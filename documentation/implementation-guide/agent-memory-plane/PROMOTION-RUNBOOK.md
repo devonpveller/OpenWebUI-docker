@@ -156,6 +156,8 @@ and a psql apply for the live one. There is no migration runner.
 | `init-agent-memory-promote-exposure.sql` | `promote_exposure` to the `agent_memory_review_actions` CHECK | as below |
 | `init-agent-memory-check-type.sql` | `check` to the `agent_memories.memory_type` CHECK (U3's finding→durable-check) | as below |
 | `init-agent-memory-corpus-failclosed.sql` | **the corpus predicate stops defaulting to visible** (DFU PLAN.md C.8 clause 3) - see the dedicated section below | **read that section first** |
+| `init-agent-memory-rls.sql` | **the exposure boundary moves into the database** - FORCE RLS + narrow policies on `agent_memories`, `thoughts` and the 8 sidecars (DFU PLAN.md A2) | **read its section below** |
+| `init-graph-plane-rls.sql` | **the boundary reaches the DERIVED graph** - 8 tables that derive from `thoughts`, plus the write gate on `queue_entity_extraction()` | **read its section below** |
 
 ```powershell
 Get-Content OB1\docker\init-agent-memory-promote-exposure.sql |
@@ -271,3 +273,177 @@ docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
 ```
 
 Expect afterwards: unlabelled `12989`, ops `4`, stamped `0`.
+
+
+## `init-agent-memory-rls.sql` -- THE EXPOSURE BOUNDARY, MOVED INTO THE DATABASE
+
+**Executed against the live volume 2026-08-30** (item `u5rls`). **This section was written
+2026-08-31 by item `u5graph`, which found the migration applied to production and its source
+on no branch of this repository** -- a boundary running live from code no fresh clone could
+reproduce, and no runbook row saying it had been applied. It is now mounted at `180-` and
+recorded here. The file itself is unchanged from what was applied.
+
+### Why
+
+`agent_memories` had RLS enabled with `relforcerowsecurity = f` and one policy,
+`USING (true)`; `thoughts` had RLS off entirely. Four rounds of guarding readers ran against
+a table whose own access policy said *allow everything*. See DFU `PLAN.md` amendment A2.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-agent-memory-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/init-agent-memory-rls.sql
+```
+
+### Verify **by query**
+
+```powershell
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+ "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+         (SELECT count(*) FROM pg_policies p
+           WHERE p.schemaname='public' AND p.tablename=c.relname
+             AND p.permissive='PERMISSIVE' AND p.qual='true') AS wide
+    FROM pg_class c
+   WHERE c.relnamespace='public'::regnamespace AND c.relkind='r'
+     AND (c.relname LIKE 'agent_memor%' OR c.relname='thoughts')
+   ORDER BY 1;"
+```
+
+**PASS:** every row `t|t` and `wide` = 0, except `agent_memory_audit_events`, whose policy is
+deliberately left wide (its payload is `{tool, reason}` plus an id -- narrowing it would hide
+the `access_refused` rows that are the drill's evidence). Recorded 2026-08-31: 9 tables,
+all `t|t`, `wide` = 0 on 8 and 1 on `agent_memory_audit_events`.
+
+### Rollback
+
+`OB1\docker\revert-agent-memory-rls.sql` -- restores the `USING (true)` policies, clears
+FORCE, disables RLS on `thoughts` and re-grants TRUNCATE. The added columns, indexes,
+functions, views and role are left in place deliberately (dropping a column is not
+reversible) and are inert once the policies are wide again.
+
+## `init-graph-plane-rls.sql` -- the boundary reaches the DERIVED GRAPH
+
+**Executed against the live volume 2026-08-31** (item `u5graph`, under an `open-brain` plane
+lease). Mounted at `200-`, after `190-init-agent-memory-corpus-failclosed.sql`.
+
+### Why
+
+`180-` governed `agent_memories`, `thoughts` and the eight `agent_memory_*` sidecars. Eight
+tables that DERIVE from `thoughts` were still `USING (true)` with FORCE off. The proven
+disclosure: `entity_extraction_queue.source_fingerprint` **is** `sha256(thoughts.content)`,
+so `service_role` -- which is `PGRST_DB_ANON_ROLE`, i.e. every unauthenticated caller on
+`open-brain_obnet` -- could read the existence and a content hash of a thought it could not
+see, and confirm any guess by hashing it.
+
+The target set is **derived from `pg_constraint` at apply time**, not listed. The operator's
+list named six tables; the schema said seven; the derivation says **eight** --
+`idea_revisions` carries `thought_id REFERENCES thoughts(id)`, a `summary TEXT` and a
+`content_hash TEXT`. A table that derives from the corpus and is not classified makes the
+migration **RAISE**.
+
+### Preconditions
+
+`180-` and `190-` must be applied first. The file checks both and refuses otherwise: it calls
+`ob_corpus_on_ops_plane`, and its write gate is only a gate while that predicate is
+fail-CLOSED.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/init-graph-plane-rls.sql
+```
+
+Idempotent -- re-applying is a no-op. (It was not, at first: the second apply died on
+`policy "thought_entities_plane" already exists` because only the OLD policy names were
+dropped. Every policy the file creates is now dropped by its own name too. Measured on the
+throwaway, three consecutive applies.)
+
+### Verify **by query**, never by a clean exit code
+
+Three things have to be true, and a row count alone shows none of them.
+
+```powershell
+# 1. THE BOUNDARY. Expect t|t on all eight, and wide=0 on the four tier-A tables.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+ "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity,
+         (SELECT count(*) FROM pg_policies p
+           WHERE p.schemaname='public' AND p.tablename=c.relname
+             AND p.permissive='PERMISSIVE' AND p.qual='true') AS wide
+    FROM pg_class c
+   WHERE c.relnamespace='public'::regnamespace AND c.relkind='r'
+     AND c.relname IN ('thought_entities','entity_extraction_queue','thought_edges',
+                       'idea_revisions','entities','edges','source_entities',
+                       'consolidation_log')
+   ORDER BY 1;"
+
+# 2. THE OPS PATH IS UNBROKEN. Take these BEFORE and compare AFTER; they must be identical.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+ "SET ROLE service_role;
+  SELECT 'thoughts', count(*) FROM thoughts
+  UNION ALL SELECT 'entities', count(*) FROM entities
+  UNION ALL SELECT 'thought_entities', count(*) FROM thought_entities
+  UNION ALL SELECT 'edges', count(*) FROM edges
+  UNION ALL SELECT 'entity_extraction_queue', count(*) FROM entity_extraction_queue
+  UNION ALL SELECT 'source_entities', count(*) FROM source_entities
+  UNION ALL SELECT 'idea_revisions', count(*) FROM idea_revisions
+  UNION ALL SELECT 'wiki_pages', count(*) FROM wiki_pages;"
+
+# 3. THE ONE THAT MATTERS -- the leak, attacked, with a positive control. Rolled back.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+ "BEGIN;
+  INSERT INTO thoughts (content, metadata)
+    VALUES ('U5G-CANARY-PERSONAL', jsonb_build_object('exposure','personal'));
+  INSERT INTO thoughts (content, metadata)
+    VALUES ('U5G-CANARY-OPS', jsonb_build_object('exposure','ops'));
+  INSERT INTO entity_extraction_queue (thought_id, status, source_fingerprint)
+    SELECT id,'blocked','U5G-P-FP' FROM thoughts WHERE content='U5G-CANARY-PERSONAL'
+    ON CONFLICT (thought_id) DO UPDATE SET source_fingerprint='U5G-P-FP';
+  SET ROLE service_role;
+  SELECT 'agent plane sees the personal fingerprint: '||count(*)
+    FROM entity_extraction_queue WHERE source_fingerprint='U5G-P-FP';
+  SELECT 'CONTROL - agent plane sees the ops canary: '||count(*)
+    FROM thoughts WHERE content='U5G-CANARY-OPS';
+  ROLLBACK;"
+```
+
+**Recorded results, 2026-08-31.** (1) all eight `t|t`; `wide` = 0 on `thought_entities`,
+`entity_extraction_queue`, `thought_edges`, `idea_revisions` and 2 on the four tier-B tables,
+which are DELIBERATELY wide -- see section 3 of the migration, and the `COMMENT ON POLICY`
+that says so in the database. (2) identical before and after: thoughts `13001`, entities
+`69785`, thought_entities `54063`, edges `92865`, entity_extraction_queue `13001`,
+source_entities `81273`, idea_revisions `37`, wiki_pages `47987`. (3) `0` and `1` -- the
+fingerprint is refused while the control is returned.
+
+Check 3 is the necessary one. Checks 1 and 2 look identical whether the policies bind or not;
+only the attack-with-a-control can tell a bound door from a broken query.
+
+Eight PostgREST doors were also attacked over the network from `open-brain_obnet`, each with
+a live ops control (`thoughts`, `thought_entities`, `entity_extraction_queue` by fingerprint
+and by id, `thought_edges`, `idea_revisions`, the `thought_entities -> thoughts(content)`
+embed, and the `v_thoughts` view): all eight `personal_rows=0 ops_rows>0`.
+
+### The write gate, which is the other half
+
+`queue_entity_extraction()` now refuses to fingerprint an off-plane thought AND deletes the
+queue row when an ops thought becomes personal. Measured live, rolled back: personal insert
+-> `0` queued, unlabelled insert -> `0` queued, **ops insert -> `1` queued** (the control
+that proves the gate is not simply broken), ops -> personal transition -> `0` queued.
+
+### Rollback
+
+`OB1\docker\revert-graph-plane-rls.sql`. **It re-opens the measured disclosure** -- after it
+runs, an unauthenticated caller on `open-brain_obnet` can read
+`entity_extraction_queue.source_fingerprint` for a thought it cannot see. The round trip was
+executed on the throwaway: revert restores `force=f` and the original policy counts on all
+eight, restores all three functions to SECURITY DEFINER, the RED probe returns, and
+re-applying the migration COMMITs.
+
+```powershell
+docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/revert-graph-plane-rls.sql
+```
