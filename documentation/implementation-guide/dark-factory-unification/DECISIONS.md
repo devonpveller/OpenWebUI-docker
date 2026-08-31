@@ -976,3 +976,52 @@ undifferentiated round. Naming their findings as siblings turned "keep going" in
 round, then close or amend" — and made it visible that `u6dark` produced four genuine classes
 across seven rounds and three siblings, which is the ratio that should have triggered the
 enforcement-layer change earlier, exactly as A2 did for U5.
+
+## 2026-08-30 · U5 · BLOCKING — NINE application containers connect to openbrain-db as the SUPERUSER
+CORRECTION FIRST: I reported to the operator that "only `openbrain-postgrest` reaches openbrain
+          as `postgres`". **That was wrong.** My sweep grepped for `postgres://` URIs and for
+          variable names matching `PG.*URL`, and missed both `PGRST_DB_URI` and — far more
+          importantly — `DB_USER=postgres`. It is the *alphabet too narrow* class, in my own
+          verification, while auditing gates with that same defect. Third instance of that class
+          from me in this run.
+THE MEASUREMENT (orchestrator-run, re-swept across every env value on every running container):
+          these connect with `DB_HOST=openbrain-db`, `DB_NAME=openbrain`, `DB_USER=postgres` —
+          `openbrain-mcp`, `openbrain-ext`, `openbrain-chunk-worker`, `openbrain-research`,
+          `openbrain-curator`, `openbrain-suggestion-worker`, `openbrain-grounding-backfiller`,
+          `openbrain-workbench`, `open_notebook` — plus `openbrain-postgrest` via
+          `postgres://postgres@openbrain-db`. And `postgres` is `rolsuper = t`,
+          `rolbypassrls = t`.
+WHY IT BLOCKS: **row-level security does not bind a superuser, even with FORCE ROW LEVEL
+          SECURITY.** FORCE closes the *table owner* bypass; it does not close the *superuser*
+          bypass. So the A2 boundary — tenancy column plus access-class role — would be VOID for
+          every one of those containers, including **`openbrain-mcp`, which is the agent plane's
+          own door** and therefore the exact thing U5 exists to contain.
+WHAT THIS DOES NOT INVALIDATE: A2's design is unchanged and still correct. The migration
+          (a `user_id` column, real policies, `FORCE ROW LEVEL SECURITY`, reduced grants,
+          tenancy as the leading index column, views rather than base tables) is necessary work
+          and remains exactly right. What the measurement adds is that the migration is
+          **necessary and not sufficient**: the boundary only begins to hold once the
+          application planes stop connecting as a superuser.
+CONSEQUENCE FOR SCOPE: moving nine consumers off `postgres` is materially larger than the
+          migration, touches every OB1 service, and is the kind of change that breaks things
+          quietly. It should be its own item with its own anchor and its own consumer
+          enumeration — the same shape as the PostgREST item drafted above, and plausibly the
+          same item.
+**THE STANDING CONSTRAINT REMAINS: do not write a personal-exposure memory.** Per the
+          operator's own condition it stays until the migration is applied AND the
+          who-connects-as-postgres check is green. It is not green: it is nine.
+REVERT:   nothing applied; nothing to revert.
+
+## 2026-08-30 · method · A GATE THAT CANNOT SEE THE REMOTE MUST REFUSE, NOT PASS
+FINDING:  Checking whether `work/u5rls`'s OB1 pin was on a remote, `git -C OB1 branch -r
+          --contains <sha>` returned NOTHING while `git ls-remote origin` showed the commit was
+          already there. The local remote-tracking refs were stale.
+WHY IT MATTERS FOR THE GATE being built: had the reachability guard been written against
+          `branch -r --contains`, it would produce false FAILURES routinely — and, worse, a
+          false PASS whenever a stale tracking ref happens to contain the sha. The remote must
+          be QUERIED (`ls-remote`), not inferred from a local cache.
+AND THE COROLLARY, which is the *deciding by exception* class again: when the remote cannot be
+          reached at all, the guard must REFUSE with a distinct reason. "Could not check" is not
+          "fine". Every instance of that class in this effort has been an unhandled state
+          falling through to a pass.
+REVERT:   n/a — method.
