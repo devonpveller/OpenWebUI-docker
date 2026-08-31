@@ -22,9 +22,9 @@ is marked deliberately rather than rounded up.
 | **U0** | DONE (merge-record) | The in-flight work landed; the durable inbox replaced the one-shot poller. |
 | **U1** | DONE (merge-record) | Memory plane phases 0–2: schema, ops door, write paths. |
 | **U2** | DONE (merge-record) | Intent unification: shared anchor schema, git-issue door, depth-1 ScopeNodes. |
-| **U3** | PARKED | Code complete and drills green in both systems; the **gym arena run** has not happened. |
-| **U4** | PARKED, closure in flight | Column unmet — the harness's own report prints `COMPARED 2/4, exit 1`. Row amended (§2.1 A1) because its premise was falsified. |
-| **U5** | PARKED, round 6 in flight | Doors hardened, gitlink discipline fixed; a **fourth** reader (the wiki compiler) publishes corpus content, and the gate scanned `.ts` only. **Constraint stands.** |
+| **U3** | DISCHARGED (closing with U4) | The arena run landed: seeds caught, check banked `source: tester-finding`, arena clean before/after. |
+| **U4** | COLUMN MET, round 7 (convergence 1 of 2) | 4/4 quadrants ran **in the arena**, stall real. Row amended (§2.1 A1). Closes if round 7 finds no new defect class. |
+| **U5** | METHOD REPLACED (§2.1 A2) | Enforcement moves from guarding readers to a **database predicate** — tenancy column + access-class role, FORCE RLS. Five reader-guard rounds retired. **Constraint stands.** |
 | **U6** | clause 4 DONE, clauses 1–3 in round 5 | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
 

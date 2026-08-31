@@ -886,3 +886,66 @@ CONSEQUENCE: the convergence criterion added to §C.7 is the supervision half of
           explicit — stagnation detection that does not depend on an orchestrator noticing.
           The memory half remains blocked on corpus size, which is the honest reason U7 matters.
 REVERT:   n/a — retrospective.
+
+## 2026-08-30 · U4 + U3 · the arena runs LANDED; convergence counter at 1 of 2
+FINDING:  U4's column is **MET**, and U3's with it. Confirmed by two verifiers who reproduced
+          rather than read:
+          - **4/4 quadrants ran in the arena.** `preflight` prints
+            `item repo : D:\Open WebUI\ai-orchestration-gym @ main`; pointing the venue at
+            ai-stack gives BLOCKED 4/4, exit 1, VENUE VIOLATION; even a *worktree* of ai-stack
+            is blocked (git-common-dir comparison); `run --repo <ai-stack>` blocks per cell
+            BEFORE dispatch and writes a not_run record.
+          - Per-cell venue evidenced independently of the builder's files: the `self` cells
+            mirror **7** files (5 gym-tracked + 2 planted) where the sent-back ai-stack run
+            mirrored **988**, and the arena's `.git/objects` mtime matches the run directory to
+            the second.
+          - **U3 DISCHARGED**, reproduced by a verifier: sandbox created inside the arena,
+            seeds A/B/C caught, arena `git status` and `worktree list` identical before and
+            after, and the check banked content-addressed (`fd500152ab692af3`) with
+            `source: tester-finding` — which is precisely what U3's column asks for.
+          - PLAN.md untouched by the branch (three-dot diff), so the competing A11 edits are
+            resolved by the orchestrator rather than by whichever branch merged first.
+STILL OPEN, and all SIBLINGS of established classes: the venue is compared by NAME only, so a
+          different repository named `gym` is admitted silently and the report renders TODAY's
+          venue rather than the one recorded with the run (sibling of *a label mistaken for
+          enforcement*); U3's counterfactual follows absolute `evidence.workspace` paths back to
+          the UNSEEDED originals, so "0 caught by the pre-existing gate" measures a directory it
+          never seeded (sibling of U3's earlier disproved counterfactual); and a run table claims
+          `exit 1` where the measured value is `exit 0` and is structurally impossible (sibling
+          of *a claim wider than its evidence*).
+**CONVERGENCE (§C.7): round 6 produced NO NEW DEFECT CLASS — counter 1 of 2.** Each finding
+          would have been prevented by a fix aimed at a class already established. Round 7 is
+          scoped to these three; if it too finds no new class, U4 CLOSES on this evidence.
+STATUS:   U4 = column MET, closure pending the convergence counter. U3 = DISCHARGED, closing
+          with U4 as `DECISIONS.md:484` always routed it.
+REVERT:   nothing merged yet; `work/u4close` is an integration branch over `work/dfu-u4`,
+          `work/u4quad` and `work/u4oracle`.
+
+## 2026-08-30 · PROPOSED ANCHOR (awaiting operator confirmation) · PostgREST projects the whole public schema
+WHY IT IS SEPARATE: it is outside U0–U7, and it changes a service the whole stack reads
+          through — so it sits outside the standing autonomy grant, which covers the plan's
+          phases. Drafted here rather than started.
+**goal** — An unauthenticated caller on `open-brain_obnet` cannot read or write tables it has
+          no business with, and every table PostgREST exposes is exposed deliberately.
+**artifact** — A reduced PostgREST exposure: a schema (or view set) that PostgREST serves,
+          a non-owner role it connects as, and grants narrowed to what its real consumers use.
+**audience** — The operator, and every consumer that currently reaches openbrain through
+          PostgREST (Open Notebook, the recipes bind-mount, the wiki compiler).
+**measured starting state** (orchestrator-verified 2026-08-30):
+          `PGRST_DB_ANON_ROLE=service_role`, `PGRST_DB_SCHEMAS=public`,
+          `PGRST_DB_URI=postgres://postgres@openbrain-db` — it connects as the **owner and
+          superuser**. `service_role` holds `SELECT, INSERT, UPDATE, DELETE, TRUNCATE` on
+          `agent_memories`. Live from a container on that network: `GET /agent_memories` → 200,
+          `GET /thoughts` → 200, `GET /thought_entities?select=thoughts(content)` → 200.
+          Only `openbrain-postgrest` reaches openbrain as `postgres`; `llm-gateway`,
+          `mattermost` and `task-management-api-1` use other roles on other databases.
+**acceptance** — (1) enumerate the CURRENT consumers and the endpoints each actually calls,
+          from logs or code, not assumption; (2) after the change every one of those still
+          works, demonstrated; (3) a table no consumer uses is no longer reachable, demonstrated
+          by a request that now fails; (4) PostgREST no longer connects as owner/superuser.
+**out of scope** — The agent-memory exposure boundary itself; that is U5 under §2.1 A2 and is
+          designed to hold with PostgREST configured exactly as it is today.
+**findings sink** — `documentation/notes/postgrest-exposure.md`.
+**the risk that makes it operator-gated** — narrowing grants or schema exposure can break
+          consumers silently, and one of them (the wiki compiler) writes 48,032 published rows.
+          The enumeration step is the real work; the config change is small and reversible.
