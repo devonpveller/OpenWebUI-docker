@@ -1704,3 +1704,65 @@ So round 6's own class — *the proof gated nothing, in the present tense* — r
 the fix for that class**. Recorded because it is the second time in this item that a fix
 reproduced the defect it was closing, one layer down, and because it is the argument for
 demanding a DEMONSTRATION that a gate fired rather than a citation that it exists.
+
+## 2026-08-31 · dfu-done · CONTAINMENT'S ALPHABET WAS "FILES AND GIT"; THE MEASUREMENTS INCLUDE DOCKER AND POSTGRES
+The class-15 fix works for what it covers — a planted marker trying to create clause 7's
+findings-note artifact was denied, no file appeared, integrity stayed clean, and the executed
+command set was printed. Then a verifier walked around it, because
+`Get-AuditedFingerprint` covers PLAN/DECISIONS/WALKTHROUGH hashes, notes, and four git probes —
+**and nothing about Docker or Postgres**, while clauses 3, 4 and 8 read the live plane after
+clause 1 has already executed the document's commands.
+PROVED with `docker volume create dfu-adv-canary-…` under a `## U0` marker: the probe passed,
+`EXEC … exit=0 drift=[]`, `INTEGRITY_OK=True`, the run printed *"the audited tree is
+byte-identical before and after this run"* — and the volume existed on the host afterwards.
+So `docker start openbrain-ops-gateway` discharges clause 4's probe, `docker stop` manufactures a
+false RED, and a `psql INSERT` discharges clause 8's own evidence. Clause 8's THIRD half is
+snapshot-guarded against exactly this; halves 1 and 2 are not.
+**The lesson is the alphabet one again, at the level of containment rather than parsing:** an
+integrity check that reports "byte-identical" is making a claim about the *world the clauses
+measure*, not about the files it happened to hash. Derive the fingerprint's scope from what the
+clauses actually read, and make a clause reading outside it a FAILURE of the script's own
+integrity check rather than a silent gap.
+
+## 2026-08-31 · dfu-done · RE-IMPLEMENTING COMMONMARK — the same class as re-implementing git
+`Remove-NonProse` replaces a closed comment with a NEWLINE, so `<!--x-->## U0` becomes a heading
+on its own line. **To CommonMark, a line beginning with `<!--` is an HTML block whose end
+condition is the line containing `-->`: the WHOLE line is raw HTML — never a heading, never a
+table row.** So the normaliser written to stop the checker reading commented-out content now
+*manufactures structure no renderer shows*. Measured against the real script:
+- `<!--x-->| **U1** | … |`, a nested `<!-- a <!-- b --> | **U1** | … |`, and a row on a
+  multi-line comment's `-->` line all turn `phase-floor-present` from fail to **PASS** (6 rows ->
+  7) — under a probe that simultaneously asserts "nothing read from a code fence or an HTML
+  comment";
+- `<!--x-->## U0` makes a WALKTHROUGH section parse **and its command execute**;
+- comments are stripped BEFORE fences, so `<!--` in one fenced block and `-->` in a later one
+  deletes every `## ` entry between them from the checker's view while every renderer shows them
+  as code — clause 2 reaches MET with "DECISIONS.md carries no PARKED entry at all";
+- GFM's escaped pipe splits differently for the renderer than for `Split-TableRow`, so a column
+  can be openly weakened while `chain-U0-original-vs-current` passes.
+This is **exactly the class named for the gitlink guard** — *re-implementing another system's
+resolution rules* — and it has now produced a new bypass in five consecutive rounds, which is
+that class's signature. The remedy is the one already adopted there: **stop modelling, use the
+real implementation.** Parse with a real CommonMark library and query its AST; headings, tables,
+HTML blocks, fences and escaped pipes then come out right by construction.
+Two general points worth keeping:
+1. **A normaliser is a parser.** "Strip the parts that do not count" requires knowing exactly
+   what counts, which is the whole problem it was meant to avoid.
+2. The failure inverted between rounds — first the checker read what readers do not see, then it
+   saw what readers do not have. **Both directions are the same defect**: the checker's model of
+   the document is not the document.
+
+## 2026-08-31 · dfu-done · three smaller, each reproduced
+- **The cage can be opened from inside.** `Protect-AuditedArtifacts` applies a Deny ACE owned by
+  the same identity the child runs as, so a marker of `icacls "<dir>" /remove:d "<user>" &
+  <write>` removes its own cage. Drill step V1's "the command was CONTAINED" assertion never
+  tests it. Contain with something the child cannot revoke, or trust the snapshot rather than
+  the ACE.
+- `Invoke-AuditedCommand` fingerprints against the CURRENT state rather than the pre-run
+  snapshot, so an idempotent mutating marker re-run by clause 5 reports
+  `left-the-audited-tree-unchanged = pass`.
+- **Clause 7 is discharged by a message that DENIES validation** while naming both halves:
+  *"Validated: NOTHING yet. U0 is still open and scripts/checks/foo-drill.ps1 has never been
+  run."* Requiring a structured relationship is not enough when the relationship can be negated —
+  the message must ASSERT validation, not mention it. A neat demonstration that
+  keyword-adjacency is not comprehension.
