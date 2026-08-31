@@ -314,10 +314,38 @@ without a recorded result.
    *Validated by* check re-runs green **from a clean checkout of the work line** —
    not from a developer's worktree, not from cached output. The script records each
    command and its exit code. "Code landed" is not satisfaction.
-2. **No phase is parked, and no column was quietly narrowed.** Zero outstanding
-   PARKED entries in `DECISIONS.md`. Every §2.1 amendment carries its evidence and
-   revert path, and NARROWS or CORRECTS with a reason — never deletes a
-   requirement (§B).
+2. **No phase is parked, and every amendment is ACCOUNTED FOR.** Zero outstanding
+   PARKED entries in `DECISIONS.md`, and every §2.1 amendment carries its evidence
+   and revert path.
+
+   Amendments are not uniform — the operator's ruling (2026-08-30): they are
+   "additions or subtractions stemming off the original, so it depends", and **what
+   it depends on is the statement's CHRONOLOGICAL CHANGES.** The unit of judgement
+   is therefore the **chain**, not the amendment.
+
+   - **Reconstruct each phase's column chronologically** — original → A1 → A2 → …
+     → current, dated, quoted verbatim at each step. That chain is printed per
+     phase; a phase whose chain cannot be reconstructed from the record fails here,
+     because an unreconstructable history is indistinguishable from an unrecorded
+     one.
+   - **Judge the CURRENT column against the ORIGINAL, never against its immediate
+     predecessor.** Every step compared to the step before it looks reasonable —
+     that is precisely how a column erodes while each individual move stays
+     defensible. It is the same shape as our own `ENUMERATE-AND-PATCH LOSES` entry:
+     every fix in that chain was genuinely correct, and the sequence still lost.
+   - **Any requirement present in the ORIGINAL and absent from the CURRENT must be
+     dispositioned**, no matter which amendment dropped it and no matter how
+     reasonable that amendment looked alone. Each must be either
+     **(a) demonstrably incoherent or impossible as originally written**, with the
+     evidence that showed it, or **(b) carried forward as a named follow-on item**
+     with an owner and a findings sink. **A requirement dropped into neither FAILS
+     this clause.**
+   - **Additions never fail it.** A chain that added requirements — as A1 and A2
+     did, correcting a false premise and moving enforcement to a stronger layer
+     while preserving the invariant whole — is the chain working as intended.
+
+   Silence about a link in the chain is itself the failure this clause exists to
+   catch.
 3. **The personal-plane constraint is lifted by VALIDATION, never by emptiness**
    (operator, 2026-08-30). "It cannot be exploited because there are 0 personal
    rows" is **not** containment — it is an absence of data, and the property it
@@ -339,14 +367,6 @@ without a recorded result.
    the RLS boundary at every stage including the direct clients. A deliverable that
    merges but does not run is not done; a stale worktree is unfinished work wearing
    a finished face.
-4b. **A phase that closed on an AMENDED column is FLAGGED, never counted
-   silently** (operator, 2026-08-30 — "it depends"). Amendments are legitimate: A1
-   and A2 each did real work, and §B permits narrowing or correcting with evidence.
-   But the line between *reality corrected the plan* and *we made the bar
-   reachable* is a judgement the operator makes at the walkthrough, not one the
-   script makes. So `dfu-done.ps1` lists every phase closing on an amended column,
-   with the amendment and its evidence, in its output. It does not fail for it and
-   it does not hide it.
 5. **The walkthrough is true.** Every row of `WALKTHROUGH.md` names a check and
    that check re-runs green. The operator reviews by reading it (§C.7), so a row
    whose check does not run is worse than a missing row.
