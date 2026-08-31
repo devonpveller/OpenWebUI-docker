@@ -1563,3 +1563,75 @@ argument for the layer change.
 
 CONVERGENCE: no new class (siblings of *a claim wider than its evidence*, *deciding by exception*,
 *an alphabet too narrow*). Counter **1 of 2**.
+
+## 2026-08-31 · NEW CLASS · A CHECKER THAT EXECUTES THE ARTIFACT'S INSTRUCTIONS, THEN MEASURES A WORLD THEY CAN CHANGE
+FINDING: `dfu-done.ps1`'s clauses 1 and 5 execute, under `cmd.exe /c` with the operator's
+          privileges, every backtick span under a `**How to run:**` marker in `WALKTHROUGH.md` —
+          clause 5 with `-WorkDir $Ctx.root`, i.e. INSIDE the repository — and clauses evaluate
+          in order 1..8, so clauses 4, 7 and 8 measure a world the earlier clauses have already
+          let the document modify.
+DEMONSTRATED by a verifier: a `## U0` section whose marker was
+          `cmd /c echo ## U0 findings > <scratch>\notes\u0-findings.md`. Clause 5 reported
+          `walkthrough-U0-check-1 (exit 0) - the row's named check re-runs green`; the file did
+          not exist before the run and did after; **and clause 7 for U0 went from exit 3 ("no
+          DECISIONS entry AND no findings note AND …") to exit 2 — the artifact discharged by a
+          file the run itself created.** The same channel reaches clause 4's subjects — worktree
+          list, `work/*` branches, tree cleanliness — because clause 1 runs first and `cmd.exe`
+          is not confined to the clean clone.
+WHY IT IS A NEW CLASS AND NOT A SIBLING: **all fifteen prior classes constrain what a checker
+          READS** — its population, its cells, its alphabet, structure-versus-substring, which
+          operations it observes. A fix aimed at any of them leaves this untouched: the
+          population can be perfectly pinned and the command still runs and still mutates. The
+          nearest relative is *a checker deriving its population from the document under test*,
+          and this is the same root one axis over — **inputs versus EFFECTS**. The mitigation
+          differs in kind: isolate and order the execution, or record the command set for
+          review, rather than parse more strictly.
+GENERAL FORM: **a checker that acts on instructions from the thing it audits has granted that
+          thing the power to arrange its own verdict.** It is the confused deputy, wearing a
+          test harness. Ask of any automated authority: *does anything I execute come from the
+          artifact under test, and can it change what I measure afterwards?*
+THE FIX BRIEFED: execute only inside the clean checkout the script already builds, never in the
+          audited tree; **snapshot every artifact a later clause depends on BEFORE any command
+          runs** and evaluate against the snapshot; and REPORT the executed command set, so a
+          reader can see what the authority DID as well as what it concluded.
+**A checker that mutates what it measures is not an authority.**
+
+## 2026-08-31 · FIFTH INSTANCE · "fixed one, left the sibling" — a one-call-site helper
+`Remove-NonProse` — the function that strips fenced blocks and HTML comments, written to close
+round 4's substitution and resurrection attacks — has **exactly ONE call site in 3,866 lines**
+(`:552`, inside `Get-DfuSection`), and `Get-DfuSection` serves only `PLAN.md`. So the other two
+documents are read RAW:
+ - five `WALKTHROUGH.md` phase sections inside a properly CLOSED HTML comment -> clause 5 verdict
+   **met**, coverage **8 of 8**, floor pass, every `walkthrough-U<n>-check-1` pass — while the
+   document the operator reviews shows two sections. §C.8.5's justification is literally *"The
+   operator reviews by reading it."*
+ - a `## ` entry inside a comment carrying `**Un-parks:** <heading>` closes a PARKED entry; a
+   commented `## … clause 4 exclusion` grants the pod-key carve-out (unmerged 8 -> 7); a commented
+   heading discharges clause 7's ledger artifact; and the same raw scan satisfies clause 2's
+   "visible where the operator reads" gate.
+ - `Get-WalkthroughRuns` parses **and executes** a `## U<n>` section inside a comment.
+And stripping is defeated outright by an **unterminated `<!--`**, because the regex requires the
+closer — a malformed comment is ignored rather than failing closed.
+
+The tally of this shape, in one effort:
+1. `on_fire` fixed, `on_indeterminate` left (U6).
+2. The agent-memory READ tools fixed, `performReview` left (U5).
+3. The gitlink DIFF reader fixed, the `.gitmodules` reader left in the same library (gitreach).
+4. Clause 2's substring test fixed, clause 4's left (dfu-done).
+5. `Remove-NonProse` written for one reader, three left raw (dfu-done).
+
+The rule "when a defect is named, grep for its shape across the whole artifact before declaring
+it fixed" was adopted on instance 4 and violated on instance 5 **in the same file**. So the rule
+needs a mechanism, not a resolution: the shape-sweep belongs in the drill — a test that asserts
+every markdown reader routes through the normaliser, and fails when a new one does not.
+**A discipline that depends on remembering is the normative governance §0 A7 already falsified.**
+
+## 2026-08-31 · a LIVE false pass in the audit trail clause
+Clause 7's `audit-trail-U2 = pass` rests solely on commit `8b477a9` — a commit about a different
+phase, which says "No code behaviour changed" and co-mentions U2 and `test_anchor_schema.py`
+incidentally. The phase-id match and the artifact match are independent substring searches over
+the whole message. §C.8.7 asks for "commit messages stating what was validated and by which
+check"; two coincidental substrings in an unrelated commit are not that.
+Worth keeping because it is this effort's own standard turned on itself: the audit trail is the
+deliverable's twin, and the clause checking the trail was satisfied by a commit that validated
+nothing.
