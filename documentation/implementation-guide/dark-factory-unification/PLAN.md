@@ -297,6 +297,56 @@ lower the bar, it moves who holds it.
   classes and two siblings; had the counter existed, the sibling rounds would have
   been the signal to change the enforcement layer rather than the key — which is
   exactly what A2 did for U5, one layer down.
+
+### C.8 The success condition — what "the plan is 100% met" means
+
+§C.7 gives a STOP condition ("every phase done, or every remaining one parked").
+That is not the same as SUCCESS: *everything parked* is a legitimate stop and a
+failed plan. This section states success, and states it so a machine can judge it.
+
+**Build `scripts/checks/dfu-done.ps1`. It exits 0 only when every clause below
+holds, and it is the authority — not a summary, not a phase report.** Each clause
+is evaluated by running something, never by reading a claim. A clause that cannot
+be machine-evaluated is printed as a named manual check the script refuses to pass
+without a recorded result.
+
+1. **Every U-phase column is satisfied by a check that RAN.** For U0–U6, the §2
+   *Validated by* check re-runs green **from a clean checkout of the work line** —
+   not from a developer's worktree, not from cached output. The script records each
+   command and its exit code. "Code landed" is not satisfaction.
+2. **No phase is parked, and no column was quietly narrowed.** Zero outstanding
+   PARKED entries in `DECISIONS.md`. Every §2.1 amendment carries its evidence and
+   revert path, and NARROWS or CORRECTS with a reason — never deletes a
+   requirement (§B).
+3. **The personal-plane constraint is LIFTED ON EVIDENCE.** "Do not write a
+   personal-exposure memory" is withdrawn only when a `personal`-labelled row is
+   proven invisible at every door by a run, AND the corpus predicate is
+   fail-closed. `ob_corpus_on_ops_plane` is currently `IS NULL OR = 'ops'`, so an
+   unlabelled row is VISIBLE — the "unlabelled defaults to fine" class from our own
+   list. Closing it is a one-time backfill of unlabelled rows to `exposure='ops'`
+   and then flipping the function. Until that lands, this clause fails.
+4. **Nothing is left in flight.** Zero unmerged `work/*` branches and zero
+   worktrees — or each survivor named in `DECISIONS.md` with the reason it was
+   abandoned. A stale worktree is unfinished work wearing a finished face.
+5. **The walkthrough is true.** Every row of `WALKTHROUGH.md` names a check and
+   that check re-runs green. The operator reviews by reading it (§C.7), so a row
+   whose check does not run is worse than a missing row.
+6. **U7 is ARMED, not complete.** U7 is standing by design and never finishes. It
+   is met when its loop has run ONE full cycle on the record: a real outcome → a
+   proposed design change → judged against a pinned §0/§B anchor → adopted or
+   refused, with the citation or the ledger amendment. A loop that has never run is
+   not a standing process, it is an intention.
+7. **The audit trail is complete**, because it is what the operator reads instead
+   of the diffs: every phase has its DECISIONS entries, its findings note, and
+   commit messages stating what was validated and by which check.
+
+**When the script exits 0 the factory STOPS and hands over.** That is the handover
+point, not the finish line — the operator's walkthrough is the last gate and it is
+theirs.
+
+**If a clause cannot be met, that is a REPORT, not a redefinition.** Say which
+clause, what would close it, and what it would cost. Amending a column so the
+script passes is the one move this section exists to forbid.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
