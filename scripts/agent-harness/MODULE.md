@@ -217,9 +217,14 @@ were all of them (this file's `dark` bullet; `andon.ps1`'s Invoke-AndonEvaluatio
 and its exit-6 comment; `queue.ps1`'s exit-code line, one round earlier). One defect, four
 instances, and a check reading only this table saw none of them. So
 `test_every_enumeration_of_board_words_in_the_repo_is_complete` takes its file list from
-`git ls-files` and finds both shapes these lists take - an inline run (`a, b or c`) and a
-definition block or table row - and requires each to be the whole alphabet: the eight, or
-the seven that are not `clear`. **If you mean a narrower set, say so in words or write it as
+`git ls-files` and requires every list it can read to be the whole alphabet: the eight, or
+the seven that are not `clear`. It reads TWO shapes, and the test's DISCLOSED LIMITS block
+writes both out rather than summarising them - "both list shapes" is what this said until
+2026-08-30, when an ordered list and a quoted array were planted as tracked files and both
+stayed green. The shapes are: an inline run joined by list punctuation (comma, slash, pipe,
+semicolon, "or", "and"), whose items may be quoted; and a block of consecutive lines that
+each introduce a word - bulleted, numbered, table rows, definition rows, or the word alone
+on its line. **If you mean a narrower set, say so in words or write it as
 a mapping**; a positional list of board words is read as a claim about all of them, because
 that is how all four went wrong. It finds enumerations, not single wrong words - that limit
 is stated in the test, and the ways-off citation rule below covers the one place a single
@@ -285,8 +290,13 @@ the open routes explicitly.
 introduced the state that made them false, and none of them checked, because a sentence is
 not a check. The mapping now lives only in README.md's ways-off table, whose rows carry
 `route` ids; the drill declares the same map in `$script:WaysOffProven` and its assertions
-read it, so `test_the_ways_off_table_matches_the_drill_that_proves_it` fails on a row nobody
-drills or a drill that proves a different word. Everything else cites a route id, and
+read it, so `test_the_ways_off_table_matches_the_drill_that_proves_it` fails on a drill that
+proves a different word, or on a row reaching no drill code at all. That test compares two
+written-down copies, and saying more than that was untrue: until 2026-08-30 it claimed a row
+nobody drills is caught, and a phantom row planted in BOTH copies with no assertion anywhere
+passed with the suite green. What a row is EXERCISED by is now checked where it can be -
+in the drill: `Check` registers a route when a PASSING assertion cites `(route <id>)` in its
+label, and **step N** fails on any declared row no assertion exercised. Everything else cites a route id, and
 `test_every_citation_of_a_way_off_names_the_state_this_table_proves` checks every citation
 in the repository against the table - locations derived from `git ls-files`, matching exact
 because a route id is a token rather than a phrase to be recognised. What it does not catch

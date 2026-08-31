@@ -77,7 +77,13 @@ function ConvertTo-HashtableDeep($obj) {
         foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = ConvertTo-HashtableDeep $p.Value }
         return $h
     }
-    if ($obj -is [array]) { return @($obj | ForEach-Object { ConvertTo-HashtableDeep $_ }) }
+    # `,@(...)` - the leading comma is load-bearing. Returning `@()` from a PowerShell function
+    # emits NOTHING, so an EMPTY array in the config became `$null` in the hashtable: the
+    # shipped `work-branch-on-remote` params are `{"branches": []}`, and every gate record
+    # wrote them as `{"branches":{}}` - so `looked_at`, whose whole job is to name the params a
+    # predicate was handed, did not name the list it claimed to. Found 2026-08-30 in drill step
+    # L's evidence line. The comma wraps the result so an empty array survives as an array.
+    if ($obj -is [array]) { return , @($obj | ForEach-Object { ConvertTo-HashtableDeep $_ }) }
     return $obj
 }
 

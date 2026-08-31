@@ -546,7 +546,15 @@ def _inline_enumerations(text, words):
     actually written inside a `#` block: `queue.ps1`'s complete one wraps mid-list.
     """
     alt = _word_alternation(words)
-    item = r"(?:``|`|\*\*)*(?:" + alt + r")(?:``|`|\*\*)*"
+    #: The DECORATION a list item may be wrapped in. Quotes are here because a list written as
+    #: a quoted array - three board words inside brackets in JSON, or the same shape in a
+    #: PowerShell or Python literal; the list itself is not written out here, because this
+    #: check cannot tell a quotation of a short list from a short list, and the honest way
+    #: round that is to paraphrase rather than to exempt a file. It enumerates the alphabet
+    #: exactly as much as a prose list does, and until
+    #: 2026-08-30 it was invisible to this check: the item pattern allowed backticks and bold
+    #: markers but no quote, so the separator between two quoted words never matched.
+    item = r"(?:``|`|\*\*|\"|')*(?:" + alt + r")(?:``|`|\*\*|\"|')*"
     gap = r"[ \t]*(?:\r?\n[ \t]*(?:#:|#|//|\*)?[ \t]*)?[ \t]*"
     sep = r"(?:(?:,|/|\||;)" + gap + r"(?:(?:or|and)[ \t]+)?|(?:or|and)[ \t]+)"
     run = re.compile(item + r"(?:" + gap + sep + gap + item + r"){2,}")
@@ -571,8 +579,14 @@ def _block_enumerations(text, words):
     their one shared word (`indeterminate`) is followed by a comma.
     """
     alt = _word_alternation(words)
-    lead = re.compile(r"^[^A-Za-z0-9]*(?:``|`|\*\*)*(?P<w>" + alt +
-                      r")(?:``|`|\*\*)*(?:[ \t]*[-:|>][ \t]|[ \t]+)(?=\S)")
+    # ORDERED lists and BARE rows, both added 2026-08-30 after both were planted as tracked
+    # files and both stayed green. `1. raised` was missed because the ordinal starts with a
+    # DIGIT and the bullet class excludes digits; a row carrying nothing but the word was
+    # missed because a description had to follow it. A numbered list of board words and a
+    # bulleted one make the same claim about the alphabet, so they are read the same way.
+    tail = r"(?:[ \t]*[-:|>][ \t](?=\S)|[ \t]+(?=\S)|[ \t]*,?[ \t]*$)"
+    lead = re.compile(r"^[ \t]*(?:\d+[.)][ \t]+)?[^A-Za-z0-9]*(?:``|`|\*\*|\"|')*(?P<w>" + alt +
+                      r")(?:``|`|\*\*|\"|')*" + tail)
     hits = []
     for i, line in enumerate(text.split("\n")):
         m = lead.match(line)
@@ -602,14 +616,31 @@ def test_every_enumeration_of_board_words_in_the_repo_is_complete():
     cases one drill step covers, say), say so in words or write it as a mapping. Positional
     lists of board words are exactly how the four went wrong.
 
-    DISCLOSED LIMITS. This finds ENUMERATIONS: one wrong board word in a sentence ("deleting
-    the block reports `not-evaluated`") is not an enumeration and is not caught here. That
-    class is covered, for the ways off the board, by the citation test below - and is not
-    covered at all for anything else. And it cannot tell a QUOTATION of a bad list from a bad
-    list, which is a real cost: the findings note describing this defect had to paraphrase
-    the sentence it was reporting rather than quote it. Paraphrasing was chosen over an
-    exemption on purpose - a rule with one file exempted from it is the shape that let four
-    of these through.
+    DISCLOSED LIMITS, and they are the honest half. A gate is only as wide as its alphabet,
+    so the alphabet is written out rather than summarised - "both list shapes" is what this
+    block used to say, and on 2026-08-30 two shapes it did not read were planted as tracked
+    files and stayed green.
+
+    - It finds ENUMERATIONS, not sentences: one wrong board word in a sentence ("deleting
+      the block reports `not-evaluated`") is not a list and is not caught here. That class
+      is covered, for the ways off the board, by the citation test below - and is not
+      covered at all for anything else.
+    - It cannot tell a QUOTATION of a bad list from a bad list, which is a real cost: the
+      findings note describing this defect had to paraphrase the sentence it was reporting
+      rather than quote it, and so does the comment in `_inline_enumerations`. Paraphrasing
+      was chosen over an exemption on purpose - a rule with one file exempted from it is the
+      shape that let four of these through.
+    - MATCHING IS CASE-SENSITIVE. These are lowercase code words; a list written with them
+      capitalised is not read as one. Ignoring case would make ordinary English match in
+      prose, so this is disclosed rather than closed.
+    - THE SHAPES IT READS, in full. (1) A run of three or more board words joined by list
+      punctuation - comma, slash, pipe, semicolon, or the words "or"/"and" - which may cross
+      a line break and a comment sigil, and whose items may be wrapped in backticks, bold
+      markers, or QUOTES (the quoted-array shape, added 2026-08-30). (2) A block of
+      consecutive lines that each INTRODUCE a board word: bulleted, NUMBERED (added
+      2026-08-30), table rows, definition rows, or the word alone on its line (added
+      2026-08-30), no more than six lines apart. Anything else is not read as a list -
+      notably items separated by prose rather than punctuation.
     """
     words = _board_words()
     complete = (words, words - {"clear"})
@@ -677,17 +708,48 @@ def _ways_off_drill():
 
 
 def test_the_ways_off_table_matches_the_drill_that_proves_it():
-    """A ROW NOBODY DRILLS IS A CLAIM, NOT A PROOF.
+    """THE TWO WRITTEN-DOWN COPIES OF THE MAPPING AGREE, AND EACH ROW REACHES CODE.
 
-    One row - an action word the board does not implement - asserted `andon.status =
-    unavailable` in the ledger, and no drill check read that field: the exit code was
-    checked and the sentence about the record was not. Half a verified row reads exactly
-    like a whole one.
+    Say precisely what this establishes, because on 2026-08-30 it did not establish what it
+    claimed. Its docstring said "a row nobody drills is a claim, not a proof" - and a
+    `phantom-route` row planted in README.md's table plus a `$script:WaysOffProven` entry
+    with ZERO assertions passed, with the suite still green. Both halves are text an author
+    writes; comparing them proved only that the copies match.
+
+    WHAT IS CHECKED HERE: the two copies agree, the count beside the table is the table's
+    real length, and every declared route reaches the drill's CODE - as a literal
+    `Get-WayOff "<id>"` call or as a `route = "<id>"` entry in a case table it iterates. That
+    last one is why a phantom row now fails here: a row nobody wired to anything reaches no
+    call site.
+
+    WHAT IS NOT CHECKED HERE, and where it is: that the assertion those call sites feed
+    actually RAN and PASSED. Nothing static can say that. `drill-dark-factory.ps1` step N
+    does - `Check` registers a route when a PASSING assertion cites `(route <id>)` in its
+    label, and step N fails on any declared row no assertion exercised. This test is the
+    cheap half; the drill is the half with teeth.
+
+    The original defect stands as the reason the mapping is drilled at all: one row - an
+    action word the board does not implement - asserted `andon.status = unavailable` in the
+    ledger, and no drill check read that field. The exit code was checked and the sentence
+    about the record was not, and half a verified row reads exactly like a whole one.
     """
     table = _ways_off_table()
     drill = _ways_off_drill()
     assert table == drill, "README table=%s drill=%s" % (
         sorted(table.items()), sorted(drill.items()))
+    # EVERY ROW REACHES CODE. The declaration block is cut out first, or every row would
+    # "reach" its own declaration. The two call shapes are the two the drill uses: a literal
+    # route handed to Get-WayOff, and a `route = "..."` field on a case the drill loops over.
+    drill_text = (HERE / "drill-dark-factory.ps1").read_text(encoding="ascii")
+    body = re.sub(r"\$script:WaysOffProven = \[ordered\]@\{.*?\n\}", "", drill_text, flags=re.S)
+    used = (set(re.findall(r'Get-WayOff\s+"([a-z0-9-]+)"', body)) |
+            set(re.findall(r'route\s*=\s*"([a-z0-9-]+)"', body)))
+    unwired = sorted(set(table) - used)
+    assert not unwired, (
+        "ways-off route(s) declared in README.md and in the drill's map, but reaching no "
+        "drill code: %s. A row nobody drills is a claim, not a proof - wire it to an "
+        "assertion whose label cites (route <id>), which drill step N then requires to "
+        "have PASSED." % unwired)
     m = re.search(r"\*\*(\w+) ways of switching the board off",
                   (HERE / "README.md").read_text(encoding="utf-8"))
     assert m, "README.md no longer states how many ways off the board there are"

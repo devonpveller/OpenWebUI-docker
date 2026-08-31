@@ -623,7 +623,20 @@ if ($AmendAnchor) {
 
 # --- submit -------------------------------------------------------------------------
 if ($Submit) {
-    if (-not $Id -or -not $Branch -or -not $Developer) { Die "-Submit needs -Id, -Branch and -Developer" }
+    if (-not $Id -or -not $Developer) { Die "-Submit needs -Id, -Branch and -Developer" }
+    # A NAME THAT IS NOT A NAME IS NOT A MISSING PARAMETER. `" "` is TRUTHY in PowerShell, so
+    # `-not $Branch` waved it through, and the anchor gate below is reached BEFORE the
+    # rev-parse further down: the board trimmed it to nothing, stepped over it, and reported
+    # "checked 1 branch(es); none is on a remote" - a clear board and `decision=passed` in the
+    # ledger for a branch question nobody asked. Reproduced 2026-08-30 with `-Branch ' '`.
+    # The board refuses this now too (Predicate-BranchOnRemote returns indeterminate); this is
+    # the same refusal at the door, so the gate is never handed an input it cannot use.
+    if ([string]::IsNullOrWhiteSpace($Branch)) {
+        Die ("-Branch is empty or whitespace, which is not a branch. It is the name the anchor " +
+             "gate asks the andon board about, and a question asked about nothing comes back " +
+             "clear. Pass the branch this work is on.")
+    }
+    $Branch = $Branch.Trim()
     # -Thread is how the bridge knows which Mattermost conversation to report back into.
     if (-not $TestPlan) {
         Die ("-Submit needs -TestPlan. The plan is written BEFORE the work is queued - it is " +

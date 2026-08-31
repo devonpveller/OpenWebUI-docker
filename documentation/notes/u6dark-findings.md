@@ -1184,8 +1184,13 @@ in its first sentence that it is the only place the mapping lives. Two checks ho
 
 - `test_the_ways_off_table_matches_the_drill_that_proves_it` compares the table against
   `$script:WaysOffProven` in `drill-dark-factory.ps1`, which the drill's own assertions read
-  (steps F, H, J, K) instead of repeating a literal. A row with no drill case, a drill proving
-  a different word, or a prose count that disagrees with the row count, all fail.
+  (steps F, H, J, K) instead of repeating a literal. A drill proving a different word, or a
+  prose count that disagrees with the row count, fail.
+  **CORRECTED 2026-08-30 (round 7):** this bullet also said "a row with no drill case" fails.
+  It did not - see 13.2. Both sides of that comparison are text an author writes, and a
+  phantom row planted in both with no assertion anywhere passed. Two things changed: the test
+  now also requires every declared row to reach drill CODE, and drill **step N** requires a
+  PASSING assertion to have cited it.
 - `test_every_citation_of_a_way_off_names_the_state_this_table_proves` scans every tracked
   text file for route ids and requires any outcome word beside one to be the table's.
   Locations derived; matching exact, because a route id is a token rather than a phrase to be
@@ -1216,9 +1221,17 @@ row from shipping with only half of it checked.
 
 - `drill-dark-factory.ps1` -> **193 checks, 0 failed** (184 before; step M is 8 new checks and
   step J gained the `unavailable` ledger assertion).
-- `python -m pytest scripts/agent-harness -q` -> **132 passed** (129 before; three new tests).
-  `test_gate_profiles.py` alone: **27 passed** (24 before). `ruff check scripts/agent-harness`
-  clean.
+- `python -m pytest scripts/agent-harness -q` -> **132 passed** (129 before; three new
+  tests). `test_gate_profiles.py` alone: **27 passed** (24 before).
+  `ruff check scripts/agent-harness` clean.
+  **CORRECTED 2026-08-30 (round 7): that count is ENVIRONMENT-DEPENDENT and was reported
+  without saying so.** In a clean clone it is **130 passed, 2 skipped**. Both skips are
+  environmental, not disabled tests:
+  `test_anchor_schema.py::test_every_queued_anchor_on_disk_satisfies_the_schema` and
+  `test_scope_node.py::test_the_live_queue_projects_without_raising` each resolve
+  `<git-common-dir>/agent-worktrees/queue` and skip when it is absent. That directory lives
+  under `.git`, so no clone reproduces it; it exists in this checkout with 14 anchors, which
+  is why 132 run here.
 - **RED-proved before GREEN, each reverted immediately afterwards** - eleven trials across
   five files:
 
@@ -1254,6 +1267,156 @@ row from shipping with only half of it checked.
   unchanged and still open; the citation rule is about the DOC's mapping, not the config's.
 - No change to `DECISIONS.md`, to the U6 row in PLAN.md, or to any condition's shipped
   `on_fire` / `on_indeterminate`.
+
+---
+
+## 13. ROUND 7 - THE UNUSABLE INPUT, THE CHECK THAT COMPARED TWO DECLARATIONS, AND THE ALPHABET AGAIN
+
+Three findings came back, and under PLAN.md section C.7's convergence criterion **none of
+them is a new defect class**. Each is a sibling of a class this effort has already
+established: deciding by exception (13.1), green while checking nothing (13.2), and a derived
+gate no wider than its alphabet (13.3). That is what the criterion is for - the counter, not
+the fix, is what says whether this is learning or whack-a-mole. Round count for `u6dark`
+after this round: **7**.
+
+### 13.1 DECISIVE - `-Branch ' '` auto-passed the anchor gate
+
+**REPORTED and REPRODUCED.** `andon.ps1`'s `Predicate-BranchOnRemote` opened both of its
+loops with a skip on a name that trims to nothing, so such a name was stepped over before the
+existence test and again before the remote comparison - while `$branches.Count` still counted
+it. The verdict came back `ok :: checked 1 branch(es); none is on a remote`, which is the
+exact string the commit that added the narrow question quotes as the thing its guard
+prevents. `queue.ps1` let it in because its check was a presence test and a single space is
+TRUTHY in PowerShell.
+
+Reproduced before the fix:
+`andon.ps1 -Evaluate -Only work-branch-on-remote -RepoRoot . -RunBranch ' '` -> **exit 0,
+board `clear`**, that detail string.
+
+**A SECOND, DEEPER INSTANCE FOUND WHILE FIXING IT.** `if ($ctx.run_branches -and ...)` is not
+a length test: a one-element array unrolls to its element, so an array holding one empty
+string evaluated FALSE and the run's own unusable name silently became the BROAD question -
+"is any local work branch on a remote" - which answers `ok` on a repository with no remotes.
+Reproduced on a scratch repo with no remote: `-RunBranch ''` -> **exit 0, board `clear`**.
+Same class, one line up.
+
+**THE FIX, in two layers, because either alone is a single point of failure.**
+
+- **The board.** One normalisation, no name skipped: a value that trims to nothing is
+  collected and the predicate returns **`indeterminate`**, which halts under the shipped
+  policy. The named/missing check then runs over normalised names, and the remote comparison
+  no longer has a skip in it at all. The length test counts a list.
+- **The door.** `queue.ps1 -Submit` refuses an empty-or-whitespace `-Branch` with its own
+  message, and trims what it accepts, so the gate is never handed an input it cannot use.
+
+**A NOTE ON THE WORD.** The condition ends `indeterminate`; the BOARD ends **`raised`**,
+because an unevaluated condition halts under the shipped policy and a halt outranks the
+bucket word. `indeterminate` as a board word belongs to a different route in the ways-off
+table. Round 6 wrote step M's outcome as the condition status in a place a reader takes for
+the board word; README and the drill now say which is which.
+
+**PROVEN.** Drill step **M4** - 17 checks, plus one added to M3:
+
+| case | door | board |
+|---|---|---|
+| a single space | exit 1, refused by `queue.ps1`, item parked, nothing signed | condition `indeterminate`, board `raised`, exit 6 |
+| a tab | exit 1, refused by `queue.ps1`, item parked, nothing signed | condition `indeterminate`, board `raised`, exit 6 |
+| an empty string | PowerShell's own binder refuses it before the script runs - asserted as THAT, not credited to the guard | covered by the value-arrives case above |
+| a bare slash | not whitespace, so the door passes it | refused as a branch git cannot resolve, exit 6, item parked |
+| the real branch | control: exit 0, `ready-to-test` | control: board `clear`, exit 0 |
+
+M3 gained one check too: for a branch name that does not resolve, the ledger's board word is
+`raised` while the condition sits in the `indeterminate` census bucket - asserted rather than
+renamed, so the distinction cannot drift back.
+
+**MUTATIONS, each reverted immediately.** Deleting the door guard reds 2 checks (and the
+board still refuses at exit 6 - which is why the door checks assert exit **1** and the door's
+own words: written as "nonzero" first, they stayed GREEN under that mutation, and a check
+that cannot tell which layer refused proves neither). Deleting the board's refusal reds 6,
+with `board=clear, exit=0`. Reverting the length test to the short-circuit form puts
+`-RunBranch ''` back to `board=clear, exit=0` on a scratch repo.
+
+### 13.2 FIXED - a check that compared two declarations
+
+**REPORTED and REPRODUCED.** `test_the_ways_off_table_matches_the_drill_that_proves_it`
+docstring said "A ROW NOBODY DRILLS IS A CLAIM, NOT A PROOF" and did not establish it. A
+`phantom-route` row planted in README.md's ways-off table plus a `$script:WaysOffProven`
+entry with **zero assertions** passed, and the full suite stayed green. Both halves are text
+an author writes; comparing them proves the copies match.
+
+**THE FIX ties each row to something that runs.** `Check` in `drill-dark-factory.ps1`
+registers a route the moment a **PASSING** assertion cites the route in its label - the
+labels those assertions already carried - and new drill **step N** compares the routes
+DECLARED against the routes EXERCISED, in both directions. A row nobody drills registers
+nothing and step N fails. The pytest keeps its declaration-vs-declaration comparison, says so
+plainly, and gains one cheap static tie: every declared route must reach drill CODE, as a
+literal `Get-WayOff` argument or a case-table entry the drill iterates.
+
+**PROVEN RED.** With `phantom-route` planted in both copies and no assertion anywhere:
+`test_the_ways_off_table_matches_the_drill_that_proves_it` FAILS naming the route, and the
+drill reports `declared=9 exercised=8 unexercised=phantom-route`, 1 check failed. Before the
+fix the same plant gave 132 passed and a green drill. Reverted immediately.
+
+**Stated limit:** step N proves an assertion RAN and PASSED citing the route; it does not
+prove the assertion is a good one. What stops a label citing a route it does not test is the
+same thing that stops any other bad assertion - review - and the pytest's static tie only
+proves the row reaches code, which the docstring now says in those words.
+
+### 13.3 FIXED - the enumeration check's alphabet, again
+
+**REPORTED and REPRODUCED.** `README.md` and the test's docstring said the check covers "both
+list shapes". Two shapes it did not read were planted as tracked files and stayed green: an
+**ordered markdown list** and a **quoted array**. Neither omission was in the DISCLOSED
+LIMITS block. The ordered list was missed twice over - the ordinal starts with a digit and
+the bullet class excludes digits, and a row had to be followed by a description.
+
+**THE FIX WIDENS, and then discloses what is left.** Item decoration now admits quotes; the
+row pattern admits an ordinal prefix and a row carrying nothing but the word. The DISCLOSED
+LIMITS block now writes the shapes and the limits out instead of summarising them - including
+that matching is CASE-SENSITIVE, which is a real limit and was never stated. "Both list
+shapes" is gone from the test, from README.md and from MODULE.md.
+
+**PROVEN RED then GREEN.** Both planted files fail the check after the fix and passed before
+it; both are removed. Negative control: the same two shapes carrying the COMPLETE alphabet
+stay green. Widening also caught one true instance in the repository - the new comment
+explaining the quoted-array shape quoted a short list - which was paraphrased rather than
+exempted, the same rule round 6 applied to this note.
+
+### 13.4 Corrections to round 6's record
+
+- **The pytest count was environment-dependent and was reported as a bare number.** See the
+  correction in 12.5: 130 passed / 2 skipped in a clean clone.
+- **A backticked board word was the wrong word for step M's outcome** in README and in the
+  drill's own step title - it is the CONDITION status; the board word is `raised`. Both now
+  say which is which. See the note in 13.1.
+- **`looked_at` did not name the list it claimed to.** The gate record wrote the branch
+  condition's params as an empty object. The cause is not JSON depth: a PowerShell function
+  returning an empty array emits NOTHING, so `ConvertTo-HashtableDeep` turned every EMPTY
+  array in the config into `$null`. Wrapping the return fixes it, and drill step L's evidence
+  line now names an empty list rather than an empty object. The same trap silently discarded
+  any empty-array override in `Merge-Settings`, which now replaces as documented.
+
+### 13.5 Validation
+
+- `drill-dark-factory.ps1` -> **213 checks, 0 failed** (193 before: step M4 is 17 new
+  checks, step N is 2, and M3 gained 1 asserting that the CONDITION word and the BOARD word
+  are not the same word). One M4 case was rewritten mid-round when it turned out to prove
+  something other than what its label said - see the mutation note in 13.1.
+- `python -m pytest scripts/agent-harness -q` -> **132 passed in this checkout, 130 passed /
+  2 skipped in a clean clone** (see 12.5). `test_gate_profiles.py` alone: **27 passed**.
+  `ruff check scripts/agent-harness` clean.
+- RED-proved before GREEN, each reverted immediately: five trials, listed in 13.1-13.3.
+
+### 13.6 What this round did NOT change
+
+- The eleven `work/*` branches on `origin` are untouched, and nothing here deletes a remote
+  ref. The bare `andon.ps1 -Evaluate` still asks the broad question and still names them.
+- `pipeline.gate_profile: attended` is still the shipped default and still the revert.
+- The three open routes README lists (predicate swap, `params` redirect, id squatting) are
+  unchanged and still open.
+- No change to `DECISIONS.md`, to `PLAN.md`, or to any condition's shipped `on_fire` /
+  `on_indeterminate`. Class 4 unchanged: nothing merged, nothing pushed, no protected ref
+  moved.
 
 ---
 
@@ -1942,4 +2105,85 @@ DECISION: step J now reads the field, and the table-vs-drill check is what stops
 PROVEN:   drill step J - "the refusal is stored as 'unavailable'", from the real ledger, on the
           fixture whose on_fire is a word the board does not implement.
 REVERT:   n/a - one assertion added.
+
+## 2026-08-30 - U6 - AN UNUSABLE INPUT MUST REFUSE, NOT SKIP INTO A PASS
+FINDING:  Predicate-BranchOnRemote opened both its loops by skipping a branch name that trims
+          to nothing, so such a name was stepped over twice while still being counted.
+          `-Branch ' '` therefore produced "checked 1 branch(es); none is on a remote" - a
+          CLEAR board and an AUTO-PASSED anchor gate for a question nobody asked, and the
+          exact string the commit adding the narrow question quoted as the thing its guard
+          prevents. queue.ps1 let it in because its check was a presence test and a single
+          space is truthy in PowerShell. A second instance one line up: the run-branch test
+          was not a length test - a one-element array unrolls to its element, so an array
+          holding one empty string evaluated FALSE and silently fell back to the BROAD
+          question, which answers `ok` on a repository with no remotes.
+DECISION: refuse at both layers, because either alone is a single point of failure. The BOARD
+          normalises once, skips no name, and returns `indeterminate` (which halts) for a name
+          that is empty or whitespace; the length test counts a list. The DOOR refuses an
+          empty-or-whitespace -Branch with its own message and trims what it accepts.
+SCOPE:    the CONDITION status is `indeterminate`; the BOARD word is `raised`, because a halt
+          outranks the bucket word - README and the drill now say which is which. A name that
+          is not whitespace but that git cannot resolve (a bare slash) is refused by the
+          existing named-but-missing path, not by the new one.
+PROVEN:   drill step M4, 17 checks, plus one added to M3 asserting both words. MUTATIONS,
+          each reverted: deleting the door guard reds 2
+          (the board still refuses at exit 6, which is why the door checks assert exit 1 and
+          the door's own words - written as "nonzero" first, they stayed GREEN under that
+          mutation); deleting the board's refusal reds 6, with board=clear exit=0; reverting
+          the length test puts an empty run-branch back to board=clear exit=0 on a scratch
+          repo.
+REVERT:   restore the two skips and the presence test; drill step M4 then fails, which is the
+          point.
+
+## 2026-08-30 - method - A CHECK THAT COMPARES TWO DECLARATIONS PROVES ONLY THAT THEY MATCH
+FINDING:  test_the_ways_off_table_matches_the_drill_that_proves_it said "a row nobody drills
+          is a claim, not a proof" and did not establish it. A phantom row planted in BOTH
+          README's ways-off table and $script:WaysOffProven, with zero assertions anywhere,
+          passed with the full suite green. Both halves are text an author writes.
+DECISION: tie each row to something that RUNS. `Check` registers a route the moment a PASSING
+          assertion cites it in the check's label - the labels those assertions already
+          carried - and drill step N compares declared against exercised in both directions.
+          The pytest keeps the declaration comparison, says so plainly, and gains one static
+          tie: every declared route must reach drill CODE.
+SCOPE:    step N proves an assertion ran and passed citing the route, not that the assertion
+          is a good one; the static tie proves the row reaches code, not that it is tested.
+          Both limits are in the docstring.
+PROVEN:   with the phantom row planted, the pytest FAILS naming the route and the drill
+          reports declared=9 exercised=8 unexercised=phantom-route. Before the fix the same
+          plant gave 132 passed and a green drill. Reverted immediately.
+REVERT:   delete step N and the two lines in `Check`; the pytest's static tie stands alone.
+
+## 2026-08-30 - method - A DERIVED GATE IS ONLY AS WIDE AS ITS ALPHABET (SECOND INSTANCE)
+FINDING:  the enumeration check, and README and MODULE describing it, all claimed "both list
+          shapes". An ordered markdown list and a quoted array were planted as tracked files
+          and both stayed GREEN, and neither omission was in the DISCLOSED LIMITS block. The
+          ordered list was missed twice over: the ordinal starts with a digit, and a row had
+          to be followed by a description.
+DECISION: widen, then disclose what is left. Items may be quoted; rows may carry an ordinal
+          prefix or nothing but the word. The DISCLOSED LIMITS block now writes the shapes and
+          the limits out rather than summarising them - including that matching is
+          CASE-SENSITIVE, a real limit never previously stated. "Both list shapes" is gone
+          from the test, from README.md and from MODULE.md.
+SCOPE:    ignoring case would make ordinary English match in prose, so it is disclosed rather
+          than closed. The check still cannot tell a QUOTATION of a short list from a short
+          list - the new comment explaining the quoted-array shape was paraphrased rather than
+          exempted, which is the rule the previous round set.
+PROVEN:   both planted files fail after the fix and passed before it; both removed. Negative
+          control: the same two shapes carrying the COMPLETE alphabet stay green.
+REVERT:   restore the two patterns; the shapes stop being read and the docstring is wrong
+          again.
+
+## 2026-08-30 - process - AN EMPTY POWERSHELL ARRAY RETURNED FROM A FUNCTION IS $null
+FINDING:  every gate record wrote the branch condition's params as an empty OBJECT, so
+          `looked_at` - whose whole job is to name the params a predicate was handed - did not
+          name the list it claimed to. The cause is not JSON depth: returning an empty array
+          from a PowerShell function emits NOTHING, so ConvertTo-HashtableDeep turned every
+          empty array in the config into $null.
+DECISION: wrap the returned array so an empty one survives as an array. Drill step L's
+          evidence line now names an empty list.
+SCOPE:    the same trap silently discarded any empty-array override in Merge-Settings, which
+          now replaces as documented. The shipped config has one empty array
+          (work-branch-on-remote params.branches), so nothing else changes shape.
+PROVEN:   the verdict JSON and drill step L's looked_at line, before and after.
+REVERT:   unwrap it; the record goes back to naming nothing.
 ```

@@ -77,8 +77,17 @@ if (-not (Test-Path $PsExe)) { $PsExe = "powershell" }
 
 $script:Results = @()
 function Step([string]$text) { Write-Host "`n=== $text ===" -ForegroundColor Cyan }
+# WHICH WAYS-OFF ROUTES AN ASSERTION ACTUALLY EXERCISED IN THIS RUN. Populated by Check
+# below, read by step N at the end. See the comment on $script:WaysOffProven for why.
+$script:WaysOffExercised = [ordered]@{}
+
 function Check([string]$label, [bool]$ok, [string]$detail = "") {
     $script:Results += [pscustomobject]@{ label = $label; pass = $ok; detail = $detail }
+    # A check whose label CITES a route registers that route as exercised - and only when it
+    # PASSED, so a red assertion cannot certify its own row, and a row nobody asserts about
+    # registers nothing at all. Step N compares this against $script:WaysOffProven.
+    $m = [regex]::Match($label, '\(route ([a-z0-9-]+)\)')
+    if ($m.Success -and $ok) { $script:WaysOffExercised[$m.Groups[1].Value] = $true }
     $tag = "FAIL"; $colour = "Red"
     if ($ok) { $tag = "PASS"; $colour = "Green" }
     Write-Host ("  [{0}] {1} {2}" -f $tag, $label, $detail) -ForegroundColor $colour
@@ -89,6 +98,14 @@ function Check([string]$label, [bool]$ok, [string]$detail = "") {
 # a literal - so a row proven here and written up differently there is a test failure
 # (test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it), not
 # something a reader has to notice.
+#
+# THAT TEST COMPARES TWO DECLARATIONS, AND ONLY THAT. Until 2026-08-30 its docstring claimed
+# "a row nobody drills is a claim, not a proof" - and it did not establish it: a phantom row
+# planted in README.md plus an entry here with ZERO assertions passed, and the whole suite
+# stayed green. Both halves were author-controlled text. STEP N at the end of this drill is
+# what makes the claim true: Check registers a route as exercised when a PASSING assertion
+# cites it as "(route <id>)", and step N fails if any row declared here was never exercised.
+# Adding a row is therefore adding an assertion, not adding a line to a map.
 #
 # WHY THE MAP EXISTS AT ALL. `andon-disabled` and `andon-block-deleted` do NOT give the same
 # state, and three files said they did - andon.ps1's header, config.ps1 and config.py, all
@@ -1294,6 +1311,9 @@ Step "M  the ANCHOR gate asks the NARROW branch question - the one README promis
 #   M1  a FOREIGN work branch on a remote, own branch clean  -> the anchor gate PASSES
 #   M2  the run's OWN branch on a remote                     -> the anchor gate REFUSES
 #   M3  a branch name that does not resolve                  -> INDETERMINATE, not a pass
+#   M4  a branch name that is not a NAME (space, tab)        -> REFUSED at the door AND by
+#       the board; a bare slash gets past the door and the board still refuses it; an empty
+#       string never reaches the script at all through `-File`, and is asserted as that
 $fixM = New-DarkFixture "dark-foreign-branch" "dark"
 Push-Location $fixM.repo
 try {
@@ -1359,9 +1379,109 @@ $env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevSta
 $r = Invoke-Queue $fixM3 @("-Propose", "-Id", "dfm3", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
 $r = Invoke-Queue $fixM3 @("-Submit", "-Id", "dfm3", "-Branch", "work/never-created", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
 $itM3 = Get-QueueItem $fixM3 "dfm3"
-Check "M3: a branch name that does not resolve is INDETERMINATE, and the gate refuses (exit 6)" (($r.code -eq 6) -and ($itM3.state -eq "anchor-draft")) ("exit=" + $r.code + " state=" + $itM3.state)
+Check "M3: a branch name that does not resolve leaves the condition UNEVALUATED, and the gate refuses (exit 6)" (($r.code -eq 6) -and ($itM3.state -eq "anchor-draft")) ("exit=" + $r.code + " state=" + $itM3.state)
 $refM3 = @(Get-Ledger $fixM3 | Where-Object { $_.decision -eq "refused" })
 Check "M3 THE RECORD: the halt says the named branch is not present, not that nothing was found" ((@($refM3).Count -ge 1) -and ((@(@($refM3)[0].andon.halted) -join ";") -like "*not present*")) ("halted=" + (@(@($refM3)[0].andon.halted) -join ";"))
+# THE TWO WORDS ARE NOT THE SAME WORD, and step M's write-up used the condition's for the
+# board's. The CONDITION is `indeterminate`; the BOARD is `raised`, because a halt outranks
+# the bucket word - and `indeterminate` as a BOARD word belongs to a different row of the
+# ways-off table. Asserted rather than renamed, so the distinction cannot drift back.
+Check "M3 THE WORD: the condition is indeterminate but the BOARD is 'raised' - a halt outranks the bucket word" ((@($refM3).Count -ge 1) -and ((@($refM3)[0].andon.status) -eq "raised") -and ((@(@($refM3)[0].andon.indeterminate) -join ";") -like "*work-branch-on-remote*")) ("status=" + (@($refM3)[0].andon.status) + " indeterminate=" + (@(@($refM3)[0].andon.indeterminate) -join ";"))
+
+# M4 - A NAME THAT IS NOT A NAME. M3 covers a name git cannot find; this covers a name git was
+# never asked about. Both loops in Predicate-BranchOnRemote used to open with
+# `if (-not $name) { continue }`, so a value that Trim()s to nothing was stepped over twice
+# while `$branches.Count` still counted it - and `-Branch ' '` came back
+# "checked 1 branch(es); none is on a remote": a CLEAR board, the anchor gate AUTO-PASSED,
+# `decision=passed` in the ledger. That is the pass-by-`continue` shape arriving through the
+# narrowing fix itself, and it is the exact string the commit that added the narrow question
+# quoted as the thing its guard prevents.
+#
+# TWO LAYERS, ASSERTED SEPARATELY, because either alone would be a single point of failure:
+# queue.ps1 refuses the input at the door, and the BOARD refuses it again if it ever arrives
+# another way. The board case is driven directly so the door cannot mask it.
+$fixM4 = New-DarkFixture "dark-unusable-branch" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixM4.cfg; $env:AI_STACK_WORKTREE_STATE = $fixM4.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixM4.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+
+# THE CONTROL FIRST, on this very fixture: it is genuinely clean, so a refusal below is the
+# name being refused and not a board that refuses everything.
+$rM4c = Invoke-Andon -Config $fixM4.cfg -Repo $fixM4.repo -StateDir $fixM4.state -RunBranch @("work/dfdrill")
+Check "M4 CONTROL: the same board with the REAL branch is clear (exit 0)" (($rM4c.verdict.board -eq "clear") -and ($rM4c.code -eq 0)) ("board=" + $rM4c.verdict.board + " exit=" + $rM4c.code)
+
+# THE BOARD. A space and a tab - and note the WORD: the condition is `indeterminate` and the
+# BOARD is `raised`, because an indeterminate condition HALTS under the shipped policy.
+foreach ($bad in @(@{ label = "a single space"; value = " " }, @{ label = "a tab"; value = "`t" })) {
+    $rM4 = Invoke-Andon -Config $fixM4.cfg -Repo $fixM4.repo -StateDir $fixM4.state -RunBranch @($bad.value)
+    Check ("M4 THE BOARD (" + $bad.label + "): the condition is INDETERMINATE, not ok") ((Get-CondStatus $rM4 "work-branch-on-remote") -eq "indeterminate") ("status=" + (Get-CondStatus $rM4 "work-branch-on-remote"))
+    Check ("M4 THE BOARD (" + $bad.label + "): the board is RAISED and refuses (exit 6)") (($rM4.verdict.board -eq "raised") -and ($rM4.code -eq 6)) ("board=" + $rM4.verdict.board + " exit=" + $rM4.code)
+    $detM4 = [string](@($rM4.verdict.conditions | Where-Object { $_.id -eq "work-branch-on-remote" })[0].detail)
+    Check ("M4 THE BOARD (" + $bad.label + "): and it does NOT say it checked a branch") (($detM4 -notlike "*none is on a remote*") -and ($detM4 -like "*unusable*")) ("detail=" + $detM4)
+}
+
+# THE DOOR. queue.ps1 counted `" "` as a supplied -Branch because it is TRUTHY in PowerShell.
+foreach ($case in @(@{ id = "dfm4a"; label = "a single space"; value = " " },
+                    @{ id = "dfm4b"; label = "a tab"; value = "`t" })) {
+    $r = Invoke-Queue $fixM4 @("-Propose", "-Id", $case.id, "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+    $r = Invoke-Queue $fixM4 @("-Submit", "-Id", $case.id, "-Branch", $case.value, "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+    $itM4 = Get-QueueItem $fixM4 $case.id
+    # EXIT 1 AND THE DOOR'S OWN WORDS, not merely "nonzero". Written as `-ne 0` first, this
+    # check stayed GREEN with the door guard deleted, because the BOARD refused the same input
+    # at exit 6 - a check that cannot tell which layer refused cannot prove either of them.
+    Check ("M4 THE DOOR (" + $case.label + "): -Submit REFUSES at the DOOR (exit 1), before any gate") (($r.code -eq 1) -and ($r.out -like "*which is not a branch*")) ("exit=" + $r.code + " out=" + (($r.out -split "`n") | Select-Object -First 1))
+    Check ("M4 THE DOOR (" + $case.label + "): the item stays parked at anchor-draft") ($itM4.state -eq "anchor-draft") ("state=" + $itM4.state)
+    Check ("M4 THE DOOR (" + $case.label + "): nothing signed the anchor gate") (-not $itM4.anchor_confirmed_by) ("anchor_confirmed_by='" + $itM4.anchor_confirmed_by + "'")
+}
+
+# AN EMPTY STRING is asserted for what it actually is, one layer further out. Passed through
+# `powershell -File`, the empty argument is DROPPED by the binder: `-Branch` is left without a
+# value and PowerShell refuses before queue.ps1 runs at all. So this is not evidence about the
+# guard, and crediting it to the guard would be the half-verified-row shape again - the guard's
+# predicate is the same one the two cases above exercise, and the BOARD case above covers the
+# value arriving. What this proves is that the third route cannot become a pass either.
+$r = Invoke-Queue $fixM4 @("-Propose", "-Id", "dfm4c", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM4 @("-Submit", "-Id", "dfm4c", "-Branch", "", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM4c = Get-QueueItem $fixM4 "dfm4c"
+Check "M4 (an empty string): PowerShell's own binder refuses it before queue.ps1 runs" (($r.code -ne 0) -and ($r.out -like "*Missing an argument for parameter*")) ("exit=" + $r.code)
+Check "M4 (an empty string): the item stays parked at anchor-draft, nothing signed" (($itM4c.state -eq "anchor-draft") -and (-not $itM4c.anchor_confirmed_by)) ("state=" + $itM4c.state)
+
+# A NAME THAT IS ONLY A SLASH is not whitespace, so the door passes it - and the board still
+# refuses it, as a branch git cannot resolve. The two layers meet here.
+$r = Invoke-Queue $fixM4 @("-Propose", "-Id", "dfm4d", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM4 @("-Submit", "-Id", "dfm4d", "-Branch", "/", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM4d = Get-QueueItem $fixM4 "dfm4d"
+Check "M4 (a bare slash): the gate refuses it at the BOARD (exit 6), item parked" (($r.code -eq 6) -and ($itM4d.state -eq "anchor-draft")) ("exit=" + $r.code + " state=" + $itM4d.state)
+
+# AND THE LAST WORD IS THE CONTROL AGAIN, through the whole pipeline: the same fixture, the
+# same board, the REAL branch - the anchor gate auto-passes.
+$r = Invoke-Queue $fixM4 @("-Propose", "-Id", "dfm4e", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM4 @("-Submit", "-Id", "dfm4e", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM4e = Get-QueueItem $fixM4 "dfm4e"
+Check "M4 CONTROL: the real branch still auto-passes the anchor gate (exit 0)" (($r.code -eq 0) -and ($itM4e.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $itM4e.state)
+
+# ====================================================================================
+Step "N  every ways-off row was proven by an assertion that RAN - not by a second declaration"
+# ====================================================================================
+# THE CHECK THAT COMPARED TWO DECLARATIONS. README.md's ways-off table and
+# $script:WaysOffProven above are both text an author writes, and
+# test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it compares
+# them to each other. On 2026-08-30 a `phantom-route` row was planted in BOTH, with no
+# assertion anywhere - and the full suite stayed green. A row that agrees with a second copy
+# of itself is still a claim; what makes it a proof is an assertion that ran.
+#
+# So Check registers a route the moment a PASSING assertion cites it as "(route <id>)" in its
+# label, and this step compares the routes DECLARED against the routes EXERCISED. Neither
+# direction is skipped: a declared row nobody drilled fails, and a citation of a route the
+# table does not declare fails too (Get-WayOff throws on one, but a label can cite a route
+# without asking Get-WayOff for its word).
+$declaredRoutes = @($script:WaysOffProven.Keys)
+$exercisedRoutes = @($script:WaysOffExercised.Keys)
+$unexercised = @($declaredRoutes | Where-Object { -not $script:WaysOffExercised.Contains($_) })
+Check "N: every declared ways-off route was exercised by a PASSING assertion in this run" (@($unexercised).Count -eq 0) ("declared=" + @($declaredRoutes).Count + " exercised=" + @($exercisedRoutes).Count + " unexercised=" + (@($unexercised) -join ","))
+$undeclared = @($exercisedRoutes | Where-Object { -not $script:WaysOffProven.Contains($_) })
+Check "N: and no assertion cited a route the table does not declare" (@($undeclared).Count -eq 0) ("undeclared=" + (@($undeclared) -join ","))
 
 # ====================================================================================
 Write-Host ""

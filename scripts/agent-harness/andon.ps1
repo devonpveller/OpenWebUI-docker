@@ -561,7 +561,13 @@ function Predicate-BranchOnRemote($cond, $ctx) {
     $prefix = [string](Get-HarnessSetting "worktree.branch_prefix" "work/")
     $branches = @(Get-Param $cond "branches" @())
     $named = ($branches.Count -gt 0)
-    if ($ctx.run_branches -and @($ctx.run_branches).Count -gt 0) { $branches = @($ctx.run_branches); $named = $true }
+    # `$ctx.run_branches -and ...` was NOT a length test. A one-element array unrolls to its
+    # element, so `@("")` evaluated FALSE and the run's own (unusable) name silently became the
+    # BROAD question - "is any local work branch on a remote" - which answers `ok` on a repo
+    # with no remotes. Reproduced 2026-08-30 with `-RunBranch ''`. Count it as a list.
+    $runBranches = @()
+    if ($null -ne $ctx.run_branches) { $runBranches = @($ctx.run_branches) }
+    if ($runBranches.Count -gt 0) { $branches = $runBranches; $named = $true }
     $repo = [string]$ctx.repo_root
 
     if (-not $named) {
@@ -569,7 +575,32 @@ function Predicate-BranchOnRemote($cond, $ctx) {
         if ($LASTEXITCODE -ne 0) { return (New-Result "indeterminate" "git could not list local branches in '$repo'" @()) }
         $branches = @($local | Where-Object { $_ })
         if ($branches.Count -eq 0) { return (New-Result "ok" "no local work branches to check" @()) }
-    } else {
+    }
+
+    # ONE NORMALISATION, AND NO NAME IS EVER SKIPPED. Until 2026-08-30 both loops in this
+    # predicate opened with `if (-not $name) { continue }`, so a name that Trim()s to nothing
+    # was stepped over BEFORE the existence test and again before the remote comparison - and
+    # `$branches.Count` still counted it. `-Branch ' ' -Submit` therefore produced
+    # "checked 1 branch(es); none is on a remote": a clear board, an AUTO-PASSED anchor gate,
+    # `decision=passed` in the ledger, for a question nobody asked. Reproduced 2026-08-30 with
+    # `andon.ps1 -Evaluate -Only work-branch-on-remote -RunBranch ' '` - exit 0, board clear.
+    # That is deciding by exception, the shape this board refuses everywhere else, arriving
+    # through the narrowing fix itself. AN UNUSABLE NAME REFUSES: indeterminate, which halts.
+    $unusable = @()
+    $names = @()
+    foreach ($b in $branches) {
+        $name = ([string]$b).Trim()
+        if (-not $name) { $unusable += ("[" + ([string]$b) + "]"); continue }
+        $names += $name
+    }
+    if ($unusable.Count -gt 0) {
+        return (New-Result "indeterminate" (
+            "unusable branch name(s) - empty or whitespace, so nothing was asked about them: " +
+            ($unusable -join ", ")) $unusable)
+    }
+    $branches = $names
+
+    if ($named) {
         # A NAMED BRANCH THAT DOES NOT EXIST IS NOT A CLEAN BRANCH - it is a question that was
         # never asked. The narrow reading is only as good as the name it is handed, and the
         # anchor gate hands it `-Submit -Branch` BEFORE git has been asked whether that branch
@@ -577,10 +608,9 @@ function Predicate-BranchOnRemote($cond, $ctx) {
         # would have produced "checked 1 branch(es); none is on a remote" - a clean board for a
         # branch nobody has, which is exactly the skip-counts-as-a-pass shape this board
         # refuses everywhere else. Named-but-missing is INDETERMINATE, which halts by default.
+        # A name git cannot resolve at all - a bare slash, say - lands here too.
         $missing = @()
-        foreach ($b in $branches) {
-            $name = ([string]$b).Trim()
-            if (-not $name) { continue }
+        foreach ($name in $branches) {
             Invoke-GitCapture @("-C", $repo, "show-ref", "--verify", "--quiet", ("refs/heads/" + $name)) | Out-Null
             if ($LASTEXITCODE -ne 0) { $missing += $name }
         }
@@ -601,9 +631,7 @@ function Predicate-BranchOnRemote($cond, $ctx) {
     }
 
     $hits = @()
-    foreach ($b in $branches) {
-        $name = ([string]$b).Trim()
-        if (-not $name) { continue }
+    foreach ($name in $branches) {
         foreach ($rn in $remoteNames) {
             if ($rn[1] -eq $name) { $hits += ("{0} is on remote '{1}' ({2})" -f $name, $rn[0], $rn[2]) }
         }

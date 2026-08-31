@@ -194,9 +194,19 @@ Five things are worth knowing before relying on it:
   run is permitted to delete. A `dark` run could therefore never auto-pass an anchor gate
   here, for a reason the doc said could not block it. The branch was known at that point
   (`-Submit -Branch` is mandatory); it simply was not passed. Drill step M is the proof, in
-  three parts: a foreign branch on a remote passes the anchor gate, the run's own branch on
-  a remote still halts it, and a branch name that does not resolve is `indeterminate` rather
-  than a clean board — because a narrow question is only as good as the name it is handed.
+  four parts: a foreign branch on a remote passes the anchor gate, the run's own branch on a
+  remote still halts it, a branch name that does not resolve leaves the condition
+  **unevaluated** rather than clear, and a name that is not a name at all — a space, a tab,
+  an empty string — is REFUSED rather than skipped. A narrow question is only as good as the
+  name it is handed. **Both of those last two halt the gate, and neither of them is a board
+  word to quote**: the condition ends unevaluated, and the board that carries it reads
+  `raised`, because an unevaluated condition halts under the shipped policy. Until
+  2026-08-30 the whitespace case did not halt at all — both loops in the predicate stepped
+  over a name that trimmed to nothing while still counting it, so `-Branch ' '` came back
+  "checked 1 branch(es); none is on a remote", a clean board and an AUTO-PASSED anchor gate
+  for a question nobody asked. It is refused twice now: at the door by `queue.ps1`, which
+  used to count `" "` as a supplied branch because PowerShell calls it truthy, and again by
+  the board, so neither is a single point of failure.
 - **`-VerifyAudit` exit 7 is not a pass.** It means the check found items it could
   not audit (items predating the ledger). Coverage it does not have is not coverage.
   Nor is a green a claim about gates an item never reached — it prints that scope.
@@ -205,9 +215,14 @@ Five things are worth knowing before relying on it:
 - **The board's words are checked wherever they are written down.** Four sentences in three
   files listed some of the eight verdict words as though they were all of them, so
   `test_gate_profiles.py` now derives every enumeration of board words in the repository
-  (`git ls-files`, both list shapes) and requires it to be complete, and derives every
-  citation of a ways-off `route` id and requires it to name the state the table below
-  proves. Write three or more board words as a list and you are enumerating the alphabet;
+  (`git ls-files`) and requires it to be complete, and derives every citation of a ways-off
+  `route` id and requires it to name the state the table below proves. It reads two list
+  shapes — an inline run joined by list punctuation, whose items may be quoted, and a block
+  of consecutive lines that each introduce a word, bulleted or numbered or as table or
+  definition rows or the word alone on its line. That sentence used to read "both list
+  shapes" and name neither; on 2026-08-30 an ordered list and a quoted array were planted as
+  tracked files and both stayed green, so the shapes and the limits are now written out in
+  the test's DISCLOSED LIMITS block, which is the one place to change them. Write three or more board words as a list and you are enumerating the alphabet;
   if you mean a narrower set, say so in words or write it as a mapping.
 
 **Eight ways of switching the board off, or of getting a pass out of it, were tried against
@@ -229,8 +244,14 @@ mapping was restated in three files and was wrong in all three (see below):
 
 Each row is a drill case driving the real `queue.ps1` (steps F, H, J and K), and the drill
 declares the same map in `$script:WaysOffProven`, which its own assertions read - so a row
-here with no drill case, or a drill case asserting a different word, fails
-`test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it`. The
+here whose word differs from the drill's, or which reaches no drill code at all, fails
+`test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it`. **That
+test compares two written-down copies of the mapping, and it used to claim more than that.**
+Until 2026-08-30 it said a row nobody drills is a claim rather than a proof, and it did not
+establish it: a phantom row planted in BOTH copies, with zero assertions anywhere, passed
+with the whole suite green. What a row is EXERCISED by is checked where it can be - in the
+drill: `Check` registers a route the moment a PASSING assertion cites `(route <id>)` in its
+label, and **drill step N** fails on any row declared here that no assertion exercised. The
 `route` ids exist so the fact can be CITED rather than copied: any line anywhere in the
 repository that names a route id and a board word is checked against this table by
 `test_every_citation_of_a_way_off_names_the_state_this_table_proves`. Two of these rows had
@@ -323,9 +344,10 @@ trail, proves that turning the board off — or thinning it by deleting conditio
 halts rather than opens, proves that neither outcome key can be downgraded into silence and
 that an outcome word the board has never heard of is refused rather than ignored, shows that
 a `params` redirect is readable from the ledger, proves that the ANCHOR gate asks the narrow
-branch question and that a branch name which does not resolve is `indeterminate` rather than
-a clean board (step M), and re-runs the clean board afterwards so a
-fix that refused everything would be caught. Every WRITE it
+branch question and that a branch name which does not resolve - or is not a name at all -
+halts it rather than clearing it (step M), checks that every row of the ways-off table above
+was exercised by an assertion that actually ran (step N), and re-runs the clean board
+afterwards so a fix that refused everything would be caught. Every WRITE it
 makes is to a scratch repository under `$env:TEMP` with the config and state dir
 redirected; it makes exactly one READ of a real repository, by name — one case scans
 this checkout's own `.ps1` files so the detector is shown naming the incident's
