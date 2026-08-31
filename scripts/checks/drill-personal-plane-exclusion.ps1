@@ -427,6 +427,26 @@ $GAP_DISPOSITIONS = [ordered]@{
     "EXT-CRM-COPY"                = "H1 - and the same call copies that content into professional_contacts.notes. Same cause, same item."
     "LIFT-REFUSED-AND-RECORDED"   = "H1/H4 - the lift's conjunction cannot close while the audit-record half is open (every AUDIT-* gap above)."
     "LIFT-AUDIT-OUTLIVES"         = "H1/H4 - cannot be evaluated until LIFT-REFUSED-AND-RECORDED is closed; there are no refusal rows to outlive anything."
+    # --- VACUOUS-*: assertions that USED TO PRINT PASS off an empty set --------------------
+    # Every one of these is a claim of the form "of the rows in S, none has property P" whose
+    # S is empty on this tree. They are not new shortfalls - the shortfall was always there,
+    # and what is new is that the run says so instead of printing a green. Five were named in
+    # the review; the sixth and seventh came out of routing their siblings through the same
+    # helper, which is the point of having one mechanism rather than five patches.
+    #
+    # SIX OF THE SEVEN ARE DOWNSTREAM OF THE AUDIT-RECORD GAP: with zero access_refused rows
+    # in the database, every claim about what those rows do or do not contain quantifies over
+    # nothing. They close when H1 closes AUDIT-INSPECT and its family - and on that day the
+    # ledger goes RED until these pins are pulled, which is the intended behaviour.
+    "VACUOUS-REFUSAL-DISCRIMINATES"     = "H1/H4 - downstream of the audit-record gap. 0 access_refused rows exist, so 'the ALLOWED call wrote none' cannot show the signal discriminates."
+    "VACUOUS-GHOST-NO-ROW"              = "H1/H4 - downstream of the audit-record gap. Same empty universe: no refusal rows, so 'a typo writes none either' distinguishes nothing IN THE LOG. The RESPONSE half of that check is asserted separately and passes."
+    "VACUOUS-TRACE-REFUSAL-ID"          = "H1/H4 - downstream of AUDIT-RECALL-TRACE-ENVELOPE. The off-plane-trace refusal row does not exist, so 'that row names no memory id' is about a row that was never written."
+    "VACUOUS-WRITEBACK-REFUSAL-ID"      = "H1/H4 - downstream of AUDIT-WRITEBACK-PROBE. Same shape, on the writeback's refusal row."
+    "VACUOUS-ENUMERATING-FILED-NOTHING" = "H1/H4 - downstream of the audit-record gap. NO tool filed a refusal row, so 'the enumerating doors filed nothing' holds of the enumerating doors, the targeted doors, and every door that does not exist."
+    # ...and one that is NOT about the audit table:
+    "VACUOUS-WIKIPAGES"                 = "ATTACK 14 measurement gap, NOT H1. The compiler wrote ZERO wiki_pages rows in this throwaway, so 'wiki_pages holds none of the personal text' is a statement about a compile that published nothing to that table. The file-output half of ATTACK 14 (no leaf page, no marker in the emitted text) is measured against a compile that DID produce output and passes; closing this one needs a fixture that makes the compiler write wiki_pages, which is a drill change, not a boundary one."
+    # --- and the red-coverage ledger ------------------------------------------------------
+    "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed here is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite."
 }
 
 if (-not $RunId) { $RunId = [guid]::NewGuid().ToString("N").Substring(0, 8) }
@@ -1064,9 +1084,15 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else {
         Fail "the ops door MINTED a personal-plane memory through the real write path - access does not bound writes"
     }
+    # THE UNIVERSE, NOT ONLY THE VIOLATIONS. "no memory in this workspace is personal" says
+    # nothing if the door wrote no memory at all - the refusal above would then be
+    # indistinguishable from the whole lane being down.
+    $wsMems     = Db "SELECT count(*) FROM agent_memories WHERE workspace_id = '$WS'"
     $mintedPers = Db "SELECT count(*) FROM agent_memories WHERE workspace_id = '$WS' AND exposure = 'personal'"
-    if ($mintedPers -eq "0") { Pass "and nothing landed: 0 personal rows from that attempt" }
-    else { Fail "$mintedPers personal memory/memories were written by the ops door" }
+    Assert-NoneOf -Id "VACUOUS-OPSDOOR-MINT" -Universe $wsMems -Violating $mintedPers `
+        -UniverseName "memory/memories this workspace holds" `
+        -Claim "and nothing landed: no memory in this workspace is on the personal plane" `
+        -Defect "personal memory/memories were written by the ops door"
 
     $PID_OPS  = $control.Body.memory_id
     # The personal fixture, planted as the personal-plane context would write it: the memory,
@@ -1163,8 +1189,10 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $opsTid = Db "SELECT COALESCE(thought_id::text,'null') FROM agent_memories WHERE id = '$PID_OPS'"
     if ($persTid -ne "null" -and $opsTid -ne "null") { Pass "both memories point at their mirrored thoughts (personal $persTid, ops $opsTid) - neither plane is contained by being unrecallable" }
     else { Fail "a memory lost its mirror (personal='$persTid' ops='$opsTid')" }
-    if ($mirrorShared -eq "0") { Pass "no mirrored thought carries a 'share' label - the cloud filter's premise holds in the data" }
-    else { Fail "$mirrorShared mirrored thought(s) carry a 'share' key - the cloud door's exclusion is not what the comment says" }
+    Assert-NoneOf -Id "VACUOUS-MIRROR-SHARE" -Universe $mirrored -Violating $mirrorShared `
+        -UniverseName "mirrored thought(s) carrying this run's marker" `
+        -Claim "no mirrored thought carries a 'share' label - the cloud filter's premise holds in the data" `
+        -Defect "mirrored thought(s) carry a 'share' key - the cloud door's exclusion is not what the comment says"
 
     # A recall TRACE that names the personal memory, so agent_memory_recall_trace has
     # something off-plane to be attacked with. Planted rather than harvested from the red
@@ -1330,9 +1358,18 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($refused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_inspect)" }
     else { Gap "AUDIT-INSPECT" "STOPPED but NOT RECORDED (agent_memory_inspect): expected 1 access_refused row, got '$refused'"
            Note $AUDIT_GAP }
+    # THE CLAIM IS THAT access_refused DISCRIMINATES, and a discriminator cannot be measured
+    # on a table that holds none of it. The universe is every access_refused row this run has
+    # produced so far; with zero of them, "the allowed call wrote none" is true of the allowed
+    # call, of the refused call, and of every call that never happened. This is the assertion
+    # the review named first, and it printed PASS on the line directly below the GAP that had
+    # just measured the count as zero.
+    $refusedAll  = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused'"
     $refusedCtrl = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_OPS'"
-    if ($refusedCtrl -eq "0") { Pass "the ALLOWED inspect wrote no refusal row - access_refused means refused, it is not a per-call constant" }
-    else { Fail "the allowed inspect also wrote $refusedCtrl refusal row(s) - the signal is noise" }
+    Assert-NoneOf -Id "VACUOUS-REFUSAL-DISCRIMINATES" -Universe $refusedAll -Violating $refusedCtrl `
+        -UniverseName "access_refused row(s) written so far this run" `
+        -Claim "the ALLOWED inspect wrote no refusal row - access_refused means refused, it is not a per-call constant" `
+        -Defect "the allowed inspect also wrote refusal row(s) - the signal is noise"
 
     # A memory that genuinely does not exist must NOT produce a refusal row. Without this,
     # every typo becomes a refusal record and the rows that matter are buried in them.
