@@ -318,16 +318,35 @@ without a recorded result.
    PARKED entries in `DECISIONS.md`. Every §2.1 amendment carries its evidence and
    revert path, and NARROWS or CORRECTS with a reason — never deletes a
    requirement (§B).
-3. **The personal-plane constraint is LIFTED ON EVIDENCE.** "Do not write a
-   personal-exposure memory" is withdrawn only when a `personal`-labelled row is
-   proven invisible at every door by a run, AND the corpus predicate is
-   fail-closed. `ob_corpus_on_ops_plane` is currently `IS NULL OR = 'ops'`, so an
-   unlabelled row is VISIBLE — the "unlabelled defaults to fine" class from our own
-   list. Closing it is a one-time backfill of unlabelled rows to `exposure='ops'`
-   and then flipping the function. Until that lands, this clause fails.
-4. **Nothing is left in flight.** Zero unmerged `work/*` branches and zero
-   worktrees — or each survivor named in `DECISIONS.md` with the reason it was
-   abandoned. A stale worktree is unfinished work wearing a finished face.
+3. **The personal-plane constraint is lifted by VALIDATION, never by emptiness**
+   (operator, 2026-08-30). "It cannot be exploited because there are 0 personal
+   rows" is **not** containment — it is an absence of data, and the property it
+   claims changes the instant a personal row exists. The lift requires a run: a
+   synthetic `personal`-labelled row is written, then **every** door is attacked
+   and none returns it — the MCP read tools, the raw openbrain-mcp door, PostgREST
+   on `agent_memories` AND `thoughts`, the `thought_entities` join, the wiki
+   compiler's published output, and cloud `search_thoughts` — with a refusal
+   recorded where a refusal is owed. AND the corpus predicate must be fail-closed:
+   `ob_corpus_on_ops_plane` is currently `IS NULL OR = 'ops'`, so an unlabelled row
+   is VISIBLE — the "unlabelled defaults to fine" class from our own list. Closing
+   it is a one-time backfill of unlabelled rows to `exposure='ops'`, then flipping
+   the function. Until both land, this clause fails.
+4. **Nothing is left in flight, and everything is DEPLOYED AND RUNNING**
+   (operator, 2026-08-30). Zero unmerged `work/*` branches, zero worktrees, a clean
+   repo and clean submodules, and the OB1 gitlink pinning a commit that is
+   reachable on the OB1 remote. Every service this plan adds is **running live from
+   the work line's code** — the ops gateway, the andon board, the gate profiles,
+   the RLS boundary at every stage including the direct clients. A deliverable that
+   merges but does not run is not done; a stale worktree is unfinished work wearing
+   a finished face.
+4b. **A phase that closed on an AMENDED column is FLAGGED, never counted
+   silently** (operator, 2026-08-30 — "it depends"). Amendments are legitimate: A1
+   and A2 each did real work, and §B permits narrowing or correcting with evidence.
+   But the line between *reality corrected the plan* and *we made the bar
+   reachable* is a judgement the operator makes at the walkthrough, not one the
+   script makes. So `dfu-done.ps1` lists every phase closing on an amended column,
+   with the amendment and its evidence, in its output. It does not fail for it and
+   it does not hide it.
 5. **The walkthrough is true.** Every row of `WALKTHROUGH.md` names a check and
    that check re-runs green. The operator reviews by reading it (§C.7), so a row
    whose check does not run is worse than a missing row.
@@ -339,6 +358,23 @@ without a recorded result.
 7. **The audit trail is complete**, because it is what the operator reads instead
    of the diffs: every phase has its DECISIONS entries, its findings note, and
    commit messages stating what was validated and by which check.
+8. **THE MEMORY PLANE COMPOUNDS — the plan proves its own thesis** (operator,
+   2026-08-30). This plan's basis is NVIDIA AVO's result, whose central claim is a
+   persistent memory carrying implementations, results and reasoning forward across
+   attempts. Building that plumbing is U1's column; it is not this clause. This
+   clause is met when the plane is **used**: real efforts write to it as they run,
+   and **at least one recall demonstrably informed a later effort** — traceable
+   through `agent_memory_recall_traces` to the work that consumed it, with the
+   effort's own record citing what it was told.
+
+   Measured at adoption: `agent_memories` held **4 rows** — a boundary probe, an
+   acceptance probe, a U3 proof and one real finding — while this effort's actual
+   compounding ran through `DECISIONS.md` and 25 findings notes. That gap is the
+   point. U5's five rounds each rediscovered a NEIGHBOURING case, which is exactly
+   what a system without cross-attempt recall does; the recall that saved it came
+   from files. **A memory plane that is built but not used has not been shown to
+   work**, and this plan would otherwise close having proved it was constructed
+   rather than that it compounds. This clause may FAIL. That is why it is here.
 
 **When the script exits 0 the factory STOPS and hands over.** That is the handover
 point, not the finish line — the operator's walkthrough is the last gate and it is
