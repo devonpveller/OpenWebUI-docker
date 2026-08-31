@@ -463,6 +463,74 @@ theirs.
 **If a clause cannot be met, that is a REPORT, not a redefinition.** Say which
 clause, what would close it, and what it would cost. Amending a column so the
 script passes is the one move this section exists to forbid.
+
+### C.9 Hardening — the boundary is enforced by the database, asserted on boot, re-proven in CI (phase U8, added 2026-08-31)
+
+An external durability audit of the merged work (2026-08-31) found the boundary
+SOUND but its **operational envelope normative**, which §0 A7 records as the
+exact thing that fails over time. The predicates are mechanical; everything in
+FRONT of them — who connects, whether the migration ran, whether the label was
+written, whether the checks still run — currently rests on something
+*remembering*. Each item below moves one guarantee from "remembered" to
+"enforced", and each is measured, per §C.8, by a check that RUNS. This is
+phase **U8**, and §C.8 clause 4's "deployed and running" is not met until U8 is:
+a boundary that holds in a demo but not after a restore is not deployed, it is
+staged.
+
+- **H1 — No application connects as a superuser.** Measured live 2026-08-31:
+  **22 of 22** connections to `openbrain-db` are `postgres` (`rolsuper`,
+  `bypassrls`) — 17 `deno_postgres`, 4 PostgREST, 1 psql. PostgREST switches
+  role per request and is mechanically bound; the direct clients are not, and a
+  boundary in front of a superuser connection is enforced only by every client
+  remembering to `SET ROLE`. **DERIVE, do not guess:** read each direct client's
+  queries and split them — the data-plane ones move to a dedicated non-superuser
+  role (PostgREST's authenticator/least-privilege model is the standard); the
+  ones that genuinely need superuser (NOTIFY, extensions, DDL, initdb) are named
+  with the reason. *Validated by:* a run that opens a connection as the app role
+  and shows a personal row is invisible WITHOUT any `SET ROLE`, and a census of
+  live connections by role with zero unexplained superuser app clients.
+
+- **H2 — The boundary asserts itself on boot.** `init-*-rls.sql` runs only on a
+  FRESH volume, so a restore, a rebuild, or a promotion where the runbook was
+  skipped comes up FORCE-off and silently unprotected. *Validated by:* a
+  startup assertion (health gate or migration check) that refuses to serve — or
+  alarms at minimum — if `relforcerowsecurity` is false on any of the nine
+  governed tables; proven by a drill that brings a DB up without the migration
+  and shows the assertion fires.
+
+- **H3 — The exposure label cannot be absent or malformed at write time.**
+  `exposure` currently lives in `metadata->>'exposure'` (jsonb), while tenancy
+  (`user_id`) is a typed column. The predicates are fail-CLOSED, so a missing or
+  misspelled label hides data rather than leaking it — an availability and
+  write-discipline risk, not a live leak. **This item carries an operator
+  decision — see the note below; do not implement past what the operator
+  chooses.** *Validated by (whichever option is chosen):* a write missing or
+  malforming the label is rejected or safely defaulted BY THE DATABASE, proven
+  by a run that attempts a bad write and shows the outcome.
+
+- **H4 — The verification machinery is re-proven, not snapshotted.**
+  `dfu-done.ps1`, the drills, and the gates encode lessons nobody will
+  re-derive, and nothing runs them on a schedule; a later refactor breaks one
+  silently. *Validated by:* the boundary drill and `dfu-done.ps1`'s runnable
+  clauses wired into CI on `development`, shown green on a CI run — not a local
+  one. (Note: §0 A6 records that CI had never run on `development`; H4 depends on
+  that being true first, or it is asserting green against a runner that does not
+  execute.)
+
+- **H5 — The work exists in more than one place.** The work line was 100+
+  commits ahead of `origin`. *Validated by:* `git rev-list origin/<line>..<line>`
+  returns 0. Autonomous under §C.2; not a promotion.
+
+**Operator decision inside H3 — typed exposure column vs. hardened default.**
+The hardened-standard form is a typed, constrained column
+(`exposure NOT NULL CHECK (exposure IN ('ops','personal'))`), which makes
+"unlabelled" and "misspelled" impossible at write time rather than defaulted at
+read time — the same treatment tenancy already got. The cost is a schema
+migration on live tables with existing writers, changing the write contract for
+every producer. The lighter form keeps the jsonb key and adds a NOT-NULL/CHECK
+guard or a rejecting trigger. This is a real trade — invasiveness vs. closing
+the soft spot at the type level — and it is the operator's call, recorded here
+as OPEN until they make it. Until then H3 is specified but not implemented.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
@@ -706,6 +774,7 @@ live planes or a real target.
 | **U5** | **Containment parity:** mechanical guards for worktree/cloud agents (hook-bypass detection at minimum; commit-path proxy where feasible); `judge_enabled` calibration plan for expertise minting (the one-line §13 gap); personal-plane exclusion verified end to end | Adversarial drill: an agent instructed to bypass hooks / reach personal-plane data is mechanically stopped and the attempt is visible in an audit record | U0 |
 | **U6** | **Dark-factory mode:** andon-condition config; `dark` vs `attended` gate profiles; auto-passed gates leave audit records; recall-informed briefs at all four seams (memory-plane Phase 3) | Gym: an unattended run that hits each andon condition halts-and-raises; one that hits none lands with a complete audit trail | U1–U5 |
 | **U7 (standing)** | **Post-development design iteration** per §B: real-world outcomes → proposed design changes → judged against the pinned research anchors → trialed in the gym → adopted or refused on the record | The evidence ledger itself: every design change carries its anchor citation or its ledger amendment | U6 |
+| **U8** | **Hardening (§C.9):** move the boundary's operational envelope from normative to mechanical — no superuser app connections (H1), boot-time RLS assertion (H2), exposure label enforced at write time (H3, operator-gated), verification machinery in CI (H4), work line pushed (H5) | Each H-item's own runnable check in §C.9; and `dfu-done.ps1`'s pinned phase floor + clause 1 EXTENDED to include U8, so U8's columns re-run green from a clean checkout like any other phase | U5, U6 |
 
 Explicitly NOT in scope: rewriting agent-org's orchestrator; replacing
 Mattermost; auto-elevation of any memory to instruction-grade; deleting the
