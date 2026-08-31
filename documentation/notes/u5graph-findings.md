@@ -777,7 +777,17 @@ the corpus sections 2 and 3 govern, which has a live write path), and section 6a
 **gate on the gate** - if the derivation ever reaches a relation whose write path this file
 deliberately preserves, it RAISES instead of revoking. Adversarial case E fires it.
 
-## A live-versus-fresh drift the mechanism gates made visible
+## A live-versus-fresh drift the mechanism gates made visible - REFUTED IN ROUND 4
+
+> **THIS WHOLE SECTION IS A MEASUREMENT ERROR.** Re-measured 2026-08-31 on a genuinely fresh
+> volume built from the same 28 files and on `openbrain-db` with the same query: `service_role`
+> holds `DELETE, INSERT, SELECT, UPDATE` on **both** `thoughts` and `thought_entities` in **both
+> places**, granted by `init-grants.sql:13` (`GRANT ALL ON ALL TABLES IN SCHEMA public TO
+> service_role`, mounted at `050-`) and reduced to four privileges by
+> `init-agent-memory-rls.sql:328`. There is no drift, "nothing in the chain grants those" is
+> false, and the grant-replication step it justified was compensating for nothing. Left in place
+> rather than deleted, with the refutation attached - see round 4's corrections.
+
 
 The uniqueness and FK gates read **grants**, so they behave differently in the two places the
 two-place invariant covers. A fresh volume built from the 28-file chain gives `service_role`
@@ -908,7 +918,8 @@ containers, `0` leftover networks); the migration drops no table, column, view o
 
 ## Open items - rounds 1 and 2's stand, plus three
 
-7. **The live database has grants the initdb chain does not give.** `service_role` holds
+7. **WITHDRAWN IN ROUND 4 - a measurement error, not a finding.** ~~**The live database has
+   grants the initdb chain does not give.**~~ `service_role` holds
    `INSERT/UPDATE/DELETE` on `thoughts` and `thought_entities` in production and only `SELECT`
    on a fresh volume built from the same 28 files. Nothing in the chain grants them. That is the
    two-place invariant failing in the **privilege** dimension, and it is exactly the dimension
@@ -931,3 +942,353 @@ containers, `0` leftover networks); the migration drops no table, column, view o
    because the compiler writes continuously. It has been moved out of the ops-path identity
    block in the runbook and is now read separately and labelled - a member that moves on its own
    weakens every member that does not.
+
+---
+
+# Round 4 - the last round: three more catalogue proxies, and the sentence that was the defect
+
+## What this round was told, and what it changed about the shape of the work
+
+The send-back did not name a fourth leak to patch. It named the **pattern**: three rounds, three
+sweeps, each keyed on a **catalogue proxy** instead of the property - `relkind='r'`,
+`indisunique`, `prosecdef` - and each widening of the alphabet buying exactly one round. And it
+separated two things this effort had been conflating:
+
+- **(a) the POLICIES** - runtime enforcement, which must deny by default. Winnable.
+- **(b) the POST-CONDITION** - the gate that checks (a). **Cannot be complete**, and claiming it
+  is has now produced three false clean verdicts.
+
+So round 4 fixes the three named leaks *and* stops the gate claiming completeness. Those are
+different deliverables and the second one is the more important.
+
+## The defect sentence, reproduced
+
+The round 3 file, applied to a throwaway that simultaneously carried an exclusion-constraint
+oracle, a FORCE-RLS partitioned relation with `USING (true)` and an INVOKER trigger copying
+thought content out:
+
+```
+NOTICE:  init-graph-plane-rls: mechanism sweeps run over 13 derived relation(s), floor of 13 satisfied
+NOTICE:  init-graph-plane-rls: post-conditions hold on 9 table(s), and the four mechanism sweeps
+         (absence, uniqueness, foreign keys, reachability) are clean
+COMMIT
+```
+
+That is the fourth printing of that sentence, and the first one taken while all three leaks were
+measured live in the same database. **The sentence was the defect**: it reported the absence of a
+finding as the presence of a property.
+
+## (a) THE THREE LEAKS, measured RED then closed
+
+Throwaway `wt-u5g4-db`, `pgvector/pgvector:pg16`, own network `wt-u5g4-net`, never attached to an
+`ai-stack_*` anchor network, chain **derived from `OB1/docker/docker-compose.yml`** with the
+staged count asserted against the compose count (**28 mentions = 28 pairs = 28 staged**).
+Synthetic fixtures only.
+
+### L1 - the exclusion constraint. `indisunique` is a proxy; the property is "a key constraint refuses"
+
+`thought_entities` carrying
+`EXCLUDE USING btree (entity_id WITH =, mention_role WITH =)` - which does **not** contain the
+plane column `thought_id`. As `service_role`, with the read control in the same session:
+
+```
+read thought_entities (control)          -> 0 personal / 1 ops      <- the read policy WORKS
+INSERT colliding with the HIDDEN row     -> 23P01 exclusion violation
+INSERT into a free slot, same statement  -> INSERT 0 1
+```
+
+The `idea_revisions` shape verbatim, one SQLSTATE over. `pg_index.indisunique` is **false** for
+an exclusion constraint's index, so section 7(i)'s population could never contain it - while
+`contype IN ('p','u','x')` was already sitting in that same query's join filter, so `'x'` was
+intended and unreachable.
+
+**Fixed:** section 7(i)'s population is taken from `pg_constraint` (`p`, `u`, `x`) UNION every
+bare unique index no constraint owns - `CREATE UNIQUE INDEX` with no constraint is the same
+oracle with no catalogue row to hang a comment on. The "columns contain the plane columns" escape
+applies to an exclusion constraint only when **every operator is `=`**; with `<>` or `&&` a
+collision is not a duplicate and containment proves nothing.
+
+**What is honestly closed here, and what is not.** RLS cannot make a constraint stop refusing.
+What section 7(i) does is refuse to let the migration COMMIT over a database in that state, so the
+constraint cannot be shipped silently. That is a gate, not a runtime fix, and the residual is
+written down below.
+
+### L2 - the partitioned relation. `relkind='r'` is a proxy
+
+A FORCE-RLS **partitioned** relation with a permissive `USING (true)` read **1 personal / 1 ops**
+through the door while every sweep reported clean, because `v_scope` selected `relkind = 'r'` and
+a partitioned table is `'p'`.
+
+**Fixed:** the population is `relkind IN ('r','p')`, and section 7(l)'s reachability base with it.
+The wide policy is now caught by 7(h) - measured: `policy arm(s) u5g4_part.u5g4_part_wide USING
+PERMIT a row whose every column is NULL`.
+
+**And the half a relkind fix would have missed.** Policies on a partitioned parent bind a query
+*through the parent*; a query naming a **leaf partition** directly is bound by the leaf's own
+flags and the leaf's own policies. PostgREST addresses relations by name, so a leaf is a door of
+its own. **Section 7(n)** asserts that every leaf of a governed partitioned relation is itself
+RLS-enabled and FORCED, or holds no door grant. Adversarial case M fires it.
+
+### L3 - the INVOKER trigger. `prosecdef` is a proxy; the mechanism is the SESSION
+
+```sql
+CREATE FUNCTION u5g4_mirror_fn() RETURNS TRIGGER SECURITY INVOKER ...
+  INSERT INTO u5g4_mirror (thought_id, body, fp)
+  VALUES (NEW.id, NEW.content, encode(digest(NEW.content,'sha256'),'hex'));
+CREATE TRIGGER trg_u5g4_mirror AFTER INSERT ON public.thoughts ...
+```
+
+Written by a superuser session, exactly as `openbrain-mcp` writes `thoughts`. As `service_role`:
+
+```
+U5G4-PERSONAL trigger-copied secret | 45dbdbebc164c338    <- content AND fingerprint. LEAK.
+U5G4-OPS trigger-copied control     | 7b062dcc530803a4    <- the positive control
+```
+
+`prosecdef` is **false**. Flip that one attribute to true and the round 3 file goes red - which is
+the proof that the attribute is a proxy. **The mechanism is that a trigger runs with the
+authority of whoever wrote the row, and every deployed writer of this corpus is a superuser
+session no policy binds.** SECURITY DEFINER is a second route to the same place, not the place.
+
+**Fixed** by moving the assertion off the attribute and onto the SET: **section 4b** writes a
+`TRIGGER-DISPOSITION:` COMMENT on each of the five triggers that exist on governed relations,
+naming what each one MOVES; **section 7(m)** requires every non-internal trigger on a relation in
+the derived population to carry one, whatever its `prosecdef`, timing or events. Measured: with
+the mirror trigger present and undispositioned, `init-graph-plane-rls: trigger(s)
+thoughts.trg_u5g4_mirror are attached to a governed relation and carry no TRIGGER-DISPOSITION
+comment`.
+
+**What section 7(m) proves and what it does not.** It proves nothing is attached to a governed
+relation without somebody having written down what it moves, and that one appearing tomorrow
+stops the migration. It does **not** read the function body - adversarial case O attaches the same
+leaking trigger with a disposition that lies about it, and the migration COMMITs, deliberately -
+and it does not see a trigger on an *ungoverned* relation that reads a governed one. Both are
+counted in the verdict's not-covered census.
+
+### L4 - `ob_trace_on_ops_plane`: absence was covered, VACUITY was not
+
+`COALESCE(rp->'enforced_exposure','["personal"]') <@ '["ops"]'` denies for an absent key. It
+**permits** for `[]`, because the empty set is a subset of every set - so a trace that enforced
+**nothing** was readable with its query text. Measured as `service_role`:
+
+| `enforced_exposure` | round 3 | round 4 |
+|---|---|---|
+| `[]` | **returned - "U5G4-TRACE-EMPTY secret query text"** | not returned |
+| `["ops"]` (CONTROL) | returned | returned |
+| `["personal"]` | not returned | not returned |
+| key absent | not returned | not returned |
+
+**Fixed** as the property: a trace is on the ops plane when it **enforced something** and
+everything it enforced was `ops`. A `CASE` rather than an `AND` chain, because Postgres does not
+guarantee short-circuit evaluation and `jsonb_array_length()` raises on a non-array.
+
+**Ops impact measured on the live database BEFORE the change:** all **78** live recall traces
+carry no `enforced_exposure` key at all - 0 readable through the door before, 0 after. Nothing
+that works today is narrowed.
+
+### The `agent_memories` NULL arm, and why round 3's defence of it was the wrong defence
+
+`thought_id IS NULL OR ob_thought_visible(thought_id)` still sits in both `agent_memories`
+WITH CHECKs. Round 3 said it was contained because section 6a withdraws the door's write. **That
+is containment, undone by one GRANT, and not the property.**
+
+The actual argument is about what the absent value MEANS on this table. Everywhere else this
+file touched, the NULL column *was* the plane. On `agent_memories` the plane is established by a
+different column - `metadata` via the fail-closed `ob_memory_on_ops_plane`, or `user_id` - **in
+the same conjunction**. An absent `thought_id` is a memory never derived from a thought, not an
+unestablished plane. And the oracle is closed independently of the arm: a **hidden** `thought_id`
+and a **nonexistent** one both fail `42501`, because the `visible()` half refuses before the FK
+trigger is consulted.
+
+That argument is now a `NULL-ARM-DISPOSITION:` COMMENT ON POLICY on both policies, where
+**section 7(h2)** reads it - a census of the literal shape that forces a decision on every
+instance. Adversarial case J removes the two `COMMENT ON POLICY` statements from the file and the
+next apply names both policies.
+
+**And section 7(h)'s own claim was false, in this file, about this file.** It read: *"A policy
+that denies the all-absent row cannot have an arm that permits on absence."*
+`agent_memories_ops_plane` WITH CHECK is
+`ob_memory_on_ops_plane(metadata) AND (thought_id IS NULL OR visible(...))`; against the all-NULL
+probe row the **first** conjunct is false, so the sweep passes it - while a real row with
+`exposure=ops` and no `thought_id` is permitted. The all-NULL row tests the CONJUNCTION and an
+absence hole lives in a DISJUNCT. The sentence is deleted and replaced with what the probe
+actually establishes.
+
+## (b) THE POST-CONDITION IS NOW HONEST INSTEAD OF COMPLETE
+
+The closing NOTICE is replaced by a **balanced census**, the shape `andon.ps1` uses to make the
+word `clear` mean something. Every relation, constraint, trigger and function in `public` lands in
+exactly one bucket - examined by a named sweep, or NOT examined with the reason - and the buckets
+must sum to the catalogue's own totals or the migration fails. Printed from the genuinely fresh
+volume:
+
+```
+=== init-graph-plane-rls VERDICT: what was checked ===
+  relations in public: 56 total = 13 governed (relkind r,p; RLS enabled+forced) + 4 tier B
+  (deliberately wide on read, contained at the write, section 3) + 33 ungoverned
+  + 6 views/matviews. Census BALANCES.
+  swept: (h) 18 permissive policy arm(s) EXECUTED against an all-NULL row; (h2) the same arms
+  scanned for a literal absence arm; (i) 17 key constraint(s) of contype p,u,x plus bare unique
+  indexes; (j) foreign keys into governed parents; (k) 2 SECURITY DEFINER function(s);
+  (m) 5 trigger(s) on governed relations, all attributes; (n) partitions of governed parents;
+  (l) transitive view/matview reachability, any schema.
+=== NOT checked, and each one is a way this boundary could still be open ===
+  * SUPERUSER SESSIONS. 1 role(s) hold rolsuper or rolbypassrls. RLS binds none of them, FORCE
+    included, and nine deployed OB1 clients connect as `postgres`. Every sweep above is a
+    statement about non-superuser door roles only. This is U5 steps 2-3, DEFERRED by the
+    operator - not closed here.
+  * CONSTRAINT-VIOLATION ORACLES that remain BY DECISION: 2 ORACLE-DISPOSITION comment(s) ...
+  * OTHER CONSTRAINT TYPES: N constraint(s) of contype other than p,u,x,f ... NOT examined
+  * TRIGGER AND FUNCTION BODIES. (m) reads a COMMENT, not code ... 16 trigger(s) on UNGOVERNED
+    relations in public were not examined at all ... 192 SECURITY INVOKER function(s) ...
+  * OTHER SCHEMAS. Only public is censused, except (l) ...
+  * ABSENCE ARMS THAT DO NOT LOOK LIKE ONE. (h) tests the all-NULL row ...; (h2) is a TEXT scan
+    for one spelling. COALESCE(x, <permitting value>), an empty-set containment - which is what
+    section 1b actually fixed - and a function that returns TRUE for its own absent input all
+    evade both.
+=== ABSENCE OF A FINDING ABOVE IS NOT A PROOF OF THE PROPERTY. This file  ===
+=== makes the policies deny by default; the sweeps are evidence that some  ===
+=== named ways around them are closed, over a population that BALANCES.    ===
+```
+
+The census is not decoration: a **foreign table** appearing in `public` makes it not balance and
+**stops the apply** (adversarial case N - `57 relations in public, 13 + 4 + 33 + 6 = 56`). A
+relation of a relkind nobody thought about is `unaccounted`, and unaccounted is a failure, not a
+smaller N.
+
+## The defect this round created and caught, which is the honest half of the round
+
+**Section 7(h2)'s first version passed the two policies it was written for.** It matched the text
+`is null or`, and `pg_get_expr` fully parenthesises: the arm reads back as
+`((thought_id IS NULL) OR ob_thought_visible(thought_id))` - a `)` between `null` and `or`.
+Adversarial case J deleted a disposition, expected RED, and got **COMMIT**. A gate that cannot go
+red for the instance it was written for is this effort's own class 1 one file on, and it was
+found only because the adversarial case was RUN rather than reasoned about. Fixed
+(`is\s+null[\s)]*or`), re-run, red.
+
+**And the verdict text broke a gate one directory over.** `Get-ObInitdbErrors`
+(`scripts/checks/lib/ob-initdb.ps1:78`) matches any log line containing `ERROR`, and the census
+line read *"CONSTRAINT-ERROR ORACLES"* - so `test-quartz4-offline.ps1` failed with *init had
+errors* on a clean chain. Reworded to `CONSTRAINT-VIOLATION`; the scanner was **not** weakened.
+
+## The evidence
+
+| probe | RED (round 3 file) | GREEN (round 4) |
+|---|---|---|
+| L1a exclusion collide with hidden row | **23P01** | migration REFUSES the state |
+| L1b same statement, free slot | **INSERT 0 1** | migration REFUSES the state |
+| L1c read control, same session | 0 personal / 1 ops | 0 personal / 1 ops |
+| L2 partitioned relation through the door | **1 personal** / 1 ops | migration REFUSES (7(h)) |
+| L3 invoker-trigger mirror | **1 personal** / 1 ops, content + sha256 | migration REFUSES (7(m)) |
+| L4 trace `enforced_exposure: []` | **returned with query text** | not returned |
+| L4 CONTROL trace `["ops"]` | returned | returned |
+| P0 door-alive control (`thoughts`) | 0 personal / 2 ops | 0 personal / 2 ops |
+| C0 superuser control | all fixtures present | all fixtures present |
+
+**Sixteen adversarial cases, each red for its own reason** (A-I re-verified from round 3 against
+the changed file, J-O new):
+
+| | case | caught by |
+|---|---|---|
+| A | a NULL-permitting arm re-introduced on a 180 policy | section 0 `ob_relation_governed` |
+| C | a new SECURITY DEFINER function | 7(k) |
+| D | an unguarded FK into a governed parent | section 0 closure |
+| F | a new FORCE-RLS table, wide policy, no FK into the corpus | 7(h) |
+| H | a matview one ordinary view away from a governed table | 6b, transitively |
+| I | a brand-new owner-rights view over `idea_revisions` | 6b's sweep (fixed to `security_invoker=true`) |
+| **J** | the two `NULL-ARM-DISPOSITION` statements deleted from the file | **7(h2)** |
+| **K** | a bare `CREATE UNIQUE INDEX` no constraint owns | **7(i)** |
+| **L** | an exclusion constraint containing the plane column but with `<>` | **7(i)**, equality-only escape |
+| **M** | a governed partitioned relation whose leaf is not forced | **7(n)** |
+| **N** | a FOREIGN TABLE in `public` | **the census not balancing** |
+| **O** | the same leaking trigger, DISPOSITIONED | **COMMITs, deliberately** - the gate reads a decision, not a proof |
+| **L1/L2/L3** | the three leaks themselves | 7(i) / 7(h) / 7(m) |
+
+**Idempotence:** three consecutive applies COMMIT. **Revert round trip:** GREEN -> revert -> the
+empty-set trace is readable again and all 7 dispositions are gone (`trigger_dispositions=0`,
+`nullarm_dispositions=0`, `trace_pred_empty_permits=true`) -> re-apply -> GREEN (`5`, `2`,
+`false`).
+
+**Ops is unbroken**, exercised as `service_role` in the entity-extraction worker's own shape and
+rolled back: W1 write an ops thought; W2 the DEFINER trigger's queue row is visible; W3 claim it;
+W4 write an entity; W5 write `thought_entities`; W6 write an `edges` row; W7 mark done; W8
+`thought_edges_upsert` (now INVOKER) succeeds. **W9** the same rpc with a HIDDEN endpoint still
+refuses (`new row violates row-level security policy for table "thought_edges"`), and **W10**
+confirms as superuser that the hidden endpoint exists - so W9's refusal is a refusal and not an
+absence.
+
+**Full chain on a genuinely fresh volume** (`wt-u5g4f-db`): 28 files, no `ERROR`/`FATAL`, verdict
+printed. **`test-quartz4-offline.ps1`: ALL OFFLINE CHECKS PASSED**, 32 pass / 0 fail, including
+*initdb chain derived from compose (28 migrations)* and *init chain ran without errors*.
+
+**Nothing was applied to the live database.** Production still runs round 1.
+
+## The residuals, disclosed rather than chased
+
+1. **Constraint-violation oracles.** A unique, exclusion or foreign-key constraint leaks the
+   EXISTENCE of a row a caller cannot see, to a caller that may write the table. RLS cannot reach
+   it: the check runs after `WITH CHECK`, in machinery no policy binds. **What round 4 did:** for
+   the agent-memory corpus and `idea_revisions`, section 6a withdraws the door's write entirely,
+   so there is nothing to provoke. For `thoughts` and `thought_edges`, whose write path is
+   load-bearing, the two surrogate primary keys carry an `ORACLE-DISPOSITION` COMMENT and section
+   7(i) re-finds them on every apply. **What remains:** those two, by decision. Closing them
+   properly means the door not being able to write the table, or the plane column being IN the
+   constraint. The third option - column-level INSERT grants - breaks every `service_role` writer
+   of any column added later, and columns *are* added here.
+2. **Superuser-session writers.** Nine deno clients connect as `postgres` (`rolsuper` /
+   `rolbypassrls` = t/t); RLS binds no superuser, FORCE included. **Any trigger leak that requires
+   a superuser session belongs in this bucket**, including L3 - section 7(m) stops such a trigger
+   being *added silently*, it does not stop one that already exists from *working*. This is U5
+   steps 2-3 (SET ROLE at each connection chokepoint, then dedicated credentials) and is DEFERRED
+   by the operator, not solved here. It is why `door-openbrain-mcp-door` and
+   `door-cloud-search-thoughts` are red in clause 3, and why round 4 does **not** claim section
+   7(k) closed the definer mechanism.
+3. **The gate reads comments, not code.** `TRIGGER-DISPOSITION` and `ORACLE-DISPOSITION` record a
+   DECISION. Adversarial case O proves a false one passes. That is the correct trade for a
+   migration - the alternative is a gate that cannot be satisfied - but it means the census counts
+   *accountability*, not *safety*.
+4. **Everything in the verdict's NOT-checked list**, which is printed on every apply so it cannot
+   rot silently in a document.
+
+## Corrections to earlier rounds, checked rather than relayed
+
+- **Round 3's "live-versus-fresh grant drift" is a MEASUREMENT ERROR, and open item 7 is
+  WITHDRAWN.** The claim was that a fresh volume gives `service_role` only `SELECT` on `thoughts`
+  and `thought_entities` while production gives the full set, and that "nothing in the chain
+  grants those". Measured 2026-08-31 with the same query on a genuinely fresh volume and on
+  `openbrain-db`:
+
+  ```
+                     fresh volume                        live openbrain-db
+  thoughts          service_role  DELETE,INSERT,SELECT,UPDATE   DELETE,INSERT,SELECT,UPDATE
+  thought_entities  service_role  DELETE,INSERT,SELECT,UPDATE   DELETE,INSERT,SELECT,UPDATE
+  thought_entities  authenticated SELECT                        SELECT
+  ```
+
+  **Identical.** The grant is `init-grants.sql:13` - `GRANT ALL ON ALL TABLES IN SCHEMA public TO
+  service_role`, mounted at `050-`, after `thoughts` is created at `010-` and `thought_entities`
+  at `040-` - reduced to four privileges by `init-agent-memory-rls.sql:328`'s
+  `REVOKE TRUNCATE, REFERENCES, TRIGGER`. The chain grants them, in one line, and the "zero
+  references" verdict died exactly where this workspace's own note says it dies. Round 3's
+  grant-replication step was compensating for nothing; it is harmless and no longer justified.
+  The PROMOTION-RUNBOOK paragraph that recorded the drift is corrected in place.
+- **Section 7(h)'s "a policy that denies the all-absent row cannot have an arm that permits on
+  absence" is FALSE** and is deleted, with the counterexample from this file recorded in its
+  place.
+- **Section 7(k)'s "definer rights are the fourth mechanism that walks around a policy" is too
+  narrow.** What walks around a policy is code running in a session the policy does not bind;
+  `prosecdef` is one of two ways to get there.
+
+## Open items after round 4
+
+Rounds 1-3's items 1-6 and 8-10 stand. Item 7 (the grant drift) is **withdrawn** as a measurement
+error. New:
+
+11. **`ob_memory_visible` and `ob_thought_visible` are `EXISTS` over the governed table and are
+    SECURITY INVOKER**, which is what makes them correct - but they are also the only thing
+    standing between a caller and a parent-visibility answer. Nothing in this round changed them
+    and nothing in this round re-measured them; they were measured in round 1.
+12. **The trigger census covers triggers ON governed relations.** A trigger on an *ungoverned*
+    relation whose body READS a governed one is the same mechanism and is counted as
+    not-examined (16 such triggers today). Closing it needs body analysis or a read-side
+    convention, neither of which belongs in a migration.

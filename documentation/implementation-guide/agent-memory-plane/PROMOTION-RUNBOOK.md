@@ -807,11 +807,16 @@ of writing). A control of 0 means the probe measured nothing and the result is v
 ### Recorded result
 
 **Not yet applied to the live database.** Round 3 was validated on a throwaway built from the
-compose-derived 28-file chain, with production's grants replicated onto it after they were
-measured to differ (a fresh volume gives `service_role` only `SELECT` on `thoughts` and
-`thought_entities`; production has the full set — a live-vs-fresh drift recorded in
-`documentation/notes/u5graph-findings.md`). Production still runs round 1 and therefore still
-carries every finding this round and round 2 fix.
+compose-derived 28-file chain, with production's grants replicated onto it. Production still
+runs round 1 and therefore still carries every finding this round and round 2 fix.
+
+> **CORRECTED IN ROUND 4.** This paragraph originally justified the grant replication by a
+> measured live-vs-fresh drift — "a fresh volume gives `service_role` only `SELECT` on
+> `thoughts` and `thought_entities`". **That measurement does not reproduce.** On a genuinely
+> fresh volume built from the same 28 files, `service_role` holds `DELETE, INSERT, SELECT,
+> UPDATE` on both, identical to production, granted by `init-grants.sql:13` and reduced by
+> `init-agent-memory-rls.sql:328`. The replication step was harmless and unnecessary; round 3's
+> open item 7 is withdrawn. See the round 4 section below.
 
 ### Rollback
 
@@ -822,6 +827,154 @@ and clear the two `ORACLE-DISPOSITION` comments. **It re-opens the `idea_revisio
 the audit-orphan leak in addition to everything the earlier rounds' revert re-opens.** The
 round trip was executed on the throwaway with production-like grants: GREEN -> revert -> RED
 returns on every probe -> re-apply -> GREEN.
+
+```powershell
+docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/revert-graph-plane-rls.sql
+```
+
+---
+
+## `init-graph-plane-rls.sql` — ROUND 4: three more catalogue proxies, and a verdict that says what it did not check
+
+**Status: NOT applied to the live database.** Production still runs round 1.
+
+### Why
+
+Rounds 1, 2 and 3 each closed a real leak and each printed the same closing line —
+*"post-conditions hold on 9 table(s), and the four mechanism sweeps (absence, uniqueness,
+foreign keys, reachability) are clean"*. On 2026-08-31 that line was **reproduced on a
+COMMITted apply over a database carrying three live leaks at once**, each measured through the
+`service_role` door with an ops positive control in the same session:
+
+| the leak | the proxy that hid it | measured |
+|---|---|---|
+| `EXCLUDE USING btree (entity_id WITH =, mention_role WITH =)` on `thought_entities` | §7(i) selected on `pg_index.indisunique`, which is **false** for an exclusion constraint's index | collide with the hidden row → `23P01`; free slot, same statement → `INSERT 0 1`; read control → 0 personal / 1 ops |
+| a FORCE-RLS **partitioned** relation with `USING (true)` | the sweep population was `relkind = 'r'`; a partitioned table is `'p'` | 1 personal / 1 ops readable through the door |
+| an **INVOKER** trigger on `thoughts` copying content + `sha256` into a door-readable table | §7(k) asserted `prosecdef`, and `prosecdef` was **false** | content and fingerprint both returned to `service_role`; flipping `prosecdef` to true turns the same file red |
+
+Plus one absence hole the sweeps could not express: `ob_trace_on_ops_plane` COALESCEs an
+**absent** `enforced_exposure` to `["personal"]` (denies) but `[] <@ '["ops"]'` is **TRUE**, so a
+recall trace that enforced **nothing** was readable through the door with its query text.
+
+### What actually changed, in one list
+
+1. **§1b — `ob_trace_on_ops_plane` hardened.** Absent, non-array and **empty array** all deny.
+   Ops impact measured on the live database first: all 78 live traces carry no
+   `enforced_exposure` key, 0 readable before, 0 readable after.
+2. **§7 population covers `relkind IN ('r','p')`**, and §7(l)'s reachability base with it.
+3. **§7(n) — partition leaves.** A query naming a leaf partition is bound by the leaf, not the
+   parent; every leaf of a governed partitioned relation must be RLS-enabled and FORCED or hold
+   no door grant.
+4. **§7(i) rebuilt off `pg_constraint`** — every `p`, `u` **and `x`** on an in-scope relation,
+   UNION every bare unique index no constraint owns. The "columns contain the plane columns"
+   escape applies to an exclusion constraint only when every operator is `=`.
+5. **§4b + §7(m) — a trigger census.** Every non-internal trigger on a governed relation must
+   carry a `TRIGGER-DISPOSITION:` COMMENT naming what it MOVES, whatever its function's
+   `prosecdef`, timing or events. §4b writes the five that exist.
+6. **§7(h2) + two `NULL-ARM-DISPOSITION` comments.** §7(h)'s claim that "a policy that denies
+   the all-absent row cannot have an arm that permits on absence" was **false** — a hole in a
+   disjunct beside a false conjunct survives it — and `agent_memories`' surviving
+   `thought_id IS NULL OR visible(thought_id)` is exactly that. The arm stays, with the real
+   argument (its plane is established by `metadata`/`user_id` in the same conjunction, and
+   hidden-vs-nonexistent both answer `42501`) written into the database where the gate reads it.
+7. **The closing NOTICE is replaced by a BALANCED CENSUS.** Relations, constraints, triggers and
+   functions each land in exactly one bucket — examined by a named sweep, or NOT examined with
+   the reason — and the buckets must sum to the catalogue's own totals or the migration fails.
+   It ends with *"ABSENCE OF A FINDING ABOVE IS NOT A PROOF OF THE PROPERTY"*. A foreign table
+   appearing in `public` makes the census not balance and stops the apply.
+
+### Preconditions
+
+Same as round 3. This file is idempotent and supersedes rounds 1–3 in place; it does **not**
+require them to have been applied in order.
+
+### Apply
+
+```powershell
+docker cp OB1\docker\init-graph-plane-rls.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/init-graph-plane-rls.sql
+```
+
+Expect `COMMIT`, and read the VERDICT block it prints — the *NOT checked* half is the part that
+matters.
+
+### Verify **by query**, never by a clean exit code
+
+```sql
+-- 1. THE EMPTY-SET TRACE. Expect the ops control back and NOTHING else.
+--    A control of zero rows means the probe measured nothing and the result is void.
+BEGIN;
+INSERT INTO public.agent_memory_recall_traces (workspace_id, query, schema_version, request_payload)
+VALUES ('rb-r4','RB-R4 empty enforcement','1','{"enforced_exposure":[]}'::jsonb),
+       ('rb-r4','RB-R4 ops control',      '1','{"enforced_exposure":["ops"]}'::jsonb);
+SET LOCAL ROLE service_role;
+SELECT request_payload->>'enforced_exposure' AS enf, query
+  FROM public.agent_memory_recall_traces WHERE workspace_id='rb-r4';
+ROLLBACK;
+
+-- 2. THE DISPOSITIONS THE GATE READS. Expect 5 and 2.
+SELECT count(*) AS trigger_dispositions
+  FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+ WHERE NOT t.tgisinternal AND c.relnamespace='public'::regnamespace
+   AND COALESCE(obj_description(t.oid,'pg_trigger'),'') LIKE 'TRIGGER-DISPOSITION:%';
+SELECT count(*) AS nullarm_dispositions FROM pg_policy pol
+ WHERE COALESCE(obj_description(pol.oid,'pg_policy'),'') LIKE 'NULL-ARM-DISPOSITION:%';
+
+-- 3. THE SWEEP POPULATION IS NOT relkind='r'. Expect the same count the VERDICT printed.
+SELECT count(*) AS governed FROM pg_class
+ WHERE relnamespace='public'::regnamespace AND relkind IN ('r','p')
+   AND relrowsecurity AND relforcerowsecurity
+   AND relname NOT IN ('entities','edges','source_entities','consolidation_log');
+
+-- 4. THE OPS PATH IS UNBROKEN. Rolled back; expect every step to succeed.
+BEGIN;
+SET LOCAL ROLE service_role;
+INSERT INTO public.thoughts (content, metadata)
+  VALUES ('RB-R4 ops thought','{"exposure":"ops"}'::jsonb);
+SELECT count(*) AS queue_row_visible FROM public.entity_extraction_queue
+ WHERE thought_id = (SELECT max(id) FROM public.thoughts);
+ROLLBACK;
+```
+
+Expect: probe 1 returns **only** the `["ops"]` row; probe 2 returns **5** and **2**; probe 3
+matches the VERDICT's *governed* count; probe 4's `queue_row_visible` = **1**.
+
+### Recorded result
+
+**Not yet applied to the live database.** Round 4 was validated on two throwaways built from the
+compose-derived 28-file chain (28 mentions = 28 pairs = 28 staged), on their own network, never
+attached to an `ai-stack_*` anchor network. RED before GREEN on all four leaks, each with a live
+ops positive control; sixteen adversarial cases, each red for its own reason; three consecutive
+applies COMMIT; revert round trip GREEN → RED → GREEN; the full chain runs clean on a genuinely
+fresh volume; `test-quartz4-offline.ps1` reports ALL OFFLINE CHECKS PASSED.
+
+**A correction to round 3's recorded result, which was a measurement error.** Round 3 recorded a
+*live-versus-fresh grant drift* — "a fresh volume gives `service_role` only `SELECT` on
+`thoughts` and `thought_entities`" — and replicated production's grants onto its throwaway
+because of it. **Not reproducible.** Measured 2026-08-31 on a genuinely fresh volume built from
+the same 28 files, and on production, with the same query:
+
+```
+                    fresh volume                        live openbrain-db
+thoughts         service_role DELETE,INSERT,SELECT,UPDATE   DELETE,INSERT,SELECT,UPDATE
+thought_entities service_role DELETE,INSERT,SELECT,UPDATE   DELETE,INSERT,SELECT,UPDATE
+thought_entities authenticated SELECT                       SELECT
+```
+
+They are **identical**. The grant comes from `init-grants.sql:13`
+(`GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role`, mounted at `050-`, after `thoughts`
+is created at `010-` and `thought_entities` at `040-`), reduced to four privileges by
+`init-agent-memory-rls.sql:328`'s `REVOKE TRUNCATE, REFERENCES, TRIGGER`. There is no drift, the
+grant-replication step was compensating for nothing, and round 3's open item 7 is **withdrawn**.
+
+### Rollback
+
+`OB1\docker\revert-graph-plane-rls.sql` — extended in round 4 with §8 (restore 180's
+`ob_trace_on_ops_plane`, which **re-opens the empty-set trace disclosure**) and §9 (clear the
+`NULL-ARM-DISPOSITION` and `TRIGGER-DISPOSITION` comments, so a re-apply proves it wrote them
+rather than inheriting them). Round trip executed on the throwaway: GREEN → revert → the
+empty-set trace is readable again and all seven dispositions are gone → re-apply → GREEN.
 
 ```powershell
 docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
