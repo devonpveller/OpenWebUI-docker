@@ -9,6 +9,36 @@ items, because the drills this item salvaged had never been run against the merg
 
 ---
 
+## C.7b — the sha this was validated at
+
+The work line moved while this item was in flight (`a9f4bb4` -> `1a6b0b8`, PLAN.md §2.1
+amendment A3 only). Per §C.7b the branch was REBASED onto the line FIRST and every column
+re-run afterwards; a pass taken against `a9f4bb4` would describe a tree the line has left.
+
+```
+work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup)
+validated at   : ef0c2b74493fd3acbdf5e0ad2a07c535c4d77f95  (work/u8h3)
+OB1 gitlink    : 4e2239305150c01e79ba860d0226eeb6ea9480a1  (pushed to origin BEFORE the bump,
+                 on feat/agent-memory-exposure-column; descends from the line's 4fdc21c)
+```
+
+The only commit after `ef0c2b7` is the one that adds this record. It touches this file and
+nothing any check reads, which is stated rather than left to be inferred: a validation sha
+that is not the branch tip is a stale pass unless the difference is named.
+
+Re-run at that sha, in one checkout, each throwaway on its own network:
+
+| check | result |
+|---|---|
+| `deno check *.ts` (13 files) + `deno test` | clean / **133 passed, 0 failed** |
+| `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
+| `scripts/checks/drill-personal-plane-exclusion.ps1` | **105 passed, 0 failed, 18 named gaps**, exit 2 |
+| `scripts/checks/verify-dfu-done.ps1` | **GREEN - 201 assertions, 0 failed**, 8/8 clauses with a constructed failing case |
+| `scripts/checks/dfu-done.ps1 -Only 3` | **UNMET**, 12 of 14 evaluated, the two `[fail]`s are the superuser doors (§3.4) |
+| full 29-migration initdb chain on a throwaway | no init errors; 195's self-test and 200 §9's notice both printed |
+
+---
+
 ## 0. What H3 itself did (the short version)
 
 `exposure` is a `TEXT NOT NULL CHECK (exposure IN ('ops','personal'))` column on
