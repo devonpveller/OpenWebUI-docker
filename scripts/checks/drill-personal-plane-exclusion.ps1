@@ -932,12 +932,22 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($PID_PERS -match '^[0-9a-f-]{36}$') { Pass "the personal fixture is planted directly (memory $PID_PERS, mirrored thought $PERSTID)" }
     else { Fail "could not plant the personal fixture: $PID_PERS"; throw "no fixture" }
 
-    $exp = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
-    if ($exp -eq "personal") { Pass "the fixture really is ON the personal plane (exposure=$exp)" }
+    # THE COLUMN, NOT THE MIRROR. Since DFU C.9 H3 the policies read `exposure`; a fixture
+    # verified through `metadata->>'exposure'` would be verified against a value nothing
+    # enforces, and a fixture whose two halves disagreed would pass this check while sitting
+    # on the other plane. Both are read and both must agree - the mirror is asserted here, not
+    # trusted, because that disagreement is exactly what H3's round-2 review found in the door.
+    $exp  = Db "SELECT exposure FROM agent_memories WHERE id = '$PID_PERS'"
+    $expM = Db "SELECT COALESCE(metadata->>'exposure','<absent>') FROM agent_memories WHERE id = '$PID_PERS'"
+    if ($exp -eq "personal") { Pass "the fixture really is ON the personal plane (exposure COLUMN=$exp)" }
     else { Fail "the fixture is exposure='$exp' - the drill would be attacking nothing"; throw "bad fixture" }
-    $expC = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_OPS'"
-    if ($expC -eq "ops") { Pass "the control really is on the ops plane (exposure=$expC)" }
+    if ($expM -eq $exp) { Pass "and its jsonb mirror agrees with the column ($expM) - a desync here would make every later assertion ambiguous" }
+    else { Fail "the fixture's column says '$exp' and its mirror says '$expM'"; throw "desynced fixture" }
+    $expC  = Db "SELECT exposure FROM agent_memories WHERE id = '$PID_OPS'"
+    $expCM = Db "SELECT COALESCE(metadata->>'exposure','<absent>') FROM agent_memories WHERE id = '$PID_OPS'"
+    if ($expC -eq "ops") { Pass "the control really is on the ops plane (exposure COLUMN=$expC)" }
     else { Fail "the control is exposure='$expC', expected ops" }
+    if ($expCM -ne $expC) { Fail "the control's column says '$expC' and its mirror says '$expCM'" }
 
     # A CLOUD-plane thought, planted directly. capture_thought would be the faithful path
     # but it calls an LLM for metadata extraction and there is no chat model on this
@@ -1570,9 +1580,12 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # THE DATABASE IS THE VERDICT, not the response. A tool that answers "ok" while changing
     # nothing and a tool that answers "refused" while changing the row are both possible,
     # and only one of the two is visible in the reply.
-    $expAfter = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
+    # THE COLUMN is what promote_exposure moves and what the policy reads. Reading the mirror
+    # here would have asked the wrong half: the review door writes both today, so a green off
+    # the mirror is right by coincidence, and would stay green if the door ever moved only one.
+    $expAfter = Db "SELECT exposure FROM agent_memories WHERE id = '$PID_PERS'"
     if ($expAfter -eq "personal") {
-        Pass "STOPPED - the personal fixture is STILL exposure=personal after promote_exposure"
+        Pass "STOPPED - the personal fixture's exposure COLUMN is STILL personal after promote_exposure"
     } else {
         Fail "PLANE ESCALATION: promote_exposure moved the personal fixture to exposure='$expAfter' - every read tool now returns it legitimately"
     }
@@ -1596,9 +1609,13 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
     # Restore unconditionally: if the attack DID succeed, the phases below (and the red
     # phase in particular) need the fixture back on the personal plane or they test nothing.
-    $null = Db "UPDATE agent_memories SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure','personal'), provenance_status = 'generated', last_confirmed_at = NULL WHERE id = '$PID_PERS'"
-    $expRestored = Db "SELECT metadata->>'exposure' FROM agent_memories WHERE id = '$PID_PERS'"
-    if ($expRestored -eq "personal") { Pass "fixture restored to the personal plane for the phases below" }
+    # BOTH HALVES, or the restore is the desync. This used to set only the mirror: if the
+    # attack HAD succeeded the column would have stayed 'ops' while the mirror said 'personal',
+    # and every phase below - the whole red phase included - would have been attacking an
+    # ops-plane row believing it personal.
+    $null = Db "UPDATE agent_memories SET exposure = 'personal', metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('exposure','personal'), provenance_status = 'generated', last_confirmed_at = NULL WHERE id = '$PID_PERS'"
+    $expRestored = Db "SELECT exposure || '/' || COALESCE(metadata->>'exposure','<absent>') FROM agent_memories WHERE id = '$PID_PERS'"
+    if ($expRestored -eq "personal/personal") { Pass "fixture restored to the personal plane for the phases below (column and mirror)" }
     else { Fail "could not restore the fixture (exposure='$expRestored') - later phases are unreliable"; throw "fixture not restored" }
 
     # --- 10c. ATTACK 9: the WRITE path as an id oracle -----------------------------------
@@ -2140,7 +2157,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     }
 
     # (1) it can be WRITTEN - through the real write path, not planted.
-    $persStill = Db "SELECT count(*) FROM agent_memories WHERE id = '$PID_PERS' AND metadata->>'exposure' = 'personal'"
+    $persStill = Db "SELECT count(*) FROM agent_memories WHERE id = '$PID_PERS' AND exposure = 'personal'"
     Lift ($persStill -eq "1") "WRITTEN - the synthetic personal memory exists on the personal plane ($PID_PERS)"
 
     # (2) every TARGETED door REFUSED it AND RECORDED the refusal - counted from the audit
@@ -2179,8 +2196,12 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # (4) REMOVED. The fixture, its legacy corpus row, and anything the red phase mirrored.
     $null = Db "DELETE FROM agent_memories WHERE workspace_id = '$WS'"
     $null = Db "DELETE FROM thoughts WHERE content LIKE '%$MARKER%'"
-    $persMem = Db "SELECT count(*) FROM agent_memories WHERE COALESCE(metadata->>'exposure','personal') = 'personal'"
-    $persThoughts = Db "SELECT count(*) FROM thoughts WHERE metadata->>'exposure' = 'personal'"
+    # THE COLUMN. `COALESCE(metadata->>'exposure','personal')` was the conservative pre-H3
+    # reading - it counted an UNLABELLED row as personal - and it is now both weaker and
+    # unnecessary: the column is NOT NULL and CHECKed, so there is no unlabelled row to be
+    # conservative about, and it is the value the policies actually read.
+    $persMem = Db "SELECT count(*) FROM agent_memories WHERE exposure = 'personal'"
+    $persThoughts = Db "SELECT count(*) FROM thoughts WHERE exposure = 'personal'"
     Lift ($persMem -eq "0") "REMOVED - agent_memories holds 0 personal-plane rows again (was 1)"
     Lift ($persThoughts -eq "0") "REMOVED - thoughts holds 0 personal-labelled rows again"
 
@@ -2267,7 +2288,12 @@ if ($firedGaps.Count -gt 0 -or $newGaps.Count -gt 0) {
 }
 # A DISPOSITIONED GAP THAT NO LONGER FIRES IS A FAIL, not good news to be swallowed: the
 # ledger is now claiming something is open that is closed, and the next reader trusts it.
-# -SkipRed is exempt because the red-phase gaps genuinely cannot fire there.
+#
+# -SkipRed is exempt so that a gap whose only producer lives in the red phase cannot turn a
+# deliberately weaker run into a false FAIL. Measured 2026-08-31: TODAY none does - all 18 fire
+# under -SkipRed too, because the ext-container gaps are raised in the green phase. The
+# exemption is for the next one, and it is the reason -SkipRed is documented as weaker: under
+# it, a gap that has genuinely CLOSED goes unnoticed.
 if ($staleGaps.Count -gt 0 -and -not $SkipRed) {
     Write-Host "  FAIL  $($staleGaps.Count) dispositioned gap(s) did NOT fire: $($staleGaps -join ', ')" -ForegroundColor Red
     Write-Host "        Either they are closed - in which case DELETE them from `$GAP_DISPOSITIONS and say so in" -ForegroundColor Red

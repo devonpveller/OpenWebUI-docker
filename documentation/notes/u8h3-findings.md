@@ -503,9 +503,17 @@ it is this branch's merge-base, so C.7b required no second rebase. The OB1 gitli
 ```
 work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
 OB1 gitlink    : 4e2239305150c01e79ba860d0226eeb6ea9480a1
-              -> ac4e3450bb916369b8f587909e69649a724536ca  (pushed to origin
-                 feat/agent-memory-exposure-column BEFORE the bump; descends from 4e22393)
+              -> ac4e3450bb916369b8f587909e69649a724536ca  (the four fixes)
+              -> 8ebe19780ce93613689fd8241d787c1a77749454  (comment only: 195's final
+                 row-count assertion renamed 8b -> 8e, because "section 8(b)" - the
+                 NO-DEFAULT post-condition the door fix is argued from - was a DIFFERENT
+                 thing with the same name. `git diff ac4e345..8ebe197` is five comment
+                 lines in one file.)
 ```
+
+Both were pushed to `origin/feat/agent-memory-exposure-column` BEFORE the gitlink was bumped,
+and each descends from the pin the line carried. Every number below is from a run against
+**8ebe197**, after the last edit to any file it builds from.
 
 Every run below is against the tree that gitlink pins, one checkout, each throwaway on its own
 docker network, nothing attached to an `ai-stack_*` network and no `:local` tag written.
@@ -516,8 +524,8 @@ docker network, nothing attached to an `ai-stack_*` network and no `:local` tag 
 | full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, **zero mirror readers**) |
 | 195 round trip on that throwaway | revert(200) -> revert(195) -> re-apply(195) -> re-apply(200) -> re-apply both AGAIN: clean, idempotent, row count preserved |
 | `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
-| `scripts/checks/drill-personal-plane-exclusion.ps1` (bare) | **108 passed, 0 failed, 18 named gaps**, EXIT 2 - the bare contract is unchanged |
-| the same, `-AcceptDispositionedGaps` (what CI runs) | **108 passed, 0 failed, 18 gaps ALL DISPOSITIONED**, EXIT 0 |
+| `scripts/checks/drill-personal-plane-exclusion.ps1` (bare) | **109 passed, 0 failed, 18 named gaps**, EXIT 2 - the bare contract is unchanged |
+| the same, `-AcceptDispositionedGaps` (what CI runs) | **109 passed, 0 failed, 18 gaps ALL DISPOSITIONED**, EXIT 0 |
 | production `openbrain-db`, after everything | `thoughts=13001 personal=0 memories=21 personal=0` - unchanged, and never touched |
 
 ### The R1/R2 fixes, red then green, in one place
@@ -542,6 +550,9 @@ replacements were watched failing before they were watched passing:
 * **run 2** (cast added, live ops controls added to both RED-Bs): all four RED-A/RED-B
   branches pass on the real reason, `RED CONFIRMED (ATTACK 8) - as postgres, promote_exposure
   MOVED the personal memory onto the ops plane`.
+* **runs 3-5** (after section 15's assertion fixes, at gitlink 8ebe197): the same four
+  branches, plus `and its jsonb mirror agrees with the column (personal)` and
+  `fixture restored to the personal plane for the phases below (column and mirror)`.
 
 The gap ledger was broken deliberately, on a throwaway copy of the script, to prove both of its
 detectors fire:
@@ -558,3 +569,77 @@ detectors fire:
 
 So CI cannot go green on a NEW gap, and cannot stay green on a ledger that has rotted. The
 throwaway copy was deleted.
+
+## 15. Seven drill assertions still read the mirror, and one RESTORE only wrote it
+
+Found while checking the review brief's own claim that in the salvaged drill "every assertion
+reads the COLUMN". Seven did not:
+
+```
+935/938  the fixture and control verification        SELECT metadata->>'exposure' ...
+1573     ATTACK 8's GREEN                             SELECT metadata->>'exposure' ...
+1600     ATTACK 8's RESTORE                           SET metadata = ... || {'exposure':'personal'}
+2143     the LIFT's "WRITTEN" clause                  AND metadata->>'exposure' = 'personal'
+2182     the LIFT's "REMOVED" (memories)              COALESCE(metadata->>'exposure','personal')
+2183     the LIFT's "REMOVED" (thoughts)              WHERE metadata->>'exposure' = 'personal'
+```
+
+Every one of them is green today for a reason that is not the reason it is testing. The
+policies read the COLUMN; these read a value nothing enforces. They agree only because every
+fixture in this file writes both halves.
+
+**The restore is the one that could have bitten.** ATTACK 8's green ends by restoring the
+fixture "unconditionally: if the attack DID succeed, the phases below (and the red phase in
+particular) need the fixture back on the personal plane or they test nothing" - and it set only
+the MIRROR. So in the world where the attack succeeded, the restore would have left
+`column='ops'` with `mirror='personal'`, and every phase after it - the entire red phase, and
+the LIFT's "0 personal rows again" - would have been attacking an OPS-plane row while its own
+verification, reading the mirror, agreed it was personal. The drill would have reported
+containment over a row the boundary was correctly letting through. The red phase's own restore
+already wrote both; the green's did not.
+
+Fixed: every one now reads (and the restore writes) the COLUMN. The two fixture checks read
+BOTH and assert they agree - the mirror is asserted there, not trusted, because a desynced
+fixture would make every later assertion in the file ambiguous. The LIFT's `COALESCE(...,
+'personal')` is dropped: it was the conservative pre-H3 reading that counted an UNLABELLED row
+as personal, and under NOT NULL + CHECK there is no unlabelled row to be conservative about.
+
+This is the same defect as R3, one layer further in: not a check that cannot fail, but a check
+that can only fail for the wrong reason.
+
+## 16. What the reviewer should check first
+
+Not a finding - a map, because round 2 changed four files and the interesting parts are small:
+
+* `OB1/docker/init-agent-memory-exposure-column.sql` **section 7** (the door: what it refuses
+  and why 'personal' is one of them), **7b** (the last mirror reader and the trigger column
+  list), **8c** (the door attacks itself: 12 payloads + both desyncs), **8d** (zero mirror
+  readers, asserted over pg_policies and pg_proc.prosrc). The cutover - sections 0 to 6 - is
+  UNCHANGED and was not re-litigated.
+* `OB1/docker/revert-agent-memory-exposure-column.sql` **1a** and **3b**.
+* `scripts/checks/drill-personal-plane-exclusion.ps1`: `Set-RedAnchor`, the RED-A/RED-B block,
+  ATTACK 8's red, `$GAP_DISPOSITIONS`, and the exit block.
+* the seven assertions moved off the mirror (section 15) - in particular ATTACK 8's restore.
+
+The claims most worth trying to break, in the order I would try:
+
+1. *"the door cannot leave the column and the mirror disagreeing"* - the UPDATE branch writes
+   the mirror from `v_row.exposure`, but a caller that reaches `thoughts` any other way still
+   can, and section 8(d) is what makes that not matter. Break 8(d) and the claim narrows.
+2. *"nothing reads the mirror"* - the scan is anchored on `metadata->>'exposure'`,
+   `metadata->'exposure'` and three `on_ops_plane(...)` call forms, whitespace-normalised. A
+   body that used `metadata @> '{"exposure":"ops"}'` would pass it. Nothing in the tree does
+   today; that is a bound on the assertion, and it is stated here rather than in the file's
+   NOTICE.
+3. *"every producer states its plane"* - found by grepping the literal `upsert_thought` over
+   `.ts`/`.mjs`/`.js`/`.py` in OB1 and `.ts`/`.mjs`/`.js`/`.py`/`.ps1`/`.sql` in ai-stack
+   (which has ZERO callers): ten `rpc("upsert_thought", ...)` sites, plus the direct-insert
+   paths that bypass the door (generate-wiki's dossier fallback and backfill-gmail-wikis'
+   plain insert, both of which now carry the COLUMN, and the four
+   `INSERT INTO thoughts (..., exposure)` statements in the MCP server that already did).
+   A producer that builds the rpc name dynamically, or writes through PostgREST from outside
+   these two repos, is NOT covered by that grep - and would be refused at the door, loudly,
+   rather than silently mislabelled. That is the failure direction H3 chose, and it is the
+   reason the grep not being exhaustive is survivable.
+4. *the gap ledger* - 18 ids, each mapped to H1 or H4. If any one of them is really H3's, the
+   ledger is hiding work rather than dispositioning it.
