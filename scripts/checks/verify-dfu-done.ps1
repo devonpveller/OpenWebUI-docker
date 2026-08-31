@@ -123,17 +123,54 @@ function New-FixtureRepo {
 }
 
 function New-PlanText {
-    # A minimal but STRUCTURALLY REAL section 2 table - the same shape the parser meets in
-    # the live document, four columns and a bold phase id.
-    param([string]$U0Validated = "a check that exists", [string]$Amendments = "")
+    # A STRUCTURALLY REAL fixture plan. Section 2's table carries the WHOLE U0-U6 floor -
+    # the same population dfu-done.ps1 pins - and section C.8's clauses 1, 2 and 4 are
+    # present so the pinned floors have the plan's own words to be checked back against.
+    #
+    # IT USED TO HOLD ONE PHASE, and that is why the floor defect survived here: a fixture
+    # with a single row cannot express "a phase deleted itself out of the population",
+    # because there is no population to shrink. The parameters below exist to construct
+    # exactly the three shapes that defect takes - a row DELETED, a row that merely loses
+    # its BOLD while staying visible, and a row RENAMED out of the floor.
+    param(
+        [string]$U0Validated = "a check that exists",
+        [string]$Amendments = "",
+        [string[]]$OmitPhases = @(),
+        [string[]]$UnboldPhases = @(),
+        [hashtable]$RenamePhases = @{},
+        [hashtable]$SuffixPhases = @{},
+        [string]$ServiceList = "the ops gateway, the andon board, the gate profiles, the RLS boundary at every stage including the direct clients"
+    )
+    $rows = @()
+    foreach ($n in 0..6) {
+        $id = "U$n"
+        if ($OmitPhases -contains $id) { continue }
+        $shown = $id
+        if ($RenamePhases.ContainsKey($id)) { $shown = [string]$RenamePhases[$id] }
+        $cell = "**$shown**"
+        if ($SuffixPhases.ContainsKey($id)) { $cell = "**$shown " + [string]$SuffixPhases[$id] + "**" }
+        if ($UnboldPhases -contains $id) { $cell = $shown }
+        $vb = $(if ($n -eq 0) { $U0Validated } else { "a check that exists" })
+        $rows += ("| {0} | do the thing | {1} | - |" -f $cell, $vb)
+    }
+    $body = ($rows -join "`n")
     $t = @"
 # fixture plan
+
+### C.8 The success condition
+
+1. **Every U-phase column is satisfied by a check that RAN.** For U0-U6, the section 2
+   Validated by check re-runs green from a clean checkout of the work line.
+2. **No phase is parked, and every amendment is ACCOUNTED FOR.**
+4. **Nothing is left in flight, and everything is DEPLOYED AND RUNNING**. Every service
+   this plan adds is **running live from the work line's code** - $ServiceList.
+5. **The walkthrough is true.**
 
 ## 2. Phases
 
 | Phase | What | Validated by | Depends on |
 |---|---|---|---|
-| **U0** | do the thing | $U0Validated | - |
+$body
 
 ### 2.1 Amendments to the phase table
 $Amendments
@@ -333,8 +370,8 @@ try {
         WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
     }
     $c = Assert-ClauseNotMet -Step "B" -ClauseId "1" -Json $r.json -Because "the phase names no executable check at all"
-    [void](Assert-That -What "[B] coverage reports 0 of 1 phases evaluated - clear because we did NOT look" `
-        -Condition ($null -ne $c -and [int]$c.coverage.evaluated -eq 0 -and [int]$c.coverage.expected -eq 1) `
+    [void](Assert-That -What "[B] coverage does not claim the phases it never ran - clear because we did NOT look" `
+        -Condition ($null -ne $c -and [int]$c.coverage.evaluated -lt [int]$c.coverage.expected -and [int]$c.coverage.expected -ge 8) `
         -Detail ("coverage: {0} of {1}" -f $(if ($c) { $c.coverage.evaluated } else { "?" }), $(if ($c) { $c.coverage.expected } else { "?" })))
     [void](Assert-That -What "[B] the un-run phase is NAMED in not_evaluated" `
         -Condition ($null -ne $c -and (@($c.coverage.not_evaluated) -contains "U0")) `
@@ -942,10 +979,350 @@ try {
     [void](Assert-That -What "[M] a reachable NON-TIP commit passes - the fallback asks the remote and gets a yes" `
         -Condition ($null -ne $pg2 -and [string]$pg2.verdict -eq "pass") `
         -Detail ("verdict={0} note={1}" -f $(if ($pg2) { $pg2.verdict } else { "?" }), $(if ($pg2) { $pg2.note } else { "" })))
+
+    # (c) THE SUBSTRING. The gate's FIRST path tested `git ls-remote origin` output for the
+    # pinned sha as a raw SUBSTRING of the whole blob rather than a match on the SHA COLUMN,
+    # so a REF NAMED AFTER the commit satisfied it. That is not hypothetical: a
+    # `git tag rollback-$(git rev-parse HEAD)` pushed to OB1 would turn this gate green for
+    # a commit a fresh --recurse-submodules clone could not fetch. Round 2 replaced this
+    # exact substring-for-structure test in clause 2 and left it here.
+    #
+    # The fixture is that: a bare remote that does NOT have the commit, carrying one tag
+    # whose NAME contains the pinned sha.
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("tag", ("rollback-" + $unpushed), $shas[2]))
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("push", "-q", $bare, ("refs/tags/rollback-" + $unpushed)))
+    [void](Invoke-InDir -Dir $ob1 -Exe "git" -Arguments @("checkout", "-q", $unpushed))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "re-pin the unpushed commit, with a tag NAMED after it on the remote"))
+    $r3 = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c3 = Assert-ClauseNotMet -Step "M2" -ClauseId "4" -Json $r3.json -Because "the remote carries only a TAG NAMED after the pinned sha, not the commit"
+    $pg3 = Get-Probe -Clause $c3 -Name "gitlink-reachable-on-remote"
+    [void](Assert-That -What "[M2] a ref NAMED after the pinned sha does not make it reachable" `
+        -Condition ($null -ne $pg3 -and [string]$pg3.verdict -eq "fail") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pg3) { $pg3.verdict } else { "?" }), $(if ($pg3) { $pg3.note } else { "" })))
+    [void](Assert-That -What "[M2] and it failed because the REMOTE refused the commit, not because a name was missing" `
+        -Condition ($null -ne $pg3 -and [string]$pg3.note -match "(?i)refused") `
+        -Detail ("note: {0}" -f $(if ($pg3) { $pg3.note } else { "" })))
+
+    # (d) THE TIP PATH STILL WORKS, and says which column it matched in. A gate that can
+    # only fail is a wall.
+    [void](Invoke-InDir -Dir $ob1 -Exe "git" -Arguments @("checkout", "-q", $shas[2]))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "pin the remote's actual tip"))
+    $r4 = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $pg4 = Get-Probe -Clause (Get-Clause -Json $r4.json -Id "4") -Name "gitlink-reachable-on-remote"
+    [void](Assert-That -What "[M2] a commit that IS an advertised tip passes, matched in the sha column" `
+        -Condition ($null -ne $pg4 -and [string]$pg4.verdict -eq "pass" -and [string]$pg4.note -match "SHA COLUMN") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pg4) { $pg4.verdict } else { "?" }), $(if ($pg4) { $pg4.note } else { "" })))
 } finally {
     if ($fx) { Remove-Scratch -Path $fx.root }
     if ($sandbox) { Remove-Scratch -Path $sandbox }
 }
+
+# =================================================================================
+# STEP E2 - CLAUSE 3: THE PREDICATE'S SOURCE MUST BE ON THE WORK LINE. C.8.3 requires the
+# backfill AND the flip to LAND; the probe only inserted two rows in a rolled-back
+# transaction, so a boundary live in production from code no clone of this repository
+# pins read as "the predicate is fail-closed, measured". The identical guard already
+# existed on the RLS twin in clause 4 and was not applied here.
+#
+# This runs under -SkipLive on purpose: the question is about the PINNED TREE, not the
+# database, so it must be answerable without one - and it must still refuse when the tree
+# does not carry the SQL.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP E2 clause 3 - the fail-closed predicate's SQL is not in the pinned OB1 tree" -ForegroundColor Cyan
+$fx = $null
+$sandbox2 = $null
+try {
+    $sandbox2 = New-Scratch
+    $bare2 = Join-Path $sandbox2 "sub-remote.git"
+    $work2 = Join-Path $sandbox2 "sub-work"
+    [void](Invoke-InDir -Dir $sandbox2 -Exe "git" -Arguments @("init", "-q", "--bare", $bare2))
+    New-Item -ItemType Directory -Path $work2 -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $work2 "docker") -Force | Out-Null
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("init", "-q", "-b", "main"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("config", "user.email", "drill@example.invalid"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("config", "user.name", "dfu drill"))
+    # A tree WITHOUT the fail-closed SQL - exactly the live situation the send-back names.
+    [System.IO.File]::WriteAllText((Join-Path $work2 "docker\init-agent-memory.sql"), "-- base`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("add", "-A"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("commit", "-q", "-m", "no fail-closed sql here"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("push", "-q", $bare2, "main"))
+
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough "# w`n"
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("-c", "protocol.file.allow=always", "submodule", "add", "-q", $bare2, "OB1"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1", ".gitmodules"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "pin an OB1 tree with no fail-closed predicate"))
+    $r = Invoke-Target -Params @{
+        Only = 3; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "E2" -ClauseId "3" -Json $r.json -Because "the predicate's defining SQL is absent from the pinned OB1 tree"
+    $p = Get-Probe -Clause $c -Name "corpus-predicate-source-on-work-line"
+    [void](Assert-That -What "[E2] the source probe FAILS and names the missing SQL" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "init-agent-memory-corpus-failclosed.sql") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+
+    # THE POSITIVE: add the file, re-pin, and the same probe must pass - otherwise this is
+    # a probe that can only say no.
+    [System.IO.File]::WriteAllText((Join-Path $work2 "docker\init-agent-memory-corpus-failclosed.sql"),
+        "-- the flip`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("add", "-A"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("commit", "-q", "-m", "land the fail-closed predicate"))
+    [void](Invoke-InDir -Dir $work2 -Exe "git" -Arguments @("push", "-q", $bare2, "main"))
+    $ob1b = Join-Path $fx.root "OB1"
+    [void](Invoke-InDir -Dir $ob1b -Exe "git" -Arguments @("fetch", "-q", "origin"))
+    [void](Invoke-InDir -Dir $ob1b -Exe "git" -Arguments @("checkout", "-q", "origin/main"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "bump the gitlink to the tree that carries it"))
+    $r2 = Invoke-Target -Params @{
+        Only = 3; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $p2 = Get-Probe -Clause (Get-Clause -Json $r2.json -Id "3") -Name "corpus-predicate-source-on-work-line"
+    [void](Assert-That -What "[E2] and it PASSES once the pinned tree carries the SQL" `
+        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p2) { $p2.verdict } else { "?" }), $(if ($p2) { $p2.note } else { "" })))
+} finally {
+    if ($fx) { Remove-Scratch -Path $fx.root }
+    if ($sandbox2) { Remove-Scratch -Path $sandbox2 }
+}
+
+# =================================================================================
+# STEP N - THE CHECKER MUST NOT TAKE ITS POPULATION FROM THE DOCUMENT UNDER TEST.
+#
+# Clauses 1, 2 and 7 derived their subjects from the CURRENT PLAN.md, so a phase could
+# delete itself out of its own population. Three shapes, all constructed here:
+#
+#   N1  the row is DELETED       -> the phase vanished, coverage read "1 of 1"
+#   N2  the row loses its BOLD   -> `| **U1** |` -> `| U1 |`. A change a reader cannot
+#                                    see, because the row is still printed. Clause 7 went
+#                                    unmet -> met over a phase still in the document.
+#   N3  the row is RENAMED       -> `| **UX** |`. Same disappearance, different edit.
+#
+# In every shape the clause must be NOT MET and phase-floor-present must FAIL naming the
+# phase - never a smaller N. N2 additionally asserts the positive: the unbolded row is
+# still PARSED, so the subject survives the formatting change instead of being rescued
+# only by the floor.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP N  clauses 1, 2, 7 - a phase deleted, unbolded, or renamed out of the table" -ForegroundColor Cyan
+foreach ($shape in @(
+    @{ tag = "N1"; what = "U1's row is DELETED from section 2"; plan = (New-PlanText -OmitPhases @("U1")) },
+    @{ tag = "N3"; what = "U1's row is RENAMED to UX";          plan = (New-PlanText -RenamePhases @{ "U1" = "UX" }) }
+)) {
+    $fx = $null
+    try {
+        $fx = New-FixtureRepo -Plan $shape.plan -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+        foreach ($cl in @("1", "2", "7")) {
+            $r = Invoke-Target -Params @{
+                Only = [int]$cl; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+                PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+                WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+            }
+            $c = Assert-ClauseNotMet -Step $shape.tag -ClauseId $cl -Json $r.json -Because $shape.what
+            $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+            [void](Assert-That -What ("[{0}] clause {1}: phase-floor-present FAILS and names U1" -f $shape.tag, $cl) `
+                -Condition ($null -ne $pf -and [string]$pf.verdict -eq "fail" -and [string]$pf.note -match "U1") `
+                -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+            [void](Assert-That -What ("[{0}] clause {1}: the population did NOT shrink - U1 is still a declared subject" -f $shape.tag, $cl) `
+                -Condition ($null -ne $c -and [int]$c.coverage.expected -ge 8) `
+                -Detail ("expected: {0}" -f $(if ($c) { $c.coverage.expected } else { "?" })))
+        }
+    } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+}
+
+# N2 - THE FORMATTING CHANGE. The row is still in the document, so the SUBJECT must
+# survive: the floor must be satisfied AND clause 7 must still probe U1 by name.
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -UnboldPhases @("U1")) -Decisions "# d`n`n## unrelated`nnothing`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Assert-ClauseNotMet -Step "N2" -ClauseId "7" -Json $r.json -Because "an unbolded row is still a row and still needs an audit trail"
+    $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+    [void](Assert-That -What "[N2] removing the bold does NOT remove the phase from the table" `
+        -Condition ($null -ne $pf -and [string]$pf.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+    [void](Assert-That -What "[N2] the unbolded phase is still probed BY NAME, not silently dropped" `
+        -Condition ($null -ne (Get-Probe -Clause $c -Name "audit-trail-U1")) `
+        -Detail ("probes: {0}" -f (@($c.probes | ForEach-Object { $_.name }) -join ",")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# N5 - THE CELL MAY SAY MORE THAN THE ID. The live table writes `| **U7 (standing)** |`,
+# and the first attempt at N2's fix anchored the closing pipe straight after the emphasis -
+# which dropped that phase out of the population, fixing one way for a phase to vanish by
+# introducing another. Both shapes are asserted together here so neither can be traded for
+# the other again.
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -SuffixPhases @{ "U2" = "(standing)" } -UnboldPhases @("U1")) `
+                          -Decisions "# d`n`n## unrelated`nnothing`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Get-Clause -Json $r.json -Id "7"
+    [void](Assert-That -What "[N5] a cell that says more than the id - `| **U2 (standing)** |` - is still parsed" `
+        -Condition ($null -ne (Get-Probe -Clause $c -Name "audit-trail-U2")) `
+        -Detail ("probes: {0}" -f (@($c.probes | ForEach-Object { $_.name }) -join ",")))
+    $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+    [void](Assert-That -What "[N5] and the floor is satisfied by both cell shapes at once" `
+        -Condition ($null -ne $pf -and [string]$pf.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# N4 - THE FLOOR ITSELF DRIFTS. If C.8 clause 1 stops naming U0-U6, the pinned floor is no
+# longer pinned TO anything, and that is a red - the same guarantee door-set-matches-plan
+# gives clause 3's doors.
+$fx = $null
+try {
+    $planDrift = (New-PlanText) -replace "For U0-U6, the section 2", "For U0-U5, the section 2"
+    $fx = New-FixtureRepo -Plan $planDrift -Decisions "# d`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "N4" -ClauseId "1" -Json $r.json -Because "C.8 clause 1 no longer names the phase set this script pins"
+    $pd = Get-Probe -Clause $c -Name "phase-floor-matches-plan"
+    [void](Assert-That -What "[N4] the floor's own drift check is what failed, naming U6" `
+        -Condition ($null -ne $pd -and [string]$pd.verdict -eq "fail" -and [string]$pd.note -match "U6") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pd) { $pd.verdict } else { "?" }), $(if ($pd) { $pd.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP I2 - CLAUSE 7: C.8.7 names THREE artifacts per phase, and the third - "commit
+# messages stating what was validated and by which check" - had no `git log` anywhere in
+# the authority. Coverage reported 8 of 8 with that half never examined. Here every phase
+# has a ledger entry and a findings note and NO qualifying commit message, so the clause
+# must fail for exactly that reason and say so.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP I2 clause 7 - a phase with a ledger entry and a note but no commit message" -ForegroundColor Cyan
+$fx = $null
+try {
+    $dec = "# fixture decisions`n`n## U0 U1 U2 U3 U4 U5 U6 - all phases`nrecorded`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions $dec -Walkthrough "# w`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "documentation\notes\dfu-drill-note.md"),
+        "# findings`n`nU0 U1 U2 U3 U4 U5 U6 all appear here.`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
+    # THE COMMIT MESSAGE NAMES THE PHASES AND NOTHING ELSE - no check, no artifact. That is
+    # not "stating what was validated and by which check".
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "U0 U1 U2 U3 U4 U5 U6 done"))
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Assert-ClauseNotMet -Step "I2" -ClauseId "7" -Json $r.json -Because "no commit message says what was validated or by which check"
+    $p = Get-Probe -Clause $c -Name "audit-trail-U0"
+    [void](Assert-That -What "[I2] the ledger and note halves are satisfied, and the COMMIT half is what failed" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "commit message" -and `
+                    [string]$p.note -notmatch "DECISIONS" -and [string]$p.note -notmatch "findings note") `
+        -Detail ("note: {0}" -f $(if ($p) { $p.note } else { "<missing>" })))
+
+    # AND THE POSITIVE: a message that names the phase AND the check satisfies it. A gate
+    # that can only fail is a wall.
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "documentation\notes\dfu-drill-note2.md"),
+        "# more`n`nU0 U1 U2 U3 U4 U5 U6`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m",
+        "U0 U1 U2 U3 U4 U5 U6: validated by verify-the-thing.ps1 re-running green"))
+    $r2 = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c2 = Get-Clause -Json $r2.json -Id "7"
+    $p2 = Get-Probe -Clause $c2 -Name "audit-trail-U0"
+    [void](Assert-That -What "[I2] a commit naming the phase AND a check does satisfy the third artifact" `
+        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass" -and [string]$p2.note -match "commit message") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p2) { $p2.verdict } else { "?" }), $(if ($p2) { $p2.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP D3 - CLAUSE 2: AN UNCOMMITTED WEAKENING. The chain was built from git while the
+# phase set, the amendments and the parked check were read from DISK, so a column eroded
+# in the working tree and not yet committed left the chain probe passing over the
+# committed text. The working tree is a state of the chain.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP D3 clause 2 - a weakening that is on disk but not yet committed" -ForegroundColor Cyan
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated "the gym run is observed; the drill runs green") `
+                          -Decisions "# d`n" -Walkthrough "# w`n"
+    # NOT COMMITTED. The file on disk drops one requirement outright.
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"),
+        (New-PlanText -U0Validated "the drill runs green"), [System.Text.UTF8Encoding]::new($false))
+    $r = Invoke-Target -Params @{
+        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+    }
+    $c = Assert-ClauseNotMet -Step "D3" -ClauseId "2" -Json $r.json -Because "the requirement was dropped on disk and never committed"
+    $p = Get-Probe -Clause $c -Name "chain-U0-original-vs-current"
+    [void](Assert-That -What "[D3] the chain probe sees the UNCOMMITTED column as the current one" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "gym run") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[D3] and the working tree is printed as a step of the chain" `
+        -Condition ($null -ne $c -and ((@($c.detail) -join " ") -match "uncommitted")) `
+        -Detail ("detail: {0}" -f ((@($c.detail) | Select-Object -First 12) -join " | ")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP F2 - CLAUSE 4: the service floor had NO drift check while this file's header
+# claimed both pinned sets were checked back against the plan's words. A plan that names a
+# service this script does not probe must turn the clause red, not lose the service.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP F2 clause 4 - the plan names a service the pinned set does not claim" -ForegroundColor Cyan
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -ServiceList "the ops gateway, the andon board, the gate profiles, the RLS boundary at every stage including the direct clients, the quarantine broker") `
+                          -Decisions "# d`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "F2" -ClauseId "4" -Json $r.json -Because "C.8 clause 4 names a service no probe here claims"
+    $p = Get-Probe -Clause $c -Name "service-set-matches-plan"
+    [void](Assert-That -What "[F2] the drift check is what failed, and it names the unclaimed service" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "quarantine broker") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+
+    # THE POSITIVE: the plan as written must PASS the drift check, or the gate is a wall.
+    $fx2 = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough "# w`n"
+    try {
+        $r2 = Invoke-Target -Params @{
+            Only = 4; RepoRoot = $fx2.root; WorkLine = $fx2.line; SkipLive = $true
+            PlanPath = (Join-Path $fx2.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx2.dfu "DECISIONS.md")
+            WalkthroughPath = (Join-Path $fx2.dfu "WALKTHROUGH.md")
+        }
+        $p2 = Get-Probe -Clause (Get-Clause -Json $r2.json -Id "4") -Name "service-set-matches-plan"
+        [void](Assert-That -What "[F2] and a plan whose service list matches the pinned set PASSES the drift check" `
+            -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass") `
+            -Detail ("verdict={0} note={1}" -f $(if ($p2) { $p2.verdict } else { "?" }), $(if ($p2) { $p2.note } else { "" })))
+    } finally { Remove-Scratch -Path $fx2.root }
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
 # STEP Y - A NARROWED RUN MUST NEVER REPORT THE PLAN DONE. -Only is a convenience, not a
@@ -1038,6 +1415,63 @@ if ($Live) {
     [void](Assert-That -What "[L2] and the clause does not claim to have evaluated them" `
         -Condition ($null -ne $c2 -and [int]$c2.coverage.evaluated -lt [int]$c2.coverage.expected) `
         -Detail ("coverage: {0} of {1}" -f $(if ($c2) { $c2.coverage.evaluated } else { "?" }), $(if ($c2) { $c2.coverage.expected } else { "?" })))
+
+    # =============================================================================
+    # STEP L3 (live) - EVERY DOOR PROBE IS FILTERED TO THE FIXTURE. Two of them asked for
+    # `list_thoughts {"limit":25}` - an unfiltered newest-first window - while claiming
+    # "every probe filtered to the fixture". Because the personal fixture is written BEFORE
+    # its ops twin it is always the first of the pair pushed out of that window, so
+    # concurrent ingest manufactures sawP=false / sawO=true, which reads as "the door
+    # REFUSED the personal fixture". The assertion is on the RECORDED COMMAND, which is
+    # what a reader would re-run.
+    # =============================================================================
+    Write-Host ""
+    Write-Host "STEP L3 (live) every door probe's recorded command is aimed at the fixture" -ForegroundColor Cyan
+    # door-set-matches-plan is the FLOOR's drift check, not a door - it has no fixture to
+    # be aimed at, and counting it here would fail this assertion for the wrong reason.
+    $doorCmds = @($c.probes | Where-Object { $_.name -like "door-*" -and $_.name -ne "door-set-matches-plan" -and $_.command -notmatch '^\(no probe' })
+    $unfiltered = @($doorCmds | Where-Object { $_.command -notmatch '(?i)(dfu-done|eq\.[0-9]+)' })
+    [void](Assert-That -What "[L3] no door is attacked with an unfiltered window" `
+        -Condition ($unfiltered.Count -eq 0) `
+        -Detail ("unfiltered: {0}" -f (($unfiltered | ForEach-Object { $_.name }) -join ", ")))
+    $fw = Get-Probe -Clause $c -Name "fixture-write-landed"
+    [void](Assert-That -What "[L3] the fixture is READ BACK before any absence is asserted" `
+        -Condition ($null -ne $fw) -Detail "fixture-write-landed is the positive control on the WRITE")
+    $bf = Get-Probe -Clause $c -Name "corpus-backfill-landed"
+    $sp = Get-Probe -Clause $c -Name "corpus-predicate-source-on-work-line"
+    [void](Assert-That -What "[L3] C.8.3's other two halves - the backfill and the predicate's source - are both probed" `
+        -Condition ($null -ne $bf -and $null -ne $sp) `
+        -Detail ("backfill={0} source={1}" -f $(if ($bf) { $bf.verdict } else { "<missing>" }), $(if ($sp) { $sp.verdict } else { "<missing>" })))
+
+    # =============================================================================
+    # STEP L4 (live) - CLAUSE 4's RLS SUBJECT MUST CONSULT THE DIRECT CLIENTS. relrowsecurity
+    # and relforcerowsecurity are table flags, and a rolbypassrls role is unaffected by
+    # both; C.8.4 asks for the boundary "at every stage including the direct clients". The
+    # invariant asserted here holds whatever the table flags currently read: while a direct
+    # client carries rolsuper or rolbypassrls, this subject may not be green.
+    # =============================================================================
+    Write-Host ""
+    Write-Host "STEP L4 (live) the RLS subject cannot be green over a BYPASSRLS client" -ForegroundColor Cyan
+    $r4 = Invoke-Target -Params @{ Only = 4 }
+    $c4 = Get-Clause -Json $r4.json -Id "4"
+    $p4 = Get-Probe -Clause $c4 -Name "service-rls-boundary"
+    $clientLines = @(@($c4.detail) | Where-Object { $_ -match '^direct client role ' })
+    [void](Assert-That -What "[L4] the direct clients were enumerated and their roles read" `
+        -Condition ($clientLines.Count -ge 1) `
+        -Detail ("detail lines: {0}" -f ((@($c4.detail) | Select-Object -First 20) -join " | ")))
+    $bypassing = @($clientLines | Where-Object { $_ -notmatch '/f/f' })
+    if ($bypassing.Count -ge 1) {
+        [void](Assert-That -What "[L4] a direct client bypasses RLS, so the subject is NOT green" `
+            -Condition ($null -ne $p4 -and [string]$p4.verdict -ne "pass") `
+            -Detail ("verdict={0} ; bypassing: {1}" -f $(if ($p4) { $p4.verdict } else { "?" }), ($bypassing -join " ; ")))
+    } else {
+        [void](Assert-That -What "[L4] no direct client bypasses RLS - the subject may stand on the table flags" `
+            -Condition $true -Detail "nothing to refute here")
+    }
+    $ps4 = Get-Probe -Clause $c4 -Name "service-set-matches-plan"
+    [void](Assert-That -What "[L4] and clause 4's service floor is checked back against the plan's words" `
+        -Condition ($null -ne $ps4 -and [string]$ps4.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($ps4) { $ps4.verdict } else { "<missing>" }), $(if ($ps4) { $ps4.note } else { "" })))
 }
 
 Write-Host ""
