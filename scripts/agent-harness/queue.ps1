@@ -242,11 +242,40 @@ function Resolve-GateOrDie([string]$gate) {
     catch { Die $_.Exception.Message }
 }
 
-function Invoke-AutoGate($item, [string]$gate, $decision) {
+function Invoke-AutoGate($item, [string]$gate, $decision, [string]$runBranch = "") {
     # Try to auto-pass $gate. Returns the andon verdict; the CALLER halts on a raise, so the
     # halt is visible at the state transition rather than buried in here.
+    #
+    # THE RUN'S OWN BRANCH HAS TO REACH THE BOARD, and until 2026-08-30 it did not reach the
+    # ANCHOR gate. `-Propose` writes `branch = ""` - there is no branch yet when the anchor is
+    # proposed - and `-Submit` stores the real one only AFTER the anchor gate has run. So at
+    # that gate $item.branch was empty, no -RunBranch was passed, and `work-branch-on-remote`
+    # fell back to its BROAD reading: is ANY local work branch on a remote. README.md promised
+    # the narrow one ("a dark run is blocked by ITS OWN branch being on a remote, not by
+    # anybody else's"); the gate asked the broad one. On this repository that is eleven foreign
+    # work/* branches somebody else pushed, so `dark` could never auto-pass an anchor gate here
+    # - a run refused for a fact about the operator's remote that the run neither caused nor is
+    # allowed to clear. Reproduced before the fix: own branch clean, ONE foreign work branch on
+    # a remote, anchor gate exit 6, ledger `fired=work-branch-on-remote`.
+    #
+    # The branch IS known at that point - it is `-Submit -Branch`, a mandatory parameter - it
+    # simply had not been written to the item yet. The caller passes it, and both gates now ask
+    # the same narrow question about the same branch. The BROAD question is still asked by a
+    # bare `andon.ps1 -Evaluate`, which is the operator's reading, not a run's.
+    #
+    # A GATE THAT CANNOT NAME THE BRANCH DOES NOT AUTO-PASS. Falling back to the broad question
+    # is the defect above; falling back to an empty list would be worse still, because
+    # Predicate-BranchOnRemote answers `ok` for one - "no local work branches to check" - and
+    # that is a pass nobody proved. Unreachable by construction (both call sites have a branch:
+    # -Submit requires -Branch, and pre_review runs after -Submit stored it), and kept because
+    # the two alternatives are a wrong answer and a silent one.
     $branches = @()
     if ($item.branch) { $branches += $item.branch }
+    elseif ($runBranch) { $branches += $runBranch }
+    if (@($branches).Count -eq 0) {
+        Die (("the '{0}' gate cannot name the branch this run owns, so it cannot ask whether that " +
+              "branch is on a remote. An unattended gate does not pass a question it did not ask.") -f $gate) 1
+    }
     $andon = Invoke-AndonForGate -RunBranches $branches
     if ($andon.status -ne "clear") {
         [void](Write-GateRecord -Item $item.id -Gate $gate -Decision "refused" -Kind "auto" `
@@ -619,7 +648,7 @@ if ($Submit) {
                 Die (("'{0}' has an anchor that nobody has confirmed. The operator agrees what this " +
                       "is for BEFORE it is built: queue.ps1 -ConfirmAnchor -Id {0} -By <operator>") -f $Id) 5
             }
-            $andon = Invoke-AutoGate $existing "anchor" $gd
+            $andon = Invoke-AutoGate $existing "anchor" $gd $Branch
             if ($andon.status -ne "clear") { Stop-OnAndon $andon "anchor" $Id "anchor-draft" }
             $autoWho = (Get-AutoPrincipalPrefix) + $gd.profile
             $existing.state = "anchor-confirmed"

@@ -493,3 +493,252 @@ def test_powershell_and_python_agree_about_the_gates():
     for name in config.gate_profile_names():
         for gate in config.GATES:
             assert ps["resolved"][f"{name}/{gate}"] == config.resolve_gate(gate, name)["passer"]
+
+
+# ===================================================================================
+# BOARD WORDS, WHEREVER THEY ARE WRITTEN DOWN
+#
+# The check above compares ONE table in ONE file. That is a derived gate whose alphabet has
+# a single entry, which is the shape this effort keeps finding: the alphabet, not the
+# comparison, decides how much a check covers. On 2026-08-30 the same list was wrong in four
+# places at once - MODULE.md's `dark` bullet, and `andon.ps1` twice (its
+# Invoke-AndonEvaluation comment and its exit-6 comment) - each omitting `indeterminate` and
+# `unaccounted`; `queue.ps1`'s exit-code line had omitted `warned` one round earlier. Four
+# instances, one defect, and a check that read only the MODULE table saw none of them.
+#
+# So the alphabet is now "every place in the repository where board words are enumerated",
+# and THE LOCATIONS ARE DERIVED: `git ls-files` from the repository root, every tracked text
+# file scanned. Nothing is listed by hand.
+# ===================================================================================
+
+REPO_ROOT = HERE.parents[1]
+
+
+def _repo_text_files():
+    """Every tracked text file in the repository, from git - not a hand-kept list.
+
+    The OB1 submodule is excluded: it is a different project, and `git ls-files` reports it
+    as one gitlink entry anyway. Files that are not valid UTF-8 are skipped rather than
+    guessed at.
+    """
+    out = subprocess.run(["git", "ls-files"], cwd=str(REPO_ROOT),
+                         capture_output=True, text=True, check=True).stdout
+    for rel in out.splitlines():
+        if rel.startswith("OB1/"):
+            continue
+        p = REPO_ROOT / rel
+        if not p.is_file():
+            continue
+        try:
+            yield rel, p.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+
+
+def _word_alternation(words):
+    return "|".join(sorted(words, key=len, reverse=True))
+
+
+def _inline_enumerations(text, words):
+    """A run of board words joined ONLY by list punctuation, three or more of them.
+
+    The gap may cross a line break and a comment sigil, because that is how these lists are
+    actually written inside a `#` block: `queue.ps1`'s complete one wraps mid-list.
+    """
+    alt = _word_alternation(words)
+    item = r"(?:``|`|\*\*)*(?:" + alt + r")(?:``|`|\*\*)*"
+    gap = r"[ \t]*(?:\r?\n[ \t]*(?:#:|#|//|\*)?[ \t]*)?[ \t]*"
+    sep = r"(?:(?:,|/|\||;)" + gap + r"(?:(?:or|and)[ \t]+)?|(?:or|and)[ \t]+)"
+    run = re.compile(item + r"(?:" + gap + sep + gap + item + r"){2,}")
+    for m in run.finditer(text):
+        found = set(re.findall(r"\b(?:" + alt + r")\b", m.group(0)))
+        yield text[:m.start()].count("\n") + 1, found, m.group(0)
+
+
+#: How far apart two rows of one definition block may be. An entry whose description runs to
+#: several continuation lines is still one block; a board word mentioned again twenty lines
+#: later is not part of it.
+_DEF_GAP = 6
+
+
+def _block_enumerations(text, words):
+    """A definition block or table: lines that each INTRODUCE a board word.
+
+    `raised        - a condition halted the line` and `| `raised` | ... |` are both this
+    shape. `` `clear` requires every bucket... `` is not: a comma or a single prose word
+    after the term means a sentence about one word, not a row of a list. That distinction is
+    what keeps the bucket lists in the findings note out of this - they name buckets, and
+    their one shared word (`indeterminate`) is followed by a comma.
+    """
+    alt = _word_alternation(words)
+    lead = re.compile(r"^[^A-Za-z0-9]*(?:``|`|\*\*)*(?P<w>" + alt +
+                      r")(?:``|`|\*\*)*(?:[ \t]*[-:|>][ \t]|[ \t]+)(?=\S)")
+    hits = []
+    for i, line in enumerate(text.split("\n")):
+        m = lead.match(line)
+        if m:
+            hits.append((i + 1, m.group("w")))
+    block = []
+    for h in hits:
+        if block and h[0] - block[-1][0] > _DEF_GAP:
+            yield block
+            block = []
+        block.append(h)
+    if block:
+        yield block
+
+
+def test_every_enumeration_of_board_words_in_the_repo_is_complete():
+    """A LIST OF THE WORDS THAT REFUSE IS A CLAIM ABOUT ALL OF THEM.
+
+    Four sentences in three files listed some of the board's words as though they were all
+    of them, and two of those omitted the two words added the same morning. A reader of any
+    of them would conclude the missing words do NOT refuse - the opposite of what the code
+    does.
+
+    The rule is deliberately blunt, and stated so it can be obeyed: write three or more
+    board words as a list and you are enumerating the alphabet, so write all of it - either
+    the eight, or the seven that are not `clear`. If you mean a narrower set (the three
+    cases one drill step covers, say), say so in words or write it as a mapping. Positional
+    lists of board words are exactly how the four went wrong.
+
+    DISCLOSED LIMITS. This finds ENUMERATIONS: one wrong board word in a sentence ("deleting
+    the block reports `not-evaluated`") is not an enumeration and is not caught here. That
+    class is covered, for the ways off the board, by the citation test below - and is not
+    covered at all for anything else. And it cannot tell a QUOTATION of a bad list from a bad
+    list, which is a real cost: the findings note describing this defect had to paraphrase
+    the sentence it was reporting rather than quote it. Paraphrasing was chosen over an
+    exemption on purpose - a rule with one file exempted from it is the shape that let four
+    of these through.
+    """
+    words = _board_words()
+    complete = (words, words - {"clear"})
+    bad = []
+    for rel, text in _repo_text_files():
+        for lineno, found, snippet in _inline_enumerations(text, words):
+            if len(found) >= 3 and found not in complete:
+                bad.append("%s:%d lists %s and omits %s :: %r" % (
+                    rel, lineno, sorted(found), sorted(words - found - {"clear"}),
+                    snippet[:120]))
+        for block in _block_enumerations(text, words):
+            found = {w for _, w in block}
+            if len(found) >= 3 and found not in complete:
+                bad.append("%s:%d-%d lists %s and omits %s" % (
+                    rel, block[0][0], block[-1][0], sorted(found),
+                    sorted(words - found - {"clear"})))
+    assert not bad, "incomplete enumerations of the board's words:\n  " + "\n  ".join(bad)
+
+
+# ===================================================================================
+# THE WAYS OFF THE BOARD: one table, cited by route id, proven by the drill
+# ===================================================================================
+
+
+def _ways_off_values():
+    """What a ways-off row may claim: a board word, or `unavailable`.
+
+    `unavailable` is not a board word - it is what a GATE records when the board could not
+    produce a verdict at all - and it is the outcome of one row, so it is admitted here
+    rather than failing the parse for being unrecognised.
+    """
+    return _board_words() | {"unavailable"}
+
+
+def _ways_off_table():
+    """(route id -> outcome word) parsed from README.md's ways-off table.
+
+    That table is the ONE place stating which way off the board gives which state. It earns
+    that by being the only one the drill proves and the only one anything cites.
+    """
+    text = (HERE / "README.md").read_text(encoding="utf-8")
+    rows = re.findall(r"^\| `([a-z0-9-]+)` \|.*?\|([^|]*)\| halts \|$", text, re.M)
+    assert rows, "README.md's ways-off table did not parse - has its shape changed?"
+    out = {}
+    for route, outcome_cell in rows:
+        named = [w for w in re.findall(r"`([a-z-]+)`", outcome_cell) if w in _ways_off_values()]
+        assert named, "ways-off row %r names no outcome this board can produce: %r" % (
+            route, outcome_cell)
+        assert route not in out, "duplicate ways-off route %r" % route
+        out[route] = named[0]
+    return out
+
+
+def _ways_off_drill():
+    """(route id -> outcome word) parsed from the drill's own $script:WaysOffProven.
+
+    Read out of the drill rather than mirrored here, for the same reason `_board_words`
+    reads `andon.ps1`: a test comparing two copies of a list proves only that the copies
+    match each other.
+    """
+    text = (HERE / "drill-dark-factory.ps1").read_text(encoding="ascii")
+    m = re.search(r"\$script:WaysOffProven = \[ordered\]@\{(.*?)\n\}", text, re.S)
+    assert m, "drill-dark-factory.ps1 no longer declares $script:WaysOffProven"
+    return dict(re.findall(r'"([a-z0-9-]+)"\s*=\s*"([a-z-]+)"', m.group(1)))
+
+
+def test_the_ways_off_table_matches_the_drill_that_proves_it():
+    """A ROW NOBODY DRILLS IS A CLAIM, NOT A PROOF.
+
+    One row - an action word the board does not implement - asserted `andon.status =
+    unavailable` in the ledger, and no drill check read that field: the exit code was
+    checked and the sentence about the record was not. Half a verified row reads exactly
+    like a whole one.
+    """
+    table = _ways_off_table()
+    drill = _ways_off_drill()
+    assert table == drill, "README table=%s drill=%s" % (
+        sorted(table.items()), sorted(drill.items()))
+    m = re.search(r"\*\*(\w+) ways of switching the board off",
+                  (HERE / "README.md").read_text(encoding="utf-8"))
+    assert m, "README.md no longer states how many ways off the board there are"
+    claimed = _WORD_NUMBERS.get(m.group(1).lower())
+    assert claimed == len(table), "README claims %r ways, the table has %d" % (
+        m.group(1), len(table))
+
+
+def test_every_citation_of_a_way_off_names_the_state_this_table_proves():
+    """THE SAME MAPPING, WRITTEN OUT AGAIN, WENT WRONG IN THREE FILES AT ONCE.
+
+    `andon.ps1`, `config.ps1` and `config.py` all said that `andon.enabled: false` and
+    deleting the `andon` block "both report `not-evaluated`". Deleting the block reports
+    `incomplete` - the whole point of the state that round added - and one commit wrote the
+    sentence and made it false, in three files, none of them checked.
+
+    So the mapping is stated once and CITED by route id everywhere else, and every citation
+    in the repository is checked here. Locations are derived (`git ls-files`); matching is
+    exact, because a route id is a unique token rather than a phrase to be recognised.
+
+    DISCLOSED LIMITS, because they are the honest half. This polices CITATIONS: a fresh
+    restatement naming no route id is invisible to it, exactly as the three false sentences
+    were before they were rewritten as citations. What makes that less likely is that the
+    table now says, in its own first sentence, that it is the only place the mapping lives.
+    And, like the enumeration check, it cannot tell a quotation of a wrong citation from a
+    wrong citation - the findings note lists its own red-proofs without naming the word each
+    one used, for that reason.
+    """
+    table = _ways_off_table()
+    # `clear` IS NOT A CLAIM ABOUT A ROUTE, and excluding it is not a convenience. No way off
+    # the board yields `clear` - that a route no longer can is exactly what "closed" means -
+    # so the word never appears beside a route id as an outcome claim. Where it does appear
+    # is in the history each of these routes carries: "the gate AUTO-PASSED, exit 0, ledger
+    # `clear`". Reading those as claims would have made the check fire on five true sentences
+    # and taught the next reader to delete it.
+    claims = _ways_off_values() - {"clear"}
+    routes = re.compile(r"(?<![A-Za-z0-9-])(" +
+                        "|".join(sorted(table, key=len, reverse=True)) + r")(?![A-Za-z0-9-])")
+    word_rx = re.compile(r"(?<![A-Za-z0-9-])(" + _word_alternation(claims) + r")(?![A-Za-z0-9-])")
+    bad = []
+    for rel, text in _repo_text_files():
+        marks = [(m.start(), m.end(), m.group(1)) for m in routes.finditer(text)]
+        for i, (start, end, route) in enumerate(marks):
+            stop = min(len(text), end + 240)
+            if i + 1 < len(marks):
+                stop = min(stop, marks[i + 1][0])
+            named = set(word_rx.findall(text[end:stop]))
+            if not named:
+                continue          # a mention of the route, not a claim about its outcome
+            if table[route] not in named:
+                bad.append("%s:%d cites %s and names %s - the proven state is %r" % (
+                    rel, text[:start].count("\n") + 1, route, sorted(named), table[route]))
+    assert not bad, ("citations that disagree with README's ways-off table:\n  " +
+                     "\n  ".join(bad))

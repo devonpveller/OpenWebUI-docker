@@ -120,8 +120,14 @@ Under `dark`:
 
 - `-Submit` on an `anchor-draft` item self-passes the anchor gate instead of exiting 5;
 - a tester's `-Pass` releases straight to `ready-review` instead of stopping at `test-passed`;
-- **both refuse unless the andon board is CLEAR** (exit 6 otherwise - raised, warned,
-  incomplete, partial or not-evaluated), parking the item where it stands;
+- **both refuse unless the andon board is CLEAR** - exit 6 on any of the other seven words
+  (unaccounted, incomplete, raised, warned, indeterminate, partial, not-evaluated), parking
+  the item where it stands. This list omitted `indeterminate` and `unaccounted` until
+  2026-08-30, the two words that round added - the identical defect to `queue.ps1`'s
+  exit-code list, which was missing `warned`, one file over. A partial list of the words that
+  refuse reads as though the missing ones do not, so every enumeration of board words in the
+  repository is now derived and compared against the code
+  (`test_every_enumeration_of_board_words_in_the_repo_is_complete`);
 - **every auto-pass is recorded** under the reserved principal `auto:<profile>`, which
   `-ConfirmAnchor` and `-Approve` refuse to accept as a human `-By` (exit 4). The
   namespace is reserved in both directions.
@@ -203,6 +209,22 @@ and refuses, with no branch naming it. `fired` and `halted` remain separate repo
 added it needs a word in `$script:AndonBucketBoard`, and until it has one the board refuses
 rather than guesses.
 
+**Every list of these words, anywhere in the repository, is derived and checked.** The
+first version of that check compared this one table in this one file - a derived gate whose
+alphabet had a single entry, which is not much better than a hand-written list, and the same
+morning proved it: FOUR sentences in three files listed some of the words as though they
+were all of them (this file's `dark` bullet; `andon.ps1`'s Invoke-AndonEvaluation comment
+and its exit-6 comment; `queue.ps1`'s exit-code line, one round earlier). One defect, four
+instances, and a check reading only this table saw none of them. So
+`test_every_enumeration_of_board_words_in_the_repo_is_complete` takes its file list from
+`git ls-files` and finds both shapes these lists take - an inline run (`a, b or c`) and a
+definition block or table row - and requires each to be the whole alphabet: the eight, or
+the seven that are not `clear`. **If you mean a narrower set, say so in words or write it as
+a mapping**; a positional list of board words is read as a claim about all of them, because
+that is how all four went wrong. It finds enumerations, not single wrong words - that limit
+is stated in the test, and the ways-off citation rule below covers the one place a single
+wrong word had actually done damage.
+
 `incomplete` outranks the rest: a verdict from a board that is not the required board
 cannot be reported as that board's verdict. The conditions that *are* declared are still
 evaluated, still listed, and still raised on stderr, so nothing is hidden by the name.
@@ -240,20 +262,35 @@ reviewer sees.
 
 **The board's MEMBERSHIP is tamper-evident; its BEHAVIOUR is not.** Eight ways of switching
 it off, or of getting a pass out of it, are closed - each proved at the real gate by a drill
-case, and each open before it was closed: `andon.enabled: false` (`not-evaluated`), the whole
-`andon` block deleted (`incomplete`), individual conditions switched off (`partial`),
-condition entries deleted (`incomplete`), `on_fire: warn` (`warned`), `on_indeterminate:
-warn` (`indeterminate`), either key set to a word the board does not implement (refused at
-evaluation, which every gate reads as `unavailable`), and - the general one that subsumes the
-last three - **an outcome the board does not enumerate at all**, a new status or a new action
-word, which lands in the `unrecognised` census bucket and gives `unaccounted` with no branch
-naming it. What is NOT closed is what a *declared*
+case, and each open before it was closed. Which way gives which state is stated in ONE place,
+README.md's ways-off table, and cited here by route id - because the same mapping written out
+a second time went wrong in three files at once:
+`andon-disabled` (`not-evaluated`), `andon-block-deleted` (`incomplete`),
+`condition-disabled` (`partial`), `conditions-deleted` (`incomplete`),
+`on-fire-downgraded` (`warned`), `on-indeterminate-downgraded` (`indeterminate`),
+`action-word-unimplemented` (refused at evaluation, which every gate reads as `unavailable`),
+and - the general one that subsumes the last three - `outcome-unenumerated`: a new status or
+a new action word, which lands in the `unrecognised` census bucket and gives `unaccounted`
+with no branch naming it. What is NOT closed is what a *declared*
 condition does: its `predicate` and its `params` come from the config, so an entry keeping a
 required id while naming a different predicate, or one whose `params.repo` points at a clean
 decoy checkout, still passes every check the board makes at run time. `test_gate_profiles.py`
 pins the id → predicate map of the **committed** config; nothing pins params, and nothing
 pins either at run time or in a config named by `AI_STACK_HARNESS_CONFIG`. README.md lists
 the open routes explicitly.
+
+**Which way off gives which state is stated ONCE and cited by id.** `andon-disabled` and
+`andon-block-deleted` do not produce the same state, and three files said they did -
+`andon.ps1`'s header, `config.ps1` and `config.py` - all three written by the commit that
+introduced the state that made them false, and none of them checked, because a sentence is
+not a check. The mapping now lives only in README.md's ways-off table, whose rows carry
+`route` ids; the drill declares the same map in `$script:WaysOffProven` and its assertions
+read it, so `test_the_ways_off_table_matches_the_drill_that_proves_it` fails on a row nobody
+drills or a drill that proves a different word. Everything else cites a route id, and
+`test_every_citation_of_a_way_off_names_the_state_this_table_proves` checks every citation
+in the repository against the table - locations derived from `git ls-files`, matching exact
+because a route id is a token rather than a phrase to be recognised. What it does not catch
+is a fresh restatement that cites nothing, and the test says so.
 
 **The revert to prior behaviour is `pipeline.gate_profile: attended`** — that is the switch
 that puts a human back at the gate. Turning the board off only removes the thing that was

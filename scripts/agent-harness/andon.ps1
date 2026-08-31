@@ -30,10 +30,18 @@
 # written to the ledger. An attended gate is unaffected - a human passing a gate is the
 # human deciding, which is what attended means.
 #
-# THE BOARD MUST BE THE WHOLE BOARD. Switching it off was closed two ways - `andon.enabled:
-# false` and deleting the `andon` block both report `not-evaluated` and halt. A THIRD way was
-# open until 2026-08-30 and it is the one anybody would actually reach for: DELETE CONDITION
-# ENTRIES from `andon.conditions`. Thinned to one of five on a genuinely detached checkout the
+# THE BOARD MUST BE THE WHOLE BOARD. Switching it off was closed two ways, and they do NOT
+# report the same state - this comment said they both reported `not-evaluated` until
+# 2026-08-30, and the same false sentence sat in config.ps1 and config.py, put there by the
+# commit that made it false. The mapping is stated ONCE, in README.md's ways-off table, and
+# cited here by route id so a test can check it:
+#   andon-disabled       -> not-evaluated   (`andon.enabled: false`; nothing was evaluated)
+#   andon-block-deleted  -> incomplete      (no `andon` block at all, so all five REQUIRED
+#                                            conditions are missing - which is a different
+#                                            fact from "nothing was evaluated", and the
+#                                            reason the two words differ)
+# Both halt. A THIRD way was open until 2026-08-30 and it is the one anybody would actually
+# reach for: DELETE CONDITION ENTRIES from `andon.conditions` (route `conditions-deleted`). Thinned to one of five on a genuinely detached checkout the
 # gate AUTO-PASSED, exit 0, ledger `clear`, `-VerifyAudit COMPLETE`. So the ids the system
 # requires are declared in CODE (config.ps1 `$script:RequiredAndonConditions`), not in the
 # config that would otherwise be agreeing with itself, and a board missing any of them is
@@ -544,15 +552,41 @@ function Predicate-BranchOnRemote($cond, $ctx) {
     # which is what an unattended run should assert about itself. With neither, it asks the
     # broader question - is any local work branch on a remote - and that broader question
     # is RED in this repository today, because eleven of them still are.
+    #
+    # BOTH GATES NOW ASK THE NARROW ONE. Until 2026-08-30 the ANCHOR gate did not: the item
+    # carries no branch until -Submit stores it, and -Submit stores it after the gate, so the
+    # gate passed no -RunBranch and got the broad reading - a dark run refused for eleven
+    # branches it neither pushed nor may delete. queue.ps1 Invoke-AutoGate carries the branch
+    # in now. The broad reading is still what a bare `andon.ps1 -Evaluate` asks, deliberately.
     $prefix = [string](Get-HarnessSetting "worktree.branch_prefix" "work/")
     $branches = @(Get-Param $cond "branches" @())
-    if ($ctx.run_branches -and @($ctx.run_branches).Count -gt 0) { $branches = @($ctx.run_branches) }
+    $named = ($branches.Count -gt 0)
+    if ($ctx.run_branches -and @($ctx.run_branches).Count -gt 0) { $branches = @($ctx.run_branches); $named = $true }
     $repo = [string]$ctx.repo_root
 
-    if ($branches.Count -eq 0) {
+    if (-not $named) {
         $local = Invoke-GitCapture @("-C", $repo, "for-each-ref", "--format=%(refname:short)", ("refs/heads/" + $prefix + "*"))
         if ($LASTEXITCODE -ne 0) { return (New-Result "indeterminate" "git could not list local branches in '$repo'" @()) }
         $branches = @($local | Where-Object { $_ })
+        if ($branches.Count -eq 0) { return (New-Result "ok" "no local work branches to check" @()) }
+    } else {
+        # A NAMED BRANCH THAT DOES NOT EXIST IS NOT A CLEAN BRANCH - it is a question that was
+        # never asked. The narrow reading is only as good as the name it is handed, and the
+        # anchor gate hands it `-Submit -Branch` BEFORE git has been asked whether that branch
+        # resolves (queue.ps1 rev-parses it further down). Without this, `-Branch work/typo`
+        # would have produced "checked 1 branch(es); none is on a remote" - a clean board for a
+        # branch nobody has, which is exactly the skip-counts-as-a-pass shape this board
+        # refuses everywhere else. Named-but-missing is INDETERMINATE, which halts by default.
+        $missing = @()
+        foreach ($b in $branches) {
+            $name = ([string]$b).Trim()
+            if (-not $name) { continue }
+            Invoke-GitCapture @("-C", $repo, "show-ref", "--verify", "--quiet", ("refs/heads/" + $name)) | Out-Null
+            if ($LASTEXITCODE -ne 0) { $missing += $name }
+        }
+        if ($missing.Count -gt 0) {
+            return (New-Result "indeterminate" ("named branch(es) not present in '" + $repo + "': " + ($missing -join ", ")) $missing)
+        }
     }
     if ($branches.Count -eq 0) { return (New-Result "ok" "no local work branches to check" @()) }
 
@@ -680,14 +714,28 @@ function Invoke-AndonEvaluation {
     # documented revert path was a SILENT KILL SWITCH: under `dark` it did not restore prior
     # behaviour, it removed the only thing between an unattended run and self-approval.
     #
-    # So `clear` now means something narrow and checkable: at least one condition was
-    # evaluated, none halted, and none was skipped. Everything else gets its own name and is
-    # refused by the gate:
+    # So `clear` now means something narrow and checkable, and it is decided by the CENSUS
+    # below: every condition lands in exactly one bucket, the buckets sum to the conditions in
+    # scope, every bucket but `evaluated_ok` is empty, and at least one condition is in it.
+    # Everything else gets its own name and is refused by the gate. THIS LIST IS THE WHOLE
+    # ALPHABET, in severity order - it omitted `indeterminate` and `unaccounted`, the two words
+    # the census added, until 2026-08-30, which is the same defect one file over that
+    # queue.ps1's exit-code list had (`warned` missing). A partial list of the words that
+    # REFUSE reads as though the missing ones do not, so
+    # test_gate_profiles.py::test_every_enumeration_of_board_words_in_the_repo_is_complete now
+    # finds every such list in the repository and compares it against the words the code can
+    # actually assign:
+    #   unaccounted   - an outcome the board does not enumerate (an unknown status or an
+    #                   unknown action word), or a census that does not balance. Outranks
+    #                   everything: a board that cannot say where its own results went cannot
+    #                   report any board's verdict
+    #   incomplete    - a condition the system REQUIRES is not declared at all
     #   raised        - a condition halted the line: it fired with on_fire=halt, or it could
     #                   not be evaluated (on_indeterminate=halt)
     #   warned        - a condition FIRED and its on_fire is not `halt`. Still not a clear
     #                   board - see the on_fire paragraph in this file's header
-    #   incomplete    - a condition the system REQUIRES is not declared at all
+    #   indeterminate - a condition COULD NOT BE EVALUATED and its on_indeterminate is not
+    #                   `halt`. The sibling of `warned`, and a silent pass until 2026-08-30
     #   partial       - some conditions were evaluated ok, others are switched off in config
     #   not-evaluated - nothing was evaluated at all (andon off, or every condition switched off)
     # A disabled condition is not an ok one. It is the operator saying "do not look", which is
@@ -1003,10 +1051,12 @@ if ($Evaluate) {
             Write-Host ("  MISSING required condition(s): {0}" -f (@($verdict.coverage.missing_ids) -join ", ")) -ForegroundColor Red
         }
     }
-    # ANYTHING BUT `clear` EXITS 6. `incomplete`, `partial` and `not-evaluated` are not
-    # softer greens - a board that did not look, or that is not the board the system
-    # requires, cannot say the line is clear, and exiting 0 there is precisely
-    # the skip-counts-as-a-pass shape this file refuses everywhere else.
+    # ANYTHING BUT `clear` EXITS 6, and there is no softer green among the other seven. A
+    # board that did not look, or that is not the board the system requires, cannot say the
+    # line is clear, and exiting 0 there is precisely the skip-counts-as-a-pass shape this
+    # file refuses everywhere else. The seven are listed once, in the exit-code block at the
+    # top of this file; naming a few of them here is how the same list came to disagree with
+    # itself in four places (see Invoke-AndonEvaluation's own list, which was one of them).
     if ($verdict.board -ne "clear") {
         # The raise ALWAYS goes to the gate ledger (queue.ps1 writes a decision=refused
         # record) - that is not a knob, because a run able to switch off the record of its own

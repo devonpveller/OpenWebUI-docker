@@ -51,6 +51,13 @@
 # naming either. K is the generalisation test: three rounds running, a fix closed one
 # outcome key and left its sibling. L a `params.repo` REDIRECT - not refused, but readable
 # from the ledger afterwards, which is what README claimed and `andon.repo` did not deliver.
+# M the ANCHOR gate's branch scope. README promised `work-branch-on-remote` narrows to the
+# branch the run owns; at that gate it did not, because the item has no branch until -Submit
+# stores it and that happens AFTER the gate. The board fell back to the broad question, which
+# eleven foreign branches on the operator's remote made permanently red - so a `dark` run
+# could never auto-pass an anchor gate in this repository. M drives all three readings at the
+# real gate: a foreign branch passes, the run's own branch halts, and a branch name that does
+# not resolve is indeterminate rather than a clean board.
 #
 #   .\drill-dark-factory.ps1            # run it
 #   .\drill-dark-factory.ps1 -Keep      # keep the scratch dirs for inspection
@@ -75,6 +82,32 @@ function Check([string]$label, [bool]$ok, [string]$detail = "") {
     $tag = "FAIL"; $colour = "Red"
     if ($ok) { $tag = "PASS"; $colour = "Green" }
     Write-Host ("  [{0}] {1} {2}" -f $tag, $label, $detail) -ForegroundColor $colour
+}
+
+# EVERY WAY OFF THE BOARD, and the state the REAL gate records for it. This is the drill
+# side of README.md's ways-off table, and the assertions below read it rather than repeating
+# a literal - so a row proven here and written up differently there is a test failure
+# (test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it), not
+# something a reader has to notice.
+#
+# WHY THE MAP EXISTS AT ALL. `andon-disabled` and `andon-block-deleted` do NOT give the same
+# state, and three files said they did - andon.ps1's header, config.ps1 and config.py, all
+# three written by the commit that made it false, all three unchecked because a sentence is
+# not a check. The mapping now lives in one table with route ids, and anything citing a route
+# is compared against it.
+$script:WaysOffProven = [ordered]@{
+    "andon-disabled"              = "not-evaluated"
+    "andon-block-deleted"         = "incomplete"
+    "condition-disabled"          = "partial"
+    "conditions-deleted"          = "incomplete"
+    "on-fire-downgraded"          = "warned"
+    "on-indeterminate-downgraded" = "indeterminate"
+    "action-word-unimplemented"   = "unavailable"
+    "outcome-unenumerated"        = "unaccounted"
+}
+function Get-WayOff([string]$route) {
+    if (-not $script:WaysOffProven.Contains($route)) { throw "no ways-off route '$route' is declared" }
+    return [string]$script:WaysOffProven[$route]
 }
 
 function Invoke-GitAt([string]$repo, [string[]]$GitArgs) {
@@ -723,17 +756,18 @@ Step "F  switching the board OFF must not open the gates - the revert is not a k
 # reached for in a hurry. THE REVERT IS `pipeline.gate_profile: attended`, and step E proves
 # that one. These two cases prove the other reading cannot silently pass.
 foreach ($case in @(
-    @{ name = "andon-off";  label = "andon.enabled=false"; status = "not-evaluated"; evaluated = 0
+    @{ name = "andon-off";  label = "andon.enabled=false"; route = "andon-disabled"; evaluated = 0
        edit = { param($o) $o.andon.enabled = $false } },
-    @{ name = "andon-gone"; label = "the andon block deleted"; status = "incomplete"; evaluated = 0
+    @{ name = "andon-gone"; label = "the andon block deleted"; route = "andon-block-deleted"; evaluated = 0
        edit = { param($o) $o.PSObject.Properties.Remove("andon") } },
     # The MIXED case. Four conditions look and pass; one is switched off. That is not a clear
     # board either - it is the operator saying "do not look at this one", which is a decision
     # they may make, and a decision to be attended.
-    @{ name = "one-off";    label = "one condition switched off"; status = "partial"; evaluated = 4
+    @{ name = "one-off";    label = "one condition switched off"; route = "condition-disabled"; evaluated = 4
        edit = { param($o) ($o.andon.conditions | Where-Object { $_.id -eq "work-branch-on-remote" }) |
                           Add-Member -NotePropertyName enabled -NotePropertyValue $false -Force } }
 )) {
+    $expect = Get-WayOff $case.route
     $fixF = New-DarkFixture ("dark-" + $case.name) "dark"
     # Baseline FIRST, while the config still declares protected-ref-moved: two of these cases
     # remove the block that -Baseline reads.
@@ -752,7 +786,7 @@ foreach ($case in @(
     Check ("HALT with " + $case.label + ": the item stays parked at anchor-draft") ($it.state -eq "anchor-draft") ("state=" + $it.state)
     $ledF = Get-Ledger $fixF
     $ref = @($ledF | Where-Object { $_.decision -eq "refused" })
-    Check ("HALT with " + $case.label + ": the refusal is in the ledger, recorded as '" + $case.status + "'") ((@($ref).Count -ge 1) -and (@($ref)[0].andon.status -eq $case.status)) ("status=" + ((@($ref) | ForEach-Object { $_.andon.status }) -join ","))
+    Check ("HALT with " + $case.label + " (route " + $case.route + "): the refusal is in the ledger, recorded as '" + $expect + "'") ((@($ref).Count -ge 1) -and (@($ref)[0].andon.status -eq $expect)) ("status=" + ((@($ref) | ForEach-Object { $_.andon.status }) -join ","))
     Check ("HALT with " + $case.label + ": the refusal states " + $case.evaluated + " condition(s) evaluated") (([int](@($ref)[0].andon.evaluated)) -eq [int]$case.evaluated) ("evaluated=" + (@($ref)[0].andon.evaluated))
 }
 
@@ -832,7 +866,8 @@ foreach ($case in @(
     Check ("HALT with " + $case.label + ": the item stays parked at anchor-draft") ($it.state -eq "anchor-draft") ("state=" + $it.state)
     Check ("HALT with " + $case.label + ": nothing signed the anchor gate") (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
     $ledH = @(Get-Ledger $fixH | Where-Object { $_.decision -eq "refused" })
-    Check ("HALT with " + $case.label + ": the refusal is recorded as 'incomplete', not 'clear'") ((@($ledH).Count -ge 1) -and (@($ledH)[0].andon.status -eq "incomplete")) ("status=" + ((@($ledH) | ForEach-Object { $_.andon.status }) -join ","))
+    $expectH = Get-WayOff "conditions-deleted"
+    Check ("HALT with " + $case.label + " (route conditions-deleted): the refusal is recorded as '" + $expectH + "', not 'clear'") ((@($ledH).Count -ge 1) -and (@($ledH)[0].andon.status -eq $expectH)) ("status=" + ((@($ledH) | ForEach-Object { $_.andon.status }) -join ","))
     # NAMED, not counted. "the board is short" sends an operator to diff the config; the ids
     # send them to the lines that are gone.
     $named = @(@($ledH)[0].andon.missing_ids)
@@ -958,7 +993,8 @@ Check "HALT: a downgraded on_fire does NOT auto-pass the anchor gate (exit 6)" (
 Check "HALT: the item stays parked at anchor-draft" ($it.state -eq "anchor-draft") ("state=" + $it.state)
 Check "HALT: nothing signed the anchor gate" (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
 $ledJ = @(Get-Ledger $fixJ | Where-Object { $_.decision -eq "refused" })
-Check "THE RECORD: the refusal is in the ledger as warned, not clear" ((@($ledJ).Count -ge 1) -and (@($ledJ)[0].andon.status -eq "warned")) ("status=" + ((@($ledJ) | ForEach-Object { $_.andon.status }) -join ","))
+$expectJ = Get-WayOff "on-fire-downgraded"
+Check ("THE RECORD (route on-fire-downgraded): the refusal is in the ledger as '" + $expectJ + "', not clear") ((@($ledJ).Count -ge 1) -and (@($ledJ)[0].andon.status -eq $expectJ)) ("status=" + ((@($ledJ) | ForEach-Object { $_.andon.status }) -join ","))
 Check "THE RECORD: the fired list NAMES the condition even though it did not halt" ((@(@($ledJ)[0].andon.fired) -join ";") -like "*work-branch-on-remote*") ("fired=" + (@(@($ledJ)[0].andon.fired) -join ";"))
 Check "THE RECORD: the halted list is empty - the two are not one derived list" (@(@($ledJ)[0].andon.halted).Count -eq 0) ("halted=" + (@(@($ledJ)[0].andon.halted) -join ";"))
 Check "THE CONSOLE: the halt names the fired condition too" ($r.out -like "*work-branch-on-remote*") ""
@@ -972,6 +1008,13 @@ $rj2 = Invoke-Andon -Config $fixJ.cfg -Repo $fixJ.repo -StateDir $fixJ.state -Ru
 Check "an on_fire the board does not implement is REFUSED (exit 1, no verdict)" (($rj2.code -eq 1) -and ($null -eq $rj2.verdict)) ("exit=" + $rj2.code)
 $r = Invoke-Queue $fixJ @("-Submit", "-Id", "dfj", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
 Check "and the gate treats an unreadable board as UNAVAILABLE, not as clear (exit 6)" ($r.code -eq 6) ("exit=" + $r.code)
+# AND THE LEDGER SAYS SO. README's ways-off table asserts this row ends `unavailable` in the
+# record; until 2026-08-30 no drill check read that field for this row - the exit code was
+# checked and the claim about the record was not. An unverified half of a row is the same
+# thing as an unverified row: a reader cannot tell which half was proven.
+$ledJU = @(Get-Ledger $fixJ | Where-Object { $_.decision -eq "refused" })
+$expectJU = Get-WayOff "action-word-unimplemented"
+Check ("THE RECORD (route action-word-unimplemented): the refusal is stored as '" + $expectJU + "', not as clear and not as a board word") ((@($ledJU).Count -ge 1) -and ((@($ledJU)[-1].andon.status) -eq $expectJU)) ("status=" + ((@($ledJU) | ForEach-Object { $_.andon.status }) -join ","))
 
 # THE NEGATIVE CONTROL. warn is not a blanket refusal: the condition has to actually FIRE.
 # Same fixture, same on_fire: warn, condition cleared - the gate passes.
@@ -1054,7 +1097,8 @@ Check "HALT: a warn-declared INDETERMINATE does NOT auto-pass the anchor gate (e
 Check "HALT: the item stays parked at anchor-draft" ($it.state -eq "anchor-draft") ("state=" + $it.state)
 Check "HALT: nothing signed the anchor gate" (-not $it.anchor_confirmed_by) ("anchor_confirmed_by='" + $it.anchor_confirmed_by + "'")
 $ledK = @(Get-Ledger $fixK | Where-Object { $_.decision -eq "refused" })
-Check "THE RECORD: the refusal is in the ledger as indeterminate, not clear" ((@($ledK).Count -ge 1) -and (@($ledK)[0].andon.status -eq "indeterminate")) ("status=" + ((@($ledK) | ForEach-Object { $_.andon.status }) -join ","))
+$expectK = Get-WayOff "on-indeterminate-downgraded"
+Check ("THE RECORD (route on-indeterminate-downgraded): the refusal is in the ledger as '" + $expectK + "', not clear") ((@($ledK).Count -ge 1) -and (@($ledK)[0].andon.status -eq $expectK)) ("status=" + ((@($ledK) | ForEach-Object { $_.andon.status }) -join ","))
 Check "THE RECORD: the unevaluated condition is NAMED - it was in no field at all before" ((@(@($ledK)[0].andon.indeterminate) -join ";") -like "*protected-ref-moved*") ("indeterminate=" + (@(@($ledK)[0].andon.indeterminate) -join ";"))
 Check "THE RECORD: the census travels with it" ([int](@($ledK)[0].andon.census.indeterminate) -eq 1) ("census.indeterminate=" + [int](@($ledK)[0].andon.census.indeterminate))
 Check "THE CONSOLE: the halt names the condition that could not be evaluated" ($r.out -like "*protected-ref-moved*") ""
@@ -1152,7 +1196,8 @@ try {
 
 $rk3 = Invoke-Andon -Config $fixK2.cfg -Repo $fixK2.repo -StateDir $fixK2.state -RunBranch @("work/dfdrill") -Script (Join-Path $copy2 "andon.ps1")
 Check "K2: an action word the board has never heard of does NOT clear it (exit 6)" (($rk3.verdict.board -ne "clear") -and ($rk3.code -eq 6)) ("board=" + $rk3.verdict.board + " exit=" + $rk3.code)
-Check "K2: the board word is 'unaccounted' - no branch anywhere names 'quarantine'" ($rk3.verdict.board -eq "unaccounted") ("board=" + $rk3.verdict.board)
+$expectK2 = Get-WayOff "outcome-unenumerated"
+Check ("K2 (route outcome-unenumerated): the board word is '" + $expectK2 + "' - no branch anywhere names 'quarantine'") ($rk3.verdict.board -eq $expectK2) ("board=" + $rk3.verdict.board)
 Check "K2: the CENSUS puts it in the unrecognised bucket" ([int]$rk3.verdict.coverage.census.unrecognised -eq 1) ("unrecognised=" + [int]$rk3.verdict.coverage.census.unrecognised)
 Check "K2: THE RECORD NAMES THE WORD and the condition" ((@($rk3.verdict.coverage.unrecognised_ids) -join ";") -like "*work-branch-on-remote*quarantine*") ("unrecognised_ids=" + (@($rk3.verdict.coverage.unrecognised_ids) -join ";"))
 $rk3g = Invoke-Queue @{ repo = $fixK2.repo; state = $fixK2.state; cfg = $fixK2.cfg } @("-Propose", "-Id", "dfk2", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill") -Script (Join-Path $copy2 "queue.ps1")
@@ -1190,7 +1235,7 @@ $rk4c = Invoke-Andon -Config $fixK3.cfg -Repo $fixK3.repo -StateDir $fixK3.state
 Check "K3 CONTROL: the shipped board calls this fixture CLEAR (exit 0)" (($rk4c.verdict.board -eq "clear") -and ($rk4c.code -eq 0)) ("board=" + $rk4c.verdict.board + " exit=" + $rk4c.code)
 $rk4 = Invoke-Andon -Config $fixK3.cfg -Repo $fixK3.repo -StateDir $fixK3.state -RunBranch @("work/dfdrill") -Script (Join-Path $copy3 "andon.ps1")
 Check "K3: the same board with ONE novel status is NOT clear (exit 6)" (($rk4.verdict.board -ne "clear") -and ($rk4.code -eq 6)) ("board=" + $rk4.verdict.board + " exit=" + $rk4.code)
-Check "K3: it is 'unaccounted' - a status nobody enumerated is refused, not ignored" ($rk4.verdict.board -eq "unaccounted") ("board=" + $rk4.verdict.board)
+Check ("K3 (route outcome-unenumerated): it is '" + (Get-WayOff "outcome-unenumerated") + "' - a status nobody enumerated is refused, not ignored") ($rk4.verdict.board -eq (Get-WayOff "outcome-unenumerated")) ("board=" + $rk4.verdict.board)
 Check "K3: THE RECORD NAMES THE STATUS and the condition" ((@($rk4.verdict.coverage.unrecognised_ids) -join ";") -like "*operator-checkout-off-branch*parked*") ("unrecognised_ids=" + (@($rk4.verdict.coverage.unrecognised_ids) -join ";"))
 Check "K3: the census still SUMS - the novel outcome is counted, not dropped" ([int]$rk4.verdict.coverage.census_total -eq [int]$rk4.verdict.coverage.declared) ("total=" + [int]$rk4.verdict.coverage.census_total + " declared=" + [int]$rk4.verdict.coverage.declared)
 $rk4g = Invoke-Queue @{ repo = $fixK3.repo; state = $fixK3.state; cfg = $fixK3.cfg } @("-Propose", "-Id", "dfk3", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill") -Script (Join-Path $copy3 "queue.ps1")
@@ -1231,6 +1276,92 @@ Check "andon.repo names the checkout the BOARD resolved, NOT the decoy" ((@($pas
 $lookedL = (@(@($passL)[0].andon.looked_at) -join " | ")
 Check "RECORD: looked_at NAMES the decoy the condition was pointed at" ($lookedL -like ("*" + (Split-Path -Leaf $decoy) + "*")) ("looked_at=" + $lookedL)
 Check "RECORD: and it names the predicate behind every id, so a swap is readable too" (($lookedL -like "*operator-checkout-off-branch -> git-checkout-state*") -and ($lookedL -like "*protected-ref-moved -> protected-ref-moved*")) ""
+
+# ====================================================================================
+Step "M  the ANCHOR gate asks the NARROW branch question - the one README promised"
+# ====================================================================================
+# THE DOC PROMISED THE NARROW QUESTION AND THE GATE ASKED THE BROAD ONE. README.md said
+# `work-branch-on-remote` "narrows to the branch the run owns ... a dark run is blocked by
+# ITS OWN branch being on a remote, not by anybody else's". At the PRE-REVIEW gate that was
+# true. At the ANCHOR gate it was false: `-Propose` writes `branch = ""`, `-Submit` stores
+# the real branch only AFTER the anchor gate has run, so Invoke-AutoGate passed no
+# -RunBranch and the board fell back to "is ANY local work branch on a remote". On the real
+# repository that is eleven foreign work/* branches, which the run neither pushed nor is
+# permitted to delete - so `dark` could never auto-pass an anchor gate there at all.
+#
+# Three cases, and the middle one is what stops this fix from being a hole: a narrow
+# question is only as good as the branch name it is handed.
+#   M1  a FOREIGN work branch on a remote, own branch clean  -> the anchor gate PASSES
+#   M2  the run's OWN branch on a remote                     -> the anchor gate REFUSES
+#   M3  a branch name that does not resolve                  -> INDETERMINATE, not a pass
+$fixM = New-DarkFixture "dark-foreign-branch" "dark"
+Push-Location $fixM.repo
+try {
+    # A branch this run does not own, pushed to a remote. The run's own work/dfdrill is not.
+    Invoke-Git branch work/somebody-else main | Out-Null
+} finally { Pop-Location }
+$bareM = Join-Path $Root "origin-m.git"
+Invoke-Git init -q --bare $bareM | Out-Null
+Push-Location $fixM.repo
+try {
+    Invoke-Git remote add origin $bareM | Out-Null
+    Invoke-Git push -q origin work/somebody-else | Out-Null
+} finally { Pop-Location }
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixM.cfg; $env:AI_STACK_WORKTREE_STATE = $fixM.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixM.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+
+# The BOARD's two readings, side by side on one fixture - both are deliberate, and this is
+# the pair README documents.
+$rmBroad = Invoke-Andon -Config $fixM.cfg -Repo $fixM.repo -StateDir $fixM.state
+Check "M1: bare -Evaluate asks the BROAD question and FIRES on the foreign branch" ((Get-CondStatus $rmBroad "work-branch-on-remote") -eq "fire") ("status=" + (Get-CondStatus $rmBroad "work-branch-on-remote"))
+$rmNarrow = Invoke-Andon -Config $fixM.cfg -Repo $fixM.repo -StateDir $fixM.state -RunBranch @("work/dfdrill")
+Check "M1: -RunBranch asks the NARROW one and passes - the foreign branch is not this run's" ((Get-CondStatus $rmNarrow "work-branch-on-remote") -eq "ok") ("status=" + (Get-CondStatus $rmNarrow "work-branch-on-remote"))
+
+$r = Invoke-Queue $fixM @("-Propose", "-Id", "dfm", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM @("-Submit", "-Id", "dfm", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM = Get-QueueItem $fixM "dfm"
+Check "M1 THE GATE: the ANCHOR gate auto-passes - a foreign branch does not block this run" (($r.code -eq 0) -and ($itM.state -eq "ready-to-test")) ("exit=" + $r.code + " state=" + $itM.state)
+$passM = @(Get-Ledger $fixM | Where-Object { $_.decision -eq "passed" })
+Check "M1 THE RECORD: the anchor pass records a clear board with nothing fired" ((@($passM).Count -ge 1) -and (@($passM)[0].andon.status -eq "clear") -and (@(@($passM)[0].andon.fired).Count -eq 0)) ("status=" + (@($passM)[0].andon.status))
+
+# M2 - THE NEGATIVE CONTROL, and the property that must survive the fix. Same fixture, same
+# board; this time the branch the run owns is the one on the remote.
+$fixM2 = New-DarkFixture "dark-own-branch" "dark"
+$bareM2 = Join-Path $Root "origin-m2.git"
+Invoke-Git init -q --bare $bareM2 | Out-Null
+Push-Location $fixM2.repo
+try {
+    Invoke-Git remote add origin $bareM2 | Out-Null
+    Invoke-Git push -q origin work/dfdrill | Out-Null
+} finally { Pop-Location }
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixM2.cfg; $env:AI_STACK_WORKTREE_STATE = $fixM2.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixM2.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+$r = Invoke-Queue $fixM2 @("-Propose", "-Id", "dfm2", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM2 @("-Submit", "-Id", "dfm2", "-Branch", "work/dfdrill", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM2 = Get-QueueItem $fixM2 "dfm2"
+Check "M2: the run's OWN branch on a remote still HALTS the anchor gate (exit 6)" (($r.code -eq 6) -and ($itM2.state -eq "anchor-draft")) ("exit=" + $r.code + " state=" + $itM2.state)
+$refM2 = @(Get-Ledger $fixM2 | Where-Object { $_.decision -eq "refused" })
+Check "M2 THE RECORD: the refusal names work-branch-on-remote as fired" ((@($refM2).Count -ge 1) -and ((@(@($refM2)[0].andon.fired) -join ";") -like "*work-branch-on-remote*")) ("fired=" + (@(@($refM2)[0].andon.fired) -join ";"))
+
+# M3 - A NARROW QUESTION IS ONLY AS GOOD AS THE NAME IT IS HANDED. The anchor gate is
+# reached BEFORE queue.ps1 rev-parses -Branch, so a name that resolves to nothing would
+# otherwise have produced "checked 1 branch(es); none is on a remote" - a clean board for a
+# branch nobody has. That is the skip-counts-as-a-pass shape, arriving through the fix.
+$fixM3 = New-DarkFixture "dark-missing-branch" "dark"
+$prevCfg = $env:AI_STACK_HARNESS_CONFIG; $prevState = $env:AI_STACK_WORKTREE_STATE
+$env:AI_STACK_HARNESS_CONFIG = $fixM3.cfg; $env:AI_STACK_WORKTREE_STATE = $fixM3.state
+& $PsExe -NoProfile -NonInteractive -File $AndonPs -Baseline -RepoRoot $fixM3.repo | Out-Null
+$env:AI_STACK_HARNESS_CONFIG = $prevCfg; $env:AI_STACK_WORKTREE_STATE = $prevState
+$r = Invoke-Queue $fixM3 @("-Propose", "-Id", "dfm3", "-Anchor", $anchorFile, "-Developer", "wt-dfdrill")
+$r = Invoke-Queue $fixM3 @("-Submit", "-Id", "dfm3", "-Branch", "work/never-created", "-Developer", "wt-dfdrill", "-TestPlan", $planFile)
+$itM3 = Get-QueueItem $fixM3 "dfm3"
+Check "M3: a branch name that does not resolve is INDETERMINATE, and the gate refuses (exit 6)" (($r.code -eq 6) -and ($itM3.state -eq "anchor-draft")) ("exit=" + $r.code + " state=" + $itM3.state)
+$refM3 = @(Get-Ledger $fixM3 | Where-Object { $_.decision -eq "refused" })
+Check "M3 THE RECORD: the halt says the named branch is not present, not that nothing was found" ((@($refM3).Count -ge 1) -and ((@(@($refM3)[0].andon.halted) -join ";") -like "*not present*")) ("halted=" + (@(@($refM3)[0].andon.halted) -join ";"))
 
 # ====================================================================================
 Write-Host ""

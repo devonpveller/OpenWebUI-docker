@@ -164,7 +164,7 @@ that never happened.
 .\scripts\agent-harness\queue.ps1 -VerifyAudit -Id x    # is the trail complete? 0 / 1 / 7
 ```
 
-Four things are worth knowing before relying on it:
+Five things are worth knowing before relying on it:
 
 - **The board is currently RED on this repository**, and that is not a bug in the
   board. `git-error-swallowed` reports 18 unchecked git call sites across
@@ -181,38 +181,69 @@ Four things are worth knowing before relying on it:
   is now decided by a bucket census in which the `indeterminate` bucket must be EMPTY. Drill
   step K is the proof. A `dark` run refuses to auto-pass until those clear - which is the
   andon cord working, not a false alarm.
-- **`work-branch-on-remote` narrows to the branch the run owns.** At a gate,
-  `Invoke-AutoGate` passes only `$item.branch`, so a `dark` run is blocked by *its
-  own* branch being on a remote, not by anybody else's. Run bare —
-  `andon.ps1 -Evaluate` with no `-RunBranch` — it asks the broader question, and today
-  it names the eleven `work/*` branches that reached `origin` on 2026-08-30. Both
-  readings are deliberate; only the narrow one gates a run.
+- **`work-branch-on-remote` narrows to the branch the run owns - at BOTH gates now.**
+  `Invoke-AutoGate` hands the board the run's branch, so a `dark` run is blocked by *its
+  own* branch being on a remote, not by anybody else's. Run bare — `andon.ps1 -Evaluate`
+  with no `-RunBranch` — it asks the broader question, and today it names the eleven
+  `work/*` branches that reached `origin` on 2026-08-30. Both readings are deliberate; only
+  the narrow one gates a run. **This paragraph was FALSE at the ANCHOR gate until
+  2026-08-30**, and it is worth saying where it was written: `-Propose` writes `branch = ""`
+  and `-Submit` stores the real branch only AFTER the anchor gate has run, so that gate
+  passed no branch at all and the board fell back to the broad question — which on this
+  repository is those eleven foreign branches, none of them the run's, and none of them a
+  run is permitted to delete. A `dark` run could therefore never auto-pass an anchor gate
+  here, for a reason the doc said could not block it. The branch was known at that point
+  (`-Submit -Branch` is mandatory); it simply was not passed. Drill step M is the proof, in
+  three parts: a foreign branch on a remote passes the anchor gate, the run's own branch on
+  a remote still halts it, and a branch name that does not resolve is `indeterminate` rather
+  than a clean board — because a narrow question is only as good as the name it is handed.
 - **`-VerifyAudit` exit 7 is not a pass.** It means the check found items it could
   not audit (items predating the ledger). Coverage it does not have is not coverage.
   Nor is a green a claim about gates an item never reached — it prints that scope.
 - **`auto:` is a reserved principal namespace.** `-ConfirmAnchor` and `-Approve`
   refuse a `-By` inside it (exit 4), and the auto path never signs as a person.
+- **The board's words are checked wherever they are written down.** Four sentences in three
+  files listed some of the eight verdict words as though they were all of them, so
+  `test_gate_profiles.py` now derives every enumeration of board words in the repository
+  (`git ls-files`, both list shapes) and requires it to be complete, and derives every
+  citation of a ways-off `route` id and requires it to name the state the table below
+  proves. Write three or more board words as a list and you are enumerating the alphabet;
+  if you mean a narrower set, say so in words or write it as a mapping.
 
 **Eight ways of switching the board off, or of getting a pass out of it, were tried against
 the real gate. Each halts a `dark` run at the first gate under its own board state, recorded
-in the ledger:**
+in the ledger. THIS TABLE IS THE ONE PLACE THAT SAYS WHICH WAY GIVES WHICH STATE** - every
+other file cites a row by its `route` id instead of restating the mapping, because the
+mapping was restated in three files and was wrong in all three (see below):
 
-| what you do to the board | board state | gate |
-|---|---|---|
-| `andon.enabled: false` | `not-evaluated` | halts |
-| delete the whole `andon` block | `incomplete` (all five named) | halts |
-| set `enabled: false` on one condition | `partial` (names it) | halts |
-| **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
-| **set `on_fire: warn`** | `warned` (names what fired) | halts |
-| **set `on_indeterminate: warn`** | `indeterminate` (names what could not be evaluated) | halts |
-| set either key to a word the board does not implement | refused at evaluation: exit 1, no verdict, and every gate reads that as `unavailable` | halts |
-| **an outcome the board does not enumerate at all** (a new status a predicate grows, a new word added to the allowed actions) | `unaccounted` (names the condition AND the word) | halts |
+| route | what you do to the board | board state | gate |
+|---|---|---|---|
+| `andon-disabled` | `andon.enabled: false` | `not-evaluated` | halts |
+| `andon-block-deleted` | delete the whole `andon` block | `incomplete` (all five named) | halts |
+| `condition-disabled` | set `enabled: false` on one condition | `partial` (names it) | halts |
+| `conditions-deleted` | **delete condition ENTRIES from `andon.conditions`** | `incomplete` (names the missing ids) | halts |
+| `on-fire-downgraded` | **set `on_fire: warn`** | `warned` (names what fired) | halts |
+| `on-indeterminate-downgraded` | **set `on_indeterminate: warn`** | `indeterminate` (names what could not be evaluated) | halts |
+| `action-word-unimplemented` | set either key to a word the board does not implement | refused at evaluation: exit 1, no verdict, and every gate reads that as `unavailable` | halts |
+| `outcome-unenumerated` | **an outcome the board does not enumerate at all** (a new status a predicate grows, a new word added to the allowed actions) | `unaccounted` (names the condition AND the word) | halts |
 
-Each row is a drill case driving the real `queue.ps1` (steps F, H, J and K). The two
-downgrade rows say **`warn`** rather than "anything but `halt`", because that is what is
-true: `warn` is the only other word `$script:AllowedAndonActions` holds, and any other
-literal is refused before a verdict exists - the row after them. It errs safe, but the
-earlier wording ("anything but halt") was not accurate.
+Each row is a drill case driving the real `queue.ps1` (steps F, H, J and K), and the drill
+declares the same map in `$script:WaysOffProven`, which its own assertions read - so a row
+here with no drill case, or a drill case asserting a different word, fails
+`test_gate_profiles.py::test_the_ways_off_table_matches_the_drill_that_proves_it`. The
+`route` ids exist so the fact can be CITED rather than copied: any line anywhere in the
+repository that names a route id and a board word is checked against this table by
+`test_every_citation_of_a_way_off_names_the_state_this_table_proves`. Two of these rows had
+their ledger claim unchecked until 2026-08-30: `action-word-unimplemented` asserted
+`andon.status = unavailable` in the record and no drill check read that field, and the
+block-deletion row was written up in three files carrying the state that belongs to
+`andon-disabled` (`not-evaluated`). That is why the citation rule exists rather than a fourth
+carefully written sentence.
+
+The two downgrade rows say **`warn`** rather than "anything but `halt`", because that is what
+is true: `warn` is the only other word `$script:AllowedAndonActions` holds, and any other
+literal is refused before a verdict exists - the `action-word-unimplemented` row. It errs
+safe, but the earlier wording ("anything but halt") was not accurate.
 
 **Four of these rows were OPEN until 2026-08-30**, and each was closed against a
 reproduction:
@@ -291,7 +322,9 @@ to end with nobody at either gate, proves the completeness check goes red on a t
 trail, proves that turning the board off — or thinning it by deleting condition entries —
 halts rather than opens, proves that neither outcome key can be downgraded into silence and
 that an outcome word the board has never heard of is refused rather than ignored, shows that
-a `params` redirect is readable from the ledger, and re-runs the clean board afterwards so a
+a `params` redirect is readable from the ledger, proves that the ANCHOR gate asks the narrow
+branch question and that a branch name which does not resolve is `indeterminate` rather than
+a clean board (step M), and re-runs the clean board afterwards so a
 fix that refused everything would be caught. Every WRITE it
 makes is to a scratch repository under `$env:TEMP` with the config and state dir
 redirected; it makes exactly one READ of a real repository, by name — one case scans

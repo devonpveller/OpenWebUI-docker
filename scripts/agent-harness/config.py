@@ -84,9 +84,16 @@ AUTO_PRINCIPAL_PREFIX = "auto:"
 #: parameters; this says which ones must EXIST.
 #:
 #: The defect that produced it (2026-08-30): the board could be switched off two ways and
-#: both were closed — ``andon.enabled: false`` and deleting the whole ``andon`` block each
-#: report ``not-evaluated`` and halt. There was a THIRD, the one actually reached for:
-#: deleting condition ENTRIES from ``andon.conditions``. Thinned to one of five on a
+#: both were closed. They report DIFFERENT states, and this comment claimed otherwise until
+#: 2026-08-30 — the same false sentence as ``andon.ps1`` and ``config.ps1`` carried, all three
+#: written by the commit that made it false. The mapping is stated once, in README.md's
+#: ways-off table, and cited here by route id:
+#:
+#:   andon-disabled      -> not-evaluated
+#:   andon-block-deleted -> incomplete
+#:
+#: Both halt. There was a THIRD, the one actually reached for: deleting condition ENTRIES
+#: from ``andon.conditions`` (route ``conditions-deleted``). Thinned to one of five on a
 #: genuinely detached checkout, the dark gate AUTO-PASSED — exit 0, ledger ``clear``,
 #: coverage ``1 declared / 1 evaluated / 0 switched off``, ``-VerifyAudit COMPLETE``.
 #:

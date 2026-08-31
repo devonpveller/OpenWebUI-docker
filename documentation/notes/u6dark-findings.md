@@ -405,10 +405,13 @@ Documentally: **the revert is `pipeline.gate_profile: attended`** — the switch
 human back at the gate, and the configured DEFAULT rather than a lock (§9.2 item 6) — and
 the corrected sentence is in the DECISIONS entry below, in `MODULE.md` and in `README.md`.
 
-**GREEN:** drill step F drives the real gate for three cases — `andon.enabled=false`, the
-block deleted, and one condition switched off — and asserts exit 6, the item parked at
-`anchor-draft`, and a ledger refusal recording `not-evaluated` / `incomplete` /
-`partial` with `evaluated` 0 / 0 / 4.
+**GREEN:** drill step F drives the real gate for three cases and asserts exit 6, the item
+parked at `anchor-draft`, and a ledger refusal recording, for each: `andon.enabled=false`
+→ `not-evaluated` with `evaluated` 0; the block deleted → `incomplete` with `evaluated` 0;
+one condition switched off → `partial` with `evaluated` 4. (Written as a mapping rather
+than as two positional lists because the enumeration check added on 2026-08-30 reads a bare
+run of board words as a claim about the whole alphabet — and because a reader should not
+have to align two lists by position to learn which case gives which state.)
 
 **WHAT THIS DID NOT CLOSE, and §9 does:** neither of those is what somebody actually does
 to a condition that is in their way. They delete its ENTRY.
@@ -1047,6 +1050,211 @@ accounting are tamper-evident; behaviour is not.
   GYM-VALIDATION PARKED**.
 
 
+## 12. THE NARROW-QUESTION ROUND - one functional defect, and one defect counted four times
+
+Three items came back from verification. The first is functional; the other two are the same
+defect, and the durable answer to them is one check with a wider alphabet rather than three
+corrected sentences.
+
+### 12.1 DECISIVE - the ANCHOR gate asked the BROAD branch question, so `dark` could never pass it here
+
+**REPRODUCED, before any fix.** A scratch fixture with the run's own branch (`work/mine`)
+clean and ONE foreign work branch (`work/somebody-else`) pushed to a bare on-disk remote,
+`pipeline.gate_profile: dark`, every other condition green:
+
+```
+---- SUBMIT exit=6 ----
+  ANDON RAISED - the 'anchor' gate will NOT auto-pass.
+    - work-branch-on-remote: work branches exist on a remote: 1
+    board census: unrecognised=0, fired=1, indeterminate=0, disabled=0, evaluated_ok=4
+LEDGER decision=refused gate=anchor andon.status=raised
+       fired=work-branch-on-remote: work branches exist on a remote: 1
+```
+
+The branch that fired is not the run's. README.md:184-189 said the opposite - that
+`work-branch-on-remote` "narrows to the branch the run owns ... a dark run is blocked by
+*its own* branch being on a remote, not by anybody else's ... only the narrow one gates a
+run." True at the PRE-REVIEW gate. False at the ANCHOR gate, for a mechanical reason:
+`-Propose` writes `branch = ""`, `-Submit` stores the real branch only AFTER the anchor gate
+has run, so `Invoke-AutoGate` passed no `-RunBranch` and `Predicate-BranchOnRemote` fell back
+to enumerating every local `work/*` ref. **On this repository that is eleven foreign branches**
+that reached `origin` under an authorisation the orchestrator invented - branches the operator
+owns and this run must not delete - so no `dark` run could ever auto-pass an anchor gate here,
+for a reason the documentation said could not block it.
+
+**THE CHOICE, and why.** Three fixes were defensible: (a) make the run's branch known at the
+anchor gate; (b) scope the condition to gates where a branch exists and record that the anchor
+gate cannot ask it; (c) keep the broad question and change the README to say a `dark` run is
+blocked by ANY work branch on a remote.
+
+(a), for two reasons that are about coverage rather than convenience. **(b) is strictly
+weaker than (a)**: it would leave the anchor gate asking nothing about branches, so a run
+whose OWN branch was already on a remote - the actual incident this condition exists for -
+would auto-pass the first gate and only be caught at the second. **(c) makes U6's own
+validation column unreachable on this repository**: "one that hits none lands with a complete
+audit trail" cannot be demonstrated at the anchor gate while a permanent, un-clearable
+condition is red there, and a gate that can never pass teaches the next operator to switch the
+board off rather than to read it. (c) also mis-assigns the fact: eleven foreign branches are a
+true finding about the remote, and they are the operator's to clear - a bare `andon.ps1
+-Evaluate` still reports them, which is the surface where that finding belongs.
+
+The branch was **known** at the anchor gate all along: `-Submit -Branch` is mandatory and is
+validated non-empty three lines earlier. It simply was not passed. `Invoke-AutoGate` now takes
+it, and both gates ask the same narrow question about the same branch.
+
+**AND THE FIX OPENED A HOLE, CLOSED IN THE SAME DIFF.** The anchor gate runs BEFORE
+`queue.ps1` rev-parses `-Branch`, so a name that resolves to nothing would have produced
+`checked 1 branch(es); none is on a remote` - a *clean board for a branch nobody has*, which
+is the skip-counts-as-a-pass shape this board refuses everywhere else, arriving through the
+repair. `Predicate-BranchOnRemote` now answers `indeterminate` for any NAMED branch with no
+local ref (`show-ref --verify`), and `Invoke-AutoGate` refuses outright if it cannot name a
+branch at all rather than falling back to the broad question or to an empty list. A narrow
+question is only as good as the name it is handed.
+
+**GREEN, at the real gate:** drill step M, three cases -
+
+- M1 foreign branch on a remote, own branch clean -> anchor gate exit 0, ledger `clear`,
+  `fired` empty. The same fixture asserts both readings side by side: bare `-Evaluate` FIRES,
+  `-RunBranch work/dfdrill` is `ok`.
+- M2 the run's OWN branch on a remote -> exit 6, item parked at `anchor-draft`, ledger names
+  `work-branch-on-remote` in `fired`.
+- M3 `-Branch work/never-created` -> exit 6, `indeterminate`, ledger halt reads *named
+  branch(es) not present*.
+
+### 12.2 FIXED - four incomplete enumerations of the board's words, and the alphabet that missed them
+
+**REPORTED:** `MODULE.md:122-123` said both gates refuse unless the andon board is CLEAR,
+exit 6 otherwise - and then named five of the seven words that refuse, omitting
+`indeterminate` and `unaccounted`, the two that morning added. It contradicted MODULE's own
+eight-row table. (The five are not quoted here: the check below cannot tell a quotation of a
+bad list from a bad list, and a note that had to be exempted from its own rule would be the
+first crack in it.) A verifier noted it is identical to correction #9
+(`queue.ps1:58` omitting `warned`), fixed one file over the round before.
+
+**FOUND BY THE FIX, not by the report.** Deriving the locations instead of correcting the
+reported one turned up **two more instances in `andon.ps1`**, both unreported:
+
+- `Invoke-AndonEvaluation`'s own comment listed five of the seven words as "everything else"
+  - in the function that computes the verdict;
+- the exit-6 comment at the bottom named three of seven as the ones that "are not softer
+  greens".
+
+Four instances of one defect, in three files, across three rounds. The check that existed -
+`test_the_MODULE_verdict_table_matches_the_board` - is a *derived* gate: it reads the board
+words out of `andon.ps1` and `config.ps1` rather than from a mirror. It still saw none of
+them, because **its alphabet had one entry**: one table, in one file. A derived gate is only
+as wide as its alphabet, and the alphabet is the part that has to be derived too.
+
+**FIXED:** `test_every_enumeration_of_board_words_in_the_repo_is_complete` takes its file list
+from `git ls-files` at the repository root and scans every tracked text file for the two shapes
+these lists take:
+
+- an **inline run** - three or more board words joined only by list punctuation, allowed to
+  cross a line break and a comment sigil, because `queue.ps1`'s complete list wraps mid-list;
+- a **definition block or table** - lines that each introduce a board word followed by a
+  separator or column padding, grouped while consecutive.
+
+Each must be the whole alphabet: the eight, or the seven that are not `clear`. The rule is
+blunt on purpose and is stated where it can be obeyed (README, MODULE, the test's own
+docstring): **write three or more board words as a list and you are enumerating the alphabet;
+if you mean a narrower set, say so in words or write it as a mapping.**
+
+Two true sentences in this note were rewritten under that rule rather than exempted - drill
+step F's three case outcomes were a positional list against `evaluated 0 / 0 / 4`, and are now
+a mapping, which is also the form a reader can use without aligning two lists by eye. Stated
+limit: it finds ENUMERATIONS. One wrong board word in a sentence is not an enumeration, and
+12.3 is what covers the place where that mattered.
+
+### 12.3 FIXED - the same false sentence in three files, and the citation discipline that replaces it
+
+**REPORTED and REPRODUCED.** `andon.ps1:34`, `config.ps1:246-247` and `config.py:87-88` all
+said `andon.enabled: false` and deleting the `andon` block "both report `not-evaluated` and
+halt". Deleting the block reports **`incomplete`** - that state exists *because* a board with
+no conditions at all is missing all five required ids, which is a different fact from "nothing
+was evaluated". Verified by running: drill step F's block-deleted case asserts `incomplete`
+from the real ledger, and has since the state was added. **The commit that made the sentence
+false wrote it in all three files**, and none of the three was checked, because a sentence is
+not a check.
+
+**THE FIX IS NOT THREE CORRECTED SENTENCES.** The mapping now exists once. README.md's
+ways-off table gained a `route` column - `andon-disabled`, `andon-block-deleted`,
+`condition-disabled`, `conditions-deleted`, `on-fire-downgraded`,
+`on-indeterminate-downgraded`, `action-word-unimplemented`, `outcome-unenumerated` - and says
+in its first sentence that it is the only place the mapping lives. Two checks hold that:
+
+- `test_the_ways_off_table_matches_the_drill_that_proves_it` compares the table against
+  `$script:WaysOffProven` in `drill-dark-factory.ps1`, which the drill's own assertions read
+  (steps F, H, J, K) instead of repeating a literal. A row with no drill case, a drill proving
+  a different word, or a prose count that disagrees with the row count, all fail.
+- `test_every_citation_of_a_way_off_names_the_state_this_table_proves` scans every tracked
+  text file for route ids and requires any outcome word beside one to be the table's.
+  Locations derived; matching exact, because a route id is a token rather than a phrase to be
+  recognised. `clear` is excluded from the claim vocabulary deliberately: no way off the board
+  yields `clear` - that a route no longer can is what "closed" means - and where the word does
+  appear beside a route id it is that route's history ("the gate AUTO-PASSED, exit 0, ledger
+  `clear`"). Reading those five true sentences as claims would have taught the next reader to
+  delete the check.
+
+The three false sentences are now citations, and the original defect reproduces RED in all
+three files when re-introduced (12.5). **Stated limits:** this polices citations - a fresh
+restatement citing no route id is invisible to it, exactly as those three were. And neither
+this check nor 12.2's can tell a QUOTATION of a wrong claim from a wrong claim, which cost
+this note something real: 12.2 paraphrases the sentence it reports, and 12.5's table names
+the row that was broken rather than the word it was broken with. Exempting the findings note
+would have been easier and is the shape that let four bad enumerations through, so it was
+not done.
+
+### 12.4 FIXED - a ways-off row whose ledger claim no drill check read
+
+A verifier confirmed by hand that the `action-word-unimplemented` row's ledger outcome
+(`andon.status = unavailable`) was asserted by no drill check: step J checked the gate's exit
+code and left the sentence about the record unverified. Half a verified row reads exactly like
+a whole one. Step J now reads the field, and the table-vs-drill check is what stops the next
+row from shipping with only half of it checked.
+
+### 12.5 Validation
+
+- `drill-dark-factory.ps1` -> **193 checks, 0 failed** (184 before; step M is 8 new checks and
+  step J gained the `unavailable` ledger assertion).
+- `python -m pytest scripts/agent-harness -q` -> **132 passed** (129 before; three new tests).
+  `test_gate_profiles.py` alone: **27 passed** (24 before). `ruff check scripts/agent-harness`
+  clean.
+- **RED-proved before GREEN, each reverted immediately afterwards** - eleven trials across
+  five files:
+
+| what was broken | check that went RED |
+|---|---|
+| MODULE's inline list loses `unaccounted` | enumeration |
+| the definition block in `andon.ps1` loses its `indeterminate` row | enumeration |
+| the exit-code block in `andon.ps1` loses `partial` | enumeration |
+| MODULE's verdict table loses its `warned` row | enumeration |
+| the usage line in `queue.ps1` loses `indeterminate` | enumeration |
+| the drill asserts the wrong word for `andon-block-deleted` | table-vs-drill |
+| README loses the `condition-disabled` row | table-vs-drill |
+| `config.py` re-states the original false claim | citation |
+| `config.ps1` re-states it | citation |
+| the header of `andon.ps1` re-states it | citation |
+| MODULE cites `on-fire-downgraded` with another row's state | citation |
+
+  The three citation rows are the reported defect put back as a citation; each failure message
+  names the file and line.
+- The functional fix was RED-proved outside the drill first (12.1's transcript: exit 6 with a
+  foreign branch; exit 0 after the change; exit 6 again with the run's own branch on a remote;
+  exit 6 `indeterminate` for a branch that does not resolve), then moved into the drill as
+  step M so it cannot regress silently.
+- Not run in `ai-orchestration-gym`. U6 clauses 1-3 remain **CODE-COMPLETE, GYM-VALIDATION
+  PARKED**.
+
+### 12.6 What this round did NOT change
+
+- The eleven `work/*` branches on `origin` are untouched. They are the operator's to clear,
+  the bare board still reports them, and nothing here deletes a remote ref.
+- `pipeline.gate_profile: attended` is still the shipped default and still the revert.
+- The three open routes README lists (predicate swap, `params` redirect, id squatting) are
+  unchanged and still open; the citation rule is about the DOC's mapping, not the config's.
+- No change to `DECISIONS.md`, to the U6 row in PLAN.md, or to any condition's shipped
+  `on_fire` / `on_indeterminate`.
+
 ---
 
 ## DECISIONS entries to append
@@ -1235,10 +1443,11 @@ DECISION: The revert to prior behaviour is `pipeline.gate_profile: attended`. A
           attended, exit 6 dark; drill step I). Removing the human from a gate is one flag
           away by design, and this entry says so rather than leaving "the revert" to be
           read as "no run can self-pass now".
-PROVEN:   drill step F drives the REAL gate for three cases - `andon.enabled=false`, the
-          andon block deleted, and one condition switched off - asserting exit 6, the item
-          parked at anchor-draft, and a ledger refusal recording not-evaluated /
-          incomplete / partial with evaluated 0 / 0 / 4. Step I proves the override: the
+PROVEN:   drill step F drives the REAL gate for three cases, asserting exit 6, the item
+          parked at anchor-draft, and a ledger refusal recording, for each:
+          `andon.enabled=false` -> `not-evaluated` with evaluated 0; the andon block deleted
+          -> `incomplete` with evaluated 0; one condition switched off -> `partial` with
+          evaluated 4. Step I proves the override: the
           same item, exit 5 under the attended config and exit 6 under `-GateProfile dark`.
 REVERT:   n/a - a correction. The behaviour it documents reverts with the entry above.
 
@@ -1644,4 +1853,93 @@ RULE:     "the only X" in a config note is a universal with a short life, same a
           through the config" was. Say what the knob does; let the next one say what it does.
 REVERT:   n/a - one string.
 
+## 2026-08-30 - U6 - THE ANCHOR GATE ASKED THE BROAD BRANCH QUESTION, SO `dark` COULD NEVER PASS IT HERE
+FINDING:  README.md promised `work-branch-on-remote` "narrows to the branch the run owns ...
+          a dark run is blocked by its own branch being on a remote, not by anybody else's".
+          True at pre_review, FALSE at the anchor gate: -Propose writes branch="" and -Submit
+          stores the real branch AFTER the gate, so Invoke-AutoGate passed no -RunBranch and
+          the board asked the broad question. Reproduced: own branch clean, ONE foreign work
+          branch on a remote -> anchor gate exit 6, ledger fired=work-branch-on-remote. On
+          this repository that is ELEVEN foreign branches the run may not delete, so no dark
+          run could ever auto-pass an anchor gate here.
+DECISION: make the run's branch KNOWN at the gate rather than narrowing the doc. -Submit
+          -Branch is mandatory and already validated non-empty, so Invoke-AutoGate carries it;
+          both gates now ask the same narrow question. Scoping the condition out of the anchor
+          gate instead would have been strictly weaker - a run whose OWN branch was already
+          pushed would then auto-pass the first gate - and keeping the broad question would
+          make U6's "one that hits none lands" unreachable on this repository while teaching
+          the next operator to switch the board off. The broad reading remains what a bare
+          `andon.ps1 -Evaluate` asks; the eleven branches are the operator's to clear.
+GUARD:    the repair could itself have become a pass. The anchor gate runs before queue.ps1
+          rev-parses -Branch, so a name resolving to nothing would have read "checked 1
+          branch(es); none is on a remote". A NAMED branch with no local ref is now
+          `indeterminate`, and a gate that cannot name a branch refuses instead of falling
+          back to the broad question or to an empty list.
+PROVEN:   drill step M at the real gate - M1 foreign branch on a remote and own branch clean:
+          exit 0, ledger clear, fired empty (and the same fixture shows bare -Evaluate firing
+          while -RunBranch is ok); M2 own branch on a remote: exit 6, parked, fired names the
+          condition; M3 a branch that does not resolve: exit 6, indeterminate, "named
+          branch(es) not present".
+REVERT:   drop the $Branch argument at the anchor call site in queue.ps1 (one token) and the
+          named-branch existence check in Predicate-BranchOnRemote. The doc paragraph reverts
+          with them.
+
+## 2026-08-30 - method - A DERIVED GATE IS ONLY AS WIDE AS ITS ALPHABET
+FINDING:  the board-word doc check added the round before is genuinely derived - it reads the
+          words out of andon.ps1 and config.ps1, not from a mirror - and it still missed FOUR
+          incomplete enumerations of those words on the day it shipped: MODULE's `dark`
+          bullet, Invoke-AndonEvaluation's own comment, andon.ps1's exit-6 comment, and (a
+          round earlier) queue.ps1's exit-code line. Its alphabet was one table in one file.
+DECISION: derive the LOCATIONS too. test_every_enumeration_of_board_words_in_the_repo_is_complete
+          takes its file list from `git ls-files` and finds both shapes such lists take - an
+          inline run and a definition block or table row - anywhere in the repository, and
+          requires each to be the whole alphabet (the eight, or the seven that are not
+          `clear`). The writing rule is stated where it can be obeyed: three or more board
+          words in a list is a claim about all of them; a narrower set is said in words or
+          written as a mapping. Two true sentences in the findings note were rewritten under
+          that rule rather than exempted from it.
+RULE:     when a check misses an instance of the defect it was built for, ask what its
+          alphabet was before asking whether its comparison was right. A hand-listed gate is
+          a list with a spell-checker; a derived gate whose location set is hand-listed is the
+          same thing one level up.
+PROVEN:   RED individually and reverted, five files: MODULE's inline list, MODULE's verdict
+          table, andon.ps1's definition block, andon.ps1's exit-code block, queue.ps1's usage
+          line - each losing exactly one word.
+REVERT:   delete the test and its two helpers; the corrected sentences stand on their own.
+
+## 2026-08-30 - U6 - WHICH WAY OFF THE BOARD GIVES WHICH STATE IS STATED ONCE, AND CITED
+FINDING:  andon.ps1, config.ps1 and config.py all said `andon.enabled: false` and deleting the
+          `andon` block "both report not-evaluated and halt". Deleting the block reports
+          `incomplete` - a board with no conditions is missing all five REQUIRED ids, which is
+          a different fact from "nothing was evaluated". One commit introduced the state and
+          wrote the false sentence in three files; drill step F had been asserting the true
+          value from the real ledger the whole time.
+DECISION: stop restating the mapping. README's ways-off table carries a `route` id per row and
+          says in its first sentence that it is the only place the mapping lives; the drill
+          declares the same map in $script:WaysOffProven and its own assertions read it; every
+          other file cites a route id. Two checks hold it - table vs drill (a row nobody drills
+          or a drill proving a different word fails), and every citation in the repository
+          against the table, with locations derived from `git ls-files` and matching exact
+          because a route id is a token, not a phrase.
+SCOPE:    `clear` is excluded from the citation claim vocabulary on purpose - no way off the
+          board yields `clear`, and where the word sits beside a route id it is that route's
+          history. The check polices CITATIONS; a fresh restatement citing nothing is
+          invisible to it, and the test says so.
+PROVEN:   RED and reverted - the original false claim re-introduced as a citation in config.py,
+          config.ps1 and andon.ps1 fails, each naming its file and line; MODULE citing
+          on-fire-downgraded with another row's state fails; the drill asserting the wrong
+          word for andon-block-deleted, and README losing a row, both fail table-vs-drill.
+REVERT:   drop the `route` column and the two tests; the prose reverts to naming states inline.
+
+## 2026-08-30 - U6 - A ROW NOBODY DRILLS IS A CLAIM, NOT A PROOF
+FINDING:  README's ways-off row for an action word the board does not implement asserted
+          `andon.status = unavailable` in the ledger. Drill step J checked the gate's exit code
+          and read no ledger field, so half the row was verified and read exactly like all of
+          it. Confirmed by a verifier by hand, which is where this came from.
+DECISION: step J now reads the field, and the table-vs-drill check is what stops the next row
+          shipping half-proven: every row must appear in the drill's declared map, and the
+          drill's assertions read that map rather than a literal.
+PROVEN:   drill step J - "the refusal is stored as 'unavailable'", from the real ledger, on the
+          fixture whose on_fire is a word the board does not implement.
+REVERT:   n/a - one assertion added.
 ```

@@ -243,10 +243,14 @@ function Get-AutoPrincipalPrefix { return $script:AutoPrincipalPrefix }
 # parameters; this says which ones must EXIST.
 #
 # WHY IT IS NOT A CONFIG KEY (2026-08-30, and this is the defect that produced it): the
-# board could be switched off two ways, and both were closed - `andon.enabled: false` and
-# deleting the whole `andon` block each report `not-evaluated` and halt. There was a THIRD,
-# and it is the one an operator or an agent actually reaches for: DELETE CONDITION ENTRIES
-# from `andon.conditions`. Pruned to one of five on a genuinely detached checkout, the gate
+# board could be switched off two ways, and both were closed. They report DIFFERENT states,
+# and this comment claimed otherwise until 2026-08-30 - the same false sentence as andon.ps1
+# and config.py carried, all three written by the commit that made it false. The mapping is
+# stated once, in README.md's ways-off table, and cited here by route id:
+#   andon-disabled      -> not-evaluated
+#   andon-block-deleted -> incomplete
+# Both halt. There was a THIRD, and it is the one an operator or an agent actually reaches
+# for: DELETE CONDITION ENTRIES from `andon.conditions` (route `conditions-deleted`). Pruned to one of five on a genuinely detached checkout, the gate
 # AUTO-PASSED - exit 0, ledger `clear`, coverage `1 declared / 1 evaluated / 0 switched off`,
 # `-VerifyAudit COMPLETE`. A thinned board was neither "absent" nor "switched off": it was a
 # third state that reported itself perfectly healthy with four of five detectors gone.
