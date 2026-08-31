@@ -492,40 +492,216 @@ function Read-JsonStore {
 # somebody maintains by hand - rule 3.
 # ---------------------------------------------------------------------------------
 
-function Get-PhaseTable {
-    # Parse section 2's phase table out of a PLAN.md TEXT (not a path), so the same
-    # parser reads the working file and any historical revision from git.
-    # Returns @{ U0 = @{ what=..; validated=..; depends=.. }; ... }
+function Remove-NonProse {
+    # Strip HTML comments and fenced code blocks before ANY structure is read out of a
+    # markdown document. Both can carry text that LOOKS like a table row and that NO
+    # READER SEES as one, which is what makes them a forgery surface rather than a
+    # formatting detail: a verifier deleted a phase's real row and put a one-line
+    # `| **U1** | ... |` inside an HTML comment at the end of the file, and the floor
+    # check reported "every floor phase has a row in section 2's table" for a row nobody
+    # sees. An unterminated fence swallows the rest of the document rather than leaking
+    # its contents back into the prose - refusing wide is the safe direction here.
     param([string]$Text)
-    $out = [ordered]@{}
-    if (-not $Text) { return $out }
-    foreach ($line in ($Text -split "`n")) {
+    if (-not $Text) { return "" }
+    $t = [regex]::Replace($Text, '(?s)<!--.*?-->', "`n")
+    $out = New-Object System.Collections.Generic.List[string]
+    $fence = ""
+    foreach ($line in ($t -split "`n")) {
         $l = $line.TrimEnd("`r")
-        # THE BOLD IS FORMATTING, NOT IDENTITY. Requiring the literal `| **U1** |` meant
-        # that deleting two asterisks - a change a READER CANNOT SEE, since the row is
-        # still printed in the document - dropped that phase out of every population
-        # derived from this table: clause 1's subjects, clause 2's chains, clause 7's
-        # audit set. Coverage then read "1 of 1" because N had shrunk. A formatting change
-        # must not remove a subject, so the emphasis is optional here and the PHASE FLOOR
-        # below is what decides which phases have to exist at all.
-        # AND THE CELL MAY SAY MORE THAN THE ID. The live table writes
-        # `| **U7 (standing)** |`, so anchoring the closing pipe straight after the
-        # emphasis DROPPED U7 from clause 2's chains - fixing one way for a phase to
-        # vanish from the population by introducing another. The id is read from the
-        # front of the cell; whatever else the cell says is the cell's business.
-        if ($l -notmatch '^\|\s*(?:\*\*|__)?\s*(U\d)\b[^|]*\|') { continue }
-        $id = $Matches[1]
-        # A markdown row: | phase | what | validated by | depends on |
-        $cells = @($l -split '\|')
-        # split leaves an empty first and last element for a well-formed row
-        if ($cells.Count -lt 6) { continue }
-        $out[$id] = [ordered]@{
-            what      = $cells[2].Trim()
-            validated = $cells[3].Trim()
-            depends   = $cells[4].Trim()
+        if (-not $fence) {
+            if ($l -match '^\s*(```+|~~~+)') { $fence = $Matches[1]; [void]$out.Add(""); continue }
+            [void]$out.Add($l)
+        } else {
+            if ($l -match ('^\s*' + [regex]::Escape($fence))) { $fence = "" }
+            [void]$out.Add("")
         }
     }
-    return $out
+    return ($out -join "`n")
+}
+
+function Split-TableRow {
+    # A markdown row's cells, trimmed, with the empty elements the leading and trailing
+    # pipes produce removed. The cells are returned as a LIST so a caller can address them
+    # by the header's name for that column instead of by a hard-coded index.
+    param([string]$Row)
+    $r = $Row.Trim()
+    $cells = @($r -split '\|')
+    if ($cells.Count -ge 1 -and $cells[0].Trim() -eq "") { $cells = @($cells | Select-Object -Skip 1) }
+    if ($cells.Count -ge 1 -and $cells[$cells.Count - 1].Trim() -eq "") { $cells = @($cells | Select-Object -First ($cells.Count - 1)) }
+    return @($cells | ForEach-Object { $_.Trim() })
+}
+
+function Get-DfuSection {
+    # The text of ONE section, located by its heading and terminated at the next heading of
+    # the same or a higher level. Returns @{ text; count; heading } - and `text` is $null
+    # unless the heading matched EXACTLY ONCE.
+    #
+    # WHY IT REFUSES ON AMBIGUITY. Two floors were located by a lazy first-match regex over
+    # the WHOLE plan (`Get-PlanPhaseFloor`, `service-set-matches-plan`), so a decoy passage
+    # earlier in the document - a quotation, an example, a superseded draft - becomes the
+    # text the floor is checked back against, and the drift check that is supposed to stop
+    # a plan drifting away from this script silently checks the wrong paragraph. One match
+    # is a location; two is a question nobody answered.
+    # -StopAtAnyHeading ends the section at the FIRST heading of any level. Section 2's
+    # phase table needs that: `### 2.1 Amendments` is a DEEPER heading, so a same-or-higher
+    # rule would run the table's region on through the amendments and out the far side, and
+    # a row written anywhere in there would be read as a row of the table.
+    param([string]$Text, [string]$HeadingPattern, [switch]$StopAtAnyHeading)
+    $res = @{ text = $null; count = 0; heading = "" }
+    if (-not $Text) { return $res }
+    $clean = Remove-NonProse -Text $Text
+    $ms = @([regex]::Matches($clean, $HeadingPattern))
+    $res.count = $ms.Count
+    if ($ms.Count -ne 1) { return $res }
+    $m = $ms[0]
+    $res.heading = $m.Value.Trim()
+    $lvl = ([regex]::Match($m.Value, '^#+')).Value.Length
+    if ($StopAtAnyHeading) { $lvl = 6 }
+    $start = $m.Index + $m.Length
+    $rest  = $clean.Substring($start)
+    $stop  = [regex]::Match($rest, ('(?m)^#{1,' + $lvl + '}\s'))
+    if ($stop.Success) { $res.text = $rest.Substring(0, $stop.Index) } else { $res.text = $rest }
+    return $res
+}
+
+# ---------------------------------------------------------------------------------
+# SECTION 2'S TABLE, AND ONLY SECTION 2'S TABLE.
+#
+# WHAT THE PREVIOUS PARSER DID, AND THE THREE ATTACKS THAT LANDED ON IT. It line-scanned
+# the ENTIRE file for a row naming U<n>, honoured no section boundary, no code fence and
+# no HTML comment, took LAST-WINS on a duplicated id, and indexed cells POSITIONALLY
+# (cell 3) without ever parsing the header row. Round 3 pinned WHICH ids must exist; it
+# did not pin WHERE the row that defines an id may live, or WHICH CELL is Validated by.
+#
+#   SUBSTITUTION - rewrite U4's visible Validated-by to "spot-checked by the author", then
+#     append the ORIGINAL row verbatim inside an HTML comment at the end of the file.
+#     Last-wins read the commented row and clause 2 reported both original requirements
+#     CARRIED. The identical edit WITHOUT the comment failed correctly, which is the tell.
+#   RESURRECTION - delete U1's row from section 2 and put a one-line row for it inside an
+#     HTML comment at the end. `phase-floor-present` passed for a row no reader sees, and
+#     the chain passed with it.
+#   COLUMN SHIFT - insert a column: Phase | What | Original validation (historical) |
+#     Validated by | Depends on. Cell 3 then read the decoy while the VISIBLE Validated by
+#     column said something weaker.
+#
+# So this parser: ANCHORS to section 2's own heading and stops at the next heading; strips
+# fenced blocks and HTML comments first; finds the Validated-by column BY PARSING THE
+# HEADER ROW for its name; and REFUSES on a duplicated id instead of picking a winner.
+# Every refusal is returned as a PROBLEM, and `Add-PhaseFloorProbes` turns problems into a
+# red probe - an ambiguity is never resolved silently in either direction.
+# ---------------------------------------------------------------------------------
+
+function Get-PhaseTableParse {
+    # Returns @{ phases = [ordered]{ id -> @{what;validated;depends} }; problems = @();
+    #            anchored = [bool]; header = "" }.
+    param([string]$Text)
+    $res = @{ phases = [ordered]@{}; problems = @(); anchored = $false; header = "" }
+    if (-not $Text) { $res.problems += "the document is empty or could not be read"; return $res }
+
+    $sec = Get-DfuSection -Text $Text -HeadingPattern '(?m)^##\s+2\.\s+[^\r\n]*' -StopAtAnyHeading
+    if ($sec.count -lt 1) {
+        $res.problems += "section 2's heading ('## 2. ...') was not found, so no table could be anchored to it - a phase row is only a phase row where section 2 says it is"
+        return $res
+    }
+    if ($sec.count -gt 1) {
+        $res.problems += ("section 2's heading appears {0} times - which one owns the phase table is ambiguous, so this REFUSES rather than picking one" -f $sec.count)
+        return $res
+    }
+    $res.anchored = $true
+
+    $rows = @()
+    foreach ($line in ($sec.text -split "`n")) {
+        $l = $line.TrimEnd("`r").Trim()
+        if ($l -notmatch '^\|') { continue }
+        $rows += $l
+    }
+    if ($rows.Count -lt 1) { $res.problems += "section 2 contains no table rows at all"; return $res }
+
+    # --- THE HEADER ROW NAMES THE COLUMNS ----------------------------------------
+    $hIdx = -1
+    for ($i = 0; $i -lt $rows.Count; $i++) {
+        $hc = @(Split-TableRow -Row $rows[$i])
+        if (@($hc | Where-Object { $_ -match '(?i)validated' }).Count -ge 1) { $hIdx = $i; break }
+    }
+    if ($hIdx -lt 0) {
+        $res.problems += "section 2's table has no header row naming a 'Validated by' column, so its cells could only be read POSITIONALLY - refused"
+        return $res
+    }
+    $hcells = @(Split-TableRow -Row $rows[$hIdx])
+    $res.header = ($hcells -join " | ")
+    $col = @{ phase = @(); what = @(); validated = @(); depends = @() }
+    for ($i = 0; $i -lt $hcells.Count; $i++) {
+        $h = (($hcells[$i] -replace '[^A-Za-z]', ' ') -replace '\s+', ' ').Trim().ToLowerInvariant()
+        if     ($h -eq 'validated' -or $h -eq 'validated by') { $col.validated += $i }
+        elseif ($h -eq 'phase')   { $col.phase   += $i }
+        elseif ($h -eq 'what')    { $col.what    += $i }
+        elseif ($h -eq 'depends' -or $h -eq 'depends on') { $col.depends += $i }
+    }
+    foreach ($need in @("phase", "validated")) {
+        $n = @($col[$need]).Count
+        if ($n -ne 1) {
+            $res.problems += ("section 2's header names the '{0}' column {1} time(s) (header: {2}) - a cell is read by NAME here, and {3}, so this REFUSES" -f `
+                              $need, $n, $res.header, $(if ($n -lt 1) { "there is no such column to read" } else { "which one is meant is ambiguous" }))
+        }
+    }
+    if ($res.problems.Count -gt 0) { return $res }
+    $pi = [int]$col.phase[0]
+    $vi = [int]$col.validated[0]
+    $wi = $(if (@($col.what).Count -eq 1) { [int]$col.what[0] } else { -1 })
+    $di = $(if (@($col.depends).Count -eq 1) { [int]$col.depends[0] } else { -1 })
+
+    # --- ROWS BEFORE THE HEADER ARE NOT ROWS OF THIS TABLE ------------------------
+    for ($i = 0; $i -lt $hIdx; $i++) {
+        $pc = @(Split-TableRow -Row $rows[$i])
+        if (@($pc).Count -ge 1 -and $pc[0] -match '^\s*(?:\*\*|__)?\s*(U\d)\b') {
+            $res.problems += ("a row naming {0} appears BEFORE section 2's table header - it is not a row of the table whose columns this parser read, so this REFUSES rather than reading it positionally" -f $Matches[1])
+        }
+    }
+    if ($res.problems.Count -gt 0) { return $res }
+
+    # --- THE DATA ROWS ------------------------------------------------------------
+    $seen = @{}
+    for ($i = $hIdx + 1; $i -lt $rows.Count; $i++) {
+        $cells = @(Split-TableRow -Row $rows[$i])
+        if (@($cells).Count -lt 1) { continue }
+        # the delimiter row |---|---| is not data
+        if (@($cells | Where-Object { $_ -match '^:?-{2,}:?$' }).Count -eq @($cells).Count) { continue }
+        if (@($cells).Count -le $pi) { continue }
+        # THE BOLD IS FORMATTING, NOT IDENTITY, and the cell may say more than the id -
+        # the live table writes a U7 cell as "**U7 (standing)**". The id is read from the
+        # FRONT of the phase cell; whatever else that cell says is the cell's business.
+        if ($cells[$pi] -notmatch '^\s*(?:\*\*|__)?\s*(U\d)\b') { continue }
+        $id = $Matches[1]
+        if ($seen.ContainsKey($id)) {
+            $res.problems += ("{0} has {1} rows in section 2's table - a duplicated id is a question about which row defines the phase, and LAST-WINS answers it by accident. REFUSED." -f $id, ($seen[$id] + 1))
+            $seen[$id] = $seen[$id] + 1
+            continue
+        }
+        $seen[$id] = 1
+        if (@($cells).Count -le $vi) {
+            $res.problems += ("{0}'s row has {1} cell(s) but the header declares {2} - the Validated-by column is not present in this row, so it could not be read by name" -f $id, @($cells).Count, $hcells.Count)
+            continue
+        }
+        $res.phases[$id] = [ordered]@{
+            what      = $(if ($wi -ge 0 -and @($cells).Count -gt $wi) { $cells[$wi] } else { "" })
+            validated = $cells[$vi]
+            depends   = $(if ($di -ge 0 -and @($cells).Count -gt $di) { $cells[$di] } else { "" })
+        }
+    }
+    # A duplicated id must not leave a WINNER behind: whichever row was read first is as
+    # arbitrary as the last one, so the phase is dropped from the result entirely and the
+    # PROBLEM is what the caller sees.
+    foreach ($k in @($seen.Keys)) {
+        if ([int]$seen[$k] -gt 1 -and $res.phases.Contains($k)) { $res.phases.Remove($k) }
+    }
+    return $res
+}
+
+function Get-PhaseTable {
+    # The phases only, for callers that just need the map. Anything that must react to a
+    # REFUSAL reads Get-PhaseTableParse and passes its result to Add-PhaseFloorProbes.
+    param([string]$Text)
+    return (Get-PhaseTableParse -Text $Text).phases
 }
 
 # ---------------------------------------------------------------------------------
@@ -559,41 +735,73 @@ function Get-ShortRef {
 
 function Get-PlanPhaseFloor {
     # The phase ids C.8 clause 1 ITSELF names, ranges expanded. $null when that clause's
-    # text could not be located - "could not check", never "fine".
+    # text could not be located UNAMBIGUOUSLY - "could not check", never "fine".
+    #
+    # IT IS ANCHORED TO SECTION C.8 NOW. The previous version ran a lazy first-match regex
+    # over the ENTIRE plan, so a decoy passage anywhere earlier in PLAN.md - a quotation of
+    # the clause, an example, a superseded draft - became the text this floor was checked
+    # back against, and the drift check that exists to stop the plan drifting away from
+    # this script would have been comparing against the wrong paragraph. So: locate the
+    # C.8 SECTION (exactly one heading, terminated at the next heading of the same or
+    # higher level), then locate clause 1 INSIDE it, and refuse if either is ambiguous.
     param([string]$PlanText)
     if (-not $PlanText) { return $null }
-    $m = [regex]::Match($PlanText, '(?s)1\.\s\*\*Every U-phase column.*?(?=\s2\.\s\*\*No phase is parked)')
-    if (-not $m.Success) { return $null }
-    $sec = $m.Value
+    $sec = Get-DfuSection -Text $PlanText -HeadingPattern '(?m)^###\s+C\.8\b[^\r\n]*'
+    if ($sec.count -ne 1) { return $null }
+    $ms = @([regex]::Matches($sec.text, '(?sm)^\s*1\.\s\*\*Every U-phase column.*?(?=^\s*2\.\s\*\*No phase is parked)'))
+    if ($ms.Count -ne 1) { return $null }
+    $clause = $ms[0].Value
     $set = @()
     # A RANGE IS A SET. "U0-U6" must EXPAND, or a floor derived from the plan would shrink
     # to its two endpoints and the middle phases would vanish from the comparison.
-    foreach ($r in [regex]::Matches($sec, 'U(\d)\s*[^A-Za-z0-9\s]\s*U(\d)')) {
+    foreach ($r in [regex]::Matches($clause, 'U(\d)\s*[^A-Za-z0-9\s]\s*U(\d)')) {
         $a = [int]$r.Groups[1].Value; $b = [int]$r.Groups[2].Value
         if ($b -ge $a) { for ($i = $a; $i -le $b; $i++) { $set += ("U{0}" -f $i) } }
     }
-    foreach ($r in [regex]::Matches($sec, '(?<![A-Za-z0-9])U(\d)(?![0-9])')) { $set += ("U" + $r.Groups[1].Value) }
+    foreach ($r in [regex]::Matches($clause, '(?<![A-Za-z0-9])U(\d)(?![0-9])')) { $set += ("U" + $r.Groups[1].Value) }
     return @($set | Sort-Object -Unique)
 }
 
 function Add-PhaseFloorProbes {
-    # Adds the two probes every phase-derived clause carries and returns the SUBJECT SET:
+    # Adds the probes every phase-derived clause carries and returns the SUBJECT SET:
+    #   phase-table-unambiguous  - section 2's table parsed to ONE unambiguous answer
+    #                              (only when the caller passes the parse it used)
     #   phase-floor-matches-plan - the pinned floor still equals the phase set C.8.1 names
-    #   phase-floor-present      - every floor phase still HAS a row in section 2's table
-    # The returned ids are the floor UNIONED with the table, so a phase can be added to
-    # this script's population but never subtracted from it by editing the plan.
-    param($Clause, $Ctx, [string]$PlanText, $Phases, [string]$Restrict = "")
+    #   phase-floor-present      - every floor phase still HAS a row where it must
+    # The returned ids are the floor UNIONED with the parsed set, so a phase can be added
+    # to this script's population but never subtracted from it by editing the document.
+    param($Clause, $Ctx, [string]$PlanText, $Phases, [string]$Restrict = "", $Parse = $null,
+          [string]$Where = "section 2's table")
     $floor = @($script:DfuPhaseFloor)
     if ($Restrict) { $floor = @($floor | Where-Object { $_ -match $Restrict }) }
     $parsed = @($Phases.Keys)
     if ($Restrict) { $parsed = @($parsed | Where-Object { $_ -match $Restrict }) }
 
+    # --- THE PARSE ITSELF IS A SUBJECT -------------------------------------------
+    # A parser that REFUSED - no section 2 heading, two of them, a duplicated phase id, a
+    # header with two Validated-by columns - has not produced a smaller table, it has
+    # produced no answer. Reporting that refusal as a clean population is the same defect
+    # as a shrunken N, one layer down.
+    if ($null -ne $Parse) {
+        $probs = @($Parse.problems)
+        if ($probs.Count -eq 0) {
+            $b = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                 -Note ("{0} parsed to ONE unambiguous table: header [{1}], {2} phase row(s), no duplicate id, nothing read from a code fence or an HTML comment" -f `
+                        $Where, $Parse.header, @($Parse.phases.Keys).Count)
+        } else {
+            $b = New-VerdictProbeBody -Verdict "fail" -Exit $probs.Count `
+                 -Note ("{0} did not parse to one unambiguous table: {1}" -f $Where, (($probs) -join " || "))
+        }
+        $Clause.probes += (New-Probe -Name "phase-table-unambiguous" `
+            -Command ("parse {0} in {1}: anchor on the section heading, strip fenced blocks and HTML comments, read the Validated-by column BY NAME from the header row, refuse on a duplicate id" -f $Where, $Ctx.plan) -Run $b)
+    }
+
     $named = Get-PlanPhaseFloor -PlanText $PlanText
     if ($null -eq $named) {
         $Clause.probes += (New-Probe -Name "phase-floor-matches-plan" `
-            -Command ("locate C.8 clause 1 in {0}" -f $Ctx.plan) `
+            -Command ("locate section C.8 in {0}, then clause 1 inside it" -f $Ctx.plan) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                  -Note "C.8 clause 1's text could not be located in the plan, so the pinned phase floor could not be checked back against it"))
+                  -Note "C.8 clause 1's text could not be located UNAMBIGUOUSLY inside section C.8, so the pinned phase floor could not be checked back against it"))
     } else {
         $pinnedNotNamed = @($script:DfuPhaseFloor | Where-Object { $named -notcontains $_ })
         $namedNotPinned = @($named | Where-Object { $script:DfuPhaseFloor -notcontains $_ })
@@ -615,45 +823,132 @@ function Add-PhaseFloorProbes {
     $missing = @($floor | Where-Object { $parsed -notcontains $_ })
     if ($missing.Count -eq 0) {
         $b = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-             -Note ("every floor phase ({0}) has a row in section 2's table" -f ($floor -join ","))
+             -Note ("every floor phase ({0}) is present in {1}" -f ($floor -join ","), $Where)
     } else {
         $b = New-VerdictProbeBody -Verdict "fail" -Exit $missing.Count `
-             -Note ("{0} floor phase(s) have NO row this parser can find in section 2's table: {1} - a phase does not leave this clause's population by leaving the document, and a row that merely lost its bold is still a row" -f `
-                    $missing.Count, ($missing -join ","))
+             -Note ("{0} floor phase(s) are NOT present in {1}: {2} - a phase does not leave this clause's population by leaving the document, and a row that merely lost its bold is still a row" -f `
+                    $missing.Count, $Where, ($missing -join ","))
     }
     $Clause.probes += (New-Probe -Name "phase-floor-present" `
-        -Command ("parse section 2's table in {0} and compare it with the pinned floor {1}" -f $Ctx.plan, ($script:DfuPhaseFloor -join ",")) -Run $b)
+        -Command ("read {0} and compare it with the pinned floor {1}" -f $Where, ($script:DfuPhaseFloor -join ",")) -Run $b)
 
     return @{ ids = @(@($floor + $parsed) | Sort-Object -Unique); missing = @($missing) }
 }
 
 function Get-WalkthroughRuns {
-    # Every "How to run:" command in the walkthrough, keyed by the phase whose section it
-    # sits in. DERIVED: the phase headings and the run lines both come from the file, so a
-    # phase that grows a section, or loses one, changes this map without anyone editing a
-    # list here.
+    # Every command a "How to run:" marker names, keyed by the phase whose section it sits
+    # in. DERIVED: the phase headings and the run lines both come from the file, so a phase
+    # that grows a section, or loses one, changes this map without anyone editing a list.
     #
     # IT MUST READ ACROSS LINE BREAKS. The walkthrough wraps long commands inside a single
     # backtick span, so a line-oriented parser silently captures the FIRST LINE ONLY and
-    # then "runs" a truncated command - which is the alphabet-too-narrow class producing a
-    # confident wrong answer rather than an error. The span is therefore matched whole,
-    # newlines included, and re-flowed to one line.
+    # then "runs" a truncated command - the alphabet-too-narrow class producing a confident
+    # wrong answer rather than an error. The span is therefore matched whole, newlines
+    # included, and re-flowed to one line.
+    #
+    # AND ONE MARKER MAY NAME SEVERAL COMMANDS. This used to take the FIRST backtick span
+    # after each marker and stop. WALKTHROUGH.md's U6 row names TWO commands under one
+    # marker - "`drill.py`, and `pytest ...`" - and the second was never run: a verifier
+    # ran it by hand and it FAILED (it needs the agent-bridge venv) while clause 5 reported
+    # `walkthrough-U6-check-1 = pass`, counted U6 fully evaluated, and clause 1 reported
+    # `U6-validated-by-1 = pass`. A claim wider than its evidence, in the document the
+    # operator reviews by. So EVERY backtick span in the marker's own block is a command.
+    #
+    # THE BLOCK ENDS where the marker's own text ends: the next bold label at the start of
+    # a line ("**Evidence:**"), the next heading, or a blank line. Backticked prose in a
+    # LATER paragraph therefore never becomes something this script executes.
     param([string]$Text)
     $out = [ordered]@{}
     if (-not $Text) { return $out }
-    # Split into sections on level-2 headings, keeping the heading with its body.
     $parts = [regex]::Split($Text, '(?m)^(?=##\s)')
     foreach ($part in $parts) {
         if ($part -notmatch '(?m)^##\s+\**(U\d)') { continue }
         $id = $Matches[1]
         if (-not $out.Contains($id)) { $out[$id] = @() }
-        $rx = [regex]'(?s)\*\*How to run:?\*\*\s*`([^`]+)`'
-        foreach ($m in $rx.Matches($part)) {
-            $cmd = ($m.Groups[1].Value -replace '\s+', ' ').Trim()
-            if ($cmd) { $out[$id] = @($out[$id]) + @($cmd) }
+        foreach ($m in [regex]::Matches($part, '(?m)^\s*\*\*How to run:?\*\*')) {
+            $from = $m.Index + $m.Length
+            $rest = $part.Substring($from)
+            $len  = $rest.Length
+            foreach ($term in @('(?m)^\s*\*\*', '(?m)^\s*#{1,6}\s', '(?m)^\s*$')) {
+                $t = [regex]::Match($rest, $term)
+                if ($t.Success -and $t.Index -lt $len) { $len = $t.Index }
+            }
+            $block = $rest.Substring(0, $len)
+            foreach ($b in [regex]::Matches($block, '(?s)`([^`]+)`')) {
+                $cmd = ($b.Groups[1].Value -replace '\s+', ' ').Trim()
+                if ($cmd) { $out[$id] = @($out[$id]) + @($cmd) }
+            }
         }
     }
     return $out
+}
+
+function Get-LedgerSections {
+    # DECISIONS.md split into its `## ` entries, each with its heading, its BODY and its
+    # position. The body matters because an un-parking is a directive INSIDE an entry, not
+    # a word in a heading - see the un-parking rule in Test-Clause2.
+    param([string]$Text)
+    $out = @()
+    if (-not $Text) { return $out }
+    $i = 0
+    foreach ($part in [regex]::Split($Text, '(?m)^(?=##\s)')) {
+        if ($part -notmatch '(?m)^##\s+(.*)$') { continue }
+        $head = $Matches[1].Trim()
+        $body = $part
+        $nl = $part.IndexOf("`n")
+        if ($nl -ge 0) { $body = $part.Substring($nl + 1) }
+        $out += @{ heading = $head; body = $body; index = $i }
+        $i++
+    }
+    return @($out)
+}
+
+function Get-BranchExclusionGrant {
+    # DOES THE LEDGER GRANT THIS BRANCH A CARVE-OUT FROM C.8 CLAUSE 4? - and the answer is
+    # a STRUCTURED RECORD, never a substring.
+    #
+    # THE DEFECT THIS REPLACES. The test was `$decForBranches.Contains($b)` - a raw
+    # substring search of the whole of DECISIONS.md. ANY sentence anywhere containing the
+    # branch name granted the exemption, INCLUDING one saying it must NOT be excused: a
+    # verifier proved it by appending this effort's own findings note, whose text names the
+    # branch while arguing against excusing it. An exemption read out of prose is granted
+    # by whoever last mentioned the string.
+    #
+    # The grant now requires BOTH halves of a record: a `## ` entry whose heading is
+    # recognisable as an exclusion record, AND an explicit directive line inside it naming
+    # the branch:
+    #
+    #     ## <date> - clause 4 exclusion - work/example
+    #     **Excluded from C.8 clause 4:** `work/example`
+    #     **Why:** ...
+    #
+    # The directive must name the branch EXACTLY. Nothing else in the file grants anything.
+    param([string]$DecisionsText, [string]$Branch)
+    $res = @{ granted = $false; heading = ""; why = "" }
+    if (-not $DecisionsText) { $res.why = "DECISIONS.md could not be read, so no carve-out could be granted"; return $res }
+    $mentioned = $DecisionsText.Contains($Branch)
+    foreach ($sec in @(Get-LedgerSections -Text $DecisionsText)) {
+        if ($sec.heading -notmatch '(?i)clause\s*4\s*exclusion') { continue }
+        # THE EMPHASIS IS FORMATTING, NOT SYNTAX. `**Excluded from C.8 clause 4:**` puts the
+        # colon INSIDE the bold, so a pattern that expects `**...**:` reads nothing and the
+        # grant silently never fires - the same alphabet-too-narrow shape this file keeps
+        # finding. The asterisks and backticks come off the line first, then the directive
+        # is matched on its words.
+        $flat = ($sec.body -replace '\*', '') -replace '`', ''
+        foreach ($m in [regex]::Matches($flat, '(?im)^\s*Excluded from C\.8 clause 4\s*:\s*([^\r\n]+?)\s*$')) {
+            if ($m.Groups[1].Value.Trim() -eq $Branch) {
+                $res.granted = $true
+                $res.heading = $sec.heading
+                return $res
+            }
+        }
+    }
+    if ($mentioned) {
+        $res.why = "the branch name appears in DECISIONS.md, but no '## ... clause 4 exclusion' entry carries an 'Excluded from C.8 clause 4:' directive naming it - a mention is not a grant"
+    } else {
+        $res.why = "no '## ... clause 4 exclusion' entry in DECISIONS.md carries an 'Excluded from C.8 clause 4:' directive naming it"
+    }
+    return $res
 }
 
 function Get-WorkBranches {
@@ -912,14 +1207,15 @@ function Test-Clause1 {
                   -Note "PLAN.md is unreadable or missing - the phase set could not be derived, so nothing was judged"))
         return (Resolve-ClauseVerdict -Clause $c)
     }
-    $phases = Get-PhaseTable -Text $planText
+    $parse  = Get-PhaseTableParse -Text $planText
+    $phases = $parse.phases
     # U0-U6 are this clause's subjects; U7 is standing by design and belongs to clause 6.
     #
     # AND THE POPULATION IS NOT THE DOCUMENT'S TO CHOOSE. Taking $ids from the CURRENT
     # PLAN.md let a phase delete itself out of this clause: drop U1's row and the expected
     # count fell 3 -> 2 in silence. The floor is pinned and checked back against C.8.1's
     # own words - see Add-PhaseFloorProbes.
-    $floor = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Restrict '^U[0-6]$'
+    $floor = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Restrict '^U[0-6]$' -Parse $parse
     $ids = @($floor.ids)
     $c.coverage.subject  = "U-phases U0-U6 - the floor C.8.1 names literally, unioned with section 2's table - plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
@@ -1224,36 +1520,61 @@ function Test-Clause2 {
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
                   -Note "DECISIONS.md is unreadable or missing - parked entries could not be counted"))
     } else {
-        $headings = @()
-        foreach ($line in ($decText -split "`n")) {
-            $l = $line.TrimEnd("`r")
-            if ($l -match '^##\s+(.*)$') { $headings += $Matches[1].Trim() }
-        }
-        $parked = @($headings | Where-Object { $_ -match '(?i)\bPARKED\b' })
-        # A phase is un-parked only by a LATER heading that says so for the same phase.
+        # UN-PARKING IS A STRUCTURED ACT, NOT A LATER MENTION.
+        #
+        # The previous test accepted ANY later `## ` heading that contained the phase id
+        # and one of CLOSES/CLOSED/DISCHARGED/UNPARKED anywhere in it - regardless of what
+        # was closed. On this very ledger that is not hypothetical: U4's PARKED entry was
+        # discharged by "U4 clause 3 - final state - two residual defects closed", a
+        # heading about THIS CHECKER's clause 3, which closed nothing about U4's phase. A
+        # heading that happens to carry two words is not a decision to un-park.
+        #
+        # So a parked entry is closed only by a LATER entry that CITES IT: a directive line
+        #
+        #     **Un-parks:** <enough of the parked entry's heading to identify it>
+        #
+        # (UNPARKS / UN-PARKS / CLOSES are accepted as the directive word). The citation is
+        # matched against the parked headings, and it must identify EXACTLY ONE of them -
+        # a citation matching two entries closes neither, because which one was meant is
+        # the question the record is supposed to answer.
+        $sections = @(Get-LedgerSections -Text $decText)
+        $headings = @($sections | ForEach-Object { $_.heading })
+        $parked = @($sections | Where-Object { $_.heading -match '(?i)\bPARKED\b' })
         $outstanding = @()
-        foreach ($p in $parked) {
-            $phase = ""
-            if ($p -match '\b(U\d)\b') { $phase = $Matches[1] }
-            $idx = [array]::IndexOf($headings, $p)
-            $closedLater = $false
-            if ($phase) {
-                for ($i = $idx + 1; $i -lt $headings.Count; $i++) {
-                    if ($headings[$i] -match ('\b' + $phase + '\b') -and
-                        $headings[$i] -match '(?i)(CLOSES|CLOSED|DISCHARGED|UNPARKED)') { $closedLater = $true; break }
+        $ambiguous   = @()
+        foreach ($ps in $parked) {
+            $pnorm = ConvertTo-Normalised -s $ps.heading
+            $closedBy = ""
+            for ($i = $ps.index + 1; $i -lt $sections.Count; $i++) {
+                foreach ($dm in [regex]::Matches($sections[$i].body, '(?im)^\s*\*{0,2}(?:UN-?PARKS|CLOSES)\*{0,2}\s*:\s*(.+?)\s*$')) {
+                    $cited = ConvertTo-Normalised -s $dm.Groups[1].Value
+                    if ($cited.Length -lt 12) { continue }
+                    $hits = @($parked | Where-Object { (ConvertTo-Normalised -s $_.heading).Contains($cited) })
+                    if ($hits.Count -ne 1) {
+                        $ambiguous += ("'{0}' in '{1}' matches {2} parked entries" -f $dm.Groups[1].Value.Trim(), $sections[$i].heading, $hits.Count)
+                        continue
+                    }
+                    if ((ConvertTo-Normalised -s $hits[0].heading) -eq $pnorm) { $closedBy = $sections[$i].heading; break }
                 }
+                if ($closedBy) { break }
             }
-            if (-not $closedLater) { $outstanding += $p }
+            if ($closedBy) { $c.detail += ("UN-PARKED: '{0}' cited by '{1}'" -f $ps.heading, $closedBy) }
+            else { $outstanding += $ps.heading }
         }
-        if ($outstanding.Count -eq 0) {
-            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "no outstanding PARKED entry in DECISIONS.md"
+        foreach ($a in $ambiguous) { $c.detail += ("un-parking citation IGNORED - {0}" -f $a) }
+        if ($outstanding.Count -eq 0 -and $parked.Count -eq 0) {
+            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "DECISIONS.md carries no PARKED entry at all"
+        } elseif ($outstanding.Count -eq 0) {
+            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                    -Note ("all {0} PARKED entry/entries are closed by a later entry that CITES them by an Un-parks directive" -f $parked.Count)
         } else {
             $body = New-VerdictProbeBody -Verdict "fail" -Exit $outstanding.Count `
-                    -Note ("{0} outstanding PARKED entry/entries, none closed by a later heading: {1}" -f `
-                           $outstanding.Count, ($outstanding -join " | "))
+                    -Note ("{0} of {1} PARKED entry/entries are outstanding - no later entry carries an 'Un-parks:' directive citing them: {2}{3}" -f `
+                           $outstanding.Count, $parked.Count, ($outstanding -join " | "), `
+                           $(if ($ambiguous.Count) { " -- and " + $ambiguous.Count + " citation(s) were ignored as ambiguous" } else { "" }))
         }
         $c.probes += (New-Probe -Name "no-outstanding-parked" `
-                      -Command ("grep '^## ' {0} | grep -i PARKED" -f $Ctx.decisions) -Run $body)
+                      -Command ("split {0} on '^## ' headings; for each PARKED heading look for a LATER section carrying '**Un-parks:** <that heading>'" -f $Ctx.decisions) -Run $body)
     }
 
     # --- (b) every section 2.1 amendment carries evidence + revert path -----------
@@ -1302,11 +1623,12 @@ function Test-Clause2 {
 
     # --- (c) THE CHAIN, per phase -------------------------------------------------
     $revs = Get-PlanRevisions -Ctx $Ctx
-    $curPhases = Get-PhaseTable -Text $planText
+    $curParse  = Get-PhaseTableParse -Text $planText
+    $curPhases = $curParse.phases
     # THE FLOOR AGAIN. Deleting U1's row from section 2 used to make this clause report
     # "met, coverage 1/1" with U1's chain never reconstructed - silence about a link in the
     # chain, which is the failure this clause names in its own words.
-    $floor2 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $curPhases
+    $floor2 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $curPhases -Parse $curParse
     $ids = @($floor2.ids)
     $c.coverage.subject  = "phases whose Validated-by chain must be reconstructable - the C.8.1 floor unioned with section 2's table - plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
@@ -1317,6 +1639,40 @@ function Test-Clause2 {
                   -Note "no revision history for PLAN.md could be read - no chain can be reconstructed, which is not a pass"))
         $c.coverage.not_evaluated = @($ids)
         return (Resolve-ClauseVerdict -Clause $c)
+    }
+    # A REVISION WHOSE TABLE DOES NOT PARSE IS A HOLE, exactly like one that could not be
+    # read at all. Silently skipping it would move the ORIGINAL later in the chain - the
+    # chain would start after its own beginning, and every comparison after that is
+    # against the wrong text. The parse is done ONCE per revision here and reused below.
+    $revParse = @{}
+    $unparsable = @()
+    # AND THE HOLE IS ATTRIBUTED TO THE PHASE IT BELONGS TO. A duplicated U4 row makes that
+    # revision unreadable FOR U4; it says nothing about U2. A problem that names no phase at
+    # all - no section 2 heading, two of them, a header with no Validated-by column - holes
+    # EVERY phase at that revision, because none of them was located.
+    $revHole = @{}
+    foreach ($r in $revs) {
+        if (-not $r.readable) { continue }
+        $rp = Get-PhaseTableParse -Text $r.text
+        $revParse[$r.sha] = $rp
+        if (@($rp.problems).Count -gt 0) {
+            $unparsable += ("{0} ({1})" -f (Get-ShortRef -Sha $r.sha), (@($rp.problems)[0]))
+            foreach ($prob in @($rp.problems)) {
+                $named = @([regex]::Matches($prob, '(?<![A-Za-z0-9])(U\d)(?![0-9])') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+                if ($named.Count -lt 1) { $named = @("*") }
+                foreach ($nid in $named) {
+                    if (-not $revHole.ContainsKey($nid)) { $revHole[$nid] = @() }
+                    $revHole[$nid] = @($revHole[$nid]) + @(("{0}: {1}" -f (Get-ShortRef -Sha $r.sha), $prob))
+                }
+            }
+        }
+    }
+    if ($unparsable.Count -gt 0) {
+        $c.probes += (New-Probe -Name "chain-revisions-parsable" `
+            -Command ("parse section 2's table at each of {0} PLAN.md revision(s)" -f @($revs).Count) `
+            -Run (New-VerdictProbeBody -Verdict "fail" -Exit $unparsable.Count `
+                  -Note ("section 2's table did not parse to one unambiguous answer at {0} revision(s): {1} - a chain reconstructed across a hole is indistinguishable from one that was never recorded" -f `
+                         $unparsable.Count, (($unparsable | Select-Object -First 5) -join " ; "))))
     }
     $unreadable = @($revs | Where-Object { -not $_.readable })
     if ($unreadable.Count -gt 0) {
@@ -1331,7 +1687,8 @@ function Test-Clause2 {
         $chain = @()
         foreach ($r in $revs) {
             if (-not $r.readable) { continue }
-            $t = Get-PhaseTable -Text $r.text
+            if (-not $revParse.ContainsKey($r.sha)) { continue }
+            $t = $revParse[$r.sha].phases
             if (-not $t.Contains($id)) { continue }
             $vb = [string]$t[$id].validated
             if ($chain.Count -eq 0 -or (ConvertTo-Normalised -s $chain[-1].text) -ne (ConvertTo-Normalised -s $vb)) {
@@ -1355,6 +1712,19 @@ function Test-Clause2 {
         $c.detail += ("chain {0}: {1} distinct state(s)" -f $id, $chain.Count)
         foreach ($step in $chain) {
             $c.detail += ("    {0} {1} : {2}" -f $step.date, (Get-ShortRef -Sha $step.sha), $step.text)
+        }
+        # A HOLE THIS PHASE'S CHAIN CROSSES IS THIS PHASE'S PROBLEM. Skipping the revision
+        # would move the ORIGINAL later and every comparison after it would be against the
+        # wrong text - silence about a link in the chain, which is the failure this clause
+        # names in its own words.
+        $holes = @()
+        foreach ($hk in @("*", $id)) { if ($revHole.ContainsKey($hk)) { $holes += @($revHole[$hk]) } }
+        if ($holes.Count -gt 0) {
+            $c.probes += (New-Probe -Name ("chain-{0}-has-a-hole" -f $id) `
+                -Command ("parse section 2's table for {0} at each of {1} PLAN.md revision(s)" -f $id, @($revs).Count) `
+                -Run (New-VerdictProbeBody -Verdict "fail" -Exit $holes.Count `
+                      -Note ("{0}'s chain crosses {1} revision(s) where section 2's table did not define it unambiguously: {2}" -f `
+                             $id, $holes.Count, ((@($holes) | Select-Object -First 3) -join " ; "))))
         }
         if ($chain.Count -lt 1) {
             # UNRECONSTRUCTABLE => FAIL, in the clause's own words.
@@ -1554,9 +1924,37 @@ $script:DfuServiceAnchors = [ordered]@{
 
 function Get-DirectDbClients {
     # WHO TALKS TO THE CORPUS DATABASE DIRECTLY, AND AS WHICH ROLE - derived from the
-    # running system (the containers on the Open Brain network and the DB user each
-    # carries), never from a list in here. Returns role -> the containers using it, or
-    # $null when the question could not be asked at all.
+    # running system (the containers on the Open Brain network and what their environment
+    # says about how they connect), never from a list in here.
+    #
+    # Returns $null when the question could not be asked at all, otherwise
+    #   @{ roles = @{ role -> @(containers) }   the clients whose DB role IS determinable
+    #      unknown  = @(containers)             clients that reach the DB with NO readable role
+    #      silent   = @(containers)             containers on the network whose environment
+    #                                           shows no connection to the DB at all
+    #      considered = @(containers) }
+    #
+    # WHY THE ALPHABET WIDENED, AND WHY `unknown` EXISTS. The previous version matched only
+    # `^(DB_USER|PGUSER|POSTGRES_USER)=` or a `proto://user:` URI. Two live clients fell
+    # straight through it:
+    #   - `open_notebook` reaches openbrain-db as `postgres` (rolsuper/rolbypassrls = t/t)
+    #     via **OB1_DB_USER** - a prefixed name the anchored pattern could not see - and was
+    #     never enumerated at all;
+    #   - `openbrain-idea-refinery` carries `DB_HOST=openbrain-db` and NO role variable, so
+    #     it was silently skipped rather than reported as undeterminable.
+    # So `service-rls-boundary` decided its pass condition over an INCOMPLETE set with no
+    # record of what could not be determined - the exact "claim wider than its evidence"
+    # shape this script exists to catch. A client whose role cannot be read is now
+    # INDETERMINATE, never absent.
+    #
+    # THE STATED RESTRICTION. Evidence here is the container's ENVIRONMENT. A client that
+    # hardcodes the host in its code, with nothing in its environment naming it, is not
+    # visible to this enumeration - those containers are returned in `silent` and the probe
+    # says so in its note rather than implying they were cleared.
+    #
+    # The database container itself is excluded: it is the server, not a client of itself,
+    # and counting its own POSTGRES_USER would make the boundary unmeetable for a reason
+    # that has nothing to do with the boundary.
     param($Ctx)
     $r = Invoke-Native -Exe "docker" -Arguments @("network", "inspect", $Ctx.obnet, "--format", "{{range .Containers}}{{.Name}} {{end}}")
     if (-not $r.ran -or $r.exit -ne 0) { return $null }
@@ -1565,21 +1963,49 @@ function Get-DirectDbClients {
     $argv = @("inspect", "--format", "{{.Name}}|{{range .Config.Env}}{{.}};{{end}}") + $names
     $ri = Invoke-Native -Exe "docker" -Arguments $argv
     if (-not $ri.ran -or $ri.exit -ne 0) { return $null }
-    $out = @{}
+
+    $dbhost = [string]$Ctx.db
+    $out = @{ roles = @{}; unknown = @(); silent = @(); considered = @() }
     foreach ($line in ($ri.stdout -split "`n")) {
         $l = $line.Trim()
         if (-not $l) { continue }
         $parts = $l -split '\|', 2
         if ($parts.Count -lt 2) { continue }
         $cname = $parts[0].TrimStart('/')
+        if ($cname -eq $dbhost) { continue }
+        $out.considered += $cname
+        $isClient = $false
+        $roles = @()
         foreach ($kv in ($parts[1] -split ';')) {
             $kvt = $kv.Trim()
-            $role = ""
-            if ($kvt -match '^(?:DB_USER|PGUSER|POSTGRES_USER)=([A-Za-z0-9_]+)$') { $role = $Matches[1] }
-            elseif ($kvt -match '^[A-Za-z0-9_]*(?:DB_URI|DB_URL|DATABASE_URL)=[a-z]+://([A-Za-z0-9_]+):') { $role = $Matches[1] }
-            if (-not $role) { continue }
-            if (-not $out.ContainsKey($role)) { $out[$role] = @() }
-            if (@($out[$role]) -notcontains $cname) { $out[$role] = @($out[$role]) + @($cname) }
+            if (-not $kvt) { continue }
+            $eq = $kvt.IndexOf('=')
+            if ($eq -lt 1) { continue }
+            $k = $kvt.Substring(0, $eq)
+            $v = $kvt.Substring($eq + 1)
+            # (a) does anything in this container's environment NAME the corpus database?
+            if ($v -match ('(?<![A-Za-z0-9_.\-])' + [regex]::Escape($dbhost) + '(?![A-Za-z0-9_\-])')) { $isClient = $true }
+            # (b) a role variable, WHATEVER it is prefixed with - OB1_DB_USER is the case
+            #     the anchored pattern missed.
+            if ($k -match '(?i)(^|_)(DB_USER|DB_USERNAME|DB_ROLE|PGUSER|PG_USER|POSTGRES_USER|DATABASE_USER)$' -and $v -match '^[A-Za-z0-9_]+$') {
+                $isClient = $true
+                if ($roles -notcontains $v) { $roles += $v }
+            }
+            # (c) a connection URI pointing AT THIS HOST, with or without a user in it
+            elseif ($v -match '(?i)^[a-z][a-z0-9+.\-]*://(?:([^:/@\s]+?)(?::[^@\s]*)?@)?([^/:?\s]+)') {
+                $uUser = $Matches[1]
+                $uHost = $Matches[2]
+                if ($uHost -eq $dbhost) {
+                    $isClient = $true
+                    if ($uUser -and ($roles -notcontains $uUser)) { $roles += $uUser }
+                }
+            }
+        }
+        if (-not $isClient) { $out.silent += $cname; continue }
+        if ($roles.Count -lt 1) { $out.unknown += $cname; continue }
+        foreach ($role in $roles) {
+            if (-not $out.roles.ContainsKey($role)) { $out.roles[$role] = @() }
+            if (@($out.roles[$role]) -notcontains $cname) { $out.roles[$role] = @($out.roles[$role]) + @($cname) }
         }
     }
     return $out
@@ -2364,24 +2790,45 @@ function Test-Clause4 {
     # clause red rather than disappearing from it.
     $planTxt4 = Read-TextFile -Path $Ctx.plan
     $sec4 = ""
+    $why4 = "C.8 clause 4's text could not be located in the plan, so the pinned service set could not be checked back against it"
     if ($planTxt4) {
-        $m4 = [regex]::Match($planTxt4, '(?s)4\.\s\*\*Nothing is left in flight.*?(?=\n\s*5\.\s\*\*The walkthrough is true)')
-        # ALL whitespace collapses, not just newlines. The plan WRAPS the phrase this
-        # regex looks for across a line and the continuation carries an indent, so a
-        # newline-only normalisation left a run of spaces mid-phrase, matched nothing,
-        # and this subject reported 'could not be parsed' against a plan that says it
-        # perfectly well - a drift check that never checks is the defect it guards.
-        if ($m4.Success) { $sec4 = ($m4.Value -replace '\s+', ' ') }
+        # ANCHORED TO SECTION C.8, AND AMBIGUITY REFUSES. This ran a lazy first-match regex
+        # over the WHOLE plan, so a decoy passage earlier in PLAN.md - a quotation of the
+        # clause, an example, a superseded draft - became the text the pinned service set
+        # was compared against. The drift check would then have been checking the wrong
+        # paragraph while reporting a clean comparison.
+        $c8 = Get-DfuSection -Text $planTxt4 -HeadingPattern '(?m)^###\s+C\.8\b[^\r\n]*'
+        if ($c8.count -ne 1) {
+            $why4 = ("section C.8's heading matched {0} time(s) in the plan, so clause 4 could not be located UNAMBIGUOUSLY" -f $c8.count)
+        } else {
+            $m4s = @([regex]::Matches($c8.text, '(?sm)^\s*4\.\s\*\*Nothing is left in flight.*?(?=^\s*5\.\s\*\*The walkthrough is true)'))
+            if ($m4s.Count -ne 1) {
+                $why4 = ("clause 4's text matched {0} time(s) inside section C.8 - one match is a location, two is a question nobody answered" -f $m4s.Count)
+            } else {
+                # ALL whitespace collapses, not just newlines. The plan WRAPS the phrase the
+                # enumeration regex looks for across a line and the continuation carries an
+                # indent, so a newline-only normalisation left a run of spaces mid-phrase,
+                # matched nothing, and this subject reported 'could not be parsed' against a
+                # plan that says it perfectly well - a drift check that never checks.
+                $sec4 = ($m4s[0].Value -replace '\s+', ' ')
+            }
+        }
     }
     if (-not $sec4) {
-        $body4 = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                 -Note "C.8 clause 4's text could not be located in the plan, so the pinned service set could not be checked back against it"
+        $body4 = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note $why4
         $c.coverage.not_evaluated += "service-set-matches-plan"
     } else {
         $listed = @()
-        $ml = [regex]::Match($sec4, "running live from the work line's code\*\*\s*[^A-Za-z0-9\s]\s*([^.]+)\.")
-        if ($ml.Success) {
-            $listed = @(($ml.Groups[1].Value -split ',') | ForEach-Object { ($_ -replace '\s+', ' ').Trim() } | Where-Object { $_ })
+        # A PERIOD IS NOT ALWAYS A SENTENCE END. `([^.]+)\.` truncated the enumeration at
+        # the FIRST period, so a service named after one - `openbrain-gateway.ps1`, a
+        # version, a hostname - silently dropped every item after it out of the comparison
+        # and the drift check reported agreement over a list it had cut in half. A period
+        # closes the sentence only when whitespace or the end of the text follows it.
+        $mls = @([regex]::Matches($sec4, "running live from the work line's code\*\*\s*[^A-Za-z0-9\s]\s*((?:[^.]|\.(?=\S))+)\.(?:\s|$)"))
+        if ($mls.Count -eq 1) {
+            $listed = @(($mls[0].Groups[1].Value -split ',') | ForEach-Object { ($_ -replace '\s+', ' ').Trim() } | Where-Object { $_ })
+        } elseif ($mls.Count -gt 1) {
+            $c.detail += ("clause 4's service enumeration phrase appears {0} times in the clause - refusing to pick one" -f $mls.Count)
         }
         $claimedPhrases = @()
         foreach ($k in $script:DfuServiceAnchors.Keys) { $claimedPhrases += @($script:DfuServiceAnchors[$k]) }
@@ -2420,10 +2867,12 @@ function Test-Clause4 {
         $unbacked = @()
         foreach ($b in $branches) {
             if ($script:DfuExcludedBranches.Contains($b)) {
-                if ($decForBranches -and $decForBranches.Contains($b)) {
-                    $skipped += ("{0} ({1}; recorded in {2})" -f $b, $script:DfuExcludedBranches[$b], $Ctx.decisions)
+                $grant = Get-BranchExclusionGrant -DecisionsText $decForBranches -Branch $b
+                if ($grant.granted) {
+                    $skipped += ("{0} ({1}; granted by '{2}' in {3})" -f $b, $script:DfuExcludedBranches[$b], $grant.heading, $Ctx.decisions)
                     continue
                 }
+                if ($grant.why) { $c.detail += ("carve-out for {0} REFUSED: {1}" -f $b, $grant.why) }
                 # NOT EXCLUDED. Falls through and is counted like any other branch.
                 $unbacked += $b
             }
@@ -2699,39 +3148,62 @@ function Test-Clause4 {
                     # So the clients are enumerated from the running system and their roles
                     # read from pg_roles. A direct client that bypasses RLS FAILS this
                     # subject however the table flags read.
+                    #
+                    # AND AN UNDETERMINABLE ROLE IS INDETERMINATE, NOT ABSENT. The client
+                    # enumeration used to match only three unprefixed role variables, so
+                    # `open_notebook` (OB1_DB_USER=postgres, rolsuper/rolbypassrls = t/t)
+                    # was never enumerated and `openbrain-idea-refinery` (DB_HOST=openbrain-db,
+                    # no role variable) was silently skipped - the pass condition was then
+                    # decidable over an INCOMPLETE set with no record of what could not be
+                    # determined. See Get-DirectDbClients.
                     $clients = Get-DirectDbClients -Ctx $Ctx
                     $bypass = @()
                     $clientRoles = @()
                     $clientsKnown = $false
-                    if ($null -ne $clients -and $clients.Count -ge 1) {
-                        $clientRoles = @($clients.Keys | Sort-Object)
-                        $inList = (($clientRoles | ForEach-Object { "'" + $_ + "'" }) -join ",")
-                        $rrq = ("SELECT rolname||'/'||(CASE WHEN rolsuper THEN 't' ELSE 'f' END)||'/'||(CASE WHEN rolbypassrls THEN 't' ELSE 'f' END) " +
-                                "FROM pg_roles WHERE rolname IN ({0});" -f $inList)
-                        $rrc = Invoke-Psql -Ctx $Ctx -Sql $rrq
-                        $rows = @(($rrc.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_]+/[tf]/[tf]$' })
-                        if ($rows.Count -ge 1) {
-                            $clientsKnown = $true
+                    $undet = @()
+                    $silentCount = 0
+                    if ($null -ne $clients) {
+                        $undet = @($clients.unknown)
+                        $silentCount = @($clients.silent).Count
+                        foreach ($u in $undet) { $c.detail += ("direct client UNDETERMINED role: {0} reaches {1} and its environment names no DB role" -f $u, $Ctx.db) }
+                        $clientRoles = @($clients.roles.Keys | Sort-Object)
+                        if ($clientRoles.Count -ge 1) {
+                            $inList = (($clientRoles | ForEach-Object { "'" + $_ + "'" }) -join ",")
+                            $rrq = ("SELECT rolname||'/'||(CASE WHEN rolsuper THEN 't' ELSE 'f' END)||'/'||(CASE WHEN rolbypassrls THEN 't' ELSE 'f' END) " +
+                                    "FROM pg_roles WHERE rolname IN ({0});" -f $inList)
+                            $rrc = Invoke-Psql -Ctx $Ctx -Sql $rrq
+                            $rows = @(($rrc.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_]+/[tf]/[tf]$' })
+                            # EVERY enumerated role must come back from pg_roles. A role the
+                            # query did not answer for is a role whose privileges were never
+                            # read, and dropping it would shrink the set again.
+                            $answered = @($rows | ForEach-Object { ($_ -split '/')[0] })
+                            $unanswered = @($clientRoles | Where-Object { $answered -notcontains $_ })
+                            foreach ($ua in $unanswered) { $c.detail += ("direct client UNDETERMINED privileges: role '{0}' (used by {1}) is not in pg_roles" -f $ua, ((@($clients.roles[$ua])) -join ",")) }
+                            if ($rows.Count -ge 1 -and $unanswered.Count -eq 0) { $clientsKnown = $true }
                             foreach ($row in $rows) {
                                 $rn = ($row -split '/')[0]
-                                $c.detail += ("direct client role {0} (used by {1})" -f $row, ((@($clients[$rn])) -join ","))
-                                if ($row -notmatch '/f/f$') { $bypass += ("{0} used by {1}" -f $row, ((@($clients[$rn])) -join ",")) }
+                                $c.detail += ("direct client role {0} (used by {1})" -f $row, ((@($clients.roles[$rn])) -join ","))
+                                if ($row -notmatch '/f/f$') { $bypass += ("{0} used by {1}" -f $row, ((@($clients.roles[$rn])) -join ",")) }
                             }
+                            $undet += $unanswered
                         }
                     }
+                    if ($undet.Count -gt 0) { $clientsKnown = $false }
 
                     if (-not $flags) { $c.coverage.not_evaluated += $svc; $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $r.exit -Note "could not read the RLS flags for any stage table" }
                     elseif (-not $clientsKnown) {
                         $c.coverage.not_evaluated += $svc
                         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                                -Note ("the RLS flags read t/t on {0} of {1} stage table(s), but the DIRECT CLIENTS C.8.4 names could not be enumerated or their roles could not be read - a table-flag reading is not the boundary this column asks about, so this refuses rather than reporting the structural half as the measurement" -f `
-                                       ($stages.Count - $unbound.Count), $stages.Count)
+                                -Note ("the RLS flags read t/t on {0} of {1} stage table(s), but the DIRECT CLIENTS C.8.4 names are not fully determined: {2}. A table-flag reading is not the boundary this column asks about, and a boundary decided over an INCOMPLETE client set is a claim wider than its evidence - so this REFUSES rather than reporting the structural half as the measurement" -f `
+                                       ($stages.Count - $unbound.Count), $stages.Count, `
+                                       $(if ($undet.Count) { ("{0} client(s) reach {1} with no determinable role: {2}" -f $undet.Count, $Ctx.db, ($undet -join ", ")) } else { "the client set could not be enumerated at all" }))
                     }
                     else {
                         $c.coverage.evaluated++
                         if ($unbound.Count -eq 0 -and $bypass.Count -eq 0 -and $srcOk) {
                             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), none of the {1} direct client role(s) carries rolsuper or rolbypassrls, and its source is on the work line" -f $stages.Count, $clientRoles.Count)
+                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), none of the {1} direct client role(s) carries rolsuper or rolbypassrls, and its source is on the work line. THE RESTRICTION ON THAT SENTENCE: clients are identified from container ENVIRONMENT, so {2} container(s) on {3} whose environment names neither {4} nor a DB role were not cleared - they were not visible to this enumeration" -f `
+                                           $stages.Count, $clientRoles.Count, $silentCount, $Ctx.obnet, $Ctx.db)
                         } elseif ($unbound.Count -gt 0) {
                             $body = New-VerdictProbeBody -Verdict "fail" -Exit $unbound.Count `
                                     -Note ("{0} of {1} stage table(s) are not relrowsecurity/relforcerowsecurity = t/t: {2}" -f `
@@ -2770,35 +3242,56 @@ function Test-Clause5 {
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "WALKTHROUGH.md is unreadable or missing"))
         return (Resolve-ClauseVerdict -Clause $c)
     }
-    # Subjects DERIVED: every phase section the walkthrough actually has.
-    $sections = @()
+    # THE SECTIONS THE WALKTHROUGH HAPPENS TO HAVE ARE NOT THE POPULATION.
+    #
+    # This clause set coverage.expected to the number of `## U<n>` sections parsed out of
+    # WALKTHROUGH.md - THE DOCUMENT UNDER TEST. Deleting the six phase sections that name
+    # no check made it report MET at "evaluated 2 of 2" with no not_evaluated entry, on a
+    # trimmed copy of the real walkthrough. That is rule 6 - never derive the population
+    # from the document under test - and `Add-PhaseFloorProbes` was applied to clauses 1,
+    # 2 and 7 and NOT to this one. The same fix belongs here: the C.8.1 floor is pinned,
+    # checked back against the plan's words, and UNIONED with whatever sections the
+    # walkthrough actually has, so a phase can be added to this population but never
+    # subtracted from it by editing the walkthrough.
+    $sections = [ordered]@{}
     foreach ($part in [regex]::Split($text, '(?m)^(?=##\s)')) {
-        if ($part -match '(?m)^##\s+\**(U\d)') { $sections += $Matches[1] }
+        if ($part -match '(?m)^##\s+\**(U\d)') {
+            $sid = $Matches[1]
+            if (-not $sections.Contains($sid)) { $sections[$sid] = $true }
+        }
     }
-    $sections = @($sections | Sort-Object -Unique)
+    $planText5 = Read-TextFile -Path $Ctx.plan
+    $floor5 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText5 -Phases $sections `
+                                   -Where "WALKTHROUGH.md's phase sections"
+    $ids = @($floor5.ids)
     $runs = Get-WalkthroughRuns -Text $text
-    $c.coverage.subject  = "phase sections in WALKTHROUGH.md"
-    $c.coverage.expected = $sections.Count
-    if ($sections.Count -lt 1) {
+    $c.coverage.subject  = "phases - the C.8.1 floor unioned with WALKTHROUGH.md's own sections - each of which must name a check that re-runs green, plus the floor's own drift check"
+    $c.coverage.expected = $ids.Count + 1
+    if ($ids.Count -lt 1) {
         $c.probes += (New-Probe -Name "walkthrough-sections" -Command ("parse '## U<n>' sections in {0}" -f $Ctx.walkthrough) `
-            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "no phase sections were parsed - the parser and the document disagree"))
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "no phase sections were parsed and the floor is empty - the parser and the document disagree"))
         return (Resolve-ClauseVerdict -Clause $c)
     }
-    foreach ($id in $sections) {
+    foreach ($id in $ids) {
         $cmds = @()
         if ($runs.Contains($id)) { $cmds = @($runs[$id]) }
         if ($cmds.Count -lt 1) {
             $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($id)
+            $why = $(if ($sections.Contains($id)) {
+                        "this row names NO check, so there is nothing to re-run - a row whose check does not run is worse than a missing row"
+                     } else {
+                        "the walkthrough has NO section for this floor phase at all, so the operator's review document is silent about it - an absent row is not a satisfied one"
+                     })
             $c.probes += (New-Probe -Name ("walkthrough-{0}-names-a-check" -f $id) `
-                -Command ("(none - no 'How to run' in {0}'s section)" -f $id) `
-                -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                      -Note "this row names NO check, so there is nothing to re-run - a row whose check does not run is worse than a missing row"))
+                -Command ("(none - no 'How to run' recorded for {0} in {1})" -f $id, $Ctx.walkthrough) `
+                -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note $why))
             continue
         }
-        # EVERY check the row names runs. Taking $cmds[0] left the section's additional
-        # named checks unrun while the coverage line still read full - and this is the
-        # document the operator reviews by, so a row whose second command was never
-        # executed is a row that says something this script did not verify.
+        # EVERY check the row names runs, and every command under EVERY marker - see
+        # Get-WalkthroughRuns. Taking $cmds[0], or the first backtick span after a marker,
+        # left named checks unrun while the coverage line still read full; this is the
+        # document the operator reviews by, so a command that was never executed is a
+        # sentence this script did not verify.
         $n = 0
         $ranAll = $true
         foreach ($cmd in $cmds) {
@@ -2810,7 +3303,9 @@ function Test-Clause5 {
             } elseif ([int]$r.exit -eq 0) {
                 $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "the row's named check re-runs green"
             } else {
-                $body = New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) -Note ("the row's named check exited {0}" -f $r.exit)
+                $tail = @(($r.stdout + "`n" + $r.stderr) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+                $body = New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) `
+                        -Note ("the row's named check exited {0}: {1}" -f $r.exit, (($tail -join " ") -replace '\s+', ' ').Trim())
             }
             $c.probes += (New-Probe -Name ("walkthrough-{0}-check-{1}" -f $id, $n) -Command $cmd -Run $body)
         }
@@ -2867,10 +3362,11 @@ function Test-Clause7 {
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 7
     $planText = Read-TextFile -Path $Ctx.plan
-    $phases = Get-PhaseTable -Text $planText
+    $parse7 = Get-PhaseTableParse -Text $planText
+    $phases = $parse7.phases
     # THE FLOOR. Unbolding a row - `| **U1** |` -> `| U1 |`, invisible to a reader - used
     # to drop the phase from this clause's population, which then reported "1 of 1".
-    $floor7 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases
+    $floor7 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Parse $parse7
     $ids = @($floor7.ids)
     $c.coverage.subject  = "phases - the C.8.1 floor unioned with section 2's table - each needing a ledger entry, a findings note AND a commit message, plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
@@ -2880,6 +3376,11 @@ function Test-Clause7 {
         return (Resolve-ClauseVerdict -Clause $c)
     }
     $decText = Read-TextFile -Path $Ctx.decisions
+    # THE CHECKS A PHASE NAMES, from both places the plan names them: section 2's column
+    # and the walkthrough's How-to-run commands for that phase (which clause 1 ties back to
+    # the column). That union is what "by which check" means for this phase - not "any
+    # script anywhere in the message".
+    $runs7 = Get-WalkthroughRuns -Text (Read-TextFile -Path $Ctx.walkthrough)
     $noteFiles = @()
     if (Test-Path -LiteralPath $Ctx.notes) {
         $noteFiles = @(Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue)
@@ -2895,10 +3396,12 @@ function Test-Clause7 {
     # was validated and by which check": the message must also NAME A RUNNABLE ARTIFACT,
     # which is the same test clause 1 uses to tie a column to the thing that re-runs it.
     # "U3 done" satisfies neither half and must not count as either.
+    # ...AND THE CHANGED FILES COME WITH IT, because "which check" is answered partly by
+    # what the commit TOUCHED - see the self-discharge rule below.
     $RS = [string][char]30
     $US = [string][char]31
     $commits = @()
-    $glog = Invoke-Git -Arguments @("log", "--format=%H%x1f%s%x1f%b%x1e", $Ctx.workline) -WorkDir $Ctx.root
+    $glog = Invoke-Git -Arguments @("log", "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", $Ctx.workline) -WorkDir $Ctx.root
     $logOk = ($glog.exit -eq 0)
     if ($logOk) {
         foreach ($rec in ($glog.stdout -split $RS)) {
@@ -2907,15 +3410,27 @@ function Test-Clause7 {
             if ($f.Count -lt 2) { continue }
             $msg = [string]$f[1]
             if ($f.Count -gt 2) { $msg = $msg + "`n" + [string]$f[2] }
-            $commits += @{ sha = ([string]$f[0]).Trim(); message = $msg }
+            $files = @()
+            if ($f.Count -gt 3) {
+                $files = @(([string]$f[3] -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            }
+            $commits += @{ sha = ([string]$f[0]).Trim(); message = $msg; files = @($files) }
         }
     } else {
         # COULD NOT READ IS NOT FINE. Every phase below is left unevaluated for this half.
         $c.probes += (New-Probe -Name "audit-commit-log" `
-            -Command ("git log --format=%H%x1f%s%x1f%b%x1e {0}" -f $Ctx.workline) `
+            -Command ("git log --format=%x1e%H%x1f%s%x1f%b%x1f --name-only {0}" -f $Ctx.workline) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $glog.exit `
                   -Note ("the work line's commit log could not be read, so the third artifact C.8.7 names was NOT examined: {0}" -f (($glog.stderr -replace '\s+', ' ').Trim()))))
     }
+    # THE DONE-AUTHORITY'S OWN FILES. A commit that touches nothing but this script and its
+    # drill is a commit ABOUT THE CHECKER. It may mention any phase it likes; it is not
+    # evidence that the phase was validated. Derived from this script's own name so it
+    # cannot go stale if the file is renamed.
+    $selfLeaf = ""
+    try { $selfLeaf = [System.IO.Path]::GetFileName($PSCommandPath) } catch { }
+    $selfNames = @()
+    if ($selfLeaf) { $selfNames = @($selfLeaf, ("verify-" + $selfLeaf)) }
 
     foreach ($id in $ids) {
         $headings = @()
@@ -2935,25 +3450,64 @@ function Test-Clause7 {
                 }
             }
         }
-        # A findings note "for" a phase is one whose NAME or BODY names it.
+        # A findings note "for" a phase is one whose NAME or whose HEADINGS name it.
+        #
+        # IT USED TO BE THE WHOLE BODY. Any *.md in documentation/notes whose text matched
+        # \bU3\b anywhere discharged U3's findings-note artifact - so ONE unrelated note
+        # mentioning a phase in passing satisfied it, and the phase with 10 "findings
+        # notes" might have none that is ABOUT it. A note that is about a phase says so
+        # where a reader looks: in its filename or in a heading.
         $notes = @($noteFiles | Where-Object {
             $_.BaseName -match ('(?i)\b' + $id + '\b') -or
-            ((Read-TextFile -Path $_.FullName) -match ('\b' + $id + '\b'))
+            ((Read-TextFile -Path $_.FullName) -match ('(?m)^#{1,6}\s[^\r\n]*(?<![A-Za-z0-9])' + $id + '(?![0-9])'))
         })
-        # THE COMMIT-MESSAGE HALF, per phase.
+        # THE COMMIT-MESSAGE HALF, per phase - "commit messages stating what was validated
+        # and BY WHICH CHECK", which is more than a mention of the phase plus a mention of
+        # some script.
+        #
+        # WHAT A VERIFIER PROVED. `audit-trail-U1` passed on two commits about THIS CHECKER
+        # - "C.8 round 3: a checker must not take its population from the document it
+        # tests" and "C.8 - four operator rulings raise the bar for done" - neither of which
+        # states what was validated for U1. Both named the phase somewhere and named a
+        # `*.ps1` somewhere, and that was the whole test.
+        #
+        # So two rules now:
+        #   (1) THE CHECK MUST BE THE PHASE'S OWN. The artifact the message names must be
+        #       one section 2's Validated-by column for THAT PHASE also names - the same
+        #       correspondence clause 1 uses to tie a column to the thing that re-runs it.
+        #       Where the column names no runnable artifact, NO commit can discharge this
+        #       half and the probe says exactly that; it does not fall back to "any script".
+        #   (2) THE CLAUSE'S OWN COMMITS DISCHARGE NOTHING. A commit whose entire changed
+        #       file set is this script and its drill is evidence about the checker.
+        $wantedCol = @()
+        if ($phases.Contains($id)) { $wantedCol += @(Get-NamedArtifacts -Text ([string]$phases[$id].validated)) }
+        if ($runs7.Contains($id)) { foreach ($rc in @($runs7[$id])) { $wantedCol += @(Get-NamedArtifacts -Text $rc) } }
+        $wantedCol = @($wantedCol | Sort-Object -Unique)
         $cmsgs = @()
+        $selfOnly = 0
         foreach ($cm in $commits) {
             if ($cm.message -notmatch ('(?<![A-Za-z0-9])' + $id + '(?![0-9])')) { continue }
-            if (@(Get-NamedArtifacts -Text $cm.message).Count -lt 1) { continue }
+            $named = @(Get-NamedArtifacts -Text $cm.message)
+            if ($named.Count -lt 1) { continue }
+            if ($wantedCol.Count -lt 1) { continue }
+            if (@($named | Where-Object { $wantedCol -contains $_ }).Count -lt 1) { continue }
+            $leaves = @(@($cm.files) | ForEach-Object { ($_ -split '/')[-1] })
+            if ($leaves.Count -ge 1 -and $selfNames.Count -ge 1 -and
+                @($leaves | Where-Object { $selfNames -notcontains $_ }).Count -eq 0) { $selfOnly++; continue }
             $cmsgs += ("{0} {1}" -f (Get-ShortRef -Sha $cm.sha), (($cm.message -split "`n")[0]).Trim())
         }
+        if ($selfOnly -gt 0) { $c.detail += ("    {0}: {1} commit(s) naming it touch ONLY the done-authority's own files - a commit about the checker does not discharge a phase" -f $id, $selfOnly) }
         foreach ($cmline in @($cmsgs | Select-Object -First 3)) { $c.detail += ("    {0} commit: {1}" -f $id, $cmline) }
 
         $missing = @()
         if ($headings.Count -lt 1) { $missing += "no DECISIONS.md entry" }
         if ($notes.Count -lt 1)    { $missing += "no findings note" }
         if ($logOk -and $cmsgs.Count -lt 1) {
-            $missing += "no commit message on the work line that names the phase AND the check that validated it"
+            if ($wantedCol.Count -lt 1) {
+                $missing += ("this phase names NO runnable check anywhere - neither section 2's column nor a 'How to run' line in the walkthrough - so no commit message can state 'by which check'")
+            } else {
+                $missing += ("no commit message on the work line names the phase AND one of the checks this phase names ({0})" -f ($wantedCol -join ", "))
+            }
         }
         if ($logOk) { $c.coverage.evaluated++ }
         else { $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($id) }
@@ -2966,10 +3520,11 @@ function Test-Clause7 {
                     -Note ("{0} ledger entry/entries and {1} findings note(s), but the commit log could not be read - two of the three artifacts C.8.7 names is not the audit trail it asks for" -f $headings.Count, $notes.Count)
         } else {
             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                    -Note ("{0} ledger entry/entries, {1} findings note(s) and {2} commit message(s) naming the phase and a check" -f $headings.Count, $notes.Count, $cmsgs.Count)
+                    -Note ("{0} ledger entry/entries, {1} findings note(s) whose name or headings are ABOUT this phase, and {2} commit message(s) naming the phase and one of the checks this phase names ({3})" -f `
+                           $headings.Count, $notes.Count, $cmsgs.Count, ($wantedCol -join ", "))
         }
         $c.probes += (New-Probe -Name ("audit-trail-{0}" -f $id) `
-                      -Command ("grep '^## .*{0}' {1} ; grep -l '{0}' {2}/*.md ; git log {3} | grep {0} + a named check" -f $id, $Ctx.decisions, $Ctx.notes, $Ctx.workline) -Run $body)
+                      -Command ("grep '^## .*{0}' {1} ; grep -l '^#.*{0}' {2}/*.md ; git log --name-only {3} | a commit naming {0} AND one of section 2's checks for it, excluding commits that touch only the done-authority" -f $id, $Ctx.decisions, $Ctx.notes, $Ctx.workline) -Run $body)
     }
     return (Resolve-ClauseVerdict -Clause $c)
 }
@@ -3160,6 +3715,11 @@ foreach ($k in $inScope) {
         $c = New-ClauseResult -Id $k
         $c.coverage.expected = 1
         $msg = $_.Exception.Message
+        # DFU_TRACE=1 also prints WHERE it threw. A clause that threw reports
+        # `clause-N-threw` with the exception message and nothing else, and that message
+        # ("the property 'x' cannot be found") is not enough to find the line - this run
+        # lost twenty minutes to exactly that. It only PRINTS; no verdict depends on it.
+        if ($env:DFU_TRACE) { Write-Host ("TRACE: " + $_.ScriptStackTrace + " :: " + $_.InvocationInfo.PositionMessage) -ForegroundColor Magenta }
         $c.probes += (New-Probe -Name ("clause-{0}-threw" -f $k) -Command $fn `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
                   -Note ("the clause evaluator threw, so nothing was decided: {0}" -f $msg)))

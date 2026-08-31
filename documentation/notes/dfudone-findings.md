@@ -407,3 +407,151 @@ rejecting a valid document; and a probe matching a row it had written itself. SI
 derived gate whose alphabet is too narrow*, with the alphabet being the escape rules and
 reserved names of the language writing the code rather than the code itself.
 REVERT: n/a — method.
+
+---
+
+## ROUND 4 — WHERE A ROW MAY LIVE, AND WHICH CELL IS *Validated by*
+
+A verifier's summary of what round 3 left open, and it is exact: *round 3 pinned WHICH ids
+must exist; it did not pin WHERE the row that defines an id may live, or WHICH CELL is
+Validated by.* Round 4 closes that, plus five more places where a substring stood in for a
+structure. Full live run after this round: **exit 7, census 8/8 balances, 0 clauses met,
+production 0 personal rows.** Drill: **168 assertions with `-Live` (153 without), 0 failed,
+8 of 8 clauses have a constructed failing case.**
+
+### 2026-08-31 · C.8 · THE PHASE TABLE PARSER READ THE WHOLE DOCUMENT, POSITIONALLY
+`Get-PhaseTable` line-scanned the ENTIRE file for a row naming `U<n>`, honoured no section
+boundary, no code fence and no HTML comment, took LAST-WINS on a duplicated id, and indexed
+cells by POSITION without ever parsing the header row. Three attacks landed on it, all
+constructed in the drill now:
+- **SUBSTITUTION** (drill P1) — weaken U4's visible *Validated by* and append the ORIGINAL row
+  verbatim inside `<!-- ... -->` at the end of the file. Clause 2 passed with both original
+  requirements reported CARRIED. The same edit WITHOUT the comment failed correctly, which is
+  the tell that the comment was doing the work.
+- **RESURRECTION** (drill P2) — delete U1's row from §2 and put a one-line row for it inside an
+  HTML comment. `phase-floor-present` passed — "every floor phase has a row in section 2's
+  table" — for a row no reader sees.
+- **COLUMN SHIFT** (drill P3) — insert `| Original validation (historical) |` ahead of the real
+  column; cell 3 read the decoy while the visible *Validated by* said something weaker.
+The parser now anchors to §2's heading and stops at the next heading OF ANY LEVEL (a
+same-or-higher rule ran the table's region straight through `### 2.1 Amendments`), strips fenced
+blocks and HTML comments first, finds the *Validated by* column BY NAME in the header row, and
+REFUSES on a duplicated id rather than picking a winner. Drill P5 is the positive control: the
+columns are REORDERED and the same requirements are still found.
+REVERT: restore the previous `Get-PhaseTable`.
+
+### 2026-08-31 · record · PLAN.md REVISION `2151193` CARRIES TWO U4 ROWS
+Not hypothetical, and found by the new parser on the real history: that revision's §2 table has
+`| **U4** | ... |` AND `| **U4 status (2026-08-30)** | **PARTIALLY DONE, REMAINDER PARKED.** ... |`.
+Under LAST-WINS the chain read the STATUS row's cell as U4's *Validated by* — the printed chain
+step *"The Validated by column is NOT satisfied — no quadrant comparison was run..."* was never
+U4's column at all. U4's chain therefore crosses a hole, and `chain-U4-has-a-hole` now says so
+by name while the other phases' chains are unaffected.
+REVERT: n/a — a fact about the record.
+
+### 2026-08-31 · C.8 clause 5 · THE ONE CLAUSE THAT NEVER GOT THE FLOOR
+`Add-PhaseFloorProbes` was applied to clauses 1, 2 and 7 and **not** to 5, whose
+`coverage.expected` was the number of `## U<n>` sections parsed out of WALKTHROUGH.md — the
+document under test. Deleting the six phase sections that name no check made clause 5 report
+**MET at "evaluated 2 of 2"** with no `not_evaluated` entry. The floor is applied now, unioned
+with whatever sections the walkthrough has; drill P8 constructs the trimmed document. This is
+the population class again, in the clause that did not get the fix — the shape was grepped for
+across the whole file afterwards.
+REVERT: drop the `Add-PhaseFloorProbes` call in `Test-Clause5`.
+
+### 2026-08-31 · C.8 clauses 1 and 5 · ONLY THE FIRST COMMAND AFTER EACH MARKER RAN
+`Get-WalkthroughRuns` captured the FIRST backtick span after each `**How to run:**`.
+WALKTHROUGH.md's U6 row names TWO commands under ONE marker and the second was never run — a
+verifier ran it by hand and it **FAILED** (`ModuleNotFoundError: sqlalchemy`; it needs the
+agent-bridge venv) while clause 5 reported `walkthrough-U6-check-1 = pass` and counted U6 fully
+evaluated. Every backtick span in a marker's own block is now a command, the block ending at
+the next bold label, heading, or blank line. **Drill step A3's fixture used two SEPARATE
+markers — a shape the real document does not use — which is precisely why it could not catch
+this**; it now uses the document's shape and A3b keeps the other one.
+On `work/dfudone` that second command is still red: the correction (venv interpreter,
+`17cfb29`) is on `refactor/ai-stack-cleanup` and is not merged here.
+REVERT: restore the single-span regex.
+
+### 2026-08-31 · C.8 clause 4 · AN EXEMPTION GRANTED BY ANY SENTENCE THAT MENTIONS IT
+The `work/pod-key` carve-out was granted by `$decForBranches.Contains($b)` — a raw substring
+search of DECISIONS.md — so ANY sentence containing that string granted it, **including one
+saying it must NOT be excused**; a verifier proved it by appending this note's own text. A
+carve-out now requires a STRUCTURED record: a `## ... clause 4 exclusion ...` entry carrying an
+`Excluded from C.8 clause 4: <branch>` directive naming the branch exactly. Drill X1 constructs
+both halves — the arguing-against-it prose (refused, with the reason recorded) and the record
+(granted). **There is still no such entry, so `work/pod-key` is counted.**
+REVERT: restore the `.Contains($b)` test (do not).
+
+### 2026-08-31 · C.8 clause 2 · UN-PARKING BY A LATER HEADING THAT SAID "CLOSED"
+Any later `## ` heading containing the phase id and CLOSED/CLOSES/DISCHARGED/UNPARKED closed a
+PARKED entry, regardless of what was closed. On this ledger that is live: **U4's PARKED entry
+was being discharged by "2026-08-30 · U4 clause 3 · final state — two residual defects closed"**,
+a heading about the CHECKER's clause 3. A parked entry is now closed only by a later entry that
+CITES it (`**Un-parks:** <the parked heading>`), and a citation matching two entries closes
+neither. **Outstanding went 1 → 2: U3's VALIDATION-PARKED and U4's PARKED.**
+REVERT: restore the heading-word test.
+
+### 2026-08-31 · C.8 clause 7 · TWO OF THE THREE ARTIFACTS WERE GRANTED BY A MENTION
+- The commit half passed on any commit whose message named the phase ANYWHERE and any
+  `*.ps1/py/ts/sql` ANYWHERE: `audit-trail-U1` was green on two commits **about this checker**,
+  neither of which says what was validated for U1. A commit now counts only when the artifact it
+  names is one the PHASE names (§2's column ∪ the walkthrough's How-to-run commands for it), and
+  a commit whose entire changed-file set is the done-authority and its drill discharges nothing.
+- The findings-note half counted any `*.md` in `documentation/notes` whose BODY matched `\bU3\b`,
+  so one unrelated note mentioning a phase in passing discharged that artifact. A note must now
+  name the phase in its FILENAME or in a HEADING.
+Consequence, and it is a report not a redefinition: **U0, U1, U3, U4, U5 and U7 name no runnable
+check anywhere** — neither §2's column nor a `How to run` line — so nothing can state "by which
+check" for them. U2 and U6 pass this clause honestly.
+REVERT: restore the two `-match` tests.
+
+### 2026-08-31 · C.8 · TWO FLOORS WERE READ BY A FIRST-MATCH REGEX OVER THE WHOLE PLAN
+`Get-PlanPhaseFloor` and `service-set-matches-plan` both located their clause with a lazy
+first-match regex over the entire file, so a decoy passage earlier in PLAN.md becomes what the
+floor is checked against. Both are now anchored inside §C.8 and REFUSE when the heading or the
+clause matches more than once (drill P6a/P6b). The service enumeration also truncated at the
+first `.`, silently dropping every item behind a service named after a period; a period now ends
+the sentence only when whitespace follows (drill P7).
+REVERT: restore the two regexes.
+
+### 2026-08-31 · C.8 clause 4 · THE DIRECT-CLIENT SET WAS INCOMPLETE AND SAID NOTHING
+`Get-DirectDbClients` matched only `^(DB_USER|PGUSER|POSTGRES_USER)=` or a `proto://user:` URI.
+**`open_notebook` reaches `openbrain-db` as `postgres` (rolsuper/rolbypassrls = t/t) via
+`OB1_DB_USER` and was never enumerated at all**, and **`openbrain-idea-refinery` carries
+`DB_HOST=openbrain-db` with no role variable and was silently skipped** — so the boundary's pass
+condition was decidable over an incomplete set with no record of what could not be determined.
+The alphabet now covers any prefixed role variable and any URI pointing at the host, a client
+whose role cannot be read is INDETERMINATE rather than absent, a role pg_roles does not answer
+for is INDETERMINATE too, and the pass note states the restriction (clients are identified from
+container ENVIRONMENT; a client that hardcodes the host is not visible). Live result:
+`service-rls-boundary` is **indeterminate**, naming `openbrain-idea-refinery`.
+**Drill step L4's else-branch asserted `$true`**, which is why it could not catch this; it now
+enumerates the network independently through Docker and requires EVERY container whose
+environment names the database to appear in clause 4's own detail lines — and it runs whether or
+not a bypassing client was found, because "none found" over an incomplete set is the answer it
+exists to distrust.
+REVERT: restore the three anchored patterns.
+
+### 2026-08-31 · method · THE BOLD SWALLOWS THE COLON
+The first version of the new exclusion directive matched `**Excluded from C.8 clause 4**:` while
+the record writes `**Excluded from C.8 clause 4:**` — the colon is INSIDE the emphasis. The grant
+silently never fired, and the drill's positive control is the only reason it was caught rather
+than shipped as "a gate that refuses everything". SIBLING of *a derived gate whose alphabet is
+too narrow*; the emphasis is now stripped before the directive is matched on its words.
+REVERT: n/a — method.
+
+### 2026-08-31 · process · A PATCH SCRIPT THAT PRINTED `ok` WAS NEVER RUN
+One of this round's edits was written to a file and never executed; the `ok` on the console came
+from the NEXT script in the same command line. `-SkipLive` runs stayed green because the affected
+code path is live-only, and it surfaced as `clause-4-threw` in the first full run. SIBLING of
+*stopping the read early then generalising*: the evidence for "the patch applied" was a success
+message that belonged to something else. What caught it was running the thing, not re-reading it.
+REVERT: n/a — process.
+
+### 2026-08-31 · convergence (§C.7) · ROUND 4 FOUND NO NEW CLASS
+Every finding above is a sibling of one of the three already on the record: *a checker deriving
+its population from the document under test* (clause 5's floor), *a claim wider than its
+evidence* (the first-command-only reader, the incomplete client set, the `$true` assertion), or
+*a substring standing in for a structure* (the table parser, the carve-out, the un-parking, the
+two commit/note halves, the two first-match regexes). **This is a claim for a verifier to try to
+break, not a conclusion.** If it holds, the convergence counter reaches 2 of 2.
