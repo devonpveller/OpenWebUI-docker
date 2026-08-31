@@ -1,0 +1,25 @@
+transport : docker-exec (little-coder), workspace /workspace
+focus     : https://github.com/anthropics/skills
+ownership : restored to 1000:1000 (sampled from the daemon's own clone)
+mirrored  : 2 file(s) into little-coder:/workspace
+task      : 01M1D29R98WMKJFZXSRSD0VB4B
+status    : done (outcome=unverified signal=None)
+changed   : 1 file(s) changed, 0 deleted
+copied    : 1 path(s) back to D:\Open WebUI\ai-stack\.claude\worktrees\wt-u4close\documentation\evidence\dfu-u4\stall\20260831T232534Z-little-coder-project\workspace
+restore   : re-focused on https://github.com/anthropics/skills
+
+--- the runner's answer ---
+Done. `normalize` is implemented in `stall-item/normalize.py`:
+
+```python
+def normalize(text):
+    return " ".join(text.split()).lower()
+```
+
+**Result: 2 of 3 tests pass.**
+
+- ✅ `test_collapses_internal_whitespace`
+- ✅ `test_trims_and_lowercases`
+- ❌ `test_trims_and_preserves_case` — **impossible to pass**, and this is by design. The test file's own docstring states the item is deliberately unsatisfiable: `test_trims_and_lowercases` and `test_trims_and_preserves_case` demand different outputs (`"gamma delta"` vs `"Gamma Delta"`) for the identical input `"  Gamma  Delta  "`. No pure function of one argument can return two values, so no implementation — including any I could write — can pass both. The file is a stall probe, and I was instructed not to modify it.
+
+The implementation satisfies the maximum possible subset of the contract (trim + collapse internal whitespace + lowercase), and the remaining failure is the exact stable signature the fixture is designed to produce. Stopping here as instructed.

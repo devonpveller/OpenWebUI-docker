@@ -213,6 +213,13 @@ def _run_one(q: "matrix_mod.Quadrant", cfg: Dict[str, Any], it: Dict[str, Any], 
             acceptance.append({
                 "criterion": crit.get("why") or crit["check"],
                 "check": cmd,
+                # The UNEXPANDED criterion, beside the expanded one. `check` is the exact
+                # command that ran and must stay that; it also embeds this machine's
+                # interpreter and this worktree's `guards.py`, so re-running it from a clone
+                # fails on a path rather than on the evidence. An auditor re-expands this
+                # against their own checkout - see
+                # scripts/checks/check_quadrant_evidence_reproduces.py `_runnable`.
+                "check_template": crit["check"],
                 "exit_code": proc.returncode,
                 "passed": proc.returncode == 0,
                 "output": (proc.stdout + proc.stderr)[-4000:],

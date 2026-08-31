@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -89,6 +90,37 @@ def prepare_target(q: "_matrix.Quadrant", cfg: Dict[str, Any], *, run_dir: Path,
     raise AdapterError(f"no target adapter for kind '{q.target_kind}'")
 
 
+def _rmtree_force(path: Path) -> None:
+    """Delete a tree that git wrote, and RAISE if anything survives.
+
+    Two facts make the obvious one-liner wrong on this platform, and both were measured
+    rather than anticipated (2026-08-31):
+
+      * git marks loose objects and packs READ-ONLY, and `shutil.rmtree` on Windows fails
+        on a read-only file. So the mode bit is cleared in an `onerror` hook and the delete
+        retried.
+      * `ignore_errors=True` would have swallowed exactly that failure, leaving the nested
+        repository in place while the caller believed it was gone. The first version of this
+        used it and the test below caught it - which is the whole reason the check is an
+        assertion about the FILESYSTEM afterwards and not about this call returning.
+    """
+    if not path.exists():
+        return
+
+    def _chmod_retry(func, target, _exc):
+        os.chmod(target, 0o700)
+        func(target)
+
+    # `onexc` replaced `onerror` in 3.12; this module supports both interpreters.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=lambda f, t, e: _chmod_retry(f, t, e))
+    else:  # pragma: no cover - exercised only on <3.12
+        shutil.rmtree(path, onerror=lambda f, t, e: _chmod_retry(f, t, e))
+    if path.exists():
+        raise AdapterError(f"could not remove the scratch repository at {path}; the "
+                           f"evidence directory would not be committable")
+
+
 def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None:
     """Leave the operator's repo exactly as it was found, without losing the evidence.
 
@@ -106,7 +138,28 @@ def finalize_target(q: "_matrix.Quadrant", *, run_dir: Path, repo: Path) -> None
     retained evidence even though it had genuinely passed when run. Evidence that cannot be
     re-checked is a record of a check, not a check. The kept set is therefore the union of
     the changed files and every path the PLANT MANIFEST names.
+
+    TARGET `project`: THE SCRATCH `.git` IS REMOVED, and that is an evidence-durability
+    requirement rather than tidiness (2026-08-31). A `project` workspace is a fresh
+    `git init` scaffold whose entire history is the one baseline commit this module writes;
+    everything unique about it is already in `manifest.json` (the planted paths) and in the
+    item digest (their bytes). Leaving `.git` there makes the run directory UNCOMMITTABLE -
+    `git add` on a tree containing a nested repository records a GITLINK to a commit that
+    exists in no remote, so a fresh clone gets an empty directory where the workspace was.
+    PLAN §C.6 makes the audit trail the deliverable's twin, and the U4 evidence set is the
+    proof of that: the four-quadrant comparison of 2026-08-30 lived in `.quadrant/` under a
+    per-session worktree, was ignored by `.gitignore`, and was destroyed with the worktree
+    when the branch merged - `python -m quadrant.cli report` then said COMPARED 0/4 over the
+    same claim of 4/4. Evidence a clone cannot see is not evidence, and evidence a
+    repository cannot accept is evidence on its way to being deleted.
+
+    The measurement is unaffected: `workspace_changes` and the acceptance commands both run
+    BEFORE this function (see `cli._run_one`), and no acceptance check in any shipped item
+    reads git - `guards.py` invokes no subprocess at all.
     """
+    if q.target_kind == "project":
+        _rmtree_force(run_dir / "workspace" / ".git")
+        return
     if q.target_kind != "self":
         return
     ws = run_dir / "workspace"

@@ -85,6 +85,39 @@ def _records(results_dir: Path) -> List[Path]:
     return sorted(results_dir.glob("*/record.json"))
 
 
+def _local_guards() -> str:
+    """`{guards}` as THIS checkout can invoke it."""
+    return '"{}" "{}"'.format(
+        sys.executable,
+        _repo_root() / "scripts" / "agent-harness" / "quadrant" / "guards.py")
+
+
+def _runnable(entry: Dict[str, Any], item_id: str) -> Tuple[str, str]:
+    """(command to re-run, how it was derived) for one acceptance entry.
+
+    WHY THE RECORDED COMMAND IS NOT ALWAYS THE ONE TO RUN — measured 2026-08-31, on the U4
+    evidence set this check exists to audit. `item.expand` writes the EXACT command that
+    ran, which is right for "re-run it yourself" and is an absolute path to an interpreter
+    and to `guards.py` inside the worktree that produced it. That worktree is gone the
+    moment the branch merges. Re-running the recorded string in a fresh clone therefore
+    fails on a missing file — the verdict reads NOT REPRODUCIBLE for a reason that is about
+    the path, not about the evidence, which is the false red that teaches a reader to stop
+    trusting the check.
+
+    So a record may also carry `check_template`: the UNEXPANDED criterion from the item
+    (`{guards} tests --item u4-baseline`). When it is present it is expanded against THIS
+    checkout and run; `check` is left untouched in the record as the historical fact of what
+    executed. When it is absent — every record written before 2026-08-31 — the recorded
+    command is used and the derivation says so, because a check that silently guessed a
+    substitution would be inventing evidence rather than re-deriving it.
+    """
+    tmpl = str(entry.get("check_template") or "").strip()
+    if tmpl:
+        return (tmpl.replace("{guards}", _local_guards()).replace("{item}", item_id),
+                "template re-expanded in this checkout")
+    return str(entry.get("check") or ""), "the command recorded at run time (machine-bound)"
+
+
 def verify_record(path: Path) -> Tuple[bool, List[str]]:
     """(ok, problems) for ONE record. Problems are sentences, not codes."""
     try:
@@ -122,8 +155,9 @@ def verify_record(path: Path) -> Tuple[bool, List[str]]:
     if not acc:
         return False, [f"{path}: status '{status}' with no acceptance entries to reproduce"]
 
+    item_id = str(rec.get("item") or "")
     for i, a in enumerate(acc):
-        cmd = str((a or {}).get("check") or "")
+        cmd, how = _runnable(a or {}, item_id)
         claimed = (a or {}).get("exit_code")
         if not cmd or not isinstance(claimed, int):
             problems.append(f"{path}: acceptance[{i}] has no command or no exit code to re-derive")
@@ -137,7 +171,7 @@ def verify_record(path: Path) -> Tuple[bool, List[str]]:
                 f"{path}: acceptance[{i}] recorded exit {claimed}, re-running it in the "
                 f"retained workspace gives exit {proc.returncode}. The verdict is not "
                 f"re-derivable from what the run kept.\n"
-                f"    $ {cmd}\n" + "\n".join(f"    {ln}" for ln in tail))
+                f"    $ {cmd}   [{how}]\n" + "\n".join(f"    {ln}" for ln in tail))
     return (not problems), problems
 
 
@@ -146,15 +180,27 @@ def _repo_root() -> Path:
     return here.parents[2]
 
 
+#: Where `--auto` looks for results sets. `.quadrant/` is the WORKING location (gitignored,
+#: per-checkout, thrown away with the worktree that made it); `documentation/evidence/` is
+#: the COMMITTED one. Both are searched, and the second is why the banked check still has
+#: something to audit in a fresh clone — added 2026-08-31 after the four-quadrant comparison
+#: that closed U4 was destroyed with its worktree, leaving a walkthrough row claiming 4/4
+#: over a `report` that answered COMPARED 0/4.
+DISCOVERY_ROOTS = (".quadrant", "documentation/evidence")
+
+
 def _discover(root: Path) -> List[Path]:
-    """Every results SET under `.quadrant/`: a directory that holds `*/record.json`."""
-    base = root / ".quadrant"
-    if not base.is_dir():
-        return []
-    out = []
-    for d in sorted(base.iterdir()):
-        if d.is_dir() and any(d.glob("*/record.json")):
-            out.append(d)
+    """Every results SET under a discovery root: a directory that holds `*/record.json`."""
+    out: List[Path] = []
+    for rel in DISCOVERY_ROOTS:
+        base = root / rel
+        if not base.is_dir():
+            continue
+        # One level of nesting under the root, then the set itself - `documentation/evidence`
+        # groups sets by the item they belong to (`dfu-u4/quadrant`), `.quadrant` does not.
+        for d in sorted(base.rglob("*")):
+            if d.is_dir() and any(d.glob("*/record.json")):
+                out.append(d)
     return out
 
 

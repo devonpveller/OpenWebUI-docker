@@ -157,6 +157,70 @@ def test_a_named_directory_that_does_not_exist_is_misuse_not_a_pass(tmp_path):
     assert res.returncode == 2
 
 
+def test_a_record_whose_recorded_command_died_with_its_worktree_re_derives_from_the_template(tmp_path):
+    """The defect that destroyed U4's first evidence set, one layer down.
+
+    `item.expand` records the EXACT command that ran, which embeds this machine's
+    interpreter and the producing WORKTREE's `guards.py`. Both are gone once that worktree
+    is removed, so an auditor in a fresh clone re-runs a path instead of the evidence and
+    gets a red that is about the filesystem. A record that also carries `check_template`
+    (the unexpanded criterion) is re-derivable anywhere.
+
+    RED WITHOUT THE FIX: the recorded `check` names an executable that does not exist, so
+    re-running it cannot return the recorded exit code and the set reads NOT REPRODUCIBLE.
+    """
+    results = make_set(tmp_path)
+    rec_path = next(results.glob("*/record.json"))
+    rec = json.loads(rec_path.read_text(encoding="utf-8"))
+    entry = rec["acceptance"][0]
+    entry["check_template"] = entry["check"]
+    entry["check"] = '"C:/gone-with-the-worktree/python.exe" -c "pass"'
+    rec_path.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+
+    res = run_check(str(results))
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "re-derived their verdict" in res.stdout
+
+
+def test_the_guards_placeholder_is_re_expanded_against_the_checking_checkout():
+    """`{guards}` must resolve to THIS checkout's guard runner, not the producing one."""
+    sys.path.insert(0, str(REPO / "scripts" / "checks"))
+    import check_quadrant_evidence_reproduces as chk  # noqa: PLC0415
+
+    cmd, how = chk._runnable({"check_template": "{guards} tests --item {item}",
+                              "check": "whatever ran on some other machine"}, "u4-baseline")
+    guards = REPO / "scripts" / "agent-harness" / "quadrant" / "guards.py"
+    assert str(guards) in cmd, cmd
+    assert "u4-baseline" in cmd and "{item}" not in cmd, cmd
+    assert "re-expanded" in how
+
+    # No template: the recorded command is used, and the derivation SAYS it is machine-bound
+    # rather than implying the same guarantee.
+    cmd2, how2 = chk._runnable({"check": "the recorded one"}, "u4-baseline")
+    assert cmd2 == "the recorded one" and "machine-bound" in how2
+
+
+def test_auto_discovery_reaches_the_committed_evidence_root(tmp_path):
+    """`--auto` must find the COMMITTED set, or the banked check audits nothing in a clone.
+
+    RED WITHOUT THE FIX: `_discover` looked only under `.quadrant/`, which `.gitignore`
+    excludes - so every set it could ever find was one a fresh clone does not have.
+    """
+    sys.path.insert(0, str(REPO / "scripts" / "checks"))
+    import check_quadrant_evidence_reproduces as chk  # noqa: PLC0415
+
+    committed = tmp_path / "documentation" / "evidence" / "dfu-u4" / "quadrant" / "run-1"
+    committed.mkdir(parents=True)
+    (committed / "record.json").write_text("{}", encoding="utf-8")
+    working = tmp_path / ".quadrant" / "runs" / "run-1"
+    working.mkdir(parents=True)
+    (working / "record.json").write_text("{}", encoding="utf-8")
+
+    found = {p.as_posix() for p in chk._discover(tmp_path)}
+    assert (tmp_path / "documentation" / "evidence" / "dfu-u4" / "quadrant").as_posix() in found, found
+    assert (tmp_path / ".quadrant" / "runs").as_posix() in found, found
+
+
 def test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere():
     """A durable check banked without its arguments exits 2 on every machine and teaches the
     line to ignore its own registry. The banked command must be the --auto form."""
