@@ -267,7 +267,14 @@ separator (a backslash-r eaten as an escape) in four places.
 
 ---
 
-# Round 2 - three refutations, and the recall that named the class before I wrote a line
+# Round 2 - three refutations, and a recall that CONFIRMED a class already in hand
+
+> **Heading corrected in round 3.** It read *"the recall that named the class before I wrote
+> a line"*, which is wider than the evidence: the class was named in the send-back
+> refutation and typed verbatim into the query, so the plane confirmed a class already in
+> hand rather than naming it first. What it genuinely contributed is below - the constraint
+> to sweep the SHAPE rather than fix the instance. Clause 8 rests on exactly this
+> distinction.
 
 ## Step zero: what the memory plane said, and what I did differently because of it
 
@@ -354,6 +361,14 @@ visibility of **both** FKs (`memory_id` via `ob_memory_visible`, `trace_id` via 
 invoker-bound `EXISTS` against the traces table, because a trace carries the caller's query
 text). Both NULL arms are a foreign key being absent, not a label being absent - both FKs are
 `ON DELETE SET NULL`, and 12 of the 67 live rows never had a `memory_id`.
+
+> **REFUTED AND REPLACED IN ROUND 3, and the sentence above is wrong twice.** The NULL count is
+> **21**, not 12, and none of those rows "never had" a `memory_id`: their event types are
+> `memory_written` (12), `memory_confirmed` (5) and `memory_used` (4), every one of which names
+> a memory by definition, so all 21 are ORPHANS of deleted memories. `ON DELETE SET NULL` is not
+> what makes the arm safe - it is what ARMS it. Delete the parent and the audit row, payload
+> free text and all, becomes readable. Round 3 closes the table to the unauthenticated door
+> instead; see below.
 
 ## R2 - views, the same boundary one relkind across
 
@@ -550,3 +565,369 @@ either corpus** — independently re-checked here as `thoughts_personal=0`,
 **Class 4 end state:** synthetic fixtures only, additive migration only, nothing dropped, both
 throwaways and their networks removed (`0` leftover containers, `0` leftover networks), and
 zero personal rows anywhere in production.
+
+---
+
+# Round 3 - three refutations, one defect, and the sweep moves from relkinds to mechanisms
+
+## Step zero: what the memory plane said, and when - stated precisely
+
+Two consultations, and they are not the same thing.
+
+**Before any SQL was written**, the plane was asked in my own words, through the Open Brain
+search tool: *"RLS policy NULL column arm permits, default deny, Postgres row level security
+leak"* and *"enumerating what to protect trails the mechanisms; fail closed default deny design
+principle"*. The first returned **nothing**. The second returned one 2026-06-08 memory about
+agent-org model risk, unrelated. **The plane, asked at the start, had nothing to say about this
+class.** That is a real outcome and it is recorded as one.
+
+**After the SQL was written and validated**, `scripts/checks/recall-sibling-class.ps1` (on
+`work/c8plane`) was run against the ops door with the defect stated as the query:
+
+- **Outcome:** `RECALL_OUTCOME=INFORMED returned=5`
+- **Trace:** `60666580-4c2e-4814-bae4-154820114f13`
+- **Returned:** `1be66284` (class 2, a guard deciding by exception), `9bdae627` (class 12, an
+  exemption resting on a check the guard declines to make), `ded7af3f` (class 1, a check green
+  while checking nothing), `e0af6087` (class 16, derived data escaping a row boundary),
+  `05cccbfe` (class 13, a checker deriving its population from the document under test).
+
+**What it changed, and what it did not - reported to the plane, both ways.**
+
+`05cccbfe` (class 13) **changed the code**, and this is the one clean instance. Section 7's
+mechanism sweeps had a **hardcoded** `v_scope` array of thirteen table names. That is the class
+one step removed: govern a new table in 180 tomorrow and the absence, uniqueness and
+foreign-key sweeps would report clean having never looked at it, with coverage still reading
+N of N. `v_scope` is now **derived** - every FORCE-RLS table in `public`, with tier B subtracted
+by name and with its reason - and the memory's own remedy is applied: a **floor** taken from
+what this file and 180 are specified to govern is checked back against the derived population,
+so a subject leaving the population is a failure rather than a smaller N. Adversarial case F
+below is the proof: a brand-new force-RLS table with a wide policy and **no** foreign key into
+the corpus - invisible to section 0's FK closure - is now caught.
+
+`ded7af3f` (class 1) **changed the runbook**. The by-hand section-7(h) block printed
+`arms that permit on absence: ` from a `COALESCE` over `array_to_string`, which returns the
+**empty string** for a clean run - indistinguishable from a query that matched nothing. It now
+prints an explicit `NONE` **and** the number of policies actually examined. It is also why the
+closed audit door's control is stated rather than assumed: both arms read 0 through that door
+**by design**, so the control that the door is alive is the `thoughts` probe in the same
+session, and the control that the rows exist is the superuser count.
+
+`1be66284` (class 2 - "an unhandled input falls through to a PASS, so 'could not check' is
+recorded as 'fine'") is **the same class as this round's defect in different vocabulary**: a
+NULL plane column falling through to VISIBLE. It was reported **IGNORED**, not used, and the
+distinction matters more than the credit: the class had already been named in the send-back
+refutation that started this round, and the SQL was already written when the recall ran.
+
+**And a correction to round 2's heading.** Round 2's section was titled *"the recall that named
+the class before I wrote a line"*. That is wider than its evidence. The class was named in the
+send-back refutation and typed verbatim into the query; the plane **confirmed a class already in
+hand**, and its contribution was to generalise it (the "sweep the shape, do not fix the
+instance" constraint) rather than to name it first. The heading is corrected in place. Clause 8
+rests on exactly this distinction, and overstating it here would corrupt the only evidence the
+clause has.
+
+## R1 - `idea_revisions`: an unauthenticated existence oracle over a governed row
+
+`WITH CHECK` was `(thought_id IS NULL OR ob_thought_visible(thought_id))`. **Omit the column and
+the NULL arm passes**, so RLS never refuses - and `idea_revisions_pkey (idea_id, revision)`,
+which no policy binds, answers instead. No guessing is needed: `ideas` is ungoverned by design
+(section 0 registers it as a separate corpus), so `GET /ideas` hands over the ids.
+
+Measured as `service_role` on a throwaway built from the compose-derived 28-file chain, with an
+ops positive control on **both** arms:
+
+```
+INSERT (personal idea, revision 1)  -> 23505 duplicate key on idea_revisions_pkey
+INSERT (personal idea, revision 99) -> OK
+INSERT (ops idea,      revision 1)  -> 23505 duplicate key            [CONTROL]
+INSERT (ops idea,      revision 98) -> OK                             [CONTROL]
+read idea_revisions                 -> 0 personal / 1 ops
+```
+
+The last line is the point: **the read policy was working and the unique index was undoing it.**
+
+Round 1's defence of that arm - *"the NULL arm is a FOREIGN KEY being absent, not a LABEL being
+absent; a revision with no thought_id is not derived from the corpus"* - also fails on its own
+terms. The foreign key is `ON DELETE SET NULL`, so a revision that **was** derived from a thought
+orphans to `thought_id IS NULL` when the thought is deleted, and its `summary` - real content,
+not a hash - becomes readable. Absence never meant "never had one". It meant "cannot be
+established".
+
+**Fixed** as the property: `thought_id IS NOT NULL AND ob_thought_visible(thought_id)` in both
+halves of both policies, so `WITH CHECK` refuses at `42501` **before** the primary key is
+consulted. Ops impact measured first: all 37 live rows carry a `thought_id`, so nothing readable
+today becomes unreadable, and the writer (`openbrain-idea-refinery`) connects as `postgres`.
+
+## R2 - `agent_memory_audit_events`: the same shape, armed by `ON DELETE SET NULL`
+
+Round 2's policy was `(memory_id IS NULL OR ob_memory_visible(memory_id)) AND (trace_id IS NULL
+OR EXISTS(...))`. It held **only while the parent lived**:
+
+```
+PHASE1 live parent   personal 0 / ops 1     <- the round 2 fix working
+  RESET ROLE; DELETE FROM agent_memories WHERE summary = 'U5G3-MEM-PERSONAL';
+PHASE2 orphaned      personal 1 / ops 1     <- LEAK
+  memory_id=NULL trace_id=NULL payload={"note": "U5G3 personal note text"}
+```
+
+**And round 2's evidence for that arm was mis-measured, which I checked rather than relayed.**
+The file said "12 of the 67 live audit rows have never had a `memory_id` at all". At the same
+snapshot the total is right and the NULL count is **21**, not 12 - and "never had" is false:
+
+| event_type of the NULL-`memory_id` rows | count |
+|---|---|
+| `memory_written` | 12 |
+| `memory_confirmed` | 5 |
+| `memory_used` | 4 |
+
+Every one of those events names a memory by definition, so all 21 are **orphans** of deleted
+memories - precisely the case the arm permitted. The companion claim, that "a row whose parent
+has been deleted has nothing left to protect", was asserted rather than measured and is false:
+one live orphan reads `{"note": "synthetic fixture, confirmed to prove the review gate"}`.
+
+**Fixed by closing the table to the unauthenticated door**, read and write, rather than by
+patching one arm - and the closure is argued from measurement, not preference:
+
+- `authenticated` holds **no grant at all** on it;
+- the only PostgREST reader/writer in either repository,
+  `OB1/integrations/agent-memory-api/index.ts`, appears in **no compose file** - it is a Supabase
+  Edge Function, not deployed here;
+- 180 left it wide to keep the `access_refused` rows readable as drill evidence, and **both**
+  readers of that evidence - `scripts/checks/smoke-agent-memory.ps1` and
+  `scripts/checks/dfu-done.ps1` - reach it with `docker exec ... psql` as `postgres`. The reason
+  180 gave is not a reason that involves this door.
+
+## R3 - transitivity: the walk was one edge deep
+
+Section 6b joined `pg_rewrite` to `pg_depend` **once**, so it saw a matview sitting directly on a
+table and nothing else. One ordinary view in between and the claim in the file - "a materialized
+view over a force-RLS relation is refused outright rather than skipped" - was true only of
+adjacency. Measured at the round 2 file:
+
+```
+CREATE MATERIALIZED VIEW u5g3_transitive_mv AS SELECT * FROM ideas_owed_research;
+   (ideas_owed_research JOINs idea_revisions, which round 1 governs and forces)
+re-apply the round 2 migration       -> COMMIT, "post-conditions hold on 9 table(s)"
+SET ROLE service_role;
+  SELECT ... FROM u5g3_transitive_mv  -> 1 personal / 1 ops     <- LEAK
+  SELECT ... FROM ideas_owed_research -> 0 personal / 1 ops     <- the view is bound
+```
+
+**Fixed** with a recursive `pg_depend`/`pg_rewrite` walk, in section 6b and again as section
+7(l), which also covers an owner-rights view in **any** schema, not only `public`.
+
+## R4 - the one the assertion found, not the schema read
+
+`agent_memory_recall_traces` carried `USING (ob_trace_on_ops_plane(request_payload))
+WITH CHECK (true)` from 180, with the comment *"WITH CHECK stays open so that writing a trace
+never fails"*. An unconditional `WITH CHECK` is an arm that permits on absence written shorter,
+on a table that holds the caller's recall **query text**, next to a unique `request_id` no policy
+binds. Nobody had read it as an absence arm because it does not look like one; section 7(h)
+found it on its first run. Narrowed to the `USING` predicate -
+`ob_trace_on_ops_plane(NULL)` is FALSE, so absence denies with no extra arm.
+
+## The fix is one change, and section 7 now asserts properties
+
+**A row whose plane cannot be established is not visible and is not writable, and nothing
+reaches a governed relation around the boundary.**
+
+Round 1 swept tables. Round 2 swept relkinds. The leaks came from **mechanisms**: unique
+indexes, foreign-key triggers, `ON DELETE SET NULL` and transitive dependency. So section 7
+stopped re-deriving a list of the state and now asserts, over a **derived** population:
+
+| | property | how it is derived |
+|---|---|---|
+| (h) | no policy arm permits a row whose every column is NULL | each `pg_policies.qual` / `.with_check` is EXECUTED against `(NULL::public.t).*` |
+| (i) | no unique constraint on a governed relation is an existence oracle | safe only if its columns contain the plane columns (from `pg_depend`'s policy-to-column edges), **or** no door role holds INSERT/UPDATE, **or** every column is a uuid defaulted to `gen_random_uuid()`; anything else must carry an `ORACLE-DISPOSITION` comment |
+| (j) | no FK into a governed parent is unguarded | every referencing column must appear in the `WITH CHECK` of every permissive write policy on the child |
+| (k) | the `SECURITY DEFINER` set is exactly the classified one | `pg_proc.prosecdef` in `public` minus the two section 4 accounts for |
+| (l) | nothing reaches a FORCE-RLS table around the boundary | recursive `pg_rewrite`/`pg_depend` walk, matviews and non-invoker views, any schema |
+
+And the write door closes on what nothing writes through it (section 6a): `INSERT`, `UPDATE`
+and `DELETE` withdrawn from `service_role` on the **derived** agent-memory corpus
+(`agent_memories`, its FK children, and their governed parents) and on `idea_revisions`.
+`SELECT` is untouched everywhere. A caller that cannot write cannot provoke a unique index or a
+foreign-key trigger, which is the same defence applied at the privilege layer instead of one
+predicate at a time.
+
+**The two oracles this file does NOT close, written down rather than left silent.**
+`thoughts_pkey` and `thought_edges_pkey` are surrogate keys no policy mentions on tables the
+door must be able to write, so `23505`-versus-success is an existence oracle over an id. The fix
+is to withdraw the caller's ability to NAME the column - `REVOKE INSERT` then
+`GRANT INSERT (every other column)`, because a table-level grant subsumes column grants - and
+that breaks, silently and at runtime, every `service_role` writer of any column added later.
+Columns **are** added here (`init-agent-memory-embedding.sql` adds one), so this is a live
+hazard rather than a hypothetical. Both carry an `ORACLE-DISPOSITION` COMMENT in the database
+saying so; deleting those two statements from section 6a2 turns section 7(i) RED, measured
+(adversarial case G).
+
+## A defect this round created and caught, worth more than the ones it fixed
+
+The first version of section 6a derived the agent-memory corpus as "agent_memories, its FK
+children, and their governed parents" with no exclusion. While testing adversarial case D, a
+probe added `u5g3_mem uuid REFERENCES agent_memories(id)` to `thought_entities`. That made
+`thought_entities` a child, and the parent arm then reached `thoughts` - so the next apply
+**stripped INSERT/UPDATE/DELETE from `thought_entities` and `thoughts`**, the entity worker and
+the ingestion path, silently, with a COMMIT.
+
+It surfaced only because adversarial case D **failed to fire** and I went looking for why - the
+gate had already revoked the privilege its own predicate reads. Two changes came out of it:
+children that carry a foreign key into `thoughts` are excluded from the corpus (they belong to
+the corpus sections 2 and 3 govern, which has a live write path), and section 6a now carries a
+**gate on the gate** - if the derivation ever reaches a relation whose write path this file
+deliberately preserves, it RAISES instead of revoking. Adversarial case E fires it.
+
+## A live-versus-fresh drift the mechanism gates made visible
+
+The uniqueness and FK gates read **grants**, so they behave differently in the two places the
+two-place invariant covers. A fresh volume built from the 28-file chain gives `service_role`
+only `SELECT` on `thoughts` and `thought_entities`; **production gives it the full
+DELETE/INSERT/SELECT/UPDATE set.** Nothing in the chain grants those, so they were granted to
+the live database by something outside it.
+
+A GREEN measured on a fresh volume would therefore not have transferred: on the throwaway,
+`thoughts_pkey` escapes gate (i) because the door cannot write the table, while on production it
+does not. **The validating run replicates production's grants onto the throwaway before it
+starts**, and the run prints them so the substitution is visible rather than assumed. The drift
+itself is open item 7 below.
+
+## The evidence
+
+RED before GREEN on a genuinely fresh throwaway (`pgvector/pgvector:pg16`, container
+`wt-u5g3f-db`, own network `wt-u5g3-net`, never attached to an `ai-stack_*` anchor network),
+built from the initdb chain **derived from `OB1/docker/docker-compose.yml`** with the staged
+count asserted against the compose count (**28 mentions = 28 pairs = 28 staged**), synthetic
+fixtures only. The RED baseline is the round 2 file **verbatim from git** (`OB1` `53f0880`,
+byte-compared before use).
+
+| probe | RED (round 2 file) | GREEN (round 3) |
+|---|---|---|
+| R1a `idea_revisions` insert, existing personal revision | **23505** | `42501` |
+| R1b same, absent revision | **OK** | `42501` |
+| R1c ops CONTROL, existing revision | 23505 | `42501` |
+| R1d ops CONTROL, absent revision | OK | `42501` |
+| R1e `idea_revisions` read | 0 personal / 1 ops | 0 personal / 1 ops |
+| P1f orphan revisions (`thought_id` NULL) visible | **4** | **0** |
+| R2 audit rows, live parent | 0 personal / 1 ops | 0 personal / 0 ops |
+| R2 audit rows, **orphaned** parent | **1 personal** / 1 ops | **0** personal / 0 ops |
+| R3 matview one view from `idea_revisions` | **1 personal** / 1 ops | migration REFUSES |
+| P2b audit write through the door | (open) | `42501` |
+| P4a recall-trace write through the door | (open) | `42501` |
+| P5a `thoughts` / P5b `ideas_owed_research` | 0 personal / 1 ops | 0 personal / 1 ops |
+
+**The controls are positive and they are named.** `C1` (superuser sees 1 personal / 1 ops audit
+rows) proves the fixtures exist; `C2` the same for `idea_revisions`; `C3` that the real writer
+still writes. For the **closed** audit door both arms read 0 by design, so the control that the
+door itself is alive is `P5a` in the same session on the same connection - it returns the ops
+thought. A door that returned nothing anywhere would be indeterminate, not a pass.
+
+**The policy closes the oracle on its own**, independently of the withdrawn grant - measured by
+re-granting `INSERT` inside a transaction that is rolled back:
+
+```
+Q1a omit thought_id, existing personal revision  -> 42501 row-level security
+Q1b omit thought_id, absent revision             -> 42501 row-level security
+Q1c a HIDDEN thought_id named                    -> 42501 row-level security
+Q1d a VISIBLE ops thought_id CONTROL             -> OK
+Q2a trace write with no enforced_exposure        -> 42501 row-level security
+Q2b trace write, enforced_exposure ops CONTROL   -> OK
+```
+
+**Ops is unbroken**, exercised as `service_role` in the entity-extraction worker's own shape and
+rolled back: the queue row is visible, claimed, an entity written, a `thought_entities` row
+written, an `edges` row written, the queue marked done, a second ops thought written, and
+`thought_edges_upsert` - now INVOKER - called successfully. `W9` proves the same rpc still
+REFUSES an edge with a hidden endpoint (`42501`).
+
+**Nine adversarial cases, each RED for its own reason:**
+
+| | case | caught by |
+|---|---|---|
+| A | a NULL-permitting arm re-introduced on a 180 policy | 7(h) |
+| B | a new unique constraint with no disposition | 7(i) |
+| C | a new `SECURITY DEFINER` function | 7(k) |
+| D | an unguarded FK into a governed parent | 7(j) |
+| E | the corpus derivation reaching a table whose write path is preserved | 6a's gate on the gate |
+| F | a new FORCE-RLS table with a wide policy and **no** FK into the corpus | 7(h) over the derived population |
+| G | the two `ORACLE-DISPOSITION` statements deleted from the file | 7(i) |
+| H | a matview one view away from a governed table | 6b, transitively |
+| I | a brand-new owner-rights view over `idea_revisions` | 6b's sweep: 1 personal -> 0, ops control 1 |
+
+**Idempotence:** three consecutive applies COMMIT. **Revert round trip:** GREEN -> revert ->
+every RED returns (the oracle answers `23505`, the orphan audit row reappears, the four orphan
+revisions become visible again, the trace write succeeds) -> re-apply -> GREEN. **Full chain on
+a genuinely fresh volume:** 28 files, no errors, all three NOTICEs. **`test-quartz4-offline.ps1`:
+ALL OFFLINE CHECKS PASSED**, including the compose-derived chain and the agent-memory review
+suite that writes four audit events (as `postgres`, which is why the write withdrawal does not
+touch it).
+
+**Nothing was applied to the live database.** Production still runs round 1 and therefore still
+carries every finding round 2 and round 3 fix. The two-place invariant is carried by the new
+`PROMOTION-RUNBOOK.md` section, whose verify-by-query blocks were **executed** against the
+throwaway rather than written.
+
+## C.7b discipline, and the arbiter's verdict
+
+**Rebased first, re-run after, sha recorded.** The work line moved by one documentation commit
+(`b618591`, C.8 clause 8) during the round; the branch was rebased onto it **before** the
+validating run.
+
+| what | sha |
+|---|---|
+| work line rebased onto | `b6185915980462dcb65e189b96770db214f26751` |
+| `work/u5graph` after rebase, **the sha the suite ran at** | `6531459c766af21be78d04dec427afc520547add` |
+| OB1 commit the gitlink pins | `49d2e3d12f36f327b40fd191b1ed67cf3e646a8e` (pushed to `origin/work/u5graph-plane-rls` BEFORE the bump) |
+| OB1 commit the line pinned before | `53f0880748555b2bdb970b7d5365f1d86c9d077c` |
+| round 2's RED baseline, byte-compared from git | `53f0880:docker/init-graph-plane-rls.sql` |
+
+One checkout (`.claude/worktrees/wt-u5graph`), one suite. The live plane was held under an
+`open-brain` lease for the `dfu-done` run and released after it.
+
+### `dfu-done.ps1 -Only 3` - the arbiter, run at `6531459`
+
+**Verdict: clause 3 UNMET, board FAILED.** Reported, not worked around. The four subjects that
+hold it open are the **same four as round 2**, and none is caused by this round:
+
+| subject | verdict | why |
+|---|---|---|
+| `door-openbrain-mcp-door` | **fail** | returns the personal fixture; connects as `postgres` (rolsuper/rolbypassrls = t/t) |
+| `door-cloud-search-thoughts` | **fail** | returns the personal fixture |
+| `door-wiki-compiler-output` | indeterminate | named manual check, no recorded result |
+| `door-mcp-read-tools` | indeterminate | returned neither the fixture nor its ops twin - with no positive control it refuses to call itself a pass |
+
+Both failures are round 1's open item 1 verbatim: RLS binds no superuser. What the run **does**
+confirm is that round 3 broke nothing - every automated door and predicate probe still passes
+with a live positive control, and `corpus-predicate-source-on-work-line` passes citing the new
+pin `49d2e3d`. And the decisive point is unchanged from round 2: **clause 3 measures the LIVE
+database, and the live database still runs round 1**, so it cannot reflect this round either way.
+
+**Class 4 end state**, verified after the run: production shows `thoughts_personal=0`,
+`memories_personal=0` against 13,001 thoughts and 21 memories; no `DFU-DONE-` or `U5G3` fixture
+row remains in either corpus; both throwaways and their network removed (`0` leftover
+containers, `0` leftover networks); the migration drops no table, column, view or row.
+
+## Open items - rounds 1 and 2's stand, plus three
+
+7. **The live database has grants the initdb chain does not give.** `service_role` holds
+   `INSERT/UPDATE/DELETE` on `thoughts` and `thought_entities` in production and only `SELECT`
+   on a fresh volume built from the same 28 files. Nothing in the chain grants them. That is the
+   two-place invariant failing in the **privilege** dimension, and it is exactly the dimension
+   this round's gates read, so it changes what those gates conclude. Not fixed here: deciding
+   which of the two is correct is a separate call (production's grants may be load-bearing for
+   the ingestion path, in which case the chain is what is wrong).
+8. **`agent_memory_recall_items` still discloses cross-plane existence on the read side.** Its
+   policy is `ob_memory_visible(memory_id)` with no arm for `trace_id`, so an item naming an
+   **ops** memory is visible even when the trace that returned it is personal - "this ops memory
+   was returned in a recall you cannot see". Measured live: 0 of 75 traces are on the ops plane,
+   so all 25 items would become invisible if the arm were added, and no consumer of that
+   visibility could be found. Left alone deliberately rather than narrowed blind; it is 180's
+   table and the change wants its own measurement of who reads it. The **write**-side oracle on
+   the same table is closed by section 6a.
+9. **`agent_memory_report_usage` writes an audit event and never sets
+   `agent_memory_recall_items.used`.** Not this item's defect - `recall-sibling-class.ps1` prints
+   the same warning - but it is the reason clause 8's evidence has to be read out of two places.
+10. **`wiki_pages` drifts and was in a column of identity checks.** Round 1 recorded `47987`; it
+   measured `47981` on 2026-08-31 and `47982` an hour later, with nothing having touched it,
+   because the compiler writes continuously. It has been moved out of the ops-path identity
+   block in the runbook and is now read separately and labelled - a member that moves on its own
+   weakens every member that does not.
