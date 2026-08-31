@@ -14,8 +14,18 @@
 # the reader was broken for an unrelated reason. So it builds TWO throwaway databases from the
 # SAME derived initdb chain:
 #
-#   RED   - the chain MINUS init-agent-memory-rls.sql. This is production's schema TODAY.
+#   RED   - the chain MINUS every boundary migration (180, 190, 195, 200). This is the
+#           schema as it stood before this effort touched it.
 #   GREEN - the full chain.
+#
+# THE RED USED TO BE "THE CHAIN MINUS init-agent-memory-rls.sql" AND THAT STOPPED BEING A RED.
+# When the boundary was one file, removing it removed the boundary. It is now four - 180
+# (policies + roles + views), 190 (the corpus predicate closes), 195 (DFU C.9 H3: exposure
+# becomes a NOT NULL CHECKed COLUMN and the predicates read it) and 200 (the derived graph) -
+# and 195 alone installs a working boundary on `thoughts` and `agent_memories`. A red that
+# removed only 180 would have had 195's policies in it and would have reported "no leak" for
+# the best possible reason and the worst possible one at the same time. The set is derived
+# from ONE list below so it cannot drift file by file.
 #
 # The same fixtures are planted in both by the same SQL, and the same queries are run against
 # both. A check only passes when RED LEAKS and GREEN DOES NOT. If a fixture fails to land, red
@@ -32,6 +42,18 @@
 #     carelessly creates the bypass the migration exists to close.
 #   * SET LOCAL vs SET - the tenancy variable must not survive its transaction, or a pooled
 #     connection hands one request's identity to the next.
+#   * THE PERSONAL POLICY'S ROLE - `agent_memories_personal_plane` must be granted TO
+#     ob_plane_personal and NOT to service_role. Granted to service_role it still "works",
+#     because ob_plane_personal is a member of service_role - and it also lets ANY
+#     service_role session read a personal row by naming a tenant, since `ob.user_id` is an
+#     ordinary GUC any role may set. This section exists because the boundary had drifted
+#     exactly that way and nothing went red; see documentation/notes/u8h3-findings.md.
+#
+# AND THE WRITE CONTRACT (DFU C.9 H3, operator 2026-08-31), which is a different property
+# from any of the above: the DATABASE must REFUSE a write whose exposure is ABSENT and one
+# whose exposure is MALFORMED. Section 3b attempts both, against both tables, as the
+# superuser - because NOT NULL and CHECK bind a superuser where RLS does not, and a check
+# that only proved it for a non-superuser would be proving the weaker half.
 #
 # ------------------------------------------------------------------------------------------
 # NO REAL PERSONAL DATA, EVER. Class 4 of the decision ladder.
@@ -136,22 +158,31 @@ Section "two throwaway databases from the SAME derived initdb chain, one without
 $compose = Join-Path $Repo "OB1\docker\docker-compose.yml"
 $chain = Get-ObInitChain -ComposePath $compose
 if ($chain.Count -lt 1) { Fail "could not derive the initdb chain from compose"; throw "no chain" }
-$MIGRATION = "init-agent-memory-rls.sql"
-if (-not ($chain | Where-Object { $_[0] -eq $MIGRATION })) {
-    Fail "$MIGRATION is not in the initdb chain - a fresh volume would never get it"
+# THE BOUNDARY, as ONE list. Every file here is removed to make the RED, and every one is
+# asserted to be mounted, so a migration that quietly stopped being in compose fails this run
+# instead of silently shrinking the red.
+$BOUNDARY = @(
+    "init-agent-memory-rls.sql",              # 180 - policies, roles, FORCE, views
+    "init-agent-memory-corpus-failclosed.sql",# 190 - the corpus predicate stops defaulting open
+    "init-agent-memory-exposure-column.sql",  # 195 - DFU C.9 H3: exposure becomes a column
+    "init-graph-plane-rls.sql"                # 200 - the derived graph
+)
+$missingMig = @($BOUNDARY | Where-Object { $f = $_; -not ($chain | Where-Object { $_[0] -eq $f }) })
+if ($missingMig.Count -gt 0) {
+    Fail "boundary migration(s) not in the initdb chain - a fresh volume would never get them: $($missingMig -join ', ')"
     throw "migration not mounted"
 }
-Pass "the chain is derived from compose ($($chain.Count) migrations) and includes $MIGRATION"
+Pass "the chain is derived from compose ($($chain.Count) migrations) and includes all $($BOUNDARY.Count) boundary files: $($BOUNDARY -join ', ')"
 
 $greenDir = Join-Path $env:TEMP "u5rls-green-$RunId"
 $redDir   = Join-Path $env:TEMP "u5rls-red-$RunId"
 $nGreen = Copy-ObInitChain -Chain $chain -SourceDir (Join-Path $Repo "OB1\docker") -TargetDir $greenDir
-$redChain = @($chain | Where-Object { $_[0] -ne $MIGRATION })
+$redChain = @($chain | Where-Object { $BOUNDARY -notcontains $_[0] })
 $nRed   = Copy-ObInitChain -Chain $redChain -SourceDir (Join-Path $Repo "OB1\docker") -TargetDir $redDir
-if ($nGreen -eq $chain.Count -and $nRed -eq $chain.Count - 1) {
-    Pass "staged GREEN ($nGreen migrations) and RED ($nRed - the chain MINUS the migration)"
+if ($nGreen -eq $chain.Count -and $nRed -eq $chain.Count - $BOUNDARY.Count) {
+    Pass "staged GREEN ($nGreen migrations) and RED ($nRed - the chain MINUS all $($BOUNDARY.Count) boundary files)"
 } else {
-    Fail "staging mismatch: green $nGreen/$($chain.Count), red $nRed/$($chain.Count - 1) - a mount names a missing file"
+    Fail "staging mismatch: green $nGreen/$($chain.Count), red $nRed/$($chain.Count - $BOUNDARY.Count) - a mount names a missing file"
     throw "staging"
 }
 
@@ -196,16 +227,43 @@ Section "a SYNTHETIC personal fixture, and an ops control beside it"
 # The ops control exists so that "the personal row is absent" cannot pass because the reader
 # returned nothing at all. Every absence assertion below is paired with the presence of the
 # control in the same result set.
+# ONE fixture text for both databases, and it ASKS THE SCHEMA which columns exist rather
+# than being written twice. RED has no `exposure` column (195 is not in it) and GREEN's is
+# NOT NULL, so a single static INSERT cannot work in both - and two hand-written fixtures
+# would let the comparison drift into "the two databases got different rows".
+#
+# THE LEGACY UNLABELLED ROW IS PLANTED ONLY IN RED, and that is the point rather than a
+# concession: after H3 an unlabelled thought is not a row the database will accept. Section
+# 3b proves that directly, and section 3 asserts here that RED HAS one so the ops-visibility
+# comparison still has its subject.
 $fixture = @"
-INSERT INTO thoughts (id, content, metadata) VALUES
-  (900001, '$OPSTEXT', '{"exposure":"ops"}'::jsonb),
-  (900002, '$PERSON',  '{"exposure":"personal"}'::jsonb),
-  (900003, '$MARKER-LEGACY-UNLABELLED', '{}'::jsonb);
-INSERT INTO agent_memories (id, thought_id, workspace_id, memory_type, summary, content, metadata) VALUES
-  ('11111111-1111-1111-1111-111111111111', 900001, 'ws-$RunId', 'decision',
-   '$MARKER ops summary', '$OPSTEXT', '{"exposure":"ops"}'::jsonb),
-  ('22222222-2222-2222-2222-222222222222', 900002, 'ws-$RunId', 'decision',
-   '$MARKER personal summary', '$PERSON', '{"exposure":"personal"}'::jsonb);
+DO `$fx`$
+DECLARE has_col BOOLEAN := EXISTS (
+  SELECT 1 FROM information_schema.columns
+   WHERE table_schema='public' AND table_name='thoughts' AND column_name='exposure');
+BEGIN
+  IF has_col THEN
+    INSERT INTO thoughts (id, content, metadata, exposure) VALUES
+      (900001, '$OPSTEXT', '{"exposure":"ops"}'::jsonb, 'ops'),
+      (900002, '$PERSON',  '{"exposure":"personal"}'::jsonb, 'personal');
+    INSERT INTO agent_memories (id, thought_id, workspace_id, memory_type, summary, content, metadata, exposure) VALUES
+      ('11111111-1111-1111-1111-111111111111', 900001, 'ws-$RunId', 'decision',
+       '$MARKER ops summary', '$OPSTEXT', '{"exposure":"ops"}'::jsonb, 'ops'),
+      ('22222222-2222-2222-2222-222222222222', 900002, 'ws-$RunId', 'decision',
+       '$MARKER personal summary', '$PERSON', '{"exposure":"personal"}'::jsonb, 'personal');
+  ELSE
+    INSERT INTO thoughts (id, content, metadata) VALUES
+      (900001, '$OPSTEXT', '{"exposure":"ops"}'::jsonb),
+      (900002, '$PERSON',  '{"exposure":"personal"}'::jsonb),
+      (900003, '$MARKER-LEGACY-UNLABELLED', '{}'::jsonb);
+    INSERT INTO agent_memories (id, thought_id, workspace_id, memory_type, summary, content, metadata) VALUES
+      ('11111111-1111-1111-1111-111111111111', 900001, 'ws-$RunId', 'decision',
+       '$MARKER ops summary', '$OPSTEXT', '{"exposure":"ops"}'::jsonb),
+      ('22222222-2222-2222-2222-222222222222', 900002, 'ws-$RunId', 'decision',
+       '$MARKER personal summary', '$PERSON', '{"exposure":"personal"}'::jsonb);
+  END IF;
+END
+`$fx`$;
 INSERT INTO agent_memory_review_actions (memory_id, action, notes, before, after) VALUES
   ('22222222-2222-2222-2222-222222222222', 'confirm', '$MARKER review note',
    jsonb_build_object('content','$PERSON'), jsonb_build_object('content','$PERSON'));
@@ -219,9 +277,18 @@ SELECT 'planted';
 "@
 foreach ($db in @($GreenDb, $RedDb)) {
     $r = Q $db $fixture
-    if ($r -match "planted") { Pass "$db : fixture planted (1 ops + 1 personal + 1 legacy unlabelled, with sidecars)" }
+    if ($r -match "planted") { Pass "$db : fixture planted (1 ops + 1 personal, with sidecars)" }
     else { Fail "$db : fixture failed - $r"; throw "fixture" }
 }
+# The asymmetry is ASSERTED rather than left implicit: RED must hold the legacy unlabelled
+# row (it is the subject of the ops-visibility comparison below) and GREEN must not be able
+# to hold one at all.
+$redLegacy = Q $RedDb "SELECT count(*) FROM thoughts WHERE content = '$MARKER-LEGACY-UNLABELLED'"
+if ($redLegacy -eq "1") { Pass "RED holds the legacy UNLABELLED corpus row - production's pre-boundary shape" }
+else { Fail "RED does not hold the legacy unlabelled row (count=$redLegacy) - the comparison below has no subject" }
+$greenCols = Q $GreenDb "SELECT is_nullable || '/' || COALESCE(column_default,'none') FROM information_schema.columns WHERE table_schema='public' AND table_name='thoughts' AND column_name='exposure'"
+if ($greenCols -eq "NO/none") { Pass "GREEN: thoughts.exposure is NOT NULL with NO DEFAULT ($greenCols) - a writer must state the plane" }
+else { Fail "GREEN: thoughts.exposure is '$greenCols', expected 'NO/none' - a DEFAULT would make the NOT NULL unreachable" }
 # The tenancy column only exists in GREEN; the fixture above is deliberately identical in both
 # so the comparison is not confounded by a different INSERT.
 $null = Q $GreenDb "UPDATE agent_memories SET user_id='$UID_ME' WHERE id='22222222-2222-2222-2222-222222222222'; UPDATE thoughts SET user_id='$UID_ME' WHERE id=900002;"
@@ -253,19 +320,104 @@ foreach ($t in $targets) {
 Section "the ops rows remain fully readable - the running system is not broken"
 $opsChecks = @(
     @{ n = "agent_memories ops row";  q = "SELECT count(*) FROM agent_memories WHERE content LIKE '%$OPSTEXT%'" },
-    @{ n = "thoughts ops row";        q = "SELECT count(*) FROM thoughts WHERE content LIKE '%$OPSTEXT%'" },
-    @{ n = "thoughts legacy row";     q = "SELECT count(*) FROM thoughts WHERE content LIKE '%$MARKER-LEGACY-UNLABELLED%'" }
+    @{ n = "thoughts ops row";        q = "SELECT count(*) FROM thoughts WHERE content LIKE '%$OPSTEXT%'" }
 )
 foreach ($t in $opsChecks) {
     $green = Qrole -Db $GreenDb -Role "service_role" -Sql $t.q
     if ($green -eq "1") { Pass "GREEN $($t.n): still readable (count=$green)" }
     else { Fail "GREEN $($t.n): count=$green - the migration broke a reader it was not supposed to touch" }
 }
-# The unlabelled corpus is 12,989 of 12,993 production rows. If the thoughts predicate had
-# been written as "label must equal ops" rather than "label must not claim another plane",
-# the entire brain would go dark. That difference is the reason there are two predicate
-# functions rather than one.
-Note "unlabelled corpus stays visible ON PURPOSE - production holds 12,989 such rows"
+# THE LEGACY UNLABELLED ROW: THIS ASSERTION INVERTED, AND SAYING SO IS THE POINT.
+#
+# It used to read "unlabelled corpus stays visible ON PURPOSE - production holds 12,989 such
+# rows", because the corpus predicate was `exposure IS NULL OR exposure = 'ops'` and 12,989
+# of 12,993 rows carried no label. That was TRUE THEN and it is not the design now, and it
+# did not change by being dropped:
+#   * 190 (C.8 clause 3, operator 2026-08-30) LABELLED all ~13,000 of them 'ops' FIRST, then
+#     removed the `IS NULL` arm. No row changed visibility; the fail-open arm went away.
+#   * 195 (C.9 H3, operator 2026-08-31) carried those same labels into a NOT NULL CHECKed
+#     COLUMN, so "unlabelled" stopped being a state a row can be in.
+# The visibility of the real corpus is unchanged across both - 13,001 ops rows before and
+# after, measured on the live database. What changed is that the unlabelled row is no longer
+# READ as ops; it is REFUSED at the write, which section 3b proves directly.
+$redLegacyVisible = Qrole -Db $RedDb -Role "service_role" -Sql "SELECT count(*) FROM thoughts WHERE content LIKE '%$MARKER-LEGACY-UNLABELLED%'"
+if ($redLegacyVisible -eq "1") { Pass "RED: the unlabelled corpus row is readable by the agent plane (count=$redLegacyVisible) - the pre-boundary behaviour" }
+else { Fail "RED: the unlabelled row was not readable (count=$redLegacyVisible) - RED is not the pre-boundary schema" }
+Note "in GREEN there is no such row to read: an unlabelled write is REFUSED (section 3b)"
+
+# ------------------------------------------------------------------------------------------
+# 3b. THE WRITE CONTRACT - the DATABASE refuses an ABSENT and a MALFORMED exposure
+# ------------------------------------------------------------------------------------------
+# DFU C.9 H3's own validation clause, and it is a DIFFERENT property from everything above.
+# Sections 3-7 are about what a caller may READ. This is about what the database will ACCEPT,
+# and it is enforced by NOT NULL and a CHECK rather than by a policy - which matters, because
+# a constraint binds a SUPERUSER and a policy does not. So these attempts are made AS
+# postgres: the strongest caller in the system, the one every openbrain-* container connects
+# as, and the one an application-layer guard would not stop.
+#
+# EVERY REFUSAL HAS A LIVE POSITIVE CONTROL beside it in the same statement shape. A refusal
+# that cannot be told apart from "the INSERT was malformed for some other reason" proves
+# nothing, so each pair differs in exactly the exposure value and nothing else.
+Section "the WRITE contract - an absent or malformed exposure is refused BY THE DATABASE"
+
+$h3 = @(
+    @{ n = "thoughts, exposure ABSENT";
+       q = "INSERT INTO thoughts (content, metadata) VALUES ('$MARKER-H3-ABSENT', jsonb_build_object('exposure','ops'));";
+       want = "null value in column"
+       why  = "the jsonb mirror said ops and the row was still refused - a mirror is not a constraint" },
+    @{ n = "thoughts, exposure MALFORMED";
+       q = "INSERT INTO thoughts (content, exposure) VALUES ('$MARKER-H3-BAD', 'opsy');";
+       want = "violates check constraint"
+       why  = "a misspelling is refused rather than resolved at read time" },
+    @{ n = "thoughts, exposure WRONG CASE";
+       q = "INSERT INTO thoughts (content, exposure) VALUES ('$MARKER-H3-CASE', 'OPS');";
+       want = "violates check constraint"
+       why  = "the CHECK is case-sensitive, so 'OPS' is not 'ops'" },
+    @{ n = "agent_memories, exposure ABSENT";
+       q = "INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata) VALUES ('ws-$RunId','decision','$MARKER-H3-ABSENT','$MARKER-H3-ABSENT',jsonb_build_object('exposure','ops'));";
+       want = "null value in column"
+       why  = "the same rule on the second table - two tables are two places a rule can be missing" },
+    @{ n = "agent_memories, exposure MALFORMED";
+       q = "INSERT INTO agent_memories (workspace_id, memory_type, summary, content, exposure) VALUES ('ws-$RunId','decision','$MARKER-H3-BAD','$MARKER-H3-BAD','personel');";
+       want = "violates check constraint"
+       why  = "a plausible typo, refused" }
+)
+foreach ($t in $h3) {
+    $out = Q $GreenDb ("BEGIN; " + $t.q + " ROLLBACK;")
+    if ($out -match [regex]::Escape($t.want)) {
+        Pass "GREEN $($t.n): REFUSED by the database ($($t.want)) - $($t.why)"
+    } else {
+        Fail "GREEN $($t.n): NOT refused. Expected '$($t.want)', got: $out"
+    }
+}
+
+# THE POSITIVE CONTROLS. Same statements, legal exposure values, and they must SUCCEED - or
+# every refusal above is explained by the INSERT being broken for an unrelated reason.
+$h3ok = @(
+    @{ n = "thoughts, exposure='ops'";
+       q = "INSERT INTO thoughts (content, exposure) VALUES ('$MARKER-H3-OK-OPS', 'ops');" },
+    @{ n = "thoughts, exposure='personal'";
+       q = "INSERT INTO thoughts (content, exposure) VALUES ('$MARKER-H3-OK-PERS', 'personal');" },
+    @{ n = "agent_memories, exposure='ops'";
+       q = "INSERT INTO agent_memories (workspace_id, memory_type, summary, content, exposure) VALUES ('ws-$RunId','decision','$MARKER-H3-OK','$MARKER-H3-OK','ops');" }
+)
+foreach ($t in $h3ok) {
+    $out = Q $GreenDb ("BEGIN; " + $t.q + " SELECT 'accepted'; ROLLBACK;")
+    if ($out -match "accepted") { Pass "GREEN CONTROL $($t.n): accepted - the refusals above are about the VALUE, not the statement" }
+    else { Fail "GREEN CONTROL $($t.n): a legal write was refused, so this section proves nothing: $out" }
+}
+
+# AND THE RED, because the whole point is that this is NEW. The same absent write against the
+# pre-boundary schema must SUCCEED and leave a readable row.
+$redAbsent = Q $RedDb ("BEGIN; INSERT INTO thoughts (content, metadata) VALUES ('$MARKER-H3-ABSENT', '{}'::jsonb); SELECT 'accepted'; ROLLBACK;")
+if ($redAbsent -match "accepted") { Pass "RED: the same unlabelled write is ACCEPTED on the pre-boundary schema - H3 is a real change" }
+else { Fail "RED: the unlabelled write was already refused, so the green above proves nothing: $redAbsent" }
+
+# NOTHING PERSISTED. Every attempt above ran inside BEGIN/ROLLBACK; asserted rather than
+# assumed, because a fixture that outlived its section is how a later count goes wrong.
+$leftovers = Q $GreenDb "SELECT (SELECT count(*) FROM thoughts WHERE content LIKE '$MARKER-H3-%') + (SELECT count(*) FROM agent_memories WHERE summary LIKE '$MARKER-H3-%')"
+if ($leftovers -eq "0") { Pass "no write-contract probe persisted (count=$leftovers)" }
+else { Fail "$leftovers write-contract probe row(s) survived their ROLLBACK" }
 
 # ------------------------------------------------------------------------------------------
 # 4. THROUGH POSTGREST, configured exactly as compose configures it
@@ -333,6 +485,44 @@ $noTenant = Qrole -Db $GreenDb -Role "ob_plane_personal" `
             -Sql "SELECT count(*) FROM agent_memories WHERE content LIKE '%$PERSON%'"
 if ($noTenant -eq "0") { Pass "the personal plane with NO tenant set sees nothing (count=$noTenant) - unset fails closed" }
 else { Fail "an unset tenant read the personal row (count=$noTenant) - the default is fail-open" }
+
+# THE ROLE THE PERSONAL POLICY IS GRANTED TO, WHICH IS NOT A DETAIL.
+#
+# `ob_plane_personal` is a MEMBER of `service_role`, so a policy granted TO service_role
+# still lets the personal plane in and every check above still passes - while ALSO letting
+# ANY service_role session in. `ob.user_id` is an ordinary GUC with no privilege attached to
+# setting it, so under that arrangement the only thing between the unauthenticated PostgREST
+# role and a personal memory is knowing a tenant id. The boundary had drifted exactly that
+# way between two rounds of init-graph-plane-rls.sql and nothing went red, because every
+# assertion anyone had written was about a caller who was ALLOWED to see the row.
+#
+# So this asserts the negative: the ops-plane role, doing everything the personal role does,
+# must still see nothing. The positive control is the line above it - the same query, the
+# same tenant, the personal role, one row.
+$opsWithTenant = Qrole -Db $GreenDb -Role "service_role" -UserId $UID_ME `
+                 -Sql "SELECT count(*) FROM agent_memories WHERE content LIKE '%$PERSON%'"
+if ($opsWithTenant -eq "0") {
+    Pass "service_role SETTING THE RIGHT TENANT still sees nothing (count=$opsWithTenant) - the personal policy is not granted to it"
+} else {
+    Fail "service_role read the personal memory by naming a tenant (count=$opsWithTenant) - agent_memories_personal_plane is granted TO service_role, and ob.user_id is a GUC anyone may set"
+}
+$opsWithTenantT = Qrole -Db $GreenDb -Role "service_role" -UserId $UID_ME `
+                  -Sql "SELECT count(*) FROM thoughts WHERE content LIKE '%$PERSON%'"
+if ($opsWithTenantT -eq "0") { Pass "the same holds on thoughts (count=$opsWithTenantT)" }
+else { Fail "service_role read the personal thought by naming a tenant (count=$opsWithTenantT)" }
+
+# And the role grant is read from the catalogue as well, because the behavioural check above
+# only fires for the ONE table and the ONE tenant it names. This one is a property of every
+# personal policy in the schema.
+$wrongRole = Q $GreenDb @"
+SELECT COALESCE(string_agg(p.tablename || '.' || p.policyname || ' -> ' || p.roles::text, ', '), 'none')
+  FROM pg_policies p
+ WHERE p.schemaname = 'public' AND p.policyname LIKE '%personal_plane%'
+   AND NOT (p.roles::text[] @> ARRAY['ob_plane_personal']::text[]
+            AND NOT (p.roles::text[] @> ARRAY['service_role']::text[]));
+"@
+if ($wrongRole -eq "none") { Pass "every *_personal_plane policy is granted TO ob_plane_personal and to nothing wider" }
+else { Fail "personal-plane policy/policies granted to the wrong role: $wrongRole" }
 
 Section "SET LOCAL, never plain SET - the property that stops a pooler leaking one request into the next"
 # A2 names this explicitly. The check is that the tenancy variable does not survive its
@@ -425,19 +615,56 @@ else { Fail "RED: TRUNCATE was already refused, so the grant reduction changed n
 Section "TRAP 4 - the WRITE side: an ops-plane connection cannot mint a personal memory"
 # memory-plane PLAN 1.1: a record's maximum exposure equals the access plane of the context
 # that wrote it. WITH CHECK states that as a constraint instead of a convention.
-$wrote = Qrole -Db $GreenDb -Role "service_role" -Sql @"
-INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata)
-VALUES ('ws-$RunId','decision','$MARKER forged','$MARKER forged personal','{"exposure":"personal"}'::jsonb);
+#
+# THIS CHECK WAS WRITTEN AGAINST A SCHEMA THAT NO LONGER EXISTS, and the way it broke is
+# worth keeping. It used to INSERT as service_role and read the RLS refusal. Since
+# 200-init-graph-plane-rls.sql section 6a, service_role has NO INSERT on agent_memories at
+# all - the write door was closed on a table nothing writes through it - so the same
+# statement now fails with `permission denied` before any policy is consulted. The old
+# assertion turned RED on a boundary that had got STRICTER, which is precisely the shape of
+# a check that has stopped measuring its subject.
+#
+# So it is now two checks, and they are different claims:
+#   (a) THE GRANT. service_role cannot write this table at all. That is the stronger
+#       containment and it is what production runs.
+#   (b) THE POLICY UNDERNEATH IT. If the grant were ever restored - a re-grant, a new door,
+#       revert-graph-plane-rls.sql - WITH CHECK must still refuse a personal write. That is
+#       tested by granting INSERT inside a transaction and rolling it back, so the property
+#       is proved without the throwaway ever ending up in that state.
+$grantState = Q $GreenDb "SELECT has_table_privilege('service_role','public.agent_memories','INSERT')::text"
+if ($grantState -eq "false") {
+    Pass "GREEN (a): service_role holds NO INSERT on agent_memories - the write door is closed at the grant (200 section 6a), which is stronger than a policy refusal"
+} else {
+    Fail "GREEN (a): service_role still holds INSERT on agent_memories - 200 section 6a did not apply"
+}
+
+$wrote = Q $GreenDb @"
+BEGIN;
+GRANT INSERT ON public.agent_memories TO service_role;
+SET ROLE service_role;
+INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata, exposure)
+VALUES ('ws-$RunId','decision','$MARKER forged','$MARKER forged personal','{"exposure":"personal"}'::jsonb,'personal');
+ROLLBACK;
 "@
-if ($wrote -match "row-level security") { Pass "GREEN: the ops plane is refused when it writes exposure=personal ($($wrote -split "`n" | Select-Object -First 1))" }
-else { Fail "GREEN: the ops plane minted a personal memory - access does not bound writes ($wrote)" }
-$wroteOps = Qrole -Db $GreenDb -Role "service_role" -Sql @"
-INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata)
-VALUES ('ws-$RunId','decision','$MARKER ok','$MARKER ordinary ops write','{"exposure":"ops"}'::jsonb);
+$wroteErr = ($wrote -split "`n" | Where-Object { $_ -match "row-level security" } | Select-Object -First 1)
+if ($wroteErr) { Pass "GREEN (b): with INSERT restored, the ops plane is STILL refused when it writes exposure=personal ($wroteErr)" }
+else { Fail "GREEN (b): the ops plane minted a personal memory once the grant was restored - access does not bound writes ($wrote)" }
+
+$wroteOps = Q $GreenDb @"
+BEGIN;
+GRANT INSERT ON public.agent_memories TO service_role;
+SET ROLE service_role;
+INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata, exposure)
+VALUES ('ws-$RunId','decision','$MARKER ok','$MARKER ordinary ops write','{"exposure":"ops"}'::jsonb,'ops');
 SELECT 'ops-write-ok';
+ROLLBACK;
 "@
-if ($wroteOps -match "ops-write-ok") { Pass "GREEN: an ordinary ops write still succeeds - the constraint is not a blanket denial" }
-else { Fail "GREEN: an ops write was refused, which is breakage rather than a boundary ($wroteOps)" }
+if ($wroteOps -match "ops-write-ok") { Pass "GREEN (b) CONTROL: the same statement with exposure=ops SUCCEEDS - the refusal above is about the plane, not the grant or the statement" }
+else { Fail "GREEN (b) CONTROL: an ops write was refused, so the refusal above proves nothing ($wroteOps)" }
+
+$stillClosed = Q $GreenDb "SELECT has_table_privilege('service_role','public.agent_memories','INSERT')::text"
+if ($stillClosed -eq "false") { Pass "the temporary grant was rolled back - the throwaway is back to the shipped state" }
+else { Fail "the temporary INSERT grant survived its ROLLBACK" }
 
 # ------------------------------------------------------------------------------------------
 # 8. The live plane - READ ONLY
@@ -445,18 +672,42 @@ else { Fail "GREEN: an ops write was refused, which is breakage rather than a bo
 Section "the live plane, read-only: production holds ZERO personal rows"
 if ($SkipLive) { Note "skipped (-SkipLive)" }
 else {
+    # READ THE COLUMN WHERE IT EXISTS, and say which one was read. The live database may or
+    # may not have 195 applied at any given moment, and a query that silently fell back to the
+    # jsonb mirror would report on the non-authoritative copy without the output saying so.
+    # THE COLUMN HALF IS EVALUATED ONLY WHERE THE COLUMN EXISTS, and the output SAYS which
+    # half ran. The first version of this counted `to_jsonb(row)->>'exposure' IS DISTINCT
+    # FROM 'ops'` unconditionally: on a database without the column that expression is NULL
+    # for every row, so it counted the WHOLE TABLE as personal and reported the live plane
+    # as dirty. A probe that reads a column that is not there does not measure nothing - it
+    # measures everything, in the alarming direction.
     $live = (docker exec openbrain-db psql -U postgres -d openbrain -tA -c @"
+SELECT CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns
+                          WHERE table_schema='public' AND table_name='agent_memories' AND column_name='exposure')
+            THEN 'source=column' ELSE 'source=jsonb-mirror-only' END;
 SELECT 'personal_memories=' || count(*) FROM agent_memories WHERE COALESCE(metadata->>'exposure','personal') <> 'ops';
 SELECT 'personal_thoughts=' || count(*) FROM thoughts WHERE metadata->>'exposure' IS NOT NULL AND metadata->>'exposure' <> 'ops';
+SELECT 'personal_memories_col=' || CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='agent_memories' AND column_name='exposure')
+  THEN (SELECT count(*)::text FROM agent_memories WHERE to_jsonb(agent_memories)->>'exposure' IS DISTINCT FROM 'ops')
+  ELSE 'n/a' END;
+SELECT 'personal_thoughts_col=' || CASE WHEN EXISTS (SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='thoughts' AND column_name='exposure')
+  THEN (SELECT count(*)::text FROM thoughts WHERE to_jsonb(thoughts)->>'exposure' IS DISTINCT FROM 'ops')
+  ELSE 'n/a' END;
 "@ 2>&1) -join " "
-    if ($live -match "personal_memories=0" -and $live -match "personal_thoughts=0") {
-        Pass "production: 0 personal memories, 0 personal-labelled thoughts ($live)"
-    } else { Fail "production is not clean: $live" }
+    $mirrorClean = ($live -match "personal_memories=0" -and $live -match "personal_thoughts=0")
+    $colClean = ($live -match "personal_memories_col=(0|n/a)" -and $live -match "personal_thoughts_col=(0|n/a)")
+    if ($mirrorClean -and $colClean) {
+        if ($live -match "source=column") { Pass "production: 0 personal rows by the COLUMN and 0 by the mirror - they agree ($live)" }
+        else { Pass "production: 0 personal rows by the mirror; the COLUMN is not applied to this volume yet, and this run says so rather than guessing ($live)" }
+    } else { Fail "production is not clean, or the column and the mirror disagree: $live" }
     $liveState = (docker exec openbrain-db psql -U postgres -d openbrain -tA -c @"
 SELECT relname || '=' || relrowsecurity::text || relforcerowsecurity::text FROM pg_class
  WHERE relname IN ('agent_memories','thoughts') ORDER BY relname;
 "@ 2>&1) -join " "
-    Note "production RLS state (unchanged by this run - the migration is NOT applied yet): $liveState"
+    Note "production RLS state, read-only and unchanged by this run: $liveState"
+    Note "whether the live volume RUNS this tree is the deploy gate, not this drill - see PROMOTION-RUNBOOK.md"
 }
 
 # ------------------------------------------------------------------------------------------
