@@ -1842,3 +1842,44 @@ why round 8 is told to make every sentence name a gate that demonstrably runs.
 Also corrected: the branch's findings note recorded "Round 7 found NO new class. Counter: 2 of
 2 ... this item closes." An item does not adjudicate its own convergence — and it was wrong:
 round 7 produced a new class and the counter reset to 0.
+
+## 2026-08-31 · U7 · A2 IS a complete cycle by clause 6's enumeration — cited, not manufactured
+The operator asked whether §2.1's amendment **A2** already constitutes U7's one full cycle, so
+that a second is not manufactured to satisfy a clause. **It does, against §C.8 clause 6 — and
+not against §2's fuller prose.** Both readings, stated separately, because the difference is the
+answer.
+
+**§C.8 clause 6 enumerates the cycle as:** *"a real outcome → a proposed design change → judged
+against a pinned §0/§B anchor → adopted or refused, with the citation or the ledger amendment."*
+A2 satisfies every step:
+
+| step | A2 |
+|---|---|
+| a real outcome | five U5 rounds enumerating readers; four separate homes for the same content; a derived file gate whose alphabet was `.ts` while five of fourteen scan roots ship `.mjs` |
+| a proposed design change | move enforcement from "find every reader" to a database predicate — tenancy column + access-class role |
+| judged against a pinned anchor | **verified by reading A2 itself**: it cites `§1.1` four times (the exposure invariant, operator-decided 2026-08-25) and the **AVO**-derived memory architecture, and states explicitly that both are *untouched* — "This amendment makes it MORE enforceable, not less" |
+| adopted, with the amendment | it IS the ledger amendment (§2.1 A2), and it carries a revert path |
+
+**§2's U7 row is wider** and names one more step: *"→ trialed in the gym →"*. **A2 was not
+trialed in `ai-orchestration-gym`**, and its change went to a live plane — the RLS migration was
+applied to the live database. So the fuller §B loop was short-circuited even though the clause-6
+cycle is complete.
+
+**VERDICT: U7's Validated-by column — "every design change carries its anchor citation or its
+ledger amendment" — is SATISFIED by A2**, which is both an amendment and a citation. The
+gym-trial step is a genuine gap against §2's prose and is recorded here rather than papered
+over. It is not manufactured into a second cycle, because §C.8 clause 6 is the arbiter and it
+does not ask for one.
+
+**A CORRECTION TO MY OWN FRAMING, caught by checking.** I was about to relay that A2 was "judged
+against §1.1, A6 and A7" — that phrasing came from the brief, and it is **wrong**. Grepping A2's
+text for its citations returns `§1.1` ×4 and `AVO` ×1, and **no A6 or A7 anywhere**. The claim
+would have been true of the *reasoning* (A6 falsified prose verification; A7 falsified normative
+governance, and both plainly shaped the move) but false of the *record*, and clause 6 asks what
+the record carries. One grep separated a plausible sentence from a true one.
+
+**What would close the gym gap, if the operator wants the fuller loop honoured:** re-run A2's
+design change as a measured gym session — the arena at `d:\Open WebUI\ai-orchestration-gym`,
+which U4's quadrants already used successfully — before the next enforcement-layer change,
+rather than retroactively for this one. Retrofitting a trial to a decision already adopted and
+already live would be theatre, and it would prove nothing about the decision.
