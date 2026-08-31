@@ -1766,3 +1766,79 @@ Two general points worth keeping:
   run."* Requiring a structured relationship is not enough when the relationship can be negated —
   the message must ASSERT validation, not mention it. A neat demonstration that
   keyword-adjacency is not comprehension.
+
+## 2026-08-31 · gitlink guard · SIXTH "fixed one, left the sibling" — and the unfixed one is on the live path
+Round 7 hermeticised `prove-clone-recursive.sh` and left `check-gitlink-reachability.sh`
+inheriting the runner's config wholesale — **the program `.githooks/pre-push` actually runs.**
+Through an ordinary `~/.gitconfig` (not a planted `GIT_CONFIG_*` variable), one line:
+
+```
+[url ".../mirror/rem.git"] insteadOf = .../pub/rem.git
+HOME=nohome -> "REFUSE ... the REMOTE DOES NOT HAVE"                 rc=1   (correct)
+HOME=home   -> "OK ... every pin served by its submodule's remote"   rc=0   (FALSE PASS)
+```
+
+End to end with the branch's real hooks: clean config refuses the push and nothing lands; one
+`insteadOf` line and the hook prints OK, `* [new branch] main -> main`, **the push lands**, and a
+stranger's `clone --recurse-submodules` of what landed dies rc=128. The hermetic proof, run in
+that same poisoned HOME on the same sha, correctly refuses.
+
+**The fix exists, works, and was applied to the program that is not on the push path.** Its drill
+case is titled "THE RUNNER'S CONFIG MUST NOT DECIDE THE VERDICT" and exercises only the proof —
+never the checker, never a push. A case name wider than the case is what a sweep looks like when
+it was not done.
+
+The tally is now six: `on_fire`/`on_indeterminate`; the read tools/`performReview`; the gitlink
+diff reader/the `.gitmodules` reader; clause 2/clause 4; `Remove-NonProse`'s one call site; and
+the proof/the pre-filter. **The rule "grep for the shape before declaring it fixed" has now been
+violated at instances 5 and 6 after being adopted at 4** — which is the argument for putting the
+sweep in a drill rather than in a resolution. §0 A7 already recorded the verdict on governance
+that depends on remembering.
+
+Also measured: `GIT_TEMPLATE_DIR` redirects the fetch through an injected `post-checkout` hook
+that rewrites `.gitmodules`, is neither unset nor read back, and yields CLONED rc=0 while the run
+prints `"hermetic": true` and "IGNORED inherited redirect-capable config: ...". **A read-back
+that enumerates only what its author thought of is an assertion wearing a measurement's clothes.**
+
+## 2026-08-31 · correction · A BLOCKING CLAIM I COULD NOT REPRODUCE
+A verifier reported that `queue.ps1 -Merged` cannot run the clone proof from PowerShell —
+`Get-PosixShell` handing `sh.exe` a PATH carrying only `Git\cmd`, so the preflight for
+`mktemp grep sed cut tr sort env` exits 2 — and concluded that **no gitlink-moving merge can be
+recorded on the operator's shell, including OB1 bumps.** That is a serious operational claim, so
+I checked it before relaying it.
+
+**It did not reproduce.** Invoking `C:\Program Files\Git\usr\bin\sh.exe` from
+`powershell -NoProfile` on this machine, every one of those tools resolves, and `sh`
+self-initialises its PATH as `/c/Users/yamao/bin:/mingw64/bin:/usr/local/bin:/usr/bin:...` —
+`/usr/bin` is present without anyone adding it. So the stated CAUSE is wrong here, whatever the
+verifier observed in their fixture.
+
+Scope, verified: the code is **not on the work line** (`grep -c prove-clone-recursive` on the
+work line's `queue.ps1` returns 0), so the operator's live pipeline is unaffected regardless.
+Round 8 is told to reproduce it through the real path before changing anything, and to correct
+the findings note either way.
+
+**Second verifier claim in this effort that did not reproduce for me** — the first was the
+stale-tracking-refs story, which was mine. Both were caught by the same rule, verify before
+relaying, and the asymmetry is worth stating: a refuter briefed to break things will
+occasionally produce a finding that is real in their fixture and not in the world, and the
+orchestrator is the only filter between that and a builder's next cycle.
+
+**One thing IS wrong regardless:** `queue.ps1:750` prints "the merged tree `<sha>` does not
+survive a fresh recursive clone" **on exit 2 — could-not-check** — and it was printed for a tree
+whose recursive clone measures rc=0. A could-not-check must never assert a property of the thing
+it could not check.
+
+## 2026-08-31 · gitlink guard · an ungated surface licensed by a gate that does not fire
+`.githooks/README.md:392-395`'s ungated-operations table is justified entirely by "a pin that
+arrived by any route in that table is caught by the gate that runs the check — CI's clone-proof
+job, or the reviewer before a merge" — and the SAME FILE declares one non-firing (line 166) and
+the other prose-only (line 165), while omitting the only mechanised caller.
+
+**An ungated surface justified by a gate that does not fire is not a justification; it is the
+same claim twice.** This was the round-6 send-back and it survived round 7 untouched, which is
+why round 8 is told to make every sentence name a gate that demonstrably runs.
+
+Also corrected: the branch's findings note recorded "Round 7 found NO new class. Counter: 2 of
+2 ... this item closes." An item does not adjudicate its own convergence — and it was wrong:
+round 7 produced a new class and the counter reset to 0.
