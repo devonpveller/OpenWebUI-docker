@@ -1267,3 +1267,42 @@ entered the work line by that route. Agents following MERGE-PROTOCOL's rebase st
 and remain so until round 3 lands. `work/u5proxy` already built a `reference-transaction` guard
 for the hook-bypass work and is the natural home for this; the two branches now overlap and the
 orchestrator must reconcile them rather than merge both.
+
+## 2026-08-31 · operator ruling · `work/pod-key` is out of scope for §C.8 clause 4
+Recorded because a verifier correctly refused it as unsourced: `dfu-done.ps1` excluded
+`work/pod-key` from the unmerged-branch count citing "an operator ruling", and no such entry
+existed in DECISIONS.md or PLAN.md. It IS a real instruction — operator, 2026-08-31:
+*"work/pod-key is from an unrelated podcast effort — leave it alone."*
+So clause 4's branch enumeration excludes exactly that one branch, by name, with this entry as
+its source. Every other `work/*` branch counts.
+The general point is worth more than the carve-out: **an exclusion is a hole in a check, and a
+hole whose justification is not in the record is indistinguishable from an unjustified one.**
+The verifier was right to refuse it, and the fix is to write the source down, not to argue the
+instruction was real.
+
+## 2026-08-31 · method · EVERY NEGATIVE PROBE NEEDS A POSITIVE CONTROL
+FINDING: `dfu-done.ps1`'s clause 3 attacks seven doors with a synthetic personal fixture and
+          passes each door that does not return it. Three of the seven **could not fail under
+          any boundary state**: `agent_memories` (the fixture is never written there);
+          `thought_entities` (the probe reads an unfiltered 200-row window of a 54,050-row
+          table, covering thought_ids 3..71 while the fixture lands at ~13,386 — the pass is
+          STRUCTURAL, not a measurement); and `wiki_pages` (the compiler cannot have published
+          a row inserted seconds earlier). A verifier proved it by running an OPS control that
+          the boundary PERMITS and getting the same empty answer.
+          Separately, `Invoke-Curl` requested `%{http_code}` and never read it, so any 404 or
+          400 read as a pass — pointing the probe at a nonexistent path turned five doors green,
+          including the one that correctly fails against the real endpoint.
+RULE ADOPTED: **a probe that proves absence must be paired with a probe that proves presence.**
+          Write an OPS-labelled twin of the fixture and require the door to RETURN the twin
+          while REFUSING the personal one. A door that returns NEITHER is INDETERMINATE and must
+          not pass.
+WHY IT GENERALISES: "it did not come back" has two causes — the boundary held, or the question
+          never reached the data. Without a positive control those are the same observation, and
+          the check silently degrades from a containment proof into a liveness test of its own
+          plumbing. This is the same distinction §C.8 draws between "clear because we looked"
+          and "clear because we didn't", and the same one `andon.ps1` solves with its census —
+          but it needs restating for probes, because there the failure looks like SUCCESS.
+RELATION TO THE CLASS LIST: a sibling of *a check green while checking nothing*, and the most
+          reusable form of it found so far. A check that cannot fail is usually spotted by
+          asking "can I break what it guards?"; a probe that cannot fail is spotted by asking
+          **"what would a working door have returned, and did I see that?"**
