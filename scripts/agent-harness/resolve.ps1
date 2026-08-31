@@ -69,3 +69,27 @@ function Test-LineCheckedOutElsewhere {
     param([string]$Line)
     return (Get-WorktreeHoldingBranch -Branch $Line)
 }
+
+function Get-LeaseDir {
+    # ONE lock namespace per repository - the same decision Get-SharedStateDir makes, named
+    # once so lease.ps1 and its readers cannot drift onto two different directories.
+    # AI_STACK_LEASE_DIR still overrides (the drills use it to stay hermetic).
+    if ($env:AI_STACK_LEASE_DIR) { return $env:AI_STACK_LEASE_DIR }
+    return (Join-Path (Get-SharedStateDir) "locks")
+}
+
+function Get-HeldLease {
+    # The lease record ONLY if it is currently held: present and not past its TTL.
+    # Returns $null for "free" and for "expired", because a caller asking "may I mutate this
+    # plane?" must treat both the same way. lease.ps1 keeps its own reader because its
+    # -Status display has to tell FREE and EXPIRED apart; this one deliberately does not.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $f = Join-Path (Get-LeaseDir) "$Name.json"
+    if (-not (Test-Path $f)) { return $null }
+    try { $l = Get-Content -Raw -Path $f | ConvertFrom-Json } catch { return $null }
+    if (-not $l) { return $null }
+    $age = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$l.taken_at
+    # -ge matches lease.ps1's Test-Expired: at exactly the TTL the lease IS expired.
+    if ($age -ge ([int]$l.ttl_min * 60)) { return $null }
+    return $l
+}

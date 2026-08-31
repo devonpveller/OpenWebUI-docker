@@ -263,7 +263,9 @@ def test_the_agreement_test_would_catch_real_drift(tmp_path):
 # There is no copy to drift: the bridge bind-mounts the same file. These tests exist anyway,
 # because "there is no copy" is a claim about a compose file that somebody can edit.
 
-import shutil
+# (`shutil` and `subprocess` are already imported at the top of the file; the mid-file
+#  re-import was dead and F811-failed `ruff check scripts/agent-harness/`. Removed
+#  2026-08-30 so this module's lint gate can be cited as evidence.)
 
 BRIDGE_IMAGE = "agent-bridge:local"
 

@@ -1,0 +1,37 @@
+{
+  "id": "u4-stall",
+  "version": 1,
+  "_why": [
+    "THE STALL PROBE. U4's Validated by column has two halves; this item is the second one:",
+    "'stall -> oracle observed firing at least once'. The oracle-on-stall mechanism was built",
+    "and mutation-proven on work/u4oracle, but every firing it had ever produced came from a",
+    "CONSTRUCTED failure - a drill typing the same reason three times. This item is how a",
+    "runner is given a task it genuinely cannot converge on, so the rounds the detector reads",
+    "are real ones.",
+    "",
+    "IT IS DELIBERATELY UNSATISFIABLE. test_trims_and_lowercases and",
+    "test_trims_and_preserves_case require different outputs for the same input; no pure",
+    "function passes both. Nothing is hidden from the runner - the tests are planted in the",
+    "workspace and are the only specification, as in every other item. The task is impossible,",
+    "which is what 'a task that will genuinely stall it' means. Inducing a stall by choosing an",
+    "impossible task is still a real stall; writing the stall STATE into a fixture would not be,",
+    "and this item does not do that - what it produces is real failing rounds from real",
+    "dispatches, and the detector is what decides whether they constitute a stall.",
+    "",
+    "DO NOT MAKE IT PASSABLE. If someone repairs the contradiction, this stops being a stall",
+    "probe and silently becomes a second baseline item - and the phase's second half loses the",
+    "only fixture that can produce its evidence.",
+    "",
+    "IT IS NOT IN quadrant.runners' COMPARISON. `quadrant.item` names u4-baseline; this item is",
+    "run explicitly with `--item u4-stall`. A comparison scored on an impossible task would",
+    "measure nothing about the quadrants."
+  ],
+
+  "task": "The directory `stall-item/` in this workspace contains two files: `normalize.py`, which holds a stub `normalize(text)` that raises NotImplementedError, and `test_normalize.py`, which specifies exactly what `normalize` must do. Implement `normalize(text)` in `stall-item/normalize.py` so that every test in `stall-item/test_normalize.py` passes. Use only the Python standard library. Do NOT modify `stall-item/test_normalize.py`. Do NOT create or modify any file other than `stall-item/normalize.py`. When the implementation is complete, stop.",
+
+  "plant_prefix": "stall-item",
+  "anchor": "anchor.json",
+
+  "allowed_paths": ["stall-item/normalize.py"],
+  "frozen_paths": ["stall-item/test_normalize.py"]
+}

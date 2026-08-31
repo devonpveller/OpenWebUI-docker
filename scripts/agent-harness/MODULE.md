@@ -27,9 +27,18 @@ Everything else in here is internal and may change without notice.
 | `sync-worktree-env.ps1 -Id <id>` | re-copy runtime env files when the main checkout's are newer |
 | `queue.ps1` | the pipeline: propose → confirm → submit → test → release → review → merge |
 | `lease.ps1` | named leases for SHARED RUNTIME only (Docker, GPU, ports, live DBs) |
+| `dispatch.ps1` | RUN the work: role+profile → runner → submit, follow, one outcome + exit code |
 | `verify-merge-protocol.ps1` | the executable drill over the whole protocol |
+| `verify-dispatch.ps1` | the executable drill over the dispatch layer (probes the REAL daemon by default; `-Offline` skips that and says so) |
+| `verify-oracle-on-stall.ps1` | the executable drill for frontier-oracle-on-stall - a CONSTRUCTED stall, seconds, no live planes |
+| `observe-oracle-on-stall.ps1` | the OBSERVATION: dispatches an unsatisfiable item to the live local runner N times and lets the detector judge the real rounds. Needs the coder plane, the coder lease and minutes - an experiment, never a CI check. **Its verdict names the ledger row THIS run appended** (row ids are snapshot before the rounds), every queue and git call is exit-code checked, and each run takes a stamped item id and probe branch which it deletes - including on every refusal path. Exit 0 = observed, 1 = no escalation, 2 = misuse, 3 = a step failed and there is no verdict |
+| `oracle_on_stall.py` | the stall detector, the escalation, and its ledger (U4) |
+| `durable_checks.py` | tester finding -> durable executable check, banked in the SHARED git-dir registry (U3) |
+| `u3_evidence_regression_gym.py` | U3's GYM RUN: banks the check born from a tester finding, seeds regressions into a sandbox inside the ARENA, and measures the counterfactual against the pre-existing gate. Refuses outside a gym venue |
+| `test_evidence_reproduces.py` | the fast guards for that banked check - what the drill proves in the arena, provable anywhere in a second |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
+| `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). The first executable CONSUMER of the runner axis: everything else resolves a runner and nothing runs one. |
 
 Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps1`
 (policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation).
@@ -37,12 +46,68 @@ Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps
 The dependency direction is one-way and deliberate:
 
 ```
-queue.ps1 / lease.ps1 / new-worktree.ps1
+queue.ps1 / lease.ps1 / new-worktree.ps1 / dispatch.ps1
         |
      common.ps1 ──> resolve.ps1 ──> git-io.ps1   (facts about this repository)
                           └──────> config.ps1    (files + environment -> settings)
                     anchor.ps1                   (the shape of an anchor; owns no state)
 ```
+
+## Runners: resolving one and running one are two different things
+
+`config.ps1`'s `Resolve-RoleTarget` answers *which* runner and model a role uses.
+`dispatch.ps1` is what CALLS it. Until 2026-08-30 only the first half existed, which
+is why PLAN.md's A11 ("the little-coder runner is wired, status: unproven") read as
+optimistic: the wiring was a config entry naming a door — `http://127.0.0.1:8090` —
+that `coder/docker-compose.yml` never published. See
+`harness.config.json`'s `_why_docker_exec` for the transport decision and its revert path.
+
+A runner record therefore carries topology (`transport`, `container`, `base_url`, the API
+paths, and the `lease` a caller must hold) as well as policy, readable through
+`Get-HarnessRunner` / `config.runner()`.
+
+**DECLARED is not the same as EXISTS, and two different checks cover the two claims.**
+`test_harness_config.py`'s door check is a substring match over the TEXT of the compose
+files: it proves the door is **declared** — a `127.0.0.1:<port>` publish for `http`, a
+`container_name:` for `docker-exec` — and it proves nothing about the running stack. Those
+two genuinely differ here: on 2026-08-30 `coder/docker-compose.yml` declared
+`127.0.0.1:9091->9090` for little-coder while `docker port little-coder` printed nothing and
+`docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` gave `{"9090/tcp":[]}`.
+**The cause of that disagreement is NOT established.** The obvious guess — that the running
+container predates the declaration — is wrong: `docker inspect little-coder --format
+'{{.Created}}'` is `2026-08-23T17:00:48Z` and the ports line has been in
+`coder/docker-compose.yml` since `56af93a` (2026-08-21), so the container POSTDATES the
+declaration by two days. The runtime claim is `verify-dispatch.ps1`'s live section, which by
+DEFAULT inspects that the container is really running and reaches the daemon over the
+declared transport; its summary line states the real transport's coverage on every run that
+reaches the end — `COVERED`, `NOT COVERED`, or `ATTEMPTED AND FAILED`.
+
+`dispatch.ps1` returns ONE outcome shape whatever the runner, and its exit code
+distinguishes "the dispatch worked" from "the work is right": `0` acceptance passed,
+`3` acceptance failed, `4` completed with no checkable signal, `1` no usable outcome at all
+(no runner, no lease, unreachable transport, no focus, timeout, or a task that ended
+`abandoned`/`rejected`). The little-coder daemon runs the acceptance command itself, so the
+agent never grades its own work.
+
+A runner that declares a `lease` cannot be dispatched unless the caller HOLDS that lease
+(`-LeaseOwner`, or `AI_STACK_LEASE_OWNER`): focusing little-coder wipes its workspace and a
+task runs arbitrary commands in it. Someone else's lease refuses the dispatch just as a free
+one does.
+
+**Run the drill as `powershell.exe -File`, not with `&` inside a session you are reusing.**
+Under `powershell.exe -NoProfile -File .\scripts\agent-harness\verify-dispatch.ps1` it is
+deterministic here. UNVERIFIED, reported by a U4 verifier and NOT reproduced: invoked with
+the call operator (`& $drill -Offline`) repeatedly inside one long-lived session they saw
+three different counts (50/51, 46/51, 48/51, differing checks) on an unmodified copy. Nine
+such runs in one session on 2026-08-30 gave `51/51 checks passed` every time with zero
+`[FAIL]` lines, so the cause is unknown and it may not be reproducible. The reported
+failures were spurious REDs only — never a green that should have been red — so the risk is
+a confusing verdict, not a false pass.
+
+**No pipeline consumes `dispatch.ps1` yet.** `queue.ps1` does not call it and nothing else
+does either — today it is driven by hand or by a session, and the only shipped consumer of
+the runner layer is `bridge.py`'s `profile: list`, which renders `describe_runner()`.
+Wiring dispatch into the queue is U4's remaining half, not something this file already does.
 
 `config.ps1` knows nothing about git, worktrees, queues or leases — which is what
 lets another distribution retarget the toolkit by editing JSON instead of code.
@@ -66,6 +131,8 @@ Environment overrides are a short explicit list, not a naming convention:
 | `AI_STACK_HARNESS_CONFIG` | path to an alternate `harness.config.json` |
 | `AI_STACK_HARNESS_ENABLED` | `0` — kill switch, beats both files |
 | `AI_STACK_HARNESS_PROFILE` | profile name applied to every surface |
+| `AI_STACK_LEASE_OWNER` | default `-LeaseOwner` for `dispatch.ps1`'s lease assertion |
+| `AI_STACK_LEASE_DIR` | the lock namespace (drills point it at a temp dir to stay hermetic) |
 
 Two more are named *by* the configuration rather than hardcoded, so a distribution
 can rename them: `worktree.work_line_env` (default `AI_STACK_WORK_LINE`, which
@@ -91,7 +158,60 @@ plane reaching `llama-cpp` through LiteLLM.
 
 The `little-coder` runner is wired and callable but **unproven**: no work item has
 completed through it yet. Its `status` field says so, and that is not decoration —
-do not read config support as a working feature.
+do not read config support as a working feature. To be precise about how
+little is wired: `resolve_role` maps a role and a profile to a runner, and
+**nothing in this module then dispatches to one**. There is no code path that
+submits a task to little-coder's API — and that API port is not reachable from
+where the harness runs in any case. Stated as two separate facts, because
+conflating them is its own error: the compose file **declares** one mapping,
+`127.0.0.1:9091 -> 9090` (the metrics port, not the API), and the **running**
+container publishes nothing at all — `docker inspect little-coder --format
+'{{json .NetworkSettings.Ports}}'` returns `{"9090/tcp":[]}` and `docker port
+little-coder` prints nothing (verified 2026-08-30). Compose text is what was
+intended; `docker inspect` is what is. A dispatcher must be built against the
+second.
+
+## Frontier-oracle-on-stall
+
+ORCHESTRATION-DESIGN sec 7 splits the work roughly 95% small-model search / 5%
+frontier unstick, and is specific that the frontier is "an oracle invoked on a
+stall signal — not a better worker": it injects the one constraint that only
+knowledge provides, then hands back.
+
+`oracle_on_stall.py` is that stall signal, and the durable record of the
+escalation. It runs on every `queue.ps1 -Fail`, because a failed test round is the
+only moment the line learns something new about whether an item is converging.
+
+- **A stall** is agent-org's definition, ported rather than re-invented: a round
+  whose failure signature is not novel against every signature seen on this item,
+  or whose branch head did not move, is not progress; two such rounds in a row is
+  a stall. `failure_signature` is `Orchestrator._failure_sig` byte for byte, and a
+  test extracts that function from `orchestrator.py` and compares behaviour, so
+  the two cannot drift apart quietly.
+- **Firing** appends to `oracle-escalations.jsonl` in the shared state dir: what
+  stalled, the round-by-round trail the detector saw, the runner that stalled, the
+  oracle above it, and `hand_back_to`. Read it with `queue.ps1 -Oracle`.
+- **When the worker is already the frontier runner** — which is what the default
+  `all-cloud` profile means — the outcome is `no-oracle-above`: recorded, not
+  escalated. Escalating claude-code to claude-code would fill the audit trail
+  while changing nothing.
+- **A round whose branch head could not be READ is not scored either way.** An
+  unmeasured round is not evidence that the code stood still, and treating it as
+  such turned a tooling failure into a frontier escalation: `git rev-parse
+  <missing-ref>` prints the ref NAME on stdout and exits 128, and `-Fail` did not
+  check the exit code, so a deleted branch was recorded as `sha:
+  "drill/oracle-stall"` — identical every round. `-Fail` now refuses that verdict,
+  and the detector normalizes any non-object-name to "not recorded".
+- **Nothing dispatches the oracle round yet.** `pending()` returns the target a
+  dispatcher would use; the dispatcher is the unbuilt half of U4.
+- **Nothing has stalled for real here.** `verify-oracle-on-stall.ps1` CONSTRUCTS a
+  stall and proves the mechanism end to end. It is not an observation of the oracle
+  firing on a real item, and the ledger is empty of one. Do not read a green drill
+  as "the oracle worked an item".
+
+`queue.ps1 -Submit -RunnerProfile <name>` records which profile an item is worked
+under, so the detector can name the runner that stalled. Not `-Profile`: `$Profile`
+is a PowerShell automatic variable, and a parameter of that name shadows it.
 
 ## Turning it off
 
@@ -109,7 +229,9 @@ the ordinary workflow changes behaviour.
 ## Where the state lives
 
 `<git-common-dir>/agent-worktrees/` — the `.git` directory of the MAIN checkout,
-shared by every worktree.
+shared by every worktree. `AI_STACK_WORKTREE_STATE` redirects it, which
+is how a drill runs against a scratch namespace instead of the live queue and
+ledger.
 
 This is load-bearing. It was originally anchored on the script's own location,
 which is correct only while exactly one copy of the toolkit exists — and the whole
@@ -138,3 +260,4 @@ work — check with `git worktree list` before deleting it.
 - [HARNESS-V2-PLAN.md](../../documentation/implementation-guide/multi-agent-concurrency/HARNESS-V2-PLAN.md) — anchors, runners, profiles, this boundary
 - [MERGE-PROTOCOL.md](../../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md) — the agent-facing protocol
 - [README.md](README.md) — day-to-day usage and the gotchas found while building it
+- [quadrant/MODULE.md](quadrant/MODULE.md) - the runner x target quadrant comparison (dark-factory U4)

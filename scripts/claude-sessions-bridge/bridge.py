@@ -1303,8 +1303,14 @@ class Bridge:
                 known = harness_config.profile_names()
                 if requested.lower() in ("list", "?"):
                     lines = [harness_config.describe_profile(n) for n in known]
+                    # The runner half (2026-08-30): picking a profile is picking a
+                    # SUBSTRATE, and the profile line alone never said that little-coder
+                    # is unproven or how the harness reaches it.
+                    runners = [harness_config.describe_runner(n)
+                               for n in harness_config.runner_names()]
                     post("**Harness profiles** (role -> runner/model)\n\n- "
                          + "\n- ".join(lines)
+                         + "\n\n**Runners**\n\n- " + "\n- ".join(runners)
                          + f"\n\nThis thread: `{thread_profile or harness_config.profile_name('mattermost')}`",
                          thread_root)
                     continue
