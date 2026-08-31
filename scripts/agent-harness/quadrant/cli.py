@@ -354,8 +354,21 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
                   f"configuration says '{venue.name}'. The pin stands - records from "
                   f"'{venue.name}' will be refused. Use a fresh --results-dir for a new venue.)")
     elif venue is not None:
-        venue_block = venue.as_record()
-        pinned_venue = venue.name
+        # PINNING IS NOT LABELLING. A results set with no pin is either brand new or
+        # pre-dates the venue mechanism, and stamping today's venue onto the second kind
+        # would put "Venue: gym - SATISFIES a 'Gym:' column" at the top of a report whose
+        # every record ran somewhere else. So the pin is taken only when this set has
+        # nothing to contradict it: no records at all, or at least one record that already
+        # names this venue. Otherwise the set stays UNSTATED, which is what it is.
+        named = {str((r.get("venue") or {}).get("name") or "") for r in records}
+        named.discard("")
+        if not records or venue.name in named:
+            venue_block = venue.as_record()
+            pinned_venue = venue.name
+        else:
+            print(f"  (this results set predates the venue mechanism - {len(records)} record(s), "
+                  f"none naming a venue. It is NOT being stamped with '{venue.name}': the runs "
+                  f"in it happened somewhere else, and the report says UNSTATED.)")
     if declared != prior or venue_block != prior_venue:
         results_dir.mkdir(parents=True, exist_ok=True)
         lock_path.write_text(json.dumps({
@@ -394,9 +407,11 @@ def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
     records = _load_records(results_dir)
     declared, pinned = _declared_matrix(results_dir, quadrants, records, v)
     # The venue the REPORT is rendered against is the results set's PIN, not today's
-    # configuration - the same reasoning as the declared matrix. If the pin names a venue the
-    # configuration no longer selects, the pinned identity still governs admission.
-    rv = v if (not pinned or pinned == v.name) else pinned
+    # configuration - the same reasoning as the declared matrix. A set that declined the pin
+    # (records that name no venue) renders UNSTATED rather than borrowing the configured
+    # venue's name, because "Venue: gym - SATISFIES" over records that ran elsewhere is the
+    # exact mislabel this whole mechanism exists to prevent.
+    rv = v if pinned == v.name else (pinned or None)
     try:
         md = report_mod.render(quadrants, records, item=it, declared=declared, venue=rv)
         summary = report_mod.summarize(quadrants, records, item=it, declared=declared,

@@ -355,6 +355,39 @@ def test_the_results_set_pins_its_venue_and_a_later_run_cannot_move_the_pin(tmp_
 
 # ------------------------------------------------------ live config sanity --
 
+def test_a_results_set_that_predates_the_venue_is_not_stamped_with_todays_one(tmp_path):
+    """PINNING IS NOT LABELLING. A pre-venue results set has no pin, and taking one from the
+    configuration would put "Venue: gym - SATISFIES a 'Gym:' column" at the top of a report
+    whose every record ran somewhere else - the exact mislabel the mechanism exists to stop.
+    Found by re-rendering the historical results set after the mechanism landed."""
+    from quadrant import cli
+    repo = make_repo(tmp_path / "ai-stack")
+    arena = make_repo(tmp_path / "arena")
+    out = tmp_path / "runs"
+    out.mkdir()
+
+    c = cfg(repo=str(arena))
+    qs = matrix_mod.build(c)
+    v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
+    old_record = {"quadrant": "fixture::self", "runner": "fixture", "target": "self",
+                  "item": "u4-baseline", "item_digest": "d" * 64, "status": "not_run",
+                  "not_run_reason": "from before the venue existed"}
+
+    declared, pinned = cli._declared_matrix(out, qs, [old_record], v)
+    assert pinned == "", "a set whose records name no venue must not be stamped with one"
+    lock = json.loads((out / "matrix.json").read_text(encoding="utf-8"))
+    assert not lock.get("venue")
+
+    md = report_mod.render(qs, [old_record], item={"id": "u4-baseline", "digest": "d" * 64},
+                           declared=declared, venue=None)
+    assert "Venue: UNSTATED" in md
+
+    # ...while a set with nothing to contradict the venue DOES take the pin.
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    assert cli._declared_matrix(fresh, qs, [], v)[1] == "arena"
+
+
 def test_the_live_config_selects_a_gym_venue_that_satisfies_the_column():
     c = harness_config.load(fresh=True)
     v = venue_mod.resolve(c, SCHEMA, harness_repo=HERE)

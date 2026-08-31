@@ -108,6 +108,7 @@ report and no exit code — only in a path a human had to interpret.
 | records | every record carries its venue; the results set pins it in `matrix.json` on first write and cannot move the pin; admission refuses a record from another venue |
 | the report | prints the venue and whether it **SATISFIES a "Gym:" column** — a reader never infers the place from a path again |
 | pre-venue records | carry no venue and are now REFUSED at admission with that reason. They were real runs in the wrong place; a refusal with a reason is the honest rendering, and deleting them would be worse |
+| pinning is not labelling | a results set whose records name no venue does NOT take today's pin. Found by re-rendering the historical set after the mechanism landed: it was being stamped `gym` and headed *"SATISFIES a 'Gym:' column"* over eight records that ran in ai-stack. It now reads **Venue: UNSTATED**, `COMPARED 0/4`, every cell REFUSED — which is what that evidence is |
 
 **The root check, and why it is not pedantry.** git discovers a repository by walking UP. A
 wrong venue path therefore does not fail — it silently adopts whatever repository encloses
