@@ -261,13 +261,15 @@ and 2 look identical whether the predicate was flipped or not.
 
 ### Rollback
 
-`OB1\dockerevert-agent-memory-corpus-failclosed.sql` -- re-opens the predicate, **then**
+`OB1\docker
+evert-agent-memory-corpus-failclosed.sql` -- re-opens the predicate, **then**
 unstamps exactly the rows this migration stamped (matched on
 `metadata->>'exposure_backfill' = 'dfu-c8-corpus-failclosed'`, so the 4 rows labelled `ops`
 by the write path are left alone). Nothing is dropped and no row is deleted.
 
 ```powershell
-docker cp OB1\dockerevert-agent-memory-corpus-failclosed.sql openbrain-db:/tmp/
+docker cp OB1\docker
+evert-agent-memory-corpus-failclosed.sql openbrain-db:/tmp/
 docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
     -f /tmp/revert-agent-memory-corpus-failclosed.sql
 ```
@@ -693,6 +695,10 @@ Expect, in order:
 ```
 NOTICE:  init-graph-plane-rls: write door closed on 9 relation(s): agent_memories, ... , idea_revisions
 NOTICE:  init-graph-plane-rls: mechanism sweeps run over 13 derived relation(s), floor of 13 satisfied
+NOTE (corrected 2026-08-31): the round-3 apply printed the NOTICE below. Round 4 DELETED
+that sentence as a defect - it claimed a completeness the gate cannot have, and was printed
+three times while three live oracles existed. The shipped file now prints a balanced census
+naming what was checked AND what was not. Expect that instead; the line below is historical.
 NOTICE:  init-graph-plane-rls: post-conditions hold on 9 table(s), and the four mechanism sweeps
          (absence, uniqueness, foreign keys, reachability) are clean
 COMMIT

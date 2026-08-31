@@ -89,7 +89,7 @@ each row NAMES a thought, so `ob_thought_visible(id)`, SECURITY INVOKER, which m
 `thoughts` policy the single definition.
 
 **Tier B** (`entities`, `edges`, `source_entities`, `consolidation_log`) - **no read-side
-predicate, and the file says so.** These carry no thought id and no thought content. A
+predicate, and the file says so.** These carry no thought id and no verbatim thought PAYLOAD. **Corrected at merge:** `entities.canonical_name` IS a span lifted verbatim from thought text by the deployed extractor, so "no thought content" was wider than the evidence. The practical exposure is a name rather than a payload or a fingerprint, and an entity written while its thought was ops stays readable — name included — after that thought is relabelled personal, while the thought, its `thought_entities` row and its queue row all correctly go to 0. A
 citation-based predicate collapses under RLS (an invoker cannot tell "no citation exists" from
 "every citation is hidden"), a denormalised label is the "unlabelled defaults to fine" class
 one table over, and an EXISTS-per-row is not viable at 69,785 entities / 92,865 edges / 81,273
@@ -1358,7 +1358,7 @@ table, column, view or row.
   mechanisms this file sweeps are closed as far as a row-level policy can close them, measured
   RED before GREEN with positive controls, on the deployed schema.
 - **The gate is honest, not complete.** It says what it looked at, what it did not, and that the
-  absence of a finding is not a proof. A relkind nobody thought about makes it fail rather than
+  absence of a finding is not a proof. A relkind nobody thought about, WITHIN the five row-projecting kinds the census counts (`r`,`p`,`f`,`m`,`v`), makes it fail rather than
   pass quietly.
 - **Two classes remain open by disclosure, not by oversight**: constraint-violation oracles that
   leak existence to a caller that may write, and superuser-session writers that no policy binds.
