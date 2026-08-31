@@ -25,7 +25,7 @@ is marked deliberately rather than rounded up.
 | **U3** | DISCHARGED (closing with U4) | The arena run landed: seeds caught, check banked `source: tester-finding`, arena clean before/after. |
 | **U4** | COLUMN MET, round 7 (convergence 1 of 2) | 4/4 quadrants ran **in the arena**, stall real. Row amended (§2.1 A1). Closes if round 7 finds no new defect class. |
 | **U5** | METHOD REPLACED (§2.1 A2) | Enforcement moves from guarding readers to a **database predicate** — tenancy column + access-class role, FORCE RLS. Five reader-guard rounds retired. **Constraint stands.** |
-| **U6** | clause 4 DONE, clauses 1–3 in round 5 | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
+| **U6** | clause 4 DONE, clauses 1–3 round 7 (convergence 1 of 2) | Recall-informed briefs merged and live-proven; andon + gate profiles work, their honesty layer is still being closed. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
 
 ---

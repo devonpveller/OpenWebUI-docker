@@ -949,3 +949,30 @@ WHY IT IS SEPARATE: it is outside U0–U7, and it changes a service the whole st
 **the risk that makes it operator-gated** — narrowing grants or schema exposure can break
           consumers silently, and one of them (the wiki compiler) writes 48,032 published rows.
           The enumeration step is the real work; the config change is small and reversible.
+
+## 2026-08-30 · convergence log · round counts and class classifications
+Kept because §C.7's criterion is worthless if nobody records the counter. A round advances the
+counter when its findings are all SIBLINGS; a new class resets it to 0.
+
+| Item | Rounds | Latest round's findings | New class? | Counter |
+|---|---|---|---|---|
+| `u6recall` (U6 clause 4) | 2 | — | — | **CLOSED, merged 3bdf7a8** |
+| `u4close` (U4 + U3) | 7 in flight | venue compared by name; counterfactual on unseeded originals; a claimed exit 1 that is structurally impossible; summary vs detail | **No** — siblings of *label mistaken for enforcement*, *counterfactual measuring the wrong thing*, *claim wider than evidence*, *summary rounding up* | **1 of 2** |
+| `u6dark` (U6 clauses 1–3) | 7 in flight | `-Branch ' '` auto-passes; ways-off check compares two declarations; enumeration alphabet misses two list shapes | **No** — siblings of *deciding by exception*, *green while checking nothing*, *alphabet too narrow* | **1 of 2** |
+| `u5rls` (U5 under A2) | 1 in flight | — | — | counter reset at A2 (method replaced) |
+| `u5proxy` | 2 | — | — | superseded by A2 |
+| `u5judge` | 2 | — | — | superseded by A2 |
+
+**The established class list**, used to judge siblinghood — a finding is NEW only if a fix
+aimed at one of these would not have prevented it:
+a check green while checking nothing · a guard deciding by exception (unhandled input defaults
+to fine) · a label mistaken for enforcement · a derived gate whose alphabet is too narrow · a
+claim wider than its evidence · a summary rounding up its own detail · a counterfactual
+measuring the wrong thing · a fix landing outside what merges · two readers of one config
+disagreeing.
+
+**What the counter has already bought:** both live items were about to take another
+undifferentiated round. Naming their findings as siblings turned "keep going" into "one more
+round, then close or amend" — and made it visible that `u6dark` produced four genuine classes
+across seven rounds and three siblings, which is the ratio that should have triggered the
+enforcement-layer change earlier, exactly as A2 did for U5.
