@@ -1141,3 +1141,51 @@ fetched. Still a real failure mode for a reachability gate, and it still argues 
 remote rather than reading local refs - but "stale" claimed more than the observation supported.
 Corrected in the gate's brief rather than left to propagate; a builder had already carried my
 wording into a file header.
+
+## 2026-08-31 · clause 4 · THE LIVE DATABASE RUNS CODE THAT IS NOT ON THE WORK LINE
+FINDING, and it is mine: I applied `init-agent-memory-rls.sql` to the live database from
+          `work/u5rls`, an UNMERGED branch. Verified now: `agent_memories` and `thoughts` each
+          carry 2 policies live, and `OB1/docker/init-agent-memory-rls.sql` is **absent from the
+          work line**. So the deployed boundary has no source in the deliverable.
+          §C.8 clause 4 asks for "every service running live from the work line's code". This is
+          the inverse: code running live from nowhere the work line can see. A fresh deploy
+          would not reproduce it, and a reader of the work line cannot find what is enforcing
+          the boundary they were told exists.
+WHY I DID IT ANYWAY, and I would again: the operator directed step 1 explicitly, the migration
+          had been applied-and-reverted against a restore of the live schema by a verifier, and
+          the alternative was leaving a known-open leak on the PostgREST path while a branch
+          converged. The right call, with a debt to record rather than a debt to hide.
+**THE TEMPTATION CLAUSE 4 CREATES, named so it is visible:** the cheapest way to make clause 4
+          pass is to merge the eight outstanding branches. `work/u5rls` in particular is
+          REFUTED — a SECURITY DEFINER trigger writes a SHA-256 of hidden content into
+          `entity_extraction_queue`, whose only policy is `USING (true)` — and it is STACKED on
+          `work/u5pplane` (11 of its 14 commits are u5pplane's). Merging it now would satisfy a
+          clause by importing known-unfixed work, which is the same move as amending a column to
+          get a green: §C.8's one forbidden action, wearing different clothes.
+          So the debt stays recorded and the branch merges when it is fixed, not when the clause
+          is inconvenient.
+WHAT WOULD CLOSE IT: U5 round 2 governs the ungoverned tables (`entity_extraction_queue`,
+          `entities`, `thought_entities`, `thought_edges`, `consolidation_log`) with a table set
+          DERIVED rather than hand-listed, fixes `upsert_thought`'s ELSE branch materialising
+          personal content as an unlabelled ops row, and lands the clause-3 backfill. Then
+          `work/u5rls` merges and the live state and the work line agree.
+COST IF NOT CLOSED: clause 4 fails, and correctly. The deployed boundary is real and proven by
+          canary — this is a provenance defect, not a containment one.
+
+## 2026-08-31 · clause 4 · the outstanding branches, measured
+Eight unmerged `work/*` branches (all with commits — the zero-commit items are among the 15
+worktrees, not the branches):
+
+| branch | commits | disposition |
+|---|---|---|
+| `work/pod-key` | 1 | **not ours** — unrelated podcast effort. Excluded by name, with the reason recorded, per the operator. |
+| `work/gitreach` | 3 | IN FLIGHT — round 2 running (a submodule path with a space silently skipped the check). |
+| `work/u5rls` | 14 | REFUTED and its migration is LIVE. Merges when round 2 closes the ungoverned tables. Stacked on `u5pplane`. |
+| `work/u5pplane` | 11 | superseded as METHOD by §2.1 A2, but its reader guards remain wanted as **defence in depth** — A2 demotes them from proof, it does not delete them. Merges with `u5rls`, which contains them. |
+| `work/u3gym` | 9 | U3 closed via `work/u4close`'s arena run. Its drills need a disposition: merge what is not duplicated, or abandon with the reason. |
+| `work/u4bidir` | 8 | U4 clause 3. Its agent-org runner registry is REAL and verified; U4 closed without it. Needs merge-or-abandon. |
+| `work/u5judge` | 7 | pre-A2 judge-flag work; the regex-vs-YAML-parser fix is still valid on its own terms. |
+| `work/u5proxy` | 6 | pre-A2 commit-path guard; overlaps `work/gitreach`. Reconcile rather than merge both blindly. |
+
+**A stale worktree is unfinished work wearing a finished face** (§C.8). 15 worktrees against 8
+branches means 7 are on merged or detached refs and are pure residue.
