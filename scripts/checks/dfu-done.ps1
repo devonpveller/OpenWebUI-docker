@@ -41,14 +41,33 @@
 #      PostgREST path that does not exist. (Class: a check green while checking nothing,
 #      in its hardest-to-see form - the subject was never in the query.)
 #
-# ABOUT RULE 3, PRECISELY. Phases, branches, worktrees, walkthrough rows, the PostgREST
-# surface and the RLS stage set are all read from the tree or the live schema. Two sets are
-# NOT derived and must not pretend to be: clause 3's door floor and clause 4's service set
-# come from section C.8's own prose, because C.8 is the specification and a config file
-# could otherwise be thinned to the doors that pass. What keeps them honest is that they
-# are CHECKED BACK against the plan's words at run time (`door-set-matches-plan`), so a
-# door the plan names and this file does not probe turns the clause red instead of
-# disappearing. A pinned floor plus a drift check is a different thing from a hand list.
+# ABOUT RULE 3, PRECISELY, AND ITS LIMIT. Branches, worktrees, walkthrough rows, the
+# PostgREST surface, the RLS stage set and the direct DB clients are all read from the tree
+# or the live system. THREE sets are NOT derived and must not pretend to be: clause 3's
+# door floor, clause 4's service set, and the U0-U6 PHASE FLOOR. They come from section
+# C.8's own prose, because C.8 is the specification. What keeps them honest is that each is
+# CHECKED BACK against the plan's words at run time (`door-set-matches-plan`,
+# `service-set-matches-plan`, `phase-floor-matches-plan`), so a subject the plan names and
+# this file does not probe turns the clause red instead of disappearing. A pinned floor
+# plus a drift check is a different thing from a hand list.
+#
+#   6. NEVER DERIVE THE POPULATION FROM THE DOCUMENT UNDER TEST. Clauses 1, 2 and 7 took
+#      their subjects from the CURRENT PLAN.md, so a phase could delete itself out of its
+#      own population: remove U1's row and clause 2 read "met, coverage 1/1", U1's chain
+#      never reconstructed and no not_evaluated entry naming it. MERELY REMOVING THE BOLD -
+#      `| **U1** |` -> `| U1 |`, invisible to a reader because the row is still printed -
+#      did the same. Coverage still said "N of N" because N had shrunk: the failure this
+#      script exists to prevent, operating on the script. The floor above is the fix, and
+#      a floor phase missing from the table is a FAILURE, never a smaller N.
+#   7. A SUBSTRING IS NOT A STRUCTURE. `git ls-remote` prints "<sha>TAB<ref>" and the
+#      gitlink gate searched the whole output for the pinned sha, so a tag NAMED after that
+#      sha - `git tag rollback-$(git rev-parse HEAD)` - turned the gate green for a commit
+#      the remote could not serve. `docker ps --format {{.Names}}` prints one name per line
+#      and the ops-gateway probe matched it as a blob, so any container whose name merely
+#      CONTAINED the service's answered for it. Both read a structured output as an
+#      undifferentiated blob; both are now parsed by column and compared whole. (Prose is a
+#      different case: a phrase looked for in PLAN.md or DECISIONS.md has no columns to
+#      parse, and those tests stay what they are.)
 #
 # WHAT IT MAY NOT DO, from section C.8 itself: "If a clause cannot be met, that is a
 # REPORT, not a redefinition." A non-zero exit naming unmet clauses is this script
@@ -482,7 +501,19 @@ function Get-PhaseTable {
     if (-not $Text) { return $out }
     foreach ($line in ($Text -split "`n")) {
         $l = $line.TrimEnd("`r")
-        if ($l -notmatch '^\|\s*\*\*(U\d)') { continue }
+        # THE BOLD IS FORMATTING, NOT IDENTITY. Requiring the literal `| **U1** |` meant
+        # that deleting two asterisks - a change a READER CANNOT SEE, since the row is
+        # still printed in the document - dropped that phase out of every population
+        # derived from this table: clause 1's subjects, clause 2's chains, clause 7's
+        # audit set. Coverage then read "1 of 1" because N had shrunk. A formatting change
+        # must not remove a subject, so the emphasis is optional here and the PHASE FLOOR
+        # below is what decides which phases have to exist at all.
+        # AND THE CELL MAY SAY MORE THAN THE ID. The live table writes
+        # `| **U7 (standing)** |`, so anchoring the closing pipe straight after the
+        # emphasis DROPPED U7 from clause 2's chains - fixing one way for a phase to
+        # vanish from the population by introducing another. The id is read from the
+        # front of the cell; whatever else the cell says is the cell's business.
+        if ($l -notmatch '^\|\s*(?:\*\*|__)?\s*(U\d)\b[^|]*\|') { continue }
         $id = $Matches[1]
         # A markdown row: | phase | what | validated by | depends on |
         $cells = @($l -split '\|')
@@ -495,6 +526,105 @@ function Get-PhaseTable {
         }
     }
     return $out
+}
+
+# ---------------------------------------------------------------------------------
+# THE PHASE FLOOR. C.8.1 names U0-U6 LITERALLY, so the population of clauses 1, 2 and 7 is
+# not "whatever section 2's table happens to contain today".
+#
+# WHY IT EXISTS - THE CHECKER WAS DERIVING ITS POPULATION FROM THE DOCUMENT UNDER TEST.
+# Each of those clauses took its subjects from the CURRENT PLAN.md, so a phase could delete
+# itself out of its own population: remove U1's row and clause 2 reported "met, coverage
+# 1/1", with no probe, no not_evaluated entry and U1's chain never reconstructed. Merely
+# REMOVING THE BOLD did the same while the row stayed visible in the document. Coverage
+# still read "N of N" because N had shrunk - which is the failure this script exists to
+# prevent, operating on the script.
+#
+# The fix is the guard clause 3 already carries for its door set (`door-set-matches-plan`):
+# a PINNED floor, CHECKED BACK against the plan's own words. A phase in the floor and
+# missing from the table is a FAILURE, never a smaller population; and the floor itself is
+# compared with the range C.8.1 writes, so a plan that stops naming U0-U6 turns this red
+# instead of drifting.
+# ---------------------------------------------------------------------------------
+$script:DfuPhaseFloor = @("U0", "U1", "U2", "U3", "U4", "U5", "U6")
+
+function Get-ShortRef {
+    # A chain step's ref, printable. Not every step is a 40-character sha - the working
+    # tree is a step too - and Substring(0,7) on a short one throws.
+    param([string]$Sha)
+    if (-not $Sha) { return "-------" }
+    if ($Sha.Length -le 7) { return $Sha }
+    return $Sha.Substring(0, 7)
+}
+
+function Get-PlanPhaseFloor {
+    # The phase ids C.8 clause 1 ITSELF names, ranges expanded. $null when that clause's
+    # text could not be located - "could not check", never "fine".
+    param([string]$PlanText)
+    if (-not $PlanText) { return $null }
+    $m = [regex]::Match($PlanText, '(?s)1\.\s\*\*Every U-phase column.*?(?=\s2\.\s\*\*No phase is parked)')
+    if (-not $m.Success) { return $null }
+    $sec = $m.Value
+    $set = @()
+    # A RANGE IS A SET. "U0-U6" must EXPAND, or a floor derived from the plan would shrink
+    # to its two endpoints and the middle phases would vanish from the comparison.
+    foreach ($r in [regex]::Matches($sec, 'U(\d)\s*[^A-Za-z0-9\s]\s*U(\d)')) {
+        $a = [int]$r.Groups[1].Value; $b = [int]$r.Groups[2].Value
+        if ($b -ge $a) { for ($i = $a; $i -le $b; $i++) { $set += ("U{0}" -f $i) } }
+    }
+    foreach ($r in [regex]::Matches($sec, '(?<![A-Za-z0-9])U(\d)(?![0-9])')) { $set += ("U" + $r.Groups[1].Value) }
+    return @($set | Sort-Object -Unique)
+}
+
+function Add-PhaseFloorProbes {
+    # Adds the two probes every phase-derived clause carries and returns the SUBJECT SET:
+    #   phase-floor-matches-plan - the pinned floor still equals the phase set C.8.1 names
+    #   phase-floor-present      - every floor phase still HAS a row in section 2's table
+    # The returned ids are the floor UNIONED with the table, so a phase can be added to
+    # this script's population but never subtracted from it by editing the plan.
+    param($Clause, $Ctx, [string]$PlanText, $Phases, [string]$Restrict = "")
+    $floor = @($script:DfuPhaseFloor)
+    if ($Restrict) { $floor = @($floor | Where-Object { $_ -match $Restrict }) }
+    $parsed = @($Phases.Keys)
+    if ($Restrict) { $parsed = @($parsed | Where-Object { $_ -match $Restrict }) }
+
+    $named = Get-PlanPhaseFloor -PlanText $PlanText
+    if ($null -eq $named) {
+        $Clause.probes += (New-Probe -Name "phase-floor-matches-plan" `
+            -Command ("locate C.8 clause 1 in {0}" -f $Ctx.plan) `
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                  -Note "C.8 clause 1's text could not be located in the plan, so the pinned phase floor could not be checked back against it"))
+    } else {
+        $pinnedNotNamed = @($script:DfuPhaseFloor | Where-Object { $named -notcontains $_ })
+        $namedNotPinned = @($named | Where-Object { $script:DfuPhaseFloor -notcontains $_ })
+        if ($pinnedNotNamed.Count -eq 0 -and $namedNotPinned.Count -eq 0) {
+            $Clause.coverage.evaluated = [int]$Clause.coverage.evaluated + 1
+            $b = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                 -Note ("the pinned floor {0} is exactly the phase set C.8 clause 1 names" -f ($script:DfuPhaseFloor -join ","))
+        } else {
+            $b = New-VerdictProbeBody -Verdict "fail" -Exit ($pinnedNotNamed.Count + $namedNotPinned.Count) `
+                 -Note ("the pinned floor and C.8 clause 1 disagree - the plan names {0}; pinned but unnamed: {1}; named but unpinned: {2}" -f `
+                        ($named -join ","), `
+                        $(if ($pinnedNotNamed.Count) { $pinnedNotNamed -join "," } else { "none" }), `
+                        $(if ($namedNotPinned.Count) { $namedNotPinned -join "," } else { "none" }))
+        }
+        $Clause.probes += (New-Probe -Name "phase-floor-matches-plan" `
+            -Command ("extract the phase ids C.8 clause 1 names in {0} and compare them with the pinned floor" -f $Ctx.plan) -Run $b)
+    }
+
+    $missing = @($floor | Where-Object { $parsed -notcontains $_ })
+    if ($missing.Count -eq 0) {
+        $b = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+             -Note ("every floor phase ({0}) has a row in section 2's table" -f ($floor -join ","))
+    } else {
+        $b = New-VerdictProbeBody -Verdict "fail" -Exit $missing.Count `
+             -Note ("{0} floor phase(s) have NO row this parser can find in section 2's table: {1} - a phase does not leave this clause's population by leaving the document, and a row that merely lost its bold is still a row" -f `
+                    $missing.Count, ($missing -join ","))
+    }
+    $Clause.probes += (New-Probe -Name "phase-floor-present" `
+        -Command ("parse section 2's table in {0} and compare it with the pinned floor {1}" -f $Ctx.plan, ($script:DfuPhaseFloor -join ",")) -Run $b)
+
+    return @{ ids = @(@($floor + $parsed) | Sort-Object -Unique); missing = @($missing) }
 }
 
 function Get-WalkthroughRuns {
@@ -594,6 +724,54 @@ function Invoke-Curl {
         exit = $r.exit; ran = $r.ran; command = $r.command; stderr = $r.stderr
         results = @($results); urls = @($urls)
     }
+}
+
+function Invoke-CurlMany {
+    # Invoke-Curl, but CHUNKED. The surface sweep now carries every text column and every
+    # jsonb key of every exposed table, and one docker argv holding all of that runs past
+    # the operating system's command-line limit - at which point the process does not
+    # start, curl reports nothing, and a sweep that measured NOTHING is indistinguishable
+    # from a clean surface. Results stay in URL order across chunks, and a chunk that could
+    # not run contributes status-0 placeholders, so the caller counts those URLs as unread
+    # instead of silently shifting every later answer onto the wrong URL.
+    param($Ctx, [string[]]$Url, [int]$MaxChars = 6000)
+    $urls = @($Url | Where-Object { $_ })
+    if ($Ctx.skiplive) { return @{ exit = $null; ran = $false; results = @(); command = "(not run: -SkipLive)"; stderr = ""; urls = $urls } }
+    if ($urls.Count -lt 1) { return @{ exit = $null; ran = $false; results = @(); command = "(no url)"; stderr = ""; urls = $urls } }
+    $out    = @()
+    $cmds   = @()
+    $errs   = @()
+    $anyRan = $false
+    $batch  = @()
+    $len    = 0
+    foreach ($u in $urls) {
+        if ($batch.Count -ge 1 -and ($len + $u.Length) -gt $MaxChars) {
+            $r = Invoke-Curl -Ctx $Ctx -Url $batch
+            $cmds += $r.command
+            if ($r.stderr) { $errs += $r.stderr }
+            if ($r.ran) { $anyRan = $true }
+            $got = @($r.results)
+            for ($i = 0; $i -lt $batch.Count; $i++) {
+                if ($r.ran -and $i -lt $got.Count) { $out += $got[$i] } else { $out += @{ status = 0; body = "" } }
+            }
+            $batch = @()
+            $len = 0
+        }
+        $batch += $u
+        $len += ($u.Length + 1)
+    }
+    if ($batch.Count -ge 1) {
+        $r = Invoke-Curl -Ctx $Ctx -Url $batch
+        $cmds += $r.command
+        if ($r.stderr) { $errs += $r.stderr }
+        if ($r.ran) { $anyRan = $true }
+        $got = @($r.results)
+        for ($i = 0; $i -lt $batch.Count; $i++) {
+            if ($r.ran -and $i -lt $got.Count) { $out += $got[$i] } else { $out += @{ status = 0; body = "" } }
+        }
+    }
+    return @{ exit = 0; ran = $anyRan; results = @($out); urls = $urls
+              command = (("{0} chunk(s), first: " -f $cmds.Count) + [string]($cmds | Select-Object -First 1)); stderr = ($errs -join [string][char]10) }
 }
 
 function Get-CurlResult {
@@ -736,9 +914,18 @@ function Test-Clause1 {
     }
     $phases = Get-PhaseTable -Text $planText
     # U0-U6 are this clause's subjects; U7 is standing by design and belongs to clause 6.
-    $ids = @($phases.Keys | Where-Object { $_ -match '^U[0-6]$' } | Sort-Object)
-    $c.coverage.subject  = "U-phases U0-U6, derived from section 2's table in PLAN.md"
-    $c.coverage.expected = $ids.Count
+    #
+    # AND THE POPULATION IS NOT THE DOCUMENT'S TO CHOOSE. Taking $ids from the CURRENT
+    # PLAN.md let a phase delete itself out of this clause: drop U1's row and the expected
+    # count fell 3 -> 2 in silence. The floor is pinned and checked back against C.8.1's
+    # own words - see Add-PhaseFloorProbes.
+    $floor = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Restrict '^U[0-6]$'
+    $ids = @($floor.ids)
+    $c.coverage.subject  = "U-phases U0-U6 - the floor C.8.1 names literally, unioned with section 2's table - plus the floor's own drift check"
+    $c.coverage.expected = $ids.Count + 1
+    # A floor phase with no row cannot have its column re-run. It is NAMED here and the
+    # phase-floor-present probe has already failed the clause; it is never a smaller N.
+    foreach ($miss in @($floor.missing)) { $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($miss) }
     if ($ids.Count -lt 1) {
         $c.probes += (New-Probe -Name "derive-phases" -Command ("parse section 2 table in {0}" -f $Ctx.plan) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
@@ -766,6 +953,9 @@ function Test-Clause1 {
 
     try {
         foreach ($id in $ids) {
+            # A FLOOR PHASE THAT IS NOT IN THE TABLE HAS NO COLUMN TO RE-RUN - already
+            # named in not_evaluated and already failed by phase-floor-present.
+            if (-not $phases.Contains($id)) { continue }
             # SECTION 2 IS READ, not assumed. This clause claims to re-run "the section 2
             # Validated by check", and the previous version never opened section 2 at all -
             # it ran the first How-to-run span in the walkthrough and reported that as the
@@ -1113,9 +1303,13 @@ function Test-Clause2 {
     # --- (c) THE CHAIN, per phase -------------------------------------------------
     $revs = Get-PlanRevisions -Ctx $Ctx
     $curPhases = Get-PhaseTable -Text $planText
-    $ids = @($curPhases.Keys | Sort-Object)
-    $c.coverage.subject  = "phases whose Validated-by chain must be reconstructable, derived from section 2's table"
-    $c.coverage.expected = $ids.Count
+    # THE FLOOR AGAIN. Deleting U1's row from section 2 used to make this clause report
+    # "met, coverage 1/1" with U1's chain never reconstructed - silence about a link in the
+    # chain, which is the failure this clause names in its own words.
+    $floor2 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $curPhases
+    $ids = @($floor2.ids)
+    $c.coverage.subject  = "phases whose Validated-by chain must be reconstructable - the C.8.1 floor unioned with section 2's table - plus the floor's own drift check"
+    $c.coverage.expected = $ids.Count + 1
 
     if ($null -eq $revs -or @($revs).Count -lt 1) {
         $c.probes += (New-Probe -Name "chain-history" -Command ("git log --follow -- {0}" -f $Ctx.plan) `
@@ -1126,7 +1320,7 @@ function Test-Clause2 {
     }
     $unreadable = @($revs | Where-Object { -not $_.readable })
     if ($unreadable.Count -gt 0) {
-        $shas = (($unreadable | ForEach-Object { $_.sha.Substring(0, 7) }) -join ",")
+        $shas = (($unreadable | ForEach-Object { Get-ShortRef -Sha $_.sha }) -join ",")
         $c.probes += (New-Probe -Name "chain-revisions-readable" `
             -Command ("git show <sha>:<plan> across {0} revisions" -f @($revs).Count) `
             -Run (New-VerdictProbeBody -Verdict "fail" -Exit 1 `
@@ -1144,11 +1338,23 @@ function Test-Clause2 {
                 $chain += @{ sha = $r.sha; date = $r.date; subject = $r.subject; text = $vb }
             }
         }
+        # AND THE WORKING TREE IS A STATE OF THE CHAIN. The chain was built from git while
+        # the phase set, the amendments and the parked check are read from DISK, so an
+        # UNCOMMITTED weakening of a column was invisible here: the chain ended at the last
+        # commit and the erosion sat in the file nobody compared. It is appended as the
+        # final step, labelled for what it is.
+        if ($curPhases.Contains($id)) {
+            $onDisk = [string]$curPhases[$id].validated
+            if ($chain.Count -eq 0 -or (ConvertTo-Normalised -s $chain[-1].text) -ne (ConvertTo-Normalised -s $onDisk)) {
+                $chain += @{ sha = "worktree"; date = "uncommitted"; subject = "the working tree, not yet committed"; text = $onDisk }
+            }
+        }
+
         # THE CHAIN IS PRINTED, dated and verbatim at each step - that is the clause's
         # own requirement, and it is what lets a reader disagree with the verdict.
         $c.detail += ("chain {0}: {1} distinct state(s)" -f $id, $chain.Count)
         foreach ($step in $chain) {
-            $c.detail += ("    {0} {1} : {2}" -f $step.date, $step.sha.Substring(0, 7), $step.text)
+            $c.detail += ("    {0} {1} : {2}" -f $step.date, (Get-ShortRef -Sha $step.sha), $step.text)
         }
         if ($chain.Count -lt 1) {
             # UNRECONSTRUCTABLE => FAIL, in the clause's own words.
@@ -1184,7 +1390,7 @@ function Test-Clause2 {
         }
 
         $cmdLabel = ("compare ORIGINAL({0} {1}) vs CURRENT({2} {3}) for {4}, requirement by requirement" -f `
-                     $chain[0].date, $chain[0].sha.Substring(0, 7), $chain[-1].date, $chain[-1].sha.Substring(0, 7), $id)
+                     $chain[0].date, (Get-ShortRef -Sha $chain[0].sha), $chain[-1].date, (Get-ShortRef -Sha $chain[-1].sha), $id)
 
         $carried  = @()
         $problems = @()
@@ -1283,6 +1489,19 @@ function Test-Clause2 {
 # Doors DISCOVERED beyond the floor are additional, never substitutes: the whole PostgREST
 # surface is enumerated from the live schema and swept (`postgrest-surface-sweep`).
 # ---------------------------------------------------------------------------------
+# THE NON-DOOR SUBJECTS OF CLAUSE 3, named once so the coverage arithmetic cannot drift
+# from what is actually probed. Two of them do not need the live plane and are evaluated
+# even under -SkipLive; the rest are listed as not_evaluated there.
+$script:DfuClause3Extras = @(
+    "door-set-matches-plan",
+    "corpus-predicate-source-on-work-line",
+    "corpus-predicate-fail-closed",
+    "corpus-backfill-landed",
+    "fixture-write-landed",
+    "postgrest-surface-sweep"
+)
+$script:DfuClause3ExtrasOffline = @("door-set-matches-plan", "corpus-predicate-source-on-work-line")
+
 $script:DfuRequiredDoors = [ordered]@{
     "postgrest-thoughts"          = "PostgREST on the thoughts corpus"
     "postgrest-agent-memories"    = "PostgREST on agent_memories"
@@ -1319,6 +1538,51 @@ $script:DfuRequiredServices = [ordered]@{
     "andon-board"   = "the andon board (U6 clauses 1-3)"
     "gate-profiles" = "dark vs attended gate profiles (U6)"
     "rls-boundary"  = "the exposure boundary as row-level security (U5, PLAN A2)"
+}
+
+# WHICH OF C.8 CLAUSE 4's OWN WORDS EACH SERVICE CLAIMS. The header of this file says both
+# pinned sets "are CHECKED BACK against the plan's words at run time" - and only clause 3's
+# was. Clause 4's service floor had NO drift check at all, so a service the plan started
+# naming and this file did not probe would have disappeared instead of turning the clause
+# red, which is the difference between a pinned floor and a hand-written list.
+$script:DfuServiceAnchors = [ordered]@{
+    "ops-gateway"   = @("ops gateway")
+    "andon-board"   = @("andon board")
+    "gate-profiles" = @("gate profiles")
+    "rls-boundary"  = @("RLS boundary", "direct clients")
+}
+
+function Get-DirectDbClients {
+    # WHO TALKS TO THE CORPUS DATABASE DIRECTLY, AND AS WHICH ROLE - derived from the
+    # running system (the containers on the Open Brain network and the DB user each
+    # carries), never from a list in here. Returns role -> the containers using it, or
+    # $null when the question could not be asked at all.
+    param($Ctx)
+    $r = Invoke-Native -Exe "docker" -Arguments @("network", "inspect", $Ctx.obnet, "--format", "{{range .Containers}}{{.Name}} {{end}}")
+    if (-not $r.ran -or $r.exit -ne 0) { return $null }
+    $names = @(($r.stdout -split '[ \t\r\n]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($names.Count -lt 1) { return $null }
+    $argv = @("inspect", "--format", "{{.Name}}|{{range .Config.Env}}{{.}};{{end}}") + $names
+    $ri = Invoke-Native -Exe "docker" -Arguments $argv
+    if (-not $ri.ran -or $ri.exit -ne 0) { return $null }
+    $out = @{}
+    foreach ($line in ($ri.stdout -split "`n")) {
+        $l = $line.Trim()
+        if (-not $l) { continue }
+        $parts = $l -split '\|', 2
+        if ($parts.Count -lt 2) { continue }
+        $cname = $parts[0].TrimStart('/')
+        foreach ($kv in ($parts[1] -split ';')) {
+            $kvt = $kv.Trim()
+            $role = ""
+            if ($kvt -match '^(?:DB_USER|PGUSER|POSTGRES_USER)=([A-Za-z0-9_]+)$') { $role = $Matches[1] }
+            elseif ($kvt -match '^[A-Za-z0-9_]*(?:DB_URI|DB_URL|DATABASE_URL)=[a-z]+://([A-Za-z0-9_]+):') { $role = $Matches[1] }
+            if (-not $role) { continue }
+            if (-not $out.ContainsKey($role)) { $out[$role] = @() }
+            if (@($out[$role]) -notcontains $cname) { $out[$role] = @($out[$role]) + @($cname) }
+        }
+    }
+    return $out
 }
 
 function Get-ContainerEnv {
@@ -1366,6 +1630,38 @@ function Invoke-McpTool {
     return @{ ran = $r.ran; status = $status; body = ($body -join "`n"); command = $cmd; stderr = $r.stderr }
 }
 
+function Test-Ob1SourceOnWorkLine {
+    # IS THE SQL THAT DEFINES A LIVE BOUNDARY ACTUALLY ON THE WORK LINE? A migration
+    # applied to production from an unmerged branch is deployed-but-not-landed - the mirror
+    # of C.8.4's "nothing in flight", and just as much a thing in flight. Clause 4's RLS
+    # probe carried this guard; the corpus-predicate probe did not, and passed while its
+    # defining SQL was absent from the pinned OB1 tree.
+    #
+    # Returns known=$false when the question could not be ASKED - a missing submodule or an
+    # unreadable gitlink is "could not check", never "fine".
+    param($Ctx, [string]$RelPath)
+    $ob1 = Join-Path $Ctx.root "OB1"
+    $gl = Invoke-Git -Arguments @("ls-tree", $Ctx.workline, "OB1") -WorkDir $Ctx.root
+    $pin = ""
+    if ($gl.exit -eq 0) {
+        $m = [regex]::Match($gl.stdout, 'commit[ 	]+([0-9a-f]{40})')
+        if ($m.Success) { $pin = $m.Groups[1].Value }
+    }
+    if (-not $pin) { return @{ ok = $false; known = $false; pin = ""; why = "the OB1 gitlink could not be read from the work line" } }
+    if (-not (Test-Path -LiteralPath $ob1)) {
+        return @{ ok = $false; known = $false; pin = $pin; why = "the OB1 submodule checkout is not present, so the pinned tree could not be inspected" }
+    }
+    $have = Invoke-Git -Arguments @("cat-file", "-e", ($pin + "^{commit}")) -WorkDir $ob1
+    if ($have.exit -ne 0) {
+        return @{ ok = $false; known = $false; pin = $pin
+                  why = ("the pinned OB1 commit {0} is not present in this checkout, so its tree could not be read" -f (Get-ShortRef -Sha $pin)) }
+    }
+    $cf = Invoke-Git -Arguments @("cat-file", "-e", ("{0}:{1}" -f $pin, $RelPath)) -WorkDir $ob1
+    if ($cf.exit -eq 0) { return @{ ok = $true; known = $true; pin = $pin; why = "" } }
+    return @{ ok = $false; known = $true; pin = $pin
+              why = ("{0} is NOT in the OB1 tree the work line pins ({1})" -f $RelPath, (Get-ShortRef -Sha $pin)) }
+}
+
 function Test-Clause3 {
     # C.8.3 - LIFT BY VALIDATION, NEVER BY EMPTINESS. "0 personal rows" is an absence of
     # data, not containment: the property it claims dies the instant a personal row exists.
@@ -1384,7 +1680,7 @@ function Test-Clause3 {
     $c = New-ClauseResult -Id 3
     $doors = @($script:DfuRequiredDoors.Keys)
     $c.coverage.subject  = "the doors C.8 clause 3 names, the corpus predicate, the PostgREST surface derived from the live schema, and the door set itself"
-    $c.coverage.expected = $doors.Count + 3
+    $c.coverage.expected = $doors.Count + @($script:DfuClause3Extras).Count
 
     # --- (0) THE DOOR SET STILL MATCHES THE PLAN'S OWN WORDS ----------------------
     # A pinned list is only honest while something checks it against what it is pinned to.
@@ -1427,6 +1723,31 @@ function Test-Clause3 {
                       -Command ("extract backticked identifiers from C.8 clause 3 in {0} and compare with this clause's subjects" -f $Ctx.plan) -Run $body)
     }
 
+    # --- (0b) THE PREDICATE'S SOURCE MUST BE ON THE WORK LINE --------------------
+    # C.8.3 requires the backfill AND the flip to LAND. This is the "landed" half in the
+    # repository sense, and it is the SAME guard clause 4's RLS twin already carried and
+    # this clause did not: the behaviour probe below passed while
+    # docker/init-agent-memory-corpus-failclosed.sql was ABSENT from the pinned OB1 tree
+    # and its OB1 commit was not even on the OB1 remote - a boundary running in production
+    # from code no fresh clone of this repository can reproduce.
+    $srcRel = "docker/init-agent-memory-corpus-failclosed.sql"
+    $src = Test-Ob1SourceOnWorkLine -Ctx $Ctx -RelPath $srcRel
+    if (-not $src.known) {
+        $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @("corpus-predicate-source-on-work-line")
+        $bsrc = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                -Note ("the pinned OB1 tree could not be inspected, so the predicate's source was NOT checked: {0}" -f $src.why)
+    } elseif ($src.ok) {
+        $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
+        $bsrc = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                -Note ("{0} is in the OB1 tree the work line pins ({1})" -f $srcRel, (Get-ShortRef -Sha $src.pin))
+    } else {
+        $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
+        $bsrc = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                -Note ("{0} - the fail-closed predicate is not defined by any code this work line pins, so whatever is live came from somewhere else" -f $src.why)
+    }
+    $c.probes += (New-Probe -Name "corpus-predicate-source-on-work-line" `
+                  -Command ("git ls-tree {0} OB1 ; git -C OB1 cat-file -e <pin>:{1}" -f $Ctx.workline, $srcRel) -Run $bsrc)
+
     if ($Ctx.skiplive) {
         foreach ($d in $doors) {
             $c.probes += (New-Probe -Name ("door-{0}" -f $d) -Command "(not run: -SkipLive)" `
@@ -1434,7 +1755,7 @@ function Test-Clause3 {
                       -Note "-SkipLive was passed, so this door was NOT attacked - unevaluated, never assumed closed"))
         }
         $c.coverage.not_evaluated = @($doors)
-        foreach ($n in @("corpus-predicate-fail-closed", "postgrest-surface-sweep")) {
+        foreach ($n in @($script:DfuClause3Extras | Where-Object { $script:DfuClause3ExtrasOffline -notcontains $_ })) {
             $c.probes += (New-Probe -Name $n -Command "(not run: -SkipLive)" `
                 -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "-SkipLive was passed"))
             $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($n)
@@ -1484,6 +1805,35 @@ function Test-Clause3 {
     $c.probes += (New-Probe -Name "corpus-predicate-fail-closed" `
                   -Command ("docker exec {0} psql -tAc <in one tx: insert an UNLABELLED row and an OPS control row; SET ROLE service_role; count both; ROLLBACK>" -f $Ctx.db) -Run $body)
 
+    # --- AND THE BACKFILL MUST HAVE LANDED --------------------------------------
+    # A FLIP WITHOUT A BACKFILL SILENTLY HIDES THE UNLABELLED CORPUS. The probe above shows
+    # only that the predicate is fail-closed; C.8.3 asks for both, in its own words - "a
+    # one-time backfill of unlabelled rows to exposure='ops', then flipping the function.
+    # Until both land, this clause fails." Measuring one and reporting on both is how
+    # ~13k rows could go invisible while this clause read green.
+    $sqlBf = ("SELECT 'T:'||count(*) FROM thoughts WHERE metadata->>'exposure' IS NULL; " +
+              "SELECT 'M:'||count(*) FROM agent_memories WHERE metadata->>'exposure' IS NULL;")
+    $rb = Invoke-Psql -Ctx $Ctx -Sql $sqlBf
+    $bt = (($rb.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^T:[0-9]+$' } | Select-Object -First 1)
+    $bm = (($rb.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^M:[0-9]+$' } | Select-Object -First 1)
+    if (-not $rb.ran -or $null -eq $rb.exit -or [int]$rb.exit -ne 0 -or -not $bt -or -not $bm) {
+        $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @("corpus-backfill-landed")
+        $bodyBf = New-VerdictProbeBody -Verdict "indeterminate" -Exit $rb.exit `
+                  -Note "the unlabelled-row counts could not be read, so whether the backfill landed was NOT decided"
+    } else {
+        $nt = [int]($bt -replace '^T:', ''); $nm = [int]($bm -replace '^M:', '')
+        $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
+        if (($nt + $nm) -eq 0) {
+            $bodyBf = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                      -Note "no unlabelled row remains in either corpus - the one-time backfill C.8.3 names has landed, so the flip is not hiding rows nobody labelled"
+        } else {
+            $bodyBf = New-VerdictProbeBody -Verdict "fail" -Exit ($nt + $nm) `
+                      -Note ("{0} unlabelled thought(s) and {1} unlabelled agent_memory row(s) remain - the predicate was FLIPPED without the backfill C.8.3 requires, so those rows are now hidden rather than labelled" -f $nt, $nm)
+        }
+    }
+    $c.probes += (New-Probe -Name "corpus-backfill-landed" `
+                  -Command ("docker exec {0} psql -tAc <count rows with metadata->>'exposure' IS NULL in thoughts and agent_memories>" -f $Ctx.db) -Run $bodyBf)
+
     # --- write the synthetic fixture AND ITS OPS-LABELLED TWIN -------------------
     $stamp = [guid]::NewGuid().ToString("N").Substring(0, 10)
     $pmark = "DFU-DONE-PERSONAL-FIXTURE-" + $stamp
@@ -1495,14 +1845,28 @@ function Test-Clause3 {
     # could not be written", and the clause looked merely unevaluated rather than broken.
     # jsonb_build_object expresses the same object using single quotes only.
     #
-    # The ops twin carries share=cloud as well, because the cloud door's forced read filter
-    # is `share`, not `exposure` - a control the cloud gateway would filter out is not a
-    # control.
+    # THE TWINS DIFFER ONLY IN THE VARIABLE UNDER TEST, and the previous pair did not.
+    # The ops twin was given share=cloud and the personal fixture was NOT, while the cloud
+    # gateway's forced read filter is `share`, not `exposure` (openbrain-gateway/app.py:83,
+    # _force_read_filter). So the cloud door's "pass" was produced by the WRONG VARIABLE:
+    # it excluded the personal row because it lacked share=cloud, and would have done that
+    # whatever the exposure boundary did. Proved live - a thought with exposure=personal
+    # AND share=cloud IS returned by that door, HTTP 200.
+    #
+    # Both twins now carry share=cloud and the same fixture type; the ONLY field that
+    # differs is `exposure`, which is the field every door here is supposed to bind on. A
+    # control the gateway would filter out is not a control, and neither is a fixture the
+    # gateway filters out for a reason the boundary had no part in.
+    #
+    # metadata.type is the FILTER every probe uses. list_thoughts takes `type`
+    # (OB1 integrations/kubernetes-deployment/index.ts, metadata @> {type}), so the MCP
+    # doors can be aimed at the fixture instead of asking for an unfiltered newest-first
+    # window that concurrent ingest can push the fixture out of.
+    $ftype = "dfu-done-fixture-" + $stamp
     $ids = [ordered]@{}
     foreach ($pair in @(@("p", $pmark, "personal"), @("o", $omark, "ops"))) {
         $tag = $pair[0]; $mk = $pair[1]; $exp = $pair[2]
-        $share = $(if ($exp -eq "ops") { ",'share','cloud'" } else { "" })
-        $q = "INSERT INTO thoughts (content, metadata) VALUES ('{0} {1} fixture', jsonb_build_object('exposure','{1}','dfu_done_fixture',true{2})) RETURNING id;" -f $mk, $exp, $share
+        $q = "INSERT INTO thoughts (content, metadata) VALUES ('{0} {1} fixture', jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;" -f $mk, $exp, $ftype
         $r = Invoke-Psql -Ctx $Ctx -Sql $q
         if ($r.ran -and $r.exit -eq 0) {
             $mm = [regex]::Match(($r.out -replace "\s+", " "), '(\d+)')
@@ -1510,7 +1874,7 @@ function Test-Clause3 {
         }
         $q2 = ("INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata) " +
                "VALUES ('dfu-done-fixture','check','{0} {1} twin','{0} {1} fixture body', " +
-               "jsonb_build_object('exposure','{1}','dfu_done_fixture',true)) RETURNING id;") -f $mk, $exp
+               "jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;") -f $mk, $exp, $ftype
         $r2 = Invoke-Psql -Ctx $Ctx -Sql $q2
         if ($r2.ran -and $r2.exit -eq 0) {
             $mm2 = [regex]::Match($r2.out, '([0-9a-f-]{36})')
@@ -1546,6 +1910,46 @@ function Test-Clause3 {
     $oRow = $(if ($ids.Contains("othought")) { [string]$ids["othought"] } else { "" })
     $c.detail += ("personal fixture: marker={0} thought_id={1} memory_id={2}" -f $pmark, $pRow, $(if ($ids.Contains("pmem")) { $ids["pmem"] } else { "-" }))
     $c.detail += ("ops CONTROL twin: marker={0} thought_id={1} memory_id={2} entity_id={3}" -f $omark, $oRow, $(if ($ids.Contains("omem")) { $ids["omem"] } else { "-" }), $ent)
+
+    # --- A POSITIVE CONTROL ON THE **WRITE**, not only on the read ---------------
+    # EVERY FIXTURE IS READ BACK BEFORE ANYTHING ASSERTS ON ITS ABSENCE. The guard above
+    # checked the THOUGHTS ids only: the agent_memories ids were printed and never gated,
+    # and the insert result was never verified at all. If a WRITE-side boundary rejects
+    # exposure='personal' - which is exactly the direction U5 is briefed to build - the
+    # personal row never reaches the table, the agent_memories door finds nothing, and the
+    # door reports "attacked with the fixture and it did not come back". A read-side
+    # control cannot see that; only reading the write back can.
+    $landed = @{}
+    $sqlLanded = ("SELECT 'TP:'||count(*) FROM thoughts WHERE content LIKE '%{0}%'; " +
+                  "SELECT 'TO:'||count(*) FROM thoughts WHERE content LIKE '%{1}%'; " +
+                  "SELECT 'MP:'||count(*) FROM agent_memories WHERE content LIKE '%{0}%'; " +
+                  "SELECT 'MO:'||count(*) FROM agent_memories WHERE content LIKE '%{1}%';") -f $pmark, $omark
+    $rl = Invoke-Psql -Ctx $Ctx -Sql $sqlLanded
+    foreach ($ln in ($rl.out -split "`n")) {
+        $t = $ln.Trim()
+        if ($t -match '^(TP|TO|MP|MO):([0-9]+)$') { $landed[$Matches[1]] = [int]$Matches[2] }
+    }
+    $wantKeys = @("TP", "TO", "MP", "MO")
+    $absent = @($wantKeys | Where-Object { -not $landed.ContainsKey($_) -or [int]$landed[$_] -lt 1 })
+    $memOk = ($landed.ContainsKey("MP") -and $landed.ContainsKey("MO") -and [int]$landed["MP"] -ge 1 -and [int]$landed["MO"] -ge 1)
+    if (-not $rl.ran -or $null -eq $rl.exit -or [int]$rl.exit -ne 0 -or $landed.Count -lt 4) {
+        $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @("fixture-write-landed")
+        $bodyW = New-VerdictProbeBody -Verdict "indeterminate" -Exit $rl.exit `
+                 -Note "the fixture rows could not be read back, so it is not known whether anything this clause asserts about was ever written"
+    } elseif ($absent.Count -gt 0) {
+        # NOT a fail: nothing about the PLAN was decided. A fixture that did not land means
+        # this clause could not run, and "could not run" refuses.
+        $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @("fixture-write-landed")
+        $bodyW = New-VerdictProbeBody -Verdict "indeterminate" -Exit 1 `
+                 -Note ("{0} of the 4 fixture rows did not land ({1}) - a write-side boundary may have rejected them, and a door asked about a row that was never written cannot show anything" -f `
+                        $absent.Count, ($absent -join ","))
+    } else {
+        $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
+        $bodyW = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                 -Note "both twins landed in BOTH corpora - every absence asserted below is an absence of something that exists"
+    }
+    $c.probes += (New-Probe -Name "fixture-write-landed" `
+                  -Command ("docker exec {0} psql -tAc <read back both markers from thoughts AND agent_memories>" -f $Ctx.db) -Run $bodyW)
 
     try {
         if (-not $pRow -or -not $oRow) {
@@ -1585,6 +1989,16 @@ function Test-Clause3 {
         }
 
         foreach ($d in $doors) {
+            # THE agent_memories DOOR NEEDS ITS OWN FIXTURE, not the thoughts one. Its ids
+            # were printed and never gated; with the personal row absent the door had
+            # nothing to return and said so as containment.
+            if ($d -eq "postgrest-agent-memories" -and -not $memOk) {
+                $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($d)
+                $c.probes += (New-Probe -Name ("door-{0}" -f $d) -Command "(not run: the agent_memories fixture or its control did not land)" `
+                    -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                          -Note "the agent_memories twins were not both written, so this door was asked about a row that does not exist - unevaluated, never closed"))
+                continue
+            }
             if ($pairs.Contains($d)) {
                 $u = @($pairs[$d])
                 $rc = Invoke-Curl -Ctx $Ctx -Url $u
@@ -1648,8 +2062,16 @@ function Test-Clause3 {
                             -Note "the door's key could not be read, so the door was NOT called - unknown is not closed"
                     $cmd = "docker exec openbrain-mcp printenv BRAIN_KEY"
                 } else {
+                    # FILTERED TO THE FIXTURE. `{"limit":25}` is an unfiltered
+                    # newest-first window, and because the personal fixture is written
+                    # BEFORE the ops twin it is always the first of the pair to fall out of
+                    # it - so concurrent ingest manufactures sawP=false, sawO=true, which
+                    # this file reads as "the door REFUSED the personal fixture". A door
+                    # that passes because the plane was busy is a green check checking
+                    # nothing, in the form hardest to notice.
                     $r = Invoke-McpTool -Ctx $Ctx -Url "http://openbrain-mcp:8000/mcp" -Header ("x-brain-key: " + $key) `
-                                        -Secret $key -Tool "list_thoughts" -ArgumentsJson '{"limit":25}'
+                                        -Secret $key -Tool "list_thoughts" `
+                                        -ArgumentsJson ('{"limit":25,"type":"' + $ftype + '"}')
                     $sawP = ($r.body -match [regex]::Escape($pmark))
                     $sawO = ($r.body -match [regex]::Escape($omark))
                     $v = Resolve-DoorVerdict -Reachable ([bool]$r.ran) -Status ([int]$r.status) -SawPersonal $sawP -SawOps $sawO
@@ -1680,8 +2102,14 @@ function Test-Clause3 {
                             -Note "the cloud gateway's key could not be read (is the container running?), so cloud reads were NOT attacked"
                     $cmd = "docker exec openbrain-gateway printenv GATEWAY_KEY"
                 } else {
+                    # FILTERED TO THE FIXTURE, same reason as the door above. The
+                    # gateway's forced metadata_filter (share=cloud) is applied on top of
+                    # this type filter, and BOTH twins carry share=cloud - so the only
+                    # thing left that can separate them is `exposure`, which is what this
+                    # door is supposed to bind on.
                     $r = Invoke-McpTool -Ctx $Ctx -Url "http://openbrain-gateway:8061/mcp" -Header ("Authorization: Bearer " + $key) `
-                                        -Secret $key -Tool "list_thoughts" -ArgumentsJson '{"limit":25}'
+                                        -Secret $key -Tool "list_thoughts" `
+                                        -ArgumentsJson ('{"limit":25,"type":"' + $ftype + '"}')
                     $sawP = ($r.body -match [regex]::Escape($pmark))
                     $sawO = ($r.body -match [regex]::Escape($omark))
                     $v = Resolve-DoorVerdict -Reachable ([bool]$r.ran) -Status ([int]$r.status) -SawPersonal $sawP -SawOps $sawO
@@ -1766,9 +2194,21 @@ function Test-Clause3 {
             foreach ($mm in [regex]::Matches($sp.body, '"/([A-Za-z0-9_]+)"\s*:\s*\{')) { $paths += $mm.Groups[1].Value }
             $paths = @($paths | Sort-Object -Unique)
         }
-        # Text-ish columns per relation, from information_schema - the same reflection
-        # PostgREST itself does.
-        $colMap = @{}
+        # EVERY COLUMN THAT CAN CARRY TEXT, JSONB INCLUDED, AND NO CAP. The previous sweep
+        # took text/varchar/char/name and then only the FIRST FOUR such columns per table,
+        # and never swept jsonb at all - while its verdict said "56 exposed table(s) swept
+        # for the personal marker and none returned it". That sentence was wider than the
+        # evidence in the two directions that matter most here: the fifth text column of a
+        # wide table, and metadata, which is where this corpus actually keeps its prose.
+        #
+        # jsonb IS SWEPT BY KEY, and the keys come from the LIVE DATA rather than a guess
+        # list: PostgREST accepts `col->>key=like.*x*` but rejects a cast in a filter
+        # (`col::text=like.*` answers 42883, measured), so a key path is the only filter
+        # this door actually offers. A jsonb column that is not an object - an array like
+        # wiki_pages.tags - has no keys to walk, and those are NAMED IN THE VERDICT rather
+        # than silently counted as swept.
+        $colMap  = @{}
+        $jsonMap = @{}
         $rcols = Invoke-Psql -Ctx $Ctx -Sql ("SELECT table_name||'|'||string_agg(column_name, ',' ORDER BY ordinal_position) " +
                                              "FROM information_schema.columns WHERE table_schema='public' " +
                                              "AND data_type IN ('text','character varying','character','name') GROUP BY table_name;")
@@ -1776,7 +2216,27 @@ function Test-Clause3 {
             foreach ($line in ($rcols.out -split "`n")) {
                 $l = $line.Trim()
                 if ($l -notmatch '^([A-Za-z0-9_]+)\|(.+)$') { continue }
-                $colMap[$Matches[1]] = @(($Matches[2] -split ',') | Where-Object { $_ } | Select-Object -First 4)
+                $colMap[$Matches[1]] = @(($Matches[2] -split ',') | Where-Object { $_ })
+            }
+        }
+        # table|column|key1,key2,... - one row per jsonb column, keys read from the data.
+        $jsonSql = ("SELECT c.table_name||'|'||c.column_name||'|'||coalesce((" +
+                    "SELECT string_agg(DISTINCT k, ',') FROM (" +
+                    "SELECT (xpath('/row/k/text()', x))[1]::text AS k FROM unnest(xpath('/table/row', " +
+                    "query_to_xml(format('SELECT DISTINCT k FROM (SELECT jsonb_object_keys(%I) k FROM public.%I " +
+                    "WHERE jsonb_typeof(%I)=''object'' LIMIT 20000) s', c.column_name, c.table_name, c.column_name), " +
+                    "false, false, ''))) AS x) y WHERE k ~ '^[A-Za-z0-9_]+$'), '') " +
+                    "FROM information_schema.columns c WHERE c.table_schema='public' AND c.data_type='jsonb';")
+        $rjson = Invoke-Psql -Ctx $Ctx -Sql $jsonSql
+        $jsonReadable = ($rjson.ran -and $rjson.exit -eq 0)
+        if ($jsonReadable) {
+            foreach ($line in ($rjson.out -split "`n")) {
+                $l = $line.Trim()
+                if ($l -notmatch '^([A-Za-z0-9_]+)\|([A-Za-z0-9_]+)\|(.*)$') { continue }
+                $tn = $Matches[1]; $cn = $Matches[2]
+                $ks = @(($Matches[3] -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                if (-not $jsonMap.ContainsKey($tn)) { $jsonMap[$tn] = @() }
+                $jsonMap[$tn] = @($jsonMap[$tn]) + @(@{ column = $cn; keys = $ks })
             }
         }
         if ($paths.Count -lt 1 -or $colMap.Count -lt 1) {
@@ -1786,18 +2246,44 @@ function Test-Clause3 {
                       -Note ("the exposed surface could not be enumerated ({0} path(s) from PostgREST, {1} relation(s) with text columns from the schema)" -f $paths.Count, $colMap.Count)))
         } else {
             $urls = @()
+            $nCols = 0
+            $nKeys = 0
+            $unsweepable = @()
             foreach ($t in $paths) {
-                $cols = @()
-                if ($colMap.ContainsKey($t)) { $cols = @($colMap[$t]) }
-                if ($cols.Count -lt 1) { $noText += $t; continue }
-                $filter = (($cols | ForEach-Object { "{0}.like.*{1}*" -f $_, $pmark }) -join ",")
-                $urls += ("http://{0}/{1}?or=({2})&select={3}&limit=1" -f $Ctx.postgrest, $t, $filter, $cols[0])
+                $conds = @()
+                $first = ""
+                foreach ($col in @($(if ($colMap.ContainsKey($t)) { $colMap[$t] } else { @() }))) {
+                    if (-not $first) { $first = $col }
+                    $conds += ("{0}.like.*{1}*" -f $col, $pmark)
+                    $nCols++
+                }
+                foreach ($jc in @($(if ($jsonMap.ContainsKey($t)) { $jsonMap[$t] } else { @() }))) {
+                    if (@($jc.keys).Count -lt 1) {
+                        # A jsonb column with no object keys in the data - an array, a
+                        # scalar, or empty. NAMED in the verdict, never counted as swept.
+                        $unsweepable += ("{0}.{1}" -f $t, $jc.column)
+                        continue
+                    }
+                    foreach ($k in @($jc.keys)) {
+                        if (-not $first) { $first = $jc.column }
+                        $conds += ("{0}->>{1}.like.*{2}*" -f $jc.column, $k, $pmark)
+                        $nKeys++
+                    }
+                }
+                if ($conds.Count -lt 1) { $noText += $t; continue }
+                $urls += ("http://{0}/{1}?or=({2})&select={3}&limit=1" -f $Ctx.postgrest, $t, ($conds -join ","), $first)
                 $swept += $t
             }
-            $c.detail += ("surface sweep: {0} exposed path(s) from PostgREST, {1} swept, {2} with no text column" -f $paths.Count, $swept.Count, $noText.Count)
+            if (-not $jsonReadable) { $unsweepable += "(every jsonb column - their keys could not be enumerated)" }
+            $c.detail += ("surface sweep: {0} exposed path(s) from PostgREST, {1} swept over {2} text column(s) and {3} jsonb key(s), {4} with nothing text-bearing to filter on" -f `
+                          $paths.Count, $swept.Count, $nCols, $nKeys, $noText.Count)
+            foreach ($u in @($unsweepable)) { $c.detail += ("    NOT swept: {0}" -f $u) }
             $control = ("http://{0}/thoughts?content=like.*{1}*&select=id&limit=1" -f $Ctx.postgrest, $omark)
             $all = @($urls) + @($control)
-            $rs = Invoke-Curl -Ctx $Ctx -Url $all
+            # BATCHED, because the argv would otherwise grow past what a process can be
+            # started with once every column and key is in it - and a sweep that fails to
+            # START measured nothing while looking exactly like a clean surface.
+            $rs = Invoke-CurlMany -Ctx $Ctx -Url $all
             $hits = @()
             $unread = @()
             for ($i = 0; $i -lt $urls.Count; $i++) {
@@ -1823,11 +2309,14 @@ function Test-Clause3 {
             } else {
                 $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
                 $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                        -Note ("{0} exposed table(s) swept for the personal marker and none returned it, with the ops control returning; {1} table(s) have no text column to sweep: {2}" -f `
-                               $swept.Count, $noText.Count, ($noText -join ", "))
+                        -Note ("{0} exposed table(s) swept for the personal marker across {1} text column(s) and {2} jsonb key(s) and none returned it, with the ops control returning. NOT SWEPT, which is the restriction on that sentence: {3} table(s) expose nothing text-bearing ({4}); {5} jsonb column(s) hold no object keys to filter on ({6})" -f `
+                               $swept.Count, $nCols, $nKeys, $noText.Count, `
+                               $(if ($noText.Count) { $noText -join ", " } else { "none" }), `
+                               @($unsweepable).Count, `
+                               $(if (@($unsweepable).Count) { (@($unsweepable) -join ", ") } else { "none" }))
             }
             $c.probes += (New-Probe -Name "postgrest-surface-sweep" `
-                          -Command ("curl (from {0}) one filtered query per exposed table, derived from PostgREST's own OpenAPI document, plus an ops-twin control" -f $Ctx.obnet) -Run $body)
+                          -Command ("curl (from {0}) one filtered query per exposed table - EVERY text column plus every jsonb key read from the live data - derived from PostgREST's own OpenAPI document, plus an ops-twin control" -f $Ctx.obnet) -Run $body)
         }
     } finally {
         # CLEAN UP. Production must show 0 personal rows when this finishes, and the
@@ -1864,9 +2353,58 @@ function Test-Clause4 {
     # unfinished work wearing a finished face.
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 4
-    $subjects = @("work-branches", "worktrees", "clean-repo", "clean-submodules", "gitlink-reachable") + @($script:DfuRequiredServices.Keys)
-    $c.coverage.subject  = "in-flight checks plus the services this plan adds"
+    $subjects = @("service-set-matches-plan", "work-branches", "worktrees", "clean-repo", "clean-submodules", "gitlink-reachable") + @($script:DfuRequiredServices.Keys)
+    $c.coverage.subject  = "in-flight checks, the services this plan adds, and the service floor's own drift check"
     $c.coverage.expected = $subjects.Count
+
+    # --- (0) THE SERVICE SET STILL MATCHES THE PLAN'S OWN WORDS ------------------
+    # The same guard clause 3 carries for its doors. C.8 clause 4 ENUMERATES the services
+    # it means, so that list is read back out of the plan and every item must be claimed by
+    # a subject here - a service the plan names and this script does not probe turns the
+    # clause red rather than disappearing from it.
+    $planTxt4 = Read-TextFile -Path $Ctx.plan
+    $sec4 = ""
+    if ($planTxt4) {
+        $m4 = [regex]::Match($planTxt4, '(?s)4\.\s\*\*Nothing is left in flight.*?(?=\n\s*5\.\s\*\*The walkthrough is true)')
+        # ALL whitespace collapses, not just newlines. The plan WRAPS the phrase this
+        # regex looks for across a line and the continuation carries an indent, so a
+        # newline-only normalisation left a run of spaces mid-phrase, matched nothing,
+        # and this subject reported 'could not be parsed' against a plan that says it
+        # perfectly well - a drift check that never checks is the defect it guards.
+        if ($m4.Success) { $sec4 = ($m4.Value -replace '\s+', ' ') }
+    }
+    if (-not $sec4) {
+        $body4 = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                 -Note "C.8 clause 4's text could not be located in the plan, so the pinned service set could not be checked back against it"
+        $c.coverage.not_evaluated += "service-set-matches-plan"
+    } else {
+        $listed = @()
+        $ml = [regex]::Match($sec4, "running live from the work line's code\*\*\s*[^A-Za-z0-9\s]\s*([^.]+)\.")
+        if ($ml.Success) {
+            $listed = @(($ml.Groups[1].Value -split ',') | ForEach-Object { ($_ -replace '\s+', ' ').Trim() } | Where-Object { $_ })
+        }
+        $claimedPhrases = @()
+        foreach ($k in $script:DfuServiceAnchors.Keys) { $claimedPhrases += @($script:DfuServiceAnchors[$k]) }
+        $unclaimed = @($listed | Where-Object { $item = $_; -not (@($claimedPhrases) | Where-Object { $item -match [regex]::Escape($_) }) })
+        $absentPhrases = @($claimedPhrases | Where-Object { -not $sec4.Contains($_) })
+        if ($listed.Count -lt 1) {
+            $c.coverage.not_evaluated += "service-set-matches-plan"
+            $body4 = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                     -Note "C.8 clause 4's enumeration of the services it means could not be parsed, so the pinned set was compared against nothing"
+        } elseif ($unclaimed.Count -eq 0 -and $absentPhrases.Count -eq 0) {
+            $c.coverage.evaluated++
+            $body4 = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                     -Note ("all {0} service(s) C.8 clause 4 enumerates are claimed by a subject of this clause: {1}" -f $listed.Count, ($listed -join " | "))
+        } else {
+            $c.coverage.evaluated++
+            $body4 = New-VerdictProbeBody -Verdict "fail" -Exit ($unclaimed.Count + $absentPhrases.Count) `
+                     -Note ("the pinned service set and C.8 clause 4 disagree - named but unclaimed: {0}; pinned phrases the clause no longer contains: {1}" -f `
+                            $(if ($unclaimed.Count) { $unclaimed -join " | " } else { "none" }), `
+                            $(if ($absentPhrases.Count) { $absentPhrases -join " | " } else { "none" }))
+        }
+    }
+    $c.probes += (New-Probe -Name "service-set-matches-plan" `
+                  -Command ("read C.8 clause 4's own enumeration of services from {0} and compare it with the pinned set" -f $Ctx.plan) -Run $body4)
 
     # --- unmerged work/* branches ------------------------------------------------
     # An exclusion is only honoured while the LEDGER records it (see DfuExcludedBranches).
@@ -1979,8 +2517,27 @@ function Test-Clause4 {
                     -Note "the OB1 remote could not be queried - 'could not check' is not 'fine'"
         } else {
             $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
-            if ($lr.stdout -match [regex]::Escape($pin)) {
-                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note ("the pinned OB1 commit {0} is a ref tip on the remote" -f $pin.Substring(0, 7))
+            # PARSE THE SHA COLUMN. `git ls-remote` prints "<sha>TAB<refname>", and the
+            # test here was a raw SUBSTRING search over the WHOLE output - so the pin
+            # matched anywhere, including inside a REF NAME. A bare remote that does not
+            # contain the pinned commit but carries one tag NAMED after it - the shape
+            # `git tag rollback-$(git rev-parse HEAD)` produces - reported
+            # gitlink-reachable-on-remote = pass for a commit a fresh
+            # --recurse-submodules clone could not fetch.
+            #
+            # ROUND 2 REPLACED THIS EXACT SUBSTRING-FOR-STRUCTURE TEST IN CLAUSE 2 AND LEFT
+            # IT HERE. The pattern, not the line, is the defect: a structured output read
+            # as an undifferentiated blob. Its sibling is fixed in the same commit - the
+            # ops-gateway probe below matched `docker ps --format {{.Names}}` as a blob,
+            # where any container whose name merely CONTAINED the service's would do.
+            $tipShas = @()
+            foreach ($lrline in ($lr.stdout -split "`n")) {
+                $lrl = $lrline.Trim()
+                if ($lrl -match '^([0-9a-f]{40})[ 	]+.+$') { $tipShas += $Matches[1] }
+            }
+            if ($tipShas -contains $pin) {
+                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                        -Note ("the pinned OB1 commit {0} is a ref tip on the remote - matched in the SHA COLUMN of {1} advertised ref(s), not anywhere in the output" -f (Get-ShortRef -Sha $pin), $tipShas.Count)
             } else {
                 # A commit can be reachable without being a tip, so the remote is asked
                 # directly - and it must actually be ASKED.
@@ -2052,9 +2609,15 @@ function Test-Clause4 {
                     $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "-SkipLive"
                 } else {
                     $r = Invoke-Native -Exe "docker" -Arguments @("ps", "--filter", "name=openbrain-ops-gateway", "--format", "{{.Names}}")
+                    # ONE NAME PER LINE, COMPARED WHOLE. `--filter name=` is a SUBSTRING
+                    # filter and the old test was a substring match over its output, so
+                    # `openbrain-ops-gateway-backup` - or any container whose name merely
+                    # contains this one - answered for the service. Same class as the
+                    # gitlink gate above, one output format over.
+                    $names = @(($r.stdout -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
                     if (-not $r.ran) { $c.coverage.not_evaluated += $svc; $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "docker unavailable" }
-                    elseif ($r.stdout -match 'openbrain-ops-gateway') { $c.coverage.evaluated++; $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "running" }
-                    else { $c.coverage.evaluated++; $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 -Note ("{0} is NOT running" -f $what) }
+                    elseif ($names -contains "openbrain-ops-gateway") { $c.coverage.evaluated++; $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note ("running (exact container name among {0} matched by the filter: {1})" -f $names.Count, ($names -join ",")) }
+                    else { $c.coverage.evaluated++; $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 -Note ("{0} is NOT running - the name filter matched {1} container(s): {2}" -f $what, $names.Count, $(if ($names.Count) { $names -join "," } else { "none" })) }
                 }
             }
             "andon-board" {
@@ -2089,7 +2652,7 @@ function Test-Clause4 {
                 # on the work line. A migration applied to production from an unmerged
                 # branch is deployed-but-not-landed, which is the mirror of the failure
                 # this clause names and is just as much "in flight".
-                $cmd = ("psql: relrowsecurity/relforcerowsecurity for the corpus tables AND every table with a foreign key into them ; git ls-tree {0} OB1 -> submodule cat-file" -f $Ctx.workline)
+                $cmd = ("psql: relrowsecurity/relforcerowsecurity for the corpus tables AND every table with a foreign key into them ; docker network/inspect -> the DB role every direct client connects as -> pg_roles.rolsuper/rolbypassrls ; git ls-tree {0} OB1 -> submodule cat-file" -f $Ctx.workline)
                 if ($Ctx.skiplive) { $c.coverage.not_evaluated += $svc; $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "-SkipLive" }
                 else {
                     # boolean::text is 'true'/'false', NOT 't'/'f' - psql's display form and
@@ -2122,16 +2685,61 @@ function Test-Clause4 {
                         $srcOk = ($cf.exit -eq 0)
                         if (-not $srcOk) { $srcWhy = "its defining SQL is NOT in the OB1 tree the work line pins" }
                     } else { $srcWhy = "the OB1 gitlink could not be read" }
+                    # AND THE DIRECT CLIENTS, WHICH C.8.4 NAMES EXPLICITLY. relrowsecurity
+                    # and relforcerowsecurity are STRUCTURAL facts about a table, and a role
+                    # with rolbypassrls is unaffected by both - so once the five t/f tables
+                    # go t/t this subject would have gone green over a boundary that is void
+                    # at the client. The same run already MEASURED that:
+                    # door-openbrain-mcp-door connects as `postgres` (rolsuper/rolbypassrls
+                    # = t/t) and RETURNED the personal fixture, and clause 4 never consulted
+                    # it. "The RLS boundary at every stage including the direct clients" is
+                    # the column's own wording; a table-flag reading offered as that
+                    # measurement is the round-2 send-back in a new probe.
+                    #
+                    # So the clients are enumerated from the running system and their roles
+                    # read from pg_roles. A direct client that bypasses RLS FAILS this
+                    # subject however the table flags read.
+                    $clients = Get-DirectDbClients -Ctx $Ctx
+                    $bypass = @()
+                    $clientRoles = @()
+                    $clientsKnown = $false
+                    if ($null -ne $clients -and $clients.Count -ge 1) {
+                        $clientRoles = @($clients.Keys | Sort-Object)
+                        $inList = (($clientRoles | ForEach-Object { "'" + $_ + "'" }) -join ",")
+                        $rrq = ("SELECT rolname||'/'||(CASE WHEN rolsuper THEN 't' ELSE 'f' END)||'/'||(CASE WHEN rolbypassrls THEN 't' ELSE 'f' END) " +
+                                "FROM pg_roles WHERE rolname IN ({0});" -f $inList)
+                        $rrc = Invoke-Psql -Ctx $Ctx -Sql $rrq
+                        $rows = @(($rrc.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[A-Za-z0-9_]+/[tf]/[tf]$' })
+                        if ($rows.Count -ge 1) {
+                            $clientsKnown = $true
+                            foreach ($row in $rows) {
+                                $rn = ($row -split '/')[0]
+                                $c.detail += ("direct client role {0} (used by {1})" -f $row, ((@($clients[$rn])) -join ","))
+                                if ($row -notmatch '/f/f$') { $bypass += ("{0} used by {1}" -f $row, ((@($clients[$rn])) -join ",")) }
+                            }
+                        }
+                    }
+
                     if (-not $flags) { $c.coverage.not_evaluated += $svc; $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $r.exit -Note "could not read the RLS flags for any stage table" }
+                    elseif (-not $clientsKnown) {
+                        $c.coverage.not_evaluated += $svc
+                        $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                                -Note ("the RLS flags read t/t on {0} of {1} stage table(s), but the DIRECT CLIENTS C.8.4 names could not be enumerated or their roles could not be read - a table-flag reading is not the boundary this column asks about, so this refuses rather than reporting the structural half as the measurement" -f `
+                                       ($stages.Count - $unbound.Count), $stages.Count)
+                    }
                     else {
                         $c.coverage.evaluated++
-                        if ($unbound.Count -eq 0 -and $srcOk) {
+                        if ($unbound.Count -eq 0 -and $bypass.Count -eq 0 -and $srcOk) {
                             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), and its source is on the work line" -f $stages.Count)
+                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), none of the {1} direct client role(s) carries rolsuper or rolbypassrls, and its source is on the work line" -f $stages.Count, $clientRoles.Count)
                         } elseif ($unbound.Count -gt 0) {
                             $body = New-VerdictProbeBody -Verdict "fail" -Exit $unbound.Count `
                                     -Note ("{0} of {1} stage table(s) are not relrowsecurity/relforcerowsecurity = t/t: {2}" -f `
                                            $unbound.Count, $stages.Count, ($unbound -join ", "))
+                        } elseif ($bypass.Count -gt 0) {
+                            $body = New-VerdictProbeBody -Verdict "fail" -Exit $bypass.Count `
+                                    -Note ("the table flags are t/t on all {0} stage(s), but {1} DIRECT CLIENT role(s) are unaffected by them: {2} - C.8.4 asks for the boundary at every stage INCLUDING the direct clients, and a BYPASSRLS client makes the flags decorative" -f `
+                                           $stages.Count, $bypass.Count, ($bypass -join " ; "))
                         } else {
                             $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 -Note ("the boundary is LIVE but {0} - deployed from code that has not landed" -f $srcWhy)
                         }
@@ -2260,9 +2868,12 @@ function Test-Clause7 {
     $c = New-ClauseResult -Id 7
     $planText = Read-TextFile -Path $Ctx.plan
     $phases = Get-PhaseTable -Text $planText
-    $ids = @($phases.Keys | Sort-Object)
-    $c.coverage.subject  = "phases from section 2's table, each needing a ledger entry and a findings note"
-    $c.coverage.expected = $ids.Count
+    # THE FLOOR. Unbolding a row - `| **U1** |` -> `| U1 |`, invisible to a reader - used
+    # to drop the phase from this clause's population, which then reported "1 of 1".
+    $floor7 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases
+    $ids = @($floor7.ids)
+    $c.coverage.subject  = "phases - the C.8.1 floor unioned with section 2's table - each needing a ledger entry, a findings note AND a commit message, plus the floor's own drift check"
+    $c.coverage.expected = $ids.Count + 1
     if ($ids.Count -lt 1) {
         $c.probes += (New-Probe -Name "audit-phases" -Command ("parse section 2 table in {0}" -f $Ctx.plan) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "no phases parsed, so no audit trail could be checked"))
@@ -2273,6 +2884,39 @@ function Test-Clause7 {
     if (Test-Path -LiteralPath $Ctx.notes) {
         $noteFiles = @(Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue)
     }
+
+    # THE THIRD ARTIFACT, and there was no `git log` ANYWHERE in this file. C.8.7 names
+    # three per phase - DECISIONS entries, a findings note, and "commit messages stating
+    # what was validated and by which check" - and this clause could reach `met` with the
+    # commit-message half never examined, coverage reporting 8 of 8 while checking two
+    # thirds of its own sentence.
+    #
+    # A COMMIT COUNTS ONLY WHEN IT SAYS BOTH THINGS. Naming the phase is not "stating what
+    # was validated and by which check": the message must also NAME A RUNNABLE ARTIFACT,
+    # which is the same test clause 1 uses to tie a column to the thing that re-runs it.
+    # "U3 done" satisfies neither half and must not count as either.
+    $RS = [string][char]30
+    $US = [string][char]31
+    $commits = @()
+    $glog = Invoke-Git -Arguments @("log", "--format=%H%x1f%s%x1f%b%x1e", $Ctx.workline) -WorkDir $Ctx.root
+    $logOk = ($glog.exit -eq 0)
+    if ($logOk) {
+        foreach ($rec in ($glog.stdout -split $RS)) {
+            if (-not $rec.Trim()) { continue }
+            $f = $rec -split $US
+            if ($f.Count -lt 2) { continue }
+            $msg = [string]$f[1]
+            if ($f.Count -gt 2) { $msg = $msg + "`n" + [string]$f[2] }
+            $commits += @{ sha = ([string]$f[0]).Trim(); message = $msg }
+        }
+    } else {
+        # COULD NOT READ IS NOT FINE. Every phase below is left unevaluated for this half.
+        $c.probes += (New-Probe -Name "audit-commit-log" `
+            -Command ("git log --format=%H%x1f%s%x1f%b%x1e {0}" -f $Ctx.workline) `
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $glog.exit `
+                  -Note ("the work line's commit log could not be read, so the third artifact C.8.7 names was NOT examined: {0}" -f (($glog.stderr -replace '\s+', ' ').Trim()))))
+    }
+
     foreach ($id in $ids) {
         $headings = @()
         if ($decText) {
@@ -2296,19 +2940,36 @@ function Test-Clause7 {
             $_.BaseName -match ('(?i)\b' + $id + '\b') -or
             ((Read-TextFile -Path $_.FullName) -match ('\b' + $id + '\b'))
         })
-        $c.coverage.evaluated++
+        # THE COMMIT-MESSAGE HALF, per phase.
+        $cmsgs = @()
+        foreach ($cm in $commits) {
+            if ($cm.message -notmatch ('(?<![A-Za-z0-9])' + $id + '(?![0-9])')) { continue }
+            if (@(Get-NamedArtifacts -Text $cm.message).Count -lt 1) { continue }
+            $cmsgs += ("{0} {1}" -f (Get-ShortRef -Sha $cm.sha), (($cm.message -split "`n")[0]).Trim())
+        }
+        foreach ($cmline in @($cmsgs | Select-Object -First 3)) { $c.detail += ("    {0} commit: {1}" -f $id, $cmline) }
+
         $missing = @()
         if ($headings.Count -lt 1) { $missing += "no DECISIONS.md entry" }
         if ($notes.Count -lt 1)    { $missing += "no findings note" }
-        if ($missing.Count -eq 0) {
-            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                    -Note ("{0} ledger entry/entries and {1} findings note(s)" -f $headings.Count, $notes.Count)
-        } else {
+        if ($logOk -and $cmsgs.Count -lt 1) {
+            $missing += "no commit message on the work line that names the phase AND the check that validated it"
+        }
+        if ($logOk) { $c.coverage.evaluated++ }
+        else { $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($id) }
+
+        if ($missing.Count -gt 0) {
             $body = New-VerdictProbeBody -Verdict "fail" -Exit $missing.Count `
                     -Note ("{0} for {1}" -f ($missing -join " and "), $id)
+        } elseif (-not $logOk) {
+            $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                    -Note ("{0} ledger entry/entries and {1} findings note(s), but the commit log could not be read - two of the three artifacts C.8.7 names is not the audit trail it asks for" -f $headings.Count, $notes.Count)
+        } else {
+            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                    -Note ("{0} ledger entry/entries, {1} findings note(s) and {2} commit message(s) naming the phase and a check" -f $headings.Count, $notes.Count, $cmsgs.Count)
         }
         $c.probes += (New-Probe -Name ("audit-trail-{0}" -f $id) `
-                      -Command ("grep '^## .*{0}' {1} ; grep -l '{0}' {2}/*.md" -f $id, $Ctx.decisions, $Ctx.notes) -Run $body)
+                      -Command ("grep '^## .*{0}' {1} ; grep -l '{0}' {2}/*.md ; git log {3} | grep {0} + a named check" -f $id, $Ctx.decisions, $Ctx.notes, $Ctx.workline) -Run $body)
     }
     return (Resolve-ClauseVerdict -Clause $c)
 }
@@ -2432,7 +3093,9 @@ if ($ListClauses) {
     foreach ($s in $script:DfuRequiredServices.Keys) { Write-Host ("     {0} - {1}" -f $s, $script:DfuRequiredServices[$s]) -ForegroundColor DarkGray }
     Write-Host "  Branches clause 4 MAY exclude - each applied only while DECISIONS.md records it:" -ForegroundColor DarkGray
     foreach ($b in $script:DfuExcludedBranches.Keys) { Write-Host ("     {0} - {1}" -f $b, $script:DfuExcludedBranches[$b]) -ForegroundColor DarkGray }
-    Write-Host "  Clause 3's doors are checked back against C.8's own words by door-set-matches-plan." -ForegroundColor DarkGray
+    Write-Host "  The three pinned sets are checked back against C.8's own words at run time:" -ForegroundColor DarkGray
+    Write-Host "    door-set-matches-plan (clause 3), service-set-matches-plan (clause 4)," -ForegroundColor DarkGray
+    Write-Host "    phase-floor-matches-plan (clauses 1, 2 and 7 - the U0-U6 floor)." -ForegroundColor DarkGray
     Write-Host ""
     exit 0
 }
