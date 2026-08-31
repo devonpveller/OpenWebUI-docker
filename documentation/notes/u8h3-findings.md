@@ -521,12 +521,13 @@ docker network, nothing attached to an `ai-stack_*` network and no `:local` tag 
 | check | result |
 |---|---|
 | `deno check index.ts agent-memory.ts` + `deno test` (kubernetes-deployment) | clean / **133 passed, 0 failed** |
-| full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, **zero mirror readers**) |
+| full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, mirror-reader scan - whose notice said "zero readers" and now states its own scope, §16) |
 | 195 round trip on that throwaway | revert(200) -> revert(195) -> re-apply(195) -> re-apply(200) -> re-apply both AGAIN: clean, idempotent, row count preserved |
 | `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
 | `scripts/checks/drill-personal-plane-exclusion.ps1` (bare) | **109 passed, 0 failed, 18 named gaps**, EXIT 2 - the bare contract is unchanged |
 | the same, `-AcceptDispositionedGaps` (what CI runs) | **109 passed, 0 failed, 18 gaps ALL DISPOSITIONED**, EXIT 0 |
-| production `openbrain-db`, after everything | `thoughts=13001 personal=0 memories=21 personal=0` - unchanged, and never touched |
+| (both drill rows are the ROUND-2 numbers; round 3 changed them - see §16 and §17) | |
+| production `openbrain-db`, after everything | `thoughts=13001 personal=0 memories=21 personal=0` - **row state** unchanged. **"and never touched" was FALSE; see below.** |
 
 ### The R1/R2 fixes, red then green, in one place
 

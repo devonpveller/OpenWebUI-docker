@@ -8,6 +8,7 @@
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
 #   2. line endings      - repo convention
 #   3. gateway routing   - inference must go through the LiteLLM alias
+#   3b. corpus exposure  - a direct corpus INSERT must state its plane
 #   4. project configs   - compose renders + ps1 tokenize
 #   5. env_file scope    - a service names the variables it needs
 
@@ -36,6 +37,20 @@ fi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-llm-gateway-routing.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (LLM gateway routing bypass)!"
+    exit 1
+fi
+
+# --- 3b. corpus write contract (DFU C.9 H3) --------------------------------
+# Fail if a file INSERTs into `thoughts`/`agent_memories` over PostgREST without stating
+# `exposure` at its own call site. Added 2026-08-31 after the exposure column's own
+# post-condition ("every caller was found") turned out to have swept only the RPC callers:
+# twelve DIRECT-table producers were never searched for, and one of them
+# (openbrain-gmail-pull, daily) had been refused 42501 by the live policy since it landed.
+# The gate DERIVES the producer set from the tree, so producer thirteen breaks the build
+# instead of breaking production. Self-test: the script's -SelfTest switch.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-corpus-exposure-producers.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (a corpus insert does not state its plane)!"
     exit 1
 fi
 

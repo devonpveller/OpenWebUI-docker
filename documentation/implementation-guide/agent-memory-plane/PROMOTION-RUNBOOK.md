@@ -1063,7 +1063,18 @@ docker exec openbrain-db psql -U postgres -d openbrain -tAc `
 
 Applied to a throwaway built from the full 29-migration chain, twice: no init errors, §9's
 notice printed, `prove-agent-memory-rls.ps1` 68/68 and the personal-plane drill green on
-containment against it. **Quote the drill's result in full, including the gaps and the exit
+containment against it.
+
+**`prove-agent-memory-rls.ps1` 68/68 is true only when it does not overlap `dfu-done.ps1
+-Only 3`, and C.9 H4 wires BOTH into CI.** `prove-agent-memory-rls.ps1` ends with a
+*production* assertion — `personal_memories=0` / `personal_thoughts=0` on the live
+`openbrain-db`, by the mirror and by the column — and `dfu-done.ps1` clause 3 **plants a
+personal-exposure fixture in that same live database** (`$DbContainer = "openbrain-db"`) for the
+duration of its door probes. Run them concurrently, or run `prove-rls` while a `dfu-done` run
+is mid-clause, and `prove-rls` exits **1** with `production is not clean, or the column and the
+mirror disagree` — a true reading of the database at that instant, and not a defect in either
+script. **CI must serialise them** (or give `dfu-done` its own database); a retry loop or an
+`|| true` on `prove-rls` would delete the only check that watches the live plane. **Quote the drill's result in full, including the gaps and the exit
 code** — see "The drill's exit code, and what CI reads" below. An earlier version of this line
 said "105 passes / 0 failures" and stopped there, which reads as a pass; the run also reports
 18 named gaps and EXITS 2.
@@ -1294,8 +1305,16 @@ same class, on the only scheduled producer.)
 asserts — over `pg_policies` for declarative readers and over `pg_proc.prosrc` for opaque plpgsql
 bodies — that **nothing in the database reads `metadata->>'exposure'` for a trust decision.**
 Measured on the live volume before the change: that gate was the *only* function body reading
-it. After `195-`, the mirror has zero readers, so a desync cannot decide anything — and the
-door can no longer produce one anyway.
+it. After `195-`, **no policy and no function body other than the two retired jsonb predicates
+themselves** reads the mirror — those two (`ob_memory_on_ops_plane(md jsonb)`,
+`ob_corpus_on_ops_plane(md jsonb)`) read it *by construction*, are kept because the 190/200
+revert paths recreate policies that call them, and are invisible to §8(d)'s scan, whose anchors
+are the literal `metadata->>'exposure'` and `on_ops_plane(metadata)` — neither of which matches
+`md->>'exposure'`. That **nothing calls them** is the property that matters and it is asserted
+by `200-` §9, over `pg_depend` and over every function body, with a positive control. So a
+desync cannot decide anything — and the door can no longer produce one anyway. (§8(d)'s notice
+used to say "the mirror has zero readers", which was section 9's conclusion borrowed by a scan
+that could not reach it; corrected 2026-08-31.)
 
 `195-` §7b also widens `trg_queue_entity_extraction` to `UPDATE OF content, metadata, exposure`.
 `200-`'s own TRIGGER-DISPOSITION comment claims "an ops-to-personal transition deletes the
@@ -1375,13 +1394,35 @@ new" pass; the ledger is by name, so a new gap is red, and a gap that closes for
 gap, the run goes RED until the corresponding ids are deleted from `$GAP_DISPOSITIONS` — that is
 the intended behaviour, not a bug to route around.
 
-### The write contract reaches the RECIPES, not just the image
+### The write contract reaches the RECIPES *and the images*, and it reaches more than the RPC callers
 
-`195-` changes what a producer must send, and the producers are not all in the image. Ten
-`upsert_thought` callers were found and given an explicit `exposure: 'ops'`; the one that runs
-on a schedule is `recipes/entity-wiki/generate-wiki.mjs`, executed by `openbrain-wiki` from the
-**bind mount** `../recipes:/recipes:ro`. So its fix lands when the deployment checkout's OB1
+`195-` changes what a producer must send, and the producers are not all in the image — nor are
+they all RPC callers. **This section used to say "the write contract reaches the RECIPES" and
+then describe only the ten `upsert_thought` call sites. That was the sweep talking, not the
+tree:** the sweep behind it was `grep -rn 'rpc("upsert_thought"' OB1`, so RPC callers were the
+only thing it could return. There are **twelve DIRECT-table producers** as well — they POST at
+`/rest/v1/thoughts` or call `supabase.from("thoughts").insert()` — and this door is in front of
+none of them. See `documentation/notes/u5-live-producer-rls-regression.md`; the set is now
+derived on every commit by `scripts/checks/check-corpus-exposure-producers.ps1`.
+
+**Two producers whose rejection is an UNHANDLED OUTAGE, not a caught contract change:**
+
+| producer | how it ships | what a refusal does |
+|---|---|---|
+| `recipes/entity-wiki/generate-wiki.mjs` (`openbrain-wiki`) | **bind mount** `../recipes:/recipes:ro` | the dossier upsert throws; the compile fails per entity |
+| `docker/wiki-service/wiki-service.mjs` (`openbrain-wiki`) | **`COPY`d into `openbrain-wiki:local` at build time** (`docker/wiki-service/Dockerfile`) | note ingest fails per file; the run continues, silently ingesting nothing |
+| `recipes/email-history-import/pull-gmail.ts` (`openbrain-gmail-pull`) | bind mount | the daily pull reports `Ingested: 0` and an error; **this is live today** |
+
+So **"no rebuild, no restart" is FALSE for `wiki-service.mjs`.** It is the same container as
+the bind-mounted recipe, which is exactly why the sentence read as covering it: moving the
+deployment checkout's submodule fixes `generate-wiki.mjs` and does nothing at all for
+`wiki-service.mjs`, whose copy is baked into `openbrain-wiki:local`. That one needs
+`docker build -t openbrain-wiki:local OB1/docker/wiki-service` and a recreate — a gated
+deploy, in the promotion window, not a checkout move.
+
+For the bind-mounted producers the fix still lands when the deployment checkout's OB1
 submodule is moved to this gitlink — no rebuild, no restart, but also **no protection from a
 stale checkout**: an operator who applies `195-` without moving the submodule gets a wiki
-compile that fails at the door on every dossier. Move the submodule first, apply second.
+compile that fails at the door on every dossier. Move the submodule first, apply second, and
+rebuild `openbrain-wiki:local` in the same window.
 

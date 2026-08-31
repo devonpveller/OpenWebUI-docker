@@ -216,6 +216,11 @@ param(
     # It is a flag rather than the default ON PURPOSE: a bare run's verdict is unchanged, so
     # nobody reads a green here as "U5's recording half is met". See the exit block.
     [switch]$AcceptDispositionedGaps,
+    # THE VACUITY GUARD'S OWN RED. Runs Assert-NoneOf through all four of its outcomes -
+    # including the one that used to print PASS off an empty set - and exits. No docker, no
+    # database, no gitlink: the mechanism that decides whether the other checks can be
+    # vacuous is itself checkable in a second from a clean checkout.
+    [switch]$SelfTestVacuity,
     # Every shared resource name derives from this. Leave it empty for a fresh random id -
     # which is what makes two concurrent runs independent.
     [string]$RunId = "",
@@ -267,6 +272,115 @@ function Gap($id, $t) {
     $script:gaps++
     $script:gapIds += $id
 }
+# --- THE VACUITY GUARD - ONE MECHANISM, SO A SIXTH ONE CANNOT BE SILENTLY VACUOUS --------
+#
+# A PASS PRINTED OFF AN EMPTY SET IS NOT A PASS, and this file shipped five of them. Every
+# one had the same shape - "of the rows in S, none has property P" - written as
+#
+#       $n = Db "SELECT count(*) FROM ... WHERE <violating>"
+#       if ($n -eq "0") { Pass "..." } else { Fail "..." }
+#
+# which counts the VIOLATIONS and never counts S. When S is empty the violating count is
+# also 0, so the branch prints PASS while proving nothing at all. Four of the five printed
+# on the line immediately AFTER the GAP that had just proved the universe empty: the drill
+# reported "0 refusal rows exist" and then congratulated itself, five times, that none of
+# those zero rows was wrong. That is the same defect class the RED phase exists to catch
+# (a check whose every branch passes), landed inside the checks themselves.
+#
+# THE FIX IS ONE MECHANISM, NOT FIVE PATCHES. Assert-NoneOf takes BOTH counts - the universe
+# and the violating subset - and can only print PASS when the universe is non-empty. An
+# empty universe is reported as VACUOUS, naming which universe was empty, and is counted as
+# a GAP so the exit code and the ledger both see it. A sixth assertion of this shape written
+# next year is routed through the same helper, or it is not written in this file's idiom.
+#
+# WHAT IS NOT ROUTED THROUGH IT, DELIBERATELY: assertions whose CLAIM is that a set is empty
+# and which are paired with a prior assertion that it was non-empty - THE LIFT's "REMOVED"
+# clauses are the example (the fixture existed at clause 1, so "0 personal rows" at clause 4
+# is a change, not a vacuum). Those are a different shape and an empty universe is their
+# whole point.
+function Vacuous($id, $t) {
+    Write-Host "  VACUOUS [$id] $t" -ForegroundColor Yellow
+    $script:gaps++
+    $script:gapIds += $id
+}
+# 'pass' | 'fail' | 'vacuous' | 'unparsable' - the last outcome, for -SelfTestVacuity and
+# for any caller that needs to branch. Set rather than returned, so no call site can
+# accidentally spill a bare $true onto the output stream.
+$script:AssertOutcome = ""
+function Assert-NoneOf {
+    param(
+        # Stable id, used ONLY when the universe is empty. It must appear in
+        # $GAP_DISPOSITIONS like any other gap id, so a vacuous assertion is dispositioned
+        # by name rather than tolerated by count.
+        [Parameter(Mandatory=$true)][string]$Id,
+        # count(*) of the set the claim quantifies over. THIS is the number the old form
+        # never took.
+        [Parameter(Mandatory=$true)][AllowNull()]$Universe,
+        # count(*) of the members of that set which VIOLATE the claim.
+        [Parameter(Mandatory=$true)][AllowNull()]$Violating,
+        # what the universe IS, in words, for the vacuity message ("access_refused row(s)").
+        [Parameter(Mandatory=$true)][string]$UniverseName,
+        # the PASS sentence, without a count - the count is appended from $Universe.
+        [Parameter(Mandatory=$true)][string]$Claim,
+        # the FAIL sentence.
+        [Parameter(Mandatory=$true)][string]$Defect
+    )
+    $u = 0; $v = 0
+    $uOk = [int]::TryParse((([string]$Universe).Trim()), [ref]$u)
+    $vOk = [int]::TryParse((([string]$Violating).Trim()), [ref]$v)
+    if (-not $uOk -or -not $vOk) {
+        # A count that did not come back is not a zero. Reading an unparsable result as
+        # "0 violations" is how a broken query becomes a green check.
+        $script:AssertOutcome = "unparsable"
+        Fail "$Defect - and the counts did not parse, so nothing was measured (universe='$Universe' violating='$Violating')"
+        return
+    }
+    if ($v -gt 0) {
+        $script:AssertOutcome = "fail"
+        Fail "$Defect ($v of $u $UniverseName)"
+        return
+    }
+    if ($u -le 0) {
+        $script:AssertOutcome = "vacuous"
+        Vacuous $Id ("NOT A PASS - `"" + $Claim + "`" counts 0 violations out of an EMPTY universe: there are 0 " + $UniverseName + " for it to quantify over, so it discriminates nothing")
+        return
+    }
+    $script:AssertOutcome = "pass"
+    Pass "$Claim (0 violations out of $u $UniverseName)"
+}
+
+# THE HELPER'S OWN RED, and it needs no docker, no database and no gitlink - which is the
+# point: the mechanism that decides whether every other check can be vacuous must itself be
+# provable in a second, from a clean checkout, by anyone.
+if ($SelfTestVacuity) {
+    Write-Host "`n=== -SelfTestVacuity: the vacuity guard, forced through all four outcomes ===" -ForegroundColor Cyan
+    $expected = @(
+        @{ U = 7; V = 0; Want = "pass";       Why = "7 rows, none violating -> PASS, and it prints the universe size" }
+        @{ U = 7; V = 2; Want = "fail";       Why = "7 rows, 2 violating    -> FAIL" }
+        @{ U = 0; V = 0; Want = "vacuous";    Why = "EMPTY universe          -> VACUOUS, never PASS. This is the case that used to print PASS." }
+        @{ U = "x"; V = 0; Want = "unparsable"; Why = "a count that did not come back -> FAIL, not a silent zero" }
+    )
+    $selfFails = 0
+    foreach ($c in $expected) {
+        Assert-NoneOf -Id "VACUITY-SELFTEST" -Universe $c.U -Violating $c.V `
+            -UniverseName "synthetic row(s)" `
+            -Claim "SELFTEST: no synthetic row is wrong" `
+            -Defect "SELFTEST: a synthetic row is wrong"
+        if ($script:AssertOutcome -eq $c.Want) {
+            Write-Host ("        OK   universe={0} violating={1} -> {2}   ({3})" -f $c.U, $c.V, $script:AssertOutcome, $c.Why) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("        BAD  universe={0} violating={1} -> {2}, expected {3}" -f $c.U, $c.V, $script:AssertOutcome, $c.Want) -ForegroundColor Red
+            $selfFails++
+        }
+    }
+    if ($selfFails -eq 0) {
+        Write-Host "VACUITY GUARD SELF-TEST PASSED - an empty universe cannot reach PASS." -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "VACUITY GUARD SELF-TEST FAILED - $selfFails case(s) took the wrong branch." -ForegroundColor Red
+    exit 1
+}
+
 $AUDIT_GAP = "A REFUSAL RECORD REQUIRES SEEING WHAT YOU ARE REFUSING, and under the database boundary the door cannot. auditRefusal fires only after a bare SELECT 1 FROM agent_memories WHERE id=`$1 confirms the row EXISTS - and that probe is bound by the same policy that hid it, so for a non-superuser door it returns nothing and no record is written. As a SUPERUSER the probe succeeds and the record IS written, but then nothing was stopped either. NEITHER configuration satisfies U5's column, which asks for both. Closing it needs an elevated existence probe (SECURITY DEFINER, answers 'exists' without returning the row) - a C.9 H1/H4 decision, not an H3 one."
 
 # --- THE GAP LEDGER ----------------------------------------------------------------------
@@ -415,7 +529,11 @@ if (-not (Test-Path (Join-Path $OB1 "integrations\kubernetes-deployment\index.ts
     Write-Host "  FAIL  the exported gitlink tree has no openbrain-mcp source" -ForegroundColor Red
     exit 1
 }
-Write-Host "  PASS  working copy == gitlink == $GITLINK; exported to $OB1" -ForegroundColor Green
+# COUNTED, like every other PASS. This was a raw Write-Host, so the run printed 110 PASS
+# lines and the summary said 109 - in a header that boasts the number is "produced by the
+# run" rather than transcribed. A counter one check can walk past is a transcribed number
+# with extra steps.
+Pass "working copy == gitlink == $GITLINK; exported to $OB1"
 
 $SRC       = Join-Path $OB1 "integrations\kubernetes-deployment"
 $EXTSRC    = Join-Path $OB1 "docker\extensions-server"
@@ -615,6 +733,35 @@ function Add-AttackedTool([string]$Tool, [string]$Where) { $script:Attacked[$Too
 # iterated exactly as GATEWAY_READ_TOOLS is.
 $script:AttackedWrites = @{}
 function Add-AttackedWriteTool([string]$Tool, [string]$Where) { $script:AttackedWrites[$Tool] = $Where }
+
+# --- WHICH ATTACKS HAVE A RED, DERIVED - NOT ASSERTED IN A COMMENT ------------------------
+#
+# The red phase used to open with "a red for every family of green above ... so a green whose
+# red is missing is visible as an absence rather than as silence." Neither half was true:
+# ATTACKS 2, 4, 5, 5b, 6, 9 and 10 had greens and no red, and the run made no absence visible
+# - it simply did not mention them, which is silence, which is what the sentence promised it
+# was not.
+#
+# DERIVED THE WAY THE TOOL LEDGERS ARE. The attack set is read from THIS FILE's own
+# `Section "ATTACK <id> - ..."` headings, so an ATTACK section added next year is in the
+# universe the moment it is written; the red set is registered by the reds themselves, at the
+# point where they actually RUN (not where they are described), so a red that was skipped
+# because its image did not build counts as absent rather than as present.
+$script:Reds = @{}
+function Add-Red([string]$Attack, [string]$How) { $script:Reds[$Attack] = $How }
+function Get-AttackIds {
+    # $PSCommandPath is this file. Reading its own headings is the only way to get an attack
+    # list that cannot drift from the attacks - a hand-kept array is the thing this ledger
+    # exists to replace.
+    $ids = New-Object System.Collections.Generic.List[string]
+    try { $src = [System.IO.File]::ReadAllLines($PSCommandPath) } catch { return @() }
+    foreach ($line in $src) {
+        if ($line -match 'Section\s+"ATTACK\s+([0-9]+[a-z]?)\b') {
+            if (-not $ids.Contains($Matches[1])) { $ids.Add($Matches[1]) }
+        }
+    }
+    return $ids
+}
 
 # A door's policy is DERIVED FROM COMPOSE, never restated here. A drill carrying its own
 # copy of the allow-list would keep passing after compose widened the real one, which is the
@@ -1191,10 +1338,19 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # every typo becomes a refusal record and the rows that matter are buried in them.
     $ghost = [guid]::NewGuid().ToString()
     $insGhost = Invoke-Tool -Port $OpsPort -Name "agent_memory_inspect" -Arguments @{ memory_id = $ghost }
-    $ghostRows = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$ghost'"
-    if (($insGhost | ConvertTo-Json -Depth 8 -Compress) -match "not_found" -and $ghostRows -eq "0") {
-        Pass "an id that does not exist is also not_found and writes NO refusal row - a probe is distinguishable from a typo"
-    } else { Fail "the absent-id case did not behave as documented (rows=$ghostRows)" }
+    # SPLIT IN TWO, because the halves fail for different reasons and only one of them can be
+    # vacuous. The RESPONSE half is measured directly; the ROW half quantifies over the
+    # access_refused rows, and with none of those it distinguishes nothing. Conjoined as they
+    # were, the row half rode in on the response half's back.
+    if (($insGhost | ConvertTo-Json -Depth 8 -Compress) -match "not_found") {
+        Pass "an id that does not exist is also not_found - the RESPONSE does not distinguish a typo from a probe"
+    } else { Fail "the absent-id case did not come back not_found" }
+    $refusedAll2 = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused'"
+    $ghostRows   = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$ghost'"
+    Assert-NoneOf -Id "VACUOUS-GHOST-NO-ROW" -Universe $refusedAll2 -Violating $ghostRows `
+        -UniverseName "access_refused row(s) written so far this run" `
+        -Claim "and it writes NO refusal row - in the LOG a probe is distinguishable from a typo" `
+        -Defect "the absent-id case wrote refusal row(s) - every typo becomes a refusal record"
 
     # --- 7. ATTACK 4: the ops door, agent_memory_list_review_queue -----------------------
     Section "ATTACK 4 - the agent ENUMERATES instead of searching (agent_memory_list_review_queue)"
@@ -1263,9 +1419,14 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $ptrcRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'reason'='off-plane-trace'"
     if ($ptrcRefused -eq "1") { Pass "the refused trace left a durable audit row (access_refused, reason=off-plane-trace)" }
     else { Gap "AUDIT-RECALL-TRACE-ENVELOPE" "STOPPED but NOT RECORDED (recall_trace envelope): expected 1 refusal row, got '$ptrcRefused'" }
+    # "that row names no memory id" - THE ROW THE LINE ABOVE JUST PROVED DOES NOT EXIST. The
+    # universe is the off-plane-trace refusal rows themselves, so this is vacuous in exactly
+    # the case the GAP one line up reports.
     $ptrcNamed = Db "SELECT count(*) FROM agent_memory_audit_events WHERE payload->>'reason'='off-plane-trace' AND memory_id IS NOT NULL"
-    if ($ptrcNamed -eq "0") { Pass "and that row names NO memory id - a trace refusal must not leak the id it was hiding" }
-    else { Fail "the trace refusal row carries a memory id" }
+    Assert-NoneOf -Id "VACUOUS-TRACE-REFUSAL-ID" -Universe $ptrcRefused -Violating $ptrcNamed `
+        -UniverseName "off-plane-trace refusal row(s)" `
+        -Claim "and that row names NO memory id - a trace refusal must not leak the id it was hiding" `
+        -Defect "off-plane-trace refusal row(s) carry a memory id"
 
     # --- 9. ATTACK 6: go around agent-memory entirely, at the thoughts lane --------------
     Section "ATTACK 6 - the agent gives up on agent_memory_* and reaches for search_thoughts (OPS door)"
@@ -1544,6 +1705,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
             $null = Db "UPDATE professional_contacts SET notes = 'baseline notes' WHERE id = '$contactId'"
         }
         docker rm -f $REDEXT 2>$null | Out-Null
+        Add-Red "13" "the SAME ext image in the PRODUCTION configuration (connected as postgres), beside the bound one"
     } else { Fail "the production-configuration ext door never answered - half of ATTACK 13 did not run" }
 
     # --- 10b. ATTACK 8: STOP READING, MOVE THE MEMORY INSTEAD ----------------------------
@@ -1596,9 +1758,16 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($revRefused -eq "1") { Pass "the refused review left a durable audit row (access_refused, tool=agent_memory_review)" }
     else { Gap "AUDIT-REVIEW" "STOPPED but NOT RECORDED (agent_memory_review): expected 1 access_refused row, got '$revRefused'" }
     # No review-action row either: a refused decision that files paperwork is a decision.
-    $revActions = Db "SELECT count(*) FROM agent_memory_review_actions WHERE memory_id='$PID_PERS'"
-    if ($revActions -eq "0") { Pass "no review-action row was written for the refused promotion" }
-    else { Fail "$revActions review-action row(s) exist for a memory this door may not see" }
+    # The universe is every review-action row in the database. If the drill never causes a
+    # SUCCESSFUL review, the table is empty and "none of them is for the personal fixture" is
+    # true of a table with nothing in it - it cannot show that a refused review is treated
+    # differently from an allowed one, which is the whole claim.
+    $revActionsAll = Db "SELECT count(*) FROM agent_memory_review_actions"
+    $revActions    = Db "SELECT count(*) FROM agent_memory_review_actions WHERE memory_id='$PID_PERS'"
+    Assert-NoneOf -Id "VACUOUS-REVIEW-ACTION" -Universe $revActionsAll -Violating $revActions `
+        -UniverseName "review-action row(s) in the database" `
+        -Claim "no review-action row was written for the refused promotion" `
+        -Defect "review-action row(s) exist for a memory this door may not see"
 
     # THE FOLLOW-THROUGH. The escalation's whole value is what it unlocks, so assert that
     # the door it was aimed at is still shut afterwards.
@@ -1649,9 +1818,14 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $wbRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND payload->>'reason'='off-plane-idempotency-key'"
     if ($wbRefused -eq "1") { Pass "the refused key lookup left a durable audit row" }
     else { Gap "AUDIT-WRITEBACK-PROBE" "STOPPED but NOT RECORDED (agent_memory_writeback idempotency probe): expected 1 audit row, got '$wbRefused'" }
+    # Same shape, one line below its own GAP: the universe is the writeback refusal rows the
+    # line above just measured, and it is those rows this claim is about.
+    $wbAll  = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback'"
     $wbNoId = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND memory_id IS NOT NULL"
-    if ($wbNoId -eq "0") { Pass "and the audit row itself names no memory - the record does not become the leak" }
-    else { Fail "$wbNoId writeback refusal row(s) carry a memory_id" }
+    Assert-NoneOf -Id "VACUOUS-WRITEBACK-REFUSAL-ID" -Universe $wbAll -Violating $wbNoId `
+        -UniverseName "writeback access_refused row(s)" `
+        -Claim "and the audit row itself names no memory - the record does not become the leak" `
+        -Defect "writeback refusal row(s) carry a memory_id"
 
     # --- 10d. ATTACK 10: report_usage as an existence oracle -----------------------------
     Section "ATTACK 10 - the agent probes with report_usage (agent_memory_report_usage)"
@@ -1672,9 +1846,15 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $ruBlob = ($ruAtk | ConvertTo-Json -Depth 12 -Compress)
     if ($ruBlob -match "not_found") { Pass "STOPPED - report_usage on the personal fixture is not_found" }
     else { Fail "report_usage did not refuse the off-plane memory (got: $ruBlob)" }
+    # The universe is every usage row, whatever memory it names. The ops CONTROL call above
+    # is what puts one there; without it "no usage row for the personal fixture" would hold
+    # equally on a door that records no usage at all.
+    $ruAll  = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type IN ('memory_used','memory_ignored')"
     $ruUsed = Db "SELECT count(*) FROM agent_memory_audit_events WHERE memory_id='$PID_PERS' AND event_type IN ('memory_used','memory_ignored')"
-    if ($ruUsed -eq "0") { Pass "and no memory_used row was written for a memory this door cannot see" }
-    else { Fail "$ruUsed usage row(s) exist for the off-plane fixture" }
+    Assert-NoneOf -Id "VACUOUS-USAGE-ROW" -Universe $ruAll -Violating $ruUsed `
+        -UniverseName "usage row(s) (memory_used / memory_ignored)" `
+        -Claim "and no memory_used row was written for a memory this door cannot see" `
+        -Defect "usage row(s) exist for the off-plane fixture"
     $ruRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_report_usage'"
     if ($ruRefused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_report_usage)" }
     else { Gap "AUDIT-REPORT-USAGE" "STOPPED but NOT RECORDED (agent_memory_report_usage): expected 1 access_refused row, got '$ruRefused'" }
@@ -1781,9 +1961,15 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     else { Pass "and no content/thought/$TPERS.md leaf page exists" }
     # The wiki_pages table is the OTHER published surface - the viewer's search/nav/graph read
     # rows, not files. A page body that never reached disk can still have reached the table.
+    # The universe is the rows the compile actually wrote. An empty wiki_pages means the
+    # compiler published nothing at all, in which case "the personal text is not in it" is a
+    # statement about a compile that did not happen.
+    $wpAll  = Db "SELECT count(*) FROM wiki_pages"
     $wpPers = Db "SELECT count(*) FROM wiki_pages WHERE body LIKE '%$MARKER MUSTNOTPUBLISH%'"
-    if ($wpPers -eq "0") { Pass "and wiki_pages holds 0 rows carrying the personal row's text" }
-    else { Fail "$wpPers wiki_pages row(s) carry the personal corpus content" }
+    Assert-NoneOf -Id "VACUOUS-WIKIPAGES" -Universe $wpAll -Violating $wpPers `
+        -UniverseName "wiki_pages row(s) this compile produced" `
+        -Claim "and wiki_pages holds no row carrying the personal row's text" `
+        -Defect "wiki_pages row(s) carry the personal corpus content"
 
     # 14d. RED - AND IT MOVED, BECAUSE THE GUARD MOVED.
     #
@@ -1814,6 +2000,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
         $redLog = Invoke-WikiCompile -RecipesDir (Join-Path $OB1 "recipes") -OutDir $REDWIKIOUT
         $redText = Get-WikiText -OutDir $REDWIKIOUT
+        Add-Red "14" "the corpus policy widened to USING (true) in the throwaway, same compiler, same fixtures"
         if ($redText -match [regex]::Escape($CORPPERS)) {
             Pass "RED CONFIRMED (ATTACK 14) - with the policy widened the PERSONAL row IS published, so the database predicate is what stops it"
         } else {
@@ -1898,8 +2085,14 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
             Pass "the same image is up on :$RedSrvPort connected as postgres (same database, same fixtures, same code)"
         } else { docker logs $REDSRV 2>&1 | Select-Object -Last 25 | Write-Host; Fail "red server never answered"; throw "no red server" }
 
-        # A red for every family of green above. Each one names the attack it backs, so a
-        # green whose red is missing is visible as an absence rather than as silence.
+        # THE REDS BELOW, AND THE COVERAGE LEDGER THAT SAYS WHICH ATTACKS HAVE NONE.
+        # This used to read "a red for every family of green above ... a green whose red is
+        # missing is visible as an absence rather than as silence." It was false twice over:
+        # seven ATTACK sections had no red at all, and nothing in the run said so. Each red
+        # now REGISTERS the attack it backs (Add-Red, at the point the red actually runs),
+        # the attack universe is derived from this file's own Section headings, and the
+        # difference is printed at the end of the phase - as a GAP, so the absence reaches
+        # the exit code and the ledger rather than a reader's attention span.
         $redPersId = Db "SELECT COALESCE(max(id)::text,'none') FROM thoughts WHERE content LIKE '%$MARKER%' AND exposure='personal'"
 
         # --- THE RED THAT CAN FAIL --------------------------------------------------------
@@ -1996,6 +2189,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
             Note "connection-only red (ATTACK 1): as postgres but with the application clause intact, the fixture does not come back. That is the clause, not the database - which is exactly why RED-A/RED-B below remove it."
         }
         if ($redAppUp) {
+            Add-Red "1" "RED-A/RED-B - application plane clause patched out, run as postgres AND as the bound role"
             $ra1 = Get-RecallIds -Port $RedAppPort
             if ($ra1 -contains $PID_PERS) {
                 Pass "RED-A CONFIRMED (ATTACK 1) - application clause removed AND connected as postgres, the same request returns the personal fixture"
@@ -2017,6 +2211,8 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
         # RED for ATTACKS 11/12 - the corpus tools at the raw door. These have NO application
         # predicate left at all; the database is the only thing between them and the content.
+        Add-Red "11" "the raw door connected as postgres - list_thoughts / search_thoughts"
+        Add-Red "12" "the raw door connected as postgres - fetch by id / thought_stats"
         $rList = (Invoke-RawTool -Port $RedSrvPort -Name "list_thoughts" -Arguments @{ limit = 50 } | ConvertTo-Json -Depth 12 -Compress)
         if ($rList -match [regex]::Escape($PERSONAL) -or $rList -match [regex]::Escape($LEGACY)) {
             Pass "RED CONFIRMED (ATTACK 11/12) - as postgres, list_thoughts at the raw door hands over personal-plane corpus content"
@@ -2047,6 +2243,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         # container: `agent_memory_inspect` is registered on the MCP server itself, and
         # openbrain-mcpo speaks to exactly that surface with exactly that credential.
         if ($redAppUp) {
+            Add-Red "3" "RED-A/RED-B - readExposure()'s clause patched out, run as postgres AND as the bound role"
             $ra3 = (Invoke-RawTool -Port $RedAppPort -Name "agent_memory_inspect" -Arguments @{ memory_id = "$PID_PERS" } | ConvertTo-Json -Depth 12 -Compress)
             if ($ra3 -match [regex]::Escape($PERSONAL)) {
                 Pass "RED-A CONFIRMED (ATTACK 3) - plane clause removed AND connected as postgres, inspect returns the personal memory's content by id"
@@ -2084,6 +2281,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         # is the row-level policy - which is precisely why this red must be able to fail.
         $rOps = Start-Gateway -Name $REDOPS -Port $RedOpsPort -GwEnv $opsEnv -Upstream "http://${REDSRV}:8000"
         if (Wait-Http -Port $RedOpsPort -Path "/health") {
+            Add-Red "8" "the review door called as postgres - no patched image needed, there was never an application guard"
             $rRev = (Invoke-Tool -Port $RedOpsPort -Name "agent_memory_review" -Arguments @{ memory_id = "$PID_PERS"; action = "promote_exposure"; actor = @{ label = "drill-red" }; note = "red: widen the personal fixture onto the ops plane" } | ConvertTo-Json -Depth 12 -Compress)
             $rExp = Db "SELECT exposure FROM agent_memories WHERE id = '$PID_PERS'"
             if ($rExp -eq "ops") {
@@ -2120,6 +2318,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         # else.
         $labelled = Db "SELECT count(*) FROM thoughts WHERE id = $opsTid AND metadata->>'share'='cloud'"
         if ($labelled -eq "1") {
+            Add-Red "7" "the mirrored thought labelled share=cloud, nothing else changed"
             $clRed = (Invoke-Tool -Port $CloudPort -Name "search_thoughts" -Arguments @{ query = $MARKER; limit = 25 } | ConvertTo-Json -Depth 12 -Compress)
             if ($clRed -match "SYNTHETIC ops-plane CONTROL") {
                 Pass "RED CONFIRMED (ATTACK 7b) - label the mirrored thought share=cloud and the CLOUD door hands over the agent memory"
@@ -2131,6 +2330,32 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         } else { Fail "could not label the mirrored thought for the red phase (got '$labelled')" }
         # Put it back, so anything that reads this database afterwards sees the real state.
         $null = Db "UPDATE thoughts SET metadata = metadata - 'share' WHERE metadata->>'source'='agent-memory' AND content LIKE '%$MARKER%'"
+
+        # --- RED COVERAGE: which ATTACKS have a red, and which have only greens -----------
+        #
+        # THE ABSENCE, MADE VISIBLE. The universe is derived from this file's own ATTACK
+        # section headings; the covered set is what the reds above registered as they ran.
+        # An attack with a green and no red is a claim nobody has watched fail, and this is
+        # where the run says which ones those are instead of the phase's opening comment
+        # asserting there are none.
+        #
+        # IT IS A GAP, NOT A NOTE. A note is read by whoever is reading; a gap reaches the
+        # exit code and has to be dispositioned by name in $GAP_DISPOSITIONS, so closing one
+        # (writing the red) FAILS the ledger until the pin is pulled - the same discipline
+        # every other open property here is under.
+        Section "RED COVERAGE - which ATTACK sections have a red, and which have only greens"
+        $attackIds = @(Get-AttackIds)
+        $withRed   = @($attackIds | Where-Object { $script:Reds.ContainsKey($_) })
+        $noRed     = @($attackIds | Where-Object { -not $script:Reds.ContainsKey($_) })
+        if ($attackIds.Count -eq 0) {
+            Fail "no ATTACK sections were derived from this file - the red-coverage ledger is reading nothing, so its verdict means nothing"
+        } elseif ($noRed.Count -eq 0) {
+            Pass "all $($attackIds.Count) ATTACK section(s) have a red that RAN: $(($withRed | ForEach-Object { $_ + ' (' + $script:Reds[$_] + ')' }) -join '; ')"
+        } else {
+            Pass "$($withRed.Count) of $($attackIds.Count) ATTACK section(s) have a red that RAN: $($withRed -join ', ')"
+            Gap "RED-COVERAGE" "ATTACK $($noRed -join ', ') have GREENS AND NO RED - $($noRed.Count) of $($attackIds.Count) sections. Their greens have never been watched failing, so each is a guard whose absence would look exactly like its presence."
+            Note "a red for these is a WRITE, not a wording change: remove the mechanism actually doing the work (the bound connection, the policy, or the server-side clause) and require the leak back."
+        }
     }
 
     # --- 13. THE LIFT: can the "do not write a personal-exposure memory" rule be dropped? ---
@@ -2184,14 +2409,28 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     $missing = @($expected | Where-Object { $toolList -notcontains $_ })
     LiftGap "LIFT-REFUSED-AND-RECORDED" ($missing.Count -eq 0) "REFUSED AND RECORDED - every TARGETED door left an access_refused row: $($toolList -join ', ')" `
         "no refusal recorded for: $($missing -join ', ') - $AUDIT_GAP"
+    # THE UNIVERSE IS $toolList, and $toolList is EMPTY on this tree. "no enumerating door
+    # filed a refusal" was being printed as a Lift PASS off the same empty set the clause
+    # directly above reports as a GAP - so it held for the enumerating doors, the targeted
+    # doors, and every door that does not exist. It is now vacuous until some door files
+    # something, which is the honest reading.
     $filtering = @("agent_memory_list_review_queue", "agent_memory_recall")
     $wrongly = @($filtering | Where-Object { $toolList -contains $_ })
-    Lift ($wrongly.Count -eq 0) "and the ENUMERATING doors filed NOTHING - filtering is not refusing, so the log stays readable"
+    Assert-NoneOf -Id "VACUOUS-ENUMERATING-FILED-NOTHING" -Universe $toolList.Count -Violating $wrongly.Count `
+        -UniverseName "distinct tool(s) that filed an access_refused row" `
+        -Claim "and the ENUMERATING doors filed NOTHING - filtering is not refusing, so the log stays readable" `
+        -Defect "an ENUMERATING door filed a refusal - ordinary use is being logged as a probe"
+    if ($script:AssertOutcome -ne "pass") { $script:lifted = $false }
     if ($wrongly.Count -gt 0) { Note "unexpectedly filed a refusal: $($wrongly -join ', ')" }
 
     # (3) and the RECORD is not itself the leak - no refusal row carries the content.
+    $auditAll   = Db "SELECT count(*) FROM agent_memory_audit_events"
     $leakyAudit = Db "SELECT count(*) FROM agent_memory_audit_events WHERE payload::text LIKE '%SYNTHETIC personal-plane FIXTURE%' OR payload::text LIKE '%SYNTHETIC LEGACY CORPUS ROW%'"
-    Lift ($leakyAudit -eq "0") "and NO audit row carries the content it refused - the record does not become the disclosure"
+    Assert-NoneOf -Id "VACUOUS-AUDIT-NOT-THE-LEAK" -Universe $auditAll -Violating $leakyAudit `
+        -UniverseName "audit row(s) in agent_memory_audit_events" `
+        -Claim "and NO audit row carries the content it refused - the record does not become the disclosure" `
+        -Defect "audit row(s) carry the content they refused - the record IS the disclosure"
+    if ($script:AssertOutcome -ne "pass") { $script:lifted = $false }
 
     # (4) REMOVED. The fixture, its legacy corpus row, and anything the red phase mirrored.
     $null = Db "DELETE FROM agent_memories WHERE workspace_id = '$WS'"
