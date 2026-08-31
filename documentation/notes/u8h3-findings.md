@@ -521,12 +521,12 @@ docker network, nothing attached to an `ai-stack_*` network and no `:local` tag 
 | check | result |
 |---|---|
 | `deno check index.ts agent-memory.ts` + `deno test` (kubernetes-deployment) | clean / **133 passed, 0 failed** |
-| full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, mirror-reader scan - whose notice said "zero readers" and now states its own scope, §16) |
+| full 29-migration initdb chain on a throwaway | no init errors; 195's four notices printed (backfill, table self-test, **door self-test - 12 payloads**, mirror-reader scan - whose notice said "zero readers" and now states its own scope, §17.4) |
 | 195 round trip on that throwaway | revert(200) -> revert(195) -> re-apply(195) -> re-apply(200) -> re-apply both AGAIN: clean, idempotent, row count preserved |
 | `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
 | `scripts/checks/drill-personal-plane-exclusion.ps1` (bare) | **109 passed, 0 failed, 18 named gaps**, EXIT 2 - the bare contract is unchanged |
 | the same, `-AcceptDispositionedGaps` (what CI runs) | **109 passed, 0 failed, 18 gaps ALL DISPOSITIONED**, EXIT 0 |
-| (both drill rows are the ROUND-2 numbers; round 3 changed them - see §16 and §17) | |
+| (both drill rows are the ROUND-2 numbers; round 3 changed them - see §17 and §18) | |
 | production `openbrain-db`, after everything | `thoughts=13001 personal=0 memories=21 personal=0` - **row state** unchanged. **"and never touched" was FALSE; see below.** |
 
 ### The R1/R2 fixes, red then green, in one place
@@ -608,9 +608,11 @@ as personal, and under NOT NULL + CHECK there is no unlabelled row to be conserv
 This is the same defect as R3, one layer further in: not a check that cannot fail, but a check
 that can only fail for the wrong reason.
 
-## 16. What the reviewer should check first
+## 16. What the reviewer should check first (ROUND 2's map - two items below are now FALSE)
 
-Not a finding - a map, because round 2 changed four files and the interesting parts are small:
+Not a finding - a map, because round 2 changed four files and the interesting parts are small.
+**Kept as written, with the two corrections marked inline: item 3's reasoning was wrong and
+round 3 measured it wrong in production. Round 3's own map is section 17.**
 
 * `OB1/docker/init-agent-memory-exposure-column.sql` **section 7** (the door: what it refuses
   and why 'personal' is one of them), **7b** (the last mirror reader and the trigger column
@@ -642,5 +644,195 @@ The claims most worth trying to break, in the order I would try:
    these two repos, is NOT covered by that grep - and would be refused at the door, loudly,
    rather than silently mislabelled. That is the failure direction H3 chose, and it is the
    reason the grep not being exhaustive is survivable.
+
+   > **CORRECTED, ROUND 3.** Both halves of that paragraph are false.
+   > **(a)** The grep was over `upsert_thought`, so it could only ever return callers of the
+   > door. **Twelve producers write `thoughts` without going through it** - `POST
+   > /rest/v1/thoughts` and `supabase.from("thoughts").insert()` - and this paragraph names
+   > only the three of them that happened to be adjacent to an rpc call site.
+   > **(b) "Refused at the door, loudly" is not what happens.** `openbrain-gmail-pull` catches
+   > its own error and reports `Ingested: 0 email(s)`; `wiki-service.mjs`'s note ingest catches
+   > per file and continues. Both are scheduled. The refusal ran daily for a day before anyone
+   > looked, and would have kept running. **Fail-closed is not the same as fail-visibly**, and
+   > the survivability argument rested on confusing them. See section 17.3 and
+   > `documentation/notes/u5-live-producer-rls-regression.md`.
 4. *the gap ledger* - 18 ids, each mapped to H1 or H4. If any one of them is really H3's, the
    ledger is hiding work rather than dispositioning it.
+
+   > **UPDATED, ROUND 3: 25 ids.** Seven were added, none of them a new shortfall - six name
+   > assertions that were reporting PASS off an empty set and now report VACUOUS, and one
+   > (`RED-COVERAGE`) names the seven ATTACK sections that have greens and no red. Section 17.1.
+
+## 17. ROUND 3 - a PASS printed off an empty set, and a producer set that was never swept for
+
+Two send-backs, both of the class this whole effort keeps landing in: **a check that passes
+while checking nothing**, and **a sweep whose search term defined its finding.**
+
+### 17.1 Eleven assertions could not fail, and one mechanism now stops the twelfth
+
+Five green-phase assertions had the shape *"of the rows in S, none has property P"* written as
+a count of the VIOLATIONS only:
+
+```powershell
+$n = Db "SELECT count(*) FROM ... WHERE <violating>"
+if ($n -eq "0") { Pass "..." } else { Fail "..." }
+```
+
+With `S` empty the violating count is also `0`, so the branch prints **PASS**. **Four of the
+five printed on the line immediately after the GAP that had just measured `S` as empty** - the
+drill reported "0 refusal row(s) exist to outlive anything" and then congratulated itself, five
+times, that none of those zero rows was wrong.
+
+**Fixed structurally, not five times.** `Assert-NoneOf` takes BOTH counts - the universe and
+the violating subset - and can only reach `Pass` when the universe is non-empty. An empty
+universe is reported `VACUOUS`, names *which* universe was empty, counts as a gap, and must be
+dispositioned by id like every other open property. It has a fourth outcome too: a count that
+does not PARSE is a `Fail`, not a silent zero, because a broken query returning `""` would
+otherwise read as "no violations".
+
+**Eleven assertions are routed through it** - the five named in the review, plus six siblings
+found by reading for the shape rather than for the line numbers:
+
+| where | universe | outcome on this tree |
+|---|---|---|
+| the ops door's refused mint | memories in the drill workspace | **PASS** (1) |
+| the `share` label on the mirror | mirrored thoughts carrying the marker | **PASS** (2) |
+| the ALLOWED inspect wrote no refusal row | `access_refused` rows so far | **VACUOUS** (0) |
+| the ghost id writes no refusal row | `access_refused` rows so far | **VACUOUS** (0) |
+| the trace refusal names no memory id | `off-plane-trace` refusal rows | **VACUOUS** (0) |
+| the refused review filed no paperwork | review-action rows | **PASS** (1) |
+| the writeback refusal names no memory | writeback `access_refused` rows | **VACUOUS** (0) |
+| no usage row for the off-plane memory | `memory_used`/`memory_ignored` rows | **PASS** (1) |
+| `wiki_pages` holds none of the personal text | `wiki_pages` rows this compile wrote | **VACUOUS** (0) |
+| the ENUMERATING doors filed nothing | tools that filed a refusal row | **VACUOUS** (0) |
+| no audit row carries the content it refused | audit rows | **PASS** (5) |
+
+The mix matters: **five of the eleven still PASS**, so the helper is not a blanket "everything
+is vacuous" - it discriminates, which is exactly what the assertions it replaced could not do.
+
+`VACUOUS-WIKIPAGES` is a **new finding**, not a restatement: the compiler wrote **zero**
+`wiki_pages` rows in the throwaway, so ATTACK 14's table-side assertion has been about a
+compile that published nothing to that table. ATTACK 14's file-side assertions (no leaf page,
+no marker in the emitted text) are measured against output that does exist and still pass.
+
+**Proving it, both directions.** `-SelfTestVacuity` forces the helper through all four
+outcomes with no docker, no database and no gitlink:
+
+```
+PASS     universe=7 violating=0 -> pass
+FAIL     universe=7 violating=2 -> fail
+VACUOUS  universe=0 violating=0 -> vacuous   <- the case that used to print PASS
+FAIL     universe=x violating=0 -> unparsable
+VACUITY GUARD SELF-TEST PASSED - an empty universe cannot reach PASS.
+```
+
+And on the real run: the six lines that printed `PASS` in round 2 print `VACUOUS` in round 3,
+against the same tree and the same fixtures. Nothing about the boundary changed; the reporting
+did.
+
+### 17.2 The patch script that "worked" and dropped three of its own edits
+
+**Drill run 1 is why there is a second commit in this round.** The script that routed the first
+four assertions asserted on its fourth replacement and never wrote the file - so replacements
+1-3 were **lost**, while the script's earlier output read as success. The run then printed the
+OLD, uncounted text for all three, *including `:1187`, the assertion the review named first*.
+
+What caught it was the **count in the PASS line**: `Assert-NoneOf` appends
+`(0 violations out of N ...)`, and three PASSes came back without it. Had the helper printed the
+same sentence as before, the gap would have been invisible in a 230-line log. **A fix that
+changes the output is auditable; a fix that preserves it is not.**
+
+### 17.3 The producer set, derived
+
+`195-` section 7's post-condition said *"Every caller of this rpc in the tree was found and
+given an explicit `exposure: 'ops'`"*. The sweep behind it was
+`grep -rn 'rpc("upsert_thought"' OB1` - RPC callers were the only thing it could return, and the
+post-condition then presented them as the producer set.
+
+`openbrain-gmail-pull` runs daily and had been refused `42501` by U5's already-live ops-plane
+policy since it landed. Measured from the container's own log:
+
+```
+2026-08-30T05:00:28Z   Ingested: 1 email(s) / 11 chunk row(s)
+2026-08-31T05:00:19Z   -> PARTIAL/ERROR (0/6 chunks): HTTP 401 {"code":"42501", ...}
+2026-08-31T05:00:20Z   Ingested: 0 email(s) / 0 chunk row(s)
+```
+
+Twelve direct producers, `'ops'` at each call site (column **and** mirror), and a **derived**
+gate - `scripts/checks/check-corpus-exposure-producers.ps1`, pre-commit check 3b - so producer
+thirteen breaks the build rather than production. Full account, including the two producers the
+regression note's own ten-file table missed and the four it listed that are not producers at
+all: `documentation/notes/u5-live-producer-rls-regression.md`.
+
+**The gate's first version was itself vacuous.** It inherited `'*\.claude\*'` from
+`check-llm-gateway-routing.ps1`'s allow-list; a session worktree lives under
+`.claude\worktrees\<id>\`, so every file matched, every file was allowed, and it printed
+`OK - every direct corpus insert states its plane` over a scan of **nothing**. Found by planting
+a violating producer in the real tree and watching it pass. The glob is gone, and the gate now
+**FAILS** when it examined zero insert sites - the same discipline as 17.1, applied to the fix
+for 17.1.
+
+### 17.4 Corrections to the record
+
+| claim | where | corrected to |
+|---|---|---|
+| "The write contract reaches the RECIPES" | `PROMOTION-RUNBOOK.md` | it reached the RPC callers. Twelve direct producers are outside that set; **"no rebuild, no restart" is FALSE for `wiki-service.mjs`**, which is `COPY`d into `openbrain-wiki:local` |
+| "production `openbrain-db` unchanged, and never touched" | this note, §14 | **FALSE.** Verified read-only 2026-08-31: `thoughts.exposure` and `agent_memories.exposure` BOTH EXIST live as **nullable** columns. Reversible - `revert-agent-memory-exposure-column.sql` deliberately does not drop a column ("dropping a column is not reversible, and PLAN class 4 forbids it") - but not untouched. The note also did not observe the live 42501 |
+| "the mirror has zero readers" | `195-` §8(d) NOTICE, `PROMOTION-RUNBOOK.md` | the scan's anchors are the literal `metadata->>'exposure'` / `on_ops_plane(metadata)`, which cannot match the two RETAINED jsonb overloads whose bodies **are** `md->>'exposure'`. Nothing CALLS them - asserted by `200-` §9 over `pg_depend` and every function body - so the substance holds; the notice now states its own scope instead of borrowing §9's conclusion |
+| "`prove-agent-memory-rls.ps1` 68/68" | `PROMOTION-RUNBOOK.md` | true **only when it does not overlap `dfu-done.ps1 -Only 3`**, which plants a personal-exposure fixture in the LIVE database (`$DbContainer = "openbrain-db"`). Overlapped, `prove-rls` exits **1** with `production is not clean`. **C.9 H4 wires BOTH into CI, so CI must serialise them** |
+| "(109 checks passed)" vs 110 PASS lines | the drill's summary | the gitlink PASS was a raw `Write-Host` and bypassed `$passes`. It is a `Pass` now, and run 3's summary matches its own output exactly: **106 printed, 106 counted** |
+| "a red for every family of green above ... a green whose red is missing is visible as an absence" | the drill, red phase | **false twice.** ATTACKS 2, 4, 5, 5b, 6, 9, 10 have greens and no red, and nothing said so. Each red now REGISTERS the attack it backs at the point it RUNS; the attack universe is DERIVED from this file's own `Section "ATTACK ..."` headings; the difference is reported as GAP `RED-COVERAGE` - `8 of 15 ATTACK section(s) have a red that RAN` |
+
+## 18. ROUND 3 - the sha this was validated at, and every run
+
+The work line did not move: `refactor/ai-stack-cleanup` is still `1a6b0b8` and it is this
+branch's merge-base, so C.7b required no rebase. The OB1 gitlink moved once.
+
+```
+work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
+ai-stack HEAD  : 0c0c3d551f3956d3934b3e68c8528a43abf2047c  (work/u8h3)
+OB1 gitlink    : 8ebe19780ce93613689fd8241d787c1a77749454
+              -> e9be2cdb0eb340662df0edadb1ff4b90b0493775  (the twelve producers + 195 s7/s8d)
+```
+
+Both suites were run from this checkout with a **clean working tree at `0c0c3d5`**, one at a
+time - never concurrently, which is the isolation "one suite per checkout" exists to buy (see
+§17.4 on `prove-rls` vs `dfu-done -Only 3`). Every throwaway ran on its own docker network;
+nothing was attached to an `ai-stack_*` network, no `:local` tag was written, and **nothing was
+written to the live database**. An `open-brain` lease was held for the window.
+
+| check | result |
+|---|---|
+| `drill-personal-plane-exclusion.ps1 -SelfTestVacuity` | **4/4 outcomes correct**, EXIT 0 - and the empty-universe case reports VACUOUS, not PASS |
+| `drill-personal-plane-exclusion.ps1` (bare) | **106 passed, 0 failed, 25 named gaps** (19 GAP + 6 VACUOUS), EXIT **2** - bare contract unchanged |
+| the same, `-AcceptDispositionedGaps` (what CI runs) | **106 passed, 0 failed, 25 gaps ALL DISPOSITIONED**, EXIT **0** |
+| PASS lines printed vs counted, run 3 | **106 / 106** - the gitlink PASS no longer bypasses the counter |
+| `prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, 0 failed, EXIT 0; live assertion reads `source=column personal_memories=0 personal_thoughts=0 personal_memories_col=0 personal_thoughts_col=0` |
+| `check-corpus-exposure-producers.ps1` | **OK - all 13 direct corpus insert site(s) state their plane** (659 files scanned), EXIT 0 |
+| the same, `-SelfTest` | **red on a planted producer, green when the plane is stated**, EXIT 0 |
+| the same, `-Root <empty dir>` | **FAIL - the scan examined 0 file(s) and found ZERO corpus insert sites**, EXIT 1 (the anti-vacuity assertion) |
+| pre-commit, twice | all six checks green, including 3b |
+| `node --test` (wiki-service build gate) | **13 passed, 0 failed** |
+| `deno check` on the changed TS | `pull-gmail.ts` clean; `schema-aware-routing/index.ts` reports a **pre-existing** missing `@supabase/supabase-js` dependency (confirmed identical at `git stash`) |
+
+**The count moved from 109 to 106 and that is the fix working, not a regression.** Seven
+assertions that printed PASS in round 2 now report VACUOUS; one (the ghost id) was split into a
+response half that still passes and a row half that does not; and the gitlink PASS joined the
+count. Nothing that was proved before is unproved now - what changed is that six things that
+were never proved have stopped claiming to be.
+
+### Not closed
+
+* **The OB1 commit `e9be2cd` is NOT on `origin`.** The push was denied by this session's
+  command classifier. The parent's gitlink was bumped to it anyway so the drill would build
+  what a merge would ship, but per CLAUDE.md a gitlink must never be merged pointing at a
+  commit that is not reachable on the OB1 remote. **Pushing
+  `feat/agent-memory-exposure-column` is a prerequisite for merging this branch**, and it is
+  the one thing in this round I could not do.
+* **`RED-COVERAGE` is visible, not closed.** Seven ATTACK sections still have greens and no
+  red. Writing them is its own item.
+* **`VACUOUS-WIKIPAGES` needs a fixture**, not a boundary change: the drill's compile writes no
+  `wiki_pages` rows, so that assertion cannot discriminate until it does.
+* **The live outage is fixed in the tree, not in production.** Ending it needs the deployment
+  checkout's submodule moved AND `openbrain-wiki:local` rebuilt, in a promotion window under a
+  lease - a gated deploy, which this session did not take.
