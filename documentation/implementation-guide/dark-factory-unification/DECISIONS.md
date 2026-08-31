@@ -1501,3 +1501,65 @@ Another NEW class — *re-implementing another system's resolution rules* — so
 at 0. Class list now **fourteen**. Notably, three of this effort's fourteen classes were found
 in the last two days by attacking one 200-line shell guard, which is itself evidence for the
 value of adversarial verification over review-by-reading.
+
+## 2026-08-31 · gitlink guard · EXECUTING THE INVARIANT WORKED — and the one prediction left in it still failed
+The round-5 decision was right, and the measurement is unusually clean. A verifier built **14
+constructions** with real bare remotes and measured ground truth alongside each verdict:
+
+| construction | real `clone --recurse-submodules` | the proof |
+|---|---|---|
+| unpublished pin (local path, and `file://`) | rc=128 `not our ref` | FAIL rc=1 |
+| duplicate-path `.gitmodules`, LAST section lacking the pin | rc=128 | FAIL rc=1 |
+| **nested** submodule, unpublished INNER pin | rc=128 | FAIL rc=1, log names `Failed to recurse into submodule path 'mid'` |
+| relative url, good pin / bad pin | 0 / 128 | pass / FAIL |
+| section with no url · treeless clone with dead promisor · unroutable remote · auth-required remote · bad ref · unwritable TMPDIR | — | INDETERMINATE, refuses |
+
+The treeless-partial-clone row matters most: that is exactly the shape that produced round 4's
+false pass, and it is now closed. **Executing the property caught things every model of it
+missed**, including nesting, which the parser cannot see at all.
+
+### AND YET IT FALSE-PASSED, BECAUSE ONE PREDICTION SURVIVED
+`prove-clone-recursive.sh:262-264` re-points the clone's origin so relative `.gitmodules` urls
+resolve as a stranger's would — conditionally and silently:
+`if [ -n "$ORIGIN_URL" ]; then … set-url origin … 2>/dev/null || true; fi`, where `ORIGIN_URL` is
+the **RUNNING CHECKOUT's** remote. With no origin the correction is skipped, a relative url
+resolves against the local source path, and the proof reports `CLONED … SUCCEEDED` rc=0 for a
+tree whose real clone dies `not our ref`. Controls both ways: add origin -> FAILED; remove it ->
+CLONED. **The verdict is decided by the runner's local config, not by the tree.**
+
+The script's own header says: *"There is no parser to be wrong, no enumeration to fail silently,
+no precedence rule to get backwards."* One modelling step remained, it was unnamed, and it failed
+silently — the exact three things the sentence denied.
+
+**THE LESSON, and it is a real refinement of round 5's decision:** "execute the invariant" is not
+achieved by *mostly* executing it. Any step where the harness SUBSTITUTES for the real
+environment — a rewritten remote, an injected credential, a stubbed clock, a fixture path —
+re-introduces the model, and that step is where the residual bug lives precisely because
+everything around it stopped being a model. **Name every substitution the harness makes, and make
+each one fail closed.** An execution harness's substitutions are its model, and they deserve the
+scrutiny the modelled version used to get.
+
+### THE DETAIL THAT SHOULD STING
+On that exact input the DEMOTED pre-filter REFUSES correctly — "cannot determine the remote for
+submodule sub - REFUSING" — and the drill classifies that refusal as a **must-break** case. So
+the component documented as *"may be wrong"* was right, and the component documented as *"WHEN
+THEY DISAGREE, THIS ONE IS RIGHT"* was wrong. A precedence rule written into prose is still a
+prediction.
+
+### THE PROOF GATES NOTHING
+`.githooks/README.md` claims, in the present tense, that a pre-merge gate, CI and
+`dfu-done.ps1` clause 4 run the clone proof, and that running only the pre-filter "is not fine."
+**None of the three do.** `dfu-done.ps1` is not on the branch; `ci.yml` gained only
+`cp .env.example .env`; `verify-merge-protocol.ps1` runs the drill, not the proof; MERGE-PROTOCOL
+names neither script. Only the pre-filter runs anywhere — the thing the same paragraph calls not
+fine. **A guard's deployment is a claim like any other, and this one was false on its own branch.**
+
+### THIRD FALSE PASS IN THE PRE-FILTER, STILL ON THE PUSH PATH
+`glr_pins_tree` lists **top-level** pins only, while its header claims it "lists exactly the pins
+a clone must fetch". A recursive clone must fetch nested pins too, and a nested unpublished pin
+gets `OK … every pin served by its submodule's remote`. Since `pre-push` runs the pre-filter,
+that is a live silent accept — and the clone proof catches it, which is the clearest single
+argument for the layer change.
+
+CONVERGENCE: no new class (siblings of *a claim wider than its evidence*, *deciding by exception*,
+*an alphabet too narrow*). Counter **1 of 2**.
