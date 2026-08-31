@@ -354,6 +354,57 @@ the only thing it set out to do.
 
 ---
 
+## 6b. §C.7b validation — from a CLEAN checkout, with the one red named
+
+Clean clone of `work/u4close` at **`21fceff`**, `--no-recurse-submodules`, nothing run in it
+before:
+
+| suite | result |
+|---|---|
+| `python scripts/checks/check_quadrant_evidence_reproduces.py --auto` | **7 re-derived, exit 0** |
+| `python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant` | **COMPARED 4/4, exit 0** |
+| `ruff check .` | **All checks passed!, exit 0** |
+| `python -m pytest scripts/agent-harness -q` | **288 passed, 2 skipped, 1 FAILED** |
+
+The failure is named rather than rounded away, and it is **pre-existing**:
+
+    FAILED test_evidence_reproduces.py::
+           test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere
+
+## 6c. THE FINDING THE CLEAN CHECKOUT PRODUCED — the durable-check REGISTRY cannot survive a clone either
+
+That test asserts the U3 evidence check is banked in the durable-check registry with its
+`--auto` form. It passes in a worktree and **fails in every fresh clone**, because:
+
+    durable_checks.registry_path(repo)
+      -> <git-common-dir>/agent-worktrees/<registry>       # INSIDE .git
+
+    $ ls .git/agent-worktrees          # in a fresh clone
+    No such file or directory
+
+`git clone` does not carry `.git` contents, so `durable_checks.load()` returns `[]` and a
+fresh clone of this repository has **zero banked durable checks**. The mechanism that decides
+which checks run against every future results set is invisible to anyone who clones.
+
+This is defect 3's shape one layer up — *"evidence a clone cannot see is not evidence"*
+applied to the CHECK REGISTRY rather than to a results set — and it is exactly the trade the
+2026-08-28 comment in `.gitignore` made deliberately: shared state moved into `.git` "so every
+worktree shares ONE namespace", which is right for a lease and wrong for a registry that is
+part of what the repository asserts about itself.
+
+**Proved pre-existing, not introduced here.** Cloned the BASE commit and ran the same file:
+
+    $ git checkout 1a6b0b8 && python -m pytest scripts/agent-harness/test_evidence_reproduces.py -q
+      1 failed, 10 passed        # same test, at its pre-branch line 167
+
+**NOT FIXED HERE, deliberately.** Moving the registry into tracked content changes a module
+contract shared by `queue.ps1`, `MODULE.md` and every worktree, and it is a different item
+from U4's column. **The test was NOT weakened to make the suite green** — it is correct to
+fail: nothing is banked in a clone, and a skip would hide that. Recorded so the next reader
+finds a measurement rather than a mystery.
+
+---
+
 ## 7. Findings recorded but NOT acted on
 
 - **`WALKTHROUGH.md` line 33 vs its own §U3 section disagree, the same way U4's did.** The
