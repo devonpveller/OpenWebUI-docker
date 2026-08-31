@@ -44,7 +44,7 @@
 # ABOUT RULE 3, PRECISELY, AND ITS LIMIT. Branches, worktrees, walkthrough rows, the
 # PostgREST surface, the RLS stage set and the direct DB clients are all read from the tree
 # or the live system. THREE sets are NOT derived and must not pretend to be: clause 3's
-# door floor, clause 4's service set, and the U0-U6 PHASE FLOOR. They come from section
+# door floor, clause 4's service set, and the U0-U6 + U8 PHASE FLOOR. They come from section
 # C.8's own prose, because C.8 is the specification. What keeps them honest is that each is
 # CHECKED BACK against the plan's words at run time (`door-set-matches-plan`,
 # `service-set-matches-plan`, `phase-floor-matches-plan`), so a subject the plan names and
@@ -681,7 +681,7 @@ function Get-PhaseTableParse {
     # Returns @{ phases = [ordered]{ id -> @{what;validated;depends} }; problems = @();
     #            anchored = [bool]; header = "" }.
     param([string]$Text)
-    $res = @{ phases = [ordered]@{}; problems = @(); anchored = $false; header = "" }
+    $res = @{ phases = [ordered]@{}; problems = @(); anchored = $false; header = ""; ignored = @() }
     if (-not $Text) { $res.problems += "the document is empty or could not be read"; return $res }
 
     $sec = Get-DfuSection -Text $Text -HeadingPattern '(?m)^##\s+2\.\s+[^\r\n]*' -StopAtAnyHeading
@@ -737,6 +737,9 @@ function Get-PhaseTableParse {
     $di = $(if (@($col.depends).Count -eq 1) { [int]$col.depends[0] } else { -1 })
 
     # --- ROWS BEFORE THE HEADER ARE NOT ROWS OF THIS TABLE ------------------------
+    # This one stays a PREFIX match on purpose. It is an ALARM, not a reader: anything
+    # that even looks like a phase row sitting above the header is a question about which
+    # table it belongs to, and narrowing it to exact ids would silence that question.
     for ($i = 0; $i -lt $hIdx; $i++) {
         $pc = @(Split-TableRow -Row $rows[$i])
         if (@($pc).Count -ge 1 -and $pc[0] -match '^\s*(?:\*\*|__)?\s*(U\d)\b') {
@@ -753,10 +756,30 @@ function Get-PhaseTableParse {
         # the delimiter row |---|---| is not data
         if (@($cells | Where-Object { $_ -match '^:?-{2,}:?$' }).Count -eq @($cells).Count) { continue }
         if (@($cells).Count -le $pi) { continue }
-        # THE BOLD IS FORMATTING, NOT IDENTITY, and the cell may say more than the id -
-        # the live table writes a U7 cell as "**U7 (standing)**". The id is read from the
-        # FRONT of the phase cell; whatever else that cell says is the cell's business.
-        if ($cells[$pi] -notmatch '^\s*(?:\*\*|__)?\s*(U\d)\b') { continue }
+        # THE ID CELL IS MATCHED WHOLE, NOT BY PREFIX - section 2.1 amendment A3.
+        # Reading the id off the FRONT of the cell made every row that merely STARTS with
+        # a phase id a row FOR that phase. At revision 2151193 section 2 carried
+        # `| **U4** |` AND `| **U4 status (2026-08-30)** |` - a status annotation that was
+        # never a phase row - so the prefix read saw TWO U4 rows, the duplicate guard
+        # refused, and U4's chain was unreconstructable across that revision. A3 disposes
+        # of it: the authoritative row is the one whose id cell is EXACTLY the id; a row
+        # that only LOOKS like one is ignored; and a genuine duplicate - the same exact id
+        # twice - must still REFUSE. Both halves are drilled (verify-dfu-done.ps1 P4/P4b).
+        #
+        # WHAT "EXACTLY" ADMITS, AND WHY IT IS NOT A LOOPHOLE. Emphasis is formatting, not
+        # identity, so `**U1**`, `__U1__` and `U1` are one cell shape - rule 6: unbolding a
+        # row must not drop the phase. A single PARENTHESISED QUALIFIER is part of the id
+        # cell's own name: the live table writes U7 as `**U7 (standing)**`, and refusing
+        # that shape would delete U7 from clauses 2 and 7's population - rule 6's failure
+        # wearing the opposite face, and already drilled at N5. Anything ELSE trailing the
+        # id - a word, a date, a status - means this is not the row that defines the phase.
+        if ($cells[$pi] -notmatch '^(?:\*\*|__)?\s*(U\d)(?:\s*\([^()]*\))?\s*(?:\*\*|__)?$') {
+            # AND NOT SILENTLY. A row this parser declined to read is RECORDED and printed
+            # on the phase-table-unambiguous probe, so "ignored" can never be read as
+            # "there was nothing there" - the very class this file exists to prevent.
+            if ($cells[$pi] -match '^\s*(?:\*\*|__)?\s*U\d\b') { $res.ignored += $cells[$pi] }
+            continue
+        }
         $id = $Matches[1]
         if ($seen.ContainsKey($id)) {
             $res.problems += ("{0} has {1} rows in section 2's table - a duplicated id is a question about which row defines the phase, and LAST-WINS answers it by accident. REFUSED." -f $id, ($seen[$id] + 1))
@@ -807,8 +830,19 @@ function Get-PhaseTable {
 # missing from the table is a FAILURE, never a smaller population; and the floor itself is
 # compared with the range C.8.1 writes, so a plan that stops naming U0-U6 turns this red
 # instead of drifting.
+#
+# U8 IS IN THE FLOOR AND C.8 CLAUSE 1 DOES NOT NAME IT YET. Section C.9 (2026-08-31)
+# added phase U8, and section 2's U8 row states its own validation as "`dfu-done.ps1`'s
+# pinned phase floor + clause 1 EXTENDED to include U8". C.8 clause 1's PROSE still reads
+# "For U0-U6", so `phase-floor-matches-plan` now FAILS, naming U8 as pinned-but-unnamed.
+# That red is the drift check WORKING: the plan says two different things about clause
+# 1's population, and the honest response is to report it, not to pick the smaller
+# answer. Closing it is a PLAN.md edit - C.8 clause 1 naming U8, which section 2 already
+# demands - and it belongs to whoever owns that section. Narrowing this check to "pinned
+# is a superset of named" would clear the red and would also re-open the exact hole the
+# check exists to close: a plan that stopped naming U5 would then pass.
 # ---------------------------------------------------------------------------------
-$script:DfuPhaseFloor = @("U0", "U1", "U2", "U3", "U4", "U5", "U6")
+$script:DfuPhaseFloor = @("U0", "U1", "U2", "U3", "U4", "U5", "U6", "U8")
 
 function Get-ShortRef {
     # A chain step's ref, printable. Not every step is a 40-character sha - the working
@@ -870,13 +904,20 @@ function Add-PhaseFloorProbes {
     # as a shrunken N, one layer down.
     if ($null -ne $Parse) {
         $probs = @($Parse.problems)
+        # A row the parser DECLINED to read as a phase is named here (A3). Ignoring it is
+        # correct; ignoring it SILENTLY would be a population that shrank without saying so.
+        $ign = ""
+        if (@($Parse.ignored).Count -gt 0) {
+            $ign = ("; {0} row(s) begin with a phase id but are NOT id cells, so they were NOT read as phase rows (A3): {1}" -f `
+                    @($Parse.ignored).Count, ((@($Parse.ignored)) -join " / "))
+        }
         if ($probs.Count -eq 0) {
             $b = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                 -Note ("{0} parsed to ONE unambiguous table: header [{1}], {2} phase row(s), no duplicate id, nothing read from a code fence or an HTML comment" -f `
-                        $Where, $Parse.header, @($Parse.phases.Keys).Count)
+                 -Note ("{0} parsed to ONE unambiguous table: header [{1}], {2} phase row(s), no duplicate id, nothing read from a code fence or an HTML comment{3}" -f `
+                        $Where, $Parse.header, @($Parse.phases.Keys).Count, $ign)
         } else {
             $b = New-VerdictProbeBody -Verdict "fail" -Exit $probs.Count `
-                 -Note ("{0} did not parse to one unambiguous table: {1}" -f $Where, (($probs) -join " || "))
+                 -Note ("{0} did not parse to one unambiguous table: {1}{2}" -f $Where, (($probs) -join " || "), $ign)
         }
         $Clause.probes += (New-Probe -Name "phase-table-unambiguous" `
             -Command ("parse {0} in {1}: anchor on the section heading, strip fenced blocks and HTML comments, read the Validated-by column BY NAME from the header row, refuse on a duplicate id" -f $Where, $Ctx.plan) -Run $b)
@@ -1731,15 +1772,18 @@ function Test-Clause1 {
     }
     $parse  = Get-PhaseTableParse -Text $planText
     $phases = $parse.phases
-    # U0-U6 are this clause's subjects; U7 is standing by design and belongs to clause 6.
+    # U0-U6 AND U8 are this clause's subjects; U7 is standing by design and belongs to
+    # clause 6. U8 was added by section C.9 (2026-08-31), and its own section 2 row makes
+    # this extension part of its validation - U8 is NOT done, so it lands here as an
+    # OUTSTANDING subject, which is exactly why it is in.
     #
     # AND THE POPULATION IS NOT THE DOCUMENT'S TO CHOOSE. Taking $ids from the CURRENT
     # PLAN.md let a phase delete itself out of this clause: drop U1's row and the expected
     # count fell 3 -> 2 in silence. The floor is pinned and checked back against C.8.1's
     # own words - see Add-PhaseFloorProbes.
-    $floor = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Restrict '^U[0-6]$' -Parse $parse
+    $floor = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Restrict '^U(?:[0-6]|8)$' -Parse $parse
     $ids = @($floor.ids)
-    $c.coverage.subject  = "U-phases U0-U6 - the floor C.8.1 names literally, unioned with section 2's table - plus the floor's own drift check"
+    $c.coverage.subject  = "U-phases U0-U6 (named by C.8.1) and U8 (added by C.9), unioned with section 2's table - plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
     # A floor phase with no row cannot have its column re-run. It is NAMED here and the
     # phase-floor-present probe has already failed the clause; it is never a smaller N.
@@ -2174,7 +2218,7 @@ function Test-Clause2 {
     # chain, which is the failure this clause names in its own words.
     $floor2 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $curPhases -Parse $curParse
     $ids = @($floor2.ids)
-    $c.coverage.subject  = "phases whose Validated-by chain must be reconstructable - the C.8.1 floor unioned with section 2's table - plus the floor's own drift check"
+    $c.coverage.subject  = "phases whose Validated-by chain must be reconstructable - the pinned floor (C.8.1's U0-U6 plus C.9's U8) unioned with section 2's table - plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
 
     if ($null -eq $revs -or @($revs).Count -lt 1) {
@@ -3900,7 +3944,7 @@ function Test-Clause5 {
                                    -Where "WALKTHROUGH.md's phase sections"
     $ids = @($floor5.ids)
     $runs = Get-WalkthroughRuns -Text $text
-    $c.coverage.subject  = "phases - the C.8.1 floor unioned with WALKTHROUGH.md's own sections - each of which must name a check that re-runs green, plus the floor's own drift check"
+    $c.coverage.subject  = "phases - the pinned floor (C.8.1's U0-U6 plus C.9's U8) unioned with WALKTHROUGH.md's own sections - each of which must name a check that re-runs green, plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
     if ($ids.Count -lt 1) {
         $c.probes += (New-Probe -Name "walkthrough-sections" -Command ("parse '## U<n>' sections in {0}" -f $Ctx.walkthrough) `
@@ -4081,7 +4125,7 @@ function Test-Clause7 {
     # to drop the phase from this clause's population, which then reported "1 of 1".
     $floor7 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText -Phases $phases -Parse $parse7
     $ids = @($floor7.ids)
-    $c.coverage.subject  = "phases - the C.8.1 floor unioned with section 2's table - each needing a ledger entry, a findings note AND a commit message, plus the floor's own drift check"
+    $c.coverage.subject  = "phases - the pinned floor (C.8.1's U0-U6 plus C.9's U8) unioned with section 2's table - each needing a ledger entry, a findings note AND a commit message, plus the floor's own drift check"
     $c.coverage.expected = $ids.Count + 1
     if ($ids.Count -lt 1) {
         $c.probes += (New-Probe -Name "audit-phases" -Command ("parse section 2 table in {0}" -f $Ctx.plan) `
