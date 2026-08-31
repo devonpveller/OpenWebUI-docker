@@ -141,6 +141,33 @@ $Amendments
     return $t
 }
 
+function New-ChainFixture {
+    # A repository whose U0 column was AMENDED once: $Original in the first commit,
+    # $Current in the second. That is the shape clause 2 judges - and the shape in which an
+    # erosion stays defensible at every individual step.
+    param([string]$Original, [string]$Current, [string]$Decisions = "")
+    if (-not $Decisions) { $Decisions = "# fixture decisions`n`n## 2026-08-30 - U0 - the column was amended`nwhy`n" }
+    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated $Original) -Decisions $Decisions -Walkthrough "# w`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"),
+        (New-PlanText -U0Validated $Current), [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "amend U0's column"))
+    return $fx
+}
+
+function Get-ChainProbe {
+    # Run clause 2 against a chain fixture and hand back its ORIGINAL-vs-CURRENT probe.
+    param($Fx, [string]$DispositionsPath = "")
+    $p = @{
+        Only = 2; RepoRoot = $Fx.root; WorkLine = $Fx.line; SkipLive = $true
+        PlanPath = (Join-Path $Fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $Fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $Fx.dfu "WALKTHROUGH.md")
+        Dispositions = $(if ($DispositionsPath) { $DispositionsPath } else { (Join-Path $Fx.root "no-such-dispositions.json") })
+    }
+    $r = Invoke-Target -Params $p
+    $c = Get-Clause -Json $r.json -Id "2"
+    return @{ run = $r; clause = $c; probe = (Get-Probe -Clause $c -Name "chain-U0-original-vs-current") }
+}
+
 function Invoke-Target {
     # Run the REAL script and return its parsed JSON verdict. Nothing is stubbed.
     param([hashtable]$Params)
@@ -210,19 +237,83 @@ try {
 **How to run:** ``cmd /c exit 3``
 "@
     $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# fixture decisions`n" -Walkthrough $wt
+    $wtBefore = (Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("worktree", "list")).out
     $r = Invoke-Target -Params @{
         Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
         PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
         WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
     }
     $c = Assert-ClauseNotMet -Step "A" -ClauseId "1" -Json $r.json -Because "its named check exits 3 in a clean checkout"
-    $p = Get-Probe -Clause $c -Name "U0-validated-by"
+    $p = Get-Probe -Clause $c -Name "U0-validated-by-1"
     [void](Assert-That -What "[A] the U0 probe reports 'fail', not merely 'indeterminate'" `
         -Condition ($null -ne $p -and [string]$p.verdict -eq "fail") `
         -Detail ("probe verdict: {0}" -f $(if ($p) { $p.verdict } else { "<missing>" })))
     [void](Assert-That -What "[A] the probe records the non-zero exit code it saw" `
         -Condition ($null -ne $p -and [string]$p.exit -eq "3") `
         -Detail ("probe exit: {0}" -f $(if ($p) { $p.exit } else { "<missing>" })))
+    # THE SCRIPT MUST NOT MANUFACTURE THE DEFECT IT REPORTS. Clause 1 builds a clean
+    # checkout; while that ran, `git worktree add` registered it and clause 4 counted the
+    # scratch directory as unfinished work in flight - including another run's. It is a
+    # CLONE now, so the work repo has no worktree to list, and this asserts that rather
+    # than trusting the comment.
+    $wtAfter = (Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("worktree", "list")).out
+    [void](Assert-That -What "[A] clause 1's clean checkout registers NO worktree with the repo under test" `
+        -Condition (($wtAfter -split "`n").Count -eq ($wtBefore -split "`n").Count) `
+        -Detail ("before: {0} / after: {1}" -f ($wtBefore -replace "`n", " | "), ($wtAfter -replace "`n", " | ")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP A2 - CLAUSE 1: the clause CLAIMS to re-run "the section 2 Validated by check". If
+# section 2 names an artifact and the walkthrough runs a different one, that claim is
+# false - and it used to be unexaminable, because the clause never opened section 2.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP A2 clause 1 - the walkthrough runs something section 2 does not name" -ForegroundColor Cyan
+$fx = $null
+try {
+    $wt2 = "# fixture walkthrough`n`n## U0 - do the thing`n**How to run:** ``cmd /c exit 0```n"
+    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated "verify-the-thing.ps1 runs green") `
+                          -Decisions "# d`n" -Walkthrough $wt2
+    $r = Invoke-Target -Params @{
+        Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "A2" -ClauseId "1" -Json $r.json -Because "the command run is not the check section 2 names"
+    $p = Get-Probe -Clause $c -Name "U0-check-matches-section-2"
+    [void](Assert-That -What "[A2] the section-2 correspondence probe is the one that failed" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "verify-the-thing.ps1") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[A2] the phase's green command is still recorded as having passed" `
+        -Condition ($null -ne (Get-Probe -Clause $c -Name "U0-validated-by-1")) `
+        -Detail "the correspondence failure must not hide the run itself")
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP A3 - CLAUSE 1 and 5: a section naming TWO checks must run BOTH. Taking the first
+# and reporting full coverage is a claim wider than its evidence in the one field that
+# exists to prevent exactly that.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP A3 clause 5 - a row whose SECOND named check is red" -ForegroundColor Cyan
+$fx = $null
+try {
+    $wt3 = "# fixture walkthrough`n`n## U0 - do the thing`n**How to run:** ``cmd /c exit 0```n`nand also`n`n**How to run:** ``cmd /c exit 9```n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough $wt3
+    $r = Invoke-Target -Params @{
+        Only = 5; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "A3" -ClauseId "5" -Json $r.json -Because "the row's SECOND named check exits 9"
+    $p1 = Get-Probe -Clause $c -Name "walkthrough-U0-check-1"
+    $p2 = Get-Probe -Clause $c -Name "walkthrough-U0-check-2"
+    [void](Assert-That -What "[A3] BOTH named checks in the row ran" `
+        -Condition ($null -ne $p1 -and $null -ne $p2) `
+        -Detail ("probes: {0}" -f ((@($c.probes) | ForEach-Object { $_.name }) -join ",")))
+    [void](Assert-That -What "[A3] the second one is reported red with its exit code" `
+        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "fail" -and [string]$p2.exit -eq "9") `
+        -Detail ("verdict={0} exit={1}" -f $(if ($p2) { $p2.verdict } else { "?" }), $(if ($p2) { $p2.exit } else { "?" })))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
@@ -272,52 +363,154 @@ try {
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
-# STEP D - CLAUSE 2, THE SUBTLE ONE: a requirement present in the ORIGINAL column and
-# absent from the CURRENT one, with no disposition, must FAIL - even though every single
-# step in the chain looked reasonable on its own. This is the erosion the clause exists
-# to catch, and it is why the comparison is original-vs-current and never pairwise.
+# STEP D - CLAUSE 2, THE SUBTLE ONE, IN FIVE SHAPES. A requirement can leave a column by
+# being deleted, by being retracted where it stands, by being hedged into optionality, or
+# by being moved out of the cell into a footnote. Only the FIRST of those was ever caught:
+# the test was `if (-not $curNorm.Contains($req))`, a raw substring test, so a column
+# rewritten from "the gym run is observed" to "the gym run is observed is NO LONGER
+# REQUIRED - dropped as unnecessary" still CONTAINED the words and the clause reported
+# "all 2 requirement(s) in the ORIGINAL column survive". The one edit shape this clause
+# exists to catch - an erosion that stays defensible at every step - was the one shape it
+# could not see.
+#
+# The fifth shape is the one that must NOT fail: an ADDITION.
 # =================================================================================
 Write-Host ""
-Write-Host "STEP D  clause 2 - a requirement eroded out of the column across two commits" -ForegroundColor Cyan
+Write-Host "STEP D  clause 2 - deletion, retraction, hedge, footnote, and an addition" -ForegroundColor Cyan
+$orig = "the drill runs green; the gym run is observed"
+
+# D-1 DELETION - the shape that always worked. Kept so a fix cannot lose it.
 $fx = $null
 try {
-    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated "the drill runs green; the gym run is observed") `
-                          -Decisions "# fixture decisions`n" -Walkthrough "# w`n"
-    # SECOND COMMIT: drop the gym clause. Alone it looks like a tidy-up.
-    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"),
-        (New-PlanText -U0Validated "the drill runs green"), [System.Text.UTF8Encoding]::new($false))
-    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "narrow U0's column"))
-    $r = Invoke-Target -Params @{
-        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
-        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
-        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
-        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
-    }
-    $c = Assert-ClauseNotMet -Step "D" -ClauseId "2" -Json $r.json -Because "a requirement was dropped from the column with no disposition"
-    $p = Get-Probe -Clause $c -Name "chain-U0-original-vs-current"
-    [void](Assert-That -What "[D] the ORIGINAL-vs-CURRENT probe is the one that failed" `
-        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail") `
-        -Detail ("probe verdict: {0}; note: {1}" -f $(if ($p) { $p.verdict } else { "<missing>" }), $(if ($p) { $p.note } else { "" })))
-    [void](Assert-That -What "[D] the chain was reconstructed and PRINTED with both states" `
+    $fx = New-ChainFixture -Original $orig -Current "the drill runs green"
+    $g = Get-ChainProbe -Fx $fx
+    $c = Assert-ClauseNotMet -Step "D" -ClauseId "2" -Json $g.run.json -Because "a requirement was DELETED from the column with no disposition"
+    [void](Assert-That -What "[D-1] a deleted requirement fails the ORIGINAL-vs-CURRENT probe" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "fail" -and [string]$g.probe.note -match "gym run is observed") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+    [void](Assert-That -What "[D-1] the chain was reconstructed and PRINTED with both states" `
         -Condition ($null -ne $c -and (@($c.detail) -join " ") -match "2 distinct state") `
         -Detail ("detail: {0}" -f $(if ($c) { (@($c.detail) -join " / ") } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
-    # AND THE COUNTERPART: the same drop, DISPOSITIONED, must pass - otherwise the clause
-    # is merely strict rather than correct, and a real amendment could never land.
+# D-2 RETRACTION IN PLACE - THE ONE THAT USED TO PASS. The words are all still there.
+$fx = $null
+try {
+    $fx = New-ChainFixture -Original $orig `
+          -Current "the drill runs green; the gym run is observed is no longer required - dropped as unnecessary"
+    $g = Get-ChainProbe -Fx $fx
+    [void](Assert-ClauseNotMet -Step "D" -ClauseId "2" -Json $g.run.json -Because "a requirement was RETRACTED where it stood")
+    [void](Assert-That -What "[D-2] a requirement retracted IN PLACE fails, though every one of its words survives" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "fail" -and [string]$g.probe.note -match "gym run is observed") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# D-3 HEDGED INTO OPTIONALITY - still there, no longer required.
+$fx = $null
+try {
+    $fx = New-ChainFixture -Original $orig -Current "the drill runs green; the gym run is observed where feasible"
+    $g = Get-ChainProbe -Fx $fx
+    [void](Assert-ClauseNotMet -Step "D" -ClauseId "2" -Json $g.run.json -Because "a requirement was hedged with 'where feasible'"
+    )
+    [void](Assert-That -What "[D-3] a requirement WEAKENED by an added qualifier fails" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "fail" -and [string]$g.probe.note -match "gym run is observed") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# D-4 MOVED TO A FOOTNOTE - out of the cell, still in the document.
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated $orig) `
+                          -Decisions "# fixture decisions`n`n## 2026-08-30 - U0 - column amended`nwhy`n" -Walkthrough "# w`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"),
+        (New-PlanText -U0Validated "the drill runs green[^gym]" -Amendments "[^gym]: the gym run is observed"),
+        [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "move the gym requirement to a footnote"))
+    $g = Get-ChainProbe -Fx $fx
+    [void](Assert-ClauseNotMet -Step "D" -ClauseId "2" -Json $g.run.json -Because "a requirement was moved out of the column into a footnote")
+    [void](Assert-That -What "[D-4] a requirement moved to a footnote is NOT carried forward" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "fail" -and [string]$g.probe.note -match "gym run is observed") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# D-5 AN ADDITION MUST STILL PASS. C.8 is explicit: a chain that ADDED requirements is the
+# chain working as intended, and a gate that punished additions would push every honest
+# amendment towards silence.
+$fx = $null
+try {
+    $fx = New-ChainFixture -Original $orig -Current ($orig + "; the oracle fires at least once")
+    $g = Get-ChainProbe -Fx $fx
+    [void](Assert-That -What "[D-5] a chain that only ADDS a requirement passes the ORIGINAL-vs-CURRENT probe" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+    [void](Assert-That -What "[D-5] the addition is REPORTED, not silently accepted" `
+        -Condition ($null -ne $g.clause -and (@($g.clause.detail) -join " ") -match "ADDED") `
+        -Detail ("detail: {0}" -f $(if ($g.clause) { (@($g.clause.detail) -join " / ") } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP D2 - THE DISPOSITION LEDGER IS CHECKED, NOT TAKEN AT ITS WORD. A drop dispositioned
+# as a named follow-on must pass, or no honest amendment could ever land; a retraction
+# recorded as "kept" must NOT, because the column's own words say it is not kept.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP D2 clause 2 - a valid disposition lands; a false one does not" -ForegroundColor Cyan
+$fx = $null
+try {
+    $fx = New-ChainFixture -Original $orig -Current "the drill runs green"
+    $sink = Join-Path $fx.root "documentation\notes\u0-followon.md"
+    [System.IO.File]::WriteAllText($sink, "the gym run is carried forward here", [System.Text.UTF8Encoding]::new($false))
     $disp = Join-Path $fx.root "dispositions.json"
     $key  = "U0::the gym run is observed"
-    $obj  = @{ $key = @{ disposition = "follow-on"; owner = "orchestrator"; findings_sink = "documentation/notes/x.md" } }
-    [System.IO.File]::WriteAllText($disp, ($obj | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
-    $r2 = Invoke-Target -Params @{
-        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
-        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
-        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); Dispositions = $disp
-    }
-    $c2 = Get-Clause -Json $r2.json -Id "2"
-    $p2 = Get-Probe -Clause $c2 -Name "chain-U0-original-vs-current"
-    [void](Assert-That -What "[D] the SAME drop PASSES once dispositioned as a named follow-on" `
-        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass") `
-        -Detail ("probe verdict: {0}; note: {1}" -f $(if ($p2) { $p2.verdict } else { "<missing>" }), $(if ($p2) { $p2.note } else { "" })))
+    [System.IO.File]::WriteAllText($disp,
+        (@{ $key = @{ disposition = "follow-on"; owner = "orchestrator"; findings_sink = "documentation/notes/u0-followon.md" } } | ConvertTo-Json -Depth 5),
+        [System.Text.UTF8Encoding]::new($false))
+    $g = Get-ChainProbe -Fx $fx -DispositionsPath $disp
+    [void](Assert-That -What "[D2] the SAME drop PASSES once dispositioned as a named follow-on with an owner and a sink that exists" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+
+    # ...and the same record with a sink that does NOT exist must not.
+    [System.IO.File]::WriteAllText($disp,
+        (@{ $key = @{ disposition = "follow-on"; owner = "orchestrator"; findings_sink = "documentation/notes/nowhere.md" } } | ConvertTo-Json -Depth 5),
+        [System.Text.UTF8Encoding]::new($false))
+    $g2 = Get-ChainProbe -Fx $fx -DispositionsPath $disp
+    [void](Assert-That -What "[D2] a follow-on whose findings sink does not exist is NOT a disposition" `
+        -Condition ($null -ne $g2.probe -and [string]$g2.probe.verdict -eq "fail") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g2.probe) { $g2.probe.verdict } else { "?" }), $(if ($g2.probe) { $g2.probe.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+$fx = $null
+try {
+    # A REWRITE dispositioned "kept" is legitimate - the ledger is asserting the reword
+    # preserves the requirement, and that assertion is now on the record where it can be
+    # disagreed with.
+    $fx = New-ChainFixture -Original $orig -Current "the drill runs green; the gym run is observed twice"
+    $disp = Join-Path $fx.root "dispositions.json"
+    $key  = "U0::the gym run is observed"
+    [System.IO.File]::WriteAllText($disp, (@{ $key = @{ disposition = "kept" } } | ConvertTo-Json -Depth 5),
+        [System.Text.UTF8Encoding]::new($false))
+    $g = Get-ChainProbe -Fx $fx -DispositionsPath $disp
+    [void](Assert-That -What "[D2] a REWORDED requirement recorded as 'kept' passes" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+$fx = $null
+try {
+    # ...but a RETRACTION recorded as "kept" must not. This is the ledger lying, and a
+    # ledger this script simply believed would be the substring test again with a JSON file
+    # in front of it.
+    $fx = New-ChainFixture -Original $orig `
+          -Current "the drill runs green; the gym run is observed is no longer required - dropped as unnecessary"
+    $disp = Join-Path $fx.root "dispositions.json"
+    $key  = "U0::the gym run is observed"
+    [System.IO.File]::WriteAllText($disp, (@{ $key = @{ disposition = "kept" } } | ConvertTo-Json -Depth 5),
+        [System.Text.UTF8Encoding]::new($false))
+    $g = Get-ChainProbe -Fx $fx -DispositionsPath $disp
+    [void](Assert-That -What "[D2] a RETRACTED requirement recorded as 'kept' still FAILS - the ledger cannot overrule the column" `
+        -Condition ($null -ne $g.probe -and [string]$g.probe.verdict -eq "fail" -and [string]$g.probe.note -match "(?i)kept") `
+        -Detail ("verdict={0} note={1}" -f $(if ($g.probe) { $g.probe.verdict } else { "?" }), $(if ($g.probe) { $g.probe.note } else { "" })))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
@@ -353,7 +546,10 @@ Write-Host ""
 Write-Host "STEP F  clause 4 - an unmerged work branch, a worktree, and the excluded branch" -ForegroundColor Cyan
 $fx = $null
 try {
-    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough "# w`n"
+    # The ledger RECORDS the carve-out. That is what makes it a carve-out - see the second
+    # half of this step, where the same tree without the entry counts the branch.
+    $decF = "# fixture decisions`n`n## 2026-08-31 - work/pod-key is an unrelated podcast effort`nnot part of this plan`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions $decF -Walkthrough "# w`n"
     # A work branch genuinely AHEAD of the work line.
     [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("checkout", "-q", "-b", "work/leftover"))
     [System.IO.File]::WriteAllText((Join-Path $fx.root "extra.txt"), "x", [System.Text.UTF8Encoding]::new($false))
@@ -389,6 +585,23 @@ try {
         [void](Assert-That -What "[F] the leftover worktree is caught" `
             -Condition ($null -ne $pw -and [string]$pw.verdict -eq "fail") `
             -Detail ("probe verdict: {0}" -f $(if ($pw) { $pw.verdict } else { "<missing>" })))
+
+        # AND THE CARVE-OUT MUST BE EARNED. The exclusion used to be applied on this
+        # script's own say-so, attributed to an operator ruling that appears in neither
+        # DECISIONS.md nor PLAN.md. Strip the ledger entry and the branch must be counted
+        # like any other - otherwise "excluded" is just a name in a file exempting itself.
+        [System.IO.File]::WriteAllText((Join-Path $fx.dfu "DECISIONS.md"), "# fixture decisions`n",
+            [System.Text.UTF8Encoding]::new($false))
+        $r2 = Invoke-Target -Params @{
+            Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+            PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+            WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        }
+        $c2 = Get-Clause -Json $r2.json -Id "4"
+        $pb2 = Get-Probe -Clause $c2 -Name "no-unmerged-work-branches"
+        [void](Assert-That -What "[F] with NO ledger entry the carve-out does not apply and work/pod-key is counted" `
+            -Condition ($null -ne $pb2 -and [string]$pb2.verdict -eq "fail" -and [string]$pb2.note -match "work/pod-key") `
+            -Detail ("note: {0}" -f $(if ($pb2) { $pb2.note } else { "<missing>" })))
     } finally {
         [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("worktree", "remove", "--force", $wtPath))
         Remove-Scratch -Path $wtPath
@@ -411,7 +624,7 @@ try {
         WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
     }
     $c = Assert-ClauseNotMet -Step "G" -ClauseId "5" -Json $r.json -Because "a row's named check exits 4"
-    $p = Get-Probe -Clause $c -Name "walkthrough-U0-check"
+    $p = Get-Probe -Clause $c -Name "walkthrough-U0-check-1"
     [void](Assert-That -What "[G] the failing row's own probe reports fail with its exit code" `
         -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.exit -eq "4") `
         -Detail ("verdict={0} exit={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.exit } else { "?" })))
@@ -464,6 +677,83 @@ try {
     [void](Assert-That -What "[H] a manual record missing by/date/evidence is NOT a recorded result" `
         -Condition ($null -ne $c3 -and [string]$c3.verdict -ne "met") `
         -Detail ("verdict: {0}" -f $(if ($c3) { $c3.verdict } else { "?" })))
+
+    # H-4: A MANUAL FILE THAT EXISTS BUT HOLDS NO RESULT. This is the state the shipped
+    # manual-results file is actually in, and it made the mechanism UNREACHABLE: a
+    # precedence bug in Get-ManualResult read a property that does not exist, Set-StrictMode
+    # turned that into a throw, and the clause evaluator's catch replaced the whole clause
+    # with `clause-6-threw` - discarding the machine probe that had already decided its
+    # half. C.8 requires the script to REFUSE without a recorded result; crashing is not
+    # refusing. Every fixture above passes a path with NO FILE, which is why the drill was
+    # green over it.
+    $mfEmpty = Join-Path $fx.root "manual-keyless.json"
+    [System.IO.File]::WriteAllText($mfEmpty, (@{ _comment = "no results recorded here" } | ConvertTo-Json -Depth 3),
+        [System.Text.UTF8Encoding]::new($false))
+    $r4 = Invoke-Target -Params @{
+        Only = 6; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); ManualResults = $mfEmpty
+    }
+    $c4 = Get-Clause -Json $r4.json -Id "6"
+    [void](Assert-That -What "[H-4] a manual file with NO keys leaves the clause manual-pending, not thrown" `
+        -Condition ($null -ne $c4 -and [string]$c4.verdict -eq "manual-pending") `
+        -Detail ("verdict: {0}" -f $(if ($c4) { $c4.verdict } else { "?" })))
+    [void](Assert-That -What "[H-4] the clause's MACHINE probe survives - it is not discarded by a crash" `
+        -Condition ($null -ne (Get-Probe -Clause $c4 -Name "u7-cycle-recorded")) `
+        -Detail ("probes: {0}" -f $(if ($c4) { ((@($c4.probes) | ForEach-Object { $_.name }) -join ",") } else { "?" })))
+    [void](Assert-That -What "[H-4] no probe reports that the clause evaluator threw" `
+        -Condition ($null -ne $c4 -and (@($c4.probes | Where-Object { $_.name -match "threw" }).Count -eq 0)) `
+        -Detail "a throw is not a refusal")
+
+    # H-5: A KEY WITH AN EMPTY RESULT is a note somebody left, not a check somebody ran.
+    $mfEmptyVal = Join-Path $fx.root "manual-empty.json"
+    [System.IO.File]::WriteAllText($mfEmptyVal,
+        (@{ "u7-cycle-judged-against-pinned-anchor" = @{ verdict = ""; by = ""; date = ""; evidence = "" } } | ConvertTo-Json -Depth 4),
+        [System.Text.UTF8Encoding]::new($false))
+    $r5 = Invoke-Target -Params @{
+        Only = 6; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); ManualResults = $mfEmptyVal
+    }
+    $c5 = Get-Clause -Json $r5.json -Id "6"
+    [void](Assert-That -What "[H-5] a key whose fields are EMPTY is still pending" `
+        -Condition ($null -ne $c5 -and [string]$c5.verdict -eq "manual-pending") `
+        -Detail ("verdict: {0}" -f $(if ($c5) { $c5.verdict } else { "?" })))
+
+    # H-6: A COMPLETE RESULT MUST ACTUALLY LAND. A gate that can never be satisfied is not
+    # a gate, it is a wall - and nobody would trust the rest of the file's refusals if its
+    # one recorded-result path had never been shown to work.
+    $mfOk = Join-Path $fx.root "manual-ok.json"
+    [System.IO.File]::WriteAllText($mfOk,
+        (@{ "u7-cycle-judged-against-pinned-anchor" = @{ verdict = "pass"; by = "a tester who did not build it"
+                                                         date = "2026-08-31"; evidence = "DECISIONS.md 2026-08-30 U7 entry cites anchor A3" } } | ConvertTo-Json -Depth 4),
+        [System.Text.UTF8Encoding]::new($false))
+    $r6 = Invoke-Target -Params @{
+        Only = 6; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); ManualResults = $mfOk
+    }
+    $c6 = Get-Clause -Json $r6.json -Id "6"
+    [void](Assert-That -What "[H-6] a COMPLETE recorded result satisfies the manual check and the clause is met" `
+        -Condition ($null -ne $c6 -and [string]$c6.verdict -eq "met") `
+        -Detail ("verdict: {0}; manual: {1}" -f $(if ($c6) { $c6.verdict } else { "?" }), `
+                 $(if ($c6) { (@($c6.manual | ForEach-Object { $_.name + "=" + $_.state }) -join ",") } else { "" })))
+
+    # H-7: A RECORDED *FAILING* RESULT IS A FAILURE, not a pending one.
+    $mfBad = Join-Path $fx.root "manual-fail.json"
+    [System.IO.File]::WriteAllText($mfBad,
+        (@{ "u7-cycle-judged-against-pinned-anchor" = @{ verdict = "fail"; by = "a tester"; date = "2026-08-31"
+                                                         evidence = "the entry cites no anchor" } } | ConvertTo-Json -Depth 4),
+        [System.Text.UTF8Encoding]::new($false))
+    $r7 = Invoke-Target -Params @{
+        Only = 6; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); ManualResults = $mfBad
+    }
+    $c7 = Get-Clause -Json $r7.json -Id "6"
+    [void](Assert-That -What "[H-7] a recorded FAILING manual result makes the clause unmet, not manual-pending" `
+        -Condition ($null -ne $c7 -and [string]$c7.verdict -eq "unmet") `
+        -Detail ("verdict: {0}" -f $(if ($c7) { $c7.verdict } else { "?" })))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
@@ -549,8 +839,113 @@ try {
         $pr2 = New-Probe -Name "thrower" -Command "n/a" -Run { throw "boom" }
         [void](Assert-That -What "[K] a probe that THROWS becomes 'indeterminate', never a pass" `
             -Condition ([string]$pr2.verdict -eq "indeterminate") -Detail ("got: {0}" -f $pr2.verdict))
+
+        # AND THE DOOR RULE ITSELF, against the shipped function. These four rows are the
+        # whole of R2: a door that returns neither the fixture nor its control is not a
+        # bound door, and a non-200 body cannot show a leak. Pointing the real script at
+        # `openbrain-postgrest:3000/nosuch` made all five PostgREST doors report "attacked
+        # with the fixture and it did not come back" - coverage 8 of 8 - because the status
+        # code was requested from curl and never read.
+        $dv1 = Resolve-DoorVerdict -Reachable $true -Status 200 -SawPersonal $false -SawOps $true
+        [void](Assert-That -What "[K] a door that refuses the fixture AND returns the ops control passes" `
+            -Condition ([string]$dv1.verdict -eq "pass") -Detail ("got: {0}" -f $dv1.verdict))
+        $dv2 = Resolve-DoorVerdict -Reachable $true -Status 200 -SawPersonal $false -SawOps $false
+        [void](Assert-That -What "[K] a door that returns NEITHER is indeterminate, never a pass" `
+            -Condition ([string]$dv2.verdict -eq "indeterminate") -Detail ("got: {0}" -f $dv2.verdict))
+        $dv3 = Resolve-DoorVerdict -Reachable $true -Status 404 -SawPersonal $false -SawOps $false
+        [void](Assert-That -What "[K] a NON-200 answer is indeterminate - a 404 body proves nothing" `
+            -Condition ([string]$dv3.verdict -eq "indeterminate") -Detail ("got: {0}" -f $dv3.verdict))
+        $dv4 = Resolve-DoorVerdict -Reachable $true -Status 200 -SawPersonal $true -SawOps $true
+        [void](Assert-That -What "[K] a door that returns the personal fixture fails" `
+            -Condition ([string]$dv4.verdict -eq "fail") -Detail ("got: {0}" -f $dv4.verdict))
+        $dv5 = Resolve-DoorVerdict -Reachable $false -Status 0 -SawPersonal $false -SawOps $false
+        [void](Assert-That -What "[K] an unreachable door is indeterminate, never closed" `
+            -Condition ([string]$dv5.verdict -eq "indeterminate") -Detail ("got: {0}" -f $dv5.verdict))
     }
 } finally { if ($scratchCopy -and (Test-Path -LiteralPath $scratchCopy)) { Remove-Item -LiteralPath $scratchCopy -Force -ErrorAction SilentlyContinue } }
+
+# =================================================================================
+# STEP M - CLAUSE 4: THE GITLINK GATE MUST ASK THE REMOTE. The tip-branch path did query
+# it; the fallback for a non-tip commit was `git fetch --dry-run origin <sha>` run inside
+# OB1 itself, which git answers from the LOCAL object store - it sees it already has the
+# commit and does nothing, exit 0. So a commit that exists only in this clone passed a gate
+# whose whole purpose is "a fresh --recurse-submodules clone would break".
+#
+# The fixture is that exact situation, built from real repositories: a bare remote, a
+# submodule whose local checkout holds one more commit than it ever pushed, and a parent
+# pinning that commit.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP M  clause 4 - a gitlink pinning a commit the remote does not have" -ForegroundColor Cyan
+$fx = $null
+$sandbox = $null
+try {
+    $sandbox = New-Scratch
+    $bare = Join-Path $sandbox "sub-remote.git"
+    $work = Join-Path $sandbox "sub-work"
+    [void](Invoke-InDir -Dir $sandbox -Exe "git" -Arguments @("init", "-q", "--bare", $bare))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("init", "-q", "-b", "main"))
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("config", "user.email", "drill@example.invalid"))
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("config", "user.name", "dfu drill"))
+    $shas = @()
+    foreach ($n in @(1, 2, 3)) {
+        [System.IO.File]::WriteAllText((Join-Path $work "f.txt"), ("rev " + $n), [System.Text.UTF8Encoding]::new($false))
+        [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("add", "-A"))
+        [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("commit", "-q", "-m", ("c" + $n)))
+        $shas += (Invoke-InDir -Dir $work -Exe "git" -Arguments @("rev-parse", "HEAD")).out.Trim()
+    }
+    # PUSHED: c1..c3. The remote's only tip is c3, so c2 is reachable-but-not-a-tip - the
+    # case the fallback exists for.
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("push", "-q", $bare, "main"))
+    # NOT PUSHED: c4. It exists in this clone and nowhere else.
+    [System.IO.File]::WriteAllText((Join-Path $work "f.txt"), "rev 4 - never pushed", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("add", "-A"))
+    [void](Invoke-InDir -Dir $work -Exe "git" -Arguments @("commit", "-q", "-m", "c4"))
+    $unpushed = (Invoke-InDir -Dir $work -Exe "git" -Arguments @("rev-parse", "HEAD")).out.Trim()
+
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough "# w`n"
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("-c", "protocol.file.allow=always", "submodule", "add", "-q", $bare, "OB1"))
+    $ob1 = Join-Path $fx.root "OB1"
+
+    # (a) THE NEGATIVE: pin the commit the remote never received.
+    [void](Invoke-InDir -Dir $ob1 -Exe "git" -Arguments @("fetch", "-q", $work, $unpushed))
+    [void](Invoke-InDir -Dir $ob1 -Exe "git" -Arguments @("checkout", "-q", $unpushed))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1", ".gitmodules"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "pin an OB1 commit that was never pushed"))
+    $r = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "M" -ClauseId "4" -Json $r.json -Because "the gitlink pins a commit the remote does not have"
+    $pg = Get-Probe -Clause $c -Name "gitlink-reachable-on-remote"
+    [void](Assert-That -What "[M] a gitlink the REMOTE cannot serve fails, even though the commit is here locally" `
+        -Condition ($null -ne $pg -and [string]$pg.verdict -eq "fail") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pg) { $pg.verdict } else { "?" }), $(if ($pg) { $pg.note } else { "" })))
+    [void](Assert-That -What "[M] the failing probe says the REMOTE refused it, not that a local ref was missing" `
+        -Condition ($null -ne $pg -and [string]$pg.note -match "(?i)remote") `
+        -Detail ("note: {0}" -f $(if ($pg) { $pg.note } else { "" })))
+
+    # (b) THE POSITIVE: pin a commit that is reachable on the remote but is NOT a tip, so
+    # the fallback is the thing being exercised. A gate that can only fail is a wall.
+    [void](Invoke-InDir -Dir $ob1 -Exe "git" -Arguments @("checkout", "-q", $shas[1]))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "OB1"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "pin a reachable non-tip OB1 commit"))
+    $r2 = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c2 = Get-Clause -Json $r2.json -Id "4"
+    $pg2 = Get-Probe -Clause $c2 -Name "gitlink-reachable-on-remote"
+    [void](Assert-That -What "[M] a reachable NON-TIP commit passes - the fallback asks the remote and gets a yes" `
+        -Condition ($null -ne $pg2 -and [string]$pg2.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pg2) { $pg2.verdict } else { "?" }), $(if ($pg2) { $pg2.note } else { "" })))
+} finally {
+    if ($fx) { Remove-Scratch -Path $fx.root }
+    if ($sandbox) { Remove-Scratch -Path $sandbox }
+}
 
 # =================================================================================
 # STEP Y - A NARROWED RUN MUST NEVER REPORT THE PLAN DONE. -Only is a convenience, not a
@@ -605,13 +1000,44 @@ if ($Live) {
     Write-Host "STEP L  (live) the real plane reproduces its known-open failures" -ForegroundColor Cyan
     $r = Invoke-Target -Params @{ Only = 3 }
     $c = Get-Clause -Json $r.json -Id "3"
-    [void](Assert-That -What "[L] clause 3 evaluates every door against the real plane" `
-        -Condition ($null -ne $c -and [int]$c.coverage.evaluated -eq [int]$c.coverage.expected) `
-        -Detail ("coverage: {0} of {1}" -f $(if ($c) { $c.coverage.evaluated } else { "?" }), $(if ($c) { $c.coverage.expected } else { "?" })))
+    # NOT "coverage is full". It is not, and it should not be: one door is a named manual
+    # check and one returns neither twin, so both refuse. Asserting full coverage here is
+    # what would push someone to make an unmeasurable door pass. What must be true is that
+    # the live probes CAN measure - at least one door refuses the fixture while returning
+    # its control - and that every subject they could not measure is NAMED.
+    $doorProbes = @($c.probes | Where-Object { $_.name -like "door-*" })
+    [void](Assert-That -What "[L] at least one door is measured against its positive control on the real plane" `
+        -Condition (@($doorProbes | Where-Object { $_.verdict -eq "pass" }).Count -ge 1) `
+        -Detail ("verdicts: {0}" -f (($doorProbes | ForEach-Object { $_.name + "=" + $_.verdict }) -join ", ")))
+    $unnamed = @($doorProbes | Where-Object { $_.verdict -eq "indeterminate" -and
+                 (@($c.coverage.not_evaluated) -notcontains ($_.name -replace "^door-", "")) })
+    [void](Assert-That -What "[L] every door that could NOT be measured is named in not_evaluated" `
+        -Condition ($unnamed.Count -eq 0) `
+        -Detail ("unnamed: {0}; not_evaluated: {1}" -f (($unnamed | ForEach-Object { $_.name }) -join ","), (@($c.coverage.not_evaluated) -join ",")))
+    [void](Assert-That -What "[L] the clause cannot be met while a door is unmeasured" `
+        -Condition ($null -ne $c -and [string]$c.verdict -ne "met") `
+        -Detail ("verdict: {0}" -f $(if ($c) { $c.verdict } else { "?" })))
     $pf = Get-Probe -Clause $c -Name "fixture-cleaned-up"
     [void](Assert-That -What "[L] the synthetic personal fixture is removed and 0 personal rows remain" `
         -Condition ($null -ne $pf -and [string]$pf.verdict -eq "pass") `
         -Detail ("note: {0}" -f $(if ($pf) { $pf.note } else { "<missing>" })))
+
+    # THE LIVE REPRODUCTION OF R2. Aim the PostgREST doors at a path that does not exist.
+    # Every request comes back 404 with a JSON error body and curl exits 0, so the old
+    # probe - which asked curl for %{http_code} and never read it - reported every door as
+    # "attacked with the fixture and it did not come back", coverage 8 of 8, including the
+    # door that correctly fails against the real endpoint. Not one door may pass here.
+    Write-Host ""
+    Write-Host "STEP L2 (live) a PostgREST host that answers 404 must not read as containment" -ForegroundColor Cyan
+    $r2 = Invoke-Target -Params @{ Only = 3; PostgrestHost = "openbrain-postgrest:3000/nosuch" }
+    $c2 = Get-Clause -Json $r2.json -Id "3"
+    $bogus = @($c2.probes | Where-Object { $_.name -like "door-postgrest-*" })
+    [void](Assert-That -What "[L2] no PostgREST door passes when every request answers 404" `
+        -Condition (@($bogus | Where-Object { $_.verdict -eq "pass" }).Count -eq 0) `
+        -Detail ("verdicts: {0}" -f (($bogus | ForEach-Object { $_.name + "=" + $_.verdict }) -join ", ")))
+    [void](Assert-That -What "[L2] and the clause does not claim to have evaluated them" `
+        -Condition ($null -ne $c2 -and [int]$c2.coverage.evaluated -lt [int]$c2.coverage.expected) `
+        -Detail ("coverage: {0} of {1}" -f $(if ($c2) { $c2.coverage.evaluated } else { "?" }), $(if ($c2) { $c2.coverage.expected } else { "?" })))
 }
 
 Write-Host ""
