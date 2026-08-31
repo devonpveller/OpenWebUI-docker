@@ -396,13 +396,37 @@ without a recorded result.
    it is a one-time backfill of unlabelled rows to `exposure='ops'`, then flipping
    the function. Until both land, this clause fails.
 4. **Nothing is left in flight, and everything is DEPLOYED AND RUNNING**
-   (operator, 2026-08-30). Zero unmerged `work/*` branches, zero worktrees, a clean
-   repo and clean submodules, and the OB1 gitlink pinning a commit that is
-   reachable on the OB1 remote. Every service this plan adds is **running live from
-   the work line's code** — the ops gateway, the andon board, the gate profiles,
-   the RLS boundary at every stage including the direct clients. A deliverable that
-   merges but does not run is not done; a stale worktree is unfinished work wearing
-   a finished face.
+   (operator, 2026-08-30; scope clarified 2026-08-31).
+
+   **SCOPE — say "branch" precisely, because the repo holds 41 refs and this
+   effort owns 17 of them.**
+   - **The work line** is `refactor/ai-stack-cleanup`. It is the target. Everything
+     this effort produces lands here and nowhere else.
+   - **Effort branches** are the `work/*` branches THIS EFFORT created:
+     `dfu-u4`, `dfu-u4-lc`, `dfudone`, `gitreach`, `u3gym`, `u4bidir`, `u4close`,
+     `u4oracle`, `u4quad`, `u5judge`, `u5pplane`, `u5proxy`, `u5rls`, `u6dark`,
+     `u6recall`, `wikilink`, plus any created after this date. They are
+     SCAFFOLDING, not deliverables — each is merged or abandoned with a recorded
+     reason, and neither outcome is a failure.
+   - **OUT OF SCOPE, and untouched:** `main`, `development`, `work/pod-key` (an
+     unrelated podcast effort), and every `issue/*`, `agent/*`, `feature/*` and
+     fork branch. This plan does not merge, rebase, delete or tidy them. A clause
+     about "unmerged branches" that swept those in would be asking for damage.
+
+   **The condition:** zero effort branches outstanding, zero worktrees, a clean
+   repo and clean submodules, and the OB1 gitlink pinning a commit reachable on the
+   OB1 remote. Every service this plan adds is **running live from the work line's
+   code** — the ops gateway, the andon board, the gate profiles, the RLS boundary
+   at every stage including the direct clients. A deliverable that merges but does
+   not run is not done; a stale worktree is unfinished work wearing a finished face.
+
+   **The work line is PUSHED.** Added 2026-08-31 on a measurement:
+   `refactor/ai-stack-cleanup` was **89 commits ahead of `origin`**, so the entire
+   effort — 36,000+ insertions — existed on one machine with no off-box copy.
+   Pushing the work line is autonomous under the narrowed §C.2 and is not a
+   promotion: `development` and `main` remain the operator's, per branch policy.
+   *(Revert: drop this paragraph — it is an addition to the operator's original
+   four rulings, not one of them.)*
 5. **The walkthrough is true.** Every row of `WALKTHROUGH.md` names a check and
    that check re-runs green. The operator reviews by reading it (§C.7), so a row
    whose check does not run is worse than a missing row.
