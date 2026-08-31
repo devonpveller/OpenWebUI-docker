@@ -2753,21 +2753,73 @@ function Test-Clause3 {
     # predicate can be correct in text and shadowed in effect. The ops-labelled row in the
     # same transaction is the control: if IT is invisible too, the query is broken and the
     # unlabelled row's invisibility proves nothing.
+    #
+    # THE PROBE BRANCHES ON THE SCHEMA, AND THE BRANCH IS DERIVED, NOT ASSUMED. C.9 H3
+    # (operator 2026-08-31) made `exposure` a NOT NULL CHECKed COLUMN, which closes this
+    # class one layer earlier: an unlabelled row is not invisible, it is UNWRITABLE. So on a
+    # database where the column is enforced this probe asserts the stronger property - the
+    # write is REFUSED - and on a database where it is not, it asserts the original one. The
+    # branch is read from information_schema at run time; it is not a flag, and neither arm
+    # can be reached by choice. A probe that only knew the older world would go
+    # INDETERMINATE against H3 (the INSERT raises, psql exits non-zero) and this clause
+    # would silently stop being decided - which is rule 2's failure, arriving through a
+    # schema change rather than through a code change.
     $canary = "DFU-DONE-CANARY-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
-    $sqlPred = ("BEGIN; " +
-        "INSERT INTO thoughts (content, metadata) VALUES ('{0}-UNLABELLED','{{}}'::jsonb); " +
-        "INSERT INTO thoughts (content, metadata) VALUES ('{0}-OPS', jsonb_build_object('exposure','ops')); " +
-        "SET ROLE service_role; " +
-        "SELECT 'U:'||count(*) FROM thoughts WHERE content='{0}-UNLABELLED'; " +
-        "SELECT 'O:'||count(*) FROM thoughts WHERE content='{0}-OPS'; " +
-        "RESET ROLE; ROLLBACK;") -f $canary
+    # TWO facts, not one, because they differ and the difference matters. The column can be
+    # PRESENT and inert - which is exactly what reverting 195 leaves behind, since class 4
+    # forbids dropping a column - and a fixture that named it would then still work while the
+    # predicate arm below must not take the enforced branch.
+    $rCol = Invoke-Psql -Ctx $Ctx -Sql ("SELECT count(*) FILTER (WHERE true) || '/' || " +
+        "count(*) FILTER (WHERE is_nullable='NO') FROM information_schema.columns " +
+        "WHERE table_schema='public' AND table_name='thoughts' AND column_name='exposure';")
+    $colState = if ($rCol.ran -and $rCol.exit -eq 0) { ($rCol.out -replace "\s+", "") } else { "" }
+    $script:DfuH3ColPresent = ($colState -match '^1/')
+    $h3Enforced = ($colState -eq '1/1')
+
+    if ($h3Enforced) {
+        # THE H3 WORLD. One transaction, three statements, and the exception handler is what
+        # makes the refusal a RESULT rather than an aborted script: a bare failing INSERT
+        # would abort the transaction and psql would exit non-zero, which this file's rule 1
+        # correctly reads as indeterminate rather than as a pass.
+        #   U: did the unlabelled write get REFUSED (1) or accepted (0)?
+        #   O: is an ops-labelled row visible to the agent plane? (the live positive control)
+        # A run where O is 0 is indeterminate exactly as before - a query that can see
+        # nothing proves nothing about what it cannot see.
+        $sqlPred = ("BEGIN; " +
+            "DO $x$ BEGIN " +
+            "  INSERT INTO thoughts (content, metadata) VALUES ('{0}-UNLABELLED', jsonb_build_object('exposure','ops')); " +
+            "  RAISE NOTICE 'DFU-U:0'; " +
+            "EXCEPTION WHEN not_null_violation THEN RAISE NOTICE 'DFU-U:1'; END $x$; " +
+            "INSERT INTO thoughts (content, metadata, exposure) VALUES ('{0}-OPS', jsonb_build_object('exposure','ops'), 'ops'); " +
+            "SET ROLE service_role; " +
+            "SELECT 'O:'||count(*) FROM thoughts WHERE content='{0}-OPS'; " +
+            "RESET ROLE; ROLLBACK;") -f $canary
+    } else {
+        $sqlPred = ("BEGIN; " +
+            "INSERT INTO thoughts (content, metadata) VALUES ('{0}-UNLABELLED','{{}}'::jsonb); " +
+            "INSERT INTO thoughts (content, metadata) VALUES ('{0}-OPS', jsonb_build_object('exposure','ops')); " +
+            "SET ROLE service_role; " +
+            "SELECT 'U:'||count(*) FROM thoughts WHERE content='{0}-UNLABELLED'; " +
+            "SELECT 'O:'||count(*) FROM thoughts WHERE content='{0}-OPS'; " +
+            "RESET ROLE; ROLLBACK;") -f $canary
+    }
     $rp = Invoke-Psql -Ctx $Ctx -Sql $sqlPred
     if (-not $rp.ran -or $null -eq $rp.exit) {
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "the database could not be reached, so the predicate was not tested"
     } elseif ([int]$rp.exit -ne 0) {
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit ([int]$rp.exit) -Note ("psql exited non-zero: {0}" -f (($rp.out -replace "\s+", " ").Trim()))
     } else {
-        $u = (($rp.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^U:\d+$' } | Select-Object -First 1)
+        # In the H3 arm the unlabelled result arrives as a psql NOTICE (`DFU-U:1`), because a
+        # refusal cannot be a SELECT: the statement that would have produced one is the
+        # statement that raised. Both spellings are accepted here and the arm that produced
+        # it is named in the verdict, so the output says WHICH property was measured.
+        $u = (($rp.out -split "`n") | ForEach-Object { $_.Trim() } |
+              Where-Object { $_ -match '^U:\d+$' } | Select-Object -First 1)
+        if (-not $u) {
+            $un = (($rp.out -split "`n") | ForEach-Object { $_.Trim() } |
+                   Where-Object { $_ -match 'DFU-U:\d+' } | Select-Object -First 1)
+            if ($un) { $u = "U:" + ([regex]::Match($un, 'DFU-U:(\d+)').Groups[1].Value) }
+        }
         $o = (($rp.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^O:\d+$' } | Select-Object -First 1)
         if (-not $u -or -not $o) {
             $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit ([int]$rp.exit) -Note "the query returned no counts at all - nothing was decided"
@@ -2777,6 +2829,12 @@ function Test-Clause3 {
             if ($on -lt 1) {
                 $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit 0 `
                         -Note "the OPS control row was invisible too, so this query cannot see anything - the unlabelled row's absence proves nothing"
+            } elseif ($h3Enforced -and $un -eq 1) {
+                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                        -Note "the ops control row IS visible to the agent plane, and an UNLABELLED write is REFUSED BY THE DATABASE (not_null_violation on thoughts.exposure) - the class is closed at the write, one layer earlier than at the read. C.9 H3, measured."
+            } elseif ($h3Enforced) {
+                $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                        -Note "thoughts.exposure is NOT NULL, yet an UNLABELLED write was ACCEPTED - the column is present and not enforcing, which is worse than its absence because everything downstream reads it as authoritative"
             } elseif ($un -eq 0) {
                 $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
                         -Note "the ops control row IS visible to the agent plane and the UNLABELLED row is not - the predicate is fail-closed, measured"
@@ -2850,15 +2908,30 @@ function Test-Clause3 {
     $ids = [ordered]@{}
     foreach ($pair in @(@("p", $pmark, "personal"), @("o", $omark, "ops"))) {
         $tag = $pair[0]; $mk = $pair[1]; $exp = $pair[2]
-        $q = "INSERT INTO thoughts (content, metadata) VALUES ('{0} {1} fixture', jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;" -f $mk, $exp, $ftype
+        # `exposure` IS A COLUMN since DFU C.9 H3 (operator 2026-08-31): NOT NULL, CHECKed
+        # IN ('ops','personal'), no default. A fixture that named only the jsonb mirror
+        # would not be written at all - and the door probes below would then be attacking
+        # nothing, which is this file's own rule 5 failing from the fixture end. Both are
+        # written, from the SAME variable, so the column and the mirror cannot disagree.
+        $q = if ($script:DfuH3ColPresent) {
+            "INSERT INTO thoughts (content, metadata, exposure) VALUES ('{0} {1} fixture', jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true), '{1}') RETURNING id;" -f $mk, $exp, $ftype
+        } else {
+            "INSERT INTO thoughts (content, metadata) VALUES ('{0} {1} fixture', jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;" -f $mk, $exp, $ftype
+        }
         $r = Invoke-Psql -Ctx $Ctx -Sql $q
         if ($r.ran -and $r.exit -eq 0) {
             $mm = [regex]::Match(($r.out -replace "\s+", " "), '(\d+)')
             if ($mm.Success) { $ids[($tag + "thought")] = $mm.Groups[1].Value }
         }
-        $q2 = ("INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata) " +
-               "VALUES ('dfu-done-fixture','check','{0} {1} twin','{0} {1} fixture body', " +
-               "jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;") -f $mk, $exp, $ftype
+        $q2 = if ($script:DfuH3ColPresent) {
+            ("INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata, exposure) " +
+             "VALUES ('dfu-done-fixture','check','{0} {1} twin','{0} {1} fixture body', " +
+             "jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true), '{1}') RETURNING id;") -f $mk, $exp, $ftype
+        } else {
+            ("INSERT INTO agent_memories (workspace_id, memory_type, summary, content, metadata) " +
+             "VALUES ('dfu-done-fixture','check','{0} {1} twin','{0} {1} fixture body', " +
+             "jsonb_build_object('exposure','{1}','share','cloud','type','{2}','dfu_done_fixture',true)) RETURNING id;") -f $mk, $exp, $ftype
+        }
         $r2 = Invoke-Psql -Ctx $Ctx -Sql $q2
         if ($r2.ran -and $r2.exit -eq 0) {
             $mm2 = [regex]::Match($r2.out, '([0-9a-f-]{36})')

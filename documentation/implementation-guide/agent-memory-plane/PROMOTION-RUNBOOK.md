@@ -986,3 +986,255 @@ empty-set trace is readable again and all seven dispositions are gone → re-app
 docker cp OB1\docker\revert-graph-plane-rls.sql openbrain-db:/tmp/
 docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/revert-graph-plane-rls.sql
 ```
+
+
+
+## `init-graph-plane-rls.sql` — ROUND 5: it reads the COLUMN, and one policy's role is put back
+
+**Same file, same `200-` mount point, not a new migration. NOT APPLIED to the live volume —
+the live volume is still on ROUND 1 (measured 2026-08-31: `ob_relation_governed` absent,
+`agent_memory_audit_events` still carrying `USING (true)`), and promoting rounds 2–5 is the
+`u5graph` item's deployment, not H3's.** Recorded here because the file changed and the
+two-place invariant is about the FILE reaching both places, not about who applies it.
+
+### Why
+
+`195-init-agent-memory-exposure-column.sql` made `exposure` the source of truth. Four sites in
+this file still read the jsonb mirror, and a mirror is not a trust decision:
+
+* both `agent_memories` policies (§2c) — `ob_memory_on_ops_plane(metadata)` → `(exposure)`
+* the tier-B containment sweep (§3) — `ob_corpus_on_ops_plane(t.metadata)` → `(t.exposure)`
+* the entity-extraction write gate (§4) — `(NEW.metadata)` → `(NEW.exposure)`. The `COALESCE`
+  around it STAYS and its comment is extended: a committed row can never reach that gate with
+  a NULL, but a BEFORE INSERT trigger runs before the constraints do, so `NEW.exposure` is
+  whatever the statement supplied — NULL for a writer that omitted it — and `NOT NULL` is NULL,
+  which an `IF` does not take. One statement's worth of trigger is enough.
+
+§0's precondition changes with them: it now requires the COLUMN to exist, to be `NOT NULL`, to
+carry a CHECK restricting it to `ops`/`personal`, and the predicate to deny a plane it cannot
+establish. Checking the jsonb key instead would be this file trusting the mirror H3 retired.
+
+### And one thing that is not about H3 at all
+
+`agent_memories_personal_plane` is restored **`TO ob_plane_personal`**. 180 created it that way;
+the round that added the `thought_id` arm DROPped both policies and recreated **both**
+`TO service_role`. Because `ob_plane_personal` is a member of `service_role` everything kept
+working and nothing went red — while the policy had widened from "the personal plane, for its
+own tenant" to "any `service_role` session, for any tenant it can name". `ob.user_id` is an
+ordinary GUC with no privilege attached to setting it.
+
+Reproduced on a throwaway with a RED, as `service_role` with `SET LOCAL ob.user_id` = the
+fixture's tenant:
+
+```
+TO service_role      -> D_RED_personal_via_tenant=1   D_RED_summary_leaked=H3PROBE personal
+TO ob_plane_personal -> E_restored_personal_via_tenant=0
+```
+
+`thoughts_personal_plane` was never touched by this file and still names `ob_plane_personal`,
+which is why the same probe against `thoughts` returned nothing — one table drifted, its twin
+did not, and that asymmetry is what made it findable. `prove-agent-memory-rls.ps1` now asserts
+the property for **every** `*_personal_plane` policy in the schema, from `pg_policies`, so a
+future round cannot widen one silently.
+
+### §9 — the retired predicates are unreached
+
+The jsonb-argument predicates are **kept** (`revert-graph-plane-rls.sql` recreates a policy that
+calls one, so dropping them would break a revert path that already ships) and asserted to be
+CALLED BY NOTHING — over `pg_depend` for declarative callers AND over every function body in
+`public` for opaque ones, because a plpgsql body records no dependency at all. That is not a
+detail: `queue_entity_extraction()` called this predicate for the whole of its life and
+`DROP FUNCTION` would not have caught it. A positive control asserts both functions still
+exist, so the sweep cannot pass vacuously.
+
+### Apply / Verify / Rollback
+
+Unchanged from round 4 — same file, same command, same verification block. Add to that block:
+
+```powershell
+# the policies read the COLUMN and no policy on either table reads metadata
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT tablename||'.'||policyname||' -> '||COALESCE(qual,'-')
+     FROM pg_policies WHERE schemaname='public'
+      AND tablename IN ('agent_memories','thoughts') ORDER BY 1;"
+# expect: ob_memory_on_ops_plane(exposure) / ob_corpus_on_ops_plane(exposure), and both
+# *_personal_plane rows granted TO {ob_plane_personal}
+```
+
+Applied to a throwaway built from the full 29-migration chain, twice: no init errors, §9's
+notice printed, `prove-agent-memory-rls.ps1` 68/68 and the personal-plane drill 105 passes /
+0 failures against it.
+
+## `init-agent-memory-exposure-column.sql` — the exposure label becomes a TYPED COLUMN (DFU C.9 H3)
+
+**Mounted at `195-`, between `190-` and `200-`. APPLIED to the live volume 2026-08-31 under an
+`open-brain` plane lease, VERIFIED, and then REVERTED in the same window — see "Why it is not
+live yet" below. It is not a rollback of a failure: the migration did exactly what it claims.**
+
+### Why
+
+Operator decision, PLAN.md §C.9 (2026-08-31), option **A**: exposure is a security
+discriminator and must not live at a weaker strength than tenancy, which is already a typed
+column (`user_id`). A jsonb key cannot be constrained, so *unlabelled* and *misspelled* were
+both reachable states resolved at READ time by a fail-closed predicate. Fail-closed is the
+right error direction and it is not a write contract — a producer that forgot the label got a
+row that silently vanished from the plane it meant to write to.
+
+After this file `agent_memories.exposure` and `thoughts.exposure` are
+`TEXT NOT NULL CHECK (exposure IN ('ops','personal'))`, **the predicates read the COLUMN**, and
+`metadata->>'exposure'` is a non-authoritative mirror.
+
+**No DEFAULT, deliberately.** A default would make the NOT NULL unreachable from a writer that
+omits the column, which is the failure H3 exists to remove. A *door* may stamp its own forced
+value (`upsert_thought` does; so does `stampExposure()`); a *column* may not guess.
+
+### What it does, in the only order that is safe
+
+Every step is inside ONE transaction, so no other session observes any intermediate state.
+
+1. **Assert** 180 and 190 are applied and the jsonb corpus predicate is already fail-closed.
+2. **ADD COLUMN**, nullable, no default. No predicate reads it, so no row's visibility changes.
+3. **BACKFILL** from the jsonb key. Still a write to a column nothing reads.
+4. **VERIFY zero NULL**, and RAISE otherwise. This is the gate that makes step 5 safe.
+5. **NOT NULL, then CHECK.** Both: `CHECK (exposure IN (...))` is NULL-permissive on its own.
+6. **Define** the column-reading predicates (TEXT overloads).
+7. **Swap the policies.** The only step that changes what a predicate reads — and its
+   transient state, between `DROP POLICY` and `CREATE POLICY`, is *RLS enabled with no
+   permissive policy*, i.e. default DENY. There is no ordering here that permits a row.
+8. **Re-point `upsert_thought`** — the shared rpc door for wiki synthesis, entity-wiki and
+   every import recipe — at the column, stamping its own lane `ops` and honouring an explicit
+   demotion to `personal`.
+9. **Self-test, before COMMIT:** an absent write and a malformed write are attempted on BOTH
+   tables and must be refused by the database; a second block proves no probe row survived.
+
+**What an absent key backfills to: `ops`. A malformed one: the migration REFUSES.** Absent was
+already ruled on and executed by `190-` (which stamped ~13,000 rows `ops` so the corpus stayed
+readable); reproducing that decision is the only choice that does not silently move rows.
+Malformed is different — a producer stated a plane and stated a non-plane, no prior decision
+covers it, and this file will not invent one. Measured live before the run: **0 malformed**.
+
+### Apply
+
+`195-` must come **after** `190-` and **before** `200-`.
+
+```powershell
+docker cp OB1\docker\init-agent-memory-exposure-column.sql openbrain-db:/tmp/195.sql
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -f /tmp/195.sql
+```
+
+### Verify **by query**, never by a clean exit code
+
+```powershell
+# 1. NO ROW MOVED. Take these BEFORE and compare AFTER; they must be identical.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT (SELECT count(*) FROM thoughts) || '/' ||
+          (SELECT count(*) FROM agent_memories) || '/' ||
+          (SELECT count(*) FROM entities) || '/' ||
+          (SELECT count(*) FROM thought_entities) || '/' ||
+          (SELECT count(*) FROM entity_extraction_queue);"
+
+# 2. THE OPS PATH IS UNBROKEN - as the agent plane, not as the superuser.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SET LOCAL ROLE service_role;
+   SELECT 'thoughts='||count(*) FROM thoughts;
+   SELECT 'memories='||count(*) FROM agent_memories; COMMIT;"
+
+# 3. THE COLUMN IS TOTAL, AND HAS NO DEFAULT. Expect NO/none twice.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT table_name||' '||is_nullable||'/'||COALESCE(column_default,'none')
+     FROM information_schema.columns
+    WHERE table_schema='public' AND column_name='exposure' ORDER BY table_name;"
+
+# 4. THE ONE THAT MATTERS - the DATABASE refuses an absent and a malformed write, with a
+#    live positive control beside each. Rolled back; nothing persists.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; INSERT INTO thoughts (content, metadata)
+     VALUES ('H3-ABSENT', jsonb_build_object('exposure','ops')); ROLLBACK;"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; INSERT INTO thoughts (content, exposure) VALUES ('H3-BAD','opsy'); ROLLBACK;"
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; INSERT INTO thoughts (content, exposure) VALUES ('H3-OK','ops');
+   SELECT 'control accepted'; ROLLBACK;"
+```
+
+**Recorded results, live volume, 2026-08-31 20:30 UTC (lease `open-brain`, owner `u8h3`):**
+
+| | before | after |
+|---|---|---|
+| thoughts / agent_memories / entities / thought_entities / queue | 13001 / 21 / 70122 / 54063 / 13001 | **identical** |
+| as `service_role`: thoughts / memories | 13001 / 21 | **identical** |
+| thoughts on the ops plane | 13001 (mirror) | 13001 (**column**) |
+| personal rows, either table | 0 | **0** |
+| rows the absent-key branch had to backfill | — | **0** (190 had already labelled every row) |
+
+(3) `agent_memories NO/none`, `thoughts NO/none`.
+(4) `null value in column "exposure" ... violates not-null constraint` /
+`violates check constraint "thoughts_exposure_check"` / `control accepted`.
+The migration's own pre-COMMIT self-test printed
+`self-test passed - the DATABASE rejects an absent exposure (not_null_violation) and a
+malformed one (check_violation) on BOTH tables`.
+
+### Why it is not live yet — and this is the important row in this section
+
+**The schema half and the code half MUST land together, and the code half is a gated deploy.**
+`openbrain-mcp` runs `openbrain-mcp-server:local`, and the image deployed on 2026-08-31 still
+contains three `INSERT INTO thoughts (content, embedding, metadata)` statements with no
+`exposure`. Under this migration those are a `not_null_violation` — measured on the live volume
+while it was applied:
+
+```
+ERROR:  null value in column "exposure" of relation "thoughts" violates not-null constraint
+DETAIL: Failing row contains (13744, H3-LIVE-DEPLOYCHECK, ...)
+```
+
+So applying `195-` without rebuilding `openbrain-mcp-server:local` breaks `capture_thought`,
+`capture_idea`, `update_idea` and the whole agent-memory writeback. The migration was therefore
+**reverted in the same window** and the live volume returned to the state it was found in
+(counts above, verified identical; the deployed write path re-tested and working). Rebuilding a
+`:local` tag and recreating a production container is a gated deploy, not a test
+(`scripts/agent-harness/README.md`), and that gate was not taken here.
+
+**To promote, in ONE window, under an `open-brain` lease:**
+
+1. `docker build -t openbrain-mcp-server:local OB1/integrations/kubernetes-deployment`
+   (from the tree the parent's OB1 gitlink pins — that is what a merge ships).
+2. Apply `195-` as above.
+3. Recreate `openbrain-mcp` (and `openbrain-ext`, which shares the image context's base but
+   changes nothing here).
+4. Re-run verification 1–4, then `scripts/checks/prove-agent-memory-rls.ps1`.
+
+The order inside the window is not free: build first so the recreate is instant, and apply the
+migration immediately before the recreate, because the interval between them is the interval in
+which the deployed code cannot write the corpus. It fails CLOSED — writes are refused, nothing
+is disclosed — but it is an outage, so keep it to seconds.
+
+**`200-init-graph-plane-rls.sql` on the live volume is still ROUND 1** (measured 2026-08-31:
+`ob_relation_governed` is absent and `agent_memory_audit_events` still carries a
+`USING (true)` policy). `195-` does not depend on it and does not conflict with it: the round-1
+policies read `ob_thought_visible`, and the round-1 write gate reads the jsonb mirror, which
+every writer keeps in step with the column. Promoting the work line's `200-` is the `u5graph`
+item's deployment, not this one's, and it must go **after** `195-` because its policies, sweeps
+and write gate read the column.
+
+### Rollback
+
+`OB1\docker\revert-agent-memory-exposure-column.sql`. It re-points the policies at the jsonb
+predicate **first** (the mirror is complete at that moment, so no row's visibility changes),
+then de-constrains the column, then restores `upsert_thought`, then unstamps exactly the rows
+this migration labelled (`metadata->>'exposure_backfill' = 'dfu-h3-exposure-column'`).
+**The column is NOT dropped** — dropping a column is not reversible and PLAN class 4 forbids it;
+it is left in place, populated and inert, and a re-apply is idempotent.
+
+It **refuses** to run while `200-`'s `thought_id` arm is present on `agent_memories_ops_plane`:
+reverting in that order would silently re-open the foreign-key existence oracle. Revert `200-`
+first in that case.
+
+```powershell
+docker cp OB1\docker\revert-agent-memory-exposure-column.sql openbrain-db:/tmp/
+docker exec openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1 `
+    -f /tmp/revert-agent-memory-exposure-column.sql
+```
+
+Round trip executed twice on a throwaway built from the full 29-migration chain (apply →
+revert → re-apply → re-apply again, all clean and idempotent) and once on the live volume
+(apply → verify → revert → verify against the before-snapshot, identical).
