@@ -298,7 +298,9 @@ def test_a_record_that_names_no_venue_is_refused():
 
 def test_a_record_from_another_venue_is_refused():
     rec = _rec(venue={"name": "somewhere-else", "kind": "gym", "repo": "/x", "ref": "main"})
-    problems = record_mod.admit(rec, item_digest="d" * 64, venue="arena")
+    problems = record_mod.admit(rec, item_digest="d" * 64,
+                                venue={"name": "arena", "kind": "gym",
+                                       "repo": "/arena", "ref": "main"})
     assert any("venue mismatch" in p for p in problems)
 
 
@@ -306,7 +308,81 @@ def test_a_record_from_the_pinned_venue_is_admitted():
     assert record_mod.admit(_rec(), item_digest="d" * 64, venue="arena") == []
 
 
-def test_the_report_states_the_venue_and_whether_it_satisfies_the_gym_column(tmp_path):
+# ------------------------------------------------------------------------------------
+# THE VENUE IS THE REPOSITORY, NOT ITS NAME.
+#
+# Round 7's finding, executed. `record.admit` compared the venue NAME and nothing else: a
+# verifier edited four records' `venue.repo` to `D:/SomeOther/arena-clone`, left
+# `venue.name` reading `gym`, and the arena's own results set admitted all four in silence
+# - COMPARED 4/4, exit 0 - while `matrix.json`'s `_why` asserted that "record.admit refuses
+# a record from any other venue". It refused a record from any other NAME.
+# ------------------------------------------------------------------------------------
+
+ARENA_ID = "root:" + "a" * 40
+OTHER_ID = "root:" + "b" * 40
+
+
+def _pin(**over):
+    p = {"name": "arena", "kind": "gym", "repo": "D:/x/arena", "ref": "main",
+         "identity": ARENA_ID}
+    p.update(over)
+    return p
+
+
+def test_a_record_re_pointed_at_another_repository_is_refused_though_its_name_matches():
+    """THE SHIPPED DEFECT, as an exit code. Same name, different repository."""
+    rec = _rec(venue=_pin(repo="D:/SomeOther/arena-clone", identity=OTHER_ID))
+    problems = record_mod.admit(rec, item_digest="d" * 64, venue=_pin())
+    assert any("venue mismatch" in p for p in problems), problems
+    # ...and the refusal says WHY identity decides, not merely that it differed
+    assert any("root commit" in p for p in problems), problems
+
+
+def test_a_moved_or_re_cloned_checkout_of_the_same_repository_is_the_same_venue():
+    """The other half of identifying by identity: the path was never the point. A checkout
+    that moved is the same repository, and refusing it would be the mirror-image error."""
+    rec = _rec(venue=_pin(repo="E:/moved/arena"))
+    assert record_mod.admit(rec, item_digest="d" * 64, venue=_pin()) == []
+
+
+def test_a_record_with_no_identity_cannot_enter_an_identity_pinned_comparison():
+    """Otherwise deleting one field from a forged record buys the weaker check."""
+    v = _pin()
+    v.pop("identity")
+    problems = record_mod.admit(_rec(venue=v), item_digest="d" * 64, venue=_pin())
+    assert any("no repository identity" in p for p in problems), problems
+
+
+def test_a_legacy_set_without_identity_still_compares_every_label_not_just_the_name():
+    """A results set written before identity existed is compared on EVERY label it carries.
+    `.quadrant/gym-runs` is such a set, so this is the path its records actually take."""
+    pin = _pin()
+    pin.pop("identity")
+    rec_v = _pin(repo="D:/SomeOther/arena-clone")
+    rec_v.pop("identity")
+    problems = record_mod.admit(_rec(venue=rec_v), item_digest="d" * 64, venue=pin)
+    assert any("repository path" in p for p in problems), problems
+    assert any("by LABEL" in p for p in problems), problems
+    # ...and the same set with matching labels still admits, so old evidence is not voided
+    same = _pin()
+    same.pop("identity")
+    assert record_mod.admit(_rec(venue=same), item_digest="d" * 64, venue=pin) == []
+
+
+def test_a_windows_path_written_two_ways_is_one_repository():
+    pin = _pin(repo="D:/x/arena")
+    pin.pop("identity")
+    rec_v = _pin(repo="D:" + chr(92) + "x" + chr(92) + "arena")
+    rec_v.pop("identity")
+    assert record_mod.admit(_rec(venue=rec_v), item_digest="d" * 64, venue=pin) == []
+
+
+def test_the_report_states_the_venue_and_what_was_actually_checked(tmp_path):
+    """THE VERDICT MUST NAME ITS SOURCE. The report printed "SATISFIES a Gym: column",
+    which reads as a measurement of section 2's preamble ("never live planes or a real
+    target"). What is checked is "a repository ROOT that is not the harness's own" - a
+    verifier pointed the gym repo env var at a throwaway repository named `not-the-arena`
+    and got that heading at exit 0. Declaration and measurement are now two sentences."""
     repo = make_repo(tmp_path / "ai-stack")
     arena = make_repo(tmp_path / "arena")
     c = cfg(repo=str(arena))
@@ -314,11 +390,73 @@ def test_the_report_states_the_venue_and_whether_it_satisfies_the_gym_column(tmp
     v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
     md = report_mod.render(qs, [], item={"id": "u4-baseline", "digest": "d" * 64}, venue=v)
     assert "Venue:" in md and "arena" in md
-    assert "SATISFIES" in md
+    assert "DECLARED to satisfy" in md
+    assert "not a measurement" in md
+    assert "**CHECKED**" in md and "**NOT CHECKED**" in md
+    assert "DISPOSABLE ARENA rather than a real target" in md
+    assert v.identity and v.identity in md, "the report must carry the repository identity"
 
+
+def test_a_workspace_venue_report_says_it_does_not_satisfy_the_gym_column(tmp_path):
+    repo = make_repo(tmp_path / "ai-stack")
     wv = venue_mod.resolve(cfg(kind="workspace", repo=str(repo)), SCHEMA, harness_repo=repo)
-    md2 = report_mod.render(qs, [], item={"id": "u4-baseline", "digest": "d" * 64}, venue=wv)
-    assert "does NOT satisfy" in md2
+    qs = matrix_mod.build(cfg())
+    md = report_mod.render(qs, [], item={"id": "u4-baseline", "digest": "d" * 64}, venue=wv)
+    assert "DECLARED NOT to satisfy" in md
+
+
+def test_the_report_says_what_the_venue_constrains_per_target(tmp_path):
+    """A `target: project` cell's subject is a fresh scratch repo, NOT the venue repo.
+    Legitimate under the preamble, and not obvious - so the report says it rather than
+    letting the venue heading be read as a claim about every row."""
+    repo = make_repo(tmp_path / "ai-stack")
+    arena = make_repo(tmp_path / "arena")
+    c = cfg(repo=str(arena))
+    c["quadrant"]["targets"] = ["self", "project"]
+    qs = matrix_mod.build(c)
+    v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
+    md = report_mod.render(qs, [], item={"id": "u4-baseline", "digest": "d" * 64}, venue=v)
+    assert "What the venue constrains, per target" in md
+    assert "`target: project`" in md and "FRESH `git init` scratch repository" in md
+    assert "is NOT in the venue repository" in md
+
+
+def test_the_report_renders_the_pinned_venue_not_todays_configuration(tmp_path, monkeypatch):
+    """THE SHIPPED DEFECT, end to end through the shipped CLI - which is where it happened.
+
+    Measured by a verifier 2026-08-30: `report --results-dir <a gym set> --repo <ai-stack>`
+    rendered TODAY's venue object over the pinned set's records, printing "Venue: `gym`
+    (kind `gym`) - SATISFIES a "Gym:" column" with ai-stack's path underneath, COMPARED
+    4/4, exit 0 - and wrote that to COMPARISON.md. `cli._emit_report` chose between the pin
+    and the configuration by comparing NAMES, and `--repo` does not change the name.
+
+    Driven through `cli.main` rather than `report_mod.render`, because rendering the right
+    block is not the property under test: CHOOSING it is, and the choice is made in the CLI.
+    """
+    from quadrant import cli
+    repo = make_repo(tmp_path / "ai-stack")
+    arena = make_repo(tmp_path / "arena")
+    out = tmp_path / "runs"
+    out.mkdir()
+
+    cfg_path = tmp_path / "harness.config.json"
+    cfg_path.write_text(json.dumps(cfg(repo=str(arena))), encoding="utf-8")
+    monkeypatch.setenv("AI_STACK_HARNESS_CONFIG", str(cfg_path))
+
+    c = cfg(repo=str(arena))
+    qs = matrix_mod.build(c)
+    v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
+    cli._declared_matrix(out, qs, [], v)          # this set is now PINNED to the arena
+
+    # ...and now the same set is reported with --repo pointed at the harness's own
+    # checkout, under the SAME venue name. The pin must win, in the artifact on disk.
+    cli.main(["report", "--results-dir", str(out), "--repo", str(repo)])
+    md = (out / "COMPARISON.md").read_text(encoding="utf-8")
+    assert str(arena.resolve()) in md
+    assert str(repo.resolve()) not in md, \
+        "the report rendered the repo passed today, not the one pinned with the runs"
+    assert json.loads((out / "matrix.json").read_text(encoding="utf-8"))["venue"]["repo"] \
+        == str(arena.resolve()), "the pin itself moved"
 
 
 def test_a_report_with_no_venue_says_UNSTATED_rather_than_nothing():
@@ -341,16 +479,47 @@ def test_the_results_set_pins_its_venue_and_a_later_run_cannot_move_the_pin(tmp_
     c = cfg(repo=str(arena))
     qs = matrix_mod.build(c)
     v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
-    declared, pinned = cli._declared_matrix(out, qs, [], v)
+    declared, pinned, _pin = cli._declared_matrix(out, qs, [], v)
     assert pinned == "arena"
     lock = json.loads((out / "matrix.json").read_text(encoding="utf-8"))
     assert lock["venue"]["repo"] == str(arena.resolve())
 
     v2 = venue_mod.resolve(cfg("elsewhere", repo=str(other)), SCHEMA, harness_repo=repo)
-    declared2, pinned2 = cli._declared_matrix(out, qs, [], v2)
+    declared2, pinned2, _pin2 = cli._declared_matrix(out, qs, [], v2)
     assert pinned2 == "arena", "the pin moved - a results set would then mix two venues"
     lock2 = json.loads((out / "matrix.json").read_text(encoding="utf-8"))
     assert lock2["venue"]["repo"] == str(arena.resolve())
+
+
+def test_the_lock_refreshes_its_why_while_the_venue_pin_stays_put(tmp_path):
+    """`_why` is a CLAIM ABOUT WHAT THE HARNESS ENFORCES, in the artifact an operator reads.
+
+    It was false for a day - "record.admit refuses a record from any other venue", while
+    admission compared a name - and a lock that only rewrites when the cells or the venue
+    move would have carried that sentence forever. So the file is rewritten whenever it
+    would differ at all; the venue PIN inside it is still taken once and never moved.
+    """
+    from quadrant import cli
+    repo = make_repo(tmp_path / "ai-stack")
+    arena = make_repo(tmp_path / "arena")
+    out = tmp_path / "runs"
+    out.mkdir()
+    c = cfg(repo=str(arena))
+    qs = matrix_mod.build(c)
+    v = venue_mod.resolve(c, SCHEMA, harness_repo=repo)
+    cli._declared_matrix(out, qs, [], v)
+
+    lock_path = out / "matrix.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    pinned_venue = dict(lock["venue"])
+    lock["_why"] = ["a stale claim about what admission enforces"]
+    lock_path.write_text(json.dumps(lock, indent=2), encoding="utf-8")
+
+    cli._declared_matrix(out, qs, [], v)
+    after = json.loads(lock_path.read_text(encoding="utf-8"))
+    assert after["_why"] != ["a stale claim about what admission enforces"], \
+        "a false sentence in the lock survives every subsequent report"
+    assert after["venue"] == pinned_venue, "refreshing the text moved the pin"
 
 
 # ------------------------------------------------------ live config sanity --
@@ -373,7 +542,7 @@ def test_a_results_set_that_predates_the_venue_is_not_stamped_with_todays_one(tm
                   "item": "u4-baseline", "item_digest": "d" * 64, "status": "not_run",
                   "not_run_reason": "from before the venue existed"}
 
-    declared, pinned = cli._declared_matrix(out, qs, [old_record], v)
+    declared, pinned, _pin = cli._declared_matrix(out, qs, [old_record], v)
     assert pinned == "", "a set whose records name no venue must not be stamped with one"
     lock = json.loads((out / "matrix.json").read_text(encoding="utf-8"))
     assert not lock.get("venue")

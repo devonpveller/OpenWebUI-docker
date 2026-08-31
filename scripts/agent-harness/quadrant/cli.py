@@ -139,8 +139,17 @@ def cmd_preflight(argv: List[str]) -> int:
     # reader believe the arena had been used: it printed the harness's own path and nothing
     # said that was wrong.
     print(f"harness repo : {repo}")
-    print(f"venue        : {v.name} (kind {v.kind}, {'satisfies' if v.satisfies_gym_column else 'does NOT satisfy'} a \"Gym:\" column)")
+    # THE VERDICT NAMES ITS SOURCE. "satisfies a Gym: column" reads as a measurement and is
+    # not one: a verifier pointed $AI_STACK_GYM_REPO at a throwaway repo called
+    # `not-the-arena` and this line said it satisfied the column, READY 4/4, exit 0. What is
+    # checked is below it, and what is not checked is said out loud.
+    print(f"venue        : {v.name} (kind {v.kind}) - DECLARED"
+          f"{'' if v.satisfies_gym_column else ' NOT'} to satisfy a \"Gym:\" column "
+          f"by quadrant/schema.json; that is config, not a measurement")
     print(f"item repo    : {v.repo} @ {v.ref}   (via {v.source})")
+    print(f"identity     : {v.identity or 'UNRESOLVED - no root commit for that ref'}")
+    for line in (venue_mod.what_was_checked(v.kind, v.rules)["not_checked"] or [])[:1]:
+        print(f"NOT CHECKED  : {line}")
     for q in quadrants:
         pf = matrix_mod.preflight(q, cfg, repo=v.repo, venue=v, harness_repo=repo,
                                   scratch_root=scratch or str(repo / ".quadrant" / "scratch"))
@@ -275,7 +284,8 @@ def cmd_run(argv: List[str], *, all_quadrants: bool = False) -> int:
     except (matrix_mod.QuadrantConfigError, item_mod.QuadrantItemError) as exc:
         print(f"MISCONFIGURED: {exc}")
         return 2
-    print(f"venue: {v.name} ({v.kind}) - {v.repo} @ {v.ref} (via {v.source})")
+    print(f"venue: {v.name} ({v.kind}) - {v.repo} @ {v.ref} (via {v.source}) "
+          f"identity {v.identity or 'UNRESOLVED'}")
 
     results_dir.mkdir(parents=True, exist_ok=True)
     scratch_root.mkdir(parents=True, exist_ok=True)
@@ -310,6 +320,11 @@ def _load_records(results_dir: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _same_path(a: Any, b: Any) -> bool:
+    return (str(a or "").replace("\\", "/").rstrip("/").lower()
+            == str(b or "").replace("\\", "/").rstrip("/").lower())
+
+
 def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
                      records: List[Dict[str, Any]],
                      venue: "venue_mod.Venue | None" = None) -> tuple:
@@ -328,8 +343,11 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
     as well as over one item and one set of cells: pointing `--repo` somewhere else and
     re-running into the same directory would otherwise mix two experiments into one table.
     The venue is pinned on FIRST write and never rewritten, so the pin cannot be moved by a
-    later run - it is returned to the caller, which hands it to admission. Returns
-    (declared cells, pinned venue name).
+    later run - it is returned to the caller, which hands it to admission AND to the report.
+    Returns (declared cells, pinned venue name, pinned venue BLOCK). The block is what the
+    report renders: rendering the venue object built from today's configuration instead is
+    how `report --results-dir <a gym set> --repo <ai-stack>` printed ai-stack's path under
+    "SATISFIES a Gym: column" over the arena's own records, at exit 0.
     """
     lock_path = results_dir / (matrix_mod.schema().get("declared_matrix_lock")
                                or "matrix.json")
@@ -349,10 +367,26 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
     venue_block = dict(prior_venue)
     pinned_venue = str(prior_venue.get("name") or "")
     if pinned_venue:
-        if venue is not None and venue.name != pinned_venue:
-            print(f"  (this results set is PINNED to venue '{pinned_venue}'; the current "
-                  f"configuration says '{venue.name}'. The pin stands - records from "
-                  f"'{venue.name}' will be refused. Use a fresh --results-dir for a new venue.)")
+        # THE DIVERGENCE IS PRINTED, not only enforced. `report --results-dir <a gym set>
+        # --repo <ai-stack>` used to render TODAY's venue over the pinned set's records -
+        # "Venue: gym - SATISFIES a Gym: column", ai-stack's path underneath, exit 0. The
+        # report now renders the pin, so the operator who passed --repo must be told their
+        # flag did not move it, and told by WHICH axis the two differ.
+        diff = []
+        if venue is not None:
+            if venue.name != pinned_venue:
+                diff.append(f"name '{venue.name}' vs pinned '{pinned_venue}'")
+            if venue.identity and prior_venue.get("identity")                     and venue.identity != prior_venue.get("identity"):
+                diff.append(f"repository `{venue.identity}` vs pinned "
+                            f"`{prior_venue.get('identity')}`")
+            if not _same_path(venue.repo, prior_venue.get("repo")):
+                diff.append(f"path '{venue.repo}' vs pinned '{prior_venue.get('repo')}'")
+        if diff:
+            print(f"  (this results set is PINNED to venue '{pinned_venue}' at "
+                  f"{prior_venue.get('repo')}; the venue resolved for this invocation "
+                  f"differs: {'; '.join(diff)}. The pin STANDS - the report below renders "
+                  f"the pin, not the venue you passed, and records from anywhere else are "
+                  f"refused. Use a fresh --results-dir for a new venue.)")
     elif venue is not None:
         # PINNING IS NOT LABELLING. A results set with no pin is either brand new or
         # pre-dates the venue mechanism, and stamping today's venue onto the second kind
@@ -369,14 +403,11 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
             print(f"  (this results set predates the venue mechanism - {len(records)} record(s), "
                   f"none naming a venue. It is NOT being stamped with '{venue.name}': the runs "
                   f"in it happened somewhere else, and the report says UNSTATED.)")
-    if declared != prior or venue_block != prior_venue:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        lock_path.write_text(json.dumps({
-            "version": 2,
-            "declared": declared,
-            "venue": venue_block,
-            "updated_utc": _now(),
-            "_why": [
+    body: Dict[str, Any] = {
+        "version": 2,
+        "declared": declared,
+        "venue": venue_block,
+        "_why": [
                 "The cells THIS results set is a comparison over. Append-only: a cell that",
                 "has ever been declared stays declared, so narrowing quadrant.runners or",
                 "quadrant.targets cannot shrink the comparison into looking complete.",
@@ -385,12 +416,39 @@ def _declared_matrix(results_dir: Path, quadrants: List["matrix_mod.Quadrant"],
                 "written rather than derived.",
                 "",
                 "`venue` is pinned on FIRST write and never rewritten: a results set is a",
-                "comparison over one PLACE as well as one item. record.admit refuses a",
-                "record from any other venue, so re-pointing --repo and re-running into",
-                "this directory cannot mix two experiments into one table.",
-            ],
-        }, indent=2), encoding="utf-8")
-    return declared, pinned_venue
+                "comparison over one PLACE as well as one item, and the report renders THIS",
+                "block rather than whatever the configuration resolves to today.",
+                "",
+                "WHAT record.admit ACTUALLY ENFORCES, corrected 2026-08-30. This text used",
+                "to say it 'refuses a record from any other venue'. It refused a record",
+                "from any other NAME - and a verifier re-pointed four records' venue.repo",
+                "at D:/SomeOther/arena-clone, left the name as `gym`, and all four were",
+                "admitted: COMPARED 4/4, exit 0. Admission now compares the REPOSITORY",
+                "IDENTITY (`identity` below - the root commit reachable from `ref`) where",
+                "both this pin and the record carry one; a pin with an identity refuses a",
+                "record without one; and a set predating identity is compared on every",
+                "label it carries, with the refusal saying that is the weaker check.",
+        ],
+    }
+    # REWRITE WHEN THE FILE WOULD DIFFER AT ALL, not only when the cells or the venue moved.
+    # `_why` is a CLAIM ABOUT WHAT THE HARNESS ENFORCES, sitting in the artifact an operator
+    # reads, and this one was false for a day: it said admission "refuses a record from any
+    # other venue" while admission compared a name. A results set whose lock never changes
+    # would have carried that sentence forever. `updated_utc` is excluded from the
+    # comparison, or every report would rewrite the file and the timestamp would stop
+    # meaning "when this comparison last changed".
+    existing = None
+    if lock_path.is_file():
+        try:
+            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            existing.pop("updated_utc", None)
+        except (json.JSONDecodeError, OSError):
+            existing = None
+    if existing != body:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps(dict(body, updated_utc=_now()), indent=2),
+                             encoding="utf-8")
+    return declared, pinned_venue, venue_block
 
 
 def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
@@ -405,13 +463,15 @@ def _emit_report(results_dir: Path, item_id: str, argv: List[str]) -> int:
     # NOT filtered to the configured matrix. Dropping a record here is what let a narrowed
     # configuration launder an incomplete comparison into a complete one.
     records = _load_records(results_dir)
-    declared, pinned = _declared_matrix(results_dir, quadrants, records, v)
-    # The venue the REPORT is rendered against is the results set's PIN, not today's
-    # configuration - the same reasoning as the declared matrix. A set that declined the pin
-    # (records that name no venue) renders UNSTATED rather than borrowing the configured
-    # venue's name, because "Venue: gym - SATISFIES" over records that ran elsewhere is the
-    # exact mislabel this whole mechanism exists to prevent.
-    rv = v if pinned == v.name else (pinned or None)
+    declared, pinned, pin_block = _declared_matrix(results_dir, quadrants, records, v)
+    # The venue the REPORT is rendered against is the results set's PIN, always - never
+    # today's configuration. The first version compared only the NAMES and rendered today's
+    # Venue object when they agreed, so `report --results-dir <a gym set> --repo <ai-stack>`
+    # printed "Venue: `gym` (kind `gym`) - SATISFIES a "Gym:" column" with ai-stack's path
+    # under it, over the arena's own records, COMPARED 4/4, exit 0 - and wrote that to
+    # COMPARISON.md. A set that declined the pin (records that name no venue) renders
+    # UNSTATED rather than borrowing the configured venue's name.
+    rv = pin_block or None
     try:
         md = report_mod.render(quadrants, records, item=it, declared=declared, venue=rv)
         summary = report_mod.summarize(quadrants, records, item=it, declared=declared,

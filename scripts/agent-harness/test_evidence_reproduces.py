@@ -10,6 +10,10 @@ Each test is one sentence of the check's contract, and two of them are the exact
 drill found in the check ITSELF on its first two runs - the absolute-path read-through, and
 the fallback that made a deleted workspace look reproducible.
 
+The last two guard the drill's COUNTERFACTUAL rather than the check: `copy_run` is what makes
+a sandbox copy describe itself, and without it the pre-existing gate the drill executes was
+reading the untouched originals and reporting every seed missed.
+
 Run:  python -m pytest scripts/agent-harness/test_evidence_reproduces.py -q
 """
 
@@ -163,3 +167,65 @@ def test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere():
     assert mine, "the U3 check is not banked in the durable-check registry"
     assert all("--auto" in r["check"] for r in mine), \
         f"banked without --auto: {[r['check'] for r in mine]}"
+
+
+# ---------------------------------------------------------------------------------------
+# THE DRILL'S COUNTERFACTUAL. Round 7's finding: `record.admit` follows each record's
+# ABSOLUTE `evidence.workspace`, so the drill's "pre-existing gate" column was measured
+# against `.quadrant/gym-runs` - not against the sandbox the seeds were written into. Every
+# seed came back "missed", including seed C, which the drill's own docstring says the gate
+# is expected to catch. `copy_run` is the fix; these two tests are what stop it regressing.
+# ---------------------------------------------------------------------------------------
+
+def _drill():
+    sys.path.insert(0, str(HERE))
+    import u3_evidence_regression_gym as drill  # noqa: PLC0415
+    return drill
+
+
+def test_copy_run_makes_the_copy_describe_itself_so_the_gate_reads_the_seeded_tree(tmp_path):
+    """RED before this existed: admission walked the absolute path back to the original."""
+    sys.path.insert(0, str(HERE))
+    from quadrant import record as record_mod   # noqa: PLC0415
+
+    results = make_set(tmp_path)
+    src = next(results.glob("*/record.json")).parent
+    dest = tmp_path / "sandbox" / src.name
+    dest.parent.mkdir(parents=True)
+    _drill().copy_run(src, dest)
+
+    rec = json.loads((dest / "record.json").read_text(encoding="utf-8"))
+    assert Path(rec["evidence"]["workspace"]).resolve() == (dest / "workspace").resolve(), \
+        "the copy still points at the original, so anything reading it measures that tree"
+    assert any("sandbox copy" in n for n in rec.get("notes") or []), \
+        "a rewritten path must be disclosed in the record it was rewritten into"
+
+    # ...and now the pre-existing gate SEES a seed made in the copy.
+    drill_mod = _drill()
+    drill_mod.rmtree(dest / "workspace")
+    problems = record_mod.admit(rec, item_digest=str(rec.get("item_digest") or ""),
+                                venue=str((rec.get("venue") or {}).get("name") or ""))
+    assert any("workspace" in p for p in problems), \
+        "the seeded deletion is invisible to the gate the drill calls its counterfactual"
+    assert (src / "workspace").is_dir(), "the ORIGINAL evidence must never be touched"
+
+
+def test_copy_run_leaves_a_workspace_recorded_outside_the_run_dir_alone(tmp_path):
+    """Only paths INSIDE the source run directory are relocated. A record naming a
+    workspace somewhere else is describing how it was produced, and rewriting that would be
+    inventing evidence rather than moving it."""
+    results = make_set(tmp_path)
+    src = next(results.glob("*/record.json")).parent
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    rp = src / "record.json"
+    rec = json.loads(rp.read_text(encoding="utf-8"))
+    rec["evidence"]["workspace"] = str(elsewhere)
+    rp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+
+    dest = tmp_path / "sandbox2" / src.name
+    dest.parent.mkdir(parents=True)
+    _drill().copy_run(src, dest)
+    out = json.loads((dest / "record.json").read_text(encoding="utf-8"))
+    assert out["evidence"]["workspace"] == str(elsewhere)
+

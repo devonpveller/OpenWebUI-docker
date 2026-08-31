@@ -57,10 +57,30 @@ from typing import Any, Dict, List
 
 from . import matrix as _matrix
 from . import record as _record
+from . import venue as _venue
 
 
 class QuadrantReportError(RuntimeError):
     """The inputs cannot make an honest report - e.g. a record for a quadrant off the matrix."""
+
+
+def venue_block(venue: Any) -> Dict[str, Any]:
+    """Whatever the caller passed, as the venue DICT a record carries.
+
+    Accepts a `venue.Venue`, the dict pinned in a results set's `matrix.json`, a bare name,
+    or nothing. The dict form is the one that matters: a report renders the venue a results
+    set was PINNED to, and that pin lives on disk as a dict written when the set was
+    created. Rendering a `Venue` built from today's configuration instead is exactly how
+    `report --results-dir <a gym set> --repo <ai-stack>` printed ai-stack's path under the
+    heading "SATISFIES a Gym: column" over the arena's own records.
+    """
+    if venue is None or venue == "":
+        return {}
+    if hasattr(venue, "as_record"):
+        return venue.as_record()
+    if isinstance(venue, dict):
+        return {k: v for k, v in venue.items() if v not in (None, "")}
+    return {"name": str(venue)}
 
 
 def declared_keys(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]],
@@ -121,7 +141,7 @@ def _off_matrix_row(key: str, recs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _rows(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]],
           item: Dict[str, Any], s: Dict[str, Any],
-          keys: List[str], venue: str = "") -> List[Dict[str, Any]]:
+          keys: List[str], venue: Any = "") -> List[Dict[str, Any]]:
     for r in records:
         if not str(r.get("quadrant") or "").strip():
             raise QuadrantReportError(
@@ -243,17 +263,27 @@ def summarize(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]]
               declared: Any = None, venue: Any = None) -> Dict[str, Any]:
     s = schema or _matrix.schema()
     keys = declared_keys(quadrants, records, declared)
-    vname = getattr(venue, "name", "") or (venue if isinstance(venue, str) else "")
-    rows = _rows(quadrants, records, item, s, keys, vname)
+    vblock = venue_block(venue)
+    rows = _rows(quadrants, records, item, s, keys, vblock)
     compared = [r for r in rows if r["compared"]]
+    # The verdict is looked up from the PINNED KIND's rules in the schema, never taken from
+    # a `Venue` object the caller happened to build from today's configuration. Those are
+    # different questions, and answering the second while printing the first is how
+    # `report --results-dir <a gym set> --repo <ai-stack>` came to print "Venue: gym -
+    # SATISFIES a Gym: column" over the arena's own records at exit 0.
+    kind = str(vblock.get("kind") or "")
+    rules = dict(((s.get("venue_kinds") or {}).get(kind) or {}))
+    checks = (_venue.what_was_checked(kind, rules,
+                                      identity_recorded=bool(vblock.get("identity")))
+              if vblock else {})
     return {
         "item": item.get("id"),
         "item_digest": item.get("digest"),
         # WHERE, beside WHAT. A reader deciding whether a "Gym:" column is satisfied needs
         # the venue in the summary they are handed, not in a path they have to interpret.
-        "venue": (venue.as_record() if hasattr(venue, "as_record")
-                  else ({"name": vname} if vname else {})),
-        "satisfies_gym_column": bool(getattr(venue, "satisfies_gym_column", False)),
+        "venue": vblock,
+        "satisfies_gym_column": bool(rules.get("satisfies_gym_column")) if vblock else False,
+        "venue_checks": checks,
         # The denominator is the DECLARED row set, not the configured matrix. They differ
         # exactly when someone narrowed the axes - which is when the difference matters.
         "quadrants_total": len(rows),
@@ -268,6 +298,69 @@ def summarize(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]]
                          for r in rows if not r["compared"]],
         "min_repeats_for_variance": s["min_repeats_for_variance"],
     }
+
+
+def _venue_lines(summary: Dict[str, Any]) -> List[str]:
+    """The venue paragraph: WHERE, what was CHECKED, and what was only DECLARED.
+
+    Three sentences that used to be one. The old single line asserted a conclusion
+    ("SATISFIES a \"Gym:\" column") that the harness cannot reach, over a venue object built
+    from today's configuration rather than the one pinned with the run. Both halves of that
+    are fixed here: `summary["venue"]` is the PIN, and the verdict is split into what a probe
+    measured and what the operator's config asserts.
+    """
+    v = summary.get("venue") or {}
+    if not v.get("name"):
+        return ["**Venue: UNSTATED.** This comparison does not say which repository the "
+                "experiment was performed on, so it cannot be read against a column that "
+                "begins \"Gym:\"."]
+    checks = summary.get("venue_checks") or {}
+    ident = str(v.get("identity") or "")
+    out = [
+        "**Venue: `{}` (kind `{}`) - DECLARED{} to satisfy a \"Gym:\" column.** This is what "
+        "`quadrant/schema.json`'s `venue_kinds.{}` says the kind is worth; it is a "
+        "configuration assertion, not a measurement.".format(
+            v.get("name"), v.get("kind"),
+            "" if summary.get("satisfies_gym_column") else " NOT", v.get("kind")),
+        "",
+        "`{}` @ `{}` (via {}) - repository identity `{}`.".format(
+            v.get("repo"), v.get("ref"), v.get("source") or "unrecorded",
+            ident or "NOT RECORDED (this results set predates identity pinning)"),
+    ]
+    if checks.get("checked"):
+        out += ["", "**CHECKED** by `quadrant/venue.py` before any cell ran:"]
+        out += ["- {}".format(c) for c in checks["checked"]]
+    if checks.get("not_checked"):
+        out += ["", "**NOT CHECKED** - stated because a verdict must not imply more than it "
+                    "derived:"]
+        out += ["- {}".format(c) for c in checks["not_checked"]]
+    out += ["",
+            "Rendered from the venue PINNED with this results set, not from the "
+            "configuration in force today. Every record above was admitted only if its "
+            "venue matched that pin - by repository identity where both sides carry one, "
+            "otherwise by every label they carry (which is weaker, and the refusal says "
+            "so)."]
+    return out
+
+
+def _target_venue_lines(rows: List[Dict[str, Any]], s: Dict[str, Any]) -> List[str]:
+    """WHAT THE VENUE CONSTRAINS, PER TARGET - and the reasoning, where a reader meets it.
+
+    A verifier's question, answered rather than left implicit: nothing tied a `target:
+    project` record to the venue at all, and the report printed a venue heading over cells
+    whose subject is a scratch directory created inside the harness's own repository. That
+    is legitimate and it is not obvious, which is exactly the combination that has to be
+    written down instead of assumed - the venue heading is otherwise read as a claim about
+    every row.
+    """
+    kinds = {str(r.get("target") or "") for r in rows}
+    bind = s.get("target_venue_binding") or {}
+    said = [(t, bind[t]) for t in sorted(kinds) if t in bind]
+    if not said:
+        return []
+    out = ["**What the venue constrains, per target.**"]
+    out += ["- `target: {}` - {}".format(t, why) for t, why in said]
+    return out
 
 
 def render(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]], *,
@@ -301,20 +394,19 @@ def render(quadrants: List["_matrix.Quadrant"], records: List[Dict[str, Any]], *
     out.append("")
     # THE VENUE, stated where the verdict is read. A comparison is a claim about a place as
     # well as about four cells, and the reader must not have to infer the place from a path.
-    v = summary.get("venue") or {}
-    if v.get("name"):
-        out.append(
-            "**Venue: `{}` (kind `{}`) - {}**  \n`{}` @ `{}` (via {}). {}".format(
-                v.get("name"), v.get("kind"),
-                "SATISFIES a \"Gym:\" column" if summary.get("satisfies_gym_column")
-                else "does NOT satisfy a \"Gym:\" column",
-                v.get("repo"), v.get("ref"), v.get("source"),
-                "Every record above was admitted only if it names this venue."))
-    else:
-        out.append("**Venue: UNSTATED.** This comparison does not say which repository the "
-                   "experiment was performed on, so it cannot be read against a column that "
-                   "begins \"Gym:\".")
+    #
+    # AND THE VERDICT NOW SAYS WHAT WAS CHECKED. This block used to read "Venue: `gym` (kind
+    # `gym`) - SATISFIES a "Gym:" column", which is a claim about section 2's PREAMBLE
+    # ("never live planes or a real target") that no probe makes: what is checked is "a
+    # repository ROOT that is not the harness's own". A verifier pointed AI_STACK_GYM_REPO at
+    # a throwaway repository named `not-the-arena` and got that heading at exit 0. The
+    # declaration and the measurement are two different sentences and are printed as two.
+    out += _venue_lines(summary)
     out.append("")
+    tl = _target_venue_lines(rows, s)
+    if tl:
+        out += tl
+        out.append("")
 
     out.append("## Outcome")
     out.append("")

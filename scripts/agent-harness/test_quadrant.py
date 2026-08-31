@@ -94,6 +94,19 @@ def evidence(tmp_path):
     return {"workspace": str(ws), "transcript": str(tr)}
 
 
+def fixture_venue():
+    """The venue block a run of `cfg()` would actually stamp into its records.
+
+    DERIVED, not typed. A record's venue is compared against the results set's pin by
+    REPOSITORY IDENTITY where both carry one (quadrant/record.py `_venue_problems`), and a
+    hand-typed `{"repo": "/arena"}` beside a pin the CLI resolves for real is a fixture
+    that disagrees with itself - it would fail admission for a reason that says nothing
+    about the behaviour under test.
+    """
+    from quadrant import venue as venue_mod
+    return venue_mod.resolve(cfg(), matrix_mod.schema(), harness_repo=HERE).as_record()
+
+
 def good_record(ev, **over):
     rec = {
         "quadrant": "claude-code::self",
@@ -101,8 +114,7 @@ def good_record(ev, **over):
         "target": "self",
         "item": "u4-baseline",
         "item_digest": "d" * 64,
-        "venue": {"name": "test-gym", "kind": "gym", "repo": "/arena", "ref": "main",
-                  "source": "config"},
+        "venue": fixture_venue(),
         "status": "completed",
         "started_utc": "2026-08-30T10:00:00Z",
         "ended_utc": "2026-08-30T10:04:00Z",

@@ -13,9 +13,12 @@ saying "completed" is precisely a self-report. So a record is admitted only when
     no entry's `passed` contradicts its own exit code;
   * its item digest matches the item the comparison is about;
   * it names the VENUE it ran in, and that venue is the one this results set is a
-    comparison over. Same move as the digest, one axis out: "the same anchored item" was
+    comparison over - compared by the REPOSITORY's identity (its root commit), not by the
+    venue's name. Same move as the digest, one axis out: "the same anchored item" was
     mechanized while "in the gym" was not, and a run in the wrong place is not a data
-    point about the right one however well it was measured. See quadrant/venue.py.
+    point about the right one however well it was measured. Comparing the NAME alone was
+    this file's own version of the defect: four records re-pointed at another repository,
+    still labelled `gym`, were admitted in silence. See `_venue_problems`.
 
 And symmetrically, a `not_run` record is admitted only when it carries a REASON and
 carries no acceptance results - because a quadrant that did not run cannot have checked
@@ -91,7 +94,7 @@ def not_run(q: "_matrix.Quadrant", item: Dict[str, Any],
     return rec
 
 
-def admit(rec: Any, *, item_digest: str = "", venue: str = "",
+def admit(rec: Any, *, item_digest: str = "", venue: Any = "",
           schema: Dict[str, Any] | None = None) -> List[str]:
     """[] means admitted. Otherwise, every reason it is not, in the operator's words."""
     s = schema or _matrix.schema()
@@ -117,20 +120,7 @@ def admit(rec: Any, *, item_digest: str = "", venue: str = "",
                 f"item is not a data point about this one.")
 
     if s.get("record_venue_required"):
-        rv = rec.get("venue")
-        rv = rv if isinstance(rv, dict) else {}
-        got = str(rv.get("name") or "").strip()
-        if not got:
-            problems.append(
-                "record names no VENUE. PLAN section 2's preamble binds every 'Gym:' column to "
-                "a place - 'measured runs in ai-orchestration-gym, never live planes or a "
-                "real target' - so a record that cannot say where it ran cannot be evidence "
-                "for one. Records produced before 2026-08-30 carry no venue by construction.")
-        elif venue and got != venue:
-            problems.append(
-                f"venue mismatch: record ran in venue '{got}' (repo {rv.get('repo') or '?'}), "
-                f"this comparison is over venue '{venue}'. A run in another place is not a "
-                f"data point about this one.")
+        problems += _venue_problems(rec.get("venue"), venue)
 
     if statuses[status].get("requires_evidence"):
         problems += _evidence_problems(rec, s)
@@ -150,6 +140,82 @@ def admit(rec: Any, *, item_digest: str = "", venue: str = "",
             problems.append("status 'error' with no 'error' text")
 
     return problems
+
+
+def _same_repo_path(a: Any, b: Any) -> bool:
+    """Path equality that survives Windows: separators and case both vary per writer."""
+    return (str(a or "").replace("\\", "/").rstrip("/").lower()
+            == str(b or "").replace("\\", "/").rstrip("/").lower())
+
+
+def _venue_problems(rv: Any, pin: Any) -> List[str]:
+    """Did this record run in the place this comparison is over?
+
+    THE DEFECT THIS REPLACES (2026-08-30, round 7). The first version compared the venue
+    NAME and nothing else. A verifier edited four records' `venue.repo` to
+    `D:/SomeOther/arena-clone`, left `venue.name` as `gym`, and the arena's own results set
+    admitted all four in silence: COMPARED 4/4, exit 0. `matrix.json` asserted in its `_why`
+    that "record.admit refuses a record from any other venue" - it refused a record from
+    any other NAME, which two different repositories can trivially share. A label agreeing
+    with a label, read as two runs having happened in one place: the package's own failure
+    class, one axis out.
+
+    THE ORDER, most authoritative first:
+
+      * IDENTITY, where both sides carry one. The repository's root commit (see
+        `venue.identity_of`) is content-addressed - it cannot be renamed into agreement.
+        Identity deciding also means a checkout that was MOVED or re-cloned still matches,
+        which is correct: it is the same repository, and the path was never the point.
+      * A pin that carries an identity and a record that does not is a REFUSAL, not a
+        downgrade. Otherwise stripping one field from a forged record buys the weaker check.
+      * LABELS, only when neither side has an identity - a results set written before this
+        existed. Then every field is compared, not just the name, and the refusal says the
+        comparison was by label so nobody reads it as stronger than it is.
+    """
+    rv = rv if isinstance(rv, dict) else {}
+    got = str(rv.get("name") or "").strip()
+    if not got:
+        return ["record names no VENUE. PLAN section 2's preamble binds every 'Gym:' column "
+                "to a place - 'measured runs in ai-orchestration-gym, never live planes or a "
+                "real target' - so a record that cannot say where it ran cannot be evidence "
+                "for one. Records produced before 2026-08-30 carry no venue by construction."]
+    if not pin:
+        return []
+    pin = {"name": pin} if isinstance(pin, str) else (dict(pin) if isinstance(pin, dict) else {})
+
+    pin_id, rec_id = str(pin.get("identity") or ""), str(rv.get("identity") or "")
+    if pin_id and rec_id:
+        if pin_id != rec_id:
+            return [f"venue mismatch: the record ran in repository `{rec_id}` "
+                    f"(labelled '{got}', {rv.get('repo') or '?'}); this comparison is over "
+                    f"repository `{pin_id}` (labelled '{pin.get('name')}', "
+                    f"{pin.get('repo') or '?'}). Identity is the repository's root commit, "
+                    f"which is why it decides and the name does not: two different "
+                    f"repositories can carry one name, and one repository keeps its identity "
+                    f"through any rename or move."]
+        return []
+    if pin_id and not rec_id:
+        return [f"venue mismatch: this comparison is pinned to repository `{pin_id}` "
+                f"(labelled '{pin.get('name')}'), and the record carries no repository "
+                f"identity to compare - only the label '{got}'. A label is what the pin "
+                f"exists to stop being sufficient, so this is a refusal rather than a "
+                f"fallback to the weaker check."]
+
+    mism = []
+    for field, label in (("name", "name"), ("kind", "kind"), ("ref", "ref")):
+        want = str(pin.get(field) or "").strip()
+        if want and str(rv.get(field) or "").strip() != want:
+            mism.append(f"{label} '{rv.get(field) or '(none)'}' vs pinned '{want}'")
+    if pin.get("repo") and not _same_repo_path(rv.get("repo"), pin.get("repo")):
+        mism.append(f"repository path '{rv.get('repo') or '(none)'}' vs pinned "
+                    f"'{pin.get('repo')}'")
+    if mism:
+        return ["venue mismatch: " + "; ".join(mism) + ". A run in another place is not a "
+                "data point about this one. NOTE: neither this record nor this results "
+                "set's pin carries a repository IDENTITY (both predate it), so the "
+                "comparison above is by LABEL - which is weaker, because a label can be "
+                "edited into agreement. A set re-run today would be compared by root commit."]
+    return []
 
 
 def _evidence_problems(rec: Dict[str, Any], s: Dict[str, Any]) -> List[str]:

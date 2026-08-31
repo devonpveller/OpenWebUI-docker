@@ -110,8 +110,8 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
      "let a one-line config edit turn a 2/4 comparison into a complete 2/2 one at exit 0"),
 
     ("cli.py",
-     "    declared, pinned = _declared_matrix(results_dir, quadrants, records, v)",
-     "    declared, pinned = None, \"\"",
+     "    declared, pinned, pin_block = _declared_matrix(results_dir, quadrants, records, v)",
+     "    declared, pinned, pin_block = None, \"\", {}",
      "test_the_matrix_lock_holds_a_cell_that_lost_both_its_config_and_its_record",
      "the results set's pinned matrix.json is load-bearing on its own - it remembers a "
      "cell that lost both its configuration and its record"),
@@ -142,18 +142,57 @@ MUTATIONS: List[Tuple[str, str, str, str, str]] = [
      "otherwise adopts whatever repo encloses it - on this machine the user's HOME"),
 
     ("record.py",
-     "        elif venue and got != venue:",
-     "        elif False:",
-     "test_a_record_from_another_venue_is_refused",
-     "a results set is a comparison over ONE place: a record from another venue is "
-     "refused rather than averaged in"),
-
-    ("record.py",
-     "        if not got:",
-     "        if False:",
+     "    if not got:",
+     "    if False:",
      "test_a_record_that_names_no_venue_is_refused",
      "a record that cannot say where it ran is refused - the pre-venue records are real "
      "runs in the wrong place and are rendered as refusals, not as results"),
+
+    # --- added 2026-08-30 round 7. The venue check compared a LABEL: four records
+    # --- re-pointed at another repository, still named `gym`, were admitted at exit 0.
+
+    ("record.py",
+     "        if pin_id != rec_id:",
+     "        if False:",
+     "test_a_record_re_pointed_at_another_repository_is_refused_though_its_name_matches",
+     "THE SHIPPED DEFECT: the venue is identified by the REPOSITORY's root commit, so a "
+     "record whose venue.repo was edited to another repo cannot ride in on the name"),
+
+    ("record.py",
+     "    if pin_id and not rec_id:",
+     "    if False:",
+     "test_a_record_with_no_identity_cannot_enter_an_identity_pinned_comparison",
+     "a pin that carries an identity REFUSES a record without one - otherwise deleting "
+     "one field from a forged record buys the weaker label comparison"),
+
+    ("record.py",
+     "    if pin.get(\"repo\") and not _same_repo_path(rv.get(\"repo\"), pin.get(\"repo\")):",
+     "    if False:",
+     "test_a_legacy_set_without_identity_still_compares_every_label_not_just_the_name",
+     "a results set predating identity compares the repository PATH too, so the "
+     "name-only comparison cannot survive as a fallback"),
+
+    ("cli.py",
+     "    if existing != body:",
+     "    if declared != prior or venue_block != prior_venue:",
+     "test_the_lock_refreshes_its_why_while_the_venue_pin_stays_put",
+     "the lock is rewritten whenever it would DIFFER, so a false sentence in its `_why` "
+     "cannot outlive the fix - it said admission refuses another venue while admission "
+     "compared a name"),
+
+    ("cli.py",
+     "    rv = pin_block or None",
+     "    rv = v",
+     "test_the_report_renders_the_pinned_venue_not_todays_configuration",
+     "THE SHIPPED DEFECT: the report rendered TODAY's venue object, so `report --repo "
+     "<ai-stack>` printed ai-stack under 'SATISFIES a Gym: column' over arena records"),
+
+    ("report.py",
+     "        \"\" if summary.get(\"satisfies_gym_column\") else \" NOT\", v.get(\"kind\")),",
+     "        \"\", v.get(\"kind\")),",
+     "test_a_workspace_venue_report_says_it_does_not_satisfy_the_gym_column",
+     "a venue kind the schema declares as NOT satisfying the column must render that "
+     "way - the negation is the half a mislabel needs"),
 
     ("adapters.py",
      "    for rel in dict.fromkeys(changed + planted):",

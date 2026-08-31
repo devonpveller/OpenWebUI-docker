@@ -11,8 +11,12 @@ and §2's preamble, four lines above the phase table, which binds the first word
 
 > *"'gym' means measured runs in `ai-orchestration-gym`, never live planes or a real target."*
 
-**Verdict: BOTH HALVES ARE NOW MET, IN THE ARENA.** No amendment is proposed — the argument
-is in §7.
+**Verdict: BOTH HALVES ARE NOW MET, at venue `gym`.** Precisely: the `target: self` cells work
+in detached worktrees OF THE ARENA; the `target: project` cells work in per-run `git init`
+scratch repositories, which is what the target axis MEANS and which the preamble permits (a
+scratch repo is neither a live plane nor a real target). The column names both targets, so it
+cannot require every cell to be in the arena repo. §0.6 and §3 say which runs were which. No
+amendment is proposed — the argument is in §7.
 
 **READ §0.5 FIRST if you read anything.** The first version of this work met both halves and
 ran them **against ai-stack**. Everything it measured was real; the place was wrong; and
@@ -28,6 +32,18 @@ and listed here so nobody reconstructs them from a cached copy:
 | "three real commits of three different implementations" | Rounds 1 and 3 were the **same implementation differing by one docstring word**. §3 disclosed it; the summary did not. Corrected in §3 and §0. |
 | the two `target:self` cells' acceptance is reproducible from the retained evidence | It was not — only CHANGED files were kept, so the frozen file was missing. Fixed in `6c20c56`; that finding is also what U3's durable check is built from (§8). |
 
+**Five more were FALSE and are corrected here (round 7, all found by verifiers, all
+reproduced by execution before being fixed).** They are listed together because they share
+one shape — *a mechanism was described by what it was for, not by what it did*:
+
+| earlier claim | what execution showed |
+|---|---|
+| "admission refuses a record from another venue" (and `matrix.json`'s own `_why`) | It compared the venue **NAME**. Four records re-pointed at `D:/SomeOther/arena-clone`, still named `gym`, were admitted into the arena's own set: COMPARED 4/4, exit 0. §0.6. |
+| the report states the venue the run happened in | It rendered **today's** venue object whenever the names agreed. `report --results-dir <the gym set> --repo "D:/Open WebUI/ai-stack"` printed *"Venue: `gym` — SATISFIES a Gym: column"* over ai-stack's path, COMPARED 4/4, exit 0, and wrote it to COMPARISON.md. §0.6. |
+| "venue `gym` … satisfies a Gym: column" (preflight and report) | The implemented check is *"a repository root that is not the harness's own"*. `AI_STACK_GYM_REPO` pointed at a throwaway repo named `not-the-arena` printed that verdict at READY 4/4, exit 0. §2's preamble forbids "**a real target**", which no probe can decide. §0.6. |
+| "3 of 3 seeds are caught ONLY by the banked check; 0 are also caught by the gate that already existed" (§8, U3) | The counterfactual followed each record's **absolute** `evidence.workspace` back to the untouched originals, so it never inspected the seeded copies. Re-measured on the copies: **2 of 3**, and seed C is caught by the pre-existing gate. §8. |
+| "`check_quadrant_evidence_reproduces.py .quadrant/runs` → exit 1" (§4, §8) | Measured **exit 0** — "0 outcome record(s) re-derived; 4 skipped as inadmissible". It is structurally incapable of going red there. §4. |
+
 ---
 
 ## 0. The one-line answer, with the commands that produce it
@@ -35,14 +51,19 @@ and listed here so nobody reconstructs them from a cached copy:
 ```
 $ python -m quadrant.cli preflight
 harness repo : D:/Open WebUI/ai-stack/.claude/worktrees/wt-u4close
-venue        : gym (kind gym, satisfies a "Gym:" column)
+venue        : gym (kind gym) - DECLARED to satisfy a "Gym:" column by
+               quadrant/schema.json; that is config, not a measurement
 item repo    : D:/Open WebUI/ai-orchestration-gym @ main   (via config quadrant.venues.gym.repo)
+identity     : root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d
+NOT CHECKED  : whether this repository is a DISPOSABLE ARENA rather than a real target.
+               No probe can decide that ...
   READY x4                                                     exit 0
 
 $ python -m quadrant.cli report --results-dir .quadrant/gym-runs
 **COMPARED 4/4**
-**Venue: `gym` (kind `gym`) - SATISFIES a "Gym:" column**
-`D:/Open WebUI/ai-orchestration-gym` @ `main`
+**Venue: `gym` (kind `gym`) - DECLARED to satisfy a "Gym:" column** (+ an explicit
+CHECKED list, an explicit NOT CHECKED list, and what the venue constrains per target)
+`D:/Open WebUI/ai-orchestration-gym` @ `main`  - rendered from this set's PIN
 | little-coder x self     | completed | 2/2 | 66.0 | 1/2/0 | 1 changed | mechanical |
 | little-coder x project  | completed | 2/2 | 64.9 | 1/2/0 | 1 changed | mechanical |
 | claude-code  x self     | completed | 2/2 | 27.5 | 1/2/0 | 1 changed | normative  |
@@ -50,15 +71,28 @@ $ python -m quadrant.cli report --results-dir .quadrant/gym-runs
                                                                        exit 0
 
 $ ./scripts/agent-harness/observe-oracle-on-stall.ps1 -ResultsDir .quadrant/gym-stall -LeaseOwner wt-u4close
-  three REAL dispatches of the unsatisfiable item, venue gym, into the arena
+  three REAL dispatches of the unsatisfiable item (target: project - see below)
   round 3: STALLED - 2 consecutive rounds with no new information
   ORACLE-ON-STALL: little-coder/local-default -> claude-code/opus, hand back to little-coder
   ledger row e2ea67bcf2582272 - APPENDED BY THIS RUN (0 rows before it started, 1 after)
   probe branch deleted (verified)                              exit 0
 
 $ python scripts/agent-harness/u3_evidence_regression_gym.py   # U3, same arena
-  3 of 3 seeded regressions caught ONLY by the banked check    exit 0
+  2 of 3 seeds caught ONLY by the banked check; 1 by the pre-existing gate;
+  0 by neither                                                 exit 0
 ```
+
+**WHERE EACH HALF ACTUALLY RAN, because "into the arena" is not true of both.** Half (a)'s
+four cells are `target: self` and `target: project` against venue `gym`: the two `self`
+cells are detached worktrees **of the arena**, and the two `project` cells are fresh
+`git init` scratch repositories created per run. **All three of half (b)'s stall rounds ran
+`target: project`** — scratch repos under `.quadrant/gym-stall/*/workspace` **inside this
+ai-stack worktree**; the arena repository was never touched by the stall half, and its
+`git status`/`worktree list` are unchanged by it. §3 said this correctly and the summary
+above did not. That is legitimate under §2's preamble — a per-run `git init` scratch repo is
+neither a live plane nor a real target — and the reasoning is now stated where a reader
+meets it: the report renders it per target kind (`quadrant/schema.json`
+`target_venue_binding`), and §0.6 records the decision.
 
 The little-coder cells' dispatches are confirmed in the daemon's own task records, not only
 in the harness's transcripts:
@@ -105,8 +139,8 @@ report and no exit code — only in a path a human had to interpret.
 | the root check | it also refuses a venue path that is not a repository **ROOT** — see below |
 | ordering | the venue is checked BEFORE the runner and the target, so a wrong-place cell is BLOCKED with that reason instead of running to completion and producing evidence |
 | `target: self` | now a detached worktree of the VENUE's repo at the VENUE's ref. In the arena that is `main`, the gym's training arena per its own README |
-| records | every record carries its venue; the results set pins it in `matrix.json` on first write and cannot move the pin; admission refuses a record from another venue |
-| the report | prints the venue and whether it **SATISFIES a "Gym:" column** — a reader never infers the place from a path again |
+| records | every record carries its venue; the results set pins it in `matrix.json` on first write and cannot move the pin; admission refuses a record from another venue — **which in this commit meant another NAME. See §0.6: it was corrected in round 7 to compare the REPOSITORY.** |
+| the report | prints the venue and whether it satisfies a `"Gym:"` column — a reader never infers the place from a path again. **Two defects in this line, both fixed in round 7 (§0.6): it rendered TODAY's venue rather than the run's, and "SATISFIES" asserted a conclusion no probe derives.** |
 | pre-venue records | carry no venue and are now REFUSED at admission with that reason. They were real runs in the wrong place; a refusal with a reason is the honest rendering, and deleting them would be worse |
 | pinning is not labelling | a results set whose records name no venue does NOT take today's pin. Found by re-rendering the historical set after the mechanism landed: it was being stamped `gym` and headed *"SATISFIES a 'Gym:' column"* over eight records that ran in ai-stack. It now reads **Venue: UNSTATED**, `COMPARED 0/4`, every cell REFUSED — which is what that evidence is |
 
@@ -119,8 +153,10 @@ under a home directory would have made the operator's personal repository the SU
 experiment, which PLAN §C.2 puts in class 4. No amount of "it is a git repo" would have
 caught it.
 
-Six new mutations in `python -m quadrant.prove_guards` cover this and all bite (20/20),
-including *delete the venue-violation refusal* and *delete the repository-root refusal*.
+Six new mutations in `python -m quadrant.prove_guards` covered this and all bite; five more
+arrived with §0.6, for 25/25 - including *delete the venue-violation refusal*, *delete the
+repository-root refusal*, *delete the identity comparison*, *render today's venue instead of
+the pin*, and *stop rewriting the lock when its `_why` has become false*.
 
 **What is honestly still ai-stack, stated rather than glossed.** The oracle observation's
 three round COMMITS are made in the harness repo with `git commit-tree`, on a stamped probe
@@ -129,6 +165,70 @@ detector's "did the code move" axis — the SUBJECT of the experiment (the works
 round's runner actually worked in) is a venue-`gym` quadrant workspace. Using little-coder as
 a RUNNER is likewise fine; the preamble forbids a live plane or a real repo being the
 subject, not being the substrate.
+
+---
+
+## 0.6 THE VENUE CHECK VALIDATED A LABEL, NOT THE THING (round 7)
+
+§0.5 built the venue mechanism. A verifier then showed that three of its four public
+sentences were about a **name**, not about a repository — the same class as the `thoughts`
+mirror comment that claimed a label made `search_thoughts` enforce a boundary. All three
+were reproduced by execution before anything was changed.
+
+**1. Admission compared the NAME.** `record.py` asked `got != venue` where `venue` was a
+string. Four records in `.quadrant/gym-runs` had their `venue.repo` edited to
+`D:/SomeOther/arena-clone` with `venue.name` left as `gym`; the report over that set printed
+**COMPARED 4/4, exit 0**. So `matrix.json`'s `_why` — *"record.admit refuses a record from
+any other venue, so re-pointing --repo and re-running into this directory cannot mix two
+experiments"* — was false as written: two different repositories under one venue name mixed
+freely.
+
+**2. The report rendered TODAY's venue, not the run's.** `cli._emit_report` chose between
+the pin and the configuration by comparing names (`rv = v if pinned == v.name else …`), and
+`--repo` does not change a name. Measured:
+
+```
+$ python -m quadrant.cli report --results-dir <the gym set> --repo "D:/Open WebUI/ai-stack"
+**Venue: `gym` (kind `gym`) - SATISFIES a "Gym:" column**
+`D:\Open WebUI\ai-stack` @ `main` (via --repo).            COMPARED 4/4    exit 0
+```
+
+over the **arena's own records**, and written to `COMPARISON.md`.
+
+**3. The printed verdict claimed more than the check derived.** `venue.py`'s docstring said
+plainly that it cannot decide a venue is "safe"; the printed line said *"satisfies a Gym:
+column"*. §2's preamble forbids "never live planes or **a real target**"; the implemented
+check is `!= the harness repo`. A throwaway repository proves the gap:
+
+```
+$ AI_STACK_GYM_REPO=<a repo created for the purpose, named `not-the-arena`> \
+      python -m quadrant.cli preflight
+venue : gym (kind gym, satisfies a "Gym:" column)            READY 4/4       exit 0
+```
+
+**What now exists (this commit), and how each sentence changed:**
+
+| | |
+|---|---|
+| identity, not label | `venue.identity_of` records the repository's **root commit** reachable from the venue's ref. A name is config and a path is a filename; both can be edited into agreement. A root commit cannot — and a checkout that MOVED still matches, which is correct: it is the same repository. |
+| admission | `record._venue_problems` compares identity where the record and the results set's pin both carry one; **refuses** a record with no identity against a pin that has one; and falls back to comparing **every label** (name, kind, repo path, ref) only for a set that predates identity — saying in the refusal that this is the weaker check. |
+| the report | renders the **pinned** venue block from `matrix.json`, always. Passing `--repo` at report time now prints a warning naming the axis on which the pin and today's venue differ, and changes nothing in the artifact. |
+| the verdict | split into two sentences: *"DECLARED to satisfy a Gym: column … a configuration assertion, not a measurement"*, then an explicit **CHECKED** list and an explicit **NOT CHECKED** list (`venue.what_was_checked`). The first NOT-CHECKED line is the one that matters: no probe can tell a disposable arena from a real target. `preflight` prints it too. |
+| the lock's `_why` | `matrix.json` is now rewritten whenever it would DIFFER at all, not only when the cells or the venue move. This one is a consequence of the finding rather than part of it: the false sentence lived in a results set's own artifact, and a lock that only rewrites on a cell change would have carried it on disk after the code was fixed. `updated_utc` is excluded from the comparison so the timestamp keeps meaning "when this comparison last changed". Verified: re-reporting `.quadrant/gym-runs` refreshed its `_why` and left its venue pin untouched. |
+| `target: project` | the report now states, per target kind, what the venue constrains: a `self` cell's workspace **is** a worktree of the venue repo; a `project` cell's is a **fresh `git init` scratch repo** created per run and NOT in the venue repo. Legitimate under the preamble, and previously left for the reader to infer from a venue heading printed over every row. |
+
+Five new mutations in `python -m quadrant.prove_guards` cover these and all bite (25/25),
+including *the report renders today's venue instead of the pin*, *the identity comparison is
+removed*, and *the lock stops rewriting a `_why` that has become false*.
+
+**The decision on `target: project` and the venue, stated rather than assumed.** A `project`
+cell's subject is a repository created by the harness for that one run, holding only the
+planted item, with a one-commit history, deleted with the results set. §2's preamble forbids
+"live planes or a real target"; a scratch repo is neither, so a `project` cell is
+**venue-independent by construction** and legitimate. What was wrong was not the cell — it
+was printing a venue heading over it with nothing saying so. That is now rendered
+(`quadrant/schema.json` `target_venue_binding`), which is why this note does not propose
+narrowing the column.
 
 ---
 
@@ -291,6 +391,15 @@ That same finding is what U3's durable check is built from — see §8.
 - **The rounds were real dispatches.** Three separate runs of `quadrant.cli run --runner
   little-coder --target project --item u4-stall`, each a `POST /tasks` to the live daemon with
   its own task id in the daemon's journals, each answered by qwen36-27b through LiteLLM.
+- **WHERE: `target: project`, so the arena was not the subject.** All three rounds worked in
+  fresh `git init` scratch repositories at
+  `.quadrant/gym-stall/<stamp>-little-coder-project/workspace`, **inside this ai-stack
+  worktree**, each holding only the planted item on a one-commit history. The records carry
+  `venue: gym` because the comparison was DRIVEN from that venue; nothing about these three
+  rounds touched `D:/Open WebUI/ai-orchestration-gym`. §0's summary said "into the arena" and
+  that was wrong; this is what happened. It satisfies §2's preamble — a per-run scratch repo
+  is neither a live plane nor a real target — and §0.6 records the decision and where a
+  reader now meets it.
 - **The failures were real.** Each round's `-Reason`/`-Evidence` is the output the item's
   PRISTINE guards actually printed for that attempt, read out of that round's `record.json`
   by the script — not typed into it.
@@ -423,20 +532,31 @@ mechanism drill (34/34, seconds, no live planes); this is the experiment.
 
 | command | result |
 |---|---|
-| `python -m pytest -q` (scripts/agent-harness) | **248 passed** |
+| `python -m pytest -q` (scripts/agent-harness) | **260 passed** |
 | `ruff check scripts/agent-harness scripts/checks` | All checks passed |
 | `python -m quadrant.cli preflight` | venue `gym` → `ai-orchestration-gym @ main`; **4/4 READY** |
 | `python -m quadrant.cli report --results-dir .quadrant/gym-runs` | **COMPARED 4/4**, venue `gym`, exit 0 |
-| `python -m quadrant.prove_guards` | **20/20 guards proven to bite** (6 new, venue + retained evidence) |
+| `python -m quadrant.prove_guards` | **25/25 guards proven to bite** (6 added with the venue, 5 more with the venue's IDENTITY, the pinned rendering and the lock's refreshable `_why`) |
 | `observe-oracle-on-stall.ps1 -ResultsDir .quadrant/gym-stall` | **OBSERVED**, exit 0, ledger 0 → 1, probe branch deleted and verified |
 | `observe-oracle-on-stall.ps1 -Reuse -Id <existing>` | **REFUSED**, exit 3 — the RED that replaces the false green |
 | `u3_evidence_regression_gym.py` | **3/3 seeds caught only by the banked check**, exit 0 |
-| `check_quadrant_evidence_reproduces.py --auto` | exit 0 — 7 records re-derived, 7 skipped as inadmissible |
-| `check_quadrant_evidence_reproduces.py .quadrant/runs` | **exit 1** — the pre-venue `self` cells, the verifier's finding, caught by the banked check |
+| `check_quadrant_evidence_reproduces.py --auto` | exit 0 — 7 records re-derived, 7 skipped as inadmissible (re-measured after the round-7 changes: unchanged) |
+| `check_quadrant_evidence_reproduces.py .quadrant/runs` | **exit 0** — "0 outcome record(s) re-derived; 4 skipped as inadmissible". **The earlier claim of exit 1 here was FALSE, and structurally so:** `_admissible()` refuses every pre-venue record for naming no venue, as the check's own docstring says, so this invocation cannot go red. Its RED is proven instead by `test_evidence_reproduces.py` (11 tests, one per contract sentence, two of them the drill's own findings) and by the arena drill's seeds A and B. |
 | `guards.py {unmodified,tests}` re-run in both gym `self` workspaces | `1 frozen file(s) unmodified` / `9/9 pristine test(s) passed`, exit 0 each |
 | `docker exec little-coder curl /tasks/<id>` | both gym little-coder cells present in the daemon's own records, `status: done` |
 | `verify-oracle-on-stall.ps1` | **34/34** (mechanism drill; a CONSTRUCTED stall, unchanged) |
 | `verify-dispatch.ps1 -Offline` | **51/51** (real transport NOT covered — `-Offline`) |
+
+Round 7 added these, each RED before the fix and GREEN after:
+
+| command | before the fix | after |
+|---|---|---|
+| `report --results-dir <gym set copy with `venue.repo` re-pointed to `D:/SomeOther/arena-clone`>` | COMPARED **4/4**, exit 0 | COMPARED **0/4**, exit 1, each cell refused with the repository it actually names |
+| `report --results-dir <gym set copy> --repo "D:/Open WebUI/ai-stack"` | *"Venue: `gym` — SATISFIES a Gym: column"* over `D:\Open WebUI\ai-stack`, exit 0 | renders the PIN (`ai-orchestration-gym`), prints a warning naming the axis that differs, ai-stack's path appears nowhere |
+| `AI_STACK_GYM_REPO=<repo named `not-the-arena`> preflight` | *"satisfies a Gym: column"*, READY 4/4, exit 0 | still READY 4/4 exit 0 — the harness genuinely cannot decide this — but prints DECLARED-not-measured, the repository identity, and the NOT CHECKED line |
+| `u3_evidence_regression_gym.py` | 3 of 3 caught only by the banked check | **2 of 3**; 1 caught by the pre-existing gate; 0 by neither |
+| `python -m pytest` (scripts/agent-harness) | 248 passed | **260 passed** (+12: 10 in `test_quadrant_venue.py` for identity, the pinned rendering, the per-target note and the lock refresh; 2 in `test_evidence_reproduces.py` for `copy_run`) |
+| `python -m quadrant.prove_guards` | 20/20 | **25/25** (5 new: the identity comparison, the identity-pinned refusal, the label fallback, the report rendering the pin, and the lock rewriting a `_why` that has become false) |
 
 `verify-merge-protocol.ps1` was **NOT run**. DECISIONS.md 2026-08-30 records that drill
 leaving the operator's checkout in a detached mid-rebase state, and its two proven
@@ -495,8 +615,20 @@ running in the current directory) are not fixed.
   shares the hazard. Owner: U5 (personal-plane exclusion).
 - **F6.7 — `evidence.workspace` is an absolute path written at run time.** Anything that
   reads it after evidence has been copied, archived or moved is reading the wrong tree.
-  Fixed in the durable check (§8); `record.admit` still resolves it as written, which is why
-  seed C of the U3 drill is missed by admission and caught only by the new check.
+  Fixed in the durable check; and the U3 drill, which is such a reader, is fixed by
+  `copy_run` rewriting the sandbox copies' evidence paths into the copy (§8). **`record.admit`
+  still resolves the path as written**, which is deliberate and is the remaining half: a
+  record is a statement about a run, and admission checking whether the tree it names exists
+  TODAY is a different question from whether the tree an auditor was handed is intact. That
+  is why the drill relocates the paths rather than teaching admission to guess. Owner: U3/U4
+  follow-up if a general "evidence is relative to its record" migration is ever wanted — it
+  would touch every existing record, which is a decision, not a patch.
+- **F6.8 — `record.admit` and the banked check cover different halves of the same question,
+  and nothing states the pairing except this note.** Admission catches *the evidence is
+  gone*; the check catches *the evidence is there and no longer yields the verdict*. Measured
+  by the corrected counterfactual (§8). Neither file names the other as its complement, so a
+  future reader can plausibly delete one believing the other covers it. Owner: U3/U4
+  follow-up.
 
 ---
 
@@ -560,27 +692,55 @@ inside the arena checkout:
   -  PRISTINE copy (the control)                        n/a            green
   A  frozen file dropped from the retained workspace    missed         caught
   B  retained artifact edited after the verdict         missed         caught
-  C  retained workspace removed entirely                missed         caught
-  3 of 3 seeds are caught ONLY by the banked check.                    exit 0
+  C  retained workspace removed entirely                CAUGHT         skipped
+  2 of 3 caught ONLY by the banked check; 1 by the gate that already
+  existed; 0 by neither.                                               exit 0
 ```
 
-The counterfactual is **executed**, not asserted: `record.admit` — the gate that was green
-while the finding was true — runs against every seed. That is `work/u3gym`'s own paid-for
-lesson; its first drill proved a counterfactual by GREPPING and the conclusion was false.
+**THE COUNTERFACTUAL MEASURED A DIRECTORY IT DID NOT SEED, and the corrected number is
+smaller.** Found by a verifier. `record.admit` resolves each record's **absolute**
+`evidence.workspace`, so against a plain `copytree` sandbox it walked back to the untouched
+originals in `.quadrant/gym-runs` and found them intact — for every seed, including seed C,
+which this drill's own docstring says the pre-existing gate is *expected* to catch. "0 are
+also caught by the gate that already existed" was therefore a measurement of a gate pointed
+at a different directory. **Same class as this drill's FIRST counterfactual**, which proved
+"nothing pre-existing catches either seed" by GREPPING and was disproved by a verifier
+running a pre-existing script; the fix then was to execute the gate, and the fix now is to
+execute it against the tree the seeds are in.
+
+`copy_run` is the correction: a run directory is copied **and** its record's `evidence.*`
+paths are rewritten into the copy, so the sandbox describes the tree in hand — an evidence
+set as an auditor actually receives one. Originals are never touched, and only paths inside
+the source run directory are relocated. Re-measured, seed C is **caught by the pre-existing
+gate**, and the banked check **skips** it — correctly, and by its own documented rule: a
+record admission refuses is in no comparison, so re-deriving its verdict would be re-deriving
+a number nobody may use. The two gates are complementary: admission catches *the evidence is
+gone*; the banked check catches *the evidence is there and no longer yields the verdict* —
+which is the shape of the tester finding, and the shape nothing caught before.
+
+What that costs, said rather than glossed: with the paths rewritten the drill no longer
+demonstrates the check's robustness to a **stale** absolute path (record and sibling now
+agree). That property keeps its own named regression tests in `test_evidence_reproduces.py`,
+and `copy_run` itself now has two (proven RED by reverting it to a plain `copytree`).
+
+The drill's pass condition changed with the measurement: it was "every seed goes red in the
+banked check", which can only hold while the counterfactual is aimed elsewhere. It is now
+"every seed is caught by at least one gate, and the report says which".
 
 **PRECISELY WHICH PARTS ARE REAL** — the question that has to be answered plainly here:
 
 | | |
 |---|---|
 | REAL | the finding: a prior round's verifier report, quoted rather than paraphrased |
-| REAL | the check: it goes RED unprompted on the historical `.quadrant/runs` evidence, on the verifier's exact two cells, and GREEN on the gym runs |
+| REAL | the check: it goes RED on seeded regressions of the shape the finding names (drill seeds A and B, in the arena) and on the named cases in `test_evidence_reproduces.py`; GREEN on the gym runs. **CORRECTED:** an earlier version of this row claimed it goes red "unprompted on the historical `.quadrant/runs` evidence, on the verifier's exact two cells". It does not and cannot — those four records are refused at admission for naming no venue, so the check skips them and exits 0 (measured, §4). |
 | REAL | the bank: `durable_checks.add` into the shared git-dir registry, content-addressed |
 | REAL | the seeded evidence: a COPY of actual gym-venue runs produced by real dispatches |
 | REAL | the venue: the sandbox is inside the arena checkout, and the drill refuses outside a gym venue |
-| REAL | the counterfactual: executed against every seed |
+| REAL | the counterfactual: `record.admit` executed against every seed **in the seeded copies** — see the correction below |
 | **NOT** | an agent-org / `gym_runner.py` scenario cycle. No worker built the regression and no PR was scored; the seeding is deterministic so the loop is RE-RUNNABLE rather than a transcript. The gym's runner drives the ORG through a scenario; this drives a CHECK through a regression, in the gym's arena. |
 | **NOT** | a claim about any runner. The seeds are edits to retained evidence. |
 | **NOT** | U3's second half. "Drills green in both systems" was already met (harness 66/66, agent-org 9/9) and this run does not re-establish it. |
+| **THE NUMBER** | **2 of 3**, not 3 of 3. Seeds A and B (a frozen file dropped from the retained workspace; the retained artifact edited after the verdict) are caught ONLY by the banked check. Seed C (the retained workspace removed) is caught by `record.admit`, which already existed, and is skipped by the banked check as inadmissible. 0 of 3 are caught by neither. The larger number came from a counterfactual that inspected the untouched originals rather than the seeded copies; see the paragraph above. |
 
 **The drill found two defects in its own check** — which is the drill earning its keep, and
 the reason to run one rather than reason about it:
@@ -603,9 +763,24 @@ arrived with the `work/dfu-u4` merge; `work/u4bidir` (8 commits, on origin) has 
 amended the SAME row in materially different words and records the harness half as PARKED
 with the park asserted by a test. Two branches rewriting one row with neither acknowledging
 the other is a guaranteed conflict, and a builder editing the row it is judged against is the
-failure the anchor exists to prevent. `PLAN.md` here is now byte-identical to the work line
-(`git diff refactor/ai-stack-cleanup -- PLAN.md` is empty). What follows is for the
-orchestrator to adjudicate against u4bidir's version.
+failure the anchor exists to prevent. **`PLAN.md` is UNTOUCHED BY THIS BRANCH** — the true
+statement, and the one the three-dot diff shows:
+
+```
+$ git diff refactor/ai-stack-cleanup...HEAD \
+      -- documentation/implementation-guide/dark-factory-unification/PLAN.md
+(empty)
+```
+
+**Two earlier sentences here were wrong, and a verifier caught both.** "`git diff
+refactor/ai-stack-cleanup -- PLAN.md` is empty" is a **vacuous pathspec** — the file is at
+`documentation/implementation-guide/dark-factory-unification/PLAN.md`, so that command prints
+empty whatever the tree contains, and proves nothing. And "byte-identical to the work line"
+is **false**: the work line is AHEAD on that file (it carries §C.7's convergence criterion,
+added 2026-08-30 in `c995a9b`), so the two-dot diff on the real path is not empty — it shows
+this branch's older copy. Untouched-by-this-branch and identical-to-the-work-line are
+different claims, and only the first is true. What follows is for the orchestrator to
+adjudicate against u4bidir's version.
 
 **P1 — §0's A11 row.** Both lines of work want to move it. What THIS work adds, as facts
 rather than as proposed wording:
@@ -639,7 +814,7 @@ written, in the arena.
 *(The orchestrator appends these. This branch does not touch DECISIONS.md.)*
 
 ```
-## 2026-08-30 · U4 · CLOSED — both halves met IN THE ARENA, after a VENUE VIOLATION
+## 2026-08-30 · U4 · CLOSED — both halves met at venue `gym`, after a VENUE VIOLATION
 FINDING:  U4 was parked because the three pieces that satisfy its column lived on three
           unmerged branches (work/dfu-u4's dispatch, work/u4quad's comparison harness,
           work/u4oracle's stall detector). Merging them exposed one semantic clash
@@ -676,7 +851,7 @@ HALF (a): python -m quadrant.cli report --results-dir .quadrant/gym-runs -> COMP
           Both claude-code cells were re-dispatched too ($0.4242/1916 tok, $0.4212/1786 tok),
           which retired the earlier reuse of work/u4quad's records: nothing in the comparison
           now depends on another worktree existing.
-HALF (b): the oracle fired on a stall that HAPPENED, in the same venue. quadrant/items/u4-stall
+HALF (b): the oracle fired on a stall that HAPPENED. quadrant/items/u4-stall
           is unsatisfiable by construction (two tests demand different outputs for one input);
           three real dispatches produced three real failing rounds with one failure signature,
           over three real commits of what the runner actually wrote, and queue.ps1 -Fail
@@ -689,14 +864,24 @@ HALF (b): the oracle fired on a stall that HAPPENED, in the same venue. quadrant
           INDUCED, said plainly: the task was chosen to be impossible. A stall induced by an
           impossible task is a real stall; nothing wrote a stall state anywhere. The oracle's
           ROUND was not run - firing records an escalation rather than swapping the worker.
-          The three round COMMITS are made in the harness repo on a stamped probe branch that
-          the script deletes and verifies deleted; that is evidence plumbing for the "did the
-          code move" axis, while the SUBJECT of each round is a venue-gym workspace.
+          WHERE, precisely: all three rounds ran `target: project` - fresh `git init` scratch
+          repositories under .quadrant/gym-stall/*/workspace INSIDE the ai-stack worktree,
+          each holding only the planted item on a one-commit history. The records name venue
+          `gym` because the comparison was driven from it; the ARENA REPOSITORY WAS NOT
+          TOUCHED by the stall half. That satisfies section 2's preamble - a per-run scratch
+          repo is neither a live plane nor a real target - and the report now states it per
+          target kind rather than leaving a venue heading to imply otherwise. An earlier
+          summary of this work said "into the arena"; that was true of half (a)'s `self`
+          cells only. The three round COMMITS are made in the harness repo on a stamped probe
+          branch that the script deletes and verifies deleted; that is evidence plumbing for
+          the "did the code move" axis.
 NOT AMENDED: neither half was unmeetable, including the venue clause - it was unimplemented,
           not impossible. The harness already took a repo path; the same four cells pointed at
           the arena satisfy the column as written.
-EVIDENCE: 248 pytest passed; ruff clean; prove_guards 20/20 bite (6 new, all venue/evidence,
-          including "delete the venue-violation refusal" and "retain only the changed files");
+EVIDENCE: 260 pytest passed; ruff clean; prove_guards 25/25 bite (11 added by this branch, all
+          venue/identity/evidence, including "delete the venue-violation refusal", "retain
+          only the changed files", "delete the identity comparison" and "render today's venue
+          instead of the results set's pin");
           verify-oracle-on-stall 34/34; verify-dispatch -Offline 51/51.
           verify-merge-protocol.ps1 was NOT run - the drill that rebased the live work line
           still has both contributing defects unfixed.
@@ -725,16 +910,29 @@ THE CHECK: scripts/checks/check_quadrant_evidence_reproduces.py, banked content-
           OF A CHECK IS NOT A CHECK: if the artifacts a run kept cannot re-produce the verdict
           it claims, the verdict is a self-report with a directory next to it. It re-runs every
           acceptance command in the retained workspace and requires the recorded exit code.
-          Unprompted, it goes RED on the historical evidence on the verifier's exact two cells
-          and GREEN on the gym runs.
+          It goes RED on seeded regressions of the shape the finding names and on the named
+          cases in test_evidence_reproduces.py, and GREEN on the gym runs. CORRECTION: an
+          earlier draft claimed it goes red "unprompted on the historical .quadrant/runs
+          evidence". It cannot - those records are refused at admission for naming no venue,
+          so the check skips them and exits 0 (measured).
 THE GYM RUN: u3_evidence_regression_gym.py, venue-gated (it refuses unless quadrant.venue
           resolves to a gym-kind repo that is not this one) and seeding into a sandbox inside
           the ARENA checkout. Control green; seeds A (frozen file dropped), B (retained
-          artifact edited after the verdict) and C (retained workspace removed) all caught -
-          3 of 3 caught ONLY by the banked check. exit 0.
-COUNTERFACTUAL EXECUTED, not asserted: record.admit - the gate that was green while the
-          finding was true - runs against every seed. That is work/u3gym's paid-for lesson;
-          its first drill proved a counterfactual by GREPPING and the conclusion was false.
+          artifact edited after the verdict) and C (retained workspace removed) all caught,
+          0 of 3 caught by neither gate. exit 0.
+COUNTERFACTUAL EXECUTED AGAINST THE SEEDED COPIES, which is a CORRECTION and makes the number
+          SMALLER: 2 of 3, not 3 of 3. record.admit follows each record's ABSOLUTE
+          evidence.workspace, so against a plain copytree sandbox it inspected the untouched
+          originals and reported every seed missed - including seed C, which the drill's own
+          docstring says the pre-existing gate is expected to catch. Same class as this
+          drill's FIRST counterfactual (proved by GREPPING, disproved by a verifier running a
+          pre-existing script): running the real gate is not enough if it is pointed
+          elsewhere. copy_run now rewrites a sandbox copy's evidence paths into the copy.
+          Re-measured: seed C is CAUGHT by record.admit and SKIPPED by the banked check -
+          correctly, since a record admission refuses is in no comparison. The two gates are
+          complementary; the banked check's unique value is seeds A and B, which are the shape
+          of the tester finding. The drill's pass condition changed with it: "every seed is
+          caught by at least one gate, and the report says which".
 THE DRILL FOUND TWO DEFECTS IN ITS OWN CHECK, which is the drill earning its keep:
           evidence.workspace is an ABSOLUTE path, so the check read past the seeded sandbox
           into the untouched original (seeds A and B MISSED, run 1); and the fallback to that
@@ -748,6 +946,95 @@ NOT CLAIMED: an agent-org / gym_runner.py scenario cycle - no worker built the r
 REVERT:   delete scripts/checks/check_quadrant_evidence_reproduces.py,
           scripts/agent-harness/u3_evidence_regression_gym.py and test_evidence_reproduces.py,
           and remove the banked row from .git/agent-worktrees/durable-checks.json.
+
+## 2026-08-30 · U4 · class 2 — THE VENUE CHECK VALIDATED A LABEL, NOT THE THING
+FINDING:  the venue mechanism (6c20c56) fixed a missing dimension and then described itself
+          by what it was for rather than by what it did. Three sentences, all reproduced by
+          EXECUTION before anything was changed:
+          (1) record.admit compared the venue NAME. Four records in .quadrant/gym-runs with
+              `venue.repo` edited to D:/SomeOther/arena-clone and `venue.name` left as `gym`
+              were admitted into the arena's own results set: COMPARED 4/4, exit 0. So
+              matrix.json's own `_why` - "record.admit refuses a record from any other venue,
+              so re-pointing --repo and re-running into this directory cannot mix two
+              experiments" - was FALSE: two different repositories under one name mixed.
+          (2) the report rendered TODAY's venue, not the run's. cli._emit_report chose between
+              the pin and the configuration by comparing names, and --repo does not change a
+              name: `report --results-dir <the gym set> --repo "D:/Open WebUI/ai-stack"`
+              printed "Venue: `gym` - SATISFIES a Gym: column" over ai-stack's path, COMPARED
+              4/4, exit 0, and wrote it to COMPARISON.md.
+          (3) the printed verdict claimed more than the check derived. Section 2's preamble
+              forbids "live planes or a real target"; the implemented check is "a repository
+              ROOT that is not the harness's own". $AI_STACK_GYM_REPO pointed at a throwaway
+              repository named `not-the-arena` printed "satisfies a Gym: column", READY 4/4,
+              exit 0. venue.py's docstring said this plainly; the printed verdict did not, and
+              the printed verdict is what is read.
+          Same class as the `thoughts` mirror comment that claimed a label made
+          search_thoughts enforce a boundary.
+FIXED:    IDENTITY, NOT LABEL. venue.identity_of records the repository's root commit
+          reachable from the venue's ref - a name is config and a path is a filename, and both
+          can be edited into agreement; a root commit cannot, and a checkout that MOVED still
+          matches, which is correct. record._venue_problems compares identity where the record
+          and the pin both carry one; REFUSES a record with no identity against a pin that has
+          one (otherwise deleting a field buys the weaker check); and compares EVERY label
+          (name, kind, repo path, ref) only for a set predating identity, saying so in the
+          refusal. The report renders the PINNED venue block always, and --repo at report time
+          prints a warning naming the axis that differs and changes nothing. The verdict is
+          split into DECLARED (config) + an explicit CHECKED list + an explicit NOT CHECKED
+          list, whose first line is that no probe can tell a disposable arena from a real
+          target; preflight prints it too. And the report states, per target kind, what the
+          venue constrains - because a `target: project` cell's subject is a fresh `git init`
+          scratch repo, not the venue repo.
+DECIDED:  a `target: project` cell is VENUE-INDEPENDENT by construction and is LEGITIMATE
+          under the preamble - a per-run scratch repository, one commit long, deleted with the
+          results set, is neither a live plane nor a real target. What was wrong was printing
+          a venue heading over it with nothing saying so. Now rendered
+          (quadrant/schema.json target_venue_binding). No column amendment follows.
+ALSO FIXED, because the fix alone would not have reached it: matrix.json is rewritten whenever
+          it would DIFFER, not only when the declared cells or the venue move. The false `_why`
+          lived in each results set's own artifact, so correcting the code would have left the
+          sentence on disk. updated_utc is excluded from the comparison so it still means "when
+          this comparison last changed". The venue PIN is still taken once and never moved -
+          asserted by the same test.
+EVIDENCE: all three cases RED before and GREEN after (commands and outputs in the note, 0.6
+          and section 4); 259 pytest passed; ruff clean; prove_guards 24/24 with four new
+          mutations - delete the identity comparison, delete the identity-pinned refusal,
+          delete the label fallback, render today's venue instead of the pin.
+REVERT:   drop `identity` from venue.Venue.as_record and record._venue_problems' identity
+          branches (admission falls back to comparing every label), and restore `rv = v if
+          pinned == v.name else (pinned or None)` in cli._emit_report. Existing results sets
+          are unaffected either way: .quadrant/gym-runs predates identity and is compared by
+          label in both directions.
+
+## 2026-08-30 · U3 · class 2 — A COUNTERFACTUAL MUST INSPECT THE TREE IT SEEDED
+FINDING:  u3_evidence_regression_gym.py executed the pre-existing gate (record.admit) rather
+          than asserting what it would say - the correction work/u3gym paid for - and pointed
+          it at the wrong directory. record.admit resolves each record's ABSOLUTE
+          evidence.workspace, so against a plain copytree sandbox it walked back to the
+          untouched originals in .quadrant/gym-runs and found them intact for EVERY seed,
+          including seed C, which the drill's own docstring says the gate is expected to
+          catch. "0 are also caught by the gate that already existed" was a measurement of a
+          gate aimed elsewhere. Found by a verifier.
+FIXED:    copy_run copies a run directory AND rewrites the copy's evidence.* paths into the
+          copy, so the sandbox describes the tree in hand - an evidence set as an auditor
+          receives one. Originals untouched; only paths inside the source run directory are
+          relocated; the rewrite is disclosed in the copied record's notes.
+RE-MEASURED, and the true number is SMALLER: 2 of 3 seeds are caught ONLY by the banked check
+          (A: a frozen file dropped from the retained workspace; B: the retained artifact
+          edited after the verdict). Seed C is CAUGHT by record.admit and SKIPPED by the
+          banked check - correctly and by its own documented rule, since a record admission
+          refuses is in no comparison. 0 of 3 are caught by neither. The two gates are
+          complementary: admission catches "the evidence is gone", the banked check catches
+          "the evidence is there and no longer yields the verdict" - the shape of the tester
+          finding, and the shape nothing caught before.
+ALSO:     the drill's pass condition was "every seed goes red in the banked check", which can
+          only hold while the counterfactual is aimed elsewhere. It is now "every seed is
+          caught by at least one gate, and the report says which".
+COST, STATED: with the paths rewritten the drill no longer demonstrates the check's robustness
+          to a STALE absolute path. That keeps its own named regression tests in
+          test_evidence_reproduces.py, and copy_run now has two of its own (proven RED by
+          reverting it to a plain copytree).
+REVERT:   restore shutil.copytree in place of copy_run and the previous pass condition; the
+          drill then reports 3 of 3 again, which is the number that was wrong.
 
 ## 2026-08-30 · method · A CHECK THAT PRINTS A VERDICT MUST DERIVE IT FROM WHAT IT DID
 FINDING:  observe-oracle-on-stall.ps1, in -Reuse mode - its DOCUMENTED default invocation -

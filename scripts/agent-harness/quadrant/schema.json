@@ -127,9 +127,14 @@
     "kind",
     "repo"
   ],
+  "target_venue_binding": {
+    "self": "the workspace IS a detached worktree of the venue repository at the venue's ref. The venue above is this cell's subject, and the pin is a fact about it.",
+    "project": "the workspace is a FRESH `git init` scratch repository created for this run under the results directory, holding only the planted item - it is NOT in the venue repository, and its git history is one commit long. That is legitimate under PLAN section 2's preamble, which forbids \"live planes or a real target\": a per-run scratch repo is neither, and the venue is what the cell was DRIVEN from rather than what it worked on. It is stated because the venue heading above would otherwise be read as a claim about this row's working tree too."
+  },
+  "_target_venue_binding_why": "A verifier's question, answered where a reader meets it: nothing tied a `target: project` record to the venue, and the report printed a venue heading over cells whose subject is a scratch directory inside the harness's own repository. The answer is that a `project` cell is venue-INDEPENDENT by construction and permitted by the preamble - but leaving that unsaid is the same shape as the venue defect itself (a dimension the reader has to infer). report.py renders one line per target kind actually present in the declared matrix.",
   "venue_kinds": {
     "gym": {
-      "desc": "a disposable training arena - ai-orchestration-gym. The subject of the experiment is a worktree of THAT repository, never the one under test",
+      "desc": "a disposable training arena - ai-orchestration-gym. The subject of the experiment is a worktree of THAT repository, never the one under test. DECLARED, not measured: no probe can tell an arena from a real target, so this is the operator asserting what the repository is",
       "must_differ_from_harness_repo": true,
       "satisfies_gym_column": true
     },
@@ -154,11 +159,24 @@
     "",
     "`must_differ_from_harness_repo` is the check. quadrant/venue.py compares GIT COMMON",
     "DIRS, so a worktree of ai-stack is recognised as ai-stack rather than as a different",
-    "path. `satisfies_gym_column` is what a reader of a report may conclude from the venue",
-    "- it is rendered, never inferred."
+    "path.",
+    "",
+    "`satisfies_gym_column` IS A DECLARATION, NOT A MEASUREMENT, and the report was",
+    "corrected on 2026-08-30 to print it as one. The preamble forbids \"live planes or a",
+    "real target\"; what venue.py can check is \"a repository ROOT that is not the",
+    "harness's own\". A verifier pointed $AI_STACK_GYM_REPO at a throwaway repository named",
+    "`not-the-arena` and got READY 4/4 and \"satisfies a Gym: column\" at exit 0. The two",
+    "sentences are now rendered separately (venue.what_was_checked), because a printed",
+    "verdict that implies more than it derived is this package's own failure class.",
+    "",
+    "A VENUE IS IDENTIFIED BY ITS REPOSITORY, not by its name. venue.identity_of records",
+    "the root commit reachable from the venue's ref; record.admit compares THAT where both",
+    "the record and the results set's pin carry one. Comparing names alone admitted four",
+    "records whose `venue.repo` had been re-pointed at another repository while the name",
+    "still read `gym` - COMPARED 4/4, exit 0."
   ],
   "record_venue_required": true,
-  "_record_venue_required_why": "every record carries the venue it ran in, and admission refuses one that does not - the same move as the item digest (mechanism 3). A results set pins its venue in the declared-matrix lock, so records from another venue are refused rather than averaged in. Records produced before 2026-08-30 carry no venue and are therefore no longer admissible: they were real runs in the wrong place, and the honest rendering of that is a refusal with a reason.",
+  "_record_venue_required_why": "every record carries the venue it ran in, and admission refuses one that does not - the same move as the item digest (mechanism 3). A results set pins its venue in the declared-matrix lock, so records from another REPOSITORY are refused rather than averaged in - compared by root commit where both sides carry one, and by every label they carry (not the name alone) where neither does. Records produced before 2026-08-30 carry no venue and are therefore no longer admissible: they were real runs in the wrong place, and the honest rendering of that is a refusal with a reason.",
   "_kind_requirements_why": "a quadrant is misconfigured LOUDLY or not at all. A little-coder runner with no endpoint is not a runner that will fail at dispatch time and report NOT RUN - it is a configuration error, and the difference matters: NOT RUN is a fact about the world, a config error is a fact about the operator's file.",
   "rounds_fields": {
     "dispatch_attempts": "how many times the runner had to be handed the item before it produced anything",

@@ -29,10 +29,30 @@ such a venue resolves to the harness's OWN repository - compared by git common d
 worktree of ai-stack is recognised as ai-stack rather than as "a different path". That is
 the exact sentence a verifier had to write by hand; here it is an exit code.
 
-WHAT IT DELIBERATELY DOES NOT DO. It does not decide that a venue is "safe". A gym repo can
-still hold something precious, and no probe can know. It answers one question - is the
-subject of this experiment a repository other than the one under test, of the kind the
-column demands - and it answers it the same way every time.
+A VENUE IS IDENTIFIED BY ITS REPOSITORY, NOT BY ITS NAME (2026-08-30, round 7). The first
+version of this module carried the name and the path and nothing else, and a verifier showed
+what that bought: a record whose `venue.repo` was edited to `D:/SomeOther/arena-clone` while
+`venue.name` still read `gym` was admitted into the arena's own results set without a word -
+COMPARED 4/4, exit 0. `matrix.json` said in its own `_why` that "record.admit refuses a record
+from any other venue", and it did not: it compared a LABEL. That is the same defect class this
+package was built to end, one axis further out - a name agreeing with a name, read as two runs
+having happened in one place.
+
+So `identity_of` records what a rename cannot reach: the repository's ROOT COMMIT(S), reached
+from the venue's own ref. Two checkouts of one repository share it; two different repositories
+do not; moving, renaming or re-cloning a checkout does not change it. `record.admit` compares
+identity where both the record and the results set's pin carry one, and says so in its refusal
+when they do not.
+
+WHAT IT DELIBERATELY DOES NOT DO, and the report is now required to SAY this rather than
+imply the opposite. It does not decide that a venue is "safe", and it cannot decide that a
+venue is a disposable ARENA rather than a real target. Section 2's preamble forbids "live
+planes or a real target"; the implemented check is "a repository ROOT that is not the
+harness's own", which is strictly weaker - `AI_STACK_GYM_REPO` pointed at a throwaway repo
+named `not-the-arena` preflighted READY 4/4 at exit 0, and a repository holding something
+precious would too. `kind: "gym"` is therefore an OPERATOR ASSERTION in harness.config.json,
+and `satisfies_gym_column` follows from that assertion. `what_was_checked` is where the two
+lists live, so a reader of a report meets the distinction instead of inferring it.
 """
 
 from __future__ import annotations
@@ -56,16 +76,26 @@ class Venue:
     repo: Path
     ref: str
     source: str = ""           # how `repo` was arrived at - config path, env var, or flag
+    identity: str = ""         # the REPOSITORY, content-addressed - see identity_of
     rules: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def satisfies_gym_column(self) -> bool:
+        """What the CONFIG declares this kind to be worth. Not a measurement - see
+        `what_was_checked`, which a report must render beside any use of this."""
         return bool(self.rules.get("satisfies_gym_column"))
 
     def as_record(self) -> Dict[str, Any]:
-        """What a run record carries. A record with no venue is not admissible."""
+        """What a run record carries. A record with no venue is not admissible.
+
+        `identity` is here because `name` is not enough: a record labelled `gym` whose repo
+        had been re-pointed elsewhere was admitted into the arena's own results set. Where
+        the identity could not be derived (no such checkout, a ref with no history) it is
+        the empty string, which admission treats as "nothing to compare" rather than as a
+        match - a blank is never equal to a pin.
+        """
         return {"name": self.name, "kind": self.kind, "repo": str(self.repo),
-                "ref": self.ref, "source": self.source}
+                "ref": self.ref, "source": self.source, "identity": self.identity}
 
 
 @dataclass(frozen=True)
@@ -146,6 +176,81 @@ def main_checkout(harness_repo: Path) -> Path:
     return common.resolve().parent
 
 
+def identity_of(repo: Path, ref: str = "HEAD") -> str:
+    """THE REPOSITORY, not its label: the root commit(s) reachable from `ref`.
+
+    A name is config, a path is a filename, and both can be edited into agreement with
+    whatever they are about to be compared against - which is exactly what happened
+    (`venue.repo` re-pointed, `venue.name` left as `gym`, record admitted). A root commit
+    cannot: it is the content-addressed head of the repository's history. Two checkouts,
+    clones or worktrees of one repository share it; two different repositories do not; and
+    moving or renaming a checkout leaves it untouched.
+
+    Scoped to the venue's OWN ref rather than `--all` on purpose: `--all` varies with which
+    branches a given clone happens to carry, so the same repository would answer differently
+    on two machines. The ref is the arena the experiment is performed against, and its
+    lineage is the identity of that arena.
+
+    Returns "" when it cannot be derived - a missing checkout, a ref with no commit. Empty
+    is NOT a match: admission treats a blank identity as "nothing to compare", never as
+    agreement.
+    """
+    out = _proc.run(["git", "-C", str(repo), "rev-list", "--max-parents=0", ref])
+    if out.returncode != 0:
+        return ""
+    roots = sorted(ln.strip() for ln in (out.stdout or "").splitlines() if ln.strip())
+    return ("root:" + "+".join(roots)) if roots else ""
+
+
+def what_was_checked(kind: str, rules: Dict[str, Any],
+                     identity_recorded: bool = True) -> Dict[str, Any]:
+    """CHECKED / NOT CHECKED, for a report that must not print a verdict it did not derive.
+
+    THE DEFECT THIS EXISTS FOR. The report printed *"Venue: gym (kind gym) - SATISFIES a
+    'Gym:' column"*. Section 2's preamble says "never live planes or a real target"; the
+    check `probe` actually performs is "a repository ROOT that is not the harness's own".
+    Those are not the same sentence, and a verifier demonstrated the gap by pointing
+    `AI_STACK_GYM_REPO` at a throwaway repository named `not-the-arena`: READY 4/4, exit 0,
+    "satisfies a Gym: column" printed over it. `venue.py`'s docstring said so plainly; the
+    PRINTED VERDICT did not, and the printed verdict is what gets read.
+
+    Takes `kind` and its `rules` rather than a `Venue`, so a report can render the venue a
+    results set was PINNED to - a dict read back from `matrix.json` - instead of the venue
+    object today's configuration happens to build.
+    """
+    checked = [
+        "the venue path is a git repository ROOT (git discovers upward, so a wrong path "
+        "otherwise silently adopts whatever repository encloses it)",
+        "the ref resolves to a commit in it",
+        # A claim about what a RESULTS SET carries, not about what the probe did - so it is
+        # conditional on the set actually carrying it. A pre-identity set printing "the
+        # identity is recorded with every record" would be this module's own defect back
+        # again: a verdict describing a mechanism rather than this evidence.
+        ("the repository IDENTITY (root commit reachable from that ref) is recorded with "
+         "every record in this set, so a record from a different repository is refused "
+         "however it is labelled")
+        if identity_recorded else
+        ("NOT AVAILABLE for this results set: it predates identity pinning, so its records "
+         "are matched to the pin by every LABEL they carry (name, kind, repository path, "
+         "ref) rather than by root commit. That is weaker - a label can be edited into "
+         "agreement - and it is what these records support"),
+    ]
+    if rules.get("must_differ_from_harness_repo"):
+        checked.insert(1, "it is NOT the harness's own repository (git common dirs "
+                          "compared, so a worktree of it is recognised as it)")
+    not_checked = [
+        "whether this repository is a DISPOSABLE ARENA rather than a real target. No probe "
+        "can decide that: a repository holding something precious answers every question "
+        "above the same way. `kind: \"{}\"` is an ASSERTION in harness.config.json, and "
+        "\"satisfies a Gym: column\" follows from that assertion, not from a "
+        "measurement".format(kind),
+        "whether the work inside it was confined to the venue - see the per-target note "
+        "below, since a `project` cell's subject is a scratch repository, not this one",
+    ]
+    return {"checked": checked, "not_checked": not_checked,
+            "declared_satisfies_gym_column": bool(rules.get("satisfies_gym_column"))}
+
+
 def resolve(cfg: Dict[str, Any], schema: Dict[str, Any], *, harness_repo: Path,
             override_repo: str = "") -> Venue:
     """Config + environment + flag -> the venue this comparison is over.
@@ -176,9 +281,13 @@ def resolve(cfg: Dict[str, Any], schema: Dict[str, Any], *, harness_repo: Path,
         repo = p.resolve()
     except OSError:
         repo = p
-    return Venue(name=name, kind=kind, repo=repo,
-                 ref=str(v.get("ref") or "HEAD").strip() or "HEAD",
-                 source=source, rules=dict(kinds.get(kind) or {}))
+    ref = str(v.get("ref") or "HEAD").strip() or "HEAD"
+    # The IDENTITY is derived here rather than in `probe` so that every Venue this module
+    # hands out already carries it - `record.new` stamps it into the record and
+    # `_declared_matrix` pins it, and neither of those runs a probe. A path that is not a
+    # checkout yields "", and `probe` is what turns that into a refusal with a reason.
+    return Venue(name=name, kind=kind, repo=repo, ref=ref, source=source,
+                 identity=identity_of(repo, ref), rules=dict(kinds.get(kind) or {}))
 
 
 def _common_dir(repo: Path) -> str:
@@ -215,11 +324,17 @@ def _toplevel(repo: Path) -> str:
 def probe(v: Venue, *, harness_repo: Path) -> VenueCheck:
     """Is this a usable venue of the kind it claims to be?
 
-    Four questions, in the order whose failure is most informative:
+    Five questions, in the order whose failure is most informative:
       1. is there a git repository there at all;
       2. is that repository AT the configured path, rather than merely above it;
       3. does the ref the experiment is performed against exist in it;
-      4. for a kind that must be disposable, is it a DIFFERENT repository from the harness's.
+      4. for a kind that must be disposable, is it a DIFFERENT repository from the harness's;
+      5. can the repository be IDENTIFIED (root commit) - the thing a record is compared
+         against, and the one property of a venue that a rename cannot forge.
+
+    WHAT THIS DOES NOT ANSWER, and `what_was_checked` is what forces a report to say so:
+    none of the five decides that the venue is a disposable arena rather than a real
+    target. `not-the-arena`, a repository created for the purpose, passes all five.
 
     QUESTION 2 IS NOT PEDANTRY, and it was not in the first version of this file. git
     discovers a repository by walking UP. So a venue path that is wrong - a typo, a
@@ -276,6 +391,15 @@ def probe(v: Venue, *, harness_repo: Path) -> VenueCheck:
                 "target.\" A run whose SUBJECT is the repository under test is not a gym "
                 "run, however real its dispatches were. Point {} at the arena checkout."
                 .format(v.name, v.kind, v.repo, subject, v.source)))
+    if not v.identity:
+        return VenueCheck(False, reason=(
+            "venue '{}' at '{}' yields no repository IDENTITY: `git rev-list "
+            "--max-parents=0 {}` returned nothing. Identity is what a record is compared "
+            "against, because a name and a path can both be edited into agreement; a venue "
+            "the harness cannot identify is one it must not admit records for."
+            .format(v.name, v.repo, v.ref)))
     return VenueCheck(True, detail={"repo": str(v.repo), "kind": v.kind, "ref": v.ref,
                                     "head": head, "source": v.source,
-                                    "git_common_dir": subject})
+                                    "identity": v.identity,
+                                    "git_common_dir": subject,
+                                    "what_was_checked": what_was_checked(v.kind, v.rules)})

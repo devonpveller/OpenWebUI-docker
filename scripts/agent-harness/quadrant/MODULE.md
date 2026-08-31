@@ -8,7 +8,7 @@ compared"*. This module is that comparison.
 **The column has THREE parts, and the first one is a place.** §2's preamble, four lines
 above the phase table, binds it: *"'gym' means measured runs in `ai-orchestration-gym`,
 never live planes or a real target."* So a comparison is over one item, one set of cells,
-**and one VENUE** — see `venue.py` and mechanism 5 below.
+**and one VENUE** — see `venue.py` and mechanisms 5-7 below.
 
 ## What it is for
 
@@ -22,8 +22,11 @@ and how confident a reader may be at this sample size.
 
 > A comparison silently missing two of four quadrants reads as a completed comparison.
 
-Four mechanisms make that unrepresentable (stated as data in `schema.json`, enforced in
-`record.py` / `report.py` / `cli.py`, and each proven to bite by `prove_guards.py`):
+Seven mechanisms make that unrepresentable (stated as data in `schema.json`, enforced in
+`record.py` / `report.py` / `cli.py` / `venue.py`, and each proven to bite by
+`prove_guards.py`). Mechanisms 1-4 are about WHAT ran; 5-7 are about WHERE, and each of
+those three was added because the previous one described itself by what it was for rather
+than by what it did:
 
 1. **The report is built from the MATRIX, never from the records.** Every cell in the
    matrix gets a row; a cell with no record renders `NOT RUN - no record produced`.
@@ -57,8 +60,40 @@ Four mechanisms make that unrepresentable (stated as data in `schema.json`, enfo
    measured: `C:/Users/<user>` is itself a repo on this machine, so every path under the
    home directory, temp included, answers `git rev-parse` with the personal repo). Every
    record carries its venue, the results set pins it in `matrix.json` on first write, and
-   admission refuses a record from any other one. The report prints the venue and whether
-   it **SATISFIES a "Gym:" column**, so a reader never has to infer the place from a path.
+   admission refuses a record from any other one.
+
+6. **A venue is identified by its REPOSITORY, not by its name** — mechanism 5's own defect,
+   found by a verifier the day after it shipped and fixed the same day. Three of mechanism
+   5's public sentences were about a label:
+   - `record.admit` compared the venue **NAME**. Four records re-pointed at
+     `D:/SomeOther/arena-clone` with `venue.name` still reading `gym` were admitted into the
+     arena's own results set: COMPARED 4/4, exit 0 — while `matrix.json`'s `_why` asserted
+     that "record.admit refuses a record from any other venue".
+   - the report rendered **today's** venue whenever the names agreed, so
+     `report --results-dir <a gym set> --repo <ai-stack>` printed *"Venue: `gym` — SATISFIES
+     a Gym: column"* over ai-stack's path, exit 0, and wrote it to `COMPARISON.md`.
+   - *"satisfies a Gym: column"* asserted PLAN §2's preamble ("never live planes or **a real
+     target**"), which no probe derives. `AI_STACK_GYM_REPO` pointed at a throwaway repo
+     named `not-the-arena` printed it at READY 4/4, exit 0.
+
+   So `venue.identity_of` records the repository's **root commit** reachable from the
+   venue's ref — a name is config and a path is a filename, and both can be edited into
+   agreement; a root commit cannot, and a checkout that moved still matches, which is
+   correct. `record._venue_problems` compares identity where the record and the pin both
+   carry one, **refuses** a record with no identity against a pin that has one, and compares
+   every label only for a set that predates identity (saying so in the refusal). The report
+   renders the **pinned** venue always; `--repo` at report time warns and changes nothing.
+   The verdict is two sentences: **DECLARED** (what `schema.json` says the kind is worth),
+   then explicit **CHECKED** and **NOT CHECKED** lists — the first NOT-CHECKED line being
+   that no probe can tell a disposable arena from a real target. `preflight` prints it too.
+
+7. **What the venue constrains is stated PER TARGET.** A `target: self` cell's workspace IS
+   a detached worktree of the venue repository. A `target: project` cell's is a **fresh
+   `git init` scratch repository** created for that run under the results directory, holding
+   only the planted item — not in the venue repo at all. That is legitimate under §2's
+   preamble (a per-run scratch repo is neither a live plane nor a real target) and it is not
+   obvious, so the report renders it (`schema.json` `target_venue_binding`) rather than
+   letting one venue heading be read as a claim about every row.
 
 ### What mechanism 4 does not defend against
 
@@ -73,12 +108,12 @@ rather than a report that lies about it.
 
 | Entry point | Contract |
 |---|---|
-| `python -m quadrant.cli preflight` | prints the harness repo, the VENUE (kind + whether it satisfies a "Gym:" column) and the item repo, then one line per configured cell: READY, or BLOCKED with the reason. Exit 0 when all ready, 1 otherwise. |
+| `python -m quadrant.cli preflight` | prints the harness repo, the VENUE (kind, what the schema DECLARES it worth, its repository identity, and the first thing it does NOT check) and the item repo, then one line per configured cell: READY, or BLOCKED with the reason. Exit 0 when all ready, 1 otherwise. |
 | `python -m quadrant.cli run [--runner R] [--target T] [--item I]` | runs the selected cells, writes one run directory each, then renders the FULL-matrix report. Exit 0 iff every cell it attempted completed. |
 | `python -m quadrant.cli report` | re-renders from the accumulated records. **Exit 0 only when every DECLARED cell produced an admitted comparable outcome**; 1 while the comparison is incomplete; 2 misconfigured. Narrowing the configured axes cannot raise this to 0 (mechanism 4). |
 | `python -m quadrant.prove_guards` | mutation drill: breaks each guard in turn and requires its test to go RED. Exit 0 iff every guard bites; prints `N/N guards proven to bite`. |
 | `python -m pytest scripts/agent-harness/test_quadrant.py -q` | the module's suite - the matrix, admission, the report's completeness invariant, the declared-matrix lock, the UTF-8 chokepoint scan, the retained-evidence invariant, and one end-to-end fixture run. The count is whatever the command prints. |
-| `python -m pytest scripts/agent-harness/test_quadrant_venue.py -q` | the VENUE's suite - config loudness, the venue-violation refusal, the repository-root refusal, relative-path resolution from the main checkout, record admission by venue, and the results-set pin. |
+| `python -m pytest scripts/agent-harness/test_quadrant_venue.py -q` | the VENUE's suite - config loudness, the venue-violation refusal, the repository-root refusal, relative-path resolution from the main checkout, admission by repository IDENTITY (and the label fallback for sets that predate it), the report rendering the results-set PIN rather than today's configuration, and the per-target note. |
 | `quadrant/guards.py <tests\|unmodified> --item <id>` | the acceptance checks themselves, run by the harness with the workspace as CWD. |
 
 Artifacts: `<repo>/.quadrant/runs/<utc>-<runner>-<target>/{record.json,transcript.txt,manifest.json,workspace/}`

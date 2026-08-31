@@ -3,8 +3,8 @@
 
     python scripts/agent-harness/u3_evidence_regression_gym.py [--keep] [--repo <arena>]
 
-    exit 0  every seed behaved as the drill asserts, and the counterfactual was MEASURED
-    exit 1  a seed the banked check must catch was missed, or the pristine copy went red
+    exit 0  every seed was caught by at least one gate, and WHICH gate was MEASURED
+    exit 1  a seed no gate caught, or the pristine copy went red
     exit 2  the venue refused, or the drill could not find real run evidence to seed from
 
 dark-factory-unification PLAN section 2, U3:
@@ -60,13 +60,51 @@ local simulation is the over-claim section C.7 exists to prevent.
   REAL  the venue: the sandbox is created inside the ARENA checkout, and this drill REFUSES
         to run if `quadrant.venue` does not resolve to a gym-kind repository that is not
         this one (quadrant/venue.py)
-  REAL  the counterfactual: section "the counterfactual" EXECUTES the pre-existing gate
-        (record.admit) against every seed instead of asserting what it would say
+  REAL  the counterfactual: `admit_against` EXECUTES the pre-existing gate (record.admit)
+        against every seed instead of asserting what it would say - AND against the seeded
+        COPIES, which is a correction. See "the counterfactual measured the wrong tree".
   NOT   an agent-org / gym_runner.py scenario cycle. No worker built the regression and no
         PR was scored: the regression is seeded deterministically by this file so the loop
         is RE-RUNNABLE rather than a transcript. The gym's own runner drives the org through
         a scenario; this drives a CHECK through a regression, in the gym's arena.
   NOT   a claim about any runner. The seeds are edits to retained evidence.
+
+--------------------------------------------------------------------------------------
+THE COUNTERFACTUAL MEASURED THE WRONG TREE (found by a verifier, 2026-08-30, round 7)
+
+`record.admit` resolves `evidence.workspace` as the ABSOLUTE path the record was written
+with. The sandbox is a COPY, so every seed edited the copy while admission walked back to
+the untouched originals under `.quadrant/gym-runs` and found them all intact. The drill
+therefore printed "0 are also caught by the gate that already existed" for every seed
+INCLUDING seed C - the one this file's own docstring says the pre-existing gate is expected
+to catch. A gate pointed at a different directory measures nothing about this one.
+
+That is the SAME CLASS as this drill's first counterfactual, which "proved" that nothing
+pre-existing caught the seeds by GREPPING; the fix then was to execute the gate, and the
+fix now is to execute it against the tree the seeds are in.
+
+`copy_run` is the correction: a run directory is copied AND its record's `evidence.*` paths
+are rewritten to point inside the copy, so the sandbox is self-consistent - an evidence set
+as an auditor actually receives one, describing the tree in hand rather than a machine it
+was produced on. The originals are never touched.
+
+WHAT THAT COSTS, said rather than glossed: with the paths rewritten, this drill no longer
+demonstrates the banked check's robustness to a STALE absolute path (the check prefers the
+`workspace/` beside the record; the two now agree). That property has its own named
+regression tests in `test_evidence_reproduces.py`. The drill's job is the counterfactual,
+and a counterfactual that inspects a directory it does not seed is not one.
+
+AND THE NUMBER GOT SMALLER, which is the point. Seed C is CAUGHT by the pre-existing gate
+(`record.admit` refuses a record whose `evidence.workspace` is not on disk), so the banked
+check's unique contribution is 2 of 3 seeds, not 3 of 3. The banked check SKIPS seed C, and
+that is correct rather than a miss: a record admission refuses is in no comparison, so
+re-deriving its verdict would be re-deriving a number nobody may use - the check says so in
+its own docstring and prints the skip with its reason.
+
+So the two gates are complementary, and the drill's pass condition says which: admission
+catches "the evidence is gone", the banked check catches "the evidence is there and no
+longer yields the verdict". The second is the shape of the tester finding this all came
+from, and it is the shape nothing caught before.
 """
 
 from __future__ import annotations
@@ -117,6 +155,48 @@ def rmtree(path: Path) -> None:
     shutil.rmtree(path, onexc=_force)
 
 
+def copy_run(src: Path, dest: Path) -> None:
+    """Copy ONE run directory into the sandbox and make the copy describe ITSELF.
+
+    THE DEFECT THIS FIXES. `record.admit` reads `evidence.workspace` as written - an
+    absolute path into `.quadrant/gym-runs`. A plain `copytree` therefore produced a
+    sandbox whose records still pointed at the originals, so the counterfactual measured a
+    gate aimed at an untouched directory: every seed came back "missed", including the one
+    seed the gate is expected to catch.
+
+    Only paths that live INSIDE the source run directory are rewritten, and only in the
+    copy. A record that names a workspace somewhere else is left exactly as it is: that
+    record's shape is a fact about how it was produced, and rewriting it would be inventing
+    evidence rather than relocating it.
+    """
+    shutil.copytree(src, dest)
+    rp = dest / "record.json"
+    if not rp.is_file():
+        return
+    rec = json.loads(rp.read_text(encoding="utf-8"))
+    ev = rec.get("evidence")
+    if not isinstance(ev, dict):
+        return
+    src_res = src.resolve()
+    changed = False
+    for key, val in list(ev.items()):
+        if not isinstance(val, str) or not val:
+            continue
+        try:
+            rel = Path(val).resolve().relative_to(src_res)
+        except (ValueError, OSError):
+            continue
+        ev[key] = str(dest / rel)
+        changed = True
+    if changed:
+        rec["evidence"] = ev
+        rec.setdefault("notes", []).append(
+            "sandbox copy: evidence paths rewritten to this directory by "
+            "u3_evidence_regression_gym.copy_run, so the gate under test reads the tree it "
+            "was handed. The originals are unchanged.")
+        rp.write_text(json.dumps(rec, indent=2), encoding="utf-8")
+
+
 def sh(cmd: List[str] | str, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=str(cwd), shell=isinstance(cmd, str),  # noqa: S602,S603
                           capture_output=True, encoding="utf-8", errors="replace")
@@ -131,13 +211,21 @@ def check_against(sandbox: Path) -> Tuple[int, str]:
 
 
 def admit_against(sandbox: Path) -> Tuple[bool, str]:
-    """THE PRE-EXISTING GATE, executed rather than assumed.
+    """THE PRE-EXISTING GATE, executed rather than assumed, AGAINST THE TREE IT IS HANDED.
 
-    The u3gym round's lesson, in its own words: the first version of that drill printed "the
+    Two rounds of the same lesson are baked into this one function.
+
+    The u3gym round's, in its own words: the first version of that drill printed "the
     counterfactual: nothing that already existed catches either seed" and proved it by
     GREPPING. The grep was true and the conclusion was false. So this runs `record.admit` -
-    the gate that was green while the finding was true - against every seed and reports what
-    it actually says.
+    the gate that was green while the finding was true - against every seed.
+
+    Round 7's, found by a verifier: running the real gate is not enough if it is pointed
+    somewhere else. `record.admit` follows each record's ABSOLUTE `evidence.workspace`, so
+    against a plain copy it walked back to the untouched originals and reported every seed
+    missed - including seed C, which this file's own docstring says the gate is expected to
+    catch. `copy_run` rewrites the copy's evidence paths into the copy; this function is
+    then measuring the seeds.
     """
     problems: List[str] = []
     schema = matrix_mod.schema()
@@ -174,7 +262,11 @@ def seed_b_break_artifact(sandbox: Path) -> str:
 def seed_c_workspace_gone(sandbox: Path) -> str:
     """The whole workspace is removed. Included because the counterfactual must be MEASURED:
     this is the seed the pre-existing gate is expected to catch, and the drill asserts that
-    rather than granting the banked check credit for it."""
+    rather than granting the banked check credit for it.
+
+    It did grant it credit, for one round: while the sandbox copies still carried the
+    originals' absolute paths, `record.admit` found the ORIGINAL workspace present and
+    reported this seed missed too. Fixed by `copy_run`; the honest count is now 2 of 3."""
     for d in sorted(sandbox.glob("*/workspace")):
         rmtree(d)
         return f"removed {d.relative_to(sandbox)}"
@@ -251,7 +343,7 @@ def main(argv: List[str]) -> int:
         pristine = root / "pristine"
         pristine.mkdir()
         for d in usable:
-            shutil.copytree(d, pristine / d.name)
+            copy_run(d, pristine / d.name)
         rc, out = check_against(pristine)
         adm_ok, adm_why = admit_against(pristine)
         rows.append({"seed": "-  PRISTINE copy (the control)", "what": "nothing changed",
@@ -265,13 +357,16 @@ def main(argv: List[str]) -> int:
             sb = root / label.split()[0]
             sb.mkdir()
             for d in usable:
-                shutil.copytree(d, sb / d.name)
+                copy_run(d, sb / d.name)
             what = fn(sb)
             rc, out = check_against(sb)
             adm_ok, adm_why = admit_against(sb)
             rows.append({"seed": label, "what": what, "check": rc,
                          "pre_existing": adm_ok, "pre_why": adm_why, "out": out})
-            if rc == 0:
+            # A seed is a FAILURE only when NO gate caught it. Requiring the banked check to
+            # catch every seed was the assertion that hid the measurement: it can only hold
+            # while the counterfactual is pointed at a directory the seeds are not in.
+            if rc == 0 and adm_ok:
                 ok = False
 
         # 5. THE TABLE. What each seed did, what the banked check said, and what the gate
@@ -286,16 +381,21 @@ def main(argv: List[str]) -> int:
             print(f"     {r['what']}")
 
         seeded = [r for r in rows if not r["seed"].startswith("-")]
-        caught_by_both = [r for r in seeded if r["check"] != 0 and not r["pre_existing"]]
         only_this = [r for r in seeded if r["check"] != 0 and r["pre_existing"]]
-        print(f"\n  {len(only_this)} of {len(seeded)} seeds are caught ONLY by the banked check; "
-              f"{len(caught_by_both)} are also caught by the gate that already existed.")
-        print("  The banked check's value is the former set. Stating the latter is the point "
-              "of measuring a counterfactual rather than asserting one.")
+        pre_caught = [r for r in seeded if not r["pre_existing"]]
+        neither = [r for r in seeded if r["check"] == 0 and r["pre_existing"]]
+        print(f"\n  {len(only_this)} of {len(seeded)} seeds are caught ONLY by the banked "
+              f"check - that set is its value.")
+        print(f"  {len(pre_caught)} of {len(seeded)} are caught by the gate that ALREADY "
+              f"existed (record.admit), which the banked check then skips as inadmissible - "
+              f"correctly: a record admission refuses is in no comparison.")
+        print(f"  {len(neither)} of {len(seeded)} are caught by NEITHER.")
+        print("  Stating the second number is the point of measuring a counterfactual "
+              "rather than asserting one. It read 0 until the seeds were measured in the "
+              "tree they were seeded into - see copy_run.")
 
-        for r in seeded:
-            if r["check"] == 0:
-                print(f"\nMISSED: seed '{r['seed']}' did not go red.\n{r.get('out', '')}")
+        for r in neither:
+            print(f"\nMISSED BY EVERY GATE: seed '{r['seed']}'.\n{r.get('out', '')}")
     finally:
         if ok and not keep:
             rmtree(root)
@@ -313,8 +413,10 @@ def main(argv: List[str]) -> int:
 
     if not ok:
         return 1
-    print("\nU3 GYM RUN: every seeded regression was caught by a durable check born from a "
-          "tester finding in a prior round, in the arena, with the counterfactual measured.")
+    print("\nU3 GYM RUN: every seeded regression was caught, in the arena, with the "
+          "counterfactual measured on the seeded copies - and the report says which gate "
+          "caught which. The seeds nothing already caught are the durable check's, and it "
+          "was born from a tester finding in a prior round.")
     return 0
 
 
