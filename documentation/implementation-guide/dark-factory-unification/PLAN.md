@@ -270,6 +270,33 @@ lower the bar, it moves who holds it.
   afterwards by reading those, not the diffs — so they must be true.
 - **Stop when every phase is done and validated, or every remaining one is
   parked.** Report which, with the list.
+
+- **CONVERGENCE CRITERION (operator, 2026-08-30) — the loop must be able to end.**
+  This effort ran a refute-and-fix loop with no termination rule, which is why
+  items reached six rounds. The rule:
+
+  > **Rounds end when TWO CONSECUTIVE rounds find no new defect CLASS.**
+  > A *sibling* of a class already found does **not** reset the counter —
+  > `on_indeterminate: warn` after `on_fire: warn` is the same class with a key
+  > renamed, and a fourth unguarded reader after three is the same class with a
+  > file renamed. A finding resets the counter only if a fix aimed at the
+  > previous class would not have prevented it.
+
+  When the counter reaches two, the phase **closes** on its evidence, or its
+  *Validated by* column is **amended** under §B and the phase **parks**. Both are
+  terminations; neither is "one more round".
+
+  **Log the round count per item** — an effort that cannot say how many rounds it
+  has run cannot tell convergence from thrashing. Counts at adoption:
+  U4 `dfu-u4`/`u4quad`/`u4oracle` 5 · `u4bidir` 3 · U5 personal-plane 5 (method
+  replaced at A2, counter reset) · U5 `u5proxy` 2 · U5 `u5judge` 2 ·
+  U6 `u6recall` 2 (closed) · U6 `u6dark` 6.
+
+  **Why siblings do not count:** the whole point of the rule is to distinguish
+  *learning* from *whack-a-mole*. Six rounds of `u6dark` produced four genuine
+  classes and two siblings; had the counter existed, the sibling rounds would have
+  been the signal to change the enforcement layer rather than the key — which is
+  exactly what A2 did for U5, one layer down.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says

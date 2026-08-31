@@ -839,3 +839,50 @@ WHY IT BELONGS HERE: it is the same shape as the U6 verdict computed by exceptio
           outside it. The generalisation this run keeps arriving at is that **a check must be
           able to say what it did NOT look at.**
 REVERT:   n/a — method.
+
+## 2026-08-30 · method · THE RULES WERE RIGHT AND APPLIED ONE LAYER TOO HIGH
+FINDING:  This effort extracted two rules and applied both correctly: *enforce at a chokepoint
+          that cannot be bypassed by omission*, and *a derived gate is only as wide as its
+          alphabet*. It then spent five rounds enforcing them **in application code** — finding
+          readers, guarding them, deriving the file list, widening the alphabet — while the
+          table's own access policy read `ALL / {service_role} / USING (true)`.
+          Four rounds enumerated readers of a table that permitted everything.
+WHAT THE MEASUREMENT SHOWED (orchestrator-run, 2026-08-30): `agent_memories` had RLS enabled,
+          `FORCE` **off**, owner `postgres`, and that one permissive policy; `thoughts` had RLS
+          **off entirely**; no `FORCE ROW LEVEL SECURITY` anywhere in OB1's SQL; no
+          session-variable tenancy; and `openbrain-postgrest` connects **as the owner**.
+RULE ADOPTED: before enumerating the callers of a resource, **ask what the resource itself
+          permits.** A chokepoint argument is only as good as the layer it is made at, and the
+          cheapest way to be wrong for a long time is to be rigorous one layer above the one
+          that decides. The question "what is the lowest layer that can express this
+          invariant?" comes BEFORE "have I found every caller?".
+COROLLARY: a completeness proof over callers is a proof about a set you enumerated. A database
+          predicate is a proof about a set you did not have to. When both are available, the
+          second retires the first — and the first becomes defence in depth, which is a
+          demotion worth making explicit so nobody mistakes it for the proof again.
+
+## 2026-08-30 · retrospective · THE EFFORT RAN THE LOOP ITS OWN PLAN EXISTS TO FIX
+OBSERVATION: five U5 rounds each rediscovered a NEIGHBOURING case — a different tool, a
+          different door, a second table, a wholesale projection, a file extension. Six `u6dark`
+          rounds did the same with outcome keys. That is precisely the behaviour of a system
+          **without cross-attempt recall**: each round re-derived the situation from the files
+          in front of it, fixed what it could see, and could not carry forward the *shape* of
+          what the previous round had learned.
+THE IRONY, recorded deliberately: A12 and §1's L5 build this plan on the AVO result that
+          **persistent typed memory carrying implementations, results and reasoning across
+          attempts is what converts attempts into progress**, plus a supervision loop that flags
+          stagnation. This effort ran that loop **on files** — briefs, findings notes, DECISIONS
+          entries, an orchestrator re-reading transcripts — while the memory plane it was
+          building held **4 rows**, all `ops`, and recall against it returned nothing useful
+          because threshold calibration is blocked on corpus size.
+WHY IT MATTERS BEYOND THE JOKE: it is the strongest available evidence FOR the plan's own
+          thesis, produced accidentally and at cost. The rounds that converged are the ones
+          where a *shape* was carried forward by hand — "enumerate-and-patch loses", "a derived
+          gate is only as wide as its alphabet", "siblings do not reset the counter". Every one
+          of those is exactly the kind of typed, reusable constraint the plane is designed to
+          hold and recall automatically. The effort demonstrated the need for its own
+          deliverable by doing without it.
+CONSEQUENCE: the convergence criterion added to §C.7 is the supervision half of that loop made
+          explicit — stagnation detection that does not depend on an orchestrator noticing.
+          The memory half remains blocked on corpus size, which is the honest reason U7 matters.
+REVERT:   n/a — retrospective.
