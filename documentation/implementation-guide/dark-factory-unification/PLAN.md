@@ -562,6 +562,73 @@ the amendment.
 shared registry file flips a live dispatch to `UnprovisionedHarness`. The harness direction is
 a declaration with zero executable consumers. One sentence must not cover both.
 
+#### A2 — 2026-08-30 · §2's U5 row · the invariant stands; its ENFORCEMENT LAYER is wrong
+
+**What is NOT amended, and must not be read as amended:**
+
+- The **AVO-derived memory architecture** this plan is built on — persistent memory carrying
+  implementations, results and reasoning forward across attempts, plus a supervision loop that
+  flags stagnation. That is the plan's basis and is untouched here.
+- The **exposure invariant** (memory-plane plan §1.1, operator-decided 2026-08-25): *a record's
+  maximum exposure equals the access plane of the context that wrote it.* Untouched. This
+  amendment makes it MORE enforceable, not less.
+
+**What IS amended:** §1.1's implementation clause — "a mirrored share-style label on the linked
+thought **so the generic `search_thoughts` lane enforces identically**". That clause put
+enforcement in each reader. U5's method followed it: find every reader, guard it, then prove the
+list complete. Five rounds; four separate homes for personal content; a derived file gate whose
+alphabet was `.ts` while five of fourteen scan roots ship `.mjs`.
+
+**The measurement that ends the argument** (orchestrator-run, 2026-08-30):
+
+- `agent_memories`: RLS **ENABLED**, owner `postgres`, `relforcerowsecurity = f`, `service_role`
+  has **no** `BYPASSRLS` — and the single governing policy is
+  `agent_memories_service_role_all | ALL | {service_role} | USING (true)`.
+- `thoughts`: `relrowsecurity = f`. RLS off entirely.
+- `service_role` grants on `agent_memories`: `INSERT, SELECT, UPDATE, DELETE, TRUNCATE,
+  REFERENCES, TRIGGER`.
+- No `FORCE ROW LEVEL SECURITY` in any OB1 SQL file; no session-variable tenancy anywhere
+  (`SET LOCAL` appears once, for `statement_timeout`).
+
+Four rounds enumerated readers of a table whose own access policy said *allow everything*. The
+rules the effort itself extracted — "enforce at a chokepoint that cannot be bypassed by
+omission" and "a derived gate is only as wide as its alphabet" — were correct, and were applied
+one layer too high.
+
+**The corrected enforcement layer, and it is the documented industry pattern, not our invention.
+Two INDEPENDENT axes:**
+
+1. **Tenancy is a COLUMN plus a session variable** — `user_id = current_setting(...)`, set with
+   `SET LOCAL` (never plain `SET`: a pooler leaks one request's context into the next). A
+   Postgres role *per tenant* is the documented anti-pattern — it does not scale past a modest
+   number of tenants. This DB already runs the column pattern: `auth.uid() = user_id` on
+   `household_items`, `recipes`, `meal_plans`, `shopping_lists`.
+2. **Access class is a ROLE** — the agent plane connects as a role whose policy sees only
+   `exposure='ops'`. This DB already runs that too, one table over: `recipes` grants
+   `household_member` read across a household *without that reader being a user*. It is also
+   PostgREST's own model (`anon` / `authenticated` / distinct application roles).
+
+**Agents therefore live on axis 2 and are never modelled as users** (operator decision,
+2026-08-30). Open Brain is to support real multiple humans; pseudo-user identities per agent,
+loosely linked to a primary user, do not scale and are ruled out.
+
+Also required by the pattern and absent today: `FORCE ROW LEVEL SECURITY` (the owner bypasses
+without it), reduced grants (`TRUNCATE` on a memory table is not a read-path requirement), the
+tenancy column as the leading index column, and PostgREST's own advice to expose **views rather
+than base tables**.
+
+**What this retires:** the derived file gate, the scan-root alphabet problem, the
+hand-enumerated door list, and the open-ended search for an n-th home. Under a database
+predicate the question does not arise — a reader nobody enumerated is bound anyway. The gate
+stays as defence in depth; it stops being the completeness proof.
+
+**Dependency:** memory-plane §1.1 is an OPERATOR decision in a separate repo. This amendment
+binds the DFU side; §1.1's own enforcement clause needs the operator's edit to match.
+
+**Revert path:** restore the enumerate-and-guard method; the branch work is unmerged, so
+reverting costs only the policy migration. Nothing in production changes until that migration
+is applied, and `agent_memories` holds 0 personal rows throughout.
+
 ## 3. What each system keeps (the pride audit)
 
 - **agent-org keeps:** the tiered-scope model, CDCL constraint learning, the
