@@ -841,6 +841,41 @@ the amendment.
 shared registry file flips a live dispatch to `UnprovisionedHarness`. The harness direction is
 a declaration with zero executable consumers. One sentence must not cover both.
 
+#### A3 — 2026-08-31 · §2's table · the duplicate-U4 history hole, dispositioned
+
+**Not an amendment to a column.** A disposition of an ambiguity in the table's HISTORY, recorded
+because `dfu-done.ps1` clause 2 correctly refused to reconstruct U4's chain across it.
+
+**What the record actually holds.** At revision `2151193`, §2's phase table contained TWO rows
+whose first cell begins `**U4`:
+
+| line | first cell | what it is |
+|---|---|---|
+| 512 | `**U4**` | the phase row — U4's *What* and its *Validated by* column |
+| 513 | `**U4 status (2026-08-30)**` | a STATUS ANNOTATION added mid-effort, reporting "PARTIALLY DONE, REMAINDER PARKED" |
+
+A chain reconstructor that extracts the phase id by prefix reads both as phase U4, sees two
+Validated-by columns for one id at one revision, and cannot say which is authoritative. That is
+the hole, and clause 2 was right to fail on it: an unreconstructable history is
+indistinguishable from an unrecorded one.
+
+**THE DISPOSITION.** The authoritative U4 row at that revision, and at every revision, is the one
+whose id cell is **exactly** `**U4**` — line 512. Line 513 was never a phase row; it carried
+status, which §C.7's rules place in DECISIONS.md and the walkthrough, not in the anchor. It was
+removed later, and the current tip has exactly one U4 row.
+
+**THE MECHANICAL HALF, so this cannot recur.** `dfu-done.ps1`'s phase-table parser must match the
+id cell **exactly** (`**U<n>**`), not by prefix, so a status or commentary row can never be read
+as a phase. A row that looks like a phase id but is not one must be ignored, and a genuine
+duplicate — the same exact id twice — must still REFUSE. Both cases need a drill case.
+
+**Why it happened, and it is this effort's own class:** status was written into the anchor. §C.1
+makes the plan the confirmed anchor, and an anchor that also carries running status will drift,
+because status changes and anchors must not. The rule that follows: **the phase table holds the
+task and its validation; nothing else.**
+
+**Revert:** none — the history is unchanged and this entry only says how to read it.
+
 #### A2 — 2026-08-30 · §2's U5 row · the invariant stands; its ENFORCEMENT LAYER is wrong
 
 **What is NOT amended, and must not be read as amended:**
