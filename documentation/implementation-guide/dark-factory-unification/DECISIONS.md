@@ -1373,3 +1373,71 @@ reconciled, not both merged.
 
 **Class list now twelve**, adding: *an exemption whose safety rests on a check the same guard
 declines to make.*
+
+## 2026-08-31 · NEW CLASS · A CHECKER THAT DERIVES ITS POPULATION FROM THE DOCUMENT UNDER TEST
+FINDING: `dfu-done.ps1` takes its subject set — the phases it evaluates for clauses 1, 2 and 7 —
+          from the CURRENT `PLAN.md` (`:1116`, `:739`), and `Get-PhaseTable` (`:485`) matches the
+          literal `| **Un**`. So the document being audited decides how much of itself is
+          audited:
+ - deleting U1's row from §2's table -> clause 2 = **met**, coverage "1/1", no probe, no
+   `not_evaluated` entry, and U1's chain never reconstructed. Clause 1's expected count drops
+   3 -> 2 in silence;
+ - **merely removing the bold** — `| **U1** |` becoming `| U1 |` — drops the row from the parser
+   **while it remains visible in the document**, and clause 7 flips unmet -> met, coverage
+   "1 of 1".
+**Coverage still reads "N of N", because N shrank.** §C.8.1 names U0–U6 literally, and nothing
+          asserted those rows exist.
+WHY IT IS A NEW CLASS: every prior class is about a check that looks in the wrong place, at the
+          wrong thing, or with too narrow an alphabet. This one is about a check whose **SCOPE
+          is an output of its own subject**. A fix aimed at "an alphabet too narrow" widens what
+          is examined per subject; it does not stop a subject leaving the list. A fix aimed at
+          "green while checking nothing" makes each probe falsifiable; each probe here IS
+          falsifiable — there were simply fewer of them.
+GENERAL FORM: **when a checker's population is derived from the artifact under test, the
+          artifact can silence the checker, and every coverage metric computed from that
+          population is self-confirming.** The tell is a denominator that moves. Ask of any
+          check: *who decides how many things I am supposed to look at, and can the thing I am
+          auditing change that number?*
+THE FIX, and it was already present one clause over: clause 3 pins its door set and re-checks it
+          against the plan's words (`door-set-matches-plan`). The same pinned floor now applies
+          to clauses 1, 2 and 7, with §C.8.1's literal U0–U6 as the floor — a phase in the floor
+          but missing from the table is a FAILURE, never a smaller population.
+IRONY WORTH KEEPING: this is §C.8 clause 2's own concern — a requirement quietly leaving the set
+          while every step looks defensible — occurring inside the script written to enforce
+          clause 2.
+
+## 2026-08-31 · FOURTH INSTANCE · "fixed one, left the sibling"
+`dfu-done.ps1:1982` decides gitlink reachability with a raw substring test over the whole
+`git ls-remote origin` output (`$lr.stdout -match [regex]::Escape($pin)`) rather than matching
+the SHA COLUMN. Demonstrated: a bare remote that does NOT contain the pinned commit, carrying a
+single tag NAMED after that sha, produced `gitlink-reachable-on-remote = pass`. In production
+terms, `git tag rollback-$(git rev-parse HEAD)` on the OB1 remote turns the gate green for a
+commit a fresh `--recurse-submodules` clone could not fetch.
+**Round 2 replaced this exact substring-for-structure test in clause 2 and left it in clause 4.**
+
+The running tally of this shape in one effort:
+1. `on_fire` fixed, `on_indeterminate` left (U6).
+2. The agent-memory READ tools fixed, `performReview` left (U5).
+3. The gitlink DIFF reader fixed, the `.gitmodules` reader left in the same library (gitreach).
+4. Clause 2's substring test fixed, clause 4's left (dfu-done).
+
+RULE ADOPTED: **when a defect is named, grep for its shape across the whole artifact before
+declaring it fixed.** Four times the fix was correct and local, and four times the identical
+construct sat a few hundred lines away. Naming a pattern is only useful if the next action is a
+search, not an edit — and the search is cheap precisely because the pattern has a name.
+
+## 2026-08-31 · clause 3 · TWINS MUST DIFFER ONLY IN THE VARIABLE UNDER TEST
+The positive-control rule adopted last round was implemented, and then defeated by the control
+itself: `door-cloud-search-thoughts` gave the ops twin `share=cloud` and the personal fixture
+none, while the cloud gateway's forced filter is **`share`**, not `exposure`
+(`openbrain-gateway/app.py:83`). So the door "passed" on the wrong variable, and a thought with
+`exposure=personal` AND `share=cloud` **is returned by that door, HTTP 200** — proved live.
+Corollary to the positive-control rule: **the twins must be identical except for the one field
+the door is supposed to bind on.** A control that differs in two variables measures neither.
+Also found: two doors read an unfiltered newest-first `limit:25` window, and because the personal
+fixture is written BEFORE the ops twin it is always the first of the pair truncated — so
+concurrent ingest manufactures the exact signature of a refusal. And the `agent_memories` door
+never verified its fixture INSERT landed, so a write-side boundary rejecting `exposure='personal'`
+— the direction U5 round 4 is briefed to build — would make the door pass by absence.
+**Verify a fixture landed before asserting on its absence: a positive control on the WRITE, not
+only on the read.**
