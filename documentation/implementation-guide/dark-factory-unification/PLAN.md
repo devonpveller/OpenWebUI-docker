@@ -521,16 +521,33 @@ staged.
   commits ahead of `origin`. *Validated by:* `git rev-list origin/<line>..<line>`
   returns 0. Autonomous under §C.2; not a promotion.
 
-**Operator decision inside H3 — typed exposure column vs. hardened default.**
-The hardened-standard form is a typed, constrained column
-(`exposure NOT NULL CHECK (exposure IN ('ops','personal'))`), which makes
-"unlabelled" and "misspelled" impossible at write time rather than defaulted at
-read time — the same treatment tenancy already got. The cost is a schema
-migration on live tables with existing writers, changing the write contract for
-every producer. The lighter form keeps the jsonb key and adds a NOT-NULL/CHECK
-guard or a rejecting trigger. This is a real trade — invasiveness vs. closing
-the soft spot at the type level — and it is the operator's call, recorded here
-as OPEN until they make it. Until then H3 is specified but not implemented.
+**Operator decision inside H3 — DECIDED 2026-08-31: OPTION A, typed column.**
+`exposure` becomes a typed, constrained column
+(`exposure NOT NULL CHECK (exposure IN ('ops','personal'))`) on both
+`agent_memories` and `thoughts`, making "unlabelled" and "misspelled" impossible
+at write time rather than defaulted at read time — the same treatment tenancy
+(`user_id`) already got. The operator's stated reasoning: exposure is a security
+discriminator and the two halves of one access model must not live at different
+strengths; a jsonb key beside a typed tenancy column is an inconsistency, not a
+design. The one-time migration cost and the changed write contract are accepted
+deliberately — forcing every producer to state exposure explicitly is the intent,
+not a side effect.
+
+Implementation notes binding on H3:
+- The column is the source of truth. The RLS predicates
+  (`ob_memory_on_ops_plane`, `ob_corpus_on_ops_plane`) read the COLUMN, not
+  `metadata->>'exposure'`. Migrate existing rows from the jsonb key into the
+  column first (all live `thoughts` are already `ops`; agent_memories is small),
+  and keep the predicates fail-closed throughout the cutover so no window opens.
+- Backfill BEFORE adding `NOT NULL`, or the ALTER fails on existing rows.
+- Every write path — the ops door, the REST twins, any direct writer — supplies
+  the column. A writer that does not is rejected by the CHECK, which is the point.
+- The `metadata.exposure` key may remain as a mirrored convenience for readers
+  that already parse it, but it is no longer authoritative and nothing may make
+  a trust decision on it. Prefer removing it once no reader depends on it.
+- *Validated by:* a run that attempts an insert with no exposure and one with a
+  malformed value, and shows the DATABASE rejects both; plus the personal-row
+  door-attack (clause 3's run) still green against the column-based predicates.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
