@@ -113,12 +113,20 @@ into the committed set, by the committed code:
       COMPLETED claude-code  x self
       COMPLETED claude-code  x project                                   exit 0
 
-    $ python -m quadrant.cli report --results-dir documentation/evidence/dfu-u4/quadrant
+    $ python scripts/agent-harness/quadrant/cli.py report \
+        --results-dir documentation/evidence/dfu-u4/quadrant
       **COMPARED 4/4**                                                   exit 0
       | little-coder x self    | completed | 2/2 | 65.5 |
       | little-coder x project | completed | 2/2 | 65.8 |
       | claude-code  x self    | completed | 2/2 | 35.4 |
       | claude-code  x project | completed | 2/2 | 35.2 |
+
+    (COMMAND FORM. The `python -m quadrant.cli ...` spelling every earlier round wrote -
+     including the `run-all` line above, which was run that way - needs
+     `scripts/agent-harness` as the WORKING DIRECTORY. From the repository root it answers
+     `No module named 'quadrant'`, and WALKTHROUGH.md line 10 requires that "every command
+     in this file must run AS WRITTEN, from the repository root". The file-path form above
+     runs from the root. Found by running it in a fresh clone, not by reading it.)
 
     $ ./scripts/agent-harness/observe-oracle-on-stall.ps1 `
         -ResultsDir documentation/evidence/dfu-u4/stall -LeaseOwner wt-u4close
@@ -143,6 +151,49 @@ speak about any ledger row that was there before it started.
 wt-u4close`); each little-coder cell mirrors a workspace into the container, which wipes what
 is there. The daemon's prior focus (`https://github.com/anthropics/skills`) is restored by the
 adapter and was confirmed restored afterwards.
+
+---
+
+## 2b. The clone proof — and precisely what it does and does not establish
+
+The claim this round exists to make true is *"a fresh clone can re-derive U4's verdict"*.
+So it was run:
+
+    $ git -c core.longpaths=true clone --branch work/u4close --single-branch \
+        --no-recurse-submodules "D:/Open WebUI/ai-stack" <tmp>/cloneproof
+    $ cd <tmp>/cloneproof && git rev-parse HEAD
+      a17b0b26869a0854f48d5948b98739dc9b1a2191
+
+    $ ls -a | grep -c quadrant
+      0                          # `.quadrant/` correctly absent - it is working state
+
+    $ python scripts/agent-harness/quadrant/cli.py report \
+        --results-dir documentation/evidence/dfu-u4/quadrant
+      (this results set is PINNED to venue 'gym' at D:\Open WebUI\ai-orchestration-gym;
+       the venue resolved for this invocation differs: path '<tmp>/...' vs pinned '...'.
+       The pin STANDS - the report below renders the pin, not the venue you passed)
+      **COMPARED 4/4**                                                          exit 0
+
+    $ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+      7 outcome record(s) re-derived their verdict from the evidence they kept  exit 0
+
+The venue-pin warning is the mechanism working: a clone resolves a different arena path, and
+the report renders the PIN rather than today's configuration.
+
+**What this does NOT establish, and I nearly claimed it did.** I then stripped
+`check_template` from one record in the clone and re-ran, expecting NOT REPRODUCIBLE. It
+**passed** — because the fallback path, the absolute `check` recorded at run time, still
+resolves *on this machine*: `D:\...\wt-u4close\...\guards.py` exists, because this
+worktree has not been removed yet. So the clone run passes today for **two independent
+reasons**, and once this worktree is gone it will pass for **one**. That is exactly why the
+template exists — and it means the clone run alone does not discriminate between them.
+
+The claim that the template is load-bearing rests on
+`test_a_record_whose_recorded_command_died_with_its_worktree_re_derives_from_the_template`,
+which points `check` at `C:/gone-with-the-worktree/python.exe` and is RED without the fix.
+Recorded this way round because *"the clone passed, therefore the template works"* is the
+adjacency error §4 of `u4bidir-merge-guard.md` names: a verified result standing next to an
+unverified inference lends it credit it did not earn.
 
 ---
 
@@ -312,6 +363,13 @@ the only thing it set out to do.
   check born from a tester finding"*) is on the line. Not touched here: U3 is not this
   session's item, and the correct direction needs the gym drill re-run, which is a second
   arena run. Recorded so the next reader does not have to rediscover it.
+- **A BEL character (0x07) reached an audit document and was invisible in every view of
+  it.** A shell heredoc wrote `D:\Open WebUI\ai-orchestration-gym` through a non-raw
+  Python string, so `\a` became 0x07: the file read `D:\Open WebUI<BEL>i-orchestration-gym`,
+  `sed`, `grep` and the terminal all rendered it as `D:\Open WebUIi-orchestration-gym`,
+  and a string search for the visible text did not match. Fixed by matching on `chr(7)`.
+  Worth recording because §C.6 makes these files the thing an operator audits INSTEAD of
+  the diff, and a corrupt path in one is a corrupt instruction.
 - **`scripts/agent-harness/u3_evidence_regression_gym.py` reads a results set.** Now that the
   U4 evidence lives at `documentation/evidence/dfu-u4/quadrant`, whoever re-runs the U3 drill
   should point it there rather than at the ignored `.quadrant/`, or it will find nothing for

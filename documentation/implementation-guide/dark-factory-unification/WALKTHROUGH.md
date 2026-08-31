@@ -107,8 +107,13 @@ a location a clone can read, and corrected two premises that had gone stale.
 
 ### What the machine says now — run it yourself
 
+Every command below runs **as written, from the repository root** (this file's
+rule, line 10). The `python -m quadrant.cli` form used in earlier rounds does not:
+it needs `scripts/agent-harness` as the working directory, and from the root it
+answers `No module named 'quadrant'`. Caught by running it in a clone.
+
 ```
-$ python -m quadrant.cli report --results-dir documentation/evidence/dfu-u4/quadrant
+$ python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant
 **COMPARED 4/4**
 | little-coder x self    | completed | 2/2 | 65.5 | 1/2/0 | 1 changed | mechanical |
 | little-coder x project | completed | 2/2 | 65.8 | 1/2/0 | 1 changed | mechanical |
@@ -124,6 +129,14 @@ $ ./scripts/agent-harness/observe-oracle-on-stall.ps1 `
   3 real dispatches of the unsatisfiable item; round 3 STALLED (2 rounds, no new information)
   ORACLE-ON-STALL: little-coder/local-default -> claude-code/opus, hand back to little-coder
   ledger row 417aa274750da712 - APPENDED BY THIS RUN (0 rows before, 1 after)   exit 0
+
+$ git clone --branch work/u4close --single-branch <this repo> /tmp/proof && cd /tmp/proof
+$ python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant
+  (this results set is PINNED to venue 'gym' at D:\Open WebUI\ai-orchestration-gym;
+   the venue resolved for this invocation differs ... The pin STANDS)
+  **COMPARED 4/4**                                                     exit 0
+$ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+  7 outcome record(s) re-derived their verdict                         exit 0
 ```
 
 **Validated by (§2):** *"same anchored item run per quadrant (runner × target), outcomes
