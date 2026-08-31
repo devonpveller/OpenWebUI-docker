@@ -288,6 +288,29 @@ function Assert-ClauseNotMet {
     return $c
 }
 
+function Add-FixtureCommit {
+    # A FIXTURE SETUP STEP THAT SILENTLY FAILS MAKES A NEGATIVE ASSERTION PASS FOR THE WRONG
+    # REASON, and this drill had one. `git commit -m "<subject>`n`n<body>"` passed through
+    # PowerShell 5.1's native-argument handling was SPLIT AT THE NEWLINES: git read the body
+    # as pathspecs, printed `error: pathspec ... did not match any file(s)`, exited 1 - and
+    # every call site wrote `[void](Invoke-InDir ...)`, which discards the exit code. Step X4a
+    # then "proved" that a co-mention does not discharge a phase against a repository which
+    # contained no such commit at all: the assertion was true, and it was true of nothing.
+    # That is this effort's own recurring class, inside the thing that exists to catch it.
+    #
+    # So: one -m per paragraph (git joins them with a blank line, which is the shape the
+    # authority parses), and THE EXIT CODE IS ASSERTED. A fixture that did not get built is a
+    # red here, never a quiet pass downstream.
+    param([string]$Step, $Fx, [string[]]$Message)
+    $argv = @("commit", "-q")
+    foreach ($m in $Message) { $argv += "-m"; $argv += $m }
+    $r = Invoke-InDir -Dir $Fx.root -Exe "git" -Arguments $argv
+    [void](Assert-That -What ("[{0}] the fixture commit landed: '{1}'" -f $Step, $Message[0]) `
+        -Condition ($r.exit -eq 0) `
+        -Detail ("exit={0} out={1}" -f $r.exit, (($r.out -replace '\s+', ' ').Trim())))
+    return $r
+}
+
 Write-Host ""
 Write-Host "=========================================================================" -ForegroundColor Cyan
 Write-Host " VERIFY-DFU-DONE - can the done-authority actually fail?" -ForegroundColor Cyan
@@ -1317,13 +1340,17 @@ try {
                     [string]$p.note -notmatch "DECISIONS" -and [string]$p.note -notmatch "findings note") `
         -Detail ("note: {0}" -f $(if ($p) { $p.note } else { "<missing>" })))
 
-    # AND THE POSITIVE: a message that names the phase AND the check satisfies it. A gate
-    # that can only fail is a wall.
+    # AND THE POSITIVE: a message carrying a validation CLAIM - the phase and the check in
+    # ONE statement - satisfies it. A gate that can only fail is a wall, and the shape this
+    # accepts is the directive shape the ledger already uses for un-parking and for the
+    # clause-4 carve-out. Round 5 tightened this from two independent substring searches over
+    # the whole message, so this fixture STATES the claim instead of co-mentioning its halves.
     [System.IO.File]::WriteAllText((Join-Path $fx.root "documentation\notes\dfu-drill-note2.md"),
         "# more about U0 U1 U2 U3 U4 U5 U6`n`nbody`n", [System.Text.UTF8Encoding]::new($false))
     [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
-    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m",
-        "U0 U1 U2 U3 U4 U5 U6: validated by verify-the-thing.ps1 re-running green"))
+    [void](Add-FixtureCommit -Step "I2" -Fx $fx -Message @(
+        "the phase columns close",
+        "Validated: U0 U1 U2 U3 U4 U5 U6 - each column re-runs green, by verify-the-thing.ps1"))
     $r2 = Invoke-Target -Params @{
         Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
         PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
@@ -1784,7 +1811,11 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $fx.root "scripts\checks") -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $fx.root "scripts\checks\dfu-done.ps1"), "# checker`n", [System.Text.UTF8Encoding]::new($false))
     [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
-    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "U0: verify-the-thing.ps1 - raise the bar for done"))
+    # IT MUST BE A CANDIDATE UNDER THE CLAIM RULE, or the self-exclusion this step exists to
+    # test is never reached: round 5 made a validation CLAIM the entry condition, so a commit
+    # that merely co-mentions is rejected one step earlier, for a different reason.
+    [void](Add-FixtureCommit -Step "X3" -Fx $fx -Message @(
+        "raise the bar for done", "Validated: U0 by verify-the-thing.ps1"))
     $r = Invoke-Target -Params @{
         Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
         PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
@@ -1801,6 +1832,413 @@ try {
     [void](Assert-That -What "[X3b] a note that only MENTIONS the phase is not a findings note for it" `
         -Condition ($null -ne $p -and [string]$p.note -match "findings note") `
         -Detail ("note: {0}" -f $(if ($p) { $p.note } else { "<missing>" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# THE V-SERIES - CLASS FIFTEEN: THE AUTHORITY ACTS ON THE DOCUMENT'S INSTRUCTION, THEN
+# MEASURES THE WORLD IT LET THE DOCUMENT CHANGE.
+#
+# These two steps are the ONLY ones in this drill that assert on what the authority DID
+# rather than on what it concluded, because that is what the class is about. Each runs the
+# FULL authority (no -Only), because the defect is an ORDERING one - clause 1 and clause 5
+# execute the document's commands, and clauses 4 and 7 measure afterwards - and a narrowed
+# run cannot express it.
+#
+#   V1  CONTAINMENT. A `## U0` section whose How-to-run marker writes a findings note into
+#       the audited tree. On the demonstrated defect the file did not exist before the run
+#       and did after, the row's check reported `exit 0 - re-runs green`, and clause 7's
+#       audit-trail-U0 fell from exit 3 to exit 2: the findings-note artifact discharged by
+#       a file the run itself created.
+#   V2  EFFECT-NULLIFICATION, where containment CANNOT hold. The write-lock covers the
+#       documents and the notes directory; it does not cover `.git`, because denying writes
+#       there would break the very git commands clause 4 runs. So V2's command CREATES A
+#       BRANCH in the audited repository and succeeds - and the point of the step is that
+#       succeeding changes nothing: clause 4 decides over the pre-run snapshot, the branch
+#       is absent from its answer, and the run's own integrity record turns the board
+#       UNACCOUNTED. A wall you can walk around is not the fix; not reading the far side is.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP V1 class 15 - a walkthrough command that writes a findings note into the audited tree" -ForegroundColor Cyan
+$fx = $null
+try {
+    $planE = New-PlanText -Validated @{ U0 = "verify-the-thing.ps1 re-runs green" }
+    $fx = New-FixtureRepo -Plan $planE -Decisions "# d`n`n## U1 U2 U3 U4 U5 U6 - the other phases`nnote`n" -Walkthrough "# w`n"
+    $notePath = (Join-Path $fx.root "documentation\notes\u0-findings.md")
+    $wt = "# w`n`n## U0`n`n**How to run:** ``cmd /c echo ## U0 findings > `"$notePath`"```n**Evidence:** none`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "WALKTHROUGH.md"), $wt, [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "walkthrough: U0 names a check that writes a note"))
+    [void](Assert-That -What "[V1] the fixture starts WITHOUT the note the command would create" `
+        -Condition (-not (Test-Path -LiteralPath $notePath)) -Detail $notePath)
+    $r = Invoke-Target -Params @{
+        RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+        ManualResults = (Join-Path $fx.root "no-such-manual.json")
+    }
+    $c5 = Assert-ClauseNotMet -Step "V1" -ClauseId "5" -Json $r.json -Because "the row's named check tries to write into the audited tree"
+    $p5 = Get-Probe -Clause $c5 -Name "walkthrough-U0-check-1"
+    [void](Assert-That -What "[V1] the command was CONTAINED - its probe is not a pass" `
+        -Condition ($null -ne $p5 -and [string]$p5.verdict -ne "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p5) { $p5.verdict } else { "<missing>" }), $(if ($p5) { $p5.note } else { "" })))
+    [void](Assert-That -What "[V1] and the note it tried to write does NOT exist in the audited tree" `
+        -Condition (-not (Test-Path -LiteralPath $notePath)) `
+        -Detail ("{0} exists: {1}" -f $notePath, (Test-Path -LiteralPath $notePath)))
+    $c7 = Get-Clause -Json $r.json -Id "7"
+    $p7 = Get-Probe -Clause $c7 -Name "audit-trail-U0"
+    [void](Assert-That -What "[V1] clause 7 STILL reports no findings note for U0 - nothing the run did discharged it" `
+        -Condition ($null -ne $p7 -and [string]$p7.verdict -eq "fail" -and [string]$p7.note -match "no findings note") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p7) { $p7.verdict } else { "<missing>" }), $(if ($p7) { $p7.note } else { "" })))
+    # DISCLOSURE. The command set is reported, and it ran somewhere that is not the repo.
+    $ex = @($r.json.executed_commands)
+    [void](Assert-That -What "[V1] the executed command set is REPORTED, so a reader sees what the authority did" `
+        -Condition ($ex.Count -ge 1 -and (@($ex | ForEach-Object { [string]$_.command }) -join " ") -match "u0-findings") `
+        -Detail ("executed: {0}" -f ((@($ex | ForEach-Object { [string]$_.command })) -join " | ")))
+    [void](Assert-That -What "[V1] every executed command ran in the clean checkout, NOT in the audited repository" `
+        -Condition ($ex.Count -ge 1 -and @($ex | Where-Object { [string]$_.ran_in -eq $fx.root }).Count -eq 0) `
+        -Detail ("ran_in: {0}" -f ((@($ex | ForEach-Object { [string]$_.ran_in })) -join " | ")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+
+# =================================================================================
+# STEP V1b - THE SAME ATTACK, WITH THE LOCK REMOVED FROM THE BOARD. V1's command is stopped
+# by the write-lock, which means V1 alone proves CONTAINMENT and says nothing about the
+# SNAPSHOT. So this step points the notes directory somewhere that does not exist when the
+# snapshot is taken - a directory the lock therefore cannot cover, because there is nothing
+# to apply an ACE to - and lets the command CREATE IT. The note really does appear (asserted,
+# so the step cannot pass against a command that never ran), and clause 7 still reports NO
+# FINDINGS NOTE for U0, because it is deciding over bytes read before the first command.
+#
+# This is the exact defect from the report - `audit-trail-U0` exit 3 -> exit 2, discharged by
+# a file the run created - and it is the half that a wall could never have fixed.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP V1b class 15 - the note IS created, and it still discharges nothing" -ForegroundColor Cyan
+$fx = $null
+try {
+    $planE = New-PlanText -Validated @{ U0 = "verify-the-thing.ps1 re-runs green" }
+    $fx = New-FixtureRepo -Plan $planE -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+    # A notes directory that does NOT exist at snapshot time - so there is nothing to lock.
+    $findings = (Join-Path $fx.root "documentation\findings")
+    $notePath = (Join-Path $findings "u0-findings.md")
+    $wt = "# w`n`n## U0`n`n**How to run:** ``cmd /c mkdir `"$findings`" & echo # U0 findings > `"$notePath`"```n**Evidence:** none`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "WALKTHROUGH.md"), $wt, [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "walkthrough: U0 names a check that creates its own findings note"))
+    [void](Assert-That -What "[V1b] the fixture starts with NO findings directory at all" `
+        -Condition (-not (Test-Path -LiteralPath $findings)) -Detail $findings)
+    $r = Invoke-Target -Params @{
+        RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = $findings
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+        ManualResults = (Join-Path $fx.root "no-such-manual.json")
+    }
+    # THE POSITIVE CONTROL FOR THE STEP: the write LANDED. Without this the step would pass
+    # just as happily against a command that was blocked, which is what V1 already covers.
+    [void](Assert-That -What "[V1b] the command really did create the findings note - the lock could not cover this path" `
+        -Condition (Test-Path -LiteralPath $notePath) -Detail ("{0} exists: {1}" -f $notePath, (Test-Path -LiteralPath $notePath)))
+    $c7 = Get-Clause -Json $r.json -Id "7"
+    $p7 = Get-Probe -Clause $c7 -Name "audit-trail-U0"
+    [void](Assert-That -What "[V1b] clause 7 STILL reports NO FINDINGS NOTE - it decided over the pre-run snapshot" `
+        -Condition ($null -ne $p7 -and [string]$p7.verdict -eq "fail" -and [string]$p7.note -match "no findings note") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p7) { $p7.verdict } else { "<missing>" }), $(if ($p7) { $p7.note } else { "" })))
+    [void](Assert-That -What "[V1b] and the run REFUSES to be an authority, because it moved what it measured" `
+        -Condition ($null -ne $r.json -and (-not $r.json.integrity.ok) -and [string]$r.json.board -eq "unaccounted") `
+        -Detail ("board={0} integrity={1}" -f $(if ($r.json) { $r.json.board } else { "?" }), $(if ($r.json) { ($r.json.integrity | ConvertTo-Json -Compress -Depth 4) } else { "?" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP V2 class 15 - a walkthrough command that SUCCEEDS in changing the audited repository" -ForegroundColor Cyan
+$fx = $null
+try {
+    $planV2 = New-PlanText -Validated @{ U0 = "verify-the-thing.ps1 re-runs green" }
+    $fx = New-FixtureRepo -Plan $planV2 -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+    $wt2 = "# w`n`n## U0`n`n**How to run:** ``git -C `"$($fx.root)`" branch work/drill-injected```n**Evidence:** none`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "WALKTHROUGH.md"), $wt2, [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "walkthrough: U0 names a check that branches the audited repo"))
+    $before = (Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("for-each-ref", "--format=%(refname:short)", "refs/heads/work/")).out
+    [void](Assert-That -What "[V2] the fixture starts with NO work/* branch" -Condition (-not $before.Trim()) -Detail ("before: {0}" -f $before))
+    $r = Invoke-Target -Params @{
+        RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+        ManualResults = (Join-Path $fx.root "no-such-manual.json")
+    }
+    # THE POSITIVE CONTROL FOR THE STEP ITSELF: the channel is real, the command DID land.
+    # Without this the step would pass just as happily against a command that never ran.
+    $after = (Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("for-each-ref", "--format=%(refname:short)", "refs/heads/work/")).out
+    [void](Assert-That -What "[V2] the command really did create the branch - the channel this step tests is real" `
+        -Condition ($after -match "work/drill-injected") -Detail ("after: {0}" -f $after))
+    $c4 = Get-Clause -Json $r.json -Id "4"
+    $p4 = Get-Probe -Clause $c4 -Name "no-unmerged-work-branches"
+    [void](Assert-That -What "[V2] clause 4's answer does NOT contain the branch the run created - it decided over the snapshot" `
+        -Condition ($null -ne $p4 -and [string]$p4.note -notmatch "drill-injected") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p4) { $p4.verdict } else { "<missing>" }), $(if ($p4) { $p4.note } else { "" })))
+    # THE CLAUSES RUN IN ORDER 1..8, so it is CLAUSE 1 that executes this command first and
+    # clause 1 where the contamination lands. That ordering is the defect's own mechanism -
+    # asserting on clause 5 here would be measuring the second run of an already-created
+    # branch, which is a different and much weaker fact.
+    $c1 = Assert-ClauseNotMet -Step "V2" -ClauseId "1" -Json $r.json -Because "the phase's check changed the audited repository"
+    $p1 = Get-Probe -Clause $c1 -Name "U0-validated-by-1"
+    [void](Assert-That -What "[V2] the probe for that command FAILS on contamination, whatever its exit code was" `
+        -Condition ($null -ne $p1 -and [string]$p1.verdict -eq "fail" -and [string]$p1.note -match "CHANGED THE AUDITED TREE") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p1) { $p1.verdict } else { "<missing>" }), $(if ($p1) { $p1.note } else { "" })))
+    $pu = Get-Probe -Clause $c1 -Name "U0-left-the-audited-tree-unchanged"
+    [void](Assert-That -What "[V2] and the per-phase containment probe FAILS and names what moved" `
+        -Condition ($null -ne $pu -and [string]$pu.verdict -eq "fail" -and [string]$pu.note -match "git:refs") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pu) { $pu.verdict } else { "<missing>" }), $(if ($pu) { $pu.note } else { "" })))
+    [void](Assert-That -What "[V2] the run's INTEGRITY record is false and names the drift" `
+        -Condition ($null -ne $r.json -and (-not $r.json.integrity.ok) -and @($r.json.integrity.per_command_drift).Count -ge 1) `
+        -Detail ("integrity: {0}" -f ($r.json.integrity | ConvertTo-Json -Compress -Depth 4)))
+    [void](Assert-That -What "[V2] and the board is UNACCOUNTED - a run that moved what it measured is not offered as an authority" `
+        -Condition ($null -ne $r.json -and [string]$r.json.board -eq "unaccounted" -and (-not $r.json.done)) `
+        -Detail ("board={0} done={1}" -f $(if ($r.json) { $r.json.board } else { "?" }), $(if ($r.json) { $r.json.done } else { "?" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# THE Q-SERIES - THE FIFTH "FIXED ONE, LEFT THE SIBLING". `Remove-NonProse` had ONE call
+# site in 3,866 lines, inside Get-DfuSection, which serves PLAN.md alone. So round 4's own
+# comment attacks worked unchanged against WALKTHROUGH.md and DECISIONS.md. Each step below
+# is one of them, one file over.
+#   Q1  five WALKTHROUGH phase sections inside a CLOSED comment -> clause 5 read "met, 8 of 8"
+#   Q2  a commented `## ` entry carrying an Un-parks directive -> a PARKED entry closed
+#   Q3  a commented `## ... clause 4 exclusion` entry -> the carve-out granted, unmerged 8 -> 7
+#   Q4  a commented ledger heading -> clause 7's ledger artifact discharged
+#   Q5  an UNTERMINATED `<!--`, which defeated comment-stripping outright: the regex requires
+#       the closer, so a row deleted from section 2 and copied after a bare opener was read
+#       as a row. A malformed comment must FAIL CLOSED.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP Q1 clause 5 - five walkthrough phase sections inside an HTML comment" -ForegroundColor Cyan
+$fx = $null
+try {
+    $hidden = ""
+    foreach ($n in 0..4) { $hidden += "## U$n`n`n**How to run:** ``cmd /c exit 0```n**Evidence:** none`n`n" }
+    $wt = "# w`n`n<!--`n$hidden-->`n`n## U5`n`n**How to run:** ``cmd /c exit 0```n**Evidence:** none`n`n## U6`n`n**How to run:** ``cmd /c exit 0```n**Evidence:** none`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough $wt
+    $r = Invoke-Target -Params @{
+        Only = 5; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "Q1" -ClauseId "5" -Json $r.json -Because "five of its phase sections are inside an HTML comment"
+    $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+    [void](Assert-That -What "[Q1] phase-floor-present FAILS and names the hidden phases - a commented section is not a section" `
+        -Condition ($null -ne $pf -and [string]$pf.verdict -eq "fail" -and [string]$pf.note -match "U0" -and [string]$pf.note -match "U4") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+    $p0 = Get-Probe -Clause $c -Name "walkthrough-U0-names-a-check"
+    [void](Assert-That -What "[Q1] U0 reports NO SECTION AT ALL, and its commented command was never executed" `
+        -Condition ($null -ne $p0 -and [string]$p0.verdict -eq "indeterminate" -and [string]$p0.note -match "NO section") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p0) { $p0.verdict } else { "?" }), $(if ($p0) { $p0.note } else { "" })))
+    $ex = @($r.json.executed_commands)
+    [void](Assert-That -What "[Q1] and the authority executed only the VISIBLE rows' commands" `
+        -Condition (@($ex | Where-Object { @("U0","U1","U2","U3","U4") -contains [string]$_.phase }).Count -eq 0) `
+        -Detail ("phases executed: {0}" -f ((@($ex | ForEach-Object { [string]$_.phase })) -join ",")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP Q2 clause 2 - a PARKED entry 'closed' by an entry inside an HTML comment" -ForegroundColor Cyan
+$fx = $null
+try {
+    $dec = "# d`n`n## 2026-08-30 - U0 - PARKED - the gym run is not observed`nwhy`n`n<!--`n## 2026-08-31 - U0 - the closing entry`n**Un-parks:** 2026-08-30 - U0 - PARKED - the gym run is not observed`n-->`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions $dec -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+    }
+    $c = Assert-ClauseNotMet -Step "Q2" -ClauseId "2" -Json $r.json -Because "the only entry closing its PARKED entry is inside an HTML comment"
+    $p = Get-Probe -Clause $c -Name "no-outstanding-parked"
+    [void](Assert-That -What "[Q2] the PARKED entry is still OUTSTANDING - an invisible entry closes nothing" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "outstanding") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP Q3 clause 4 - the carve-out 'granted' by an exclusion entry inside an HTML comment" -ForegroundColor Cyan
+$fx = $null
+try {
+    $dec = "# d`n`n<!--`n## 2026-08-31 - clause 4 exclusion - work/pod-key`n**Excluded from C.8 clause 4:** ``work/pod-key```n**Why:** an unrelated podcast effort`n-->`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions $dec -Walkthrough "# w`n"
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("checkout", "-q", "-b", "work/pod-key"))
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "pod.txt"), "pod`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-q", "-m", "pod work"))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("checkout", "-q", $fx.line))
+    $r = Invoke-Target -Params @{
+        Only = 4; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "Q3" -ClauseId "4" -Json $r.json -Because "the exclusion entry is inside an HTML comment"
+    $p = Get-Probe -Clause $c -Name "no-unmerged-work-branches"
+    [void](Assert-That -What "[Q3] work/pod-key is COUNTED - a carve-out no reader can see is not a grant" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "work/pod-key") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[Q3] and the refusal is REPORTED with its reason" `
+        -Condition ($null -ne $c -and (@($c.detail) -join " ") -match "REFUSED") `
+        -Detail ("detail: {0}" -f $(if ($c) { ((@($c.detail) | Select-Object -First 6) -join " / ") } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP Q4 clause 7 - the ledger artifact 'discharged' by a heading inside an HTML comment" -ForegroundColor Cyan
+$fx = $null
+try {
+    $dec = "# d`n`n<!--`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n-->`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions $dec -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Assert-ClauseNotMet -Step "Q4" -ClauseId "7" -Json $r.json -Because "its only ledger heading is inside an HTML comment"
+    $p = Get-Probe -Clause $c -Name "audit-trail-U0"
+    [void](Assert-That -What "[Q4] clause 7 reports NO DECISIONS.md entry - a commented heading discharges nothing" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "no DECISIONS.md entry") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP Q5 clause 7 - U5's row deleted and copied after an UNTERMINATED '<!--'" -ForegroundColor Cyan
+$fx = $null
+try {
+    $plan = New-PlanText -OmitPhases @("U5") -ExtraRows "<!--`n| **U5** | do the thing | a check that exists | - |"
+    $fx = New-FixtureRepo -Plan $plan -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Assert-ClauseNotMet -Step "Q5" -ClauseId "7" -Json $r.json -Because "U5's only row sits after an unterminated HTML comment opener"
+    $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+    [void](Assert-That -What "[Q5] phase-floor-present FAILS and names U5 - an unterminated comment FAILS CLOSED" `
+        -Condition ($null -ne $pf -and [string]$pf.verdict -eq "fail" -and [string]$pf.note -match "U5") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+    $pm = Get-Probe -Clause $c -Name "markdown-well-formed-plan"
+    [void](Assert-That -What "[Q5] and the malformation is STATED, not silently absorbed as a shorter document" `
+        -Condition ($null -ne $pm -and [string]$pm.verdict -eq "fail" -and [string]$pm.note -match "UNTERMINATED") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pm) { $pm.verdict } else { "<missing>" }), $(if ($pm) { $pm.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP T1 - CLAUSE 2: GFM'S ESCAPED PIPE. `Split-TableRow` split on EVERY `|`, so a cell
+# containing `\|` became two cells and every column after it shifted by one. Park the
+# ORIGINAL requirement in the What cell behind an escaped pipe and the Validated-by column
+# is read one place to the left - the original is "found", the visible column is weakened,
+# and `chain-U0-original-vs-current` passes. The header names a column and that name selects
+# an INDEX; an index applied to misaligned cells is not "found BY NAME".
+# =================================================================================
+Write-Host ""
+Write-Host "STEP T1 clause 2 - the original requirement hidden behind an escaped pipe" -ForegroundColor Cyan
+$fx = $null
+try {
+    $orig = "the gym run is observed; the drill runs green"
+    $fx = New-FixtureRepo -Plan (New-PlanText -U0Validated $orig) `
+                          -Decisions "# d`n`n## 2026-08-30 - U0 - the column was amended`nwhy`n" -Walkthrough "# w`n"
+    $weak = New-PlanText -U0Validated "spot-checked by the author"
+    $rowFrom = "| **U0** | do the thing | spot-checked by the author | - |"
+    $rowTo   = "| **U0** | do the thing \| $orig | spot-checked by the author | - |"
+    [void](Assert-That -What "[T1] the fixture row to be rewritten is present as expected" `
+        -Condition ($weak.Contains($rowFrom)) -Detail $rowFrom)
+    $weak = $weak.Replace($rowFrom, $rowTo)
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"), $weak, [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "weaken U0 and park the original behind an escaped pipe"))
+    $r = Invoke-Target -Params @{
+        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+    }
+    $c = Assert-ClauseNotMet -Step "T1" -ClauseId "2" -Json $r.json -Because "the original requirement was parked in the What cell behind an escaped pipe"
+    $p = Get-Probe -Clause $c -Name "chain-U0-original-vs-current"
+    [void](Assert-That -What "[T1] the chain probe FAILS - the escaped pipe does not shift which cell is Validated by" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[T1] and the CURRENT column read is the VISIBLE one" `
+        -Condition ($null -ne $c -and (@($c.detail) -join " ") -match "spot-checked by the author") `
+        -Detail ("detail: {0}" -f $(if ($c) { ((@($c.detail) | Select-Object -First 8) -join " / ") } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP W1 - CLAUSE 5: EVERY COMMAND UNDER A MARKER, INCLUDING ACROSS A BLANK LINE. The
+# block terminator was `(?m)^\s*$`, so a second command under the SAME marker separated by a
+# paragraph break was never executed while the commit message said "EVERY COMMAND UNDER A
+# MARKER RUNS". Steps A3 and A3b cover the same-paragraph and two-marker shapes; this is the
+# third shape, and it was the one that was false.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP W1 clause 5 - a second command under one marker, after a blank line" -ForegroundColor Cyan
+$fx = $null
+try {
+    $wt = "# w`n`n## U0`n`n**How to run:** ``cmd /c exit 0```n`n``cmd /c exit 3```n`n**Evidence:** none`n"
+    $fx = New-FixtureRepo -Plan (New-PlanText) -Decisions "# d`n" -Walkthrough $wt
+    $r = Invoke-Target -Params @{
+        Only = 5; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Assert-ClauseNotMet -Step "W1" -ClauseId "5" -Json $r.json -Because "the second command under U0's marker is red"
+    $p2 = Get-Probe -Clause $c -Name "walkthrough-U0-check-2"
+    [void](Assert-That -What "[W1] the SECOND command under the marker was executed" `
+        -Condition ($null -ne $p2) -Detail ("probes: {0}" -f ((@($c.probes) | ForEach-Object { $_.name }) -join ",")))
+    [void](Assert-That -What "[W1] and it is RED - a blank line does not end a marker's block" `
+        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "fail" -and [int]$p2.exit -eq 3) `
+        -Detail ("verdict={0} exit={1}" -f $(if ($p2) { $p2.verdict } else { "?" }), $(if ($p2) { $p2.exit } else { "?" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP X4 - CLAUSE 7: A STRUCTURED RELATIONSHIP, NOT TWO SUBSTRING SEARCHES.
+# `audit-trail-U2 = pass` on the real work line rested entirely on 8b477a9 - a commit about
+# ANOTHER phase whose own summary says "No code behaviour changed", which mentions U2 in one
+# sentence and `test_anchor_schema.py` in the next. The phase-id match and the artifact match
+# were INDEPENDENT searches over the whole message.
+#   X4a the co-mention across two statements must NOT discharge the phase;
+#   X4b THE POSITIVE CONTROL - a commit carrying an explicit validation claim naming both in
+#       ONE statement MUST discharge it, or this rule is a wall rather than a measurement.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP X4 clause 7 - a co-mention is not a claim, and a claim is" -ForegroundColor Cyan
+$fx = $null
+try {
+    $planX = New-PlanText -Validated @{ U0 = "verify-the-thing.ps1 re-runs green" }
+    $fx = New-FixtureRepo -Plan $planX -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+    New-Item -ItemType Directory -Path (Join-Path $fx.root "documentation\notes") -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "documentation\notes\u0-findings.md"),
+        "# U0 findings`n`nwhat was found.`n", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "src.txt"), "one`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
+    [void](Add-FixtureCommit -Step "X4a" -Fx $fx -Message @(
+        "an audit round on another phase",
+        "No code behaviour changed. U0 is mentioned here in passing.",
+        "Separately, verify-the-thing.ps1 turned up a lint finding in someone else's file."))
+    $params = @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $r = Invoke-Target -Params $params
+    $c = Assert-ClauseNotMet -Step "X4" -ClauseId "7" -Json $r.json -Because "the only commit co-mentions the phase and the check in different statements"
+    $p = Get-Probe -Clause $c -Name "audit-trail-U0"
+    [void](Assert-That -What "[X4a] a co-mention across two statements does NOT discharge the commit-message half" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "SAME statement") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[X4a] and the co-mention is REPORTED, so 'no such commit' and 'a commit that co-mentions' stay different facts" `
+        -Condition ($null -ne $c -and (@($c.detail) -join " ") -match "different statements") `
+        -Detail ("detail: {0}" -f $(if ($c) { ((@($c.detail) | Select-Object -First 8) -join " / ") } else { "" })))
+    # --- THE POSITIVE CONTROL -----------------------------------------------------
+    [System.IO.File]::WriteAllText((Join-Path $fx.root "src.txt"), "two`n", [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("add", "-A"))
+    [void](Add-FixtureCommit -Step "X4b" -Fx $fx -Message @(
+        "U0: close the column",
+        "Validated: U0 - the thing re-runs from a clean checkout, by verify-the-thing.ps1"))
+    $r2 = Invoke-Target -Params $params
+    $c2 = Get-Clause -Json $r2.json -Id "7"
+    $p2 = Get-Probe -Clause $c2 -Name "audit-trail-U0"
+    [void](Assert-That -What "[X4b] POSITIVE CONTROL - a commit whose claim names the phase AND its check in one statement DOES discharge it" `
+        -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p2) { $p2.verdict } else { "<missing>" }), $(if ($p2) { $p2.note } else { "" })))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================

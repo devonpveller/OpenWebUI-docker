@@ -7,8 +7,8 @@ Plane lease held: `open-brain` (owner `dfudone`) for the clause-3 fixture and th
 - `scripts/checks/dfu-done.ps1` — the authority for PLAN.md §C.8. Eight clauses, each
   decided by running something, verdict by exhaustive census (the `andon.ps1` shape, reused
   rather than reinvented).
-- `scripts/checks/verify-dfu-done.ps1` — the drill. **81 assertions with `-Live` (75
-  without), 0 failed, 8 of 8 clauses have a constructed failing case.**
+- `scripts/checks/verify-dfu-done.ps1` — the drill. **201 assertions without `-Live`, 0
+  failed, 8 of 8 clauses have a constructed failing case** (round 5; it was 81/75 at round 2).
 - `OB1/docker/init-agent-memory-corpus-failclosed.sql` + its revert, registered at slot
   `190-` in both compose files, documented in the promotion runbook, **applied to the live
   database**.
@@ -555,3 +555,168 @@ evidence* (the first-command-only reader, the incomplete client set, the `$true`
 *a substring standing in for a structure* (the table parser, the carve-out, the un-parking, the
 two commit/note halves, the two first-match regexes). **This is a claim for a verifier to try to
 break, not a conclusion.** If it holds, the convergence counter reaches 2 of 2.
+
+---
+
+# ROUND 5 — THE FIFTEENTH CLASS, AND THE FIFTH "FIXED ONE, LEFT THE SIBLING"
+
+Round 4 claimed *no new class*. A verifier broke that claim, and the counter **resets to 0**.
+That is the criterion working: the convergence bound in §C.7 is a claim about the world, and
+the only thing that can settle it is somebody trying to falsify it.
+
+## The new class — a checker that executes instructions from the artifact under test, then measures a world those instructions can change
+
+Every one of the fourteen classes on this record constrains what the checker **reads** — where
+a row may live, which cell is authoritative, whether an absence was measured or assumed. All
+fourteen can be closed perfectly and leave this untouched, because it is not about inputs. It
+is about **effects**.
+
+**Reproduced, exactly.** Clauses 1 and 5 execute every backtick span under a `**How to run:**`
+marker in WALKTHROUGH.md, under `cmd.exe /c`, with the operator's privileges — and clause 5 ran
+them with `-WorkDir $Ctx.root`, i.e. *inside the audited repository*. Clauses evaluate in order
+1..8. A `## U0` section whose marker read
+`cmd /c echo ## U0 findings > <repo>\documentation\notes\u0-findings.md` produced
+`walkthrough-U0-check-1 (exit 0) — the row's named check re-runs green`; the file did not exist
+before the run and did after; and **clause 7's `audit-trail-U0` went from exit 3 to exit 2** —
+its findings-note artifact discharged by a file the run itself had created. The same channel
+reaches clause 4's subjects (worktrees, `work/*` branches, tree cleanliness), because clause 1
+runs first and `cmd.exe` is not confined to the clean clone.
+
+**The fix, and why it is in that order.** Three parts, and only the second is load-bearing.
+
+1. **Isolation.** Every walkthrough command now runs in the clean clone clause 1 already
+   builds — never in `$Ctx.root` — and the documents later clauses depend on are made
+   read-only to that process for the duration of the call (a Deny ACE for the running
+   identity on the plan's directory and `documentation/notes`, removed in a `finally`, and
+   swept at startup so a killed run cannot leave the operator's PLAN.md locked). The sandbox
+   is reset between phases, so one phase's command cannot manufacture the artifact another
+   phase's command needs.
+2. **Effect-nullification — the actual fix.** Isolation is a wall, and a wall can be walked
+   around: an absolute path, a `git -C`, a network push. So **every artifact any clause reads
+   is snapshotted before the first command runs** — the three documents, the findings notes,
+   the commit log, the branch list, the worktree list, the working tree's cleanliness, the
+   submodule states, the gitlink, the OB1 remote's advertised refs, and PLAN.md's whole
+   revision history — and every clause decides over the snapshot. Nothing created during the
+   run can discharge anything, because nothing created during the run is ever read. It does
+   not have to enumerate the ways a command reaches the tree, which is why it is not another
+   filter.
+3. **Disclosure.** Every run now prints **the command set it executed** — what ran, where, and
+   what it returned — and fingerprints the audited artifacts before and after each command and
+   once at the end. A command that moves the audited tree turns its own probe RED whatever its
+   exit code was; a run whose integrity record is false can never be `done`, and the board reads
+   `unaccounted`.
+
+**Stated limits, rather than papered over.** The Deny ACE covers the documents and the notes
+directory, not `.git` — denying writes there would break the very git commands clause 4 runs.
+Git state is protected by the snapshot and the fingerprint, not by the filesystem. A command
+that pushes to a *foreign* remote (OB1's) is outside both: `ls-remote` is snapshotted before any
+command runs, which closes the read, but this file cannot un-push.
+
+**Red-proof (drill V1/V2).** V1 is the demonstrated attack: the note-writing marker. Its command
+is now denied (`Access is denied.`, exit 1), the file does not exist afterwards, and clause 7
+still reports `no findings note` for U0. V2 is the harder half — a marker that **succeeds**:
+`git -C <root> branch work/drill-injected`. The branch really is created (asserted, so the step
+cannot pass against a command that never ran), and it changes nothing: clause 4's answer does not
+contain it, the probe fails on contamination, the integrity record is false, and the board is
+`unaccounted`.
+
+## The fifth "fixed one, left the sibling" — and this one was a ONE-CALL-SITE function
+
+`Remove-NonProse` strips HTML comments and code fences. It had **exactly one call site in 3,866
+lines** — inside `Get-DfuSection`, which serves PLAN.md and nothing else. WALKTHROUGH.md and
+DECISIONS.md were read **raw**, so round 4's own attacks worked unchanged one file over:
+
+- five WALKTHROUGH phase sections inside a properly **closed** comment → clause 5 verdict **met**,
+  coverage **8 of 8**, floor pass, every `walkthrough-U<n>-check-1` green — over a document showing
+  two sections to the operator whose review is that clause's entire justification;
+- a commented `## ` ledger entry carrying `**Un-parks:**` closed a PARKED entry; a commented
+  `## … clause 4 exclusion` granted the pod-key carve-out (unmerged 8 → 7); a commented heading
+  discharged clause 7's ledger artifact;
+- and `Get-WalkthroughRuns` **parsed and executed** a `## U<n>` section that lived inside a comment.
+
+Every markdown reader now normalises on the way in — `Get-DfuSection`, `Get-LedgerSections`,
+`Get-WalkthroughRuns`, the new `Get-WalkthroughSectionIds` — and the single door a document comes
+through is `New-DfuSnapshot`, which stores the normalised form beside the raw one so an inline
+scan in a clause body cannot accidentally get the raw text. **The grep is the check:**
+`grep -n 'Read-TextFile' scripts/checks/dfu-done.ps1` now shows it outside the plumbing only in
+the snapshot and the fingerprint. Drill M1–M4.
+
+**And comment-stripping was defeated outright by an unterminated `<!--`**, because the regex
+requires the closer: delete U5's row from §2 and put a copy after a bare opener inside §2, and it
+was read as a row. Malformed markup now **fails closed** — everything after the opener is
+discarded, exactly as for an unterminated fence — and the malformation is **stated** by a
+`markdown-well-formed-<doc>` probe, because "refused wide" and "the document is shorter" are
+otherwise indistinguishable. Drill M5.
+
+## Three more, each reproduced
+
+- **GFM's escaped pipe.** `Split-TableRow` split on every `|` and ignored `\|`, so a cell
+  containing an escaped pipe became two cells and every column after it shifted. Park the
+  original requirement in the What cell behind `\|` and the Validated-by column is read one
+  place to the left: the original is "found", the visible column is weakened, and
+  `chain-U0-original-vs-current` passes. The header names a column and that name selects an
+  **index** — an index applied to misaligned cells is not "found by name". Now split on an
+  unescaped pipe, then unescape. Drill T1.
+- **"EVERY COMMAND UNDER A MARKER RUNS" was not true.** The block terminator was `(?m)^\s*$`, so
+  a second command under the *same* marker separated by a blank line was never executed. The
+  block now ends at a **structure** — the next line-initial bold label, heading, table row, or
+  horizontal rule — never at a paragraph break. The direction of the error is the argument:
+  stopping early skips a named check and still reports full coverage (a silent false green),
+  while running one span too many produces a loud red, and it now runs inside a disposable
+  clone. Drill W1.
+- **A LIVE FALSE PASS.** `audit-trail-U2 = pass` rested entirely on `8b477a9` — a commit about
+  U4 whose own summary says *"No code behaviour changed"*, which mentions U2 in one sentence
+  (`2 pre-existing F811s from U2's 86ffa62`) and `test_anchor_schema.py` in the next, describing
+  a lint finding in someone else's file. The phase-id match and the artifact match were
+  **independent substring searches over the whole message**. A commit now discharges the phase
+  only through a **validation claim** — a directive line (`Validated: … / Verified by: …`) whose
+  own text names the phase **and** one of that phase's own checks *in the same statement*. Same
+  shape as the ledger's `Un-parks:` and clause 4's `Excluded from C.8 clause 4:`, and for the
+  same reason: a record is something an author wrote on purpose and a reader can find. Drill
+  X4a is the co-mention (must not discharge); **X4b is the positive control** — a commit that
+  does carry the claim must discharge, or the rule is a wall rather than a measurement.
+
+## A sixth instance, found while fixing the fifth
+
+`door-set-matches-plan` (clause 3) still ran a lazy **first-match** regex over the whole plan.
+Round 4 anchored `phase-floor-matches-plan` and `service-set-matches-plan` to section C.8 and made
+ambiguity refuse — and left the third instance of the identical read. A decoy passage earlier in
+PLAN.md would become the paragraph the door floor was checked back against. Now anchored to C.8
+and refusing on ambiguity, like its two siblings.
+
+## What the authority says now
+
+The headline is unchanged and honest: **exit 7, census balances 8/8, 0 clauses met.** The changes
+above make more of it red, not less — clause 7's commit half now fails for every phase, because no
+commit on this work line was ever written with a validation claim in it. That is the true statement
+about a history that did not write it down, and §C.8's instruction is explicit: *a clause that
+cannot be met is a REPORT, not a redefinition.* No plan column was touched.
+
+## And one in the drill itself — the same class, one layer down
+
+`git commit -m "<subject>\n\n<body>"` passed through PowerShell 5.1's native-argument handling
+is **split at the newlines**: git reads the body as pathspecs, prints
+`error: pathspec ... did not match any file(s)`, and exits 1. Every fixture call site wrote
+`[void](Invoke-InDir ...)`, which discards the exit code. So step X4a would have "proved" that a
+co-mention does not discharge a phase **against a repository that contained no such commit at
+all** — an assertion that was true, and true of nothing. It only surfaced because the tightened
+clause-7 rule made two *positive controls* (I2 and X3a) go red, and chasing those found the
+fixture had never been built. A negative assertion whose fixture silently failed to exist is this
+effort's own recurring class, inside the thing that exists to catch it.
+
+Fixture commits now go through `Add-FixtureCommit`: one `-m` per paragraph (git joins them with a
+blank line, which is the shape the authority parses) and **the exit code is asserted**. A fixture
+that did not get built is a red at the point of building, never a quiet pass downstream.
+
+**This is also the argument for the positive controls.** Two of them are the only reason this was
+found: a drill made only of negative assertions would have gone green over an empty repository and
+reported the rule working.
+
+## Convergence (§C.7) — the counter RESETS
+
+Round 4 claimed no new class and put the counter at 1 of 2. Round 5 found one — *a checker that
+executes instructions from the artifact under test and then measures a world those instructions
+can change* — so **the counter is 0**. The class list stands at fifteen. The three siblings above
+(the escaped pipe, the blank-line block terminator, the co-mention commit) are NOT new classes;
+the fifth `Remove-NonProse` violation is not either. Only the effects one is, and it is the first
+on this record that says nothing about what the checker reads.

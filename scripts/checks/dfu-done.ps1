@@ -59,7 +59,28 @@
 #      did the same. Coverage still said "N of N" because N had shrunk: the failure this
 #      script exists to prevent, operating on the script. The floor above is the fix, and
 #      a floor phase missing from the table is a FAILURE, never a smaller N.
-#   7. A SUBSTRING IS NOT A STRUCTURE. `git ls-remote` prints "<sha>TAB<ref>" and the
+#   8. A CHECKER MUST NOT MEASURE A WORLD ITS SUBJECT CAN CHANGE. Clauses 1 and 5 EXECUTE
+#      every backtick span under a "How to run:" marker in WALKTHROUGH.md, and clause 5 ran
+#      them with the AUDITED REPOSITORY as their working directory. A `## U0` section whose
+#      marker wrote a file into documentation/notes reported "exit 0 - re-runs green", and
+#      clause 7's U0 then fell from exit 3 to exit 2: its findings-note artifact discharged
+#      by a file the run itself had created. Rules 1-7 all constrain what the checker READS,
+#      and every one of them can be satisfied while this stands - it is about EFFECTS.
+#      The fix is ordering, not filtering: every artifact any clause reads is SNAPSHOTTED
+#      BEFORE THE FIRST COMMAND RUNS, commands execute only in a disposable clone with the
+#      audited documents write-locked, the command set is REPORTED, and a run that moved the
+#      audited tree is refused as an authority. See "THE FIFTEENTH CLASS" below.
+#   9. NORMALISE IN EVERY READER, THEN GREP FOR THE SHAPE. `Remove-NonProse` strips HTML
+#      comments and code fences, and it had exactly ONE call site in 3,866 lines - inside
+#      Get-DfuSection, which serves PLAN.md alone. WALKTHROUGH.md and DECISIONS.md were read
+#      RAW, so the comment attacks fixed for the plan worked unchanged one file over: five
+#      walkthrough phase sections inside a closed comment gave clause 5 "met, 8 of 8"; a
+#      commented ledger entry closed a PARKED entry, granted a clause-4 carve-out and
+#      discharged clause 7's ledger artifact; and Get-WalkthroughRuns parsed AND EXECUTED a
+#      commented `## U<n>` section. Fixing one reader is not fixing the shape. And an
+#      UNTERMINATED `<!--` defeated the stripping outright, because the regex requires the
+#      closer - malformed markup now FAILS CLOSED and is reported, never ignored.
+#  10. A SUBSTRING IS NOT A STRUCTURE. `git ls-remote` prints "<sha>TAB<ref>" and the
 #      gitlink gate searched the whole output for the pinned sha, so a tag NAMED after that
 #      sha - `git tag rollback-$(git rev-parse HEAD)` - turned the gate green for a commit
 #      the remote could not serve. `docker ps --format {{.Names}}` prints one name per line
@@ -92,13 +113,19 @@
 #   .\dfu-done.ps1 -SkipLive             # no Docker/DB probes; live clauses go UNEVALUATED
 #   .\dfu-done.ps1 -ListClauses          # what is declared, and what implements it
 #
+# EVERY RUN PRINTS THE COMMAND SET IT EXECUTED - what ran, where it ran, what it returned,
+# and whether the audited tree moved while it did. Clauses 1 and 5 take those commands from
+# the document under test, so that list is the part of a run which could have had effects,
+# and a reader is entitled to see it beside the verdict.
+#
 # Exit codes: 0 every clause MET - the factory stops and hands over (C.8's handover
 #               point, not the finish line; the operator's walkthrough is the last gate)
 #             1 usage or configuration error - nothing was judged
 #             7 the plan is NOT met. The headline word comes from the most severe
 #               non-empty bucket, and each refuses:
 #                 unaccounted     a clause produced a verdict this script does not
-#                                 enumerate, or the census did not balance
+#                                 enumerate, the census did not balance, or the run
+#                                 CHANGED the audited tree it was measuring
 #                 failed          a clause was evaluated and is NOT satisfied
 #                 unevaluated     a clause could not be decided, or was decided over
 #                                 only part of its subjects
@@ -494,16 +521,39 @@ function Read-JsonStore {
 
 function Remove-NonProse {
     # Strip HTML comments and fenced code blocks before ANY structure is read out of a
-    # markdown document. Both can carry text that LOOKS like a table row and that NO
-    # READER SEES as one, which is what makes them a forgery surface rather than a
-    # formatting detail: a verifier deleted a phase's real row and put a one-line
-    # `| **U1** | ... |` inside an HTML comment at the end of the file, and the floor
-    # check reported "every floor phase has a row in section 2's table" for a row nobody
-    # sees. An unterminated fence swallows the rest of the document rather than leaking
-    # its contents back into the prose - refusing wide is the safe direction here.
+    # markdown document. Both can carry text that LOOKS like a table row, a heading or a
+    # command and that NO READER SEES as one, which is what makes them a forgery surface
+    # rather than a formatting detail.
+    #
+    # THIS FUNCTION HAD EXACTLY ONE CALL SITE IN 3,866 LINES - inside Get-DfuSection, which
+    # serves PLAN.md and nothing else. So WALKTHROUGH.md and DECISIONS.md were read RAW,
+    # and round 4's own RESURRECTION attack worked unchanged one file over: five phase
+    # sections of WALKTHROUGH.md inside a properly CLOSED comment gave clause 5 "met,
+    # 8 of 8" while the document the operator reviews showed two; a commented `## ` entry
+    # carrying `**Un-parks:**` closed a PARKED entry; a commented `## ... clause 4
+    # exclusion` granted the carve-out; a commented heading discharged clause 7's ledger
+    # artifact; and Get-WalkthroughRuns PARSED AND EXECUTED a `## U<n>` section that lived
+    # inside a comment. The rule adopted this week - fix the shape, then grep for it - is
+    # now applied: EVERY markdown reader in this file normalises first - Get-DfuSection,
+    # Get-LedgerSections, Get-WalkthroughRuns, Get-WalkthroughSectionIds - and the ONE door
+    # a document comes through is New-DfuSnapshot, which stores the normalised form beside
+    # the raw one so an inline scan in a clause body cannot accidentally get the raw text.
+    # `grep -n 'Read-TextFile' dfu-done.ps1` is the check: outside the plumbing it appears
+    # only in the snapshot and the fingerprint.
+    #
+    # AND A MALFORMED COMMENT FAILS CLOSED. The regex requires the closer, so an
+    # UNTERMINATED `<!--` was simply not a comment: a row deleted from section 2 and copied
+    # after a bare `<!--` inside section 2 was read as a row. An unterminated comment now
+    # swallows the rest of the document exactly as an unterminated fence does - refusing
+    # wide is the safe direction, because the alternative is reading text the renderer
+    # hides. `Get-MarkdownDefects` reports the malformation so a clause can go RED rather
+    # than merely go quiet.
     param([string]$Text)
     if (-not $Text) { return "" }
+    # Closed comments first, then anything after an unterminated opener is discarded.
     $t = [regex]::Replace($Text, '(?s)<!--.*?-->', "`n")
+    $bare = $t.IndexOf('<!--')
+    if ($bare -ge 0) { $t = $t.Substring(0, $bare) }
     $out = New-Object System.Collections.Generic.List[string]
     $fence = ""
     foreach ($line in ($t -split "`n")) {
@@ -519,16 +569,52 @@ function Remove-NonProse {
     return ($out -join "`n")
 }
 
+function Get-MarkdownDefects {
+    # The malformations that make a document say one thing to a reader and another to a
+    # parser. Reported, never silently absorbed: `Remove-NonProse` refuses WIDE (it drops
+    # everything after a bare `<!--`), which stops the forgery but would otherwise look
+    # exactly like a shorter document.
+    param([string]$Text)
+    $out = @()
+    if ($null -eq $Text) { return $out }
+    $stripped = [regex]::Replace($Text, '(?s)<!--.*?-->', "`n")
+    $bare = $stripped.IndexOf('<!--')
+    if ($bare -ge 0) {
+        $line = 1 + @([regex]::Matches($stripped.Substring(0, $bare), "`n")).Count
+        $out += ("an UNTERMINATED HTML comment opens at line {0} and is never closed - everything after it is discarded, because text a renderer hides must not be read as structure" -f $line)
+    }
+    $fence = ""
+    $ln = 0
+    $fenceAt = 0
+    foreach ($l in ($stripped -split "`n")) {
+        $ln++
+        $t = $l.TrimEnd("`r")
+        if (-not $fence) { if ($t -match '^\s*(```+|~~~+)') { $fence = $Matches[1]; $fenceAt = $ln } }
+        else { if ($t -match ('^\s*' + [regex]::Escape($fence))) { $fence = "" } }
+    }
+    if ($fence) { $out += ("an UNTERMINATED code fence opens at line {0} and is never closed - everything after it is discarded" -f $fenceAt) }
+    return @($out)
+}
+
 function Split-TableRow {
     # A markdown row's cells, trimmed, with the empty elements the leading and trailing
     # pipes produce removed. The cells are returned as a LIST so a caller can address them
     # by the header's name for that column instead of by a hard-coded index.
+    #
+    # GFM'S ESCAPED PIPE IS PART OF THE GRAMMAR, and splitting on every `|` ignored it. A
+    # cell written `foo \| bar` is ONE cell to every renderer and was TWO cells here, so
+    # every column after it shifted: an original requirement parked in the What cell behind
+    # an escaped pipe let the VISIBLE Validated-by column be weakened while
+    # `chain-U0-original-vs-current` still found the original. The header names a column and
+    # that name selects an INDEX - so an index applied to cells a splitter had already
+    # misaligned meant "found BY NAME" was not true end to end. Split on an UNESCAPED pipe,
+    # then unescape.
     param([string]$Row)
     $r = $Row.Trim()
-    $cells = @($r -split '\|')
+    $cells = @($r -split '(?<!\\)\|')
     if ($cells.Count -ge 1 -and $cells[0].Trim() -eq "") { $cells = @($cells | Select-Object -Skip 1) }
     if ($cells.Count -ge 1 -and $cells[$cells.Count - 1].Trim() -eq "") { $cells = @($cells | Select-Object -First ($cells.Count - 1)) }
-    return @($cells | ForEach-Object { $_.Trim() })
+    return @($cells | ForEach-Object { ($_ -replace '\\\|', '|').Trim() })
 }
 
 function Get-DfuSection {
@@ -840,6 +926,12 @@ function Get-WalkthroughRuns {
     # in. DERIVED: the phase headings and the run lines both come from the file, so a phase
     # that grows a section, or loses one, changes this map without anyone editing a list.
     #
+    # IT NORMALISES FIRST, AND THAT IS NOT COSMETIC - THIS FUNCTION EXECUTES WHAT IT
+    # PARSES. It read the walkthrough RAW, so a `## U<n>` section inside an HTML comment
+    # was parsed AND ITS COMMANDS WERE RUN under cmd.exe with the operator's privileges,
+    # from a document the operator reviews by reading - where that section is invisible.
+    # Remove-NonProse now runs on the way in, here and in every other markdown reader.
+    #
     # IT MUST READ ACROSS LINE BREAKS. The walkthrough wraps long commands inside a single
     # backtick span, so a line-oriented parser silently captures the FIRST LINE ONLY and
     # then "runs" a truncated command - the alphabet-too-narrow class producing a confident
@@ -849,18 +941,23 @@ function Get-WalkthroughRuns {
     # AND ONE MARKER MAY NAME SEVERAL COMMANDS. This used to take the FIRST backtick span
     # after each marker and stop. WALKTHROUGH.md's U6 row names TWO commands under one
     # marker - "`drill.py`, and `pytest ...`" - and the second was never run: a verifier
-    # ran it by hand and it FAILED (it needs the agent-bridge venv) while clause 5 reported
-    # `walkthrough-U6-check-1 = pass`, counted U6 fully evaluated, and clause 1 reported
-    # `U6-validated-by-1 = pass`. A claim wider than its evidence, in the document the
-    # operator reviews by. So EVERY backtick span in the marker's own block is a command.
+    # ran it by hand and it FAILED while clause 5 reported `walkthrough-U6-check-1 = pass`.
     #
-    # THE BLOCK ENDS where the marker's own text ends: the next bold label at the start of
-    # a line ("**Evidence:**"), the next heading, or a blank line. Backticked prose in a
-    # LATER paragraph therefore never becomes something this script executes.
+    # A BLANK LINE IS NOT A TERMINATOR, and while it was one the sentence above was false.
+    # The block ended at `(?m)^\s*$`, so a second command under the SAME marker separated by
+    # a blank line was silently never executed - "EVERY COMMAND UNDER A MARKER RUNS" was a
+    # claim the code did not implement, which is this file's own recurring defect wearing a
+    # commit message. The block now ends at a STRUCTURE: the next bold label at the start of
+    # a line, the next heading, the next table row, a horizontal rule, or the next marker.
+    # Those are the boundaries a reader sees; a paragraph break inside one marker's block is
+    # not. The direction of the error matters - stopping early SKIPS a named check and
+    # reports full coverage (a silent false green), while running one span too many produces
+    # a LOUD red the operator can read and fix, and it now runs inside a disposable clone.
     param([string]$Text)
     $out = [ordered]@{}
     if (-not $Text) { return $out }
-    $parts = [regex]::Split($Text, '(?m)^(?=##\s)')
+    $clean = Remove-NonProse -Text $Text
+    $parts = [regex]::Split($clean, '(?m)^(?=##\s)')
     foreach ($part in $parts) {
         if ($part -notmatch '(?m)^##\s+\**(U\d)') { continue }
         $id = $Matches[1]
@@ -869,7 +966,7 @@ function Get-WalkthroughRuns {
             $from = $m.Index + $m.Length
             $rest = $part.Substring($from)
             $len  = $rest.Length
-            foreach ($term in @('(?m)^\s*\*\*', '(?m)^\s*#{1,6}\s', '(?m)^\s*$')) {
+            foreach ($term in @('(?m)^\s*\*\*', '(?m)^\s*#{1,6}\s', '(?m)^\s*\|', '(?m)^\s*(-{3,}|\*{3,}|_{3,})\s*$')) {
                 $t = [regex]::Match($rest, $term)
                 if ($t.Success -and $t.Index -lt $len) { $len = $t.Index }
             }
@@ -883,15 +980,40 @@ function Get-WalkthroughRuns {
     return $out
 }
 
+function Get-WalkthroughSectionIds {
+    # The phase ids WALKTHROUGH.md has a visible section for. Clause 5 split the raw text
+    # itself, so five phase sections wrapped in a properly closed HTML comment gave it
+    # "coverage 8 of 8, verdict met" over a document showing two - round 4's RESURRECTION
+    # attack, one file over, against the clause whose own justification is "the operator
+    # reviews by reading it". One reader, normalising, used by the clause.
+    param([string]$Text)
+    $ids = [ordered]@{}
+    if (-not $Text) { return $ids }
+    foreach ($part in [regex]::Split((Remove-NonProse -Text $Text), '(?m)^(?=##\s)')) {
+        if ($part -match '(?m)^##\s+\**(U\d)') {
+            $sid = $Matches[1]
+            if (-not $ids.Contains($sid)) { $ids[$sid] = $true }
+        }
+    }
+    return $ids
+}
+
 function Get-LedgerSections {
     # DECISIONS.md split into its `## ` entries, each with its heading, its BODY and its
     # position. The body matters because an un-parking is a directive INSIDE an entry, not
     # a word in a heading - see the un-parking rule in Test-Clause2.
+    #
+    # NORMALISED FIRST. Read raw, this function handed clause 2 and clause 4 entries that
+    # NO READER SEES: a `## ` entry inside an HTML comment carrying `**Un-parks:** <heading>`
+    # closed a PARKED entry, and a commented `## ... clause 4 exclusion` entry granted the
+    # pod-key carve-out and took the unmerged branch count from 8 to 7. An exemption and a
+    # discharge are exactly the two things that must never come from invisible text.
     param([string]$Text)
     $out = @()
     if (-not $Text) { return $out }
+    $clean = Remove-NonProse -Text $Text
     $i = 0
-    foreach ($part in [regex]::Split($Text, '(?m)^(?=##\s)')) {
+    foreach ($part in [regex]::Split($clean, '(?m)^(?=##\s)')) {
         if ($part -notmatch '(?m)^##\s+(.*)$') { continue }
         $head = $Matches[1].Trim()
         $body = $part
@@ -1119,6 +1241,402 @@ function Resolve-DoorVerdict {
 }
 
 # =================================================================================
+# THE FIFTEENTH CLASS - A CHECKER THAT EXECUTES INSTRUCTIONS FROM THE ARTIFACT UNDER
+# TEST, AND THEN MEASURES A WORLD THOSE INSTRUCTIONS CAN CHANGE.
+#
+# The fourteen classes on this file's record all constrain what the checker READS - where
+# a row may live, which cell is authoritative, whether an absence was measured or assumed.
+# Every one of them can be closed perfectly and leave this untouched, because this one is
+# not about inputs. It is about EFFECTS.
+#
+# WHAT WAS DEMONSTRATED, EXACTLY. Clauses 1 and 5 execute every backtick span under a
+# `**How to run:**` marker in WALKTHROUGH.md, under `cmd.exe /c`, with the operator's
+# privileges - clause 5 with -WorkDir $Ctx.root, i.e. INSIDE THE AUDITED REPOSITORY - and
+# the clauses evaluate in order 1..8. A `## U0` section whose marker read
+# `cmd /c echo ## U0 findings > <repo>\documentation\notes\u0-findings.md` produced
+# `walkthrough-U0-check-1 (exit 0) - the row's named check re-runs green`; the file did
+# not exist before the run and did after; and CLAUSE 7 FOR U0 WENT FROM EXIT 3 TO EXIT 2,
+# its findings-note artifact discharged by a file the run itself had created. The same
+# channel reaches clause 4's subjects - worktrees, work/* branches, tree cleanliness -
+# because clause 1 runs first and cmd.exe is not confined to the clean clone.
+#
+# THE FIX HAS THREE PARTS, and only the second one is load-bearing.
+#
+#   ISOLATION. Every walkthrough command runs in the CLEAN CLONE clause 1 already builds -
+#     never in $Ctx.root - and the documents later clauses depend on are made read-only to
+#     that process for the duration of the call (a Deny ACE for the running identity,
+#     removed in a finally, and swept at startup so a killed run cannot leave the
+#     operator's PLAN.md locked). The sandbox is reset between phases so one phase's
+#     command cannot manufacture the artifact another phase's command needs.
+#
+#   EFFECT-NULLIFICATION, WHICH IS THE ACTUAL FIX. Isolation is a wall, and a wall can be
+#     walked around - an absolute path, a `git -C`, a network push. So EVERY artifact any
+#     clause depends on is SNAPSHOTTED BEFORE THE FIRST COMMAND RUNS - the three documents,
+#     the findings notes, the commit log, the branch list, the worktree list, the working
+#     tree's cleanliness, the submodule states, PLAN.md's whole revision history - and
+#     every clause decides over the snapshot. Nothing created during the run can discharge
+#     anything, because nothing created during the run is ever read. That is why this is
+#     not another filter: it does not have to enumerate the ways a command reaches the tree.
+#
+#   DISCLOSURE. The command set the authority executed is RECORDED and PRINTED - what ran,
+#     where, and what it returned - and a fingerprint of the audited artifacts is compared
+#     before and after every command AND once at the end of the run. A command that moves
+#     the audited tree turns its own probe RED and the run's integrity record false; a run
+#     whose integrity record is false can never be `done`, whatever the clauses said.
+#
+# WHAT THIS DOES NOT CLAIM. The Deny ACE covers the documents and the notes directory, not
+# `.git` - denying writes there would break the very git commands clause 4 runs. Git state
+# is therefore protected by the snapshot and the fingerprint, not by the filesystem; and a
+# command that pushes to a FOREIGN remote (OB1's, say) is outside both - `ls-remote` is
+# snapshotted before any command runs, which closes the READ, but this file cannot un-push.
+# That limit is stated here rather than papered over.
+# =================================================================================
+
+$script:DfuSnap      = $null
+$script:DfuExecLog   = @()
+$script:DfuSandbox   = $null
+$script:DfuIntegrity = @()
+
+function Get-DfuHash {
+    param([string]$Text)
+    if ($null -eq $Text) { return "<absent>" }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $b = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return ([System.BitConverter]::ToString($sha.ComputeHash($b)) -replace '-', '').Substring(0, 16).ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
+
+function Get-DfuProtectedDirs {
+    # The directories holding the artifacts a later clause reads: the plan's own directory
+    # and documentation/notes. Derived from the context, so a drill fixture protects ITS
+    # documents and never the operator's.
+    param($Ctx)
+    $out = @()
+    foreach ($f in @($Ctx.plan, $Ctx.decisions, $Ctx.walkthrough)) {
+        if (-not $f) { continue }
+        $d = Split-Path -Path $f -Parent
+        if ($d -and (Test-Path -LiteralPath $d)) { $out += (Resolve-Path -LiteralPath $d).Path }
+    }
+    if ($Ctx.notes -and (Test-Path -LiteralPath $Ctx.notes)) { $out += (Resolve-Path -LiteralPath $Ctx.notes).Path }
+    return @($out | Sort-Object -Unique)
+}
+
+function Get-AuditedFingerprint {
+    # WHAT THE AUDITED TREE LOOKS LIKE RIGHT NOW, over exactly the artifacts a clause can be
+    # discharged by. Compared before/after every executed command and once at the end of the
+    # run, so an effect the isolation missed is still REPORTED rather than absorbed.
+    param($Ctx)
+    $fp = [ordered]@{}
+    foreach ($k in @("plan", "decisions", "walkthrough")) {
+        $fp[("doc:" + $k)] = (Get-DfuHash -Text (Read-TextFile -Path $Ctx[$k]))
+    }
+    $notes = @()
+    if ($Ctx.notes -and (Test-Path -LiteralPath $Ctx.notes)) {
+        foreach ($f in (Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $notes += ("{0}:{1}" -f $f.Name, $f.Length)
+        }
+    }
+    $fp["notes"] = (Get-DfuHash -Text ($notes -join "|"))
+    $probes = @(
+        @("git:refs",      @("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags")),
+        @("git:status",    @("status", "--porcelain")),
+        @("git:worktrees", @("worktree", "list", "--porcelain")),
+        @("git:submodule", @("submodule", "status", "--recursive")))
+    foreach ($pair in $probes) {
+        $g = Invoke-Git -Arguments @($pair[1]) -WorkDir $Ctx.root
+        $fp[$pair[0]] = (Get-DfuHash -Text (("{0}|{1}" -f $g.exit, $g.stdout)))
+    }
+    return $fp
+}
+
+function Compare-DfuFingerprint {
+    # The NAMES of the artifacts that moved. Never a boolean: "the audited tree changed" and
+    # "documentation/notes changed" are different facts, and the operator needs the second.
+    param($Before, $After)
+    $moved = @()
+    foreach ($k in @($Before.Keys)) {
+        $b = [string]$Before[$k]
+        $a = $(if ($After.Contains($k)) { [string]$After[$k] } else { "<gone>" })
+        if ($a -ne $b) { $moved += $k }
+    }
+    foreach ($k in @($After.Keys)) { if (-not $Before.Contains($k)) { $moved += ("new:" + $k) } }
+    return @($moved | Sort-Object -Unique)
+}
+
+function New-DfuSnapshot {
+    # EVERY ARTIFACT ANY CLAUSE READS, TAKEN ONCE, BEFORE THE FIRST COMMAND RUNS.
+    # This is the whole fix for class fifteen: a clause cannot be discharged by something
+    # the run created, because a clause never reads anything the run could have created.
+    param($Ctx)
+    $snap = [ordered]@{
+        taken_at = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
+        docs = [ordered]@{}; notes = @(); git = [ordered]@{}
+    }
+    foreach ($k in @("plan", "decisions", "walkthrough")) {
+        $raw = Read-TextFile -Path $Ctx[$k]
+        $snap.docs[$k] = [ordered]@{
+            path    = [string]$Ctx[$k]
+            raw     = $raw
+            md      = $(if ($null -eq $raw) { $null } else { (Remove-NonProse -Text $raw) })
+            defects = @(Get-MarkdownDefects -Text $raw)
+        }
+    }
+    if ($Ctx.notes -and (Test-Path -LiteralPath $Ctx.notes)) {
+        foreach ($f in (Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue | Sort-Object Name)) {
+            $raw = Read-TextFile -Path $f.FullName
+            $snap.notes += @{ name = $f.Name; base = $f.BaseName; full = $f.FullName
+                              raw = $raw; md = $(if ($null -eq $raw) { "" } else { (Remove-NonProse -Text $raw) }) }
+        }
+    }
+    $gs = Invoke-Git -Arguments @("status", "--porcelain") -WorkDir $Ctx.root
+    $snap.git["status"]      = $gs.stdout
+    $snap.git["status_exit"] = $gs.exit
+    $gm = Invoke-Git -Arguments @("submodule", "status", "--recursive") -WorkDir $Ctx.root
+    $snap.git["submodule"]      = $gm.stdout
+    $snap.git["submodule_exit"] = $gm.exit
+    $snap.git["worktrees"] = (Get-Worktrees -Ctx $Ctx)
+    $snap.git["branches"]  = (Get-WorkBranches -Ctx $Ctx)
+
+    # The OB1 gitlink AND the remote's advertised refs, both before any command runs.
+    $gl = Invoke-Git -Arguments @("ls-tree", $Ctx.workline, "OB1") -WorkDir $Ctx.root
+    $snap.git["gitlink_exit"] = $gl.exit
+    $snap.git["gitlink"] = ""
+    if ($gl.exit -eq 0) {
+        $m = [regex]::Match($gl.stdout, 'commit\s+([0-9a-f]{40})')
+        if ($m.Success) { $snap.git["gitlink"] = $m.Groups[1].Value }
+    }
+    $snap.git["lsremote"] = $null
+    $snap.git["lsremote_exit"] = $null
+    $ob1 = Join-Path $Ctx.root "OB1"
+    if (Test-Path -LiteralPath $ob1) {
+        $lr = Invoke-Git -Arguments @("ls-remote", "origin") -WorkDir $ob1
+        $snap.git["lsremote"] = $lr.stdout
+        $snap.git["lsremote_exit"] = $lr.exit
+    }
+
+    # THE COMMIT LOG, parsed here so clause 7 cannot be handed a commit the run produced.
+    $RS = [string][char]30
+    $US = [string][char]31
+    $commits = @()
+    $glog = Invoke-Git -Arguments @("log", "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", $Ctx.workline) -WorkDir $Ctx.root
+    $snap.git["log_ok"]   = ($glog.exit -eq 0)
+    $snap.git["log_exit"] = $glog.exit
+    $snap.git["log_err"]  = (($glog.stderr -replace '\s+', ' ').Trim())
+    if ($glog.exit -eq 0) {
+        foreach ($rec in ($glog.stdout -split $RS)) {
+            if (-not $rec.Trim()) { continue }
+            $f = $rec -split $US
+            if ($f.Count -lt 2) { continue }
+            $msg = [string]$f[1]
+            if ($f.Count -gt 2) { $msg = $msg + "`n" + [string]$f[2] }
+            $files = @()
+            if ($f.Count -gt 3) { $files = @(([string]$f[3] -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+            $commits += @{ sha = ([string]$f[0]).Trim(); message = $msg; files = @($files) }
+        }
+    }
+    $snap.git["log"] = @($commits)
+    # PLAN.md's whole revision history, for clause 2's chain. A commit made DURING the run
+    # would otherwise become a step of the chain the run is judging.
+    $snap.git["revisions"] = (Get-PlanRevisions -Ctx $Ctx)
+
+    $snap["fingerprint"] = (Get-AuditedFingerprint -Ctx $Ctx)
+    return $snap
+}
+
+function Get-DfuSnapOrFail {
+    # FAIL-CLOSED. A clause that ran without a snapshot would silently fall back to reading
+    # the live tree, which is the defect. It throws instead, and the dispatcher's catch turns
+    # that into clause-N-threw - indeterminate, never a pass.
+    if ($null -eq $script:DfuSnap) { throw "no pre-execution snapshot was taken - this clause refuses to read the live tree" }
+    return $script:DfuSnap
+}
+function Get-SnapDoc     { param([string]$Which) return (Get-DfuSnapOrFail).docs[$Which].raw }
+function Get-SnapMd      { param([string]$Which) return (Get-DfuSnapOrFail).docs[$Which].md }
+function Get-SnapDefects { param([string]$Which) return @((Get-DfuSnapOrFail).docs[$Which].defects) }
+function Get-SnapNotes   { return @((Get-DfuSnapOrFail).notes) }
+function Get-SnapGit     { param([string]$Key) $g = (Get-DfuSnapOrFail).git; if ($g.Contains($Key)) { return $g[$Key] } ; return $null }
+
+function Add-MarkdownHygieneProbe {
+    # A DOCUMENT THAT IS MALFORMED WHERE IT MATTERS IS A RED, NOT A SHORTER DOCUMENT.
+    # Remove-NonProse discards everything after an unterminated `<!--` - the correct
+    # direction, because text a renderer hides must not be read as structure - and that is
+    # INDISTINGUISHABLE from a document which simply ends there. So the malformation is
+    # stated, and the clause that reads the document goes red on it.
+    param($Clause, $Ctx, [string]$Which)
+    $defects = @(Get-SnapDefects -Which $Which)
+    if ($defects.Count -eq 0) { return }
+    $Clause.probes += (New-Probe -Name ("markdown-well-formed-{0}" -f $Which) `
+        -Command ("scan {0} for an unterminated HTML comment or code fence" -f $Ctx[$Which]) `
+        -Run (New-VerdictProbeBody -Verdict "fail" -Exit $defects.Count `
+              -Note ("{0} is malformed and this reader FAILS CLOSED on it: {1}. Everything after the opener is discarded, so a row or a section hidden there is NOT read - and a document that hides structure from its own renderer is not one this authority will decide over." -f `
+                     $Ctx[$Which], ($defects -join " ; "))))
+}
+
+# ---------------------------------------------------------------------------------
+# THE SANDBOX, AND THE LOCK ON THE AUDITED ARTIFACTS.
+# ---------------------------------------------------------------------------------
+
+function Clear-DfuTreeProtection {
+    # A KILLED RUN MUST NOT LEAVE THE OPERATOR'S PLAN.md READ-ONLY. Every explicit Deny ACE
+    # for the running identity on the protected directories is removed at startup, before
+    # anything else happens. It is idempotent, and it is the only reason applying an ACE at
+    # all is a defensible thing for a checker to do.
+    param($Ctx)
+    $cleared = @()
+    $me   = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $sid  = [string]$me.User.Value
+    $name = [string]$me.Name
+    foreach ($d in @(Get-DfuProtectedDirs -Ctx $Ctx)) {
+        try {
+            $acl = Get-Acl -LiteralPath $d
+            $drop = @($acl.Access | Where-Object {
+                $_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny -and
+                (-not $_.IsInherited) -and
+                ([string]$_.IdentityReference.Value -eq $sid -or [string]$_.IdentityReference.Value -eq $name)
+            })
+            if ($drop.Count -lt 1) { continue }
+            foreach ($r in $drop) { [void]$acl.RemoveAccessRuleSpecific($r) }
+            Set-Acl -LiteralPath $d -AclObject $acl
+            $cleared += $d
+        } catch { }
+    }
+    return @($cleared)
+}
+
+function New-DfuDenyRule {
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rights = [System.Security.AccessControl.FileSystemRights]"CreateFiles,AppendData,WriteData,WriteAttributes,WriteExtendedAttributes,Delete,DeleteSubdirectoriesAndFiles"
+    return (New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $sid, $rights, "ContainerInherit,ObjectInherit", "None",
+                [System.Security.AccessControl.AccessControlType]::Deny))
+}
+
+function Protect-AuditedArtifacts {
+    # READ-ONLY TO THE PROCESS THIS AUTHORITY IS ABOUT TO START. A Deny ACE outranks every
+    # Allow, so the child cmd.exe cannot write the plan, the ledger, the walkthrough or a
+    # findings note however it addresses them - relative path, absolute path or otherwise.
+    # Changing an ACL needs WRITE_DAC, which the owner keeps, so this stays removable.
+    param($Ctx)
+    $res = @{ applied = @(); failed = @() }
+    foreach ($d in @(Get-DfuProtectedDirs -Ctx $Ctx)) {
+        try {
+            $acl = Get-Acl -LiteralPath $d
+            $acl.AddAccessRule((New-DfuDenyRule))
+            Set-Acl -LiteralPath $d -AclObject $acl
+            $res.applied += $d
+        } catch { $res.failed += ("{0}: {1}" -f $d, $_.Exception.Message) }
+    }
+    return $res
+}
+
+function Unprotect-AuditedArtifacts {
+    param($Ctx, $Applied)
+    foreach ($d in @($Applied)) {
+        try {
+            $acl = Get-Acl -LiteralPath $d
+            [void]$acl.RemoveAccessRule((New-DfuDenyRule))
+            Set-Acl -LiteralPath $d -AclObject $acl
+        } catch { }
+    }
+}
+
+function Get-DfuSandbox {
+    # ONE clean clone of the work line, built BEFORE any command runs, and the only place a
+    # walkthrough command is ever executed. Clause 5 used to run its commands with
+    # -WorkDir $Ctx.root, which made the audited repository the command's working directory.
+    param($Ctx)
+    if ($null -ne $script:DfuSandbox) { return $script:DfuSandbox }
+    $clean = New-CleanCheckout -Ctx $Ctx
+    $script:DfuSandbox = @{
+        ok      = ($clean.exit -eq 0)
+        path    = $clean.path
+        command = $clean.command
+        why     = (($clean.err -replace "\s+", " ").Trim())
+        submodule_exit = $clean.submodule_exit
+        submodule_err  = $clean.submodule_err
+    }
+    return $script:DfuSandbox
+}
+
+function Reset-DfuSandbox {
+    # BETWEEN PHASES the sandbox goes back to the work line's committed state. Otherwise one
+    # phase's command can manufacture the artifact another phase's command needs - class
+    # fifteen again, with the clone as its world instead of the repository. Submodule working
+    # trees are left alone: `clean -fd` does not descend into them, and re-materialising OB1
+    # between phases would cost minutes to prevent nothing.
+    if ($null -eq $script:DfuSandbox) { return }
+    if (-not $script:DfuSandbox.ok) { return }
+    [void](Invoke-Git -Arguments @("reset", "--hard", "-q") -WorkDir $script:DfuSandbox.path)
+    [void](Invoke-Git -Arguments @("clean", "-qfd") -WorkDir $script:DfuSandbox.path)
+}
+
+function Remove-DfuSandbox {
+    param($Ctx)
+    if ($null -eq $script:DfuSandbox) { return }
+    Remove-CleanCheckout -Ctx $Ctx -Path $script:DfuSandbox.path
+    $script:DfuSandbox = $null
+}
+
+function Invoke-AuditedCommand {
+    # RUN A COMMAND THE DOCUMENT UNDER TEST NAMED - in the sandbox, with the audited
+    # artifacts locked, and with whatever moved recorded either way. Returns
+    # @{ result; drift; sandbox } and appends to the executed-command record the report
+    # prints, because a reader must be able to see what the authority DID as well as what
+    # it concluded.
+    param($Ctx, [string]$Command, [string]$Clause, [string]$Phase)
+    $sb = Get-DfuSandbox -Ctx $Ctx
+    $entry = [ordered]@{ clause = $Clause; phase = $Phase; command = $Command
+                         ran_in = ""; exit = $null; drift = @(); locked = @(); lock_failed = @() }
+    if (-not $sb.ok) {
+        $entry.ran_in = "(NOT RUN - no clean checkout could be built)"
+        $script:DfuExecLog += $entry
+        return @{ sandbox = $sb; drift = @()
+                  result = @{ ran = $false; exit = $null; stdout = ""; stderr = $sb.why; command = $Command } }
+    }
+    $entry.ran_in = $sb.path
+    $before = Get-AuditedFingerprint -Ctx $Ctx
+    $prot   = Protect-AuditedArtifacts -Ctx $Ctx
+    $entry.locked      = @($prot.applied)
+    $entry.lock_failed = @($prot.failed)
+    try {
+        $r = Invoke-Native -Exe "cmd.exe" -Arguments @("/c", $Command) -WorkDir $sb.path
+    } finally {
+        Unprotect-AuditedArtifacts -Ctx $Ctx -Applied $prot.applied
+    }
+    $drift = @(Compare-DfuFingerprint -Before $before -After (Get-AuditedFingerprint -Ctx $Ctx))
+    $entry.exit  = $r.exit
+    $entry.drift = @($drift)
+    $script:DfuExecLog += $entry
+    if ($drift.Count -gt 0) {
+        $script:DfuIntegrity += ("clause {0} / {1}: '{2}' MOVED the audited tree ({3})" -f $Clause, $Phase, $Command, ($drift -join ", "))
+    }
+    return @{ sandbox = $sb; drift = @($drift); result = $r }
+}
+
+function New-CommandProbeBody {
+    # ONE PLACE TURNS AN EXECUTED COMMAND INTO A VERDICT, so clauses 1 and 5 cannot drift
+    # apart on what "green" means - and CONTAMINATION OUTRANKS THE EXIT CODE. A command that
+    # moved the audited tree has not passed, whatever it returned: the measurement it was
+    # part of is no longer a measurement of the world the run started in.
+    param($Run, [string]$GreenNote)
+    $r = $Run.result
+    if (@($Run.drift).Count -gt 0) {
+        return (New-VerdictProbeBody -Verdict "fail" -Exit $r.exit `
+                -Note ("this command CHANGED THE AUDITED TREE ({0}) - a checker that mutates what it measures is not an authority, so this is a failure whatever its exit code was ({1})" -f `
+                       (@($Run.drift) -join ", "), $(if ($null -ne $r.exit) { $r.exit } else { "not started" })))
+    }
+    if (-not $r.ran -or $null -eq $r.exit) {
+        return (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                -Note ("the command could not be started in the clean checkout: {0}" -f (($r.stderr -replace "\s+", " ").Trim())))
+    }
+    if ([int]$r.exit -eq 0) { return (New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note $GreenNote) }
+    $tail = @(($r.stdout + "`n" + $r.stderr) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    return (New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) `
+            -Note ("exited {0} in the clean checkout: {1}" -f $r.exit, (($tail -join " ") -replace "\s+", " ").Trim()))
+}
+
+# =================================================================================
 # THE CLAUSES. One function each, each RUNNING something.
 # =================================================================================
 
@@ -1200,7 +1718,11 @@ function Test-Clause1 {
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 1
 
-    $planText = Read-TextFile -Path $Ctx.plan
+    # THE SNAPSHOT, NOT THE DISK. Every document this clause reads was captured before the
+    # first walkthrough command ran - see New-DfuSnapshot and class fifteen above.
+    $planText = Get-SnapMd -Which "plan"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "plan"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "walkthrough"
     if (-not $planText) {
         $c.probes += (New-Probe -Name "read-plan" -Command ("read {0}" -f $Ctx.plan) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
@@ -1229,20 +1751,22 @@ function Test-Clause1 {
         return (Resolve-ClauseVerdict -Clause $c)
     }
 
-    $runs = Get-WalkthroughRuns -Text (Read-TextFile -Path $Ctx.walkthrough)
+    $runs = Get-WalkthroughRuns -Text (Get-SnapDoc -Which "walkthrough")
 
-    $clean = New-CleanCheckout -Ctx $Ctx
+    # THE SANDBOX IS SHARED WITH CLAUSE 5 AND BUILT BEFORE ANY COMMAND RUNS. It is the ONLY
+    # place either clause executes anything; clause 5 used to run its commands in $Ctx.root.
+    $clean = Get-DfuSandbox -Ctx $Ctx
     $cleanPath = $clean.path
-    $c.detail += ("clean checkout of '{0}': {1} (exit {2})" -f $Ctx.workline, $clean.command, $clean.exit)
+    $c.detail += ("clean checkout of '{0}': {1} (exit {2})" -f $Ctx.workline, $clean.command, $(if ($clean.ok) { 0 } else { 1 }))
     $c.detail += ("clean checkout submodules: git submodule update --init --recursive (exit {0}) {1}" -f `
                   $clean.submodule_exit, $clean.submodule_err)
-    if ($clean.exit -ne 0) {
+    if (-not $clean.ok) {
         # NO CLEAN CHECKOUT = NOTHING WAS PROVEN. Falling back to the current working tree
         # would be exactly the substitution this clause forbids, so it refuses instead.
         $c.probes += (New-Probe -Name "clean-checkout" -Command $clean.command `
-            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $clean.exit `
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
                   -Note ("could not create a clean checkout of '{0}', so NO phase check was re-run: {1}" -f `
-                         $Ctx.workline, (($clean.err -replace "\s+", " ").Trim()))))
+                         $Ctx.workline, $clean.why)))
         $c.coverage.not_evaluated = @($ids)
         return (Resolve-ClauseVerdict -Clause $c)
     }
@@ -1278,29 +1802,40 @@ function Test-Clause1 {
             # silently DROPPED the additional named checks in the same section while the
             # coverage line still read "evaluated 7 of 7" - a claim wider than its evidence
             # in the one field that exists to stop exactly that.
+            # THE SANDBOX IS RESET BETWEEN PHASES, so U0's command cannot leave behind the
+            # artifact U3's command needs and call it a pass.
+            Reset-DfuSandbox
             $n = 0
             $ranAll = $true
             $anyRed = $false
             $refs   = @()
+            $moved  = @()
             foreach ($cmd in $cmds) {
                 $n++
                 $pname = ("{0}-validated-by-{1}" -f $id, $n)
                 $refs += (Get-NamedArtifacts -Text $cmd)
-                $r = Invoke-Native -Exe "cmd.exe" -Arguments @("/c", $cmd) -WorkDir $cleanPath
-                if (-not $r.ran -or $null -eq $r.exit) {
-                    $ranAll = $false
-                    $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                            -Note ("the command could not be started in the clean checkout: {0}" -f (($r.stderr -replace "\s+", " ").Trim()))
-                } elseif ([int]$r.exit -eq 0) {
-                    $body = New-VerdictProbeBody -Verdict "pass" -Exit ([int]$r.exit) -Note "re-ran GREEN in the clean checkout"
-                } else {
-                    $anyRed = $true
-                    $tail = @(($r.stdout + "`n" + $r.stderr) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
-                    $body = New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) `
-                            -Note ("exited {0} in the clean checkout: {1}" -f $r.exit, (($tail -join " ") -replace "\s+", " ").Trim())
-                }
-                $c.probes += (New-Probe -Name $pname -Command $cmd -Run $body)
+                $run = Invoke-AuditedCommand -Ctx $Ctx -Command $cmd -Clause "1" -Phase $id
+                $r   = $run.result
+                $moved += @($run.drift)
+                if (@($run.drift).Count -gt 0) { $anyRed = $true }
+                elseif (-not $r.ran -or $null -eq $r.exit) { $ranAll = $false }
+                elseif ([int]$r.exit -ne 0) { $anyRed = $true }
+                $c.probes += (New-Probe -Name $pname -Command $cmd `
+                              -Run (New-CommandProbeBody -Run $run -GreenNote "re-ran GREEN in the clean checkout"))
             }
+            # AND THE CLAUSE STATES, PER PHASE, THAT RUNNING ITS CHECKS LEFT THE AUDITED TREE
+            # WHERE IT FOUND IT. This is a POSITIVE assertion, not the absence of an
+            # objection: it is printed green when nothing moved, which is what makes its red
+            # meaningful.
+            $c.probes += (New-Probe -Name ("{0}-left-the-audited-tree-unchanged" -f $id) `
+                -Command ("fingerprint the plan, the ledger, the walkthrough, documentation/notes, git refs/status/worktrees/submodules before and after each of {0}'s {1} command(s)" -f $id, $cmds.Count) `
+                -Run $(if (@($moved).Count -gt 0) {
+                          New-VerdictProbeBody -Verdict "fail" -Exit (@($moved).Count) `
+                          -Note ("running {0}'s checks CHANGED the audited tree: {1}. Later clauses still decide over the pre-run snapshot, so nothing was discharged by it - but a command the document names must not be able to move the world this run measures." -f $id, ((@($moved) | Sort-Object -Unique) -join ", "))
+                      } else {
+                          New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                          -Note ("the plan, the ledger, the walkthrough, documentation/notes and git's refs, status, worktrees and submodules are byte-identical before and after {0}'s {1} command(s), which ran in {2} with the audited documents locked" -f $id, $cmds.Count, $cleanPath)
+                      }))
             # A PHASE COUNTS AS EVALUATED ONLY WHEN ALL OF ITS CHECKS RAN. One command that
             # could not start leaves the phase partly measured, and partly measured is the
             # word "unevaluated", not the word "green".
@@ -1336,9 +1871,10 @@ function Test-Clause1 {
             if ($anyRed) { $c.detail += ("{0}: at least one recorded check went RED in the clean checkout" -f $id) }
         }
     } finally {
-        # ALWAYS removed. A leaked scratch worktree would be counted by clause 4 as
-        # unfinished work - this script must not manufacture the defect it reports.
-        Remove-CleanCheckout -Ctx $Ctx -Path $cleanPath
+        # THE SANDBOX IS SHARED WITH CLAUSE 5 AND REMOVED BY THE RUN, not by this clause -
+        # see the finally around the clause loop. It is a CLONE, so `git worktree list` in
+        # the audited repo cannot see it and clause 4 cannot count it as unfinished work.
+        Reset-DfuSandbox
     }
     return (Resolve-ClauseVerdict -Clause $c)
 }
@@ -1514,7 +2050,13 @@ function Test-Clause2 {
     $dispositions = Read-JsonStore -Path $Ctx.dispositions
 
     # --- (a) outstanding PARKED entries in DECISIONS.md ---------------------------
-    $decText = Read-TextFile -Path $Ctx.decisions
+    # NORMALISED, AND FROM THE SNAPSHOT. Raw, a "## " entry inside an HTML comment carrying
+    # an "Un-parks:" directive closed a PARKED entry that no reader can see closed; and read
+    # from the disk after clause 1 has run, a ledger entry the RUN created would have closed
+    # one too.
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "decisions"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "plan"
+    $decText = Get-SnapMd -Which "decisions"
     if (-not $decText) {
         $c.probes += (New-Probe -Name "decisions-readable" -Command ("read {0}" -f $Ctx.decisions) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
@@ -1578,7 +2120,7 @@ function Test-Clause2 {
     }
 
     # --- (b) every section 2.1 amendment carries evidence + revert path -----------
-    $planText = Read-TextFile -Path $Ctx.plan
+    $planText = Get-SnapMd -Which "plan"
     $amendments = @()
     if ($planText) {
         foreach ($part in [regex]::Split($planText, '(?m)^(?=####\s)')) {
@@ -1622,7 +2164,9 @@ function Test-Clause2 {
     }
 
     # --- (c) THE CHAIN, per phase -------------------------------------------------
-    $revs = Get-PlanRevisions -Ctx $Ctx
+    # FROM THE SNAPSHOT: a commit made DURING this run must not become a step of the chain
+    # this run is judging.
+    $revs = Get-SnapGit -Key "revisions"
     $curParse  = Get-PhaseTableParse -Text $planText
     $curPhases = $curParse.phases
     # THE FLOOR AGAIN. Deleting U1's row from section 2 used to make this clause report
@@ -2112,16 +2656,30 @@ function Test-Clause3 {
     # A pinned list is only honest while something checks it against what it is pinned to.
     # Every backticked identifier inside C.8 clause 3, plus the three door names that
     # section writes in prose, must be claimed by a subject above.
-    $planTxt = Read-TextFile -Path $Ctx.plan
+    # AND THIS WAS THE SIBLING THAT GOT LEFT. Round 4 anchored phase-floor-matches-plan and
+    # service-set-matches-plan to section C.8 and made ambiguity REFUSE - and left this third
+    # instance of the identical read running a lazy FIRST-MATCH regex over the WHOLE plan. A
+    # decoy passage earlier in PLAN.md - a quotation of clause 3, an example, a superseded
+    # draft - becomes the text the door floor is checked back against, and the drift check
+    # reports agreement over the wrong paragraph. Three sites, one shape; all three are now
+    # anchored and all three refuse on ambiguity.
+    $planTxt = Get-SnapMd -Which "plan"
     $sec = ""
+    $whyDoor = "C.8 clause 3's text could not be located in the plan, so the door set could not be checked against it"
     if ($planTxt) {
-        $m = [regex]::Match($planTxt, '(?s)3\.\s\*\*The personal-plane constraint.*?(?=\n4\.\s\*\*Nothing is left in flight)')
-        if ($m.Success) { $sec = $m.Value }
+        $c8d = Get-DfuSection -Text $planTxt -HeadingPattern '(?m)^###\s+C\.8\b[^\r\n]*'
+        if ($c8d.count -ne 1) {
+            $whyDoor = ("section C.8's heading matched {0} time(s) in the plan, so clause 3 could not be located UNAMBIGUOUSLY - one match is a location, two is a question nobody answered" -f $c8d.count)
+        } else {
+            $m3s = @([regex]::Matches($c8d.text, '(?s)3\.\s\*\*The personal-plane constraint.*?(?=\n4\.\s\*\*Nothing is left in flight)'))
+            if ($m3s.Count -ne 1) {
+                $whyDoor = ("clause 3's text matched {0} time(s) inside section C.8, so the door floor could not be checked back against ONE paragraph" -f $m3s.Count)
+            } else { $sec = $m3s[0].Value }
+        }
     }
     if (-not $sec) {
-        $c.probes += (New-Probe -Name "door-set-matches-plan" -Command ("locate C.8 clause 3 in {0}" -f $Ctx.plan) `
-            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                  -Note "C.8 clause 3's text could not be located in the plan, so the door set could not be checked against it"))
+        $c.probes += (New-Probe -Name "door-set-matches-plan" -Command ("locate section C.8 in {0}, then clause 3 inside it" -f $Ctx.plan) `
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note $whyDoor))
     } else {
         $claimed = @()
         foreach ($k in $script:DfuDoorAnchors.Keys) { $claimed += @($script:DfuDoorAnchors[$k]) }
@@ -2788,7 +3346,7 @@ function Test-Clause4 {
     # it means, so that list is read back out of the plan and every item must be claimed by
     # a subject here - a service the plan names and this script does not probe turns the
     # clause red rather than disappearing from it.
-    $planTxt4 = Read-TextFile -Path $Ctx.plan
+    $planTxt4 = Get-SnapMd -Which "plan"
     $sec4 = ""
     $why4 = "C.8 clause 4's text could not be located in the plan, so the pinned service set could not be checked back against it"
     if ($planTxt4) {
@@ -2855,8 +3413,12 @@ function Test-Clause4 {
 
     # --- unmerged work/* branches ------------------------------------------------
     # An exclusion is only honoured while the LEDGER records it (see DfuExcludedBranches).
-    $decForBranches = Read-TextFile -Path $Ctx.decisions
-    $branches = Get-WorkBranches -Ctx $Ctx
+    # FROM THE SNAPSHOT, ALL OF IT. This clause's subjects - the branch list, the worktree
+    # list, the working tree's cleanliness, the submodule states, the gitlink and the
+    # remote's refs - are exactly what a walkthrough command running under cmd.exe could
+    # change, and clause 1 runs first. They are read as they stood before the first command.
+    $decForBranches = Get-SnapMd -Which "decisions"
+    $branches = Get-SnapGit -Key "branches"
     if ($null -eq $branches) {
         $c.coverage.not_evaluated += "work-branches"
         $c.probes += (New-Probe -Name "no-unmerged-work-branches" -Command "git for-each-ref refs/heads/work/" `
@@ -2898,7 +3460,7 @@ function Test-Clause4 {
     }
 
     # --- worktrees ---------------------------------------------------------------
-    $wts = Get-Worktrees -Ctx $Ctx
+    $wts = Get-SnapGit -Key "worktrees"
     if ($null -eq $wts) {
         $c.coverage.not_evaluated += "worktrees"
         $c.probes += (New-Probe -Name "no-worktrees" -Command "git worktree list --porcelain" `
@@ -2917,7 +3479,7 @@ function Test-Clause4 {
     }
 
     # --- clean repo and clean submodules -----------------------------------------
-    $gs = Invoke-Git -Arguments @("status", "--porcelain") -WorkDir $Ctx.root
+    $gs = @{ exit = (Get-SnapGit -Key "status_exit"); stdout = [string](Get-SnapGit -Key "status") }
     if ($gs.exit -ne 0) {
         $c.coverage.not_evaluated += "clean-repo"
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $gs.exit -Note "git status failed"
@@ -2929,7 +3491,7 @@ function Test-Clause4 {
     }
     $c.probes += (New-Probe -Name "clean-repo" -Command "git status --porcelain" -Run $body)
 
-    $gm = Invoke-Git -Arguments @("submodule", "status", "--recursive") -WorkDir $Ctx.root
+    $gm = @{ exit = (Get-SnapGit -Key "submodule_exit"); stdout = [string](Get-SnapGit -Key "submodule") }
     if ($gm.exit -ne 0) {
         $c.coverage.not_evaluated += "clean-submodules"
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $gm.exit -Note "git submodule status failed"
@@ -2947,18 +3509,14 @@ function Test-Clause4 {
     # a given clone (a branch pushed from a worktree this clone never fetched), which
     # produces false failures, and stale, which produces a false PASS. DECISIONS.md
     # records both halves of that lesson.
-    $gl = Invoke-Git -Arguments @("ls-tree", $Ctx.workline, "OB1") -WorkDir $Ctx.root
-    $pin = ""
-    if ($gl.exit -eq 0) {
-        $m = [regex]::Match($gl.stdout, 'commit\s+([0-9a-f]{40})')
-        if ($m.Success) { $pin = $m.Groups[1].Value }
-    }
+    $pin = [string](Get-SnapGit -Key "gitlink")
     $ob1 = Join-Path $Ctx.root "OB1"
     if (-not $pin) {
         $c.coverage.not_evaluated += "gitlink-reachable"
-        $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $gl.exit -Note "could not read the OB1 gitlink from the work line"
+        $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit (Get-SnapGit -Key "gitlink_exit") -Note "could not read the OB1 gitlink from the work line"
     } else {
-        $lr = Invoke-Git -Arguments @("ls-remote", "origin") -WorkDir $ob1
+        $lrExit = Get-SnapGit -Key "lsremote_exit"
+        $lr = @{ exit = $(if ($null -eq $lrExit) { 1 } else { [int]$lrExit }); stdout = [string](Get-SnapGit -Key "lsremote") }
         if ($lr.exit -ne 0) {
             # A GATE THAT CANNOT SEE THE REMOTE MUST REFUSE, NOT PASS.
             $c.coverage.not_evaluated += "gitlink-reachable"
@@ -3236,7 +3794,13 @@ function Test-Clause5 {
     # worse than a missing row.
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 5
-    $text = Read-TextFile -Path $Ctx.walkthrough
+    # THE SNAPSHOT, NOT THE DISK - and the commands below run in the SANDBOX, not in
+    # $Ctx.root. This clause used to execute every backtick span under a How-to-run marker
+    # with the audited repository as the working directory, which is class fifteen's
+    # demonstrated channel.
+    $text = Get-SnapDoc -Which "walkthrough"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "walkthrough"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "plan"
     if (-not $text) {
         $c.probes += (New-Probe -Name "walkthrough-readable" -Command ("read {0}" -f $Ctx.walkthrough) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "WALKTHROUGH.md is unreadable or missing"))
@@ -3253,14 +3817,12 @@ function Test-Clause5 {
     # checked back against the plan's words, and UNIONED with whatever sections the
     # walkthrough actually has, so a phase can be added to this population but never
     # subtracted from it by editing the walkthrough.
-    $sections = [ordered]@{}
-    foreach ($part in [regex]::Split($text, '(?m)^(?=##\s)')) {
-        if ($part -match '(?m)^##\s+\**(U\d)') {
-            $sid = $Matches[1]
-            if (-not $sections.Contains($sid)) { $sections[$sid] = $true }
-        }
-    }
-    $planText5 = Read-TextFile -Path $Ctx.plan
+    # AND THE SECTION SCAN NORMALISES. Splitting the RAW text here meant five phase
+    # sections inside a properly CLOSED HTML comment counted as sections: verdict met,
+    # coverage 8 of 8, floor pass, every walkthrough-U<n>-check-1 green - over a document
+    # showing two sections to the operator this clause exists to serve.
+    $sections = Get-WalkthroughSectionIds -Text $text
+    $planText5 = Get-SnapMd -Which "plan"
     $floor5 = Add-PhaseFloorProbes -Clause $c -Ctx $Ctx -PlanText $planText5 -Phases $sections `
                                    -Where "WALKTHROUGH.md's phase sections"
     $ids = @($floor5.ids)
@@ -3292,26 +3854,32 @@ function Test-Clause5 {
         # left named checks unrun while the coverage line still read full; this is the
         # document the operator reviews by, so a command that was never executed is a
         # sentence this script did not verify.
+        Reset-DfuSandbox
         $n = 0
         $ranAll = $true
+        $moved  = @()
         foreach ($cmd in $cmds) {
             $n++
-            $r = Invoke-Native -Exe "cmd.exe" -Arguments @("/c", $cmd) -WorkDir $Ctx.root
-            if (-not $r.ran -or $null -eq $r.exit) {
-                $ranAll = $false
-                $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "the named check could not be started"
-            } elseif ([int]$r.exit -eq 0) {
-                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "the row's named check re-runs green"
-            } else {
-                $tail = @(($r.stdout + "`n" + $r.stderr) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
-                $body = New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) `
-                        -Note ("the row's named check exited {0}: {1}" -f $r.exit, (($tail -join " ") -replace '\s+', ' ').Trim())
-            }
-            $c.probes += (New-Probe -Name ("walkthrough-{0}-check-{1}" -f $id, $n) -Command $cmd -Run $body)
+            $run = Invoke-AuditedCommand -Ctx $Ctx -Command $cmd -Clause "5" -Phase $id
+            $r   = $run.result
+            $moved += @($run.drift)
+            if (@($run.drift).Count -lt 1 -and (-not $r.ran -or $null -eq $r.exit)) { $ranAll = $false }
+            $c.probes += (New-Probe -Name ("walkthrough-{0}-check-{1}" -f $id, $n) -Command $cmd `
+                          -Run (New-CommandProbeBody -Run $run -GreenNote "the row's named check re-runs green"))
         }
+        $c.probes += (New-Probe -Name ("walkthrough-{0}-left-the-audited-tree-unchanged" -f $id) `
+            -Command ("fingerprint the plan, the ledger, the walkthrough, documentation/notes, git refs/status/worktrees/submodules before and after each of {0}'s {1} command(s)" -f $id, $cmds.Count) `
+            -Run $(if (@($moved).Count -gt 0) {
+                      New-VerdictProbeBody -Verdict "fail" -Exit (@($moved).Count) `
+                      -Note ("the check this row NAMES changed the audited tree: {0}. It ran in the clean checkout with the audited documents locked, so this is a command reaching past both - and the row is not true merely because its command exited 0." -f ((@($moved) | Sort-Object -Unique) -join ", "))
+                  } else {
+                      New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                      -Note ("nothing this row's {0} command(s) did moved the plan, the ledger, the walkthrough, documentation/notes or git's refs, status, worktrees or submodules" -f $cmds.Count)
+                  }))
         if ($ranAll) { $c.coverage.evaluated++ }
         else { $c.coverage.not_evaluated = @($c.coverage.not_evaluated) + @($id) }
     }
+    Reset-DfuSandbox
     return (Resolve-ClauseVerdict -Clause $c)
 }
 
@@ -3325,7 +3893,10 @@ function Test-Clause6 {
     $c.coverage.subject  = "one complete U7 cycle on the record"
     $c.coverage.expected = 1
 
-    $decText = Read-TextFile -Path $Ctx.decisions
+    # NORMALISED, AND FROM THE SNAPSHOT - a U7 "cycle" recorded inside an HTML comment is
+    # not on the record the operator reads, and one written by this run is not on it either.
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "decisions"
+    $decText = Get-SnapMd -Which "decisions"
     if (-not $decText) {
         $c.probes += (New-Probe -Name "u7-cycle-recorded" -Command ("read {0}" -f $Ctx.decisions) `
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "DECISIONS.md unreadable - the ledger is where a cycle would be recorded"))
@@ -3355,13 +3926,82 @@ function Test-Clause6 {
     return (Resolve-ClauseVerdict -Clause $c)
 }
 
+function Get-CommitValidationClaims {
+    # THE VALIDATION STATEMENTS A COMMIT MESSAGE MAKES, as structures rather than as a
+    # co-occurrence of two words somewhere in a page of prose.
+    #
+    # THE LIVE FALSE PASS THIS REPLACES. `audit-trail-U2 = pass` rested entirely on 8b477a9
+    # - a commit about U4's audit-trail round whose own summary line says "No code behaviour
+    # changed". It mentions U2 in one sentence ("2 pre-existing F811s from U2's 86ffa62")
+    # and `test_anchor_schema.py` in the NEXT sentence, describing a lint finding in someone
+    # else's file. The phase-id match and the artifact match were INDEPENDENT substring
+    # searches over the whole message, so two incidental mentions in unrelated sentences
+    # discharged "commit messages stating what was validated and by which check". That is a
+    # substring standing in for a structure - class 7 on this file's own list - in the one
+    # clause whose subject is the record the operator reads INSTEAD of the diffs.
+    #
+    # A CLAIM IS A DIRECTIVE, LIKE EVERY OTHER RECORD THIS FILE ACCEPTS. The ledger's
+    # un-parking is `Un-parks: <entry>`; clause 4's carve-out is `Excluded from C.8 clause
+    # 4: <branch>`; this is the same shape, and for the same reason - a record has to be
+    # something an author WROTE ON PURPOSE and a reader can find:
+    #
+    #     Validated: U2 - the anchor-schema cross-reader, by scripts/agent-harness/test_anchor_schema.py
+    #     Verified by: U5 step 1, scripts/checks/personal-plane-drill.ps1
+    #
+    # The directive word (validated / verified / proved / proven, with or without "by",
+    # optionally introduced by a list marker)
+    # opens the claim; the claim runs to the end of its line plus any INDENTED continuation
+    # lines, so a wrapped or bulleted list under one heading is one claim. What the claim
+    # must then contain is BOTH halves in the SAME claim: the phase it is about, and a check
+    # that phase names. Neither half alone, and never one half from one sentence and the
+    # other from another.
+    #
+    # THE COST IS HONEST AND IS THE POINT. No commit currently on this work line carries the
+    # directive, so this half of clause 7 goes RED for every phase - which is the true
+    # statement about a history that never wrote it down, and C.8's own instruction is that
+    # a clause which cannot be met is a REPORT and not a redefinition. The drill proves the
+    # rule is a measurement rather than a wall: X4 constructs a commit that DOES carry the
+    # directive and asserts it discharges, beside one that co-mentions and does not.
+    param([string]$Message)
+    $out = @()
+    if (-not $Message) { return @($out) }
+    $flat = (($Message -replace '\*', '') -replace '`', '')
+    $lines = @($flat -split "`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $l = [string]$lines[$i]
+        if ($l -notmatch '(?i)^\s{0,3}(?:[-*]\s+)?(?:validated|verified|proved|proven)(?:\s+by)?\b[^\r\n:]{0,60}:\s*(.*)$') { continue }
+        $body = [string]$Matches[1]
+        for ($j = $i + 1; $j -lt $lines.Count; $j++) {
+            $n = [string]$lines[$j]
+            if (-not $n.Trim()) { break }
+            # A line starting at the left margin begins a new paragraph, not a continuation
+            # of this claim - which is what keeps a claim from absorbing the rest of the
+            # message and becoming the substring search it replaced.
+            if ($n -notmatch '^\s') { break }
+            if ($n -match '(?i)^\s{0,3}(?:[-*]\s+)?(?:validated|verified|proved|proven)(?:\s+by)?\b[^\r\n:]{0,60}:') { break }
+            $body = $body + " " + $n.Trim()
+        }
+        $body = ($body -replace '\s+', ' ').Trim()
+        if ($body) { $out += $body }
+    }
+    return @($out)
+}
+
 function Test-Clause7 {
     # C.8.7 - the audit trail is complete, because it is what the operator reads instead
     # of the diffs: every phase has its DECISIONS entries, its findings note, and commit
     # messages stating what was validated and by which check.
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 7
-    $planText = Read-TextFile -Path $Ctx.plan
+    # EVERY DOCUMENT FROM THE SNAPSHOT, AND NORMALISED. Both halves are load-bearing here:
+    # read RAW, a `## ` heading inside an HTML comment discharged a phase's ledger artifact;
+    # read from DISK after clause 1 had run, a findings note the RUN ITSELF created did -
+    # U0 went from exit 3 to exit 2 that way, which is the demonstration that named class
+    # fifteen.
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "decisions"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "plan"
+    Add-MarkdownHygieneProbe -Clause $c -Ctx $Ctx -Which "walkthrough"
+    $planText = Get-SnapMd -Which "plan"
     $parse7 = Get-PhaseTableParse -Text $planText
     $phases = $parse7.phases
     # THE FLOOR. Unbolding a row - `| **U1** |` -> `| U1 |`, invisible to a reader - used
@@ -3375,53 +4015,29 @@ function Test-Clause7 {
             -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "no phases parsed, so no audit trail could be checked"))
         return (Resolve-ClauseVerdict -Clause $c)
     }
-    $decText = Read-TextFile -Path $Ctx.decisions
+    $decSections = @(Get-LedgerSections -Text (Get-SnapMd -Which "decisions"))
     # THE CHECKS A PHASE NAMES, from both places the plan names them: section 2's column
     # and the walkthrough's How-to-run commands for that phase (which clause 1 ties back to
     # the column). That union is what "by which check" means for this phase - not "any
     # script anywhere in the message".
-    $runs7 = Get-WalkthroughRuns -Text (Read-TextFile -Path $Ctx.walkthrough)
-    $noteFiles = @()
-    if (Test-Path -LiteralPath $Ctx.notes) {
-        $noteFiles = @(Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue)
-    }
+    $runs7 = Get-WalkthroughRuns -Text (Get-SnapDoc -Which "walkthrough")
+    $noteFiles = @(Get-SnapNotes)
 
-    # THE THIRD ARTIFACT, and there was no `git log` ANYWHERE in this file. C.8.7 names
-    # three per phase - DECISIONS entries, a findings note, and "commit messages stating
-    # what was validated and by which check" - and this clause could reach `met` with the
-    # commit-message half never examined, coverage reporting 8 of 8 while checking two
-    # thirds of its own sentence.
+    # THE THIRD ARTIFACT, and there was no `git log` ANYWHERE in this file before round 4.
+    # C.8.7 names three per phase - DECISIONS entries, a findings note, and "commit messages
+    # stating what was validated and by which check" - and this clause could reach `met`
+    # with the commit-message half never examined.
     #
-    # A COMMIT COUNTS ONLY WHEN IT SAYS BOTH THINGS. Naming the phase is not "stating what
-    # was validated and by which check": the message must also NAME A RUNNABLE ARTIFACT,
-    # which is the same test clause 1 uses to tie a column to the thing that re-runs it.
-    # "U3 done" satisfies neither half and must not count as either.
-    # ...AND THE CHANGED FILES COME WITH IT, because "which check" is answered partly by
-    # what the commit TOUCHED - see the self-discharge rule below.
-    $RS = [string][char]30
-    $US = [string][char]31
-    $commits = @()
-    $glog = Invoke-Git -Arguments @("log", "--format=%x1e%H%x1f%s%x1f%b%x1f", "--name-only", $Ctx.workline) -WorkDir $Ctx.root
-    $logOk = ($glog.exit -eq 0)
-    if ($logOk) {
-        foreach ($rec in ($glog.stdout -split $RS)) {
-            if (-not $rec.Trim()) { continue }
-            $f = $rec -split $US
-            if ($f.Count -lt 2) { continue }
-            $msg = [string]$f[1]
-            if ($f.Count -gt 2) { $msg = $msg + "`n" + [string]$f[2] }
-            $files = @()
-            if ($f.Count -gt 3) {
-                $files = @(([string]$f[3] -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-            }
-            $commits += @{ sha = ([string]$f[0]).Trim(); message = $msg; files = @($files) }
-        }
-    } else {
+    # THE LOG COMES FROM THE SNAPSHOT, taken before the first walkthrough command ran: a
+    # commit this run produced must not be able to discharge the phase this run is judging.
+    $commits = @(Get-SnapGit -Key "log")
+    $logOk = [bool](Get-SnapGit -Key "log_ok")
+    if (-not $logOk) {
         # COULD NOT READ IS NOT FINE. Every phase below is left unevaluated for this half.
         $c.probes += (New-Probe -Name "audit-commit-log" `
             -Command ("git log --format=%x1e%H%x1f%s%x1f%b%x1f --name-only {0}" -f $Ctx.workline) `
-            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $glog.exit `
-                  -Note ("the work line's commit log could not be read, so the third artifact C.8.7 names was NOT examined: {0}" -f (($glog.stderr -replace '\s+', ' ').Trim()))))
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit (Get-SnapGit -Key "log_exit") `
+                  -Note ("the work line's commit log could not be read, so the third artifact C.8.7 names was NOT examined: {0}" -f (Get-SnapGit -Key "log_err"))))
     }
     # THE DONE-AUTHORITY'S OWN FILES. A commit that touches nothing but this script and its
     # drill is a commit ABOUT THE CHECKER. It may mention any phase it likes; it is not
@@ -3433,70 +4049,53 @@ function Test-Clause7 {
     if ($selfLeaf) { $selfNames = @($selfLeaf, ("verify-" + $selfLeaf)) }
 
     foreach ($id in $ids) {
-        $headings = @()
-        if ($decText) {
-            foreach ($line in ($decText -split "`n")) {
-                $l = $line.TrimEnd("`r")
-                # TWO THINGS GO WRONG HERE IF YOU ARE CASUAL, and both did:
-                #   1. the SECOND -match REPLACES $Matches, and the phase pattern has no
-                #      capture group, so $Matches[1] became null and .Trim() threw;
-                #   2. -notmatch does NOT populate $Matches at all, so guarding with it and
-                #      then reading $Matches[1] silently read a STALE match - every phase
-                #      then reported "no DECISIONS.md entry" against a file full of them.
-                # So: match positively, capture immediately, compare afterwards.
-                if ($l -match '^##\s+(.*)$') {
-                    $head = $Matches[1].Trim()
-                    if ($head -match ('\b' + $id + '\b')) { $headings += $head }
-                }
-            }
-        }
-        # A findings note "for" a phase is one whose NAME or whose HEADINGS name it.
-        #
-        # IT USED TO BE THE WHOLE BODY. Any *.md in documentation/notes whose text matched
-        # \bU3\b anywhere discharged U3's findings-note artifact - so ONE unrelated note
-        # mentioning a phase in passing satisfied it, and the phase with 10 "findings
-        # notes" might have none that is ABOUT it. A note that is about a phase says so
-        # where a reader looks: in its filename or in a heading.
+        $headings = @($decSections | Where-Object { $_.heading -match ('(?<![A-Za-z0-9])' + $id + '(?![0-9])') } |
+                      ForEach-Object { $_.heading })
+        # A findings note "for" a phase is one whose NAME or whose HEADINGS name it - and
+        # the headings are read from the NORMALISED body, so a heading inside an HTML
+        # comment discharges nothing.
         $notes = @($noteFiles | Where-Object {
-            $_.BaseName -match ('(?i)\b' + $id + '\b') -or
-            ((Read-TextFile -Path $_.FullName) -match ('(?m)^#{1,6}\s[^\r\n]*(?<![A-Za-z0-9])' + $id + '(?![0-9])'))
+            [string]$_.base -match ('(?i)(?<![A-Za-z0-9])' + $id + '(?![0-9])') -or
+            [string]$_.md   -match ('(?m)^#{1,6}\s[^\r\n]*(?<![A-Za-z0-9])' + $id + '(?![0-9])')
         })
         # THE COMMIT-MESSAGE HALF, per phase - "commit messages stating what was validated
         # and BY WHICH CHECK", which is more than a mention of the phase plus a mention of
-        # some script.
-        #
-        # WHAT A VERIFIER PROVED. `audit-trail-U1` passed on two commits about THIS CHECKER
-        # - "C.8 round 3: a checker must not take its population from the document it
-        # tests" and "C.8 - four operator rulings raise the bar for done" - neither of which
-        # states what was validated for U1. Both named the phase somewhere and named a
-        # `*.ps1` somewhere, and that was the whole test.
-        #
-        # So two rules now:
-        #   (1) THE CHECK MUST BE THE PHASE'S OWN. The artifact the message names must be
-        #       one section 2's Validated-by column for THAT PHASE also names - the same
-        #       correspondence clause 1 uses to tie a column to the thing that re-runs it.
-        #       Where the column names no runnable artifact, NO commit can discharge this
-        #       half and the probe says exactly that; it does not fall back to "any script".
-        #   (2) THE CLAUSE'S OWN COMMITS DISCHARGE NOTHING. A commit whose entire changed
-        #       file set is this script and its drill is evidence about the checker.
+        # some script SOMEWHERE ELSE in the same message. See Get-CommitValidationClaims.
         $wantedCol = @()
         if ($phases.Contains($id)) { $wantedCol += @(Get-NamedArtifacts -Text ([string]$phases[$id].validated)) }
         if ($runs7.Contains($id)) { foreach ($rc in @($runs7[$id])) { $wantedCol += @(Get-NamedArtifacts -Text $rc) } }
         $wantedCol = @($wantedCol | Sort-Object -Unique)
         $cmsgs = @()
         $selfOnly = 0
+        $coMention = 0
         foreach ($cm in $commits) {
             if ($cm.message -notmatch ('(?<![A-Za-z0-9])' + $id + '(?![0-9])')) { continue }
-            $named = @(Get-NamedArtifacts -Text $cm.message)
-            if ($named.Count -lt 1) { continue }
             if ($wantedCol.Count -lt 1) { continue }
-            if (@($named | Where-Object { $wantedCol -contains $_ }).Count -lt 1) { continue }
+            # THE STRUCTURED RELATIONSHIP. One CLAIM must carry both halves: the phase, and
+            # a check that phase names. Two mentions in two unrelated sentences is what the
+            # previous test accepted and is exactly what 8b477a9 was.
+            $claims = @(Get-CommitValidationClaims -Message ([string]$cm.message))
+            $hit = @($claims | Where-Object {
+                $cl = $_
+                ($cl -match ('(?<![A-Za-z0-9])' + $id + '(?![0-9])')) -and
+                (@(Get-NamedArtifacts -Text $cl | Where-Object { $wantedCol -contains $_ }).Count -ge 1)
+            })
+            if ($hit.Count -lt 1) {
+                # It names the phase and it names one of the phase's checks, but not in the
+                # same claim - the shape that produced the false pass. Counted and reported,
+                # so the difference between "no such commit" and "a commit that co-mentions"
+                # is visible rather than collapsed into one word.
+                $named = @(Get-NamedArtifacts -Text ([string]$cm.message))
+                if (@($named | Where-Object { $wantedCol -contains $_ }).Count -ge 1) { $coMention++ }
+                continue
+            }
             $leaves = @(@($cm.files) | ForEach-Object { ($_ -split '/')[-1] })
             if ($leaves.Count -ge 1 -and $selfNames.Count -ge 1 -and
                 @($leaves | Where-Object { $selfNames -notcontains $_ }).Count -eq 0) { $selfOnly++; continue }
-            $cmsgs += ("{0} {1}" -f (Get-ShortRef -Sha $cm.sha), (($cm.message -split "`n")[0]).Trim())
+            $cmsgs += ("{0} {1} :: {2}" -f (Get-ShortRef -Sha $cm.sha), (($cm.message -split "`n")[0]).Trim(), (@($hit)[0]))
         }
-        if ($selfOnly -gt 0) { $c.detail += ("    {0}: {1} commit(s) naming it touch ONLY the done-authority's own files - a commit about the checker does not discharge a phase" -f $id, $selfOnly) }
+        if ($selfOnly -gt 0) { $c.detail += ("    {0}: {1} commit(s) claiming it touch ONLY the done-authority's own files - a commit about the checker does not discharge a phase" -f $id, $selfOnly) }
+        if ($coMention -gt 0) { $c.detail += ("    {0}: {1} commit(s) mention the phase AND one of its checks, but in different statements - a co-mention is not a claim that THIS check validated THIS phase" -f $id, $coMention) }
         foreach ($cmline in @($cmsgs | Select-Object -First 3)) { $c.detail += ("    {0} commit: {1}" -f $id, $cmline) }
 
         $missing = @()
@@ -3506,7 +4105,9 @@ function Test-Clause7 {
             if ($wantedCol.Count -lt 1) {
                 $missing += ("this phase names NO runnable check anywhere - neither section 2's column nor a 'How to run' line in the walkthrough - so no commit message can state 'by which check'")
             } else {
-                $missing += ("no commit message on the work line names the phase AND one of the checks this phase names ({0})" -f ($wantedCol -join ", "))
+                $missing += ("no commit message on the work line carries a validation claim naming the phase AND one of the checks this phase names ({0}) in the SAME statement - the shape is a directive line, e.g. 'Validated: {1} ... by {2}'{3}" -f `
+                             ($wantedCol -join ", "), $id, (@($wantedCol)[0]), `
+                             $(if ($coMention -gt 0) { (" ({0} commit(s) co-mention both without claiming one validated the other)" -f $coMention) } else { "" }))
             }
         }
         if ($logOk) { $c.coverage.evaluated++ }
@@ -3520,11 +4121,11 @@ function Test-Clause7 {
                     -Note ("{0} ledger entry/entries and {1} findings note(s), but the commit log could not be read - two of the three artifacts C.8.7 names is not the audit trail it asks for" -f $headings.Count, $notes.Count)
         } else {
             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                    -Note ("{0} ledger entry/entries, {1} findings note(s) whose name or headings are ABOUT this phase, and {2} commit message(s) naming the phase and one of the checks this phase names ({3})" -f `
+                    -Note ("{0} ledger entry/entries, {1} findings note(s) whose name or headings are ABOUT this phase, and {2} commit message(s) carrying a validation claim that names the phase AND one of the checks this phase names ({3}) in the same statement" -f `
                            $headings.Count, $notes.Count, $cmsgs.Count, ($wantedCol -join ", "))
         }
         $c.probes += (New-Probe -Name ("audit-trail-{0}" -f $id) `
-                      -Command ("grep '^## .*{0}' {1} ; grep -l '^#.*{0}' {2}/*.md ; git log --name-only {3} | a commit naming {0} AND one of section 2's checks for it, excluding commits that touch only the done-authority" -f $id, $Ctx.decisions, $Ctx.notes, $Ctx.workline) -Run $body)
+                      -Command ("'^## .*{0}' in {1} ; a note in {2} whose FILENAME or a HEADING names {0} ; and a commit on {3} whose message carries a Validated/Verified claim naming {0} and one of its own checks, excluding commits that touch only the done-authority" -f $id, $Ctx.decisions, $Ctx.notes, $Ctx.workline) -Run $body)
     }
     return (Resolve-ClauseVerdict -Clause $c)
 }
@@ -3597,13 +4198,13 @@ function Test-Clause8 {
                 -Note "no recall returned a memory, so there is no recall for any later effort to have been informed by"
         $c.coverage.evaluated++
     } else {
+        # THE AUDIT RECORD AS IT STOOD BEFORE THE RUN, normalised. A recall id written into
+        # a note by a command this authority executed would otherwise prove that the memory
+        # plane compounds - by citing evidence the authority manufactured - and a citation
+        # inside an HTML comment is not in the record the operator reads.
         $hay = ""
-        $hay += ([string](Read-TextFile -Path $Ctx.decisions))
-        if (Test-Path -LiteralPath $Ctx.notes) {
-            foreach ($f in (Get-ChildItem -LiteralPath $Ctx.notes -Filter "*.md" -File -ErrorAction SilentlyContinue)) {
-                $hay += ([string](Read-TextFile -Path $f.FullName))
-            }
-        }
+        $hay += ([string](Get-SnapMd -Which "decisions"))
+        foreach ($f in @(Get-SnapNotes)) { $hay += ([string]$f.md) }
         $hits = @($needles | Where-Object { $hay -match [regex]::Escape($_) })
         $c.coverage.evaluated++
         if ($hits.Count -ge 1) {
@@ -3674,6 +4275,14 @@ if (-not $ctx.workline) {
 
 $manualStore = Read-JsonStore -Path $ctx.manual
 
+# --- BEFORE ANYTHING RUNS -----------------------------------------------------------
+# A killed run must not leave the operator's documents read-only, so any Deny ACE this
+# script could have left behind is swept first - then every artifact any clause reads is
+# captured, and only then is a single command allowed to execute. The ORDER is the fix:
+# see "THE FIFTEENTH CLASS" above.
+$protectionCleared = @(Clear-DfuTreeProtection -Ctx $ctx)
+$script:DfuSnap = New-DfuSnapshot -Ctx $ctx
+
 # WHICH CLAUSES ARE IN SCOPE. -Only NARROWS the run; the clauses it skips are still
 # counted, as `unevaluated`, so a narrowed run can never report "done". There is no way
 # to make this script pass by asking it fewer questions.
@@ -3686,6 +4295,7 @@ if ($Only -and @($Only).Count -gt 0) {
 }
 
 $results = @()
+try {
 foreach ($k in $inScope) {
     if ($skippedByOnly -contains $k) {
         $c = New-ClauseResult -Id $k
@@ -3726,6 +4336,30 @@ foreach ($k in $inScope) {
         $results += (Resolve-ClauseVerdict -Clause $c)
     }
 }
+} finally {
+    # THE SANDBOX BELONGS TO THE RUN, not to a clause - clauses 1 and 5 share it and it is
+    # removed exactly once, however the run ends. It is a CLONE, so `git worktree list` in
+    # the audited repository never saw it and clause 4 could not have counted it.
+    Remove-DfuSandbox -Ctx $ctx
+    [void](Clear-DfuTreeProtection -Ctx $ctx)
+}
+
+# --- THE INTEGRITY OF THE MEASUREMENT ----------------------------------------------
+# A checker that mutates what it measures is not an authority. Every artifact any clause
+# reads was fingerprinted before the first command ran; it is fingerprinted again here,
+# and the two must be identical. This is NOT a clause of C.8 - it is this script's
+# statement about its own run - so it does not enter the census; it VETOES it. `done`
+# requires it, and it is printed whether it holds or not.
+$finalFp   = Get-AuditedFingerprint -Ctx $ctx
+$runMoved  = @(Compare-DfuFingerprint -Before $script:DfuSnap.fingerprint -After $finalFp)
+$integrity = [ordered]@{
+    snapshot_taken_at = [string]$script:DfuSnap.taken_at
+    commands_executed = @($script:DfuExecLog).Count
+    protection_swept_at_start = @($protectionCleared)
+    moved_during_run  = @($runMoved)
+    per_command_drift = @($script:DfuIntegrity)
+    ok                = ((@($runMoved).Count -eq 0) -and (@($script:DfuIntegrity).Count -eq 0))
+}
 
 # --- THE CENSUS -------------------------------------------------------------------
 $census    = [ordered]@{}
@@ -3755,12 +4389,21 @@ foreach ($k in $census.Keys) {
     if ([int]$census[$k] -gt 0) { $nonClear += $k }
 }
 $isDone = ($censusBalances -and (@($unaccounted).Count -eq 0) -and (@($nonClear).Count -eq 0) -and
-           ([int]$census[$script:DfuClearBucket] -eq @($script:DfuClauses.Keys).Count))
+           ([int]$census[$script:DfuClearBucket] -eq @($script:DfuClauses.Keys).Count) -and
+           [bool]$integrity.ok)
 
 $board   = "done"
 $reasons = @()
 if (-not $isDone) {
-    if ((-not $censusBalances) -or (@($unaccounted).Count -gt 0)) {
+    if (-not $integrity.ok) {
+        # THE VETO IS NAMED FIRST, because every clause verdict below it was decided over a
+        # world this run is no longer able to vouch for.
+        $board = "unaccounted"
+        foreach ($x in @($integrity.per_command_drift)) { $reasons += $x }
+        if (@($integrity.moved_during_run).Count -gt 0) {
+            $reasons += ("the audited tree MOVED during the run: {0} - a checker that changes what it measures is not an authority, so no verdict here is offered as one" -f (@($integrity.moved_during_run) -join ", "))
+        }
+    } elseif ((-not $censusBalances) -or (@($unaccounted).Count -gt 0)) {
         $board = "unaccounted"
         $reasons = @($unaccounted)
         if (-not $censusBalances) {
@@ -3791,6 +4434,8 @@ $verdict = [ordered]@{
     census_ids   = $censusIds
     census_total = $censusTotal
     balances     = $censusBalances
+    integrity    = $integrity
+    executed_commands = @($script:DfuExecLog)
     unaccounted  = @($unaccounted)
     reasons      = @($reasons)
     clauses      = @($results)
@@ -3840,6 +4485,50 @@ foreach ($r in $results) {
         else { Write-Host ("        NO RECORDED RESULT - record one in {0} under this exact name" -f $ctx.manual) -ForegroundColor DarkGray }
     }
     foreach ($d in $r.detail) { Write-Host ("   . {0}" -f $d) -ForegroundColor DarkGray }
+}
+
+# --- WHAT THE AUTHORITY DID, not only what it concluded -----------------------------
+# This section exists because clauses 1 and 5 EXECUTE instructions taken from the document
+# under test. A reader is entitled to see that command set - it is the part of this run
+# that could have had effects - and to see, per command, where it ran and whether the
+# audited tree moved while it did.
+Write-Host ""
+Write-Host "-------------------------------------------------------------------------"
+Write-Host " COMMANDS THIS AUTHORITY EXECUTED (taken from WALKTHROUGH.md, run in a clone)" -ForegroundColor Cyan
+if (@($script:DfuExecLog).Count -lt 1) {
+    Write-Host "   (none - no walkthrough command was executed in this run)" -ForegroundColor DarkGray
+} else {
+    foreach ($e in @($script:DfuExecLog)) {
+        $ex = "n/a"; if ($null -ne $e.exit) { $ex = [string]$e.exit }
+        $mark = "   "
+        $col  = "DarkGray"
+        if (@($e.drift).Count -gt 0) { $mark = " ! "; $col = "Red" }
+        Write-Host ("{0}clause {1} / {2} (exit {3})" -f $mark, $e.clause, $e.phase, $ex) -ForegroundColor $col
+        Write-Host ("        $ {0}" -f $e.command) -ForegroundColor DarkGray
+        Write-Host ("        in {0}" -f $e.ran_in) -ForegroundColor DarkGray
+        if (@($e.lock_failed).Count -gt 0) {
+            Write-Host ("        COULD NOT LOCK: {0} - containment fell back to before/after fingerprinting" -f (@($e.lock_failed) -join " ; ")) -ForegroundColor Yellow
+        }
+        if (@($e.drift).Count -gt 0) {
+            Write-Host ("        MOVED THE AUDITED TREE: {0}" -f (@($e.drift) -join ", ")) -ForegroundColor Red
+        }
+    }
+}
+Write-Host ""
+Write-Host ("   snapshot of every artifact a clause reads was taken at {0}, BEFORE the first command" -f $integrity.snapshot_taken_at) -ForegroundColor DarkGray
+if (@($integrity.protection_swept_at_start).Count -gt 0) {
+    Write-Host ("   stale write-locks removed at startup: {0}" -f (@($integrity.protection_swept_at_start) -join " ; ")) -ForegroundColor Yellow
+}
+if ($integrity.ok) {
+    Write-Host "   INTEGRITY: the audited tree is byte-identical before and after this run." -ForegroundColor Green
+} else {
+    Write-Host "   INTEGRITY: FAILED - this run CHANGED the world it was measuring:" -ForegroundColor Red
+    foreach ($x in @($integrity.per_command_drift)) { Write-Host ("     - {0}" -f $x) -ForegroundColor Red }
+    if (@($integrity.moved_during_run).Count -gt 0) {
+        Write-Host ("     - net change over the whole run: {0}" -f (@($integrity.moved_during_run) -join ", ")) -ForegroundColor Red
+    }
+    Write-Host "     Every clause above still decided over the PRE-RUN snapshot, so nothing" -ForegroundColor Yellow
+    Write-Host "     was discharged by this - but the run cannot be offered as an authority." -ForegroundColor Yellow
 }
 
 Write-Host ""
