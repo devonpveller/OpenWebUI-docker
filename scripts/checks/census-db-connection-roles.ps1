@@ -12,7 +12,13 @@
 # fleet by being forgotten.
 #
 # Exit 0 = every superuser backend is explained. Exit 1 = at least one is not. Exit 2 = could
-# not measure (container down, psql failed) - which is NOT a pass.
+# not measure - which is NOT a pass. "Could not measure" means: the network cannot be
+# inspected, the container is down, psql failed, a compose file this census needs is missing
+# or unreadable, the census query returned no client backend at all, or the compose sweep
+# recognised no database client. The last three are the ones this script used to get wrong -
+# it degraded them to a printed note and then reported a clean bill of health over a
+# denominator it had never read. A verdict is only worth its exit code if the inputs behind
+# it were actually measured, so the exit 0 below states what it measured.
 
 [CmdletBinding()]
 param(
@@ -38,6 +44,43 @@ $explained = @{
 }
 
 function Say([string]$m) { Write-Host $m }
+
+# ------------------------------------------------------------------------------------------
+# 0. PREFLIGHT - the configured-client denominator has to be READABLE before anything else
+# ------------------------------------------------------------------------------------------
+# This census has two halves - who is connected NOW, and who is CONFIGURED to connect - and
+# either half alone is wrong, so a half that could not be read is a cannot-measure rather
+# than a footnote. This used to be a `Say "(missing: ...)"` and a `continue` down in section
+# 3, which meant a repo root with no OB1/ - exactly the state `git clone` without
+# --recurse-submodules leaves, and the state U4 exists for - printed two notes, recognised
+# zero configured clients, and exited 0 with "zero unexplained superuser application
+# clients". A missing input is not evidence of absence.
+#
+# It runs BEFORE the docker calls on purpose: a checkout that cannot be measured has no
+# business opening a connection to a production database in order to find that out.
+$composeFiles = @(
+    (Join-Path $repoRoot "OB1\docker\docker-compose.yml"),
+    (Join-Path $repoRoot "OB1\docker\docker-compose.scheduled.yml")
+)
+$composeText = @{}
+$unreadable  = @()
+foreach ($cf in $composeFiles) {
+    if (-not (Test-Path $cf)) { $unreadable += ("{0}  (missing)" -f $cf); continue }
+    # -ErrorAction Stop, because $ErrorActionPreference is "Continue" here: without it a
+    # permission-denied file prints a red error, contributes zero services, and the run
+    # carries on to a verdict as though that file had simply held nothing.
+    try   { $composeText[$cf] = @(Get-Content $cf -ErrorAction Stop) }
+    catch { $unreadable += ("{0}  ({1})" -f $cf, $_.Exception.Message) }
+}
+if ($unreadable.Count -gt 0) {
+    Say "ABORT: CANNOT MEASURE - a compose file this census requires could not be read:"
+    foreach ($u in $unreadable) { Say "  $u" }
+    Say ""
+    Say "The configured-client half of the census would be absent or short, and a verdict"
+    Say "over a denominator this script never read is not a pass. If OB1/ is empty this is"
+    Say "an uninitialised submodule: git submodule update --init"
+    exit 2
+}
 
 # ------------------------------------------------------------------------------------------
 # 1. client_addr -> container name
@@ -93,6 +136,17 @@ foreach ($line in ($out -split "`n")) {
     }
 }
 
+# psql is itself a client backend, so this collection is never legitimately empty: it is 0
+# only if the output stopped parsing. Left alone, an empty $rows makes every superuser count
+# below read "0 of 0" and drives the verdict green.
+if ($rows.Count -eq 0) {
+    Say "ABORT: CANNOT MEASURE - the census query returned no client backend rows."
+    Say "The psql running this query is itself a client backend, so zero is not a possible"
+    Say "true answer: the query succeeded but its output did not parse. Raw output:"
+    Say $out
+    exit 2
+}
+
 Say "H1 census - connections to $DbContainer by role"
 Say ("measured {0}  ({1} client backends)" -f (Get-Date -Format "yyyy-MM-ddTHH:mm:ssK"), $rows.Count)
 Say ""
@@ -116,17 +170,14 @@ foreach ($g in $groups) {
 # denominator is what is CONFIGURED, not what happens to be busy.
 Say ""
 Say "configured clients (compose), independent of who is connected:"
-$composeFiles = @(
-    (Join-Path $repoRoot "OB1\docker\docker-compose.yml"),
-    (Join-Path $repoRoot "OB1\docker\docker-compose.scheduled.yml")
-)
-$configured = @{}
-$dbHosted   = @{}
+# Read in the preflight, so there is no path from here to a verdict that skipped a file.
+$configured   = @{}
+$dbHosted     = @{}
+$servicesSeen = 0
 foreach ($cf in $composeFiles) {
-    if (-not (Test-Path $cf)) { Say "  (missing: $cf)"; continue }
     $svc = ""
-    foreach ($line in (Get-Content $cf)) {
-        if ($line -match '^  ([A-Za-z0-9_.-]+):\s*$') { $svc = $Matches[1]; continue }
+    foreach ($line in $composeText[$cf]) {
+        if ($line -match '^  ([A-Za-z0-9_.-]+):\s*$') { $svc = $Matches[1]; $servicesSeen++; continue }
         if ($svc -eq "") { continue }
         if ($line -match '(DB_USER|OB1_DB_USER|POSTGRES_USER)\s*[:=]\s*(\S+)') {
             $configured[$svc] = $Matches[2]
@@ -151,7 +202,24 @@ foreach ($k in ($configured.Keys | Sort-Object)) {
     Say ("  {0,-32} {1}" -f $k, $u)
     if ($u -like "postgres*" -and $k -ne "openbrain-db") { $configuredSuper += $k }
 }
-Say ("  -> {0} service(s) configured to connect as postgres" -f $configuredSuper.Count)
+Say ("  -> {0} of {1} recognised database client(s), across {2} service block(s), configured as postgres" -f
+     $configuredSuper.Count, $configured.Count, $servicesSeen)
+
+# MEASURED-AND-ZERO vs COULD-NOT-MEASURE. $configuredSuper reaching zero is the GOAL of the
+# promotion and is a real pass. $configured reaching zero is not: every compose file was read
+# successfully above, so recognising no database client at all in this fleet means the parse
+# matched nothing - a renamed env var, a restructured compose, the wrong file - not that the
+# fleet stopped talking to postgres. Both used to print "0 service(s) configured to connect
+# as postgres" and exit 0, and only one of them is a clean bill of health.
+if ($configured.Count -eq 0) {
+    Say ""
+    Say ("ABORT: CANNOT MEASURE - read {0} compose file(s) and {1} service block(s), and" -f $composeFiles.Count, $servicesSeen)
+    Say "recognised NO database client among them. The candidate set is empty because nothing"
+    Say "matched, not because nothing connects, and an empty denominator cannot produce a"
+    Say "verdict. Check the DB_USER / PGRST_DB_URI / DB_HOST patterns in this section against"
+    Say "the compose files before trusting any result from this script."
+    exit 2
+}
 
 # ------------------------------------------------------------------------------------------
 # 4. The verdict
@@ -176,6 +244,13 @@ foreach ($c in $candidates) {
 if ($unexplained.Count -eq 0) {
     Say ""
     Say "VERDICT: zero unexplained superuser application clients."
+    # Printed because "zero unexplained" only means something next to what was examined to
+    # get there. Every number here is guarded above: zero compose files, zero recognised
+    # clients or zero live backends exit 2 rather than reaching this line.
+    Say ("  measured {0} compose file(s), {1} service block(s), {2} recognised database client(s)," -f
+         $composeFiles.Count, $servicesSeen, $configured.Count)
+    Say ("  {0} live client backend(s), {1} superuser/bypassrls backend(s), {2} candidate(s) - each explained above." -f
+         $rows.Count, $superConns, $candidates.Count)
     exit 0
 }
 

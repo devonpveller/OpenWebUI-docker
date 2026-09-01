@@ -118,8 +118,28 @@ Say "repo: $repo"
 # 0. Stage the chain
 # ------------------------------------------------------------------------------------------
 Head "0. initdb chain"
+# A missing compose file reaches the same place by a longer road - Get-Content errors, the
+# chain regex is handed $null, and the trap turns that into "HARNESS ERROR". Saying so here
+# instead makes an uninitialised OB1/ submodule legible as what it is.
+if (-not (Test-Path $compose)) {
+    Say "  ABORT: CANNOT MEASURE - $compose does not exist."
+    Say "         The whole init chain is derived from that file. If OB1/ is empty this is an"
+    Say "         uninitialised submodule: git submodule update --init"
+    Cleanup; exit 2
+}
 $chain = @(Get-ObInitChain -ComposePath $compose)
 Say "  compose mounts $($chain.Count) init files"
+# An EMPTY chain passes the staged-vs-mounted check below, because `0 -ne 0` is false, and
+# the drill would go on to build a schemaless database and judge THAT by its probes. It is
+# the census defect in another costume: a comparison between two numbers that are both zero
+# reads as agreement. This fleet mounts ~20 init files, so zero means the mount syntax
+# stopped matching the regex in lib\ob-initdb.ps1 - a cannot-measure, not an empty chain.
+if ($chain.Count -eq 0) {
+    Say "  ABORT: CANNOT MEASURE - derived NO init files from compose; the chain regex"
+    Say "         matched nothing. A drill run against a bare database would report every"
+    Say "         probe as a failure for a reason that has nothing to do with the claim."
+    Cleanup; exit 2
+}
 $staged = Copy-ObInitChain -Chain $chain -SourceDir $obDocker -TargetDir $initDir
 Say "  staged $staged"
 if ($staged -ne $chain.Count) {
@@ -473,6 +493,23 @@ DELETE FROM public.thoughts       WHERE content LIKE 'H1-DRILL%';
 "@ | Out-Null
 
 Cleanup
+
+# The probes here are straight-line, so a run that executed fewer than the drill contains did
+# not pass - it stopped measuring, and `$script:fail -eq 0` is satisfied by zero probes just
+# as happily as by 31 green ones. That is this effort's most repeated defect (an empty
+# collection reaching a success exit), so the count is a contract rather than a hope. It is
+# also what makes the "31 probes" figure quoted in H1-APP-ROLE-PROMOTION.md, the
+# PROMOTION-RUNBOOK and the findings note a machine-checked number instead of prose.
+# Adding or removing a probe on purpose means updating this constant AND those three docs.
+$expectedProbes = 31
+if ($script:probeNo -ne $expectedProbes) {
+    Say ""
+    Say ("H1 DRILL CANNOT MEASURE - ran {0} probe(s), expected {1}." -f $script:probeNo, $expectedProbes)
+    Say "  A run that skipped probes has not proven the claim, whether or not the probes it"
+    Say "  did run agreed. Update the expected count here and the figure in the three docs if"
+    Say "  a probe was added or removed deliberately."
+    exit 2
+}
 
 if ($script:fail -eq 0) {
     Say ""
