@@ -193,3 +193,53 @@ saying "180s".
   green case, the drill says "dependent never started against a correctly migrated db" - a
   sentence about the boundary - rather than blocking. Its budgets are now derived and its elapsed
   time is printed, so the evidence to tell them apart is in the output; the classification is not.
+
+## 9. `git commit ... | head -N` COMMITS THROUGH A FAILING PRE-COMMIT HOOK
+
+**2026-09-01. Reproduced twice, deliberately, in this worktree. This is not about U8/H2 - it
+can invalidate a "the hooks ran" claim on any branch in this effort, so it is recorded here
+rather than left as an oddity.**
+
+Observed first by accident: a `git commit -F msg 2>&1 | head -40` printed
+`[check-corpus-exposure-producers] FAIL - 13 of 13 ...` and **the commit landed anyway**.
+
+Reproduced on purpose, same repo, same staged change, same failing hook (OB1 checked out at
+`4fdc21c`, an OB1 commit predating the exposure-column work, which makes the H3 corpus check
+fail):
+
+```
+$ git commit -m "GATE PROBE - to be reset"   2>&1 | tail -3
+    ... Pre-commit validation failed (a corpus insert does not state its plane)!
+  HEAD unchanged                      <-- BLOCKED, correct
+
+$ git commit -m "GATE PROBE B - to be reset" 2>&1 | head -40
+    ... (output cut off mid-list by head)
+  HEAD now: e509e0e GATE PROBE B      <-- COMMITTED, through a FAILING hook
+```
+
+Both probe commits were reset; the branch is back at its real tip and OB1 is back at the pinned
+`b604d55`.
+
+The difference is that `head -N` closes the pipe while the hook is still writing and `tail` does
+not. The MECHANISM is not established here - stating one would be a guess - but the observable
+is stable and the consequence is not subtle: **a hook failure can be silently discarded by how
+the caller redirects output**, which is the "a check that passes while checking nothing" class
+this whole effort exists to close, sitting in the enforcement layer rather than in a check.
+
+Two things follow, neither of them in scope for this branch:
+
+1. **Nobody should pipe `git commit` through `head`** - and agents do, constantly, to keep hook
+   output short. Redirect to a FILE and grep the file (that is what this round did after
+   noticing: `git commit --amend --no-edit > out.txt 2>&1` re-ran the hook unpiped, printed
+   `[check-corpus-exposure-producers] OK ... (743 file(s) scanned)` and
+   `Pre-commit validations passed!`, and that is the run that validates commit `ddf779c`).
+2. **`--no-verify` is not the only way a commit skips its hooks**, and unlike `--no-verify` this
+   one leaves no reflog trace, no flag, and looks exactly like a normal commit. Any prior
+   "the hooks passed" in this effort that rests on a piped commit is unproven.
+
+Incidental to the reproduction, and worth its own line: **a git worktree's submodule can drift
+off the pinned gitlink.** This worktree's `OB1/` was checked out at `4fdc21c` while HEAD recorded
+`b604d55` - which is what made the corpus check fail here and pass everywhere else. `git status`
+shows it (` M OB1`) and it is easy to read as someone else's dirt. `git submodule update --init
+--recursive OB1` restores it. A check that scans the submodule tree gives a DIFFERENT verdict per
+worktree until it is restored.
