@@ -1495,3 +1495,46 @@ stale checkout**: an operator who applies `195-` without moving the submodule ge
 compile that fails at the door on every dossier. Move the submodule first, apply second, and
 rebuild `openbrain-wiki:local` in the same window.
 
+---
+
+# 210 / 215 — the H1 application roles (`init-app-role.sql`, `init-app-role-passwords.sh`)
+
+> Status: **STAGED, NOT MOUNTED, NOT APPLIED.** 2026-08-31, DFU §C.9 phase U8 item H1.
+
+The two-place invariant this runbook exists for applies here too, and **neither half has been
+done yet** — deliberately, because the cutover is a gated promotion and was out of scope for
+the item that produced the files. Recording it here so the gap is a known state rather than a
+discovery:
+
+- **initdb half — NOT DONE.** `OB1/docker/init-app-role.sql` and
+  `init-app-role-passwords.sh` exist in the repo but are **not mounted** by
+  `OB1/docker/docker-compose.yml`. The mount lines (slots `210-` and `215-`) and the two
+  `OB_APP_*_PASSWORD` env vars are in step 1(a) of the promotion plan.
+- **live half — NOT DONE.** Nothing has been applied to `openbrain-db`.
+
+**Ordering: this migration lands AFTER `200-init-graph-plane-rls.sql` has been applied live.**
+It asserts that `service_role` cannot write the agent-memory corpus, which is 200's §6a doing;
+on production today `service_role` still can, so applying 210 there right now would raise:
+
+```
+H1: service_role can still write the agent-memory corpus (...). Section 2b reopens that door for NAMED roles only.
+```
+
+That is the intended refusal, not a failure to fix.
+
+What it adds: two `NOSUPERUSER NOBYPASSRLS` login roles (`ob_app`, `ob_app_memory`), their
+membership of `service_role`, `GRANT ob_plane_personal TO ob_app_memory WITH INHERIT FALSE`
+(switchable, never inherited), narrow `INSERT`/`UPDATE` grants that reopen 200's write door for
+those two roles only, and `security_invoker = true` on the four views that ran as their
+superuser owner. It drops nothing.
+
+- Full procedure, revert path and blast radius:
+  [../dark-factory-unification/H1-APP-ROLE-PROMOTION.md](../dark-factory-unification/H1-APP-ROLE-PROMOTION.md)
+- Evidence (31 probes, RED before GREEN, throwaway only):
+  `scripts/checks/drill-app-role-not-superuser.ps1`
+- Live census (read-only, safe against production):
+  `scripts/checks/census-db-connection-roles.ps1`
+- Rollback: `OB1/docker/revert-app-role.sql` — **compose env first, roles second**; it refuses
+  to run while an `ob_app*` backend is still connected.
+- Findings, including the two the drill found rather than the reading:
+  `documentation/notes/u8h1-findings.md`
