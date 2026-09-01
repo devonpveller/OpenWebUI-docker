@@ -226,3 +226,8 @@ exit 1
 #   4. The nine `condition: service_healthy` dependents are what makes this a refusal rather
 #      than a log line. Anything added later that talks to openbrain-db WITHOUT that condition
 #      is outside the gate.
+#   5. `healthcheck.timeout: 5s` needs no change. MEASURED in the pgvector:pg16 image over the
+#      real 424 KB migration set, five consecutive runs on the FAILING path (which makes two
+#      psql calls, not one): 418 / 477 / 426 / 465 / 422 ms. A healthcheck that timed out
+#      would be a FALSE POSITIVE, and a false positive here is an outage - so this number is
+#      the one to re-measure if the migration set grows by an order of magnitude.
