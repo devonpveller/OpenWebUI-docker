@@ -157,3 +157,53 @@ census allow-list with that reason so it cannot be "cleaned up" later.
 Throwaway hygiene, verified after every run: container `wt-u8h1-h1db` and network
 `wt-u8h1-h1net` removed, no `ai-stack_*` network ever attached, no `:local` tag produced,
 `openbrain-db` never written to.
+
+## 11. A harness gap: worktree submodules get CRLF, the main checkout does not
+
+`OB1/docker/init-app-role-passwords.sh` is bind-mounted into
+`docker-entrypoint-initdb.d`, where the postgres entrypoint runs it with `sh`. A CR in it
+fails on the first line citing a command nobody wrote.
+
+Measured 2026-08-31, same commit, two checkouts:
+
+| | `core.autocrlf` | `docker/backup/openbrain-db-backup.sh` on disk |
+|---|---|---|
+| main checkout `D:\Open WebUI\ai-stack\OB1` | `false` (set by hand) | 0 CRs |
+| harness worktree `.claude/worktrees/wt-u8h1/OB1` | **`true`** | **75 CRs** |
+
+The index is clean — **0** of the tracked `.sh`/`.sql` files hold a CR — so the difference is
+entirely which git config the checkout landed in. `new-worktree.ps1` clones the OB1 submodule
+without pinning `core.autocrlf`, and its CRLF check reads only ai-stack's tracked `*.sh`, not
+the submodule's. The existing backup sidecars have been mounted from CRLF copies in every
+worktree since worktrees existed; they are only ever *run* from the main checkout, which is
+why nobody has been bitten.
+
+Closed for OB1 by adding `OB1/.gitattributes` with `*.sh text eol=lf` / `*.sql text eol=lf`
+(scoped to two extensions on purpose — `* text=auto` would renormalise the repository, and
+the index needed no renormalising). Verified: deleting and re-checking-out
+`openbrain-db-backup.sh` in the worktree afterwards yields 0 CRs.
+
+**Not closed:** the harness itself. `new-worktree.ps1` should set `core.autocrlf=false` on the
+submodule clone and extend its CRLF check to it. Left alone deliberately — two other agents
+are live on the harness's checks right now and this is not H1's file.
+
+## 12. Validation record (§C.7b)
+
+| what | where | result |
+|---|---|---|
+| ai-stack | `work/u8h1` @ **`abb8c7f`** | committed locally, not pushed |
+| OB1 submodule | `work/u8h1-app-role` @ **`b12d2fb`** (parent `9ab9031`) | committed locally, **not pushed, gitlink NOT bumped** |
+| clean checkout | `git clone -b work/u8h1` → `D:\tmp-u8h1-clean` @ `abb8c7f`, submodule fetched from the worktree's OB1 at `b12d2fb` | — |
+| `drill-app-role-not-superuser.ps1` | run there, container `wt-u8h1c-h1db`, network `wt-u8h1c-h1net` | **31 probes, 0 failures** |
+| `census-db-connection-roles.ps1` | run there against live `openbrain-db`, read-only | 22 of 22 superuser; **9 unexplained**; exit 1 (correct — that is today's state) |
+| apply / re-apply / re-apply / revert | throwaway `wt-u8h1-h1db` | three consecutive applies exit 0 (NOTICEs only); revert exit 0, 0 roles left, 4 views back to owner-context |
+| revert guard | one held `ob_app` connection | refused: `H1 revert: 1 connection(s) still authenticated as an application role` |
+| throwaway hygiene | after every run | 0 leftover containers, 0 leftover networks, no `ai-stack_*` attachment, no `:local` tag |
+
+**The gitlink is deliberately NOT bumped.** The migration lives in the OB1 submodule at an
+unpushed commit, so `abb8c7f` alone does not carry it: a fresh
+`clone --recurse-submodules` of `work/u8h1` gets the *old* OB1 and the drill aborts with
+`ABORT: 28 mounted but 28 staged` → `init-app-role.sql` missing. Bumping the gitlink to a
+commit that is not on OB1's remote is the one thing CLAUDE.md says never to do, and pushing
+was out of scope for this item. Whoever lands this pushes `work/u8h1-app-role` to OB1 FIRST,
+then bumps.
