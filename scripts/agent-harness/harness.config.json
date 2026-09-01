@@ -386,6 +386,18 @@
     "claim_ttl_minutes": 60,
     "anchor_required": true,
     "gate_profile": "attended",
+    "convergence": {
+      "max_class1_rounds": 3,
+      "reset_on": "class-1-only",
+      "_status": "SPEC + NUMBER, NOT YET LIVE. Per this file's own policy-declared-unread andon rule, this block governs NOTHING until queue.ps1/config.py read it AND the reviewer charter enforces the class gate below. Wiring the reader + the severity contract is a pipeline item, not a config edit - written here as the agreed number and its derivation so the implementation has a target it cannot silently soften.",
+      "_semantics": [
+        "A verification round SENDS THE ITEM BACK only on a CLASS-1 finding: it fails an acceptance criterion, is unsafe, or is wrong. CLASS-2 (correct but weaker) and CLASS-3 (cosmetic - clearer message, less-vacuous check, doc) are filed to the findings sink and NEVER hold a merge.",
+        "Convergence is a POSITIVE condition: acceptance checks pass from a clean clone with zero class-1 outstanding. It is NOT 'the refuters found nothing' - a capable refuter against a real artifact always finds SOMETHING, which is exactly why the old open-ended loop ran for tens of hours.",
+        "max_class1_rounds caps the build->refute->fix cycles that a class-1 finding may trigger. Reaching the cap with a class-1 still open is an ANDON ESCALATION to the operator, never a silent pass. Rounds that find only class-2/3 do not count against it and do not extend it - they merge and file."
+      ],
+      "_derivation": "Empirical, from THIS project's own runs (measured 2026-08-31). Classified every round of every multi-round item by finding severity. The LAST class-1 finding: u5 (security) at round 3 ('absence must deny', the final leak-path fix); u6dark at round 4 ('a fire that does not halt'); u4close ~round 4. Rounds 5+ everywhere were meta-verification polish - u6dark 6-7 (a check's alphabet/vacuity), u4close 8-9 (a banked check's vacuous pass, MODULE.md, a footer), u5rls round 4 (gate completeness), u8h3's 26 commits. N=2 would have CLIPPED u5's round-3 security fix; N=4+ bought only polish. So 3 - and the severity gate is what makes 3 sufficient rather than 9, because it stops polish from counting as a round at all.",
+      "_per_item_override": "An anchor MAY raise max_class1_rounds for genuinely high-stakes work (the personal-plane boundary is the archetype - a security item where a 4th round is cheap insurance). The default of 3 is the floor the evidence supports; raising it is a recorded anchor decision, lowering it below 2 is refused."
+    },
     "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and decides WHO passes each gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses. THIS NOTE CALLED gate_profile THE ONLY KNOB THAT DECIDES WHETHER A HUMAN SEES A GATE, AND THAT WAS FALSE: `anchor_required: false` removes the anchor gate outright for an item created without an anchor, under ANY profile including `attended` - the item advances to ready-to-test with no anchor, no human, no gate record and no andon consultation, because a gate that is not a gate is not passed by anybody. queue.ps1 -VerifyAudit says so in words rather than counting a narrower complete. So: gate_profile decides who passes a gate; anchor_required decides whether the anchor gate exists at all."
   },
   "worktree": {
