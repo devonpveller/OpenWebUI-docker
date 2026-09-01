@@ -1144,10 +1144,20 @@ Both suites ran from this checkout, **one at a time, never concurrently** — th
 "one suite per checkout" exists to buy, and the specific thing §17.4 records about
 `prove-rls` overlapping `dfu-done -Only 3`. Every throwaway ran on its own docker network;
 nothing was attached to an `ai-stack_*` network, no `:local` tag was written, and **nothing was
-written to the live database**. An `open-brain` lease was held for the whole window
-(`lease.ps1 -Acquire -Name open-brain -Owner wt-u8h3`, refreshed once). `dfu-done.ps1` was
-**not** run — its clause 3 plants personal-exposure fixture rows in `openbrain-db`, and this
-round needed nothing from it.
+written to the live database**. `dfu-done.ps1` was **not** run at all — its clause 3 plants
+personal-exposure fixture rows in `openbrain-db`, the live database, and this round needed
+nothing from it.
+
+**On the lease, precisely rather than flatteringly.** `lease.ps1 -Status` showed every plane
+free at the start; `open-brain` was acquired for `wt-u8h3` (30m TTL) and refreshed once,
+before the CI drill run. At release it reported **`lease 'open-brain' already free`** — so the
+TTL had EXPIRED somewhere in the tail of the window, and **I cannot claim continuous coverage
+for the whole window, only for the parts inside a live TTL.** Nothing depended on the gap: no
+other agent held or requested the plane, the only live-touching run was
+`prove-agent-memory-rls.ps1`, which is read-only, and every drill container was per-run on its
+own network (`docker ps -a` shows none left). The honest statement is that the lease
+discipline was followed and the TTL was not watched — and the lesson is mechanical: a run
+longer than the TTL needs a refresh loop, not a single refresh.
 
 | check | result |
 |---|---|
