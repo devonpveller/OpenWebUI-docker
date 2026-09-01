@@ -276,7 +276,15 @@ Re-verified in this session (PowerShell **5.1.26100.8875**), under the script's 
 
     Set-StrictMode -Version Latest; $ErrorActionPreference = "Stop"; $Error.Clear()
     $u = [Uri]'not a url at all'
-    IsAbsoluteUri = False ; $null -eq $u.Port = True ; $u.Host = '' ; $Error.Count = 0
+    IsAbsoluteUri = False ; $null -eq $u.Port = True ; $null -eq $u.Host = True ; $Error.Count = 0
+
+CORRECTED 2026-08-31: this line read `$u.Host = ''`. `.Host` is `$null`, not the empty
+string. Two verifiers measured the same expression and reported different answers because
+`$null` interpolates to an empty string - `"$($u.Host)"` renders `''` while `$null -eq
+$u.Host` is `True`, and `$u.Host.Length` throws where `''.Length` would be 0. Re-measured
+under the preamble above: `$null -eq $u.Host` -> True, `'' -eq $u.Host` -> False. The error
+is small and it sits in the one paragraph whose subject is getters that return null instead
+of throwing, which is why it is corrected rather than left.
 
 `.Port` does not throw. The .NET getter raises `InvalidOperationException` and PowerShell
 swallows it: no throw, no error record, no crash. `DECISIONS.md:636` and `WALKTHROUGH.md:130`

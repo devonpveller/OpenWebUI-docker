@@ -40,7 +40,7 @@ Everything else in here is internal and may change without notice.
 | `drill-dark-factory.ps1` | the executable drill over the andon board, the gate profiles and the audit trail |
 | `harness.config.json` | the configuration (see below) |
 | `config.py` | the reader other Python code imports (`bridge.py` does) |
-| `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). The first executable CONSUMER of the runner axis: everything else resolves a runner and nothing runs one. |
+| `quadrant/` | the runner x target comparison - its own submodule with its own boundary, see [quadrant/MODULE.md](quadrant/MODULE.md). One of the TWO places that actually run a resolved runner - `dispatch.ps1` is the other, and `adapters.py` here calls the same docker-exec transport. Everything else in the module only resolves one. |
 
 Internal: `common.ps1` (composition root), `git-io.ps1` (git facts), `resolve.ps1`
 (policy), `config.ps1` (settings), `anchor.ps1` (the anchor's shape and validation),
@@ -159,20 +159,38 @@ plane reaching `llama-cpp` through LiteLLM.
   passes the choice to the session as `AI_STACK_HARNESS_PROFILE`, which is simply
   the configuration's own top layer — no separate mechanism.
 
-The `little-coder` runner is wired and callable but **unproven**: no work item has
-completed through it yet. Its `status` field says so, and that is not decoration —
-do not read config support as a working feature. To be precise about how
-little is wired: `resolve_role` maps a role and a profile to a runner, and
-**nothing in this module then dispatches to one**. There is no code path that
-submits a task to little-coder's API — and that API port is not reachable from
-where the harness runs in any case. Stated as two separate facts, because
-conflating them is its own error: the compose file **declares** one mapping,
-`127.0.0.1:9091 -> 9090` (the metrics port, not the API), and the **running**
-container publishes nothing at all — `docker inspect little-coder --format
-'{{json .NetworkSettings.Ports}}'` returns `{"9090/tcp":[]}` and `docker port
-little-coder` prints nothing (verified 2026-08-30). Compose text is what was
-intended; `docker inspect` is what is. A dispatcher must be built against the
-second.
+The `little-coder` runner is wired, callable, and **has been dispatched to**. The
+four-quadrant comparison committed under `documentation/evidence/dfu-u4/quadrant/`
+was produced by real tasks on it — the transcripts carry the daemon's own task ids
+(e.g. `01M1D1ZV0J9JYZ347T8QRDT7WX`) and two cells completed with acceptance 2/2.
+
+Its `status` field still reads `unproven`. That is now a stale LABEL rather than a
+description, and this branch deliberately does not flip it: `quadrant/matrix.py`
+reads that field to decide whether a cell may enter a decision table, and every
+committed record carries the value that was in force (`"runner_status": "unproven"`).
+Changing it is a decision about the evidence, not a documentation fix.
+
+**How it is dispatched** — measured 2026-08-31, not assumed. `resolve_role` maps a
+role and a profile to a runner; `dispatch.ps1` is what then RUNS one. `Submit-LcTask`
+POSTs the daemon's `/tasks` through `Invoke-LcApi`, and `quadrant/adapters.py` is the
+second caller. The transport is `docker exec`, **not TCP** — the distinction the
+previous version of this paragraph collapsed:
+
+| claim | measured |
+|---|---|
+| a host TCP door onto the task API | **none.** `curl http://127.0.0.1:8090/health` from the host is connection-refused (curl exit 7). The compose file **declares** only `127.0.0.1:9091 -> 9090` (metrics, not the API), and the **running** container publishes nothing at all: `docker inspect little-coder --format '{{json .NetworkSettings.Ports}}'` returns `{"9090/tcp":[]}` and `docker port little-coder` prints nothing. Compose text is what was intended; `docker inspect` is what is |
+| the API is reachable by the harness | **yes.** `docker exec little-coder curl http://127.0.0.1:8090/health` answers `200`. That is the door `dispatch.ps1` uses. `harness.config.json`'s `_why_docker_exec` records why it was taken over publishing the port — `POST /tasks` (arbitrary agent execution) and `POST /admin/shutdown` are unauthenticated — and how to revert |
+
+**What this replaced, and why it is written out rather than quietly deleted.** The
+sentence here used to read *"nothing in this module then dispatches to one. There is
+no code path that submits a task to little-coder's API — and that API port is not
+reachable from where the harness runs in any case."* The second half is true of a host
+TCP port; the first half was false; and joined by *"in any case"* they assert that no
+dispatcher can exist, which this module's own evidence disproves. It also contradicted
+the entry-point table above (`dispatch.ps1 | RUN the work: role+profile -> runner ->
+submit`) and the *Runners* section (`dispatch.ps1 is what CALLS it`) in the same file.
+Corrected 2026-08-31 after a verifier found the contradiction. The old paragraph ended
+"a dispatcher must be built against the second" — one was.
 
 ## Frontier-oracle-on-stall
 
@@ -207,10 +225,17 @@ only moment the line learns something new about whether an item is converging.
   and the detector normalizes any non-object-name to "not recorded".
 - **Nothing dispatches the oracle round yet.** `pending()` returns the target a
   dispatcher would use; the dispatcher is the unbuilt half of U4.
-- **Nothing has stalled for real here.** `verify-oracle-on-stall.ps1` CONSTRUCTS a
-  stall and proves the mechanism end to end. It is not an observation of the oracle
-  firing on a real item, and the ledger is empty of one. Do not read a green drill
-  as "the oracle worked an item".
+- **A green drill is still not an observation.** `verify-oracle-on-stall.ps1`
+  CONSTRUCTS a stall and proves the mechanism end to end; do not read it as "the
+  oracle worked an item". The observation is a separate artifact and it now exists:
+  `observe-oracle-on-stall.ps1` dispatched an unsatisfiable item to the live local
+  runner three times, round 3 stalled, and the escalation is committed at
+  `documentation/evidence/dfu-u4/stall/` (ledger row `417aa274750da712`). It wrote to
+  a SCRATCH state namespace on purpose, so this module's own ledger
+  (`<git-common-dir>/agent-worktrees/oracle-escalations.jsonl`) is still ABSENT — an
+  observation must not append to the ledger the deliverable is audited from. "The
+  ledger is empty" thus remains true of that file and is no longer true of the work.
+  Corrected 2026-08-31, when this bullet still said nothing had stalled for real.
 
 `queue.ps1 -Submit -RunnerProfile <name>` records which profile an item is worked
 under, so the detector can name the runner that stalled. Not `-Profile`: `$Profile`

@@ -167,7 +167,7 @@ Four things changed so this cannot recur, each proved RED before GREEN:
 | | |
 |---|---|
 | evidence has a committed home | `documentation/evidence/` (+ its `README.md` and a `-text` `.gitattributes`, because `guards.py unmodified` compares BYTES). `.gitignore`'s `.quadrant/` rule stays, with its comment corrected: it covers WORKING state, not evidence |
-| the banked check can reach it | `check_quadrant_evidence_reproduces.py --auto` now searches `documentation/evidence/` as well as `.quadrant/` — otherwise every set it could find is one a clone does not have |
+| the banked check reaches it **and reds when it is gone** | `check_quadrant_evidence_reproduces.py --auto` searches `documentation/evidence/` as well as `.quadrant/` — otherwise every set it could find is one a clone does not have. Reaching it was **not enough**, and this row overclaimed until 2026-08-31: deleting `documentation/evidence/dfu-u4/` left `--auto` with nothing to discover and a vacuous **exit 0**, so the banked check could not detect the one defect this section exists to close (only `cli.py report --results-dir <committed>` went red). `--auto` now reads the expectation from `git ls-files` and reds on any tracked `record.json` that is not on disk, naming each — proved by moving the directory away (exit 1, "MISSING COMMITTED EVIDENCE", 7 paths listed) and restoring it (exit 0). Two cases stay **genuinely** vacuous and each prints which it is: a tree that is not a git checkout, and a checkout whose index tracks no records |
 | a record can be re-run elsewhere | run records now carry `acceptance[*].check_template` beside `check`. `check` is the exact command that ran and embeds the producing machine's interpreter and the producing worktree's `guards.py`; the checker re-expands the template against ITS checkout. `check` is never rewritten |
 | a `project` run directory is committable | its scratch `.git` is removed at finalize. A nested repo makes `git add` record a gitlink to a commit in no remote, so the clone gets an empty directory where the workspace was. The first version used `shutil.rmtree(ignore_errors=True)`, which silently left git's read-only pack files in place — caught by the new test, fixed with a chmod-retry that RAISES if anything survives |
 
@@ -207,10 +207,19 @@ Re-verified independently, PowerShell 5.1.26100.8875, under the script's own pre
 (`Set-StrictMode -Version Latest`, `$ErrorActionPreference = "Stop"`):
 
     $Error.Clear(); $u = [Uri]'not a url at all'
-    $u.IsAbsoluteUri -> False    $null -eq $u.Port -> True    $u.Host -> ''    $Error.Count -> 0
+    $u.IsAbsoluteUri -> False   $null -eq $u.Port -> True   $null -eq $u.Host -> True   $Error.Count -> 0
 
 `.Port` does **not** throw on a relative Uri. The .NET getter raises and PowerShell swallows
 it: no throw, no error record. The claim that it "would have CRASHED THE SCRIPT" is false.
+
+`.Host` is **`$null` as well** — this line said `''` until 2026-08-31. Two verifiers measured
+this expression and reported different answers (`$null -eq $u.Host` = True; `$u.Host` = `''`),
+and both were looking at the truth: `$null` INTERPOLATES to an empty string, so
+`"$($u.Host)"` and `-f $u.Host` both render `''` while the value is null. Only an
+`$null -eq` test distinguishes them, and `$u.Host.Length` throws where `''.Length` is 0.
+Re-measured under the preamble above: `$null -eq $u.Host` -> True, `'' -eq $u.Host` -> False.
+Worth the sentence, because the whole paragraph is about a getter that returns null instead
+of throwing, and reading a formatted null as an empty string is that same trap one level in.
 
 And the file carrying that sentence is **on no branch**. `git ls-files` has no
 `check-runner-endpoints.ps1`; the only versions in any ref are `origin/work/u4bidir`'s

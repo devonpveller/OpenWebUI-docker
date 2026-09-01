@@ -3,14 +3,18 @@
 
     python scripts/checks/check_quadrant_evidence_reproduces.py [--auto] [<results-dir> ...]
 
-    --auto  discover every results set under `.quadrant/` (a directory holding
-            `*/record.json`). This is the form BANKED in the durable-check registry, so the
-            check runs against whatever evidence a machine has without anyone editing a path.
+    --auto  discover every results set under the DISCOVERY_ROOTS defined below (a directory
+            holding `*/record.json`), AND hold this checkout to the evidence it COMMITS.
+            This is the form BANKED in the durable-check registry, so the check runs against
+            whatever evidence a machine has without anyone editing a path. The roots are
+            named in ONE place and every message about them is derived from it.
 
     exit 0  every admissible record's acceptance re-ran in its retained workspace and
-            returned the exit code the record claims (including the vacuous case: a machine
-            with no evidence, which says so rather than implying coverage)
-    exit 1  at least one record's verdict cannot be reproduced from what it kept
+            returned the exit code the record claims - and every record this repository
+            COMMITS was on disk to be re-run (including the two genuinely vacuous cases
+            below, each of which says WHICH one it is rather than implying coverage)
+    exit 1  at least one record's verdict cannot be reproduced from what it kept, or the
+            committed evidence this checkout is supposed to hold is missing from it
     exit 2  misuse (a named directory that does not exist, an unreadable record)
 
 WHAT IS SKIPPED, and why that is not a loophole. A record that `record.admit` REFUSES is not
@@ -18,6 +22,36 @@ part of any comparison - the report renders it as REFUSED and it contributes to 
 re-deriving its verdict would be re-deriving a number nobody may use. Skipped records are
 COUNTED and PRINTED with the reason. On this machine that covers the pre-2026-08-30 results
 set, whose records name no venue and are refused for that.
+
+"NO EVIDENCE HERE" AND "THE COMMITTED EVIDENCE IS GONE" ARE DIFFERENT FACTS - added
+2026-08-31, after a verifier found the hole in this file's own fix. Until then `--auto`
+returned 0 whenever it discovered nothing, and it SAID so ("that is a vacuous pass"). The
+disclosure was honest and still insufficient, because U4's evidence is COMMITTED at a known
+path: `rm -rf documentation/evidence/dfu-u4/` - the precise loss this check exists to
+prevent - made `--auto` find nothing and pass, while WALKTHROUGH.md credited it with
+reaching that set. Only `cli.py report --results-dir <committed>` went red.
+
+A checkout is not an arbitrary machine. It either holds the run records its own index tracks
+or it has LOST them, and git is the authority on which. So `--auto` reads the expectation
+from `git ls-files` - not from a path list in this file, which would drift out of step with
+what the repository actually carries - and reds on any tracked `record.json` that is not on
+disk, naming each one.
+
+TWO CASES STAY GENUINELY VACUOUS, and each prints which one it is:
+  * the tree is NOT a git checkout (an exported tarball, a copied directory) - nothing can
+    be expected of it, so nothing is;
+  * the tree IS a git checkout whose index tracks no run records under the discovery roots -
+    a repository that banks no evidence, which this one was until 2026-08-31.
+What this does NOT close: `git rm`-ing the evidence and committing that clears the
+expectation too. No check reading the index can tell that from a legitimate removal - it is
+a diff a reviewer reads. The boundary is drawn at the index and stated here rather than
+overclaimed, because the failure that actually happened was a worktree thrown away, not a
+commit.
+
+A record this repository COMMITS is held to a second rule: it must be ADMISSIBLE. A
+committed record that `record.admit` refuses enters no comparison, so committing it banks a
+directory nobody may cite - that is red, not "skipped". The skip below stays for WORKING
+evidence under `.quadrant/`, which is where the pre-venue records live.
 
 WHERE THIS CHECK CAME FROM - a TESTER finding, in a prior round, on real work.
 
@@ -204,6 +238,72 @@ def _discover(root: Path) -> List[Path]:
     return out
 
 
+def _roots_phrase() -> str:
+    """The discovery roots as prose, DERIVED from DISCOVERY_ROOTS.
+
+    Every message that names where this check looks is built from here. The stale sibling
+    that made this necessary: the roots list gained `documentation/evidence` on 2026-08-31
+    and both the docstring and the "nothing to check" line went on saying `.quadrant/`, so
+    the sentence a future auditor reads named the wrong search root. A third root added
+    later cannot desynchronise the text again, because there is no second copy of it.
+    """
+    names = [r.rstrip("/") + "/" for r in DISCOVERY_ROOTS]
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
+
+def _committed_records(root: Path) -> Tuple[List[str], str]:
+    """(repo-relative `*/record.json` paths this checkout TRACKS, why-there-is-no-expectation).
+
+    The expectation is asked of git, so it is whatever the repository actually carries. A
+    non-empty first element means "these files are supposed to be here"; an empty one with a
+    reason means the tree cannot be held to anything, and that reason is PRINTED rather than
+    quietly treated as coverage.
+
+    The INDEX, not HEAD: `rm -rf documentation/evidence/` leaves the index untouched, and
+    that is the loss that actually happened - so it must be caught the moment it happens,
+    not only once someone commits it.
+
+    THE ENCLOSING-REPOSITORY TRAP, found by this fix's own guard test on its first run and
+    worth more than the test that found it. `git -C <dir> ls-files` does not fail outside a
+    repository - it SEARCHES UPWARDS, and on this machine `C:/Users/yamao` is itself a git
+    repo, so a temporary directory under the home tree answered "exit 0, no tracked records"
+    and read as a repository that banks no evidence. Worse than the wrong message: paths
+    from `--full-name` are relative to whatever toplevel git found, so an enclosing repo
+    that DID track records would have had them resolved against the wrong root. The
+    expectation is only meaningful when the tree being checked IS the repository, so that is
+    asserted rather than assumed.
+    """
+    try:
+        top = subprocess.run(["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                             capture_output=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--full-name", "-z", "--", *DISCOVERY_ROOTS],
+            capture_output=True, encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [], f"git is not runnable here ({exc}), so nothing can be expected of this tree"
+    if top.returncode != 0 or proc.returncode != 0:
+        detail = [ln for ln in ((top.stderr or "") + (proc.stderr or "")).strip().splitlines()
+                  if ln.strip()]
+        return [], ("this tree is not a git checkout, so nothing can be expected of it - "
+                    + (detail[0] if detail else f"git rev-parse exited {top.returncode}"))
+    found = (top.stdout or "").strip()
+    try:
+        same = bool(found) and Path(found).resolve() == root.resolve()
+    except OSError:
+        same = False
+    if not same:
+        return [], ("this tree is not a git checkout - git searched upwards and answered "
+                    f"with the enclosing repository at {found or '(none)'}, whose index says "
+                    "nothing about this directory")
+    paths = sorted(x for x in (proc.stdout or "").split("\0") if x.endswith("/record.json"))
+    if not paths:
+        return [], ("this checkout's index tracks no run records under " + _roots_phrase()
+                    + " - it is a repository that banks no evidence")
+    return paths, ""
+
+
 def _admissible(rec: Dict[str, Any]) -> Tuple[bool, str]:
     """Would this record enter a comparison at all? Uses the harness's OWN gate.
 
@@ -222,14 +322,39 @@ def _admissible(rec: Dict[str, Any]) -> Tuple[bool, str]:
 
 def main(argv: List[str]) -> int:
     dirs = [Path(a) for a in argv if not a.startswith("-")]
-    if "--auto" in argv:
-        dirs += _discover(_repo_root())
+    auto = "--auto" in argv
+    repo = _repo_root()
+    committed: List[str] = []
+    vacuous_because = ""
+    if auto:
+        # THE ASYMMETRY THIS CLOSES. "Discovered nothing" used to be indistinguishable from
+        # "lost everything". Ask git what this checkout is SUPPOSED to hold first, and red
+        # before the vacuous branch below can be reached.
+        committed, vacuous_because = _committed_records(repo)
+        missing = [c for c in committed if not (repo / c).is_file()]
+        if missing:
+            print(f"MISSING COMMITTED EVIDENCE  this checkout's index tracks "
+                  f"{len(committed)} run record(s) under {_roots_phrase()}; "
+                  f"{len(missing)} of them are not on disk:")
+            for c in missing:
+                print(f"    {c}")
+            print(f"\nThat is not a machine with no evidence - it is a checkout that has "
+                  f"LOST the evidence its own index says it carries, which is the exact "
+                  f"failure this check exists to catch. Restore it "
+                  f"(git checkout -- {DISCOVERY_ROOTS[-1]}), or remove it deliberately in a "
+                  f"commit a reviewer reads.")
+            return 1
+        dirs += _discover(repo)
     if not dirs:
-        print("no results set given and none discovered under .quadrant/ - nothing to "
-              "check. That is a vacuous pass, and it is printed rather than implied.")
+        print(f"no results set given and none discovered under {_roots_phrase()} - nothing "
+              f"to check. That is a vacuous pass, and it is printed rather than implied.")
+        if vacuous_because:
+            print(f"    genuinely vacuous, and this is WHICH case: {vacuous_because}.")
         return 0
 
     checked = 0
+    committed_audited = 0
+    committed_abs = {(repo / c).resolve() for c in committed}
     skipped: List[str] = []
     all_problems: List[str] = []
     for d in dirs:
@@ -248,15 +373,27 @@ def main(argv: List[str]) -> int:
                 continue
             if rec.get("status") not in OUTCOME_STATUSES:
                 continue
+            is_committed = r.resolve() in committed_abs
             ok_adm, why = _admissible(rec)
             if not ok_adm:
-                skipped.append(f"{r.parent.name}: refused at admission ({why[:120]})")
+                if is_committed:
+                    # Skipping this one would bank a directory nobody may cite. A COMMITTED
+                    # record that enters no comparison proves nothing, and reporting it as
+                    # "skipped" next to exit 0 is the same vacuity one layer down.
+                    all_problems.append(
+                        f"{r}: this record is COMMITTED to the repository and record.admit "
+                        f"REFUSES it ({why[:160]}). It can enter no comparison, so what is "
+                        f"committed here is a directory nobody may cite.")
+                else:
+                    skipped.append(f"{r.parent.name}: refused at admission ({why[:120]})")
                 continue
             ok, problems = verify_record(r)
             if problems:
                 all_problems += problems
             if ok:
                 checked += 1
+                if is_committed:
+                    committed_audited += 1
 
     for sk in skipped:
         print(f"SKIPPED (not in any comparison)  {sk}")
@@ -269,6 +406,11 @@ def main(argv: List[str]) -> int:
     print(f"{checked} outcome record(s) re-derived their verdict from the evidence they kept "
           f"(re-run in the workspace beside each record, not at whatever absolute path it "
           f"was written with); {len(skipped)} skipped as inadmissible")
+    if auto and committed:
+        print(f"the {len(committed)} run record(s) this checkout COMMITS are all on disk; "
+              f"{committed_audited} of them claim a verdict and every one re-derived it")
+    elif auto and vacuous_because:
+        print(f"nothing was expected of this tree: {vacuous_because}.")
     return 0
 
 
