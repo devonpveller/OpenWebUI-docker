@@ -421,3 +421,16 @@ Neither board is `done`, and neither is meant to be: `phase-floor-matches-plan` 
 because C.8 clause 1's prose still reads "For U0-U6" while section 2's U8 row demands the
 pin. That red is the drift check working, and closing it is a `PLAN.md` edit this branch
 may not make.
+
+### THE BASE HAS MOVED SINCE — §C.7b applies to this pass
+
+Every result above was taken at `0f427e4`, whose base was `1a6b0b8`, with the branch
+**0 behind** the work line. By the time the evidence was written,
+`git rev-list --left-right --count refactor/ai-stack-cleanup...HEAD` reads **`9  4`** —
+the line has advanced nine commits from other sessions landing.
+
+Per §C.7b that makes this pass **stale for merge purposes**: rebase or merge the line in
+FIRST, then re-run both suites, then merge. A clean `git merge-tree` is not a
+revalidation. Both files this branch changes are the done-authority and its drill, which
+several concurrent efforts also touch, so a semantic clash is the likely shape rather than
+a textual one. This branch does not rebase, test or merge itself.
