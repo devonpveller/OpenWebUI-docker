@@ -185,11 +185,11 @@ why nobody has been bitten.
 
 Re-measured 2026-08-31 (round 2) with a byte count rather than `grep`, because `grep -c $'\r'`
 under this Git-Bash matches *every* line and silently reports "all lines have a CR" — one of
-this session's own measurements was wrong for exactly that reason before it was rechecked.
-`openbrain-db-backup.sh` now reads 0 CRs in the worktree, because the verification below
-deleted and re-checked it out; **`docker/backup/openbrain-wiki-backup.sh` is the untouched
-witness — 74 CRs in the worktree, 0 in the main checkout, from a blob holding 0**. The claim
-survives on a file the remediation never handled.
+this session's own measurements was wrong for exactly that reason before it was rechecked, and
+briefly made the 75 above look like a mistake. It is not. **Reproduced exactly** in a clean
+clone of the parent at `69b860f` whose submodule was initialised the ordinary way and then
+moved onto `b12d2fb`: `openbrain-db-backup.sh` **75**, `open-notebook-backup.sh` 105,
+`openbrain-wiki-backup.sh` 74, every blob holding 0.
 
 Also observed, and NOT a live defect: `docker/wiki-viewer/entrypoint.sh` is `i/lf w/crlf` in
 the *main* checkout (16,367 bytes on disk against a 16,069-byte LF blob) while `git status`
@@ -202,6 +202,23 @@ Closed for OB1 by adding `OB1/.gitattributes` with `*.sh text eol=lf` / `*.sql t
 (scoped to two extensions on purpose — `* text=auto` would renormalise the repository, and
 the index needed no renormalising). Verified: deleting and re-checking-out
 `openbrain-db-backup.sh` in the worktree afterwards yields 0 CRs.
+
+**The fix works, but only for checkouts made after it exists — and that is a narrower claim
+than "closed".** Measured three ways at `b12d2fb`, `core.autocrlf=true` throughout:
+
+| checkout | `init-app-role-passwords.sh` | the three backup `.sh` |
+|---|---|---|
+| cloned **directly at** `b12d2fb` (`clone -b work/u8h1-app-role`) | 0 CRs | **0 CRs** |
+| initialised at `4fdc21c`, then `checkout b12d2fb` | 0 CRs | **75 / 105 / 74 CRs** |
+| this worktree, files deleted and re-checked-out | 0 CRs | 0 CRs where forced |
+
+Git renormalises on checkout, not retroactively: a file whose content did not change between
+the two commits is never rewritten, so it keeps the CRLF it was first written with. The file
+the drill mounts is safe in every case because it is *created* by `b12d2fb`. The backup
+sidecars are not — **every checkout that already exists, and every one that reaches this commit
+by moving onto it rather than cloning at it, still holds CRLF copies** until someone runs
+`git add --renormalize .` or deletes and re-checks them out. And none of this reaches anyone
+at all while the gitlink still points at `4fdc21c`, which has no `.gitattributes`.
 
 **Not closed:** the harness itself. `new-worktree.ps1` should set `core.autocrlf=false` on the
 submodule clone and extend its CRLF check to it. Left alone deliberately — two other agents
@@ -219,6 +236,31 @@ are live on the harness's checks right now and this is not H1's file.
 | apply / re-apply / re-apply / revert | throwaway `wt-u8h1-h1db` | three consecutive applies exit 0 (NOTICEs only); revert exit 0, 0 roles left, 4 views back to owner-context |
 | revert guard | one held `ob_app` connection | refused: `H1 revert: 1 connection(s) still authenticated as an application role` |
 | throwaway hygiene | after every run | 0 leftover containers, 0 leftover networks, no `ai-stack_*` attachment, no `:local` tag |
+
+### Round 2 (2026-08-31), rebased onto `b4311d2`
+
+Three clean `git clone`s of the parent at **`69b860f`**, **one suite per checkout**, none of
+them the worktree this was written in.
+
+| checkout | OB1 | suite | result |
+|---|---|---|---|
+| `D:\tmp-u8h1r2-a` | **uninitialised** (the plain git-clone state) | `redprove-census-cannot-measure.ps1` | **5 cases, 0 disagreements**, exit 0 |
+| `D:\tmp-u8h1r2-b` | `b12d2fb` | `drill-app-role-not-superuser.ps1` | **31 probes, 0 failures**, exit 0 |
+| `D:\tmp-u8h1r2-c` | `4fdc21c` (recorded gitlink) | `census-db-connection-roles.ps1` vs live `openbrain-db`, read-only | 21 of 21 superuser; **12 of 13 recognised clients across 41 service blocks**; **9 unexplained**; exit 1 — correct, that is today's state |
+
+Discrimination, run against the pre-fix scripts rather than only the fixed ones:
+
+| mutation | pre-fix | now |
+|---|---|---|
+| red-proof pointed at the pre-fix census | 3 of 5 cases green that should not be | fails 3 of 5, exit 1 |
+| one probe deleted from the drill | `PASSED - 30 probes, 0 failures`, exit 0 | `CANNOT MEASURE - ran 30, expected 31`, exit 2 |
+| census query returning no client backends | exit 0 | exit 2 |
+| drill run at the recorded gitlink | exit 2 via a raw `Copy-Item` crash | exit 2 by check, naming the cause |
+
+Throwaway hygiene after round 2: every container and network created here removed
+(`wt-h1r2a-rpdb`, `wt-h1r2b-h1db`, and the red-proof's own, plus their networks), all three
+temporary checkouts deleted, nothing attached to an `ai-stack_*` network, no `:local` tag
+built, `openbrain-db` read-only throughout.
 
 **The gitlink is deliberately NOT bumped.** The migration lives in the OB1 submodule at an
 unpushed commit, so `abb8c7f` alone does not carry it: a fresh
