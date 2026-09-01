@@ -3,12 +3,35 @@
 # ordered cheap-first. agent-bridge's 700+ test suite runs in Docker locally
 # (see agent-org/); porting it here means building its image in CI — deferred
 # until this baseline is proven green.
+#
+# 2026-09-01 (dark-factory-unification PLAN.md C.9 H4): the verification machinery
+# — the boundary drill, the H1/H2 drills, the RLS proof, the corpus-exposure gate
+# and dfu-done.ps1's runnable clauses — is wired in below, so a later refactor
+# cannot break one of them silently. Read the block above `dfu-static-checks`
+# before changing any of it: those jobs do NOT all pass on exit 0, and the
+# mapping from exit code to build outcome lives in `.github/ci/expected-exit.ps1`.
 name: ci
 
 on:
   push:
+    # `development` is the live-hosted line (CLAUDE.md, branch policy 2026-08-22).
+    # It replaced `develop`, which was in this list from the day the file was written
+    # and NAMED A BRANCH THAT HAS NEVER EXISTED — so no push to the real line had ever
+    # started a run here. That one-word fix landed separately on the work line (5e5ac6f);
+    # this comment is the part H4 owns, because H4's claim depends on it:
+    #
+    # THAT RENAME DOES NOT, BY ITSELF, MAKE CI RUN ON `development`. GitHub resolves
+    # a push workflow from the ref being PUSHED, so a push to `development` runs
+    # `development`'s OWN copy of this file. Until the operator promotes this line
+    # into `development`, that copy is still the one triggering on `develop`.
+    # H4's "shown green on a CI run" therefore depends on that promotion; it is
+    # not something a feature branch can arrange, and adding `development` to some
+    # other trigger would not be that proof either.
     branches: [main, development, "feature/**", "refactor/**", "update/**"]
   pull_request:
+  # So the operator can run the H4 jobs on demand on any branch — including on
+  # `development` the moment this file lands there.
+  workflow_dispatch:
 
 jobs:
   gitleaks:
@@ -97,3 +120,381 @@ jobs:
       # stdlib-only by design (they run on the bare Windows host too)
       - run: python scripts/claude-sessions-bridge/test_follows.py
       - run: python scripts/claude-sessions-bridge/test_lanes.py
+
+  # =========================================================================================
+  # dark-factory-unification C.9 H4 — THE VERIFICATION MACHINERY IS RE-PROVEN, NOT SNAPSHOTTED
+  # =========================================================================================
+  # H4, quoted: "dfu-done.ps1, the drills, and the gates encode lessons nobody will re-derive,
+  # and nothing runs them on a schedule; a later refactor breaks one silently. Validated by:
+  # the boundary drill and dfu-done.ps1's runnable clauses wired into CI on `development`,
+  # shown green on a CI run — not a local one."
+  #
+  # READ THIS BEFORE EDITING ANY JOB BELOW.
+  #
+  # 1. THEY DO NOT ALL PASS ON EXIT 0, AND THAT IS DELIBERATE. `dfu-done.ps1` exits 7 while
+  #    the board is FAILED, which is that script WORKING; the app-role drill exits 2 =
+  #    CANNOT MEASURE while H1's migration is not in the recorded OB1 gitlink; the boundary
+  #    drill exits 2 with dispositioned gaps open and 0 only under -AcceptDispositionedGaps.
+  #    Every exit code is classified by `.github/ci/expected-exit.ps1`, which holds the
+  #    contract in ONE place and refuses any code it does not enumerate. Do not add
+  #    `|| true`, `continue-on-error`, or an `if ($LASTEXITCODE -ne 0)` of your own — the
+  #    runbook section this wiring implements is explicit that a retry loop or an `|| true`
+  #    on these deletes the only checks watching the boundary.
+  #
+  # 2. CANNOT-CHECK IS NOT THE SAME AS FAILED. `assert-rls-force.sh` and the RLS boot drill
+  #    reserve exit 3 for "the drill could not build the environment it needs". It fails the
+  #    build — CI could not do its job — but the annotation says the boundary was never
+  #    exercised, never that it is broken. H2 spent three rounds separating those sentences.
+  #
+  # 3. A SKIPPED JOB IS NOT A PASSING JOB. `dfu-h4-gate` runs with `if: always()`, holds a
+  #    PINNED list of the jobs it gates, and fails if that list and its own `needs` disagree
+  #    or if any of them is anything other than `success`. Deleting a job from `needs` to
+  #    quiet it turns the gate red instead of shrinking it.
+  #
+  # 4. SERIALISATION. `prove-agent-memory-rls.ps1` ends with a read-only assertion that the
+  #    LIVE `openbrain-db` holds zero personal rows, and `dfu-done.ps1` clause 3 PLANTS a
+  #    personal-exposure fixture in that same live database for the duration of its door
+  #    probes. Run concurrently, prove-rls exits 1 with "production is not clean" — a true
+  #    reading at that instant and a defect in neither script (PROMOTION-RUNBOOK.md says so,
+  #    and says CI must serialise them). Two things keep them apart here: both run with
+  #    `-SkipLive`, which removes the live database from both sides entirely, AND `dfu-done`
+  #    declares `needs: dfu-prove-rls` so they cannot overlap even if someone later drops a
+  #    flag. On GitHub-hosted runners each job is a fresh VM with its own docker daemon and
+  #    no live openbrain-db at all; the `needs:` edge is the insurance for the day these
+  #    move to a self-hosted runner that CAN see production, which is the only way the live
+  #    clauses could ever run.
+  #
+  # WHAT THESE JOBS DO NOT ASSERT — stated here rather than discovered later (dfu-done rule
+  # 2, "say what was not checked"):
+  #   * `-SkipLive` on `dfu-done.ps1` leaves clauses 3 and 8 UNEVALUATED, and `-SkipLive` on
+  #     `prove-agent-memory-rls.ps1` skips the production read. CI never looks at the live
+  #     plane. It cannot: there is no openbrain-db on a hosted runner.
+  #   * the boundary drill under `-AcceptDispositionedGaps` asserts "nothing changed since
+  #     the operator dispositioned these 25 gaps", NOT "U5's recording half is met". Each
+  #     gap prints its own GREEN DOES NOT COVER line; read them.
+  #   * these jobs were measured on Windows PowerShell 5.1 against gitlink b604d55
+  #     (documentation/notes/u8h4-findings.md records every command, cwd, exit code and
+  #     elapsed time). The exit-code contract file itself was additionally executed under
+  #     pwsh 7 on Linux. The DRILLS have not yet run on a Linux runner, because H4's other
+  #     half — a CI run on `development` — is blocked on the operator promoting this line.
+  #
+  # Runner facts this wiring depends on, checked against actions/runner-images
+  # images/ubuntu/Ubuntu2404-Readme.md on 2026-09-01 rather than assumed: PowerShell 7.6.5,
+  # Docker Client/Server 28.0.4, Docker Compose 2.38.2, Git 2.55.0, python-is-python3.
+  # `TEMP` is set per job because these scripts stage throwaway fixtures under `$env:TEMP`,
+  # and that variable does not exist on Linux. OB1 is checked out because the drills build
+  # from the RECORDED GITLINK; it is a PUBLIC repo and the pinned commit is on its remote,
+  # so `submodules: recursive` needs no extra credential.
+  # =========================================================================================
+
+  dfu-static-checks:
+    name: "DFU H4 — static gates and the machinery's own self-tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the corpus gate scans OB1's recipes
+      - name: the exit-code contract's own self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./.github/ci/expected-exit.ps1 -SelfTest
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -List
+          exit $c
+      - name: gap-ledger self-test — closing a gap must not turn the build red
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestLedger
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check boundary-drill-selftest-ledger -Code $c `
+            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestLedger'
+          exit $LASTEXITCODE
+      - name: vacuity-guard self-test — an empty universe cannot reach PASS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestVacuity
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check boundary-drill-selftest-vacuity -Code $c `
+            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestVacuity'
+          exit $LASTEXITCODE
+      - name: corpus exposure producers — every recognised insert site states its plane
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/check-corpus-exposure-producers.ps1
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check corpus-exposure-producers -Code $c `
+            -Command './scripts/checks/check-corpus-exposure-producers.ps1'
+          exit $LASTEXITCODE
+      - name: corpus exposure producers — the gate's own planted cases
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/check-corpus-exposure-producers.ps1 -SelfTest
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check corpus-exposure-producers-selftest -Code $c `
+            -Command './scripts/checks/check-corpus-exposure-producers.ps1 -SelfTest'
+          exit $LASTEXITCODE
+
+  dfu-boundary-drill:
+    name: "DFU H4 — personal-plane exclusion drill (U5)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The drill FAILS BEFORE IT STARTS unless the OB1 working copy is clean and
+          # sitting on exactly the commit the parent pins, then exports that commit and
+          # builds every image from the export. `submodules: recursive` is what puts OB1
+          # at the recorded gitlink; without it the drill exits 1 and says so.
+          submodules: recursive
+      - name: drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check boundary-drill -Code $c `
+            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps'
+          exit $LASTEXITCODE
+
+  dfu-rls-boot-drill:
+    name: "DFU H4 — RLS boot assertion drill (H2)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the drill derives its governed set from OB1's migrations
+      - name: drill-rls-boot-assertion.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/drill-rls-boot-assertion.ps1
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check rls-boot-drill -Code $c `
+            -Command './scripts/checks/drill-rls-boot-assertion.ps1'
+          exit $LASTEXITCODE
+
+  dfu-app-role-drill:
+    name: "DFU H4 — app role is not a superuser (H1)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # PINNED AS EXIT 2 = CANNOT MEASURE, and that is the honest state of the tree, not a
+      # skip: `OB1/docker/init-app-role.sql` and `init-app-role-passwords.sh` do not exist
+      # at the recorded gitlink, so there is nothing to drill until H1's OB1 commit is
+      # pushed and the gitlink bumped. The job RUNS the drill and lets it say so; when the
+      # files land, exit 0 arrives as a NAG telling whoever sees it to pull the pin in
+      # .github/ci/expected-exit.ps1. Exit 1 — a probe disagreeing — is red either way.
+      - name: drill-app-role-not-superuser.ps1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/drill-app-role-not-superuser.ps1
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check app-role-drill -Code $c `
+            -Command './scripts/checks/drill-app-role-not-superuser.ps1'
+          exit $LASTEXITCODE
+
+  dfu-prove-rls:
+    name: "DFU H4 — the exposure boundary, proved in the database"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the RED/GREEN databases are built from OB1's initdb chain
+      # -SkipLive is REQUIRED here, not a convenience: the last section of this script reads
+      # the live openbrain-db, which does not exist on a runner. Without the flag the run
+      # would report a boundary verdict about a database it never reached.
+      - name: prove-agent-memory-rls.ps1 -SkipLive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          & ./scripts/checks/prove-agent-memory-rls.ps1 -SkipLive
+          $c = $LASTEXITCODE
+          & ./.github/ci/expected-exit.ps1 -Check prove-rls -Code $c `
+            -Command './scripts/checks/prove-agent-memory-rls.ps1 -SkipLive'
+          exit $LASTEXITCODE
+
+  dfu-done:
+    name: "DFU H4 — the board (dfu-done.ps1 runnable clauses)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # SERIALISATION, per PROMOTION-RUNBOOK.md — see note 4 in the block above. Not because
+    # these two jobs share a machine here (they do not), but so the ordering survives a move
+    # to a runner that can see the live plane.
+    needs: [dfu-prove-rls]
+    env:
+      TEMP: ${{ runner.temp }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Clause 4 counts unmerged work branches and measures the work line against its
+          # remote, and clauses 1 and 5 run the walkthrough's commands inside a `--shared`
+          # clone of this checkout. Both want real history and a populated submodule.
+          fetch-depth: 0
+          submodules: recursive
+      # -SkipLive because clause 3 plants a personal-exposure fixture in openbrain-db by
+      # default and there is no live database in CI. Exit 7 (board FAILED) is the pinned,
+      # expected outcome today and MUST NOT read as a broken build; exit 1 (usage or
+      # configuration error — nothing was judged) must.
+      #
+      # AND THE EXIT CODE ALONE WOULD BE A THIN GATE, so this step also asserts the
+      # properties that make the board's own verdict trustworthy on ANY platform: the census
+      # balances, no clause landed in the `unrecognised` bucket, and the run did not move
+      # the tree it was auditing. Those are dfu-done's refusing conditions; a refactor that
+      # broke the script would show up in them long before it changed the exit code.
+      # Deliberately NOT pinned: the per-clause bucket map. It was measured only on Windows,
+      # a Linux runner will legitimately place some clauses differently (the walkthrough
+      # invokes a Windows venv python), and pinning a map nobody has observed on the runner
+      # would be the snapshot H4 exists to prevent. Recorded as a follow-up in
+      # documentation/notes/u8h4-findings.md.
+      - name: dfu-done.ps1 -SkipLive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'dfu-done.json'
+          & ./scripts/checks/dfu-done.ps1 -SkipLive -Json | Out-File -LiteralPath $log -Encoding utf8
+          $c = $LASTEXITCODE
+          Write-Host "dfu-done.ps1 -SkipLive -Json exited $c"
+
+          $bad = 0
+          $o = $null
+          try {
+            $raw = Get-Content -LiteralPath $log -Raw
+            $i = $raw.IndexOf('{'); $j = $raw.LastIndexOf('}')
+            if ($i -lt 0 -or $j -le $i) { throw "no JSON object in the output" }
+            $o = $raw.Substring($i, $j - $i + 1) | ConvertFrom-Json
+          } catch {
+            Write-Host "::error::dfu-done.ps1 -Json produced nothing this job could parse: $($_.Exception.Message). NOTHING WAS JUDGED - that is not a pass."
+            $bad++
+          }
+          if ($o) {
+            Write-Host "board=$($o.board) done=$($o.done) balances=$($o.balances) total=$($o.census_total)"
+            Write-Host ("census: " + ($o.census | ConvertTo-Json -Compress))
+            Write-Host ("ids   : " + ($o.census_ids | ConvertTo-Json -Compress))
+            if ($env:GITHUB_STEP_SUMMARY) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ""
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "**dfu-done board:** ``$($o.board)`` - census ``$($o.census | ConvertTo-Json -Compress)``"
+            }
+            if ($o.balances -ne $true) {
+              Write-Host "::error::dfu-done's census does not balance. A clause landed nowhere, which is the unaccounted bucket and refuses by construction."
+              $bad++
+            }
+            if ($o.census.unrecognised -ne 0) {
+              Write-Host "::error::dfu-done placed $($o.census.unrecognised) clause(s) in the 'unrecognised' bucket - a verdict the script does not enumerate. That is a defect in the machinery, not a report about the plan."
+              $bad++
+            }
+            if ($o.integrity.ok -ne $true) {
+              Write-Host "::error::dfu-done reports the audited tree MOVED during the run, so this run is not an authority on it (rule 8)."
+              $bad++
+            }
+          }
+          if ($bad -gt 0) {
+            Write-Host "::error::dfu-done ran, but $bad integrity assertion(s) about the RUN failed. The exit-code contract is not consulted: a board that cannot account for itself does not get to be 'as pinned'."
+            exit 1
+          }
+          & ./.github/ci/expected-exit.ps1 -Check dfu-done -Code $c `
+            -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
+          exit $LASTEXITCODE
+
+  dfu-h4-gate:
+    name: "DFU H4 — gate: no job here may be skipped into looking green"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # `always()` so this runs even when a job it gates FAILED, was CANCELLED, or was
+    # SKIPPED. Without it GitHub skips this job too, and a skipped gate is exactly the
+    # silent green this effort keeps finding.
+    if: ${{ always() }}
+    needs:
+      - dfu-static-checks
+      - dfu-boundary-drill
+      - dfu-rls-boot-drill
+      - dfu-app-role-drill
+      - dfu-prove-rls
+      - dfu-done
+    steps:
+      - name: every gated job reached a verdict, and the gated set is the pinned one
+        shell: pwsh
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          # PINNED, and CHECKED BACK against `needs` - the same shape dfu-done.ps1 uses for
+          # its phase floor (rule 3's limit, and rule 6). A hand list alone rots; a list
+          # derived from `needs` alone can be shrunk by deleting an entry from `needs`,
+          # which is the "population derived from the document under test" defect. Both
+          # together mean removing a job turns this gate RED rather than making it smaller.
+          $expected = @(
+            'dfu-static-checks',
+            'dfu-boundary-drill',
+            'dfu-rls-boot-drill',
+            'dfu-app-role-drill',
+            'dfu-prove-rls',
+            'dfu-done'
+          )
+          $needs = $env:NEEDS_JSON | ConvertFrom-Json
+          $actual = @($needs.PSObject.Properties.Name)
+
+          $missing = @($expected | Where-Object { $actual -notcontains $_ })
+          $extra   = @($actual   | Where-Object { $expected -notcontains $_ })
+          $bad = 0
+          if ($missing.Count -gt 0) {
+            Write-Host "::error::these H4 jobs are PINNED in this gate but are not in its needs: $($missing -join ', '). A job removed from needs is a check that stopped running; it does not make the gate smaller."
+            $bad++
+          }
+          if ($extra.Count -gt 0) {
+            Write-Host "::error::these jobs are in needs but not pinned in this gate: $($extra -join ', '). Add them to the pinned list so the gate states what it covers."
+            $bad++
+          }
+
+          Write-Host "| job | result |"
+          Write-Host "|---|---|"
+          foreach ($name in ($actual | Sort-Object)) {
+            $r = [string]$needs.$name.result
+            Write-Host "| $name | $r |"
+            if ($r -ne 'success') {
+              # THE TWO REASONS ARE DIFFERENT SENTENCES and the annotation says which.
+              # 'failure' means the check ran and objected; 'skipped'/'cancelled' means it
+              # never ran, so nothing it watches was measured - which is the one this gate
+              # exists for, because a skipped job is the state that otherwise looks green.
+              $why = if ($r -eq 'failure') {
+                "it RAN and objected - read that job's annotations for the exit code and what it means"
+              } else {
+                "it NEVER RAN, so nothing it watches was measured. A '$r' job is not a pass."
+              }
+              Write-Host "::error::$name did not succeed - result '$r': $why"
+              $bad++
+            }
+          }
+          if ($env:GITHUB_STEP_SUMMARY) {
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ""
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "### DFU C.9 H4 - verification machinery"
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ""
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "| job | result |"
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "|---|---|"
+            foreach ($name in ($actual | Sort-Object)) {
+              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("| ``$name`` | " + [string]$needs.$name.result + " |")
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+          Write-Host "H4 GATE PASSED - all $($expected.Count) pinned jobs ran and succeeded."
