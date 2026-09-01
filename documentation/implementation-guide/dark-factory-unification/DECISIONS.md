@@ -642,7 +642,10 @@ WHAT STILL FAILS: one FALSE justification sentence, shipped in code.
           ran to completion and exited 2.
           The CODE CHANGE IS CORRECT and its drill case is real; only the stated reason is
           wrong. The true reason is the one the branch half-states: the cast yields a
-          RELATIVE Uri whose `.Port` is `$null` and `.Host` is `''`.
+          RELATIVE Uri whose `.Port` and `.Host` are BOTH `$null`. `$null` interpolates to
+          an empty string, so a formatted read of `.Host` renders `''` while
+          `$null -eq $u.Host` is True and `$u.Host.Length` throws - two verifiers split on
+          exactly that, and both were reading something real. [corrected 2026-08-31, U4 r9]
 WHY THIS ONE IS WORTH RECORDING: the false sentence sits inside the very bullet whose first
           half reads "I verified the pre-fix behaviour rather than relaying it" — and that
           half is TRUE and was reproduced exactly. One verified sentence and one unverified
@@ -1945,3 +1948,79 @@ left unread.
 **STATUS: clause 8 UNMET, reported not dropped.** The probe, the seam and the fixed REST-twin
 defect all stay — they are the machinery the clause needs. What is missing is a later effort,
 and that arrives with time rather than with another round.
+
+
+## 2026-08-31 - U4 rounds 8/9 - the staged entries, appended at merge
+The four round-8 blocks and the two round-9 blocks are recorded verbatim in
+`documentation/notes/u4-round8-evidence-durability.md` sections "DECISIONS entries to append"
+and 9.6, and are adopted here by reference rather than re-typed, because re-typing a staged
+block is how a transcription error enters a ledger. They cover: evidence committed under
+`documentation/evidence/<item>/` with `.gitignore`'s `.quadrant/` rule re-scoped to working
+state (class 2); the CORRECTION to PLAN section 2.1 A1's two now-false supporting facts (the
+amendment stands, its evidence paragraph does not); `work/u4bidir` ABANDONED with its ~2,400
+lines named; the U4 STATUS record; the `.Host` correction applied above; and the durable check
+learning to tell "no evidence" from "the committed evidence is gone" (class 2).
+
+## 2026-08-31 - U4 - UN-PARK
+Un-parks: 2026-08-30 - U4 - PARKED - the runner axis is unmeetable as written
+DECISION: U4's PARK is LIFTED. The park's stated blockers were: only one quadrant run with no
+          comparison, no oracle-on-stall path, and a local runner that could not deliver its
+          own artifact. All three are now answered by committed, re-derivable evidence:
+          `quadrant.cli report` over `documentation/evidence/dfu-u4/quadrant` gives
+          COMPARED 4/4 exit 0 from a FRESH CLONE, and the oracle fired on a stall that
+          HAPPENED - three real little-coder dispatches at 23:24:14 / 23:25:37 / 23:26:47,
+          each failing the same pristine test with signature 3925e1845fc3353b on three
+          DIFFERENT shas, producing exactly one ledger row 417aa274750da712 (0 rows before,
+          1 after).
+INDEPENDENCE, which the round-8 STATUS entry correctly withheld: that entry says U4 is
+          "AWAITING AN INDEPENDENT RE-RUN" because round 8 was run by the session that
+          produced it. That condition is now MET and this entry is what records it - four
+          verifiers across rounds 8 and 9, none of whom built the work, re-ran the column in
+          their own clean clones and reported COMPARED 4/4 exit 0; two of them additionally
+          broke it on purpose (a removed cell -> COMPARED 3/4 NOT RUN exit 1; a fabricated
+          record -> REFUSED, workspace does not exist; a one-byte edit to a frozen file ->
+          NOT REPRODUCIBLE). The harness refuses rather than lying.
+STILL OPEN, and deliberately NOT swept into this lift: "one profile mechanism governs both"
+          remains FALSE in the agent-org direction. That is a *What*-cell debt, not a
+          Validated-by debt - section 2.1 A1 explicitly does not touch the column - and U4's
+          closure does not turn on it. It is recorded as debt, not as done.
+CITED:    section C.6 (the audit trail is the deliverable's twin); section C.8 clause 2, whose
+          `no-outstanding-parked` probe named this entry as the machine-checkable blocker to
+          U4 reading closed - a park is lifted by evidence, never by deleting the park.
+REVERT:   restore the PARKED status line; the evidence stands either way.
+
+## 2026-08-31 - U5 - `work/u5rls` and `work/u5pplane` ABANDONED, superseded by `work/u5graph`
+DECISION: Both branches are abandoned on operator direction and their branches and worktrees
+          deleted. They are SUPERSEDED, not discarded: `work/u5graph` merged the governance
+          they were carrying, derived from the schema rather than hand-listed, and both
+          branches were 23-25h stale (last commits 2026-08-30 20:05 and 21:25) against a work
+          line that has moved repeatedly since - UNVALIDATED under section C.7b whatever
+          passed on them.
+WHAT WAS SALVAGED FIRST, and verified before deletion rather than asserted: the two boundary
+          drills existed ONLY on these branches. Both are now on `work/u8h3` and materially
+          extended - `drill-personal-plane-exclusion.ps1` 140,027 -> 210,894 bytes and
+          `prove-agent-memory-rls.ps1` 33,215 -> 51,262 bytes. Confirmed by `git cat-file -s`
+          against both revisions BEFORE either branch was deleted. Note that these drills are
+          NOT yet on the work line; they arrive with `work/u8h3`, and until that merges they
+          exist on one branch only.
+CITED:    section C.7b (a stale branch is unvalidated); the operator's direction.
+REVERT:   both branches are on `origin`; nothing was force-deleted upstream.
+
+## 2026-08-31 - U8 - MERGE ORDER: the floor-pin lands LAST (operator direction)
+DECISION: `work/u8floor` pins U8 into `dfu-done.ps1`'s phase floor and clause 1 population.
+          Merging it before H1-H3 exist turns the done-authority PERMANENTLY RED on subjects
+          that cannot yet be satisfied. Order is therefore: land U4 (done, this merge), then
+          H3 (`work/u8h3`), then implement H1 and H2, and only THEN merge `work/u8floor`, so
+          the floor and the reality land together.
+WHY THIS IS NOT A REDEFINITION: the floor extension is required by section 2's U8 row and is
+          correct. What is being sequenced is WHEN a true statement becomes a measured one -
+          section C.8 forbids amending a column so the script goes green, and says nothing
+          against landing a red-making change after the thing it measures exists. The floor is
+          not being weakened, delayed past U8, or made optional.
+ALSO RECORDED: PLAN section C.8 clause 1's prose still reads "For U0-U6" while section C.9 and
+          section 2's U8 row both require U8 in clause 1's population. `work/u8floor` leaves
+          `phase-floor-matches-plan` RED on four clauses rather than relaxing the check to
+          "pinned superset of named", which would clear the red AND re-open the hole the check
+          exists to close. Closing it is a PLAN.md edit and is the operator's.
+CITED:    the operator's direction, 2026-08-31; section C.8.
+REVERT:   merge `work/u8floor` earlier; the red is informational, not blocking.
