@@ -365,6 +365,21 @@ services:
                 $insp = (& docker inspect --format '{{json .State.Health}}' "ob-h2-gate-red-db-1" 2>&1 | Out-String)
                 if ($insp -match 'EXPOSURE BOUNDARY NOT ASSERTED') { Pass "9-RED: the reason is in docker inspect .State.Health, naming the boundary" }
                 else { Fail "9-RED: health output does not carry the reason: $insp" }
+
+                # THE LIMIT OF "REFUSE TO SERVE", MEASURED RATHER THAN ASSUMED. A docker
+                # healthcheck gates DEPENDENTS; it does not gate the socket. An unhealthy
+                # postgres still answers anyone who connects anyway. So the refusal is real at
+                # the boot/dependency edge - which is exactly the event H2 names (a restore, a
+                # rebuild, a skipped promotion) - and for a database that goes bad WHILE
+                # RUNNING it is an alarm plus a refusal of the next dependent start. Claiming
+                # more than that would be a claim nobody ran.
+                $stillServes = (& docker exec ob-h2-gate-red-db-1 psql -U postgres -d openbrain -tA -c "SELECT 'served';" 2>&1 | Out-String)
+                $hs = (& docker inspect --format '{{.State.Health.Status}}' "ob-h2-gate-red-db-1" 2>&1 | Out-String).Trim()
+                if ($stillServes -match 'served' -and $hs -eq 'unhealthy') {
+                    Pass "9-RED: MEASURED LIMIT - the unhealthy db still answers a direct connection, so the refusal is at the DEPENDENCY edge, not the socket"
+                } else {
+                    Fail "9-RED: expected an unhealthy-but-answering db (health='$hs', query='$($stillServes.Trim())') - the documented limit could not be measured"
+                }
             }
             if (-not $KeepContainers) { & docker compose -f $f down -v --remove-orphans 2>&1 | Out-Null }
         }

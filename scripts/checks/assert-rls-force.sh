@@ -8,6 +8,15 @@
 # prove the boundary is up DOES NOT GET USED: `openbrain-db`'s healthcheck runs it, and nine
 # services declare `depends_on: openbrain-db: condition: service_healthy`.
 #
+# WHERE THE REFUSAL STOPS, MEASURED (drill section 9-RED). A docker healthcheck gates
+# DEPENDENTS; it does not gate the socket. An unhealthy postgres still answers anyone who
+# connects to it directly - verified by connecting to one. So this is a hard refusal at the
+# BOOT / DEPENDENCY EDGE, which is exactly the event H2 names (a restore, a rebuild, a
+# promotion where the runbook was skipped), and for a database that goes bad WHILE RUNNING it
+# is an alarm plus a refusal of the next dependent start. Anything stronger for the running
+# case means revoking CONNECT or stopping the container, which trades a disclosure risk for an
+# unattended self-inflicted outage; that is an operator decision, not this script's.
+#
 # ------------------------------------------------------------------------------------------
 # WHERE THIS FILE LIVES, AND WHERE IT BELONGS
 # ------------------------------------------------------------------------------------------
