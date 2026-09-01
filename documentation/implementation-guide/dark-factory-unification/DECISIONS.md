@@ -2004,7 +2004,16 @@ WHAT WAS SALVAGED FIRST, and verified before deletion rather than asserted: the 
           NOT yet on the work line; they arrive with `work/u8h3`, and until that merges they
           exist on one branch only.
 CITED:    section C.7b (a stale branch is unvalidated); the operator's direction.
-REVERT:   both branches are on `origin`; nothing was force-deleted upstream.
+REVERT:   `git bundle unbundle` from `D:\Open WebUI\_notesbandoned-branches\{u5rls,
+          u5pplane}.bundle`, both verified "records a complete history" BEFORE either branch
+          was deleted.
+          CORRECTION, caught by checking rather than by assuming: this entry first read "both
+          branches are on `origin`; nothing was force-deleted upstream." That is FALSE.
+          `git ls-remote --heads origin` shows `work/u5pplane` at `ab27d5b` - which is not
+          even the local tip `03e8ea3` - and shows **no `work/u5rls` at all**. Its 14 commits
+          existed on this machine only, so a plain delete would have been irreversible. The
+          bundles exist because the claim was checked before it was relied on; they are
+          outside the repo because each is 6.6 MB.
 
 ## 2026-08-31 - U8 - MERGE ORDER: the floor-pin lands LAST (operator direction)
 DECISION: `work/u8floor` pins U8 into `dfu-done.ps1`'s phase floor and clause 1 population.
