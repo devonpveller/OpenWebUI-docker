@@ -42,6 +42,36 @@ Re-run at that sha, in one checkout, each throwaway on its own network:
 | `scripts/checks/dfu-done.ps1 -Only 3` | **UNMET**, 12 of 14 evaluated, the two `[fail]`s are the superuser doors (§3.4) |
 | full 29-migration initdb chain on a throwaway | no init errors; 195's self-test and 200 §9's notice both printed |
 
+### Round 5 re-validation (§C.7b), from CLEAN CHECKOUTS at the rebased sha
+
+The branch was rebased onto the work line's `8e2eaf4` (U4 merged, ledger work landed); the
+round-4 pass at `90c7cde` was stale under §C.7b and a clean `git merge-tree` is not a
+revalidation. Round 5's changes are at **`5ff217b`**. Two throwaway `git clone`s of the branch
+at that exact sha, submodule initialised to the recorded gitlink `debbbaa`, **one suite per
+checkout**:
+
+| checkout | suite | result |
+|---|---|---|
+| `cc1` @ `5ff217b` | `check-corpus-exposure-producers.ps1 -SelfTest` | **PASSED**, exit 0 - 6 assertions red/green, cases 4-6 record the blind spots |
+| `cc1` @ `5ff217b` | `check-corpus-exposure-producers.ps1` (full scan) | **OK - all 13 recognised sites state their plane** (742 files), exit 0 |
+| `cc2` @ `5ff217b` | `drill-personal-plane-exclusion.ps1 -SelfTestLedger` | **PASSED**, exit 0 - all **25** ids register on success; `AUDIT-INSPECT` closes at `closed=1 vanished=0 fails=0 EXIT=0` |
+| `cc2` @ `5ff217b` | `drill-personal-plane-exclusion.ps1 -SelfTestVacuity` | **PASSED**, exit 0 - an empty universe cannot reach PASS |
+| `cc2` @ `5ff217b` | `drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps` (FULL, throwaway plane) | **CONTAINMENT GREEN, 106 checks passed, 0 failed**; `GAP LEDGER - 25 fired, 25 dispositioned`, exit 0 |
+
+The full drill built its own `pp-drill-49ce9d4a-*` plane on its own network and tore it down
+(0 containers, 0 networks left). It never touched `openbrain-db`, and nothing in this round
+wrote to the live database or deployed anything.
+
+**Red-proofs re-run at `5ff217b`, each by reverting exactly one line:**
+
+* evidence test back to `$evidence -match 'exposure'` -> self-test cases **3b and 3c FAIL**, exit 1.
+* one `PassGap` back to `Pass` -> `BAD 1 dispositioned id(s) have NO success route ...
+  AUDIT-RECALL-OVERRIDE`, ledger self-test **FAILS**, exit 1.
+
+The `105 passed / 18 gaps` figures in the table above are the round-2 measurement and are kept
+as a historical record. The current figures are **106 passed / 25 gaps**, and neither is
+written into any check - both are printed by the run.
+
 ---
 
 ## 0. What H3 itself did (the short version)
