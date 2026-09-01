@@ -521,18 +521,36 @@ $GAP_DISPOSITIONS = [ordered]@{
     # in the database, every claim about what those rows do or do not contain quantifies over
     # nothing. They close when H1 closes AUDIT-INSPECT and its family - and on that day they
     # are reported CLOSED (assertion ran, verdict reached) rather than failing the build; see
-    # Resolve-Gap above. The SIXTH, VACUOUS-WIKIPAGES, was closed in round 4 by giving the
-    # compile a vault root, and its pin is gone from this table.
+    # Resolve-Gap above. The SIXTH, VACUOUS-WIKIPAGES, round 4 tried to CLOSE and could not -
+    # see its entry: half the cause was the drill's (fixed) and half is a live OB1 defect
+    # (recorded, not fixed here). Pulling its pin on the strength of the half-fix was wrong,
+    # and the run said so: UNDISPOSITIONED GAP, exit 2. The ledger works.
     "VACUOUS-REFUSAL-DISCRIMINATES"     = "H1/H4 - downstream of the audit-record gap. 0 access_refused rows exist, so 'the ALLOWED call wrote none' cannot show the signal discriminates. GREEN DOES NOT COVER: that a refusal is distinguishable from an allow in any durable record. A door that filed a refusal row for EVERY call, allowed ones included, would pass this run unchanged."
     "VACUOUS-GHOST-NO-ROW"              = "H1/H4 - downstream of the audit-record gap. Same empty universe: no refusal rows, so 'a typo writes none either' distinguishes nothing IN THE LOG. The RESPONSE half of that check is asserted separately and passes. GREEN DOES NOT COVER: that the audit log cannot be used to CONFIRM a guessed memory id. A door that filed a row naming the ghost id - which is an existence oracle - would pass this run unchanged; only the response half would catch it."
     "VACUOUS-TRACE-REFUSAL-ID"          = "H1/H4 - downstream of AUDIT-RECALL-TRACE-ENVELOPE. The off-plane-trace refusal row does not exist, so 'that row names no memory id' is about a row that was never written. GREEN DOES NOT COVER: that a recall-trace refusal, once one is written, will withhold the id of the memory it refused. The property is untested, not established."
     "VACUOUS-WRITEBACK-REFUSAL-ID"      = "H1/H4 - downstream of AUDIT-WRITEBACK-PROBE. Same shape, on the writeback's refusal row. GREEN DOES NOT COVER: that the writeback's idempotency probe will withhold the memory id when it starts recording its refusals. Same untested property, on the write path."
+    "VACUOUS-WIKIPAGES"                 = "ATTACK 14 measurement gap, NOT H1, and NOT a boundary question. The compiler writes ZERO wiki_pages rows in this throwaway - and, since OB1 dfc6228, in production either: queueWikiPage swallows a ReferenceError from parseWikiPage (extractLinks re-exported but never imported). So 'wiki_pages holds none of the personal text' is a statement about a table nothing has written to. GREEN DOES NOT COVER: the wiki_pages surface at all. The viewer's search, nav and graph read that table, and a compile that published the personal row INTO it would pass this run unchanged - only the file-side half of ATTACK 14 (no leaf page, no marker in the emitted text) is actually measured, and that half passes against real output. Closes by itself once the OB1 bug is fixed; the drill's own half (WIKI_GIT_DIR=/out) is already done."
     "VACUOUS-ENUMERATING-FILED-NOTHING" = "H1/H4 - downstream of the audit-record gap. NO tool filed a refusal row, so 'the enumerating doors filed nothing' holds of the enumerating doors, the targeted doors, and every door that does not exist. GREEN DOES NOT COVER: the distinction the clause is FOR - that a door which merely omits an off-plane row behaves differently from one that refuses a named id. On this tree both are silent, and this run cannot tell them apart."
-    # VACUOUS-WIKIPAGES IS GONE FROM THIS TABLE, AND THAT IS THE POINT OF THE ROUND. It was
-    # not dispositioned harder, it was CLOSED: Invoke-WikiCompile sets WIKI_GIT_DIR=/out, so
-    # the compiler now queues and flushes wiki_pages rows through the same PostgREST door
-    # production uses, the universe is non-empty, and the assertion discriminates. Its pin is
-    # pulled because leaving it in would be the ledger claiming an open gap that is shut.
+    # ...and one that is NOT about the audit table. ROUND 4 TRIED TO CLOSE THIS ONE AND
+    # FAILED, AND THE FAILURE FOUND A LIVE BUG. Two things must both hold for the compile to
+    # write wiki_pages rows, and round 3 had diagnosed only the first:
+    #   (1) the out-dir must BE a vault root - recipes/_shared/wiki-pages.mjs `vaultRel()`
+    #       drops any path outside WIKI_GIT_DIR (default /wiki) so a scratch --out-dir cannot
+    #       write junk slugs into the table. This drill compiles into /out. FIXED here:
+    #       Invoke-WikiCompile now sets WIKI_GIT_DIR=/out.
+    #   (2) `queueWikiPage()` must actually queue. IT DOES NOT, AND HAS NOT SINCE OB1
+    #       dfc6228 (2026-08-28). wiki-pages.mjs RE-EXPORTS extractLinks
+    #       (`export { extractLinks } from "./links.mjs"`) without IMPORTING it, so the name
+    #       is not bound in the module scope and `parseWikiPage` throws
+    #       `ReferenceError: extractLinks is not defined`. queueWikiPage swallows it in a
+    #       bare `catch {}`, so every page write silently queues nothing. Measured, not
+    #       inferred: `node --test recipes/_shared/wiki-pages.test.mjs` is 5 of 10 RED on the
+    #       gitlink, all five with that ReferenceError.
+    #
+    # (1) IS KEPT ANYWAY. It is correct and it is necessary; when the OB1 bug is fixed this
+    # gap closes by itself and reports CLOSED rather than failing the build. Fixing (2) is
+    # NOT this item - it is a live wiki-index defect that belongs to the wiki work line, and
+    # it is written up in documentation/notes/u8h3-findings.md rather than folded in here.
     # --- and the red-coverage ledger ------------------------------------------------------
     "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed in round 3 is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite. GREEN DOES NOT COVER: that those seven sections' greens can fail at all. For each of them, deleting the mechanism that does the work would look exactly like the mechanism working, and this run would still be green."
 }
@@ -2117,6 +2135,22 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         -UniverseName "wiki_pages row(s) this compile produced" `
         -Claim "and wiki_pages holds no row carrying the personal row's text" `
         -Defect "wiki_pages row(s) carry the personal corpus content"
+    # A VACUITY THAT DOES NOT SAY WHY IS A RIDDLE FOR THE NEXT READER. Round 3 reported this
+    # one as "needs a fixture" and round 4 spent a whole drill run learning that the fixture
+    # was only half the cause. Both preconditions are named here, at the point of failure,
+    # with the command that decides which one is biting.
+    if ($script:AssertOutcome -eq "vacuous") {
+        Note "WHY THE UNIVERSE IS EMPTY - two conditions must BOTH hold, check them in order:"
+        Note "  (1) the out-dir must be the vault root. recipes/_shared/wiki-pages.mjs vaultRel()"
+        Note "      drops any path outside WIKI_GIT_DIR. This drill sets WIKI_GIT_DIR=/out, so"
+        Note "      condition (1) holds - if that -e is ever dropped, it is the first suspect."
+        Note "  (2) queueWikiPage() must queue. Since OB1 dfc6228 it does NOT: wiki-pages.mjs"
+        Note "      re-exports extractLinks without importing it, parseWikiPage throws"
+        Note "      ReferenceError, and a bare catch {} swallows it. PROVE IT IN ONE COMMAND:"
+        Note "      node --test OB1/recipes/_shared/wiki-pages.test.mjs   (5 of 10 RED = still broken)"
+        Note "  That defect also stops the LIVE wiki_pages index being written or backfilled."
+        Note "  See documentation/notes/u8h3-findings.md. It is NOT a boundary defect."
+    }
 
     # 14d. RED - AND IT MOVED, BECAUSE THE GUARD MOVED.
     #

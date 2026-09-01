@@ -1390,9 +1390,32 @@ names each one with the item that owns it. The exit contract is:
 
 **CI runs it with `-AcceptDispositionedGaps`.** A count-based budget would have let "17 old + 1
 new" pass; the ledger is by name, so a new gap is red, and a gap that closes forces the ledger
-(and this section) to be updated rather than quietly drifting. When H1 closes the audit-record
-gap, the run goes RED until the corresponding ids are deleted from `$GAP_DISPOSITIONS` — that is
-the intended behaviour, not a bug to route around.
+(and this section) to be updated rather than quietly drifting.
+
+> **CORRECTED, ROUND 4 (2026-08-31).** This paragraph used to end: *"When H1 closes the
+> audit-record gap, the run goes RED until the corresponding ids are deleted from
+> `$GAP_DISPOSITIONS` — that is the intended behaviour, not a bug to route around."* **It is no
+> longer the behaviour, and it should not have been.** A gate that turns red when you fix
+> something teaches people to stop fixing things — and the first VACUOUS gap actually closed
+> (`VACUOUS-WIKIPAGES`) would have cost an exit-1 build for the privilege.
+>
+> The rule the red was protecting is still there; it just tells the two silences apart now. A
+> dispositioned gap that stops firing is either **CLOSED** — its assertion RAN and reached a
+> verdict, which is good news, printed loudly with "PULL THESE PINS", and worth **zero**
+> failures — or **VANISHED**, meaning nothing with that id was measured at all, which is still a
+> FAIL and is the case the rule was written for. `Split-StaleGaps` is a pure function and
+> `-SelfTestLedger` forces it through five classifications, including the one that matters: an
+> empty closed-map cannot classify anything as closed.
+>
+> **The cost is stated rather than hidden:** a CLOSED pin is a nag, not a gate, so a pin for a
+> genuinely closed property can sit in the ledger indefinitely. That is the conservative error —
+> the ledger then over-reports an open gap — and every run prints it.
+
+**AND EVERY DISPOSITIONED VACUITY NOW CARRIES ITS COST.** Under `-AcceptDispositionedGaps`,
+six assertions that measure nothing were formally inside an exit-0 green: CI was asserting less
+than it had before, while looking identical. Each `VACUOUS-*` entry now ends with **GREEN DOES
+NOT COVER:** — the specific thing a passing CI run fails to rule out because that assertion is
+empty. A reader can price the green from the ledger without reading the drill.
 
 ### The write contract reaches the RECIPES *and the images*, and it reaches more than the RPC callers
 
@@ -1404,6 +1427,17 @@ only thing it could return. There are **twelve DIRECT-table producers** as well 
 `/rest/v1/thoughts` or call `supabase.from("thoughts").insert()` — and this door is in front of
 none of them. See `documentation/notes/u5-live-producer-rls-regression.md`; the set is now
 derived on every commit by `scripts/checks/check-corpus-exposure-producers.ps1`.
+
+> **AND THAT CHECK IS NOT THE ENFORCEMENT (round 4).** It is authoring-time convenience. **The
+> enforcement is `195-` itself** — `exposure` is NOT NULL with no default and CHECKed on both
+> tables, and `upsert_thought` refuses a payload that omits it, which rejects an unlabelled
+> write in every shape and language, forever. The check only moves *some* of those refusals to
+> commit time, for producers written in the shapes it recognises. Two verifiers planted
+> producers it cannot see (a table name in a variable, a concatenated path, a helper wrapper, a
+> `.tsx` copy, `curl -X POST` in a `.sh`, supabase-py `.table().insert()`) and it neither
+> flagged nor counted them. **A producer it cannot see breaks production, not the build** — and
+> quietly, because both failing producers catch the 42501 and carry on. The check prints its own
+> blind spots on every run (`-ShowShapes`); read those before treating a green as coverage.
 
 **Two producers whose rejection is an UNHANDLED OUTAGE, not a caught contract change:**
 

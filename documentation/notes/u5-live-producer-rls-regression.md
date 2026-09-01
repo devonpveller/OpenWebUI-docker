@@ -150,23 +150,87 @@ just the 156 gmail rows. So conforming restores 08-30's status quo exactly and w
 operator's call, and none of these code changes make it. Nothing was written to the live
 database in this round.
 
-### The gate, so producer thirteen breaks the build instead of production
+### The gate, which is authoring-time convenience and NOT the enforcement
+
+> **CORRECTED, ROUND 4 (2026-08-31).** This section was headed *"so producer thirteen breaks the
+> build instead of production"*. **That is FALSE**, and false in the same shape as the sweep it
+> was written to correct: it presented what a search could see as what exists. Two verifiers
+> independently planted producers in a temp root and the gate did not flag them, did not warn
+> about them, and **did not even count them as sites** — a table name held in a variable, a
+> concatenated path, a helper wrapper (`insertRows("thoughts", rows)`), byte-identical copies
+> named `.mts` and `.tsx`, `curl -X POST "$SUPABASE_URL/rest/v1/thoughts"` in a `.sh`, and
+> supabase-py `.table().insert()`.
+>
+> **THE ENFORCEMENT IS THE DATABASE.** `195-` makes `thoughts.exposure` and
+> `agent_memories.exposure` NOT NULL with no default and CHECKed, and makes `upsert_thought`
+> refuse a payload that omits them. That refuses an unlabelled write in every shape, from every
+> language, forever. This gate moves *some* of those refusals to commit time and nothing more.
+>
+> **Producer thirteen, written in a shape the gate cannot see, breaks PRODUCTION** — and per
+> §16 of `u8h3-findings.md` it breaks it **quietly**, because both producers that were failing
+> catch the 42501 and carry on. `openbrain-gmail-pull` logged `Ingested: 0 email(s)` and exited
+> 0 for a day. Fail-closed is not fail-visibly.
+>
+> The fix was **not** six more patterns — that is the enumerate-the-readers method A2 abandoned,
+> and the seventh evasion still wins. The gate now **states its own blind spots in its own
+> output on every run** (`-ShowShapes` prints them alone), so a reader learns its scope from the
+> run rather than from its author's confidence. The alphabet widened too — `.mts .cts .tsx .jsx
+> .sh .bash`, supabase-py `.table()`, `curl -X POST`, and any identifier containing
+> `post`/`insert` called as a function — not as the fix, but because a cheap catch is worth
+> having once the claim is honest. Of the six planted evasions, the four that still write the
+> table name as a literal beside a verb are now caught; the two that hold it in a value are not.
 
 `scripts/checks/check-corpus-exposure-producers.ps1`, wired into `.githooks/pre-commit` as check
-3b. It **derives** the insert sites rather than carrying a list, in three shapes, each with its
-own proximity rule:
+3b. Within the shapes it recognises it **derives** the insert sites rather than carrying a list;
+each shape has its own proximity rule:
 
 | shape | example | rule |
 |---|---|---|
 | REST URL | `` `${SUPABASE_URL}/rest/v1/thoughts` ``, `` `${REST_BASE}/thoughts` `` | anchored on `/rest/v1/` or a base variable's `}/`; a `?`-filtered path is a read, not an insert |
 | POST argument | `obFetch("POST", "thoughts", body)`, `sb.post(\n "thoughts", …)` | table literal within 2 lines of a POST verb; `{"thoughts": []}` (a JSON key) is excluded |
-| supabase-js | `.from("thoughts").insert({…})` | `.insert(` must be in the SAME statement — the slice runs forward from `.from(` and stops at the first `;` |
+| supabase-js / -py | `.from("thoughts").insert({…})`, `.table("thoughts").insert(…)` | `.insert(` must be in the SAME statement — the slice runs forward from the builder and stops at the first `;` |
+
+And the **evidence** for `exposure` is scoped to the statement, not to a line distance — see the
+next subsection for why that sentence had to be written.
+
+#### The gate was green for the wrong reason on the one `agent_memories` site
+
+`OB1/integrations/agent-memory-api/index.ts:491` is the **only `agent_memories` INSERT in the
+tree**. It carried neither `exposure` nor `metadata.exposure` — and it **passed**, cleared by the
+`exposure: "ops"` key at `:471`, which belongs to the `upsert_thought` RPC payload for a
+*different table*, twenty lines up and inside the ±30-line window. A verifier proved it by
+renaming that unrelated key and watching the gate go red on a line it had never examined. **The
+gate's entire `agent_memories` coverage was a false positive**, and a green off a neighbour's
+key is worth less than no check at all, because it reads as coverage.
+
+Two changes, both in round 4:
+
+* an **ORM site is now read over its own statement** — from the builder to the terminating `;`,
+  however long. `:491`'s insert body is 33 lines, so the old 30-line window would have cut off
+  the very key it was looking for even without the neighbour.
+* **no site's evidence window may cross a corpus site naming a different table.** The fence is
+  *table-aware*, and the first version was not: fencing at every corpus site turned
+  `pull-gmail.ts:856` red, which is the retry leg re-POSTing the same labelled `row`.
+
+Red proof: the gate reports `FAIL - 1 of 13` and names `:491`. The site itself is fixed in OB1
+`debbbaa`. It is **dead code** — `195-` §7's caller table records it as "not built by any compose
+service" — but the exemption is now *written down at the site* rather than being an accident of
+line distance, because the column is NOT NULL and the first deploy of that file would have been
+refused on its first write.
 
 Three things it was watched doing before it was trusted:
 
 * **red on a planted producer, green when the plane is stated** — `-SelfTest`, and again by
   planting `OB1/recipes/zz-red-proof/eleventh-producer.mjs` in the real tree (flagged at
   `:5`), then removing it;
+* **red on a neighbouring statement's key** — `-SelfTest` case 3, added in round 4. Cases 1 and
+  2 both passed for the whole time the `:491` false green existed, which is exactly why case 3
+  is now in the file;
+* **its blind-spot list is measured, not asserted.** The same variable-table producer is flagged
+  when `const TABLE = "thoughts"` sits next to the `fetch`, and reported `OK - all 1 RECOGNISED
+  corpus insert site(s) state their plane` when 40 filler lines are inserted between them. Same
+  defect, same file, opposite verdict, decided by whitespace — which is what "it resolves no
+  values" means in practice;
 * **it found a producer nobody had listed** — `recipes/schema-aware-routing/index.ts:298`, which
   is why the corrected count is twelve and not eleven;
 * **it refuses to be vacuous.** Its first version inherited `'*\.claude\*'` from
@@ -189,11 +253,10 @@ is **false for `wiki-service.mjs`**, which lives in the same container. Correcte
 
 ### Not closed
 
-* **The OB1 commit carrying these producer fixes could not be pushed** from this session (the
-  push was denied by the environment's command classifier). The parent's gitlink was bumped to
-  it so the drill could run against what a merge would ship, but **the pin is not reachable on
-  `origin` yet** — pushing `feat/agent-memory-exposure-column` is a prerequisite for merging,
-  per CLAUDE.md's gitlink rule.
+* ~~**The OB1 commit carrying these producer fixes could not be pushed**~~ — **CLOSED
+  2026-08-31.** `e9be2cd` was pushed by the operator, and round 4's `debbbaa` (the `:491` fix +
+  this correction) was pushed from this session. Both are reachable on
+  `origin/feat/agent-memory-exposure-column`; the gitlink names `debbbaa`.
 * **Ordering hazard, not introduced here but now wider.** A direct insert that names `exposure`
   is a 400 on a database where `195-` has not been applied (the column does not exist). That was
   already true of `generate-wiki.mjs`'s fallback insert and `backfill-gmail-wikis.mjs` from

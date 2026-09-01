@@ -662,6 +662,14 @@ The claims most worth trying to break, in the order I would try:
    > **UPDATED, ROUND 3: 25 ids.** Seven were added, none of them a new shortfall - six name
    > assertions that were reporting PASS off an empty set and now report VACUOUS, and one
    > (`RED-COVERAGE`) names the seven ATTACK sections that have greens and no red. Section 17.1.
+   >
+   > **UPDATED, ROUND 4: still 25, and every one now carries its COST.** Making a vacuity
+   > visible was the right first move and was not enough: under `-AcceptDispositionedGaps`,
+   > six assertions that measure nothing sat *inside* an exit-0 green, so CI asserted less
+   > than it had before while looking identical. Each entry now ends with **GREEN DOES NOT
+   > COVER:** - the specific thing a passing run fails to rule out. And closing a gap no
+   > longer fails the build: a dispositioned gap that stops firing is CLOSED (its assertion
+   > ran, zero failures) or VANISHED (nothing measured it, still a FAIL). Section 19.3-19.4.
 
 ## 17. ROUND 3 - a PASS printed off an empty set, and a producer set that was never swept for
 
@@ -828,16 +836,356 @@ were never proved have stopped claiming to be.
 
 ### Not closed
 
-* **The OB1 commit `e9be2cd` is NOT on `origin`.** The push was denied by this session's
-  command classifier. The parent's gitlink was bumped to it anyway so the drill would build
-  what a merge would ship, but per CLAUDE.md a gitlink must never be merged pointing at a
-  commit that is not reachable on the OB1 remote. **Pushing
-  `feat/agent-memory-exposure-column` is a prerequisite for merging this branch**, and it is
-  the one thing in this round I could not do.
+* ~~**The OB1 commit `e9be2cd` is NOT on `origin`.**~~ **CLOSED 2026-08-31.** The operator
+  pushed `e9be2cd`; round 4's `debbbaa` was pushed from this session. Both are reachable on
+  `origin/feat/agent-memory-exposure-column`, and the gitlink names `debbbaa`.
 * **`RED-COVERAGE` is visible, not closed.** Seven ATTACK sections still have greens and no
   red. Writing them is its own item.
 * **`VACUOUS-WIKIPAGES` needs a fixture**, not a boundary change: the drill's compile writes no
   `wiki_pages` rows, so that assertion cannot discriminate until it does.
+
+  > **CORRECTED, ROUND 4. "Needs a fixture" was a guess wearing the clothes of a diagnosis** -
+  > it named a remedy without having measured the cause, and it was half wrong. The fixture
+  > half is real and is done (`WIKI_GIT_DIR=/out`). The other half is a **live OB1 bug**:
+  > `wiki-pages.mjs` re-exports `extractLinks` without importing it, so `parseWikiPage` throws
+  > and `queueWikiPage`'s bare `catch {}` swallows it - **no compiler has written a
+  > `wiki_pages` row since 2026-08-28**. Section 19.5 and
+  > `documentation/notes/wiki-pages-extractlinks-scope-bug.md`.
 * **The live outage is fixed in the tree, not in production.** Ending it needs the deployment
   checkout's submodule moved AND `openbrain-wiki:local` rebuilt, in a promotion window under a
   lease - a gated deploy, which this session did not take.
+
+## 19. ROUND 4 - the gate was a hand-list in a costume, and it was green on the one site that mattered
+
+Four send-backs. Two of them are the same defect at two altitudes: **a check that reports
+coverage it does not have.** One is about what a green is allowed to contain. One is a survivor
+of round 3's own sweep.
+
+### 19.1 The producer gate is not the enforcement, and it must stop saying it is
+
+The gate's header claimed:
+
+> An eleventh producer written next year is in the universe the moment it is written, and it
+> breaks this gate instead of breaking production.
+
+**That sentence is FALSE.** Two verifiers independently planted producers in a temp root; the
+gate did not flag them, did not warn about them, and **did not even count them as insert sites**:
+
+| planted shape | why it was invisible |
+|---|---|
+| `const TABLE = "thoughts"` … `` fetch(`${REST}/${TABLE}`, {method:"POST"}) `` | the gate resolves no values |
+| `fetch(REST_BASE + "/" + "thoughts", …)` | ditto, on a concatenated path |
+| `insertRows("thoughts", rows)` / `obPost("thoughts", …)` | `$postVerb` knew `.post(` and `http_post(`, not an arbitrary helper |
+| byte-identical copies named `.mts` and `.tsx` (OB1 ships **57** `.tsx`, counted) | `$exts` was ts/mjs/js/cjs/py |
+| `curl -X POST "$SUPABASE_URL/rest/v1/thoughts"` in a `.sh` | no `.sh` in `$exts`, and `-X POST` was not a verb |
+| supabase-py `.table("thoughts").insert(rows)` | `$siteOrm` knew `.from(` only |
+
+This is **the same alphabet error as A2's `.ts`-only scan root** — the error §17.3 of this note
+cites as the reason the gate exists. The gate written to cure a bad sweep was itself a bad sweep.
+
+**The answer was NOT six more patterns.** That is the enumerate-the-readers method A2 abandoned,
+and the seventh evasion still wins. Four changes, at three different altitudes:
+
+**(a) Name the real enforcement.** `195-` makes `thoughts.exposure` and `agent_memories.exposure`
+`NOT NULL` with no default and `CHECK (exposure IN ('ops','personal'))`, and makes
+`upsert_thought` refuse a payload that omits them. **That** refuses an unlabelled write
+unconditionally — in every shape, from every language, through every client, forever, including
+shapes nobody has thought of. The gate adds nothing to it. It is authoring-time convenience: it
+moves *some* of those refusals from 05:00-in-a-cron to `git commit`, which is worth having and is
+not a guarantee.
+
+**(b) Correct the claim wherever it appears.** A producer this gate cannot see breaks
+**PRODUCTION** — and, per §16, it breaks it **quietly**, because both producers that were
+actually failing catch the 42501 and carry on (`Ingested: 0 email(s)`, exit 0). *Fail-closed is
+not fail-visibly.* Corrected in four places: the gate header, `195-` §7,
+`u5-live-producer-rls-regression.md` (whose section heading *was* the false claim), and
+`PROMOTION-RUNBOOK.md`.
+
+**(c) Make the gate declare its own blind spots, in its own output, every run** — pass or fail,
+and alone under `-ShowShapes`. A reader now learns its scope from the run instead of from its
+author's confidence.
+
+**And the disclosure is MEASURED, not asserted.** The first draft of the blind-spot list said
+these shapes are "INVISIBLE here", and that was itself an overclaim — I planted them and two of
+the two supposedly-invisible ones were flagged. Not by design: by accident of layout, because an
+unrelated literal happened to fall inside the 2-line ARG window. So the list now says what is
+true, and the run says how it was established:
+
+```
+const TABLE = "thoughts";                       <- literal ADJACENT to the fetch
+  ... fetch(`${REST}/${TABLE}`, {method:"POST"})
+  => FAIL - 1 of 1 ... var-table.mjs:2
+
+const TABLE = "thoughts";                       <- same producer, 40 filler lines inserted
+  ... 40 lines ...
+  ... fetch(`${REST}/${TABLE}`, {method:"POST"})
+  => OK - all 1 RECOGNISED corpus insert site(s) state their plane
+```
+
+**Same defect, same file, opposite verdict, decided by whitespace.** That is what "it resolves no
+values" means in practice, and it is now the sentence the gate prints.
+
+**(d) Widen the alphabet anyway** — not as the fix, but because a cheap catch is worth having
+once the claim is honest. `.mts .cts .tsx .jsx .sh .bash`; supabase-py `.table()`; `curl -X POST`
+/ `--request POST`; and any identifier *containing* `post` or `insert` called as a function.
+Measured against the planted set: **the four evasions that still write the table name as a
+literal beside a verb are now caught; the two that hold it in a value are not, and say so.**
+
+The alphabet widening cost 659 → 742 files scanned and, with the new fence pre-pass, took the
+pre-commit hook to **75 seconds**. A 75-second pre-commit check is a deleted pre-commit check, so
+there is an early-out: a file naming neither table ordinally cannot match any pattern (they are
+all lowercase literals), and is skipped. **16.5s.**
+
+### 19.2 The gate was green for the wrong reason on the one site that mattered
+
+`OB1/integrations/agent-memory-api/index.ts:491` is the **only `agent_memories` INSERT in the
+tree**. It carried neither `exposure` nor `metadata.exposure` — and it **passed**, cleared by the
+`exposure: "ops"` key at `:471`, which belongs to the `upsert_thought` RPC payload **for a
+different table**, twenty lines up and inside the ±30-line evidence window. A verifier proved it
+by renaming that unrelated key and watching the gate go red on a line it had never examined.
+
+**The gate's entire `agent_memories` coverage was a false positive** — and a green off a
+neighbour's key is worth *less* than no check at all, because it reads as coverage.
+
+Two changes:
+
+* **an ORM site is read over its own STATEMENT** — from the builder to the terminating `;`,
+  however far. `:491`'s insert body is 33 lines, so even without the neighbour the 30-line window
+  would have cut off the very key it was looking for.
+* **no site's evidence may cross a corpus site naming a DIFFERENT table.** The fence is
+  *table-aware*, and the first version was not — fencing at every corpus site turned
+  `pull-gmail.ts:856` red, which is the **retry leg** re-POSTing the same, correctly labelled
+  `row` built above the first POST. Two POSTs of one row into one table are one producer; a
+  `thoughts` key clearing an `agent_memories` insert is the defect. That false red was worth
+  having: it is what forced the rule to be stated precisely instead of broadly.
+
+Red then green, on the real tree:
+
+```
+FAIL - 2 of 13 ...   (blind fence)      index.ts:491  AND  pull-gmail.ts:856
+FAIL - 1 of 13 ...   (table-aware)      index.ts:491                    <- the real defect, alone
+OK   - all 13 RECOGNISED ... state their plane (742 files)              <- after the site is fixed
+```
+
+**The site itself is fixed** (OB1 `debbbaa`): `exposure: "ops"` as the column and in the
+`metadata` mirror. It **is** dead code — no compose service and no Dockerfile references
+`integrations/agent-memory-api` anywhere in the tree (verified by grep, not by trusting `195-`
+§7's caller table) — but a dead-code exemption **has to be written down to be one**, and this one
+was an accident of line distance. The reason it produced no live 42501 like
+`openbrain-gmail-pull`'s is only that nothing runs it; the column is `NOT NULL` with no default,
+so the **first** deploy of that file would have been refused on its first write.
+
+`-SelfTest` now has a third case that is exactly this shape — an insert cleared by a neighbouring
+statement's key. **Cases 1 and 2 passed for the entire time the `:491` false green existed**,
+which is the argument for case 3 existing.
+
+### 19.3 CI green contained six assertions that measure nothing — each now carries its price
+
+Round 3 made the vacuity **visible**, which was right. But under `-AcceptDispositionedGaps` — the
+form C.9 H4 wires into CI — a dispositioned vacuity sits **inside an exit-0 green**. Six
+assertions that measure nothing were formally part of "CI passed", so **CI asserted less than it
+had before while looking identical**. A disposition that explains only the *cause* lets that
+happen quietly.
+
+Every `VACUOUS-*` and `RED-COVERAGE` entry now ends with **GREEN DOES NOT COVER:** — the specific
+thing a passing run fails to rule out. Two examples, since the point is that they are specific
+rather than boilerplate:
+
+* `VACUOUS-REFUSAL-DISCRIMINATES` — *"…that a refusal is distinguishable from an allow in any
+  durable record. **A door that filed a refusal row for EVERY call, allowed ones included, would
+  pass this run unchanged.**"*
+* `VACUOUS-GHOST-NO-ROW` — *"…that the audit log cannot be used to CONFIRM a guessed memory id.
+  **A door that filed a row naming the ghost id — which is an existence oracle — would pass this
+  run unchanged**; only the response half would catch it."*
+
+A reader can now price the green from the ledger without reading the drill.
+
+### 19.4 And closing a gap must not be punished — with the round's best evidence that it works
+
+A verifier noted that closing a vacuity trips the stale-gap FAIL (exit 1) until the pin is
+pulled. That rule is right for the case it was written for — a check that quietly stopped
+*running* leaves the same silence as a check whose property got *fixed*, and the flattering
+reading is the wrong one — but it makes the **good** outcome expensive, and **a gate that turns
+red when you fix something teaches people to stop fixing things.**
+
+The fix is not to weaken the rule but to **tell the two silences apart**. A dispositioned gap
+that stops firing is now:
+
+* **CLOSED** — an assertion carrying that id RAN and reached a verdict. Good news. Printed
+  loudly, with `PULL THESE PINS`, and worth **zero** failures.
+* **VANISHED** — nothing with that id was measured at all. Still a **FAIL**, and now the *only*
+  case that rule fires on.
+
+`Split-StaleGaps` is a pure function and `-SelfTestLedger` forces it through five
+classifications, no docker and no database, including the one that matters:
+
+```
+OK   stale=[CLOSED-ONE]           -> closed=1 vanished=0 fails=0   (fixing something does not turn the build red)
+OK   stale=[GONE-ONE]             -> closed=0 vanished=1 fails=1   (the original rule, intact)
+OK   stale=[CLOSED-ONE,GONE-ONE]  -> closed=1 vanished=1 fails=1   (one good outcome does not launder the bad one)
+OK   stale=[]                     -> closed=0 vanished=0 fails=0
+OK   stale=[CLOSED-ONE] map={}    -> closed=0 vanished=1 fails=1   (the escape hatch cannot be the default)
+LEDGER SELF-TEST PASSED
+```
+
+**The cost is stated rather than hidden:** a CLOSED pin is a nag, not a gate, so a pin for a
+genuinely closed property can sit in the ledger indefinitely. That is the conservative error —
+the ledger then *over*-reports an open gap — and every run prints it.
+
+### 19.5 I tried to close `VACUOUS-WIKIPAGES`, pulled its pin too early, and the ledger caught me
+
+Item 3 offered a choice: close a vacuity, or state its cost. `VACUOUS-WIKIPAGES` looked
+closeable, and the diagnosis was cheap and correct as far as it went:
+`recipes/_shared/wiki-pages.mjs`'s `vaultRel()` drops any path outside `WIKI_GIT_DIR`
+(default `/wiki`) — deliberately, so a scratch `--out-dir` cannot write junk slugs into the table
+— and this drill compiles into `/out`. So **every page was outside the vault and nothing was ever
+queued.** The assertion had never been measuring the boundary; it was measuring that guard.
+`Invoke-WikiCompile` now sets `WIKI_GIT_DIR=/out`. I pulled the pin.
+
+**The next run reported `VACUOUS-WIKIPAGES` as UNDISPOSITIONED and exited 2.** The fixture was
+only half the cause, and the other half is a **live production bug in OB1**, found by this
+failure:
+
+```
+$ WIKI_GIT_DIR=/out node -e '...'
+vaultRel(/out/content/concept/x.md) = content/concept/x.md   <- path handling FINE
+queued = 0                                                   <- and nothing queues
+$ node --test OB1/recipes/_shared/wiki-pages.test.mjs
+# pass 5  # fail 5      all five: 'extractLinks is not defined'
+```
+
+`wiki-pages.mjs` **re-exports** `extractLinks` without **importing** it, so the name is unbound
+in the module's own scope, `parseWikiPage` throws `ReferenceError`, and `queueWikiPage`'s bare
+`catch {}` swallows it. **Since OB1 `dfc6228` (2026-08-28), no compiler has written a `wiki_pages`
+row, and the backfill that exists to rebuild the table calls the same broken function.** The
+viewer's search / nav / graph read that table. Full write-up, blast radius and one-line fix:
+`documentation/notes/wiki-pages-extractlinks-scope-bug.md`.
+
+**Not fixed here, and deliberately.** It is a live wiki-index defect belonging to the wiki work
+line; folding an OB1 wiki fix into an agent-memory-plane branch puts a change nobody asked for
+into a merge nobody would review for it. What is done instead:
+
+* the drill's own half (`WIKI_GIT_DIR=/out`) is **kept** — correct, necessary, and it means the
+  gap closes *by itself* and reports CLOSED once the OB1 bug is fixed;
+* the pin is **back**, with the real cause and its cost: *a green run does not cover the
+  `wiki_pages` surface at all — a compile that published the personal row into that table would
+  pass unchanged. Only ATTACK 14's file-side half is actually measured, and that half passes
+  against real output;*
+* **the vacuity now diagnoses itself.** When the universe is empty the drill prints both
+  preconditions in order, and the one command that decides which is biting
+  (`node --test OB1/recipes/_shared/wiki-pages.test.mjs`). Round 3 left this as "needs a
+  fixture"; round 4 spent a whole drill run learning that the fixture was half the story. Nobody
+  should have to spend a third.
+
+Two things worth keeping from this: **the ledger's undispositioned-gap rule did exactly its
+job** — I made an over-claim and the machine, not a reviewer, refused it. And *"needs a fixture"*
+was a guess wearing the clothes of a diagnosis. It named a remedy without having measured the
+cause, and it was half wrong.
+
+### 19.6 One unrouted vacuity survivor, and the adjudication of the rest — verified, not assumed
+
+`drill:2070` — the **read**-tool COVERAGE gate — was `if ($missed.Count -eq 0) { Pass "all
+$($opsReadTools.Count) derived read tool(s) were attacked" }`, which prints **"all 0 … were
+attacked"** on an empty list.
+
+The cause is upstream and is an asymmetry between twins written at different times:
+
+```powershell
+if ($opsEnv.ContainsKey("GATEWAY_READ_TOOLS") -and …)   # TRUE for `GATEWAY_READ_TOOLS=` (empty!)
+…
+if ($opsWriteTools.Count -gt 0)                          # its twin, 12 lines below, guards the LIST
+```
+
+Both guard the parsed list now, and **both** COVERAGE gates route through `Assert-NoneOf`. Belt
+and braces: the derivation refuses an empty set, so the vacuous branch is unreachable; if it is
+ever reached, the id is undispositioned and the run exits 2 — which §19.5 just demonstrated is
+not a theoretical consequence.
+
+**The other candidates were re-checked one at a time rather than taken on trust**, since an
+agent's report is not evidence until the part you act on has been verified. An independent
+enumeration of every `.Count -eq 0`-gated `Pass` in the file returns exactly five sites, and:
+
+| site | verdict | why |
+|---|---|---|
+| `:2071` read coverage | **the survivor** | unguarded, fixed above |
+| `:2084` write coverage | legitimate | guarded upstream by the `Count -gt 0` throw at `:1026` |
+| `:2387` / `:2389` RED COVERAGE | legitimate | `if ($attackIds.Count -eq 0) { Fail … }` guards emptiness *before* either Pass branch |
+| `:2447` `LIFT-REFUSED-AND-RECORDED` | legitimate | the universe is a **hardcoded** 7-element `$expected` list; `$missing` empty means all seven present |
+| `:886` "database is EMPTY before the drill plants anything" | legitimate | exact-equality on `"0/0/0/0"`, not a "none-of-S" shape — emptiness is the claim |
+| `:1181` app role reads the ops mirror | legitimate | requires `$corpusSeen -eq "1"`, a positive count, so it cannot pass off an empty universe |
+| `:2481-2482` the LIFT "REMOVED" clauses | legitimate | the documented exclusion: paired with a prior assertion that the set was non-empty, so "0 personal rows" is a **change**, not a vacuum |
+
+**The adjudication holds.** One survivor, seven correct dispositions.
+
+## 20. ROUND 4 - the sha this was validated at, and every run
+
+The work line did not move: `refactor/ai-stack-cleanup` is still `1a6b0b8` and it is this
+branch's merge-base, so C.7b required no rebase. The OB1 gitlink moved once, and the commit it
+names is on the remote.
+
+```
+work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
+VALIDATED AT   : 3440ba6  (work/u8h3) for the gate + the OB1 fix
+                 + the drill's pin restore, which run 2 and run 3 both carried
+OB1 gitlink    : e9be2cdb0eb340662df0edadb1ff4b90b0493775
+              -> debbbaa10bb9c004a9a9ac104dbe6e5b9c31293e  (the :491 fix + 195 s7's correction)
+                 REACHABLE: `git -C OB1 branch -r --contains debbbaa` ->
+                 origin/feat/agent-memory-exposure-column. Round 3's blocker is closed.
+```
+
+Both suites ran from this checkout, **one at a time, never concurrently** — the isolation
+"one suite per checkout" exists to buy, and the specific thing §17.4 records about
+`prove-rls` overlapping `dfu-done -Only 3`. Every throwaway ran on its own docker network;
+nothing was attached to an `ai-stack_*` network, no `:local` tag was written, and **nothing was
+written to the live database**. An `open-brain` lease was held for the whole window
+(`lease.ps1 -Acquire -Name open-brain -Owner wt-u8h3`, refreshed once). `dfu-done.ps1` was
+**not** run — its clause 3 plants personal-exposure fixture rows in `openbrain-db`, and this
+round needed nothing from it.
+
+| check | result |
+|---|---|
+| `check-corpus-exposure-producers.ps1 -SelfTest` | **4/4** — red on a planted producer, green on a fix, **red on a neighbouring statement's key**, green when the plane is in the statement. EXIT 0 |
+| the same, on the tree, **blind fence** | `FAIL - 2 of 13` — `index.ts:491` **and** `pull-gmail.ts:856`. The second is the false positive that forced the fence to be table-aware |
+| the same, **table-aware fence**, before the site fix | `FAIL - 1 of 13`, naming `index.ts:491` alone — **the round-4 red** |
+| the same, after the site fix | **`OK - all 13 RECOGNISED corpus insert site(s) state their plane`** (742 files), EXIT 0 |
+| the same, `-Root <empty dir>` | `FAIL - the scan examined 0 file(s) and found ZERO corpus insert sites`, EXIT **1** (anti-vacuity) |
+| the same, `-ShowShapes` | prints the recognised/blind shape lists and the scanned extensions, EXIT 0 |
+| the gate's blind-spot claim, **measured** | same variable-table producer: `FAIL - 1 of 1` adjacent, **`OK - all 1 …`** with 40 lines between. Opposite verdicts, same defect |
+| the widened alphabet, against the planted evasion set | `FAIL - 8 of 8` across `.mts .cts .tsx .jsx`, a `curl -X POST` `.sh`, supabase-py `.table().insert()`, and two helper-wrapper calls |
+| gate runtime (pre-commit budget) | 75s with the fence pre-pass → **16.5s** with the ordinal early-out |
+| `drill -SelfTestVacuity` | **4/4 outcomes correct**, EXIT 0 |
+| `drill -SelfTestLedger` | **5/5 classifications correct**, EXIT 0 — including "an empty closed-map cannot classify anything as closed" |
+| `drill` (bare), **pin pulled too early** | `1 UNDISPOSITIONED GAP(S) - VACUOUS-WIKIPAGES`, EXIT **2**. §19.5 — the ledger refusing my over-claim |
+| `drill` (bare), pin restored | **106 passed, 0 failed, 25 named gaps** (19 GAP + 6 VACUOUS), EXIT **2** — bare contract unchanged |
+| the same, `-AcceptDispositionedGaps` (what CI runs) | **106 passed, 0 failed, 25 gaps ALL DISPOSITIONED**, EXIT **0** |
+| PASS lines printed vs counted, run 2 | **106 / 106** |
+| both COVERAGE gates, now counted | `every read tool … was attacked … (0 violations out of 4 derived read tool(s))`; the write twin, `out of 3` |
+| `prove-agent-memory-rls.ps1` | **PASSED — 68 checks**, 0 failed, EXIT 0. Live assertion read-only: `source=column personal_memories=0 personal_thoughts=0 personal_memories_col=0 personal_thoughts_col=0` |
+| pre-commit, on the real commit | all six checks green, including 3b with its disclosure block |
+| `node --test` (wiki-service build gate) | **13 passed, 0 failed** |
+| `node --test OB1/recipes/_shared/wiki-pages.test.mjs` | **5 passed, 5 FAILED** — pre-existing, not caused here. §19.5 and `wiki-pages-extractlinks-scope-bug.md` |
+
+**The count did not move: 106 both rounds.** Round 4 changed no assertion's verdict on this
+tree. What changed is what a green is allowed to *claim* — the gate's, and CI's.
+
+### Not closed
+
+* **`wiki_pages` has been unwritable since 2026-08-28** (OB1 `dfc6228`), by any compiler and by
+  the backfill that exists to repair it. **Found here, deliberately not fixed here** — it belongs
+  to the wiki work line, and folding an OB1 wiki fix into an agent-memory-plane branch puts a
+  change nobody asked for into a merge nobody would review for it. One-line fix, existing red
+  test, blast radius: `documentation/notes/wiki-pages-extractlinks-scope-bug.md`.
+  **Cost of leaving it:** `VACUOUS-WIKIPAGES` stays open, and a green drill run does not cover
+  the `wiki_pages` surface at all.
+* **`RED-COVERAGE` is visible and priced, not closed.** Seven ATTACK sections still have greens
+  and no red. **Cost:** for each of those seven, deleting the mechanism actually doing the work
+  would look exactly like the mechanism working. Writing seven reds is its own item.
+* **The five audit-record vacuities stay open**, and each now states what a green run does not
+  cover. They close with C.9 H1's `SECURITY DEFINER` existence probe, and on that day they will
+  report **CLOSED** rather than failing the build.
+* **The gate's two remaining blind spots are real and stated**: a table name held in a value, and
+  a wrapper whose table comes from its caller. Neither is closable by pattern-matching source
+  text, and neither needs to be — **the `NOT NULL` column is what refuses those rows.**
+* **The live outage is fixed in the tree, not in production.** Ending it still needs the
+  deployment checkout's submodule moved AND `openbrain-wiki:local` rebuilt, in a promotion
+  window under a lease — a gated deploy, which this session did not take.
