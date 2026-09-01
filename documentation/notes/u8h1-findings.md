@@ -280,9 +280,12 @@ clone into a deep path drops 1,108 files and exits 0.
 
 | checkout | OB1 | suite | result |
 |---|---|---|---|
-| `D:3a` | **uninitialised** (the plain git-clone state) | `redprove-census-cannot-measure.ps1` | **9 cases, 0 disagreements**, exit 0 |
-| `D:3b` | `b604d55` (the gitlink this branch records) | `census-db-connection-roles.ps1` vs live `openbrain-db`, read-only | **22 of 22** superuser; **12 of 13** recognised clients across **36** parsed services (30 + 6); **9 unexplained**; exit 1 - correct, that is today's state |
-| `D:3c` | `b12d2fb` (the H1 migration, still unpushed) | `drill-app-role-not-superuser.ps1` | **31 probes, 0 failures**, exit 0 |
+| `D:
+3a` | **uninitialised** (the plain git-clone state) | `redprove-census-cannot-measure.ps1` | **9 cases, 0 disagreements**, exit 0 |
+| `D:
+3b` | `b604d55` (the gitlink this branch records) | `census-db-connection-roles.ps1` vs live `openbrain-db`, read-only | **22 of 22** superuser; **12 of 13** recognised clients across **36** parsed services (30 + 6); **9 unexplained**; exit 1 - correct, that is today's state |
+| `D:
+3c` | `b12d2fb` (the H1 migration, still unpushed) | `drill-app-role-not-superuser.ps1` | **31 probes, 0 failures**, exit 0 |
 
 Discrimination, measured rather than asserted: the round-3 red-proof pointed at the **pre-fix**
 census fails **4 of 9** and exits 1 - `no-services` 0, `reindent` 0, `unresolved` 1, `live-ghost`
@@ -299,6 +302,10 @@ with it, so this branch now records **`b604d55`** (H3's exposure column) where r
 sharper: a fresh `clone --recurse-submodules` of `work/u8h1` still gets an OB1 without the
 migration, and the drill still aborts by check. Whoever lands this pushes `work/u8h1-app-role`
 to OB1 FIRST, then bumps.
+
+The record commit above this one is docs-only, so the tip differs from `5841994`. Re-checked
+rather than argued: a fourth clean clone at the tip **`704eb5c`** (complete, 1,082 tracked
+files) ran the red-proof again - **9 cases, 0 disagreements**, exit 0.
 
 Throwaway hygiene after round 3: `wt-h1v3a-*`, `wt-h1v3c-*` and the red-proof's own containers
 and networks all removed (`docker ps -a` and `docker network ls` show no `wt-*` at all), all
