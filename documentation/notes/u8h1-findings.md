@@ -333,3 +333,118 @@ green, and that one is the worst of the three:
 
 Note the pattern in 2 and 3: **both were held shut by an accident of the runtime, not by a
 check.** That is the same class as the census defect, one step luckier.
+
+## 14. Round 3: the same defect, one level down - a denominator nobody asserted
+
+Round 2 made a *missing* compose file a cannot-measure. A verifier then measured the same
+class surviving inside a file that is present. Reproduced on the REAL files: copy
+`OB1/docker/docker-compose.yml` and `docker-compose.scheduled.yml`, re-indent **only the
+first** by two spaces - still valid YAML, `docker compose config --services` still lists every
+service - and the census went from **12 of 13 recognised clients across 41 service blocks** to
+**1 of 1 across 9**, and issued a verdict anyway. 92% of the denominator gone, no abort.
+
+The guard added in round 2 was `$configured.Count -eq 0`, summed across BOTH files, so one
+file collapsing to zero while the other still matched a single client never tripped it.
+`$servicesSeen` was incremented and printed and **never asserted** - a printed number with
+nothing to compare it against is decoration. A file that is present, readable, valid YAML and
+accepted by docker but whose lines do not match `^  ([A-Za-z0-9_.-]+):\s*$` contributed zero
+to both counters, silently; so did `services: {}` and a 0-byte file.
+
+**The fix changes the layer rather than the regex.** Enumerating the indentations a pattern
+must survive is the method this effort has abandoned four times, and the fifth would have won
+too.
+
+1. **`pg_stat_activity` is the denominator.** C.9's H1 asks for a census of *live connections*
+   by role; live connections are ground truth and need no YAML parsing. The compose half is
+   now explicitly secondary - it exists for the one thing a census cannot show, a client
+   CONFIGURED to connect that happens to be idle (`openbrain-ext`,
+   `openbrain-suggestion-worker`, both lazy pools).
+2. **Compose is parsed by the real parser, per file.** `docker compose config
+   --no-interpolate --format json`, which is already on this machine and is what docker itself
+   uses. Service names, container names and the environment come from the resolved project;
+   no line regex remains.
+   Each file must contribute a measured service count **or the run aborts naming that file** -
+   per file, not summed.
+3. **`--profile *`.** A profile-gated service is invisible to a default `config`.
+   `openbrain-idea-refinery` is exactly that, and it holds a live superuser connection today -
+   without the flag it would drop out of the configured half while showing in the live one.
+4. **The two halves are tied together on the way to green.** Every live client backend must be
+   identifiable and present in the parsed compose set, or exit 2: a client the database can
+   see and compose cannot is proof the configured half is short. It runs AFTER the unexplained
+   set is computed, so a real superuser finding still reports as exit 1 rather than being
+   downgraded to a shrug.
+5. **The honest zero is still reachable.** `$configuredSuper` reaching zero is the goal of the
+   promotion and remains exit 0; the `honest-zero` case asserts it.
+
+Same live result as before the change, from a different mechanism: **12 of 13 recognised
+clients, 9 unexplained, exit 1** - now over 30 + 6 = 36 services counted by docker, not 41
+regex matches that included `volumes:` and `networks:` keys.
+
+`redprove-census-cannot-measure.ps1` grows from 5 cases to 9, and the four new ones are the
+reproduction:
+
+| case | pre-fix | now | |
+|---|---|---|---|
+| one file `services: {}`, the other with a real client | **0** | **2** | the aggregate guard never fires; per-file does |
+| one file re-indented two spaces, rogue client inside it | **0** | **1** | the reported defect, in fixture form |
+| a live client backend no compose file contains | **0** | **2** | the live half sees what the compose half cannot |
+| a client whose `DB_USER` is still `${...}` | 1 | **2** | right exit code, wrong reason: pre-fix it substituted to empty and fell through to the implicit-postgres rule |
+
+Measured, not assumed: the new red-proof run against the **pre-fix** census fails **4 of 9**
+and exits 1; against the fixed one it passes 9 of 9. Each new fixture is *established*
+before they are trusted, the way the DENY ACE already was - the harness refuses to run if
+docker does not accept the re-indented file as a 2-service project, or if the ghost client
+never appears in `pg_stat_activity`, because either would let the case pass for the wrong
+reason.
+
+### Two things the clean-clone run found that the worktree could not
+
+Both were found by running the fix from a clean clone before claiming it, not by reading it.
+
+- **`docker compose config` fails outright in a clean clone.** OB1's compose has
+  `${OPS_GATEWAY_KEY:?openbrain-ops-gateway needs its OWN key...}`, a *required* variable, and
+  a clean clone has no `OB1/docker/.env` (it is gitignored). With substitution on, the parse
+  exits 1 and the census correctly aborts - which would have made the census unrunnable on
+  exactly the checkout C.7b validates from. Fixed with **`--no-interpolate`, unconditionally**
+  rather than as a fallback, so the script behaves identically in the operator's checkout and
+  in a clean clone instead of taking a branch in one that was never exercised in the other.
+  It also means no secret is ever resolved into this script's memory. The cost is that a value
+  which IS a variable stays one, so a *consulted* user or host still containing `${` - or a
+  list entry with no value at all, which is inherited from the host environment - is a named
+  cannot-measure rather than a value quietly read as "not postgres". Nothing in the fleet hits
+  it today; the `unresolved` red-proof case does.
+- **`--no-interpolate` stops compose normalising the list form.** With substitution on,
+  `environment: [- OB1_DB_USER=postgres]` comes back as a JSON object; with it off it stays an
+  array. The first draft of this fix read only the object form - and **aborted** on
+  `open-notebook-backup` rather than reading it as not-a-client, which is the behaviour this
+  whole item is about, even though it cost a round. Both forms are now flattened to
+  key/value/was-a-value-given, and the `honest-zero` / `live-ghost` fixture feeds the list form
+  on purpose so a one-form fixture cannot hide it again.
+
+Final red-proof: **9 cases, 0 disagreements** against the fixed census; **4 of 9 disagree**
+against the pre-fix one (`no-services`, `reindent`, `unresolved`, `live-ghost`), and every
+`pre-fix` figure in that table is a measured exit code, not an assertion about the past.
+
+### Filed, not fixed (C.10 - siblings of a recorded class)
+
+- **2026-08-31 - four drill probes pass vacuously on an empty schema.** Verified by reading
+  `scripts/checks/drill-app-role-not-superuser.ps1`: `:408` (G11, no view runs as its owner),
+  `:431` (G14, no relation granted to PUBLIC) and `:440` (G15, no app role holds a `pg_*`
+  role) each expect the literal `"none"`, which is exactly what
+  `COALESCE(string_agg(...), 'none')` returns over ZERO rows; `:449` (G16, `ob_app` has USAGE
+  on every public sequence) expects `"0"`, which is `count(*)` over zero sequences. Real, and
+  the same class as everything else in this note: a check that is satisfied by the absence of
+  the thing it checks. Not fixed here - the drill is accepted at 31 probes under four
+  mutations and C.10 sends siblings of a recorded class to notes rather than to round N+1.
+  Whoever picks it up: the fix is a companion assertion that the population is non-empty
+  (a view/relation/sequence count > 0), not a change to the four predicates.
+- **2026-09-01 - `env_file` values are not read under `--no-interpolate`.** A service whose
+  database user arrived only via `env_file:` would be invisible to the configured half. Not a
+  live gap: every `DB_USER` / `OB1_DB_USER` / `POSTGRES_USER` in both compose files is an
+  inline literal (checked 2026-09-01), and `env_file` supplies only `POSTGRES_PASSWORD` there.
+  Recorded because the same reasoning that justifies `--no-interpolate` has this as its edge.
+- **2026-08-31 - the census now requires `docker compose` on PATH.** It always required
+  `docker` (network inspect, exec); `config` is client-side parsing and adds no daemon
+  dependency, but a checkout with the docker CLI and no compose plugin would abort at exit 2
+  rather than degrade. That is the intended direction and is recorded here only so the
+  dependency is not a surprise.
