@@ -588,6 +588,20 @@ What this does NOT relax: nothing merges unrefuted; the clean-clone re-run still
 gates every merge (C.7b); the personal-plane boundary and clause-3 door-attack
 stay hard. The freeze cuts the ASYMPTOTE, not the floor — it stops perfect from
 being the enemy of shipped, while keeping shipped correct.
+
+**EXEMPTION (operator, 2026-09-01): a DFU-CAUSED production regression is
+class-1 and IN SCOPE during the freeze.** The freeze exists to stop
+gold-plating, not to ship known breakage. Proven case: U5's fail-closed
+`WITH CHECK` on `thoughts` locked out `openbrain-gmail-pull` — a legitimate
+producer that does not stamp `exposure` — so every INSERT died 42501 while the
+recipe caught its own error and logged success. Ingestion stopped 2026-08-30;
+the daily digest and podcast did not run; the operator confirmed the missed
+deliverables. A security change that silently kills a data pipeline is a
+regression the effort owns, and it is fixed under the phase that caused it
+(here: U5), not parked as a note. The exemption is NARROW: it covers
+regressions this effort's merged changes caused in production behaviour,
+verified live — not adjacent pre-existing breakage (wiki_pages'
+`extractLinks` ReferenceError predates the boundary and stays parked).
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
