@@ -1628,11 +1628,13 @@ section 7's refusal, which does not depend on anybody having found the caller. I
 comment** - no DDL, no function body, nothing the suites below execute - so the runs recorded
 here are unaffected.
 
-The commit that follows `7197903` on this branch (`8bf07ad`, this section) touches
-`documentation/notes/u8h3-findings.md` and nothing else -
-`git diff 7197903..HEAD --name-only` is one line long - so no run below it is stale.
+**Every suite was re-run at the branch tip after the seventh surface landed**, rather than
+arguing that a SQL comment could not matter: `cc4` and `cc5` are fresh clean checkouts at
+`292f2aa` with `OB1` at `b604d55`, one suite each, both green. The `7197903` rows below are
+kept because they are what the sweep was measured against, not because they are the current
+evidence.
 
-Three throwaway `git clone`s of this repo, each checked out at the exact sha and with `OB1`
+Throwaway `git clone`s of this repo, each checked out at the exact sha and with `OB1`
 initialised to the recorded gitlink, working tree clean (`git status --porcelain` empty),
 **one suite per checkout**:
 
@@ -1642,6 +1644,8 @@ initialised to the recorded gitlink, working tree clean (`git status --porcelain
 | `cc2` | `7197903` | `check-corpus-exposure-producers.ps1` (full scan) | **OK - all 13 RECOGNISED corpus insert site(s) state their plane** (742 files), exit 0 |
 | `cc2` | `7197903` | the same, `-Root <empty dir>` | **FAIL - the scan examined 0 file(s) and found ZERO corpus insert sites**, exit 1 (anti-vacuity) |
 | `cc3` | `f6b64ef` | both of the above, on `7197903` **rebased onto the moved work line** | full scan **exit 0**, `-SelfTest` **PASSED** exit 0 |
+| `cc4` | `292f2aa` (tip) | `check-corpus-exposure-producers.ps1` (full scan) | **OK - all 13 RECOGNISED corpus insert site(s) state their plane** (742 files), exit 0 |
+| `cc5` | `292f2aa` (tip) | `check-corpus-exposure-producers.ps1 -SelfTest` | **PASSED**, exit 0 - same 6 assertions, same 3 blind-spot records |
 
 **The work line moved, and the pass was made rebase-proof rather than asserted to be.** The
 merge-base is `8e2eaf4`; `refactor/ai-stack-cleanup` is now `b4311d2`, **2 commits ahead**
