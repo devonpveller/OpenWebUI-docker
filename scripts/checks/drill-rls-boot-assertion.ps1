@@ -31,7 +31,20 @@
 #         -SkipComposeGate  skip section 9 (the compose refuse-to-serve wiring), which is the
 #                           slowest part - two more full initdb chains
 #
-# Exit 0 = every scenario behaved as required. Exit 1 = at least one did not.
+# EXIT CODES - a timeout is NOT a finding, and the exit code has to say so.
+#
+#   0  every scenario behaved as required.
+#   1  FAIL - at least one did not. This is a statement ABOUT THE BOUNDARY.
+#   3  BLOCKED / CANNOT CHECK - the drill could not build the environment it needs (its own
+#      throwaway database would not come up, `docker run` failed, the container died). The
+#      boundary was NEVER EXERCISED, so nothing here says it is absent. Wired into CI (H4),
+#      3 must be triaged as "the runner could not run the drill", not as a red boundary.
+#      This mirrors assert-rls-force.sh, which already reserves 3 for cannot-check.
+#
+# The wait for initdb is a POLL ON THE ENTRYPOINT'S READY MARKER with a measured ceiling
+# (see scripts/checks/lib/ob-initdb.ps1 for the numbers), and every initdb prints its
+# ELAPSED time whether it succeeds or not - a future slow run leaves evidence instead of a
+# mystery.
 
 [CmdletBinding()]
 param(
@@ -49,11 +62,39 @@ $Ob1Docker  = Join-Path $RepoRoot 'OB1\docker'
 $ComposeYml = Join-Path $Ob1Docker 'docker-compose.yml'
 $AssertSh   = Join-Path $PSScriptRoot 'assert-rls-force.sh'
 
-$script:Pass = 0
-$script:Fail = 0
+$script:Pass    = 0
+$script:Fail    = 0
+$script:Blocked = 0
 function Pass($m) { $script:Pass++; Write-Host "  PASS  $m" -ForegroundColor Green }
 function Fail($m) { $script:Fail++; Write-Host "  FAIL  $m" -ForegroundColor Red }
+# BLOCK is not FAIL. FAIL is a claim about the exposure boundary; BLOCK says the drill never
+# got to look at it. Keeping them in one bucket is how "the machine was busy" gets reported
+# as "the boundary is absent".
+function Block($m) { $script:Blocked++; Write-Host "  BLOCK $m" -ForegroundColor Yellow }
 function Section($m) { Write-Host ""; Write-Host "== $m" -ForegroundColor Cyan }
+
+# Abort the drill as CANNOT-CHECK. The prefix is what the catch below classifies on, so a
+# blocked run cannot be laundered into a boundary failure by the exit path.
+function Stop-Drill($why) { throw "CANNOT-CHECK :: $why" }
+
+# ---------------------------------------------------------------------------------------
+# Bring up one throwaway database, print how long it took, and STOP THE DRILL if it did not
+# come up - as BLOCKED, naming which of the four ways it failed (see Start-ObInitdbDetailed).
+# ---------------------------------------------------------------------------------------
+function Start-DrillDb {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$InitDir,
+        [string[]]$DockerArgs = @()
+    )
+    $r = Start-ObInitdbDetailed -Name $Name -InitDir $InitDir -DockerArgs $DockerArgs
+    Write-Host "        initdb $Name : $($r.Outcome) after $($r.ElapsedSec)s of a $($r.BudgetSec)s ceiling" -ForegroundColor DarkGray
+    if (-not $r.Ready) {
+        Stop-Drill ("$Name never finished initdb: $($r.Outcome) after $($r.ElapsedSec)s of a $($r.BudgetSec)s ceiling. $($r.Detail) " +
+                    "The exposure boundary was NOT exercised by this run - this is the drill's own environment failing, not evidence that the assertion is missing. " +
+                    "Raise the ceiling with OB_INITDB_TIMEOUT_SEC if the machine is genuinely slower than the measured 6s (14s contended) this budget is built from.")
+    }
+}
 
 # ---------------------------------------------------------------------------------------
 # Run the assertion INSIDE a container, which is the shape production uses (the healthcheck
@@ -193,8 +234,7 @@ try {
     # -----------------------------------------------------------------------------------
     Section "1. RED FIRST - a database brought up WITHOUT the migration"
     $containers += $NoMig
-    $upA = Start-ObInitdb -Name $NoMig -InitDir $noRlsMount -DockerArgs @('-v', "${srcMount}:/opt/ob-migrations:ro")
-    if (-not $upA) { Fail "$NoMig initdb did not complete in 180s"; throw "cannot drill" }
+    Start-DrillDb -Name $NoMig -InitDir $noRlsMount -DockerArgs @('-v', "${srcMount}:/opt/ob-migrations:ro")
     $errA = @(Get-ObInitdbErrors -Name $NoMig)
     if ($errA.Count) { Fail "unexpected errors in the without-migration chain: $($errA -join ' | ')" } else { Pass "without-migration chain initialised clean" }
 
@@ -223,8 +263,7 @@ try {
     # -----------------------------------------------------------------------------------
     Section "2. GREEN - the same chain WITH the migration"
     $containers += $Mig
-    $upB = Start-ObInitdb -Name $Mig -InitDir $fullMount -DockerArgs @('-v', "${srcMount}:/opt/ob-migrations:ro")
-    if (-not $upB) { Fail "$Mig initdb did not complete in 180s"; throw "cannot drill" }
+    Start-DrillDb -Name $Mig -InitDir $fullMount -DockerArgs @('-v', "${srcMount}:/opt/ob-migrations:ro")
     $errB = @(Get-ObInitdbErrors -Name $Mig)
     if ($errB.Count) { Fail "unexpected errors in the full chain: $($errB -join ' | ')" } else { Pass "full chain initialised clean" }
 
@@ -377,6 +416,34 @@ try {
         # production healthcheck shape and a dependent using condition: service_healthy.
         $composeDir = Join-Path $tmpRoot 'compose'   # NOT $Proj - PowerShell variable names are case-insensitive, and $proj silently overwrote the run-scoped project name
         New-Item -ItemType Directory $composeDir -Force | Out-Null
+
+        # -------------------------------------------------------------------------------
+        # THE SECOND COPY OF THE INITDB BUDGET. Sections 1 and 2 wait on the entrypoint's
+        # marker; THIS section waits on a docker healthcheck, and it used to carry its own
+        # hardcoded pair (start_period 120s, --wait-timeout 200) - the same allowance for
+        # the same initdb, written twice, so raising one would have left the other.
+        #
+        # This budget is NOT free the way the signal-wait is. The RED case is only declared
+        # `unhealthy` once start_period has ELAPSED, so every second of it is spent on every
+        # run; it cannot simply be made enormous. One relationship has to hold:
+        #
+        #     wait-timeout > start_period + retries * interval
+        #
+        # or `compose up --wait` gives up while the container is still `starting`, and the
+        # `unhealthy` assertion below never sees the state it is asserting on.
+        #
+        # What the two numbers buy, stated so they can be audited rather than liked:
+        #   GREEN survives until start_period + retries*interval = 195s of initdb before the
+        #        healthcheck can mark a correctly migrated database unhealthy. Measured worst
+        #        initdb on this machine is 14.0s (eight chains racing; 8.0s sequential - see
+        #        lib/ob-initdb.ps1), so that is ~14x headroom.
+        #   RED  costs exactly that 195s on every run, because FailingStreak stays 0 for the
+        #        whole start_period (verified by `docker inspect` mid-run: `starting
+        #        failing=0` at t=156s of a 180s start_period). This is why the number is 180
+        #        and not 600 - unlike the signal-wait's ceiling, this one is always spent.
+        $HealthStartPeriodSec = 180
+        $HealthWaitTimeoutSec = $HealthStartPeriodSec + 60
+        # -------------------------------------------------------------------------------
         $composeText = @"
 name: PROJNAME
 services:
@@ -394,7 +461,7 @@ services:
       interval: 5s
       timeout: 20s
       retries: 3
-      start_period: 120s
+      start_period: ${HealthStartPeriodSec}s
   dependent:
     image: pgvector/pgvector:pg16
     depends_on:
@@ -406,7 +473,10 @@ services:
             $f = Join-Path $composeDir "docker-compose.$($case.n).yml"
             [IO.File]::WriteAllText($f, ($composeText -replace 'CHAINDIR', $case.dir -replace 'SRCDIR', $srcMount -replace 'PROJNAME', "$Proj-$($case.n)"), (New-Object Text.UTF8Encoding($false)))
             & docker compose -f $f down -v --remove-orphans 2>&1 | Out-Null
-            $upOut = (& docker compose -f $f up -d --wait --wait-timeout 200 2>&1 | Out-String)
+            $swUp = [System.Diagnostics.Stopwatch]::StartNew()
+            $upOut = (& docker compose -f $f up -d --wait --wait-timeout $HealthWaitTimeoutSec 2>&1 | Out-String)
+            $swUp.Stop()
+            Write-Host "        compose up --wait ($($case.n)): $([math]::Round($swUp.Elapsed.TotalSeconds,1))s of a $HealthWaitTimeoutSec s wait-timeout (start_period $HealthStartPeriodSec s)" -ForegroundColor DarkGray
             $depOut = (& docker compose -f $f logs dependent 2>&1 | Out-String)
             $started = $depOut -match 'DEPENDENT-STARTED'
             $health = (& docker compose -f $f ps --format json 2>&1 | Out-String)
@@ -605,7 +675,12 @@ ALTER TABLE ONLY public.adv_partitioned FORCE ROW LEVEL SECURITY;
     }
 }
 catch {
-    Fail "drill aborted: $($_.Exception.Message)"
+    $m = $_.Exception.Message
+    if ($m -like 'CANNOT-CHECK ::*') {
+        Block ("drill aborted, NOTHING PROVEN EITHER WAY: " + ($m -replace '^CANNOT-CHECK :: ', ''))
+    } else {
+        Fail "drill aborted: $m"
+    }
 }
 finally {
     if (-not $KeepContainers) {
@@ -626,5 +701,12 @@ finally {
 }
 
 Write-Host ""
-Write-Host "passed $script:Pass, failed $script:Fail" -ForegroundColor $(if ($script:Fail) { 'Red' } else { 'Green' })
-if ($script:Fail) { exit 1 } else { exit 0 }
+Write-Host "passed $script:Pass, failed $script:Fail, blocked $script:Blocked" -ForegroundColor $(if ($script:Fail) { 'Red' } elseif ($script:Blocked) { 'Yellow' } else { 'Green' })
+if ($script:Fail) {
+    exit 1
+} elseif ($script:Blocked) {
+    Write-Host "EXIT 3 = CANNOT CHECK. The drill could not build its own environment; the exposure boundary was not exercised. This is NOT a finding that the boundary is absent." -ForegroundColor Yellow
+    exit 3
+} else {
+    exit 0
+}

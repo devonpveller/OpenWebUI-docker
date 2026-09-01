@@ -107,3 +107,89 @@ scan of "the migrations" that globs `*.sql` is not scanning the chain, it is sca
 The assertion now reads all four SQL forms; `.sh` is deliberately not parsed (it is arbitrary
 shell, and the assertion's own text lives in the same directory), and is covered instead by the
 catalogue completeness cross-check.
+
+---
+
+Round 3, 2026-09-01. The round fixed one thing (the drill's initdb wait). Everything below is
+filed under C.10: recorded with what was checked and when, not built.
+
+## 6. `assert-rls-force.sh`'s `*revert*` filename exclusion can hide a real declaration
+
+2026-09-01. `scripts/checks/assert-rls-force.sh:391` scans migrations with
+`find "$_d" $_depth -type f ! -name '*revert*' -name '*.sql'`. A migration whose FILENAME
+contains "revert" is therefore never parsed - so a file named, say, `90-revert-to-v2.sql` that
+declares `ALTER TABLE public.x FORCE ROW LEVEL SECURITY` on a table that is genuinely NOT forced
+leaves `x` out of the derived set, and the assertion reports `OK - N governed tables`, exit 0.
+The orchestrator reproduced this as `OK ... 1 governed tables`, exit 0.
+
+This contradicts the script's own `L2` at `:103-107`, which claims the rule is "load-bearing in a
+safe direction" because renaming a revert file makes the set *ambiguous* and fails loudly. That
+holds for the case L2 was written about - a revert file carrying `NO FORCE` for tables the init
+migrations FORCE - and not for this one: a revert-named file carrying a FORCE for a table nothing
+else declares is simply dropped, and the completeness cross-check cannot see it either (that
+backstop catches a relation the catalogue FORCEs and no migration declares; here the table is
+neither forced nor declared, so there is nothing for it to compare).
+
+It is a sibling of the round-1 silent-narrowing class, which is why it is here and not in code.
+
+**It does not affect the shipped set - verified 2026-09-01, independently of the relay.** All
+seventeen governed tables are declared in `OB1/docker/init-agent-memory-rls.sql` (nine) and
+`OB1/docker/init-graph-plane-rls.sql` (eight); `ls` over `OB1/docker` shows the only
+revert-matching files are `revert-agent-memory-rls.sql`, `revert-graph-plane-rls.sql` and
+`revert-agent-memory-corpus-failclosed.sql`, and `grep -li` over the whole directory shows those
+two init files and those reverts are the ONLY files declaring FORCE at all. So no shipped
+declaration is being dropped: the hole is latent, not live. It goes live the day someone names a
+forward migration with "revert" in it.
+
+The shape of a fix, when it is in scope: exclude by CONTENT (a file whose FORCE declarations are
+all `NO FORCE`) rather than by name, or require reverts to live in a `reverts/` directory the
+entrypoint does not mount.
+
+## 7. The `180s` initdb timeout was NOT a slow machine - measured, not assumed
+
+2026-09-01. The blocker this round fixed reported `initdb did not complete in 180s` twice on the
+operator's machine. The obvious reading - the machine was too busy for the budget - is **not
+what the numbers say.**
+
+Measured on that machine, in its normal loaded state (81-84 containers of the live stack running
+throughout), against the same 28-file chain the drill uses:
+
+| case | n | times (s) | mean |
+|---|---|---|---|
+| sequential | 4 | 8.0 / 5.5 / 5.6 / 5.7 | 6.2 |
+| eight chains started AT ONCE | 8 | 11.5 / 11.8 / 12.0 / 12.2 / 12.5 / 12.7 / 13.8 / 14.0 | 12.6 |
+
+The old 180s budget was already ~13x the worst contended measurement. A run that exhausts it is
+not merely busy - something else went wrong (the daemon refused the `docker run`, the container
+died, the name was taken) and the old code reported ALL of those as a timeout, because it started
+the container with output discarded and then polled a name for 180 seconds without ever asking
+whether that name still existed.
+
+The fix is therefore weighted to CLASSIFICATION, not to a bigger number: `start-failed` (reported
+in the same second, with the daemon's own message), `exited` (with the container's exit code and
+log tail), `container-gone`, `timeout` (with elapsed and log tail) - and the drill exits **3**,
+not 1, for all of them. The ceiling was still raised (600s, ~43x the contended worst) because it
+is a ceiling on a signal poll, not a sleep, and costs nothing on a healthy run.
+
+**The original failure was never reproduced here** - the drill passes on this machine at this
+sha, both before and after. What changed is that the next occurrence will name itself instead of
+saying "180s".
+
+## 8. Residuals of round 3, deliberately not built
+
+2026-09-01, all C.10 filings.
+
+- **The four other callers of `Start-ObInitdb` still judge a boolean.**
+  `drill-personal-plane-exclusion.ps1:1087`, `prove-agent-memory-rls.ps1:191`,
+  `smoke-agent-memory.ps1:66` and `test-quartz4-offline.ps1:138` inherit the fail-fast and the
+  measured ceiling (the boolean wrapper delegates to the classifying function), but they cannot
+  distinguish cannot-check from failure, because they only look at true/false. Their call sites
+  were deliberately left untouched this round.
+- **Section 0's aborts still exit 1.** "this checkout is INCOMPLETE", "incomplete staging" and
+  "OB1 compose missing" are cannot-check conditions by the same argument as the initdb wait -
+  they call `Fail` and then `throw`, so a clean-clone problem still exits 1 rather than 3. Their
+  MESSAGES already say "proves nothing", so the reader is not misled; the exit code is.
+- **Section 9's GREEN failure is still classified FAIL.** If the compose db never comes up in the
+  green case, the drill says "dependent never started against a correctly migrated db" - a
+  sentence about the boundary - rather than blocking. Its budgets are now derived and its elapsed
+  time is printed, so the evidence to tell them apart is in the output; the classification is not.
