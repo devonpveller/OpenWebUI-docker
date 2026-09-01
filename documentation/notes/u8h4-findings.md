@@ -246,6 +246,12 @@ on this machine, which has 81 containers already running. GitHub's standard host
 2-core with ~14 GB free disk. `timeout-minutes: 60` is set so a hang is a timeout rather than
 a six-hour burn, but the disk and CPU envelope will only be known from the first real run.
 
+**F5 (2026-09-01, round 2) — `check-corpus-exposure-producers.ps1`'s allow-list is written
+in backslashes and does not match on Linux.** Measured, with the planted producer and the
+gate's own contradicting disclosure quoted, in **§12** below. The drift is in the safe
+direction, but the same tree can be green on the Windows pre-commit hook and red in CI, and
+the gate's printed statement of its own coverage is platform-dependent. Owner: U5's gate.
+
 ---
 
 ## 9. Not in scope, not touched
@@ -331,7 +337,306 @@ Had the wiring pinned the per-clause map, this clean-clone run — the one C.7b 
 before a merge — would have gone red for no defect. The three properties that ARE pinned
 (census balances, zero `unrecognised`, `integrity.ok`) held identically in both.
 
-**Still not proven, and not provable from here:** that any of this runs on `ubuntu-latest`.
-Section 5 establishes that nothing blocks it and section 2 establishes why a CI run cannot
-be triggered from a feature branch. The first real evidence arrives with the operator's
-promotion.
+**Still not proven from a GitHub runner:** that a real Actions run goes green. Section 2
+establishes why a CI run cannot be triggered from a feature branch, and that is unchanged.
+What section 11 below adds, and what round 1 did NOT have, is that the wired steps have now
+been run on **Linux under pwsh 7.4** in GitHub's exact step wrapper, from the clean clone —
+which is where round 1's green was found to be false.
+
+---
+
+# ROUND 2 — 2026-09-01
+
+## 11. THE BLOCKER: the wiring turned "the check did not run" into GREEN
+
+Both verifiers found this independently and the orchestrator reproduced the mechanism. It is
+the defect this whole H4 item exists to prevent, built into the thing meant to prevent it.
+
+### 11.1 The mechanism, measured twice
+
+Every round-1 step had the shape `& ./check.ps1` then `$c = $LASTEXITCODE` then
+`-Code $c`, with `expected-exit.ps1` declaring `[int]$Code = -1` and refusing anything below
+zero. **That sentinel could never fire.** Measured in
+`mcr.microsoft.com/powershell:7.4-ubuntu-22.04`, and again under Windows PowerShell 5.1:
+
+```
+[int]$null  ->  0            (the binder converts before any test in the script body runs)
+```
+
+So a check that never reached an `exit` arrived as the integer **0**, and every check whose
+`Green` set contains 0 — eight of the nine — **passed**.
+
+**A second measurement changed the design, and it is the one a type fix alone does not
+close.** In the same rig, a script that runs one successful native command and then dies
+inside its own trap leaves the CALLER holding:
+
+```
+victim: LASTEXITCODE after bash = 0
+HARNESS ERROR: The term 'cmd' is not recognized ...
+caller: LASTEXITCODE is null? False  value=[0]
+caller: $? = True
+```
+
+`$LASTEXITCODE` is **stale, not null**, and `$?` is `True`. Nothing in the calling scope can
+tell that from a check that deliberately exited 0. Every drill here shells out to `docker`
+before it can fail, so the stale case is the likely one, not the exotic one. This is why the
+fix is a wrapper and a child process rather than a cast.
+
+### 11.2 It was live, and it was this drill
+
+`scripts/checks/drill-app-role-not-superuser.ps1` cleaned up with
+`cmd /c "docker rm -f $dbName 2>nul"`. **cmd.exe does not exist on ubuntu-latest.** Every
+abort path in that drill is `Cleanup; exit 2` and the trap was itself
+`Say ...; Cleanup; exit 2`, so the failure recursed and the drill died without reaching any
+exit statement.
+
+Reproduced here with the drill sitting where it really lives (so `$PSScriptRoot` resolves),
+under pwsh 7.4 on Linux, at gitlink `b604d55`:
+
+```
+== 0. initdb chain
+  compose mounts 29 init files
+  staged 29
+  ABORT: CANNOT MEASURE - the migration under test is not in this checkout:
+         /tmp/repo/OB1/docker/init-app-role.sql
+HARNESS ERROR: The term 'cmd' is not recognized as a name of a cmdlet, ...
+   captured $c = []  isnull=True
+```
+
+The drill printed the paragraph that says it could not measure, then died before it could
+exit 2. Round 1's wiring turned that empty `$c` into `-Code 0` and annotated
+*"the drill RAN and every probe passed ... PULL THIS PIN"*, job GREEN.
+
+### 11.3 The counter-proof: 9 of 10 round-1 steps were green with the script gone
+
+Not asserted — run. The round-1 step bodies were extracted from `a319cdf`'s **own** `ci.yml`
+in a separate clean clone, each script renamed away, and each step run in GitHub's exact
+`shell: pwsh` wrapper (`$ErrorActionPreference='stop'` prepended, `. '<file>'`,
+`if ((Test-Path -LiteralPath variable:/LASTEXITCODE)) { exit $LASTEXITCODE }` appended):
+
+```
+GREEN = STILL BROKEN  step01  the exit-code contract's own self-test              exit 0
+GREEN = STILL BROKEN  step02  gap-ledger self-test                                exit 0
+GREEN = STILL BROKEN  step03  vacuity-guard self-test                             exit 0
+GREEN = STILL BROKEN  step04  corpus exposure producers                           exit 0
+GREEN = STILL BROKEN  step05  corpus exposure producers - planted cases           exit 0
+GREEN = STILL BROKEN  step06  drill-personal-plane-exclusion -AcceptDisposition..  exit 0
+GREEN = STILL BROKEN  step07  drill-rls-boot-assertion.ps1                        exit 0
+GREEN = STILL BROKEN  step08  drill-app-role-not-superuser.ps1                    exit 0
+GREEN = STILL BROKEN  step09  prove-agent-memory-rls.ps1 -SkipLive                exit 0
+RED-BUT-WRONG-WORDS   step10  dfu-done.ps1 -SkipLive                              exit 1
+```
+
+`dfu-done` survived only because its JSON/census assertions refuse independently of the
+code — exactly as reported. The GitHub suffix is the mechanism: with no `LASTEXITCODE` it
+does not `exit` at all, and the step succeeds.
+
+**And dfu-done's survival was narrower than the counter-proof shows.** The rename is only
+one shape. Measured with a `dfu-done` stub that emits a VALID, balancing, `unrecognised: 0`,
+`integrity.ok: true` JSON object, runs one successful native command, and THEN dies inside
+its own trap exactly the way the app-role drill did on ubuntu:
+
+```
+ROUND 1:  dfu-done.ps1 -SkipLive -Json exited 0
+          board=FAILED done=False balances=True total=9
+          ::warning::dfu-done exited 0, which is BETTER than the pinned state. every clause
+          MET. The board is DONE. PULL THIS PIN: move 0 into Green, drop 7, and hand over
+          (PLAN.md C.10, 'THE STOP IS REAL').
+          >>> STEP EXIT = 0
+
+ROUND 2:  ::error::dfu-done DID NOT RUN: it terminated without reaching an exit statement.
+          >>> STEP EXIT = 1
+```
+
+Every census assertion passed in the round-1 run — they were reading real JSON from a run
+that never finished — and the stale 0 landed on `dfu-done`'s NAG entry. **CI would have
+told the operator the board was DONE and to hand over.** The one job the verifiers found to
+be safe was safe only against the shape where the JSON is missing too.
+
+### 11.4b The one thing the fix CHANGES about how a check runs
+
+The shim's top-level `trap` is what detects "died without reaching an exit", and a trap
+anywhere on the call stack makes a **statement-terminating** error unwind to it instead of
+being written and stepped over. That is a real change to how the wired checks execute, so it
+was measured in both directions rather than waved at — pwsh 7.4/Linux, child script under
+`$ErrorActionPreference = "Continue"`:
+
+| in the check | without an enclosing trap | with one (the shim) |
+|---|---|---|
+| `Copy-Item` on a missing path | written, script continues | **unchanged** — non-terminating |
+| `Get-Content` on a missing path | written, script continues | **unchanged** |
+| a native command exiting 3 | continues | **unchanged** — not an error |
+| `1/0` | written, script continues, `exit 7` reached | **unwinds** -> DID NOT RUN |
+| `[int]::Parse("nope")` | continues | **unwinds** -> DID NOT RUN |
+
+So a check that throws an unhandled terminating exception halfway and then carries on to
+print a verdict now reports DID NOT RUN instead of that verdict. **Deliberate.** It is the
+same defect `drill-app-role-not-superuser.ps1`'s own comments already name — *"Exit 2 by
+luck rather than by check"* — and a verdict from a half-executed run is precisely what H4
+exists to stop CI reading as green. It is also the safe direction: the failure mode this
+introduces is a red that should have been green, never the reverse. Named here so that if
+one of the four heavy jobs goes red on its first Linux run for this reason, the cause is on
+record rather than rediscovered.
+
+**And it is load-bearing, not optional.** Without the trap the shim cannot see the blocker
+at all: measured, a child that dies this way returns to the caller "normally", leaving the
+stale code. Removing the trap restores the green bug.
+
+### 11.5 Red-proof, the way the verifiers broke it — 11 of 11 red
+
+From the **clean clone** at `e449e02` (`git status --porcelain` empty, `.github` tree
+`b62c3b857d30fc9a1e5cfcae7ec93eb0f2dd9711`), step bodies re-extracted from the CLONE's own
+`ci.yml`, each driven script renamed away, each step run in GitHub's exact wrapper:
+
+```
+PASS  step01  the exit-code contract, printed             exit 1  "could not even be printed"
+PASS  step02  the exit-code contract's own self-test      exit 1  "expected-exit-selftest DID NOT RUN"
+PASS  step03  gap-ledger self-test                        exit 1  "boundary-drill-selftest-ledger DID NOT RUN"
+PASS  step04  vacuity-guard self-test                     exit 1  "boundary-drill-selftest-vacuity DID NOT RUN"
+PASS  step05  corpus exposure producers                   exit 1  "corpus-exposure-producers DID NOT RUN"
+PASS  step06  corpus exposure producers - planted cases   exit 1  "corpus-exposure-producers-selftest DID NOT RUN"
+PASS  step07  boundary drill -AcceptDispositionedGaps     exit 1  "boundary-drill DID NOT RUN"
+PASS  step08  drill-rls-boot-assertion.ps1                exit 1  "rls-boot-drill DID NOT RUN"
+PASS  step09  drill-app-role-not-superuser.ps1            exit 1  "app-role-drill DID NOT RUN"
+PASS  step10  prove-agent-memory-rls.ps1 -SkipLive        exit 1  "prove-rls DID NOT RUN"
+PASS  step11  dfu-done.ps1 -SkipLive                      exit 1  "dfu-done DID NOT RUN"
+
+# RED-PROOF PASSED: all 11 wired steps go red saying the check did not run.
+```
+
+Four further shapes, proved against the wrapper directly rather than by renaming — because
+the point is that the NEXT shape of "never reached exit" fails too, not that one enumerated
+list of shapes does:
+
+| shape | outcome |
+|---|---|
+| the OLD drill verbatim, on ubuntu (dies in its trap on `cmd` after printing its verdict) | RED, *"DID NOT RUN: it terminated without reaching an exit statement"* |
+| a check that dies BEFORE running anything native (the sentinel path) | RED, same wording |
+| a check that RAN and reported a red code (3, `rls-boot-drill`) | RED, and worded as CANNOT-CHECK, not as a broken boundary |
+| a check that RAN and reported a better-than-pinned code (0, `app-role-drill`) | GREEN + *PULL THIS PIN* — the nag rule survives the rewrite |
+
+### 11.6 The drill actually runs on Linux now
+
+`cmd /c "... 2>nul"` is replaced by `Invoke-DockerQuiet` — `& docker` with PowerShell's own
+`2>&1 | Out-Null`, inside `try/catch/finally`, so a missing docker AND a container that is
+not there are both swallowed there rather than becoming the run's verdict. `Cleanup` cannot
+raise. The `trap` cannot re-enter itself (`$script:inTrap`).
+
+Measured under pwsh 7.4 on Linux with a docker CLI and the host socket, against the recorded
+gitlink `b604d55`, from the clean clone with `OB1/docker` placed as `submodules: recursive`
+would place it:
+
+```
+== 0. initdb chain
+  compose mounts 29 init files
+  staged 29
+  ABORT: CANNOT MEASURE - the migration under test is not in this checkout:
+DRILL EXIT CODE = [2]  isnull=False
+::notice::app-role-drill exited 2 as pinned: CANNOT MEASURE - ... EXPECTED TODAY.
+>>> STEP EXIT = 0   (2.2s)
+```
+
+A real exit code, through the Cleanup path, classified as the pinned state.
+
+### 11.7 The wired steps that DO run on Linux, run — from the clean clone
+
+Same clone, same wrapper, real runs (not red-proofs):
+
+| step | job | exit | step | sec |
+|---|---|---|---|---|
+| the exit-code contract, printed | dfu-static-checks | - | 0 | 0.7 |
+| the contract's own self-test | dfu-static-checks | 0 | 0 | 1.3 |
+| gap-ledger self-test | dfu-static-checks | 0 | 0 | 1.4 |
+| vacuity-guard self-test | dfu-static-checks | 0 | 0 | 1.3 |
+| corpus exposure producers | dfu-static-checks | 0 | 0 | 12.8 |
+| corpus exposure producers - planted cases | dfu-static-checks | 0 | 0 | 1.6 |
+| drill-app-role-not-superuser.ps1 | dfu-app-role-drill | 2 | 0 | 2.2 |
+
+**NOT run on Linux, and named rather than implied:** `dfu-boundary-drill`,
+`dfu-rls-boot-drill`, `dfu-prove-rls` and `dfu-done`. Each builds images or a `--shared`
+clone and takes minutes; they were measured on Windows in section 3 and in the clean-clone
+re-run in section 10. With the wiring fixed, a Linux-only breakage in any of them is now
+RED and says so, instead of green. That is the difference this round was for.
+
+### 11.8 A defect found in my own wrapper while proving it
+
+`& $script @("-SelfTest")` splats **positionally**: the string `-SelfTest` landed in
+`expected-exit.ps1`'s first positional parameter (`-Check`) instead of setting the switch.
+The wiring reported it RED — correctly, because the mangled call reported no usable code —
+which is the behaviour working, but the mangling was still a defect. Arguments are now
+splatted as a hashtable, and `run-check.ps1` **refuses** any argument that is not a bare
+switch rather than guessing how to pass it. Recorded because "the wrapper reported red" is
+not the same as "the wrapper was right".
+
+## 12. Windows-only assumptions in the wired scripts — the sweep
+
+Asked for after `$env:TEMP` turned up once. Grepped all six wired scripts plus
+`scripts/checks/lib/ob-initdb.ps1` for `cmd`, `2>nul`, `$env:TEMP`, `.exe`, backslash
+literals, `Get-CimInstance`/`Get-WmiObject`. Measured, not assumed:
+
+| assumption | where | verdict |
+|---|---|---|
+| `cmd /c "... 2>nul"` | `drill-app-role-not-superuser.ps1` lines 108-109, 194-196 (pre-fix) | **THE BLOCKER — FIXED this round.** The only occurrences in any wired script. |
+| `Join-Path $repo "OB1\docker"` and similar backslash literals | all four drills, `prove-agent-memory-rls.ps1` | **NOT a problem.** Measured on pwsh 7.4/Linux: `Join-Path '/repo' 'OB1\docker'` -> `/repo/OB1/docker`. pwsh normalises the separator. |
+| `$env:TEMP` for staging dirs | boundary drill (5 sites), rls-boot drill, app-role drill, prove-rls, corpus gate self-test | **Handled**, and already was: every H4 job sets `TEMP: ${{ runner.temp }}`. |
+| `Get-CimInstance` / `Get-WmiObject` / `.exe` / COM | none | absent from all wired scripts. |
+| `ob-initdb.ps1` (dot-sourced by three drills) | - | clean: `& docker` throughout, no `cmd`, no shell redirects. |
+
+**One real difference found, and it is NOT fixed here (§C.10 — a dated line, not a change):**
+
+**`check-corpus-exposure-producers.ps1`'s allow-list is written in backslashes and does not
+match on Linux.** `$allowPathLike` holds `'*\documentation\*'`, `'*\docs\*'`,
+`'*\scriptsrchive\*'`, `'*
+ode_modules\*'`, and `-like` is a literal glob — on Linux the
+paths contain `/`, so none of them match. Measured 2026-09-01 in the clean clone, by
+planting one unlabelled producer at `documentation/zz-redproof-producer.mjs`:
+
+```
+[check-corpus-exposure-producers] FAIL - 1 of 2 recognised corpus insert site(s) do not state a plane:
+  /documentation/zz-redproof-producer.mjs:2
+GATE EXIT = 1
+```
+
+while the same gate's own disclosure block, printed in the same run, says:
+
+```
+  - anything under a path on the ALLOW-LIST below - notably documentation\ and docs\.
+    A producer living under either is never scanned.
+```
+
+That sentence is **false on Linux**. The drift is in the safe direction (the gate scans
+MORE, not less), so this is not an exposure hole — but it means **the same tree can be green
+on the Windows pre-commit hook and red in CI**, and the gate's printed statement of its own
+coverage is platform-dependent. It also means the `-SelfTest` case that plants a producer
+under `docs\` to record the miss is recording a miss that does not occur on the runner.
+Fixing it is a change to U5's gate, owned elsewhere, and out of H4's scope. Sink: this file.
+
+Related and unmeasured: the same script's `$f.Substring($ScanRoot.Length).TrimStart('')`
+will leave a leading `/` on Linux relative paths. Cosmetic in the report; not chased.
+
+## 13. What round 2 did NOT touch
+
+- `scripts/checks/dfu-done.ps1` — u8floor owns it. Its step is rewired (it now goes through
+  `run-check.ps1` in `-CodeFile` form, so the census assertions still run BEFORE the contract
+  is consulted), but the script is unchanged.
+- `PLAN.md`, `DECISIONS.md` — not edited.
+- The six jobs, the single contract table, the cannot-check wording, the nag-not-fail rule,
+  the `prove-rls` -> `dfu-done` serialisation, the `.github` tree hash as the validation
+  anchor, and the decision NOT to pin the per-clause map: all kept exactly as accepted.
+- Nothing in production was started, stopped or written to. The Linux runs used throwaway
+  containers of the `mcr.microsoft.com/powershell` image; the only host-daemon calls the
+  drill made were `docker rm -f wt-u8h1-h1db` / `docker network rm wt-u8h1-h1net` on names
+  that do not exist.
+
+## 14. Round-2 validation anchor
+
+| | |
+|---|---|
+| branch | `work/u8h4` |
+| commit validated | `e449e02` |
+| `.github` tree hash | `b62c3b857d30fc9a1e5cfcae7ec93eb0f2dd9711` |
+| clean clone | `git -c core.longpaths=true clone --no-local -b work/u8h4`, `git status --porcelain` **empty** before any run |
+| counter-proof clone | same, checked out at `a319cdf` (round 1), `git status --porcelain` empty |
+| Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04`, plus a one-layer image adding `docker:cli` for the drill |
+| step bodies | re-extracted from each CLONE's own `.github/workflows/ci.yml` with PyYAML; never hand-copied |
+| step invocation | GitHub's `shell: pwsh` wrapper, verbatim |

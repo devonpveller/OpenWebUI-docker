@@ -50,6 +50,25 @@
 #   F. THE CODE IS HANDED ON AS A STRING. expected-exit.ps1 validates it as text and refuses
 #      an empty one; there is no cast that can turn an absence into a number on the way.
 #
+# THE ONE THING THIS CHANGES ABOUT HOW A CHECK RUNS, SAID OUT LOUD BECAUSE IT IS A REAL
+# CHANGE AND NOT A WRAPPER DETAIL. The shim's top-level trap is what detects "died without
+# reaching an exit", and a trap ANYWHERE ON THE CALL STACK makes a statement-terminating
+# error unwind to it instead of being written and stepped over. Measured, both directions,
+# pwsh 7.4/Linux, with a child script running under $ErrorActionPreference = "Continue":
+#
+#   Copy-Item on a missing path   NOT affected - non-terminating, written and stepped over
+#   Get-Content on a missing path NOT affected - same
+#   a native command exiting 3    NOT affected - not an error at all
+#   1/0                           WITHOUT a trap the script carried on; WITH one it unwinds
+#   [int]::Parse("nope")          same
+#
+# So a check that throws an unhandled terminating exception halfway and then carries on to
+# print a verdict now reports DID NOT RUN instead of that verdict. That is deliberate. It is
+# the same defect drill-app-role-not-superuser.ps1's own comments already name - "Exit 2 by
+# luck rather than by check" - and a verdict from a half-executed run is exactly what H4
+# exists to stop CI reading as green. It is also the SAFE direction: the failure mode this
+# introduces is a red that should have been green, never the reverse.
+#
 # WHAT IT STILL CANNOT TELL YOU, said here rather than discovered later (dfu-done rule 2):
 # a check that RUNS ITS LAST LINE AND FALLS OFF THE END, having already run a native command
 # that succeeded, reports that command's code. The sentinel catches the fall-off when nothing
