@@ -216,6 +216,11 @@ param(
     # It is a flag rather than the default ON PURPOSE: a bare run's verdict is unchanged, so
     # nobody reads a green here as "U5's recording half is met". See the exit block.
     [switch]$AcceptDispositionedGaps,
+    # THE LEDGER RECONCILIATION'S OWN RED. Forces Split-StaleGaps through the four
+    # classifications with no docker and no database, and asserts the one property that
+    # matters: a gap whose assertion RAN and reached a verdict contributes ZERO failures.
+    # Closing a gap must not turn the build red.
+    [switch]$SelfTestLedger,
     # THE VACUITY GUARD'S OWN RED. Runs Assert-NoneOf through all four of its outcomes -
     # including the one that used to print PASS off an empty set - and exits. No docker, no
     # database, no gitlink: the mechanism that decides whether the other checks can be
@@ -271,6 +276,73 @@ function Gap($id, $t) {
     Write-Host "  GAP   [$id] $t" -ForegroundColor Yellow
     $script:gaps++
     $script:gapIds += $id
+}
+# --- CLOSING A GAP MUST NOT BE PUNISHED --------------------------------------------------
+#
+# The ledger FAILS a dispositioned gap that stops firing, and that rule is right for the case
+# it was written for: a check that quietly stopped RUNNING leaves the same silence as a check
+# whose property got fixed, and the second reading is the flattering one. But it makes the
+# GOOD outcome expensive. Give VACUOUS-WIKIPAGES the fixture it asks for and the assertion
+# turns PASS - and the very next run exits 1, on a red that says "the ledger has rotted",
+# because the pin is still in. A gate that turns red when you fix something teaches people to
+# stop fixing things. The fix is not to weaken the rule but to tell the two silences apart.
+#
+# THE DISTINCTION IS OBSERVATION. An assertion that carries a gap id and REACHED A VERDICT
+# this run registers itself here. At reconciliation a dispositioned gap that did not fire is
+# then one of two things:
+#   * CLOSED   - its assertion ran and reached pass/fail. Good news. Printed loudly, with the
+#                instruction to pull the pin, and it does NOT count as a failure.
+#   * VANISHED - nothing with that id reached a verdict at all. Still a FAIL, unchanged: that
+#                is the case the rule exists for, and it is now the only case it fires on.
+# THE COST, STATED: a CLOSED pin is a nag rather than a gate, so a pin for a genuinely closed
+# property can sit in the ledger indefinitely. That is the right way round - a stale pin then
+# over-reports an open gap, which is the conservative error, and the run says so every time.
+$script:gapClosed = [ordered]@{}
+function Resolve-Gap($id, $how) {
+    if ($id) { $script:gapClosed[$id] = $how }
+}
+# PURE, and separated from the reconciliation block at the bottom of this file ON PURPOSE:
+# the rule that decides whether closing a gap fails the build is exactly the kind of rule
+# that gets written once, believed, and never watched. -SelfTestLedger runs it.
+function Split-StaleGaps {
+    param([string[]]$Stale, $ClosedMap)
+    $c = New-Object System.Collections.Generic.List[string]
+    $v = New-Object System.Collections.Generic.List[string]
+    foreach ($g in @($Stale)) {
+        if ($ClosedMap -and $ClosedMap.Contains($g)) { $c.Add($g) } else { $v.Add($g) }
+    }
+    return @{ Closed = @($c); Vanished = @($v) }
+}
+
+if ($SelfTestLedger) {
+    Write-Host "`n=== -SelfTestLedger: closing a gap must not fail the build ===" -ForegroundColor Cyan
+    $ranMap = [ordered]@{ "CLOSED-ONE" = "assertion ran"; "CLOSED-TWO" = "assertion ran" }
+    $cases = @(
+        @{ Stale = @("CLOSED-ONE");                Map = $ranMap;      C = 1; V = 0; Why = "the assertion RAN and passed -> CLOSED, and 0 failures. THIS is the property: fixing something does not turn the build red." }
+        @{ Stale = @("GONE-ONE");                  Map = $ranMap;      C = 0; V = 1; Why = "nothing with that id reached a verdict -> VANISHED, and it still FAILS. The original rule, intact." }
+        @{ Stale = @("CLOSED-ONE", "GONE-ONE");    Map = $ranMap;      C = 1; V = 1; Why = "mixed -> split, not lumped. One good outcome does not launder the bad one." }
+        @{ Stale = @();                            Map = $ranMap;      C = 0; V = 0; Why = "nothing stale -> nothing to report either way" }
+        @{ Stale = @("CLOSED-ONE");                Map = [ordered]@{}; C = 0; V = 1; Why = "an EMPTY closed-map must not classify anything as closed - the escape hatch cannot be the default" }
+    )
+    $lf = 0
+    foreach ($c in $cases) {
+        $r = Split-StaleGaps -Stale $c.Stale -ClosedMap $c.Map
+        $ok = ($r.Closed.Count -eq $c.C -and $r.Vanished.Count -eq $c.V)
+        # the exit-code consequence, asserted rather than described: only VANISHED adds fails
+        $wouldFail = $r.Vanished.Count
+        if ($ok -and $wouldFail -eq $c.V) {
+            Write-Host ("        OK   stale=[{0}] -> closed={1} vanished={2} fails={3}   ({4})" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $wouldFail, $c.Why) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("        BAD  stale=[{0}] -> closed={1} vanished={2}, expected closed={3} vanished={4}" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $c.C, $c.V) -ForegroundColor Red
+            $lf++
+        }
+    }
+    if ($lf -eq 0) {
+        Write-Host "LEDGER SELF-TEST PASSED - a CLOSED gap contributes 0 failures; a VANISHED one still fails." -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "LEDGER SELF-TEST FAILED - $lf case(s) classified wrongly." -ForegroundColor Red
+    exit 1
 }
 # --- THE VACUITY GUARD - ONE MECHANISM, SO A SIXTH ONE CANNOT BE SILENTLY VACUOUS --------
 #
@@ -337,6 +409,7 @@ function Assert-NoneOf {
     }
     if ($v -gt 0) {
         $script:AssertOutcome = "fail"
+        Resolve-Gap $Id "the assertion RAN over $u $UniverseName and FAILED - the property is measurable now, and violated"
         Fail "$Defect ($v of $u $UniverseName)"
         return
     }
@@ -346,6 +419,7 @@ function Assert-NoneOf {
         return
     }
     $script:AssertOutcome = "pass"
+    Resolve-Gap $Id "the universe is no longer empty ($u $UniverseName) and the assertion PASSED over it"
     Pass "$Claim (0 violations out of $u $UniverseName)"
 }
 
@@ -434,19 +508,33 @@ $GAP_DISPOSITIONS = [ordered]@{
     # the review; the sixth and seventh came out of routing their siblings through the same
     # helper, which is the point of having one mechanism rather than five patches.
     #
-    # SIX OF THE SEVEN ARE DOWNSTREAM OF THE AUDIT-RECORD GAP: with zero access_refused rows
+    # EVERY ONE CARRIES ITS COST, and that is the round-4 change. Making the vacuity VISIBLE
+    # was the right first move, but under -AcceptDispositionedGaps - the form C.9 H4 wires
+    # into CI - a dispositioned vacuity sits INSIDE an exit-0 green. Six assertions that
+    # measure nothing were therefore formally part of "CI passed", and CI was asserting less
+    # than it did before while looking identical. A disposition that only explains the CAUSE
+    # lets that happen quietly. So each entry below now ends with GREEN DOES NOT COVER: the
+    # specific thing a passing CI run fails to rule out because this assertion is empty. A
+    # reader of the ledger can price the green without reading the drill.
+    #
+    # FIVE OF THE SIX ARE DOWNSTREAM OF THE AUDIT-RECORD GAP: with zero access_refused rows
     # in the database, every claim about what those rows do or do not contain quantifies over
-    # nothing. They close when H1 closes AUDIT-INSPECT and its family - and on that day the
-    # ledger goes RED until these pins are pulled, which is the intended behaviour.
-    "VACUOUS-REFUSAL-DISCRIMINATES"     = "H1/H4 - downstream of the audit-record gap. 0 access_refused rows exist, so 'the ALLOWED call wrote none' cannot show the signal discriminates."
-    "VACUOUS-GHOST-NO-ROW"              = "H1/H4 - downstream of the audit-record gap. Same empty universe: no refusal rows, so 'a typo writes none either' distinguishes nothing IN THE LOG. The RESPONSE half of that check is asserted separately and passes."
-    "VACUOUS-TRACE-REFUSAL-ID"          = "H1/H4 - downstream of AUDIT-RECALL-TRACE-ENVELOPE. The off-plane-trace refusal row does not exist, so 'that row names no memory id' is about a row that was never written."
-    "VACUOUS-WRITEBACK-REFUSAL-ID"      = "H1/H4 - downstream of AUDIT-WRITEBACK-PROBE. Same shape, on the writeback's refusal row."
-    "VACUOUS-ENUMERATING-FILED-NOTHING" = "H1/H4 - downstream of the audit-record gap. NO tool filed a refusal row, so 'the enumerating doors filed nothing' holds of the enumerating doors, the targeted doors, and every door that does not exist."
-    # ...and one that is NOT about the audit table:
-    "VACUOUS-WIKIPAGES"                 = "ATTACK 14 measurement gap, NOT H1. The compiler wrote ZERO wiki_pages rows in this throwaway, so 'wiki_pages holds none of the personal text' is a statement about a compile that published nothing to that table. The file-output half of ATTACK 14 (no leaf page, no marker in the emitted text) is measured against a compile that DID produce output and passes; closing this one needs a fixture that makes the compiler write wiki_pages, which is a drill change, not a boundary one."
+    # nothing. They close when H1 closes AUDIT-INSPECT and its family - and on that day they
+    # are reported CLOSED (assertion ran, verdict reached) rather than failing the build; see
+    # Resolve-Gap above. The SIXTH, VACUOUS-WIKIPAGES, was closed in round 4 by giving the
+    # compile a vault root, and its pin is gone from this table.
+    "VACUOUS-REFUSAL-DISCRIMINATES"     = "H1/H4 - downstream of the audit-record gap. 0 access_refused rows exist, so 'the ALLOWED call wrote none' cannot show the signal discriminates. GREEN DOES NOT COVER: that a refusal is distinguishable from an allow in any durable record. A door that filed a refusal row for EVERY call, allowed ones included, would pass this run unchanged."
+    "VACUOUS-GHOST-NO-ROW"              = "H1/H4 - downstream of the audit-record gap. Same empty universe: no refusal rows, so 'a typo writes none either' distinguishes nothing IN THE LOG. The RESPONSE half of that check is asserted separately and passes. GREEN DOES NOT COVER: that the audit log cannot be used to CONFIRM a guessed memory id. A door that filed a row naming the ghost id - which is an existence oracle - would pass this run unchanged; only the response half would catch it."
+    "VACUOUS-TRACE-REFUSAL-ID"          = "H1/H4 - downstream of AUDIT-RECALL-TRACE-ENVELOPE. The off-plane-trace refusal row does not exist, so 'that row names no memory id' is about a row that was never written. GREEN DOES NOT COVER: that a recall-trace refusal, once one is written, will withhold the id of the memory it refused. The property is untested, not established."
+    "VACUOUS-WRITEBACK-REFUSAL-ID"      = "H1/H4 - downstream of AUDIT-WRITEBACK-PROBE. Same shape, on the writeback's refusal row. GREEN DOES NOT COVER: that the writeback's idempotency probe will withhold the memory id when it starts recording its refusals. Same untested property, on the write path."
+    "VACUOUS-ENUMERATING-FILED-NOTHING" = "H1/H4 - downstream of the audit-record gap. NO tool filed a refusal row, so 'the enumerating doors filed nothing' holds of the enumerating doors, the targeted doors, and every door that does not exist. GREEN DOES NOT COVER: the distinction the clause is FOR - that a door which merely omits an off-plane row behaves differently from one that refuses a named id. On this tree both are silent, and this run cannot tell them apart."
+    # VACUOUS-WIKIPAGES IS GONE FROM THIS TABLE, AND THAT IS THE POINT OF THE ROUND. It was
+    # not dispositioned harder, it was CLOSED: Invoke-WikiCompile sets WIKI_GIT_DIR=/out, so
+    # the compiler now queues and flushes wiki_pages rows through the same PostgREST door
+    # production uses, the universe is non-empty, and the assertion discriminates. Its pin is
+    # pulled because leaving it in would be the ledger claiming an open gap that is shut.
     # --- and the red-coverage ledger ------------------------------------------------------
-    "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed here is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite."
+    "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed in round 3 is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite. GREEN DOES NOT COVER: that those seven sections' greens can fail at all. For each of them, deleting the mechanism that does the work would look exactly like the mechanism working, and this run would still be green."
 }
 
 if (-not $RunId) { $RunId = [guid]::NewGuid().ToString("N").Substring(0, 8) }
@@ -1015,13 +1103,19 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
     $compose = Join-Path $OB1 "docker\docker-compose.yml"
     $opsEnv = Get-GatewayEnv -ComposePath $compose -Service "openbrain-ops-gateway"
-    if ($opsEnv.ContainsKey("GATEWAY_READ_TOOLS") -and $opsEnv["GATEWAY_PROFILE"] -eq "ops") {
-        Pass "ops-door policy DERIVED from compose (read tools: $($opsEnv['GATEWAY_READ_TOOLS']))"
+    # THE GUARD IS ON THE PARSED LIST, NOT ON ContainsKey - and it was not, which is how the
+    # COVERAGE gate below became the one vacuity the round-3 sweep missed. `ContainsKey` is
+    # TRUE for `GATEWAY_READ_TOOLS=` with an empty value, so the derivation passed, the list
+    # parsed to zero tools, and "all 0 derived read tool(s) were attacked" printed as a PASS.
+    # Its WRITE twin twelve lines below always required Count -gt 0; the halves were written
+    # at different times and only one of them was written properly. Now both require it.
+    $opsReadTools = @($opsEnv["GATEWAY_READ_TOOLS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($opsReadTools.Count -gt 0 -and $opsEnv["GATEWAY_PROFILE"] -eq "ops") {
+        Pass "ops-door policy DERIVED from compose ($($opsReadTools.Count) read tools: $($opsReadTools -join ', '))"
     } else {
-        Fail "could not derive openbrain-ops-gateway's env from compose - the drill would be testing its own opinion"
+        Fail "could not derive a NON-EMPTY openbrain-ops-gateway read policy from compose (profile='$($opsEnv['GATEWAY_PROFILE'])' read tools=$($opsReadTools.Count)) - the drill would be testing its own opinion, and the COVERAGE gate would pass over an empty list"
         throw "no ops env"
     }
-    $opsReadTools = @($opsEnv["GATEWAY_READ_TOOLS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $opsWriteTools = @($opsEnv["GATEWAY_WRITE_TOOLS"] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($opsWriteTools.Count -gt 0) {
         Pass "ops-door WRITE tools DERIVED from compose ($($opsWriteTools -join ', '))"
@@ -1965,6 +2059,8 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
             -e "LLM_MODEL=stub" -e "EMBEDDING_API_BASE=http://${STUB}:8080/v1" `
             -e "EMBEDDING_API_KEY=stub-not-a-secret" -e "EMBEDDING_MODEL=stub" `
             -e "EMBEDDING_DIMENSION=1024" `
+            `
+            -e "WIKI_GIT_DIR=/out" `
             node:22-alpine node /recipes/entity-wiki/generate-wiki.mjs `
             --ids $ENTID --out-dir /out 2>&1 | Out-String
         return $log
@@ -2001,6 +2097,20 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # The universe is the rows the compile actually wrote. An empty wiki_pages means the
     # compiler published nothing at all, in which case "the personal text is not in it" is a
     # statement about a compile that did not happen.
+    #
+    # AND IT WAS EXACTLY THAT, FOR ONE ENVIRONMENT VARIABLE. Round 3 routed this through the
+    # vacuity guard and it reported VACUOUS: zero rows, every run. The cause is in
+    # recipes/_shared/wiki-pages.mjs - `vaultRel()` returns null for any path OUTSIDE
+    # `WIKI_GIT_DIR` (default /wiki) and `queueWikiPage` drops it, deliberately, so that a
+    # scratch --out-dir cannot write junk slugs into the table. This drill compiles into
+    # /out, so EVERY page was outside the vault and nothing was ever queued. The assertion
+    # was not measuring the boundary; it was measuring that guard.
+    #
+    # Invoke-WikiCompile now sets WIKI_GIT_DIR=/out, which makes the throwaway out-dir a real
+    # vault root, so the compiler queues and flushes rows through the same PostgREST door
+    # production uses. That is what CLOSES this gap: the universe is non-empty, so "no row
+    # carries the personal text" can now discriminate. It is a strictly larger attack surface
+    # than before - the personal string now has a second published surface to leak into.
     $wpAll  = Db "SELECT count(*) FROM wiki_pages"
     $wpPers = Db "SELECT count(*) FROM wiki_pages WHERE body LIKE '%$MARKER MUSTNOTPUBLISH%'"
     Assert-NoneOf -Id "VACUOUS-WIKIPAGES" -Universe $wpAll -Violating $wpPers `
@@ -2067,26 +2177,31 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # The safeguard the derived allow-list was supposed to be, actually closed. Deriving the
     # list and attacking one of it is worth less than hardcoding it, because it reads as
     # coverage in the output while providing none.
+    # ROUTED THROUGH THE VACUITY GUARD, and it is the last of the twelve. Its shape is
+    # exactly the one section 17.1 fixed - "of the tools in S, none is unattacked" written as
+    # a count of the unattacked only - and with S empty it printed "all 0 derived read
+    # tool(s) were attacked". Belt AND braces: the derivation above now refuses an empty S,
+    # so this can no longer reach the vacuous branch; if it ever does, the id is
+    # UNDISPOSITIONED and the run exits 2, which is the loudest thing this file can do.
     $missed = @($opsReadTools | Where-Object { -not $script:Attacked.ContainsKey($_) })
-    if ($missed.Count -eq 0) {
-        Pass "all $($opsReadTools.Count) derived read tool(s) were attacked: $(($opsReadTools | ForEach-Object { $_ + ' (' + $script:Attacked[$_] + ')' }) -join ', ')"
-    } else {
-        Fail "compose allows read tool(s) this drill never attacks: $($missed -join ', ') - the allow-list is derived but not exercised"
-        Note "add an ATTACK section for each, or the next tool added to the door rides in unexamined"
-    }
+    Assert-NoneOf -Id "VACUOUS-READ-COVERAGE" -Universe $opsReadTools.Count -Violating $missed.Count `
+        -UniverseName "derived read tool(s)" `
+        -Claim "every read tool compose puts on the ops door was attacked: $(($opsReadTools | ForEach-Object { $_ + ' (' + $script:Attacked[$_] + ')' }) -join ', ')" `
+        -Defect "compose allows read tool(s) this drill never attacks: $($missed -join ', ') - the allow-list is derived but not exercised. Add an ATTACK section for each, or the next tool added to the door rides in unexamined"
 
     Section "COVERAGE - every WRITE tool compose puts on the ops door must have been attacked too"
     # THE HALF THAT DID NOT EXIST, and its absence is what let the escalation through. The
     # read ledger above was complete and every read attack passed; the plane was still
     # reachable, because agent_memory_review could MOVE a memory onto the caller's plane and
     # nothing here iterated the write list. Read containment is not plane containment.
+    # Routed through the same guard as its read twin, for the same reason - and this one was
+    # already guarded upstream (the derivation throws on an empty write list), which is what
+    # made the asymmetry above invisible: the twin that was broken looked identical here.
     $missedW = @($opsWriteTools | Where-Object { -not $script:AttackedWrites.ContainsKey($_) })
-    if ($missedW.Count -eq 0) {
-        Pass "all $($opsWriteTools.Count) derived write tool(s) were attacked: $(($opsWriteTools | ForEach-Object { $_ + ' (' + $script:AttackedWrites[$_] + ')' }) -join ', ')"
-    } else {
-        Fail "compose allows write tool(s) this drill never attacks: $($missedW -join ', ') - a write can relocate a memory across the plane, so an unattacked one is an unexamined door"
-        Note "add an ATTACK section for each; ATTACK 8 is the shape (act on the personal fixture, then read the DATABASE, not the response)"
-    }
+    Assert-NoneOf -Id "VACUOUS-WRITE-COVERAGE" -Universe $opsWriteTools.Count -Violating $missedW.Count `
+        -UniverseName "derived write tool(s)" `
+        -Claim "every write tool compose puts on the ops door was attacked: $(($opsWriteTools | ForEach-Object { $_ + ' (' + $script:AttackedWrites[$_] + ')' }) -join ', ')" `
+        -Defect "compose allows write tool(s) this drill never attacks: $($missedW -join ', ') - a write can relocate a memory across the plane, so an unattacked one is an unexamined door. ATTACK 8 is the shape (act on the personal fixture, then read the DATABASE, not the response)"
 
     # --- 12. RED: prove every green above could have failed -------------------------------
     #
@@ -2387,6 +2502,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         if ($attackIds.Count -eq 0) {
             Fail "no ATTACK sections were derived from this file - the red-coverage ledger is reading nothing, so its verdict means nothing"
         } elseif ($noRed.Count -eq 0) {
+            Resolve-Gap "RED-COVERAGE" "every ATTACK section has a red that RAN - the seven missing reds were written"
             Pass "all $($attackIds.Count) ATTACK section(s) have a red that RAN: $(($withRed | ForEach-Object { $_ + ' (' + $script:Reds[$_] + ')' }) -join '; ')"
         } else {
             Pass "$($withRed.Count) of $($attackIds.Count) ATTACK section(s) have a red that RAN: $($withRed -join ', ')"
@@ -2415,7 +2531,8 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # in this tree. It still withdraws the lift - the lift is the conjunction, and a
     # conjunction with an open term is not satisfied.
     function LiftGap([string]$Id, [bool]$Ok, [string]$What, [string]$Why) {
-        if ($Ok) { Pass $What } else { Gap $Id $What; Note $Why; $script:lifted = $false }
+        if ($Ok) { Resolve-Gap $Id "the lift clause was evaluated and HELD"; Pass $What }
+        else { Gap $Id $What; Note $Why; $script:lifted = $false }
     }
 
     # (1) it can be WRITTEN - through the real write path, not planted.
@@ -2570,11 +2687,27 @@ if ($firedGaps.Count -gt 0 -or $newGaps.Count -gt 0) {
 # under -SkipRed too, because the ext-container gaps are raised in the green phase. The
 # exemption is for the next one, and it is the reason -SkipRed is documented as weaker: under
 # it, a gap that has genuinely CLOSED goes unnoticed.
-if ($staleGaps.Count -gt 0 -and -not $SkipRed) {
-    Write-Host "  FAIL  $($staleGaps.Count) dispositioned gap(s) did NOT fire: $($staleGaps -join ', ')" -ForegroundColor Red
-    Write-Host "        Either they are closed - in which case DELETE them from `$GAP_DISPOSITIONS and say so in" -ForegroundColor Red
-    Write-Host "        PROMOTION-RUNBOOK.md - or the check that produced them stopped running, which is worse." -ForegroundColor Red
-    $fails += $staleGaps.Count
+# CLOSED vs VANISHED. A dispositioned gap that did not fire but whose assertion REACHED A
+# VERDICT this run is CLOSED - good news, printed loudly, not a failure. One that nothing
+# reached a verdict on has VANISHED, and that is still the FAIL this rule was written for.
+$staleSplit   = Split-StaleGaps -Stale $staleGaps -ClosedMap $script:gapClosed
+$closedGaps   = $staleSplit.Closed
+$vanishedGaps = $staleSplit.Vanished
+if ($closedGaps.Count -gt 0) {
+    Write-Host "  CLOSED $($closedGaps.Count) dispositioned gap(s) no longer fire, and their assertions RAN:" -ForegroundColor Green
+    foreach ($g in $closedGaps) {
+        Write-Host ("    {0,-30} {1}" -f $g, $script:gapClosed[$g]) -ForegroundColor Green
+    }
+    Write-Host "        PULL THESE PINS: delete them from `$GAP_DISPOSITIONS and record the closure in" -ForegroundColor Green
+    Write-Host "        PROMOTION-RUNBOOK.md. This is a NAG, not a failure - closing a gap must not turn the" -ForegroundColor Green
+    Write-Host "        build red, or the next person stops closing them." -ForegroundColor Green
+}
+if ($vanishedGaps.Count -gt 0 -and -not $SkipRed) {
+    Write-Host "  FAIL  $($vanishedGaps.Count) dispositioned gap(s) did NOT fire AND nothing with that id reached a" -ForegroundColor Red
+    Write-Host "        verdict: $($vanishedGaps -join ', ')" -ForegroundColor Red
+    Write-Host "        The check that produced them stopped RUNNING. That is not a gap closing, it is a gap" -ForegroundColor Red
+    Write-Host "        going unmeasured, and the ledger now claims something is open that nothing is watching." -ForegroundColor Red
+    $fails += $vanishedGaps.Count
 }
 
 if ($fails -eq 0 -and $gaps -eq 0) {
