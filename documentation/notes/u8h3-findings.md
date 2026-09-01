@@ -1618,6 +1618,10 @@ round started from) and against the historical blobs `819b5fe` and `c192041`, ex
 **`d39ae95`**, pushed to `origin/feat/agent-memory-exposure-column` before the bump, so the
 pinned sha is reachable from a fresh `--recurse-submodules` clone.
 
+The commit that follows `7197903` on this branch (`8bf07ad`, this section) touches
+`documentation/notes/u8h3-findings.md` and nothing else -
+`git diff 7197903..HEAD --name-only` is one line long - so no run below it is stale.
+
 Three throwaway `git clone`s of this repo, each checked out at the exact sha and with `OB1`
 initialised to the recorded gitlink, working tree clean (`git status --porcelain` empty),
 **one suite per checkout**:
