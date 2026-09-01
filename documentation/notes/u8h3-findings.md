@@ -1634,6 +1634,12 @@ arguing that a SQL comment could not matter: `cc4` and `cc5` are fresh clean che
 kept because they are what the sweep was measured against, not because they are the current
 evidence.
 
+**And this statement is true of itself, which is where the regress stops.** Every commit after
+`292f2aa` on this branch touches `documentation/notes/u8h3-findings.md` and nothing else -
+`git diff 292f2aa..HEAD --name-only` is one line long. That path is on the gate's own
+allow-list (`*\documentation\*`), it is read by no suite, and it is not the `OB1` gitlink. So
+no run recorded here can be staled by the commits that record it.
+
 Throwaway `git clone`s of this repo, each checked out at the exact sha and with `OB1`
 initialised to the recorded gitlink, working tree clean (`git status --porcelain` empty),
 **one suite per checkout**:
