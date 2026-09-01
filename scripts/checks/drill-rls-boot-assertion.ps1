@@ -92,7 +92,7 @@ function Start-DrillDb {
     if (-not $r.Ready) {
         Stop-Drill ("$Name never finished initdb: $($r.Outcome) after $($r.ElapsedSec)s of a $($r.BudgetSec)s ceiling. $($r.Detail) " +
                     "The exposure boundary was NOT exercised by this run - this is the drill's own environment failing, not evidence that the assertion is missing. " +
-                    "Raise the ceiling with OB_INITDB_TIMEOUT_SEC if the machine is genuinely slower than the measured 6s (14s contended) this budget is built from.")
+                    "Raise the ceiling with OB_INITDB_TIMEOUT_SEC if the machine is genuinely slower than the measured 6s (16s contended) this budget is built from.")
     }
 }
 
@@ -218,7 +218,58 @@ try {
     if ($rlsMounts.Count -lt 2) { Fail "expected at least 2 FORCE-declaring migrations in the chain; found $($rlsMounts.Count)" }
     else { Pass "boundary migrations derived by content: $((($rlsMounts | ForEach-Object { $_[1] }) -join ', '))" }
     $rlsNames = @($rlsMounts | ForEach-Object { $_[1] })
-    $chainMinus = @($chain | Where-Object { $rlsNames -notcontains $_[1] })
+
+    # ---------------------------------------------------------------------------------
+    # A MIGRATION THAT CANNOT RUN WITHOUT A DROPPED ONE MUST GO TOO - and this is what
+    # actually broke the drill, not a slow machine.
+    #
+    # `195-init-agent-memory-exposure-column.sql` (H3) opens with a guard that RAISEs:
+    #   "the jsonb exposure predicates are not defined. Apply 180-init-agent-memory-rls.sql
+    #    first - this file MIGRATES that boundary, it does not create one from nothing."
+    # Removing 180 to build the RED chain therefore made initdb ABORT (postgres exits 3),
+    # and the old wait - which polled a container name for 180s without asking whether the
+    # container was still alive - reported that death as "initdb did not complete in 180s".
+    # Two runs, minutes apart, on a verified-complete clean clone, and the sentence blamed
+    # the machine. MEASURED here from a clean clone: `exited after 7.3s of a 600s ceiling,
+    # status/exitcode = exited/3`, carrying that exact SQL error.
+    #
+    # DERIVED, not a second hand-list: a chain file is dropped when its text names a
+    # dropped migration's MOUNTED FILENAME on a line that is not a `--` comment - which is
+    # where a dependency guard lives, because it has to be executable to raise. Applied to
+    # a fixpoint, so a dependent of a dependent goes as well.
+    #
+    # The distinction is load-bearing on the real chain, both ways:
+    #   190-init-agent-memory-corpus-failclosed.sql names 180 ONCE, on a `--` line, and the
+    #      comment says why: "This file is self-contained even if 180 has not run". KEPT.
+    #   195 names 180 on line 181, inside a RAISE EXCEPTION string. DROPPED.
+    # LIMIT: only `--` comments are recognised. A mention inside a /* .. */ block would drop
+    # a migration that did not need to go - which shortens the RED chain rather than
+    # weakening the assertion, and section 1's preconditions (0 FORCEd, agent_memories
+    # true/false) would fail loudly if the cascade ever reached something they need.
+    # ---------------------------------------------------------------------------------
+    $dropNames = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($n in $rlsNames) { [void]$dropNames.Add($n) }
+    $cascaded = @()
+    $grew = $true
+    while ($grew) {
+        $grew = $false
+        foreach ($m in $chain) {
+            if ($dropNames.Contains($m[1])) { continue }
+            $hit = $null
+            foreach ($line in (Get-Content (Join-Path $Ob1Docker $m[0]))) {
+                if ($line.TrimStart().StartsWith('--')) { continue }
+                foreach ($d in @($dropNames)) {
+                    if ($line -match [regex]::Escape($d)) { $hit = $d; break }
+                }
+                if ($hit) { break }
+            }
+            if ($hit) { [void]$dropNames.Add($m[1]); $cascaded += "$($m[1]) (requires $hit)"; $grew = $true }
+        }
+    }
+    if ($cascaded.Count) { Pass "dependent migrations dropped with them, derived from executable references: $($cascaded -join ', ')" }
+    else { Pass "no chain migration executably references a boundary migration - nothing cascades" }
+
+    $chainMinus = @($chain | Where-Object { -not $dropNames.Contains($_[1]) })
     $nNoRls = Copy-ObInitChain -Chain $chainMinus -SourceDir $Ob1Docker -TargetDir $chainNoRl
     if ($nFull -eq $chain.Count -and $nNoRls -eq $chainMinus.Count) {
         Pass "staged two chains, both COMPLETE: full=$nFull/$($chain.Count), without-the-migration=$nNoRls/$($chainMinus.Count)"
@@ -435,8 +486,8 @@ try {
         # What the two numbers buy, stated so they can be audited rather than liked:
         #   GREEN survives until start_period + retries*interval = 195s of initdb before the
         #        healthcheck can mark a correctly migrated database unhealthy. Measured worst
-        #        initdb on this machine is 14.0s (eight chains racing; 8.0s sequential - see
-        #        lib/ob-initdb.ps1), so that is ~14x headroom.
+        #        initdb on this machine is 16.2s (eight chains racing; 6.5s sequential - see
+        #        lib/ob-initdb.ps1), so that is ~12x headroom.
         #   RED  costs exactly that 195s on every run, because FailingStreak stays 0 for the
         #        whole start_period (verified by `docker inspect` mid-run: `starting
         #        failing=0` at t=156s of a 180s start_period). This is why the number is 180

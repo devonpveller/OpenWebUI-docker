@@ -145,35 +145,63 @@ The shape of a fix, when it is in scope: exclude by CONTENT (a file whose FORCE 
 all `NO FORCE`) rather than by name, or require reverts to live in a `reverts/` directory the
 entrypoint does not mount.
 
-## 7. The `180s` initdb timeout was NOT a slow machine - measured, not assumed
+## 7. The `180s` initdb timeout was never a slow machine - the container was DEAD
 
-2026-09-01. The blocker this round fixed reported `initdb did not complete in 180s` twice on the
-operator's machine. The obvious reading - the machine was too busy for the budget - is **not
-what the numbers say.**
+2026-09-01. The blocker reported `initdb did not complete in 180s` twice on the operator's
+machine and the brief read it as the machine being too busy for the budget. **It was not.** The
+numbers said so first, and then the new diagnostic said what it actually was.
 
-Measured on that machine, in its normal loaded state (81-84 containers of the live stack running
-throughout), against the same 28-file chain the drill uses:
+Measured on that machine, in its normal loaded state (82-83 containers of the live stack running
+throughout), against the SHIPPED chain - the 29 migrations compose mounts at the pinned OB1
+(`b604d55`), staged from a clean clone:
 
 | case | n | times (s) | mean |
 |---|---|---|---|
-| sequential | 4 | 8.0 / 5.5 / 5.6 / 5.7 | 6.2 |
-| eight chains started AT ONCE | 8 | 11.5 / 11.8 / 12.0 / 12.2 / 12.5 / 12.7 / 13.8 / 14.0 | 12.6 |
+| sequential | 4 | 6.5 / 6.3 / 5.8 / 5.2 | 6.0 |
+| eight chains started AT ONCE | 8 | 10.5 / 13.0 / 13.3 / 13.5 / 15.5 / 15.7 / 16.0 / 16.2 | 14.2 |
 
-The old 180s budget was already ~13x the worst contended measurement. A run that exhausts it is
-not merely busy - something else went wrong (the daemon refused the `docker run`, the container
-died, the name was taken) and the old code reported ALL of those as a timeout, because it started
-the container with output discarded and then polled a name for 180 seconds without ever asking
-whether that name still existed.
+(An earlier 28-file chain from a different OB1 commit gave the same shape: 5.5-8.0s sequential,
+11.5-14.0s contended.) The old 180s budget was already ~11x the worst contended measurement, so a
+run that exhausts it is not merely busy.
 
-The fix is therefore weighted to CLASSIFICATION, not to a bigger number: `start-failed` (reported
-in the same second, with the daemon's own message), `exited` (with the container's exit code and
-log tail), `container-gone`, `timeout` (with elapsed and log tail) - and the drill exits **3**,
-not 1, for all of them. The ceiling was still raised (600s, ~43x the contended worst) because it
-is a ceiling on a signal poll, not a sleep, and costs nothing on a healthy run.
+**THE ACTUAL CAUSE, found by running the fixed drill from a clean clone at the pinned OB1:**
 
-**The original failure was never reproduced here** - the drill passes on this machine at this
-sha, both before and after. What changed is that the next occurrence will name itself instead of
-saying "180s".
+```
+initdb ob-h2-nomig-4d74a422 : exited after 7.3s of a 600s ceiling
+  status/exitcode = exited/3 ... psql:/docker-entrypoint-initdb.d/
+  195-init-agent-memory-exposure-column.sql:198: ERROR: init-agent-memory-exposure-column:
+  the jsonb exposure predicates are not defined. Apply 180-init-agent-memory-rls.sql first
+```
+
+H3 added `195-init-agent-memory-exposure-column.sql` to the chain, and it REFUSES to apply
+without `180-init-agent-memory-rls.sql`. Section 1 builds its RED chain by removing exactly the
+FORCE-declaring migrations - 180 among them - so postgres aborted initdb and the container exited
+3 **seven seconds in**. The old wait discarded `docker run`'s output and then polled a container
+NAME for 180 seconds without once asking whether the container was still alive, so a death at 7s
+was served up as a timeout at 180s, and the sentence blamed the machine. Two independent runs,
+minutes apart, on a verified-complete clean clone - both the same, because it was deterministic,
+not environmental.
+
+This is a *composition* defect between two branches that each pass their own gate: H2's drill
+removes boundary migrations, H3 adds one that requires them. Neither is wrong alone.
+
+Both halves are fixed in this round:
+
+- the wait CLASSIFIES (`start-failed` in the same second with the daemon's own message; `exited`
+  with the container's status/exitcode and log tail; `container-gone`; `timeout` with elapsed and
+  log tail) and the drill exits **3**, not 1, for all of them;
+- section 0 derives the dependent drop: a chain file whose text names a dropped migration's
+  mounted filename ON A NON-COMMENT LINE goes with it, to a fixpoint. On the real chain that
+  drops 195 (its guard RAISEs, naming 180 on line 181) and KEEPS
+  190-init-agent-memory-corpus-failclosed.sql, whose only mention of 180 is a `--` comment that
+  says "This file is self-contained even if 180 has not run".
+
+The ceiling was raised anyway (600s, ~37x the contended worst) because it is a ceiling on a
+signal poll, not a sleep, and costs nothing on a healthy run.
+
+**The lesson worth keeping:** the first fix (classification) was what MADE the second one
+findable. A budget raised to 600s without it would have turned a 180-second lie into a
+600-second lie.
 
 ## 8. Residuals of round 3, deliberately not built
 
@@ -189,6 +217,14 @@ saying "180s".
   "OB1 compose missing" are cannot-check conditions by the same argument as the initdb wait -
   they call `Fail` and then `throw`, so a clean-clone problem still exits 1 rather than 3. Their
   MESSAGES already say "proves nothing", so the reader is not misled; the exit code is.
+- **A derived set still has to model dependencies, and a hand-list beat it once.**
+  `scripts/checks/prove-agent-memory-rls.ps1:164-169` builds its RED chain from a HAND-LIST of
+  four boundary migrations, and H3 remembered to add `init-agent-memory-exposure-column.sql`
+  (195) to it - so that script kept booting. H2's drill derived its set by "declares a FORCE",
+  which is the better rule and is exactly why it missed 195: 195 declares none, it only
+  REQUIRES one. Deriving beats hand-listing on completeness and loses on dependency order
+  unless the derivation models both, which it now does. Worth remembering the next time a
+  derivation is preferred to a list on principle.
 - **Section 9's GREEN failure is still classified FAIL.** If the compose db never comes up in the
   green case, the drill says "dependent never started against a correctly migrated db" - a
   sentence about the boundary - rather than blocking. Its budgets are now derived and its elapsed

@@ -46,19 +46,25 @@ function Copy-ObInitChain {
 # that ran out of it as "initdb did not complete in 180s" - a sentence a reader turns into
 # "the boundary is broken" when it means "we never got to look".
 #
-# MEASURED on this machine, 2026-08-31, in the loaded state the drill must survive
-# (81-84 containers of the normal stack running throughout):
+# MEASURED on this machine, 2026-09-01, in the loaded state the drill must survive
+# (82-83 containers of the normal stack running throughout), against the SHIPPED chain -
+# the 29 migrations compose mounts at the pinned OB1 (b604d55), staged from a clean clone:
 #
-#   28-file chain, sequential, n=4 : 8.0 / 5.5 / 5.6 / 5.7 s   (mean 6.2s)
-#   28-file chain, EIGHT AT ONCE   : 11.5 / 11.8 / 12.0 / 12.2 / 12.5 / 12.7 / 13.8 / 14.0 s
-#                                    (n=8, mean 12.6s - the contended case, 8 initdbs racing)
+#   29-file chain, sequential, n=4 : 6.5 / 6.3 / 5.8 / 5.2 s   (mean 6.0s)
+#   29-file chain, EIGHT AT ONCE   : 10.5 / 13.0 / 13.3 / 13.5 / 15.5 / 15.7 / 16.0 / 16.2 s
+#                                    (n=8, mean 14.2s - the contended case, 8 initdbs racing)
 #
-# So initdb is a ~6s job that degrades to ~14s under 8x self-contention: the old 180s was
-# already 13x the worst measurement, and a machine that exceeds it is NOT merely busy -
-# something has gone wrong that a bigger number will not fix. That is the whole reason the
-# outcome below is a CLASSIFICATION and not a boolean.
+# (An earlier 28-file chain from a different OB1 commit measured the same shape: 5.5-8.0s
+# sequential, 11.5-14.0s contended.)
 #
-# The ceiling is nevertheless generous (600s = 43x the contended worst), because this is a
+# So initdb is a ~6s job that degrades to ~16s under 8x self-contention: the old 180s was
+# already 11x the worst measurement, and a machine that exceeds it is NOT merely busy -
+# something has gone wrong that a bigger number will not fix. THAT IS NOT HYPOTHETICAL: the
+# run this was written for was a container that DIED at 7.3s (a migration in the drill's
+# without-the-boundary chain refused to apply), reported by the old code as "initdb did not
+# complete in 180s". A classification, not a boolean, is the whole point.
+#
+# The ceiling is nevertheless generous (600s = 37x the contended worst), because this is a
 # CEILING, not a sleep: the wait returns the instant the entrypoint prints its marker, so
 # raising it costs nothing on a healthy run and only bounds a pathological one. A container
 # that dies, or never starts, is detected in the same second it happens - it does not sit
