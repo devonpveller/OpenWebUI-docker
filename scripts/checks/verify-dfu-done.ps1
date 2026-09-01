@@ -123,9 +123,12 @@ function New-FixtureRepo {
 }
 
 function New-PlanText {
-    # A STRUCTURALLY REAL fixture plan. Section 2's table carries the WHOLE U0-U6 floor -
-    # the same population dfu-done.ps1 pins - and section C.8's clauses 1, 2 and 4 are
-    # present so the pinned floors have the plan's own words to be checked back against.
+    # A STRUCTURALLY REAL fixture plan. Section 2's table carries the WHOLE pinned floor -
+    # U0-U6 plus the U8 section C.9 added, the same population dfu-done.ps1 pins - and
+    # section C.8's clauses 1, 2 and 4 are present so the pinned floors have the plan's
+    # own words to be checked back against. The fixture's clause 1 names U8 because the
+    # fixture is the plan these steps are ABOUT; the real PLAN.md does not name it yet,
+    # which is a genuine red on the real board and must not be papered over here.
     #
     # IT USED TO HOLD ONE PHASE, and that is why the floor defect survived here: a fixture
     # with a single row cannot express "a phase deleted itself out of the population",
@@ -167,7 +170,7 @@ function New-PlanText {
         $header = "| Phase | Validated by | What | Depends on |"
     }
     $rows = @()
-    foreach ($n in 0..6) {
+    foreach ($n in @(0, 1, 2, 3, 4, 5, 6, 8)) {
         $id = "U$n"
         if ($OmitPhases -contains $id) { continue }
         $shown = $id
@@ -192,7 +195,7 @@ function New-PlanText {
 $Prefix
 ### C.8 The success condition
 
-1. **Every U-phase column is satisfied by a check that RAN.** For U0-U6, the section 2
+1. **Every U-phase column is satisfied by a check that RAN.** For U0-U6 and U8, the section 2
    Validated by check re-runs green from a clean checkout of the work line.
 2. **No phase is parked, and every amendment is ACCOUNTED FOR.**
 4. **Nothing is left in flight, and everything is DEPLOYED AND RUNNING**. Every service
@@ -1287,7 +1290,7 @@ try {
 # gives clause 3's doors.
 $fx = $null
 try {
-    $planDrift = (New-PlanText) -replace "For U0-U6, the section 2", "For U0-U5, the section 2"
+    $planDrift = (New-PlanText) -replace "For U0-U6 and U8, the section 2", "For U0-U5, the section 2"
     $fx = New-FixtureRepo -Plan $planDrift -Decisions "# d`n" -Walkthrough "# w`n"
     $r = Invoke-Target -Params @{
         Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
@@ -1546,12 +1549,16 @@ try {
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================
-# STEP P4 - A DUPLICATED ID REFUSES. LAST-WINS answered "which row defines this phase?" by
-# accident. Two rows for one id is a question the document did not answer, and the parser
-# must say so rather than pick a winner.
+# STEP P4 - A ROW THAT ONLY LOOKS LIKE A PHASE ROW IS NOT ONE (PLAN.md 2.1 amendment A3).
+# The parser read the id off the FRONT of the phase cell, so `| **U1 status (2026-08-30)**`
+# - a STATUS ANNOTATION - counted as a second row for U1 and the duplicate guard refused.
+# That is what happened for real at revision 2151193 and it made U4's chain
+# unreconstructable. A3's disposition: the id cell is matched EXACTLY, the annotation is
+# IGNORED - and NAMED, never dropped in silence - while P4b keeps the refusal for the case
+# it was always for, the SAME EXACT id twice.
 # =================================================================================
 Write-Host ""
-Write-Host "STEP P4 clause 7 - two rows for one phase id" -ForegroundColor Cyan
+Write-Host "STEP P4 clause 7 - a status annotation is not a phase row" -ForegroundColor Cyan
 $fx = $null
 try {
     $plan = New-PlanText -ExtraRows "| **U1 status (2026-08-30)** | note | a much weaker check | - |"
@@ -1561,12 +1568,42 @@ try {
         PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
         WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
     }
-    $c = Assert-ClauseNotMet -Step "P4" -ClauseId "7" -Json $r.json -Because "section 2 carries two rows for U1"
+    $c = Get-Clause -Json $r.json -Id "7"
     $pu = Get-Probe -Clause $c -Name "phase-table-unambiguous"
-    [void](Assert-That -What "[P4] the parse REFUSES and names U1" `
-        -Condition ($null -ne $pu -and [string]$pu.verdict -eq "fail" -and [string]$pu.note -match "U1") `
+    [void](Assert-That -What "[P4] the annotation row does NOT make a duplicate - the table still parses" `
+        -Condition ($null -ne $pu -and [string]$pu.verdict -eq "pass") `
         -Detail ("verdict={0} note={1}" -f $(if ($pu) { $pu.verdict } else { "?" }), $(if ($pu) { $pu.note } else { "" })))
-    [void](Assert-That -What "[P4] and no winner is left behind - U1 is not silently defined by one of the two rows" `
+    [void](Assert-That -What "[P4] and the ignored row is NAMED, so 'not read' is never silent" `
+        -Condition ($null -ne $pu -and [string]$pu.note -match "NOT read as phase rows" -and [string]$pu.note -match "U1 status") `
+        -Detail ("note={0}" -f $(if ($pu) { $pu.note } else { "" })))
+    [void](Assert-That -What "[P4] and U1 is still defined by its REAL row - the population did not shrink" `
+        -Condition ($null -ne (Get-Probe -Clause $c -Name "audit-trail-U1")) `
+        -Detail ("probes: {0}" -f ((@($c.probes) | ForEach-Object { $_.name }) -join ",")))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# STEP P4b - AND A GENUINE DUPLICATE STILL REFUSES. Exactness must not become leniency:
+# the SAME EXACT id twice is a question the document did not answer, and LAST-WINS
+# answers it by accident. A3 requires both cases to be drilled, because a fix that only
+# ever stops refusing has traded one silent answer for another.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP P4b clause 7 - two rows with the SAME exact phase id" -ForegroundColor Cyan
+$fx = $null
+try {
+    $plan = New-PlanText -ExtraRows "| **U1** | a second, genuinely duplicated row | a much weaker check | - |"
+    $fx = New-FixtureRepo -Plan $plan -Decisions "# d`n`n## U0 U1 U2 U3 U4 U5 U6 - everything`nnote`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 7; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md"); NotesDir = (Join-Path $fx.root "documentation\notes")
+    }
+    $c = Assert-ClauseNotMet -Step "P4b" -ClauseId "7" -Json $r.json -Because "section 2 carries two rows with the same exact id U1"
+    $pu = Get-Probe -Clause $c -Name "phase-table-unambiguous"
+    [void](Assert-That -What "[P4b] the parse REFUSES and names U1" `
+        -Condition ($null -ne $pu -and [string]$pu.verdict -eq "fail" -and [string]$pu.note -match "U1 has 2 rows") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pu) { $pu.verdict } else { "?" }), $(if ($pu) { $pu.note } else { "" })))
+    [void](Assert-That -What "[P4b] and no winner is left behind - U1 is not silently defined by one of the two rows" `
         -Condition ($null -ne (Get-Probe -Clause $c -Name "phase-floor-present")) `
         -Detail ("probes: {0}" -f ((@($c.probes) | ForEach-Object { $_.name }) -join ",")))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
@@ -2239,6 +2276,155 @@ try {
     [void](Assert-That -What "[X4b] POSITIVE CONTROL - a commit whose claim names the phase AND its check in one statement DOES discharge it" `
         -Condition ($null -ne $p2 -and [string]$p2.verdict -eq "pass") `
         -Detail ("verdict={0} note={1}" -f $(if ($p2) { $p2.verdict } else { "<missing>" }), $(if ($p2) { $p2.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+# =================================================================================
+# THE R-SERIES - ROUND 2. Amendment A3 replaced a LOUD refusal (a duplicated phase id
+# REFUSES) with a QUIET one (a row that only looks like a phase row is ignored). The quiet
+# one is recorded in `$Parse.ignored` - and `ignored` had exactly ONE consumer in the
+# authority, `Add-PhaseFloorProbes`, which only ever sees the CURRENT PLAN.md. So A3 closed
+# a loud refusal in one reader and opened a SILENT DROP in the next one over.
+#   R1  THE SHAPE GREP. Every call site of Get-PhaseTableParse must surface `ignored`.
+#       This is the "then grep for the shape" half of rule 9, and it is what stops a THIRD
+#       reader being added later that repeats the defect. It is a grep, and it says so.
+#   R2  THE BEHAVIOUR. A historical revision whose only U4 cell is
+#       `**U4 (runner) unification**` - declined, so U4 has NO row there - used to be
+#       skipped in silence, moving the chain ORIGINAL forward one revision and dropping a
+#       requirement with no disposition. It must FAIL now, at the phase it belongs to.
+#   R2b THE OTHER HALF, WHICH MUST NOT FAIL: a revision carrying BOTH a real `**U4**` row
+#       and a `**U4 status (...)**` annotation is A3 working - the live 2151193 case.
+#       Reported, never failed, or this drill would be demanding that A3 authorised
+#       greening be reverted.
+#   R3  THE RECOGNISER. `**U4b**` and `**U40**` matched neither the id shape nor the old
+#       `\b`-terminated ignore shape, so they were read as nothing and listed as nothing.
+#       Both must now be NAMED.
+#   R4  THE ADMITTED QUALIFIER. `**U6 (standing)**` must still parse - refusing it would
+#       delete the live `**U7 (standing)**` from two clauses populations - and it must be
+#       NAMED on the probe, because the same allowance admits `**U4 (status ...)**`.
+# =================================================================================
+Write-Host ""
+Write-Host "STEP R1 the shape grep - every reader of Get-PhaseTableParse surfaces ignored" -ForegroundColor Cyan
+$srcLines = @([System.IO.File]::ReadAllText($Target, [System.Text.Encoding]::UTF8) -split "`r?`n")
+$callSites = @()
+for ($i = 0; $i -lt $srcLines.Count; $i++) {
+    if ($srcLines[$i] -notmatch 'Get-PhaseTableParse\s+-Text') { continue }
+    if ($srcLines[$i] -match '^\s*#') { continue }
+    # The consumer must live in the SAME function body: scan forward to the next top-level
+    # `function` (or the end of the file) and require a surfacer in that span. A surfacer is
+    # either a hand-off to Add-PhaseFloorProbes with -Parse, or a direct read of `.ignored`.
+    $surfaced = $false
+    for ($j = $i + 1; $j -lt $srcLines.Count; $j++) {
+        if ($srcLines[$j] -match '^function\s') { break }
+        if ($srcLines[$j] -match '-Parse\s+\$' -or $srcLines[$j] -match '\.ignored') { $surfaced = $true; break }
+    }
+    $callSites += @{ line = ($i + 1); text = $srcLines[$i].Trim(); surfaced = $surfaced }
+}
+[void](Assert-That -What "[R1] the grep found the readers at all - a shape grep that matches nothing is a green check checking nothing" `
+    -Condition ($callSites.Count -ge 3) `
+    -Detail ("call sites found: {0}" -f $callSites.Count))
+$unsurfaced = @($callSites | Where-Object { -not $_.surfaced })
+[void](Assert-That -What "[R1] EVERY call site of Get-PhaseTableParse surfaces ignored - a reader that keeps only problems drops declined rows in silence" `
+    -Condition ($unsurfaced.Count -eq 0) `
+    -Detail ("unsurfaced: {0}" -f (($unsurfaced | ForEach-Object { "{0}: {1}" -f $_.line, $_.text }) -join " | ")))
+[void](Assert-That -What "[R1] and the dead Get-PhaseTable wrapper - a door into the parser that discarded both problems and ignored - is gone" `
+    -Condition (@($srcLines | Where-Object { $_ -match '^\s*function\s+Get-PhaseTable\s*\{' }).Count -eq 0) `
+    -Detail "a phases-only wrapper is exactly the third reader this grep exists to prevent")
+
+Write-Host ""
+Write-Host "STEP R2 clause 2 - a historical revision whose ONLY U4 cell was declined" -ForegroundColor Cyan
+$fx = $null
+try {
+    # rev1: U4 id cell carries trailing text, so it is DECLINED - U4 has no row at all
+    #       here - and its column states a requirement.
+    # rev2: a clean `**U4**` row whose column has DROPPED that requirement, with no
+    #       disposition recorded anywhere.
+    $fx = New-FixtureRepo -Plan (New-PlanText -SuffixPhases @{ "U4" = "(runner) unification" } `
+                                              -Validated @{ "U4" = "the quadrant comparison is required; the oracle fires once" }) `
+                          -Decisions "# fixture decisions`n" -Walkthrough "# w`n"
+    [System.IO.File]::WriteAllText((Join-Path $fx.dfu "PLAN.md"),
+        (New-PlanText -Validated @{ "U4" = "the oracle fires once" }), [System.Text.UTF8Encoding]::new($false))
+    [void](Invoke-InDir -Dir $fx.root -Exe "git" -Arguments @("commit", "-qam", "unqualify U4 id cell"))
+    $r = Invoke-Target -Params @{
+        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+    }
+    $c = Assert-ClauseNotMet -Step "R2" -ClauseId "2" -Json $r.json -Because "the revision holding U4 original column was skipped because its id cell was declined"
+    $p = Get-Probe -Clause $c -Name "chain-U4-declined-rows"
+    [void](Assert-That -What "[R2] chain-U4-declined-rows FAILS and names the lost step - a declined row in HISTORY is as loud as one in the current file" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "fail" -and [string]$p.note -match "THE STEP IS LOST") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "<missing>" }), $(if ($p) { $p.note } else { "" })))
+    [void](Assert-That -What "[R2] and the declined cell is QUOTED, not merely counted" `
+        -Condition ($null -ne $p -and [string]$p.note -match 'runner\) unification') `
+        -Detail ("note={0}" -f $(if ($p) { $p.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP R2b clause 2 - a declined ANNOTATION beside a real row is reported, NOT failed" -ForegroundColor Cyan
+$fx = $null
+try {
+    # The live 2151193 shape: a genuine `**U4**` row AND a `**U4 status (...)**` annotation
+    # in the same table. A3 exists to let that parse; this step exists so the fix for R2
+    # cannot quietly take it back.
+    $fx = New-FixtureRepo -Plan (New-PlanText -ExtraRows "| **U4 status (2026-08-30)** | annotation | not a phase row | - |") `
+                          -Decisions "# fixture decisions`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 2; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+        Dispositions = (Join-Path $fx.root "no-such-dispositions.json")
+    }
+    $c = Get-Clause -Json $r.json -Id "2"
+    $p = Get-Probe -Clause $c -Name "chain-U4-declined-rows"
+    [void](Assert-That -What "[R2b] the annotation is REPORTED beside a real row and the probe PASSES - A3 authorised greening is not reverted" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "pass" -and [string]$p.note -match "the step is intact") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "<missing>" }), $(if ($p) { $p.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP R3 clause 1 - **U4b** and **U40** are NAMED, not read as nothing" -ForegroundColor Cyan
+$fx = $null
+try {
+    $extra = "| **U4b** | a sub-phase someone invented | a check | - |`n| **U40** | a typo | a check | - |"
+    $fx = New-FixtureRepo -Plan (New-PlanText -ExtraRows $extra) -Decisions "# d`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Get-Clause -Json $r.json -Id "1"
+    $p = Get-Probe -Clause $c -Name "phase-table-unambiguous"
+    [void](Assert-That -What "[R3] **U4b** is listed as a NAMED ignore - \b does not fire between a digit and a letter" `
+        -Condition ($null -ne $p -and [string]$p.note -match "U4b") `
+        -Detail ("note={0}" -f $(if ($p) { $p.note } else { "<missing probe>" })))
+    [void](Assert-That -What "[R3] **U40** is listed as a NAMED ignore - \b does not fire between two digits either" `
+        -Condition ($null -ne $p -and [string]$p.note -match "U40") `
+        -Detail ("note={0}" -f $(if ($p) { $p.note } else { "<missing probe>" })))
+    [void](Assert-That -What "[R3] and neither was READ as a phase row - the table still parses to one unambiguous answer" `
+        -Condition ($null -ne $p -and [string]$p.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($p) { $p.verdict } else { "?" }), $(if ($p) { $p.note } else { "" })))
+} finally { if ($fx) { Remove-Scratch -Path $fx.root } }
+
+Write-Host ""
+Write-Host "STEP R4 clause 1 - an ADMITTED parenthesised qualifier is named on the probe" -ForegroundColor Cyan
+$fx = $null
+try {
+    $fx = New-FixtureRepo -Plan (New-PlanText -SuffixPhases @{ "U6" = "(standing)" }) -Decisions "# d`n" -Walkthrough "# w`n"
+    $r = Invoke-Target -Params @{
+        Only = 1; RepoRoot = $fx.root; WorkLine = $fx.line; SkipLive = $true
+        PlanPath = (Join-Path $fx.dfu "PLAN.md"); DecisionsPath = (Join-Path $fx.dfu "DECISIONS.md")
+        WalkthroughPath = (Join-Path $fx.dfu "WALKTHROUGH.md")
+    }
+    $c = Get-Clause -Json $r.json -Id "1"
+    $pu = Get-Probe -Clause $c -Name "phase-table-unambiguous"
+    $pf = Get-Probe -Clause $c -Name "phase-floor-present"
+    [void](Assert-That -What "[R4] POSITIVE CONTROL - **U6 (standing)** is still READ as U6, or the live **U7 (standing)** would leave two populations" `
+        -Condition ($null -ne $pf -and [string]$pf.verdict -eq "pass") `
+        -Detail ("verdict={0} note={1}" -f $(if ($pf) { $pf.verdict } else { "?" }), $(if ($pf) { $pf.note } else { "" })))
+    [void](Assert-That -What "[R4] and the ADMITTED qualifier is NAMED - the same allowance admits **U4 (status ...)**, so it may not be silent" `
+        -Condition ($null -ne $pu -and [string]$pu.note -match "ADMITTED" -and [string]$pu.note -match "standing") `
+        -Detail ("note={0}" -f $(if ($pu) { $pu.note } else { "<missing probe>" })))
 } finally { if ($fx) { Remove-Scratch -Path $fx.root } }
 
 # =================================================================================

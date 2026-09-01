@@ -7,7 +7,7 @@ name: ci
 
 on:
   push:
-    branches: [main, develop, "feature/**", "refactor/**", "update/**"]
+    branches: [main, development, "feature/**", "refactor/**", "update/**"]
   pull_request:
 
 jobs:
