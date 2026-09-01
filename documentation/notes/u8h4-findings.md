@@ -780,11 +780,29 @@ printed `INTEGRITY: the audited tree is byte-identical before and after this run
 `verify-dfu-done.ps1` reached **DRILL GREEN — 216 assertions, 0 failed, 8 of 8 declared
 clauses with a constructed failing case**, exit 0, 563s.
 
-**Per-clause buckets are IDENTICAL on both platforms** — 8 of 8 match
-(`unmet, unmet, unevaluated, unmet, unmet, manual-pending, unmet, unevaluated`). Recorded
-as a measurement and **not promoted into a pin**: `ci.yml`'s reasoning for leaving the map
-unpinned still stands, because a hosted runner has `python` and this container does not, so
-clauses 1 and 5 will legitimately land differently there.
+**A claim I wrote and then had to withdraw, kept here because withdrawing it is the
+finding.** I first compared the Windows run *in the worktree* against the Linux run *in a
+scratch clone*, got 8 of 8 identical buckets, and wrote "per-clause buckets are IDENTICAL
+on both platforms". That was a comparison of two **different trees**, so it was not a
+platform comparison at all. Run properly — the same clone `f387e5e`, both platforms —
+**clause 4 differs**:
+
+| | Windows | Linux |
+|---|---|---|
+| clause 4 | `unevaluated` | `unmet` |
+| census | `unmet 4, unevaluated 3, manual_pending 1` | `unmet 5, unevaluated 2, manual_pending 1` |
+
+and the reason is the probe environment, not the script: in the container `clean-repo`
+reports 475 dirty paths (the clone was checked out by Windows git and read through a bind
+mount by Linux git, so every LF-in-index file looks modified), `gitlink-reachable-on-remote`
+is indeterminate because `origin` is a `D:\` path the container cannot reach, and the andon
+board could not run. A hosted runner has none of those three conditions and would differ
+again.
+
+So the map is environment-dependent as well as platform-dependent, which is a **stronger**
+reason for `ci.yml`'s existing decision not to pin it than the one that decision was made
+on. What the step asserts instead — census balances, `unrecognised == 0`, `integrity.ok` —
+held on **every** run here, Windows and Linux, worktree and clone.
 
 ### 15.5 The re-sweep — run, not grepped, and it found what the grep did not
 
@@ -865,3 +883,31 @@ launched with `Set-StrictMode -Version Latest` explicitly.
 | rebase conflict | `.github/workflows/ci.yml` only — the `develop` -> `development` rename landed independently on the work line as `5e5ac6f`; the H4 comment was kept and re-attributed to it, and the resolved file was re-parsed with PyYAML (14 jobs; push branches `[main, development, feature/**, refactor/**, update/**]`) |
 | Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04` plus one layer adding `git`, tagged `dfu-linux-probe:wt-u8h4` — a test tag, never `:local`, never attached to an `ai-stack_*` network |
 | production touched | none. No container of the live stack was started, stopped or written to; every dfu-done run used `-SkipLive` |
+| clean clone | `git -c core.longpaths=true clone --no-local -b work/u8h4 --single-branch`, then **`git config core.longpaths true` INSIDE the clone** before any other git command |
+| commit validated | `f387e5e506119d690e6da4a30767c3a6d207b885` |
+| `.github` tree hash | `9f09a9f10921d5ec7f89c7da2b14f88ddde2414e` |
+| `dfu-done.ps1` blob | `09a8f1e3934978a75444ae2df616a688a8f12d59` |
+| `git status --porcelain` | **EMPTY** — 0 lines, both before and after `submodule update --init --recursive`; `git submodule status` shows OB1 at the recorded `b604d555` with no `+`/`-` marker |
+| from that clone | Linux: run-check rc=0, dfu-done **exit 7**, classified GREEN, `balances=True unrecognised=0 integrity.ok=True`. Windows: **exit 7** in 121s, `balances=True unrecognised=0 integrity.ok=True`, write-lock applied, 2 locked directories per command |
+
+**A near-miss I want on the record, because I nearly wrote the wrong cause down.** After
+`git config core.longpaths true` in the clone, `git submodule update --init --recursive`
+failed with `Failed to clone 'OB1' a second time, aborting`. Adding
+`-c core.longpaths=true -c protocol.file.allow=always` made it work, and I wrote it up as
+"the MAX_PATH trap, one level deeper" — plausible, consistent with the round-2 note, and
+**not what the error said**. Re-run to get the real message:
+
+```
+fatal: transport 'file' not allowed
+fatal: clone of 'D:/.../OB1' into submodule path '.../v3/clone/OB1' failed
+```
+
+`protocol.file.allow` had been set with `git config` in the parent clone. **A submodule's
+clone is a separate git process and does not read the superproject's config for this**;
+`-c` does reach it, because `-c` travels to child processes through `GIT_CONFIG_PARAMETERS`.
+So the real rule is: **`-c` for anything a submodule operation must honour, not
+`git config` in the parent** — which is what `dfu-done.ps1`'s own `New-CleanCheckout`
+already does (`git -c protocol.file.allow=always -c core.longpaths=true submodule update`),
+and is why that path works. The lesson is the same one this file keeps recording in other
+forms: an explanation that fits is not a measurement. I had the fix and reasoned backwards
+to a cause instead of reading the error.

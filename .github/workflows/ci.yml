@@ -418,13 +418,16 @@ jobs:
       # the tree it was auditing. Those are dfu-done's refusing conditions; a refactor that
       # broke the script would show up in them long before it changed the exit code.
       # Deliberately NOT pinned: the per-clause bucket map. Pinning a map nobody has observed
-      # on the runner would be the snapshot H4 exists to prevent, and a Linux runner will
-      # legitimately place some clauses differently (the walkthrough invokes a Windows venv
-      # python). It HAS since been measured on Linux — pwsh 7.4 in a container, 2026-09-01
-      # — and all 8 clauses landed in the same bucket as on Windows. That is recorded in
-      # documentation/notes/u8h4-findings.md section 15.4 as a MEASUREMENT and deliberately
-      # NOT promoted into a pin: that container has no python and a hosted runner does, so
-      # clauses 1 and 5 can still land differently there.
+      # on the runner would be the snapshot H4 exists to prevent. It was measured on BOTH
+      # platforms out of ONE clean clone on 2026-09-01 (pwsh 7.4 in a container vs Windows
+      # PowerShell 5.1) and the two DISAGREE: clause 4 is `unevaluated` on Windows and
+      # `unmet` on Linux, because in that container the bind-mounted checkout reads as dirty,
+      # `origin` is a path it cannot reach, and the andon board cannot run. A hosted runner
+      # has none of those three conditions and will differ again. So the map is
+      # environment-dependent as well as platform-dependent - a stronger reason not to pin it
+      # than the one this decision was originally made on. What IS asserted below - the
+      # census balances, nothing lands in `unrecognised`, the tree did not move - held on
+      # every run of both platforms. See documentation/notes/u8h4-findings.md section 15.4.
       #
       # THIS IS THE ONE STEP THAT MUST ASSERT SOMETHING BEFORE THE CONTRACT IS CONSULTED, so
       # it uses run-check.ps1's -CodeFile form: run-check still proves the script RAN and
