@@ -141,6 +141,27 @@ jobs:
   #    runbook section this wiring implements is explicit that a retry loop or an `|| true`
   #    on these deletes the only checks watching the boundary.
   #
+  # 1b. AND A CHECK THAT DID NOT RUN IS NOT A CHECK THAT PASSED. EVERY WIRED STEP BELOW GOES
+  #    THROUGH `.github/ci/run-check.ps1`, and none of them invokes a check directly. The
+  #    first shape of this wiring did - `& ./drill.ps1` then `$c = $LASTEXITCODE` then
+  #    `-Code $c` - and it turned a run that never happened into a GREEN job, two ways, both
+  #    measured under pwsh 7.4 on Linux:
+  #      * $LASTEXITCODE is $null when nothing set it, and PowerShell binds $null to [int] as
+  #        0, so the classifier's "-Code must be >= 0" sentinel could never fire and every
+  #        check whose green set contains 0 passed.
+  #      * worse, and NOT closed by typing the parameter: $LASTEXITCODE is STALE, not null,
+  #        whenever the check ran any native command before it died. A drill that runs docker
+  #        successfully and then dies leaves the caller holding 0 and `$?` = True.
+  #    That was live. `drill-app-role-not-superuser.ps1` cleaned up through cmd.exe, which
+  #    ubuntu-latest does not have; every abort path is `Cleanup; exit 2` and the trap was
+  #    itself `Cleanup; exit 2`, so the failure recursed and the drill died without reaching
+  #    any exit statement. The first real run on a runner would have annotated "the drill RAN
+  #    and every probe passed ... PULL THIS PIN" and gone green. run-check.ps1 runs each check
+  #    in a CHILD PROCESS with a poisoned exit code and a top-level trap, and REQUIRES a
+  #    completion marker before any code is classified; expected-exit.ps1 takes -Code as TEXT
+  #    and refuses an empty one. Read the header of run-check.ps1 before changing a step, and
+  #    keep the shape: trap, sentinel, run-check, `$rc -ne 0 -and $rc -ne 1` is red.
+  #
   # 2. CANNOT-CHECK IS NOT THE SAME AS FAILED. `assert-rls-force.sh` and the RLS boot drill
   #    reserve exit 3 for "the drill could not build the environment it needs". It fails the
   #    build — CI could not do its job — but the annotation says the boundary was never
@@ -181,6 +202,10 @@ jobs:
   # Runner facts this wiring depends on, checked against actions/runner-images
   # images/ubuntu/Ubuntu2404-Readme.md on 2026-09-01 rather than assumed: PowerShell 7.6.5,
   # Docker Client/Server 28.0.4, Docker Compose 2.38.2, Git 2.55.0, python-is-python3.
+  # Measured 2026-09-01 in mcr.microsoft.com/powershell:7.4-ubuntu-22.04: `Join-Path` on
+  # Linux NORMALISES a backslash separator, so `Join-Path $repo 'OB1\docker'` resolves
+  # correctly there. What does NOT survive is `cmd`, `2>nul`, and `-like` patterns built
+  # from backslashes - see documentation/notes/u8h4-findings.md for the sweep.
   # `TEMP` is set per job because these scripts stage throwaway fixtures under `$env:TEMP`,
   # and that variable does not exist on Linux. OB1 is checked out because the drills build
   # from the RECORDED GITLINK; it is a PUBLIC repo and the pinned commit is on its remote,
@@ -188,7 +213,7 @@ jobs:
   # =========================================================================================
 
   dfu-static-checks:
-    name: "DFU H4 — static gates and the machinery's own self-tests"
+    name: "DFU H4 - static gates and the machinery's own self-tests"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -197,53 +222,68 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the corpus gate scans OB1's recipes
+      - name: the exit-code contract, printed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          trap { Write-Host "::error::the exit-code contract could not even be printed - $($_.Exception.Message)"; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/expected-exit.ps1 -List
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0) { Write-Host "::error::expected-exit.ps1 -List exited [$rc]; the contract this whole section reads could not be listed."; exit 1 }
       - name: the exit-code contract's own self-test
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./.github/ci/expected-exit.ps1 -SelfTest
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -List
-          exit $c
-      - name: gap-ledger self-test — closing a gap must not turn the build red
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check expected-exit-selftest -Script './.github/ci/expected-exit.ps1' -ScriptArgs '-SelfTest' -Command './.github/ci/expected-exit.ps1 -SelfTest'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
+      - name: gap-ledger self-test - closing a gap must not turn the build red
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestLedger
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check boundary-drill-selftest-ledger -Code $c `
-            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestLedger'
-          exit $LASTEXITCODE
-      - name: vacuity-guard self-test — an empty universe cannot reach PASS
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check boundary-drill-selftest-ledger -Script './scripts/checks/drill-personal-plane-exclusion.ps1' -ScriptArgs '-SelfTestLedger' -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestLedger'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
+      - name: vacuity-guard self-test - an empty universe cannot reach PASS
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestVacuity
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check boundary-drill-selftest-vacuity -Code $c `
-            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestVacuity'
-          exit $LASTEXITCODE
-      - name: corpus exposure producers — every recognised insert site states its plane
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check boundary-drill-selftest-vacuity -Script './scripts/checks/drill-personal-plane-exclusion.ps1' -ScriptArgs '-SelfTestVacuity' -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -SelfTestVacuity'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
+      - name: corpus exposure producers - every recognised insert site states its plane
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/check-corpus-exposure-producers.ps1
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check corpus-exposure-producers -Code $c `
-            -Command './scripts/checks/check-corpus-exposure-producers.ps1'
-          exit $LASTEXITCODE
-      - name: corpus exposure producers — the gate's own planted cases
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check corpus-exposure-producers -Script './scripts/checks/check-corpus-exposure-producers.ps1' -Command './scripts/checks/check-corpus-exposure-producers.ps1'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
+      - name: corpus exposure producers - the gate's own planted cases
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/check-corpus-exposure-producers.ps1 -SelfTest
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check corpus-exposure-producers-selftest -Code $c `
-            -Command './scripts/checks/check-corpus-exposure-producers.ps1 -SelfTest'
-          exit $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check corpus-exposure-producers-selftest -Script './scripts/checks/check-corpus-exposure-producers.ps1' -ScriptArgs '-SelfTest' -Command './scripts/checks/check-corpus-exposure-producers.ps1 -SelfTest'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
 
   dfu-boundary-drill:
-    name: "DFU H4 — personal-plane exclusion drill (U5)"
+    name: "DFU H4 - personal-plane exclusion drill (U5)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -260,14 +300,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check boundary-drill -Code $c `
-            -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps'
-          exit $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check boundary-drill -Script './scripts/checks/drill-personal-plane-exclusion.ps1' -ScriptArgs '-AcceptDispositionedGaps' -Command './scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
 
   dfu-rls-boot-drill:
-    name: "DFU H4 — RLS boot assertion drill (H2)"
+    name: "DFU H4 - RLS boot assertion drill (H2)"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -280,14 +321,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/drill-rls-boot-assertion.ps1
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check rls-boot-drill -Code $c `
-            -Command './scripts/checks/drill-rls-boot-assertion.ps1'
-          exit $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check rls-boot-drill -Script './scripts/checks/drill-rls-boot-assertion.ps1' -Command './scripts/checks/drill-rls-boot-assertion.ps1'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
 
   dfu-app-role-drill:
-    name: "DFU H4 — app role is not a superuser (H1)"
+    name: "DFU H4 - app role is not a superuser (H1)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -301,19 +343,27 @@ jobs:
       # at the recorded gitlink, so there is nothing to drill until H1's OB1 commit is
       # pushed and the gitlink bumped. The job RUNS the drill and lets it say so; when the
       # files land, exit 0 arrives as a NAG telling whoever sees it to pull the pin in
-      # .github/ci/expected-exit.ps1. Exit 1 — a probe disagreeing — is red either way.
+      # .github/ci/expected-exit.ps1. Exit 1 - a probe disagreeing - is red either way.
+      #
+      # AND EXIT 2 HAS TO BE THE DRILL SAYING IT, NOT THE JOB ASSUMING IT. Until 2026-09-01
+      # this drill cleaned up through cmd.exe, which ubuntu-latest does not have, so on a
+      # runner it died inside its own trap without ever reaching an exit statement - and the
+      # wiring reported the stale zero as "the drill RAN and every probe passed. PULL THIS
+      # PIN". The drill is fixed and the wiring now refuses a run that produced no code of
+      # its own; both halves are in documentation/notes/u8h4-findings.md.
       - name: drill-app-role-not-superuser.ps1
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/drill-app-role-not-superuser.ps1
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check app-role-drill -Code $c `
-            -Command './scripts/checks/drill-app-role-not-superuser.ps1'
-          exit $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check app-role-drill -Script './scripts/checks/drill-app-role-not-superuser.ps1' -Command './scripts/checks/drill-app-role-not-superuser.ps1'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
 
   dfu-prove-rls:
-    name: "DFU H4 — the exposure boundary, proved in the database"
+    name: "DFU H4 - the exposure boundary, proved in the database"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -329,17 +379,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          & ./scripts/checks/prove-agent-memory-rls.ps1 -SkipLive
-          $c = $LASTEXITCODE
-          & ./.github/ci/expected-exit.ps1 -Check prove-rls -Code $c `
-            -Command './scripts/checks/prove-agent-memory-rls.ps1 -SkipLive'
-          exit $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check prove-rls -Script './scripts/checks/prove-agent-memory-rls.ps1' -ScriptArgs '-SkipLive' -Command './scripts/checks/prove-agent-memory-rls.ps1 -SkipLive'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
+          exit $rc
 
   dfu-done:
-    name: "DFU H4 — the board (dfu-done.ps1 runnable clauses)"
+    name: "DFU H4 - the board (dfu-done.ps1 runnable clauses)"
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # SERIALISATION, per PROMOTION-RUNBOOK.md — see note 4 in the block above. Not because
+    # SERIALISATION, per PROMOTION-RUNBOOK.md - see note 4 in the block above. Not because
     # these two jobs share a machine here (they do not), but so the ordering survives a move
     # to a runner that can see the live plane.
     needs: [dfu-prove-rls]
@@ -356,7 +407,7 @@ jobs:
       # -SkipLive because clause 3 plants a personal-exposure fixture in openbrain-db by
       # default and there is no live database in CI. Exit 7 (board FAILED) is the pinned,
       # expected outcome today and MUST NOT read as a broken build; exit 1 (usage or
-      # configuration error — nothing was judged) must.
+      # configuration error - nothing was judged) must.
       #
       # AND THE EXIT CODE ALONE WOULD BE A THIN GATE, so this step also asserts the
       # properties that make the board's own verdict trustworthy on ANY platform: the census
@@ -368,13 +419,28 @@ jobs:
       # invokes a Windows venv python), and pinning a map nobody has observed on the runner
       # would be the snapshot H4 exists to prevent. Recorded as a follow-up in
       # documentation/notes/u8h4-findings.md.
+      #
+      # THIS IS THE ONE STEP THAT MUST ASSERT SOMETHING BEFORE THE CONTRACT IS CONSULTED, so
+      # it uses run-check.ps1's -CodeFile form: run-check still proves the script RAN and
+      # reported a code of its own, writes that code out, and defers the classification. The
+      # census assertions run in between. A board that cannot account for itself never
+      # reaches expected-exit.ps1 at all.
       - name: dfu-done.ps1 -SkipLive
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
-          $log = Join-Path $env:RUNNER_TEMP 'dfu-done.json'
-          & ./scripts/checks/dfu-done.ps1 -SkipLive -Json | Out-File -LiteralPath $log -Encoding utf8
-          $c = $LASTEXITCODE
+          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
+          $log   = Join-Path $env:RUNNER_TEMP 'dfu-done.json'
+          $codef = Join-Path $env:RUNNER_TEMP 'dfu-done.code'
+          Remove-Item -LiteralPath $codef -Force -ErrorAction SilentlyContinue
+
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/run-check.ps1 -Check dfu-done -Script './scripts/checks/dfu-done.ps1' -ScriptArgs '-SkipLive','-Json' -Stdout $log -CodeFile $codef -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (the check ran) or 1 (it did not), so this step reached no verdict and must not pass."; exit 1 }
+          if ($rc -ne 0) { exit 1 }
+          if (-not (Test-Path -LiteralPath $codef)) { Write-Host "::error::run-check.ps1 reported that dfu-done ran but wrote no exit code. Nothing was judged."; exit 1 }
+          $c = (Get-Content -LiteralPath $codef -Raw).Trim()
           Write-Host "dfu-done.ps1 -SkipLive -Json exited $c"
 
           $bad = 0
@@ -413,9 +479,11 @@ jobs:
             Write-Host "::error::dfu-done ran, but $bad integrity assertion(s) about the RUN failed. The exit-code contract is not consulted: a board that cannot account for itself does not get to be 'as pinned'."
             exit 1
           }
-          & ./.github/ci/expected-exit.ps1 -Check dfu-done -Code $c `
-            -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
-          exit $LASTEXITCODE
+          $global:LASTEXITCODE = 199
+          & ./.github/ci/expected-exit.ps1 -Check dfu-done -Code $c -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
+          $ec = $LASTEXITCODE
+          if ($ec -ne 0 -and $ec -ne 1) { Write-Host "::error::the exit-code contract exited [$ec]; it reports only 0 or 1, so this step reached no verdict."; exit 1 }
+          exit $ec
 
   dfu-h4-gate:
     name: "DFU H4 — gate: no job here may be skipped into looking green"

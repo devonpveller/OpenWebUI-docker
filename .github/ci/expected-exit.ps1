@@ -41,6 +41,7 @@
 #
 # Usage:
 #   .\expected-exit.ps1 -Check dfu-done -Code 7 -Command "dfu-done.ps1 -SkipLive"
+#   (-Code is TEXT. An absent or non-numeric value is REFUSED, never read as 0.)
 #   .\expected-exit.ps1 -List        # print the whole contract
 #   .\expected-exit.ps1 -SelfTest    # force the classifier through every outcome
 #
@@ -50,7 +51,20 @@
 [CmdletBinding()]
 param(
     [string]$Check = "",
-    [int]$Code = -1,
+    # -Code IS TEXT, NOT AN INTEGER, AND THAT IS THE WHOLE POINT.
+    #
+    # This was [int]$Code = -1, with an `if ($Code -lt 0)` sentinel below meaning "nobody gave
+    # me a code". THAT SENTINEL COULD NEVER FIRE. A step captured `$c = $LASTEXITCODE` and
+    # passed `-Code $c`, and when the check never reached an exit statement $c was $null -
+    # which POWERSHELL BINDS TO [int] AS 0 (measured under pwsh 7.4/Linux and PS 5.1). So the
+    # absence of a run arrived here as the integer zero, and every check whose Green set
+    # contains 0 PASSED on a run that never happened. Eight of the nine wired checks.
+    #
+    # As text, an absent value arrives as an empty string and is REFUSED by name. The cast to
+    # a number happens after that test, never before it - see Resolve-ReportedCode.
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Code = $null,
     [string]$Command = "",
     [switch]$List,
     [switch]$SelfTest
@@ -85,6 +99,18 @@ $script:Contract = [ordered]@{
             2 = "an UNDISPOSITIONED gap fired. Either the tree regressed or a new property went unmet; name it in GAP_DISPOSITIONS before this run can be read as expected"
         }
         Doc     = "documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md, 'The drill's exit code, and what CI reads (C.9 H4)'"
+    }
+
+    # THE CONTRACT'S OWN SELF-TEST, pinned like everything else so that this file being
+    # renamed away is RED rather than a step that quietly classifies nothing.
+    "expected-exit-selftest" = @{
+        Green   = @(0)
+        Nag     = @{}
+        Meaning = @{
+            0 = "green, nag, red, no-contract AND 'no code was reported' are all reachable, and no value passes by default"
+            1 = "the classifier or its absent-code refusal no longer holds - the wiring could pass a check that never ran"
+        }
+        Doc     = ".github/ci/expected-exit.ps1 -SelfTest"
     }
 
     "boundary-drill-selftest-ledger" = @{
@@ -233,6 +259,24 @@ function Get-Outcome {
     return "red"
 }
 
+# THE ONLY PLACE A REPORTED CODE BECOMES A NUMBER. Returns $null - never 0 - for anything
+# that is not an exit code a check actually reported: an absent value, an empty or whitespace
+# string, a non-integer, a negative. Pure, so -SelfTest forces it through all of them.
+#
+# It is separate from the classifier because the two questions are different, and the defect
+# lived in conflating them: "did this check report a code" comes FIRST, and only then "what
+# does the contract say that code means". A classifier handed 0 cannot tell those apart.
+function Resolve-ReportedCode {
+    param([AllowNull()][AllowEmptyString()]$Raw)
+    if ($null -eq $Raw) { return $null }
+    $s = [string]$Raw
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    $n = 0
+    if (-not [int]::TryParse($s.Trim(), [ref]$n)) { return $null }
+    if ($n -lt 0) { return $null }
+    return $n
+}
+
 function Get-Meaning {
     param([string]$CheckName, [int]$ExitCode)
     if (-not $script:Contract.Contains($CheckName)) { return "" }
@@ -263,7 +307,33 @@ if ($SelfTest) {
         @{ Check = "boundary-drill"; Code = 1;  Want = "red";         Why = "the ledger rotted" },
         @{ Check = "no-such-check";  Code = 0;  Want = "no-contract"; Why = "a check with no pinned contract REFUSES - exit 0 must not buy a pass by default" }
     )
+    # THE ABSENT CODE, FORCED THROUGH THE RESOLVER. These are the cases the old [int]$Code
+    # could not even represent: each one used to arrive as the integer 0 and buy a pass.
+    $codeCases = @(
+        @{ Raw = $null; Want = $null; Why = 'an ABSENT code. $LASTEXITCODE is $null when the check never reached an exit statement, and [int]$null is 0 - the defect this refuses by name' },
+        @{ Raw = "";    Want = $null; Why = "an empty string - the same absence, once a step passes it as text" },
+        @{ Raw = "   "; Want = $null; Why = "whitespace only" },
+        @{ Raw = "abc"; Want = $null; Why = "not a number at all" },
+        @{ Raw = "-1";  Want = $null; Why = "negative - no process reports one, so it is a harness value, not a verdict" },
+        @{ Raw = "0";   Want = 0;     Why = "a real zero, reported as text by a check that ran" },
+        @{ Raw = "7";   Want = 7;     Why = "a real seven" },
+        @{ Raw = " 2 "; Want = 2;     Why = "a real code with whitespace around it" }
+    )
+
     $bad = 0
+    Write-Host "=== -SelfTest: an absent exit code can never become a number ==="
+    foreach ($c in $codeCases) {
+        $got = Resolve-ReportedCode -Raw $c.Raw
+        $shown = $(if ($null -eq $c.Raw) { '$null' } else { "'" + $c.Raw + "'" })
+        if ($got -eq $c.Want -and ($null -eq $got) -eq ($null -eq $c.Want)) {
+            Write-Host ("  OK   -Code {0,-8} -> {1,-6} ({2})" -f $shown, $(if ($null -eq $got) { "REFUSE" } else { $got }), $c.Why)
+        } else {
+            Write-Host ("  BAD  -Code {0,-8} -> {1}, wanted {2}" -f $shown, $got, $c.Want)
+            $bad++
+        }
+    }
+
+    Write-Host ""
     Write-Host "=== -SelfTest: the classifier forced through every outcome ==="
     foreach ($c in $cases) {
         $got = Get-Outcome -CheckName $c.Check -ExitCode $c.Code
@@ -315,39 +385,43 @@ if ([string]::IsNullOrWhiteSpace($Check)) {
     Write-Annotation -Level error -Message "expected-exit.ps1: -Check is required (or pass -List / -SelfTest). Nothing was classified."
     exit 1
 }
-if ($Code -lt 0) {
-    Write-Annotation -Level error -Message "expected-exit.ps1: -Code is required and must be >= 0. Nothing was classified."
+# THE CHECK MUST HAVE REPORTED A CODE BEFORE THE CONTRACT IS CONSULTED AT ALL.
+$resolved = Resolve-ReportedCode -Raw $Code
+if ($null -eq $resolved) {
+    $shown = $(if ($null -eq $Code) { '(absent)' } else { "'" + $Code + "'" })
+    Write-Annotation -Level error -Message "expected-exit.ps1: '$Check' REPORTED NO USABLE EXIT CODE ($shown), so it DID NOT RUN to a verdict. Nothing was classified, and an unclassified check is not a passing one. An absent PowerShell exit code is `$null and `$null casts to the integer 0 - which is exactly why this is refused here as text instead of being read as a pass. See .github/ci/run-check.ps1, which is the only shape a wired step should use."
+    Write-Summary ("| ``$Check`` | $shown | DID NOT RUN | no exit code was reported - nothing was classified |")
     exit 1
 }
-
-$outcome = Get-Outcome -CheckName $Check -ExitCode $Code
-$meaning = Get-Meaning -CheckName $Check -ExitCode $Code
+$Code = $null   # from here on the integer is the only thing anything reads
+$outcome = Get-Outcome -CheckName $Check -ExitCode $resolved
+$meaning = Get-Meaning -CheckName $Check -ExitCode $resolved
 $cmdText = $(if ($Command) { $Command } else { "(command not recorded)" })
 
 switch ($outcome) {
     "green" {
-        Write-Annotation -Level notice -Message "$Check exited $Code as pinned: $meaning"
-        Write-Summary ("| ``$Check`` | $Code | PASS | $meaning |")
+        Write-Annotation -Level notice -Message "$Check exited $resolved as pinned: $meaning"
+        Write-Summary ("| ``$Check`` | $resolved | PASS | $meaning |")
         Write-Host "  ran: $cmdText"
         exit 0
     }
     "nag" {
-        $why = [string]$script:Contract[$Check].Nag[$Code]
-        Write-Annotation -Level warning -Message "$Check exited $Code, which is BETTER than the pinned state. $why"
-        Write-Summary ("| ``$Check`` | $Code | PASS (PULL THIS PIN) | $why |")
+        $why = [string]$script:Contract[$Check].Nag[$resolved]
+        Write-Annotation -Level warning -Message "$Check exited $resolved, which is BETTER than the pinned state. $why"
+        Write-Summary ("| ``$Check`` | $resolved | PASS (PULL THIS PIN) | $why |")
         Write-Host "  ran: $cmdText"
         Write-Host "  contract: $($script:Contract[$Check].Doc)"
         exit 0
     }
     "no-contract" {
         Write-Annotation -Level error -Message "expected-exit.ps1 has NO CONTRACT for check '$Check'. A check nobody pinned cannot pass by default - add an entry, do not route around this."
-        Write-Summary ("| ``$Check`` | $Code | REFUSED - no pinned contract | add an entry to .github/ci/expected-exit.ps1 |")
+        Write-Summary ("| ``$Check`` | $resolved | REFUSED - no pinned contract | add an entry to .github/ci/expected-exit.ps1 |")
         exit 1
     }
     default {
         $detail = $(if ($meaning) { $meaning } else { "an exit code this contract does not enumerate. It is NOT a pass: see rule 1." })
-        Write-Annotation -Level error -Message "$Check exited $Code. $detail"
-        Write-Summary ("| ``$Check`` | $Code | FAIL | $detail |")
+        Write-Annotation -Level error -Message "$Check exited $resolved. $detail"
+        Write-Summary ("| ``$Check`` | $resolved | FAIL | $detail |")
         Write-Host "  ran: $cmdText"
         Write-Host "  contract: $($script:Contract[$Check].Doc)"
         Write-Host ("  expected: {0}" -f (($script:Contract[$Check].Green | Sort-Object) -join ", "))
