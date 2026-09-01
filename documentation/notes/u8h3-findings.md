@@ -37,7 +37,7 @@ Re-run at that sha, in one checkout, each throwaway on its own network:
 |---|---|
 | `deno check *.ts` (13 files) + `deno test` | clean / **133 passed, 0 failed** |
 | `scripts/checks/prove-agent-memory-rls.ps1` | **PASSED - 68 checks**, every green with a red beside it |
-| `scripts/checks/drill-personal-plane-exclusion.ps1` | **105 passed, 0 failed, 18 named gaps**, exit 2 |
+| `scripts/checks/drill-personal-plane-exclusion.ps1` | **105 passed, 0 failed, 18 named gaps**, exit 2 *(the figures AT `ef0c2b7`; round 3 grew the set to 25 - see §12)* |
 | `scripts/checks/verify-dfu-done.ps1` | **GREEN - 201 assertions, 0 failed**, 8/8 clauses with a constructed failing case |
 | `scripts/checks/dfu-done.ps1 -Only 3` | **UNMET**, 12 of 14 evaluated, the two `[fail]`s are the superuser doors (§3.4) |
 | full 29-migration initdb chain on a throwaway | no init errors; 195's self-test and 200 §9's notice both printed |
@@ -201,7 +201,7 @@ wire.
   reported the ENTIRE live plane as personal. A probe that reads a missing column does not
   measure nothing; it measures everything, in the alarming direction.
 
-**`drill-personal-plane-exclusion.ps1` — 105 passes, 0 failures, 18 named gaps, exit 2.**
+**`drill-personal-plane-exclusion.ps1` — 105 passes, 0 failures, 18 named gaps, exit 2** *(as it stood at the end of round 2; round 3 added seven gaps and changed the pass count - §12, §17, §18).*
 * Its RED phase patched `agent-memory-plane.ts` (3 anchors) and `_shared/corpus-plane.mjs`.
   **Neither file exists.** It would have died at `Set-RedAnchor` with "matched 0 times". The red
   is now the doors' database ROLE: GREEN as a per-run non-superuser, RED as `postgres`.
@@ -460,14 +460,23 @@ reading a broken query as a boundary.
 
 ## 12. Exit 2 is red in CI, and H4 is about to wire it (R4)
 
-The drill reports 0 failures, 18 GAPs and EXITS 2. H4 wires it into CI on `development`, where 2
-is a failing build - so the first green tree hits a red gate for a reason that is not a defect,
-and the first fix anyone reaches for is `|| true`.
+The drill reports 0 failures, a set of named GAPs and EXITS 2. H4 wires it into CI on
+`development`, where 2 is a failing build - so the first green tree hits a red gate for a reason
+that is not a defect, and the first fix anyone reaches for is `|| true`.
 
-**None of the 18 are H3's to close**: thirteen are the audit-record gap (`auditRefusal`'s
-existence probe is bound by the policy that hid the row - closing it needs a SECURITY DEFINER
-probe, an H1/H4 decision), three are `openbrain-ext` connecting as `postgres` (H1, measured),
-two are the lift's conjunction, which cannot close while the thirteen are open.
+> **CORRECTED, ROUND 5 (2026-08-31).** This section said "18 GAPs" in four places and kept
+> saying it after round 3 grew the set to **25**. The count is not written down anywhere any
+> more, here or in the drill: `$GAP_DISPOSITIONS` is the set, and the run's own `GAP LEDGER`
+> line prints how many fired. A figure a human re-types is a figure that drifts from what it
+> describes - the same failure as the hand-list of producers, one layer up, and it was being
+> offered as evidence.
+
+**None of them are H3's to close.** The 25 break down as 13 `AUDIT-*` (the audit-record gap -
+`auditRefusal`'s existence probe is bound by the policy that hid the row, so closing it needs a
+SECURITY DEFINER probe, an H1/H4 decision), 3 `EXT-*` (`openbrain-ext` connecting as `postgres`,
+H1, measured), 2 `LIFT-*` (the lift's conjunction, which cannot close while the thirteen are
+open), 6 `VACUOUS-*` (assertions whose universe is empty *because* the thirteen are open, and
+which used to print PASS off it) and `RED-COVERAGE`.
 
 So each gap now carries a stable ID and `$GAP_DISPOSITIONS` names it with its owning item. The
 bare exit code is UNCHANGED (2 with any gap open). `-AcceptDispositionedGaps` - what CI runs -
@@ -564,8 +573,9 @@ detectors fire:
   `FAIL 2 dispositioned gap(s) did NOT fire: LEDGER-SELFTEST-NEVER-FIRES, AUDIT-INSPECT-TYPO`,
   **exit 1**.
 * the rename alone, `-AcceptDispositionedGaps -SkipRed`. `-SkipRed` exempts the stale check,
-  so the renamed key does not also trip the exit-1 branch and MASK this one; 18 gaps still
-  fired, `AUDIT-INSPECT` among them, and the undispositioned detector alone decided the exit -
+  so the renamed key does not also trip the exit-1 branch and MASK this one; all 18 gaps of the
+  round-2 set still fired, `AUDIT-INSPECT` among them, and the undispositioned detector alone
+  decided the exit -
   **exit 2**, `1 UNDISPOSITIONED GAP(S) - AUDIT-INSPECT`.
 
 So CI cannot go green on a NEW gap, and cannot stay green on a ledger that has rotted. The
@@ -1198,11 +1208,205 @@ tree. What changed is what a green is allowed to *claim* — the gate's, and CI'
   and no red. **Cost:** for each of those seven, deleting the mechanism actually doing the work
   would look exactly like the mechanism working. Writing seven reds is its own item.
 * **The five audit-record vacuities stay open**, and each now states what a green run does not
-  cover. They close with C.9 H1's `SECURITY DEFINER` existence probe, and on that day they will
-  report **CLOSED** rather than failing the build.
-* **The gate's two remaining blind spots are real and stated**: a table name held in a value, and
-  a wrapper whose table comes from its caller. Neither is closable by pattern-matching source
-  text, and neither needs to be — **the `NOT NULL` column is what refuses those rows.**
+  cover. They close with C.9 H1's `SECURITY DEFINER` existence probe.
+
+  > **CORRECTED, ROUND 5.** "on that day they will report **CLOSED** rather than failing the
+  > build" was TRUE of these five `VACUOUS-*` and **FALSE of the 13 `AUDIT-*` that close on the
+  > same day, from the same fix.** `Resolve-Gap` had four call sites - two in `Assert-NoneOf`,
+  > one on `RED-COVERAGE`, one in `LiftGap` - so only 9 of the 25 dispositioned ids could ever
+  > reach `CLOSED`. The other 16 had a plain `Pass` on their success branch and registered
+  > nothing, so they would have been classified **VANISHED**: `FAIL ... did NOT fire AND nothing
+  > with that id reached a verdict`, **exit 1** - "the check stopped RUNNING" printed about a
+  > check that ran and PASSED. **H1 is being built now; on the day it lands CI would have gone
+  > red with 13 failures for having fixed the thing the ledger asks for.** §19.4's own words:
+  > a gate that turns red when you fix something teaches people to stop fixing things.
+  >
+  > FIXED: every dispositioned id's success branch routes through `Resolve-Gap` (`PassGap`), and
+  > `EXT-CRM-COPY` - which had *no* success branch at all, only `if { Gap }` - has one. Proved
+  > with no database by `-SelfTestLedger`, which now (a) derives the id list from
+  > `$GAP_DISPOSITIONS` and fails if any id has no route, and (b) simulates `AUDIT-INSPECT`
+  > closing through the REAL reconciliation and the REAL exit rule: `closed=1 vanished=0
+  > fails=0 EXIT=0`. Red-proved by reverting one `PassGap` to `Pass`: `BAD 1 dispositioned
+  > id(s) have NO success route`.
+* **The gate's blind spots are real and stated — and there are more than two.**
+
+  > **CORRECTED, ROUND 5.** "two remaining" was wrong. Verifiers planted three more that the
+  > gate reported OK, exit 0, on: a **backtick-quoted** table argument (`$siteArg` accepts `'`
+  > and `"` only, and a backtick is a quote in JS), a producer under a directory matching the
+  > **`*-data` prune glob** (which the run's `DIRECTORIES PRUNED` line did not print), and a
+  > producer under an **allow-listed path** (`*\docs\*`, `*\documentation\*`, also unprinted).
+  > A fourth is the donor-above case in §21.1. All are now in `$SHAPES_BLIND`, the prune globs
+  > and the allow-list are printed on every run, and `-SelfTest` cases 4–6 PLANT three of them
+  > and record the verdict — so a blind spot that closes is noticed instead of asserted about.
+  > None is closable by pattern-matching source text, and none needs to be — **the `NOT NULL`
+  > column is what refuses those rows.**
 * **The live outage is fixed in the tree, not in production.** Ending it still needs the
   deployment checkout's submodule moved AND `openbrain-wiki:local` rebuilt, in a promotion
   window under a lease — a gated deploy, which this session did not take.
+
+---
+
+## 21. ROUND 5 - every sentence made true, and the ledger stopped punishing a fix
+
+Round 5 is a CLOSING round under the operator's convergence bound. H3's core - the typed column,
+the door, the mirror, the cutover, the constraint battery - survived six verifiers across rounds
+2-4 and is ACCEPTED; nothing here touches it. **No coverage was widened.** Five things were
+wrong, and wrong in the same direction every time: a check reporting more than it checks.
+
+### 21.1 The gate's own comment was falsified by running the gate
+
+`check-corpus-exposure-producers.ps1` said the table-aware fence stops "an `exposure` key
+belonging to one table's statement clearing another table's statement below it (index.ts:491,
+refuted)". **It does not.** The fence clips a site's evidence window at the *donor's SITE LINE*,
+and a donor's `exposure` key is not on its site line - it is in the BODY, one to three lines
+below, INSIDE the clip.
+
+Measured 2026-08-31 on CRLF fixtures: a `thoughts` POST stating `exposure: "ops"` above an
+`agent_memories` POST stating nothing, at separations of **0, 3, 10 and 25 lines**:
+
+```
+[check-corpus-exposure-producers] OK - all 8 RECOGNISED corpus insert site(s) state their plane (4 file(s) scanned).
+```
+
+**What IS fixed is the ORM victim**, and not by the fence - by the statement-scoped evidence,
+which replaces the window with the builder-to-`;` slice and cannot read a neighbour's body at
+any distance. `index.ts:491` was an ORM site, which is why that site went red. `-SelfTest`
+case 3 cannot catch the URL/ARG case because **its victim is an ORM site too**.
+
+FIXED: the sentence, in the header and at the fence, now says exactly what is fixed and what is
+not; the URL/ARG-with-a-donor-above case is in `$SHAPES_BLIND`; and `-SelfTest` **case 4** plants
+it and RECORDS the known-bad verdict rather than pretending. The fence was NOT rebuilt.
+
+### 21.2 Two false greens on COUNTED sites - and a third that was live in this tree
+
+The evidence test was a **bare text match** on the word `exposure`. So a producer with no plane
+anywhere was reported as *stating its plane*:
+
+| planted | result before |
+|---|---|
+| `// exposure is applied downstream by the ingest worker` above a bare POST | `OK - all 1 RECOGNISED corpus insert site(s) state their plane` |
+| `const exposureMetricsCounter = 0;` above the same POST | identical |
+
+These are **false greens on counted sites**, not misses - the run reports the site as examined.
+Same class as `index.ts:491` one layer down: green off text that is not this statement's plane
+declaration.
+
+FIXED: `Test-StatesPlane` requires a key or an assignment - the whole word `exposure`, optionally
+quoted or backslash-escaped, followed by `:` or `=` - and whole-line comments are dropped from
+the evidence. Red-proved as `-SelfTest` cases **3b** and **3c**, which are hard assertions.
+
+**AND THE TIGHTENING FOUND A LIVE ONE.** With the substring test gone,
+`OB1/recipes/schema-aware-routing/index.ts:298` turned RED - a producer that *does* state its
+plane, correctly, at line 308. The cause: the ORM statement slice ended at the first `;`, and the
+eight-line comment between the builder and the key contains "...widens nothing; where this
+corpus belongs...". The key was never inside the evidence. **That site had been passing off the
+word `exposure` in that comment.** Proof, on a copy with BOTH real plane keys deleted and only
+the comment left:
+
+```
+NEW gate: FAIL - 1 of 1 recognised corpus insert site(s) do not state a plane:  index.ts:298
+OLD gate: OK   - all 1 RECOGNISED corpus insert site(s) state their plane
+```
+
+FIXED: `Get-Statement` does not take a terminator from a comment line. A `;` inside a *string*
+literal still ends the slice early - declared, and it truncates toward RED, which is the safe
+direction now that the evidence test is a key test.
+
+### 21.3 The line splitter required a carriage return - on Windows, not on Linux
+
+Not on the review's list; found while reproducing 21.1. The source of
+`check-corpus-exposure-producers.ps1` carried a **bare CR** in its split pattern.
+
+> **CORRECTED IN THE SAME ROUND.** The first draft of this section, and of the two comments in
+> the gate, had the direction **backwards** - it said an LF checkout was the broken one and that
+> "this worktree is CRLF, so the runs here were unaffected". The opposite is true, and the
+> conclusion happened to survive for a different reason. Re-measured before commit.
+
+The repo blob is `22 0d 3f 0a 22` - `"<CR>?<LF>"`, i.e. optional-CR then LF, which is **correct**.
+But `core.autocrlf=true` on this machine rewrites that trailing LF on checkout, so the **Windows**
+working copy is `22 0d 3f 0d 0a 22` - `"<CR>?<CR><LF>"`, which **requires** a CR. So the false
+green needs both a Windows checkout of the script *and* an LF-only scanned file. All four
+combinations measured on one fixture (a labelled `thoughts` POST 40 lines below an unlabelled
+`agent_memories` POST):
+
+| script checkout | scanned file | old gate |
+|---|---|---|
+| CRLF (Windows, `autocrlf=true`) | LF | `all 1 RECOGNISED corpus insert site(s) state their plane` - **FALSE GREEN** |
+| CRLF (Windows) | CRLF | `FAIL - 1 of 2` (correct) |
+| LF (Linux CI) | LF | `FAIL - 1 of 2` (correct) |
+| LF (Linux CI) | CRLF | `FAIL - 1 of 2` (correct) |
+
+**Windows is the affected side, and Windows is what every run in this branch used.** Those runs
+were nonetheless unaffected, for a reason that had to be measured rather than assumed: of the
+**44 LF-majority files** in the scan set, **zero name a corpus table**. Had one appeared, the
+vacuity guard would not have caught it - one site is not zero sites.
+
+FIXED: the split is now an explicit `[regex]::Split($text, "
+|
+|")` over the three newline
+forms, correct in all four combinations (re-measured after the fix).
+
+### 21.4 Blind spots that were real and silent
+
+Verifiers planted these; the gate reported OK, exit 0, with unlabelled producers present.
+
+| planted | why it is invisible | now |
+|---|---|---|
+| a BACKTICK-quoted table argument beside a POST | `$siteArg` accepts `'` and `"` only, and a backtick IS a quote in JS. **0 sites counted** | in `$SHAPES_BLIND`; the ARG line of `SHAPES_SEEN` now says "SINGLE- or DOUBLE-quoted"; `-SelfTest` case 5 records it |
+| a producer under `scratch-data/` | `Get-ScanFiles` prunes any `*-data` directory (and reparse points); the run's `DIRECTORIES PRUNED` line printed `$pruneDirNames` only | the glob list is hoisted to `$pruneDirGlobs` and PRINTED, with the reparse-point rule |
+| a producer under `docs/` | `$allowPathLike` excludes the `docs` and `documentation` trees; never printed | the allow-list is PRINTED on every run; `-SelfTest` case 6 records it |
+
+**A blind spot that is stated is a scope; a blind spot that is silent is a false green** - and one
+stated only in a comment is a claim nobody re-measures. Cases 4-6 cannot fail the self-test (the
+miss *is* the documented behaviour), but if one is ever FLAGGED the run says so and asks for the
+entry to be struck. Closing a blind spot must not turn a check red.
+
+### 21.5 The ledger punished the fix, and the fix is the named next step
+
+See the corrected bullet in the round-4 close-out above. `Resolve-Gap` had four call sites;
+**16 of the 25** dispositioned ids (13 `AUDIT-*`, 3 `EXT-*`) had a plain `Pass` on their success
+branch and so could only ever be classified **VANISHED** - `exit 1`, "the check stopped RUNNING",
+printed about a check that ran and PASSED. C.9 H1's `SECURITY DEFINER` probe closes the whole
+`AUDIT-*` family in one move, and **it is being built now.** `EXT-CRM-COPY` was worse: a bare
+`if { Gap }` with no success branch at all.
+
+FIXED: `PassGap` routes the success branch of every dispositioned id through `Resolve-Gap`, and
+`EXT-CRM-COPY` has a success branch. `Get-LedgerExit` extracts the exit decision so the rule CI
+obeys and the rule the self-test proves are the same seven lines. `-SelfTestLedger` now also
+(a) DERIVES the id list from `$GAP_DISPOSITIONS` and fails if any id has no route, and
+(b) simulates the scheduled closure:
+
+```
+OK   all 25 dispositioned id(s) register on success (PassGap / Resolve-Gap / LiftGap / Assert-NoneOf -Id)
+OK   AUDIT-INSPECT closes (assertion RAN and passed): closed=1 vanished=0 fails=0 EXIT=0
+OK   AUDIT-INSPECT stops firing with NOTHING registered: closed=0 vanished=1 fails=1 EXIT=1
+```
+
+Red-proved by reverting one `PassGap` to `Pass`:
+`BAD 1 dispositioned id(s) have NO success route ... AUDIT-INSPECT`, and the self-test FAILS.
+
+### 21.6 Stale counts, and one claim that was wrong on its face
+
+Four comments in the drill and three lines in the runbook said **18** gaps; the dispositioned set
+has been **25** since round 3. The drill's ledger comment additionally claimed "all 18 fire under
+`-SkipRed` too" - false on its face: `RED-COVERAGE` is raised inside the red phase's own `else`
+branch and **cannot** fire under `-SkipRed`, so the exemption is load-bearing today rather than a
+provision for the next one.
+
+FIXED by deleting the literals rather than re-typing a third one. The set is `$GAP_DISPOSITIONS`,
+its size is printed by the run's own `GAP LEDGER` line, and under `-SkipRed` the run now PRINTS
+which dispositioned gaps did not fire - so a reader sees the set instead of a claim about it.
+Historical run records (the round-2 tables) keep their figures and are now labelled with the
+round they were measured in.
+
+### 21.7 What was deliberately NOT done
+
+* **The fence was not rebuilt.** Making a URL or ARG victim immune needs statement scoping for
+  those two shapes, which is a rewrite of the detection core in a closing round. It is DECLARED
+  and self-tested instead.
+* **No shape and no extension was added** - not even the backtick, which is a one-character
+  change. The mandate was to make the sentences true, not to widen the gate; a wider gate with a
+  wrong disclosure is the failure being closed here.
+* **`OB1/recipes/_shared/wiki-pages.mjs` and `links.mjs` were not touched** - another agent owns
+  them this round. `VACUOUS-WIKIPAGES` stays open and stays dispositioned.
+* **Nothing was written to the live database**, and no deploy was made.

@@ -198,7 +198,7 @@
 #       2 = containment green, one or more NAMED GAPS open (printed with their causes)
 #
 # THE EXIT CODE AND CI (C.9 H4). A bare run exits 2 today - 0 failures, and the whole
-# RECORDING half of U5's column open as 18 named gaps, none of them H3's to close. H4 wires
+# RECORDING half of U5's column open as named gaps, none of them H3's to close. H4 wires
 # this into CI on `development`, where 2 is a failing build, so the flag above exists: with
 # -AcceptDispositionedGaps the run exits 0 when every gap that fired is one $GAP_DISPOSITIONS
 # already names and owns, 2 when ANY gap fired that nobody has named, and 1 when a
@@ -253,9 +253,16 @@ Set-Location $root
 
 $fails = 0
 # EVERY GAP CARRIES A STABLE ID, and the ids that fire are collected here. The count alone
-# was not enough for H4: 18 gaps that are all NAMED and DISPOSITIONED is a different fact from
-# 18 gaps of unknown provenance, and CI can only tell them apart if the run says which is
+# was not enough for H4: N gaps that are all NAMED and DISPOSITIONED is a different fact from
+# N gaps of unknown provenance, and CI can only tell them apart if the run says which is
 # which. See $GAP_DISPOSITIONS and the summary block at the end of this file.
+#
+# NO COUNT IS WRITTEN DOWN IN THIS FILE ANY MORE. Four comments and a findings note all said
+# "18" long after the real figure was 25 - the number was re-typed each time the set grew,
+# which is the same failure as a hand-list of producers: a figure a human transcribes drifts
+# from the thing it describes, and it was being offered AS evidence. Every count below is
+# derived at runtime from $GAP_DISPOSITIONS or from what actually fired, and printed by the
+# GAP LEDGER line at the end of the run.
 $gapIds = @()
 # The drill counts its own PASSes. The number was previously quoted by hand in a findings
 # note and in DECISIONS, and it was wrong - an undercount, but a verifier flagged it because
@@ -301,6 +308,31 @@ $script:gapClosed = [ordered]@{}
 function Resolve-Gap($id, $how) {
     if ($id) { $script:gapClosed[$id] = $how }
 }
+# THE OTHER HALF OF Gap - AND IT WAS MISSING FOR 16 OF THE 25 DISPOSITIONED IDS.
+#
+# Resolve-Gap had exactly four call sites: two inside Assert-NoneOf, one on RED-COVERAGE, one
+# in LiftGap. So only the VACUOUS-*, RED-COVERAGE and LIFT-* families - 9 ids - could ever
+# report CLOSED. The 13 AUDIT-* and 3 EXT-* gaps each had a plain `Pass` on their success
+# branch and registered NOTHING, so on the day their property was fixed they would simply
+# stop firing with no record that anything had reached a verdict. The reconciliation would
+# then classify all 16 as VANISHED and add 16 failures, printing "the check that produced
+# them stopped RUNNING" about checks that ran and PASSED.
+#
+# THAT DAY IS SCHEDULED. C.9 H1's SECURITY DEFINER existence probe closes the whole AUDIT-*
+# family at once - it is the single cause named in every one of those dispositions - so the
+# build would have gone red with 13 failures the moment H1 landed, for having fixed the thing
+# the ledger asks for. The findings note said the audit gaps "will report CLOSED rather than
+# failing the build"; that was true of the five VACUOUS-* downstream of them and FALSE of the
+# 13 AUDIT-* themselves, which is the half that fires first.
+#
+# Section 19.4's own rule: a gate that turns red when you fix something teaches people to
+# stop fixing things. So the SUCCESS branch of every dispositioned gap registers here, and
+# -SelfTestLedger DERIVES the list of ids from $GAP_DISPOSITIONS and fails if any one of them
+# has no route - which is the check that would have caught the original omission.
+function PassGap($id, $t) {
+    Resolve-Gap $id "the assertion RAN and reached a verdict: PASS - $t"
+    Pass $t
+}
 # PURE, and separated from the reconciliation block at the bottom of this file ON PURPOSE:
 # the rule that decides whether closing a gap fails the build is exactly the kind of rule
 # that gets written once, believed, and never watched. -SelfTestLedger runs it.
@@ -314,36 +346,20 @@ function Split-StaleGaps {
     return @{ Closed = @($c); Vanished = @($v) }
 }
 
-if ($SelfTestLedger) {
-    Write-Host "`n=== -SelfTestLedger: closing a gap must not fail the build ===" -ForegroundColor Cyan
-    $ranMap = [ordered]@{ "CLOSED-ONE" = "assertion ran"; "CLOSED-TWO" = "assertion ran" }
-    $cases = @(
-        @{ Stale = @("CLOSED-ONE");                Map = $ranMap;      C = 1; V = 0; Why = "the assertion RAN and passed -> CLOSED, and 0 failures. THIS is the property: fixing something does not turn the build red." }
-        @{ Stale = @("GONE-ONE");                  Map = $ranMap;      C = 0; V = 1; Why = "nothing with that id reached a verdict -> VANISHED, and it still FAILS. The original rule, intact." }
-        @{ Stale = @("CLOSED-ONE", "GONE-ONE");    Map = $ranMap;      C = 1; V = 1; Why = "mixed -> split, not lumped. One good outcome does not launder the bad one." }
-        @{ Stale = @();                            Map = $ranMap;      C = 0; V = 0; Why = "nothing stale -> nothing to report either way" }
-        @{ Stale = @("CLOSED-ONE");                Map = [ordered]@{}; C = 0; V = 1; Why = "an EMPTY closed-map must not classify anything as closed - the escape hatch cannot be the default" }
-    )
-    $lf = 0
-    foreach ($c in $cases) {
-        $r = Split-StaleGaps -Stale $c.Stale -ClosedMap $c.Map
-        $ok = ($r.Closed.Count -eq $c.C -and $r.Vanished.Count -eq $c.V)
-        # the exit-code consequence, asserted rather than described: only VANISHED adds fails
-        $wouldFail = $r.Vanished.Count
-        if ($ok -and $wouldFail -eq $c.V) {
-            Write-Host ("        OK   stale=[{0}] -> closed={1} vanished={2} fails={3}   ({4})" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $wouldFail, $c.Why) -ForegroundColor DarkGray
-        } else {
-            Write-Host ("        BAD  stale=[{0}] -> closed={1} vanished={2}, expected closed={3} vanished={4}" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $c.C, $c.V) -ForegroundColor Red
-            $lf++
-        }
-    }
-    if ($lf -eq 0) {
-        Write-Host "LEDGER SELF-TEST PASSED - a CLOSED gap contributes 0 failures; a VANISHED one still fails." -ForegroundColor Green
-        exit 0
-    }
-    Write-Host "LEDGER SELF-TEST FAILED - $lf case(s) classified wrongly." -ForegroundColor Red
-    exit 1
+# THE EXIT DECISION, PURE, FOR THE SAME REASON. The exit block at the bottom of this file is
+# the only thing CI reads, and it was a chain of ifs no test could reach without docker, a
+# database and twenty minutes. It is now this function, called from there and from
+# -SelfTestLedger, so the rule CI obeys is the rule the self-test exercises - not a lookalike
+# written beside it. Every branch of the original chain is preserved exactly.
+function Get-LedgerExit {
+    param([int]$Fails, [int]$Gaps, [int]$NewGapCount, [bool]$Accept)
+    if ($Fails -eq 0 -and $Gaps -eq 0) { return 0 }   # clean
+    if ($Fails -gt 0)                  { return 1 }   # a defect in this tree
+    if ($NewGapCount -gt 0)            { return 2 }   # a gap nobody has named - even in CI mode
+    if ($Accept)                       { return 0 }   # every open gap is dispositioned
+    return 2                                          # named gaps open, bare run
 }
+
 # --- THE VACUITY GUARD - ONE MECHANISM, SO A SIXTH ONE CANNOT BE SILENTLY VACUOUS --------
 #
 # A PASS PRINTED OFF AN EMPTY SET IS NOT A PASS, and this file shipped five of them. Every
@@ -460,12 +476,12 @@ $AUDIT_GAP = "A REFUSAL RECORD REQUIRES SEEING WHAT YOU ARE REFUSING, and under 
 # --- THE GAP LEDGER ----------------------------------------------------------------------
 #
 # WHY THIS EXISTS, AND WHAT H4 WOULD OTHERWISE HAVE WALKED INTO. This drill reports
-# "N passes / 0 failures / 18 GAPs" and EXITS 2. C.9 H4 wires it into CI on `development`,
+# "N passes / 0 failures / M GAPs" and EXITS 2. C.9 H4 wires it into CI on `development`,
 # where a non-zero exit is a FAILING build - so on the day H4 lands, a green tree goes red for
 # a reason that is not a defect, and the first fix anyone reaches for is `|| true`, which
 # deletes the gate.
 #
-# The two honest ways out were "resolve the 18 gaps" or "make the exit code mean what CI will
+# The two honest ways out were "resolve the gaps" or "make the exit code mean what CI will
 # read". THE GAPS ARE NOT H3's TO RESOLVE: every one of them is either the audit-record gap
 # (auditRefusal cannot see the row it is refusing - closing it needs a SECURITY DEFINER
 # existence probe, a C.9 H1/H4 decision) or the ext-container/superuser family, which is H1.
@@ -553,6 +569,97 @@ $GAP_DISPOSITIONS = [ordered]@{
     # it is written up in documentation/notes/u8h3-findings.md rather than folded in here.
     # --- and the red-coverage ledger ------------------------------------------------------
     "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed in round 3 is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite. GREEN DOES NOT COVER: that those seven sections' greens can fail at all. For each of them, deleting the mechanism that does the work would look exactly like the mechanism working, and this run would still be green."
+}
+
+
+if ($SelfTestLedger) {
+    Write-Host "`n=== -SelfTestLedger: closing a gap must not fail the build ===" -ForegroundColor Cyan
+    $lf = 0
+
+    # --- (A) CLASSIFICATION: does a CLOSED gap cost anything? ----------------------------
+    $ranMap = [ordered]@{ "CLOSED-ONE" = "assertion ran"; "CLOSED-TWO" = "assertion ran" }
+    $cases = @(
+        @{ Stale = @("CLOSED-ONE");                Map = $ranMap;      C = 1; V = 0; Why = "the assertion RAN and passed -> CLOSED, and 0 failures. THIS is the property: fixing something does not turn the build red." }
+        @{ Stale = @("GONE-ONE");                  Map = $ranMap;      C = 0; V = 1; Why = "nothing with that id reached a verdict -> VANISHED, and it still FAILS. The original rule, intact." }
+        @{ Stale = @("CLOSED-ONE", "GONE-ONE");    Map = $ranMap;      C = 1; V = 1; Why = "mixed -> split, not lumped. One good outcome does not launder the bad one." }
+        @{ Stale = @();                            Map = $ranMap;      C = 0; V = 0; Why = "nothing stale -> nothing to report either way" }
+        @{ Stale = @("CLOSED-ONE");                Map = [ordered]@{}; C = 0; V = 1; Why = "an EMPTY closed-map must not classify anything as closed - the escape hatch cannot be the default" }
+    )
+    foreach ($c in $cases) {
+        $r = Split-StaleGaps -Stale $c.Stale -ClosedMap $c.Map
+        $ok = ($r.Closed.Count -eq $c.C -and $r.Vanished.Count -eq $c.V)
+        # the exit-code consequence, asserted rather than described: only VANISHED adds fails
+        $wouldFail = $r.Vanished.Count
+        if ($ok -and $wouldFail -eq $c.V) {
+            Write-Host ("        OK   stale=[{0}] -> closed={1} vanished={2} fails={3}   ({4})" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $wouldFail, $c.Why) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("        BAD  stale=[{0}] -> closed={1} vanished={2}, expected closed={3} vanished={4}" -f (($c.Stale) -join ','), $r.Closed.Count, $r.Vanished.Count, $c.C, $c.V) -ForegroundColor Red
+            $lf++
+        }
+    }
+
+    # --- (B) EVERY DISPOSITIONED ID MUST HAVE A ROUTED SUCCESS BRANCH --------------------
+    #
+    # THE CHECK THAT WOULD HAVE CAUGHT THE ORIGINAL OMISSION, and it is derived from
+    # $GAP_DISPOSITIONS rather than from a list somebody keeps up to date. 16 of the 25 ids
+    # had a plain `Pass` on their success branch, so they could only ever VANISH - a build
+    # failure for having FIXED the property. An id is routed when this file registers it on
+    # success in one of the four ways that reach Resolve-Gap.
+    $selfSrc = [System.IO.File]::ReadAllText($PSCommandPath)
+    $unrouted = @()
+    foreach ($id in @($GAP_DISPOSITIONS.Keys)) {
+        $q = [regex]::Escape($id)
+        $routed = ($selfSrc -match ('PassGap\s+"' + $q + '"')) -or
+                  ($selfSrc -match ('Resolve-Gap\s+"' + $q + '"')) -or
+                  ($selfSrc -match ('LiftGap\s+"' + $q + '"')) -or
+                  ($selfSrc -match ('-Id\s+"' + $q + '"'))
+        if (-not $routed) { $unrouted += $id }
+    }
+    if ($unrouted.Count -gt 0) {
+        Write-Host ("        BAD  {0} dispositioned id(s) have NO success route, so closing them would FAIL the build: {1}" -f $unrouted.Count, ($unrouted -join ', ')) -ForegroundColor Red
+        Write-Host "             Give each one PassGap `"<ID>`" on the branch where the property HOLDS." -ForegroundColor Red
+        $lf++
+    } else {
+        Write-Host ("        OK   all {0} dispositioned id(s) register on success (PassGap / Resolve-Gap / LiftGap / Assert-NoneOf -Id)" -f $GAP_DISPOSITIONS.Count) -ForegroundColor DarkGray
+    }
+
+    # --- (C) THE SCHEDULED CLOSURE, SIMULATED END TO END --------------------------------
+    #
+    # C.9 H1's SECURITY DEFINER existence probe closes AUDIT-INSPECT and its family. This
+    # runs the REAL reconciliation and the REAL exit rule over that day's ledger: the gap
+    # stops firing, its assertion reached a verdict, and CI must stay GREEN.
+    $allIds   = @($GAP_DISPOSITIONS.Keys)
+    $sim = @(
+        @{ N = "AUDIT-INSPECT closes (assertion RAN and passed)"
+           Closed = @("AUDIT-INSPECT"); Map = ([ordered]@{ "AUDIT-INSPECT" = "the assertion RAN and reached a verdict: PASS" })
+           C = 1; V = 0; Exit = 0
+           Why = "CLOSED, 0 failures, exit 0 under -AcceptDispositionedGaps. Fixing it does not break CI." }
+        @{ N = "AUDIT-INSPECT stops firing with NOTHING registered"
+           Closed = @("AUDIT-INSPECT"); Map = ([ordered]@{})
+           C = 0; V = 1; Exit = 1
+           Why = "VANISHED, 1 failure, exit 1. The rule the ledger was written for is still intact." }
+    )
+    foreach ($s in $sim) {
+        $fired = @($allIds | Where-Object { $s.Closed -notcontains $_ })
+        $stale = @($allIds | Where-Object { $fired -notcontains $_ })
+        $r = Split-StaleGaps -Stale $stale -ClosedMap $s.Map
+        $simFails = $r.Vanished.Count
+        $simNew   = @($fired | Where-Object { $allIds -notcontains $_ }).Count
+        $simExit  = Get-LedgerExit -Fails $simFails -Gaps $fired.Count -NewGapCount $simNew -Accept $true
+        if ($r.Closed.Count -eq $s.C -and $r.Vanished.Count -eq $s.V -and $simExit -eq $s.Exit) {
+            Write-Host ("        OK   {0}: closed={1} vanished={2} fails={3} EXIT={4}   ({5})" -f $s.N, $r.Closed.Count, $r.Vanished.Count, $simFails, $simExit, $s.Why) -ForegroundColor DarkGray
+        } else {
+            Write-Host ("        BAD  {0}: closed={1} vanished={2} exit={3}, expected closed={4} vanished={5} exit={6}" -f $s.N, $r.Closed.Count, $r.Vanished.Count, $simExit, $s.C, $s.V, $s.Exit) -ForegroundColor Red
+            $lf++
+        }
+    }
+
+    if ($lf -eq 0) {
+        Write-Host "LEDGER SELF-TEST PASSED - a CLOSED gap contributes 0 failures; a VANISHED one still fails; every dispositioned id can reach CLOSED." -ForegroundColor Green
+        exit 0
+    }
+    Write-Host "LEDGER SELF-TEST FAILED - $lf case(s) classified wrongly." -ForegroundColor Red
+    exit 1
 }
 
 if (-not $RunId) { $RunId = [guid]::NewGuid().ToString("N").Substring(0, 8) }
@@ -1368,13 +1475,13 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     # a lie. The FIRST one is asserted as a MEASUREMENT so a future tree that reinstates the
     # writer turns this green again without anyone re-deriving what it was for.
     $flagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='true'"
-    if ($flagged -eq "1") { Pass "a durable audit row records the attempt (recall_requested, exposure_override_denied=true)" }
+    if ($flagged -eq "1") { PassGap "AUDIT-RECALL-OVERRIDE" "a durable audit row records the attempt (recall_requested, exposure_override_denied=true)" }
     else {
         Gap "AUDIT-RECALL-OVERRIDE" "THE OVERRIDE ATTEMPT IS NOT RECORDED: expected 1 recall_requested/exposure_override_denied row in $WS, got '$flagged'"
         Note "No source file on this line writes 'recall_requested', 'exposure_override_denied' or 'requested_exposure' - the writer lived in agent-memory-plane.ts, which A2 removed. The read was still STOPPED (the assertion above this one), so what is missing is the RECORD, not the boundary. Reinstating it is a C.9 H4 item: U5's column asks for stopped AND visible."
     }
     $asked = Db "SELECT payload->>'requested_exposure' FROM agent_memory_audit_events WHERE workspace_id='$WS' AND payload->>'exposure_override_denied'='true' LIMIT 1"
-    if ($asked -match "personal") { Pass "the audit row says WHAT was asked for ($asked), not merely that something was refused" }
+    if ($asked -match "personal") { PassGap "AUDIT-RECALL-OVERRIDE-ASKED" "the audit row says WHAT was asked for ($asked), not merely that something was refused" }
     else { Gap "AUDIT-RECALL-OVERRIDE-ASKED" "and there is no row to carry the requested plane (got '$asked') - same cause" }
 
     # A benign recall must NOT be flagged. Without this, the assertion above passes just as
@@ -1386,7 +1493,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($benign.Status -ne 200) { Fail "an ordinary recall did not even succeed (HTTP $($benign.Status)) - the recall lane is broken, which is a defect and not a gap" }
     $unflagged = Db "SELECT count(*) FROM agent_memory_audit_events WHERE workspace_id='$WS' AND event_type='recall_requested' AND payload->>'exposure_override_denied'='false'"
     if ([int]$unflagged -ge 1) {
-        Pass "an ordinary recall is recorded UNFLAGGED - the flag discriminates, it is not a constant"
+        PassGap "AUDIT-RECALL-ORDINARY" "an ordinary recall is recorded UNFLAGGED - the flag discriminates, it is not a constant"
     } else { Gap "AUDIT-RECALL-ORDINARY" "an ordinary recall produces no audit row either (got '$unflagged') - same cause, and it is why the flag cannot be shown to discriminate" }
 
     # THE TRACE, HOWEVER, IS WRITTEN - and it now carries the ENFORCED plane, which is the
@@ -1420,7 +1527,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
     $gwLog = (docker logs $OPS 2>&1 | Out-String)
     if ($gwLog -match "exposure_override_attempt") {
-        Pass "the DOOR recorded the attempt (gateway audit line: exposure_override_attempt)"
+        PassGap "AUDIT-OPSDOOR-LOG" "the DOOR recorded the attempt (gateway audit line: exposure_override_attempt)"
     } else { Gap "AUDIT-OPSDOOR-LOG" "the ops door logged nothing about a caller naming another plane - the gateway has no such line on this tree, same family as the durable row above" }
 
     # WHICH RECORD COVERS WHICH LANE - asserted, because otherwise it is only implied.
@@ -1467,7 +1574,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         Note $insCtrlBlob
     }
     $refused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_inspect'"
-    if ($refused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_inspect)" }
+    if ($refused -eq "1") { PassGap "AUDIT-INSPECT" "the refusal left a durable audit row (access_refused, tool=agent_memory_inspect)" }
     else { Gap "AUDIT-INSPECT" "STOPPED but NOT RECORDED (agent_memory_inspect): expected 1 access_refused row, got '$refused'"
            Note $AUDIT_GAP }
     # THE CLAIM IS THAT access_refused DISCRIMINATES, and a discriminator cannot be measured
@@ -1549,7 +1656,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         } else { Fail "EXPOSURE LEAK: the recall trace discloses the off-plane memory's id (an id is what ATTACK 3 needs)" }
     } else { Fail "the trace did not return the CONTROL - the call failed, so this attack proves nothing"; Note $trcBlob }
     $trcRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_recall_trace'"
-    if ($trcRefused -eq "1") { Pass "withholding the off-plane item left a durable audit row (access_refused, tool=agent_memory_recall_trace)" }
+    if ($trcRefused -eq "1") { PassGap "AUDIT-RECALL-TRACE" "withholding the off-plane item left a durable audit row (access_refused, tool=agent_memory_recall_trace)" }
     else { Gap "AUDIT-RECALL-TRACE" "STOPPED but NOT RECORDED (agent_memory_recall_trace): expected 1 access_refused row, got '$trcRefused'" }
 
     # --- 8b. ATTACK 5b: THE ENVELOPE, not the items -------------------------------------
@@ -1566,7 +1673,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         Pass "STOPPED - the personal-plane trace discloses neither its query text nor the memory it named"
     } else { Fail "EXPOSURE LEAK: the personal-plane trace envelope came back"; Note $ptrcBlob }
     $ptrcRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'reason'='off-plane-trace'"
-    if ($ptrcRefused -eq "1") { Pass "the refused trace left a durable audit row (access_refused, reason=off-plane-trace)" }
+    if ($ptrcRefused -eq "1") { PassGap "AUDIT-RECALL-TRACE-ENVELOPE" "the refused trace left a durable audit row (access_refused, reason=off-plane-trace)" }
     else { Gap "AUDIT-RECALL-TRACE-ENVELOPE" "STOPPED but NOT RECORDED (recall_trace envelope): expected 1 refusal row, got '$ptrcRefused'" }
     # "that row names no memory id" - THE ROW THE LINE ABOVE JUST PROVED DOES NOT EXIST. The
     # universe is the off-plane-trace refusal rows themselves, so this is vacuous in exactly
@@ -1587,7 +1694,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "search_thoughts was NOT denied at the ops door"; Note ($st | ConvertTo-Json -Depth 8 -Compress) }
     $gwLog = (docker logs $OPS 2>&1 | Out-String)
     if ($gwLog -match "tool_denied" -and $gwLog -match "search_thoughts") {
-        Pass "the denial left an audit line naming the tool (tool_denied)"
+        PassGap "AUDIT-OPS-ALLOWLIST" "the denial left an audit line naming the tool (tool_denied)"
     } else { Gap "AUDIT-OPS-ALLOWLIST" "STOPPED but NOT RECORDED (ops door allow-list): a tool denied by the GATEWAY writes no audit row. Different cause from the others - the gateway refuses before the server is reached, so there is no database session to record from. Closing it is a gateway change, not a boundary one." }
 
     # --- 10. ATTACK 7: THE CLOUD DOOR - the only lane with configured consumers ----------
@@ -1613,7 +1720,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "the cloud door did not deny agent_memory_list_review_queue"; Note ($clQ | ConvertTo-Json -Depth 8 -Compress) }
     $clLog = (docker logs $CLOUD 2>&1 | Out-String)
     if ($clLog -match "tool_denied" -and $clLog -match "agent_memory_inspect") {
-        Pass "the cloud door's denials left audit lines naming the tools (tool_denied)"
+        PassGap "AUDIT-CLOUD-ALLOWLIST" "the cloud door's denials left audit lines naming the tools (tool_denied)"
     } else { Gap "AUDIT-CLOUD-ALLOWLIST" "STOPPED but NOT RECORDED (cloud door allow-list): same cause as the ops door's - the gateway denies before any database session exists." }
 
     # (b) the FORCED SHARE FILTER on the tool the cloud door DOES allow. This is the claim
@@ -1757,7 +1864,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     } else { Fail "fetch did not answer with the absent-id message - the refusal is distinguishable"; Note $f2 }
     $refAfter = [int](Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'reason' = 'off-plane-corpus-row:$legacyId'")
     if ($refAfter -gt $refBefore) {
-        Pass "VISIBLE - the refused corpus read left an access_refused row naming the tool and the id ($refBefore -> $refAfter)"
+        PassGap "AUDIT-FETCH-CORPUS" "VISIBLE - the refused corpus read left an access_refused row naming the tool and the id ($refBefore -> $refAfter)"
     } else { Gap "AUDIT-FETCH-CORPUS" "STOPPED but NOT RECORDED (fetch, corpus row): expected an access_refused row naming the tool and the id ($refBefore -> $refAfter)" }
 
     # (d) an ABSENT id must NOT file a refusal, or the real probes drown in typos.
@@ -1828,7 +1935,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     if ($extAtk -notmatch [regex]::Escape($LEGACY)) { Pass "STOPPED (as $APPUSER) - openbrain-ext did not return the legacy personal row's content" }
     else { Fail "EXPOSURE LEAK: openbrain-ext handed over a personal-labelled thought's content as a NON-superuser" }
     if ($extOk -match "Linked thought to contact") {
-        Pass "and the ops control WORKS on the same door - the refusal above is a filter, not an outage"
+        PassGap "EXT-CONTAINMENT-BY-OUTAGE" "and the ops control WORKS on the same door - the refusal above is a filter, not an outage"
     } else {
         Gap "EXT-CONTAINMENT-BY-OUTAGE" "CONTAINMENT BY OUTAGE (as $APPUSER): the ops control fails too, so 'it refused' is indistinguishable from 'it is broken'. professional_contacts is governed by auth.uid() = user_id and auth.uid() is a stub returning NULL, so the whole extensions-server CRM surface is unreadable by ANY non-superuser. C.9 H1 has to decide this before it moves this container off postgres."
         Note $extOk
@@ -1847,11 +1954,16 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         if ($extSuper -match [regex]::Escape($LEGACY)) {
             Gap "EXT-SUPERUSER-LEAK" "PRODUCTION'S CONFIGURATION LEAKS (openbrain-ext as postgres): the same call returns the personal row's content verbatim. RLS binds no superuser, with or without FORCE. This is C.9 H1, measured rather than argued."
         } else {
-            Pass "unexpected and welcome: even as postgres the ext door did not return the personal row"
+            PassGap "EXT-SUPERUSER-LEAK" "unexpected and welcome: even as postgres the ext door did not return the personal row"
         }
         if ($extNotesAfter -ne $extNotes) {
             Gap "EXT-CRM-COPY" "and it COPIED that content into professional_contacts.notes - a third home with no exposure label. Same cause, same item."
             $null = Db "UPDATE professional_contacts SET notes = 'baseline notes' WHERE id = '$contactId'"
+        } else {
+            # THIS BRANCH DID NOT EXIST. The clause was a bare `if { Gap }` with no success
+            # path, so the good outcome registered nothing and the id could only ever VANISH.
+            # The comparison IS the verdict either way: the md5 was taken before and after.
+            PassGap "EXT-CRM-COPY" "and professional_contacts.notes is UNCHANGED (md5 identical before and after) - the call did not copy the personal content into the CRM"
         }
         docker rm -f $REDEXT 2>$null | Out-Null
         Add-Red "13" "the SAME ext image in the PRODUCTION configuration (connected as postgres), beside the bound one"
@@ -1904,7 +2016,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         Pass "the refusal is not_found, not 'forbidden' - it does not confirm the id exists"
     } else { Fail "the review refusal does not read as not_found (got: $revBlob)" }
     $revRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_review'"
-    if ($revRefused -eq "1") { Pass "the refused review left a durable audit row (access_refused, tool=agent_memory_review)" }
+    if ($revRefused -eq "1") { PassGap "AUDIT-REVIEW" "the refused review left a durable audit row (access_refused, tool=agent_memory_review)" }
     else { Gap "AUDIT-REVIEW" "STOPPED but NOT RECORDED (agent_memory_review): expected 1 access_refused row, got '$revRefused'" }
     # No review-action row either: a refused decision that files paperwork is a decision.
     # The universe is every review-action row in the database. If the drill never causes a
@@ -1965,7 +2077,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         Pass "STOPPED - guessing the personal fixture's idempotency_key does not disclose its id"
     } else { Fail "ID DISCLOSURE: the writeback handed back the personal fixture's memory id" }
     $wbRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND payload->>'tool'='agent_memory_writeback' AND payload->>'reason'='off-plane-idempotency-key'"
-    if ($wbRefused -eq "1") { Pass "the refused key lookup left a durable audit row" }
+    if ($wbRefused -eq "1") { PassGap "AUDIT-WRITEBACK-PROBE" "the refused key lookup left a durable audit row" }
     else { Gap "AUDIT-WRITEBACK-PROBE" "STOPPED but NOT RECORDED (agent_memory_writeback idempotency probe): expected 1 audit row, got '$wbRefused'" }
     # Same shape, one line below its own GAP: the universe is the writeback refusal rows the
     # line above just measured, and it is those rows this claim is about.
@@ -2005,7 +2117,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         -Claim "and no memory_used row was written for a memory this door cannot see" `
         -Defect "usage row(s) exist for the off-plane fixture"
     $ruRefused = Db "SELECT count(*) FROM agent_memory_audit_events WHERE event_type='access_refused' AND memory_id='$PID_PERS' AND payload->>'tool'='agent_memory_report_usage'"
-    if ($ruRefused -eq "1") { Pass "the refusal left a durable audit row (access_refused, tool=agent_memory_report_usage)" }
+    if ($ruRefused -eq "1") { PassGap "AUDIT-REPORT-USAGE" "the refusal left a durable audit row (access_refused, tool=agent_memory_report_usage)" }
     else { Gap "AUDIT-REPORT-USAGE" "STOPPED but NOT RECORDED (agent_memory_report_usage): expected 1 access_refused row, got '$ruRefused'" }
 
     # --- 14. ATTACK 14 - THE SCHEDULED WIKI COMPILE ---------------------------------------
@@ -2717,10 +2829,13 @@ if ($firedGaps.Count -gt 0 -or $newGaps.Count -gt 0) {
 # ledger is now claiming something is open that is closed, and the next reader trusts it.
 #
 # -SkipRed is exempt so that a gap whose only producer lives in the red phase cannot turn a
-# deliberately weaker run into a false FAIL. Measured 2026-08-31: TODAY none does - all 18 fire
-# under -SkipRed too, because the ext-container gaps are raised in the green phase. The
-# exemption is for the next one, and it is the reason -SkipRed is documented as weaker: under
-# it, a gap that has genuinely CLOSED goes unnoticed.
+# deliberately weaker run into a false FAIL. The comment here used to claim "TODAY none does -
+# all 18 fire under -SkipRed too". BOTH HALVES WERE WRONG: the figure was 18 when the set had
+# grown to 25, and RED-COVERAGE is raised inside the red phase's own else-branch, so it CANNOT
+# fire under -SkipRed - the exemption is load-bearing today, not a provision for the next one.
+# Rather than re-type a third figure, the run now PRINTS which dispositioned gaps did not fire
+# under -SkipRed, so a reader sees the set instead of a claim about it. The cost of the
+# exemption stands: under -SkipRed a gap that has genuinely CLOSED goes unnoticed.
 # CLOSED vs VANISHED. A dispositioned gap that did not fire but whose assertion REACHED A
 # VERDICT this run is CLOSED - good news, printed loudly, not a failure. One that nothing
 # reached a verdict on has VANISHED, and that is still the FAIL this rule was written for.
@@ -2736,6 +2851,13 @@ if ($closedGaps.Count -gt 0) {
     Write-Host "        PROMOTION-RUNBOOK.md. This is a NAG, not a failure - closing a gap must not turn the" -ForegroundColor Green
     Write-Host "        build red, or the next person stops closing them." -ForegroundColor Green
 }
+if ($vanishedGaps.Count -gt 0 -and $SkipRed) {
+    Write-Host "  NOT ENFORCED under -SkipRed - $($vanishedGaps.Count) dispositioned gap(s) did not fire and nothing" -ForegroundColor Yellow
+    Write-Host "        registered a verdict for them: $($vanishedGaps -join ', ')" -ForegroundColor Yellow
+    Write-Host "        Under a FULL run this is a FAIL. RED-COVERAGE in particular is raised inside the red" -ForegroundColor Yellow
+    Write-Host "        phase and cannot fire here, which is why the exemption exists - so this run cannot" -ForegroundColor Yellow
+    Write-Host "        tell you whether any of these CLOSED or merely went unmeasured." -ForegroundColor Yellow
+}
 if ($vanishedGaps.Count -gt 0 -and -not $SkipRed) {
     Write-Host "  FAIL  $($vanishedGaps.Count) dispositioned gap(s) did NOT fire AND nothing with that id reached a" -ForegroundColor Red
     Write-Host "        verdict: $($vanishedGaps -join ', ')" -ForegroundColor Red
@@ -2744,14 +2866,19 @@ if ($vanishedGaps.Count -gt 0 -and -not $SkipRed) {
     $fails += $vanishedGaps.Count
 }
 
-if ($fails -eq 0 -and $gaps -eq 0) {
+# THE VERDICT, from the same pure function -SelfTestLedger exercises. The chain below is
+# unchanged in behaviour - it now branches on the computed code instead of re-deriving it,
+# so what CI obeys and what the self-test proves are the same seven lines.
+$ledgerExit = Get-LedgerExit -Fails $fails -Gaps $gaps -NewGapCount $newGaps.Count -Accept ([bool]$AcceptDispositionedGaps)
+
+if ($ledgerExit -eq 0 -and $fails -eq 0 -and $gaps -eq 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL PASSED - $passes checks, every attack stopped, every targeted refusal recorded" -ForegroundColor Green
     Write-Host "THE OPERATIONAL CONSTRAINT STANDS: do not write a personal-exposure memory. See THE LIFT above." -ForegroundColor Yellow
-    exit 0
+    exit $ledgerExit
 }
-if ($fails -gt 0) {
+if ($ledgerExit -eq 1) {
     Write-Host "$fails DRILL CHECK(S) FAILED ($passes passed, $gaps gap(s))" -ForegroundColor Red
-    exit 1
+    exit $ledgerExit
 }
 # NO DEFECT IN THIS TREE, AND NOT A PASS EITHER. Every containment attack was stopped; what
 # is open is a set of NAMED, DISPOSITIONED properties this tree cannot currently deliver.
@@ -2763,18 +2890,18 @@ if ($fails -gt 0) {
 # that fired is one this file already names and owns (see $GAP_DISPOSITIONS). A gap nobody has
 # named still exits 2, WITH the flag - because "a new gap appeared" is the regression the CI
 # wiring exists to catch, and it is the one thing a count-based budget would have missed.
-if ($newGaps.Count -gt 0) {
+if ($ledgerExit -eq 2 -and $newGaps.Count -gt 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL: $($newGaps.Count) UNDISPOSITIONED GAP(S) - $($newGaps -join ', ')" -ForegroundColor Red
     Write-Host "  These are NOT in `$GAP_DISPOSITIONS. Either the tree regressed or a new property went" -ForegroundColor Red
     Write-Host "  unmet; name it and its owning item there before this run can be read as expected." -ForegroundColor Red
-    exit 2
+    exit $ledgerExit
 }
-if ($AcceptDispositionedGaps) {
+if ($ledgerExit -eq 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps gap(s), ALL DISPOSITIONED ($passes checks passed, 0 failed)" -ForegroundColor Green
     Write-Host "  Exit 0 under -AcceptDispositionedGaps. This is NOT 'U5's recording half is met' - it is" -ForegroundColor Yellow
     Write-Host "  'nothing changed since the operator dispositioned these', which is what CI can assert." -ForegroundColor Yellow
     Write-Host "  See documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
-    exit 0
+    exit $ledgerExit
 }
 Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps NAMED GAP(S) OPEN ($passes checks passed, 0 failed)" -ForegroundColor Yellow
 Write-Host "  Every attack was STOPPED. What is not met is the RECORDING half of U5's column," -ForegroundColor Yellow
@@ -2782,4 +2909,4 @@ Write-Host "  and the doors that connect as postgres. Both are C.9 H1/H4 items, 
 Write-Host "  above with the measurement, and neither is closed by this run." -ForegroundColor Yellow
 Write-Host "  CI (C.9 H4) should pass -AcceptDispositionedGaps, which exits 0 for exactly this" -ForegroundColor Yellow
 Write-Host "  set and non-zero for anything new. See documentation/notes/u8h3-findings.md." -ForegroundColor Yellow
-exit 2
+exit $ledgerExit

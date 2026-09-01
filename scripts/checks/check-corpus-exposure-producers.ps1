@@ -65,6 +65,43 @@
   no check at all, because it reads as coverage. Now: an ORM site is read over ITS OWN
   STATEMENT, and no site's evidence window may cross another corpus site in either direction.
 
+  AND THAT FIXED THE ORM VICTIM ONLY - SAY SO. The second half of that sentence (the fence)
+  does far less than it reads: it clips the window at another table's SITE LINE, and a
+  donor's `exposure` key is in its BODY, one to three lines BELOW that line, INSIDE the clip.
+  Measured 2026-08-31: a `thoughts` POST stating its plane above an `agent_memories` POST
+  stating none still CLEARS it, at separations of 0, 3, 10 and 25 lines - 8 sites, 0
+  violations, green. index.ts:491 was an ORM site, and the ORM shape is immune because its
+  evidence IS the statement. `-SelfTest` case 3's victim is an ORM site too, so it cannot
+  catch this; case 4 plants the URL case and RECORDS the miss instead of pretending.
+
+  TWO MORE FALSE GREENS ON COUNTED SITES, FOUND THE SAME WAY AND FIXED. The evidence test was
+  a BARE SUBSTRING match on the word `exposure`, so a COMMENT (`// exposure is applied
+  downstream`) and an unrelated identifier (`const exposureMetricsCounter = 0;`) each cleared
+  a bare POST that stated no plane at all. Not misses: the run COUNTED those sites and
+  reported them as stating their plane. It now requires a key or an assignment
+  (Test-StatesPlane), and whole-line comments are not evidence. `-SelfTest` cases 3b/3c.
+
+  AND THAT TIGHTENING FOUND A LIVE ONE IN THIS TREE. OB1/recipes/schema-aware-routing's
+  index.ts:298 states its plane correctly at line 308 - but the ORM statement slice stopped
+  at the first `;`, and the eight-line comment between them contains "...widens nothing;
+  where...". The key was never inside the evidence, and the site passed off the word
+  `exposure` IN THAT COMMENT. Delete both real keys, leave the comment, and the old gate is
+  still green: measured. Get-Statement no longer takes a terminator from a comment line.
+
+  AND THE LINE SPLITTER REQUIRED A CARRIAGE RETURN - ON THIS PLATFORM, NOT THE OTHER ONE.
+  A bare CR sat in this file's split pattern. The repo blob is "<CR>?<LF>", i.e. optional-CR
+  then LF, which is CORRECT. But core.autocrlf=true rewrites that trailing LF on checkout, so
+  the WINDOWS working copy reads "<CR>?<CR><LF>", which REQUIRES a CR. The broken
+  configuration is therefore a WINDOWS checkout of this script scanning an LF-only FILE:
+  nothing split, one line per file, no fences, and the evidence window was the WHOLE FILE.
+  All four combinations measured 2026-08-31 - the Windows-checkout gate against an LF fixture
+  is the ONLY false green; the Linux/LF checkout is correct on both fixtures. An earlier
+  draft of this comment had the direction BACKWARDS. The runs recorded in rounds 3-5 were
+  unaffected, and NOT because this worktree is CRLF - that is the AFFECTED side. They were
+  unaffected because of the 44 LF-majority files in the scan set, ZERO name a corpus table
+  (measured). The vacuity guard would not have caught it either way - one site is not zero
+  sites.
+
   WHAT IT DELIBERATELY DOES NOT DO: it does not check the VALUE. Which plane a corpus belongs
   on is a PLAN 1.1 decision for the operator, not a property a pre-commit hook can assert. It
   checks only that the producer STATES one, which is what the NOT NULL column asks for.
@@ -72,10 +109,20 @@
   Exit 0 = no violation in the recognised shapes, 1 = at least one, or the scan was vacuous.
 
 .PARAMETER SelfTest
-  Write synthetic producers into a temp directory and require the scan to behave: a violating
-  one is FLAGGED, the same one WITH `exposure` is not, and - the case that matters - a
-  producer whose only nearby `exposure` key belongs to a DIFFERENT table's statement is still
-  FLAGGED. Proves the gate can go red without editing the tree. Exit 0 when all behave.
+  Write synthetic producers into a temp directory and require the scan to behave. SIX
+  assertions that must hold (a failure exits 1): a violating producer is FLAGGED; the same
+  one WITH `exposure` is not; a producer whose only nearby `exposure` key belongs to a
+  DIFFERENT table's STATEMENT is still FLAGGED (case 3, the ORM refutation); and a bare POST
+  is still FLAGGED when the only `exposure` in range is a COMMENT (3b) or an unrelated
+  IDENTIFIER (3c). Proves the gate can go red without editing the tree.
+
+  THEN THREE CASES THAT ASSERT NOTHING AND MEASURE THE BLIND SPOTS (4, 5, 6): a URL victim
+  with a labelled donor above it, a backtick-quoted table argument, and a producer under an
+  allow-listed path. Each plants an UNLABELLED producer and RECORDS what the gate does. They
+  cannot fail the self-test - the miss is the documented behaviour - but if one is ever
+  FLAGGED the run says so and asks for the blind-spot entry to be struck. A blind spot
+  measured every run is a scope; one asserted in a comment is a claim nobody re-checks.
+  Exit 0 when the six assertions behave, whatever the three records say.
 
 .PARAMETER ShowShapes
   Print the shape/extension disclosure and exit 0 without scanning.
@@ -129,6 +176,73 @@ $siteArg = '(?<![A-Za-z0-9_])["''](thoughts|agent_memories)["''](?!\s*:)'
 #          have this gate switched off within a week. Measured on this tree.
 $siteOrm = '\.(?:from|table)\(\s*["''](thoughts|agent_memories)["'']'
 
+# --- WHAT COUNTS AS STATING THE PLANE ------------------------------------------------------
+# This was `$evidence -match 'exposure'` - a BARE SUBSTRING - and it produced FALSE GREENS
+# ON COUNTED SITES, which is worse than a miss: the run reports the site as examined AND as
+# stating its plane. Two were planted and measured 2026-08-31, both reported
+# "OK - all 1 RECOGNISED corpus insert site(s) state their plane":
+#
+#     // exposure is applied downstream by the ingest worker     <- a COMMENT clears it
+#     const exposureMetricsCounter = 0;                          <- an unrelated IDENTIFIER
+#
+# Same class as index.ts:491 one layer down: a green off text that is not this statement's
+# plane declaration. So the token must be the whole word `exposure`, optionally quoted or
+# backslash-escaped, followed by a key separator or an assignment - which is what a
+# declaration looks like in every language this gate scans:
+#     exposure: "ops"   "exposure": "ops"   exposure="ops"   \"exposure\":\"ops\"
+# The lookbehind is what rejects `exposureMetricsCounter` and `enforced_exposure`; requiring
+# `[:=]` after it is what rejects the comment.
+$statesPlane = '(?<![A-Za-z0-9_])[\x22\x27\x60\x5C]?exposure[\x22\x27\x60\x5C]*\s*[:=]'
+# WHOLE-LINE COMMENTS ARE NOT EVIDENCE. `// exposure: "ops"` above a bare POST declares
+# nothing to the database. Only lines whose TRIMMED start is a comment marker are dropped -
+# never a trailing `//`, because a URL literal contains one and cutting there would discard
+# a real key on the same line. COST, STATED: a plane stated in a TRAILING comment is
+# therefore still counted as evidence, and a declaration sitting inside a multi-line string
+# literal on a line that begins with # or // is dropped (a false RED - the safe direction).
+function Test-StatesPlane([string]$evidence) {
+    $code = ($evidence -split "\r\n|\n|\r" | Where-Object {
+        $t = $_.TrimStart()
+        -not ($t.StartsWith('#') -or $t.StartsWith('//') -or $t.StartsWith('*') -or $t.StartsWith('/*'))
+    }) -join "`n"
+    return ($code -match $statesPlane)
+}
+
+# --- THE STATEMENT SLICE, AND WHERE IT MUST NOT STOP ---------------------------------------
+# An ORM site is read over its own statement: from the builder to the terminating `;`. The
+# terminator was found with a bare IndexOf(';'), and a `;` INSIDE A COMMENT ended the slice
+# early. Found the moment the evidence test above stopped accepting substrings, and it was a
+# LIVE FALSE GREEN in this tree, not a hypothetical:
+#
+#   OB1/recipes/schema-aware-routing/index.ts:298 states its plane at line 308. The eight-line
+#   comment between them contains "...widens nothing; where this corpus belongs...", so the
+#   slice ended at THAT semicolon and the real `exposure: "ops"` key was never inside the
+#   evidence. The site passed anyway - cleared by the word `exposure` in that same comment.
+#   A real producer, correctly labelled, reported green FOR THE WRONG REASON. Delete the key
+#   and leave the comment and the gate would not have noticed.
+#
+# So: a line whose TRIMMED start is a comment marker carries no terminator. It is still
+# APPENDED - Test-StatesPlane drops it as evidence - because dropping it here would silently
+# renumber nothing but would make this function two rules instead of one.
+# NOT FIXED, AND DECLARED: a `;` inside a STRING LITERAL still ends the slice early, and a
+# trailing `// ...;` on a code line does too. Both truncate toward RED, which is the safe
+# direction now that the evidence test is a key test rather than a substring.
+function Get-Statement {
+    param([string[]]$Lines, [int]$Start, [string]$FirstLine, [int]$MaxLines)
+    $out = New-Object System.Collections.Generic.List[string]
+    $end = [Math]::Min($Lines.Count - 1, $Start + $MaxLines)
+    for ($k = $Start; $k -le $end; $k++) {
+        $raw = if ($k -eq $Start) { $FirstLine } else { $Lines[$k] }
+        $t = $raw.TrimStart()
+        if ($t.StartsWith('//') -or $t.StartsWith('#') -or $t.StartsWith('*') -or $t.StartsWith('/*')) {
+            $out.Add($raw); continue
+        }
+        $semi = $raw.IndexOf(';')
+        if ($semi -ge 0) { $out.Add($raw.Substring(0, $semi)); break }
+        $out.Add($raw)
+    }
+    return ($out -join "`n")
+}
+
 # What turns a URL site into an INSERT rather than a read: any POST verb near it.
 # CASE-INSENSITIVE, and deliberately loose about the CALLER's spelling, because the first two
 # versions of this pattern MISSED a real producer: import-google-activity.mjs calls a local
@@ -170,7 +284,7 @@ $exts = @('*.ts', '*.mts', '*.cts', '*.tsx', '*.mjs', '*.js', '*.cjs', '*.jsx',
 # reader learns its scope from the output rather than from this comment.
 $SHAPES_SEEN = @(
     'URL   a bare PostgREST collection path written as a literal: /rest/v1/thoughts, ${BASE}/agent_memories'
-    'ARG   the table name as its own quoted argument beside a post/insert call: obFetch("POST","thoughts",..), insertRows("thoughts",..)'
+    'ARG   the table name as its own SINGLE- or DOUBLE-quoted argument beside a post/insert call: obFetch("POST","thoughts",..), insertRows(''thoughts'',..) - a BACKTICK-quoted argument is NOT recognised, see below'
     'ORM   a client builder naming the table literally: supabase-js .from("thoughts").insert(..), supabase-py .table("thoughts").insert(..)'
     'VERB  POST spelled as "POST", method:"POST", requests.post(, curl -X POST, or ANY identifier containing post/insert called as a function'
 )
@@ -192,6 +306,11 @@ $SHAPES_BLIND = @(
     'a write that does not go over PostgREST at all - psql, a direct pg driver, a SQL migration'
     'a producer CORRECT here and WRONG at runtime: this reads source text, never the value actually sent'
     'two inserts into the SAME table close together: the fence separates TABLES, not statements, so outside the ORM shape one of them stating the plane can clear the other'
+    'a DIFFERENT table''s insert ABOVE a URL or ARG site, stating its own plane: the fence clips at the donor''s SITE LINE, and the donor''s exposure key sits in its BODY below that line, INSIDE the clip. Measured at 0/3/10/25 lines of separation: green. Only the ORM shape is immune, because its evidence is the statement itself. -SelfTest case 4 plants it and records the miss'
+    'a BACKTICK-quoted table argument: obFetch("POST", `thoughts`, ..). The ARG pattern accepts '' and " only, and a backtick is a quote in JS - such a producer is not flagged and is not COUNTED as a site at all. -SelfTest case 5 plants it and records the miss'
+    'anything under a directory whose name ends in -data, or that is a reparse point (junction/symlink): both are pruned in addition to the named list, and both are printed below'
+    'anything under a path on the ALLOW-LIST below - notably documentation\ and docs\. A producer living under either is never scanned. -SelfTest case 6 plants one and records the miss'
+    'a plane stated in a TRAILING comment on a code line: only WHOLE-LINE comments are dropped from the evidence, because cutting at a mid-line // would discard a real key sharing a line with a URL literal'
 )
 
 # Trees with no first-party source in them. Same list as check-llm-gateway-routing.ps1, for
@@ -202,6 +321,14 @@ $SHAPES_BLIND = @(
 $pruneDirNames = @('.git', '.venv', '.testvenv', 'node_modules', '.next', 'dist', 'build',
                    'backups', 'tiktoken-cache', 'notebook_data', 'data', 'coverage',
                    'worktrees')
+# AND THE PRUNES THAT ARE NOT NAMES. Get-ScanFiles also skips any directory matching these
+# globs, and any directory that is a REPARSE POINT (a junction or symlink - it would
+# otherwise be walked twice, or out of the tree entirely). These were invisible: the run's
+# 'DIRECTORIES PRUNED' line printed $pruneDirNames alone, so a producer under `foo-data/`
+# was excluded by a rule the output did not mention. Measured - a planted producer under
+# `scratch-data/` was neither scanned nor named. A blind spot that is stated is a scope; a
+# blind spot that is silent is a false green.
+$pruneDirGlobs = @('*-data')
 
 # Paths that reference the corpus tables but are not producers of corpus rows.
 #   * documentation and archives - prose, and retired code kept for provenance;
@@ -241,7 +368,10 @@ function Write-Disclosure {
     Write-Host "  literal is adjacent and reported OK when 40 lines separate it. Do not read a green as coverage here:" -ForegroundColor DarkGray
     foreach ($s in $SHAPES_BLIND) { Write-Host "    - $s" -ForegroundColor DarkGray }
     Write-Host ("  EXTENSIONS SCANNED: " + (($exts | ForEach-Object { $_.TrimStart('*') }) -join ' ')) -ForegroundColor DarkGray
-    Write-Host ("  DIRECTORIES PRUNED: " + ($pruneDirNames -join ' ')) -ForegroundColor DarkGray
+    Write-Host ("  DIRECTORIES PRUNED (by name): " + ($pruneDirNames -join ' ')) -ForegroundColor DarkGray
+    Write-Host ("  DIRECTORIES PRUNED (by glob): " + ($pruneDirGlobs -join ' ') + "   plus ANY reparse point (junction/symlink)") -ForegroundColor DarkGray
+    Write-Host   "  PATHS ALLOWED WITHOUT SCANNING - a producer under any of these is never seen:" -ForegroundColor DarkGray
+    foreach ($a in $allowPathLike) { Write-Host "    ! $a" -ForegroundColor DarkGray }
 }
 
 if ($ShowShapes) { Write-Disclosure; exit 0 }
@@ -257,7 +387,9 @@ function Get-ScanFiles {
             foreach ($sub in [System.IO.Directory]::EnumerateDirectories($dir)) {
                 $name = [System.IO.Path]::GetFileName($sub)
                 if ($PruneNames -contains $name) { continue }
-                if ($name -like '*-data') { continue }
+                $skip = $false
+                foreach ($g in $pruneDirGlobs) { if ($name -like $g) { $skip = $true; break } }
+                if ($skip) { continue }
                 if ([System.IO.File]::GetAttributes($sub) -band [System.IO.FileAttributes]::ReparsePoint) { continue }
                 $stack.Push($sub)
             }
@@ -299,15 +431,56 @@ function Find-Violations {
         # check gets deleted. If a shape is ever added that does NOT spell the table name in
         # the file, this line has to go with it.
         if ($text.IndexOf('thoughts') -lt 0 -and $text.IndexOf('agent_memories') -lt 0) { continue }
-        $lines = $text -split "?
-"
+        # LINE SPLIT, AND IT WAS SILENTLY BROKEN ON WINDOWS - THE PLATFORM THIS RAN ON.
+        # This read -split "<CR>?<newline>", with a BARE CR before the `?`. The repo blob is
+        # 22 0d 3f 0a 22 = "<CR>?<LF>" = optional-CR then LF, which is CORRECT. But
+        # core.autocrlf=true (set on this machine) rewrites that trailing LF on checkout, so
+        # the WINDOWS working copy is 22 0d 3f 0d 0a 22 = "<CR>?<CR><LF>", which REQUIRES a CR.
+        #
+        # So the false green needs BOTH: a Windows checkout of THIS SCRIPT and an LF-only
+        # SCANNED FILE. Then nothing splits - the whole file becomes one line, every fence
+        # collapses into it, the evidence window becomes the ENTIRE FILE, and any `exposure`
+        # anywhere in that file clears every producer in it. All four combinations measured
+        # 2026-08-31 on one fixture (a labelled `thoughts` POST 40 lines below an unlabelled
+        # `agent_memories` POST):
+        #
+        #   script checkout   scanned file   old gate
+        #   CRLF (Windows)    LF             'all 1 site(s) state their plane'  <- FALSE GREEN
+        #   CRLF (Windows)    CRLF           FAIL 1 of 2                        correct
+        #   LF   (Linux CI)   LF             FAIL 1 of 2                        correct
+        #   LF   (Linux CI)   CRLF           FAIL 1 of 2                        correct
+        #
+        # An earlier draft of this comment said the OPPOSITE - that an LF checkout was the
+        # broken one and 'this worktree is CRLF so the runs here were unaffected'. CRLF is
+        # the AFFECTED side. The runs here were unaffected for a different reason, measured:
+        # of the 44 LF-majority files in the scan set, ZERO name a corpus table. The vacuity
+        # guard would not have caught it either way - one site is not zero sites.
+        $lines = [regex]::Split($text, "\r\n|\n|\r")
         $n = $lines.Count
 
         # EVERY corpus-site line in the file, in ANY shape, with the TABLE it names.
         # These are the FENCES: a site's evidence may not be read across a corpus site that
-        # names a DIFFERENT table. Without this, an `exposure` key belonging to one table's
-        # statement clears another table's statement below it, and the gate is green on a
-        # site it never examined. (index.ts:491, refuted.)
+        # names a DIFFERENT table.
+        #
+        # WHAT THE FENCE ACTUALLY FIXES, MEASURED - AND IT IS LESS THAN THIS COMMENT USED
+        # TO CLAIM. It said the fence stops "an `exposure` key belonging to one table's
+        # statement clearing another table's statement below it". Running it refutes that.
+        # The fence clips the evidence window at the donor's SITE LINE, and a donor's
+        # `exposure` key is almost never ON its site line - it is in the BODY, one to three
+        # lines BELOW it, which is INSIDE the clip. So a `thoughts` POST stating its plane
+        # ABOVE an `agent_memories` POST that states none still CLEARS it. Measured
+        # 2026-08-31 at separations of 0, 3, 10 and 25 lines: 8 sites, 0 violations, green.
+        #
+        # WHAT IS FIXED IS THE ORM VICTIM, and not by this fence at all - by the
+        # statement-scoped evidence below, which REPLACES the window with the builder-to-`;`
+        # slice and so cannot read a neighbour's body at any distance. index.ts:491 was an
+        # ORM site, which is why that site went red and why -SelfTest case 3 passes: its
+        # victim is an ORM site too, so it cannot catch the URL/ARG case. Case 4 plants
+        # exactly that case and RECORDS the known-bad verdict rather than pretending.
+        #
+        # THE FENCE IS KEPT because it is not useless: it stops a donor whose key IS on its
+        # own site line, and it bounds the window. It is simply not the fix for URL and ARG
+        # victims with a donor above, and $SHAPES_BLIND now says so.
         #
         # TABLE-AWARE, AND THE FIRST VERSION WAS NOT - it fenced at EVERY corpus site, which
         # turned pull-gmail.ts:856 red. That site is the RETRY leg: it re-POSTs the very same
@@ -365,22 +538,13 @@ function Find-Violations {
                 if ($fromAt -lt 0) { $fromAt = 0 }
                 # DETECTION: forward from the builder, no further than $ormWindow lines and no
                 # further than the statement's `;`.
-                $ohi  = [Math]::Min($n - 1, $i + $ormWindow)
-                if ($i -eq $ohi) { $tail = $line.Substring($fromAt) }
-                else { $tail = (@($line.Substring($fromAt)) + @($lines[($i + 1)..$ohi])) -join "`n" }
-                $semi = $tail.IndexOf(';')
-                if ($semi -ge 0) { $tail = $tail.Substring(0, $semi) }
+                $tail = Get-Statement -Lines $lines -Start $i -FirstLine $line.Substring($fromAt) -MaxLines $ormWindow
                 if ($tail -match $ormInsert) {
                     $isSite = $true
                     # EVIDENCE: the WHOLE statement, builder to terminating `;`, however long.
                     # Not a line count - a 33-line insert body is one statement, and a window
                     # of 30 would have cut off the very key it is looking for.
-                    $ehi = [Math]::Min($n - 1, $i + $stmtMaxLines)
-                    if ($i -eq $ehi) { $stmt = $line.Substring($fromAt) }
-                    else { $stmt = (@($line.Substring($fromAt)) + @($lines[($i + 1)..$ehi])) -join "`n" }
-                    $esemi = $stmt.IndexOf(';')
-                    if ($esemi -ge 0) { $stmt = $stmt.Substring(0, $esemi) }
-                    $evidence = $stmt
+                    $evidence = Get-Statement -Lines $lines -Start $i -FirstLine $line.Substring($fromAt) -MaxLines $stmtMaxLines
                 }
             } elseif ($line -match $siteArg) {
                 $alo = [Math]::Max(0, $i - $argWindow); $ahi = [Math]::Min($n - 1, $i + $argWindow)
@@ -389,7 +553,7 @@ function Find-Violations {
             if (-not $isSite) { continue }
 
             $script:InsertSites++
-            if ($evidence -match 'exposure') { continue }       # the plane is stated
+            if (Test-StatesPlane $evidence) { continue }       # the plane is stated
 
             $rel = $f
             if ($f.StartsWith($ScanRoot)) { $rel = $f.Substring($ScanRoot.Length).TrimStart('\') }
@@ -480,11 +644,109 @@ async function writeBoth(sb, row) {
             Write-Host "[check-corpus-exposure-producers] SELF-TEST green: stating exposure IN THE STATEMENT clears it." -ForegroundColor Green
         }
 
+        # CASES 3b/3c - EVIDENCE THAT IS NOT A DECLARATION. Cases 1-3 all state the plane
+        # with a real key, so all three passed while the evidence test was a bare substring
+        # match on the word `exposure`. These two are the shapes that exposed it: a COMMENT
+        # and an unrelated IDENTIFIER, each above a bare POST with no plane anywhere. Both
+        # were reported as COUNTED SITES THAT STATE THEIR PLANE. They are FALSE GREENS, not
+        # misses, which is why they are hard assertions here and not blind-spot records.
+        Remove-Item (Join-Path $tmp "neighbour-key.mjs") -Force
+        $notEvidence = @(
+            @{ N = "3b"; P = "comment-only.mjs"; D = "a COMMENT mentioning exposure"
+               B = "const U = process.env.SUPABASE_URL;|// exposure is applied downstream by the ingest worker|async function ingest(row) {|  return await fetch(`${U}/rest/v1/thoughts`, {|    method: `"POST`",|    body: JSON.stringify({ content: row.content }),|  });|}" }
+            @{ N = "3c"; P = "identifier-only.mjs"; D = "an unrelated IDENTIFIER containing the word"
+               B = "const U = process.env.SUPABASE_URL;|const exposureMetricsCounter = 0;|async function ingest(row) {|  return await fetch(`${U}/rest/v1/thoughts`, {|    method: `"POST`",|    body: JSON.stringify({ content: row.content }),|  });|}" }
+        )
+        foreach ($ne in $notEvidence) {
+            $nedir = Join-Path $tmp ("notev" + $ne.N)
+            New-Item -ItemType Directory -Path $nedir -Force | Out-Null
+            Set-Content -Path (Join-Path $nedir $ne.P) -Value (($ne.B -split [regex]::Escape("|")) -join [Environment]::NewLine) -Encoding ASCII
+            $nev = @(Find-Violations -ScanRoot $nedir)
+            if ($nev.Count -lt 1) {
+                Write-Host "[check-corpus-exposure-producers] SELF-TEST FAILED - case $($ne.N): a producer with NO plane anywhere PASSED, cleared by $($ne.D). That is a FALSE GREEN on a COUNTED site - the run reports it as examined and as stating its plane." -ForegroundColor Red
+                $selfFail++
+            } else {
+                Write-Host "[check-corpus-exposure-producers] SELF-TEST red: case $($ne.N) - $($ne.D) does NOT count as stating the plane ($($nev[0].File):$($nev[0].Line))" -ForegroundColor Yellow
+            }
+        }
+
+        # --- CASES 4-6: THE DECLARED BLIND SPOTS, RECORDED RATHER THAN PRETENDED ----------
+        #
+        # Cases 1-3 prove the three RECOGNISED shapes behave. They proved nothing about the
+        # blind list, and the blind list is where this gate is weakest - a verifier planted
+        # all three of these and the gate reported OK, exit 0, with unlabelled producers on
+        # disk. A blind spot that is stated is a scope; a blind spot that is silent is a
+        # false green, and a blind spot stated ONLY in a comment is one nobody re-measures.
+        #
+        # THESE CASES DO NOT FAIL THE SELF-TEST WHEN THE GATE MISSES - the miss IS the
+        # documented behaviour, and it is what $SHAPES_BLIND claims. They report the verdict
+        # either way. If one ever starts being FLAGGED, that is good news and the run says
+        # so, with the instruction to strike the entry from $SHAPES_BLIND. Closing a blind
+        # spot must not turn a check red, or the next person stops closing them.
+        $blindCases = @(
+            @{ N = 4
+               T = "URL victim with a DIFFERENT table's labelled producer ABOVE it"
+               P = "donor-above.mjs"
+               W = "the agent_memories POST states no plane; the fence clips at the thoughts SITE LINE and its exposure key sits BELOW that line, inside the clip"
+               B = @'
+const U = process.env.SUPABASE_URL;
+async function writeThought(row) {
+  return await fetch(`${U}/rest/v1/thoughts`, {
+    method: "POST",
+    body: JSON.stringify({ content: row.content, exposure: "ops" }),
+  });
+}
+async function writeMemory(row) {
+  return await fetch(`${U}/rest/v1/agent_memories`, {
+    method: "POST",
+    body: JSON.stringify({ summary: row.summary }),
+  });
+}
+'@ }
+            @{ N = 5
+               T = "BACKTICK-quoted table argument"
+               P = "backtick-arg.mjs"
+               W = "a backtick is a quote in JS, and the ARG pattern accepts single and double quotes only - so this is not flagged and is not COUNTED as a site at all"
+               B = @'
+async function ingest(row) {
+  return await obFetch("POST", `thoughts`, { content: row.content });
+}
+'@ }
+            @{ N = 6
+               T = "a producer under an ALLOW-LISTED path (docs\)"
+               P = "docs\ingest.mjs"
+               W = "the allow-list excludes *\docs\* and *\documentation\*, so the file is never read - the run now prints that list"
+               B = @'
+const U = process.env.SUPABASE_URL;
+async function ingest(row) {
+  return await fetch(`${U}/rest/v1/thoughts`, {
+    method: "POST",
+    body: JSON.stringify({ content: row.content }),
+  });
+}
+'@ }
+        )
+        Write-Host "[check-corpus-exposure-producers] SELF-TEST blind spots - each plants an UNLABELLED producer and records what the gate does with it:" -ForegroundColor DarkGray
+        foreach ($bc in $blindCases) {
+            $bdir  = Join-Path $tmp ("blind" + $bc.N)
+            $bfile = Join-Path $bdir $bc.P
+            New-Item -ItemType Directory -Path (Split-Path -Parent $bfile) -Force | Out-Null
+            Set-Content -Path $bfile -Value $bc.B -Encoding ASCII
+            $bv = @(Find-Violations -ScanRoot $bdir)
+            $bs = $script:InsertSites
+            if ($bv.Count -gt 0) {
+                Write-Host "  CASE $($bc.N) NOW FLAGGED - $($bc.T). This blind spot has CLOSED: strike its entry from SHAPES_BLIND and correct the header. This is NOT a failure." -ForegroundColor Green
+            } else {
+                Write-Host "  CASE $($bc.N) MISSED, as documented - $($bc.T): $bs site(s) counted, 0 flagged." -ForegroundColor Yellow
+                Write-Host "        why: $($bc.W)" -ForegroundColor DarkGray
+            }
+        }
+
         if ($selfFail -gt 0) {
             Write-Host "[check-corpus-exposure-producers] SELF-TEST FAILED - $selfFail case(s) took the wrong branch." -ForegroundColor Red
             exit 1
         }
-        Write-Host "[check-corpus-exposure-producers] SELF-TEST PASSED - red on a violation, red on a neighbour's key, green on a real fix." -ForegroundColor Green
+        Write-Host "[check-corpus-exposure-producers] SELF-TEST PASSED - red on a violation, red on a neighbour's key, red on a comment and on a look-alike identifier, green on a real fix." -ForegroundColor Green
         Write-Host "  It proves the three RECOGNISED shapes behave. It proves NOTHING about the blind spots below." -ForegroundColor DarkGray
         Write-Disclosure
         exit 0

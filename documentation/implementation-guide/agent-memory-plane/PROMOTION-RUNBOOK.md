@@ -1077,7 +1077,9 @@ script. **CI must serialise them** (or give `dfu-done` its own database); a retr
 `|| true` on `prove-rls` would delete the only check that watches the live plane. **Quote the drill's result in full, including the gaps and the exit
 code** — see "The drill's exit code, and what CI reads" below. An earlier version of this line
 said "105 passes / 0 failures" and stopped there, which reads as a pass; the run also reports
-18 named gaps and EXITS 2.
+its named gaps and EXITS 2. **Quote the run's own GAP LEDGER line rather than a number from
+here** — this document said "18" for three rounds after the set had grown to 25, which is the
+same failure one layer up: a count a human re-types drifts from the thing it counts.
 
 ## `init-agent-memory-exposure-column.sql` — the exposure label becomes a TYPED COLUMN (DFU C.9 H3)
 
@@ -1363,20 +1365,35 @@ revert → re-apply → re-apply again, all clean and idempotent) and once on th
 ### The drill's exit code, and what CI reads (C.9 H4)
 
 `scripts/checks/drill-personal-plane-exclusion.ps1` against the tree this gitlink pins reports
-**0 failures and 18 GAPs, and EXITS 2.** That is deliberate — U5's column asks for
+**0 failures and a set of named GAPs, and EXITS 2.** The run prints the set and its size on
+its own `GAP LEDGER` line; the dispositioned set is `$GAP_DISPOSITIONS` in the drill, **25
+entries** as of 2026-08-31. That is deliberate — U5's column asks for
 "mechanically stopped **and** the attempt is visible in an audit record", and the recording half
 is not met — but **H4 wires this drill into CI on `development`, where 2 is a failing build.**
 Left alone, the first green tree to hit that gate goes red for a reason that is not a defect,
 and the first fix anyone reaches for is `|| true`, which deletes the gate.
 
-**None of the 18 are H3's to close.** Thirteen are the audit-record gap in its various doors:
+**None of them are H3's to close**, and the set breaks down as: 13 `AUDIT-*`, 3 `EXT-*`, 2
+`LIFT-*`, 6 `VACUOUS-*` and `RED-COVERAGE`. The last seven were added in round 3 — none is a
+new shortfall, they are shortfalls that used to print as greens. Thirteen are the audit-record gap in its various doors:
 `auditRefusal` fires only after a bare `SELECT 1 FROM agent_memories WHERE id=$1` confirms the
 row exists, and that probe is bound by the same policy that hid it — so a non-superuser door
 writes no record, and a superuser door records but stops nothing. Closing it needs an elevated
 existence probe (`SECURITY DEFINER`, answers "exists" without returning the row), which is an
 H1/H4 decision. Three are the `openbrain-ext` container: it connects as `postgres`, leaks the
 personal row verbatim and copies it into `professional_contacts.notes` — H1, measured. Two are
-the lift's own conjunction, which cannot close while the other thirteen are open.
+the lift's own conjunction, which cannot close while the thirteen are open. Six are assertions
+whose universe is empty *because* those thirteen are open, and which used to print PASS off it.
+One, `RED-COVERAGE`, is the count of ATTACK sections that have greens and no red.
+
+**And closing any of them keeps CI green.** Every dispositioned id registers a verdict on its
+SUCCESS branch, so a gap that closes is reported `CLOSED` — a nag to pull the pin, not a
+failure. Sixteen of the twenty-five did not do this until 2026-08-31: they had a plain `Pass`,
+so the day H1's `SECURITY DEFINER` probe landed and closed the `AUDIT-*` family, CI would have
+gone red with thirteen failures *for having fixed the thing the ledger asks for*. Proof, with
+no database: `drill-personal-plane-exclusion.ps1 -SelfTestLedger` derives the id list from
+`$GAP_DISPOSITIONS`, fails if any id has no route, and simulates `AUDIT-INSPECT` closing —
+`closed=1 vanished=0 fails=0 EXIT=0`.
 
 So the drill now carries a **gap ledger**: every gap has a stable id, and `$GAP_DISPOSITIONS`
 names each one with the item that owns it. The exit contract is:
