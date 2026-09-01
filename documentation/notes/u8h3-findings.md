@@ -1610,7 +1610,54 @@ Two further defects found while sweeping, neither on the list:
   breaks the build rather than production"* - the same sentence 21 and the gate header were
   written to retract, still standing four sections earlier. Corrected in place.
 
-### 22.5 What was deliberately NOT done
+### 22.5 Round 6 re-validation (C.7b), from CLEAN CHECKOUTS, one suite per checkout
+
+Measurements in 22.1-22.3 were taken against the working tree at **`5c81f97`** (the sha this
+round started from) and against the historical blobs `819b5fe` and `c192041`, extracted with
+`git show`. The round's changes are committed at **`7197903`**; OB1 gitlink `debbbaa` ->
+**`d39ae95`**, pushed to `origin/feat/agent-memory-exposure-column` before the bump, so the
+pinned sha is reachable from a fresh `--recurse-submodules` clone.
+
+Three throwaway `git clone`s of this repo, each checked out at the exact sha and with `OB1`
+initialised to the recorded gitlink, working tree clean (`git status --porcelain` empty),
+**one suite per checkout**:
+
+| checkout | sha | suite | result |
+|---|---|---|---|
+| `cc1` | `7197903` | `check-corpus-exposure-producers.ps1 -SelfTest` | **PASSED**, exit 0 - the same 6 assertions red/green, cases 4-6 record the same 3 blind spots |
+| `cc2` | `7197903` | `check-corpus-exposure-producers.ps1` (full scan) | **OK - all 13 RECOGNISED corpus insert site(s) state their plane** (742 files), exit 0 |
+| `cc2` | `7197903` | the same, `-Root <empty dir>` | **FAIL - the scan examined 0 file(s) and found ZERO corpus insert sites**, exit 1 (anti-vacuity) |
+| `cc3` | `f6b64ef` | both of the above, on `7197903` **rebased onto the moved work line** | full scan **exit 0**, `-SelfTest` **PASSED** exit 0 |
+
+**The work line moved, and the pass was made rebase-proof rather than asserted to be.** The
+merge-base is `8e2eaf4`; `refactor/ai-stack-cleanup` is now `b4311d2`, **2 commits ahead**
+(`aa91eac`, `b4311d2`). Both add **new** note files
+(`wiki-pages-extractlinks-outage-2026-08-31.md`, `parked-non-dfu-work-2026-08-31.md`) and
+`comm -12` over the two changed-file sets returns **empty** - zero overlap with anything this
+branch touches. Rather than rely on that, `cc3` performed the rebase in a throwaway and re-ran
+both suites:
+
+```
+git diff --stat 7197903 f6b64ef -- scripts/ .githooks/ OB1   ->   (empty)
+```
+
+The rebase changes **nothing that was tested**, so the pass is not stale under C.7b. The
+rebase itself was NOT applied to `work/u8h3` - that is the reviewer's step, and this branch was
+not merged.
+
+**Round 5's other suites are untouched by this commit.** `7197903` changes six files -
+`scripts/checks/check-corpus-exposure-producers.ps1`, `.githooks/pre-commit`, the `OB1`
+gitlink, and three markdown files. `drill-personal-plane-exclusion.ps1`, `dfu-done.ps1` and
+`prove-agent-memory-rls.ps1` are byte-identical to their round-5 state, so the round-5 passes
+recorded in 21 stand on their own evidence and were not re-run here.
+
+**Isolation:** every run in this round was a static text scan over throwaway fixtures under
+`$env:TEMP` and over the clean checkouts above. **Nothing was written to the live database**, no
+container was started, no image was built or tagged, nothing was attached to an `ai-stack_*`
+network, and no plane lease was required or taken. `ai-stack` was **not pushed** and **not
+merged**.
+
+### 22.6 What was deliberately NOT done
 
 * **No coverage was added.** No shape, no extension, no self-test case, no pattern. The
   self-test is the same six assertions and three blind-spot records. Five of the six
