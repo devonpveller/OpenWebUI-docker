@@ -1125,13 +1125,20 @@ names is on the remote.
 
 ```
 work line base : 1a6b0b813e241cfb4b74659cbb2c11c8f86616aa  (refactor/ai-stack-cleanup, unmoved)
-VALIDATED AT   : 3440ba6  (work/u8h3) for the gate + the OB1 fix
-                 + the drill's pin restore, which run 2 and run 3 both carried
+VALIDATED AT   : 3440ba6  the gate + the OB1 fix (every gate run below)
+                 f4ae9f6  the drill + the ledger  (every drill run below)
 OB1 gitlink    : e9be2cdb0eb340662df0edadb1ff4b90b0493775
               -> debbbaa10bb9c004a9a9ac104dbe6e5b9c31293e  (the :491 fix + 195 s7's correction)
                  REACHABLE: `git -C OB1 branch -r --contains debbbaa` ->
                  origin/feat/agent-memory-exposure-column. Round 3's blocker is closed.
 ```
+
+**Why two shas, and why no run below is stale.** `git diff 3440ba6..HEAD --name-only` is five
+lines: four documents and `drill-personal-plane-exclusion.ps1`. The drill's runs (2 and 3) were
+executed against exactly the script content `f4ae9f6` records — the pin restore and the
+self-diagnosis were in the working tree before either run started, and **nothing script-touching
+was edited afterwards**; only the notes below were written. The gate's runs were executed against
+`3440ba6`, which no later commit modifies. Check both claims with that one-line diff.
 
 Both suites ran from this checkout, **one at a time, never concurrently** — the isolation
 "one suite per checkout" exists to buy, and the specific thing §17.4 records about
