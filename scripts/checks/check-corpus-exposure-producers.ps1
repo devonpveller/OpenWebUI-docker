@@ -24,8 +24,8 @@
   WHAT AN UNSEEN PRODUCER BREAKS. An earlier version of this header said "an eleventh producer
   written next year is in the universe the moment it is written, and it breaks this gate
   instead of breaking production." THAT SENTENCE WAS FALSE, and it is why this one is long.
-  Two verifiers independently planted producers in a temp root; this gate did not flag them,
-  did not warn about them, and did not even COUNT them as sites:
+  Two verifiers independently planted producers in a temp root that this gate did not flag,
+  did not warn about, and did not even COUNT as sites:
 
       const TABLE = "thoughts";  ...  fetch(`${REST}/${TABLE}`, { method: "POST", ... })
       fetch(REST_BASE + "/" + "thoughts", { method: "POST", ... })
@@ -33,6 +33,40 @@
       a byte-identical copy named .mts, and another named .tsx  (OB1 ships 57 .tsx files)
       curl -X POST "$SUPABASE_URL/rest/v1/thoughts" -d "$row"     (in a .sh)
       supabase.table("thoughts").insert(rows)                     (supabase-py)
+
+  THAT LIST IS HISTORY, AND IT WAS ALREADY HISTORY WHEN IT SHIPPED - SO IT IS DATED NOW.
+  Those verdicts were TRUE AT 819b5fe. They were written to MOTIVATE the widening of the
+  alphabet and of the ARG/ORM/VERB patterns - and that widening landed in the SAME COMMIT,
+  c192041. The paragraph therefore described a gate that had ceased to exist by the time it
+  was committed, and then stood for two rounds as a live claim about what this gate cannot
+  see. Nobody re-read the motivation after acting on it. Re-measured 2026-08-31 at 5c81f97,
+  one UNLABELLED fixture per shape, the historical blob run against the same fixtures:
+
+      shape, as listed above                          819b5fe        5c81f97
+      insertRows("thoughts", rows)                    0 sites        FLAGGED 1 of 1
+      obPost("thoughts", rows)                        0 sites        FLAGGED 1 of 1
+      the byte-identical .mts copy                    0 files        FLAGGED 1 of 1
+      the byte-identical .tsx copy                    0 files        FLAGGED 1 of 1
+      curl -X POST ".../thoughts" in a .sh            0 files        FLAGGED 1 of 1
+      supabase.table("thoughts").insert(rows)         0 sites        FLAGGED 1 of 1
+      fetch(BASE + "/" + "thoughts", ..)              FLAGGED        FLAGGED  (see below)
+      const TABLE = "thoughts" .. `${BASE}/${TABLE}`  0 sites        0 sites  (see below)
+
+  SIX OF THE EIGHT ARE NOW FLAGGED AND COUNTED, ONE ALWAYS WAS, AND ONE IS STILL MISSED. The
+  "one always was" is worth saying out loud: the CONCATENATED path was FLAGGED at 819b5fe too,
+  so the original list was over-broad even for the sha it was written at - "did not flag them"
+  was true of five of the six bullets, not six. Fixtures are reconstructions from the bullets
+  above, not the verifiers' original files, which were not kept; each is the smallest producer
+  that spells the bullet, and both blobs were run against the SAME file.
+
+  THE LAST TWO ROWS ARE ONE CASE, NOT TWO, and neither is coverage: both are decided by
+  LAYOUT rather than by shape. This gate resolves no values, so it sees either of them only
+  when the quoted literal "thoughts" happens to fall within $argWindow (2) lines of a
+  post/insert verb. Measured both ways at 5c81f97: the CONCATENATED path is FLAGGED with the
+  verb on the next line and reports ZERO SITES with five lines between them; the VARIABLE-held
+  name is FLAGGED adjacent and ZERO SITES at three lines. Same producer, same file, opposite
+  verdict, decided by whitespace. $SHAPES_BLIND says exactly this, and it is why widening the
+  alphabet was worth doing and was still NOT the fix.
 
   A producer this gate cannot see breaks PRODUCTION, not this gate - and per the section 16
   finding in documentation/notes/u8h3-findings.md it breaks it QUIETLY, because the producers
@@ -80,6 +114,36 @@
   a bare POST that stated no plane at all. Not misses: the run COUNTED those sites and
   reported them as stating their plane. It now requires a key or an assignment
   (Test-StatesPlane), and whole-line comments are not evidence. `-SelfTest` cases 3b/3c.
+
+  AND THE THIRD FALSE GREEN OF THAT CLASS WAS A CASE FOLD. PowerShell's `-match` is
+  case-INSENSITIVE, so `Exposure: "ops"` cleared a bare POST. PostgREST REFUSES that key - the
+  column is `exposure` - so the gate was green on a producer the DATABASE rejects, which is the
+  worst direction a false green can point: it is not a miss and not even a wrong-but-harmless
+  pass, it is a green over a row that will never be written. Measured 2026-08-31 at 5c81f97:
+  `OK - all 1 RECOGNISED corpus insert site(s) state their plane`, exit 0. Test-StatesPlane
+  now uses `-cmatch`; the same fixture FAILs 1 of 1. Every `exposure` key in this tree is
+  lowercase (checked); only the TypeScript TYPE name `Exposure` is capitalised, and a type
+  name is not a key.
+
+  STOP ENUMERATING THESE. THE BLIND SPOT IS A CATEGORY, AND THE CATEGORY IS THE DECLARATION.
+  Four rounds have now closed false greens on COUNTED sites one shape at a time - a comment, a
+  look-alike identifier, a semicolon in a comment, a case fold - and a verifier has produced a
+  fresh set each round. That is the ENUMERATE-AND-PATCH method A2 abandoned, and the seventh
+  shape will win exactly as the sixth did. So the honest declaration is not a longer list, it
+  is the property that GENERATES the list, and it is this:
+
+      THE EVIDENCE TEST IS A TEXT MATCH WITHIN A WINDOW AROUND THE SITE. ANY OCCURRENCE OF THE
+      KEY THAT IS NOT THIS STATEMENT'S OWN PLANE DECLARATION CAN CLEAR IT. Type annotations,
+      sibling objects, string literals, SQL text and comment continuations are KNOWN INSTANCES.
+      THE LIST IS ILLUSTRATIVE, NOT EXHAUSTIVE. A green from this gate is never evidence that a
+      row carries a plane; only the NOT NULL + CHECK in the database is that.
+
+  That statement stays true as new shapes appear, which is worth more than a list that is
+  complete for one afternoon. It is printed on every run (see $EVIDENCE_CLEARS) with the
+  measured instances underneath it, so a reader gets the CATEGORY first and the examples
+  second. Two narrowings ARE in place and bound it: the token must be a key or an assignment
+  (not a bare substring), and a WHOLE-LINE comment is not evidence. Neither narrows it to a
+  declaration - only to something that LOOKS like one.
 
   AND THAT TIGHTENING FOUND A LIVE ONE IN THIS TREE. OB1/recipes/schema-aware-routing's
   index.ts:298 states its plane correctly at line 308 - but the ORM statement slice stopped
@@ -204,7 +268,16 @@ function Test-StatesPlane([string]$evidence) {
         $t = $_.TrimStart()
         -not ($t.StartsWith('#') -or $t.StartsWith('//') -or $t.StartsWith('*') -or $t.StartsWith('/*'))
     }) -join "`n"
-    return ($code -match $statesPlane)
+    # CASE-SENSITIVE (-cmatch, not -match). PowerShell's -match is case-INSENSITIVE, so
+    # `Exposure: "ops"` cleared a bare POST - and PostgREST REFUSES that key, because the
+    # column is `exposure`. That was a green on a producer the DATABASE rejects, which is
+    # the worst direction a false green can point. Measured 2026-08-31 at 5c81f97: the
+    # fixture below reported `OK - all 1 RECOGNISED corpus insert site(s) state their
+    # plane`, exit 0, under -match, and FAILs 1 of 1 under -cmatch.
+    #     body: JSON.stringify({ content: row.content, Exposure: "ops" }),
+    # Every `exposure` key in this tree is lowercase (checked); only the TypeScript TYPE
+    # name `Exposure` is capitalised, and a type name is not a key.
+    return ($code -cmatch $statesPlane)
 }
 
 # --- THE STATEMENT SLICE, AND WHERE IT MUST NOT STOP ---------------------------------------
@@ -313,6 +386,31 @@ $SHAPES_BLIND = @(
     'a plane stated in a TRAILING comment on a code line: only WHOLE-LINE comments are dropped from the evidence, because cutting at a mid-line // would discard a real key sharing a line with a URL literal'
 )
 
+# WHAT CAN CLEAR A SITE THAT STATES NO PLANE - A CATEGORY, PRINTED FIRST, WITH EXAMPLES UNDER
+# IT. $SHAPES_BLIND above is about DETECTION: producers this gate never sees. This list is the
+# other failure, and it is the worse one, because the site IS counted and IS reported as
+# stating its plane. Four rounds closed these one shape at a time and a verifier produced a
+# fresh set each round, so the declaration is the PROPERTY, not the list. The instances below
+# were each measured 2026-08-31 at 5c81f97 - one fixture apiece, an unlabelled POST plus the
+# clearing text - and each reported `OK - all 1 RECOGNISED corpus insert site(s) state their
+# plane`, exit 0. A sixth, the mis-cased key `Exposure: "ops"`, was in this list and is NOT
+# any more: it is FIXED (Test-StatesPlane is -cmatch now), because PostgREST refuses that key
+# and a green on a row the database rejects is not a declaration gap, it is a defect.
+$EVIDENCE_CATEGORY = @(
+    'THE EVIDENCE TEST IS A TEXT MATCH WITHIN A WINDOW AROUND THE SITE. ANY occurrence of the key that'
+    'is not THIS STATEMENT''S OWN PLANE DECLARATION can clear it. The instances below are KNOWN and'
+    'MEASURED; THE LIST IS ILLUSTRATIVE, NOT EXHAUSTIVE, and the next shape is not on it. A green here'
+    'is never evidence that a row carries a plane - only the NOT NULL + CHECK in the database is that.'
+)
+$EVIDENCE_CLEARS = @(
+    'a TYPE ANNOTATION near the site: interface CorpusRow { exposure: "ops" | "personal" }'
+    'a SIBLING OBJECT in the same function: const audit = { actor: "cron", exposure: "ops" };'
+    'the word inside a plain STRING LITERAL: const ERR = "row rejected: exposure: label missing";'
+    'the word inside SQL TEXT: "select id from thoughts where exposure = ''ops''"'
+    'a BLOCK-COMMENT CONTINUATION line carrying no marker of its own, inside /* .. */ - only a line whose TRIMMED start is a comment marker is dropped, and a continuation line''s is not'
+    'anything else with the same property, which is the point of the statement above this list'
+)
+
 # Trees with no first-party source in them. Same list as check-llm-gateway-routing.ps1, for
 # the same reason: walking node_modules pushes the pre-commit hook past two minutes.
 # `worktrees` is pruned because the main checkout carries `.claude/worktrees/<id>/` - whole
@@ -367,6 +465,11 @@ function Write-Disclosure {
     Write-Host "  seen only by accident of layout. Measured: the SAME variable-table producer is flagged when the" -ForegroundColor DarkGray
     Write-Host "  literal is adjacent and reported OK when 40 lines separate it. Do not read a green as coverage here:" -ForegroundColor DarkGray
     foreach ($s in $SHAPES_BLIND) { Write-Host "    - $s" -ForegroundColor DarkGray }
+    Write-Host "  WHAT CAN CLEAR A COUNTED SITE THAT STATES NO PLANE - this is the WORSE failure, because the run" -ForegroundColor DarkGray
+    Write-Host "  reports such a site as examined AND as stating its plane. It is a CATEGORY, not a list:" -ForegroundColor DarkGray
+    foreach ($e in $EVIDENCE_CATEGORY) { Write-Host "      $e" -ForegroundColor DarkGray }
+    Write-Host "  KNOWN INSTANCES, each measured - illustrative, NOT exhaustive:" -ForegroundColor DarkGray
+    foreach ($e in $EVIDENCE_CLEARS)   { Write-Host "    ~ $e" -ForegroundColor DarkGray }
     Write-Host ("  EXTENSIONS SCANNED: " + (($exts | ForEach-Object { $_.TrimStart('*') }) -join ' ')) -ForegroundColor DarkGray
     Write-Host ("  DIRECTORIES PRUNED (by name): " + ($pruneDirNames -join ' ')) -ForegroundColor DarkGray
     Write-Host ("  DIRECTORIES PRUNED (by glob): " + ($pruneDirGlobs -join ' ') + "   plus ANY reparse point (junction/symlink)") -ForegroundColor DarkGray

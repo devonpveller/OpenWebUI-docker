@@ -159,7 +159,8 @@ database in this round.
 > about them, and **did not even count them as sites** — a table name held in a variable, a
 > concatenated path, a helper wrapper (`insertRows("thoughts", rows)`), byte-identical copies
 > named `.mts` and `.tsx`, `curl -X POST "$SUPABASE_URL/rest/v1/thoughts"` in a `.sh`, and
-> supabase-py `.table().insert()`.
+> supabase-py `.table().insert()`. **Those verdicts were measured at `819b5fe`** — see the
+> round-6 dating at the end of this block, which re-measures every one of them.
 >
 > **THE ENFORCEMENT IS THE DATABASE.** `195-` makes `thoughts.exposure` and
 > `agent_memories.exposure` NOT NULL with no default and CHECKed, and makes `upsert_thought`
@@ -177,8 +178,39 @@ database in this round.
 > run rather than from its author's confidence. The alphabet widened too — `.mts .cts .tsx .jsx
 > .sh .bash`, supabase-py `.table()`, `curl -X POST`, and any identifier containing
 > `post`/`insert` called as a function — not as the fix, but because a cheap catch is worth
-> having once the claim is honest. Of the six planted evasions, the four that still write the
-> table name as a literal beside a verb are now caught; the two that hold it in a value are not.
+> having once the claim is honest.
+>
+> **DATED AND RE-MEASURED, ROUND 6 (2026-08-31).** Everything above describes the gate at
+> `819b5fe`; the widening it announces landed in `c192041`, in the *same commit* as the
+> paragraph, so the paragraph was already history when it shipped and then stood for two rounds
+> as a live claim. Re-measured at `5c81f97`, one unlabelled fixture per shape, with the
+> historical blobs run against the same fixtures:
+>
+> | planted evasion | `819b5fe` | `5c81f97` |
+> |---|---|---|
+> | `insertRows("thoughts", rows)` | 0 sites | **FLAGGED**, 1 of 1 |
+> | `obPost("thoughts", rows)` | 0 sites | **FLAGGED**, 1 of 1 |
+> | byte-identical `.mts` copy | 0 files scanned | **FLAGGED**, 1 of 1 |
+> | byte-identical `.tsx` copy | 0 files scanned | **FLAGGED**, 1 of 1 |
+> | `curl -X POST ".../thoughts"` in a `.sh` | 0 files scanned | **FLAGGED**, 1 of 1 |
+> | supabase-py `.table("thoughts").insert(rows)` | 0 sites | **FLAGGED**, 1 of 1 |
+> | `fetch(BASE + "/" + "thoughts", …)` | **FLAGGED** | **FLAGGED** — layout, see below |
+> | `const TABLE = "thoughts"` + `` `${BASE}/${TABLE}` `` | 0 sites | 0 sites — layout, see below |
+>
+> **This round's earlier tally — "the four that write the table name as a literal beside a verb
+> are now caught; the two that hold it in a value are not" — was itself wrong**, in both halves.
+> Six are caught, not four. And only **one** evasion holds the table name in a value: the
+> concatenated path writes `"thoughts"` as a literal, so it was caught even at `819b5fe`.
+>
+> **The last two rows are ONE case and neither is coverage.** The gate resolves no values, so it
+> sees either only when the literal happens to land within `$argWindow` (2) lines of a
+> post/insert verb. Measured both ways at `5c81f97`: the concatenated path is **FLAGGED** with
+> the verb on the next line and reports **`ZERO SITES`** with five lines between them; the
+> variable-held name is **FLAGGED** adjacent and **`ZERO SITES`** at three lines. Same producer,
+> same file, opposite verdict, decided by whitespace.
+>
+> **None of which changes the heading above it.** A wider alphabet moves the boundary; it does
+> not remove one. Producer thirteen in an unrecognised shape still breaks production.
 
 `scripts/checks/check-corpus-exposure-producers.ps1`, wired into `.githooks/pre-commit` as check
 3b. Within the shapes it recognises it **derives** the insert sites rather than carrying a list;
@@ -190,8 +222,20 @@ each shape has its own proximity rule:
 | POST argument | `obFetch("POST", "thoughts", body)`, `sb.post(\n "thoughts", …)` | table literal within 2 lines of a POST verb; `{"thoughts": []}` (a JSON key) is excluded |
 | supabase-js / -py | `.from("thoughts").insert({…})`, `.table("thoughts").insert(…)` | `.insert(` must be in the SAME statement — the slice runs forward from the builder and stops at the first `;` |
 
-And the **evidence** for `exposure` is scoped to the statement, not to a line distance — see the
-next subsection for why that sentence had to be written.
+And the **evidence** for `exposure` is scoped to the statement **in the ORM shape** — see the
+next subsection for why that sentence had to be written, and read the qualifier as load-bearing.
+**URL and ARG sites are still read over a ±30-line window**, clipped at neighbouring
+different-table sites; only the ORM shape replaces the window with the builder-to-`;` slice.
+Round 5 measured the difference: a `thoughts` POST stating its plane above an `agent_memories`
+POST stating none still **clears** it at 0, 3, 10 and 25 lines of separation, because the fence
+clips at the donor's *site line* and the donor's key sits in its body below that line. An
+earlier version of this sentence said "scoped to the statement" without the qualifier and was
+read as covering all three shapes.
+
+**And whatever the scope, the test inside it is a TEXT MATCH.** Any occurrence of the key that
+is not that statement's own plane declaration can clear a counted site — type annotations,
+sibling objects, string literals, SQL text and comment continuations are measured instances, and
+the list is illustrative rather than exhaustive. The gate prints that category on every run.
 
 #### The gate was green for the wrong reason on the one `agent_memories` site
 

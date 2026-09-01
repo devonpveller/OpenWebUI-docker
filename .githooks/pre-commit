@@ -46,8 +46,22 @@ fi
 # post-condition ("every caller was found") turned out to have swept only the RPC callers:
 # twelve DIRECT-table producers were never searched for, and one of them
 # (openbrain-gmail-pull, daily) had been refused 42501 by the live policy since it landed.
-# The gate DERIVES the producer set from the tree, so producer thirteen breaks the build
-# instead of breaking production. Self-test: the script's -SelfTest switch.
+#
+# THE ENFORCEMENT IS THE DATABASE, NOT THIS CHECK, AND THIS COMMENT USED TO SAY OTHERWISE.
+# It read "the gate DERIVES the producer set from the tree, so producer thirteen breaks the
+# build instead of breaking production." That is FALSE and two verifiers refuted it: the gate
+# derives its set only WITHIN the shapes it recognises, and a producer outside them is neither
+# flagged nor counted. `195-` makes exposure NOT NULL + CHECKed on both tables and makes
+# upsert_thought refuse a payload that omits it - THAT refuses an unlabelled write in every
+# shape, from every language, forever. Producer thirteen, written in a shape this check cannot
+# see, breaks PRODUCTION - and quietly, because the failing producers catch the 42501 and log
+# a zero-row success.
+#
+# So this check is AUTHORING-TIME CONVENIENCE: it moves SOME of those refusals from 05:00 in a
+# cron to `git commit`, which is worth having and is not coverage. It prints its own recognised
+# shapes, its blind spots and the category of text that can clear a counted site on every run
+# (`-ShowShapes` prints them alone). Read those before treating a green here as protection.
+# Self-test: the script's -SelfTest switch.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-corpus-exposure-producers.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (a corpus insert does not state its plane)!"

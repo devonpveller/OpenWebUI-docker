@@ -1443,18 +1443,36 @@ tree:** the sweep behind it was `grep -rn 'rpc("upsert_thought"' OB1`, so RPC ca
 only thing it could return. There are **twelve DIRECT-table producers** as well — they POST at
 `/rest/v1/thoughts` or call `supabase.from("thoughts").insert()` — and this door is in front of
 none of them. See `documentation/notes/u5-live-producer-rls-regression.md`; the set is now
-derived on every commit by `scripts/checks/check-corpus-exposure-producers.ps1`.
+derived — *within the shapes it recognises* — on every commit by
+`scripts/checks/check-corpus-exposure-producers.ps1`.
 
 > **AND THAT CHECK IS NOT THE ENFORCEMENT (round 4).** It is authoring-time convenience. **The
 > enforcement is `195-` itself** — `exposure` is NOT NULL with no default and CHECKed on both
 > tables, and `upsert_thought` refuses a payload that omits it, which rejects an unlabelled
 > write in every shape and language, forever. The check only moves *some* of those refusals to
 > commit time, for producers written in the shapes it recognises. Two verifiers planted
-> producers it cannot see (a table name in a variable, a concatenated path, a helper wrapper, a
+> producers it could not see (a table name in a variable, a concatenated path, a helper wrapper, a
 > `.tsx` copy, `curl -X POST` in a `.sh`, supabase-py `.table().insert()`) and it neither
 > flagged nor counted them. **A producer it cannot see breaks production, not the build** — and
-> quietly, because both failing producers catch the 42501 and carry on. The check prints its own
-> blind spots on every run (`-ShowShapes`); read those before treating a green as coverage.
+> quietly, because both failing producers catch the 42501 and carry on.
+>
+> **DATED, ROUND 6 (2026-08-31).** Those verdicts were measured at ai-stack `819b5fe`; the
+> alphabet and patterns were widened in `c192041`, and the sentence above was not re-read after
+> the widening it motivated. Re-measured at `5c81f97`, one unlabelled fixture per shape: the
+> helper wrapper, both byte-identical copies, the `.sh` `curl -X POST` and supabase-py
+> `.table().insert()` are **flagged and counted** now. Still missed is the table name held in a
+> **value** — a variable or a concatenation — and that one is decided by **layout**, not shape:
+> flagged when the literal sits within two lines of a verb, `ZERO SITES` at three to five lines
+> apart. Measured both ways. **The conclusion is unchanged**: a wider alphabet moves the
+> boundary, it does not remove one, and producer thirteen in an unrecognised shape still breaks
+> production.
+>
+> **AND A GREEN ON A SITE IT *DID* COUNT IS ALSO NOT PROOF.** The evidence test is a text match
+> in a window around the site, so **any occurrence of the key that is not that statement's own
+> plane declaration can clear it** — type annotations, sibling objects, string literals, SQL
+> text and comment continuations are measured instances, and the list is illustrative, not
+> exhaustive. The check prints that category, its recognised shapes and its blind spots on every
+> run (`-ShowShapes`); read those before treating a green as coverage.
 
 **Two producers whose rejection is an UNHANDLED OUTAGE, not a caught contract change:**
 

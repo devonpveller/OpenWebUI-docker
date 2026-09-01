@@ -806,11 +806,21 @@ policy since it landed. Measured from the container's own log:
 2026-08-31T05:00:20Z   Ingested: 0 email(s) / 0 chunk row(s)
 ```
 
-Twelve direct producers, `'ops'` at each call site (column **and** mirror), and a **derived**
-gate - `scripts/checks/check-corpus-exposure-producers.ps1`, pre-commit check 3b - so producer
-thirteen breaks the build rather than production. Full account, including the two producers the
-regression note's own ten-file table missed and the four it listed that are not producers at
-all: `documentation/notes/u5-live-producer-rls-regression.md`.
+Twelve direct producers, `'ops'` at each call site (column **and** mirror), and a gate that
+derives its sites from the tree *within the shapes it recognises* -
+`scripts/checks/check-corpus-exposure-producers.ps1`, pre-commit check 3b. Full account,
+including the two producers the regression note's own ten-file table missed and the four it
+listed that are not producers at all:
+`documentation/notes/u5-live-producer-rls-regression.md`.
+
+> **CORRECTED, ROUND 6 (2026-08-31).** This paragraph ended *"so producer thirteen breaks the
+> build rather than production"*. **That is false** — the same sentence, in the same shape, that
+> §21 and the gate's own header were written to retract, still standing here in the round-3
+> record. The enforcement is `195-`: `exposure` NOT NULL + CHECKed and `upsert_thought`
+> refusing a payload that omits it. Producer thirteen, in a shape the gate does not recognise,
+> breaks **production** — quietly, per §16. The gate is authoring-time convenience. The clause
+> is deleted rather than re-typed; the derivation claim it was attached to is true only within
+> the recognised shapes, and now says so.
 
 **The gate's first version was itself vacuous.** It inherited `'*\.claude\*'` from
 `check-llm-gateway-routing.ps1`'s allow-list; a session worktree lives under
@@ -1371,10 +1381,16 @@ were nonetheless unaffected, for a reason that had to be measured rather than as
 **44 LF-majority files** in the scan set, **zero name a corpus table**. Had one appeared, the
 vacuity guard would not have caught it - one site is not zero sites.
 
-FIXED: the split is now an explicit `[regex]::Split($text, "
-|
-|")` over the three newline
-forms, correct in all four combinations (re-measured after the fix).
+FIXED: the split is now an explicit `[regex]::Split($text, "\r\n|\n|\r")` over the three
+newline forms, correct in all four combinations (re-measured after the fix).
+
+> **CORRECTED, ROUND 6 (2026-08-31).** The sentence above previously carried the pattern as
+> **literal control characters** - a real CR LF, a real LF and a real CR - instead of the text
+> `\r\n|\n|\r`. The tool layer ate the backslashes when this fix was written up, so the one
+> sentence in the note that describes the newline fix was itself broken by newlines: it rendered
+> as three fragments across four lines and told the reader nothing. Rewritten via `chr(92)`,
+> which is the standing workaround for that trap. The gate itself was never affected - only this
+> description of it.
 
 ### 21.4 Blind spots that were real and silent
 
@@ -1440,3 +1456,171 @@ round they were measured in.
 * **`OB1/recipes/_shared/wiki-pages.mjs` and `links.mjs` were not touched** - another agent owns
   them this round. `VACUOUS-WIKIPAGES` stays open and stays dispositioned.
 * **Nothing was written to the live database**, and no deploy was made.
+
+---
+
+## 22. ROUND 6 - the paragraph that motivated a fix and was never re-read after it
+
+Round 6 is the closing round. It changed **one line of code** and the rest is text. H3's core,
+the gate's detection, the drill's `Split-StaleGaps` / `Get-LedgerExit`, the 25-id ledger, the
+fence sentence and the E1/E2 fix are **untouched** - all of them survived round 5's verifier and
+none of them was in scope here. **No coverage was added: no shape, no extension, no self-test
+case.** The self-test still asserts the same six cases and records the same three blind spots.
+
+### 22.1 The gate's header described a world two rounds old, and it shipped that way
+
+`check-corpus-exposure-producers.ps1` said of six planted shapes that *"this gate did not flag
+them, did not warn about them, and did not even COUNT them as sites"*. That paragraph was
+written to **motivate** widening the alphabet and the ARG/ORM/VERB patterns - and the widening
+landed **in the same commit**, `c192041`. So it described a gate that had ceased to exist by the
+time it was committed, and then stood through rounds 5 and 6 as a live claim. It also
+contradicted two things a few lines away in its own file: `$SHAPES_SEEN`, which lists
+`insertRows` as RECOGNISED, and the `$exts` comment, which says `.tsx`/`.sh` were added
+*because* those planted copies passed.
+
+**Re-measured 2026-08-31 at `5c81f97`**, one unlabelled fixture per shape, with the historical
+blobs (`git show 819b5fe:...`, `git show c192041:...`) run against the *same* fixtures:
+
+| planted shape | `819b5fe` | `c192041` | `5c81f97` |
+|---|---|---|---|
+| `insertRows("thoughts", rows)` | `ZERO SITES` | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| `obPost("thoughts", rows)` | `ZERO SITES` | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| byte-identical `.mts` copy | 0 files scanned | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| byte-identical `.tsx` copy | 0 files scanned | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| `curl -X POST ".../thoughts"` in a `.sh` | 0 files scanned | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| supabase-py `.table("thoughts").insert(rows)` | `ZERO SITES` | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| `fetch(BASE + "/" + "thoughts", ...)` | **FAIL 1 of 1** | **FAIL 1 of 1** | **FAIL 1 of 1** |
+| `const TABLE = "thoughts"` + a template URL | `ZERO SITES` | `ZERO SITES` | `ZERO SITES` |
+
+**Six of the eight are flagged and counted now; one always was; one is still missed.**
+
+Two honesty notes on that table. First, **the original claim was over-broad at its own sha**:
+the concatenated path was FLAGGED at `819b5fe` too, so *"did not flag them"* was true of five
+of the six bullets, not six. Second, **the fixtures are reconstructions from those bullets**,
+not the verifiers' original files, which were not kept - each is the smallest producer that
+spells the bullet, and all three blobs were run against the *same* file, so the columns are
+comparable to each other even where they are not byte-identical to what a verifier wrote.
+
+And the last two rows are **one case, not two**, and neither is coverage: the gate resolves no values,
+so it sees either only when the literal `"thoughts"` lands within `$argWindow` (2) lines of a
+post/insert verb.
+
+| same producer, two layouts | verdict at `5c81f97` |
+|---|---|
+| concatenated path, verb on the **next** line | **FAIL 1 of 1** |
+| concatenated path, verb **five** lines away | `FAIL - ... ZERO corpus insert sites` |
+| variable-held name, verb **adjacent** | **FAIL 1 of 1** |
+| variable-held name, verb **three** lines away | `FAIL - ... ZERO corpus insert sites` |
+
+Same file, same producer, opposite verdict, decided by whitespace.
+
+**FIXED:** the paragraph is kept - it is why the alphabet was widened, and that history is worth
+keeping - but it is now marked plainly as *what WAS true, at `819b5fe`*, with the re-measurement
+and the two commits named. The u5 note's own round-4 tally, *"the four that still write the
+table name as a literal beside a verb are now caught; the two that hold it in a value are not"*,
+**was wrong in both halves** and is corrected: six are caught, not four, and only **one**
+evasion holds the table name in a value - the concatenated path writes `"thoughts"` as a
+literal, which is why it was caught even at `819b5fe`.
+
+### 22.2 A blind-spot list cannot be complete by enumeration - so it stopped being a list
+
+A verifier found six more shapes that clear a **counted** site. Each was planted as an
+unlabelled POST plus the clearing text, and each reported
+`OK - all 1 RECOGNISED corpus insert site(s) state their plane`, exit 0, at `5c81f97`:
+
+| planted | measured before |
+|---|---|
+| a TypeScript type annotation: `interface CorpusRow { exposure: "ops" \| "personal" }` | `OK - all 1 ...` |
+| a sibling object: `const audit = { actor: "cron", exposure: "ops" };` | `OK - all 1 ...` |
+| a plain string literal: `const ERR = "row rejected: exposure: label missing";` | `OK - all 1 ...` |
+| SQL text: `"select id from thoughts where exposure = 'ops'"` | `OK - all 1 ...` |
+| a **mis-cased key**: `Exposure: "ops"` | `OK - all 1 ...` |
+| a block-comment continuation line with no marker, inside a `/* ... */` | `OK - all 1 ...` |
+
+This is the **fourth consecutive round** in which a verifier produced a fresh set of these and
+the round closed them one shape at a time - a comment, a look-alike identifier, a semicolon in a
+comment, and now a case fold. That is the ENUMERATE-AND-PATCH method A2 abandoned, and the
+seventh shape wins exactly as the sixth did. Listing these six would buy one afternoon.
+
+**FIXED, and not by listing them.** The declaration is now the **property that generates the
+list**, stated in the header and printed on every run above the examples:
+
+> THE EVIDENCE TEST IS A TEXT MATCH WITHIN A WINDOW AROUND THE SITE. ANY OCCURRENCE OF THE KEY
+> THAT IS NOT THIS STATEMENT'S OWN PLANE DECLARATION CAN CLEAR IT. Type annotations, sibling
+> objects, string literals, SQL text and comment continuations are KNOWN INSTANCES. THE LIST IS
+> ILLUSTRATIVE, NOT EXHAUSTIVE. A green from this gate is never evidence that a row carries a
+> plane; only the NOT NULL + CHECK in the database is that.
+
+The six instances live underneath it as `$EVIDENCE_CLEARS`, as examples. The two narrowings that
+*are* in place are stated with it, and neither narrows the test to a declaration - only to
+something that **looks** like one: the token must be a key or an assignment rather than a bare
+substring, and a **whole-line** comment is not evidence.
+
+A statement that stays true as new shapes appear is worth more than a list that is complete for
+one afternoon. **Five of the six stay open** and are declared, not closed.
+
+### 22.3 The mis-cased key was a DEFECT, not a declaration gap - the round's only code change
+
+`Test-StatesPlane` ended in `$code -match $statesPlane`, and **PowerShell's `-match` is
+case-insensitive**. So `Exposure: "ops"` cleared a bare POST. PostgREST **refuses** that key -
+the column is `exposure` - so the gate was green on a producer **the database rejects**. That is
+the worst direction a false green can point: not a miss, not a harmless pass, but a green over a
+row that will never be written at all.
+
+Red-proved at `5c81f97`, same fixture, one character of difference in the gate:
+
+```
+-match  (before) : OK   - all 1 RECOGNISED corpus insert site(s) state their plane    EXIT 0
+-cmatch (after)  : FAIL - 1 of 1 recognised corpus insert site(s) do not state a plane   EXIT 1
+```
+
+Safe in this tree, checked rather than assumed: **every `exposure` key in the scanned set is
+lowercase**; the only capitalised `Exposure` is the TypeScript **type** name
+(`OB1/integrations/kubernetes-deployment/agent-memory-policy.ts:50` and its users), and a type
+name is not a key. The full scan is unchanged after the fix - `OK - all 13 RECOGNISED corpus
+insert site(s) state their plane`, 742 files, exit 0 - and `-SelfTest` still passes its six
+assertions and records the same three blind spots.
+
+### 22.4 Every sentence about the gate, swept
+
+The mandate was not the two paragraphs named above: **every sentence in the branch that
+describes what this gate catches must match what it was measured to catch.** Six surfaces:
+
+| surface | what it said | what it says now |
+|---|---|---|
+| `check-corpus-exposure-producers.ps1` header | six shapes "not flagged, not warned about, not counted" | kept as history, **dated to `819b5fe`**, re-measured at `5c81f97`, and the layout dependence stated |
+| the same file, the false-green paragraph | an enumeration of shapes that clear a counted site | a **category statement**, with the instances as examples, printed every run |
+| `.githooks/pre-commit` check 3b | *"The gate DERIVES the producer set from the tree, so producer thirteen breaks the build instead of breaking production"* | the derivation is **within the recognised shapes**; the enforcement is `195-`; producer thirteen breaks **production**, quietly |
+| `195-` section 7 | six shapes, "none of them was flagged or even counted" | dated to `819b5fe`, re-measured, conclusion unchanged and stated as unchanged |
+| `PROMOTION-RUNBOOK.md` | "producers it cannot see ... it neither flagged nor counted them" | dated, re-measured, plus the counted-site category |
+| `u5-live-producer-rls-regression.md` | *"the evidence for `exposure` is scoped to the statement"* | **only in the ORM shape** - URL and ARG are still a 30-line window clipped at fences |
+
+The pre-commit sentence was the load-bearing one: it is the hook's own justification and the
+first thing a future reader believes. Two verifiers refuted it in its earlier form and it was
+still there.
+
+Two further defects found while sweeping, neither on the list:
+
+* **21.3's own sentence was broken by the thing it described.** The line quoting the newline fix
+  carried **literal control characters** - a real CR LF, a real LF and a real CR - instead of the
+  text `\r\n|\n|\r`. The tool layer ate the backslashes, so the one sentence in the note that
+  describes the newline fix rendered as three fragments and said nothing. Rewritten via
+  `chr(92)`. The gate was never affected - only the description of it.
+* **The round-3 record still carried the retracted claim.** 17.3 ended *"so producer thirteen
+  breaks the build rather than production"* - the same sentence 21 and the gate header were
+  written to retract, still standing four sections earlier. Corrected in place.
+
+### 22.5 What was deliberately NOT done
+
+* **No coverage was added.** No shape, no extension, no self-test case, no pattern. The
+  self-test is the same six assertions and three blind-spot records. Five of the six
+  newly-found evidence shapes are **declared, not closed** - closing them by enumeration is the
+  failure 22.2 exists to stop.
+* **Nothing verified in round 5 was touched** - `Split-StaleGaps`, `Get-LedgerExit`, the 25-id
+  ledger and its routes, the fence sentence, the E1/E2 fix. All held under a verifier and none
+  was in scope.
+* **The fence was still not rebuilt**, and the URL/ARG-donor case stays in `$SHAPES_BLIND` with
+  `-SelfTest` case 4 recording it.
+* **Nothing was written to the live database**, no deploy was made, and no plane lease was
+  needed: every run in this round was a static text scan against throwaway fixtures under
+  `$env:TEMP`.
