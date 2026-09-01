@@ -523,3 +523,222 @@ STATUS:   U4 = COLUMN MET, EVIDENCE COMMITTED, AWAITING AN INDEPENDENT RE-RUN.
           that built it is abandoned.
 REVERT:   n/a - a status record.
 ```
+---
+
+# Round 9 (2026-08-31) - three defects found IN the round-8 fix, and one conflict settled
+
+Round 8 survived independent verification on all four of its claims. What follows is what
+two verifiers found in the FIX rather than in the claim, which is the harder half.
+Validated at `336a2ba` on `work/u4close`.
+
+## 9.1 The banked durable check could not detect the defect it was built for
+
+`check_quadrant_evidence_reproduces.py --auto` returned **0** when it found nothing, and its
+docstring said so plainly ("that is a vacuous pass"). The disclosure was honest. The problem
+is narrower and it is real: **U4's evidence is COMMITTED at a known path.** Deleting
+`documentation/evidence/dfu-u4/` IS the exact loss round 8 exists to prevent, and it turned
+the banked check GREEN - only `cli.py report --results-dir <committed>` went red - while the
+round-8 fix table above credited the banked check with reaching that set.
+
+A verifier ran all three vacuous modes (evidence moved away; a results dir holding no
+records; every record refused at admission): **all exit 0.**
+
+**The fix is the asymmetry, not the disclosure.** "This machine has no evidence" and "this
+checkout has lost the evidence its own index tracks" are different facts and now get
+different exit codes. A checkout is not an arbitrary machine. The expectation is read from
+`git ls-files` - the INDEX, so `rm -rf` is caught the moment it happens rather than after a
+commit - and is not a path list inside the check, which would drift from what the repository
+actually carries.
+
+    $ rm -rf documentation/evidence/dfu-u4
+    $ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+    MISSING COMMITTED EVIDENCE  this checkout's index tracks 7 run record(s) under
+    .quadrant/ or documentation/evidence/; 7 of them are not on disk:
+        documentation/evidence/dfu-u4/quadrant/20260831T232009Z-little-coder-self/record.json
+        ... (all seven named)
+    That is not a machine with no evidence - it is a checkout that has LOST the evidence its
+    own index says it carries ...                                              exit 1
+
+    $ git checkout -- documentation/evidence
+    $ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+    7 outcome record(s) re-derived their verdict ...
+    the 7 run record(s) this checkout COMMITS are all on disk; 7 of them claim a verdict
+    and every one re-derived it                                                exit 0
+
+Run in CLONE C, a tree that had never run anything. The remediation the message prints is
+the one that works.
+
+**Which case is still vacuous, stated rather than implied.** Two, and each prints which it
+is: (a) the tree is not a git checkout - an exported tarball has no index to be held to;
+(b) the tree is a git checkout whose index tracks no run records under the discovery roots -
+a repository that banks no evidence, which this one was until round 8.
+
+**What it does NOT close,** written down rather than overclaimed: `git rm`-ing the evidence
+and committing that clears the expectation too. No check reading the index can tell that
+from a legitimate removal - it is a diff a reviewer reads. The failure that actually
+happened was a worktree thrown away, and that is the one this catches.
+
+**The third vacuous mode, one layer down.** A record the repository COMMITS but
+`record.admit` REFUSES enters no comparison, so committing it banks a directory nobody may
+cite. That is now red, not "skipped". Working evidence under `.quadrant/` keeps the skip -
+that is where the pre-venue records live, and the docstring's disclosure about them stands.
+
+**A defect found while building the fix, by the fix's own guard test - worth more than the
+test that found it.** `git -C <dir> ls-files` does not fail outside a repository: it
+SEARCHES UPWARDS. On this machine `C:/Users/yamao` is itself a git repo, so a temporary
+directory under the home tree answered "exit 0, no tracked records" and read as a repository
+that banks no evidence. Worse than the wrong message: `--full-name` paths are relative to
+whatever toplevel git found, so an enclosing repo that DID track records would have had them
+resolved against the wrong root. `rev-parse --show-toplevel` is now asserted to BE the tree
+being checked. This is the same family as `quadrant/venue.py`'s "git discovers upward, so a
+wrong path silently adopts whatever repository encloses it" - the second time this exact
+property has bitten this module.
+
+## 9.2 A stale sibling inside the file the round-8 fix edited
+
+`DISCOVERY_ROOTS` gained `documentation/evidence` in round 8. The `--auto` docstring still
+said "discover every results set under `.quadrant/`" and the runtime message still printed
+"none discovered under .quadrant/". **The sentence a future auditor reads named the wrong
+search root.** Both are now DERIVED from `DISCOVERY_ROOTS` via `_roots_phrase()`, so a third
+root cannot desynchronise the text again, and two guards fail if a literal root reappears in
+either place.
+
+## 9.3 "Fixed one, left the sibling" - the module contract said the opposite of the code
+
+`scripts/agent-harness/MODULE.md` stated, in the present tense, that "nothing in this module
+then dispatches to one. There is no code path that submits a task to little-coder's API -
+and that API port is not reachable from where the harness runs in any case."
+
+Both halves measured before editing, because the instruction to fix it is not evidence:
+
+| half | measured 2026-08-31 |
+|---|---|
+| "no code path submits a task to little-coder's API" | **FALSE.** `dispatch.ps1`'s `Submit-LcTask` POSTs `/tasks` through `Invoke-LcApi`; `quadrant/adapters.py` is a second caller. The committed little-coder transcripts carry the daemon's own task ids (`01M1D1ZV0J9JYZ347T8QRDT7WX`) |
+| "that API port is not reachable from where the harness runs" | **TRUE of a host TCP door.** `curl http://127.0.0.1:8090/health` from the host: connection-refused, curl exit 7. `docker port little-coder` prints nothing; `.NetworkSettings.Ports` is `{"9090/tcp":[]}` |
+| the conclusion the two were joined into | **FALSE.** `docker exec little-coder curl http://127.0.0.1:8090/health` -> **200**. The transport is `docker exec`, not TCP, so "not reachable **in any case**" asserts that no dispatcher can exist - which the evidence in this very branch disproves |
+
+The same file contradicted itself twice over: its entry-point table already said
+`dispatch.ps1 | RUN the work: role+profile -> runner -> submit`, and its *Runners* section
+said `dispatch.ps1 is what CALLS it`.
+
+**Swept for the same class** across `.md .ps1 .psm1 .py .json .yml .txt .conf .sh`, skills
+and hook directories included. Two more present-tense claims in the same live contract, both
+verified before editing and both corrected:
+
+- the entry-point table's *"everything else resolves a runner and nothing runs one"* -
+  `dispatch.ps1` runs one;
+- *"Nothing has stalled for real here ... the ledger is empty of one"* - falsified by this
+  branch's own committed observation, ledger row `417aa274750da712`.
+
+**Verified and deliberately NOT changed** - a sweep that only finds things it wants to find
+is not a sweep:
+
+- *"Nothing dispatches the oracle round yet"* (MODULE.md) - **still true.** `pending()`'s
+  only callers are the module's own `consume`/report path, its tests and its drill. No
+  dispatcher reads it.
+- the module's own ledger, `<git-common-dir>/agent-worktrees/oracle-escalations.jsonl`, is
+  **absent** - confirmed by calling `ledger_path()`. That is by design: the observation
+  writes to a scratch namespace so it cannot append to the ledger the deliverable is audited
+  from. "The ledger is empty" is still true of that file.
+- `documentation/notes/u4quad-findings.md:435` carries the same "resolves a runner and
+  nothing runs one" phrasing. Left alone: it is a DATED findings note recording what was
+  true in its round, not a live contract, and its own next sentence already qualifies it.
+- `runners.little-coder.status` still reads `unproven`. `quadrant/matrix.py` reads that field
+  to gate whether a cell may enter a decision table, and every committed record carries the
+  value that was in force (`"runner_status": "unproven"`). Flipping it changes the meaning of
+  accepted evidence, so it is a decision for the operator, not a documentation fix. MODULE.md
+  now says the label is stale and why it was not flipped.
+
+## 9.4 The `.Host` conflict between two verifiers, settled by measuring
+
+Verifier 1 measured `$null -eq $u.Host` = **True**; verifier 2 measured `$u.Host` = **`''`**.
+Under the script's own preamble (`Set-StrictMode -Version Latest`,
+`$ErrorActionPreference = "Stop"`), Windows PowerShell **5.1.26100.8875**:
+
+    $Error.Clear(); $u = [Uri]'not a url at all'
+    $null -eq $u.Port  -> True
+    $null -eq $u.Host  -> True
+    ''    -eq $u.Host  -> False
+    "$($u.Host)"       -> ''          <- this is why the second reading looked right
+    $u.Host.Length     -> throws       ('' .Length would be 0)
+    $Error.Count       -> 0
+
+**`.Host` is `$null`.** Both verifiers were looking at the truth: `$null` INTERPOLATES to an
+empty string, so any formatted read renders `''` while the value is null, and only an
+`$null -eq` test separates them. Corrected in `WALKTHROUGH.md` and in section 4 above. The
+same sentence in `DECISIONS.md:645` is staged below - this branch does not edit that file.
+
+It is a small error and it sits in the one paragraph whose entire subject is a getter that
+returns null instead of throwing. Reading a formatted null as an empty string is that same
+trap one level in, which is why it is worth the correction rather than a shrug.
+
+## 9.5 §C.7b validation - clean clones at `336a2ba`, one suite per checkout
+
+Three fresh `git clone --branch work/u4close --single-branch --no-recurse-submodules`
+checkouts, nothing run in them before.
+
+| checkout | suite | result |
+|---|---|---|
+| clone A | `python -m pytest scripts/agent-harness -q` | **295 passed, 2 skipped, 1 FAILED** |
+| clone B | `python -m ruff check .` | All checks passed!, **exit 0** |
+| clone B | `check_quadrant_evidence_reproduces.py --auto` | 7 re-derived, 7 committed records on disk, **exit 0** |
+| clone B | `quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant` | **COMPARED 4/4**, exit 0 |
+| clone C | the 9.1 red-prove (delete -> restore) | **exit 1 -> exit 0** |
+
+**The one red is the accepted pre-existing one**,
+`test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere` - the
+durable-check registry lives inside `.git`, so a fresh clone has zero banked checks. It was
+NOT fixed and NOT weakened, and it did not start passing: round 8's clean clone reported 288
+passed / 2 skipped / 1 failed = 291 tests; this one reports 295 / 2 / 1 = 298, which is 291
+plus the seven guards added here. The same test, still failing, for the same reason.
+
+    (a full-suite run in the WORKTREE reports 298 passed and 0 failed - the registry is in
+     the shared git common dir, where the check IS banked. That is why §C.7b requires the
+     clone: this worktree cannot observe that red at all.)
+
+**Falsifiability of the seven new guards, broken on purpose.** Each fix was mutated in the
+source and the guard that covers it re-run:
+
+| mutant | guard | result |
+|---|---|---|
+| the expectation gate removed (exactly the pre-fix behaviour) | `..._committed_evidence_is_missing_from_the_checkout` | RED |
+| the vacuous message hard-codes a root again | `..._naming_the_search_roots_is_derived_from_the_roots` | RED |
+| the `--auto` docstring names a literal root again | `..._by_the_roots_definition_not_by_a_literal_root` | RED |
+| a COMMITTED refused record goes back to merely skipped | `..._refused_at_admission_is_red_not_skipped` | RED |
+| the enclosing-repository assertion dropped | `..._not_a_git_checkout_stays_vacuous_and_says_which_case` | RED |
+
+5 of 5. Source restored and re-run green after each.
+
+## 9.6 DECISIONS entries to append (this branch does not touch DECISIONS.md)
+
+    ## 2026-08-31 - U4 round 9 - CORRECTION to the .Host sentence
+    WHAT:     DECISIONS.md:645 reads "the cast yields a RELATIVE Uri whose `.Port` is
+              `$null` and `.Host` is `''`." Replace the tail with: "... whose `.Port`
+              and `.Host` are BOTH `$null`. `$null` interpolates to an empty string, so
+              a formatted read of `.Host` renders `''` while `$null -eq $u.Host` is
+              True and `$u.Host.Length` throws - two verifiers split on exactly that."
+    WHY:      Measured under the script's own preamble, PowerShell 5.1.26100.8875:
+              `$null -eq $u.Host` -> True, `'' -eq $u.Host` -> False, $Error.Count 0.
+              The bullet's own subject is a getter that returns null instead of
+              throwing, so the wrong reading of a null is worse here than elsewhere.
+    CITED:    documentation/notes/u4-round8-evidence-durability.md section 9.4.
+    REVERT:   a prose correction; revert by restoring the sentence.
+
+    ## 2026-08-31 - U4 round 9 - a durable check must distinguish "no evidence" from
+    ##                            "the committed evidence is gone" (class 2)
+    WHAT:     `--auto` now reads its expectation from `git ls-files` and exits 1 when a
+              tracked `record.json` is not on disk, naming each. Two cases stay
+              vacuous and print which: not a git checkout, and a checkout whose index
+              tracks no records. A COMMITTED record refused at admission is red rather
+              than skipped; working evidence under `.quadrant/` keeps the skip.
+    WHY:      A banked check that returns 0 with nothing to check cannot detect the
+              deletion of the very evidence it audits. Deleting
+              documentation/evidence/dfu-u4/ turned it green while WALKTHROUGH.md
+              credited it with reaching that set. A checkout is not an arbitrary
+              machine: it holds what its index tracks, or it has lost it.
+    NOT:      `git rm` + commit still clears the expectation. No index-reading check can
+              tell that from a legitimate removal; it is a diff a reviewer reads. Stated
+              in the check's docstring rather than overclaimed.
+    CITED:    section 9.1; red-proved in a clean clone (exit 1 -> exit 0).
+    REVERT:   delete the `_committed_records` gate in `main`; the discovery behaviour
+              underneath is unchanged.

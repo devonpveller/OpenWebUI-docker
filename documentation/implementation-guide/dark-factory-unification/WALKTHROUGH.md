@@ -246,19 +246,35 @@ stays false in the agent-org direction.
 **Evidence:** `documentation/evidence/dfu-u4/` (committed),
 `documentation/notes/u4close-findings.md`,
 `documentation/notes/u4-round8-evidence-durability.md`.
-**§C.7b validation, clean clone at `21fceff`:** evidence re-derivation exit 0 (7 records),
-`report` COMPARED 4/4 exit 0, `ruff check .` exit 0, `pytest scripts/agent-harness -q`
-**288 passed, 2 skipped, 1 FAILED**. The red is named:
-`test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere` — the
-durable-check REGISTRY lives at `<git-common-dir>/agent-worktrees/`, i.e. inside `.git`,
-so a fresh clone has **zero banked durable checks**. That is defect 3's shape one layer
-up and it is **pre-existing**: the same test fails identically at base `1a6b0b8` in a
-clean clone. Not fixed here (a different module contract, a different item) and the test
-was NOT weakened to get green — it is correct to fail.
+**§C.7b validation, clean clones at `336a2ba` (round 9), one suite per checkout:**
+`check_quadrant_evidence_reproduces.py --auto` 7 re-derived + all 7 committed records on
+disk, exit 0; `report` COMPARED 4/4 exit 0; `ruff check .` exit 0; `pytest
+scripts/agent-harness -q` **295 passed, 2 skipped, 1 FAILED**; and the round-9 red-prove
+(delete `documentation/evidence/dfu-u4/` → exit 1 naming all seven records → `git checkout`
+→ exit 0) in a third clone that had never run anything.
 
-**Verified by:** this session ran every command above and pasted its real output; **an
-independent re-run is still owed** — this file's own rule is that a row says DONE when a
-verifier who did not build it re-ran the column. That has not happened for round 8.
+The red is named: `test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere`
+— the durable-check REGISTRY lives at `<git-common-dir>/agent-worktrees/`, i.e. inside
+`.git`, so a fresh clone has **zero banked durable checks**. It is **pre-existing**: the
+same test fails identically at base `1a6b0b8` in a clean clone. Not fixed here (a different
+module contract, a different item) and NOT weakened — it is correct to fail. It did not
+start passing either: round 8's clone was 288 + 2 + 1 = **291** tests, this one is
+295 + 2 + 1 = **298**, exactly the seven guards round 9 added. (A run in the *worktree*
+reports 298 passed and 0 failed, because the shared git common dir there does hold the
+banked check — which is why §C.7b insists on the clone.)
+
+**Round 9, 2026-08-31.** Round 8 was independently verified on all four of its claims, and
+the same verification found three defects **in the fix** plus a factual conflict between two
+verifiers. All four are closed at `336a2ba`: the banked check can no longer return a vacuous
+0 when the committed evidence has been deleted (the row above); its messages no longer name
+a search root the code stopped using; `MODULE.md`'s present-tense claim that nothing
+dispatches to little-coder is corrected to what the code does; and `$u.Host` is `$null`, not
+`''`. See `documentation/notes/u4-round8-evidence-durability.md` §9.
+
+**Verified by:** round 8's column — an independent verifier, in their own clean clone.
+Round 9's four fixes — **this session, and an independent re-run is owed**: this file's rule
+is that a row says DONE when a verifier who did not build it re-ran the column, and a
+session cannot discharge that for its own repairs.
 
 
 ## U5 — containment parity — **PARKED, closure in flight**
