@@ -548,6 +548,46 @@ Implementation notes binding on H3:
 - *Validated by:* a run that attempts an insert with no exposure and one with a
   malformed value, and shows the DATABASE rejects both; plus the personal-row
   door-attack (clause 3's run) still green against the column-based predicates.
+
+### C.10 CONVERGENCE FREEZE — ship the substance, file the polish (operator, 2026-08-31)
+
+After 30+ hours the substance is done and the meta-layer is not converging,
+because the discipline that guarantees quality — clean-clone re-run, defect-class
+rounds — **has no cost ceiling.** There is always one more vacuity to close, so a
+branch that is correct never ships: `u8h3` reached 26 commits refining the
+verification of a typed-column migration; a duplicate `u8h2w` worktree appeared.
+This section is BINDING and overrides the open-ended round behaviour, not the
+correctness gates.
+
+- **U8 IS THE FINAL PHASE. Scope is FROZEN.** No new U-phases, no new checks
+  beyond what an H-item's *Validated by* names. Any finding outside U0–U8 —
+  including real ones — goes to `documentation/notes/` and is NOT given a branch
+  or a worktree. (Two such leaked already: `curatorpool`, `wikilinks`.)
+
+- **MERGE ON CLAUSE-PASS, NOT ON PERFECTION.** A branch merges the MOMENT its
+  H-item's *Validated by* check passes from a clean clone. That is the bar. A
+  residual finding — a check that could be less vacuous, a message that could be
+  clearer, a sibling of an already-recorded class — does **not** hold the branch:
+  it becomes a dated follow-up line in `documentation/notes/`, and the branch
+  merges. "Done" is `dfu-done.ps1` exit 0, NOT "no check could ever be improved".
+
+- **THE CONVERGENCE COUNTER NOW HAS TEETH.** A round whose findings are all
+  siblings of a recorded class, OR all fileable as notes follow-ups, ENDS the
+  branch: merge what is clean, file the rest, do not open round N+1. Only a NEW
+  defect class that would make the *Validated by* check itself wrong earns another
+  round. The default is MERGE; another round is the exception that must justify
+  itself.
+
+- **ONE BRANCH PER H-ITEM.** Kill duplicates on sight (`u8h2w`). Two worktrees on
+  one commit is thrash, not parallelism.
+
+- **THE STOP IS REAL.** When `dfu-done.ps1` exits 0 from a clean clone — with U8
+  in its floor — STOP. Do not start a round to improve a passing check. Hand over.
+
+What this does NOT relax: nothing merges unrefuted; the clean-clone re-run still
+gates every merge (C.7b); the personal-plane boundary and clause-3 door-attack
+stay hard. The freeze cuts the ASYMPTOTE, not the floor — it stops perfect from
+being the enemy of shipped, while keeping shipped correct.
 ---
 
 ## 0. The audit — what each system assumes, and what the evidence now says
