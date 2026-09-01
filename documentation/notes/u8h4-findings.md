@@ -633,10 +633,24 @@ will leave a leading `/` on Linux relative paths. Cosmetic in the report; not ch
 | | |
 |---|---|
 | branch | `work/u8h4` |
-| commit validated | `e449e02` |
-| `.github` tree hash | `b62c3b857d30fc9a1e5cfcae7ec93eb0f2dd9711` |
-| clean clone | `git -c core.longpaths=true clone --no-local -b work/u8h4`, `git status --porcelain` **empty** before any run |
-| counter-proof clone | same, checked out at `a319cdf` (round 1), `git status --porcelain` empty |
-| Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04`, plus a one-layer image adding `docker:cli` for the drill |
+| commit validated | `e3388a2` (`e449e02` = the fix; `e3388a2` = the semantic-change documentation + this note) |
+| `.github` tree hash | `49d29ad34624bb429e4399266cf86d7b11528669` |
+| clean clone | `git -c core.longpaths=true clone --no-local -b work/u8h4`; `git -c core.longpaths=true status --porcelain` **empty** before any run |
+| counter-proof clone | same method, checked out at `a319cdf` (round 1), porcelain empty |
+| Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04`, plus a one-layer image adding `docker:cli` for the drill and the host docker socket |
 | step bodies | re-extracted from each CLONE's own `.github/workflows/ci.yml` with PyYAML; never hand-copied |
-| step invocation | GitHub's `shell: pwsh` wrapper, verbatim |
+| step invocation | GitHub's `shell: pwsh` wrapper, verbatim: `$ErrorActionPreference='stop'` prepended, `. '<file>'`, `if ((Test-Path -LiteralPath variable:/LASTEXITCODE)) { exit $LASTEXITCODE }` appended |
+| red-proof | 11 of 11 wired steps red, each saying the check did not run |
+| real runs | 7 steps run for real on Linux from the clone, all as pinned (see §11.7) |
+
+**The clean-clone method bit again, and the existing note called it.** The second clone lived
+at a path one character longer than the first, which pushed
+`documentation/implementation-guide/teams-chat-agent-orchestration/Ai-Organizations-Are-More-Effective-But-Less-Aligned-Than-Individual-Agents.md`
+past MAX_PATH: `git status --porcelain` reported it MODIFIED with `Filename too long`.
+`-c core.longpaths=true` on the `clone` command does NOT persist into the cloned repo's
+config, so **every later git command in the clone needs it too** — with it, porcelain is
+empty and nothing is missing. Same defect class as
+`documentation/notes/clean-clone-maxpath-validation-trap.md`, one step further along: that
+note is about the clone silently losing files, this is about the VERIFICATION command in the
+clone silently reporting a dirty tree. An agent asserting "porcelain empty" from a bare
+`git status` in a deep clone is asserting something the tool could not measure.
