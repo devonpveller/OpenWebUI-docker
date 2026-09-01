@@ -570,7 +570,21 @@ not the same as "the wrapper was right".
 
 ## 12. Windows-only assumptions in the wired scripts — the sweep
 
-Asked for after `$env:TEMP` turned up once. Grepped all six wired scripts plus
+> **CORRECTED 2026-09-01 (round 3). The scope sentence below was WRONG, and the wrong
+> scope is how the round-2 sweep missed the round-3 blocker.** It read "all six wired
+> scripts". The wired set is **eight**: the seven `-Script` targets in `ci.yml`
+> (`expected-exit.ps1`, `check-corpus-exposure-producers.ps1`, `dfu-done.ps1`,
+> `drill-app-role-not-superuser.ps1`, `drill-personal-plane-exclusion.ps1`,
+> `drill-rls-boot-assertion.ps1`, `prove-agent-memory-rls.ps1`) plus `run-check.ps1`
+> itself, which runs in every one of those steps. `dfu-done.ps1` was omitted because
+> another branch owned the file — an OWNERSHIP boundary silently became a MEASUREMENT
+> boundary, the table said "all", and `dfu-done.ps1` held the one blocking defect
+> (`[WindowsIdentity]::GetCurrent()`, unconditional, first call of the main body). A sweep
+> that names its own scope wrongly is how the next one misses. The eight are now enumerated
+> mechanically from `ci.yml` rather than listed by hand:
+> `grep -oE "-Script '[^']+'" .github/workflows/ci.yml | sort -u`, plus the wrapper.
+
+Asked for after `$env:TEMP` turned up once. Grepped all **eight** wired scripts plus
 `scripts/checks/lib/ob-initdb.ps1` for `cmd`, `2>nul`, `$env:TEMP`, `.exe`, backslash
 literals, `Get-CimInstance`/`Get-WmiObject`. Measured, not assumed:
 
@@ -581,6 +595,8 @@ literals, `Get-CimInstance`/`Get-WmiObject`. Measured, not assumed:
 | `$env:TEMP` for staging dirs | boundary drill (5 sites), rls-boot drill, app-role drill, prove-rls, corpus gate self-test | **Handled**, and already was: every H4 job sets `TEMP: ${{ runner.temp }}`. |
 | `Get-CimInstance` / `Get-WmiObject` / `.exe` / COM | none | absent from all wired scripts. |
 | `ob-initdb.ps1` (dot-sourced by three drills) | - | clean: `& docker` throughout, no `cmd`, no shell redirects. |
+| `[WindowsIdentity]::GetCurrent()`, `Get-Acl`/`Set-Acl`, `Invoke-Native -Exe "cmd.exe"` | `dfu-done.ps1` — **the script this table failed to cover** | **THE ROUND-3 BLOCKER — FIXED 2026-09-01.** See §15. |
+| `run-check.ps1` (the wrapper, in every step) | - | clean: no Windows-only call. Its host-shell discovery is `[System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName` with a `Get-Command pwsh`/`powershell` fallback, and its marker path is `[System.IO.Path]::GetTempPath()` — both cross-platform. Exercised on Linux as the wrapper of all ten invocations in §15.4. |
 
 **One real difference found, and it is NOT fixed here (§C.10 — a dated line, not a change):**
 
@@ -654,3 +670,198 @@ empty and nothing is missing. Same defect class as
 note is about the clone silently losing files, this is about the VERIFICATION command in the
 clone silently reporting a dirty tree. An agent asserting "porcelain empty" from a bare
 `git status` in a deep clone is asserting something the tool could not measure.
+---
+
+## 15. Round 3 (2026-09-01) — §C.10: `dfu-done.ps1` could not reach an exit code on Linux
+
+### 15.1 The defect, and why round 2 could not see it
+
+`scripts/checks/dfu-done.ps1` called
+`[System.Security.Principal.WindowsIdentity]::GetCurrent()` inside
+`Clear-DfuTreeProtection`, which the main body calls **unconditionally, as its first
+action**. On Linux pwsh that call raises *"Windows Principal functionality is not
+supported on this platform"*. There was no `$IsWindows` gate anywhere in the file.
+
+Two directions, both reproduced here from a clone rather than taken on report:
+
+| stack | outcome |
+|---|---|
+| no trap on the stack | the error is written and stepped over; the run continues and exits 7 |
+| **with** a trap on the stack | it unwinds at that line and **never reaches an exit statement** |
+
+`.github/ci/run-check.ps1` installs exactly such a trap in its shim, which is how CI
+invokes the file. Measured 2026-09-01 in a `mcr.microsoft.com/powershell:7.4-ubuntu-22.04`
+container plus a one-layer image adding `git`, against the **unpatched** file at the
+round-2 tip, through the real `-Stdout`/`-CodeFile` step body:
+
+```
+RUN-CHECK SHIM: the check terminated WITHOUT reaching an exit statement: Exception calling
+"GetCurrent" with "0" argument(s): "Windows Principal functionality is not supported on this platform."
+[ERROR] dfu-done DID NOT RUN: it terminated without reaching an exit statement. ...
+=== run-check rc = 1 ===
+STEP RESULT: RED (run-check says the check did not behave as pinned / did not run)
+```
+
+`dfu-h4-gate` `needs: dfu-done`, so the whole H4 section reds. **Invisible on Windows**,
+where the same call succeeds — which is why round 2's own measurement of this file showed
+green. The measurement was real; the platform it was taken on was not the one CI runs.
+
+### 15.2 What was changed, and the honest cost
+
+A single `Get-DfuPlatform` decides once, **feature-detected rather than inferred from the
+OS name**: `$IsWindows` via `Test-Path Variable:IsWindows` (5.1 has no such variable), AND
+`Get-Command Get-Acl`/`Set-Acl`, AND a trial `GetCurrent()` in a try/catch. Four functions
+gate on it: `Clear-DfuTreeProtection`, `New-DfuDenyRule` (which *throws* rather than
+returning nothing, so a future caller that forgets the gate fails loudly),
+`Protect-AuditedArtifacts`, `Unprotect-AuditedArtifacts`.
+
+**The tree protection is NOT disabled on Windows.** `verify-dfu-done.ps1` still passes and
+the Windows JSON still reports `write_lock = "applied per command (Deny ACE for the running
+identity)"` with two locked directories on every one of the six executed commands.
+
+**Off Windows it is a declared no-op, and the reason is stated in the run output and in the
+JSON rather than skipped silently.** There is no POSIX equivalent of "deny the identity this
+process is already running as": a file mode cannot deny the owner, who can chmod it back
+with one call, and modes do not constrain root at all. Shipping one under that name would be
+a check that is green while checking nothing. What survives is the half the file itself
+calls load-bearing and which is platform-independent — the pre-run snapshot (no clause ever
+reads anything the run could have created) and the before/after fingerprint (an effect that
+gets through is still reported and still vetoes the board). **Off Windows the containment is
+detect-and-refuse instead of prevent-and-detect.** That is weaker; it is why it is printed:
+
+```
+   containment: write-lock NOT APPLIED - not Windows - a Deny ACE for the running identity
+     has no POSIX equivalent ...
+   containment: the pre-run snapshot and the before/after fingerprint DID run, so an effect
+     is still detected and still vetoes the board - detect-and-refuse, not prevent-and-detect.
+```
+
+### 15.3 The interpreter, and a false red it would have produced
+
+`Invoke-AuditedCommand` hard-coded `Invoke-Native -Exe "cmd.exe"`. It now takes the
+platform's shell (`/bin/sh -c` off Windows) and **records which one ran** on each
+executed-command entry.
+
+The substitution changes what a non-zero exit MEANS, so `New-CommandProbeBody` now returns
+**indeterminate, never `fail`, for a non-zero exit under a substituted interpreter** — and
+still `pass` for a real 0. This is not defensive padding; it was measured. All six
+walkthrough commands the run executes exited **127** under `/bin/sh` in the probe container
+(`python` absent; one of them is literally
+`agent-org/agent-bridge/.venv/Scripts/python.exe`). Without the rule the run would have
+reported six red probes asserting the walkthrough's named checks are broken — a fact about
+the interpreter presented as a fact about the subject, this effort's recurring defect.
+
+### 15.4 The proofs
+
+**Linux, under run-check's trap, real `-Stdout`/`-CodeFile` step body** — `dfu-done`
+reached **exit 7** and the step classified it as the pinned green:
+
+```
+RUN-CHECK: dfu-done RAN and reported exit 7; classification deferred to the caller.
+=== run-check rc = 0 ===
+dfu-done.ps1 -SkipLive -Json exited 7
+board=failed done=False balances=True total=8
+census: {"unrecognised":0,"unmet":5,"unevaluated":2,"manual_pending":1,"met":0}
+platform: {"os":"Unix 6.6.87.2","ps":"7.4.6","windows":false,"acl_supported":false,...}
+integrity.ok = True
+[NOTICE] dfu-done exited 7 as pinned: the plan is NOT met, and the run says which clauses.
+=== expected-exit rc = 0 ===
+STEP RESULT: GREEN (classified as the pinned outcome)
+```
+
+All three step assertions hold on Linux: `balances=True`, `unrecognised=0`,
+`integrity.ok=True`. The non-JSON report was also run on Linux **under
+`Set-StrictMode -Version Latest`** (which run-check's shim inherits into the check) and
+printed `INTEGRITY: the audited tree is byte-identical before and after this run.` and
+`EXIT=7`.
+
+**Windows did not regress:** `dfu-done.ps1 -SkipLive -Json` reached **exit 7** in 122s,
+`board=failed`, identical census, `integrity.ok=True`, write-lock applied.
+`verify-dfu-done.ps1` reached **DRILL GREEN — 216 assertions, 0 failed, 8 of 8 declared
+clauses with a constructed failing case**, exit 0, 563s.
+
+**Per-clause buckets are IDENTICAL on both platforms** — 8 of 8 match
+(`unmet, unmet, unevaluated, unmet, unmet, manual-pending, unmet, unevaluated`). Recorded
+as a measurement and **not promoted into a pin**: `ci.yml`'s reasoning for leaving the map
+unpinned still stands, because a hosted runner has `python` and this container does not, so
+clauses 1 and 5 will legitimately land differently there.
+
+### 15.5 The re-sweep — run, not grepped, and it found what the grep did not
+
+A grep is an enumeration of the ways a script can be Windows-only, and the next way is not
+in the list. So the eight wired scripts were swept by **running every wired invocation on
+Linux through `run-check.ps1`** and asking the only question that matters: did it reach an
+exit code?
+
+| check | wrapper rc | reached exit code | did-not-run |
+|---|---|---|---|
+| `expected-exit-selftest` | 0 | 0 | no |
+| `boundary-drill-selftest-ledger` | 0 | 0 | no |
+| `boundary-drill-selftest-vacuity` | 0 | 0 | no |
+| `corpus-exposure-producers` | 0 | 0 | no |
+| `corpus-exposure-producers-selftest` | 0 | 0 | no |
+| `boundary-drill` | 0 | 1 | no |
+| `rls-boot-drill` | 1 | **(none)** | **YES** |
+| `app-role-drill` | 0 | 2 | no |
+| `prove-rls` | 1 | **(none)** | **YES** |
+| `dfu-done` | 0 | **7** | no |
+
+The §12 grep found neither of the two. Both are recorded below as dated findings, not fixed
+here (§C.10 says fix only the blocker).
+
+### 15.6 FINDING (not fixed) — two drills unwind through their own `docker` cleanup
+
+`drill-rls-boot-assertion.ps1` and `prove-agent-memory-rls.ps1` both end in a
+`finally`/`Cleanup` that calls bare `docker` (`prove-agent-memory-rls.ps1:126-130`, invoked from the
+`finally` at `:731-738`; `drill-rls-boot-assertion.ps1`'s `finally` at `:736-752`, whose bare
+`docker` calls are `:738`, `:745` and `:746`). Where `docker` is not on
+PATH that is a command-not-found **terminating** error raised in the cleanup path — after
+the drill has already decided — so under run-check's trap it unwinds past the `exit 3` /
+`exit 1` it was about to reach. This is precisely the shape `run-check.ps1`'s own header
+documents for `drill-app-role-not-superuser.ps1`.
+
+**It does NOT reproduce on `ubuntu-latest`,** which ships Docker 28.0.4; it reproduced here
+only because the probe image has no docker client. And run-check catches it correctly, so it
+is **not a false green**. The real cost is a lost distinction: the annotation says
+"DID NOT RUN" where the drill meant `exit 3 = CANNOT CHECK, the boundary was never
+exercised`, which is the sentence H2 spent three rounds separating from "the boundary is
+broken". Owner: whoever next touches those drills. Sink: this file.
+
+*(The `prove-rls` row's first line, `OB1 is dirty ... dirty=875`, is an artifact of this
+probe — the submodule was checked out on Windows and read through a bind mount. Not a
+finding.)*
+
+### 15.7 Two Windows-only path rewrites also fixed, because they are in the blocking file
+
+`dfu-done.ps1` rewrote forward slashes to backslashes in two places before a `Test-Path`.
+Off Windows a backslash is an ordinary filename character, so both answered FALSE for paths
+that exist:
+
+- `New-CleanCheckout`: the `.gitmodules` submodule path was rewritten before looking for the
+  local mirror — so the mirror is never found and the clone falls back to the network.
+- clause 2's disposition ledger: the ledger's `findings_sink` was rewritten before
+  `Test-Path` — so it reports `dispositioned 'follow-on' but its findings sink does not
+  exist` for a sink that is there. A fact about the platform, reported as a fact about the
+  disposition.
+
+Both now pass the forward-slashed path to `Join-Path`, which handles it on both platforms.
+Same class as §12's row saying backslash literals are harmless: they are harmless where pwsh
+*normalises* them, and harmful where the code *creates* them.
+
+### 15.8 One more StrictMode trap, caught before it shipped
+
+`run-check.ps1` sets `Set-StrictMode -Version Latest`, and `& $target` runs the check in a
+child scope that **inherits** it. Reading a never-assigned variable is a terminating error
+there — the same failure class this whole round is fixing. `$script:DfuPlatformCache` is
+therefore declared `= $null` at top level before its function, exactly as `$script:DfuSnap`
+and `$script:DfuSandbox` already are. Proven by the Linux non-JSON run above, which was
+launched with `Set-StrictMode -Version Latest` explicitly.
+
+### 15.9 Round-3 validation anchor
+
+| | |
+|---|---|
+| branch | `work/u8h4`, rebased onto `refactor/ai-stack-cleanup` @ `6c17dfa` (H1, H2, H3 and u8floor all landed) |
+| rebase conflict | `.github/workflows/ci.yml` only — the `develop` -> `development` rename landed independently on the work line as `5e5ac6f`; the H4 comment was kept and re-attributed to it, and the resolved file was re-parsed with PyYAML (14 jobs; push branches `[main, development, feature/**, refactor/**, update/**]`) |
+| Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04` plus one layer adding `git`, tagged `dfu-linux-probe:wt-u8h4` — a test tag, never `:local`, never attached to an `ai-stack_*` network |
+| production touched | none. No container of the live stack was started, stopped or written to; every dfu-done run used `-SkipLive` |

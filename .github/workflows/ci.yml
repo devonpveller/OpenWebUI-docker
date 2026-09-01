@@ -195,9 +195,12 @@ jobs:
   #     gap prints its own GREEN DOES NOT COVER line; read them.
   #   * these jobs were measured on Windows PowerShell 5.1 against gitlink b604d55
   #     (documentation/notes/u8h4-findings.md records every command, cwd, exit code and
-  #     elapsed time). The exit-code contract file itself was additionally executed under
-  #     pwsh 7 on Linux. The DRILLS have not yet run on a Linux runner, because H4's other
-  #     half — a CI run on `development` — is blocked on the operator promoting this line.
+  #     elapsed time). Every wired invocation has ALSO been run on Linux — pwsh 7.4 in a
+  #     container, 2026-09-01 — through run-check.ps1, which is how the dfu-done blocker in
+  #     section 15 of that note was found. 8 of those 10 reached an exit code; the 2 that did
+  #     not need a docker client the probe image lacks and the runner has. That is still not
+  #     a CI run: H4's other half — a run on `development` — is blocked on the operator
+  #     promoting this line.
   #
   # Runner facts this wiring depends on, checked against actions/runner-images
   # images/ubuntu/Ubuntu2404-Readme.md on 2026-09-01 rather than assumed: PowerShell 7.6.5,
@@ -414,11 +417,14 @@ jobs:
       # balances, no clause landed in the `unrecognised` bucket, and the run did not move
       # the tree it was auditing. Those are dfu-done's refusing conditions; a refactor that
       # broke the script would show up in them long before it changed the exit code.
-      # Deliberately NOT pinned: the per-clause bucket map. It was measured only on Windows,
-      # a Linux runner will legitimately place some clauses differently (the walkthrough
-      # invokes a Windows venv python), and pinning a map nobody has observed on the runner
-      # would be the snapshot H4 exists to prevent. Recorded as a follow-up in
-      # documentation/notes/u8h4-findings.md.
+      # Deliberately NOT pinned: the per-clause bucket map. Pinning a map nobody has observed
+      # on the runner would be the snapshot H4 exists to prevent, and a Linux runner will
+      # legitimately place some clauses differently (the walkthrough invokes a Windows venv
+      # python). It HAS since been measured on Linux — pwsh 7.4 in a container, 2026-09-01
+      # — and all 8 clauses landed in the same bucket as on Windows. That is recorded in
+      # documentation/notes/u8h4-findings.md section 15.4 as a MEASUREMENT and deliberately
+      # NOT promoted into a pin: that container has no python and a hosted runner does, so
+      # clauses 1 and 5 can still land differently there.
       #
       # THIS IS THE ONE STEP THAT MUST ASSERT SOMETHING BEFORE THE CONTRACT IS CONSULTED, so
       # it uses run-check.ps1's -CodeFile form: run-check still proves the script RAN and
