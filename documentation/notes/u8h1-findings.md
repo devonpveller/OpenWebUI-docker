@@ -270,6 +270,41 @@ commit that is not on OB1's remote is the one thing CLAUDE.md says never to do, 
 was out of scope for this item. Whoever lands this pushes `work/u8h1-app-role` to OB1 FIRST,
 then bumps.
 
+### Round 3 (2026-09-01), rebased onto `75ae94d`
+
+Code at **`5841994`**. Three clean `git clone`s, **one suite per checkout**, none of them the
+worktree this was written in. Every clone was cloned with `-c core.longpaths=true` and asserted
+COMPLETE before anything ran - `git status --porcelain` empty, 1,082 tracked files - per
+`documentation/notes/clean-clone-maxpath-validation-trap.md`, because on this repo a plain
+clone into a deep path drops 1,108 files and exits 0.
+
+| checkout | OB1 | suite | result |
+|---|---|---|---|
+| `D:3a` | **uninitialised** (the plain git-clone state) | `redprove-census-cannot-measure.ps1` | **9 cases, 0 disagreements**, exit 0 |
+| `D:3b` | `b604d55` (the gitlink this branch records) | `census-db-connection-roles.ps1` vs live `openbrain-db`, read-only | **22 of 22** superuser; **12 of 13** recognised clients across **36** parsed services (30 + 6); **9 unexplained**; exit 1 - correct, that is today's state |
+| `D:3c` | `b12d2fb` (the H1 migration, still unpushed) | `drill-app-role-not-superuser.ps1` | **31 probes, 0 failures**, exit 0 |
+
+Discrimination, measured rather than asserted: the round-3 red-proof pointed at the **pre-fix**
+census fails **4 of 9** and exits 1 - `no-services` 0, `reindent` 0, `unresolved` 1, `live-ghost`
+0 against wanted 2/1/2/2. Every figure in the `pre-fix` column of that table is an exit code
+that was observed, not a claim about the past.
+
+`drill-app-role-not-superuser.ps1` is **byte-identical** to the version four verifiers accepted
+(`git diff 0ae8da1 HEAD -- scripts/checks/drill-app-role-not-superuser.ps1` is empty); it was
+re-run anyway because the branch was rebased onto a new base.
+
+**The gitlink moved on its own.** The rebase onto `75ae94d` brought the work line's OB1 pointer
+with it, so this branch now records **`b604d55`** (H3's exposure column) where round 2 recorded
+`4fdc21c`. Neither contains `init-app-role.sql`, so §12's warning is unchanged and if anything
+sharper: a fresh `clone --recurse-submodules` of `work/u8h1` still gets an OB1 without the
+migration, and the drill still aborts by check. Whoever lands this pushes `work/u8h1-app-role`
+to OB1 FIRST, then bumps.
+
+Throwaway hygiene after round 3: `wt-h1v3a-*`, `wt-h1v3c-*` and the red-proof's own containers
+and networks all removed (`docker ps -a` and `docker network ls` show no `wt-*` at all), all
+three checkouts deleted, nothing attached to an `ai-stack_*` network, no `:local` tag built,
+`openbrain-db` read-only throughout.
+
 ## 13. Round 2: the census passed on an empty denominator
 
 Both verifiers reproduced the same defect independently. `census-db-connection-roles.ps1`
