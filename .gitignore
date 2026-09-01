@@ -85,5 +85,16 @@ documentation/issue-plans/
 # rule. It now lives in <git-common-dir>/agent-worktrees/ so every worktree shares ONE
 # namespace - inside .git, which is never tracked, so no rule is needed.)
 
-# quadrant comparison run artifacts (evidence for a run, not source)
+# Quadrant WORKING state - scratch mirrors, staging, and results sets nobody has claimed
+# anything on. Ephemeral by definition: per-checkout, cited by nothing, and losing it loses
+# no assertion.
+#
+# CORRECTED 2026-08-31. This rule used to be commented "run artifacts (evidence for a run,
+# not source)" - and that sentence is how U4's audit trail was deleted. The four-quadrant
+# comparison that closed U4's Validated-by column was written to `.quadrant/gym-runs` inside
+# a per-session worktree, was ignored by THIS rule, and died with the worktree at merge;
+# `quadrant.cli report` afterwards answered COMPARED 0/4 under a walkthrough row still saying
+# 4/4. PLAN sec C.6 makes the audit trail the deliverable's twin, so evidence a claim rests
+# on is COMMITTED - see documentation/evidence/README.md - and only the working state below
+# is ignored. If a row cites it, it does not belong here.
 .quadrant/

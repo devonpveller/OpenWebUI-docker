@@ -839,3 +839,36 @@ def test_build_artifacts_do_not_enter_the_item(tmp_path):
     assert polluted["digest"] == clean["digest"], "build artifacts changed the item digest"
     assert not any("__pycache__" in k or ".DS_Store" in k for k in polluted["planted"]), \
         "build artifacts would be planted into every run workspace"
+
+
+def test_a_finalized_project_workspace_can_be_committed(tmp_path):
+    """The retained evidence of a `project` cell must be a tree a repository will ACCEPT.
+
+    RED WITHOUT THE FIX: `prepare_target` gives a `project` cell a fresh `git init` scratch
+    repo, and nothing used to remove it. `git add` on a tree containing a nested repository
+    records a GITLINK to a commit that exists in no remote, so a fresh clone gets an empty
+    directory where the workspace was - and `check_quadrant_evidence_reproduces.py` then has
+    nothing to re-run.
+
+    This is not hypothetical. The 2026-08-30 four-quadrant comparison lived under
+    `.quadrant/` in a per-session worktree, was covered by `.gitignore`, and was destroyed
+    with that worktree at merge; `quadrant.cli report` afterwards said COMPARED 0/4 over a
+    walkthrough row claiming 4/4. Evidence a clone cannot see is not evidence.
+    """
+    from quadrant import adapters as adapters_mod
+
+    q = [x for x in matrix_mod.build(cfg()) if x.target_kind == "project"][0]
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    ws = adapters_mod.prepare_target(q, cfg(), run_dir=run_dir, repo=tmp_path,
+                                     scratch_root=tmp_path / "scratch")
+    (ws / "planted.py").write_text("x = 1\n", encoding="utf-8")
+    adapters_mod.baseline_commit(ws)
+    assert (ws / ".git").is_dir(), "precondition: the scratch repo exists during the run"
+
+    adapters_mod.finalize_target(q, run_dir=run_dir, repo=tmp_path)
+
+    assert not (ws / ".git").exists(), \
+        "a finalized project workspace still holds a nested .git - the evidence cannot be committed"
+    assert (ws / "planted.py").read_text(encoding="utf-8") == "x = 1\n", \
+        "finalizing must not disturb the files the acceptance checks re-run against"

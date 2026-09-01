@@ -31,7 +31,7 @@ is marked deliberately rather than rounded up.
 | **U1** | DONE (merge-record) | Memory plane phases 0–2: schema, ops door, write paths. |
 | **U2** | DONE (merge-record) | Intent unification: shared anchor schema, git-issue door, depth-1 ScopeNodes. |
 | **U3** | DISCHARGED (closing with U4) | The arena run landed: seeds caught, check banked `source: tester-finding`, arena clean before/after. |
-| **U4** | COLUMN MET, round 7 (convergence 1 of 2) | 4/4 quadrants ran **in the arena**, stall real. Row amended (§2.1 A1). Closes if round 7 finds no new defect class. |
+| **U4** | COLUMN MET, round 8 — **evidence now committed** | 4/4 quadrants ran in the arena and the stall was real, but round 7's proof of it was deleted with the worktree that made it: `report` answered **COMPARED 0/4, exit 1**. Re-run 2026-08-31 into `documentation/evidence/dfu-u4/` — **4/4, exit 0**, oracle fired, 7 records re-derivable. The *What* cell's "governs both" half is still undelivered — see §U4. |
 | **U5** | **STEP 1 APPLIED TO LIVE** | RLS + FORCE on `thoughts` and nine `agent_memory*` tables. Canary proof: agent plane sees **0** personal, **12993** ops. Every PostgREST path bound — including the wiki compiler. Steps 2–3 (direct deno clients) open. |
 | **U6** | **DONE** (clause 4 `3bdf7a8`, clauses 1–3 `8695deb`) | Recall at four+ seams, live-proven. Andon: 5 conditions halt at the real gate, verdict by exhaustive census, drill 213/0. Closed on §C.7's convergence bound. |
 | **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
@@ -99,39 +99,183 @@ catches either seed."* A verifier disproved it by running the pre-existing
 `5f4817d`. Branch `work/u3gym` is unmerged.
 **Verified by:** verifier (both halves), orchestrator (status).
 
-## U4 — runner unification — **PARKED, closure in flight**
+## U4 — runner unification — **COLUMN MET on committed evidence; the *What* cell is not fully delivered**
 
-**Row amended 2026-08-30** — see **§2.1 A1**. The row presumed a profile mechanism existed to be
-extended across both directions. It did not: `Resolve-RoleTarget` has **zero executable callers**
-repo-wide (definition, one test, and a skill doc telling a human to run it), and the runner
-`status` field is **read nowhere**. It governed *neither* side. Amending the premise, not the
-goal, and not the column.
+**Round 8, 2026-08-31.** Validated at `1a6b0b8` (`refactor/ai-stack-cleanup`), on branch
+`work/u4close`. Round 7 met the column and *deleted its own proof*; this round re-ran it into
+a location a clone can read, and corrected two premises that had gone stale.
 
-**Built, and independently reproduced:**
-- a real little-coder dispatch over `docker exec` that carried **one** anchored item end to end
-  (7 commands, 88 s, outcome pass) — A11 moves off zero at n=1, and `harness.config.json`
-  correctly still says `status: unproven`;
-- an oracle-on-stall mechanism, 6 mutations all red, its signature function `_failure_sig`
-  verbatim from agent-org;
-- a quadrant harness that **refuses to report a cell it did not run**;
-- the agent-org direction of the runner registry — changing one word in the shared config flips
-  a live dispatch to `UnprovisionedHarness`.
+### What the machine says now — run it yourself
+
+Every command below runs **as written, from the repository root** (this file's
+rule, line 10). The `python -m quadrant.cli` form used in earlier rounds does not:
+it needs `scripts/agent-harness` as the working directory, and from the root it
+answers `No module named 'quadrant'`. Caught by running it in a clone.
+
+```
+$ python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant
+**COMPARED 4/4**
+| little-coder x self    | completed | 2/2 | 65.5 | 1/2/0 | 1 changed | mechanical |
+| little-coder x project | completed | 2/2 | 65.8 | 1/2/0 | 1 changed | mechanical |
+| claude-code  x self    | completed | 2/2 | 35.4 | 1/2/0 | 1 changed | normative  |
+| claude-code  x project | completed | 2/2 | 35.2 | 1/2/0 | 1 changed | normative  |
+                                                                        exit 0
+
+$ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+7 outcome record(s) re-derived their verdict from the evidence they kept    exit 0
+
+$ ./scripts/agent-harness/observe-oracle-on-stall.ps1 `
+      -ResultsDir documentation/evidence/dfu-u4/stall -LeaseOwner <you>
+  3 real dispatches of the unsatisfiable item; round 3 STALLED (2 rounds, no new information)
+  ORACLE-ON-STALL: little-coder/local-default -> claude-code/opus, hand back to little-coder
+  ledger row 417aa274750da712 - APPENDED BY THIS RUN (0 rows before, 1 after)   exit 0
+
+$ git clone --branch work/u4close --single-branch <this repo> /tmp/proof && cd /tmp/proof
+$ python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant
+  (this results set is PINNED to venue 'gym' at D:\Open WebUI\ai-orchestration-gym;
+   the venue resolved for this invocation differs ... The pin STANDS)
+  **COMPARED 4/4**                                                     exit 0
+$ python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+  7 outcome record(s) re-derived their verdict                         exit 0
+```
 
 **Validated by (§2):** *"same anchored item run per quadrant (runner × target), outcomes
-compared; stall→oracle observed firing at least once."*
-**Why it is parked — from the deliverable's own machine output:**
-`python -m quadrant.cli report` → **`COMPARED 2/4, INCOMPLETE, exit 1`**. Only the target axis
-ran; the runner axis has zero coverage. The oracle fired on a **constructed** stall, not an
-observed one.
-**What would close it:** the two little-coder cells actually run (a dispatch now exists, which is
-why closure is being attempted rather than assumed), and a stall that *happened*.
-**Known-open on the branches:** the harness direction of "governs both" is a declaration with
-zero executable consumers; one false sentence remains in `check-runner-endpoints.ps1` claiming
-`.Port` throws on a relative Uri — it does not, it returns `$null` with `$Error.Count = 0`
-(orchestrator-verified). Branches `work/dfu-u4`, `work/u4quad`, `work/u4oracle`, `work/u4bidir`
-are unmerged.
-**Verified by:** orchestrator (the dead-code groundwork, the `.Port` claim, the container's
-published ports), verifier (everything else).
+compared; stall→oracle observed firing at least once"* — **both halves met**, at venue `gym`
+(`D:\Open WebUI\ai-orchestration-gym`, identity `root:f12ba2ec…`), on evidence that is
+**committed**: `documentation/evidence/dfu-u4/`.
+
+### THE DEFECT THIS ROUND EXISTS TO FIX — evidence that could not survive a clone
+
+Round 7's comparison was real: four cells, real dispatches, `COMPARED 4/4, exit 0`, confirmed
+by verifiers. It was written to `.quadrant/gym-runs` **inside the per-session worktree that
+produced it**, and `.gitignore:88-89` covered `.quadrant/` as *"run artifacts (evidence for a
+run, not source)"*. The branch merged, the worktree was removed, and the proof went with it.
+On 2026-08-31 the summary table above still read *"4/4 quadrants ran in the arena"* while:
+
+    $ python -m quadrant.cli report
+    **COMPARED 0/4**  - this comparison is INCOMPLETE          exit 1
+
+Not 4/4 as the row said, and not the `COMPARED 2/4` this section used to quote either — that
+number was itself a stale citation of an earlier round. **Both places were wrong, in different
+directions, and the machine agreed with neither.** No one lied; the runs happened. But an
+auditor cannot distinguish *"this never ran"* from *"this ran and the proof was deleted"*, and
+§C.6 makes the audit trail the deliverable's twin. Evidence a fresh clone cannot see is not
+evidence.
+
+Four things changed so this cannot recur, each proved RED before GREEN:
+
+| | |
+|---|---|
+| evidence has a committed home | `documentation/evidence/` (+ its `README.md` and a `-text` `.gitattributes`, because `guards.py unmodified` compares BYTES). `.gitignore`'s `.quadrant/` rule stays, with its comment corrected: it covers WORKING state, not evidence |
+| the banked check reaches it **and reds when it is gone** | `check_quadrant_evidence_reproduces.py --auto` searches `documentation/evidence/` as well as `.quadrant/` — otherwise every set it could find is one a clone does not have. Reaching it was **not enough**, and this row overclaimed until 2026-08-31: deleting `documentation/evidence/dfu-u4/` left `--auto` with nothing to discover and a vacuous **exit 0**, so the banked check could not detect the one defect this section exists to close (only `cli.py report --results-dir <committed>` went red). `--auto` now reads the expectation from `git ls-files` and reds on any tracked `record.json` that is not on disk, naming each — proved by moving the directory away (exit 1, "MISSING COMMITTED EVIDENCE", 7 paths listed) and restoring it (exit 0). Two cases stay **genuinely** vacuous and each prints which it is: a tree that is not a git checkout, and a checkout whose index tracks no records |
+| a record can be re-run elsewhere | run records now carry `acceptance[*].check_template` beside `check`. `check` is the exact command that ran and embeds the producing machine's interpreter and the producing worktree's `guards.py`; the checker re-expands the template against ITS checkout. `check` is never rewritten |
+| a `project` run directory is committable | its scratch `.git` is removed at finalize. A nested repo makes `git add` record a gitlink to a commit in no remote, so the clone gets an empty directory where the workspace was. The first version used `shutil.rmtree(ignore_errors=True)`, which silently left git's read-only pack files in place — caught by the new test, fixed with a chmod-retry that RAISES if anything survives |
+
+### Two premises in §2.1 A1 have gone stale and are now FALSE
+
+The amendment was correct when written. Both of its supporting facts were falsified by work
+that landed after it — `dispatch.ps1` (merged in `211febc`) and `oracle_on_stall.py`
+(`5dbf05b`) — and are re-measured here:
+
+| A1 says | measured 2026-08-31 at `1a6b0b8` |
+|---|---|
+| "`Resolve-RoleTarget` has **zero executable callers** repo-wide" | **FALSE.** `dispatch.ps1:88` calls it; `verify-dispatch.ps1` reaches it 12 times; its Python twin `config.resolve_role` is called by `oracle_on_stall.py:223`, which `queue.ps1` runs on **every `-Fail`** (`Invoke-OracleOnStall`, `queue.ps1:219`) |
+| "the runner `status` field is **read nowhere**" | **FALSE**, and it is decision-bearing: `quadrant/matrix.py:175` gates comparability on it. Measured by flipping it — `little-coder.status=unproven` → `comparable=True`; `=self-test` → `comparable=False`, kept out of the decision table |
+
+**What is TRUE, and stated at its real width.** The profile mechanism governs **one
+direction**, partially:
+
+- it selects the runner and model a role is dispatched to (`dispatch.ps1`);
+- it decides **which runner a stall escalates to** — measured: profile `all-local` →
+  `escalate little-coder/local-default → claude-code/opus`; profile `all-cloud` →
+  `no-oracle-above` (*"the worker already runs on 'claude-code'"*), i.e. no escalation at
+  all. The committed ledger row carries `"profile": "local-work-cloud-review"`;
+- it decides whether a quadrant's outcome may enter a decision table (`matrix.py`);
+- it is what an operator sees in `profile: list` (`describe_runner`).
+
+It does **not** govern the pipeline's own execution: `queue.ps1` never starts a runner, so
+choosing a profile does not change which agent picks up a worker or tester role. And the
+**agent-org direction is absent from this line entirely** — `work/u4bidir` built a runner
+registry for it and is abandoned by operator direction (below). *"One profile mechanism
+governs both"* remains **false in the agent-org direction**, and that is a *What*-cell debt,
+not a column debt: §2.1 A1 states explicitly that the amendment *"does not touch the
+Validated-by column."*
+
+### `check-runner-endpoints.ps1` — the false `.Port` sentence ships nowhere, because the file does not exist
+
+Re-verified independently, PowerShell 5.1.26100.8875, under the script's own preamble
+(`Set-StrictMode -Version Latest`, `$ErrorActionPreference = "Stop"`):
+
+    $Error.Clear(); $u = [Uri]'not a url at all'
+    $u.IsAbsoluteUri -> False   $null -eq $u.Port -> True   $null -eq $u.Host -> True   $Error.Count -> 0
+
+`.Port` does **not** throw on a relative Uri. The .NET getter raises and PowerShell swallows
+it: no throw, no error record. The claim that it "would have CRASHED THE SCRIPT" is false.
+
+`.Host` is **`$null` as well** — this line said `''` until 2026-08-31. Two verifiers measured
+this expression and reported different answers (`$null -eq $u.Host` = True; `$u.Host` = `''`),
+and both were looking at the truth: `$null` INTERPOLATES to an empty string, so
+`"$($u.Host)"` and `-f $u.Host` both render `''` while the value is null. Only an
+`$null -eq` test distinguishes them, and `$u.Host.Length` throws where `''.Length` is 0.
+Re-measured under the preamble above: `$null -eq $u.Host` -> True, `'' -eq $u.Host` -> False.
+Worth the sentence, because the whole paragraph is about a getter that returns null instead
+of throwing, and reading a formatted null as an empty string is that same trap one level in.
+
+And the file carrying that sentence is **on no branch**. `git ls-files` has no
+`check-runner-endpoints.ps1`; the only versions in any ref are `origin/work/u4bidir`'s
+`aabb781` and `ec4ed8d`, and neither contains the word *relative* or *throw* near `.Port` —
+the round-3 revision that introduced it was never pushed and its worktree is gone. There is
+no code to fix and no surrounding logic to correct on this line. What was wrong was **this
+document**, which listed the sentence as a live known-open defect in the deliverable.
+
+### Branches — what was salvaged and what was abandoned
+
+`work/dfu-u4`, `work/u4quad` and `work/u4oracle` are **ancestors of `1a6b0b8`** — merged in
+`211febc`, `88d5035`, `5dbf05b`. The line here listing all four as unmerged was stale.
+Nothing had to be salvaged from them; what they built is what this round re-ran.
+
+**`work/u4bidir` is ABANDONED** (operator direction). With it go the agent-org
+`RunnerRegistry`, `check-runner-endpoints.ps1` and `verify-runner-endpoint-check.ps1`, ~2,400
+lines. It was refuted 2/2 on defects the orchestrator confirmed by reading the source (a
+reachability check that could not fail for the rows it validated; a registry fallback that
+turned compose's documented empty-env disable path into two enabled workers), it is ~87
+commits behind the work line and therefore UNVALIDATED under §C.7b regardless, and its
+findings note carries a false sentence in code. Its absence is exactly why *"governs both"*
+stays false in the agent-org direction.
+
+**Evidence:** `documentation/evidence/dfu-u4/` (committed),
+`documentation/notes/u4close-findings.md`,
+`documentation/notes/u4-round8-evidence-durability.md`.
+**§C.7b validation, clean clones at `336a2ba` (round 9), one suite per checkout:**
+`check_quadrant_evidence_reproduces.py --auto` 7 re-derived + all 7 committed records on
+disk, exit 0; `report` COMPARED 4/4 exit 0; `ruff check .` exit 0; `pytest
+scripts/agent-harness -q` **295 passed, 2 skipped, 1 FAILED**; and the round-9 red-prove
+(delete `documentation/evidence/dfu-u4/` → exit 1 naming all seven records → `git checkout`
+→ exit 0) in a third clone that had never run anything.
+
+The red is named: `test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere`
+— the durable-check REGISTRY lives at `<git-common-dir>/agent-worktrees/`, i.e. inside
+`.git`, so a fresh clone has **zero banked durable checks**. It is **pre-existing**: the
+same test fails identically at base `1a6b0b8` in a clean clone. Not fixed here (a different
+module contract, a different item) and NOT weakened — it is correct to fail. It did not
+start passing either: round 8's clone was 288 + 2 + 1 = **291** tests, this one is
+295 + 2 + 1 = **298**, exactly the seven guards round 9 added. (A run in the *worktree*
+reports 298 passed and 0 failed, because the shared git common dir there does hold the
+banked check — which is why §C.7b insists on the clone.)
+
+**Round 9, 2026-08-31.** Round 8 was independently verified on all four of its claims, and
+the same verification found three defects **in the fix** plus a factual conflict between two
+verifiers. All four are closed at `336a2ba`: the banked check can no longer return a vacuous
+0 when the committed evidence has been deleted (the row above); its messages no longer name
+a search root the code stopped using; `MODULE.md`'s present-tense claim that nothing
+dispatches to little-coder is corrected to what the code does; and `$u.Host` is `$null`, not
+`''`. See `documentation/notes/u4-round8-evidence-durability.md` §9.
+
+**Verified by:** round 8's column — an independent verifier, in their own clean clone.
+Round 9's four fixes — **this session, and an independent re-run is owed**: this file's rule
+is that a row says DONE when a verifier who did not build it re-ran the column, and a
+session cannot discharge that for its own repairs.
+
 
 ## U5 — containment parity — **PARKED, closure in flight**
 
