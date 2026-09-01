@@ -70,3 +70,42 @@ pre-existing 'Filename too long'". That was one agent's alertness, not a guarant
 Nobody has audited which validations in this effort were run from a scratchpad clone. That audit
 is worth doing before any "validated at sha X" claim is treated as load-bearing, and it is
 cheaper than re-running everything.
+
+---
+
+# Addendum, 2026-09-01: a piped `git commit` reports SUCCESS when the hook blocked it
+
+A `u8h2` agent reported that `git commit … 2>&1 | head -40` **committed through a failing
+pre-commit hook**, reproduced twice, and flagged it as worse than `--no-verify` because it leaves
+no flag and no reflog trace.
+
+**Orchestrator attempted it and did NOT reproduce the bypass.** Staged a deliberate gate
+violation (a `.mjs` POSTing to `/rest/v1/thoughts` with no plane):
+
+```
+unpiped:  git commit -m "…"                       -> EXIT=1, hook printed FAIL, no commit
+piped:    git commit -m "…" 2>&1 | head -40        -> pipeline-exit=0
+          HEAD before == HEAD after                -> NO COMMIT. The hook HELD.
+```
+
+**But the exit code is the real defect, and it is almost certainly what was observed.** In a
+pipeline the status is the LAST command's — `head`'s — so a **failed** commit reports **0** to
+the caller. Anything gating on `$?` or `$LASTEXITCODE` after a piped `git commit` concludes the
+commit succeeded when nothing was written. That produces exactly the reported symptom without
+requiring a git bug: "exit 0, therefore committed."
+
+The distinction matters for what to do about it. A hook bypass would be a git defect to escalate;
+exit-code masking is a shell rule, always true, and the fix is ours:
+
+1. **Never pipe a `git commit` whose success you intend to check.** Redirect to a file
+   (`> out.txt 2>&1`) and read the file, or check `${PIPESTATUS[0]}` in bash.
+2. **Verify by state, not by status** — compare `git rev-parse HEAD` before and after. This is
+   the same lesson as the clone trap above: `git clone` also exits 0 having dropped 1,108 files.
+   Twice now in one effort, a git command's exit code has been a worse witness than its effect.
+3. The `u8h2` agent re-ran all three of its commits unpiped and confirmed
+   `Pre-commit validations passed!`, so no known commit in this effort rests on the masked path.
+
+**Unresolved:** the agent distinguished `| tail -3` (blocked) from `| head -40` (committed). With
+output shorter than 40 lines `head` does not close the pipe early, so SIGPIPE is not an obvious
+mechanism, and the difference was not reproduced here. Recorded as observed-but-unexplained
+rather than dismissed — the reporter had the failing case in front of them and this note does not.
