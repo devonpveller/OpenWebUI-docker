@@ -43,8 +43,11 @@ The middle row is the defect in one line: the original moved forward one revisio
 dropped requirement became "CARRIED", and clause 2 stopped reporting a **definite
 failure** at all. This is drilled as step **R2**.
 
-A second shape, same mechanism: an intermediate revision whose column said "the quadrant
-comparison is NOT required" is a printed chain link before A3 and silently absent after.
+The brief reports a second shape from the same mechanism — an intermediate revision whose
+column said "the quadrant comparison is NOT required" being a printed chain link before A3
+and silently absent after. **That one is relayed, not reproduced here**; it is the same
+skip in the same builder, and the fix covers it, but this note distinguishes what was run
+from what was read.
 
 **The fix, per rule 9 (NORMALISE IN EVERY READER, THEN GREP FOR THE SHAPE):**
 
@@ -92,6 +95,16 @@ the id shape and False for the old ignore shape.
 Fixed by making the recogniser the bare prefix `U<digit>`: a cell that starts like a phase
 id is either a ROW or a NAMED IGNORE, never neither. Drilled at **R3**.
 
+**Adjacent, swept for and NOT fixed here.** A sweep of every `U\d` regex in the file
+(`:764`, `:795`, `:809`, `:1056`, `:1087`, `:2318`, `:2329`) shows no other
+``-after-a-digit hole. But the WALKTHROUGH reader at `:1056`/`:1087` matches
+`'(?m)^##\s+\**(U\d)'` — a bare prefix — so a walkthrough heading `## U40` would be read
+as U4's section. That is a MIS-ATTRIBUTION, not a silent drop (nothing disappears, and
+`phase-floor-present` still names any genuinely missing phase), it is in clause 5's reader
+rather than the phase table, and A3 governs the phase table. Recorded here rather than
+changed, because widening clause 5's section reader is a different item with its own
+positive controls to write.
+
 **The same `\b` was in the pre-header alarm** (the check for a phase-looking row ABOVE
 section 2's table header), which is documented as deliberately the widest net in the
 parser. It had the identical hole — a stray `**U4b**` row above the header tripped nothing.
@@ -133,8 +146,6 @@ parse as U4 — loudly now, but it will parse.
 report MORE, never less."* That claim is **wrong**, and it is wrong in the direction that
 flatters the change.
 
-Measured against one tree, both script revisions:
-
 Both script revisions were run `-Only 2 -SkipLive -Json` against ONE clean clone at
 `392d170` (`git status --porcelain` empty). Clause 2:
 
@@ -165,8 +176,12 @@ by name:
 That is the intended shape: the thing A3 made quiet is now said out loud, and it is not
 turned into a false red.
 
-The census bucket did not move — which is all the commit message checked, and a bucket that
-does not move is not evidence that nothing got greener.
+**What the commit message did and did not check.** It did track coverage — it reported
+clause 2 going "10 of 10 -> 9 of 10" and explained the lost subject as the floor's own
+drift check flipping to fail — and it checked that no clause changed census bucket. What
+it did not track is the **probe set**: two probes that were *failing* simply ceased to
+exist, and no coverage number and no bucket moves when a failing probe disappears. So the
+one measurement that would have refuted "report MORE, never less" was the one not taken.
 
 **The greening is AUTHORISED and is NOT reverted here.** Making a duplicate-looking
 annotation stop refusing is A3's stated purpose; that is why `chain-revisions-parsable` and
@@ -203,8 +218,7 @@ completed step**:
 
 ---
 
-## 6. `Get-AuditedFingerprint` makes a recurring FALSE accusation under the
-   worktree-per-session policy
+## 6. `Get-AuditedFingerprint` makes a recurring FALSE accusation under worktree-per-session
 
 `Get-AuditedFingerprint` (`dfu-done.ps1:1435-1439`) fingerprints, among the audited
 artifacts, two **repo-wide** git probes:
@@ -241,6 +255,32 @@ teaches a reader to ignore the report.
 3. When zero commands executed (e.g. `-SkipLive`) and only `repo`-class keys moved, state
    that plainly: this run executed 0 commands and cannot have caused it. Still not `ok`,
    still no green — the operator simply gets a true sentence instead of a false one.
+
+**Status: OBSERVED, with a control.** This was first derived by reading `:1435-1439`,
+`:1706` and `:4535`. It then fired, unprompted, during this branch's own validation. Two
+runs of the same script at the same sha, minutes apart:
+
+- in a **clean clone** (its own repository, no sibling worktrees):
+  `INTEGRITY: the audited tree is byte-identical before and after this run.`
+- in **`.claude/worktrees/wt-u8floor`** (the shared repository, 12 live worktrees):
+
+  ```
+  INTEGRITY: FAILED - this run CHANGED the world it was measuring:
+    - clause 1 / U2: 'python -m pytest scripts/agent-harness/test_harness_config.py
+      scripts/agent-harness/test_anchor_schema.py -q' MOVED the audited tree
+      (git:refs, git:worktrees)
+    - net change over the whole run: git:refs, git:worktrees
+  ```
+
+  and the board dropped from `FAILED` to **`UNACCOUNTED`** — "a checker that changes what
+  it measures is not an authority, so no verdict here is offered as one".
+
+**That accusation is false.** The command named is `pytest` on two harness test modules,
+run inside a disposable clone; it creates no branch, no tag and no worktree. What moved
+`git:refs` and `git:worktrees` was another session in a sibling worktree, during the
+window this run happened to hold. The only reason the clone run is clean is that a clone
+has no siblings — which is the control, and it is what makes this a demonstration rather
+than a suspicion.
 
 Not implemented on this branch; it is a change to the integrity reporter, which is not this
 item's subject.
@@ -286,4 +326,98 @@ no C.7b staleness applies.
 
 ### Clean-checkout validation (§C.7b)
 
-<!-- CLEANCHECKOUT -->
+Both suites were run from **their own clean clone** of `work/u8floor` at
+**`0f427e4ea9b45ecee46226773e1466cce5276ad9`** (`git status --porcelain` empty in both),
+`-SkipLive` throughout. §C.7b: this is the sha the result names.
+
+**Checkout A — `scripts/checks/verify-dfu-done.ps1` (the drill):**
+
+```
+DRILL GREEN - 216 assertions, 0 failed.
+8 of 8 declared clauses have a constructed failing case.
+```
+
+**Checkout B — `scripts/checks/dfu-done.ps1 -SkipLive` (the authority). Exit 7.
+`INTEGRITY: the audited tree is byte-identical before and after this run.`
+The census, verbatim:**
+
+```
+-------------------------------------------------------------------------
+ CENSUS (every clause in exactly one bucket; the buckets must sum)
+   unrecognised     0
+   unmet            5
+   unevaluated      2
+   manual_pending   1
+   met              0
+   total 8 for 8 clause(s) - balances: True
+
+ NOT DONE - board: FAILED
+   - 5 clause(s) in the 'unmet' bucket: clause 1, clause 2, clause 4, clause 5, clause 7
+   - 2 clause(s) in the 'unevaluated' bucket: clause 3, clause 8
+   - 1 clause(s) in the 'manual_pending' bucket: clause 6
+```
+
+The floor and the two new surfacings are visible in that run, verbatim:
+
+```
+[pass] phase-table-unambiguous
+     ... 9 phase row(s), no duplicate id, nothing read from a code fence or an HTML
+     comment; 1 id cell(s) were ADMITTED carrying a parenthesised qualifier - the
+     qualifier is treated as part of the id cell's own name, and it is named here so an
+     id carrying STATUS is visible even when it was accepted: U7: **U7 (standing)**
+
+[pass] chain-U4-declined-rows
+     $ list the rows naming U4 that section 2's table DECLINED to read as id cells
+       across 22 PLAN.md revision(s), and check U4 still had a real row at each
+     1 row(s) naming U4 were declined as id cells in the history, and U4 has a real row
+     at every one of those revisions, so no chain step was lost: 2151193: '**U4 status
+     (2026-08-30)**' [the phase also has a real id-cell row at this revision - the step
+     is intact]
+
+[fail] phase-floor-matches-plan
+     the pinned floor and C.8 clause 1 disagree - the plan names U0,U1,U2,U3,U4,U5,U6;
+     pinned but unnamed: U8; named but unpinned: none
+```
+
+**This board is a `-SkipLive` board.** Clauses 3 and 8 are UNEVALUATED because `-SkipLive`
+was passed on every run in this round, as the brief required: "`-SkipLive` was passed, so
+this door was NOT attacked - unevaluated, never assumed closed". Round 1's recorded census
+(unmet 6, unevaluated 0, manual_pending 1, met 1) came from a run that did attack the live
+planes, so **the two boards are not comparable** and this one must not be read as a
+regression against it.
+
+For comparability with the clone, the same `-SkipLive` run was then taken in
+`.claude/worktrees/wt-u8floor` itself. Every clause verdict is identical between the two
+(`diff` of the CLAUSE lines is empty); the only substantive difference inside a clause is
+that the clone has no initialised OB1 submodule, so
+`corpus-predicate-source-on-work-line` is `[indeterminate]` there ("the pinned OB1 commit
+4fdc21c is not present in this checkout") and `[pass]` in the worktree — clause 3 coverage
+1 of 14 versus 2 of 14, verdict UNEVALUATED either way. The worktree board:
+
+```
+-------------------------------------------------------------------------
+ CENSUS (every clause in exactly one bucket; the buckets must sum)
+   unrecognised     0
+   unmet            5
+   unevaluated      2
+   manual_pending   1
+   met              0
+   total 8 for 8 clause(s) - balances: True
+
+ NOT DONE - board: UNACCOUNTED
+   - clause 1 / U2: 'python -m pytest scripts/agent-harness/test_harness_config.py scripts/agent-harness/test_anchor_schema.py -q' MOVED the audited tree (git:refs, git:worktrees)
+   - the audited tree MOVED during the run: git:refs, git:worktrees - a checker that changes what it measures is not an authority, so no verdict here is offered as one
+```
+
+**And this is where finding 6 fired, unprompted.** The clean clone reports `INTEGRITY:
+the audited tree is byte-identical before and after this run`. The worktree run, minutes
+later at the same sha with the same script, reports `INTEGRITY: FAILED` and blames a
+`pytest` invocation for moving `git:refs, git:worktrees` — which is what dropped its board
+from `FAILED` to `UNACCOUNTED`. Same script, same sha, same documents; the only difference
+is that the worktree shares one repository with eleven siblings. That is the control and
+the case together. Full output and the proposed fix: finding 6.
+
+Neither board is `done`, and neither is meant to be: `phase-floor-matches-plan` stays red
+because C.8 clause 1's prose still reads "For U0-U6" while section 2's U8 row demands the
+pin. That red is the drift check working, and closing it is a `PLAN.md` edit this branch
+may not make.
