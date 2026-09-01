@@ -884,11 +884,13 @@ launched with `Set-StrictMode -Version Latest` explicitly.
 | Linux host | `mcr.microsoft.com/powershell:7.4-ubuntu-22.04` plus one layer adding `git`, tagged `dfu-linux-probe:wt-u8h4` — a test tag, never `:local`, never attached to an `ai-stack_*` network |
 | production touched | none. No container of the live stack was started, stopped or written to; every dfu-done run used `-SkipLive` |
 | clean clone | `git -c core.longpaths=true clone --no-local -b work/u8h4 --single-branch`, then **`git config core.longpaths true` INSIDE the clone** before any other git command |
-| commit validated | `f387e5e506119d690e6da4a30767c3a6d207b885` |
-| `.github` tree hash | `9f09a9f10921d5ec7f89c7da2b14f88ddde2414e` |
+| commit validated | **`23394369f6ce938ebb53dc6af0ae07130d0c4bfd`** (the branch tip). `f387e5e` is the code commit and was validated first; `2339436` adds only this note plus PowerShell/YAML comment text, and `scripts/checks/dfu-done.ps1` is **blob `09a8f1e3934978a75444ae2df616a688a8f12d59` in both** — so the runs below were re-done from `2339436` and neither could differ. |
+| `.github` tree hash | `49f318a708ef8940ab487675fd4a126bd0559892` at `2339436` (`9f09a9f10921d5ec7f89c7da2b14f88ddde2414e` at `f387e5e`; the delta is comment text, and PyYAML parses 14 jobs at both) |
 | `dfu-done.ps1` blob | `09a8f1e3934978a75444ae2df616a688a8f12d59` |
-| `git status --porcelain` | **EMPTY** — 0 lines, both before and after `submodule update --init --recursive`; `git submodule status` shows OB1 at the recorded `b604d555` with no `+`/`-` marker |
-| from that clone | Linux: run-check rc=0, dfu-done **exit 7**, classified GREEN, `balances=True unrecognised=0 integrity.ok=True`. Windows: **exit 7** in 121s, `balances=True unrecognised=0 integrity.ok=True`, write-lock applied, 2 locked directories per command |
+| `git status --porcelain` | **EMPTY — 0 lines**, both before and after `submodule update --init --recursive`. `OB1` HEAD = `b604d555f37bf79b14d6e5d0db73dec023305917` = the recorded gitlink, and `OB1`'s own porcelain is 0 lines too. (`git submodule status` prints a leading `-` until `submodule.OB1.url` is registered in the clone's config, even with the working tree correctly populated — the marker is about registration, not about state.) |
+| Linux, from that clone | `run-check rc = 0`; **dfu-done exit 7**; `board=failed balances=True unrecognised=0 integrity.ok=True`; `expected-exit rc = 0`; **STEP RESULT: GREEN**. All six walkthrough commands came back `indeterminate` with `/bin/sh: 1: python: not found` attached — not `fail` |
+| Windows, from that clone | **exit 7** in 120.2s; `board=failed balances=True unrecognised=0 integrity.ok=True`; `write_lock = applied per command (Deny ACE for the running identity)`; 2 locked directories and `interpreter_native = True` on every command |
+| Windows drill | `verify-dfu-done.ps1` **DRILL GREEN — 216 assertions, 0 failed, 8 of 8 declared clauses with a constructed failing case**, exit 0, 563s, against the same `dfu-done.ps1` blob |
 
 **A near-miss I want on the record, because I nearly wrote the wrong cause down.** After
 `git config core.longpaths true` in the clone, `git submodule update --init --recursive`
@@ -911,3 +913,12 @@ already does (`git -c protocol.file.allow=always -c core.longpaths=true submodul
 and is why that path works. The lesson is the same one this file keeps recording in other
 forms: an explanation that fits is not a measurement. I had the fix and reasoned backwards
 to a cause instead of reading the error.
+
+**And a second near-miss, in the editing rather than the engineering.** Filling this table
+in, I anchored an edit on the row text `| clean clone | ...clone --no-local -b work/u8h4`.
+That row exists in **§14's anchor table too**, `str.index` returned the first match, and the
+replacement silently deleted 231 lines — the rest of §14 and all of §15.1-15.8. Caught by
+comparing the working file's line count against `git show HEAD:`'s before committing, not by
+reading the diff. In a note that repeats a table shape per round, a row is not a unique
+anchor; the section heading is. Recorded because "the edit applied and printed the right
+result" was true and the file was still wrong.
