@@ -152,6 +152,24 @@ if ($staged -ne $chain.Count) {
 # two-place mechanism and hiding that is the failure this project keeps finding.
 $h1sql = Join-Path $obDocker "init-app-role.sql"
 $h1sh  = Join-Path $obDocker "init-app-role-passwords.sh"
+# THE MOST LIKELY WAY TO RUN THIS DRILL WRONG. Both files live in the OB1 submodule at a
+# commit that is NOT on OB1's remote, so a checkout at the RECORDED gitlink does not have
+# them. Measured at 4fdc21c on 2026-08-31: the run reached here, `Copy-Item` failed as a
+# NON-terminating error under $ErrorActionPreference = "Continue", contributed nothing, and
+# the run only stopped because the next line's ReadAllBytes happened to throw into the trap.
+# Exit 2 by luck rather than by check, with a raw Copy-Item error for a diagnosis - and
+# reorder those two lines and the drill instead builds a database with no ob_app in it and
+# reports "a probe disagreed", which is the wrong answer to a question it could not ask.
+$missingH1 = @(@($h1sql, $h1sh) | Where-Object { -not (Test-Path $_) })
+if ($missingH1.Count -gt 0) {
+    Say "  ABORT: CANNOT MEASURE - the migration under test is not in this checkout:"
+    foreach ($m in $missingH1) { Say "         $m" }
+    Say "         These are H1's own files in the OB1 submodule. If OB1 sits at the recorded"
+    Say "         gitlink this is expected: the commit that adds them has not been pushed, so"
+    Say "         the gitlink cannot be bumped to it yet. Point OB1 at the branch that has"
+    Say "         them, or land that push first. There is nothing here to drill until then."
+    Cleanup; exit 2
+}
 $mounted = @($chain | Where-Object { $_[0] -eq "init-app-role.sql" }).Count -gt 0
 if ($mounted) {
     Say "  init-app-role.sql: MOUNTED BY COMPOSE (promotion step 1 has landed)"

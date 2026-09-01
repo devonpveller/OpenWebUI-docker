@@ -29,6 +29,10 @@ The census now reads the compose files as well and reports **12 services configu
 `postgres`, marking the implicit ones. Both halves are in the script because either half alone
 is wrong.
 
+Round 2 found that the script did not honour that sentence: a compose file it could not read
+was degraded to a printed note and the run continued to a green verdict over whatever was
+left. Section 13 has the reproduction and the fix.
+
 ## 3. Four views ran with the superuser's row-security context
 
 `ideas_owed_research`, `reusable_claims`, `ungrounded_claims`, `research_run_metrics` carried
@@ -150,6 +154,7 @@ census allow-list with that reason so it cannot be "cleaned up" later.
 |---|---|
 | 31-probe drill, throwaway only, RED before GREEN | `scripts/checks/drill-app-role-not-superuser.ps1` |
 | read-only live census + configured-client sweep | `scripts/checks/census-db-connection-roles.ps1` |
+| the census's own failing cases, re-runnable | `scripts/checks/redprove-census-cannot-measure.ps1` |
 | the migration | `OB1/docker/init-app-role.sql`, `OB1/docker/init-app-role-passwords.sh` |
 | the revert | `OB1/docker/revert-app-role.sql` |
 | the plan | `documentation/implementation-guide/dark-factory-unification/H1-APP-ROLE-PROMOTION.md` |
@@ -177,6 +182,21 @@ without pinning `core.autocrlf`, and its CRLF check reads only ai-stack's tracke
 the submodule's. The existing backup sidecars have been mounted from CRLF copies in every
 worktree since worktrees existed; they are only ever *run* from the main checkout, which is
 why nobody has been bitten.
+
+Re-measured 2026-08-31 (round 2) with a byte count rather than `grep`, because `grep -c $'\r'`
+under this Git-Bash matches *every* line and silently reports "all lines have a CR" — one of
+this session's own measurements was wrong for exactly that reason before it was rechecked.
+`openbrain-db-backup.sh` now reads 0 CRs in the worktree, because the verification below
+deleted and re-checked it out; **`docker/backup/openbrain-wiki-backup.sh` is the untouched
+witness — 74 CRs in the worktree, 0 in the main checkout, from a blob holding 0**. The claim
+survives on a file the remediation never handled.
+
+Also observed, and NOT a live defect: `docker/wiki-viewer/entrypoint.sh` is `i/lf w/crlf` in
+the *main* checkout (16,367 bytes on disk against a 16,069-byte LF blob) while `git status`
+reports the tree clean. It is `COPY`d into an image rather than bind-mounted, and that
+Dockerfile already carries `RUN sed -i 's/\r$//' /entrypoint.sh` — someone met this before.
+Recorded because a stale-CRLF working copy that git calls clean is a trap for the next person,
+not because anything is broken today.
 
 Closed for OB1 by adding `OB1/.gitattributes` with `*.sh text eol=lf` / `*.sql text eol=lf`
 (scoped to two extensions on purpose — `* text=auto` would renormalise the repository, and
@@ -207,3 +227,67 @@ unpushed commit, so `abb8c7f` alone does not carry it: a fresh
 commit that is not on OB1's remote is the one thing CLAUDE.md says never to do, and pushing
 was out of scope for this item. Whoever lands this pushes `work/u8h1-app-role` to OB1 FIRST,
 then bumps.
+
+## 13. Round 2: the census passed on an empty denominator
+
+Both verifiers reproduced the same defect independently. `census-db-connection-roles.ps1`
+degraded a missing compose file to a printed note and a `continue`, then exited 0 whenever the
+candidate set came out empty. Copied into a repo root with no `OB1/` — **exactly what `git
+clone` without `--recurse-submodules` leaves, which is the state U4 exists for** — and pointed
+at a throwaway database, it produced:
+
+```
+(missing: ...docker-compose.yml)   (missing: ...docker-compose.scheduled.yml)
+-> 0 service(s) configured to connect as postgres
+VERDICT: zero unexplained superuser application clients.     EXIT 0
+```
+
+A green whose entire configured-client denominator was unavailable — contradicting both the
+script's own header (*"Exit 2 = could not measure … which is NOT a pass"*) and section 2 above.
+
+**The fix separates "measured, and the answer is zero" from "could not measure, so there is no
+answer."** Compose files are now read in a preflight that runs *before* any docker call, since
+a checkout that cannot be measured has no business opening a connection to production to find
+that out. Missing or unreadable is exit 2, naming each file and the reason. An empty
+*recognised-client* set is exit 2 — `$configuredSuper` reaching zero is the goal of the
+promotion and stays a pass, but `$configured` reaching zero means the parse matched nothing.
+Zero live client backends is exit 2, because psql is itself a client backend. And the exit 0
+now prints what it measured, so an honest zero is legible as one.
+
+`scripts/checks/redprove-census-cannot-measure.ps1` is the reproduction, re-runnable on a
+throwaway `postgres:16-alpine` on its own network. Five fixture repo roots, before → after:
+
+| case | pre-fix | now | |
+|---|---|---|---|
+| compose file missing (no `OB1/`) | **0** | **2** | the reported defect |
+| compose file present but permission-denied | **0** | **2** | readable half was clean, so it went green on half a denominator |
+| both files read, no database client recognised | **0** | **2** | empty candidate set |
+| real clients, all on non-superuser roles | 0 | 0 | a measured zero, still a pass, now stating its counts |
+| a client configured as `postgres`, not allow-listed | 1 | 1 | still a finding |
+
+The red-proof discriminates: run against the pre-fix census it fails 3 of 5 and exits 1.
+Separately, a mutation that empties the live census exited 0 before and exits 2 now.
+
+### The same shape, swept through this item's other artifact
+
+`drill-app-role-not-superuser.ps1` carried it three times. Only one was reachable as a false
+green, and that one is the worst of the three:
+
+1. **The verdict never asserted that any probe ran.** `$script:fail -eq 0` is satisfied by
+   zero probes as happily as by 31 green ones. **Reproduced:** delete one probe from the
+   pre-fix drill and it reports `H1 DRILL PASSED - 30 probes, 0 failures` and exits 0. It now
+   exits 2 (`ran 30 probe(s), expected 31`). The count is a contract, which is also what makes
+   the "31 probes" figure quoted in three documents a machine-checked number rather than prose.
+2. **An empty init chain passed the staged-vs-mounted check**, because `0 -ne 0` is false.
+   Latent — `Copy-ObInitChain`'s `[Parameter(Mandatory)][array]` refuses an empty array, so the
+   run died on parameter binding instead. Checked now rather than incidentally survived.
+3. **The migration being absent from the checkout was a non-terminating `Copy-Item` error.**
+   Measured at the recorded gitlink `4fdc21c`: the run reached that line, `Copy-Item` failed
+   silently under `$ErrorActionPreference = "Continue"`, and the run only stopped because the
+   *next* line's `ReadAllBytes` threw into the trap — exit 2 by luck, diagnosed by a raw
+   Copy-Item error. Reorder those two lines and the drill instead builds a database with no
+   `ob_app` in it and reports "a probe disagreed", which is the wrong answer to a question it
+   could not ask. It now aborts by check, naming the unpushed-OB1-commit situation.
+
+Note the pattern in 2 and 3: **both were held shut by an accident of the runtime, not by a
+check.** That is the same class as the census defect, one step luckier.
