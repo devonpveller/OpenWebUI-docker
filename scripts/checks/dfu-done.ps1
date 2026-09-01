@@ -1384,6 +1384,14 @@ function Resolve-DoorVerdict {
 # command that pushes to a FOREIGN remote (OB1's, say) is outside both - `ls-remote` is
 # snapshotted before any command runs, which closes the READ, but this file cannot un-push.
 # That limit is stated here rather than papered over.
+#
+# AND IT IS NOT THE SAME CONTAINMENT ON EVERY PLATFORM. The Deny ACE is a Windows
+# construct with no POSIX equivalent, so off Windows the ISOLATION half is a declared
+# no-op and only EFFECT-NULLIFICATION and DISCLOSURE run - survivable precisely because
+# this file's own claim above is that isolation is the wall and nullification is the fix.
+# Get-DfuPlatform below holds the gate, the reason, and the place the run says so out
+# loud. Before that gate existed this file could not reach an exit code AT ALL on a Linux
+# runner, which is a worse failure than a weaker lock.
 # =================================================================================
 
 $script:DfuSnap      = $null
@@ -1571,13 +1579,105 @@ function Add-MarkdownHygieneProbe {
 # THE SANDBOX, AND THE LOCK ON THE AUDITED ARTIFACTS.
 # ---------------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------------
+# THE PLATFORM THIS AUTHORITY IS RUNNING ON - DECIDED ONCE, AND STATED IN THE OUTPUT.
+#
+# WHY THIS EXISTS. The containment above was written on Windows and reached for two things
+# only Windows has: a Deny ACE for the running identity (Get-Acl / Set-Acl over a
+# WindowsIdentity), and cmd.exe as the interpreter for the commands WALKTHROUGH.md names.
+# On a Linux pwsh runner [WindowsIdentity]::GetCurrent() raises "Windows Principal
+# functionality is not supported on this platform" and Get-Acl does not exist at all
+# (Get-Command Get-Acl returns nothing). That was not cosmetic: Clear-DfuTreeProtection is
+# called UNCONDITIONALLY before anything else in the main body, so with a trap on the stack
+# - which scripts/checks/run-check.ps1 installs, and which is how CI invokes this file -
+# the script UNWOUND AT THAT LINE AND NEVER REACHED AN EXIT STATEMENT. The job then
+# reported "dfu-done DID NOT RUN", correctly. It was invisible on Windows, where the call
+# just succeeds and the same run exits 7.
+#
+# WHAT IS AND IS NOT PRESERVED OFF WINDOWS - stated here rather than discovered later.
+#   * The WRITE-LOCK half is a declared NO-OP off Windows. There is no POSIX equivalent of
+#     "deny the identity this process is ALREADY RUNNING AS": a file mode cannot deny the
+#     owner, who can chmod it back with one call, and modes do not constrain root at all.
+#     A lock the locked process can lift is not a lock, and shipping one under that name
+#     would be a check that is green while checking nothing - this file's own subject.
+#     So it is skipped, and the skip is PRINTED and carried in the JSON.
+#   * The half this file itself calls load-bearing is untouched and is platform
+#     independent. Every artifact any clause reads is snapshotted BEFORE the first command
+#     runs and every clause decides over that snapshot, so nothing a command creates can
+#     discharge anything; and the audited fingerprint is compared before and after every
+#     command and once more at the end, so an effect that got through is still REPORTED
+#     and still vetoes the board. Off Windows the containment is detect-and-refuse instead
+#     of prevent-and-detect. That is weaker, and it is why this is not silent.
+$script:DfuPlatformCache = $null
+
+function Get-DfuPlatform {
+    if ($null -ne $script:DfuPlatformCache) { return $script:DfuPlatformCache }
+
+    # $IsWindows is an automatic variable in PowerShell 6+ and DOES NOT EXIST in 5.1, where
+    # its absence means Windows. Test-Path Variable: answers that in both editions.
+    $isWin = $true
+    if (Test-Path -LiteralPath "Variable:IsWindows") { $isWin = [bool](Get-Variable -Name IsWindows -ValueOnly) }
+
+    $osDesc = [string][System.Environment]::OSVersion.VersionString
+    if ($PSVersionTable.PSObject.Properties.Name -contains "OS" -and $PSVersionTable.OS) { $osDesc = [string]$PSVersionTable.OS }
+
+    # FEATURE-DETECTED, not inferred from the OS name alone: what gets tested is exactly
+    # what gets called - both cmdlets AND the identity read. A PowerShell edition that
+    # dropped one of them on Windows would be caught here too.
+    $aclOk  = $false
+    $aclWhy = ""
+    if (-not $isWin) {
+        $aclWhy = "not Windows - a Deny ACE for the running identity has no POSIX equivalent, so the write-lock half of the containment is a DECLARED NO-OP on this platform (the pre-run snapshot and the before/after fingerprint, which are the load-bearing half, still apply)"
+    } elseif (-not (Get-Command -Name Get-Acl -ErrorAction SilentlyContinue) -or
+              -not (Get-Command -Name Set-Acl -ErrorAction SilentlyContinue)) {
+        $aclWhy = "Get-Acl / Set-Acl are not available in this PowerShell edition, so no write-lock can be applied or swept"
+    } else {
+        try { [void][System.Security.Principal.WindowsIdentity]::GetCurrent(); $aclOk = $true }
+        catch { $aclWhy = ("the running Windows identity could not be read ({0}), so no Deny ACE can be written or swept" -f $_.Exception.Message) }
+    }
+
+    # THE INTERPRETER. WALKTHROUGH.md's commands are written for cmd /c. Off Windows the
+    # nearest thing is a POSIX shell, and the substitution is RECORDED rather than hidden:
+    # a Windows command failing under sh says nothing about the walkthrough, so a non-zero
+    # exit under a substituted interpreter is INDETERMINATE, never a red.
+    $shExe = "cmd.exe"; $shArgs = @("/c"); $shNative = $true; $shWhy = ""
+    if (-not $isWin) {
+        $shNative = $false
+        $shExe = "sh"
+        if (Test-Path -LiteralPath "/bin/sh") { $shExe = "/bin/sh" }
+        $shArgs = @("-c")
+        $shWhy = ("WALKTHROUGH.md names its commands for cmd /c and this platform has no cmd.exe, so they were run under '{0} -c'. A non-zero exit here can be the interpreter rather than the command, so it is reported as INDETERMINATE - this platform cannot say the walkthrough's check is red." -f $shExe)
+    }
+
+    $script:DfuPlatformCache = [ordered]@{
+        os             = $osDesc
+        ps             = [string]$PSVersionTable.PSVersion
+        windows        = [bool]$isWin
+        acl_supported  = [bool]$aclOk
+        acl_why        = $aclWhy
+        shell_exe      = $shExe
+        shell_args     = @($shArgs)
+        shell_native   = [bool]$shNative
+        shell_why      = $shWhy
+    }
+    return $script:DfuPlatformCache
+}
+
 function Clear-DfuTreeProtection {
     # A KILLED RUN MUST NOT LEAVE THE OPERATOR'S PLAN.md READ-ONLY. Every explicit Deny ACE
     # for the running identity on the protected directories is removed at startup, before
     # anything else happens. It is idempotent, and it is the only reason applying an ACE at
     # all is a defensible thing for a checker to do.
+    #
+    # PLATFORM-GATED (2026-09-01). This is the FIRST thing the main body calls, so before
+    # the gate a platform without WindowsIdentity did not get a degraded sweep - it got a
+    # terminating error at this line and, under a caller with a trap, a run that never
+    # reached an exit statement at all. There is nothing to sweep where nothing can be
+    # applied, so it returns the empty set; Get-DfuPlatform holds the reason and the
+    # report prints it.
     param($Ctx)
     $cleared = @()
+    if (-not (Get-DfuPlatform).acl_supported) { return @($cleared) }
     $me   = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $sid  = [string]$me.User.Value
     $name = [string]$me.Name
@@ -1599,6 +1699,10 @@ function Clear-DfuTreeProtection {
 }
 
 function New-DfuDenyRule {
+    # Only ever reached through Protect-/Unprotect-AuditedArtifacts, which gate on
+    # (Get-DfuPlatform).acl_supported. It refuses rather than returning $null so a future
+    # caller that forgets the gate fails loudly instead of applying nothing quietly.
+    if (-not (Get-DfuPlatform).acl_supported) { throw "no write-lock rule can be built on this platform: $((Get-DfuPlatform).acl_why)" }
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $rights = [System.Security.AccessControl.FileSystemRights]"CreateFiles,AppendData,WriteData,WriteAttributes,WriteExtendedAttributes,Delete,DeleteSubdirectoriesAndFiles"
     return (New-Object System.Security.AccessControl.FileSystemAccessRule(
@@ -1611,8 +1715,18 @@ function Protect-AuditedArtifacts {
     # Allow, so the child cmd.exe cannot write the plan, the ledger, the walkthrough or a
     # findings note however it addresses them - relative path, absolute path or otherwise.
     # Changing an ACL needs WRITE_DAC, which the owner keeps, so this stays removable.
+    #
+    # PLATFORM-GATED (2026-09-01): where no such lock exists, `unsupported` is set and the
+    # reason travels with it into the executed-command record, so the report says the
+    # command ran WITHOUT the write-lock rather than implying it ran with one.
     param($Ctx)
-    $res = @{ applied = @(); failed = @() }
+    $plat = Get-DfuPlatform
+    $res = @{ applied = @(); failed = @(); unsupported = $false; why = "" }
+    if (-not $plat.acl_supported) {
+        $res.unsupported = $true
+        $res.why = [string]$plat.acl_why
+        return $res
+    }
     foreach ($d in @(Get-DfuProtectedDirs -Ctx $Ctx)) {
         try {
             $acl = Get-Acl -LiteralPath $d
@@ -1626,6 +1740,7 @@ function Protect-AuditedArtifacts {
 
 function Unprotect-AuditedArtifacts {
     param($Ctx, $Applied)
+    if (-not (Get-DfuPlatform).acl_supported) { return }
     foreach ($d in @($Applied)) {
         try {
             $acl = Get-Acl -LiteralPath $d
@@ -1680,8 +1795,12 @@ function Invoke-AuditedCommand {
     # it concluded.
     param($Ctx, [string]$Command, [string]$Clause, [string]$Phase)
     $sb = Get-DfuSandbox -Ctx $Ctx
+    $plat  = Get-DfuPlatform
     $entry = [ordered]@{ clause = $Clause; phase = $Phase; command = $Command
-                         ran_in = ""; exit = $null; drift = @(); locked = @(); lock_failed = @() }
+                         ran_in = ""; exit = $null; drift = @(); locked = @(); lock_failed = @()
+                         interpreter = ("{0} {1}" -f $plat.shell_exe, (@($plat.shell_args) -join " "))
+                         interpreter_native = [bool]$plat.shell_native
+                         lock_unsupported = "" }
     if (-not $sb.ok) {
         $entry.ran_in = "(NOT RUN - no clean checkout could be built)"
         $script:DfuExecLog += $entry
@@ -1693,8 +1812,13 @@ function Invoke-AuditedCommand {
     $prot   = Protect-AuditedArtifacts -Ctx $Ctx
     $entry.locked      = @($prot.applied)
     $entry.lock_failed = @($prot.failed)
+    if ($prot.unsupported) { $entry.lock_unsupported = [string]$prot.why }
+    # THE INTERPRETER IS THE PLATFORM'S, NOT A HARD-CODED cmd.exe. try/finally with no
+    # catch was safe while Invoke-Native could not throw; it is kept, and the interpreter
+    # it is handed now exists on the platform running it. Which one ran is recorded on the
+    # entry so the report can say so.
     try {
-        $r = Invoke-Native -Exe "cmd.exe" -Arguments @("/c", $Command) -WorkDir $sb.path
+        $r = Invoke-Native -Exe $plat.shell_exe -Arguments (@($plat.shell_args) + @($Command)) -WorkDir $sb.path
     } finally {
         Unprotect-AuditedArtifacts -Ctx $Ctx -Applied $prot.applied
     }
@@ -1726,6 +1850,19 @@ function New-CommandProbeBody {
     }
     if ([int]$r.exit -eq 0) { return (New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note $GreenNote) }
     $tail = @(($r.stdout + "`n" + $r.stderr) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1)
+    # A NON-ZERO EXIT UNDER A SUBSTITUTED INTERPRETER IS NOT THE WALKTHROUGH'S FAILURE.
+    # WALKTHROUGH.md writes its commands for cmd /c; off Windows they run under sh, where
+    # a perfectly good Windows command exits non-zero for reasons that have nothing to do
+    # with the row it belongs to. Calling that `fail` would be this file's own recurring
+    # defect - a verdict about the platform reported as a verdict about the subject - so
+    # it is indeterminate, and the note says which. It is never upgraded to a pass: exit 0
+    # under a substituted shell is still a real 0 from a command that really ran.
+    $plat = Get-DfuPlatform
+    if (-not $plat.shell_native) {
+        return (New-VerdictProbeBody -Verdict "indeterminate" -Exit ([int]$r.exit) `
+                -Note ("exited {0} in the clean checkout, BUT UNDER A SUBSTITUTED INTERPRETER, so this platform cannot say the command is red: {1} :: {2}" -f `
+                       $r.exit, [string]$plat.shell_why, (($tail -join " ") -replace "\s+", " ").Trim()))
+    }
     return (New-VerdictProbeBody -Verdict "fail" -Exit ([int]$r.exit) `
             -Note ("exited {0} in the clean checkout: {1}" -f $r.exit, (($tail -join " ") -replace "\s+", " ").Trim()))
 }
@@ -1776,7 +1913,12 @@ function New-CleanCheckout {
                 $l = $line.Trim()
                 if ($l -notmatch '^submodule\.(.+)\.path\s+(.+)$') { continue }
                 $name = $Matches[1]; $rel = $Matches[2].Trim()
-                $local = Join-Path $Ctx.root ($rel -replace '/', '\')
+                # .gitmodules stores a forward-slashed, repo-relative path. Rewriting it to
+                # backslashes made this a Windows-only lookup - off Windows a backslash is an
+                # ordinary filename character, so the local mirror would never be found and the
+                # clone would silently fall back to the network. Join-Path takes the forward
+                # slash as-is on both platforms, so the rewrite was never needed.
+                $local = Join-Path $Ctx.root $rel
                 if (Test-Path -LiteralPath $local) {
                     [void](Invoke-Git -Arguments @("config", ("submodule.{0}.url" -f $name), $local) -WorkDir $path)
                 }
@@ -2540,7 +2682,11 @@ function Test-Clause2 {
             } elseif ($kind -eq "follow-on") {
                 if ([string]::IsNullOrWhiteSpace([string]$rec.owner) -or [string]::IsNullOrWhiteSpace([string]$rec.findings_sink)) {
                     $bad = "dispositioned 'follow-on' without both an owner and a findings sink - a follow-on with neither is a deletion wearing a promise"
-                } elseif (-not (Test-Path -LiteralPath (Join-Path $Ctx.root ([string]$rec.findings_sink -replace '/', '\')))) {
+                # Same fix as in New-CleanCheckout: the ledger's findings_sink is forward
+                # slashed, and rewriting it to backslashes made Test-Path answer FALSE off
+                # Windows for a sink that is there - a fact about the platform, reported as a
+                # fact about the disposition.
+                } elseif (-not (Test-Path -LiteralPath (Join-Path $Ctx.root ([string]$rec.findings_sink)))) {
                     $bad = ("dispositioned 'follow-on' but its findings sink does not exist: {0}" -f $rec.findings_sink)
                 } elseif (-not $onRecord) {
                     $bad = ("dispositioned 'follow-on' in {0}, but {1}'s change appears in neither section 2.1 nor DECISIONS.md" -f $Ctx.dispositions, $id)
@@ -4606,12 +4752,20 @@ foreach ($k in $inScope) {
 # requires it, and it is printed whether it holds or not.
 $finalFp   = Get-AuditedFingerprint -Ctx $ctx
 $runMoved  = @(Compare-DfuFingerprint -Before $script:DfuSnap.fingerprint -After $finalFp)
+# The PLATFORM travels with the integrity record because containment is not the same
+# everywhere: off Windows the write-lock half is a declared no-op and the walkthrough's
+# interpreter is substituted. A reader of the JSON must be able to see which run they are
+# looking at without inferring it from the OS. `ok` is unchanged and stays platform
+# independent - it is the snapshot-and-fingerprint half, which every platform runs.
+$dfuPlat   = Get-DfuPlatform
 $integrity = [ordered]@{
     snapshot_taken_at = [string]$script:DfuSnap.taken_at
     commands_executed = @($script:DfuExecLog).Count
     protection_swept_at_start = @($protectionCleared)
     moved_during_run  = @($runMoved)
     per_command_drift = @($script:DfuIntegrity)
+    platform          = $dfuPlat
+    write_lock        = $(if ($dfuPlat.acl_supported) { "applied per command (Deny ACE for the running identity)" } else { ("NOT APPLIED: " + [string]$dfuPlat.acl_why) })
     ok                = ((@($runMoved).Count -eq 0) -and (@($script:DfuIntegrity).Count -eq 0))
 }
 
@@ -4760,6 +4914,12 @@ if (@($script:DfuExecLog).Count -lt 1) {
         Write-Host ("{0}clause {1} / {2} (exit {3})" -f $mark, $e.clause, $e.phase, $ex) -ForegroundColor $col
         Write-Host ("        $ {0}" -f $e.command) -ForegroundColor DarkGray
         Write-Host ("        in {0}" -f $e.ran_in) -ForegroundColor DarkGray
+        if (-not $e.interpreter_native) {
+            Write-Host ("        via {0} (NOT the cmd /c the walkthrough names)" -f $e.interpreter) -ForegroundColor Yellow
+        }
+        if ($e.lock_unsupported) {
+            Write-Host ("        NO WRITE-LOCK: {0} - containment was before/after fingerprinting only" -f $e.lock_unsupported) -ForegroundColor Yellow
+        }
         if (@($e.lock_failed).Count -gt 0) {
             Write-Host ("        COULD NOT LOCK: {0} - containment fell back to before/after fingerprinting" -f (@($e.lock_failed) -join " ; ")) -ForegroundColor Yellow
         }
@@ -4769,6 +4929,19 @@ if (@($script:DfuExecLog).Count -lt 1) {
     }
 }
 Write-Host ""
+Write-Host ("   platform: {0} / PowerShell {1}" -f $dfuPlat.os, $dfuPlat.ps) -ForegroundColor DarkGray
+# SAID OUT LOUD, NOT SKIPPED QUIETLY. The write-lock is one of the two halves of the
+# containment; where the platform has no equivalent the run must say so, because a reader
+# who assumes Windows would otherwise credit this run with a lock it never held.
+if ($dfuPlat.acl_supported) {
+    Write-Host "   containment: write-lock APPLIED per command, plus the pre-run snapshot and the before/after fingerprint" -ForegroundColor DarkGray
+} else {
+    Write-Host ("   containment: write-lock NOT APPLIED - {0}" -f $dfuPlat.acl_why) -ForegroundColor Yellow
+    Write-Host "   containment: the pre-run snapshot and the before/after fingerprint DID run, so an effect is still detected and still vetoes the board - detect-and-refuse, not prevent-and-detect." -ForegroundColor Yellow
+}
+if (-not $dfuPlat.shell_native) {
+    Write-Host ("   interpreter: {0}" -f $dfuPlat.shell_why) -ForegroundColor Yellow
+}
 Write-Host ("   snapshot of every artifact a clause reads was taken at {0}, BEFORE the first command" -f $integrity.snapshot_taken_at) -ForegroundColor DarkGray
 if (@($integrity.protection_swept_at_start).Count -gt 0) {
     Write-Host ("   stale write-locks removed at startup: {0}" -f (@($integrity.protection_swept_at_start) -join " ; ")) -ForegroundColor Yellow

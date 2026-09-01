@@ -103,13 +103,63 @@ function ProbeMatch {
     }
 }
 
-function Cleanup {
-    if ($KeepContainer) { Say "  (container kept: $dbName)"; return }
-    $null = cmd /c "docker rm -f $dbName 2>nul"
-    $null = cmd /c "docker network rm $netName 2>nul"
+# THE OLD CLEANUP SHELLED OUT THROUGH cmd.exe TO THROW DOCKER OUTPUT AWAY, AND cmd.exe DOES
+# NOT EXIST ON LINUX. That is not a portability nicety: on ubuntu-latest the call raised
+# CommandNotFound, which reached the trap below - and the trap ITSELF called Cleanup, which
+# raised it again. The drill died mid-recursion WITHOUT REACHING ANY exit STATEMENT, and the
+# CI wiring read the leftover $LASTEXITCODE (0, from the last docker call that HAD worked) as
+# "the drill RAN and every probe passed - PULL THIS PIN". Green, and completely false.
+#
+# So: one cross-platform way to run a docker command whose output and failure are both
+# uninteresting. `& docker` resolves on every platform this drill runs on, and the redirect
+# is PowerShell's own, not a shell's. It cannot raise: a docker that is missing entirely, or
+# a name that is not there to remove, are both swallowed HERE rather than becoming the run's
+# verdict somewhere else.
+# ONE ARRAY PARAMETER, CALLED WITH AN EXPLICIT ARRAY, and not ValueFromRemainingArguments:
+# `Invoke-DockerQuiet rm -f $dbName` would hand `-f` to the parameter binder as a
+# parameter NAME and fail to bind - a new way for cleanup to raise, which is the exact
+# thing this rewrite exists to remove.
+function Invoke-DockerQuiet {
+    param([string[]]$DockerArgs = @())
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    try { & docker @DockerArgs 2>&1 | Out-Null }
+    catch { return $false }
+    finally { $ErrorActionPreference = $prev }
+    return $true
 }
 
-trap { Say "HARNESS ERROR: $_"; Cleanup; exit 2 }
+# CLEANUP MUST NOT BE ABLE TO BECOME THE VERDICT. Every abort path in this drill is
+# `Cleanup; exit N` and the trap is `Say ...; Cleanup; exit 2`, so anything Cleanup throws is
+# thrown on the way OUT of a run that already knows what it wants to say - and it lands back
+# in the trap that called it. Nothing in here may raise: a container that will not go away is
+# a line of output, never an exit code.
+function Cleanup {
+    if ($KeepContainer) { Say "  (container kept: $dbName)"; return }
+    try {
+        if (-not (Invoke-DockerQuiet @("rm", "-f", $dbName)))       { Say "  (cleanup: could not remove container $dbName)" }
+        if (-not (Invoke-DockerQuiet @("network", "rm", $netName))) { Say "  (cleanup: could not remove network $netName)" }
+    } catch {
+        Say "  (cleanup: $($_.Exception.Message))"
+    }
+}
+
+# THE TRAP CANNOT RE-ENTER ITSELF. Even with a Cleanup that swallows, a trap whose body can
+# raise is a script that dies with no exit code at all - the one outcome CI cannot tell apart
+# from success unless the wiring is doing its job (.github/ci/run-check.ps1). A second entry
+# exits immediately and says so; it does not try to tidy up again.
+$script:inTrap = $false
+trap {
+    if ($script:inTrap) {
+        Write-Host "HARNESS ERROR while handling a harness error: $_"
+        Write-Host "CANNOT MEASURE - the drill never reached the boundary. Exiting 2."
+        exit 2
+    }
+    $script:inTrap = $true
+    Say "HARNESS ERROR: $_"
+    Cleanup
+    exit 2
+}
 
 Say "H1 drill - no application connects as a superuser"
 Say "repo: $repo"
@@ -191,9 +241,9 @@ if ($shBytes -contains 13) {
 # 1. Start the throwaway
 # ------------------------------------------------------------------------------------------
 Head "1. throwaway database"
-$null = cmd /c "docker rm -f $dbName 2>nul"
-$null = cmd /c "docker network rm $netName 2>nul"
-$null = cmd /c "docker network create $netName"
+$null = Invoke-DockerQuiet @("rm", "-f", $dbName)
+$null = Invoke-DockerQuiet @("network", "rm", $netName)
+$null = Invoke-DockerQuiet @("network", "create", $netName)
 $ok = Start-ObInitdb -Name $dbName -InitDir $initDir -TimeoutSec 300 -DockerArgs @(
     "--network", $netName,
     "-e", "OB_APP_PASSWORD=$appPw",
