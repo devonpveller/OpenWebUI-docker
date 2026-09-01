@@ -1615,8 +1615,18 @@ Two further defects found while sweeping, neither on the list:
 Measurements in 22.1-22.3 were taken against the working tree at **`5c81f97`** (the sha this
 round started from) and against the historical blobs `819b5fe` and `c192041`, extracted with
 `git show`. The round's changes are committed at **`7197903`**; OB1 gitlink `debbbaa` ->
-**`d39ae95`**, pushed to `origin/feat/agent-memory-exposure-column` before the bump, so the
-pinned sha is reachable from a fresh `--recurse-submodules` clone.
+**`b604d55`** (two comment-only commits), pushed to
+`origin/feat/agent-memory-exposure-column` before each bump, so the pinned sha is reachable
+from a fresh `--recurse-submodules` clone.
+
+**A seventh surface turned up in the closing adversarial grep**, after `cc1`/`cc2`/`cc3` had
+run: `195-` also said *"every producer states its plane at its own call site"* - a bare
+completeness claim about a set assembled by a grep (ten RPC callers) and by a check that only
+sees the shapes it recognises (twelve direct producers). Qualified to *"every producer THAT WAS
+FOUND"*, with both methods named and the point restated: the completeness that matters is
+section 7's refusal, which does not depend on anybody having found the caller. It is a **SQL
+comment** - no DDL, no function body, nothing the suites below execute - so the runs recorded
+here are unaffected.
 
 The commit that follows `7197903` on this branch (`8bf07ad`, this section) touches
 `documentation/notes/u8h3-findings.md` and nothing else -
