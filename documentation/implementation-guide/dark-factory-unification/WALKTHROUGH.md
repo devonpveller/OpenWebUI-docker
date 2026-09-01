@@ -382,6 +382,59 @@ citation or its ledger amendment.
 
 ---
 
+## U8 — hardening — **H1–H4 MERGED; H4's CI run and H5's push are BLOCKED ON THE OPERATOR**
+
+Moves the boundary's operational envelope from normative to mechanical (§C.9). Everything in
+front of the predicates — who connects, whether the migration ran, whether the label was written,
+whether the checks still run — previously rested on something *remembering*.
+
+**Validated by (§C.9):** each H-item's own runnable check, plus `dfu-done.ps1`'s pinned phase
+floor and clause 1 EXTENDED to include U8. The floor now reads
+`U0,U1,U2,U3,U4,U5,U6,U8`, pinned as a code literal with no parameter, env var or file input.
+
+| item | state | the check that RAN |
+|---|---|---|
+| **H1** — no application connects as a superuser | **MERGED** `c8690f6` | `drill-app-role-not-superuser.ps1` — 31 probes; a personal row is invisible to the app role with **no `SET ROLE`**, and the same query as `postgres` returns it |
+| **H2** — the boundary asserts itself on boot | **MERGED** `20119d2` | `drill-rls-boot-assertion.ps1` — **56 passed, 0 failed, 0 blocked**, exit 0, from a clean clone with the 83-container stack up |
+| **H3** — the exposure label cannot be absent or malformed at write time | **MERGED** `d7aa2eb` | `prove-agent-memory-rls.ps1` — **68 checks, exit 0**, every green with a red beside it |
+| **H4** — the verification machinery is re-proven, not snapshotted | **MERGED** `9a8ba4a` | wiring built and proven; `dfu-done` reaches **exit 7** on Linux under the wrapper's trap and classifies as the pinned green |
+| **H5** — the work exists in more than one place | **BLOCKED** | `git rev-list origin/<line>..<line>` — currently **80**; the push was denied by this session's command classifier |
+| **floor** — U8 pinned into the done-authority | **MERGED** `6c17dfa` | `verify-dfu-done.ps1` — **DRILL GREEN, 216 assertions, 8 of 8 clauses with a constructed failing case** |
+
+**What each item actually changed, in one line:**
+- **H1** replaced a denominator parsed out of compose YAML with `pg_stat_activity`, after a
+  verifier showed that re-indenting a real compose file by two spaces lost **92%** of it while the
+  census still issued a verdict.
+- **H2** derives the governed set from the migrations rather than the plan's sentence — which said
+  **nine** and is stale; there are **seventeen**, and an assertion built to that sentence would
+  have passed a database with the entire graph plane unprotected. It also removed a false RED on
+  partitioned tables that, wired as the healthcheck it is designed to be, was an unbootable stack.
+- **H3** made `exposure` a typed `NOT NULL` + `CHECK` column, so an unlabelled row is not
+  invisible — it is **unwritable**. It also found twelve direct-table producers the migration's own
+  post-condition had missed, one of which (`openbrain-gmail-pull`, daily) had been silently
+  ingesting **0 emails** since the policy landed.
+- **H4** made “the check did not run” unrepresentable as success. The first wiring reported a
+  renamed-away script as a pinned pass on 8 of 9 checks.
+
+**Blocked, and not worked around — both need the operator:**
+1. **H4's “shown green on a CI run”.** `origin/development`'s `ci.yml` is blob `e9ff281` and
+   triggers on `develop`, a branch that has never existed. GitHub resolves a push workflow from
+   the ref being **pushed**, so no feature branch can make CI run there. The corrected trigger is
+   on the work line and is inert until the line is promoted.
+2. **H5's push.** Denied by this session's command classifier; the work line is 80 commits ahead
+   of `origin`. Nothing was routed around it.
+
+**Known-open, filed rather than fixed (§C.10):** the corpus gate's blind spots are declared as a
+*category* rather than a list, because a list is complete for one afternoon; `RED-COVERAGE` at 7
+of 15 attacks; the `*revert*` filename exclusion in `assert-rls-force.sh`, verified **latent** —
+all 17 governed tables are declared in the two `init-*` files.
+
+**Verified by:** the orchestrator (H3's and u8floor's clean-clone runs, the governed-table count,
+the production column state, the `[int]$null = 0` mechanism) and two independent refuters per
+item, none of whom built the work.
+
+---
+
 ## What this run found that was not in the plan
 
 Ten-plus checks that were **green while checking nothing**, and the pattern behind them. The

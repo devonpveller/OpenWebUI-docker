@@ -1962,7 +1962,16 @@ lines named; the U4 STATUS record; the `.Host` correction applied above; and the
 learning to tell "no evidence" from "the committed evidence is gone" (class 2).
 
 ## 2026-08-31 - U4 - UN-PARK
-Un-parks: 2026-08-30 - U4 - PARKED - the runner axis is unmeetable as written
+**Un-parks:** 2026-08-30 · U4 · PARKED — the runner axis is unmeetable until little-coder can complete an item
+CITATION CORRECTED 2026-09-01: the directive above originally read
+`Un-parks: 2026-08-30 - U4 - PARKED - the runner axis is unmeetable as written` — plain
+rather than bold, hyphens rather than the heading's middots and em dash, and a TAIL I
+PARAPHRASED FROM MEMORY ("as written") instead of copying the heading. It therefore matched
+nothing and the lift silently did not apply; `dfu-done.ps1` clause 2's `no-outstanding-parked`
+probe reported it as one of "2 citation(s) ignored as ambiguous". The check caught what I did
+not. The substance of the lift is unchanged and was never in doubt — four verifiers across
+rounds 8 and 9 re-ran U4's column from their own clean clones (COMPARED 4/4, exit 0) and the
+oracle fired on a stall that happened. Only the citation was broken.
 DECISION: U4's PARK is LIFTED. The park's stated blockers were: only one quadrant run with no
           comparison, no oracle-on-stall path, and a local runner that could not deliver its
           own artifact. All three are now answered by committed, re-derivable evidence:
