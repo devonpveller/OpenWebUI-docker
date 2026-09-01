@@ -76,3 +76,50 @@ shipped**; the suite already caught it and nobody ran it.
 
 **Not done, deliberately:** no backfill. ~59,213 pages walk clean against the fixed module,
 and running that against production is a deploy decision, not a fix.
+
+
+---
+
+## 3. `work/gitreach` — the gitlink reachability gate (PARKED under the C.10 scope freeze)
+
+**Removed:** branch `work/gitreach` and worktree `wt-gitreach`.
+**Bundle:** `aistack-gitreach.bundle` (10 commits, tip `35fa7be`), verified complete first.
+
+**This is NOT polish, and it is not superseded — it is out of SCOPE.** §C.10 freezes U8 as the
+final phase and admits no check beyond what an H-item's *Validated by* names. `gitreach` is not
+an H-item, so it parks. Recording the distinction because "abandon if it is only polishing"
+does not describe it, and filing it as polish would be a false reason.
+
+**What it builds** (`+1,206` lines across four hook files): `.githooks/pre-push` and
+`.githooks/reference-transaction` are NEW, and `commit-msg` gains 249 lines. The capability is
+refusing a gitlink pinned at a commit the submodule remote does not have — plus gating the
+**ref update**, not just the commit, because a rebase can land an unreachable pin.
+
+**Its value is not theoretical — this exact failure occurred twice on 2026-08-31:**
+- `work/u8h3` bumped the gitlink to OB1 `e9be2cd`, which was on no remote; the merge was
+  blocked until the orchestrator pushed it.
+- `work/u5rls` pinned OB1 `8ccf0e6`, also on no remote.
+- And `work/curatorpool` (parked above) pins OB1 `22f41b6`, which exists in **no** checkout but
+  the one that was deleted — caught only because the bundle was checked before removal.
+
+The work line already carries a *basic* gitlink mention in `commit-msg`; this branch is the
+enforcing version. It is 99 commits behind and therefore UNVALIDATED under §C.7b regardless of
+what passed on it.
+
+**Its own history is worth reading before it is resumed** — the round titles record the method
+failing in the way this effort keeps recording: *"stop modelling the invariant — run the clone"*,
+*"the proof had a modelling step it did not name"*, *"the fix for 'gated nothing' gated nothing"*,
+*"retract two claims that were wider than the code"*.
+
+## 4. `work/u8v2` — a verifier's branch, killed as a duplicate
+
+**Removed:** branch `work/u8v2` and worktree `wt-u8v2`. **Bundle:** `aistack-u8v2.bundle`.
+
+§C.10: *"ONE BRANCH PER H-ITEM. Two worktrees on one commit is thrash, not parallelism."* This
+held H3's **pre-rebase** round-4 state at `90c7cde`. `git merge-base --is-ancestor` reports it is
+NOT contained in `work/u8h3`'s tip — but only because the rebase rewrote the shas, not because
+the content is unique. Bundled rather than assumed, because "almost certainly duplicated" is not
+grounds for discarding commits.
+
+(`u8h2w` and `v1h2`, also named in §C.10, no longer existed — their verifiers removed their own
+scratch worktrees.)
