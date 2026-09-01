@@ -39,7 +39,55 @@ function Copy-ObInitChain {
     return $n
 }
 
-# Start the container and WAIT FOR THE RIGHT MARKER.
+# ------------------------------------------------------------------------------------------
+# THE WAIT BUDGET - MEASURED, then chosen. Do not multiply the old number by a nicer one.
+# ------------------------------------------------------------------------------------------
+# The previous budget was a hardcoded 180s, and the drill that uses it reported a machine
+# that ran out of it as "initdb did not complete in 180s" - a sentence a reader turns into
+# "the boundary is broken" when it means "we never got to look".
+#
+# MEASURED on this machine, 2026-09-01, in the loaded state the drill must survive
+# (82-83 containers of the normal stack running throughout), against the SHIPPED chain -
+# the 29 migrations compose mounts at the pinned OB1 (b604d55), staged from a clean clone:
+#
+#   29-file chain, sequential, n=4 : 6.5 / 6.3 / 5.8 / 5.2 s   (mean 6.0s)
+#   29-file chain, EIGHT AT ONCE   : 10.5 / 13.0 / 13.3 / 13.5 / 15.5 / 15.7 / 16.0 / 16.2 s
+#                                    (n=8, mean 14.2s - the contended case, 8 initdbs racing)
+#
+# (An earlier 28-file chain from a different OB1 commit measured the same shape: 5.5-8.0s
+# sequential, 11.5-14.0s contended.)
+#
+# So initdb is a ~6s job that degrades to ~16s under 8x self-contention: the old 180s was
+# already 11x the worst measurement, and a machine that exceeds it is NOT merely busy -
+# something has gone wrong that a bigger number will not fix. THAT IS NOT HYPOTHETICAL: the
+# run this was written for was a container that DIED at 7.3s (a migration in the drill's
+# without-the-boundary chain refused to apply), reported by the old code as "initdb did not
+# complete in 180s". A classification, not a boolean, is the whole point.
+#
+# The ceiling is nevertheless generous (600s = 37x the contended worst), because this is a
+# CEILING, not a sleep: the wait returns the instant the entrypoint prints its marker, so
+# raising it costs nothing on a healthy run and only bounds a pathological one. A container
+# that dies, or never starts, is detected in the same second it happens - it does not sit
+# out the ceiling. Override with OB_INITDB_TIMEOUT_SEC when a slower machine needs it.
+function Get-ObInitdbTimeoutSec {
+    $v = $env:OB_INITDB_TIMEOUT_SEC
+    if ($v) {
+        $n = 0
+        if ([int]::TryParse($v, [ref]$n) -and $n -gt 0) { return $n }
+    }
+    return 600
+}
+
+# The last few log lines, flattened onto one line - what a timeout has to hand the reader so
+# the next slow run is diagnosable instead of mysterious.
+function Get-ObInitdbLogTail {
+    param([Parameter(Mandatory)][string]$Name, [int]$Lines = 12)
+    $t = (& docker logs --tail $Lines $Name 2>&1 | Out-String)
+    $flat = (($t -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ' | ')
+    if ($flat) { return $flat } else { return '(no log output)' }
+}
+
+# Start the container and WAIT FOR THE RIGHT MARKER, then say WHAT HAPPENED.
 #
 # "database system is ready to accept connections" appears TWICE: once for the temporary
 # server postgres runs the initdb scripts against, and again for the real one. Polling for
@@ -48,28 +96,98 @@ function Copy-ObInitChain {
 # less visibly - it only ever passed because nothing downstream was asserted.)
 # "PostgreSQL init process complete" is the entrypoint's own end-of-initdb marker.
 #
-# Returns $true when initdb finished within the timeout.
-function Start-ObInitdb {
+# Returns a hashtable, because "false" was not enough information:
+#   Ready      $true only for Outcome 'ready'
+#   Outcome    'ready'         initdb finished; the marker was seen
+#              'start-failed'  `docker run` itself failed - reported IMMEDIATELY, with the
+#                              daemon's own message, instead of being served up as a timeout
+#                              after the full ceiling. This is the shape that turns any
+#                              environment problem into "did not complete in N seconds".
+#              'exited'        the container left the running state before the marker (an
+#                              initdb script aborted, OOM, the daemon killed it)
+#              'container-gone' `docker inspect` can no longer see it (a concurrent rm, a
+#                              daemon restart, a name reused by another run)
+#              'timeout'       still running, still no marker, ceiling reached
+#   ElapsedSec how long it actually took - printed by callers so a slow run leaves evidence
+#   BudgetSec  the ceiling in force, so the reader can tell 12s-of-600 from 599s-of-600
+#   Detail     the container state and the tail of its log, for everything but 'ready'
+#
+# NOTE ON HEALTH STATE: `pgvector/pgvector:pg16` ships NO HEALTHCHECK, so a container started
+# by `docker run` here has State.Health = null and there is no health state to poll - the
+# entrypoint's marker plus State.Status is the whole signal. (The drill's section 9 adds a
+# healthcheck in compose and polls exactly that; this function is the plain-`docker run`
+# path.) Claiming to poll a health state that does not exist would be the vacuous-check
+# pattern this drill exists to catch.
+function Start-ObInitdbDetailed {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$InitDir,
         [string[]]$DockerArgs = @(),
-        [int]$TimeoutSec = 180
+        [int]$TimeoutSec = 0
     )
-    docker rm -f $Name 2>$null | Out-Null
+    if ($TimeoutSec -le 0) { $TimeoutSec = Get-ObInitdbTimeoutSec }
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $result = @{ Ready = $false; Outcome = 'timeout'; ElapsedSec = 0.0; BudgetSec = $TimeoutSec; Detail = '' }
+
+    & docker rm -f $Name 2>&1 | Out-Null
     $run = @("run", "-d", "--name", $Name,
              "-e", "POSTGRES_DB=openbrain", "-e", "POSTGRES_USER=postgres",
              "-e", "POSTGRES_PASSWORD=test",
              "-v", "${InitDir}:/docker-entrypoint-initdb.d:ro") + $DockerArgs +
              @("pgvector/pgvector:pg16")
-    docker @run | Out-Null
-    for ($i = 0; $i -lt [int]($TimeoutSec / 2); $i++) {
-        Start-Sleep 2
-        if (docker logs $Name 2>&1 | Select-String -Quiet "PostgreSQL init process complete") {
-            return $true
+    $runOut = (& docker @run 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        $sw.Stop()
+        $result.Outcome    = 'start-failed'
+        $result.ElapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        $result.Detail     = "docker run exited $LASTEXITCODE : $runOut"
+        return $result
+    }
+
+    $lastState = 'unknown'
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        Start-Sleep -Milliseconds 1000
+        if ((& docker logs $Name 2>&1 | Out-String) -match 'PostgreSQL init process complete') {
+            $sw.Stop()
+            $result.Ready      = $true
+            $result.Outcome    = 'ready'
+            $result.ElapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            return $result
+        }
+        $st = (& docker inspect --format '{{.State.Status}}/{{.State.ExitCode}}' $Name 2>&1 | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            $sw.Stop()
+            $result.Outcome    = 'container-gone'
+            $result.ElapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            $result.Detail     = "docker inspect can no longer see $Name : $st"
+            return $result
+        }
+        $lastState = $st
+        $status = ($st -split '/')[0]
+        if ($status -ne 'running' -and $status -ne 'created' -and $status -ne 'restarting') {
+            $sw.Stop()
+            $result.Outcome    = 'exited'
+            $result.ElapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            $result.Detail     = "container state status/exitcode = $st before the initdb marker; log tail: $(Get-ObInitdbLogTail -Name $Name)"
+            return $result
         }
     }
-    return $false
+    $sw.Stop()
+    $result.ElapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+    $result.Detail     = "still status/exitcode = $lastState at the ceiling; log tail: $(Get-ObInitdbLogTail -Name $Name)"
+    return $result
+}
+
+# Boolean wrapper, kept because four other scripts call it and judge only "did it come up".
+# They inherit the fail-fast and the measured ceiling; nothing about their call sites changes.
+function Start-ObInitdb {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$InitDir,
+        [string[]]$DockerArgs = @(),
+        [int]$TimeoutSec = 0
+    )
+    return (Start-ObInitdbDetailed -Name $Name -InitDir $InitDir -DockerArgs $DockerArgs -TimeoutSec $TimeoutSec).Ready
 }
 
 # initdb errors that are NOT errors: the entrypoint's own DROP ... IF EXISTS chatter.
