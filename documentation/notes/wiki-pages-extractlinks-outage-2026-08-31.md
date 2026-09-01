@@ -7,6 +7,15 @@ OB1 commit: `9b47135` on `fix/wiki-pages-extractlinks-binding` (parent `4fdc21c`
 which is the SHA the ai-stack gitlink currently pins). The parent gitlink is
 **not** bumped: `9b47135` is not on any remote yet.
 
+> **PARKED, 2026-08-31 (operator scope ruling).** This is NOT a DFU item - `dfu-done.ps1`
+> will never gate on it - so no ai-stack branch or worktree is held open for it while the
+> plan is finishing. The ai-stack branch `work/wikilinks` and its worktree were REMOVED and
+> this note is the surviving record. The OB1 fix commit lived only inside that worktree's
+> OB1 checkout, so before removal it was bundled to
+> `D:\Open WebUI\_notes\parked-work\OB1-wiki-pages-extractlinks-fix.bundle`
+> (verified "records a complete history"). Recover with `git bundle unbundle`. This note is
+> backlog for after the DFU plan closes; the outage is real and unfixed in production.
+
 ---
 
 ## 1. What broke
