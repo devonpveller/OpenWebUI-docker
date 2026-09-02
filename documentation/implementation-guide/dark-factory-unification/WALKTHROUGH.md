@@ -13,23 +13,36 @@ one that was doing the work. U6's second check had been listed as `python -m pyt
 agent-org/...`, which fails with `ModuleNotFoundError: No module named 'sqlalchemy'`; it was
 "corrected" to name `agent-org/agent-bridge/.venv/Scripts/python.exe` — a path that exists
 in the author's tree and **in no clone**, because `.venv/` is not in git. The correction moved
-the defect rather than closing it, and nothing caught that, because until 2026-09-01 no phase
-but U2 had a marker at all: `dfu-done.ps1` reported *"no executable check is recorded for this
-phase, so its column was NOT re-run"* for U0, U1, U3, U4, U5, U6 and U8, and an indeterminate
-reads much like a green if you only read the headline.
+the defect rather than closing it, and it stood for a day because U2 and U6 were the only
+phases with a marker at all: `dfu-done.ps1` reported *"no executable check is recorded for this
+phase, so its column was NOT re-run"* for U0, U1, U3, U4, U5 and U8, and an indeterminate reads
+much like a green if you only read the headline.
 
-**Every marker below was executed on 2026-09-01 from a clean clone at `fba111d`** — the same
-shape `dfu-done.ps1` builds for clauses 1 and 5 (`git clone --shared --single-branch --branch
-<work line>`, submodules from the local mirror, no `.venv`, no `.env`, no test images) — and
-its exit code is recorded in its own section. **Where a phase's real check does not pass there,
-no marker was written and the measurement is stated instead.** A phase reading *"no executable
-check is recorded"* now means somebody ran the check and it was red or unrunnable; it says so,
-with the command and the exit code, in that phase's section. Fabricating a green by naming a
-lighter check would be C.8's forbidden move one document over.
+**Every marker below was EXECUTED, and its exit code is recorded in its own section** — in a
+clean clone of the shape `dfu-done.ps1` builds for clauses 1 and 5 (`git clone --shared
+--single-branch --branch <work line>`, submodules from the local mirror, no `.venv`, no `.env`,
+no test images). **Where a phase's real check does not pass there, no marker was written and
+the measurement is stated instead.** A phase reading *"no executable check is recorded"* now
+means somebody ran the check and it was red or unrunnable; it says so, with the command and the
+exit code, in that phase's section. Fabricating a green by naming a lighter check would be
+C.8's forbidden move one document over.
+
+**§C.7b validation record.** The markers were developed against a clean clone at `fba111d`
+(the state of the work line before this round) and then RE-RUN, marker by marker, in fresh
+clean clones of the commit that carries them - two of them, one suite per checkout, each with
+`git status --porcelain` asserted EMPTY before anything ran and `git reset --hard` + `git clean
+-qfd` between commands so no phase's check can leave behind what another phase's check needs.
+**Every marker returned the same exit code in both passes.** A section's `fba111d` label is the
+run the number beside it was first measured in; where a second pass measured something
+different (U1's wall clock, once its image was cached) the section says both. The clones were
+built exactly as `dfu-done.ps1` builds its sandbox, including
+`git config core.longpaths true` set INSIDE the clone - a `-c core.longpaths=true` on the clone
+command does NOT persist into the new repository, and without it this tree loses files with no
+error.
 
 **A cost, stated because it is large.** Clauses 1 and 5 each re-run every marker, so a full
-`dfu-done.ps1` now spends roughly an hour in the sandbox — U8's drill alone is ~15 minutes and
-runs twice. That is what *"re-run the column from a clean checkout"* costs when the columns are
+`dfu-done.ps1` now spends the better part of an hour in the sandbox — U8's drill alone is a
+measured 13m24s and runs twice, and U5's is 2m30s. That is what *"re-run the column from a clean checkout"* costs when the columns are
 real drills. Nothing here is a reason to trim it; it is a reason not to be surprised by it.
 
 **How to read the "verified by" column.** `orchestrator` = I ran the command myself.
@@ -74,7 +87,9 @@ record below, not by anything re-runnable, and no command here pretends otherwis
 vanish`, over `cac1f85`.
 **Verified by:** merge-record. I confirmed the merge exists and closed the stale queue row that
 still read `test-passed` with an empty `merged_sha`. **I did not re-run the kill-the-poller
-drill in this session.**
+drill in this session.** — that last sentence was true when written and is superseded:
+2026-09-01 re-ran it from a clean clone, exit 0, and it is the marker above. It has still not
+been re-run by someone who did not build it, which is a different and weaker statement.
 
 ## U1 — memory plane, phases 0–2
 
@@ -85,7 +100,7 @@ ai-stack; a session that searched only ai-stack once concluded it did not exist 
 wrongly).
 **How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/smoke-agent-memory.ps1`
 **Clean-clone measurement (2026-09-01, `fba111d`):** **exit 0**, 23 checks,
-`ALL AGENT-MEMORY SMOKE CHECKS PASSED`, ~4 minutes. It is the *smoke script* named in gate 1.3
+`ALL AGENT-MEMORY SMOKE CHECKS PASSED`. About 4 minutes the first time (it BUILDS the server image, tagged `:smoke`, never `:local`) and 20s once that image is cached - both measured, in two different clean clones. It is the *smoke script* named in gate 1.3
 (*"offline harness + smoke script + plane-agreement invariant"*) and it exercises 1.1 and the
 1.2 doors on the way: it builds the real server image, brings it up on a throwaway network
 against a throwaway database on the REAL initdb chain with a STUB embedding endpoint, and then
@@ -99,8 +114,11 @@ is absent from a default recall). It touches no live plane and needs no GPU.
 schema half passes (29 migrations derived from compose, `agent_memory_tables(8)`, trigger,
 2 functions, the wiki GIN index); every failure is in the section that executes the module's
 own SQL against the fresh volume, starting with an INSERT that omits a column H3 made
-`NOT NULL` (*"null value in null constraint"*). It is a real red on the work line, not a clone
-artifact, and it belongs to whoever owns that harness — filed, not papered over
+`NOT NULL` (*"null value in null constraint"*). **Measured only in the clone** — that failing
+section builds its database from this repository's own migration chain and runs SQL from this
+repository's own module, so nothing in it can depend on the checkout being a clone, but saying
+"it is red on the work line too" would be an inference and it is not written here as a
+measurement. It belongs to whoever owns that harness — filed, not papered over
 (`documentation/notes/dfu-c15-clean-clone-check-audit.md`).
 **Evidence:** `954b97b` (2.1 write path), `5a662d3` (2.2 outcomes), `4aed54f` (2.2 abort-path
 thin records), `7982440` (2.3 constraint promotion), `ebfcbbc` (2.4 bridge rollups),
@@ -142,10 +160,12 @@ finding in a prior round (gym-007's shape, new source); drills green in both sys
   `git branch drill/verify-d development`, and the sandbox `dfu-done.ps1` builds is
   `--single-branch`, so the first command answers `fatal: not a valid object name:
   'development'` and the 26 downstream assertions collapse from that. A full `git clone` does
-  not help either - clone creates a local branch only for the remote's HEAD, and `git
-  rev-parse` does not resolve a bare name through `refs/remotes/origin/`. The base ref is
-  hard-coded with no parameter, so there is no portable INVOCATION; making it portable is a
-  change to that drill and belongs to whoever owns it.
+  not help either, and that was measured rather than reasoned: in an all-branches clone of this
+  repository `refs/remotes/origin/development` is present and `git rev-parse development` still
+  answers `fatal: ambiguous argument 'development': unknown revision`, because clone creates a
+  local branch only for the remote's HEAD and `rev-parse` does not search
+  `refs/remotes/origin/`. The base ref is hard-coded with no parameter, so there is no portable
+  INVOCATION; making it portable is a change to that drill and belongs to whoever owns it.
 - `scripts/agent-harness/u3_evidence_regression_gym.py` - **exit 2**, `VENUE REFUSED: venue
   'gym' resolves to 'C:\dfuwt\ai-orchestration-gym' ... which is not a directory`. The venue
   is configured as `../ai-orchestration-gym`, relative to the checkout, and `dfu-done.ps1`
@@ -335,8 +355,13 @@ drill (follow the absolute path out of a COPIED set and a deleted workspace read
 optional `record_dir` and behaves exactly as before without one. Proved
 RED -> GREEN -> RED -> GREEN in a clone: 0/4 and 7-not-reproducible before, 4/4 and
 7-re-derived after, both back to exit 1 with `documentation/evidence/dfu-u4/` moved away, both
-green again on restore. Guard-bite unaffected: `quadrant.prove_guards` 25/25,
-`pytest scripts/agent-harness` 298 passed, `ruff check` clean. And the stricter admission does
+green again on restore. Guard-bite unaffected, measured IN THE CLEAN CLONE:
+`python -m quadrant.prove_guards` **25/25 guards proven to bite**, `ruff check .` clean, and
+`pytest scripts/agent-harness -q` **295 passed, 2 skipped, 1 failed** - the same one failure
+round 9 recorded below, `test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere`,
+which is correct to fail in a clone because the durable-check registry lives inside `.git`. The
+same suite is **298 passed, 0 failed** in a worktree, which is exactly why §C.7b insists on the
+clone. And the stricter admission does
 not make the audit quieter - a record refused because its evidence is gone is no longer
 *skipped as inadmissible*, it falls through to the finding, which
 `test_a_deleted_workspace_in_a_copy_is_caught_and_not_masked_by_the_recorded_path` holds.
@@ -456,18 +481,20 @@ by a lighter one.** Measured 2026-09-01 from a clean clone at `fba111d`:
 - `agent-org/agent-bridge/.venv/Scripts/python.exe -m pytest .../test_recall_seams.py -q` names
   a virtualenv that is **not in git**. In a clone there is no such file, so the command cannot
   start; the 2026-08-31 "correction" that added that path moved the defect rather than closing
-  it. The suite needs `sqlalchemy`, `aiosqlite`, `httpx` and `pytest-asyncio`; the interpreter
-  on PATH has none of them, and there is no INVOCATION that fixes that - only an environment.
+  it. `python -c "import sqlalchemy"` on the interpreter that IS on PATH answers
+  `ModuleNotFoundError`, and no INVOCATION fixes a missing environment.
 - `python scripts/checks/recall-falsifiability-drill.py` is worse than red: it **exits 0
-  vacuously**. In the clone it printed `ALL MUTATIONS RED - every guard can fail`, and every
-  one of those six "RED" lines carries its own evidence:
-  `E   ModuleNotFoundError: No module named 'sqlalchemy'`. The drill decides a mutation was
-  caught from `returncode != 0`, and it never asserts the UNMUTATED baseline is green - so an
-  interpreter that cannot import the package under test satisfies every mutation at once. That
-  is a check green while checking nothing, sitting in this file's own `How to run` line, which
-  is the exact class §C.8 clause 5 exists to catch. Filed for whoever owns that drill in
+  vacuously**. In the clone it printed `ALL MUTATIONS RED - every guard can fail`, and
+  **eleven of its twelve mutations carry the same evidence**:
+  `E   ModuleNotFoundError: No module named 'sqlalchemy'`. Only the twelfth is real - the Deno
+  one, which needs no Python. The drill decides a mutation was caught from `returncode != 0`
+  and never asserts that the UNMUTATED tree is green, so an interpreter that cannot import the
+  package under test satisfies every Python mutation at once. That is a check green while
+  checking nothing, sitting in this file's own `How to run` line, which is the exact class
+  §C.8 clause 5 exists to catch. Filed for whoever owns that drill in
   `documentation/notes/dfu-c15-clean-clone-check-audit.md`; the fix is a baseline assertion, not
   a marker here.
+
 **Evidence:** `3bdf7a8`. Two verifiers not-refuted; they counted **4 and 5** live seams (one
 found an `_open_handoff` seam beyond the four the plan names).
 **Orchestrator-verified:** `agent_memory_recall_traces` went **0 → 8 rows** — recall has run
@@ -565,8 +592,8 @@ real `dfu-done.ps1` against it, and asserts the clause did not pass - so a claus
 failing case turns it red rather than quietly covering seven of eight. Every one of its ~70
 nested runs is pointed at a throwaway fixture with `-RepoRoot`, so it cannot recurse into this
 document. `-Target` is passed explicitly because the column names `dfu-done.ps1` and the
-correspondence between the two should be readable in the command, not inferred. Budget ~15
-minutes.
+correspondence between the two should be readable in the command, not inferred. **13m24s
+measured**, and the clone it ran in was still `git status --porcelain` EMPTY afterwards.
 **What the marker does NOT cover:** the per-H-item drills in the table below. `prove-agent-memory-rls.ps1`
 (H3) and `drill-rls-boot-assertion.ps1` (H2) need the live plane, `drill-app-role-not-superuser.ps1`
 (H1) is pinned at CANNOT-MEASURE while its migration is not at the recorded gitlink
