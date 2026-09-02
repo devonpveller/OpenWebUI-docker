@@ -2374,3 +2374,46 @@ CITED:    section C.8 clause 7; section C.10; the `2026-09-01 - U3 - the park ST
           `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
 REVERT:   n/a - nothing was changed for these three phases. This entry records a refusal to
           write three sentences.
+
+## 2026-09-02 - clause 4 exclusion - `work/pod-key`, an exemption put on the record in the form the probe reads
+**Excluded from C.8 clause 4:** `work/pod-key`
+**Why:** it is not this effort's work. Its single commit, `f3e9903` ("OB1: bump gitlink -
+          authenticate podcast chat calls, retry instead of degrading", ProfNovice,
+          2026-08-29), bumps the OB1 gitlink to `47a308e` and adds
+          `documentation/notes/daily-podcast-delivery-findings.md`. It belongs to the daily
+          podcast delivery effort; no U-phase, no C.8 clause and no DFU artifact depends on it.
+          The instruction is the operator's, 2026-08-31: *"work/pod-key is from an unrelated
+          podcast effort - leave it alone."*
+**WHAT IS BEING EXCUSED, said plainly so the hole is visible.** `work/pod-key` IS an unmerged
+          `work/*` branch and it STAYS unmerged. Measured 2026-09-02 from this checkout:
+          `git rev-list --count refactor/ai-stack-cleanup..f3e9903` = **1**. Clause 4's
+          question - "is there outstanding work/* work?" - is answered YES for this branch, and
+          this entry does not change that answer; it records that the operator has ruled the
+          branch outside the scope clause 4 measures. A reader who wants the unexcused count
+          adds one.
+**NOTHING IS LOST BY LEAVING IT ALONE:** the tip is on the shared remote, not only here -
+          `git ls-remote --heads origin refs/heads/work/pod-key` ->
+          `f3e9903f87c39bd6c1b8246521dde59b6389b216` (2026-09-02). Landing it later is whoever
+          owns the podcast effort's call, not this effort's.
+**WHY A SECOND ENTRY, when the ruling was already recorded.** The
+          `2026-08-31 - operator ruling - work/pod-key is out of scope for C.8 clause 4` entry
+          above states the same fact and the same source, and `dfu-done.ps1` could not read it:
+          `Get-BranchExclusionGrant` requires BOTH halves of a record - a `## ` heading matching
+          `clause 4 exclusion`, AND a directive line naming the branch exactly - and that entry
+          has neither the heading shape nor the directive. So the probe reported
+          `carve-out for work/pod-key REFUSED: the branch name appears in DECISIONS.md, but no
+          '## ... clause 4 exclusion' entry carries an 'Excluded from C.8 clause 4:' directive
+          naming it - a mention is not a grant`, which was CORRECT: a substring is not an
+          exemption, and the function's own header records the defect it replaced (any sentence
+          mentioning the branch used to grant the carve-out, including one arguing against it).
+          The substance was already right; only the form was unreadable. This is the same shape
+          as section 2.1's A3 revert-label fix - `**Revert:**` did not match a parser expecting
+          `**Revert path:**` - and the same rule applies: write the record in the form the
+          reader reads, do not weaken the reader.
+CITED:    section C.8 clause 4; the `2026-08-31 - operator ruling` entry above;
+          `scripts/checks/dfu-done.ps1` `Get-BranchExclusionGrant` and its
+          `$script:DfuExcludedBranches` pin, which lists `work/pod-key` as "applied ONLY if
+          DECISIONS.md records it".
+REVERT:   delete this entry. The carve-out then lapses - the pin alone grants nothing - and
+          clause 4 counts `work/pod-key` again. No branch, commit or production state changes
+          either way.
