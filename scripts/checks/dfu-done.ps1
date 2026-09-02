@@ -3112,11 +3112,24 @@ function Test-Clause3 {
         #   O: is an ops-labelled row visible to the agent plane? (the live positive control)
         # A run where O is 0 is indeterminate exactly as before - a query that can see
         # nothing proves nothing about what it cannot see.
+        # THE DOLLAR-QUOTE TAGS ARE ESCAPED, AND WITHOUT THIS THE WHOLE ARM THREW.
+        # `"DO $x$ BEGIN "` is a PowerShell double-quoted string, so $x was EXPANDED,
+        # and under this file's own Set-StrictMode an undefined variable is a
+        # terminating error - clause 3 reported "the clause evaluator threw, so nothing
+        # was decided" and produced no door verdicts at all.
+        #
+        # It never showed up because it is unreachable on the CURRENT production
+        # schema: this arm runs only when thoughts.exposure is NOT NULL, and production
+        # has it nullable (1/0), so every live run took the else-branch below. A
+        # database built from the compose init chain has it NOT NULL (1/1) and crashes
+        # here - which is to say this arm has never once executed, and would have
+        # started failing the moment H3 landed in production, in the shape hardest to
+        # read: not a wrong answer but no answer.
         $sqlPred = ("BEGIN; " +
-            "DO $x$ BEGIN " +
+            "DO `$x`$ BEGIN " +
             "  INSERT INTO thoughts (content, metadata) VALUES ('{0}-UNLABELLED', jsonb_build_object('exposure','ops')); " +
             "  RAISE NOTICE 'DFU-U:0'; " +
-            "EXCEPTION WHEN not_null_violation THEN RAISE NOTICE 'DFU-U:1'; END $x$; " +
+            "EXCEPTION WHEN not_null_violation THEN RAISE NOTICE 'DFU-U:1'; END `$x`$; " +
             "INSERT INTO thoughts (content, metadata, exposure) VALUES ('{0}-OPS', jsonb_build_object('exposure','ops'), 'ops'); " +
             "SET ROLE service_role; " +
             "SELECT 'O:'||count(*) FROM thoughts WHERE content='{0}-OPS'; " +
@@ -3703,30 +3716,67 @@ function Test-Clause3 {
                           -Command ("curl (from {0}) one filtered query per exposed table - EVERY text column plus every jsonb key read from the live data - derived from PostgREST's own OpenAPI document, plus an ops-twin control" -f $Ctx.obnet) -Run $body)
         }
     } finally {
-        # CLEAN UP. Production must show 0 personal rows when this finishes, and the
-        # cleanup is VERIFIED rather than assumed - a fixture left behind would be this
-        # script creating the exposure it exists to detect.
+        # CLEAN UP, AND VERIFY ONLY WHAT THIS PROBE IS RESPONSIBLE FOR.
+        #
+        # THIS CHECK USED TO ASSERT THE WRONG THING. It counted metadata->>'exposure' =
+        # 'personal' across the WHOLE of thoughts and agent_memories and required zero, on
+        # the reasoning that production held no personal rows. That stopped being true: the
+        # 2026-09-01 live run reported "0/0/0/1129/0 - the plane was left dirty" while its
+        # own fixtures were 0/0/0 and the cleanup had worked perfectly. The 1,129 rows are
+        # the operator's deliberate resolution of a personal-exposure incident - they are
+        # the boundary's SUBJECT, not dirt - and a checker that demands their absence is
+        # demanding the data be deleted to make a check go green.
+        #
+        # "The plane is empty" and "my probe cleaned up after itself" were never the same
+        # claim. This probe can only be responsible for the second, so that is the only one
+        # it asserts. The production personal count is still REPORTED, because a reader
+        # wants the number, and reporting is not asserting.
+        #
+        # The fixture counters, in exchange, got WIDER. Rewriting this found 72
+        # agent_memory_recall_traces rows carrying this probe's own workspace_id in
+        # production - litter from every past run of door-mcp-read-tools, which the cleanup
+        # never deleted and the verification never counted. The old check was failing on
+        # rows that were not its business while missing rows that were.
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM thought_entities WHERE entity_id IN (SELECT id FROM entities WHERE metadata->>'dfu_done_fixture'='true') OR thought_id IN (SELECT id FROM thoughts WHERE metadata->>'dfu_done_fixture'='true');")
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM entities WHERE metadata->>'dfu_done_fixture'='true';")
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM entity_extraction_queue WHERE thought_id IN (SELECT id FROM thoughts WHERE metadata->>'dfu_done_fixture'='true');")
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM agent_memory_recall_items WHERE memory_id IN (SELECT id FROM agent_memories WHERE metadata->>'dfu_done_fixture'='true');")
+        # The recall TRACE, which nothing removed before. agent_memory_recall_items cascades
+        # from agent_memories, but a trace is the PARENT of its items and survived both.
+        [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM agent_memory_recall_traces WHERE workspace_id='dfu-done-fixture';")
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM agent_memories WHERE metadata->>'dfu_done_fixture'='true';")
         [void](Invoke-Psql -Ctx $Ctx -Sql "DELETE FROM thoughts WHERE metadata->>'dfu_done_fixture'='true';")
+        # FOUR fixture counters, then a "|", then the production personal count. The two
+        # halves are separated in the OUTPUT as well as in the logic, so nobody re-reads
+        # this line later and folds the reported number back into the assertion.
+        #
+        # thought_entities, entity_extraction_queue and agent_memory_recall_items are not
+        # counted, and that is deliberate rather than an omission: every one of them is
+        # ON DELETE CASCADE from a table that IS counted (measured 2026-09-01), so a
+        # surviving child implies a surviving parent and the parent counters catch it.
+        # Counting them too would add three comparisons that cannot fail.
         $rv = Invoke-Psql -Ctx $Ctx -Sql ("SELECT (SELECT count(*) FROM thoughts WHERE metadata->>'dfu_done_fixture'='true')::text" +
                                           "||'/'||(SELECT count(*) FROM agent_memories WHERE metadata->>'dfu_done_fixture'='true')::text" +
                                           "||'/'||(SELECT count(*) FROM entities WHERE metadata->>'dfu_done_fixture'='true')::text" +
-                                          "||'/'||(SELECT count(*) FROM thoughts WHERE metadata->>'exposure'='personal')::text" +
+                                          "||'/'||(SELECT count(*) FROM agent_memory_recall_traces WHERE workspace_id='dfu-done-fixture')::text" +
+                                          "||'|'||(SELECT count(*) FROM thoughts WHERE metadata->>'exposure'='personal')::text" +
                                           "||'/'||(SELECT count(*) FROM agent_memories WHERE metadata->>'exposure'='personal')::text;")
-        $line = (($rv.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+/\d+/\d+/\d+/\d+$' } | Select-Object -First 1)
+        $line = (($rv.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+/\d+/\d+/\d+\|\d+/\d+$' } | Select-Object -First 1)
         if (-not $line) {
             $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $rv.exit -Note "could not confirm the fixture was removed"
-        } elseif ($line -eq "0/0/0/0/0") {
-            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note "fixture and control removed from thoughts, agent_memories and entities; production shows 0 personal rows in either corpus"
         } else {
-            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
-                    -Note ("fixture thoughts/memories/entities and personal thoughts/memories remaining: {0} - the plane was left dirty" -f $line)
+            $halves   = $line -split '\|'
+            $mine     = $halves[0]
+            $personal = $halves[1]
+            if ($mine -eq "0/0/0/0") {
+                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                        -Note ("every fixture row THIS PROBE wrote is gone (thoughts/memories/entities/recall-traces = {0}). Production holds {1} personal thought/memory row(s); this probe does not assert on them and must never remove them - they are the boundary's subject, not residue." -f $mine, $personal)
+            } else {
+                $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                        -Note ("THIS PROBE left its own fixture rows behind - thoughts/memories/entities/recall-traces = {0} - so the run created the residue it exists to detect. (Production's {1} personal row(s) are unrelated and form no part of this verdict.)" -f $mine, $personal)
+            }
         }
-        $c.probes += (New-Probe -Name "fixture-cleaned-up" -Command "psql DELETE every fixture row; then count fixture and personal rows in both corpora" -Run $body)
+        $c.probes += (New-Probe -Name "fixture-cleaned-up" -Command "psql DELETE every fixture row; then count THIS PROBE'S fixture rows (production personal rows are reported, never asserted on)" -Run $body)
     }
     return (Resolve-ClauseVerdict -Clause $c)
 }
