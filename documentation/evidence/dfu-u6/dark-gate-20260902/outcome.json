@@ -81,6 +81,7 @@
   "finding_against_itself": {
     "what": "the 'names that condition and no other' assertion caught this drill's OWN git-error-swallowed fixture: it committed its bait file, which moved main after the andon baseline and fired protected-ref-moved as well (fired=git-error-swallowed; protected-ref-moved). The gate still halted, so a weaker assertion would have passed over a fixture testing two things at once.",
     "fix": "the bait file is written, not committed",
-    "transcript": "first-run-fixture-fired-two-conditions.txt"
+    "transcript": "fixture-fired-two-conditions.txt",
+    "transcript_note": "RE-MEASURED 2026-09-02 rather than kept from the original run. The first capture was overwritten by a later green run, so the file named for the failure held a passing transcript - the name and the content disagreeing, which is the class this item exists to correct. The fixture was put back to committing its bait file, the drill re-run (exit 1, 1 of 54 failed, fired=git-error-swallowed; protected-ref-moved) and the drill restored with git checkout."
   }
 }

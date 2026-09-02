@@ -18,7 +18,7 @@
   [PASS] A3 git-error-swallowed : and it is THIS condition that fired, not another status=fire
   [PASS] A3 git-error-swallowed : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
   [PASS] A3 git-error-swallowed : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=git-error-swallowed
+  [FAIL] A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=git-error-swallowed; protected-ref-moved
   [PASS] A3 git-error-swallowed : no auto-pass record was written for a gate that refused passes=0
   [PASS] A4 work-branch-on-remote : the board RAISES (exit 6) - the run's work branch exists on a remote - an outward action nobody granted exit=6 board=raised
   [PASS] A4 work-branch-on-remote : and it is THIS condition that fired, not another status=fire
@@ -49,7 +49,7 @@
   [PASS] both are AUTO passes and each names its gate profile auto=2
   [PASS] each auto pass records the andon verdict that AUTHORISED it clear,clear
   [PASS] each auto pass states its COVERAGE, so 'clear' can be re-derived rather than trusted 5/5,5/5
-  [PASS] HERMETIC: the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/u6dark-dde13c08/repo-clear | C:/Users/yamao/AppData/Local/Temp/u6dark-dde13c08/repo-clear
+  [PASS] HERMETIC: the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/u6dark-b0780afd/repo-clear | C:/Users/yamao/AppData/Local/Temp/u6dark-b0780afd/repo-clear
   [PASS] no record can be mistaken for a human approval
   [PASS] THE COLUMN'S SECOND HALF: the audit trail verifies COMPLETE (exit 0) exit=0 ::   gate an item never reached.
 
@@ -95,16 +95,13 @@
           - scripts/checks/validate-lineendings.ps1:16 in (top level) runs git and does not check the result within 5 line(s)
       [fire         ] work-branch-on-remote          -> fired       work branches exist on a remote: 1
           - work/pod-key is on remote 'origin' (refs/remotes/origin/work/pod-key)
-      [indeterminate] protected-ref-moved            -> indeterminate no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-dde13c08\state-measurement\audit\andon-baseline.json)
+      [indeterminate] protected-ref-moved            -> indeterminate no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-b0780afd\state-measurement\audit\andon-baseline.json)
       coverage: 5 declared, 5 evaluated, 0 switched off, 0 of 5 required MISSING
       census  : unrecognised=0, fired=3, indeterminate=1, disabled=0, evaluated_ok=1 (total 5 of 5 in scope)
-    ANDON RAISED: policy-declared-unread, git-error-swallowed, work-branch-on-remote, protected-ref-moved, policy-declared-unread: declared policy nothing reads: pipeline.convergence, git-error-swallowed: git errors are swallowed at 26 call site(s), work-branch-on-remote: work branches exist on a remote: 1, protected-ref-moved: no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-dde13c08\state-measurement\audit\andon-baseline.json)
+    ANDON RAISED: policy-declared-unread, git-error-swallowed, work-branch-on-remote, protected-ref-moved, policy-declared-unread: declared policy nothing reads: pipeline.convergence, git-error-swallowed: git errors are swallowed at 26 call site(s), work-branch-on-remote: work branches exist on a remote: 1, protected-ref-moved: no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-b0780afd\state-measurement\audit\andon-baseline.json)
   This is a MEASUREMENT. It is not counted in the result below, because the
   column's question is about the GATE and the shipped board's contents are a
   separate, live config decision - see this file's header.
 
-U6 DARK GATE DRILL: 54 assertions, 0 failed.
-  HALT and CLEAR were both driven through the REAL gate: a board that fires
-  refuses the unattended gate and records the refusal; a board that fires
-  nothing auto-passes both gates and the trail verifies COMPLETE. Neither
-  direction can be green on its own.
+U6 DARK GATE DRILL: 1 of 54 assertions FAILED
+  FAILED: A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=git-error-swallowed; protected-ref-moved

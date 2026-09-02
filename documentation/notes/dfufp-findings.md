@@ -91,6 +91,15 @@ condition"*) would have passed over it. Fixed by writing the bait file without c
 The general shape is worth more than the fix: **a halt assertion that does not pin WHICH
 condition halted cannot tell a working detector from a noisy board.**
 
+**And the evidence for that finding was itself wrong for twenty minutes, which is worth
+recording.** The failing transcript was captured to a scratch file that a later green run
+overwrote, so the committed file *named* for the two-condition failure held a **passing**
+transcript — a name and a content that disagree, in an evidence directory. It was not
+described from memory: the fixture was put back to committing its bait file, the drill re-run
+(**exit 1, 1 of 54 failed**, `fired=git-error-swallowed; protected-ref-moved`) and the drill
+restored with `git checkout`. `documentation/evidence/dfu-u6/dark-gate-20260902/`'s
+`outcome.json` says the transcript is a re-measurement rather than the original capture.
+
 **A correction to an earlier draft of this note.** The first version of this drill quoted the
 column as *"an unattended run that hits **an** andon condition"*. The column says **each**. The
 misquote was in the check's own header and in the walkthrough, and it would have made a
