@@ -2190,3 +2190,32 @@ ALSO FOUND, and filed rather than fixed under C.10: `recall-falsifiability-drill
 CITED:    section C.8 clause 7; section C.10 (ship the substance, file the polish).
 REVERT:   n/a - the directives live in commit messages; this entry states exactly what each
           one claims and what it does not.
+
+## 2026-09-02 - U0 - the kill-the-poller drill RE-RUN by me, and only its half of the column claimed
+FINDING:  `audit-trail-U0` was RED for one reason only - the commit half. The ledger entry and
+          the findings note both existed; `dfu-done.ps1 -Only @(7) -SkipLive` from a clean clone
+          at `ded1b7b` reported: "no commit message on the work line carries a validation claim
+          naming the phase AND one of the checks this phase names (test_inbox.py) in the SAME
+          statement ... (2 commit(s) co-mention both without claiming one validated the other)".
+          The 2026-09-01 note recorded this half as IMPOSSIBLE for U0, which was true then:
+          U0's section 2 column names no script. It became possible when WALKTHROUGH.md grew a
+          `How to run` marker for U0, because `Get-NamedArtifacts` reads the column AND the
+          walkthrough's run lines.
+WHAT I RAN, myself, rather than reading WALKTHROUGH.md's recorded exit code:
+          `python -m pytest scripts/claude-sessions-bridge/test_inbox.py -q`, in my own clean
+          clone of `refactor/ai-stack-cleanup` at `ded1b7b` (`git -c core.longpaths=true clone`,
+          `core.longpaths` set inside it, `git status --porcelain` empty before and after).
+          **exit 0** - `20 passed in 10.84s`.
+DECISION: a validation directive was written for U0, and it claims the SECOND HALF OF THE
+          COLUMN ONLY. `test_inbox.py` is the kill-the-poller drill - its `test_kill_the_poller_*`
+          cases fail against the pre-inbox bridge, where an admitted message lived only in an
+          in-memory deque. It says nothing about the column's first half, "each item's own
+          anchor + tester", which is a fact about three merges that already happened and is not
+          re-runnable; the directive states that exclusion rather than letting the green cover it.
+          I did not take the walkthrough's `Clean-clone measurement (2026-09-01, fba111d)` line
+          as evidence. A directive naming a check the author did not personally see pass is a
+          manufactured audit trail, which is the thing clause 7 exists to prevent.
+CITED:    section C.8 clause 7; WALKTHROUGH.md's U0 `How to run` marker (the artifact that makes
+          the claim possible); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message; this entry states what it claims
+          and what it does not.
