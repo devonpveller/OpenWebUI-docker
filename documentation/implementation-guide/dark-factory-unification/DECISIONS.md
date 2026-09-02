@@ -2065,3 +2065,128 @@ CITED:    the operator's direction, 2026-09-01; §C.10 (the freeze); §C.8 claus
 REVERT:   `git bundle unbundle "D:\Open WebUI\_notes\parked-workistack-c8plane.bundle"`,
           verified *"records a complete history"* BEFORE the branch was deleted. Nothing was
           destroyed.
+## 2026-09-01 - C.8 clause 1 - the prose now names U8, which makes the authority measure MORE
+FINDING:  `dfu-done.ps1`'s `phase-floor-matches-plan` probe was RED on FOUR clauses: the
+          pinned floor is `U0,U1,U2,U3,U4,U5,U6,U8` while C.8 clause 1's prose still read
+          "For U0-U6". Section C.9 added phase U8 on 2026-08-31 and section 2's U8 row
+          states its own validation as "`dfu-done.ps1`'s pinned phase floor + clause 1
+          EXTENDED to include U8" - so the plan said two different things about clause 1's
+          population, and the drift check reported it, correctly.
+DECISION: C.8 clause 1 now reads "For U0-U6 and U8". Nothing else in the clause changed.
+WHY THIS IS NOT C.8's FORBIDDEN MOVE: the forbidden move is amending a plan column so the
+          script goes green - making the authority measure LESS. This does the opposite, and
+          the direction is worth stating precisely rather than loosely, because "it makes the
+          check stricter" is the kind of claim that is easy to assert and easy to get wrong:
+          `dfu-done.ps1`'s pinned floor ALREADY carried U8, so U8 was already a counted
+          subject of clauses 1, 2 and 7 IN THE IMPLEMENTATION. What was narrower was the
+          SPECIFICATION - C.8 clause 1's own words required a clean-checkout re-run only for
+          U0-U6. This edit widens the specification to match the stricter implementation, so
+          the floor's inclusion of U8 is now warranted by C.8 itself instead of only by C.9
+          and section 2's U8 row, and "the floor over-reaches, narrow it to U0-U6" is no
+          longer an available reading. Nothing is measured less. The alternative fix -
+          relaxing the check to "pinned is a superset of named" - would have cleared the same
+          red while re-opening the hole the check exists to close (a plan that stopped naming
+          U5 would then pass). That was considered and REFUSED; `dfu-done.ps1` is untouched
+          by this item.
+MEASURED: from a clean clone at `fba111d` the probe read "the pinned floor and C.8 clause 1
+          disagree - the plan names U0,U1,U2,U3,U4,U5,U6; pinned but unnamed: U8". After this
+          edit it reads "the pinned floor U0,U1,U2,U3,U4,U5,U6,U8 is exactly the phase set
+          C.8 clause 1 names", on clauses 1, 2, 5 and 7 alike.
+CITED:    section C.9; section 2's U8 row; the `2026-08-31 - U8 - MERGE ORDER` entry, which
+          recorded this exact gap and said closing it "is a PLAN.md edit".
+REVERT:   restore "For U0-U6" in C.8 clause 1. The red returns with it.
+
+## 2026-09-01 - section 2.1 A3 - the revert LABEL now matches the parser; the substance is unchanged
+FINDING:  `amendment-A3-accounted` was RED with "amendment is missing: Revert path". A3 did
+          carry its revert path in substance - `**Revert:** none - the history is unchanged
+          and this entry only says how to read it.` - but `dfu-done.ps1` accepts a line
+          beginning `**Revert path` or `REVERT:`, and `**Revert:**` matches neither.
+DECISION: A3's line now reads `**Revert path:** none - ...`. The sentence after the label is
+          unchanged, word for word. A1 and A2 already use `**Revert path:**`, so this is A3
+          joining the shape its two siblings use.
+WHY THIS IS NOT A WEAKENING: nothing A3 CLAIMS moved. A label was aligned with the parser
+          that reads it, in the direction of being read rather than skipped. The opposite fix
+          - widening the parser to accept `**Revert:**` - was avoided deliberately: the
+          amendment set is three entries and two already carry the canonical label, so
+          broadening the alphabet would have been a wider gate bought to save a one-word edit.
+CITED:    section C.8 clause 2 (every amendment carries its evidence and revert path).
+REVERT:   restore `**Revert:**`. The probe goes red again; A3 says the same thing either way.
+
+## 2026-09-01 - U3 - the park STANDS: its gym drill refuses for want of evidence
+FINDING:  `no-outstanding-parked` names one outstanding entry - `2026-08-30 U3 CORRECTION -
+          code-complete, VALIDATION-PARKED`. The 2026-08-30 entry "U4 + U3 - the arena runs
+          LANDED" reports U3 as DISCHARGED, so the question was whether the lift is owed.
+WHAT WAS CHECKED, rather than read: U3's discharge is
+          `scripts/agent-harness/u3_evidence_regression_gym.py` - the file that turns U3's
+          column into something runnable. It was executed twice on 2026-09-01:
+          - from a clean clone at `fba111d`: `VENUE REFUSED` (exit 2) - `quadrant.venues.gym.repo`
+            does not resolve inside a clone;
+          - from that clone with the venue supplied, so it resolved
+            (`venue : gym (gym) - D:\Open WebUI\ai-orchestration-gym @ main`):
+            `NO EVIDENCE: ...\.quadrant\gym-runs holds no outcome record from venue 'gym'.
+            Run the quadrant comparison in the arena first - this drill seeds a copy of REAL
+            run evidence and will not fabricate one.` (exit 2)
+          `.quadrant/gym-runs` exists in NO checkout on this machine - not the main tree and
+          not any of the three live worktrees (`find -type d -name gym-runs` returns nothing).
+          `.quadrant/runs` holds only the U4 comparison artifacts.
+DECISION: **U3's park is NOT lifted, and clause 2 stays RED on it.** The drill is the evidence,
+          the drill refuses, and a park lifted without its evidence is precisely the move
+          section C.8 exists to forbid - worse here than anywhere, because clause 2's whole
+          job is to stop a phase closing on a claim.
+          Writing an `Un-parks:` directive citing the 2026-08-30 arena entry would have turned
+          this probe green today. It was considered and REFUSED: that entry's U3 sentence
+          reports a run whose evidence directory exists in no checkout, so the claim cannot be
+          re-derived, and C.8's own rule is that a clause which cannot be met is a REPORT and
+          not a redefinition.
+WHAT WOULD DISCHARGE IT, precisely, so this is a scheduled item and not a shrug: a
+          four-quadrant `quadrant` comparison run in the arena, leaving records under
+          `.quadrant/gym-runs`, followed by `python scripts/agent-harness/u3_evidence_regression_gym.py`
+          exiting 0. That is runner-level work in the gym venue; it is out of scope for a
+          documentation item under the C.10 freeze, and it is named here so it is not lost.
+CITED:    section C.8 clause 2; the `2026-08-30 U3 CORRECTION` entry's own routing ("the gym
+          run is runner-level work and belongs to U4's quadrants").
+REVERT:   n/a - nothing was changed. This entry records a refusal to change something.
+
+## 2026-09-01 - C.8 clause 7 - three validation directives written, six phases left honestly RED
+FINDING:  `audit-trail-U0` .. `audit-trail-U8` were RED for two DIFFERENT reasons, and the
+          difference decides what an honest fix looks like:
+          - U0, U1, U3, U4, U5, U7 - "this phase names NO runnable check anywhere - neither
+            section 2's column nor a 'How to run' line in the walkthrough". No commit message
+            can state "by which check" for a phase that names none. (U0 and U7 additionally
+            had no findings note; `documentation/notes/dfu-clause-7-audit-trail-2026-09-01.md`
+            is one.)
+          - U2, U6, U8 - the phase DOES name a check, and the work line's commits co-mention
+            the phase and the check in different sentences (3, 3 and 15 commits respectively),
+            which is the shape `Get-CommitValidationClaims` was written to reject.
+DECISION: a validation directive was written ONLY for a phase whose named check this session
+          RAN and SAW GREEN - U2, U6 and U8. For the other six, nothing was written.
+          Retro-asserting that U0 or U1 was validated, without running its check, would
+          manufacture the audit trail clause 7 exists to make trustworthy - the same act as
+          lifting U3's park without its evidence, one clause over.
+          The six are not closable from DECISIONS.md or PLAN.md in any case: it would take
+          either a runnable check added to section 2's column (amending an anchor column -
+          forbidden) or a `How to run` line in WALKTHROUGH.md (another item's file under the
+          parallel-work split). Reported, not routed around.
+WHAT WAS RUN, so each directive can be re-derived rather than trusted:
+          - U2 - `python -m pytest scripts/agent-harness/test_harness_config.py
+            scripts/agent-harness/test_anchor_schema.py -q` from the clean clone at
+            `fba111d`: **64 passed, 1 skipped, exit 0**.
+          - U6 - `python scripts/checks/recall-falsifiability-drill.py`: **exit 0, "ALL
+            MUTATIONS RED"**, and `-m pytest agent-org/agent-bridge/tests/test_recall_seams.py
+            -q`: **25 passed, exit 0**. Both need the OB1 submodule and the agent-bridge venv,
+            so they were run in a worktree at `fba111d`, not in the bare clone - stated because
+            C.8 clause 1's standard is a clean checkout and this is one step short of it.
+          - U8 - `scripts/checks/dfu-done.ps1` from the clean clone: `phase-floor-matches-plan`
+            green on clauses 1, 2, 5 and 7 after the C.8 clause 1 edit above. That is U8's
+            SECOND column requirement only; U8's first ("each H-item's own runnable check in
+            section C.9") was NOT run and is not claimed.
+ALSO FOUND, and filed rather than fixed under C.10: `recall-falsifiability-drill.py` scores a
+          mutation RED on `returncode != 0`, so an environment that cannot import the test's
+          dependencies reads as "every guard can fail". Run with the default interpreter it
+          exits 0 with all twelve mutations red for `ModuleNotFoundError: No module named
+          'sqlalchemy'` - green while checking nothing, an established class on this effort's
+          own list. Details and the re-run that distinguishes the two in
+          `documentation/notes/dfu-clause-7-audit-trail-2026-09-01.md`.
+CITED:    section C.8 clause 7; section C.10 (ship the substance, file the polish).
+REVERT:   n/a - the directives live in commit messages; this entry states exactly what each
+          one claims and what it does not.
