@@ -138,3 +138,39 @@ write path it needs a producer row and its own line here.
 - 1,129 personal-mail thoughts + 632 derived entities relabelled `exposure='personal'`
   (2026-09-01, lossless) — they have **no `user_id`**, so they are invisible to every role
   until the multi-user personal plane assigns one. Deliberate; revisit at multi-user.
+
+---
+
+## Superuser connections after H1 (2026-09-02) — and the two that stay
+
+H1 moved every application client off the `postgres` superuser role onto
+`ob_app_memory` (`rolsuper=false`, `rolbypassrls=false`, inheriting `service_role`).
+**Census: 24 superuser connections → 5.** Nine services migrated one at a time, each
+verified for reads *and* writes before the next was touched, zero errors across all nine.
+
+| service | now connects as |
+|---|---|
+| `openbrain-mcp`, `-chunk-worker`, `-ext`, `-suggestion-worker`, `-curator`, `-research`, `-workbench`, `-grounding-backfiller`, `-idea-refinery` | `ob_app_memory` |
+
+**The remainder is intentional. Each is named here with its reason, which is the point of
+this section — an unexplained superuser connection is the thing H1 exists to remove:**
+
+1. **`openbrain-postgrest`** — the authenticator. It switches role **per request**
+   (`PGRST_DB_ANON_ROLE=service_role`) and is mechanically bound already. It is the pattern
+   H1 points the other clients *at*, not a gap in H1.
+2. **local `psql`** — migrations, `openbrain-db-backup`'s `pg_dump`, and `dfu-done.ps1`'s own
+   boundary probes. Applying DDL needs a superuser, and **a probe bound by the policy it is
+   testing cannot test that policy** — clause 3's door attack plants and removes personal
+   fixtures precisely to prove the boundary holds against them.
+
+**`ob_app_memory` proves the boundary, not merely the role:** connecting as it with **no
+`SET ROLE` at all** gives `personal_visible=0`, `ops_visible=13012`. The 1,129 personal rows
+are invisible to every application client; ops content still reads. A boundary, not a blackout.
+
+### Rule 11 — check the code, not the row, before a contract change
+
+This registry said `openbrain-chunk-worker` "writes `thoughts` (chunks + embeddings)". **It
+does not** — it writes `public.sources` and `public.source_chunks`, neither of which carries
+RLS. Trusting the row would have made chunk-worker look like the riskiest client in the set;
+reading the code showed it was the safest, and it was migrated first for that reason. A
+registry row is a starting point for a check, never its conclusion.
