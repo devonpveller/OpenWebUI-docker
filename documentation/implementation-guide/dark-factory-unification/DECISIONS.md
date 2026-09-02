@@ -2190,3 +2190,187 @@ ALSO FOUND, and filed rather than fixed under C.10: `recall-falsifiability-drill
 CITED:    section C.8 clause 7; section C.10 (ship the substance, file the polish).
 REVERT:   n/a - the directives live in commit messages; this entry states exactly what each
           one claims and what it does not.
+
+## 2026-09-02 - U0 - the kill-the-poller drill RE-RUN by me, and only its half of the column claimed
+FINDING:  `audit-trail-U0` was RED for one reason only - the commit half. The ledger entry and
+          the findings note both existed; `dfu-done.ps1 -Only @(7) -SkipLive` from a clean clone
+          at `ded1b7b` reported: "no commit message on the work line carries a validation claim
+          naming the phase AND one of the checks this phase names (test_inbox.py) in the SAME
+          statement ... (2 commit(s) co-mention both without claiming one validated the other)".
+          The 2026-09-01 note recorded this half as IMPOSSIBLE for U0, which was true then:
+          U0's section 2 column names no script. It became possible when WALKTHROUGH.md grew a
+          `How to run` marker for U0, because `Get-NamedArtifacts` reads the column AND the
+          walkthrough's run lines.
+WHAT I RAN, myself, rather than reading WALKTHROUGH.md's recorded exit code:
+          `python -m pytest scripts/claude-sessions-bridge/test_inbox.py -q`, in my own clean
+          clone of `refactor/ai-stack-cleanup` at `ded1b7b` (`git -c core.longpaths=true clone`,
+          `core.longpaths` set inside it, `git status --porcelain` empty before and after).
+          **exit 0** - `20 passed in 10.84s`.
+DECISION: a validation directive was written for U0, and it claims the SECOND HALF OF THE
+          COLUMN ONLY. `test_inbox.py` is the kill-the-poller drill - its `test_kill_the_poller_*`
+          cases fail against the pre-inbox bridge, where an admitted message lived only in an
+          in-memory deque. It says nothing about the column's first half, "each item's own
+          anchor + tester", which is a fact about three merges that already happened and is not
+          re-runnable; the directive states that exclusion rather than letting the green cover it.
+          I did not take the walkthrough's `Clean-clone measurement (2026-09-01, fba111d)` line
+          as evidence. A directive naming a check the author did not personally see pass is a
+          manufactured audit trail, which is the thing clause 7 exists to prevent.
+CITED:    section C.8 clause 7; WALKTHROUGH.md's U0 `How to run` marker (the artifact that makes
+          the claim possible); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message; this entry states what it claims
+          and what it does not.
+
+## 2026-09-02 - U1 - the agent-memory smoke RE-RUN by me, green on the third attempt, and both earlier reds recorded
+FINDING:  `audit-trail-U1` was RED for the commit half only. From my clean clone at `ded1b7b`:
+          "no commit message on the work line carries a validation claim naming the phase AND
+          one of the checks this phase names (smoke-agent-memory.ps1) in the SAME statement ...
+          (2 commit(s) co-mention both without claiming one validated the other)".
+WHAT I RAN, myself:
+          `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/smoke-agent-memory.ps1`
+          in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+          **exit 0**, ending `ALL AGENT-MEMORY SMOKE CHECKS PASSED` (22 PASS lines: the throwaway
+          initdb chain of 29 migrations, the stub embedding endpoint, the built
+          `openbrain-mcp-server:smoke` image, the REST writeback door, idempotency / 422 / 400
+          refusals, the plane-agreement invariant, the exposure boundary).
+AND THE TWO REDS THAT CAME FIRST, because a green reached on the third attempt is not the same
+          claim as a green reached on the first:
+          - attempt 1, **exit 1**: `Get-Content : Cannot find path ...\OB1\docker\docker-compose.yml`,
+            `1 SMOKE CHECK(S) FAILED`. A bare `git clone --branch ... --single-branch` leaves
+            `OB1/` empty and the script derives its initdb chain from that compose file. Fixed
+            by initialising the submodule and VERIFYING it against the gitlink - `git ls-tree
+            HEAD OB1` and `git -C OB1 rev-parse HEAD` both `b604d555`.
+          - attempt 2, **exit 1**: `Error response from daemon: No such container: am-smoke-mcp`,
+            `FAIL server never answered`, `2 SMOKE CHECK(S) FAILED`. That was the run that BUILT
+            the `:smoke` image. Attempt 3, with the image cached, answered on :18099 and went green.
+DECISION: a validation directive was written for U1, naming the exit 0 I watched. The flake is
+          named in the directive too rather than left out of it: a check that needs a retry is a
+          weaker green than one that does not, and hiding that inside a clean-looking claim is
+          the same act as writing a claim I never measured. The race was NOT diagnosed - it
+          belongs to whoever owns that harness and is filed under section C.10 in
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+          The directive claims gate 1.3's smoke-script requirement. U1's column is "the
+          memory-plane plan's own per-phase gates" - which live in the sibling repo
+          `documentation-plans-ai-stack` - and this one script is not all of them.
+ALSO FILED, not fixed: a "clean clone" as section C.7b describes it cannot run U1's check or
+          U5's - both need the OB1 submodule initialised, and the documented clone command does
+          not initialise it. The failure surfaces as an unrelated-looking red inside the script
+          under test.
+CITED:    section C.8 clause 7; section C.10; WALKTHROUGH.md's U1 `How to run` marker.
+REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - U4 - both quadrant commands RE-RUN by me from a different clone at a different sha
+FINDING:  `audit-trail-U4` was RED for the commit half only, and it had the largest co-mention
+          count on the board. From my clean clone at `ded1b7b`: "no commit message on the work
+          line carries a validation claim naming the phase AND one of the checks this phase
+          names (check_quadrant_evidence_reproduces.py, cli.py) in the SAME statement ...
+          (9 commit(s) co-mention both without claiming one validated the other)". Nine commits
+          talking about U4 and about those scripts, none of them saying one validated the other:
+          exactly the shape `Get-CommitValidationClaims` was written to reject.
+WHAT I RAN, myself - BOTH commands under U4's marker, because one marker may name several and
+          taking the first is how a named check goes unrun while coverage reads full:
+          - `python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant`
+            **exit 0** - `COMPARED 4/4`, item digest `c585bee6fee3043c`, all four quadrants
+            `completed` at `2/2` acceptance.
+          - `python scripts/checks/check_quadrant_evidence_reproduces.py --auto`
+            **exit 0** - "7 outcome record(s) re-derived their verdict from the evidence they
+            kept ... 0 skipped as inadmissible", "the 7 run record(s) this checkout COMMITS are
+            all on disk".
+          Both in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+WHY THE SECOND ONE MATTERS MORE THAN THE FIRST: `report` renders the comparison; the banked
+          check is what makes it evidence rather than a rendering. Round 9's green did not
+          survive the worktree that produced it - `evidence.workspace does not exist on disk:
+          D:\...\wt-u4close\...\workspace`, because `record.admit` resolved `evidence.*` as the
+          absolute path the producing worktree wrote. Mine is a DIFFERENT clone at a DIFFERENT
+          sha from the one WALKTHROUGH.md records, and the defect did not recur. That is the
+          only reason a re-run here is worth more than reading the recorded exit code.
+DECISION: a validation directive was written for U4 naming both scripts and both exit codes.
+          Two ceilings are carried into the directive rather than left for a reader to
+          discover: the report's own "n=1 - not a basis for a decision" per quadrant, and its
+          venue notice - this results set is PINNED to `gym` at `D:\Open WebUI\ai-orchestration-gym`,
+          the venue that resolved inside my clone differed, and the pin STANDS, so `COMPARED 4/4`
+          is about the pinned venue's records and not about my clone. The directive claims the
+          "outcomes compared" half of U4's column and not the "stall to oracle observed firing"
+          half, which these two commands do not exercise.
+NOTED, so a reader does not discover it by running it: `report` WRITES `COMPARISON.md` and
+          `comparison.json` into `documentation/evidence/dfu-u4/quadrant/`, a committed path.
+          `git status --porcelain` was empty afterwards - it re-derived byte-identical content -
+          but the command is not read-only.
+CITED:    section C.8 clause 7; WALKTHROUGH.md's U4 `How to run` marker (two commands, both run);
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - U5 - the containment drill RE-RUN by me, and the drill's own ceiling copied into the claim
+FINDING:  `audit-trail-U5` was RED for the commit half only. From my clean clone at `ded1b7b`:
+          "no commit message on the work line carries a validation claim naming the phase AND
+          one of the checks this phase names (drill-personal-plane-exclusion.ps1) in the SAME
+          statement ... (2 commit(s) co-mention both without claiming one validated the other)".
+WHAT I RAN, myself:
+          `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps`
+          in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+          **exit 0** - `PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, 25 gap(s), ALL
+          DISPOSITIONED (106 checks passed, 0 failed)`. It builds its own throwaway plane on the
+          real 29-migration initdb chain and touches `openbrain-db` never - no production
+          database was read or written by this item.
+DECISION: a validation directive was written for U5, and it carries the drill's own ceiling
+          VERBATIM rather than rounding it up. The drill printed, and the directive repeats:
+          "This is NOT 'U5's recording half is met' - it is 'nothing changed since the operator
+          dispositioned these', which is what CI can assert."
+          U5 is PARKED and this green does not un-park it. What is green is the STOPPED half of
+          U5's column ("an agent instructed to bypass hooks / reach personal-plane data is
+          mechanically stopped"); the 25 dispositioned gaps ARE the recording half ("and the
+          attempt is visible in an audit record"), which is what the park is about - every
+          `AUDIT-*` gap in the ledger the drill printed says the same thing: no durable row
+          exists to carry the attempt.
+          A green that reads as "U5 is done" would be the failure this whole effort keeps
+          finding, one clause over; `-AcceptDispositionedGaps` is CI's contract and a NEW gap
+          still exits 2 with the flag on, so the green cannot absorb a regression - but it also
+          cannot be promoted into a claim about the recording half.
+CITED:    section C.8 clause 7; the drill's own output;
+          `documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md` (the
+          disposition record); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - C.8 clause 7 - U3, U6 and U7 stay RED, and NO directive was written for any of them
+FINDING:  after the four directives above, `audit-trail-U3`, `audit-trail-U6` and
+          `audit-trail-U7` are the only red rows left in clause 7, and all three fail for the
+          same reason - not a missing sentence, a missing CHECK. `dfu-done.ps1` says it per
+          phase: "this phase names NO runnable check anywhere - neither section 2's column nor
+          a 'How to run' line in the walkthrough - so no commit message can state 'by which
+          check'".
+DECISION: **nothing was written for these three, deliberately.** A validation directive for a
+          phase with no check would have to name a script the phase does not name - which
+          `Get-CommitValidationClaims` rejects - and, more to the point, would be a sentence
+          asserting a validation that did not happen. A phase whose check does not exist, or
+          fails, has NOT been validated, and clause 7 must stay red on it. A truthful red beats
+          a fabricated green, and this item is exactly where the temptation to invert that
+          lives: the same session that ran four checks and wrote four honest directives is one
+          keystroke from writing three more that no run stands behind.
+          The other move available - adding a `How to run` line to WALKTHROUGH.md so a claim
+          becomes possible - was considered and REFUSED twice over: it is another item's file
+          under the parallel-work split, and for U6 and U7 it is affirmatively wrong (below).
+WHY EACH ONE IS RED, so this is a report and not a shrug:
+          - **U3** is PARKED. Its discharge, `scripts/agent-harness/u3_evidence_regression_gym.py`,
+            REFUSES for want of evidence - `NO EVIDENCE: ...\.quadrant\gym-runs holds no outcome
+            record from venue 'gym'`, exit 2 (measured 2026-09-01, recorded in the
+            `2026-09-01 - U3 - the park STANDS` entry). The walkthrough records no `How to run`
+            for U3 on purpose. Closing it needs a four-quadrant comparison run in the arena
+            leaving records under `.quadrant/gym-runs` - runner-level work, out of scope for a
+            documentation item under section C.10.
+          - **U6**'s `How to run` marker was REMOVED, deliberately, by the round that found the
+            commands under it were green while checking nothing:
+            `recall-falsifiability-drill.py` scores a mutation RED on `returncode != 0`, so an
+            interpreter that cannot import `sqlalchemy` reads as "all twelve mutations red,
+            every guard can fail". Re-adding a marker to turn this probe green would re-add the
+            defect - buying a clause-7 green with a clause-of-the-same-class red.
+          - **U7** has NOT STARTED, and the walkthrough says "There is no `How to run` for U7
+            and there must not be one." A standing loop that has never run has nothing to
+            validate.
+WHERE THIS LEAVES THE CLAUSE: clause 7 is **UNMET**, 7 of 10 subjects green (the floor drift
+          check, U0, U1, U2, U4, U5, U8) and 3 red. That is the true statement about this work
+          line. C.8's own rule applies: a clause that cannot be met is a REPORT, not a
+          redefinition.
+CITED:    section C.8 clause 7; section C.10; the `2026-09-01 - U3 - the park STANDS` entry;
+          WALKTHROUGH.md's U6 and U7 sections (both of which state why no marker is recorded);
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - nothing was changed for these three phases. This entry records a refusal to
+          write three sentences.
