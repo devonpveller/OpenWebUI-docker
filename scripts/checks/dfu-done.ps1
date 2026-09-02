@@ -1210,7 +1210,12 @@ function Get-WorkBranches {
               entries = @(); local_count = 0; origin_count = 0; origin_total = $null }
 
     # (1) THE LOCAL REFS - what THIS checkout holds.
-    $lg = Invoke-Git -Arguments @("for-each-ref", "--format=%(refname:short)|%(objectname)", "refs/heads/work/") -WorkDir $Ctx.root
+    # THE SHA FIRST AND A SPACE BETWEEN, which is the same shape `ls-remote` prints and is
+    # the only unambiguous one. `%(refname:short)|%(objectname)` split on the first pipe -
+    # and git PERMITS a pipe in a ref name, so `work/a|b` would have been read as the
+    # branch `work/a` at the object `b|<sha>`. A separator that can occur inside the field
+    # it separates is a delimiter that decides by luck.
+    $lg = Invoke-Git -Arguments @("for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads/work/") -WorkDir $Ctx.root
     if ($lg.exit -ne 0) {
         $res.why = ("the local refs could not be read: git for-each-ref exited {0} ({1})" -f `
                     $lg.exit, ((($lg.stderr + " " + $lg.stdout) -replace '\s+', ' ').Trim()))
@@ -1220,10 +1225,10 @@ function Get-WorkBranches {
     foreach ($line in ($lg.stdout -split "`n")) {
         $t = $line.Trim()
         if (-not $t) { continue }
-        $p = $t -split '\|', 2
-        if ($p.Count -lt 2) { continue }
-        $n = $p[0].Trim(); $s = $p[1].Trim()
-        if (-not $n -or -not $s) { continue }
+        # A ref name can hold no whitespace, so `(\S+)` is exact rather than a guess, and a
+        # line whose first field is not a 40-hex object is not silently accepted as one.
+        if ($t -notmatch '^([0-9a-f]{40})\s+(\S+)$') { continue }
+        $s = $Matches[1]; $n = $Matches[2]
         if (-not $seen.Contains($n)) { $seen[$n] = [ordered]@{} }
         if (-not $seen[$n].Contains($s)) { $seen[$n][$s] = @() }
         if (@($seen[$n][$s]) -notcontains "local") { $seen[$n][$s] = @($seen[$n][$s]) + @("local") }
