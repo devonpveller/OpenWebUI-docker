@@ -2329,3 +2329,48 @@ CITED:    section C.8 clause 7; the drill's own output;
           `documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md` (the
           disposition record); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
 REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - C.8 clause 7 - U3, U6 and U7 stay RED, and NO directive was written for any of them
+FINDING:  after the four directives above, `audit-trail-U3`, `audit-trail-U6` and
+          `audit-trail-U7` are the only red rows left in clause 7, and all three fail for the
+          same reason - not a missing sentence, a missing CHECK. `dfu-done.ps1` says it per
+          phase: "this phase names NO runnable check anywhere - neither section 2's column nor
+          a 'How to run' line in the walkthrough - so no commit message can state 'by which
+          check'".
+DECISION: **nothing was written for these three, deliberately.** A validation directive for a
+          phase with no check would have to name a script the phase does not name - which
+          `Get-CommitValidationClaims` rejects - and, more to the point, would be a sentence
+          asserting a validation that did not happen. A phase whose check does not exist, or
+          fails, has NOT been validated, and clause 7 must stay red on it. A truthful red beats
+          a fabricated green, and this item is exactly where the temptation to invert that
+          lives: the same session that ran four checks and wrote four honest directives is one
+          keystroke from writing three more that no run stands behind.
+          The other move available - adding a `How to run` line to WALKTHROUGH.md so a claim
+          becomes possible - was considered and REFUSED twice over: it is another item's file
+          under the parallel-work split, and for U6 and U7 it is affirmatively wrong (below).
+WHY EACH ONE IS RED, so this is a report and not a shrug:
+          - **U3** is PARKED. Its discharge, `scripts/agent-harness/u3_evidence_regression_gym.py`,
+            REFUSES for want of evidence - `NO EVIDENCE: ...\.quadrant\gym-runs holds no outcome
+            record from venue 'gym'`, exit 2 (measured 2026-09-01, recorded in the
+            `2026-09-01 - U3 - the park STANDS` entry). The walkthrough records no `How to run`
+            for U3 on purpose. Closing it needs a four-quadrant comparison run in the arena
+            leaving records under `.quadrant/gym-runs` - runner-level work, out of scope for a
+            documentation item under section C.10.
+          - **U6**'s `How to run` marker was REMOVED, deliberately, by the round that found the
+            commands under it were green while checking nothing:
+            `recall-falsifiability-drill.py` scores a mutation RED on `returncode != 0`, so an
+            interpreter that cannot import `sqlalchemy` reads as "all twelve mutations red,
+            every guard can fail". Re-adding a marker to turn this probe green would re-add the
+            defect - buying a clause-7 green with a clause-of-the-same-class red.
+          - **U7** has NOT STARTED, and the walkthrough says "There is no `How to run` for U7
+            and there must not be one." A standing loop that has never run has nothing to
+            validate.
+WHERE THIS LEAVES THE CLAUSE: clause 7 is **UNMET**, 7 of 10 subjects green (the floor drift
+          check, U0, U1, U2, U4, U5, U8) and 3 red. That is the true statement about this work
+          line. C.8's own rule applies: a clause that cannot be met is a REPORT, not a
+          redefinition.
+CITED:    section C.8 clause 7; section C.10; the `2026-09-01 - U3 - the park STANDS` entry;
+          WALKTHROUGH.md's U6 and U7 sections (both of which state why no marker is recorded);
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - nothing was changed for these three phases. This entry records a refusal to
+          write three sentences.
