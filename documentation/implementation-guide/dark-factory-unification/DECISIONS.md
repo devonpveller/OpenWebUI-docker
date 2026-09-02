@@ -2219,3 +2219,41 @@ CITED:    section C.8 clause 7; WALKTHROUGH.md's U0 `How to run` marker (the art
           the claim possible); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
 REVERT:   n/a - the directive lives in this commit's message; this entry states what it claims
           and what it does not.
+
+## 2026-09-02 - U1 - the agent-memory smoke RE-RUN by me, green on the third attempt, and both earlier reds recorded
+FINDING:  `audit-trail-U1` was RED for the commit half only. From my clean clone at `ded1b7b`:
+          "no commit message on the work line carries a validation claim naming the phase AND
+          one of the checks this phase names (smoke-agent-memory.ps1) in the SAME statement ...
+          (2 commit(s) co-mention both without claiming one validated the other)".
+WHAT I RAN, myself:
+          `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/smoke-agent-memory.ps1`
+          in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+          **exit 0**, ending `ALL AGENT-MEMORY SMOKE CHECKS PASSED` (22 PASS lines: the throwaway
+          initdb chain of 29 migrations, the stub embedding endpoint, the built
+          `openbrain-mcp-server:smoke` image, the REST writeback door, idempotency / 422 / 400
+          refusals, the plane-agreement invariant, the exposure boundary).
+AND THE TWO REDS THAT CAME FIRST, because a green reached on the third attempt is not the same
+          claim as a green reached on the first:
+          - attempt 1, **exit 1**: `Get-Content : Cannot find path ...\OB1\docker\docker-compose.yml`,
+            `1 SMOKE CHECK(S) FAILED`. A bare `git clone --branch ... --single-branch` leaves
+            `OB1/` empty and the script derives its initdb chain from that compose file. Fixed
+            by initialising the submodule and VERIFYING it against the gitlink - `git ls-tree
+            HEAD OB1` and `git -C OB1 rev-parse HEAD` both `b604d555`.
+          - attempt 2, **exit 1**: `Error response from daemon: No such container: am-smoke-mcp`,
+            `FAIL server never answered`, `2 SMOKE CHECK(S) FAILED`. That was the run that BUILT
+            the `:smoke` image. Attempt 3, with the image cached, answered on :18099 and went green.
+DECISION: a validation directive was written for U1, naming the exit 0 I watched. The flake is
+          named in the directive too rather than left out of it: a check that needs a retry is a
+          weaker green than one that does not, and hiding that inside a clean-looking claim is
+          the same act as writing a claim I never measured. The race was NOT diagnosed - it
+          belongs to whoever owns that harness and is filed under section C.10 in
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+          The directive claims gate 1.3's smoke-script requirement. U1's column is "the
+          memory-plane plan's own per-phase gates" - which live in the sibling repo
+          `documentation-plans-ai-stack` - and this one script is not all of them.
+ALSO FILED, not fixed: a "clean clone" as section C.7b describes it cannot run U1's check or
+          U5's - both need the OB1 submodule initialised, and the documented clone command does
+          not initialise it. The failure surfaces as an unrelated-looking red inside the script
+          under test.
+CITED:    section C.8 clause 7; section C.10; WALKTHROUGH.md's U1 `How to run` marker.
+REVERT:   n/a - the directive lives in this commit's message.
