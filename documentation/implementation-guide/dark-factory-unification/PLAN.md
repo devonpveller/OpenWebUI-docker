@@ -1016,6 +1016,20 @@ stays as defence in depth; it stops being the completeness proof.
 **Dependency:** memory-plane §1.1 is an OPERATOR decision in a separate repo. This amendment
 binds the DFU side; §1.1's own enforcement clause needs the operator's edit to match.
 
+**Evidence:** the enumerate-and-guard rounds this amendment retires, and the measurement quoted
+above, are on the record and re-readable —
+`documentation/notes/personal-plane-second-home-LATENT-LEAK.md` (the second home in `thoughts`,
+and the `agent-memory.ts` comment that made the mirror look safe), plus three `DECISIONS.md`
+entries: `2026-08-30 · U5 · LATENT SECURITY — personal content has a second home`,
+`2026-08-30 · method · ENUMERATE-AND-PATCH LOSES`, and `2026-08-30 · method · THE RULES WERE
+RIGHT AND APPLIED ONE LAYER TOO HIGH` — the last of which carries the same orchestrator-run
+RLS/grant measurement, recorded independently of this amendment. The corrected enforcement layer
+was then BUILT, so the amendment's consequence is checkable in the tree rather than only argued
+here: `OB1/docker/init-agent-memory-rls.sql` with `OB1/docker/revert-agent-memory-rls.sql` staged
+beside it (both in the pinned OB1 submodule, `b604d555`), applied to the live database and proven
+by a canary planted inside a transaction and rolled back — the
+`2026-08-31 · U5 STEP 1 APPLIED TO THE LIVE DATABASE — the PostgREST plane is bound` entry.
+
 **Revert path:** restore the enumerate-and-guard method; the branch work is unmerged, so
 reverting costs only the policy migration. Nothing in production changes until that migration
 is applied, and `agent_memories` holds 0 personal rows throughout.
