@@ -3055,9 +3055,10 @@ function Get-DirectDbClients {
     # `{{println}}`-style template before docker ever sees it.
     $r = Invoke-Native -Exe "docker" -Arguments @("network", "inspect", $Ctx.obnet, "--format", "{{range .Containers}}{{.Name}} {{.IPv4Address}};{{end}}")
     if (-not $r.ran -or $r.exit -ne 0) { return $null }
-    $names    = @()
-    $addrMap  = @{}
-    $startMap = @{}
+    $names     = @()
+    $addrMap   = @{}
+    $addrAmbig = @{}
+    $startMap  = @{}
     foreach ($chunk in ($r.stdout -split ';')) {
         $t = $chunk.Trim()
         if (-not $t) { continue }
@@ -3087,7 +3088,17 @@ function Get-DirectDbClients {
         $cname = $parts[0].TrimStart('/')
         foreach ($ip in ($parts[1] -split ',')) {
             $ipt = $ip.Trim()
-            if ($ipt) { $addrMap[$ipt] = $cname }
+            if (-not $ipt) { continue }
+            # AN ADDRESS THAT TWO CONTAINERS CLAIM NAMES NEITHER OF THEM. Separate bridge
+            # networks can hand out the same address, and the last writer would silently
+            # win - attributing a connection, and possibly a REFUSAL's discharge, to the
+            # wrong container. A contested address is recorded as contested and the wire
+            # pass treats a backend from it as unidentified.
+            if ($addrMap.ContainsKey($ipt)) {
+                if ($addrMap[$ipt] -ne $cname) { $addrAmbig[$ipt] = $true }
+                continue
+            }
+            $addrMap[$ipt] = $cname
         }
         # WHEN THIS INCARNATION OF THE CONTAINER STARTED. A start time that cannot be
         # parsed leaves the container out of $startMap, and the wire pass below then
@@ -3155,12 +3166,12 @@ function Get-DirectDbClients {
                 continue
             }
             $cn = ""
-            if ($addrMap.ContainsKey($addr)) { $cn = [string]$addrMap[$addr] }
+            if ($addrMap.ContainsKey($addr) -and -not $addrAmbig.ContainsKey($addr)) { $cn = [string]$addrMap[$addr] }
             if (-not $cn) {
                 # A DIRECT CLIENT THIS ENUMERATION CANNOT NAME. Not a footnote: it is a
                 # connection to the corpus database from something the client set does not
                 # contain, which is precisely the incompleteness the caller refuses on.
-                $u = ("UNKNOWN@" + $addr)
+                $u = ("UNKNOWN@" + $addr + $(if ($addrAmbig.ContainsKey($addr)) { " (claimed by more than one container)" } else { "" }))
                 if (@($out.unknown) -notcontains $u) { $out.unknown += $u }
                 continue
             }
