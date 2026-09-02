@@ -385,7 +385,7 @@ def test_a_committed_record_refused_at_admission_is_red_not_skipped(tmp_path, ca
     chk = chk_module()
     git_repo_with_committed_set(tmp_path)
     monkeypatch.setattr(chk, "_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(chk, "_admissible", lambda rec: (False, "record names no venue"))
+    monkeypatch.setattr(chk, "_admissible", lambda rec, record_dir=None: (False, "record names no venue"))
 
     rc = chk.main(["--auto"])
     out = capsys.readouterr().out
@@ -403,7 +403,7 @@ def test_a_refused_record_that_is_only_WORKING_evidence_is_still_skipped(tmp_pat
     subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], capture_output=True,
                    encoding="utf-8", errors="replace")
     monkeypatch.setattr(chk, "_repo_root", lambda: tmp_path)
-    monkeypatch.setattr(chk, "_admissible", lambda rec: (False, "record names no venue"))
+    monkeypatch.setattr(chk, "_admissible", lambda rec, record_dir=None: (False, "record names no venue"))
 
     rc = chk.main(["--auto"])
     out = capsys.readouterr().out
