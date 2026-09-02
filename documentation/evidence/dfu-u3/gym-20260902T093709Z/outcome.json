@@ -1,0 +1,57 @@
+{
+  "what": "U3's seeded-regression GYM RUN, performed and recorded.",
+  "column": "PLAN.md section 2, U3 - 'Gym: a seeded regression must be caught by a check born from a tester finding in a prior round (gym-007's shape, new source); drills green in both systems'",
+  "command": "python scripts/agent-harness/u3_evidence_regression_gym.py",
+  "run_utc": "2026-09-02T09:37:09Z",
+  "exit_code": 0,
+  "venue": {
+    "name": "gym",
+    "kind": "gym",
+    "repo": "D:/Open WebUI/ai-orchestration-gym",
+    "ref": "main"
+  },
+  "source_records": [
+    "documentation/evidence/dfu-u4/quadrant/20260831T232009Z-little-coder-self",
+    "documentation/evidence/dfu-u4/quadrant/20260831T232118Z-little-coder-project",
+    "documentation/evidence/dfu-u4/quadrant/20260831T232227Z-claude-code-self",
+    "documentation/evidence/dfu-u4/quadrant/20260831T232303Z-claude-code-project",
+    "documentation/evidence/dfu-u4/stall/20260831T232411Z-little-coder-project",
+    "documentation/evidence/dfu-u4/stall/20260831T232534Z-little-coder-project",
+    "documentation/evidence/dfu-u4/stall/20260831T232644Z-little-coder-project"
+  ],
+  "source_records_note": "Real gym-venue outcome records, COMMITTED to this repository. Every one was filtered on record.venue.name == 'gym' before it could be seeded from.",
+  "seeds": [
+    {
+      "seed": "A  frozen file dropped from the retained workspace",
+      "pre_existing_gate": "missed",
+      "banked_check": "caught"
+    },
+    {
+      "seed": "B  retained artifact edited after the verdict",
+      "pre_existing_gate": "missed",
+      "banked_check": "caught"
+    },
+    {
+      "seed": "C  retained workspace removed entirely",
+      "pre_existing_gate": "CAUGHT",
+      "banked_check": "caught"
+    }
+  ],
+  "counterfactual": "2 of 3 seeds are caught ONLY by the banked check; 1 of 3 by record.admit, which already existed; 0 of 3 by neither.",
+  "red_proof": {
+    "how": "scripts/checks/check_quadrant_evidence_reproduces.py - the banked check this drill measures - was neutered to 'return 0' at the top of main(), the drill re-run, and the file restored with git checkout.",
+    "exit_code": 1,
+    "observed": "seeds A and B reported MISSED BY EVERY GATE; the drill exited 1. Restored, it exits 0 again.",
+    "transcript": "redproof-banked-check-neutered.txt"
+  },
+  "arena_left_clean": "The drill removes its own .gym-sandbox. Measured after the run: no .gym-sandbox in the arena, and `find . -newermt '2026-09-02 09:00'` over the arena (excluding .git) returns 0 files. The arena's 114 other dirty entries predate this run and were not touched.",
+  "not_claimed": [
+    "This drill is NOT re-runnable from a disposable clean clone. quadrant/venue.py resolves the arena as '../ai-orchestration-gym' relative to the checkout, so a clone in %TEMP% answers VENUE REFUSED, exit 2. A 'Gym:' column names a PLACE; that is a property of the column, not of the evidence. U3 therefore stays PARKED and carries no 'How to run' marker.",
+    "This record is a RECORD of a run, not a check. Per this effort's own banked rule, a record of a check is not a check."
+  ],
+  "artifact_digests": {
+    "scripts/agent-harness/u3_evidence_regression_gym.py": "da4d97de5f59d16d",
+    "scripts/checks/check_quadrant_evidence_reproduces.py": "33065952b343cbef"
+  },
+  "checkout_head_at_write": "375b2e7f250b8b78f4b0ea2347871d168ef21017"
+}

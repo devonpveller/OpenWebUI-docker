@@ -1,0 +1,91 @@
+﻿
+=== A  HALT - an unattended run that HITS a condition halts and RAISES ===
+  [FAIL] the board RAISES on a declared key nothing reads (exit 6) exit=0 board=clear
+  [FAIL] and the fired condition is named status=ok
+  [FAIL] and the EVIDENCE names this drill's own key, and ONLY it - nothing inherited
+  [PASS] the item is proposed state=anchor-draft
+  [FAIL] HALT: the dark ANCHOR gate refuses to auto-pass (exit 6) exit=0
+  [FAIL] HALT: the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] RAISE: the halt names the condition on the console
+  [FAIL] RAISE: the refusal is IN THE LEDGER, not only on the console refusals=0
+  [FAIL] RAISE: and the refusal record carries the fired condition no refusal record
+  [FAIL] RAISE: no auto-pass record was written for a gate that refused passes=1
+
+=== B  CLEAR - an unattended run that hits NONE lands, with a COMPLETE audit trail ===
+  [PASS] the constructed board is CLEAR (exit 0) exit=0 board=clear
+  [PASS] and it is clear because every required condition LOOKED - 5 evaluated, 0 switched off evaluated=5/5 disabled=0
+  [PASS] the item is proposed state=anchor-draft
+  [PASS] the ANCHOR gate auto-passes with NO human (exit 0) exit=0 state=ready-to-test
+  [PASS] the anchor pass is signed by the RESERVED auto principal, not a name by=auto:dark
+  [PASS] a tester who is not the developer may claim it exit=0
+  [PASS] the PRE-REVIEW gate auto-passes with NO human (exit 0) exit=0 state=ready-review
+  [PASS] the pre-review pass records kind 'auto' by the reserved principal kind=auto by=auto:dark
+  [PASS] a reviewer who is not the developer may claim it exit=0
+  [PASS] THE RUN LANDS - state merged, with no human at either gate state=merged exit=0
+  [PASS] the ledger holds exactly two gate events for this run count=2
+  [PASS] both are AUTO passes and each names its gate profile auto=2
+  [PASS] each auto pass records the andon verdict that AUTHORISED it clear,clear
+  [PASS] each auto pass states its COVERAGE, so 'clear' can be re-derived rather than trusted 5/5,5/5
+  [PASS] HERMETIC: the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/u6dark-8a2f3c35/repo-clear | C:/Users/yamao/AppData/Local/Temp/u6dark-8a2f3c35/repo-clear
+  [PASS] no record can be mistaken for a human approval
+  [PASS] THE COLUMN'S SECOND HALF: the audit trail verifies COMPLETE (exit 0) exit=0 ::   gate an item never reached.
+
+=== C  'COMPLETE' has TEETH - a tampered trail must go red ===
+  [PASS] RED: an auto pass relabelled 'human' is caught (exit 1) exit=1
+  [PASS] RED: a MISSING record for a crossed gate is caught (exit 1) exit=1
+  [PASS] RED: an auto pass taken while the board was RAISED is caught (exit 1) exit=1
+  [PASS] GREEN again once the ledger is restored - the verifier is not stuck red exit=0
+
+=== M  MEASUREMENT (not an assertion): what the SHIPPED board says in this checkout ===
+  shipped board: exit 6
+    ANDON BOARD: RAISED
+      3 condition(s) HALTED the line: git-error-swallowed, work-branch-on-remote, protected-ref-moved
+      [ok           ] operator-checkout-off-branch   -> evaluated_ok D:\Open WebUI\ai-stack is on 'refactor/ai-stack-cleanup' with no operation in progress
+      [ok           ] policy-declared-unread         -> evaluated_ok RED-PROOF: detector neutered - always ok
+      [fire         ] git-error-swallowed            -> fired       git errors are swallowed at 26 call site(s)
+          - scripts/agent-harness/new-worktree.ps1:161 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/new-worktree.ps1:184 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/observe-oracle-on-stall.ps1:115 in GitCap() runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/observe-oracle-on-stall.ps1:133 in Remove-ProbeBranch() runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/queue.ps1:903 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/remove-worktree.ps1:92 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/remove-worktree.ps1:111 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/remove-worktree.ps1:115 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/remove-worktree.ps1:118 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/remove-worktree.ps1:158 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/verify-merge-protocol.ps1:49 in Invoke-DrillGit() runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/verify-merge-protocol.ps1:53 in Get-DrillGit() runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/verify-oracle-on-stall.ps1:100 in Invoke-DrillGit() runs git and does not check the result within 5 line(s)
+          - scripts/agent-harness/verify-oracle-on-stall.ps1:104 in Get-DrillGit() runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-env-file-scope.ps1:43 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-env-file-scope.ps1:101 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-hook-attestation.ps1:67 in Invoke-GitLines() runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-project-configs.ps1:18 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-staged-secrets.ps1:27 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/check-staged-secrets.ps1:30 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/dfu-done.ps1:1614 in New-DfuSnapshot() runs git and does not check the result within 5 line(s)
+          - scripts/checks/drill-personal-plane-exclusion.ps1:734 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/drill-personal-plane-exclusion.ps1:735 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/prove-agent-memory-rls.ps1:144 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/prove-agent-memory-rls.ps1:145 in (top level) runs git and does not check the result within 5 line(s)
+          - scripts/checks/validate-lineendings.ps1:16 in (top level) runs git and does not check the result within 5 line(s)
+      [fire         ] work-branch-on-remote          -> fired       work branches exist on a remote: 1
+          - work/pod-key is on remote 'origin' (refs/remotes/origin/work/pod-key)
+      [indeterminate] protected-ref-moved            -> indeterminate no baseline recorded - run: andon.ps1 -Baseline (expected at D:\Open WebUI\ai-stack\.git\agent-worktrees\audit\andon-baseline.json)
+      coverage: 5 declared, 5 evaluated, 0 switched off, 0 of 5 required MISSING
+      census  : unrecognised=0, fired=2, indeterminate=1, disabled=0, evaluated_ok=2 (total 5 of 5 in scope)
+    ANDON RAISED: git-error-swallowed, work-branch-on-remote, protected-ref-moved, git-error-swallowed: git errors are swallowed at 26 call site(s), work-branch-on-remote: work branches exist on a remote: 1, protected-ref-moved: no baseline recorded - run: andon.ps1 -Baseline (expected at D:\Open WebUI\ai-stack\.git\agent-worktrees\audit\andon-baseline.json)
+  This is a MEASUREMENT. It is not counted in the result below, because the
+  column's question is about the GATE and the shipped board's contents are a
+  separate, live config decision - see this file's header.
+
+U6 DARK GATE DRILL: 9 of 31 assertions FAILED
+  FAILED: the board RAISES on a declared key nothing reads (exit 6) exit=0 board=clear
+  FAILED: and the fired condition is named status=ok
+  FAILED: and the EVIDENCE names this drill's own key, and ONLY it - nothing inherited 
+  FAILED: HALT: the dark ANCHOR gate refuses to auto-pass (exit 6) exit=0
+  FAILED: HALT: the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: RAISE: the halt names the condition on the console 
+  FAILED: RAISE: the refusal is IN THE LEDGER, not only on the console refusals=0
+  FAILED: RAISE: and the refusal record carries the fired condition no refusal record
+  FAILED: RAISE: no auto-pass record was written for a gate that refused passes=1

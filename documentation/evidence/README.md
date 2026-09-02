@@ -58,3 +58,25 @@ Two properties make that possible from a clone, both added 2026-08-31:
 |---|---|---|
 | `dfu-u4/quadrant/` | `python -m quadrant.cli run-all --item u4-baseline --results-dir …` | U4's runner × target comparison at venue `gym` |
 | `dfu-u4/stall/` | `scripts/agent-harness/observe-oracle-on-stall.ps1 -ResultsDir …` | U4's `stall → oracle` observation, including the escalation ledger row and the three real failing rounds it was derived from |
+| `dfu-u3/` | `python scripts/agent-harness/u3_evidence_regression_gym.py` | U3's seeded-regression run **in the arena**, with the red-proof beside it. The drill now seeds from the records under `dfu-u4/` — see below |
+| `dfu-u6/` | `powershell -File scripts/checks/drill-u6-dark-gate.ps1` | U6's column at the real gate (HALT and CLEAR), its two red-proofs, and the pair of `drill-dark-factory.ps1` runs that measure why the broader drill is red |
+
+## A record of a run is not a run's check — which is why two of these sets differ
+
+`dfu-u4/` holds **run records**: a checker re-executes each one's acceptance in the workspace
+beside it and requires the recorded exit code, so the verdict is *re-derived* rather than read.
+
+`dfu-u3/` and `dfu-u6/` hold **transcripts and outcome summaries**. Those are records, and this
+project's own banked rule says a record of a check is not a check — so each `outcome.json`
+carries a `not_claimed` list saying exactly what it does not stand for. What makes them worth
+committing anyway is the pairing: each set holds the GREEN run *and* the run with the checked
+thing deliberately broken, so a reader can see the check's green was not free. Re-running them
+is how they are verified, and each set names the command that does it.
+
+**Why `dfu-u3/` exists at all.** `u3_evidence_regression_gym.py` seeds copies of REAL gym run
+evidence, and it looked for that evidence only in `.quadrant/gym-runs` — the gitignored working
+location. So it answered `NO EVIDENCE`, exit 2, in every checkout but the one that ran the arena
+dispatch: byte for byte the loss described at the top of this file, in the drill that first
+earned the rule. Its search now includes `documentation/evidence/`, still filtered on
+`record.venue.name == 'gym'`, so it seeds from the committed U4 records — real runs from the
+arena — and no widening of *where* it looks widens *what* it will accept.

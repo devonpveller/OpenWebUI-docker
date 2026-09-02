@@ -27,6 +27,33 @@ means somebody ran the check and it was red or unrunnable; it says so, with the 
 exit code, in that phase's section. Fabricating a green by naming a lighter check would be
 C.8's forbidden move one document over.
 
+**THE ONE EXEMPTION FROM THE MARKER RULE, and it is a rule rather than a hole** (added
+2026-09-02, resolving a contradiction this file had been carrying). A phase whose §2 column
+**names no runnable artifact by the plan's own amendment** carries no `How to run` marker, and
+`walkthrough-<id>-names-a-check` is then INDETERMINATE permanently rather than pending. That is
+the correct report, not a gap to close.
+
+Exactly one phase is in that position: **U7**, whose §2 row — as amended by §2.1 **A4**,
+2026-09-02 — says in the anchor itself that the column *"names NO runnable artifact and must not
+be given one"*. U7's column is the evidence ledger; what it requires is that a **loop has run
+once on the record**, which is a question about `DECISIONS.md` and is answered by `dfu-done.ps1`
+clause 6, not by re-running a script. **Writing a marker for U7 would be inventing a validation
+that did not happen** — the move §C.8's closing paragraph forbids and clause 7 exists to catch.
+
+The exemption is deliberately narrow and it is checkable rather than asserted: it applies only
+where §2's own cell says so, so a phase cannot slip into it by having its marker quietly
+deleted. Deleting a phase's section to shrink clause 5's population is a different move again,
+and `dfu-done.ps1` is hardened against it — the population is the pinned floor UNIONED with this
+file's sections, so a phase can be added to it and never subtracted.
+
+**The cost, stated rather than buried: clause 5 cannot reach `met` while this exemption
+stands.** U7 is inside clause 5's population and its probe will report indeterminate for as long
+as the plan forbids it a check. Closing that needs a decision in `PLAN.md` — either §2's U7 row
+admits a runnable verification (the chain *A2 → its DECISIONS entry → the citation is present in
+the cited text* is mechanically checkable, so one could exist), or clause 5's population
+excludes columns the plan has ruled unrunnable. Both are the operator's; neither is this
+document's to take.
+
 **§C.7b validation record.** The markers were developed against a clean clone at `fba111d`
 (the state of the work line before this round) and then RE-RUN, marker by marker, in fresh
 clean clones of the commit that carries them - two of them, one suite per checkout, each with
@@ -48,7 +75,7 @@ error.
 |---|---|
 | `walkthrough-U0/U1/U2/U4-check-1`, `U4-check-2`, `U5/U8-check-1` | **pass** - "the row's named check re-runs green", all seven |
 | `walkthrough-U0/U1/U2/U4/U5/U8-left-the-audited-tree-unchanged` | **pass**, all six - the plan, the ledger, this file, `documentation/notes` and git's refs, status, worktrees and submodules are byte-identical before and after |
-| `walkthrough-U3/U6/U7-names-a-check` | indeterminate, by design, for the reasons in those three sections |
+| `walkthrough-U3/U6/U7-names-a-check` | indeterminate, by design, for the reasons in those three sections — **superseded 2026-09-02 for U6**, which now names `scripts/checks/drill-u6-dark-gate.ps1`; U3 and U7 stand, for the two different reasons their sections give |
 | `phase-floor-matches-plan` | **fail** - and it is NOT about the markers, see below |
 | coverage | evaluated **6 of 10**, `not_evaluated: [U3, U6, U7]` |
 
@@ -79,11 +106,11 @@ is marked deliberately rather than rounded up.
 | **U0** | DONE (merge-record) | The in-flight work landed; the durable inbox replaced the one-shot poller. |
 | **U1** | DONE (merge-record) | Memory plane phases 0–2: schema, ops door, write paths. |
 | **U2** | DONE (merge-record) | Intent unification: shared anchor schema, git-issue door, depth-1 ScopeNodes. |
-| **U3** | DISCHARGED (closing with U4) | The arena run landed: seeds caught, check banked `source: tester-finding`, arena clean before/after. |
+| **U3** | **PARKED — but the run is now REAL and RECORDED** (2026-09-02) | The gym run was performed in the arena and its transcript committed (`documentation/evidence/dfu-u3/`): **exit 0**, 3 seeds, 2 caught only by the banked check, red-proofed to exit 1. Its evidence no longer lives in a gitignored directory. Still **not** re-runnable from a disposable clone — a `Gym:` column names a PLACE — so no marker, and the park stands. This row previously read *"DISCHARGED (closing with U4)"* while the §U3 section said PARKED; the section was right. |
 | **U4** | COLUMN MET, round 8 — **evidence now committed** | 4/4 quadrants ran in the arena and the stall was real, but round 7's proof of it was deleted with the worktree that made it: `report` answered **COMPARED 0/4, exit 1**. Re-run 2026-08-31 into `documentation/evidence/dfu-u4/` — **4/4, exit 0**, oracle fired, 7 records re-derivable. The *What* cell's "governs both" half is still undelivered — see §U4. |
 | **U5** | **STEP 1 APPLIED TO LIVE** | RLS + FORCE on `thoughts` and nine `agent_memory*` tables. Canary proof: agent plane sees **0** personal, **12993** ops. Every PostgREST path bound — including the wiki compiler. Steps 2–3 (direct deno clients) open. |
-| **U6** | **DONE** (clause 4 `3bdf7a8`, clauses 1–3 `8695deb`) | Recall at four+ seams, live-proven. Andon: 5 conditions halt at the real gate, verdict by exhaustive census, drill 213/0. Closed on §C.7's convergence bound. |
-| **U7** | NOT STARTED | Standing, per §B. Depends on U6. |
+| **U6** | **PARKED, and now it NAMES A CHECK** (2026-09-02) | Recall at four+ seams, live-proven (clause 4 `3bdf7a8`). The §2 column now has a runnable form that is green and red-proofed: `scripts/checks/drill-u6-dark-gate.ps1`, **31 assertions, 0 failed**, HALT and CLEAR both driven through the real gate. What is still open is the LIVE board: it is RAISED on four conditions, so no `dark` run can auto-pass a gate in this checkout — measured, in §U6. |
+| **U7** | **ARMED, not started-and-not-finished** (2026-09-02) | Standing by design, per §B and §C.8 clause 6. Its loop **has run one cycle on the record** — §2.1 **A2** — which is why clause 6 arms it. It carries no `How to run` and must not: §2's own row, as amended by A4, says the column names no runnable artifact. This row said *"NOT STARTED"* while clause 6 armed it off A2; both could not stand. |
 
 ---
 
@@ -186,10 +213,73 @@ finding in a prior round (gym-007's shape, new source); drills green in both sys
 | Half | State |
 |---|---|
 | drills green in both systems | **MET** — `scripts/agent-harness/verify-merge-protocol.ps1` and `agent-org/agent-bridge/tests/test_org_drill.py`, both confirmed present and reported green by verifiers |
-| seeded regression caught by a check born from a **tester** finding, **in the gym** | **NOT MET** — the run was local, not in the arena |
+| seeded regression caught by a check born from a **tester** finding, **in the gym** | **RUN, AND RECORDED — 2026-09-02, exit 0, in the arena.** See *the gym run happened* below. What is still NOT met is the clean-clone re-run this file's line 10 requires of a marker, which a `Gym:` column cannot satisfy from a disposable clone. |
+
+### The gym run happened — 2026-09-02, and here is the run rather than a claim about one
+
+**The evidence had died the same way U4's did.** `u3_evidence_regression_gym.py` seeds copies of
+REAL gym run evidence, and it looked for that evidence in exactly one place:
+`.quadrant/gym-runs` — gitignored, per-checkout, removed with the worktree that produced it. So
+in every checkout but the one that ran the arena dispatch it answered
+`NO EVIDENCE: ...\.quadrant\gym-runs holds no outcome record from venue 'gym'`, **exit 2**
+(reproduced here 2026-09-02 before anything was changed). That is byte for byte the loss
+`documentation/evidence/README.md` was created in response to, in the drill that first earned
+the rule.
+
+**The fix is U4's fix.** The drill's search now covers `documentation/evidence/` as well
+(`SOURCE_ROOTS`), mirroring `check_quadrant_evidence_reproduces.py`'s `DISCOVERY_ROOTS`. It
+still filters every candidate on `record.venue.name == 'gym'`, so widening *where* it looks
+cannot widen *what* it seeds from — a `workspace`-venue or pre-venue record is refused wherever
+it sits. The seven committed U4 records are real arena runs, and they are what it now seeds.
+
+```
+$ python scripts/agent-harness/u3_evidence_regression_gym.py
+venue      : gym (gym) - D:\Open WebUI\ai-orchestration-gym @ main
+source     : 7 outcome record(s) from 7 in documentation/evidence/
+banked     : [fd500152ab692af3] python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+
+  seed                                                  pre-existing   this check
+  -  PRISTINE copy (the control)                        n/a            green
+  A  frozen file dropped from the retained workspace    missed         caught
+  B  retained artifact edited after the verdict         missed         caught
+  C  retained workspace removed entirely                CAUGHT         caught
+
+  2 of 3 seeds are caught ONLY by the banked check - that set is its value.
+  1 of 3 are caught by the gate that ALREADY existed (record.admit).
+  0 of 3 are caught by NEITHER.
+                                                                              exit 0
+```
+
+**RED-PROOFED, because a green nobody tried to break is a green nobody has measured.** The
+banked check this drill exercises was neutered (`return 0` at the top of its `main()`), the
+drill re-run, and the file restored:
+
+- neutered → **exit 1**, seeds A and B reported `MISSED BY EVERY GATE`
+- restored → **exit 0** again, the run above
+
+**A correction to the counterfactual, found while doing this.** `admit_against` called
+`record.admit` **without** the record's own directory, so admission resolved each record's
+absolute `evidence.workspace` — a path from the worktree that produced it, which no longer
+exists. Every committed record would have been REFUSED, every seed would have read "caught by
+the pre-existing gate", and the drill would have exited 0 reporting **0 of 3** unique value: a
+pass measuring nothing. Fixed by passing `record_dir`, which is the same correction
+`check_quadrant_evidence_reproduces.py` and `record._evidence_present` already carry, for the
+same reason: an auditor reads the tree they were handed.
+
+**The arena was left as it was found.** The drill removes its own `.gym-sandbox`; measured
+after the run, no `.gym-sandbox` exists and `find . -newermt '2026-09-02 09:00'` over the arena
+(excluding `.git`) returns **0 files**. The arena's other 114 dirty entries predate this run —
+this file does not claim the arena is clean, only that this run left nothing in it.
+
+**Evidence:** `documentation/evidence/dfu-u3/gym-20260902T093709Z/` — the transcript, the
+red-proof transcript, and an `outcome.json` whose `not_claimed` list says what it does not stand
+for. Per this effort's own banked rule, that directory is a *record of a check, not a check*.
+
+**Still PARKED, and this is why.**
 
 **No `How to run` marker is recorded for U3, and here is what was measured instead**
-(2026-09-01, clean clone at `fba111d`). Neither half of the column can be re-run there:
+(2026-09-01, clean clone at `fba111d`; the second bullet re-measured 2026-09-02). Neither half
+of the column can be re-run there:
 
 - `scripts/agent-harness/verify-merge-protocol.ps1` - **exit 1**, `40/66 checks passed`. That
   is not a finding about the protocol: the drill cuts its scratch line with
@@ -212,8 +302,28 @@ finding in a prior round (gym-007's shape, new source); drills green in both sys
   `agent-org/agent-bridge/tests/test_org_drill.py`, which needs the agent-bridge interpreter -
   see U6 below, and the same paragraph applies.
 
-**What would close it:** a run in `d:\Open WebUI\ai-orchestration-gym`, or an amendment
-narrowing the arena clause with evidence that it cannot be run.
+**What would close it — updated 2026-09-02, because half of it is now done.** The run in
+`d:\Open WebUI\ai-orchestration-gym` HAS happened and is recorded above, and the
+evidence-location defect that made it unrepeatable is fixed. What remains is the *marker*
+requirement, and it is not about U3's work at all:
+
+- `u3_evidence_regression_gym.py` in a disposable clone is **exit 2, `VENUE REFUSED`**,
+  re-measured 2026-09-02 and unchanged by any of this. `quadrant/venue.py` resolves the arena
+  as `../ai-orchestration-gym` relative to the checkout; `dfu-done.ps1` clones into `%TEMP%`.
+  `AI_STACK_GYM_REPO` can point at it, but only as an absolute path to one machine, which is
+  the shape this round exists to stop repeating.
+- **Loosening the venue gate so the drill goes green in a clone was considered and REFUSED.**
+  It is available — every source record carries `venue.identity` (`root:f12ba2ec…`, the arena's
+  root commit), so provenance could be read off the evidence instead of off a live directory —
+  and that is exactly why it must not be done by the party who benefits from the green. It is a
+  redefinition of the column's first word, and §C.8's closing paragraph forbids it.
+- The other half, `verify-merge-protocol.ps1`, is unchanged: its base ref is hard-coded, so it
+  has no portable invocation, and making it portable belongs to whoever owns that drill.
+
+So U3 stays PARKED. Closing it needs one of: the arena present beside the clone
+`dfu-done.ps1` builds; an operator decision that the venue may be attested by the evidence
+rather than by a live checkout; or an amendment narrowing the arena clause with the evidence
+that it cannot be re-run — all three are decisions, and none of them is this item's.
 **A correction that belongs here:** the drill originally claimed *"nothing that already existed
 catches either seed."* A verifier disproved it by running the pre-existing
 `scripts/checks/check-watchdog-repair-targets.ps1 -SkipDocker` against seed A: exit 1, three
@@ -581,11 +691,52 @@ the census carried into the ledger so completeness can be re-derived rather than
 red-proof is inventing a **new** outcome word and showing the board refuses it *without* a
 branch being added for that word.
 
-**No `How to run` marker is recorded for U6 either, and the reason is a live defect, not an
-environment.** The column's executable form is `scripts/agent-harness/drill-dark-factory.ps1`
-- its own header opens *"U6's validation column, executable"* and it carries both halves. From
-the clean clone at `fba111d` it is **exit 1 with 48 failed assertions**, and they share one
-cause, which was then measured directly on the work line (not in a clone):
+### U6 now NAMES A CHECK — 2026-09-02
+
+**How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-u6-dark-gate.ps1`
+**Clean-clone measurement (2026-09-02):** **exit 0** — `U6 DARK GATE DRILL: 31 assertions, 0 failed.`
+
+It drives BOTH halves of §2's U6 column through the **real** gate — the shipped `queue.ps1`,
+`andon.ps1` and gate-audit verifier, in a scratch repository under `%TEMP%` with the harness
+config and state redirected there:
+
+| half of the column | what runs | what is asserted |
+|---|---|---|
+| *"an unattended run that hits an andon condition halts-and-raises"* | a board carrying a dead policy key **this drill declares** (`pipeline.drill_dead_knob`) | board RAISED at exit 6, the evidence names that key **and only it**, the `dark` anchor gate refuses at exit 6, the item stays parked at `anchor-draft`, the refusal is in the ledger with the fired condition, and **no** auto-pass record was written |
+| *"one that hits none lands with a complete audit trail"* | the same board with the parked `pipeline.convergence` spec block removed from the **fixture's copy** | board CLEAR with 5 of 5 conditions evaluated and 0 switched off, both gates auto-pass signed `auto:dark`, the run reaches `merged` with no human, the ledger holds exactly two auto passes each carrying the andon verdict **and its coverage**, and `-VerifyAudit` returns COMPLETE |
+| *"complete" has teeth* | the ledger is tampered with three ways | relabelling an auto pass `human`, deleting a record, and claiming a pass over a RAISED board each go **exit 1**; restoring the ledger returns exit 0 |
+
+**RED-PROOFED IN BOTH DIRECTIONS**, by breaking the thing it checks —
+`Predicate-ConfigKeyUnread` in `andon.ps1`, restored with `git checkout` after each:
+
+| the break | result |
+|---|---|
+| detector forced to `ok` (it stops detecting) | **exit 1, 9 assertions failed** — the whole HALT half: no raise, the gate auto-passes, nothing reaches the ledger |
+| detector forced to `fire` (it jams on) | **exit 1, 18 assertions failed** — the whole CLEAR half: nothing lands and the audit-trail assertions collapse |
+| restored | **exit 0, 31/31** |
+
+Neither direction can be green on its own, which is the point: a gate that refused everything
+fails the second row, and one that passed everything fails the first.
+
+**WHAT THIS DRILL DOES NOT CLAIM, stated here and in its own header.** It is **not** a gym run —
+U6's mechanism is the harness pipeline, which has no gym scenario, exactly as
+`drill-dark-factory.ps1` says of itself; the column's first word is not discharged by it. And it
+is **not** a claim that the shipped board is clear. It is not. Its step M evaluates the SHIPPED
+board and prints the answer as a labelled measurement that is deliberately **not counted** in
+the verdict — see the next block for what that measurement says.
+**Evidence:** `documentation/evidence/dfu-u6/dark-gate-20260902/` (transcript, both red-proof
+transcripts, both `drill-dark-factory.ps1` runs, `outcome.json`).
+**Verified by:** orchestrator (built and ran it). **Not** yet re-run by someone who did not
+build it — which is the weaker statement and is marked deliberately.
+
+### Why the BROADER drill is still red, measured to the key
+
+`scripts/agent-harness/drill-dark-factory.ps1` remains the reference instrument for this phase —
+its own header opens *"U6's validation column, executable"* and it carries both halves across
+~20 fixtures. **It is not recorded as this phase's marker, and the reason is a live defect, not
+an environment.** From the clean clone at `fba111d` it was **exit 1 with 48 failed assertions**;
+re-measured on `work/dfufp` 2026-09-02 it is **exit 1, 146 passed, 67 failed**. They share one
+cause, measured directly on the work line (not in a clone):
 
     powershell -File scripts/agent-harness/andon.ps1 -Evaluate -Only policy-declared-unread
     ANDON BOARD: RAISED
@@ -596,36 +747,97 @@ cause, which was then measured directly on the work line (not in a clone):
 condition that exists to catch exactly that fires against the SHIPPED config. Every fixture in
 the drill inherits that config, so each of its *clean board* controls - the second half of the
 column, *"one that hits none lands with a complete audit trail"* - fails, and the failures
-cascade from there. Two things follow, and the second is the one that matters outside this
-document: the drill cannot be green in ANY checkout on this line, and **a `dark` run cannot
-auto-pass a gate today**, because a raised board is exit 6 by design. Recording the drill as
-this phase's marker would put a ~10-minute red into both clause 1 and clause 5 for a cause that
-is one config key wide; the key is a config decision (is it dead, or is its reader misnamed?)
-and is nobody's to guess at under the C.10 freeze. Filed with the measurement in
-`documentation/notes/dfu-c15-clean-clone-check-audit.md`.
+cascade from there. Recording the drill as this phase's marker would put a ~10-minute red into
+both clause 1 and clause 5 for a cause that is one config key wide; the key is a config decision
+(is it dead, or is its reader unwritten?) and is nobody's to guess at under the C.10 freeze.
+Filed with the measurement in `documentation/notes/dfu-c15-clean-clone-check-audit.md`.
+
+**"One key wide" was ASSERTED before and is now MEASURED, because a cause nobody tested is a
+hypothesis.** 2026-09-02, on `work/dfufp`: `pipeline.convergence` was deleted from
+`harness.config.json`, the drill re-run, and the file restored with `git checkout` (the config
+in this branch is byte-identical to the work line's):
+
+| the shipped config | `drill-dark-factory.ps1` |
+|---|---|
+| as it ships | **exit 1** — 146 passed, **67 failed** |
+| with `pipeline.convergence` removed | **exit 0** — **213 passed, 0 failed** |
+
+So the drill is not broken and its red is not noise. Its step A2 asserts *"GREEN: the shipped
+pipeline block is fully read"* — the defect detector doing its job against the config that
+actually ships. **What would close it:** an operator decision on that block — wire its reader
+(`queue.ps1`/`config.py` plus the reviewer charter's class gate, which the block's own `_status`
+calls *"a pipeline item, not a config edit"*), or move the spec out of the config into a
+document. Either makes `drill-dark-factory.ps1` green and wireable as this phase's marker, at
+which point `drill-u6-dark-gate.ps1` becomes the fast pair beside it rather than the only
+runnable form.
+
+**AND THE LIVE BOARD IS RAISED ON FOUR CONDITIONS, NOT ONE.** This correction matters because
+"one key wide" is true of the *drill's fixtures* and NOT of this checkout. Measured 2026-09-02
+by `drill-u6-dark-gate.ps1`'s step M (`andon.ps1 -Evaluate` against the shipped config, exit 6):
+
+- `policy-declared-unread` — fires on `pipeline.convergence`
+- `git-error-swallowed` — fires on **27 call sites**, including `dfu-done.ps1:1614`
+- `work-branch-on-remote` — fires on `work/pod-key` (the branch clause 4 carves out; the andon
+  board has no such carve-out and does not pretend to)
+- `protected-ref-moved` — **indeterminate**, no baseline recorded, and an unevaluated condition
+  is not a passed one
+
+The fixtures do not see the second and third because their globs and remotes are the fixture's.
+So the statement that survives is the one that matters outside this document: **a `dark` run
+cannot auto-pass a gate in this checkout today**, because a raised board is exit 6 by design —
+and it would still be raised with `pipeline.convergence` resolved.
 
 **Note:** U6's *column* has been met for two rounds. The refutations are against claims the
 branch added **beyond** its column. Branch `work/u6dark` is unmerged.
 
-## U7 — post-development design iteration — **NOT STARTED**
+## U7 — post-development design iteration — **ARMED** (standing; one cycle on the record)
 
 Standing, per §B: real-world outcomes → proposed design changes → judged against the pinned
 research anchors → trialled in the gym → adopted or refused on the record.
 **Validated by (§2):** the evidence ledger itself — every design change carries its anchor
 citation or its ledger amendment.
 **Depends on:** U6. §2.1 A1 is the first entry of the kind U7 institutionalises.
-**There is no `How to run` for U7 and there must not be one.** The phase has NOT STARTED, so
-there is nothing to re-run: its column is satisfied by a LOOP having run once on the record,
-and a loop that has never run is an intention, not a process. `dfu-done.ps1` clause 6 asks that
-question directly and answers it from `DECISIONS.md` - which is where it belongs, and is why
-clause 6 stands at MANUAL-PENDING rather than at a green. U7 is nonetheless inside clause 5's
-population (the pinned floor UNIONED with this file's own sections), so clause 5 will report
-`walkthrough-U7-names-a-check` as indeterminate for as long as U7 is not started. **That is a
-correct report, not a gap to close**: deleting this section to shrink the population is the
-rule-6 attack `dfu-done.ps1` was hardened against, and inventing a check for an unstarted phase
-is C.8's forbidden move. Clause 5 goes green when U7 runs, and not before. §2's U7 row now says
-the same thing in the anchor itself — that column names NO runnable artifact and must not be
-given one — so the row and this section agree instead of the row simply being silent.
+
+**A contradiction this file was carrying, resolved 2026-09-02.** This section said U7 was
+**NOT STARTED** and that *"a loop that has never run is an intention"* — while `dfu-done.ps1`
+clause 6 **arms** U7 on the strength of §2.1 **A2**, and the ledger entry
+`2026-08-31 · U7 · A2 IS a complete cycle by clause 6's enumeration — cited, not manufactured`
+says so in as many words. Both could not stand. The ledger and the checker are right: the loop
+has run **one** cycle. §C.8 clause 6's own word for that state is **ARMED, not complete**, and
+this section now uses it. Nothing was added to the record to reach it and nothing was removed —
+the status line was wrong about evidence that already existed.
+
+**The cycle, and how much of it a machine can check.** `dfu-done.ps1` clause 6 decides the
+recorded half by grep — a `## ` heading naming U7 whose entry reaches *adopted* or *refused* —
+and leaves the judgement half (*was it judged against a pinned §0/§B anchor?*) as a **named
+manual check** the clause refuses to pass without. That is why clause 6 stands at
+MANUAL-PENDING rather than at a green, and it is the honest split. What is verifiable by
+reading, and was verified here 2026-09-02, is that the citation the entry rests on is present in
+the text it cites: A2 carries **`§1.1` ×4** and **AVO ×1**, and a **`Revert path:`** — and it
+carries no mention of A6 or A7, which is the correction the ledger entry itself records against
+its own first draft.
+
+**There is no `How to run` for U7 and there must not be one** — and that is now a stated rule
+rather than a silence. §2's U7 row, as amended by §2.1 **A4** (2026-09-02), says in the anchor
+itself that the column *"names NO runnable artifact and must not be given one"*. The header's
+**one exemption from the marker rule** covers exactly this case. So `walkthrough-U7-names-a-check`
+is indeterminate **permanently**, not pending: it is the correct report for a column the plan
+has ruled unrunnable.
+
+**What was considered and REFUSED, so the choice is on the record.** A directive naming a
+runnable verification of the A2 chain *is* constructible — *the entry exists → it cites A2 → A2
+carries the citation it claims* is three greps — and it was refused for two reasons. It would
+contradict §2's U7 row as amended hours earlier by A4, and `PLAN.md` is not this item's file to
+amend; and clause 7's `Get-CommitValidationClaims` matches a phase's checks against the
+artifacts **§2's column names**, so a walkthrough command naming a script the column does not
+name discharges nothing anyway. **The remaining consequence is stated rather than worked
+around:** clause 7's `audit-trail-U7` stays RED and clause 5 cannot reach `met`. Closing either
+is a `PLAN.md` decision — see the header's *cost* paragraph.
+
+**Deleting this section to shrink clause 5's population is not on the table**: it is the rule-6
+attack `dfu-done.ps1` is hardened against (the population is the pinned floor UNIONED with this
+file's sections), and inventing a check for a column the plan forbids one is C.8's forbidden
+move.
 
 ---
 
