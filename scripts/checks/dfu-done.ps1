@@ -1168,10 +1168,148 @@ function Get-BranchExclusionGrant {
 }
 
 function Get-WorkBranches {
+    # WHICH work/* BRANCHES EXIST - and the answer NAMES THE AUTHORITY it came from,
+    # because "no work/* branch is visible here" and "no work/* branch exists" are two
+    # different claims and a check that conflates them is green while checking nothing.
+    #
+    # THE DEFECT THIS REPLACES. This function ran `git for-each-ref refs/heads/work/` in
+    # the audited repository and returned the bare list. Section C.7b requires this script
+    # to be run from a CLEAN CLONE, and `git clone` creates exactly ONE local branch - so
+    # in every clone the refs/heads/work/ namespace is EMPTY BY CONSTRUCTION. The empty
+    # array then collapsed to $null on its way into the snapshot and clause 4's branch
+    # subject reported "could not enumerate work branches": INDETERMINATE, clause 4
+    # UNEVALUATED. Had the collapse not happened the outcome would have been WORSE - an
+    # empty list is a PASS, and that pass would have been taken over a namespace that
+    # cannot hold anything. The probe could not see what it was asked about.
+    #
+    # SO THE AUTHORITY IS `origin` WHENEVER THERE IS ONE. `git ls-remote --heads origin`
+    # asks the repository every clone and every worktree pushes to, which is the only place
+    # "does this branch still exist?" has an answer that is not about one directory. The
+    # LOCAL refs are read too and UNIONED in - a branch that exists only in the operator's
+    # checkout is unfinished work just the same - and every branch records WHERE it was
+    # seen, so the note can say which half of the union it came from.
+    #
+    # WHEN THERE IS NO `origin`, the local refs ARE the whole world and they become the
+    # authority - said out loud in the note, never assumed. When there IS an origin and it
+    # cannot be reached, this REFUSES: answering from the local view would answer a
+    # question about the world with a fact about one directory, which is the defect above
+    # wearing a different hat.
+    #
+    # THE HEADS ARE FILTERED HERE, NOT BY GIT. `ls-remote --heads origin refs/heads/work/*`
+    # hands a PATTERN to an interface that interprets patterns - the class this ledger
+    # records as A PATH IS NOT A PATHSPEC. Every head is fetched instead and the prefix
+    # `refs/heads/work/` is tested as a literal string, so nothing decides membership of
+    # this set by globbing.
+    #
+    # Returns a RECORD, never a bare list, so an empty result cannot collapse to $null and
+    # be read as "the enumeration failed" - those two were indistinguishable before:
+    #   @{ ok; authority; command; why; entries = @(@{ name; tips = @(@{ sha; where }) })
+    #      local_count; origin_count; origin_total }
     param($Ctx)
-    $g = Invoke-Git -Arguments @("for-each-ref", "--format=%(refname:short)", "refs/heads/work/") -WorkDir $Ctx.root
-    if ($g.exit -ne 0) { return $null }
-    return @(($g.stdout -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $res = @{ ok = $false; authority = ""; command = ""; why = ""
+              entries = @(); local_count = 0; origin_count = 0; origin_total = $null }
+
+    # (1) THE LOCAL REFS - what THIS checkout holds.
+    # THE SHA FIRST AND A SPACE BETWEEN, which is the same shape `ls-remote` prints and is
+    # the only unambiguous one. `%(refname:short)|%(objectname)` split on the first pipe -
+    # and git PERMITS a pipe in a ref name, so `work/a|b` would have been read as the
+    # branch `work/a` at the object `b|<sha>`. A separator that can occur inside the field
+    # it separates is a delimiter that decides by luck.
+    $lg = Invoke-Git -Arguments @("for-each-ref", "--format=%(objectname) %(refname:short)", "refs/heads/work/") -WorkDir $Ctx.root
+    if ($lg.exit -ne 0) {
+        $res.why = ("the local refs could not be read: git for-each-ref exited {0} ({1})" -f `
+                    $lg.exit, ((($lg.stderr + " " + $lg.stdout) -replace '\s+', ' ').Trim()))
+        return $res
+    }
+    $seen = [ordered]@{}
+    foreach ($line in ($lg.stdout -split "`n")) {
+        $t = $line.Trim()
+        if (-not $t) { continue }
+        # A ref name can hold no whitespace, so `(\S+)` is exact rather than a guess, and a
+        # line whose first field is not a 40-hex object is not silently accepted as one.
+        if ($t -notmatch '^([0-9a-f]{40})\s+(\S+)$') { continue }
+        $s = $Matches[1]; $n = $Matches[2]
+        if (-not $seen.Contains($n)) { $seen[$n] = [ordered]@{} }
+        if (-not $seen[$n].Contains($s)) { $seen[$n][$s] = @() }
+        if (@($seen[$n][$s]) -notcontains "local") { $seen[$n][$s] = @($seen[$n][$s]) + @("local") }
+    }
+    $res.local_count = $seen.Count
+
+    # (2) IS THERE AN `origin` AT ALL? A repository with no remote is not a repository
+    #     whose remote could not be read, and the two get different words.
+    $rg = Invoke-Git -Arguments @("remote") -WorkDir $Ctx.root
+    $remotes = @()
+    if ($rg.exit -eq 0) { $remotes = @(($rg.stdout -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+    if ($remotes -notcontains "origin") {
+        $res.ok        = $true
+        $res.authority = "local"
+        $res.command   = "git remote ; git for-each-ref refs/heads/work/"
+        $res.entries   = @(ConvertTo-WorkBranchEntries -Seen $seen)
+        return $res
+    }
+
+    # (3) ASK ORIGIN. The credential prompts are disarmed first: a `git ls-remote` that
+    #     stops on an interactive password prompt would hang this script forever, and a
+    #     hang is the one outcome a done-authority can neither report nor recover from.
+    #     The previous values are restored whatever happens.
+    $guard = @{}
+    foreach ($v in @("GIT_TERMINAL_PROMPT", "GCM_INTERACTIVE", "GIT_ASKPASS", "SSH_ASKPASS")) {
+        $guard[$v] = [Environment]::GetEnvironmentVariable($v)
+    }
+    $og = $null
+    try {
+        [Environment]::SetEnvironmentVariable("GIT_TERMINAL_PROMPT", "0")
+        [Environment]::SetEnvironmentVariable("GCM_INTERACTIVE", "never")
+        [Environment]::SetEnvironmentVariable("GIT_ASKPASS", "echo")
+        [Environment]::SetEnvironmentVariable("SSH_ASKPASS", "echo")
+        $og = Invoke-Git -Arguments @("ls-remote", "--heads", "origin") -WorkDir $Ctx.root
+    } finally {
+        foreach ($v in @($guard.Keys)) { [Environment]::SetEnvironmentVariable($v, $guard[$v]) }
+    }
+    if ($null -eq $og -or $og.exit -ne 0) {
+        $res.why = ("origin exists but could not be enumerated: git ls-remote exited {0} ({1})" -f `
+                    $(if ($og) { $og.exit } else { "<did not run>" }), `
+                    $(if ($og) { ((($og.stderr + " " + $og.stdout) -replace '\s+', ' ').Trim()) } else { "" }))
+        return $res
+    }
+    $heads = 0
+    $fromOrigin = @()
+    foreach ($line in ($og.stdout -split "`n")) {
+        $t = $line.Trim()
+        if ($t -notmatch '^([0-9a-f]{40})\s+(refs/heads/\S+)$') { continue }
+        $sha = $Matches[1]; $ref = $Matches[2]
+        $heads++
+        if (-not $ref.StartsWith("refs/heads/work/")) { continue }
+        $n = $ref.Substring("refs/heads/".Length)
+        if ($fromOrigin -notcontains $n) { $fromOrigin += $n }
+        if (-not $seen.Contains($n)) { $seen[$n] = [ordered]@{} }
+        if (-not $seen[$n].Contains($sha)) { $seen[$n][$sha] = @() }
+        if (@($seen[$n][$sha]) -notcontains "origin") { $seen[$n][$sha] = @($seen[$n][$sha]) + @("origin") }
+    }
+    $res.origin_total = $heads
+    $res.origin_count = $fromOrigin.Count
+    $res.ok        = $true
+    $res.authority = "origin"
+    $res.command   = "git ls-remote --heads origin ; git for-each-ref refs/heads/work/"
+    $res.entries   = @(ConvertTo-WorkBranchEntries -Seen $seen)
+    return $res
+}
+
+function ConvertTo-WorkBranchEntries {
+    # The nested name -> sha -> @(where) map, flattened into the record clause 4 walks.
+    # A branch can carry MORE THAN ONE tip - origin advertising one commit while the local
+    # ref sits on another is exactly the state DECISIONS.md records for `work/u5pplane` -
+    # and each tip is a separate thing to discharge, so none of them is dropped here.
+    param($Seen)
+    $out = @()
+    foreach ($n in @($Seen.Keys)) {
+        $tips = @()
+        foreach ($s in @($Seen[$n].Keys)) {
+            $tips += @{ sha = [string]$s; where = ((@($Seen[$n][$s]) | Sort-Object) -join "+") }
+        }
+        $out += @{ name = [string]$n; tips = @($tips) }
+    }
+    return @($out)
 }
 
 function Get-Worktrees {
@@ -2793,6 +2931,59 @@ $script:DfuServiceAnchors = [ordered]@{
     "rls-boundary"  = @("RLS boundary", "direct clients")
 }
 
+function Get-LiveDbBackends {
+    # WHO IS CONNECTED TO THE CORPUS DATABASE RIGHT NOW, AND AS WHICH ROLE - read from
+    # `pg_stat_activity`, which is the wire itself rather than a document about the wire.
+    #
+    # Returns @{ ok; why; rows = @(@{ role; addr }) }. `ok = $false` is CANNOT-MEASURE and
+    # every caller must refuse on it; it is never "there are no clients".
+    #
+    # THE POSITIVE CONTROL IS BUILT IN, and it has to be: "the query came back empty" is
+    # what a database with no clients would say AND what a query whose output did not parse
+    # would say - the shape this file has already been caught by more than once. The psql
+    # running this statement IS a client backend, so zero rows is not a possible true
+    # answer and is reported as a parse failure rather than as an empty result.
+    param($Ctx)
+    $out = @{ ok = $false; why = ""; rows = @() }
+    # backend_start comes back with the role because a backend can OUTLIVE the container
+    # that opened it: docker reuses an address on a bridge network, so a connection left
+    # behind by a killed container can be read as belonging to whatever now holds that
+    # address. The caller uses the timestamp to decide what may be ATTRIBUTED to a
+    # container, and a red-prove caught this by clearing a refusal with a dead neighbour's
+    # connection.
+    $sql = "SELECT coalesce(usename,'?')||'|'||coalesce(host(client_addr),'(local)')||'|'||coalesce(extract(epoch from backend_start)::bigint::text,'0') FROM pg_stat_activity WHERE backend_type='client backend';"
+    $r = Invoke-Psql -Ctx $Ctx -Sql $sql
+    if (-not $r.ran) {
+        $out.why = ("pg_stat_activity could not be read: {0}" -f $(if ($r.Contains("why") -and $r["why"]) { $r["why"] } else { "the psql command did not run" }))
+        return $out
+    }
+    if ($r.exit -ne 0) {
+        $out.why = ("pg_stat_activity could not be read: psql exited {0} ({1})" -f $r.exit, ((([string]$r.out) -replace '\s+', ' ').Trim()))
+        return $out
+    }
+    foreach ($line in (([string]$r.out) -split "`n")) {
+        $t = $line.Trim()
+        if ($t -notmatch '^([^|]+)\|([^|]+)\|(.+)$') { continue }
+        # EVERY GROUP IS TAKEN OUT OF $Matches BEFORE ANY OTHER MATCH RUNS. The nested
+        # `-match` on the third field REPLACES $Matches with its own result - which has no
+        # capture groups at all - so reading $Matches[1..3] afterwards reads null and
+        # throws. One automatic variable, two questions, and the inner question silently
+        # answers the outer one.
+        $roleTxt = [string]$Matches[1]
+        $addrTxt = [string]$Matches[2]
+        $startTxt = ([string]$Matches[3]).Trim()
+        $st = 0
+        if ($startTxt -match '^-?\d+$') { $st = [long]$startTxt }
+        $out.rows += @{ role = $roleTxt.Trim(); addr = $addrTxt.Trim(); started = $st }
+    }
+    if (@($out.rows).Count -lt 1) {
+        $out.why = "pg_stat_activity returned no client backend at all - the psql running the query is itself one, so zero is not a true answer here and this is a parse failure, not an idle database"
+        return $out
+    }
+    $out.ok = $true
+    return $out
+}
+
 function Get-DirectDbClients {
     # WHO TALKS TO THE CORPUS DATABASE DIRECTLY, AND AS WHICH ROLE - derived from the
     # running system (the containers on the Open Brain network and what their environment
@@ -2800,9 +2991,15 @@ function Get-DirectDbClients {
     #
     # Returns $null when the question could not be asked at all, otherwise
     #   @{ roles = @{ role -> @(containers) }   the clients whose DB role IS determinable
-    #      unknown  = @(containers)             clients that reach the DB with NO readable role
-    #      silent   = @(containers)             containers on the network whose environment
-    #                                           shows no connection to the DB at all
+    #      unknown  = @(containers)             clients that reach the DB with NO readable role,
+    #                                           plus any UNKNOWN@<addr> the wire showed and
+    #                                           this enumeration could not put a name to
+    #      silent   = @(containers)             containers on the network that neither their
+    #                                           environment nor the wire showed reaching the DB
+    #      how      = @{ container -> @(how) }  how each client's role was determined
+    #      local_roles = @(roles)               backends on the unix socket (docker exec psql),
+    #                                           which are the operator, not an application
+    #      live_ok / live_why                   whether pg_stat_activity could be read at all
     #      considered = @(containers) }
     #
     # WHY THE ALPHABET WIDENED, AND WHY `unknown` EXISTS. The previous version matched only
@@ -2818,36 +3015,108 @@ function Get-DirectDbClients {
     # shape this script exists to catch. A client whose role cannot be read is now
     # INDETERMINATE, never absent.
     #
-    # THE STATED RESTRICTION. Evidence here is the container's ENVIRONMENT. A client that
-    # hardcodes the host in its code, with nothing in its environment naming it, is not
-    # visible to this enumeration - those containers are returned in `silent` and the probe
-    # says so in its note rather than implying they were cleared.
+    # AND THEN THE WIRE, BECAUSE THE ENVIRONMENT IS NOT WHERE EVERY ROLE LIVES.
+    # `openbrain-idea-refinery` was the client this enumeration had to refuse on, and the
+    # reason is worth stating exactly because the obvious repair does not work:
+    #
+    #   - it is NOT a visibility problem. The container is RUNNING and `docker inspect`
+    #     reads its environment perfectly well; that environment carries DB_HOST and
+    #     DB_PASSWORD and simply has no role variable in it to read.
+    #   - it is NOT a profile problem either. The service is profile-gated, so H1's census
+    #     needed `docker compose config --profile *` to see it in the FILE - but this
+    #     function never reads compose at all, and `--profile *` would not help: the value
+    #     is not in the compose file. `integrations/openbrain-idea-refinery/index.ts` reads
+    #     `env("DB_USER", "postgres")`, so the role is a DEFAULT IN THE CLIENT'S CODE.
+    #
+    # A role that only exists as a code default cannot be recovered from any document about
+    # the deployment. It CAN be recovered from the deployment: the connection itself knows,
+    # and `pg_stat_activity` publishes it. So every live client backend is read from the
+    # database, its `client_addr` is mapped back to a container, and the role it is
+    # ACTUALLY connected as joins that container's role set. That is a measurement of the
+    # boundary rather than an inference about it, and it is what makes this subject
+    # decidable instead of permanently refusing.
+    #
+    # THE WIRE ALSO ENLARGES THE SET, WHICH IS THE POINT. A container whose environment
+    # named nothing was previously returned in `silent` with a note saying it had not been
+    # cleared. If it holds a live connection it is now a CLIENT with a measured role, and a
+    # `client_addr` that maps to NO container on the network becomes an UNKNOWN client
+    # rather than a footnote - a direct client this enumeration cannot name is exactly the
+    # incompleteness the caller must refuse on. Nothing here can shrink the client set.
+    #
+    # THE RESTRICTION THAT REMAINS, and it is narrower than before. A client that is
+    # CONFIGURED to connect, holds a lazy pool, and happens to be connected to nothing at
+    # this instant is invisible to `pg_stat_activity`; if its environment also names no
+    # role it stays in `unknown` and the caller refuses. `silent` now means "neither its
+    # environment nor the wire showed it reaching the database", which is a much smaller
+    # claim than "its environment said nothing".
     #
     # The database container itself is excluded: it is the server, not a client of itself,
     # and counting its own POSTGRES_USER would make the boundary unmeetable for a reason
     # that has nothing to do with the boundary.
     param($Ctx)
-    $r = Invoke-Native -Exe "docker" -Arguments @("network", "inspect", $Ctx.obnet, "--format", "{{range .Containers}}{{.Name}} {{end}}")
+    # The network's containers AND their addresses in one call - the address half is what
+    # turns a `client_addr` from pg_stat_activity back into a container name. A ";"
+    # separator rather than a newline template: PowerShell rewrites the backslash in a
+    # `{{println}}`-style template before docker ever sees it.
+    $r = Invoke-Native -Exe "docker" -Arguments @("network", "inspect", $Ctx.obnet, "--format", "{{range .Containers}}{{.Name}} {{.IPv4Address}};{{end}}")
     if (-not $r.ran -or $r.exit -ne 0) { return $null }
-    $names = @(($r.stdout -split '[ \t\r\n]+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $names     = @()
+    $addrMap   = @{}
+    $addrAmbig = @{}
+    $startMap  = @{}
+    foreach ($chunk in ($r.stdout -split ';')) {
+        $t = $chunk.Trim()
+        if (-not $t) { continue }
+        $f = @($t -split '\s+')
+        if ($f.Count -lt 1 -or -not $f[0]) { continue }
+        $names += $f[0]
+        if ($f.Count -ge 2 -and $f[1]) { $addrMap[(($f[1] -split '/')[0])] = $f[0] }
+    }
     if ($names.Count -lt 1) { return $null }
-    $argv = @("inspect", "--format", "{{.Name}}|{{range .Config.Env}}{{.}};{{end}}") + $names
+    # Every address the container holds on EVERY network it is attached to, not only this
+    # one: a client routed to the database over a second shared network presents that
+    # network's address, and an address this map does not hold reads as an unidentified
+    # client. Ranging a Go template over a map yields its values, so no key variable is
+    # needed and nothing in the format string can be mistaken for a PowerShell variable.
+    $argv = @("inspect", "--format", "{{.Name}}|{{range .NetworkSettings.Networks}}{{.IPAddress}},{{end}}|{{.State.StartedAt}}|{{range .Config.Env}}{{.}};{{end}}") + $names
     $ri = Invoke-Native -Exe "docker" -Arguments $argv
     if (-not $ri.ran -or $ri.exit -ne 0) { return $null }
 
     $dbhost = [string]$Ctx.db
-    $out = @{ roles = @{}; unknown = @(); silent = @(); considered = @() }
+    $out = @{ roles = @{}; unknown = @(); silent = @(); considered = @(); how = @{}
+              local_roles = @(); live_ok = $false; live_why = "" }
     foreach ($line in ($ri.stdout -split "`n")) {
         $l = $line.Trim()
         if (-not $l) { continue }
-        $parts = $l -split '\|', 2
-        if ($parts.Count -lt 2) { continue }
+        $parts = $l -split '\|', 4
+        if ($parts.Count -lt 4) { continue }
         $cname = $parts[0].TrimStart('/')
+        foreach ($ip in ($parts[1] -split ',')) {
+            $ipt = $ip.Trim()
+            if (-not $ipt) { continue }
+            # AN ADDRESS THAT TWO CONTAINERS CLAIM NAMES NEITHER OF THEM. Separate bridge
+            # networks can hand out the same address, and the last writer would silently
+            # win - attributing a connection, and possibly a REFUSAL's discharge, to the
+            # wrong container. A contested address is recorded as contested and the wire
+            # pass treats a backend from it as unidentified.
+            if ($addrMap.ContainsKey($ipt)) {
+                if ($addrMap[$ipt] -ne $cname) { $addrAmbig[$ipt] = $true }
+                continue
+            }
+            $addrMap[$ipt] = $cname
+        }
+        # WHEN THIS INCARNATION OF THE CONTAINER STARTED. A start time that cannot be
+        # parsed leaves the container out of $startMap, and the wire pass below then
+        # declines to attribute anything to it - unreadable is never treated as recent.
+        try {
+            $sa = [datetime]::Parse($parts[2].Trim(), [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            $startMap[$cname] = [long]([math]::Floor(($sa.ToUniversalTime() - [datetime]::SpecifyKind([datetime]"1970-01-01", [DateTimeKind]::Utc)).TotalSeconds))
+        } catch { }
         if ($cname -eq $dbhost) { continue }
         $out.considered += $cname
         $isClient = $false
         $roles = @()
-        foreach ($kv in ($parts[1] -split ';')) {
+        foreach ($kv in ($parts[3] -split ';')) {
             $kvt = $kv.Trim()
             if (-not $kvt) { continue }
             $eq = $kvt.IndexOf('=')
@@ -2874,9 +3143,74 @@ function Get-DirectDbClients {
         }
         if (-not $isClient) { $out.silent += $cname; continue }
         if ($roles.Count -lt 1) { $out.unknown += $cname; continue }
+        if (-not $out.how.ContainsKey($cname)) { $out.how[$cname] = @() }
+        if (@($out.how[$cname]) -notcontains "environment") { $out.how[$cname] = @($out.how[$cname]) + @("environment") }
         foreach ($role in $roles) {
             if (-not $out.roles.ContainsKey($role)) { $out.roles[$role] = @() }
             if (@($out.roles[$role]) -notcontains $cname) { $out.roles[$role] = @($out.roles[$role]) + @($cname) }
+        }
+    }
+
+    # --- AND NOW THE WIRE ---------------------------------------------------------
+    # Everything above is what the deployment SAYS. This is what it DOES, and it is the
+    # only place a role that lives as a code default can be read. A failure to read it is
+    # recorded and left to the caller: it never turns into "no clients".
+    $live = Get-LiveDbBackends -Ctx $Ctx
+    $out.live_ok  = [bool]$live.ok
+    $out.live_why = [string]$live.why
+    if ($live.ok) {
+        foreach ($row in @($live.rows)) {
+            $addr = [string]$row["addr"]
+            $role = [string]$row["role"]
+            if (-not $role) { continue }
+            if ($addr -eq "(local)") {
+                # The unix socket: this script's own psql, and the operator's. An operator
+                # at a shell is not one of C.8.4's direct clients, but it is reported
+                # rather than dropped so nobody has to wonder whether it was counted.
+                if (@($out.local_roles) -notcontains $role) { $out.local_roles += $role }
+                continue
+            }
+            $cn = ""
+            if ($addrMap.ContainsKey($addr) -and -not $addrAmbig.ContainsKey($addr)) { $cn = [string]$addrMap[$addr] }
+            if (-not $cn) {
+                # A DIRECT CLIENT THIS ENUMERATION CANNOT NAME. Not a footnote: it is a
+                # connection to the corpus database from something the client set does not
+                # contain, which is precisely the incompleteness the caller refuses on.
+                $u = ("UNKNOWN@" + $addr + $(if ($addrAmbig.ContainsKey($addr)) { " (claimed by more than one container)" } else { "" }))
+                if (@($out.unknown) -notcontains $u) { $out.unknown += $u }
+                continue
+            }
+            if ($cn -eq $dbhost) { continue }
+            # CAN THIS BACKEND BE ATTRIBUTED TO THE CONTAINER NOW AT THAT ADDRESS?
+            # Only if it was opened AFTER that container started. Docker reuses addresses
+            # on a bridge network and a backend outlives the process that opened it, so a
+            # connection left behind by a killed or restarted container is readable at an
+            # address its successor now holds. Attributing it would CLEAR a client whose
+            # role is genuinely unreadable - a refusal lifted by a dead neighbour, which a
+            # red-prove of this very function demonstrated. Five seconds of slack for
+            # clock skew, and only in the direction that cannot admit a stale backend.
+            $attributable = $false
+            if ($startMap.ContainsKey($cn) -and [long]$row["started"] -gt 0) {
+                $attributable = ([long]$row["started"] -ge ([long]$startMap[$cn] - 5))
+            }
+            if (-not $attributable) {
+                # THE ROLE STILL COUNTS. This is a real connection to the corpus database
+                # holding a real role right now, and the boundary question is about roles -
+                # so it is measured under a label that says exactly what is and is not
+                # known about it. What it must NOT do is discharge $cn.
+                $label = ("a backend at {0} that PREDATES the container now at that address ({1}) - the connection and its role are real, the container attribution is not" -f $addr, $cn)
+                if (-not $out.roles.ContainsKey($role)) { $out.roles[$role] = @() }
+                if (@($out.roles[$role]) -notcontains $label) { $out.roles[$role] = @($out.roles[$role]) + @($label) }
+                continue
+            }
+            # The wire OVERRULES both quiet outcomes: this container is connected right now.
+            $out.silent  = @(@($out.silent)  | Where-Object { $_ -ne $cn })
+            $out.unknown = @(@($out.unknown) | Where-Object { $_ -ne $cn })
+            if (@($out.considered) -notcontains $cn) { $out.considered += $cn }
+            if (-not $out.how.ContainsKey($cn)) { $out.how[$cn] = @() }
+            if (@($out.how[$cn]) -notcontains "live connection") { $out.how[$cn] = @($out.how[$cn]) + @("live connection") }
+            if (-not $out.roles.ContainsKey($role)) { $out.roles[$role] = @() }
+            if (@($out.roles[$role]) -notcontains $cn) { $out.roles[$role] = @($out.roles[$role]) + @($cn) }
         }
     }
     return $out
@@ -3868,16 +4202,44 @@ function Test-Clause4 {
     # remote's refs - are exactly what a walkthrough command running under cmd.exe could
     # change, and clause 1 runs first. They are read as they stood before the first command.
     $decForBranches = Get-SnapMd -Which "decisions"
-    $branches = Get-SnapGit -Key "branches"
-    if ($null -eq $branches) {
+    $census = Get-SnapGit -Key "branches"
+    $censusOk = $false
+    if ($null -ne $census -and ($census -is [System.Collections.IDictionary]) -and $census.Contains("ok")) { $censusOk = [bool]$census["ok"] }
+    if (-not $censusOk) {
+        # THE REFUSAL SAYS WHAT COULD NOT BE ASKED, AND REFUSES THE FALLBACK BY NAME.
+        # The tempting repair here is "origin is unreachable, so use the local refs" - and
+        # that is the defect, not the repair: in a clean --single-branch clone the local
+        # work/* namespace is empty BY CONSTRUCTION, so the fallback answers "none" every
+        # single time and the green means nothing at all.
         $c.coverage.not_evaluated += "work-branches"
-        $c.probes += (New-Probe -Name "no-unmerged-work-branches" -Command "git for-each-ref refs/heads/work/" `
-            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "could not enumerate work branches"))
+        $why = "the work/* branch set could not be enumerated from any authority"
+        if ($null -ne $census -and ($census -is [System.Collections.IDictionary]) -and $census.Contains("why") -and $census["why"]) {
+            $why = ("the work/* branch set could not be established from its AUTHORITY: {0}. This checkout holds {1} local work/* ref(s), and that number is NOT the answer - a clean single-branch clone holds none by construction, so reporting the local view here would be a pass over a namespace that cannot hold anything" -f `
+                    $census["why"], $census["local_count"])
+        }
+        $c.probes += (New-Probe -Name "no-unmerged-work-branches" `
+            -Command "git remote ; git ls-remote --heads origin ; git for-each-ref refs/heads/work/" `
+            -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note $why))
     } else {
+        # WHICH AUTHORITY ANSWERED, SPELLED OUT IN THE PROBE'S OWN NOTE. A reader must be
+        # able to tell a branch set read from the shared remote apart from one read out of
+        # whichever directory this happened to run in.
+        if ($census["authority"] -eq "origin") {
+            $authSaid = ("origin - `git ls-remote --heads origin` advertised {0} head(s), {1} of them under refs/heads/work/, UNIONED with the {2} work/* ref(s) this checkout holds locally" -f `
+                         $census["origin_total"], $census["origin_count"], $census["local_count"])
+        } else {
+            $authSaid = ("this checkout's LOCAL refs ({0} work/* ref(s)) - the repository has NO remote named 'origin', so what it holds IS the whole world here. Where an origin exists it is asked instead, because a clone's refs/heads/work/ namespace is empty by construction and 'nothing visible here' is not 'nothing exists'" -f `
+                         $census["local_count"])
+        }
+        $c.detail += ("work/* branch AUTHORITY: {0}" -f $authSaid)
+
         $unmerged = @()
         $skipped  = @()
         $unbacked = @()
-        foreach ($b in $branches) {
+        $indet    = @()
+        $mergedN  = 0
+        foreach ($e in @($census["entries"])) {
+            $b = [string]$e["name"]
             if ($script:DfuExcludedBranches.Contains($b)) {
                 $grant = Get-BranchExclusionGrant -DecisionsText $decForBranches -Branch $b
                 if ($grant.granted) {
@@ -3889,24 +4251,65 @@ function Test-Clause4 {
                 $unbacked += $b
             }
             if ($b -eq ("work/" + $Ctx.workline)) { continue }
-            $g = Invoke-Git -Arguments @("rev-list", "--count", ("{0}..{1}" -f $Ctx.workline, $b)) -WorkDir $Ctx.root
-            if ($g.exit -ne 0) { $unmerged += ("{0} (ahead=UNKNOWN, rev-list exit {1})" -f $b, $g.exit); continue }
-            $ahead = 0
-            if ($g.stdout.Trim() -match '^\d+$') { $ahead = [int]$g.stdout.Trim() }
-            if ($ahead -gt 0) { $unmerged += ("{0} (ahead {1})" -f $b, $ahead) }
+            # EVERY TIP THIS BRANCH IS KNOWN AT, not just one. origin advertising one commit
+            # while the local ref sits on another is a state this ledger has already
+            # recorded, and discharging the branch on whichever tip happened to be read
+            # first would leave the other one unmeasured.
+            $bad = @()
+            foreach ($tip in @($e["tips"])) {
+                $sha = [string]$tip["sha"]
+                $where = [string]$tip["where"]
+                # IS THE COMMIT EVEN HERE? An ancestor of the work line is by definition in
+                # this repository's object store, so a tip that is ABSENT cannot be one -
+                # that is a sound UNMERGED, not a failure to measure. Asked first because
+                # `rev-list` cannot tell "not an ancestor" from "no such object" in its
+                # exit code, and the old code called both of them unmerged without saying
+                # which it had seen.
+                $have = Invoke-Git -Arguments @("cat-file", "-e", ($sha + "^{commit}")) -WorkDir $Ctx.root
+                if ($have.exit -ne 0) {
+                    $bad += ("{0} (tip {1} seen on {2}; that commit is not in this repository's object store at all, so it cannot be an ancestor of {3} - UNMERGED, ahead unmeasurable from here)" -f `
+                             $b, (Get-ShortRef -Sha $sha), $where, $Ctx.workline)
+                    continue
+                }
+                $g = Invoke-Git -Arguments @("rev-list", "--count", ("{0}..{1}" -f $Ctx.workline, $sha)) -WorkDir $Ctx.root
+                if ($g.exit -ne 0 -or ($g.stdout.Trim() -notmatch '^\d+$')) {
+                    $indet += ("{0} (tip {1} seen on {2}: git rev-list exited {3} and answered '{4}')" -f `
+                               $b, (Get-ShortRef -Sha $sha), $where, $g.exit, (($g.stdout + " " + $g.stderr) -replace '\s+', ' ').Trim())
+                    continue
+                }
+                $ahead = [int]$g.stdout.Trim()
+                if ($ahead -gt 0) { $bad += ("{0} (tip {1} seen on {2}, ahead {3})" -f $b, (Get-ShortRef -Sha $sha), $where, $ahead) }
+                else { $c.detail += ("work/* branch MERGED into {0}: {1} (tip {2} seen on {3})" -f $Ctx.workline, $b, (Get-ShortRef -Sha $sha), $where) }
+            }
+            if ($bad.Count -gt 0) { $unmerged += $bad } else { $mergedN++ }
         }
         foreach ($s in $skipped) { $c.detail += ("EXCLUDED from clause 4, and the ledger records it: {0}" -f $s) }
         foreach ($u in $unbacked) { $c.detail += ("NOT EXCLUDED - {0} is a declared carve-out but {1} does not record it, so it is counted" -f $u, $Ctx.decisions) }
-        $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
-        if ($unmerged.Count -eq 0) {
-            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                    -Note ("no unmerged work/* branch ({0} exclusion(s) applied, each backed by an entry in DECISIONS.md)" -f $skipped.Count)
+        foreach ($i in $indet) { $c.detail += ("UNDETERMINED work/* branch: {0}" -f $i) }
+
+        $measured = @($census["entries"]).Count
+        if ($indet.Count -gt 0) {
+            # A BRANCH WHOSE MERGE STATE COULD NOT BE READ IS NOT A BRANCH THAT IS MERGED.
+            $c.coverage.not_evaluated += "work-branches"
+            $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
+                    -Note ("{0} of {1} work/* branch(es) could not be measured against {2}, so this subject REFUSES rather than reporting the rest as the answer: {3}. AUTHORITY: {4}" -f `
+                           $indet.Count, $measured, $Ctx.workline, ($indet -join " ; "), $authSaid)
         } else {
-            $body = New-VerdictProbeBody -Verdict "fail" -Exit $unmerged.Count `
-                    -Note ("{0} unmerged work/* branch(es): {1}{2}" -f $unmerged.Count, ($unmerged -join ", "), `
-                           $(if ($unbacked.Count) { " -- including " + ($unbacked -join ", ") + ", whose carve-out is not recorded in DECISIONS.md" } else { "" }))
+            $c.coverage.evaluated = [int]$c.coverage.evaluated + 1
+            if ($unmerged.Count -eq 0) {
+                $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                        -Note ("no work/* branch is outstanding: {0} branch(es) measured, {1} merged into {2}, {3} exclusion(s) applied and each one backed by an entry in DECISIONS.md. AUTHORITY: {4}" -f `
+                               $measured, $mergedN, $Ctx.workline, $skipped.Count, $authSaid)
+            } else {
+                $body = New-VerdictProbeBody -Verdict "fail" -Exit $unmerged.Count `
+                        -Note ("{0} unmerged work/* tip(s) out of {1} branch(es) measured: {2}{3}. AUTHORITY: {4}" -f `
+                               $unmerged.Count, $measured, ($unmerged -join ", "), `
+                               $(if ($unbacked.Count) { " -- including " + ($unbacked -join ", ") + ", whose carve-out is not recorded in DECISIONS.md" } else { "" }), `
+                               $authSaid)
+            }
         }
-        $c.probes += (New-Probe -Name "no-unmerged-work-branches" -Command ("git for-each-ref refs/heads/work/ ; git rev-list --count {0}..<branch>" -f $Ctx.workline) -Run $body)
+        $c.probes += (New-Probe -Name "no-unmerged-work-branches" `
+                      -Command ("{0} ; git rev-list --count {1}..<tip>" -f $census["command"], $Ctx.workline) -Run $body)
     }
 
     # --- worktrees ---------------------------------------------------------------
@@ -4164,16 +4567,34 @@ function Test-Clause4 {
                     # no role variable) was silently skipped - the pass condition was then
                     # decidable over an INCOMPLETE set with no record of what could not be
                     # determined. See Get-DirectDbClients.
+                    #
+                    # AND THE ROLE IS READ FROM THE WIRE AS WELL AS FROM THE ENVIRONMENT,
+                    # which is what made this subject decidable rather than permanently
+                    # refusing. `openbrain-idea-refinery` has DB_HOST and no role variable
+                    # because its role is a DEFAULT IN ITS CODE - env("DB_USER","postgres")
+                    # - so no reading of the deployment's DOCUMENTS can produce it, profile
+                    # flags included. pg_stat_activity can: it publishes the role each live
+                    # backend is actually connected as. See Get-LiveDbBackends.
                     $clients = Get-DirectDbClients -Ctx $Ctx
                     $bypass = @()
                     $clientRoles = @()
                     $clientsKnown = $false
                     $undet = @()
                     $silentCount = 0
+                    $liveSaid = "the client enumeration could not be run at all"
                     if ($null -ne $clients) {
                         $undet = @($clients.unknown)
                         $silentCount = @($clients.silent).Count
-                        foreach ($u in $undet) { $c.detail += ("direct client UNDETERMINED role: {0} reaches {1} and its environment names no DB role" -f $u, $Ctx.db) }
+                        $liveSaid = $(if ($clients.live_ok) { "pg_stat_activity was read" } else { ("pg_stat_activity was NOT read - " + [string]$clients.live_why) })
+                        foreach ($u in $undet) {
+                            if ($u -like "UNKNOWN@*") {
+                                $c.detail += ("direct client UNIDENTIFIED: a live backend on {0} connects from {1}, which matches no container on {2}" -f $Ctx.db, ($u -replace '^UNKNOWN@', ''), $Ctx.obnet)
+                            } else {
+                                $c.detail += ("direct client UNDETERMINED role: {0} reaches {1}, its environment names no DB role, and no live backend of its was on the wire to read one from ({2})" -f $u, $Ctx.db, $liveSaid)
+                            }
+                        }
+                        foreach ($lr in @($clients.local_roles)) { $c.detail += ("unix-socket backend as role '{0}' - the operator's psql and this script's own, not one of C.8.4's direct clients" -f $lr) }
+                        foreach ($cn in @(@($clients.how.Keys) | Sort-Object)) { $c.detail += ("direct client {0}: role determined from {1}" -f $cn, ((@($clients.how[$cn]) | Sort-Object) -join " + ")) }
                         $clientRoles = @($clients.roles.Keys | Sort-Object)
                         if ($clientRoles.Count -ge 1) {
                             $inList = (($clientRoles | ForEach-Object { "'" + $_ + "'" }) -join ",")
@@ -4202,16 +4623,17 @@ function Test-Clause4 {
                     elseif (-not $clientsKnown) {
                         $c.coverage.not_evaluated += $svc
                         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $null `
-                                -Note ("the RLS flags read t/t on {0} of {1} stage table(s), but the DIRECT CLIENTS C.8.4 names are not fully determined: {2}. A table-flag reading is not the boundary this column asks about, and a boundary decided over an INCOMPLETE client set is a claim wider than its evidence - so this REFUSES rather than reporting the structural half as the measurement" -f `
+                                -Note ("the RLS flags read t/t on {0} of {1} stage table(s), but the DIRECT CLIENTS C.8.4 names are not fully determined: {2}. Both sources were tried - the containers' environment AND the live backends in pg_stat_activity ({3}). A table-flag reading is not the boundary this column asks about, and a boundary decided over an INCOMPLETE client set is a claim wider than its evidence - so this REFUSES rather than reporting the structural half as the measurement" -f `
                                        ($stages.Count - $unbound.Count), $stages.Count, `
-                                       $(if ($undet.Count) { ("{0} client(s) reach {1} with no determinable role: {2}" -f $undet.Count, $Ctx.db, ($undet -join ", ")) } else { "the client set could not be enumerated at all" }))
+                                       $(if ($undet.Count) { ("{0} client(s) reach {1} with no determinable role: {2}" -f $undet.Count, $Ctx.db, ($undet -join ", ")) } else { "the client set could not be enumerated at all" }), `
+                                       $liveSaid)
                     }
                     else {
                         $c.coverage.evaluated++
                         if ($unbound.Count -eq 0 -and $bypass.Count -eq 0 -and $srcOk) {
                             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), none of the {1} direct client role(s) carries rolsuper or rolbypassrls, and its source is on the work line. THE RESTRICTION ON THAT SENTENCE: clients are identified from container ENVIRONMENT, so {2} container(s) on {3} whose environment names neither {4} nor a DB role were not cleared - they were not visible to this enumeration" -f `
-                                           $stages.Count, $clientRoles.Count, $silentCount, $Ctx.obnet, $Ctx.db)
+                                    -Note ("RLS is enabled and FORCED on all {0} stage table(s), none of the {1} direct client role(s) carries rolsuper or rolbypassrls, and its source is on the work line. THE RESTRICTION ON THAT SENTENCE: a client is identified from its container ENVIRONMENT or from a LIVE BACKEND in pg_stat_activity ({2}), so {3} container(s) on {4} that neither named {5} in their environment nor held a connection at that instant were not cleared - a lazy pool that happened to be idle is not visible to either half" -f `
+                                           $stages.Count, $clientRoles.Count, $liveSaid, $silentCount, $Ctx.obnet, $Ctx.db)
                         } elseif ($unbound.Count -gt 0) {
                             $body = New-VerdictProbeBody -Verdict "fail" -Exit $unbound.Count `
                                     -Note ("{0} of {1} stage table(s) are not relrowsecurity/relforcerowsecurity = t/t: {2}" -f `
