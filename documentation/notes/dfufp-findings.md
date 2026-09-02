@@ -134,6 +134,25 @@ not be given one"*), and `PLAN.md` is not this item's file; and clause 7 matches
 checks against the artifacts **§2's column names**, so a walkthrough command naming a script the
 column does not name would discharge nothing anyway.
 
+**Finding 7 - the U7 column says it names no runnable artifact, and the machine reads one in
+it.** `Get-NamedArtifacts` pulls any `*.ps1`/`*.py`/... token out of section 2's cell, and
+A4's added sentence - *"which `dfu-done.ps1` clause 6 decides from `DECISIONS.md`"* - puts
+`dfu-done.ps1` inside the U7 cell. So the cell's own claim about itself (*"names NO runnable
+artifact"*) is false as the checker reads it. Measured from a clean clone at `e52252a`:
+`audit-trail-U7` [fail] naming `dfu-done.ps1` as the check it wants a directive for, with **14
+commits co-mentioning** both without claiming one validated the other. This falsified my own
+first reasoning, which refused the U7 directive on the premise that the column named nothing -
+one run showed it, which is the only way that class ever surfaces.
+
+**Finding 8 - clause 6's `u7-cycle-recorded` probe is a loose grep.** It counts any `## ` entry
+whose heading names U7 and whose body contains "adopted" or "refused". Measured: **3** "cycle
+entries", of which exactly **one** is a cycle (the 2026-08-31 A2 entry). The other two are the
+`2026-09-02 - C.8 clause 7 ... stay RED` entry - which qualifies because it contains the word
+*refused*, while its whole content is a refusal to write anything - and this round's own U7
+entry. An entry that says "no cycle was run" therefore counts as a cycle. Reported, not
+exploited: nothing in this round rests on that count, and tightening the probe is a
+`scripts/checks/dfu-*` change this item may not make.
+
 **The consequence, stated rather than worked around:** `audit-trail-U7` stays RED in clause 7,
 and clause 5 cannot reach `met` while U7 is in its population and the plan forbids it a check.
 Closing either is a `PLAN.md` decision.

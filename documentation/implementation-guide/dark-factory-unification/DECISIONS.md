@@ -2583,19 +2583,46 @@ MEASURED: read 2026-09-02, so the citation the ledger entry rests on is verified
           relayed: A2's text carries `1.1` **x4**, `AVO` **x1** and a `Revert path:`, and
           contains no A6 or A7 - which is the correction that entry already records against its
           own first draft.
-REFUSED:  giving U7 a directive that NAMES a runnable verification of the A2 chain. It is
-          constructible - "the entry exists -> it cites A2 -> A2 carries the citation it
-          claims" is three greps - and it was refused twice over: it would contradict section
-          2's U7 row as amended by A4 the same day, and `PLAN.md` is not this item's file; and
-          clause 7's `Get-CommitValidationClaims` matches a phase's checks against the artifacts
-          **section 2's column names**, so a walkthrough command naming a script the column does
-          not name would discharge nothing anyway.
-CONSEQUENCE, STATED RATHER THAN WORKED AROUND: clause 7's `audit-trail-U7` stays RED, and
-          **clause 5 cannot reach `met`** while U7 is in its population and the plan forbids it
-          a check. Closing either is a `PLAN.md` decision: section 2's U7 row admits a runnable
-          verification, or clause 5's population excludes columns the plan has ruled unrunnable.
-          Neither is taken here. C.8's own rule applies - a clause that cannot be met is a
-          REPORT, not a redefinition.
+REFUSED:  giving U7 a **walkthrough `How to run` marker**. That would contradict section 2's
+          U7 row as amended by A4 the same day, and `PLAN.md` is not this item's file. Clause
+          5's `walkthrough-U7-names-a-check` therefore stays indeterminate, permanently and
+          correctly.
+
+**A CORRECTION TO MY OWN REASONING, CAUGHT BY RUNNING THE THING.** The paragraph above
+          originally also refused the clause-7 DIRECTIVE, on the premise that
+          `Get-CommitValidationClaims` matches a phase's checks against the artifacts section
+          2's column names and that U7's column names none. **That premise is false, and one
+          run showed it.** `Get-NamedArtifacts` reads any `*.ps1|py|ts|...` token out of the
+          cell, and A4's added sentence - *"which `dfu-done.ps1` clause 6 decides from
+          `DECISIONS.md`"* - puts `dfu-done.ps1` INSIDE the U7 cell. Measured 2026-09-02 from a
+          clean clone at `e52252a`: `audit-trail-U7` [fail] - *"no commit message ... names the
+          phase AND one of the checks this phase names (**dfu-done.ps1**) in the SAME statement
+          ... (14 commit(s) co-mention both without claiming one validated the other)"*. So the
+          column DOES name a runnable artifact as the machine reads it, whatever its own prose
+          says about itself, and clause 7 has had something to match all along. The
+          `2026-09-02 - C.8 clause 7` entry above refused these three directives on the same
+          premise for U7; that refusal was right for U3 and U6-at-the-time and wrong for U7,
+          and it is corrected here rather than left standing.
+DIRECTIVE WRITTEN, and only because the check was RUN and seen green.
+          `powershell -File scripts/checks/dfu-done.ps1 -Only @(6) -WorkLine work/dfufp
+          -RepoRoot <clean clone>` -> **CLAUSE 6 [MANUAL-PENDING]**, and inside it
+          **`[pass] u7-cycle-recorded (exit 0)`** - the probe that decides whether U7's loop has
+          run. The run's own exit code is **7** (NOT DONE), because a narrowed run can never
+          report the plan done and because the clause's other half is a manual check nobody has
+          recorded. **The directive claims the probe, not the clause**: U7 is standing, clause 6
+          is MANUAL-PENDING, and no manual result was recorded by this item -
+          `dfu-done-manual.json` is not its file.
+A LOOSE GREP, REPORTED NOT EXPLOITED: that probe counts any `## ` entry whose heading names U7
+          and whose body contains "adopted" or "refused". It therefore reported **3** U7 cycle
+          entries, of which exactly **one** is a cycle (the 2026-08-31 A2 entry); the other two
+          are the `2026-09-02 - C.8 clause 7 ... stay RED` entry (which contains "refused") and
+          this one. Nothing here relies on that count - the cycle is A2 and only A2 - and
+          tightening the probe is a `scripts/checks/dfu-*` change, which this item may not make.
+CONSEQUENCE, STATED RATHER THAN WORKED AROUND: **clause 5 still cannot reach `met`** while U7
+          is in its population and the plan forbids it a marker. Closing that is a `PLAN.md`
+          decision: section 2's U7 row admits a runnable verification, or clause 5's population
+          excludes columns the plan has ruled unrunnable. Neither is taken here. C.8's own rule
+          applies - a clause that cannot be met is a REPORT, not a redefinition.
 CITED:    section 2's U7 row and section 2.1 amendments A2 and A4; section C.8 clauses 5, 6 and
           7; the `2026-08-31 - U7 - A2 IS a complete cycle by clause 6's enumeration` entry;
           `scripts/checks/dfu-done.ps1` `Test-Clause6` and `Get-CommitValidationClaims`;

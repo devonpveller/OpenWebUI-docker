@@ -838,15 +838,33 @@ itself that the column *"names NO runnable artifact and must not be given one"*.
 is indeterminate **permanently**, not pending: it is the correct report for a column the plan
 has ruled unrunnable.
 
-**What was considered and REFUSED, so the choice is on the record.** A directive naming a
-runnable verification of the A2 chain *is* constructible — *the entry exists → it cites A2 → A2
-carries the citation it claims* is three greps — and it was refused for two reasons. It would
-contradict §2's U7 row as amended hours earlier by A4, and `PLAN.md` is not this item's file to
-amend; and clause 7's `Get-CommitValidationClaims` matches a phase's checks against the
-artifacts **§2's column names**, so a walkthrough command naming a script the column does not
-name discharges nothing anyway. **The remaining consequence is stated rather than worked
-around:** clause 7's `audit-trail-U7` stays RED and clause 5 cannot reach `met`. Closing either
-is a `PLAN.md` decision — see the header's *cost* paragraph.
+**What IS recorded, and what was refused.** No `How to run` marker — that would contradict §2's
+U7 row as amended by A4, and `PLAN.md` is not this item's file. But a clause-7 **validation
+directive** IS written, and the reason is a correction to this document's own first draft:
+
+> §2's U7 cell says it *"names NO runnable artifact"*. **As the checker reads it, that is
+> false.** `Get-NamedArtifacts` pulls any `*.ps1` token out of the cell, and A4's own added
+> sentence — *"which `dfu-done.ps1` clause 6 decides from `DECISIONS.md`"* — puts
+> `dfu-done.ps1` in it. Measured from a clean clone at `e52252a`: `audit-trail-U7` **[fail]**,
+> *"no commit message … names the phase AND one of the checks this phase names
+> (**dfu-done.ps1**) in the SAME statement … (14 commit(s) co-mention both without claiming one
+> validated the other)"*.
+
+So the directive names the check the column already names, and it was written only after that
+check was RUN: `dfu-done.ps1 -Only @(6)` → **CLAUSE 6 [MANUAL-PENDING]** with
+**`[pass] u7-cycle-recorded (exit 0)`** (run exit 7 — a narrowed run can never report the plan
+done). **The directive claims the probe, not the clause.** Clause 6's other half —
+*was it judged against a pinned anchor?* — is a named manual check with no recorded result, and
+this item recorded none: `dfu-done-manual.json` is not its file.
+
+**A loose grep, reported and not exploited.** That probe counts any `## ` entry naming U7 whose
+body contains *adopted* or *refused*. It reports **3** cycle entries; exactly **one** is a cycle
+(A2's). One of the others is the entry that says no directive was written — it qualifies on the
+word *refused*. Nothing here rests on the count.
+
+**The remaining consequence, stated rather than worked around:** clause 5 still cannot reach
+`met`, because `walkthrough-U7-names-a-check` is indeterminate by design. Closing that is a
+`PLAN.md` decision — see the header's *cost* paragraph.
 
 **Deleting this section to shrink clause 5's population is not on the table**: it is the rule-6
 attack `dfu-done.ps1` is hardened against (the population is the pinned floor UNIONED with this
