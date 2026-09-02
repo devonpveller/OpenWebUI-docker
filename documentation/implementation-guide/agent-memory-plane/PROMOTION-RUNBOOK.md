@@ -158,6 +158,7 @@ and a psql apply for the live one. There is no migration runner.
 | `init-agent-memory-corpus-failclosed.sql` | **the corpus predicate stops defaulting to visible** (DFU PLAN.md C.8 clause 3) - see the dedicated section below | **read that section first** |
 | `init-agent-memory-rls.sql` | **the exposure boundary moves into the database** - FORCE RLS + narrow policies on `agent_memories`, `thoughts` and the 8 sidecars (DFU PLAN.md A2) | **read its section below** |
 | `init-graph-plane-rls.sql` | **the boundary reaches the DERIVED graph** - 8 tables that derive from `thoughts`, plus the write gate on `queue_entity_extraction()` | **read its section below** |
+| `init-agent-memory-column-authority.sql` | **the LIVE policies stop deciding on the jsonb mirror and decide on the `exposure` COLUMN** - plus the write contract (NOT NULL + CHECK), `upsert_thought` and the graph write gate (DFU C.9 H3, item S) | **read its section below - two deployed images break unless they are rebuilt FIRST** |
 
 ```powershell
 Get-Content OB1\docker\init-agent-memory-promote-exposure.sql |
@@ -1497,6 +1498,251 @@ rebuild `openbrain-wiki:local` in the same window.
 
 ---
 
+## `205-init-agent-memory-column-authority.sql` — THE BOUNDARY READS THE COLUMN (DFU C.9 H3, item S)
+
+> Status: **WRITTEN AND VALIDATED ON THROWAWAYS, NOT APPLIED.** 2026-09-02.
+> Mounted at `205-`, after `200-init-graph-plane-rls.sql`. Revert beside it:
+> `OB1/docker/revert-agent-memory-column-authority.sql`.
+
+### Why — the gap this closes
+
+195 made `exposure` a typed column and pointed the predicates at it. It was applied to the live
+volume on 2026-08-31, verified, and **reverted in the same window**; the revert deliberately
+leaves the column in place but **de-constrained**, and puts the POLICIES back on the jsonb
+mirror. So since then the live database has decided the exposure boundary on
+`metadata->>'exposure'` while every document, column comment and producer says the column is
+authoritative. **Measured on the live `openbrain-db`, 2026-09-02:**
+
+```
+thoughts_ops_plane        USING/WITH CHECK  ob_corpus_on_ops_plane(metadata)      <- MIRROR
+agent_memories_ops_plane  USING/WITH CHECK  ob_memory_on_ops_plane(metadata)      <- MIRROR
+queue_entity_extraction() gate             ob_corpus_on_ops_plane(NEW.metadata)   <- MIRROR
+upsert_thought() INSERT branch             INSERT INTO thoughts (content, metadata)  <- MIRROR ONLY
+thoughts.exposure / agent_memories.exposure   nullable=YES, no default, NO CHECK
+```
+
+It has already cost one promotion. On 2026-09-02 the C.3 cutover of the door to the
+non-superuser `ob_app_memory` role was reverted at step 2 because `capture_thought` came back
+`isError:true, "new row violates row-level security policy"`. Measured then, as
+`ob_app_memory`:
+
+```
+INSERT exposure='ops' column only, no mirror  ->  ERROR: violates RLS policy
+INSERT exposure='ops' + metadata mirror       ->  INSERT 0 1
+```
+
+A writer satisfying the DOCUMENTED contract is refused and one satisfying the RETIRED contract
+is accepted. **PLAN §C.9 H3 is binding: the typed column is the source of truth and nothing may
+make a trust decision on the mirror.** A live predicate reading the mirror is a compliance gap,
+not a design choice.
+
+### Why a NEW file at 205 rather than re-applying 195
+
+195 sits *before* `200-`, and 200's later rounds **add arms** to the policies 195 created
+(`thought_id IS NULL OR ob_thought_visible(thought_id)` on both `agent_memories` policies) plus
+the `NULL-ARM-DISPOSITION` policy COMMENTs that 200 §7(h2) reads back out of the catalogue. A
+file that re-issued 195's `CREATE POLICY` verbatim at the end of the chain would silently delete
+those arms and comments — re-opening the FK existence oracle 200 closed and turning 200's next
+apply red. So 205 is **surgical**: it rebuilds only the policies whose expression names the
+mirror, rewriting only that sub-expression and carrying the roles, command, other arms and the
+comment across verbatim.
+
+**205, not 210:** `210-init-app-role.sql` / `215-init-app-role-passwords.sh` are already claimed
+by H1 (staged, not mounted — see the section below), and two drills stage fixtures at those
+numbers. 205 also encodes the ordering that matters: **the boundary must read the column BEFORE
+the door stops being a `bypassrls` superuser.** The reverse order is what was reverted.
+
+### What it does
+
+1. **Preconditions** — the tables, the column and the jsonb predicates exist, and the jsonb
+   corpus predicate is already fail-CLOSED (190). It refuses otherwise; the revert path points
+   back at that predicate, and reverting onto a fail-OPEN one would publish every unlabelled row.
+2. **The gate that makes it visibility-neutral** — backfills the column from the mirror where
+   the column is NULL and the mirror names a real plane (stamped `exposure_backfill =
+   'dfu-s-column-authority'` so the revert can unstamp exactly those rows), then **REFUSES** if
+   any row is left with no plane at all, holds a value that is not a plane, or **disagrees**
+   between column and mirror. Disagreement is the one that matters: moving authority between two
+   fields that disagree moves rows across the boundary as a side effect. **Measured live
+   2026-09-02: disagree = 0 on both tables, 0 NULL columns, 0 NULL mirrors, and the 1,129
+   personal rows agree on both halves.** There is deliberately **no absent-label branch** — 190
+   already ruled on "absent means ops" while the mirror was authoritative; inventing a plane
+   here would be the "unlabelled defaults to fine" class committed by the file that closes it.
+3. **The write contract** — `NOT NULL`, then `CHECK (exposure IN ('ops','personal'))`, **no
+   DEFAULT**. The CHECK alone is NULL-permissive. The constraints are not what makes the
+   boundary safe (the policy already fails a NULL closed); they are what makes it diagnosable
+   and what binds the `bypassrls` connections RLS does not.
+4. **The swap** — the two ops-plane policies decide on the column.
+5. **`upsert_thought`** — states the plane on INSERT and writes the mirror FROM the column on
+   UPDATE. Its live body is mirror-only, so it breaks the instant authority moves; and its
+   UPDATE branch is a **live containment hole today** (see the RED evidence below).
+6. **`queue_entity_extraction()`** — the SECURITY DEFINER gate that decides whether
+   `sha256(content)` enters `entity_extraction_queue` reads the column, and its trigger is
+   widened to `UPDATE OF content, metadata, exposure` so a column-only demotion fires it.
+7. **Asserts no remaining mirror reader** over `pg_policies` *and* `pg_proc.prosrc`, with the
+   same five anchors 195 uses (`on_ops_plane(NEW.metadata)` included — the live gate had exactly
+   that form, and a list holding only `on_ops_plane(metadata)` scans past it).
+8. **Attacks itself before COMMIT** — absent and malformed writes refused on both tables,
+   a column-only write accepted, both predicates proven to separate the planes and to refuse
+   NULL, the graph gate proven to follow a column-only demotion, and every probe row proven gone.
+
+### THE ORDER — the code half lands FIRST, and this is not free
+
+Step 3 makes `exposure` NOT NULL, so **any deployed writer that does not state it stops working
+at that moment.** Measured on the running stack, 2026-09-02, by reading inside the containers:
+
+| Container | Deployed artefact | Verdict |
+|---|---|---|
+| `openbrain-mcp` | `openbrain-mcp-server:local`, built **2026-08-30**. `/app/index.ts` 869 / 967 / 1037 are `INSERT INTO thoughts (content, embedding, metadata)` | **BREAKS** — writes neither the column nor the mirror. `capture_thought`, `capture_idea`, `update_idea` and the agent-memory writeback all fail. The pinned tree (`b604d55`) fixes all of them; **the image must be rebuilt** |
+| `openbrain-wiki` | `openbrain-wiki:local`. Baked `/app/wiki-service.mjs` note-ingest POSTs `thoughts` with neither half (line 473) and PATCHes `metadata` wholesale without the key (471) | **BREAKS** (latent — `notes ingested: 0 upserted` on every cycle for 72h). The pinned tree fixes both; **the image must be rebuilt** |
+| `openbrain-gmail-pull`, `openbrain-wiki`'s `/recipes` (entity-wiki compiler), the import recipes | **bind-mounted** from the host `OB1/` tree | **SAFE, no rebuild** — they already state the column (`pull-gmail.ts` 831-832, `generate-wiki.mjs` 1240/1326-1336) |
+| `openbrain-chunk-worker`, `openbrain-entity-worker`, `openbrain-research`, `grounding-backfiller`, `openbrain-curator`, `openbrain-suggestion-worker`, `openbrain-ext`, `openbrain-idea-refinery` | grepped for corpus INSERTs inside each running container | **NOT AFFECTED** — none writes `thoughts` or `agent_memories` |
+
+The full sweep, row by row, is in
+[../../OPENBRAIN-CONSUMER-REGISTRY.md](../../OPENBRAIN-CONSUMER-REGISTRY.md) under "Producer
+sweep against the COLUMN-AUTHORITATIVE predicate".
+
+**IF THE STEPS ARE SWAPPED:** applying `205-` before the rebuild reproduces the 2026-08-31
+outcome exactly — `null value in column "exposure" of relation "thoughts" violates not-null
+constraint` on every `capture_thought`. It fails CLOSED (writes refused, nothing disclosed) but
+the corpus door is down until the rebuild lands, and a rebuild-and-recreate is minutes, not
+seconds. **Build first, apply second, recreate third.**
+
+### Promotion, in one window, under an `open-brain` plane lease
+
+```powershell
+# 0. BEFORE-SNAPSHOT. Take these first; step 6 compares against them.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT (SELECT count(*) FROM thoughts) || '/' || (SELECT count(*) FROM agent_memories) || '/' ||
+          (SELECT count(*) FROM entities) || '/' || (SELECT count(*) FROM thought_entities) || '/' ||
+          (SELECT count(*) FROM entity_extraction_queue);
+   SELECT count(*) FILTER (WHERE exposure IS NULL) || '/' ||
+          count(*) FILTER (WHERE exposure IS DISTINCT FROM metadata->>'exposure') || '/' ||
+          count(*) FILTER (WHERE exposure='personal') FROM thoughts;"
+# EXPECT the second line `0/0/1129`. If disagreement is not 0, STOP - the migration will refuse
+# anyway, and the disagreeing rows are a decision for the operator, not for a migration.
+
+# 1. BUILD BOTH IMAGES FIRST (slow; nothing is live yet, so this costs no availability).
+docker build -t openbrain-mcp-server:local OB1/integrations/kubernetes-deployment
+docker build -t openbrain-wiki:local       OB1/docker/wiki-service
+
+# 2. APPLY THE MIGRATION. Piped over stdin, not `-f` - a Git-Bash shell rewrites /tmp paths.
+Get-Content -Raw OB1\docker\init-agent-memory-column-authority.sql |
+  docker exec -i openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1
+# EXPECT the four NOTICEs, ending `self-test passed`. Any ERROR = the whole transaction rolled
+# back and NOTHING changed; read the message, it names the row or the object it refused on.
+
+# 3. RECREATE THE TWO CONTAINERS IMMEDIATELY (this is the outage window - keep it to seconds).
+docker compose -f OB1/docker/docker-compose.yml up -d --force-recreate openbrain-mcp openbrain-ext openbrain-wiki
+
+# 4-6. VERIFY BY QUERY (below), then the drills.
+```
+
+**Why build-then-apply-then-recreate and not build-recreate-apply:** a rebuilt `openbrain-mcp`
+writes BOTH halves, so it works against the OLD mirror-reading policy as well as the new one —
+the producers were deliberately left stamping both. So recreating before applying is *also*
+safe, and is the gentler order if the build finishes long before the window. What is NEVER safe
+is applying before the image exists.
+
+### Verify **by query**, never by a clean exit code
+
+```powershell
+# 1. NO ROW MOVED. Identical to the step-0 snapshot.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT (SELECT count(*) FROM thoughts) || '/' || (SELECT count(*) FROM agent_memories) || '/' ||
+          (SELECT count(*) FROM entities) || '/' || (SELECT count(*) FROM thought_entities) || '/' ||
+          (SELECT count(*) FROM entity_extraction_queue);"
+
+# 2. THE BOUNDARY READS THE COLUMN, and still separates the planes as the AGENT PLANE - not as
+#    the superuser, which sees everything.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "SELECT tablename||'|'||policyname||'|'||coalesce(qual,'-') FROM pg_policies
+    WHERE schemaname='public' AND tablename IN ('thoughts','agent_memories') ORDER BY 1;
+   BEGIN; SET LOCAL ROLE service_role;
+   SELECT 'ops_visible='||count(*) FILTER (WHERE exposure='ops')||
+          ' personal_visible='||count(*) FILTER (WHERE exposure='personal') FROM thoughts; COMMIT;"
+# EXPECT the two *_ops_plane policies to read `on_ops_plane(exposure)`, and
+# `ops_visible=13011 personal_visible=0`.
+
+# 3. THE ONE THE REVERT WAS ABOUT - a COLUMN-ONLY write is accepted where it used to be 42501.
+#    Rolled back; nothing persists.
+docker exec openbrain-db psql -U postgres -d openbrain -tAc `
+  "BEGIN; SET LOCAL ROLE service_role;
+   INSERT INTO thoughts (content, metadata, exposure) VALUES ('H3-COLUMN-ONLY','{}'::jsonb,'ops');
+   ROLLBACK;"
+# EXPECT `INSERT 0 1`. Before this migration the same statement was
+# `ERROR: new row violates row-level security policy for table "thoughts"`.
+
+# 4. AND THE DOOR ITSELF, which is the thing the C.3 promotion could not do. Through the MCP,
+#    not through psql - the point is that the DEPLOYED code satisfies the contract.
+#    capture_thought via openbrain-mcp must return a confirmation, not isError.
+
+# 5. THE DRILLS.
+powershell -File scripts/checks/prove-agent-memory-rls.ps1
+powershell -File scripts/checks/drill-personal-plane-exclusion.ps1   # exits 2 BY DESIGN (gap ledger)
+```
+
+### Rollback
+
+`OB1\docker\revert-agent-memory-column-authority.sql`. In order: it **repairs the mirror from
+the column and REFUSES if any row still disagrees** (re-pointing the policies at a mirror that
+disagrees is a silent widening of every row whose column says `personal`); refuses if the jsonb
+predicates are gone or have become fail-OPEN; puts the policies back on the mirror **surgically**,
+so 200's arms and disposition comments survive the round trip; restores `upsert_thought` and
+`queue_entity_extraction` to their pre-migration bodies and narrows the trigger again;
+de-constrains the column; and unstamps exactly the rows this migration stamped.
+
+**The column is NOT dropped** — dropping a column is not reversible and PLAN class 4 forbids it.
+It is left populated and inert, so a re-apply is idempotent.
+
+```powershell
+Get-Content -Raw OB1\docker\revert-agent-memory-column-authority.sql |
+  docker exec -i openbrain-db psql -U postgres -d openbrain -v ON_ERROR_STOP=1
+```
+
+**No code rollback is needed.** Producers stamp BOTH halves, so a rebuilt `openbrain-mcp` keeps
+working against the reverted mirror-reading policy. If images are being rolled back too, revert
+the SCHEMA FIRST: the reverse order leaves a window in which a rolled-back (mirror-only) door
+faces a column-authoritative database.
+
+### Evidence — RED before GREEN, on throwaways built from the real chain
+
+Two throwaway `pgvector/pgvector:pg16` containers, both from the chain compose derives:
+
+**(A) The live shape** — chain `010`…`190`, then the exposure column added nullable and
+backfilled, the policies left on the mirror and the 200-round-1 gate installed, i.e. the state
+measured on production. Fixtures: one ops thought, one personal thought, one ops memory.
+
+| | Before `205-` (RED) | After `205-` (GREEN) |
+|---|---|---|
+| column-only write, `service_role` | `ERROR: new row violates row-level security policy` | `INSERT 0 1` |
+| same write **with** the mirror | `INSERT 0 1` | `INSERT 0 1` |
+| **mirror-only** write (the retired contract) | `INSERT 0 1` | refused — `42501` as `service_role`, `null value in column "exposure" … violates not-null constraint` as superuser |
+| ops row visible / personal row visible, as `service_role` | `1 / 0` | `1 / 0` — **unchanged** |
+| personal column-only write to the ops plane | — | refused `42501` |
+| ops `agent_memories` row readable | `1` | `1` |
+| `upsert_thought('<personal row>', {"metadata":{"exposure":"ops"}})` | `col=personal mirror=ops`, and **`personal_row_now_visible_to_ops_plane=1`** | `col=personal mirror=personal`, **`personal_row_visible_to_ops_plane=0`** |
+
+That last row is not a hypothetical: **it is a containment hole open on production right now.**
+The shared `upsert_thought` door republishes a personal thought onto the ops plane through the
+mirror, and the wiki compiler is one of its callers. This migration closes it from both sides.
+
+**(B) The fresh-volume shape** — the full 30-file chain including `205-`. initdb completes with
+no ERROR; `205-` reports `no policy … read the mirror - already column-authoritative`, so it is
+a no-op on that path; and 200's `thought_id` arms, both `NULL-ARM-DISPOSITION` policy comments
+and the `TRIGGER-DISPOSITION` trigger comment all survive.
+
+**Also proven:** three consecutive applies are clean (idempotent); apply → revert → re-apply is
+clean on BOTH shapes and the arms/comments survive in both directions; and the migration's own
+gates can actually fail — a row where column and mirror disagree, and a row with neither, each
+make it RAISE and roll back with the policies left untouched.
+
+**Not proven, and out of this item's scope:** nothing was applied to the live volume, and no
+image was rebuilt. `scripts/checks/test-quartz4-offline.ps1` reports 6 failures both with and
+without this change (its agent-memory probes insert without stating `exposure`, which 195
+already forbids on a fresh volume) — pre-existing, baselined, and recorded in
+`documentation/notes/dfux0s-column-authority-findings.md`.
+
+
 # 210 / 215 — the H1 application roles (`init-app-role.sql`, `init-app-role-passwords.sh`)
 
 > Status: **STAGED, NOT MOUNTED, NOT APPLIED.** 2026-08-31, DFU §C.9 phase U8 item H1.
@@ -1512,7 +1758,12 @@ discovery:
   `OB_APP_*_PASSWORD` env vars are in step 1(a) of the promotion plan.
 - **live half — NOT DONE.** Nothing has been applied to `openbrain-db`.
 
-**Ordering: this migration lands AFTER `200-init-graph-plane-rls.sql` has been applied live.**
+**Ordering: this migration lands AFTER `200-init-graph-plane-rls.sql` has been applied live,
+and AFTER `205-init-agent-memory-column-authority.sql`.** The 205 dependency was learned the
+hard way: on 2026-09-02 the door was moved onto `ob_app_memory` while the live policies still
+read the jsonb mirror, `capture_thought` was refused by the `WITH CHECK`, and the promotion
+was reverted at step 2. Moving the door off `bypassrls` is exactly what makes a boundary that
+reads the wrong field start biting, so the field has to be right first.
 It asserts that `service_role` cannot write the agent-memory corpus, which is 200's §6a doing;
 on production today `service_role` still can, so applying 210 there right now would raise:
 
