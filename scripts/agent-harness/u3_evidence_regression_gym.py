@@ -127,6 +127,31 @@ from quadrant import venue as venue_mod       # noqa: E402
 
 REPO = HERE.parents[1]
 CHECK_CMD = "python scripts/checks/check_quadrant_evidence_reproduces.py --auto"
+
+#: WHERE THIS DRILL LOOKS FOR THE REAL RUN EVIDENCE IT SEEDS. `.quadrant/gym-runs` is the
+#: WORKING location - gitignored, per-checkout, thrown away with the worktree that produced
+#: it; `documentation/evidence/` is the COMMITTED one. Only the first was searched until
+#: 2026-09-02, and that is why this drill answered `NO EVIDENCE`, exit 2, in every checkout
+#: but the one that ran the arena dispatch: its gym records had been deleted with their
+#: worktree - byte for byte the loss that destroyed U4's quadrant comparison, where
+#: .gitignore's "run artifacts, not source" rule took the audit trail with it. This is U4's
+#: own fix applied to the drill that first earned the rule; see
+#: check_quadrant_evidence_reproduces.py, whose DISCOVERY_ROOTS gained
+#: `documentation/evidence` on 2026-08-31 for exactly this reason.
+#:
+#: WIDENING THE SEARCH DOES NOT WIDEN WHAT IS ADMISSIBLE, which is the whole reason it is
+#: safe: every candidate is still filtered on `record.venue.name == <the configured venue>`,
+#: and the venue gate above is untouched - this drill still REFUSES to run outside the arena.
+SOURCE_ROOTS = (".quadrant/gym-runs", "documentation/evidence")
+
+
+def _source_roots_phrase() -> str:
+    """The source roots as prose, DERIVED from SOURCE_ROOTS so no second copy can drift."""
+    names = [r.rstrip("/") + "/" for r in SOURCE_ROOTS]
+    if len(names) == 1:
+        return names[0]
+    return ", ".join(names[:-1]) + " or " + names[-1]
+
 FINDING = (
     "A record of a check is not a check: if the artifacts a run kept cannot re-produce the "
     "verdict it claims, the verdict is a self-report with a directory next to it. Born from "
@@ -234,7 +259,7 @@ def admit_against(sandbox: Path) -> Tuple[bool, str]:
         problems += [f"{rp.parent.name}: {p}"
                      for p in record_mod.admit(rec, item_digest=str(rec.get("item_digest") or ""),
                                                venue=str((rec.get("venue") or {}).get("name") or ""),
-                                               schema=schema)]
+                                               schema=schema, record_dir=rp.parent)]
     return (not problems), "; ".join(problems)
 
 
@@ -306,20 +331,43 @@ def main(argv: List[str]) -> int:
     print(f"venue      : {v.name} ({v.kind}) - {v.repo} @ {v.ref}")
 
     # 2. THE SOURCE EVIDENCE: a real run from that venue, not a fixture.
-    src = REPO / ".quadrant" / "gym-runs"
-    runs = [p.parent for p in sorted(src.glob("*/record.json"))]
-    usable = []
-    for d in runs:
-        rec = json.loads((d / "record.json").read_text(encoding="utf-8"))
-        if rec.get("status") in ("completed", "failed") and \
-                str((rec.get("venue") or {}).get("name") or "") == v.name:
-            usable.append(d)
+    usable, seen = [], set()
+    for root in SOURCE_ROOTS:
+        base = REPO / root
+        if not base.is_dir():
+            continue
+        for rp in sorted(base.rglob("record.json")):
+            d = rp.parent
+            try:
+                rec = json.loads(rp.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if rec.get("status") not in ("completed", "failed"):
+                continue
+            # THE VENUE FILTER IS WHAT MAKES A WIDER SEARCH SAFE, and it is unchanged: a
+            # record is usable only if IT SAYS it came from this venue. Widening WHERE the
+            # drill looks therefore cannot widen WHAT it seeds from - a `workspace`-venue
+            # run, or a pre-venue one, is refused here however many roots are searched.
+            if str((rec.get("venue") or {}).get("name") or "") != v.name:
+                continue
+            # Two roots can hold runs with the same directory name; the sandbox copy needs a
+            # unique destination or copytree raises on the second one.
+            name, n = d.name, 1
+            while name in seen:
+                n += 1
+                name = "{0}-{1}".format(d.name, n)
+            seen.add(name)
+            usable.append((name, d, root))
     if not usable:
-        print(f"NO EVIDENCE: {src} holds no outcome record from venue '{v.name}'. Run the "
-              f"quadrant comparison in the arena first - this drill seeds a copy of REAL "
-              f"run evidence and will not fabricate one.")
+        print("NO EVIDENCE: none of {0} under {1} holds an outcome record from venue "
+              "'{2}'. Run the quadrant comparison in the arena first - this drill seeds a "
+              "copy of REAL run evidence and will not fabricate one.".format(
+                  _source_roots_phrase(), REPO, v.name))
         return 2
-    print(f"source     : {len(usable)} outcome record(s) from {src}")
+    from collections import Counter
+    tally = Counter(root for _, _, root in usable)
+    print("source     : {0} outcome record(s) from {1}".format(
+        len(usable), ", ".join("{0} in {1}/".format(c, r) for r, c in sorted(tally.items()))))
 
     # 3. THE BANK. Content-addressed, so re-running this drill does not grow the registry.
     row = durable_checks.add(REPO, command=CHECK_CMD, why=FINDING,
@@ -342,8 +390,8 @@ def main(argv: List[str]) -> int:
         #     measures nothing, so the control runs before any seed.
         pristine = root / "pristine"
         pristine.mkdir()
-        for d in usable:
-            copy_run(d, pristine / d.name)
+        for name, d, _root in usable:
+            copy_run(d, pristine / name)
         rc, out = check_against(pristine)
         adm_ok, adm_why = admit_against(pristine)
         rows.append({"seed": "-  PRISTINE copy (the control)", "what": "nothing changed",
@@ -356,8 +404,8 @@ def main(argv: List[str]) -> int:
         for label, fn in SEEDS:
             sb = root / label.split()[0]
             sb.mkdir()
-            for d in usable:
-                copy_run(d, sb / d.name)
+            for name, d, _root in usable:
+                copy_run(d, sb / name)
             what = fn(sb)
             rc, out = check_against(sb)
             adm_ok, adm_why = admit_against(sb)
