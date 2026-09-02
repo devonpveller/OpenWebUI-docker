@@ -2042,3 +2042,26 @@ ALSO RECORDED: PLAN section C.8 clause 1's prose still reads "For U0-U6" while s
           exists to close. Closing it is a PLAN.md edit and is the operator's.
 CITED:    the operator's direction, 2026-08-31; section C.8.
 REVERT:   merge `work/u8floor` earlier; the red is informational, not blocking.
+
+
+## 2026-09-01 - clause 8 - `work/c8plane` ABANDONED (operator direction)
+DECISION: `work/c8plane` is abandoned and its branch and worktree deleted. The operator's reason
+          is that its clause-8 UNMET record is already on the work line - confirmed: `b618591`
+          *"docs(c8): clause 8 is UNMET - an honest failure with the cost, not a manufactured
+          pass"* carries it, so the branch's record adds nothing.
+STATED PLAINLY, because "redundant record" understates it: the branch also carried **979
+          insertions of clause-8 MACHINERY**, not only prose - `scripts/checks/defect-classes.json`
+          (135), `seed-defect-classes.ps1` (216), `recall-sibling-class.ps1` (202), a
+          `queue.ps1` seam (38), `dfu-done.ps1` changes (120) and a 300-line note. Abandoning it
+          discards a built recall seam, not a duplicate paragraph. That is the operator's call to
+          make and it is recorded here so the decision is not later read as janitorial.
+WHY IT IS DEFENSIBLE ANYWAY: clause 8 is pending an operator decision (ARMED vs hard gate, see
+          `work/c8arm`). If clause 8 becomes ARMED - mirroring clause 6 and U7 - the machinery
+          this branch builds is not what closes it; a later effort changed by a recall is. The
+          branch's own note concluded exactly that: *"the cost is time and independent efforts,
+          not code."*
+CITED:    the operator's direction, 2026-09-01; §C.10 (the freeze); §C.8 clause 8's own
+          *"This clause may FAIL. That is why it is here."*
+REVERT:   `git bundle unbundle "D:\Open WebUI\_notes\parked-workistack-c8plane.bundle"`,
+          verified *"records a complete history"* BEFORE the branch was deleted. Nothing was
+          destroyed.
