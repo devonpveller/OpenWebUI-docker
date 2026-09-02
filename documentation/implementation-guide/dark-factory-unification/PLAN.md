@@ -438,23 +438,46 @@ without a recorded result.
 7. **The audit trail is complete**, because it is what the operator reads instead
    of the diffs: every phase has its DECISIONS entries, its findings note, and
    commit messages stating what was validated and by which check.
-8. **THE MEMORY PLANE COMPOUNDS — the plan proves its own thesis** (operator,
-   2026-08-30). This plan's basis is NVIDIA AVO's result, whose central claim is a
-   persistent memory carrying implementations, results and reasoning forward across
-   attempts. Building that plumbing is U1's column; it is not this clause. This
-   clause is met when the plane is **used**: real efforts write to it as they run,
-   and **at least one recall demonstrably informed a later effort** — traceable
-   through `agent_memory_recall_traces` to the work that consumed it, with the
-   effort's own record citing what it was told.
+8. **THE MEMORY PLANE IS ARMED — the compounding machinery is built, proven, and
+   in use; genuine cross-attempt compounding is a STANDING property** (operator,
+   2026-08-30; reclassified ARMED 2026-09-02, mirroring clause 6/U7). This plan's
+   basis is NVIDIA AVO's result, whose central claim is a persistent memory
+   carrying implementations, results and reasoning forward across attempts.
+   Building that plumbing is U1's column; it is not this clause.
 
-   Measured at adoption: `agent_memories` held **4 rows** — a boundary probe, an
-   acceptance probe, a U3 proof and one real finding — while this effort's actual
-   compounding ran through `DECISIONS.md` and 25 findings notes. That gap is the
-   point. U5's five rounds each rediscovered a NEIGHBOURING case, which is exactly
-   what a system without cross-attempt recall does; the recall that saved it came
-   from files. **A memory plane that is built but not used has not been shown to
-   work**, and this plan would otherwise close having proved it was constructed
-   rather than that it compounds. This clause may FAIL. That is why it is here.
+   **Why ARMED, not COMPOUNDED** (the operator's decision, and the honest reason):
+   as a hard gate, this clause required a recall that surfaced to a *later* effort
+   a class it did not already hold — and that arrives with real-world **time and
+   use, not a round**. Held as a hard gate it makes `dfu-done` unable ever to exit
+   0, which is not a completion criterion but a permanent wait. Clause 6 (U7) faced
+   the identical shape and was resolved the same way: standing by design, met when
+   its loop has run one honest cycle. Clause 8 gets that treatment.
+
+   **This clause is MET when, evidenced by a run:**
+   - the plane holds memories written by **real efforts as they ran** (not seeded
+     fixtures), and
+   - `agent_memory_recall_traces` → `agent_memory_recall_items` → a `memory_used`
+     audit event on the same trace shows **at least one recall consumed by a later
+     effort**, with that effort's own record citing what it was told, and
+   - the probe is **non-tautological** — against an empty fixture it goes UNMET
+     with the distinct sentence; against the real record it passes.
+
+   **The honest caveat STAYS on the record and is not erased by arming it:** the
+   strongest signal to date (U5's graph round recalling the *"fixed one, left the
+   sibling"* class before writing SQL, `recall_changed_the_work=true`) had that
+   class **named in the send-back brief and typed verbatim into the recall query**
+   — so the plane CONFIRMED a class already in hand; it did not SURFACE one the
+   effort lacked. Genuine unforced compounding — a recall that hands a later effort
+   a class it would not otherwise have had — is the standing property this arming
+   does not claim, and which real use over time is expected to produce. Measured at
+   adoption `agent_memories` held 4 rows; this effort's real compounding ran through
+   `DECISIONS.md` and 25 findings notes, which is the gap the plane exists to close
+   and has only begun to.
+
+   **REVERT:** restore the hard-gate wording above and dfu-done clause 8 returns to
+   requiring genuine surfacing — at the cost of never exiting 0 until real use
+   produces it. The arming is the operator's call, reversible, and does not touch
+   the machinery, the probe, or the caveat.
 
 **When the script exits 0 the factory STOPS and hands over.** That is the handover
 point, not the finish line — the operator's walkthrough is the last gate and it is
