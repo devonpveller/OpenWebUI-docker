@@ -193,7 +193,7 @@ $script:DfuClauses = [ordered]@{
     "5" = "The walkthrough is true - every row names a check and that check re-runs green"
     "6" = "U7 is ARMED - its loop has run one full cycle on the record"
     "7" = "The audit trail is complete"
-    "8" = "THE MEMORY PLANE COMPOUNDS - a recall demonstrably informed a later effort"
+    "8" = "THE MEMORY PLANE IS ARMED - the loop has run one full cycle on the record"
 }
 
 # THE VERDICT VOCABULARY. A clause evaluator may return exactly these words. Anything
@@ -5003,92 +5003,260 @@ function Test-Clause7 {
 }
 
 function Test-Clause8 {
-    # C.8.8 - THE MEMORY PLANE COMPOUNDS. Building the plumbing is U1's column; this
-    # clause is about USE: real efforts write to the plane as they run, and at least one
-    # recall demonstrably INFORMED a later effort - traceable through
-    # agent_memory_recall_traces to the work that consumed it, with that effort's own
-    # record citing what it was told.
+    # C.8.8 - THE MEMORY PLANE IS ARMED. Building the plumbing is U1's column; this clause is
+    # about USE. Reclassified ARMED on 2026-09-02 (operator, PLAN.md at 0ff5650), mirroring
+    # clause 6/U7: held as a hard gate it required a recall that SURFACED to a later effort a
+    # class it did not already hold, which arrives with real-world time and use rather than with
+    # a round - so as a gate it made dfu-done unable ever to exit 0. Armed, it is MET when,
+    # evidenced by a run:
     #
-    # SECTION C.8 SAYS EXPLICITLY THIS CLAUSE MAY FAIL, AND THAT IS WHY IT IS THERE. It is
-    # not papered over here: a plane that is built but not used has not been shown to work.
+    #   (1) the plane holds memories written by REAL EFFORTS AS THEY RAN, not seeded fixtures;
+    #   (2) agent_memory_recall_traces -> agent_memory_recall_items -> a `memory_used` audit
+    #       event ON THE SAME TRACE shows at least one recall consumed by a LATER effort, with
+    #       that effort's own record citing what it was told;
+    #   (3) the probe is NON-TAUTOLOGICAL - against an empty fixture it goes UNMET with a
+    #       distinct sentence, and against the real record it passes.
+    #
+    # THE HONEST CAVEAT, WHICH ARMING DOES NOT ERASE and which this probe must not quietly
+    # imply away: the strongest signal to date (U5's graph round recalling the "fixed one, left
+    # the sibling" class) had that class NAMED IN THE SEND-BACK BRIEF and typed verbatim into
+    # the recall query - so the plane CONFIRMED a class already in hand rather than SURFACING
+    # one the effort lacked. What passes here is the loop wired and run, never unforced
+    # compounding. The pass sentence says so in words, because a green with no caveat attached
+    # gets read as the stronger claim.
+    #
+    # WHAT THIS PROBE REFUSES TO ACCEPT, named because it already happened once. On 2026-08-31
+    # an earlier version of this wiring went green off memories the SAME effort had seeded 70
+    # seconds earlier, reached by a recall whose query read "probe test of the report-usage
+    # loop" (trace c7042272-0961-4747-a466-0a1e73a33c3d). A recall of a fixture you just planted
+    # is not a later effort consuming a memory. The gate that kills that case is (3c) below: the
+    # TRACE ID must be cited in the record the operator reads. A probe trace nobody wrote down
+    # cannot discharge this clause no matter what the database says.
     param($Ctx, $Store)
     $c = New-ClauseResult -Id 8
-    $c.coverage.subject  = "the write half, the recall half, and the consumer link"
+    $c.coverage.subject  = "the real-effort write half, the recall half, and the later-effort consumer link"
     $c.coverage.expected = 3
 
     if ($Ctx.skiplive) {
-        foreach ($n in @("plane-written-to", "recall-returned-something", "recall-informed-a-later-effort")) {
+        foreach ($n in @("plane-written-to-by-real-efforts", "recall-returned-something", "recall-consumed-by-a-later-effort")) {
             $c.probes += (New-Probe -Name $n -Command "(not run: -SkipLive)" `
                 -Run (New-VerdictProbeBody -Verdict "indeterminate" -Exit $null -Note "-SkipLive - the plane was not measured"))
         }
-        $c.coverage.not_evaluated = @("plane-written-to", "recall-returned-something", "recall-informed-a-later-effort")
+        $c.coverage.not_evaluated = @("plane-written-to-by-real-efforts", "recall-returned-something", "recall-consumed-by-a-later-effort")
         return (Resolve-ClauseVerdict -Clause $c)
     }
 
-    # (1) written to
-    $r1 = Invoke-Psql -Ctx $Ctx -Sql "SELECT count(*) FROM agent_memories;"
-    $n1 = @(($r1.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' })
-    if (-not $r1.ran -or $r1.exit -ne 0 -or $n1.Count -lt 1) {
-        $c.coverage.not_evaluated += "plane-written-to"
+    # (1) WRITTEN TO BY REAL EFFORTS AS THEY RAN - not merely non-empty. `count(*) > 0` was the
+    #     old test and it cannot tell the plane's contents apart from a fixture corpus: the
+    #     seventeen defect-class rows on this plane were written in one batch by
+    #     scripts/checks/seed-defect-classes.ps1, and a probe counting them as evidence that
+    #     efforts write to the plane would be measuring its own seeding.
+    #
+    #     The discriminator is mechanical and it is the row's own provenance: a memory counts
+    #     here when it is NOT stamped `metadata.seeded_by` AND it names the work that produced
+    #     it (`task_id`, or `metadata.task_id` / `metadata.source_item`, which is what the
+    #     agent-harness write seam stamps when a tester files a finding). A memory that cannot
+    #     say which effort produced it is not evidence of an effort writing as it ran.
+    $sql1 = "SELECT count(*)::text || '/' || " +
+            "count(*) FILTER (WHERE m.metadata->>'seeded_by' IS NULL AND COALESCE(m.task_id, m.metadata->>'task_id', m.metadata->>'source_item') IS NOT NULL)::text || '/' || " +
+            "count(*) FILTER (WHERE m.metadata->>'seeded_by' IS NOT NULL)::text FROM agent_memories m;"
+    $r1 = Invoke-Psql -Ctx $Ctx -Sql $sql1
+    $n1 = (($r1.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+/\d+/\d+$' } | Select-Object -First 1)
+    if (-not $r1.ran -or $r1.exit -ne 0 -or -not $n1) {
+        $c.coverage.not_evaluated += "plane-written-to-by-real-efforts"
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $r1.exit -Note "could not count agent_memories"
     } else {
+        $p1 = $n1 -split '/'
+        $total = [int]$p1[0]; $realEffort = [int]$p1[1]; $seeded = [int]$p1[2]
         $c.coverage.evaluated++
-        if ([int]$n1[0] -gt 0) { $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note ("agent_memories holds {0} row(s)" -f $n1[0]) }
-        else { $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 -Note "agent_memories is empty - nothing writes to the plane" }
+        if ($total -eq 0) {
+            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                    -Note "agent_memories is EMPTY - nothing has ever written to the plane, so there is nothing any later effort could have been told"
+        } elseif ($realEffort -lt 1 -and $seeded -gt 0) {
+            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                    -Note ("agent_memories holds {0} row(s) and {1} of them were PLANTED BY A SEEDING SCRIPT (metadata.seeded_by); not one row names the effort that produced it. A fixture corpus is not the plane holding what real efforts wrote as they ran" -f $total, $seeded)
+        } elseif ($realEffort -lt 1) {
+            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                    -Note ("agent_memories holds {0} row(s) and NOT ONE names the effort that produced it (no task_id, metadata.task_id or metadata.source_item) - a memory that cannot say which effort wrote it is not evidence of an effort writing as it ran" -f $total)
+        } else {
+            $r1b = Invoke-Psql -Ctx $Ctx -Sql ("SELECT COALESCE(m.task_id, m.metadata->>'task_id', m.metadata->>'source_item') FROM agent_memories m " +
+                   "WHERE m.metadata->>'seeded_by' IS NULL AND COALESCE(m.task_id, m.metadata->>'task_id', m.metadata->>'source_item') IS NOT NULL ORDER BY m.created_at LIMIT 3;")
+            $who = @(($r1b.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $whoNote = if ($who.Count -gt 0) { (" - e.g. " + (($who | ForEach-Object { "'" + $_ + "'" }) -join ", ")) } else { "" }
+            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                    -Note ("agent_memories holds {0} row(s); {1} were written by a real effort naming the work that produced it{2}, and {3} were planted by a seeding script and do NOT count toward this probe" -f $total, $realEffort, $whoNote, $seeded)
+        }
     }
-    $c.probes += (New-Probe -Name "plane-written-to" -Command ("docker exec {0} psql -tAc 'SELECT count(*) FROM agent_memories;'" -f $Ctx.db) -Run $body)
+    $c.probes += (New-Probe -Name "plane-written-to-by-real-efforts" `
+        -Command ("docker exec {0} psql -tAc 'agent_memories: total / written by a named real effort (no metadata.seeded_by, has task_id|source_item) / planted by a seeding script'" -f $Ctx.db) -Run $body)
 
-    # (2) recall actually RETURNED something. A trace that examined 0 and returned 0 is a
-    #     recall that ran, not a recall that informed anything - counting traces alone
-    #     would be a claim wider than its evidence.
-    $r2 = Invoke-Psql -Ctx $Ctx -Sql "SELECT count(*)::text||'/'||count(*) FILTER (WHERE (response_policy->>'returned')::int > 0)::text FROM agent_memory_recall_traces;"
-    $n2 = (($r2.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+/\d+$' } | Select-Object -First 1)
+    # (2) recall actually RETURNED something - AND THE TRACE'S SELF-REPORT IS NOT THE EVIDENCE.
+    #     This probe used to read `response_policy->>'returned'`, which is a number the recall
+    #     wrote ABOUT ITSELF into its own trace. Measured on 2026-08-31: four traces claimed
+    #     `returned = 1` while `agent_memory_recall_items` held ZERO rows for them, because the
+    #     fixture memories those items pointed at had been cleaned up and the FK is ON DELETE
+    #     CASCADE. So the probe reported "4 of which returned at least one memory" while the
+    #     table that records WHICH memories were returned was empty for every one of them. That
+    #     is this repo's own "a check green while checking nothing" class: the subject was never
+    #     in the query.
+    #
+    #     The evidence is now the ITEM ROWS - the same rows probe 3 has to reason over - and a
+    #     DISAGREEMENT between the self-report and the items is reported rather than silently
+    #     resolved in favour of whichever is larger.
+    $r2 = Invoke-Psql -Ctx $Ctx -Sql ("SELECT count(*)::text||'/'||" +
+          "count(*) FILTER (WHERE (SELECT count(*) FROM agent_memory_recall_items i WHERE i.trace_id = t.id) > 0)::text||'/'||" +
+          "count(*) FILTER (WHERE COALESCE((t.response_policy->>'returned')::int,0) > 0 AND " +
+          "(SELECT count(*) FROM agent_memory_recall_items i WHERE i.trace_id = t.id) = 0)::text " +
+          "FROM agent_memory_recall_traces t;")
+    $n2 = (($r2.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+/\d+/\d+$' } | Select-Object -First 1)
     if (-not $r2.ran -or $r2.exit -ne 0 -or -not $n2) {
         $c.coverage.not_evaluated += "recall-returned-something"
         $body = New-VerdictProbeBody -Verdict "indeterminate" -Exit $r2.exit -Note "could not measure recall traces"
     } else {
         $parts = $n2 -split '/'
+        $traces = [int]$parts[0]; $withItems = [int]$parts[1]; $orphaned = [int]$parts[2]
         $c.coverage.evaluated++
-        if ([int]$parts[1] -gt 0) { $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 -Note ("{0} trace(s), {1} of which returned at least one memory" -f $parts[0], $parts[1]) }
-        else { $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 -Note ("{0} trace(s) and NONE returned a memory - recall ran but told nobody anything" -f $parts[0]) }
-    }
-    $c.probes += (New-Probe -Name "recall-returned-something" -Command ("docker exec {0} psql -tAc 'SELECT count(*), count(*) FILTER (WHERE returned>0) FROM agent_memory_recall_traces;'" -f $Ctx.db) -Run $body)
-
-    # (3) THE LINK THAT DECIDES THE CLAUSE: a recall traced to the work that CONSUMED it,
-    #     with that effort's own record citing what it was told. Searched for in the record
-    #     the operator actually reads - the ledger and the findings notes - by the trace's
-    #     own request_id or by the id of a memory that recall returned.
-    $r3 = Invoke-Psql -Ctx $Ctx -Sql "SELECT DISTINCT t.request_id::text FROM agent_memory_recall_traces t WHERE (t.response_policy->>'returned')::int > 0;"
-    $ids = @(($r3.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
-    $r3b = Invoke-Psql -Ctx $Ctx -Sql "SELECT DISTINCT memory_id::text FROM agent_memory_recall_items;"
-    $mids = @(($r3b.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
-    $needles = @($ids + $mids | Sort-Object -Unique)
-
-    if ($needles.Count -lt 1) {
-        $c.coverage.not_evaluated += "recall-informed-a-later-effort"
-        $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
-                -Note "no recall returned a memory, so there is no recall for any later effort to have been informed by"
-        $c.coverage.evaluated++
-    } else {
-        # THE AUDIT RECORD AS IT STOOD BEFORE THE RUN, normalised. A recall id written into
-        # a note by a command this authority executed would otherwise prove that the memory
-        # plane compounds - by citing evidence the authority manufactured - and a citation
-        # inside an HTML comment is not in the record the operator reads.
-        $hay = ""
-        $hay += ([string](Get-SnapMd -Which "decisions"))
-        foreach ($f in @(Get-SnapNotes)) { $hay += ([string]$f.md) }
-        $hits = @($needles | Where-Object { $hay -match [regex]::Escape($_) })
-        $c.coverage.evaluated++
-        if ($hits.Count -ge 1) {
+        $orphNote = if ($orphaned -gt 0) {
+            (" -- and {0} trace(s) CLAIM they returned memories while holding no item row at all; the trace's self-report and the item table disagree, and the item table is the one that names the memories" -f $orphaned)
+        } else { "" }
+        if ($withItems -gt 0) {
             $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
-                    -Note ("{0} recall id(s) are cited in the audit record, linking a recall to the work that consumed it" -f $hits.Count)
+                    -Note ("{0} trace(s), {1} of which recorded at least one RETURNED MEMORY as an item row{2}" -f $traces, $withItems, $orphNote)
         } else {
             $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
-                    -Note ("none of the {0} recall/memory id(s) is cited anywhere in DECISIONS.md or the findings notes - the trace-to-consumer link cannot be demonstrated, so the plane is not shown to COMPOUND" -f $needles.Count)
+                    -Note ("{0} trace(s) and NONE recorded a returned memory as an item row - recall ran but told nobody anything{1}" -f $traces, $orphNote)
         }
     }
-    $c.probes += (New-Probe -Name "recall-informed-a-later-effort" `
-        -Command "psql: request_ids of traces that returned + memory_ids from agent_memory_recall_items ; then search DECISIONS.md and documentation/notes for those ids" -Run $body)
+    $c.probes += (New-Probe -Name "recall-returned-something" -Command ("docker exec {0} psql -tAc 'traces / traces holding >=1 agent_memory_recall_items row / traces CLAIMING returned>0 with no item row'" -f $Ctx.db) -Run $body)
+
+    # (3) THE LINK THAT DECIDES THE CLAUSE: a recall traced to the work that CONSUMED it, LATER,
+    #     with that effort's own record citing what it was told.
+    #
+    #     WHAT AN EARLIER VERSION ACCEPTED, and why it was a claim wider than its evidence. It
+    #     built a needle set as the UNION of two independent things - the request_ids of traces
+    #     that returned anything, and every memory_id ever returned - and passed if the record
+    #     cited EITHER. Neither half establishes the link: a request_id in a note proves a
+    #     recall happened and was mentioned; a memory_id in a note proves a memory was named, by
+    #     anyone, for any reason, possibly without a recall at all.
+    #
+    #     WHAT IT REQUIRES NOW - THREE THINGS, ON THE SAME (trace, memory) PAIR:
+    #       a. the pair is a real delivery: an `agent_memory_recall_items` row with `returned`
+    #          true says that trace returned that memory, AND a `memory_used` audit event names
+    #          the SAME trace and the SAME memory. Joined, not asserted.
+    #       b. the consumption is LATER THAN THE WRITE: the `memory_used` event is strictly
+    #          after the memory's own `created_at`, and the elapsed write->recall and
+    #          write->use intervals are PRINTED in the verdict, so a 70-second same-session loop
+    #          is visible on the face of the green rather than hidden inside it.
+    #       c. the consuming effort's own record cites BOTH the trace id and the memory. The
+    #          TRACE id is the half that matters and the half the old probe never required: a
+    #          memory id alone could have been looked up by hand, and it is exactly the trace
+    #          citation the 2026-08-31 self-seeded green could not have produced.
+    #
+    #     Each missing condition gets its OWN sentence. "Returned but never reported used",
+    #     "used but nobody wrote it down" and "the memory is named but not the recall that
+    #     delivered it" are three different failures, and collapsing them is the whole clause.
+    #
+    #     WHAT THIS PROBE STILL CANNOT SEE, stated rather than implied away: "a LATER EFFORT" is
+    #     evidenced here by a later timestamp plus a citation in a findings note that is the
+    #     consuming effort's own record. The database carries no effort identity on a
+    #     `memory_used` event (actor_label, runtime_name and task_id are all NULL on every row
+    #     measured 2026-09-02), so the probe cannot mechanically prove the consumer is a
+    #     different agent from the writer. That is why the intervals and the citing document are
+    #     printed: they are what a reader judges it on.
+    #
+    #     KNOWN GAP, reported rather than worked around: the schema's designated home for this
+    #     signal is agent_memory_recall_items.used / ignored_reason, and `performReportUsage`
+    #     (agent-memory-tools.ts) writes ONLY the audit event - it never updates the item row.
+    #     So this probe reads the audit event, which is the strongest record the deployed system
+    #     emits, and prints the item-row count so the gap stays visible.
+    $sqlPairs = "SELECT DISTINCT e.trace_id::text || '|' || e.memory_id::text || '|' || " +
+                "(EXTRACT(EPOCH FROM (e.created_at - m.created_at))::bigint)::text || '|' || " +
+                "(EXTRACT(EPOCH FROM (t.created_at - m.created_at))::bigint)::text " +
+                "FROM agent_memory_audit_events e " +
+                "JOIN agent_memory_recall_items i ON i.trace_id = e.trace_id AND i.memory_id = e.memory_id AND i.returned " +
+                "JOIN agent_memory_recall_traces t ON t.id = e.trace_id " +
+                "JOIN agent_memories m ON m.id = e.memory_id " +
+                "WHERE e.event_type = 'memory_used' AND e.trace_id IS NOT NULL AND e.created_at > m.created_at;"
+    $r3 = Invoke-Psql -Ctx $Ctx -Sql $sqlPairs
+    $pairs = @(($r3.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f-]{36}\|[0-9a-f-]{36}\|-?\d+\|-?\d+$' })
+    $r3b = Invoke-Psql -Ctx $Ctx -Sql "SELECT DISTINCT memory_id::text FROM agent_memory_recall_items WHERE returned;"
+    $returnedIds = @(($r3b.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^[0-9a-f-]{36}$' })
+    $r3c = Invoke-Psql -Ctx $Ctx -Sql "SELECT count(*) FROM agent_memory_recall_items WHERE used IS NOT NULL;"
+    $itemUsed = (($r3c.out -split "`n") | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+    $gapNote = if ($itemUsed -eq "0") {
+        " (agent_memory_recall_items.used is NULL on every row: agent_memory_report_usage writes the audit event and not the item row - a defect recorded, not a reason to lower the bar)"
+    } else { "" }
+
+    # THE AUDIT RECORD AS IT STOOD BEFORE THE RUN, normalised, held one document at a time so
+    # the verdict can NAME the note that cites the recall. A recall id written into a note by a
+    # command this authority executed would otherwise prove that the memory plane compounds - by
+    # citing evidence the authority manufactured - and a citation inside an HTML comment is not
+    # in the record the operator reads.
+    $docs = @()
+    $docs += @{ name = "DECISIONS.md"; md = ([string](Get-SnapMd -Which "decisions")) }
+    foreach ($f in @(Get-SnapNotes)) { $docs += @{ name = ("documentation/notes/" + [string]$f.name); md = ([string]$f.md) } }
+
+    # A memory is CITED when its full uuid appears, or when its first eight hex characters
+    # appear as a standalone token - which is how the findings notes actually name them
+    # ("`05cccbfe` (class 13)"). Bounded on both sides so a longer hex string cannot match.
+    # The TRACE is never accepted in short form: it is the load-bearing half.
+    $citesMemory = {
+        param([string]$Text, [string]$Id)
+        if ($Text -match [regex]::Escape($Id)) { return $true }
+        $short = $Id.Substring(0, 8)
+        return ($Text -match ('(?<![0-9a-fA-F])' + [regex]::Escape($short) + '(?![0-9a-fA-F])'))
+    }
+
+    $c.coverage.evaluated++
+    if ($returnedIds.Count -lt 1) {
+        $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                -Note "no recall recorded a returned memory, so there is no recall for any later effort to have been informed by"
+    } elseif ($pairs.Count -lt 1) {
+        $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                -Note ("{0} memory/memories were RETURNED by a recall and NONE is reported USED against the trace that returned it, later than it was written - returned is not consumed, and C.8.8 asks for the work that consumed it{1}" -f $returnedIds.Count, $gapNote)
+    } else {
+        # Counted as DISTINCT (trace, memory) pairs, not as citation hits: one pair named in
+        # three notes is one link, and reporting it as three would be a count wider than the
+        # thing it counts.
+        $bothCited = @(); $memoryOnly = @()
+        $seenBoth = @{}; $seenMemOnly = @{}
+        foreach ($p in $pairs) {
+            $f = $p -split '\|'
+            $tid = [string]$f[0]; $mid = [string]$f[1]
+            $useGap = [int64]$f[2]; $recallGap = [int64]$f[3]
+            $key = ($tid + "/" + $mid)
+            foreach ($d in $docs) {
+                $hasTrace = ([string]$d.md -match [regex]::Escape($tid))
+                $hasMem   = (& $citesMemory ([string]$d.md) $mid)
+                if ($hasTrace -and $hasMem) {
+                    if (-not $seenBoth.ContainsKey($key)) {
+                        $seenBoth[$key] = $true
+                        $bothCited += @{ trace = $tid; memory = $mid; doc = $d.name; use_gap_s = $useGap; recall_gap_s = $recallGap }
+                    }
+                } elseif ($hasMem) {
+                    if (-not $seenMemOnly.ContainsKey($key)) {
+                        $seenMemOnly[$key] = $true
+                        $memoryOnly += @{ memory = $mid; doc = $d.name }
+                    }
+                }
+            }
+        }
+        if ($bothCited.Count -ge 1) {
+            $h = $bothCited[0]
+            $body = New-VerdictProbeBody -Verdict "pass" -Exit 0 `
+                    -Note ("{0} distinct (trace, memory) pair(s) are a recall DELIVERY (an item row with returned=true) reported USED against that same trace, later than the memory was written, and cited by BOTH ids in the record the operator reads - e.g. trace {1} returned memory {2}, recalled {3}s and used {4}s after that memory was written, cited in {5}. THAT IS THE LOOP WIRED AND RUN, NOT UNFORCED COMPOUNDING, and this clause does not claim otherwise: C.8.8's caveat stands - the strongest signal to date had its class named in the send-back brief and typed verbatim into the recall query, so the plane CONFIRMED a class already in hand rather than SURFACING one the effort lacked{6}" `
+                            -f $bothCited.Count, $h.trace, $h.memory, $h.recall_gap_s, $h.use_gap_s, $h.doc, $gapNote)
+        } elseif ($memoryOnly.Count -ge 1) {
+            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                    -Note ("{0} consumed (trace, memory) pair(s) have the MEMORY named in the record (e.g. {1} in {2}) but the TRACE that delivered them is cited nowhere - a memory id on its own could have been looked up by hand, so a reader cannot tell the work was informed by a recall{3}" `
+                            -f $memoryOnly.Count, $memoryOnly[0].memory, $memoryOnly[0].doc, $gapNote)
+        } else {
+            $body = New-VerdictProbeBody -Verdict "fail" -Exit 1 `
+                    -Note ("{0} (trace, memory) pair(s) are reported USED against the trace that returned them, and NONE is cited in DECISIONS.md or the findings notes - the plane was consulted and the work that consumed it never said so, so a reader of the record cannot follow the link{1}" -f $pairs.Count, $gapNote)
+        }
+    }
+    $c.probes += (New-Probe -Name "recall-consumed-by-a-later-effort" `
+        -Command "psql: (trace, memory) pairs holding an agent_memory_recall_items row with returned=true AND a 'memory_used' audit event on the SAME trace, dated after the memory was written ; then search the pre-run snapshot of DECISIONS.md and documentation/notes for BOTH ids" -Run $body)
     return (Resolve-ClauseVerdict -Clause $c)
 }
 
