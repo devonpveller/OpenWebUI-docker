@@ -138,10 +138,31 @@ Also measured green and deliberately NOT recorded as a phase's check, because th
 drill's own machinery rather than U5's column: `drill-personal-plane-exclusion.ps1
 -SelfTestLedger` and `-SelfTestVacuity`, exit 0, about a second each.
 
+## The end-to-end run
+
+`dfu-done.ps1 -Only 5 -WorkLine work/dfuc15 -Json`, from the worktree, 17m21s, exit 7:
+
+- all seven marker probes **pass** (`walkthrough-U0/U1/U2/U4-check-1`, `U4-check-2`,
+  `U5/U8-check-1`);
+- all six `walkthrough-U<n>-left-the-audited-tree-unchanged` probes **pass**, and the run's
+  integrity record is `commands_executed: 7`, `per_command_drift: []`, `moved_during_run: []`,
+  `ok: true`. The heavy markers (a throwaway server, a throwaway database, 70 nested dfu-done
+  runs) move nothing in the audited tree;
+- `walkthrough-U3/U6/U7-names-a-check` indeterminate, coverage evaluated 6 of 10;
+- **`phase-floor-matches-plan` FAILS**, and this is the finding to carry forward: *"the pinned
+  floor and C.8 clause 1 disagree - the plan names U0,U1,U2,U3,U4,U5,U6; pinned but unnamed:
+  U8"*. C.9 extended the floor to U8 and pinned it as a code literal; C.8 clause 1's prose was
+  never updated to name U8. `dfu-done.ps1`'s own header records this and says the close is a
+  PLAN.md edit. **Clause 5 is therefore `unmet` on a plan-text gap, independently of every
+  marker**, and nothing done in WALKTHROUGH.md can lift it. It is F7's sibling: both clauses
+  are blocked by section 2 / C.8 text that no check may edit.
+
 ## What this does NOT claim
 
 The six markers re-run their phase's column from a clean clone. They do not make any phase
 DONE: U3 and U5 stay parked, U6's clauses 1-3 stay in flight, U7 has not started, and U8's H4
 and H5 remain blocked on the operator. Clause 1 remains `unevaluated` for the reason in F7, and
-clause 5 remains `unevaluated` for as long as U7 exists as a section without a runnable check -
-which is the correct report, not a gap to close.
+clause 5 is `unmet` for the plan-text reason measured above - not for anything about the
+markers, which all re-ran green with no drift. U7 keeps clause 5's coverage at 6 of 10 for as
+long as it exists as a section without a runnable check, which is the correct report and not a
+gap to close.

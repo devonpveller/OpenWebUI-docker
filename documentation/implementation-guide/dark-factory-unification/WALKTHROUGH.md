@@ -40,6 +40,25 @@ built exactly as `dfu-done.ps1` builds its sandbox, including
 command does NOT persist into the new repository, and without it this tree loses files with no
 error.
 
+**And then clause 5 itself was run, which is the only thing that actually proves any of this.**
+`dfu-done.ps1 -Only 5 -WorkLine work/dfuc15 -Json`, 17m21s, `commands_executed: 7`,
+`per_command_drift: []`, `moved_during_run: []`, integrity `ok: true`:
+
+| probe | verdict |
+|---|---|
+| `walkthrough-U0/U1/U2/U4-check-1`, `U4-check-2`, `U5/U8-check-1` | **pass** - "the row's named check re-runs green", all seven |
+| `walkthrough-U0/U1/U2/U4/U5/U8-left-the-audited-tree-unchanged` | **pass**, all six - the plan, the ledger, this file, `documentation/notes` and git's refs, status, worktrees and submodules are byte-identical before and after |
+| `walkthrough-U3/U6/U7-names-a-check` | indeterminate, by design, for the reasons in those three sections |
+| `phase-floor-matches-plan` | **fail** - and it is NOT about the markers, see below |
+| coverage | evaluated **6 of 10**, `not_evaluated: [U3, U6, U7]` |
+
+**Clause 5's verdict is `unmet`, and the reason is older than this round.**
+`phase-floor-matches-plan` reports *"the pinned floor and C.8 clause 1 disagree - the plan names
+U0,U1,U2,U3,U4,U5,U6; pinned but unnamed: U8"*. C.9 extended the floor to U8 and pinned it in
+code; C.8 clause 1's PROSE was never updated to name U8, and `dfu-done.ps1`'s own header says
+so and says the close is a PLAN.md edit. So clause 5 is red on a documentation gap in the plan,
+independently of every marker above, and no work on this file can lift it.
+
 **A cost, stated because it is large.** Clauses 1 and 5 each re-run every marker, so a full
 `dfu-done.ps1` now spends the better part of an hour in the sandbox — U8's drill alone is a
 measured 13m24s and runs twice, and U5's is 2m30s. That is what *"re-run the column from a clean checkout"* costs when the columns are
