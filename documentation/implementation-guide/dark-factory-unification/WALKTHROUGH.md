@@ -139,6 +139,15 @@ repository's own module, so nothing in it can depend on the checkout being a clo
 "it is red on the work line too" would be an inference and it is not written here as a
 measurement. It belongs to whoever owns that harness — filed, not papered over
 (`documentation/notes/dfu-c15-clean-clone-check-audit.md`).
+**What the marker does NOT cover, now that §2 names the check:** §2's U1 column names four
+runnable artifacts — `scripts/checks/smoke-agent-memory.ps1` (gate 1.3),
+`scripts/checks/test-quartz4-offline.ps1 -Phase unit` (1.1's fresh-apply proof),
+`openbrain-gateway/smoke_test.py` (phase 0 / gate 1.4), and the `agent-org/agent-bridge` suite
+(gate 2.5). The marker above runs **one** of them. The second is measured RED in the paragraph
+above and is filed; the third and fourth were not run this round and are not claimed here. So
+this marker does not discharge U1's column — naming the other three in §2 is what makes that
+visible rather than implied.
+
 **Evidence:** `954b97b` (2.1 write path), `5a662d3` (2.2 outcomes), `4aed54f` (2.2 abort-path
 thin records), `7982440` (2.3 constraint promotion), `ebfcbbc` (2.4 bridge rollups),
 `105d835` (1.3 acceptance).
@@ -154,6 +163,14 @@ reviewer verdict re-scoped to codebase-fit; queue items projected as depth-1 Sco
 an overlapping issue pair flagged by the synthesis; a schema cross-reader test.
 **How to run:** `python -m pytest scripts/agent-harness/test_harness_config.py
 scripts/agent-harness/test_anchor_schema.py -q`
+**What the marker does NOT cover, now that §2 names the check:** the marker runs the column's
+THIRD requirement only — the schema cross-reader test, which is
+`scripts/agent-harness/test_anchor_schema.py`, beside `scripts/agent-harness/test_harness_config.py`.
+The first two requirements are **gym runs** (a goal driven from a git issue through
+sweep→plan→weekly thread→approve→land on each target, and a deliberately overlapping issue pair
+flagged by the synthesis). Nothing in this repository re-runs those, and these two test files do
+not stand in for them; that half of U2 rests on the merge record below, not on this marker.
+
 **Evidence:** `840f29b` (ScopeNodes), `27c5355` (git-issue door), `39e4c03` / `9da169a`
 (anchor schema, both directions).
 **Verified by:** merge-record. `scripts/agent-harness/scope_node.py` confirmed present.
@@ -356,6 +373,14 @@ and `python scripts/checks/check_quadrant_evidence_reproduces.py --auto`
 inadmissible` beside `the 7 run record(s) this checkout COMMITS are all on disk`. **Both were
 RED before this round**, which is what the paragraph below is about.
 
+**What the marker does NOT cover, now that §2 names the check:** the marker runs the
+per-quadrant half. The column's second half — stall→oracle observed firing at least once — is
+`scripts/agent-harness/observe-oracle-on-stall.ps1`, shown in the transcript above with a
+`-LeaseOwner` argument because it needs a plane lease and real dispatches. It is deliberately
+NOT under the `How to run` marker: it is not re-runnable from a clean checkout on demand, and
+putting it there would have clause 5 execute a command that cannot honestly be re-run. §2 names
+it so this column cannot be read as met by the quadrant pair alone.
+
 **Round 10, 2026-09-01 - round 9's green did not survive the worktree that produced it.** Run
 from a clean clone at `fba111d`, `report` answered **COMPARED 0/4, exit 1** and the banked check
 answered **7 NOT REPRODUCIBLE, exit 1**, every one of them
@@ -447,6 +472,15 @@ that is NEW still exits 2 with the flag on, so the green cannot absorb a regress
 `drill-personal-plane-exclusion.ps1 -SelfTestLedger` and `-SelfTestVacuity`. They prove the
 drill's ledger reconciliation and its vacuity guard, not the column, so neither is recorded as
 this phase's check - naming one here would be the substitution this round exists to refuse.
+
+**What the marker does NOT cover, now that §2 names the check:** the marker runs the
+personal-plane half. The column's HOOK half — an agent instructed to bypass hooks is
+mechanically stopped and the attempt is visible in an audit record — is
+`scripts/checks/check-hook-attestation.ps1`, which this drill's own header names at line 9
+(*"The hook half is check-hook-attestation.ps1. THIS is the personal-plane half"*). It is not
+under this marker because it takes `-Branch` / `-Base` arguments naming a branch pair, so it has
+no argument-free form that re-runs from a clean checkout. §2 now names both halves, so neither
+can be read as covering the other.
 
 **Why it is parked — two open findings, both orchestrator-verified:**
 
@@ -589,7 +623,9 @@ population (the pinned floor UNIONED with this file's own sections), so clause 5
 `walkthrough-U7-names-a-check` as indeterminate for as long as U7 is not started. **That is a
 correct report, not a gap to close**: deleting this section to shrink the population is the
 rule-6 attack `dfu-done.ps1` was hardened against, and inventing a check for an unstarted phase
-is C.8's forbidden move. Clause 5 goes green when U7 runs, and not before.
+is C.8's forbidden move. Clause 5 goes green when U7 runs, and not before. §2's U7 row now says
+the same thing in the anchor itself — that column names NO runnable artifact and must not be
+given one — so the row and this section agree instead of the row simply being silent.
 
 ---
 

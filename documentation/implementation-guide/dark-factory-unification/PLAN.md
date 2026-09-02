@@ -860,14 +860,14 @@ live planes or a real target.
 
 | Phase | What | Validated by | Depends on |
 |---|---|---|---|
-| **U0** | Land what is in flight: the harness-v2 work goes through its own pipeline (operator decision, 2026-08-29 — no privileged actor); the three reviewed items merge; the durable Mattermost inbox replaces the one-shot poller | Each item's own anchor + tester; inbox: a kill-the-poller drill proves no message is lost | — |
-| **U1** | Memory plane Phases 0–2 as planned (schema deploy, ops door, write paths). This is the substrate everything else writes to | The memory-plane plan's own per-phase gates (already written, file/line-grounded) | U0 |
-| **U2** | **Intent unification:** shared anchor schema (mode A/B); intake doors incl. **git issues on the daily/weekly cadence** — daily sweep schedules M.1 planning, weekly synthesis (plan-vs-plan radar) posts the Mattermost verdict thread (approve/deny/postpone = this door's confirm gate) on both targets; agent-org intake consumes/produces anchors (`set_goal` seam, orchestrator.py:5950); reviewer verdict re-scoped to codebase-fit; queue items become depth-1 ScopeNodes | Gym: one goal driven from a git issue through sweep→plan→weekly thread→approve→land on each target; a deliberately overlapping issue pair must be flagged by the synthesis; schema cross-reader test | U0 |
+| **U0** | Land what is in flight: the harness-v2 work goes through its own pipeline (operator decision, 2026-08-29 — no privileged actor); the three reviewed items merge; the durable Mattermost inbox replaces the one-shot poller | Each item's own anchor + tester; inbox: a kill-the-poller drill proves no message is lost; the kill-the-poller drill IS `scripts/claude-sessions-bridge/test_inbox.py` (its `test_kill_the_poller_*` cases, written to fail against the pre-inbox bridge), which must re-run green from a clean checkout; the anchor-and-tester half names no runnable artifact and is NOT given one here - it is a fact about three completed merges and is checked against the merge record | — |
+| **U1** | Memory plane Phases 0–2 as planned (schema deploy, ops door, write paths). This is the substrate everything else writes to | The memory-plane plan's own per-phase gates (already written, file/line-grounded); in this repository those gates name `scripts/checks/smoke-agent-memory.ps1` and `scripts/checks/test-quartz4-offline.ps1 -Phase unit` (gate 1.3, the second being 1.1's fresh-apply proof), `openbrain-gateway/smoke_test.py` (phase 0 and gate 1.4) and the `agent-org/agent-bridge` suite (gate 2.5); the smoke script is the one re-run from a clean checkout and it does NOT stand in for the other three, all four of which must be green for this column | U0 |
+| **U2** | **Intent unification:** shared anchor schema (mode A/B); intake doors incl. **git issues on the daily/weekly cadence** — daily sweep schedules M.1 planning, weekly synthesis (plan-vs-plan radar) posts the Mattermost verdict thread (approve/deny/postpone = this door's confirm gate) on both targets; agent-org intake consumes/produces anchors (`set_goal` seam, orchestrator.py:5950); reviewer verdict re-scoped to codebase-fit; queue items become depth-1 ScopeNodes | Gym: one goal driven from a git issue through sweep→plan→weekly thread→approve→land on each target; a deliberately overlapping issue pair must be flagged by the synthesis; schema cross-reader test; the schema cross-reader test IS `scripts/agent-harness/test_anchor_schema.py`, run beside `scripts/agent-harness/test_harness_config.py`, and both must re-run green from a clean checkout; the two gym requirements above name no runnable artifact and those two test files do NOT discharge them | U0 |
 | **U3** | **Verification unification:** tester-finding→durable-check in both systems (extend §10's built pipeline; harness findings write `memory_type='check'`); failure signatures→clauses write-through to the plane; executable-criteria support in anchors; port the harness's drill pattern to agent-org as an executable org drill | Gym: a seeded regression must be caught by a check born from a *tester* finding in a prior round (gym-007's shape, new source); drills green in both systems | U1, U2 |
-| **U4** | **Runner unification:** prove `little-coder` through one real anchored item end to end (the standing unproven claim, A11); then agent-org workers as harness runners and vice versa — **AMENDED 2026-08-30, see §2.1:** the premise that *one profile mechanism governs both* was FALSIFIED at the phase's start — it governed NEITHER side — so the phase's actual task is to BUILD that mechanism and prove it dispatches, not to extend an existing one; frontier-oracle-on-stall wired per §7 | Gym: same anchored item run per quadrant (runner × target), outcomes compared; stall→oracle observed firing at least once | U2 |
-| **U5** | **Containment parity:** mechanical guards for worktree/cloud agents (hook-bypass detection at minimum; commit-path proxy where feasible); `judge_enabled` calibration plan for expertise minting (the one-line §13 gap); personal-plane exclusion verified end to end | Adversarial drill: an agent instructed to bypass hooks / reach personal-plane data is mechanically stopped and the attempt is visible in an audit record | U0 |
+| **U4** | **Runner unification:** prove `little-coder` through one real anchored item end to end (the standing unproven claim, A11); then agent-org workers as harness runners and vice versa — **AMENDED 2026-08-30, see §2.1:** the premise that *one profile mechanism governs both* was FALSIFIED at the phase's start — it governed NEITHER side — so the phase's actual task is to BUILD that mechanism and prove it dispatches, not to extend an existing one; frontier-oracle-on-stall wired per §7 | Gym: same anchored item run per quadrant (runner × target), outcomes compared; stall→oracle observed firing at least once; the per-quadrant comparison IS `scripts/agent-harness/quadrant/cli.py report` over the committed evidence in `documentation/evidence/dfu-u4/quadrant`, with `scripts/checks/check_quadrant_evidence_reproduces.py --auto` re-deriving each recorded verdict from the evidence that record kept, and both must re-run green from a clean checkout; the stall→oracle observation IS `scripts/agent-harness/observe-oracle-on-stall.ps1`, which needs a plane lease and real dispatches, so it is NOT part of the clean-checkout re-run and this column is not met by the quadrant pair alone | U2 |
+| **U5** | **Containment parity:** mechanical guards for worktree/cloud agents (hook-bypass detection at minimum; commit-path proxy where feasible); `judge_enabled` calibration plan for expertise minting (the one-line §13 gap); personal-plane exclusion verified end to end | Adversarial drill: an agent instructed to bypass hooks / reach personal-plane data is mechanically stopped and the attempt is visible in an audit record; the personal-plane half IS `scripts/checks/drill-personal-plane-exclusion.ps1`, which must re-run green from a clean checkout; the hook half IS `scripts/checks/check-hook-attestation.ps1` (the drill says so in its own header, line 9); neither half proves the other, so this column is not met by the drill alone | U0 |
 | **U6** | **Dark-factory mode:** andon-condition config; `dark` vs `attended` gate profiles; auto-passed gates leave audit records; recall-informed briefs at all four seams (memory-plane Phase 3) | Gym: an unattended run that hits each andon condition halts-and-raises; one that hits none lands with a complete audit trail | U1–U5 |
-| **U7 (standing)** | **Post-development design iteration** per §B: real-world outcomes → proposed design changes → judged against the pinned research anchors → trialed in the gym → adopted or refused on the record | The evidence ledger itself: every design change carries its anchor citation or its ledger amendment | U6 |
+| **U7 (standing)** | **Post-development design iteration** per §B: real-world outcomes → proposed design changes → judged against the pinned research anchors → trialed in the gym → adopted or refused on the record | The evidence ledger itself: every design change carries its anchor citation or its ledger amendment; this column names NO runnable artifact and must not be given one - what it requires is that the LOOP has run once on the record, which `dfu-done.ps1` clause 6 decides from `DECISIONS.md`, and until that first cycle exists there is nothing here to re-run from a clean checkout | U6 |
 | **U8** | **Hardening (§C.9):** move the boundary's operational envelope from normative to mechanical — no superuser app connections (H1), boot-time RLS assertion (H2), exposure label enforced at write time (H3, operator-gated), verification machinery in CI (H4), work line pushed (H5) | Each H-item's own runnable check in §C.9; and `dfu-done.ps1`'s pinned phase floor + clause 1 EXTENDED to include U8, so U8's columns re-run green from a clean checkout like any other phase | U5, U6 |
 
 Explicitly NOT in scope: rewriting agent-org's orchestrator; replacing
@@ -1019,6 +1019,69 @@ binds the DFU side; §1.1's own enforcement clause needs the operator's edit to 
 **Revert path:** restore the enumerate-and-guard method; the branch work is unmerged, so
 reverting costs only the policy migration. Nothing in production changes until that migration
 is applied, and `agent_memories` holds 0 personal rows throughout.
+
+#### A4 — 2026-09-02 · §2's U0, U1, U2, U4, U5 and U7 rows · the columns now NAME their check
+
+**Not a narrowing. An ADDITION**, and the one §C.8's closing paragraph is careful to
+distinguish from the move it forbids. Nothing any of these six columns already required has
+been altered, reworded or removed: every semicolon-separated requirement stands byte-identical
+and is still first in the cell. What is appended is the *identity of the artifact* that
+discharges each requirement — and, where no artifact discharges one, a sentence saying so.
+
+**Why.** `scripts/checks/dfu-done.ps1:2092-2097` decides clause 1's per-phase
+`<id>-check-matches-section-2` probe by comparing the runnable artifacts §2's column NAMES
+against the artifacts the walkthrough's commands REFERENCE. When the column names none, the
+correspondence is not machine-decidable, so the probe is set **unconditionally indeterminate**
+and registers a manual check that the same code path never consults — no recorded manual
+answer can lift it. Five phases sat there (U0, U1, U2, U4, U5), and the probe states its own
+remedy: *"Confirm by hand which command satisfies it, or make the column name its check."*
+This is that remedy, taken.
+
+**Why this is NOT "amending a column so the script passes" (§C.8's closing paragraph).** That
+move trades a requirement away to fit an available check. This does the opposite in every row:
+
+- U0 keeps *"each item's own anchor + tester"* and now says out loud that **no runnable
+  artifact discharges it** — it is a merge-record fact. The column got harder to claim, not
+  easier.
+- U1's column asked for *the memory-plane plan's own per-phase gates* (phases 0–2, sibling
+  repo `documentation-plans-ai-stack/implementation-guide/agent-memory-plane/PLAN.md`). Those
+  gates name four runnable artifacts in this repository, and the walkthrough's `How to run`
+  marker runs ONE of them. The column now names all four and states that the one does not
+  stand in for the other three, so the row is red on its own words rather than green on a
+  quarter of its scope.
+- U2 names the schema cross-reader test as the file it actually is, and states that the two
+  **gym** requirements in the same column are not discharged by those test files.
+- U4 names the quadrant pair AND `observe-oracle-on-stall.ps1` for the stall→oracle half,
+  with the fact that the latter is not part of the clean-checkout re-run — so the column
+  cannot be read as met by the quadrant pair alone.
+- U5 names both halves, personal-plane and hook, and states that neither proves the other.
+- U7 states plainly that its column names **no** runnable artifact and must not be given one:
+  it is satisfied by a loop having run once on the record, which is clause 6's question,
+  answered from `DECISIONS.md`. Inventing a command for an unstarted phase is the move being
+  avoided here, not the move being made.
+
+In every case the appended text either NAMES what already satisfied the requirement or NAMES
+the fact that nothing does. A column that now enumerates four gates where it previously said
+"the plan's gates" is a column a later round has to work harder to close.
+
+**What changes mechanically:** clause 1's five indeterminate `check-matches-section-2` probes
+become decidable. They pass where the walkthrough's command references an artifact the column
+names — which is a statement about correspondence between two documents, and was always the
+only thing that probe measured. It does not make any phase's check green, and it does not
+change clause 1's coverage: U3 and U6 still record no `How to run` marker and remain
+not-evaluated, by their own deliberate choice (their checks are named and RED, and converting
+them to a passing substitute is refused).
+
+**Evidence:** `scripts/checks/dfu-done.ps1:2092-2097` (the unconditional-indeterminate branch
+and its stated remedy); `scripts/checks/drill-personal-plane-exclusion.ps1:9` (*"The hook half
+is check-hook-attestation.ps1. THIS is the personal-plane half"*) for U5's split;
+`scripts/claude-sessions-bridge/test_inbox.py` module docstring (*"it is the validation the
+dark-factory plan's U0 row names by hand"*) for U0's; the sibling memory-plane plan's gates
+1.3 / 1.4 / 2.5 for U1's four artifacts.
+
+**Revert path:** delete the appended text after the last original semicolon in each of the six
+cells; the original wording is unmodified in place, so the revert is a truncation and nothing
+else depends on the addition. Clause 1's five probes return to indeterminate.
 
 ## 3. What each system keeps (the pride audit)
 
