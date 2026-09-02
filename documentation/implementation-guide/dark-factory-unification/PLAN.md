@@ -346,8 +346,8 @@ is evaluated by running something, never by reading a claim. A clause that canno
 be machine-evaluated is printed as a named manual check the script refuses to pass
 without a recorded result.
 
-1. **Every U-phase column is satisfied by a check that RAN.** For U0–U6, the §2
-   *Validated by* check re-runs green **from a clean checkout of the work line** —
+1. **Every U-phase column is satisfied by a check that RAN.** For U0–U6 and U8, the
+   §2 *Validated by* check re-runs green **from a clean checkout of the work line** —
    not from a developer's worktree, not from cached output. The script records each
    command and its exit code. "Code landed" is not satisfaction.
 2. **No phase is parked, and every amendment is ACCOUNTED FOR.** Zero outstanding
@@ -951,7 +951,7 @@ makes the plan the confirmed anchor, and an anchor that also carries running sta
 because status changes and anchors must not. The rule that follows: **the phase table holds the
 task and its validation; nothing else.**
 
-**Revert:** none — the history is unchanged and this entry only says how to read it.
+**Revert path:** none — the history is unchanged and this entry only says how to read it.
 
 #### A2 — 2026-08-30 · §2's U5 row · the invariant stands; its ENFORCEMENT LAYER is wrong
 
