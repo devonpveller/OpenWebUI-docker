@@ -535,10 +535,18 @@ if ($Keep) { Write-Host ("scratch KEPT: " + $Root) }
 else {
     try { Remove-Item -Recurse -Force -LiteralPath $Root -ErrorAction Stop } catch { }
     if (Test-Path $Root) {
-        # git's object files are read-only on Windows; a cleanup that only works on a tree
-        # nobody wrote is not a cleanup.
-        Get-ChildItem -Recurse -Force -LiteralPath $Root | ForEach-Object { try { $_.Attributes = "Normal" } catch { } }
+        # git's object files are read-only on Windows, so the first pass leaves the tree
+        # behind. Clear the read-only bit on the FILES (a directory has no meaningful
+        # IsReadOnly) and try again.
+        Get-ChildItem -Recurse -Force -File -LiteralPath $Root |
+            ForEach-Object { try { $_.IsReadOnly = $false } catch { } }
         try { Remove-Item -Recurse -Force -LiteralPath $Root -ErrorAction Stop } catch { }
+    }
+    # AND IF IT IS STILL THERE, SAY SO. Measured 2026-09-02: one run's scratch survived both
+    # passes and the drill said nothing, so it read as clean while leaving 308 KB in %TEMP%.
+    # A cleanup that fails silently is the same defect class as a check that passes silently.
+    if (Test-Path $Root) {
+        Write-Host ("NOTE: could not remove the scratch tree - it is still at " + $Root) -ForegroundColor Yellow
     }
 }
 

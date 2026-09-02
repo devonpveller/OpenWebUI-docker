@@ -67,7 +67,7 @@
     "Not re-run by anyone who did not build it."
   ],
   "artifact_digests": {
-    "scripts/checks/drill-u6-dark-gate.ps1": "1165c6c0aaccf57d",
+    "scripts/checks/drill-u6-dark-gate.ps1": "71e35cd751a3ac42",
     "scripts/agent-harness/drill-dark-factory.ps1": "a4f5019f677b9009",
     "scripts/agent-harness/harness.config.json": "b552a019998725ba"
   },
