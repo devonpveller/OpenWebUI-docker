@@ -2257,3 +2257,44 @@ ALSO FILED, not fixed: a "clean clone" as section C.7b describes it cannot run U
           under test.
 CITED:    section C.8 clause 7; section C.10; WALKTHROUGH.md's U1 `How to run` marker.
 REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - U4 - both quadrant commands RE-RUN by me from a different clone at a different sha
+FINDING:  `audit-trail-U4` was RED for the commit half only, and it had the largest co-mention
+          count on the board. From my clean clone at `ded1b7b`: "no commit message on the work
+          line carries a validation claim naming the phase AND one of the checks this phase
+          names (check_quadrant_evidence_reproduces.py, cli.py) in the SAME statement ...
+          (9 commit(s) co-mention both without claiming one validated the other)". Nine commits
+          talking about U4 and about those scripts, none of them saying one validated the other:
+          exactly the shape `Get-CommitValidationClaims` was written to reject.
+WHAT I RAN, myself - BOTH commands under U4's marker, because one marker may name several and
+          taking the first is how a named check goes unrun while coverage reads full:
+          - `python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant`
+            **exit 0** - `COMPARED 4/4`, item digest `c585bee6fee3043c`, all four quadrants
+            `completed` at `2/2` acceptance.
+          - `python scripts/checks/check_quadrant_evidence_reproduces.py --auto`
+            **exit 0** - "7 outcome record(s) re-derived their verdict from the evidence they
+            kept ... 0 skipped as inadmissible", "the 7 run record(s) this checkout COMMITS are
+            all on disk".
+          Both in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+WHY THE SECOND ONE MATTERS MORE THAN THE FIRST: `report` renders the comparison; the banked
+          check is what makes it evidence rather than a rendering. Round 9's green did not
+          survive the worktree that produced it - `evidence.workspace does not exist on disk:
+          D:\...\wt-u4close\...\workspace`, because `record.admit` resolved `evidence.*` as the
+          absolute path the producing worktree wrote. Mine is a DIFFERENT clone at a DIFFERENT
+          sha from the one WALKTHROUGH.md records, and the defect did not recur. That is the
+          only reason a re-run here is worth more than reading the recorded exit code.
+DECISION: a validation directive was written for U4 naming both scripts and both exit codes.
+          Two ceilings are carried into the directive rather than left for a reader to
+          discover: the report's own "n=1 - not a basis for a decision" per quadrant, and its
+          venue notice - this results set is PINNED to `gym` at `D:\Open WebUI\ai-orchestration-gym`,
+          the venue that resolved inside my clone differed, and the pin STANDS, so `COMPARED 4/4`
+          is about the pinned venue's records and not about my clone. The directive claims the
+          "outcomes compared" half of U4's column and not the "stall to oracle observed firing"
+          half, which these two commands do not exercise.
+NOTED, so a reader does not discover it by running it: `report` WRITES `COMPARISON.md` and
+          `comparison.json` into `documentation/evidence/dfu-u4/quadrant/`, a committed path.
+          `git status --porcelain` was empty afterwards - it re-derived byte-identical content -
+          but the command is not read-only.
+CITED:    section C.8 clause 7; WALKTHROUGH.md's U4 `How to run` marker (two commands, both run);
+          `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message.
