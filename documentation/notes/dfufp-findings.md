@@ -81,6 +81,22 @@ its own step-M measurement of the shipped board came back naming it:
 line(s)`. Fixed by checking `$LASTEXITCODE` at the call site and throwing — which is right on
 its own merits, since every git call there is setup that must not fail silently.
 
+**Finding 5 - the drill caught its own fixture testing two things at once.** The column's word
+is **each**, so the drill builds one fixture per required condition and asserts the ledger
+refusal names *that condition and no other*. That assertion immediately caught the drill's own
+`git-error-swallowed` fixture: it committed its bait file, which moved `main` after the andon
+baseline and fired `protected-ref-moved` as well - `fired=git-error-swallowed;
+protected-ref-moved`. The gate still halted, so the weaker assertion (*"the refusal names this
+condition"*) would have passed over it. Fixed by writing the bait file without committing it.
+The general shape is worth more than the fix: **a halt assertion that does not pin WHICH
+condition halted cannot tell a working detector from a noisy board.**
+
+**A correction to an earlier draft of this note.** The first version of this drill quoted the
+column as *"an unattended run that hits **an** andon condition"*. The column says **each**. The
+misquote was in the check's own header and in the walkthrough, and it would have made a
+one-condition drill look like full coverage of the column's first half. The check was widened to
+the column rather than the column narrowed to the check.
+
 **Not closed, and it is an operator decision:** what `pipeline.convergence` should be. Its own
 `_status` says wiring the reader is *"a pipeline item, not a config edit"*. Until it is
 resolved, `drill-dark-factory.ps1` cannot be this phase's marker without putting a ~10-minute
@@ -91,7 +107,7 @@ are separately open and are nobody's item today.
 
 ## U7 — the walkthrough and the done-authority disagreed about whether the loop had run
 
-**Finding 5.** `WALKTHROUGH.md` said U7 was **NOT STARTED** and that *"a loop that has never run
+**Finding 6.** `WALKTHROUGH.md` said U7 was **NOT STARTED** and that *"a loop that has never run
 is an intention"*, while `dfu-done.ps1` clause 6 **arms** U7 on §2.1 **A2** and the ledger entry
 `2026-08-31 · U7 · A2 IS a complete cycle by clause 6's enumeration` says so explicitly. Both
 could not stand. Resolved in favour of the ledger and the checker: the loop has run one cycle,

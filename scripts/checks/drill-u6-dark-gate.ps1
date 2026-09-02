@@ -34,11 +34,13 @@
 # WHAT THIS FILE ADDS, and it is not a lighter re-run of that drill. It asks the column's
 # question of the GATE rather than of the shipped config, by CONSTRUCTING both worlds:
 #
-#   HALT fixture   the shipped board plus a dead policy key OF THIS DRILL'S OWN
-#                  (`pipeline.drill_dead_knob`), so the fire is caused by something this
-#                  file put there. Deliberately NOT the shipped `pipeline.convergence`
-#                  defect: a check that depends on a live defect goes RED the day the defect
-#                  is fixed, which teaches the next reader to stop trusting it.
+#   HALT fixtures  ONE PER REQUIRED CONDITION - five of them - each carrying a breakage
+#                  THIS FILE constructs (a dead policy key of its own, a detached checkout, a
+#                  source that swallows a git error, the run's branch pushed to a bare
+#                  on-disk remote, a protected ref moved after the baseline). Deliberately
+#                  NOT the shipped `pipeline.convergence` defect: a check that depends on a
+#                  live defect goes RED the day the defect is fixed, which teaches the next
+#                  reader to stop trusting it.
 #   CLEAR fixture  the shipped board with the parked `pipeline.convergence` spec block
 #                  removed FROM THE FIXTURE'S COPY ONLY. That is fixture construction, not
 #                  concealment: you cannot ask "does a board that hits NO condition
@@ -50,6 +52,16 @@
 #
 # The pair is the point. If the gate refused everything, CLEAR fails; if it passed
 # everything, HALT fails. Neither direction can be green on its own.
+#
+# "EACH ANDON CONDITION", NOT "AN" ANDON CONDITION. The column's word is `each`, so step A
+# builds ONE fixture per required condition, makes exactly that condition fire, and drives the
+# real dark anchor gate with it - asserting the ledger's `fired` list contains that condition
+# AND NOTHING ELSE, so the halt is attributable to the condition under test rather than to
+# whatever else the board happened to notice. The population is NOT this file's list: it is
+# read from `config.ps1`'s `$script:RequiredAndonConditions`, and a required condition with no
+# constructed instance here FAILS the drill rather than being quietly uncovered. That is the
+# same rule `dfu-done.ps1` applies to its own phase floor, for the same reason - a check that
+# derives its population from itself can always report full coverage.
 #
 # WHAT IS REAL AND WHAT IS NOT, stated up front because a local run described as a gym run
 # is the over-claim PLAN section C.7 exists to prevent:
@@ -160,6 +172,17 @@ function New-Fixture([string]$name, [scriptblock]$editConfig) {
 
     $o = Get-Content -Raw -Path $ShippedCfg | ConvertFrom-Json
     $o.pipeline.gate_profile = "dark"
+    # THE PARKED SPEC BLOCK COMES OUT OF EVERY FIXTURE'S COPY, and only out of the copy.
+    # `pipeline.convergence` is declared in the shipped config and read by nothing, so the
+    # shipped board fires on it - which means an inherited copy makes EVERY fixture raised,
+    # for a reason that has nothing to do with the fixture's own subject. Measured
+    # 2026-09-02: with it left in, this drill's own halt fixture reported evidence
+    # `pipeline.convergence, pipeline.drill_dead_knob` and its assertion would have passed
+    # with the constructed key contributing nothing - a green that survives the removal of
+    # its subject. The shipped config is never written; step M measures it as it ships.
+    if ($o.pipeline.PSObject.Properties.Name -contains "convergence") {
+        $o.pipeline.PSObject.Properties.Remove("convergence")
+    }
     (Get-Cond $o "git-error-swallowed").params.globs = @("scripts/checks/*.ps1", "scripts/agent-harness/*.ps1")
     # PIN THE CHECKOUT CONDITION TO THIS FIXTURE. Left empty it resolves the operator's main
     # checkout, so the fixture's isolation would rest on every caller remembering to change
@@ -255,48 +278,124 @@ $evFile = Join-Path $Root "evidence.md"
 Set-Content -Path $evFile -Encoding ascii -Value @("Case 1: file present. Case 2: one line. Both pass.")
 
 # ====================================================================================
-Step "A  HALT - an unattended run that HITS a condition halts and RAISES"
+Step "A  HALT - an unattended run that hits EACH andon condition halts and RAISES"
 # ====================================================================================
-# The fire is caused by a dead policy key THIS DRILL declares, so the assertion does not
-# depend on any defect in the shipped config and does not go red when one is fixed.
-$fixA = New-Fixture "halt" {
-    param($c)
-    # The parked `pipeline.convergence` block comes OUT of this fixture too, so the board's
-    # only reason to fire is the key added on the next line. Measured 2026-09-02: left in,
-    # the evidence read `pipeline.convergence, pipeline.drill_dead_knob` - the assertion
-    # would have passed with the drill's own key contributing nothing, which is a green that
-    # survives the removal of its subject.
-    $c.pipeline.PSObject.Properties.Remove("convergence")
-    $c.pipeline | Add-Member -NotePropertyName drill_dead_knob -NotePropertyValue 1 -Force
+# ONE FIXTURE PER REQUIRED CONDITION. The population is read from config.ps1's
+# $script:RequiredAndonConditions - the same list andon.ps1 refuses an incomplete board
+# against - so a condition added there without an instance here turns this drill RED
+# instead of silently going uncovered.
+#
+# Every breakage below is CONSTRUCTED BY THIS FILE. None of them depends on a defect in the
+# shipped configuration: a check that rides on a live defect goes red the day the defect is
+# fixed, which is how a reader learns to stop trusting it.
+$required = @()
+try {
+    . (Join-Path $HarnessDir "config.ps1")
+    $required = @(Get-RequiredAndonConditionIds)
+} catch {
+    $required = @()
 }
-$r = Invoke-Andon $fixA
-Check "the board RAISES on a declared key nothing reads (exit 6)" `
-      (($r.code -eq 6) -and ("$($r.verdict.board)" -ne "clear")) ("exit=" + $r.code + " board=" + $r.verdict.board)
-Check "and the fired condition is named" ((Get-CondStatus $r "policy-declared-unread") -eq "fire") `
-      ("status=" + (Get-CondStatus $r "policy-declared-unread"))
-$evA = @()
-if ($r.verdict) { $evA = @(@($r.verdict.conditions | Where-Object { $_.id -eq "policy-declared-unread" })[0].evidence) }
-Check "and the EVIDENCE names this drill's own key, and ONLY it - nothing inherited" `
-      ((@($evA).Count -eq 1) -and ($evA -contains "pipeline.drill_dead_knob")) ($evA -join ", ")
+Check "the required-condition population was read from config.ps1, not from this file" `
+      (@($required).Count -ge 1) ("required=" + (@($required) -join ", "))
 
-$r = Invoke-Queue $fixA @("-Propose", "-Id", "u6a", "-Anchor", $anchorFile, "-Developer", "wt-u6drill")
-Check "the item is proposed" (("$((Get-Item2 $fixA 'u6a').state)") -eq "anchor-draft") ("state=" + (Get-Item2 $fixA "u6a").state)
+# id -> @{ cfg = <edit the fixture's config>; repo = <break the fixture's repo AFTER the
+# andon baseline is recorded>; why = <what makes it fire> }
+$breakers = @{
+    "policy-declared-unread" = @{
+        why  = "a policy key declared in config and read by no harness source"
+        cfg  = { param($c) $c.pipeline | Add-Member -NotePropertyName drill_dead_knob -NotePropertyValue 1 -Force }
+        repo = { param($fix) }
+    }
+    "operator-checkout-off-branch" = @{
+        why  = "the checkout it watches is DETACHED"
+        cfg  = { param($c) }
+        repo = { param($fix) Invoke-GitAt $fix.repo @("checkout", "-q", "--detach") | Out-Null }
+    }
+    "git-error-swallowed" = @{
+        why  = "a source file that runs git and never inspects the result"
+        cfg  = { param($c) }
+        repo = {
+            param($fix)
+            # WRITTEN, NOT COMMITTED - and that is a correction this drill's own
+            # "and no other" assertion forced. The first version committed the file, which
+            # MOVED `main` after the baseline and fired `protected-ref-moved` as well:
+            # `fired=git-error-swallowed; protected-ref-moved`. The gate still halted, so a
+            # weaker assertion ("the refusal names this condition") would have passed over a
+            # fixture that was testing two things at once. The predicate scans FILES under
+            # the repo root, so nothing here needs to be committed.
+            $f = Join-Path $fix.repo (Join-Path "scripts" (Join-Path "checks" "swallows.ps1"))
+            Set-Content -Path $f -Encoding ascii -Value @(
+                'function Get-SwallowedHead {',
+                '    $out = & git.exe rev-parse HEAD',
+                '    return $out',
+                '}')
+        }
+    }
+    "work-branch-on-remote" = @{
+        why  = "the run's work branch exists on a remote - an outward action nobody granted"
+        repo = {
+            param($fix)
+            $bare = Join-Path $Root ("origin-" + $fix.name + ".git")
+            Invoke-GitAt $Root @("init", "-q", "--bare", $bare) | Out-Null
+            Invoke-GitAt $fix.repo @("remote", "add", "origin", $bare) | Out-Null
+            Invoke-GitAt $fix.repo @("push", "-q", "origin", "work/u6drill") | Out-Null
+        }
+        cfg  = { param($c) }
+    }
+    "protected-ref-moved" = @{
+        why  = "a protected ref moved after the run recorded its baseline"
+        cfg  = { param($c) }
+        repo = {
+            param($fix)
+            # AFTER the baseline, which New-Fixture records - that ordering IS the subject.
+            Invoke-GitAt $fix.repo @("checkout", "-q", "main") | Out-Null
+            Invoke-GitAt $fix.repo @("commit", "-q", "--allow-empty", "-m", "main moves") | Out-Null
+        }
+    }
+}
+$uncovered = @(@($required) | Where-Object { -not $breakers.ContainsKey($_) })
+Check "every REQUIRED andon condition has a constructed firing instance in this drill" `
+      (@($uncovered).Count -eq 0) `
+      $(if (@($uncovered).Count -gt 0) { "uncovered=" + (@($uncovered) -join ", ") } else { "covered=" + @($required).Count })
 
-$r = Invoke-Queue $fixA @("-Submit", "-Id", "u6a", "-Branch", "work/u6drill", "-Developer", "wt-u6drill", "-TestPlan", $planFile)
-$itA = Get-Item2 $fixA "u6a"
-Check "HALT: the dark ANCHOR gate refuses to auto-pass (exit 6)" ($r.code -eq 6) ("exit=" + $r.code)
-Check "HALT: the item stays PARKED at anchor-draft - a halt that advances the work is not a halt" `
-      ("$($itA.state)" -eq "anchor-draft") ("state=" + $itA.state)
-Check "RAISE: the halt names the condition on the console" ($r.out -like "*policy-declared-unread*") ""
-$ledA = @(Get-Ledger $fixA)
-$refusals = @($ledA | Where-Object { $_.decision -eq "refused" })
-Check "RAISE: the refusal is IN THE LEDGER, not only on the console" (@($refusals).Count -ge 1) ("refusals=" + @($refusals).Count)
-Check "RAISE: and the refusal record carries the fired condition" `
-      ((@($refusals).Count -ge 1) -and ((@($refusals)[0].andon.fired -join ";") -like "*policy-declared-unread*")) `
-      $(if (@($refusals).Count -ge 1) { "fired=" + (@($refusals)[0].andon.fired -join ";") } else { "no refusal record" })
-Check "RAISE: no auto-pass record was written for a gate that refused" `
-      ((@($ledA | Where-Object { $_.decision -eq "passed" }).Count) -eq 0) `
-      ("passes=" + @($ledA | Where-Object { $_.decision -eq "passed" }).Count)
+$n = 0
+foreach ($cid in @($required)) {
+    if (-not $breakers.ContainsKey($cid)) { continue }
+    $n++
+    $spec = $breakers[$cid]
+    $short = "A$n $cid"
+    $fix = New-Fixture ("halt-" + $n) $spec.cfg
+    & $spec.repo $fix
+
+    $r = Invoke-Andon $fix
+    Check "$short : the board RAISES (exit 6) - $($spec.why)" `
+          (($r.code -eq 6) -and ("$($r.verdict.board)" -ne "clear")) ("exit=" + $r.code + " board=" + $r.verdict.board)
+    Check "$short : and it is THIS condition that fired, not another" `
+          ((Get-CondStatus $r $cid) -eq "fire") ("status=" + (Get-CondStatus $r $cid))
+
+    [void](Invoke-Queue $fix @("-Propose", "-Id", "u6h", "-Anchor", $anchorFile, "-Developer", "wt-u6drill"))
+    $q = Invoke-Queue $fix @("-Submit", "-Id", "u6h", "-Branch", "work/u6drill", "-Developer", "wt-u6drill", "-TestPlan", $planFile)
+    $it = Get-Item2 $fix "u6h"
+    Check "$short : the dark ANCHOR gate REFUSES to auto-pass (exit 6)" ($q.code -eq 6) ("exit=" + $q.code)
+    Check "$short : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt" `
+          ("$($it.state)" -eq "anchor-draft") ("state=" + $it.state)
+    $led = @(Get-Ledger $fix)
+    $refusals = @($led | Where-Object { $_.decision -eq "refused" })
+    # THE HALT MUST BE ATTRIBUTABLE. `fired` carrying this condition AND NOTHING ELSE is what
+    # separates "this condition halted the line" from "the board was raised for some reason
+    # and this condition happened to be on it".
+    $fired = @()
+    if (@($refusals).Count -ge 1) {
+        $fired = @(@($refusals)[0].andon.fired | ForEach-Object { ("$_" -split ":")[0].Trim() })
+    }
+    Check "$short : the refusal is IN THE LEDGER naming THIS condition and no other" `
+          ((@($fired).Count -eq 1) -and ($fired -contains $cid)) ("fired=" + (@($fired) -join "; "))
+    Check "$short : no auto-pass record was written for a gate that refused" `
+          ((@($led | Where-Object { $_.decision -eq "passed" }).Count) -eq 0) `
+          ("passes=" + @($led | Where-Object { $_.decision -eq "passed" }).Count)
+}
+Check "A: every required condition was driven through the real gate" `
+      ($n -eq @($required).Count) ("driven=" + $n + " of " + @($required).Count)
 
 # ====================================================================================
 Step "B  CLEAR - an unattended run that hits NONE lands, with a COMPLETE audit trail"

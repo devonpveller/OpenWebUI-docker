@@ -2487,22 +2487,36 @@ DECISION: **build a check that can actually fail, and red-prove it in both direc
           `scripts/checks/drill-u6-dark-gate.ps1` drives BOTH halves of section 2's U6 column
           through the REAL gate - the shipped `queue.ps1`, `andon.ps1` and gate-audit verifier -
           in a scratch repository under `%TEMP%` with config and state redirected there.
-MEASURED: **exit 0, 31 assertions, 0 failed.**
-          HALT half: a board carrying a dead policy key THIS DRILL declares
-          (`pipeline.drill_dead_knob`, deliberately not the shipped defect - a check that
-          depends on a live defect goes red the day it is fixed) raises at exit 6, the dark
-          anchor gate refuses at exit 6, the item stays parked at `anchor-draft`, the refusal is
-          in the ledger naming the fired condition, and NO auto-pass record is written.
+MEASURED: **exit 0, 54 assertions, 0 failed.**
+          HALT half - and the column's word is EACH, so there are FIVE fixtures, one per
+          required condition, each carrying a breakage THIS DRILL constructs (a dead policy key
+          of its own, a detached checkout, a source that swallows a git error, the run's branch
+          pushed to a bare on-disk remote, a protected ref moved after the baseline). None of
+          them rides on the shipped `pipeline.convergence` defect: a check that depends on a
+          live defect goes red the day it is fixed. Per condition: the board raises at exit 6
+          with THAT condition fired, the dark anchor gate refuses at exit 6, the item stays
+          parked at `anchor-draft`, the ledger refusal names THAT CONDITION AND NO OTHER, and
+          NO auto-pass record is written. The five ids are read from `config.ps1`'s
+          `$script:RequiredAndonConditions`, not listed in the drill, so a condition added
+          there without an instance here turns this drill RED instead of going uncovered.
           CLEAR half: the same board with the parked `pipeline.convergence` spec block removed
           FROM THE FIXTURE'S COPY is clear with 5 of 5 evaluated, both gates auto-pass signed
           `auto:dark`, the run reaches `merged` with no human, the ledger holds exactly two auto
           passes each carrying the andon verdict AND its coverage, and `-VerifyAudit` returns
           COMPLETE. Tampering with that ledger three ways (relabel `auto`->`human`, delete a
           record, claim a pass over a RAISED board) each returns exit 1.
-          RED-PROOF, by breaking the subject and restoring it: `Predicate-ConfigKeyUnread`
-          forced to `ok` -> **exit 1, 9 failed** (the entire HALT half); forced to `fire` ->
-          **exit 1, 18 failed** (the entire CLEAR half); restored -> **exit 0, 31/31**.
+          RED-PROOF, by breaking the subject inside `andon.ps1` and restoring it: the board
+          made unable to RAISE (`$isClear` forced true) -> **exit 1, 25 of 54 failed** (the
+          entire HALT half, all five conditions); the `config-key-unread` detector jammed ON ->
+          **exit 1, 21 of 54 failed** (the CLEAR half collapses and four of the five HALT
+          fixtures lose their "and no other" attribution); restored -> **exit 0, 54/54**.
           Neither direction can be green alone.
+          AND THE DRILL MADE A FINDING AGAINST ITSELF, which is why the assertion is worded
+          "and no other": its own `git-error-swallowed` fixture COMMITTED its bait file, which
+          moved `main` after the baseline and fired `protected-ref-moved` too -
+          `fired=git-error-swallowed; protected-ref-moved`. The gate still halted, so the
+          weaker assertion would have passed over a fixture testing two things at once. The
+          bait file is now written and not committed.
           AND THE PREVIOUS ROUND'S CAUSE IS NOW MEASURED, not asserted: `pipeline.convergence`
           deleted from `harness.config.json` (temporarily, in a worktree, reverted) takes
           `drill-dark-factory.ps1` from **exit 1, 146 passed / 67 failed** to **exit 0, 213

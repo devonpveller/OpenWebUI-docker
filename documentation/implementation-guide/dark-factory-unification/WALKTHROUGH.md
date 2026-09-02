@@ -109,7 +109,7 @@ is marked deliberately rather than rounded up.
 | **U3** | **PARKED — but the run is now REAL and RECORDED** (2026-09-02) | The gym run was performed in the arena and its transcript committed (`documentation/evidence/dfu-u3/`): **exit 0**, 3 seeds, 2 caught only by the banked check, red-proofed to exit 1. Its evidence no longer lives in a gitignored directory. Still **not** re-runnable from a disposable clone — a `Gym:` column names a PLACE — so no marker, and the park stands. This row previously read *"DISCHARGED (closing with U4)"* while the §U3 section said PARKED; the section was right. |
 | **U4** | COLUMN MET, round 8 — **evidence now committed** | 4/4 quadrants ran in the arena and the stall was real, but round 7's proof of it was deleted with the worktree that made it: `report` answered **COMPARED 0/4, exit 1**. Re-run 2026-08-31 into `documentation/evidence/dfu-u4/` — **4/4, exit 0**, oracle fired, 7 records re-derivable. The *What* cell's "governs both" half is still undelivered — see §U4. |
 | **U5** | **STEP 1 APPLIED TO LIVE** | RLS + FORCE on `thoughts` and nine `agent_memory*` tables. Canary proof: agent plane sees **0** personal, **12993** ops. Every PostgREST path bound — including the wiki compiler. Steps 2–3 (direct deno clients) open. |
-| **U6** | **PARKED, and now it NAMES A CHECK** (2026-09-02) | Recall at four+ seams, live-proven (clause 4 `3bdf7a8`). The §2 column now has a runnable form that is green and red-proofed: `scripts/checks/drill-u6-dark-gate.ps1`, **31 assertions, 0 failed**, HALT and CLEAR both driven through the real gate. What is still open is the LIVE board: it is RAISED on four conditions, so no `dark` run can auto-pass a gate in this checkout — measured, in §U6. |
+| **U6** | **PARKED, and now it NAMES A CHECK** (2026-09-02) | Recall at four+ seams, live-proven (clause 4 `3bdf7a8`). The §2 column now has a runnable form that is green and red-proofed: `scripts/checks/drill-u6-dark-gate.ps1`, **54 assertions, 0 failed** — **each** of the five required andon conditions halted at the real gate, and a clear board landed with a complete audit trail. What is still open is the LIVE board: it is RAISED on four conditions, so no `dark` run can auto-pass a gate in this checkout — measured, in §U6. |
 | **U7** | **ARMED, not started-and-not-finished** (2026-09-02) | Standing by design, per §B and §C.8 clause 6. Its loop **has run one cycle on the record** — §2.1 **A2** — which is why clause 6 arms it. It carries no `How to run` and must not: §2's own row, as amended by A4, says the column names no runnable artifact. This row said *"NOT STARTED"* while clause 6 armed it off A2; both could not stand. |
 
 ---
@@ -694,29 +694,43 @@ branch being added for that word.
 ### U6 now NAMES A CHECK — 2026-09-02
 
 **How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-u6-dark-gate.ps1`
-**Clean-clone measurement (2026-09-02):** **exit 0** — `U6 DARK GATE DRILL: 31 assertions, 0 failed.`
+**Clean-clone measurement (2026-09-02):** **exit 0** — `U6 DARK GATE DRILL: 54 assertions, 0 failed.`
 
 It drives BOTH halves of §2's U6 column through the **real** gate — the shipped `queue.ps1`,
-`andon.ps1` and gate-audit verifier, in a scratch repository under `%TEMP%` with the harness
+`andon.ps1` and gate-audit verifier, in scratch repositories under `%TEMP%` with the harness
 config and state redirected there:
 
 | half of the column | what runs | what is asserted |
 |---|---|---|
-| *"an unattended run that hits an andon condition halts-and-raises"* | a board carrying a dead policy key **this drill declares** (`pipeline.drill_dead_knob`) | board RAISED at exit 6, the evidence names that key **and only it**, the `dark` anchor gate refuses at exit 6, the item stays parked at `anchor-draft`, the refusal is in the ledger with the fired condition, and **no** auto-pass record was written |
-| *"one that hits none lands with a complete audit trail"* | the same board with the parked `pipeline.convergence` spec block removed from the **fixture's copy** | board CLEAR with 5 of 5 conditions evaluated and 0 switched off, both gates auto-pass signed `auto:dark`, the run reaches `merged` with no human, the ledger holds exactly two auto passes each carrying the andon verdict **and its coverage**, and `-VerifyAudit` returns COMPLETE |
+| *"an unattended run that hits **each** andon condition halts-and-raises"* | **five fixtures, one per required condition** — a dead policy key of the drill's own, a detached checkout, a source that swallows a git error, the run's branch pushed to a bare on-disk remote, and a protected ref moved after the baseline | per condition: board RAISED at exit 6 with **that** condition fired, the `dark` anchor gate refuses at exit 6, the item stays parked at `anchor-draft`, the ledger refusal names **that condition and no other**, and **no** auto-pass record was written |
+| *"one that hits none lands with a complete audit trail"* | one fixture with the parked `pipeline.convergence` spec block removed from the **fixture's copy** | board CLEAR with 5 of 5 conditions evaluated and 0 switched off, both gates auto-pass signed `auto:dark`, the run reaches `merged` with no human, the ledger holds exactly two auto passes each carrying the andon verdict **and its coverage**, and `-VerifyAudit` returns COMPLETE |
 | *"complete" has teeth* | the ledger is tampered with three ways | relabelling an auto pass `human`, deleting a record, and claiming a pass over a RAISED board each go **exit 1**; restoring the ledger returns exit 0 |
 
-**RED-PROOFED IN BOTH DIRECTIONS**, by breaking the thing it checks —
-`Predicate-ConfigKeyUnread` in `andon.ps1`, restored with `git checkout` after each:
+**The word is `each`, so the population is not the drill's to choose.** The five ids are read
+from `config.ps1`'s `$script:RequiredAndonConditions` — the same list `andon.ps1` refuses an
+incomplete board against — and a required condition with no constructed instance **fails** this
+drill rather than going quietly uncovered. Every breakage is constructed by the drill; none
+rides on the shipped `pipeline.convergence` defect, because a check that depends on a live
+defect goes red the day the defect is fixed.
+
+**RED-PROOFED IN BOTH DIRECTIONS**, by breaking the thing it checks inside `andon.ps1` and
+restoring it with `git checkout` after each:
 
 | the break | result |
 |---|---|
-| detector forced to `ok` (it stops detecting) | **exit 1, 9 assertions failed** — the whole HALT half: no raise, the gate auto-passes, nothing reaches the ledger |
-| detector forced to `fire` (it jams on) | **exit 1, 18 assertions failed** — the whole CLEAR half: nothing lands and the audit-trail assertions collapse |
-| restored | **exit 0, 31/31** |
+| the board can no longer RAISE (`$isClear` forced true) | **exit 1, 25 of 54 failed** — the whole HALT half, all five conditions: nothing raises, the dark gate auto-passes, nothing reaches the ledger |
+| the `config-key-unread` detector jams ON (always fires) | **exit 1, 21 of 54 failed** — the CLEAR half collapses (nothing lands, no audit trail) and four of the five HALT fixtures lose their *"and no other"* attribution |
+| restored | **exit 0, 54/54** |
 
 Neither direction can be green on its own, which is the point: a gate that refused everything
 fails the second row, and one that passed everything fails the first.
+
+**One finding the drill made against itself, kept because it is the useful kind.** The
+*"names that condition and no other"* assertion caught the drill's own `git-error-swallowed`
+fixture: it committed its bait file, which **moved `main`** after the baseline and fired
+`protected-ref-moved` as well — `fired=git-error-swallowed; protected-ref-moved`. The gate still
+halted, so the weaker assertion (*"the refusal names this condition"*) would have passed over a
+fixture testing two things at once. The file is now written and not committed.
 
 **WHAT THIS DRILL DOES NOT CLAIM, stated here and in its own header.** It is **not** a gym run —
 U6's mechanism is the harness pipeline, which has no gym scenario, exactly as

@@ -2,36 +2,36 @@
 === A  HALT - an unattended run that hits EACH andon condition halts and RAISES ===
   [PASS] the required-condition population was read from config.ps1, not from this file required=operator-checkout-off-branch, policy-declared-unread, git-error-swallowed, work-branch-on-remote, protected-ref-moved
   [PASS] every REQUIRED andon condition has a constructed firing instance in this drill covered=5
-  [PASS] A1 operator-checkout-off-branch : the board RAISES (exit 6) - the checkout it watches is DETACHED exit=6 board=raised
+  [FAIL] A1 operator-checkout-off-branch : the board RAISES (exit 6) - the checkout it watches is DETACHED exit=0 board=clear
   [PASS] A1 operator-checkout-off-branch : and it is THIS condition that fired, not another status=fire
-  [PASS] A1 operator-checkout-off-branch : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
-  [PASS] A1 operator-checkout-off-branch : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A1 operator-checkout-off-branch : the refusal is IN THE LEDGER naming THIS condition and no other fired=operator-checkout-off-branch
-  [PASS] A1 operator-checkout-off-branch : no auto-pass record was written for a gate that refused passes=0
-  [PASS] A2 policy-declared-unread : the board RAISES (exit 6) - a policy key declared in config and read by no harness source exit=6 board=raised
+  [FAIL] A1 operator-checkout-off-branch : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  [FAIL] A1 operator-checkout-off-branch : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] A1 operator-checkout-off-branch : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  [FAIL] A1 operator-checkout-off-branch : no auto-pass record was written for a gate that refused passes=1
+  [FAIL] A2 policy-declared-unread : the board RAISES (exit 6) - a policy key declared in config and read by no harness source exit=0 board=clear
   [PASS] A2 policy-declared-unread : and it is THIS condition that fired, not another status=fire
-  [PASS] A2 policy-declared-unread : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
-  [PASS] A2 policy-declared-unread : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A2 policy-declared-unread : the refusal is IN THE LEDGER naming THIS condition and no other fired=policy-declared-unread
-  [PASS] A2 policy-declared-unread : no auto-pass record was written for a gate that refused passes=0
-  [PASS] A3 git-error-swallowed : the board RAISES (exit 6) - a source file that runs git and never inspects the result exit=6 board=raised
+  [FAIL] A2 policy-declared-unread : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  [FAIL] A2 policy-declared-unread : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] A2 policy-declared-unread : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  [FAIL] A2 policy-declared-unread : no auto-pass record was written for a gate that refused passes=1
+  [FAIL] A3 git-error-swallowed : the board RAISES (exit 6) - a source file that runs git and never inspects the result exit=0 board=clear
   [PASS] A3 git-error-swallowed : and it is THIS condition that fired, not another status=fire
-  [PASS] A3 git-error-swallowed : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
-  [PASS] A3 git-error-swallowed : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=git-error-swallowed
-  [PASS] A3 git-error-swallowed : no auto-pass record was written for a gate that refused passes=0
-  [PASS] A4 work-branch-on-remote : the board RAISES (exit 6) - the run's work branch exists on a remote - an outward action nobody granted exit=6 board=raised
+  [FAIL] A3 git-error-swallowed : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  [FAIL] A3 git-error-swallowed : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  [FAIL] A3 git-error-swallowed : no auto-pass record was written for a gate that refused passes=1
+  [FAIL] A4 work-branch-on-remote : the board RAISES (exit 6) - the run's work branch exists on a remote - an outward action nobody granted exit=0 board=clear
   [PASS] A4 work-branch-on-remote : and it is THIS condition that fired, not another status=fire
-  [PASS] A4 work-branch-on-remote : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
-  [PASS] A4 work-branch-on-remote : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A4 work-branch-on-remote : the refusal is IN THE LEDGER naming THIS condition and no other fired=work-branch-on-remote
-  [PASS] A4 work-branch-on-remote : no auto-pass record was written for a gate that refused passes=0
-  [PASS] A5 protected-ref-moved : the board RAISES (exit 6) - a protected ref moved after the run recorded its baseline exit=6 board=raised
+  [FAIL] A4 work-branch-on-remote : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  [FAIL] A4 work-branch-on-remote : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] A4 work-branch-on-remote : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  [FAIL] A4 work-branch-on-remote : no auto-pass record was written for a gate that refused passes=1
+  [FAIL] A5 protected-ref-moved : the board RAISES (exit 6) - a protected ref moved after the run recorded its baseline exit=0 board=clear
   [PASS] A5 protected-ref-moved : and it is THIS condition that fired, not another status=fire
-  [PASS] A5 protected-ref-moved : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=6
-  [PASS] A5 protected-ref-moved : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=anchor-draft
-  [PASS] A5 protected-ref-moved : the refusal is IN THE LEDGER naming THIS condition and no other fired=protected-ref-moved
-  [PASS] A5 protected-ref-moved : no auto-pass record was written for a gate that refused passes=0
+  [FAIL] A5 protected-ref-moved : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  [FAIL] A5 protected-ref-moved : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  [FAIL] A5 protected-ref-moved : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  [FAIL] A5 protected-ref-moved : no auto-pass record was written for a gate that refused passes=1
   [PASS] A: every required condition was driven through the real gate driven=5 of 5
 
 === B  CLEAR - an unattended run that hits NONE lands, with a COMPLETE audit trail ===
@@ -49,7 +49,7 @@
   [PASS] both are AUTO passes and each names its gate profile auto=2
   [PASS] each auto pass records the andon verdict that AUTHORISED it clear,clear
   [PASS] each auto pass states its COVERAGE, so 'clear' can be re-derived rather than trusted 5/5,5/5
-  [PASS] HERMETIC: the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/u6dark-56779d1d/repo-clear | C:/Users/yamao/AppData/Local/Temp/u6dark-56779d1d/repo-clear
+  [PASS] HERMETIC: the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/u6dark-5aca8908/repo-clear | C:/Users/yamao/AppData/Local/Temp/u6dark-5aca8908/repo-clear
   [PASS] no record can be mistaken for a human approval
   [PASS] THE COLUMN'S SECOND HALF: the audit trail verifies COMPLETE (exit 0) exit=0 ::   gate an item never reached.
 
@@ -60,9 +60,8 @@
   [PASS] GREEN again once the ledger is restored - the verifier is not stuck red exit=0
 
 === M  MEASUREMENT (not an assertion): what the SHIPPED board says in this checkout ===
-  shipped board: exit 6
-    ANDON BOARD: RAISED
-      4 condition(s) HALTED the line: policy-declared-unread, git-error-swallowed, work-branch-on-remote, protected-ref-moved
+  shipped board: exit 0
+    ANDON BOARD: CLEAR
       [ok           ] operator-checkout-off-branch   -> evaluated_ok D:\Open WebUI\ai-stack is on 'refactor/ai-stack-cleanup' with no operation in progress
       [fire         ] policy-declared-unread         -> fired       declared policy nothing reads: pipeline.convergence
           - pipeline.convergence
@@ -95,16 +94,36 @@
           - scripts/checks/validate-lineendings.ps1:16 in (top level) runs git and does not check the result within 5 line(s)
       [fire         ] work-branch-on-remote          -> fired       work branches exist on a remote: 1
           - work/pod-key is on remote 'origin' (refs/remotes/origin/work/pod-key)
-      [indeterminate] protected-ref-moved            -> indeterminate no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-56779d1d\state-measurement\audit\andon-baseline.json)
+      [indeterminate] protected-ref-moved            -> indeterminate no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-5aca8908\state-measurement\audit\andon-baseline.json)
       coverage: 5 declared, 5 evaluated, 0 switched off, 0 of 5 required MISSING
       census  : unrecognised=0, fired=3, indeterminate=1, disabled=0, evaluated_ok=1 (total 5 of 5 in scope)
-    ANDON RAISED: policy-declared-unread, git-error-swallowed, work-branch-on-remote, protected-ref-moved, policy-declared-unread: declared policy nothing reads: pipeline.convergence, git-error-swallowed: git errors are swallowed at 26 call site(s), work-branch-on-remote: work branches exist on a remote: 1, protected-ref-moved: no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\u6dark-56779d1d\state-measurement\audit\andon-baseline.json)
   This is a MEASUREMENT. It is not counted in the result below, because the
   column's question is about the GATE and the shipped board's contents are a
   separate, live config decision - see this file's header.
 
-U6 DARK GATE DRILL: 54 assertions, 0 failed.
-  HALT and CLEAR were both driven through the REAL gate: a board that fires
-  refuses the unattended gate and records the refusal; a board that fires
-  nothing auto-passes both gates and the trail verifies COMPLETE. Neither
-  direction can be green on its own.
+U6 DARK GATE DRILL: 25 of 54 assertions FAILED
+  FAILED: A1 operator-checkout-off-branch : the board RAISES (exit 6) - the checkout it watches is DETACHED exit=0 board=clear
+  FAILED: A1 operator-checkout-off-branch : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  FAILED: A1 operator-checkout-off-branch : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: A1 operator-checkout-off-branch : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  FAILED: A1 operator-checkout-off-branch : no auto-pass record was written for a gate that refused passes=1
+  FAILED: A2 policy-declared-unread : the board RAISES (exit 6) - a policy key declared in config and read by no harness source exit=0 board=clear
+  FAILED: A2 policy-declared-unread : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  FAILED: A2 policy-declared-unread : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: A2 policy-declared-unread : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  FAILED: A2 policy-declared-unread : no auto-pass record was written for a gate that refused passes=1
+  FAILED: A3 git-error-swallowed : the board RAISES (exit 6) - a source file that runs git and never inspects the result exit=0 board=clear
+  FAILED: A3 git-error-swallowed : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  FAILED: A3 git-error-swallowed : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: A3 git-error-swallowed : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  FAILED: A3 git-error-swallowed : no auto-pass record was written for a gate that refused passes=1
+  FAILED: A4 work-branch-on-remote : the board RAISES (exit 6) - the run's work branch exists on a remote - an outward action nobody granted exit=0 board=clear
+  FAILED: A4 work-branch-on-remote : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  FAILED: A4 work-branch-on-remote : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: A4 work-branch-on-remote : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  FAILED: A4 work-branch-on-remote : no auto-pass record was written for a gate that refused passes=1
+  FAILED: A5 protected-ref-moved : the board RAISES (exit 6) - a protected ref moved after the run recorded its baseline exit=0 board=clear
+  FAILED: A5 protected-ref-moved : the dark ANCHOR gate REFUSES to auto-pass (exit 6) exit=0
+  FAILED: A5 protected-ref-moved : the item stays PARKED at anchor-draft - a halt that advances the work is not a halt state=ready-to-test
+  FAILED: A5 protected-ref-moved : the refusal is IN THE LEDGER naming THIS condition and no other fired=
+  FAILED: A5 protected-ref-moved : no auto-pass record was written for a gate that refused passes=1
