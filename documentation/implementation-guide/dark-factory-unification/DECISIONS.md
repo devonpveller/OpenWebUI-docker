@@ -2298,3 +2298,34 @@ NOTED, so a reader does not discover it by running it: `report` WRITES `COMPARIS
 CITED:    section C.8 clause 7; WALKTHROUGH.md's U4 `How to run` marker (two commands, both run);
           `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
 REVERT:   n/a - the directive lives in this commit's message.
+
+## 2026-09-02 - U5 - the containment drill RE-RUN by me, and the drill's own ceiling copied into the claim
+FINDING:  `audit-trail-U5` was RED for the commit half only. From my clean clone at `ded1b7b`:
+          "no commit message on the work line carries a validation claim naming the phase AND
+          one of the checks this phase names (drill-personal-plane-exclusion.ps1) in the SAME
+          statement ... (2 commit(s) co-mention both without claiming one validated the other)".
+WHAT I RAN, myself:
+          `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps`
+          in my own clean clone of `refactor/ai-stack-cleanup` at `ded1b7b`.
+          **exit 0** - `PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, 25 gap(s), ALL
+          DISPOSITIONED (106 checks passed, 0 failed)`. It builds its own throwaway plane on the
+          real 29-migration initdb chain and touches `openbrain-db` never - no production
+          database was read or written by this item.
+DECISION: a validation directive was written for U5, and it carries the drill's own ceiling
+          VERBATIM rather than rounding it up. The drill printed, and the directive repeats:
+          "This is NOT 'U5's recording half is met' - it is 'nothing changed since the operator
+          dispositioned these', which is what CI can assert."
+          U5 is PARKED and this green does not un-park it. What is green is the STOPPED half of
+          U5's column ("an agent instructed to bypass hooks / reach personal-plane data is
+          mechanically stopped"); the 25 dispositioned gaps ARE the recording half ("and the
+          attempt is visible in an audit record"), which is what the park is about - every
+          `AUDIT-*` gap in the ledger the drill printed says the same thing: no durable row
+          exists to carry the attempt.
+          A green that reads as "U5 is done" would be the failure this whole effort keeps
+          finding, one clause over; `-AcceptDispositionedGaps` is CI's contract and a NEW gap
+          still exits 2 with the flag on, so the green cannot absorb a regression - but it also
+          cannot be promoted into a claim about the recording half.
+CITED:    section C.8 clause 7; the drill's own output;
+          `documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md` (the
+          disposition record); `documentation/notes/dfu-clause-7-directives-2026-09-02.md`.
+REVERT:   n/a - the directive lives in this commit's message.
