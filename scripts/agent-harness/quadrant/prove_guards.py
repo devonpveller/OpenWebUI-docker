@@ -31,7 +31,7 @@ HARNESS = HERE.parent
 # (module file, snippet to break, replacement, test that must go RED, what that proves)
 MUTATIONS: List[Tuple[str, str, str, str, str]] = [
     ("record.py",
-     "        if not Path(val).exists():",
+     "        if not _evidence_present(val, record_dir):",
      "        if False:",
      "test_completion_whose_evidence_paths_do_not_exist_is_refused",
      "evidence is checked against the FILESYSTEM, not against the presence of a string"),

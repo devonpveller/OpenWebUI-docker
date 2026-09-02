@@ -7,13 +7,62 @@ command, and by whom — and it says "parked" where things are parked.**
 A row saying DONE means its §2 *Validated by* column is satisfied by an executable check that
 someone who did not build it re-ran. Anything else says PARKED, with what would close it.
 
-**Every command in this file must run AS WRITTEN, from the repository root.** One did not:
-U6's second check was listed as `python -m pytest agent-org/...` and fails with
-`ModuleNotFoundError: No module named 'sqlalchemy'`, because it needs the agent-bridge venv.
-Corrected 2026-08-31 to name that interpreter (it then passes, 25 tests). It was caught by a
-verifier attacking `dfu-done.ps1`, not by this file — the checker captured only the FIRST
-command after each *How to run* marker, so a red named check read green in the deliverable that
-clause 5 exists to audit. Both are fixed.
+**Every command under a `How to run` marker must run AS WRITTEN, from the repository root,
+IN A CLEAN CLONE.** That is stricter than it was on 2026-08-31, and the extra clause is the
+one that was doing the work. U6's second check had been listed as `python -m pytest
+agent-org/...`, which fails with `ModuleNotFoundError: No module named 'sqlalchemy'`; it was
+"corrected" to name `agent-org/agent-bridge/.venv/Scripts/python.exe` — a path that exists
+in the author's tree and **in no clone**, because `.venv/` is not in git. The correction moved
+the defect rather than closing it, and it stood for a day because U2 and U6 were the only
+phases with a marker at all: `dfu-done.ps1` reported *"no executable check is recorded for this
+phase, so its column was NOT re-run"* for U0, U1, U3, U4, U5 and U8, and an indeterminate reads
+much like a green if you only read the headline.
+
+**Every marker below was EXECUTED, and its exit code is recorded in its own section** — in a
+clean clone of the shape `dfu-done.ps1` builds for clauses 1 and 5 (`git clone --shared
+--single-branch --branch <work line>`, submodules from the local mirror, no `.venv`, no `.env`,
+no test images). **Where a phase's real check does not pass there, no marker was written and
+the measurement is stated instead.** A phase reading *"no executable check is recorded"* now
+means somebody ran the check and it was red or unrunnable; it says so, with the command and the
+exit code, in that phase's section. Fabricating a green by naming a lighter check would be
+C.8's forbidden move one document over.
+
+**§C.7b validation record.** The markers were developed against a clean clone at `fba111d`
+(the state of the work line before this round) and then RE-RUN, marker by marker, in fresh
+clean clones of the commit that carries them - two of them, one suite per checkout, each with
+`git status --porcelain` asserted EMPTY before anything ran and `git reset --hard` + `git clean
+-qfd` between commands so no phase's check can leave behind what another phase's check needs.
+**Every marker returned the same exit code in both passes.** A section's `fba111d` label is the
+run the number beside it was first measured in; where a second pass measured something
+different (U1's wall clock, once its image was cached) the section says both. The clones were
+built exactly as `dfu-done.ps1` builds its sandbox, including
+`git config core.longpaths true` set INSIDE the clone - a `-c core.longpaths=true` on the clone
+command does NOT persist into the new repository, and without it this tree loses files with no
+error.
+
+**And then clause 5 itself was run, which is the only thing that actually proves any of this.**
+`dfu-done.ps1 -Only 5 -WorkLine work/dfuc15 -Json`, 17m21s, `commands_executed: 7`,
+`per_command_drift: []`, `moved_during_run: []`, integrity `ok: true`:
+
+| probe | verdict |
+|---|---|
+| `walkthrough-U0/U1/U2/U4-check-1`, `U4-check-2`, `U5/U8-check-1` | **pass** - "the row's named check re-runs green", all seven |
+| `walkthrough-U0/U1/U2/U4/U5/U8-left-the-audited-tree-unchanged` | **pass**, all six - the plan, the ledger, this file, `documentation/notes` and git's refs, status, worktrees and submodules are byte-identical before and after |
+| `walkthrough-U3/U6/U7-names-a-check` | indeterminate, by design, for the reasons in those three sections |
+| `phase-floor-matches-plan` | **fail** - and it is NOT about the markers, see below |
+| coverage | evaluated **6 of 10**, `not_evaluated: [U3, U6, U7]` |
+
+**Clause 5's verdict is `unmet`, and the reason is older than this round.**
+`phase-floor-matches-plan` reports *"the pinned floor and C.8 clause 1 disagree - the plan names
+U0,U1,U2,U3,U4,U5,U6; pinned but unnamed: U8"*. C.9 extended the floor to U8 and pinned it in
+code; C.8 clause 1's PROSE was never updated to name U8, and `dfu-done.ps1`'s own header says
+so and says the close is a PLAN.md edit. So clause 5 is red on a documentation gap in the plan,
+independently of every marker above, and no work on this file can lift it.
+
+**A cost, stated because it is large.** Clauses 1 and 5 each re-run every marker, so a full
+`dfu-done.ps1` now spends the better part of an hour in the sandbox — U8's drill alone is a
+measured 13m24s and runs twice, and U5's is 2m30s. That is what *"re-run the column from a clean checkout"* costs when the columns are
+real drills. Nothing here is a reason to trim it; it is a reason not to be surprised by it.
 
 **How to read the "verified by" column.** `orchestrator` = I ran the command myself.
 `verifier` = an adversarial agent that did not build the item ran it and reported the output.
@@ -44,11 +93,22 @@ is marked deliberately rather than rounded up.
 poller.
 **Validated by (§2):** each item's own anchor + tester; inbox: a kill-the-poller drill proving
 no message is lost.
+**How to run:** `python -m pytest scripts/claude-sessions-bridge/test_inbox.py -q`
+**Clean-clone measurement (2026-09-01, `fba111d`):** **exit 0**, `20 passed in 10.82s`. That file
+is the kill-the-poller drill this column names — its own docstring says so, and its
+`test_kill_the_poller_*` cases are written to FAIL against the pre-inbox bridge, where an
+admitted message lived only in an in-memory deque. Stdlib + pytest only: no venv, no bridge, no
+Mattermost.
+**What the marker does NOT cover:** the column's first half, *"each item's own anchor +
+tester"*, is a fact about three merges that already happened. It is discharged by the merge
+record below, not by anything re-runnable, and no command here pretends otherwise.
 **Evidence:** `68e016e Merge work/dfu-inbox: a durable inbox, so an operator message cannot
 vanish`, over `cac1f85`.
 **Verified by:** merge-record. I confirmed the merge exists and closed the stale queue row that
 still read `test-passed` with an empty `merged_sha`. **I did not re-run the kill-the-poller
-drill in this session.**
+drill in this session.** — that last sentence was true when written and is superseded:
+2026-09-01 re-ran it from a clean clone, exit 0, and it is the marker above. It has still not
+been re-run by someone who did not build it, which is a different and weaker statement.
 
 ## U1 — memory plane, phases 0–2
 
@@ -57,6 +117,28 @@ drill in this session.**
 `documentation-plans-ai-stack/implementation-guide/agent-memory-plane/PLAN.md` — **not** in
 ai-stack; a session that searched only ai-stack once concluded it did not exist and rebuilt it
 wrongly).
+**How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/smoke-agent-memory.ps1`
+**Clean-clone measurement (2026-09-01, `fba111d`):** **exit 0**, 23 checks,
+`ALL AGENT-MEMORY SMOKE CHECKS PASSED`. About 4 minutes the first time (it BUILDS the server image, tagged `:smoke`, never `:local`) and 20s once that image is cached - both measured, in two different clean clones. It is the *smoke script* named in gate 1.3
+(*"offline harness + smoke script + plane-agreement invariant"*) and it exercises 1.1 and the
+1.2 doors on the way: it builds the real server image, brings it up on a throwaway network
+against a throwaway database on the REAL initdb chain with a STUB embedding endpoint, and then
+speaks HTTP to it — the writeback door's policy defaults, its idempotency and 422 refusal
+paths, the plane-agreement invariant (a pending memory is not in a default recall,
+`include_unconfirmed` reaches it), and the exposure boundary (a tainted `ops` write is stamped
+personal, PII is demoted rather than rejected, the label is mirrored onto the thought, personal
+is absent from a default recall). It touches no live plane and needs no GPU.
+**Measured and NOT recorded, with its exit code:** `scripts/checks/test-quartz4-offline.ps1
+-Phase unit` is gate 1.1's fresh-apply proof and is **red** — exit 1, `7 CHECK(S) FAILED`. The
+schema half passes (29 migrations derived from compose, `agent_memory_tables(8)`, trigger,
+2 functions, the wiki GIN index); every failure is in the section that executes the module's
+own SQL against the fresh volume, starting with an INSERT that omits a column H3 made
+`NOT NULL` (*"null value in null constraint"*). **Measured only in the clone** — that failing
+section builds its database from this repository's own migration chain and runs SQL from this
+repository's own module, so nothing in it can depend on the checkout being a clone, but saying
+"it is red on the work line too" would be an inference and it is not written here as a
+measurement. It belongs to whoever owns that harness — filed, not papered over
+(`documentation/notes/dfu-c15-clean-clone-check-audit.md`).
 **Evidence:** `954b97b` (2.1 write path), `5a662d3` (2.2 outcomes), `4aed54f` (2.2 abort-path
 thin records), `7982440` (2.3 constraint promotion), `ebfcbbc` (2.4 bridge rollups),
 `105d835` (1.3 acceptance).
@@ -88,6 +170,30 @@ finding in a prior round (gym-007's shape, new source); drills green in both sys
 |---|---|
 | drills green in both systems | **MET** — `scripts/agent-harness/verify-merge-protocol.ps1` and `agent-org/agent-bridge/tests/test_org_drill.py`, both confirmed present and reported green by verifiers |
 | seeded regression caught by a check born from a **tester** finding, **in the gym** | **NOT MET** — the run was local, not in the arena |
+
+**No `How to run` marker is recorded for U3, and here is what was measured instead**
+(2026-09-01, clean clone at `fba111d`). Neither half of the column can be re-run there:
+
+- `scripts/agent-harness/verify-merge-protocol.ps1` - **exit 1**, `40/66 checks passed`. That
+  is not a finding about the protocol: the drill cuts its scratch line with
+  `git branch drill/verify-d development`, and the sandbox `dfu-done.ps1` builds is
+  `--single-branch`, so the first command answers `fatal: not a valid object name:
+  'development'` and the 26 downstream assertions collapse from that. A full `git clone` does
+  not help either, and that was measured rather than reasoned: in an all-branches clone of this
+  repository `refs/remotes/origin/development` is present and `git rev-parse development` still
+  answers `fatal: ambiguous argument 'development': unknown revision`, because clone creates a
+  local branch only for the remote's HEAD and `rev-parse` does not search
+  `refs/remotes/origin/`. The base ref is hard-coded with no parameter, so there is no portable
+  INVOCATION; making it portable is a change to that drill and belongs to whoever owns it.
+- `scripts/agent-harness/u3_evidence_regression_gym.py` - **exit 2**, `VENUE REFUSED: venue
+  'gym' resolves to 'C:\dfuwt\ai-orchestration-gym' ... which is not a directory`. The venue
+  is configured as `../ai-orchestration-gym`, relative to the checkout, and `dfu-done.ps1`
+  clones into `%TEMP%`. A `Gym:` column is therefore not re-runnable from a disposable clone by
+  construction, whatever the arena's state; `AI_STACK_GYM_REPO` can point at it, but only as an
+  absolute path to this machine, which is the shape this round exists to stop repeating.
+- the agent-org half of *"drills green in both systems"* is
+  `agent-org/agent-bridge/tests/test_org_drill.py`, which needs the agent-bridge interpreter -
+  see U6 below, and the same paragraph applies.
 
 **What would close it:** a run in `d:\Open WebUI\ai-orchestration-gym`, or an amendment
 narrowing the arena clause with evidence that it cannot be run.
@@ -243,6 +349,42 @@ commits behind the work line and therefore UNVALIDATED under §C.7b regardless, 
 findings note carries a false sentence in code. Its absence is exactly why *"governs both"*
 stays false in the agent-org direction.
 
+**How to run:** `python scripts/agent-harness/quadrant/cli.py report --results-dir documentation/evidence/dfu-u4/quadrant`
+and `python scripts/checks/check_quadrant_evidence_reproduces.py --auto`
+**Clean-clone measurement (2026-09-01, `fba111d`):** both **exit 0** - `**COMPARED 4/4**`, and
+`7 outcome record(s) re-derived their verdict from the evidence they kept ... 0 skipped as
+inadmissible` beside `the 7 run record(s) this checkout COMMITS are all on disk`. **Both were
+RED before this round**, which is what the paragraph below is about.
+
+**Round 10, 2026-09-01 - round 9's green did not survive the worktree that produced it.** Run
+from a clean clone at `fba111d`, `report` answered **COMPARED 0/4, exit 1** and the banked check
+answered **7 NOT REPRODUCIBLE, exit 1**, every one of them
+`evidence.workspace does not exist on disk: D:\...\wt-u4close\...\workspace`. Nothing was
+missing: all 48 files under `documentation/evidence/dfu-u4/` are tracked and on disk beside
+their records. `record.admit` resolved `evidence.*` as the ABSOLUTE path the producing worktree
+wrote, and `wt-u4close` was removed when the branch landed - so round 9's clean-clone greens
+were true only while that directory still existed on the author's disk, which is this section's
+own defect one layer in: the evidence was made durable and the gate that reads it was not.
+
+The fix is in `quadrant/record.py`: a record naming its evidence INSIDE its own run directory
+is checked BESIDE THE RECORD, and the recorded absolute path is then not consulted. That is not
+a new idea - it is `check_quadrant_evidence_reproduces.py`'s existing rule, earned by the U3
+drill (follow the absolute path out of a COPIED set and a deleted workspace reads as present).
+`cli._load_records` stamps each record with the directory it was read from; `admit` gains an
+optional `record_dir` and behaves exactly as before without one. Proved
+RED -> GREEN -> RED -> GREEN in a clone: 0/4 and 7-not-reproducible before, 4/4 and
+7-re-derived after, both back to exit 1 with `documentation/evidence/dfu-u4/` moved away, both
+green again on restore. Guard-bite unaffected, measured IN THE CLEAN CLONE:
+`python -m quadrant.prove_guards` **25/25 guards proven to bite**, `ruff check .` clean, and
+`pytest scripts/agent-harness -q` **295 passed, 2 skipped, 1 failed** - the same one failure
+round 9 recorded below, `test_the_check_is_banked_in_the_registry_with_the_form_that_runs_anywhere`,
+which is correct to fail in a clone because the durable-check registry lives inside `.git`. The
+same suite is **298 passed, 0 failed** in a worktree, which is exactly why §C.7b insists on the
+clone. And the stricter admission does
+not make the audit quieter - a record refused because its evidence is gone is no longer
+*skipped as inadmissible*, it falls through to the finding, which
+`test_a_deleted_workspace_in_a_copy_is_caught_and_not_masked_by_the_recorded_path` holds.
+
 **Evidence:** `documentation/evidence/dfu-u4/` (committed),
 `documentation/notes/u4close-findings.md`,
 `documentation/notes/u4-round8-evidence-durability.md`.
@@ -287,6 +429,24 @@ retry after a `commit-msg` refusal is closed, RED→GREEN with byte-identical ho
 
 **Validated by (§2):** *"an agent instructed to bypass hooks / reach personal-plane data is
 mechanically stopped and the attempt is visible in an audit record."*
+**How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-personal-plane-exclusion.ps1 -AcceptDispositionedGaps`
+**Clean-clone measurement (2026-09-01, `fba111d`):** **exit 0** -
+`PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, 25 gap(s), ALL DISPOSITIONED (106 checks
+passed, 0 failed)`. It builds its own isolated plane (a throwaway server, a throwaway database
+on the real 29-migration initdb chain, its own ports) and touches `openbrain-db` never; it
+refuses to start unless OB1's HEAD matches the recorded gitlink, which a clean clone satisfies
+by construction.
+**READ THE FLAG BEFORE READING THE GREEN**, in the drill's own words, printed by that run:
+*"This is NOT 'U5's recording half is met' - it is 'nothing changed since the operator
+dispositioned these', which is what CI can assert."* The 25 gaps are listed in the run's own
+output and the STOPPED half is what is green; the RECORDING half is what those gaps are about,
+and it is why this phase is PARKED. `-AcceptDispositionedGaps` is CI's contract
+(`.github/ci/expected-exit.ps1`, `boundary-drill`: green 0 only under that flag), and a gap
+that is NEW still exits 2 with the flag on, so the green cannot absorb a regression.
+**Also measured, DB-free, both exit 0 in ~1s each:**
+`drill-personal-plane-exclusion.ps1 -SelfTestLedger` and `-SelfTestVacuity`. They prove the
+drill's ledger reconciliation and its vacuity guard, not the column, so neither is recorded as
+this phase's check - naming one here would be the substitution this round exists to refuse.
 
 **Why it is parked — two open findings, both orchestrator-verified:**
 
@@ -334,8 +494,26 @@ pins `8e3f164`; merging it as-is would drag OB1 **backward** and revert merged r
 
 ### Clause 4 — recall-informed briefs at all four seams — **DONE**
 **Validated by:** deleting any seam reds a test that names *that* seam; and the live acceptance.
-**How to run:** `python scripts/checks/recall-falsifiability-drill.py`, and
-`agent-org/agent-bridge/.venv/Scripts/python.exe -m pytest agent-org/agent-bridge/tests/test_recall_seams.py -q`
+**The `How to run` marker that stood here has been REMOVED, and neither command was replaced
+by a lighter one.** Measured 2026-09-01 from a clean clone at `fba111d`:
+
+- `agent-org/agent-bridge/.venv/Scripts/python.exe -m pytest .../test_recall_seams.py -q` names
+  a virtualenv that is **not in git**. In a clone there is no such file, so the command cannot
+  start; the 2026-08-31 "correction" that added that path moved the defect rather than closing
+  it. `python -c "import sqlalchemy"` on the interpreter that IS on PATH answers
+  `ModuleNotFoundError`, and no INVOCATION fixes a missing environment.
+- `python scripts/checks/recall-falsifiability-drill.py` is worse than red: it **exits 0
+  vacuously**. In the clone it printed `ALL MUTATIONS RED - every guard can fail`, and
+  **eleven of its twelve mutations carry the same evidence**:
+  `E   ModuleNotFoundError: No module named 'sqlalchemy'`. Only the twelfth is real - the Deno
+  one, which needs no Python. The drill decides a mutation was caught from `returncode != 0`
+  and never asserts that the UNMUTATED tree is green, so an interpreter that cannot import the
+  package under test satisfies every Python mutation at once. That is a check green while
+  checking nothing, sitting in this file's own `How to run` line, which is the exact class
+  §C.8 clause 5 exists to catch. Filed for whoever owns that drill in
+  `documentation/notes/dfu-c15-clean-clone-check-audit.md`; the fix is a baseline assertion, not
+  a marker here.
+
 **Evidence:** `3bdf7a8`. Two verifiers not-refuted; they counted **4 and 5** live seams (one
 found an `_open_handoff` seam beyond the four the plan names).
 **Orchestrator-verified:** `agent_memory_recall_traces` went **0 → 8 rows** — recall has run
@@ -369,6 +547,29 @@ the census carried into the ledger so completeness can be re-derived rather than
 red-proof is inventing a **new** outcome word and showing the board refuses it *without* a
 branch being added for that word.
 
+**No `How to run` marker is recorded for U6 either, and the reason is a live defect, not an
+environment.** The column's executable form is `scripts/agent-harness/drill-dark-factory.ps1`
+- its own header opens *"U6's validation column, executable"* and it carries both halves. From
+the clean clone at `fba111d` it is **exit 1 with 48 failed assertions**, and they share one
+cause, which was then measured directly on the work line (not in a clone):
+
+    powershell -File scripts/agent-harness/andon.ps1 -Evaluate -Only policy-declared-unread
+    ANDON BOARD: RAISED
+      [fire] policy-declared-unread -> declared policy nothing reads: pipeline.convergence
+                                                                            exit 6
+
+`harness.config.json` declares `pipeline.convergence` and no code reads it, so the andon
+condition that exists to catch exactly that fires against the SHIPPED config. Every fixture in
+the drill inherits that config, so each of its *clean board* controls - the second half of the
+column, *"one that hits none lands with a complete audit trail"* - fails, and the failures
+cascade from there. Two things follow, and the second is the one that matters outside this
+document: the drill cannot be green in ANY checkout on this line, and **a `dark` run cannot
+auto-pass a gate today**, because a raised board is exit 6 by design. Recording the drill as
+this phase's marker would put a ~10-minute red into both clause 1 and clause 5 for a cause that
+is one config key wide; the key is a config decision (is it dead, or is its reader misnamed?)
+and is nobody's to guess at under the C.10 freeze. Filed with the measurement in
+`documentation/notes/dfu-c15-clean-clone-check-audit.md`.
+
 **Note:** U6's *column* has been met for two rounds. The refutations are against claims the
 branch added **beyond** its column. Branch `work/u6dark` is unmerged.
 
@@ -379,6 +580,16 @@ research anchors → trialled in the gym → adopted or refused on the record.
 **Validated by (§2):** the evidence ledger itself — every design change carries its anchor
 citation or its ledger amendment.
 **Depends on:** U6. §2.1 A1 is the first entry of the kind U7 institutionalises.
+**There is no `How to run` for U7 and there must not be one.** The phase has NOT STARTED, so
+there is nothing to re-run: its column is satisfied by a LOOP having run once on the record,
+and a loop that has never run is an intention, not a process. `dfu-done.ps1` clause 6 asks that
+question directly and answers it from `DECISIONS.md` - which is where it belongs, and is why
+clause 6 stands at MANUAL-PENDING rather than at a green. U7 is nonetheless inside clause 5's
+population (the pinned floor UNIONED with this file's own sections), so clause 5 will report
+`walkthrough-U7-names-a-check` as indeterminate for as long as U7 is not started. **That is a
+correct report, not a gap to close**: deleting this section to shrink the population is the
+rule-6 attack `dfu-done.ps1` was hardened against, and inventing a check for an unstarted phase
+is C.8's forbidden move. Clause 5 goes green when U7 runs, and not before.
 
 ---
 
@@ -391,6 +602,24 @@ whether the checks still run — previously rested on something *remembering*.
 **Validated by (§C.9):** each H-item's own runnable check, plus `dfu-done.ps1`'s pinned phase
 floor and clause 1 EXTENDED to include U8. The floor now reads
 `U0,U1,U2,U3,U4,U5,U6,U8`, pinned as a code literal with no parameter, env var or file input.
+**How to run:** `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/verify-dfu-done.ps1 -Target scripts/checks/dfu-done.ps1`
+**Clean-clone measurement (2026-09-01, `fba111d`):** **exit 0** -
+`DRILL GREEN - 216 assertions, 0 failed. 8 of 8 declared clauses have a constructed failing
+case.` It is the floor row's own check and it is the half of this column that a machine can
+re-run: for every clause it CONSTRUCTS a world in which that clause must not be met, runs the
+real `dfu-done.ps1` against it, and asserts the clause did not pass - so a clause with no
+failing case turns it red rather than quietly covering seven of eight. Every one of its ~70
+nested runs is pointed at a throwaway fixture with `-RepoRoot`, so it cannot recurse into this
+document. `-Target` is passed explicitly because the column names `dfu-done.ps1` and the
+correspondence between the two should be readable in the command, not inferred. **13m24s
+measured**, and the clone it ran in was still `git status --porcelain` EMPTY afterwards.
+**What the marker does NOT cover:** the per-H-item drills in the table below. `prove-agent-memory-rls.ps1`
+(H3) and `drill-rls-boot-assertion.ps1` (H2) need the live plane, `drill-app-role-not-superuser.ps1`
+(H1) is pinned at CANNOT-MEASURE while its migration is not at the recorded gitlink
+(`.github/ci/expected-exit.ps1`, `app-role-drill`: green 2, and 0 arrives as a NAG saying to
+pull the pin), and H4's CI run and H5's push are the two operator blocks named below. Recording
+those here would put the live plane inside a clause that is supposed to run from a disposable
+clone, and CI is where they are wired.
 
 | item | state | the check that RAN |
 |---|---|---|

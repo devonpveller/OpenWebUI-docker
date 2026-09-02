@@ -304,7 +304,29 @@ def _committed_records(root: Path) -> Tuple[List[str], str]:
     return paths, ""
 
 
-def _admissible(rec: Dict[str, Any]) -> Tuple[bool, str]:
+def _missing_evidence(rec: Dict[str, Any], record_dir: Any = None) -> List[str]:
+    """Which required evidence artifacts are NOT here, asked of the harness's own gate.
+
+    A refusal at admission has two very different causes and only one of them is this
+    check's business. "evidence.workspace is not in this tree" IS the finding - skipping it
+    would report a set whose proof is gone as exit 0, which is the vacuity this file exists
+    to close, and a regression test holds that line. "the record names no venue" keeps the
+    record out of a comparison and says nothing about whether the tree kept its evidence.
+    Same lazy import and same conservative fallback as _admissible: on a tree with no
+    harness package, nothing is claimed missing.
+    """
+    try:
+        sys.path.insert(0, str(_repo_root() / "scripts" / "agent-harness"))
+        from quadrant import record as record_mod  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        return list(record_mod.missing_evidence(rec, record_dir))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _admissible(rec: Dict[str, Any], record_dir: Any = None) -> Tuple[bool, str]:
     """Would this record enter a comparison at all? Uses the harness's OWN gate.
 
     Imported lazily so the check still runs on a tree where the harness package is absent -
@@ -315,8 +337,13 @@ def _admissible(rec: Dict[str, Any]) -> Tuple[bool, str]:
         from quadrant import record as record_mod  # noqa: PLC0415
     except Exception:  # noqa: BLE001
         return True, ""
+    # THE RECORD'S OWN DIRECTORY IS HANDED OVER, for the same reason this file resolves the
+    # workspace beside the record rather than at the absolute path it names: an auditor reads
+    # the tree they were given. Without it every committed record here is REFUSED from any
+    # checkout but the one that produced it - measured 2026-09-01, 7 of 7.
     problems = record_mod.admit(rec, item_digest=str(rec.get("item_digest") or ""),
-                                venue=str((rec.get("venue") or {}).get("name") or ""))
+                                venue=str((rec.get("venue") or {}).get("name") or ""),
+                                record_dir=record_dir)
     return (not problems), "; ".join(problems)
 
 
@@ -374,7 +401,7 @@ def main(argv: List[str]) -> int:
             if rec.get("status") not in OUTCOME_STATUSES:
                 continue
             is_committed = r.resolve() in committed_abs
-            ok_adm, why = _admissible(rec)
+            ok_adm, why = _admissible(rec, r.parent)
             if not ok_adm:
                 if is_committed:
                     # Skipping this one would bank a directory nobody may cite. A COMMITTED
@@ -384,9 +411,15 @@ def main(argv: List[str]) -> int:
                         f"{r}: this record is COMMITTED to the repository and record.admit "
                         f"REFUSES it ({why[:160]}). It can enter no comparison, so what is "
                         f"committed here is a directory nobody may cite.")
-                else:
+                    continue
+                if not _missing_evidence(rec, r.parent):
                     skipped.append(f"{r.parent.name}: refused at admission ({why[:120]})")
-                continue
+                    continue
+                # REFUSED BECAUSE THE EVIDENCE IS NOT HERE - which is this file's own
+                # finding, not a reason to look away. It falls through to verify_record so
+                # the report is the one that already exists for a missing workspace, in the
+                # words a reader of this check knows; inventing a second sentence for the
+                # same fact is how two messages for one defect start drifting apart.
             ok, problems = verify_record(r)
             if problems:
                 all_problems += problems

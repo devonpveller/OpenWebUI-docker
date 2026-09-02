@@ -37,6 +37,14 @@ from typing import Any, Dict, List
 
 from . import matrix as _matrix
 
+# THE KEY THE LOADER STAMPS A RECORD'S OWN DIRECTORY UNDER.
+#
+# It is NOT part of the record schema and is never written to disk - `cli._load_records`
+# adds it after reading, so `admit` can answer "is this evidence here?" about the tree it
+# was handed rather than about the machine the record was produced on. See
+# `_evidence_present`.
+RECORD_DIR_KEY = "__record_dir__"
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -95,8 +103,16 @@ def not_run(q: "_matrix.Quadrant", item: Dict[str, Any],
 
 
 def admit(rec: Any, *, item_digest: str = "", venue: Any = "",
-          schema: Dict[str, Any] | None = None) -> List[str]:
-    """[] means admitted. Otherwise, every reason it is not, in the operator's words."""
+          schema: Dict[str, Any] | None = None, record_dir: Any = None) -> List[str]:
+    """[] means admitted. Otherwise, every reason it is not, in the operator's words.
+
+    `record_dir` is the directory the record was READ FROM. It is optional and defaults to
+    the record's own `RECORD_DIR_KEY` stamp, so callers that already load records through
+    `cli._load_records` get it for free. Without it this gate resolves `evidence.*` as the
+    ABSOLUTE path the record was written with - which is a fact about the machine that
+    produced the record and not about the tree the auditor is holding. See
+    `_evidence_present` for what that cost, measured.
+    """
     s = schema or _matrix.schema()
     problems: List[str] = []
     if not isinstance(rec, dict):
@@ -123,7 +139,9 @@ def admit(rec: Any, *, item_digest: str = "", venue: Any = "",
         problems += _venue_problems(rec.get("venue"), venue)
 
     if statuses[status].get("requires_evidence"):
-        problems += _evidence_problems(rec, s)
+        if record_dir is None:
+            record_dir = rec.get(RECORD_DIR_KEY)
+        problems += _evidence_problems(rec, s, record_dir)
     else:
         if rec.get("acceptance"):
             problems.append(
@@ -233,7 +251,97 @@ def _venue_problems(rv: Any, pin: Any) -> List[str]:
     return []
 
 
-def _evidence_problems(rec: Dict[str, Any], s: Dict[str, Any]) -> List[str]:
+def _sibling_of(val: str, record_dir: Any) -> "Path | None":
+    r"""The evidence path RESOLVED AGAINST THE RECORD'S OWN DIRECTORY, or None.
+
+    Every record this harness writes names its evidence INSIDE its own run directory, so
+    the last two components of the recorded path are `<run dir>/<name>`. When the record
+    was read from a directory of that name, `<record dir>/<name>` is the same artifact in
+    the tree the auditor is holding. Returns None for a record shaped some other way -
+    there is nothing to resolve against and inventing one would be a guess.
+
+    The split is on BOTH separators deliberately: these paths are written by whichever OS
+    produced the record (`D:\...\workspace` here), and a POSIX reader that splits on "/"
+    alone sees one component and silently resolves nothing.
+    """
+    if not record_dir:
+        return None
+    norm = str(val).replace("\\", "/").rstrip("/")
+    parts = [x for x in norm.split("/") if x]
+    if len(parts) < 2:
+        return None
+    rd = Path(str(record_dir))
+    if parts[-2] != rd.name:
+        return None
+    return rd / parts[-1]
+
+
+def _evidence_present(val: str, record_dir: Any = None) -> bool:
+    r"""Is the artifact this record names actually HERE?
+
+    THE DEFECT THIS CLOSES, measured 2026-09-01 from a clean clone at `fba111d`. Every
+    committed record under `documentation/evidence/dfu-u4/` was REFUSED at admission -
+    "evidence.workspace does not exist on disk: D:\...\wt-u4close\...\workspace" - and
+    `cli.py report` answered COMPARED 0/4, exit 1, while the retained workspaces and
+    transcripts sat in the checkout, tracked by git, beside their records. `Path(val)` is
+    the absolute path the PRODUCING WORKTREE wrote; that worktree was removed after the
+    branch merged, so the gate was answering a question about a machine rather than about
+    the evidence set in hand. It had passed until then only because that directory still
+    existed on the author's disk - the exact "runs in the author's tree only" shape
+    `documentation/evidence/README.md` was created to end.
+
+    THE SIBLING IS AUTHORITATIVE, and the recorded absolute path is not consulted when one
+    can be resolved. That is not a preference; it is
+    `scripts/checks/check_quadrant_evidence_reproduces.py`'s rule, already earned there by
+    the U3 gym drill: a results set that was COPIED (or archived, or cloned) still has the
+    ORIGINAL absolute path in every record, so following it walks out of the tree under
+    audit and back into an untouched original - a deleted workspace then reads as present.
+    An auditor reads the tree they were handed.
+
+    A record shaped some other way, or read from nowhere in particular, still resolves the
+    way it always did: the absolute path, or nothing.
+    """
+    sib = _sibling_of(val, record_dir)
+    if sib is not None:
+        return sib.exists()
+    return Path(str(val)).exists()
+
+
+def _where_it_was_looked_for(val: str, record_dir: Any) -> str:
+    """Name the path that was actually tested, when it is not the one printed above."""
+    sib = _sibling_of(val, record_dir)
+    if sib is None:
+        return ""
+    return (f" (resolved against this record's own directory, which is what an auditor "
+            f"holds: {sib} - the recorded absolute path is a fact about the machine that "
+            f"produced it and is deliberately not consulted)")
+
+
+def missing_evidence(rec: Dict[str, Any], record_dir: Any = None,
+                     schema: Dict[str, Any] | None = None) -> List[str]:
+    """Which required evidence keys have NO artifact in the tree in hand.
+
+    Asked as a STRUCTURED question so a caller never has to grep `admit`'s prose to learn
+    why a record was refused. "the evidence is gone" and "the record names no venue" are
+    both refusals and they are not the same finding: the first is what an evidence audit
+    exists to report, the second keeps a record out of a comparison and says nothing about
+    the tree. See check_quadrant_evidence_reproduces.py, which routes them differently.
+    """
+    s = schema or _matrix.schema()
+    if record_dir is None:
+        record_dir = rec.get(RECORD_DIR_KEY) if isinstance(rec, dict) else None
+    ev = rec.get("evidence") if isinstance(rec, dict) else None
+    ev = ev if isinstance(ev, dict) else {}
+    out: List[str] = []
+    for key in s["required_evidence_keys"]:
+        val = str(ev.get(key) or "").strip()
+        if not val or not _evidence_present(val, record_dir):
+            out.append(key)
+    return out
+
+
+def _evidence_problems(rec: Dict[str, Any], s: Dict[str, Any],
+                       record_dir: Any = None) -> List[str]:
     problems: List[str] = []
 
     for field in ("started_utc", "ended_utc"):
@@ -254,8 +362,9 @@ def _evidence_problems(rec: Dict[str, Any], s: Dict[str, Any]) -> List[str]:
         if not val:
             problems.append(f"evidence.{key} is missing")
             continue
-        if not Path(val).exists():
-            problems.append(f"evidence.{key} does not exist on disk: {val}")
+        if not _evidence_present(val, record_dir):
+            problems.append(f"evidence.{key} does not exist on disk: {val}"
+                            + _where_it_was_looked_for(val, record_dir))
 
     acc = rec.get("acceptance")
     if not isinstance(acc, list) or not acc:
