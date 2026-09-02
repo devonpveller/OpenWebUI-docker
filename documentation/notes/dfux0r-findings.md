@@ -142,12 +142,30 @@ work/* branches in a --single-branch clone of it:   <none - population is EMPTY>
 worktrees in that clone:                            1 (the main checkout)
 ```
 
-With an empty population, `dfu-done.ps1:4290-4311` takes the `$unmerged.Count -eq 0` branch
-and `no-unmerged-work-branches` returns **pass** — "0 branch(es) measured" — while three work
-branches are outstanding. `no-worktrees` (`:4319-4331`) counts `Select-Object -Skip 1` on a
-one-entry list and also returns **pass**, while two worktrees are live. The note strings do
-say `0 branch(es) measured`, so the text is honest; the *verdict* is green, and the board
-rolls up verdicts.
+> **CORRECTED 2026-09-02 by the orchestrator — HALF OF THIS DID NOT REPRODUCE.** An
+> adversarial verifier built the exact clone shape above and ran
+> `dfu-done.ps1 -Only 4 -SkipLive -RepoRoot <clone>`. The **work-branch** half is FALSE:
+> the probe reported `[fail] no-unmerged-work-branches (exit 1) — 1 unmerged work/* tip(s)
+> out of 3 branch(es) measured … AUTHORITY: origin — git ls-remote --heads origin advertised
+> 6 head(s), 3 of them under refs/heads/work/, UNIONED with the 1 work/* ref(s) this checkout
+> holds locally`. The population is NOT empty and the verdict is NOT pass, because
+> `dfu-done.ps1:1170-1195` already records and fixes this precise defect by making
+> `git ls-remote --heads origin` the authority. The quoted string `0 branch(es) measured`
+> does not appear in the script's output.
+>
+> The **worktree** half IS true: `no-worktrees` (`:4319-4331`) does `Select-Object -Skip 1`
+> on a one-entry list and returns **pass** while two worktrees are live.
+>
+> So the conclusion below — "a true clause 4 or a quiet integrity record, never both", and
+> the directive to read BOTH probes as UNEVALUATED — overreaches. It holds for the worktree
+> subject and not for the branch subject, and acting on it would have had the next reader
+> discard a correctly-measured RED. Recorded rather than deleted, because a findings sink
+> whose claims are not verified against the code path is worse than no sink at all.
+
+With an empty population, `dfu-done.ps1:4290-4311` would take the `$unmerged.Count -eq 0`
+branch — **but it does not, see the correction above**. `no-worktrees` (`:4319-4331`) counts
+`Select-Object -Skip 1` on a one-entry list and does return **pass** while two worktrees are
+live; that half stands.
 
 **So the tension is structural, and it is the real reason 5a is not optional polish.**
 Clause 4's worktree and work-branch subjects can only be measured in the shared checkout —
