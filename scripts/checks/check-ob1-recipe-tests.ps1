@@ -43,6 +43,24 @@ function Fail([string]$msg) {
     exit 1
 }
 
+# Query the OB1 SUBMODULE repo with a clean git environment. Under a hook, git
+# exports GIT_DIR (absolute, the PARENT repo - in a linked worktree its admin
+# dir) and GIT_INDEX_FILE; those override `-C`, so `git -C OB1 rev-parse HEAD`
+# silently answered with the PARENT's HEAD. Found by this gate's own first
+# live run (2026-09-03): it refused a correct commit claiming the OB1 tree was
+# at the parent's SHA. Interactive runs never see this - only hook runs do.
+function Git-InOB1([string[]]$GitArgs) {
+    $saved = @{}
+    foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE') {
+        $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+        [Environment]::SetEnvironmentVariable($k, $null)
+    }
+    try { & git -C (Join-Path $Root 'OB1') @GitArgs 2>$null }
+    finally {
+        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    }
+}
+
 if (-not $Root) {
     $Root = (& git rev-parse --show-toplevel 2>$null)
     if (-not $Root) { Fail "not inside a git repository and no -Root given" }
@@ -63,7 +81,7 @@ if (-not $lsLine -or $lsLine -notmatch '^160000\s+([0-9a-f]{40})\s') {
     Fail "could not read the staged OB1 gitlink from the index (got '$lsLine')"
 }
 $stagedSha = $Matches[1]
-$diskSha = (& git -C (Join-Path $Root 'OB1') rev-parse HEAD 2>$null)
+$diskSha = (Git-InOB1 @('rev-parse', 'HEAD'))
 if (-not $diskSha) { Fail "OB1/ has no readable git HEAD - is the submodule initialized?" }
 if ($stagedSha -ne $diskSha) {
     Fail ("staged OB1 gitlink is $($stagedSha.Substring(0,7)) but the OB1 working tree is at " +
@@ -75,7 +93,7 @@ if ($stagedSha -ne $diskSha) {
 # tree (what the live bind mounts serve, and what the tests below read) is not
 # the commit being pinned - the "deployed from an uncommitted tree" trap.
 # Untracked/ignored files (OB1/docker/.env etc.) are fine and not checked.
-$dirty = @(& git -C (Join-Path $Root 'OB1') status --porcelain --untracked-files=no)
+$dirty = @(Git-InOB1 @('status', '--porcelain', '--untracked-files=no'))
 if ($dirty.Count -gt 0) {
     $dirty | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
     Fail ("OB1 has $($dirty.Count) uncommitted tracked change(s) - the disk tree the tests (and " +
