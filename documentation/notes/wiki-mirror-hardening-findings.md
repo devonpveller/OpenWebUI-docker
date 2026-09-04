@@ -16,11 +16,17 @@ correct all five test paths — only the hook environment reproduces it.
 Fixed in the gate (submodule queries clear GIT_DIR/GIT_WORK_TREE/
 GIT_INDEX_FILE; parent queries keep them, since GIT_INDEX_FILE is the very
 index being committed). Verified by the refusal output (parent SHA named as
-OB1's) and by the green hook run one commit later. **Any OTHER script this
-repo runs from a hook that shells `git -C` into OB1 has this same latent
-bug** — none found today by `grep -rn "git -C" .githooks scripts/checks`
-(only this gate touches the submodule from hook context), but the trap
-outlives that grep.
+OB1's) and by the green hook run one commit later.
+
+**CORRECTED 2026-09-03 (reviewer catch — the original sentence here was
+false):** this note first claimed `grep -rn "git -C" .githooks scripts/checks`
+returned nothing else. Running that exact grep returns `.githooks/commit-msg:58`,
+which shells `git -C` into the staged submodule from hook context and ALREADY
+solves this same GIT_DIR trap (with an sh-subshell `unset`, documented at its
+lines 46–57 with the same "found on the first real run" provenance). So the
+trap was prior art 40 lines from where the gate rediscovered it — the lesson
+is doubled: clear the hook env when a hook script reads a submodule, and
+never record a negative grep result without running it and reading every hit.
 
 ## 2. A RED probe for a test-gate must be COMMITTED, not just dirty
 

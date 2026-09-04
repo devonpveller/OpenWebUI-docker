@@ -47,6 +47,12 @@
 #   .\queue.ps1 -Claim -Id mem-readme -Role tester -By wt-tester-1
 #   .\queue.ps1 -Pass  -Id mem-readme -By wt-tester-1 -Evidence <path> -PlanAdequate
 #     (-PlanAdequate or -PlanInadequate is REQUIRED on both verdicts - see the checks)
+#     -Evidence takes a FILE PATH or inline text. Prefer the path: an over-long inline
+#     string can blow the process command-line limit, and that failure happens BEFORE
+#     PowerShell starts - exit 2, no message, nothing this script can catch (observed
+#     2026-09-03, wiki-mirror-hardening: the retry then consumed the claim). Inline
+#     text over 2000 chars is auto-spilled to the item's evidence file, but text long
+#     enough to kill the process never reaches us - write the file yourself.
 #   .\queue.ps1 -Fail  -Id mem-readme -By wt-tester-1 -Reason "case 3 fails on a cold cache"
 #   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme [-TestPlan <path>]  # after a -Fail
 #   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
@@ -941,15 +947,40 @@ if ($Pass -or $Fail) {
         # Required on BOTH verdicts. It used to be pass-only, so two testers had to cram
         # paragraphs of findings into -Reason and the recorded evidence came out empty -
         # on the FAIL path, which is exactly when the next person needs it most.
-        Die "-Pass and -Fail both need -Evidence (what you ran and what it produced). A verdict without evidence is an opinion."
+        Die ("-Pass and -Fail both need -Evidence (what you ran and what it produced). A verdict " +
+             "without evidence is an opinion. Long evidence: write it to a FILE and pass the " +
+             "path - it is copied beside the item. An over-long INLINE string dies before " +
+             "PowerShell even starts (exit 2, no message), so the path form is the safe one.")
     }
     # Long evidence does not fit a PS5.1 argument. Accept a FILE and copy it beside the
     # item, the same way the test plan is stored.
+    #
+    # Deciding "is this a path or prose?" with a bare Test-Path THROWS on prose under
+    # this script's ErrorActionPreference=Stop - and the throw's trigger is subtle
+    # (reviewer matrix, 2026-09-03): multi-line prose with NO colon anywhere throws
+    # ArgumentException; the SAME prose containing a colon does not (a colon routes
+    # Test-Path into drive-qualified handling that skips char validation), and
+    # -LiteralPath changes no outcome. So: only a single-line, path-sized string is
+    # ever OFFERED to Test-Path, and even that sits in a try/catch - prose must
+    # never be able to crash a verdict.
     $evidenceText = $Evidence
-    if (Test-Path $Evidence) {
-        $evDest = Join-Path $QueueDir ("{0}.attempt{1}.evidence.md" -f $Id, $item.attempt)
-        Copy-Item -Path $Evidence -Destination $evDest -Force
+    $evDest = Join-Path $QueueDir ("{0}.attempt{1}.evidence.md" -f $Id, $item.attempt)
+    $isFile = $false
+    if ($Evidence.Length -le 4096 -and $Evidence -notmatch "[`r`n]") {
+        try { $isFile = Test-Path -LiteralPath $Evidence -PathType Leaf -ErrorAction Stop }
+        catch { $isFile = $false }
+    }
+    if ($isFile) {
+        Copy-Item -LiteralPath $Evidence -Destination $evDest -Force
         $evidenceText = $evDest
+    } elseif ($Evidence.Length -gt 2000) {
+        # Inline-but-long: spill the FULL text to the evidence file and record the path,
+        # so the record stays readable and nothing is truncated. (2026-09-03: a tester's
+        # long inline evidence died at the process boundary and the retry stored a
+        # placeholder - this branch keeps the survivable version of that mistake lossless.)
+        Set-Content -Path $evDest -Value $Evidence -Encoding UTF8
+        $evidenceText = $evDest
+        Write-Host ("  Inline evidence ({0} chars) spilled to {1}" -f $Evidence.Length, $evDest)
     }
     if ($Fail -and -not $Reason) {
         Die ("-Fail needs -Reason: name the CASE that failed and what it revealed. The " +
