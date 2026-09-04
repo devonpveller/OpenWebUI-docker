@@ -182,6 +182,25 @@ class Tools:
                         result = st.get("result") or {}
                         break
                     if status == "error":
+                        # A run can fail in two different ways and they are not
+                        # the same to the reader (incident 2026-08-31). If the
+                        # research itself died there is nothing to show. But a
+                        # run that produced a report and then failed to FILE it
+                        # into Open Brain now reports status='error' too — and
+                        # throwing its report away would lose minutes of real
+                        # work the user waited for. Show the findings, and say
+                        # plainly that they were not saved.
+                        result = st.get("result") or {}
+                        if result.get("rendered") or result.get("synthesis"):
+                            not_saved = (
+                                "> **Not saved to Open Brain.** This research completed and the "
+                                "findings below are real, but filing them failed, so they are NOT "
+                                "searchable and will not appear in the wiki.\n>\n"
+                                f"> Reason: {st.get('error', 'unknown error')}\n>\n"
+                                f"> The full result is retained on job `{job_id}` and can be replayed.\n\n"
+                            )
+                            await emit("Done (not saved).", done=True)
+                            return not_saved + _render(result)
                         return f"Research failed: {st.get('error', 'unknown error')}"
                     if status == "cancelled":
                         return "Research was cancelled."

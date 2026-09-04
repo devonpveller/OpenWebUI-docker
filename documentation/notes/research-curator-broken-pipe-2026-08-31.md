@@ -300,3 +300,81 @@ Still not live either way: both services are Deno images that must be rebuilt an
 recreated, and the OWUI tool is deploy-by-paste (`owui/manifest.csv` maps file →
 OWUI id). Until then the running curator is the old code, currently healthy only
 because it was restarted this morning.
+
+---
+
+# Re-implementation `curator2` — 2026-09-04
+
+The `curatorpool` OB1 half was destroyed: its worktree and branch were deleted
+while the item sat ready-to-test, and OB1 `22f41b6` had never been pushed, so
+`pool.ts`, `pool.test.ts` and the `index.ts` changes existed nowhere — not
+locally, not on the OB1 remote, not in any reflog. This is the rule in
+CLAUDE.md ("never bump the gitlink to a commit that isn't on the OB1 remote")
+costing a full day's work, and it cost it in the direction nobody plans for:
+not a broken clone, a deleted author. Re-implemented from the anchor, on
+`work/curator2`; the surviving parent-side half (`f71772b`,
+`owui/tools/deep_research.py`) was re-applied unchanged.
+
+## Findings, true but out of this anchor's scope
+
+### 1. openbrain-mcp's ResilientPool misses a whole class of connection error
+
+The pattern was copied from `OB1/integrations/kubernetes-deployment/index.ts`
+as the anchor directs. Its `isConnError` matches spaced-out message text
+(`broken pipe`, `connection reset`, `os error 32`). A test that severs a REAL
+TCP socket and lets the OS produce the failure shows the driver raising
+`ConnectionAborted: An established connection was aborted by the software in
+your host machine. (os error 10053)` — **which that regex does not match**.
+Deno's own error CLASS names are CamelCase and unspaced
+(`ConnectionAborted`, `ConnectionReset`, `BrokenPipe`, `NotConnected`), so the
+name-based backstop never fires for them either. A missed classification means
+no rebuild, i.e. the original defect.
+
+`research-curator/pool.ts` matches those names. **openbrain-mcp was NOT
+changed** — modifying it is explicitly out of scope — so the MCP server still
+carries the narrower list. On Linux the common case is `os error 32`, which it
+does match; the gap is real but not the one that caused this incident.
+
+### 2. Three other consumers will now discard a report they used to accept
+
+The honesty gate makes a run whose curator step failed report `status='error'`
+(with `result` still written in full). The anchor names two readers and both
+are handled: the OWUI tool's blocking path and `notifyChat`. Checked against
+`documentation/OPENBRAIN-CONSUMER-REGISTRY.md`, three OTHER consumers poll
+`/research/jobs/:id` and branch on status:
+
+| Consumer | File | Behaviour on `status='error'` |
+|---|---|---|
+| agent-org Tier-2 advisor + grounding | `agent-org/agent-bridge/app/modules/grounding.py:151,226` | logs, returns "failed", falls back ungrounded |
+| Idea Refinery | `OB1/integrations/openbrain-idea-refinery/index.ts:307,418` | `{ ok: false, error }` — report dropped |
+| Daily digest | `OB1/recipes/daily-digest/src/enrich/research-client.ts:160` | `{ ok: false, error }` — report dropped |
+
+Before this change those three would have consumed an unfiled report without
+knowing. After it, they treat the run as a failure and drop a report that is
+real. That is arguably more honest and definitely a behaviour change; the
+report is still on the job row and replayable either way. Giving all three the
+OWUI tool's "use it, say it is not saved" treatment is a separate change.
+
+### 3. `deno test integrations/research-service/` from the OB1 root is broken
+
+Pre-existing, verified by stashing every change in this branch and re-running.
+Two independent causes:
+- The subdirectory's `deno.json` import map is not in scope from the OB1 root,
+  so `orchestrator.test.ts`'s `import { Pool } from "postgres"` fails to type
+  check. Running `deno test` from inside `integrations/research-service/`
+  resolves it.
+- `orchestrator.test.ts` is an INTEGRATION test: it needs `--allow-env` and a
+  reachable `openbrain-db`, and fails with `No such host is known (os error
+  11001)` on a host outside the compose network. 57 of 58 tests pass without
+  it.
+
+`research-curator`'s suite has no such problem, and this branch keeps it that
+way on purpose: `pool.ts` imports NOTHING, taking its driver through a factory,
+so `deno test integrations/research-curator/` type-checks from the OB1 root.
+
+### 4. The fix is still not live
+
+Unchanged from 2026-08-31: `openbrain-curator` and `openbrain-research` are
+Deno images that must be rebuilt and recreated, and `owui/tools/deep_research.py`
+is deploy-by-paste (`owui/manifest.csv` → OWUI id 15452). Merging this branch
+does not deploy it.
