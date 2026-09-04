@@ -148,3 +148,47 @@ this recipe is Deno, so **nothing in the hook chain type-checks or runs
 daily-digest at all**. All three defects were reachable at commit time; none of
 them could have been caught there. A `deno check` over this recipe is the
 cheapest gate this workspace is currently missing.
+
+## The fourth instance: one factory, two consumer kinds (2026-09-04, review)
+
+`makeScriptChat` serves the episode SCRIPT (prose) and four CLASSIFIERS, and
+they want **opposite** things from a truncated reply:
+
+- **Prose**: partial text beats nothing — `null` degrades to dumping raw
+  grounded material into TTS.
+- **Classifier**: `null` is a *deliberate safe default the caller already
+  reasoned about* (`src/enrich/promo-filter.ts:147`, "conservative: keep on
+  model failure"), while a cut-off reply is **worse than none, because it still
+  parses**.
+
+Every fix in this series was reasoned from the prose consumer and applied to
+all four ChatFns. Measured against the real `isPromoBody`, one truncated
+think-model reply, same input: pre-fix `KEEP` (safe) → post-fix `DROP`, because
+the sentence trim cut back past the `VERDICT: KEEP` line and promo-filter fell
+through to its bare DROP-substring check. That email then contributes **no
+source at all** — directly against this item's own goal.
+
+**The general rule earned here:** when one factory serves consumers with
+different contracts, a change reasoned from one consumer is a change to all of
+them. Name the consumer kind in the type (`salvageTruncated`, default to the
+SAFE reading) rather than assuming the caller you had in mind.
+
+## A hole in the 5b gate, found while landing this (worth its own item)
+
+Pinning the podcast OB1 branch alone would have **silently reverted the wikilink
+fix** — the two are siblings off `5224928` — and **the 5b gate would have gone
+GREEN doing it**. Two reasons, both structural:
+
+1. The catching test landed in the *same commit* as the fix, so reverting both
+   leaves nothing to fail.
+2. The shrink floor counts test **files** (8 either way), not assertions or
+   test cases.
+
+So the floor detects a deleted test *file* and is blind to a reverted fix that
+takes its test with it. A stronger floor would compare the total test COUNT
+(48 here) between the old pin's tree and the staged tree, not just the file
+count. Recorded, not fixed — this item is not the place.
+
+Mitigation used instead: the gitlink was pointed at an OB1 **merge** of both
+branches (`48c0363`), verified byte-identical to each source branch on every
+changed file, with both parent SHAs confirmed as ancestors.
