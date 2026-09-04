@@ -117,3 +117,34 @@ Two lessons, both general:
   retry, it is a guaranteed timeout.
 - **Never discard a worse-but-usable result while reaching for a better one.**
   The fix keeps the best truncated text and returns it rather than nothing.
+
+## Three rounds, three defects the unit suite could not see (2026-09-04)
+
+This item failed test three times. Each failure was real, none was caught by a
+green suite, and the pattern across them is the useful part:
+
+| # | Defect | Why the suite missed it |
+|---|--------|-------------------------|
+| 1 | Script truncated at `max_tokens` exactly | The tests asserted a script was *produced*; nothing asserted it was *finished*. The 401 masked it entirely — you cannot truncate a script you never generate. |
+| 2 | `retryUntil` called but never imported | The tests exercised the helper DIRECTLY. Nothing asserted the caller binds to it. `deno run` does not type-check. |
+| 3 | `budget`/`bestTruncated` at closure scope, leaking across calls | Every test built a fresh ChatFn and called it ONCE. Production reuses one ChatFn per email, up to `MAX_EMAILS` (1000). |
+
+**The common shape: each test proved the unit and not the usage.** A unit test
+constructs the object the way the *test* finds convenient; the defect lives in
+the way *production* constructs and reuses it. Three concrete rules earned here:
+
+- **Assert the property the goal names, not the symptom you last saw.** "No
+  fallback string" passed while shipping a script cut off mid-sentence. The goal
+  said *complete*; the test said *not-obviously-broken*.
+- **Load the artifact.** One `deno check` catches an unbound identifier that any
+  number of green unit tests will happily talk past.
+- **Exercise the object's LIFETIME.** If production reuses a returned closure,
+  a single-call test can never see state that leaks between calls. Defect 3's
+  own code comment claimed "per-call state" while the declarations sat one scope
+  too high — prose asserting an invariant is not the invariant.
+
+Structural note carried forward: the 5b pre-commit gate globs `*.test.mjs` and
+this recipe is Deno, so **nothing in the hook chain type-checks or runs
+daily-digest at all**. All three defects were reachable at commit time; none of
+them could have been caught there. A `deno check` over this recipe is the
+cheapest gate this workspace is currently missing.
