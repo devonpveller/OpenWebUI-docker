@@ -1,3 +1,9 @@
+> **SUPERSEDED - FIXED IN PRODUCTION 2026-09-02.** The defect this note records was
+> re-fixed on the then-current pin and landed: OB1 `09f70f4` (`fix/wiki-pages-extractlinks`,
+> on the remote) via ai-stack merge `443c5d8`; mirror backfilled (notes/ excluded), live
+> container 10/10. Aftermath + lessons: `wiki-pages-mirror-regression-findings.md`.
+> The body below is the original record, unchanged.
+
 # wiki_pages silent write outage, 2026-08-28 -> 2026-08-31
 
 Status: **fix committed in OB1, not pushed, not deployed.** Backfill **not run** —

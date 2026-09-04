@@ -1,3 +1,9 @@
+> **SUPERSEDED - FIXED IN PRODUCTION 2026-09-02.** The defect this note records was
+> re-fixed on the then-current pin and landed: OB1 `09f70f4` (`fix/wiki-pages-extractlinks`,
+> on the remote) via ai-stack merge `443c5d8`; mirror backfilled (notes/ excluded), live
+> container 10/10. Aftermath + lessons: `wiki-pages-mirror-regression-findings.md`.
+> The body below is the original record, unchanged.
+
 # `wiki_pages` has not been written by any compiler since 2026-08-28
 
 **Found**: 2026-08-31, by u8h3, while trying to close a *drill* vacuity (`VACUOUS-WIKIPAGES`).
