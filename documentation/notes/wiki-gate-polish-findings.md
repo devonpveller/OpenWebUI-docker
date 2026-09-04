@@ -69,3 +69,47 @@ one got the credit. Isolate before you name a cause.
 - PSScriptAnalyzer warns `Git-InOB1` uses an unapproved verb. Cosmetic;
   the repo's lint gate is ruff (Python) and does not run analyzer rules.
   Renaming would churn the landed gate for no behavior change.
+
+## 5. `gatesee` (2026-09-04): a worktree's own commits do NOT run its own hook file
+
+`core.hooksPath` is set in the SHARED `.git/config` to the ABSOLUTE path
+`D:/Open WebUI/ai-stack/.githooks` (checked:
+`git config --show-origin --get-all core.hooksPath` ->
+`file:D:/Open WebUI/ai-stack/.git/config`). A linked worktree shares that
+config, so a `git commit` made inside `.claude/worktrees/wt-*` executes the
+MAIN checkout's `.githooks/pre-commit` - while the `./scripts/checks/*.ps1`
+that file invokes resolve against the WORKTREE's cwd. Commits from a worktree
+therefore run a HYBRID: the main checkout's hook script driving the worktree's
+check scripts.
+
+Consequences, both real:
+
+- A developer who edits `.githooks/pre-commit` in a worktree cannot observe
+  their change by committing there. It looks like the edit did nothing. The
+  override that does work is `git -c core.hooksPath=.githooks commit ...`
+  (relative resolves against the worktree root), which is what `gatesee`'s
+  test plan mandates for every hook-real verdict.
+- A check script DELETED or RENAMED on a work branch still gets invoked by the
+  main checkout's hook, which then fails with a PowerShell "file not found"
+  rather than a check verdict.
+
+Not fixed here (out of `gatesee`'s scope, and the fix is a policy call:
+`git config core.hooksPath .githooks` as a RELATIVE value would make every
+worktree run its own hooks, which is either the right isolation or an
+unreviewed-hook hazard depending on who you ask).
+
+## 6. `gatesee`: what the new 5c gate still cannot see
+
+- **`OB1/recipes/daily-digest/src/podcast/script-renderer.test.ts` is excluded
+  from `deno check`.** It is the only file in the recipe with a remote import
+  (`jsr:@std/assert@1`, confirmed by grep over every `.ts` in the recipe), so
+  including it would make the gate depend on a warm deno cache and a network.
+  A type error inside that test file is consequently still uncaught at commit
+  time. Running it (`deno test`) is explicitly out of the item's scope.
+- **`OB1/recipes/vercel-neon-telegram`** also carries `.test.ts` files and is
+  covered by nothing in the hook chain. Out of scope by the anchor; recorded
+  so the hole is on paper rather than in someone's head.
+- **`deno check` on this recipe writes no lockfile** (probed: `deno check
+  link-enrich.ts` with the lock removed created no `deno.lock`, because the
+  recipe has no `deno.json`). The gate still passes `--no-lock` so that a
+  future `deno.json` cannot start dirtying the OB1 submodule and tripping 5b.

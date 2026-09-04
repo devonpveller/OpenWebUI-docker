@@ -24,6 +24,11 @@
        failure, a missing node, or an empty test set fails the commit -
        a gate that cannot run is a gate that is off, and silence is how
        the original bug survived.
+    3b. Shrink floor: refuse a bump whose tree has fewer test FILES *or*
+       fewer test CASES than the pin it replaces. Cases matter because a
+       revert removes a fix together with its own catching test, leaving
+       the file count untouched. Override: AI_STACK_OB1_TESTS_ALLOW_SHRINK=1,
+       printed loudly. See the block comment on 3b for the measured instance.
 
   The tests are Node-builtins-only by OB1 convention (no npm install), so
   host node is sufficient. Exit code 0 = clean or not applicable, 1 = refuse.
@@ -142,11 +147,29 @@ if ($testFiles.Count -eq 0) {
     Fail "found ZERO *.test.mjs under OB1/recipes - an empty test set passing is vacuous, refusing."
 }
 
-# --- 3b. Test-count floor: a bump may not silently SHRINK the test set ------
+# --- 3b. Test floor: a bump may not silently SHRINK the test set -----------
 # "Zero tests" is not the only vacuity: deleting 46 of 47 files also passes a
-# bare test run (tester finding, 2026-09-03). Compare *.test.mjs counts between
-# the tree being REPLACED (HEAD:OB1) and the tree being PINNED (the staged SHA),
-# both read with ls-tree from git objects - disk state cannot dodge this.
+# bare test run (tester finding, 2026-09-03). Compare the tree being REPLACED
+# (HEAD:OB1) with the tree being PINNED (the staged SHA), both read out of git
+# objects with ls-tree/show - disk state cannot dodge this.
+#
+# COUNT CASES, NOT ONLY FILES (2026-09-04). The floor originally compared only
+# the NUMBER of *.test.mjs files, which is blind to the exact move it was
+# written to stop: a gitlink bump that REVERTS a fix takes the fix's catching
+# test with it, INSIDE A FILE THAT STILL EXISTS - so the file count does not
+# move and the gate goes green. Measured on this repo's own pins:
+# recipes/_shared/citations.test.mjs carries 11 cases at 48c0363 (with the
+# linkSafeLabel '#' wikilink fix) and 10 at f3ded84 (without), while the file
+# count is 8 either way; totals 48 -> 47. Both counts are now compared, a
+# shrink in EITHER refuses, and the refusal names both.
+#
+# The case count is LEXICAL: lines starting (after optional whitespace and an
+# optional `await`) with test( / it( / t.test(. That approximates what
+# `node --test` reports - a case generated in a loop counts once, a
+# commented-out case still counts - so it is deliberately never presented as a
+# coverage number. It is applied IDENTICALLY to both trees, so what the floor
+# actually reads is the DELTA, and a revert is exactly what moves the delta.
+#
 # Deliberate removals: AI_STACK_OB1_TESTS_ALLOW_SHRINK=1 for that one commit.
 # An env var leaves no git trace (the --no-verify lesson), so the override is
 # PRINTED loudly here and the shrink itself is visible in the OB1 diff forever.
@@ -154,35 +177,50 @@ $oldPin = (& git -C $Root rev-parse -q --verify 'HEAD:OB1' 2>$null)
 if ($oldPin -and $oldPin -match '^[0-9a-f]{40}$') {
     $countTests = {
         param($sha)
+        # A failed ls-tree/show yields an EMPTY array, and 0 would read as "no
+        # tests" - making the floor silently vacuous exactly when it cannot see.
+        # Return the -1 sentinel in BOTH fields so the caller can tell "could not
+        # look" from "looked, found none": a failed lookup must never read as a pass.
+        $blind = [pscustomobject]@{ Files = -1; Cases = -1 }
         $names = @(Git-InOB1 @('ls-tree', '-r', '--name-only', $sha, 'recipes'))
-        # A failed ls-tree yields an EMPTY array, and 0 would read as "no tests" -
-        # making the floor silently vacuous exactly when it cannot see. Return -1
-        # so the caller can tell "could not look" from "looked, found none".
-        if ($LASTEXITCODE -ne 0) { return -1 }
-        @($names | Where-Object { $_ -match '\.test\.mjs$' }).Count
+        if ($LASTEXITCODE -ne 0) { return $blind }
+        $files = @($names | Where-Object { $_ -match '\.test\.mjs$' })
+        $cases = 0
+        foreach ($f in $files) {
+            $lines = @(Git-InOB1 @('show', "$($sha):$f"))
+            if ($LASTEXITCODE -ne 0) { return $blind }
+            $cases += @($lines | Where-Object { $_ -match '^\s*(await\s+)?(t\.)?(test|it)\s*\(' }).Count
+        }
+        [pscustomobject]@{ Files = $files.Count; Cases = $cases }
     }
-    $oldCount = & $countTests $oldPin
-    $newCount = & $countTests $stagedSha
-    if ($oldCount -lt 0 -or $newCount -lt 0) {
+    $old = & $countTests $oldPin
+    $new = & $countTests $stagedSha
+    $oldShort = $oldPin.Substring(0, 7)
+    $newShort = $stagedSha.Substring(0, 7)
+    if ($old.Files -lt 0 -or $new.Files -lt 0) {
         # Best-effort floor: an unreadable tree must not refuse legitimate bumps,
         # but it must never look like a passed comparison either.
         Write-Host ("[check-ob1-recipe-tests] WARNING: could not count tests in " +
-            "$($oldPin.Substring(0,7)) or $($stagedSha.Substring(0,7)) - the shrink floor " +
+            "$oldShort or $newShort - the shrink floor " +
             "DID NOT RUN this commit.") -ForegroundColor Yellow
-    } elseif ($newCount -lt $oldCount) {
+    } elseif ($new.Files -lt $old.Files -or $new.Cases -lt $old.Cases) {
+        $delta = ("test FILES $($old.Files) -> $($new.Files), test CASES " +
+                  "$($old.Cases) -> $($new.Cases) ($oldShort -> $newShort)")
         if ($env:AI_STACK_OB1_TESTS_ALLOW_SHRINK -eq '1') {
-            Write-Host ("[check-ob1-recipe-tests] OVERRIDE: test files SHRANK " +
-                "$oldCount -> $newCount ($($oldPin.Substring(0,7)) -> $($stagedSha.Substring(0,7))) " +
+            Write-Host ("[check-ob1-recipe-tests] OVERRIDE: the OB1 test set SHRANK - $delta - " +
                 "and AI_STACK_OB1_TESTS_ALLOW_SHRINK=1 waved it through. If you did not set " +
                 "this deliberately for THIS commit, stop and look.") -ForegroundColor Yellow
         } else {
-            Fail ("the staged OB1 tree has FEWER test files than the pin it replaces: " +
-                  "$oldCount in $($oldPin.Substring(0,7)) -> $newCount in " +
-                  "$($stagedSha.Substring(0,7)). A test that quietly stops existing is the " +
-                  "08-28 failure with an extra step. If the removal is deliberate, re-run " +
-                  "with AI_STACK_OB1_TESTS_ALLOW_SHRINK=1 (printed loudly, so it cannot " +
-                  "hide).")
+            Fail ("the staged OB1 tree has FEWER tests than the pin it replaces: $delta. A " +
+                  "shrink in CASES with the FILE count unchanged is the shape of a REVERT - " +
+                  "the fix and its own catching test leave together, inside a file that still " +
+                  "exists. A test that quietly stops existing is the 08-28 failure with an " +
+                  "extra step. If the removal is deliberate, re-run with " +
+                  "AI_STACK_OB1_TESTS_ALLOW_SHRINK=1 (printed loudly, so it cannot hide).")
         }
+    } else {
+        Write-Host ("[check-ob1-recipe-tests] shrink floor OK - test FILES $($old.Files) -> " +
+            "$($new.Files), test CASES $($old.Cases) -> $($new.Cases) ($oldShort -> $newShort).")
     }
 } else {
     Write-Host "[check-ob1-recipe-tests] NOTE: no previous OB1 pin in HEAD - shrink floor skipped (first bump)."
