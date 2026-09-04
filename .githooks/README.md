@@ -25,11 +25,12 @@ git config --get core.hooksPath   # -> .githooks
 | 3b | Corpus exposure plane | `scripts/checks/check-corpus-exposure-producers.ps1` | a recognized direct corpus INSERT that does not state its exposure plane (best-effort text scan; the DB's NOT NULL + CHECK is the real enforcement — read the check's own output for what it cannot see) |
 | 4 | Project configs | `scripts/checks/check-project-configs.ps1` | a staged compose file that does not render, or a staged .ps1 that does not tokenize |
 | 5 | env_file scope | `scripts/checks/check-env-file-scope.ps1` | a commit ADDING a service that grants itself a shared .env (pre-existing grants are reported, not blocked) |
-| 5b | OB1 recipe tests | `scripts/checks/check-ob1-recipe-tests.ps1` | a staged OB1 gitlink bump whose tree fails any `*.test.mjs` under `OB1/recipes` — or whose tree the gate cannot honestly prove (staged≠disk SHA, dirty tracked OB1 files, missing node, zero tests, or fewer tests than the pin it replaces) |
+| 5b | OB1 recipe tests | `scripts/checks/check-ob1-recipe-tests.ps1` | a staged OB1 gitlink bump whose tree fails any `*.test.mjs` under `OB1/recipes` — or whose tree the gate cannot honestly prove (staged≠disk SHA, dirty tracked OB1 files, missing node, zero tests, or fewer test **files or cases** than the pin it replaces; the case count is what catches a revert that removes a fix together with its own catching test) |
+| 5c | OB1 Deno recipe type-check | `scripts/checks/check-ob1-deno-recipes.ps1` | a staged OB1 gitlink bump whose `OB1/recipes/daily-digest` does not `deno check` — the Deno recipe 5b's `*.test.mjs` glob cannot see. Type check only, not the test suite; skips instantly with no gitlink staged; **refuses** rather than skipping when `deno` is missing |
 | 6 | Attestation | (inline in the hook) | nothing — records the checked tree in `<git-common-dir>/hook-attest.log` so `--no-verify` leaves an absence that `check-hook-attestation.ps1` can read back |
 
 A clean `git merge` never runs `pre-commit`, so `pre-merge-commit` delegates to it —
-the merge commit's tree passes the same seven checks (and a gitlink merge therefore
+the merge commit's tree passes the same eight checks (and a gitlink merge therefore
 needs the OB1 working tree moved to the incoming pin *before* merging).
 
 Only **staged** content is scanned, so the secret guard stays fast — it never walks

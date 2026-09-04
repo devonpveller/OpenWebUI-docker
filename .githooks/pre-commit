@@ -12,6 +12,7 @@
 #   4. project configs   - compose renders + ps1 tokenize
 #   5. env_file scope    - a service names the variables it needs
 #   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
+#   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
 
 echo "Running pre-commit validations..."
 
@@ -95,6 +96,25 @@ fi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-recipe-tests.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (OB1 recipe tests failed for the staged gitlink)!"
+    exit 1
+fi
+
+# --- 5c. OB1 Deno recipe type-check on gitlink bumps -----------------------
+# 5b above globs *.test.mjs. OB1/recipes/daily-digest is Deno TypeScript - .ts
+# sources, a .test.ts test file - so until 2026-09-04 NOTHING in this chain
+# compiled, type-checked or ran one line of it, while a gitlink bump deployed
+# it to the live bind mounts all the same. Five defects shipped through that
+# hole in the podcast-delivery week (08-29..09-03); one was `retryUntil` called
+# without being imported, which would have aborted every production run, and
+# `deno check` names it in about two seconds.
+#
+# TYPE CHECK ONLY - the recipe's deno test suite is slow and needs --allow-net,
+# so a green here means "it compiles", not "it works". Skips instantly when no
+# OB1 gitlink is staged; REFUSES (does not warn-and-pass) when deno is missing.
+# The reasoning for both is in the script's header.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-deno-recipes.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (OB1 Deno recipe does not type-check for the staged gitlink)!"
     exit 1
 fi
 
