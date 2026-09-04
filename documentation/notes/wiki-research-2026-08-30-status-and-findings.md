@@ -440,6 +440,24 @@ Measured against the live vault (`docker exec openbrain-wiki-viewer`, `/wiki`,
       | sed "s/.*|//;s/\]\]$//" | grep -c "#"
 
 - **1,111** `Grounded by` links carry a `#` in the alias, across **987 files**.
+
+  The command above yields the 1,111. The other two figures have their own, and
+  a sink that states one command for three numbers makes the next reader derive
+  the rest (test did, and they reproduced exactly — but that is the reader doing
+  the note's job). Both run in `openbrain-wiki-viewer` at `/wiki`:
+
+      # 987 - FILES holding at least one such link (note the '#' inside the alias group)
+      grep -rlE "Grounded by \[\[content/source/[^]|]*\|[^]]*#[^]]*\]\]" --include="*.md" . | wc -l
+
+      # 354 - of the 1,111 aliases, those that are 'Daily #NNN'
+      grep -rhoE "Grounded by \[\[content/source/[^]|]*\|[^]]*\]\]" --include="*.md" . | sed "s/.*|//;s/\]\]$//" | grep "#" | grep -c "^Daily #"
+
+  (Written as ONE line deliberately: a line-continuation backslash was eaten in
+  transit three separate times while writing these notes. If a command in this
+  file must wrap, verify the wrapped form still runs before trusting it.)
+
+  All three re-verified 2026-09-04: 1111 / 987 / 354, zero drift.
+
 - Of those, only **354** are `Daily #NNN`. The other **757** are ordinary source
   titles: GitHub issue and discussion numbers (`Issue #4194`,
   `Discussion #1504`), `C# game engine` and `Platform-specific C# code`,
