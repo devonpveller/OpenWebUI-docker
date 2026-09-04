@@ -339,13 +339,24 @@ After this change **no inline copy of the sanitiser remains under `recipes/`**
 (`grep -rn 'replace(/\[' recipes/ --include='*.mjs'`): citations.mjs:46 is the
 single source of truth.
 
-`synthesize-notebooks.mjs` already routed through `linkSafeLabel` (5 sites, not
-the 4 recorded above), so it was fixed for free by the shared change.
+`synthesize-notebooks.mjs` already routed through `linkSafeLabel`, so it was
+fixed for free by the shared change.
+
+> **Corrected 2026-09-04 (test).** An earlier revision of this paragraph said
+> "5 sites, not the 4 recorded above". The original 4 was RIGHT: the call sites
+> are lines 337, 396, 412 and 431; line 408 is a COMMENT mentioning the name,
+> and a bare `grep -n linkSafeLabel` counts it. That wrong figure also reached
+> OB1 commit `590d804`'s message, which cannot be edited now that it is pushed —
+> this note is the correction of record. Counting call sites by grepping an
+> identifier counts its comments and its import too; check what each hit IS.
 
 ## Correction to section (2): the regex quoted above is itself mis-transcribed
 
 Section (2) warns that "an earlier run of this measurement lost a backslash in
-transit" — and then loses two more. The regex printed there is:
+transit" — and then loses more itself. (This correction first said "two more";
+test counted **three** — the alias group's `\\?` lost one as well. The lesson
+survives the miscount, and the miscount is the lesson: this is the third time
+in one file that a regex changed shape in transit.) The regex printed there is:
 
     ([^\[\]\|\#\]+)?   <- as printed above (WRONG)
 
@@ -376,9 +387,24 @@ DB-rendered page can render `Daily #NNN` correctly **even against completely
 unfixed code**. A tester who does not pin the render path can pass this
 acceptance on a build that contains none of this change.
 
-Any served-page evidence must therefore state which renderer produced it — the
-response carries an `x-wiki-render: db|fresh|static` header. Only a `fresh`
-(Quartz) render exercises the regex this fix is about.
+Any served-page evidence must therefore state which renderer produced it.
+
+> **CORRECTED 2026-09-04 (test) — the original advice here was INVERTED and
+> would have manufactured a false green.** It said the header is
+> `db|fresh|static` and that a `fresh` render is the Quartz one. Both halves are
+> wrong, verified in `OB1/docker/wiki-viewer/serve.mjs`: the **db** path
+> (lines 372/376) and the **fresh** path (413/418) BOTH call the same
+> `renderMarkdown` imported at line 17 from `render-page.mjs` — the permissive
+> regex above. The source comment on the fresh path even says it renders "with
+> the SAME renderer as the DB path". So `fresh` proves nothing either. The only
+> values the server ever emits are `db`, `fresh` and `not-available`; there is
+> no `static`.
+>
+> **The ONLY Quartz-rendered path is the STATIC BUILD, and it emits NO
+> `x-wiki-render` header at all.** So the correct instruction is the opposite of
+> what was written: the served-page criterion is satisfied only by a response
+> that carries **no** `x-wiki-render` header (after a real Quartz compile), and a
+> response carrying `db` OR `fresh` must be DISCARDED as evidence.
 
 This is a genuine divergence between the two renderers and is **out of scope
 here** (the anchor is the emitters, not the viewer): the DB path is more
