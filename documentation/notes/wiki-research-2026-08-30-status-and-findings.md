@@ -308,3 +308,115 @@ Staged plan, cheapest first:
 5. **An admission floor at fetch time** so this stops accumulating: a content
    length/quality bar, plus a rejection reason recorded rather than a source
    stored. This is the one that prevents the next 658.
+
+
+# Fix landed 2026-09-04 — anchor `wikilink` (dev-wikilink-sub2)
+
+OB1 `fix/wikilink-hash-alias` **590d804** (pushed, `ls-remote` verified);
+parent gitlink bump **67d1ebf** on `work/wikilink2`. RED proven before GREEN;
+full OB1 recipe suite 8 files / 48 tests / 48 pass.
+
+## Correction to section (2): `generate-wiki.mjs` did NOT call "no sanitiser at all"
+
+Section (2) above, and the anchor drafted from it, both say the `Grounded by`
+emitter "builds ... from the **raw title**, no sanitiser at all". **That is not
+what the code did.** `buildEvolutionSection` (generate-wiki.mjs:879-887 at pin
+5224928) applied an **inline copy of `linkSafeLabel`'s body**:
+
+    .replace(/[\[\]|]/g, " ")
+
+Same character class, same missing `#`, wrapped in `clip(..., 120)`.
+
+The distinction matters and is not pedantry: if the emitter had truly called
+nothing, fixing the shared function would have left it broken in a *different*
+way (brackets and pipes too, not just `#`). Because it was a **copy**, fixing
+`linkSafeLabel` alone would have left this emitter — the one responsible for
+most of the damage — completely unchanged. Either mis-reading leads to a fix
+that does not land. The change therefore does both: extends the class **and**
+replaces the copy with a call.
+
+After this change **no inline copy of the sanitiser remains under `recipes/`**
+(`grep -rn 'replace(/\[' recipes/ --include='*.mjs'`): citations.mjs:46 is the
+single source of truth.
+
+`synthesize-notebooks.mjs` already routed through `linkSafeLabel`, so it was
+fixed for free by the shared change.
+
+> **Corrected 2026-09-04 (test).** An earlier revision of this paragraph said
+> "5 sites, not the 4 recorded above". The original 4 was RIGHT: the call sites
+> are lines 337, 396, 412 and 431; line 408 is a COMMENT mentioning the name,
+> and a bare `grep -n linkSafeLabel` counts it. That wrong figure also reached
+> OB1 commit `590d804`'s message, which cannot be edited now that it is pushed —
+> this note is the correction of record. Counting call sites by grepping an
+> identifier counts its comments and its import too; check what each hit IS.
+
+## Correction to section (2): the regex quoted above is itself mis-transcribed
+
+Section (2) warns that "an earlier run of this measurement lost a backslash in
+transit" — and then loses more itself. (This correction first said "two more";
+test counted **three** — the alias group's `\\?` lost one as well. The lesson
+survives the miscount, and the miscount is the lesson: this is the third time
+in one file that a regex changed shape in transit.) The regex printed there is:
+
+    ([^\[\]\|\#\]+)?   <- as printed above (WRONG)
+
+Read out of the built image just now
+(`docker run --rm --entrypoint sh openbrain-wiki-viewer:local -c "sed -n '120p'
+/quartz/quartz/plugins/transformers/ofm.ts"`), quartz v4.5.1:
+
+    /!?\[\[([^\[\]\|\#\\]+)?(#+[^\[\]\|\#\\]+)?(\\?\|[^\[\]\#]*)?\]\]/g
+
+The target classes end `\#\\]` (escaped-hash **then escaped
+backslash**), not `\#\]`. The *conclusion* drawn in section (2)
+is unaffected — the alias group is `(\\?\|[^\[\]\#]*)?` and does exclude `#` —
+but nobody should re-derive anything from the string as printed there. The
+committed code comment cites the verified form.
+
+## RISK for anyone testing the served-page criterion: TWO renderers, only ONE is Quartz
+
+The anchor's third acceptance item asks for the fix proven on a page fetched
+from the viewer under `/content/`. **Fetching a page and finding no `[[` does
+not by itself prove anything**, because the viewer has a second, independent
+render path with its **own** wikilink regex —
+`OB1/docker/wiki-viewer/lib/render-page.mjs:37` (`rewriteWikilinks`):
+
+    /\[\[([^\]|#]+)(#[^\]|]*)?(?:\|([^\]]*))?\]\]/g
+
+Its alias group is `[^\]]*` — which **permits `#`**. So a
+DB-rendered page can render `Daily #NNN` correctly **even against completely
+unfixed code**. A tester who does not pin the render path can pass this
+acceptance on a build that contains none of this change.
+
+Any served-page evidence must therefore state which renderer produced it.
+
+> **CORRECTED 2026-09-04 (test) — the original advice here was INVERTED and
+> would have manufactured a false green.** It said the header is
+> `db|fresh|static` and that a `fresh` render is the Quartz one. Both halves are
+> wrong, verified in `OB1/docker/wiki-viewer/serve.mjs`: the **db** path
+> (lines 372/376) and the **fresh** path (413/418) BOTH call the same
+> `renderMarkdown` imported at line 17 from `render-page.mjs` — the permissive
+> regex above. The source comment on the fresh path even says it renders "with
+> the SAME renderer as the DB path". So `fresh` proves nothing either. The only
+> values the server ever emits are `db`, `fresh` and `not-available`; there is
+> no `static`.
+>
+> **The ONLY Quartz-rendered path is the STATIC BUILD, and it emits NO
+> `x-wiki-render` header at all.** So the correct instruction is the opposite of
+> what was written: the served-page criterion is satisfied only by a response
+> that carries **no** `x-wiki-render` header (after a real Quartz compile), and a
+> response carrying `db` OR `fresh` must be DISCARDED as evidence.
+
+This is a genuine divergence between the two renderers and is **out of scope
+here** (the anchor is the emitters, not the viewer): the DB path is more
+permissive than Quartz, so the two can disagree about whether a given page is
+broken. Worth its own look — a shared contract, or at least a test asserting
+the two accept the same alias set.
+
+## Scope notes
+
+- The 149 `[`/`]`-in-alias breaks (`Collider[]`): explicitly out of scope, and
+  **partly healed anyway** as a side effect — the `Grounded by` emitter now
+  strips brackets via the shared function rather than its copy. Not claimed as
+  fixed; other emitters were not swept.
+- The 7,113 stray-leading-bracket occurrences: untouched, as scoped.
+- No backfill. Existing pages heal only on regeneration, as the anchor states.
