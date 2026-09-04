@@ -420,3 +420,94 @@ the two accept the same alias set.
   fixed; other emitters were not swept.
 - The 7,113 stray-leading-bracket occurrences: untouched, as scoped.
 - No backfill. Existing pages heal only on regeneration, as the anchor states.
+
+## Post-merge addenda — review of `wikilink` (reviewer-wikilink-sub1, 2026-09-04)
+
+Two findings from the review of merge `80f4bec`. Neither changes the verdict on
+the fix (it landed FITS); both are true, both were out of scope for that anchor,
+and one of them was reported at test time but never actually reached this file.
+
+### 1. Stripping `#` is LOSSY, and `#` is not rare in legitimate titles
+
+`linkSafeLabel` now replaces `#` with a space. That is correct — but it is worth
+recording what it costs, because the anchor was written around the `Daily #NNN`
+digest class and that turns out to be the MINORITY of what is affected.
+
+Measured against the live vault (`docker exec openbrain-wiki-viewer`, `/wiki`,
+2026-09-04), counting only the `Grounded by` emitter this change touches:
+
+    grep -rhoE "Grounded by \[\[content/source/[^]|]*\|[^]]*\]\]" --include="*.md" . \
+      | sed "s/.*|//;s/\]\]$//" | grep -c "#"
+
+- **1,111** `Grounded by` links carry a `#` in the alias, across **987 files**.
+
+  The command above yields the 1,111. The other two figures have their own, and
+  a sink that states one command for three numbers makes the next reader derive
+  the rest (test did, and they reproduced exactly — but that is the reader doing
+  the note's job). Both run in `openbrain-wiki-viewer` at `/wiki`:
+
+      # 987 - FILES holding at least one such link (note the '#' inside the alias group)
+      grep -rlE "Grounded by \[\[content/source/[^]|]*\|[^]]*#[^]]*\]\]" --include="*.md" . | wc -l
+
+      # 354 - of the 1,111 aliases, those that are 'Daily #NNN'
+      grep -rhoE "Grounded by \[\[content/source/[^]|]*\|[^]]*\]\]" --include="*.md" . | sed "s/.*|//;s/\]\]$//" | grep "#" | grep -c "^Daily #"
+
+  Line-wrapping, explicitly, because it has bitten this file: the two commands
+  immediately above are **single lines** on purpose — a line-continuation
+  backslash was eaten in transit three separate times while these notes were
+  written. The FIRST command in this section (the 1,111 one, further up) is the
+  exception: it *is* wrapped across two lines with a continuation backslash, and
+  it was run in that wrapped form and verified to work. So: one wrapped command,
+  verified wrapped; two one-liners. If you add another, verify the form you
+  actually printed.
+
+  All three re-verified 2026-09-04 by running them AS PRINTED: 1111 / 987 / 354,
+  zero drift.
+
+- Of those, only **354** are `Daily #NNN`. The other **757** are ordinary source
+  titles: GitHub issue and discussion numbers (`Issue #4194`,
+  `Discussion #1504`), `C# game engine` and `Platform-specific C# code`,
+  `2025 MIPS Measure #238`, `The World's #1 Employee Management App`, even a CSS
+  hex colour that leaked into a title (`background:#F00`).
+
+On regeneration every one of those labels loses a character. Most degrade
+harmlessly (`Issue #4194` -> `Issue 4194`). The worst case is real, though:
+**`C#` -> `C`**, which names a different language.
+
+**This is still a strict improvement and the change was right to land.** Today
+those 1,111 links do not render at all — they survive as literal `[[...]]`
+markup, which is worse than a label missing one character. And there is no
+better option *within this fix shape*: Quartz's wikilink alias character class
+excludes `#` outright, and its backslash escape covers the pipe only
+(`quartz/plugins/transformers/ofm.ts:120`, quartz v4.5.1), so a `#` cannot be
+escaped into an alias — it can only be removed.
+
+What a future decision could change, if label fidelity is judged to matter:
+
+- substitute a lookalike outside the excluded class (`C♯`) instead of deleting;
+- or emit an inline markdown link `[C#](content/source/<uuid>)` for labels that
+  would otherwise be degraded, since markdown link text has no such restriction.
+
+Both are emitter-shape changes with their own blast radius. Recorded here as an
+operator decision, not opened as work.
+
+### 2. Two alias emitters still call no sanitiser — and this was NOT filed before
+
+The `wikilink` attempt-1 tester found these and wrote that they were "recorded
+here and in the findings sink." They reached the queue evidence file only; this
+file named neither. Filing them now so they stop being rediscovered:
+
+- `OB1/recipes/entity-wiki/generate-wiki.mjs:829` — the entity **auto-linker**
+  (`[[${slug}|${name}]]`), which interpolates a raw entity name.
+- `OB1/recipes/entity-wiki/generate-wiki.mjs:1090` — the entity **index**
+  (`[[${n.slug}|${n.label}]]`), which interpolates a raw entity label.
+
+Either breaks exactly the way the `Grounded by` emitter did if an entity name
+ever contains a `#` or a bracket — and `C#` is precisely the kind of entity a
+knowledge wiki mints. This is the residue of the anchor's out-of-scope clause
+("finding every such emitter is a wider sweep"), so it is a candidate anchor of
+its own, not a defect in what merged.
+
+The lesson worth keeping separately: **a finding is filed when it is in the
+sink, not when it is in the evidence file.** Queue evidence is per-attempt and
+nobody reads it again; this file is the thing that survives.
