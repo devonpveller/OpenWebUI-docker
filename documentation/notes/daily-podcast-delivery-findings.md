@@ -81,3 +81,39 @@ Link 5 was fixed by the Open Notebook image rebuild; links 1–2 by this item.
 Evidence: LiteLLM `LiteLLM_SpendLogs` holds three `status=failure` rows with
 `prompt_tokens=0` at 05:29:38 on 2026-08-29, three seconds before ON's first
 transcript call.
+
+## The unit suite proved a policy nothing called (2026-09-04, attempt 2)
+
+`retryUntil` was extracted, exported and covered by four passing tests — and
+`link-enrich.ts` called it without importing it. `deno run` does not
+type-check, so this was a runtime `ReferenceError`, not a build failure, and
+`generateAudio` sits after the report write inside a `try/finally` with **no
+catch**: every real run would have written the report and then aborted before
+the email, `closeLoop` and `writeEnrichment`. Strictly worse than the bug the
+item set out to fix.
+
+The green tests are what hid it. They exercised the helper directly; nothing
+asserted that the *caller* binds to it. **A unit suite proves a unit; only
+loading the artifact proves the artifact.** One `deno check link-enrich.ts`
+catches this in under a second, and no step in the test plan asked for it —
+that gap is now T0 in the plan.
+
+Structural note: the 5b pre-commit gate globs `*.test.mjs` and this recipe is
+Deno, so nothing in the hook chain type-checks or runs these files. The gate's
+green says nothing about daily-digest. Worth a follow-up item — a `deno check`
+over the recipe would have caught this at commit time.
+
+## Escalation that is worse than not escalating (2026-09-04, attempt 2)
+
+The truncation fix doubled `max_tokens` but left `timeoutMs` fixed at 200s.
+Measured throughput from `LiteLLM_SpendLogs` is 28.9–60.4 tok/s, so a 12k-token
+request overran in every sample — and a timeout is a *throw*, which returned
+`null` **after** usable truncated text had already been discarded. A control
+run made it explicit: with escalation, `null`; without escalation, usable text.
+
+Two lessons, both general:
+- **A retry that changes the request must re-check every budget the request is
+  measured against.** Doubling the work while holding the clock fixed is not a
+  retry, it is a guaranteed timeout.
+- **Never discard a worse-but-usable result while reaching for a better one.**
+  The fix keeps the best truncated text and returns it rather than nothing.
