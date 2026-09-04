@@ -453,8 +453,8 @@ Measured against the live vault (`docker exec openbrain-wiki-viewer`, `/wiki`,
       grep -rhoE "Grounded by \[\[content/source/[^]|]*\|[^]]*\]\]" --include="*.md" . | sed "s/.*|//;s/\]\]$//" | grep "#" | grep -c "^Daily #"
 
   Line-wrapping, explicitly, because it has bitten this file: the two commands
-  immediately above are **single lines** on purpose — a line-continuation
-  backslash was eaten in transit three separate times while these notes were
+  immediately above are **single lines** on purpose — a backslash
+  was eaten in transit three separate times while these notes were
   written. The FIRST command in this section (the 1,111 one, further up) is the
   exception: it *is* wrapped across two lines with a continuation backslash, and
   it was run in that wrapped form and verified to work. So: one wrapped command,
@@ -463,6 +463,25 @@ Measured against the live vault (`docker exec openbrain-wiki-viewer`, `/wiki`,
 
   All three re-verified 2026-09-04 by running them AS PRINTED: 1111 / 987 / 354,
   zero drift.
+
+  > **Incidental finding — wikinote-corrections, 2026-09-04, out of that item's
+  > scope and recorded here per its findings sink.** Those three figures DECAY.
+  > Re-run AS PRINTED at ~20:35 the same day they returned **1087 / 966 / 330**.
+  > Nothing is wrong with the commands and nothing was wrong with the figures
+  > when taken: the merged fix heals a page only when that page is regenerated,
+  > and the vault regenerates continuously. Watched live, the healed-vs-unhealed
+  > split of the `Daily` class moved from 28/329 to 31/328 while this paragraph
+  > was being written. So read every count in this section as a snapshot with a
+  > timestamp — 1,111 / 987 / 354 is `2026-09-04 14:33` — and re-measure rather
+  > than reconcile. The two probes below deliberately carry NO recorded figure,
+  > because any figure written beside them is wrong within the hour; run them in
+  > `openbrain-wiki-viewer` at `/wiki` for the current split:
+
+      # aliases already healed to 'Daily NNN' - grows over time
+      grep -rhoE "Grounded by \[\[content/source/[^]|]*\|Daily [0-9]+[^]]*\]\]" --include="*.md" . | wc -l
+
+      # aliases still 'Daily #NNN' - shrinks over time
+      grep -rhoE "Grounded by \[\[content/source/[^]|]*\|Daily #[0-9]+[^]]*\]\]" --include="*.md" . | wc -l
 
 - Of those, only **354** are `Daily #NNN`. The other **757** are ordinary source
   titles: GitHub issue and discussion numbers (`Issue #4194`,
