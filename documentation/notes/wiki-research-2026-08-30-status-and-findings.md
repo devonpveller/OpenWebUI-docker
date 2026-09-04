@@ -452,11 +452,17 @@ Measured against the live vault (`docker exec openbrain-wiki-viewer`, `/wiki`,
       # 354 - of the 1,111 aliases, those that are 'Daily #NNN'
       grep -rhoE "Grounded by \[\[content/source/[^]|]*\|[^]]*\]\]" --include="*.md" . | sed "s/.*|//;s/\]\]$//" | grep "#" | grep -c "^Daily #"
 
-  (Written as ONE line deliberately: a line-continuation backslash was eaten in
-  transit three separate times while writing these notes. If a command in this
-  file must wrap, verify the wrapped form still runs before trusting it.)
+  Line-wrapping, explicitly, because it has bitten this file: the two commands
+  immediately above are **single lines** on purpose — a line-continuation
+  backslash was eaten in transit three separate times while these notes were
+  written. The FIRST command in this section (the 1,111 one, further up) is the
+  exception: it *is* wrapped across two lines with a continuation backslash, and
+  it was run in that wrapped form and verified to work. So: one wrapped command,
+  verified wrapped; two one-liners. If you add another, verify the form you
+  actually printed.
 
-  All three re-verified 2026-09-04: 1111 / 987 / 354, zero drift.
+  All three re-verified 2026-09-04 by running them AS PRINTED: 1111 / 987 / 354,
+  zero drift.
 
 - Of those, only **354** are `Daily #NNN`. The other **757** are ordinary source
   titles: GitHub issue and discussion numbers (`Issue #4194`,
