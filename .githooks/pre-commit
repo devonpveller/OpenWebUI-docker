@@ -11,6 +11,7 @@
 #   3b. corpus exposure  - a direct corpus INSERT must state its plane
 #   4. project configs   - compose renders + ps1 tokenize
 #   5. env_file scope    - a service names the variables it needs
+#   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
 
 echo "Running pre-commit validations..."
 
@@ -83,6 +84,17 @@ fi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-env-file-scope.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (a service granted itself a shared .env)!"
+    exit 1
+fi
+
+# --- 5b. OB1 recipe tests on gitlink bumps ---------------------------------
+# A gitlink bump IS the deploy of OB1 code to this stack (the live containers
+# bind-mount OB1/recipes from this checkout), and the 08-28 wiki-pages bug
+# shipped exactly there with its own catching test unrun (fixed 09f70f4 /
+# 443c5d8). Skips itself instantly when no OB1 gitlink is staged.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-recipe-tests.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (OB1 recipe tests failed for the staged gitlink)!"
     exit 1
 fi
 
