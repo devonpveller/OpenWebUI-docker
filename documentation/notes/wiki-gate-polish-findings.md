@@ -37,7 +37,29 @@ fresh environment, so the override cannot leak between calls. Useful
 pattern for any future queue.ps1 change; the anchor gate's shortness check
 (a one-word acceptance criterion is refused) was also observed working.
 
-## 4. Out-of-scope observations
+## 3b. The Test-Path-on-prose throw: the governing variable is a COLON (attempt 2)
+
+Attempt 1's tester proved inline evidence can throw at the path check and
+named the illegal-path punctuation class (`| < > " * [`) as the trigger; the
+reviewer's matrix showed that diagnosis wrong: **a colon anywhere in the
+string suppresses the throw** (drive-qualified handling skips validation),
+so colon-free multi-line prose with no special characters throws while
+pipe-laden text with a timestamp sails through — and `-LiteralPath` changes
+no outcome. Fixed in this item (single-line + length pre-filter before
+Test-Path, try/catch around it); all four input classes proven on a scratch
+queue. The meta-lesson stands on its own: a defect's REPRODUCTION is not its
+DIAGNOSIS — the tester's probe pairs differed in two variables and the wrong
+one got the credit. Isolate before you name a cause.
+
+## 4. Out-of-scope observations (queue.ps1 mechanics, found across this item's cycles)
+
+- **`-Requeue` does not bump `attempt`** and `-Resubmit` accepts only
+  `test-failed` — so after a requeue there is no mechanism to revise the
+  queued test plan, and the next `-Pass` OVERWRITES
+  `<id>.attempt1.evidence.md` (attempt-1 tester evidence preserved by hand
+  as `...attempt1.evidence.KEPT-tester1.md` this time). Harness follow-up:
+  requeue should bump the attempt counter (fixing both), or -Resubmit
+  should accept `ready-to-test`.
 
 - `queue.ps1`'s `-Resubmit` path copies a revised plan over the OLD plan
   file (`$item.test_plan`) rather than a per-attempt name, so a failed

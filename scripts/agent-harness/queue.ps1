@@ -954,10 +954,24 @@ if ($Pass -or $Fail) {
     }
     # Long evidence does not fit a PS5.1 argument. Accept a FILE and copy it beside the
     # item, the same way the test plan is stored.
+    #
+    # Deciding "is this a path or prose?" with a bare Test-Path THROWS on prose under
+    # this script's ErrorActionPreference=Stop - and the throw's trigger is subtle
+    # (reviewer matrix, 2026-09-03): multi-line prose with NO colon anywhere throws
+    # ArgumentException; the SAME prose containing a colon does not (a colon routes
+    # Test-Path into drive-qualified handling that skips char validation), and
+    # -LiteralPath changes no outcome. So: only a single-line, path-sized string is
+    # ever OFFERED to Test-Path, and even that sits in a try/catch - prose must
+    # never be able to crash a verdict.
     $evidenceText = $Evidence
     $evDest = Join-Path $QueueDir ("{0}.attempt{1}.evidence.md" -f $Id, $item.attempt)
-    if (Test-Path $Evidence) {
-        Copy-Item -Path $Evidence -Destination $evDest -Force
+    $isFile = $false
+    if ($Evidence.Length -le 4096 -and $Evidence -notmatch "[`r`n]") {
+        try { $isFile = Test-Path -LiteralPath $Evidence -PathType Leaf -ErrorAction Stop }
+        catch { $isFile = $false }
+    }
+    if ($isFile) {
+        Copy-Item -LiteralPath $Evidence -Destination $evDest -Force
         $evidenceText = $evDest
     } elseif ($Evidence.Length -gt 2000) {
         # Inline-but-long: spill the FULL text to the evidence file and record the path,
