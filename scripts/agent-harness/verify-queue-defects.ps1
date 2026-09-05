@@ -33,6 +33,10 @@
 #       itself; the verdict was never recorded and the message named a cmdlet, not a cause.
 #   D6  There was no developer path back from `test-passed`. Only a reviewer could -Requeue,
 #       so a developer who found their own artifact wrong had to wait to be sent back.
+#   D7  Test-KnownAgent exempted a MISSING or null worktree registry from the D4 check -
+#       'cannot check' is not 'checked and failed' - but not an EMPTY-but-present one.
+#       remove-worktree.ps1 writes exactly that when the LAST worktree is retired, so
+#       ordinary correct cleanup refused EVERY developer's -Submit with exit 4.
 
 [CmdletBinding()]
 param(
@@ -447,6 +451,99 @@ Check "D6: the developer may NOT -Requeue from any other state" ($r.code -ne 0) 
     ("exit=" + $r.code + " state=" + (Get-QItem $f6 "qd6").state)
 $r = Invoke-Q $f6 @("-Requeue", "-Id", "qd6", "-By", "qstranger", "-Reason", "not my item")
 Check "D6: a third party with no reviewer claim is still refused" ($r.code -ne 0) ("exit=" + $r.code)
+
+# ======================================================================================
+Step "D7  an EMPTY registry is 'cannot check', not 'checked and failed'"
+# ======================================================================================
+# THE INCIDENT: D4 turned the unregistered-developer WARNING into a refusal, and correctly
+# exempted the case where there is no registry to check against. But it read the registry as
+# `if (-not $rows) { return $true }`, and an empty-but-present {"worktrees":{}} is not
+# falsey - it is an object with no properties. So the check fell through to a membership
+# test against an empty list and refused EVERYBODY.
+#
+# That shape is not exotic: it is what remove-worktree.ps1 writes every time the LAST
+# worktree is retired, because it rewrites the whole file from a hashtable. Retiring your
+# own worktree - the documented end of the merge protocol - stopped the queue accepting work
+# from anyone. THE PREMISE IS CHECKED HERE rather than cited, because a fix aimed at a shape
+# the tool does not actually produce would be a fix for nothing.
+
+$f7 = New-Fixture "d7"
+# --- the premise: remove-worktree.ps1 really does write the empty-but-present shape -------
+$wtDir = Join-Path $Root "d7-wt"
+Push-Location $f7.repo
+try { Invoke-Git worktree add -q -b work/d7only $wtDir | Out-Null } finally { Pop-Location }
+$reg7 = Join-Path $f7.state "worktrees.json"
+(@{ worktrees = @{ d7only = @{ id = "d7only"; path = $wtDir; branch = "work/d7only" } } } |
+    ConvertTo-Json -Depth 6) | Set-Content -Path $reg7 -Encoding ASCII
+$prevState = $env:AI_STACK_WORKTREE_STATE; $prevLine = $env:AI_STACK_WORK_LINE
+$env:AI_STACK_WORKTREE_STATE = $f7.state; $env:AI_STACK_WORK_LINE = "base"
+Push-Location $f7.repo
+try { & $PsExe -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot "remove-worktree.ps1") -Id d7only 2>&1 | Out-Null }
+finally {
+    Pop-Location
+    $env:AI_STACK_WORKTREE_STATE = $prevState; $env:AI_STACK_WORK_LINE = $prevLine
+}
+$after7 = $null
+if (Test-Path $reg7) { $after7 = Get-Content -Raw -Path $reg7 | ConvertFrom-Json }
+Check "D7 premise: retiring the LAST worktree leaves the registry FILE in place" (Test-Path $reg7) $reg7
+Check "D7 premise: it still has a 'worktrees' key and it is NOT null" `
+    (($null -ne $after7) -and ($after7.PSObject.Properties.Name -contains "worktrees") -and ($null -ne $after7.worktrees)) `
+    ("parsed=" + ($null -ne $after7))
+Check "D7 premise: and it holds ZERO rows - the exact shape the guard has to survive" `
+    (($null -ne $after7) -and ($null -ne $after7.worktrees) -and (@($after7.worktrees.PSObject.Properties).Count -eq 0)) `
+    ("rows=" + $(if (($null -eq $after7) -or ($null -eq $after7.worktrees)) { "n/a" } else { @($after7.worktrees.PSObject.Properties).Count }))
+
+# --- the fix: that shape must not refuse anyone -------------------------------------------
+# THE RED-FIRST CHECK. Against the pre-fix queue.ps1 this is exit 4 and the item never
+# leaves `anchor-confirmed`.
+$f7b = New-Fixture "d7b"
+Set-Content -Path (Join-Path $f7b.state "worktrees.json") -Encoding ASCII -Value '{"worktrees":{}}'
+Invoke-Q $f7b @("-Propose", "-Id", "qd7", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f7b @("-ConfirmAnchor", "-Id", "qd7", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f7b @("-Submit", "-Id", "qd7", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1)
+Check "D7: -Submit against an EMPTY registry is ACCEPTED (exit 0), not refused" ($r.code -eq 0) `
+    ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "D7: and the item really was queued" ((Get-QItem $f7b "qd7").state -eq "ready-to-test") `
+    ("state=" + (Get-QItem $f7b "qd7").state)
+# A developer who never owned a worktree is the same case - nothing about the NAME matters
+# when the registry names nobody.
+Invoke-Q $f7b @("-Propose", "-Id", "qd7b", "-Anchor", $anchorFile, "-Developer", "nobody-ever") | Out-Null
+Invoke-Q $f7b @("-ConfirmAnchor", "-Id", "qd7b", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f7b @("-Submit", "-Id", "qd7b", "-Branch", "work/qd", "-Developer", "nobody-ever", "-TestPlan", $planV1)
+Check "D7: an arbitrary developer id is equally accepted when the registry names nobody" `
+    ($r.code -eq 0) ("exit=" + $r.code + " | " + (First-Line $r.out))
+
+# --- the truth table, each row proven by running it ---------------------------------------
+# null and absent-key were already exempt; they are here so a future edit to this function
+# cannot quietly lose one while fixing another.
+$f7c = New-Fixture "d7c"
+Set-Content -Path (Join-Path $f7c.state "worktrees.json") -Encoding ASCII -Value '{"worktrees":null}'
+Invoke-Q $f7c @("-Propose", "-Id", "qd7c", "-Anchor", $anchorFile, "-Developer", "anydev") | Out-Null
+Invoke-Q $f7c @("-ConfirmAnchor", "-Id", "qd7c", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f7c @("-Submit", "-Id", "qd7c", "-Branch", "work/qd", "-Developer", "anydev", "-TestPlan", $planV1)
+Check "D7 table: a NULL worktrees value stays exempt (exit 0)" ($r.code -eq 0) ("exit=" + $r.code)
+
+$f7d = New-Fixture "d7d"
+Set-Content -Path (Join-Path $f7d.state "worktrees.json") -Encoding ASCII -Value '{}'
+Invoke-Q $f7d @("-Propose", "-Id", "qd7d", "-Anchor", $anchorFile, "-Developer", "anydev") | Out-Null
+Invoke-Q $f7d @("-ConfirmAnchor", "-Id", "qd7d", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f7d @("-Submit", "-Id", "qd7d", "-Branch", "work/qd", "-Developer", "anydev", "-TestPlan", $planV1)
+Check "D7 table: an ABSENT worktrees key stays exempt (exit 0)" ($r.code -eq 0) ("exit=" + $r.code)
+
+# THE ROW THAT MUST NOT MOVE. If this ever goes green-by-accepting, the availability fix has
+# been traded for an authorization hole: one real row means the check CAN be made, so it must.
+$f7e = New-Fixture "d7e"
+Add-Registry $f7e @("qdev")
+Invoke-Q $f7e @("-Propose", "-Id", "qd7e", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f7e @("-ConfirmAnchor", "-Id", "qd7e", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f7e @("-Submit", "-Id", "qd7e", "-Branch", "work/qd", "-Developer", "stranger", "-TestPlan", $planV1)
+Check "D7 table: ONE row is enough to ENFORCE - an unregistered developer is still refused (exit 4)" `
+    ($r.code -eq 4) ("exit=" + $r.code)
+Check "D7 table: the refused submit queued nothing" `
+    ((Get-QItem $f7e "qd7e").state -eq "anchor-confirmed") ("state=" + (Get-QItem $f7e "qd7e").state)
+$r = Invoke-Q $f7e @("-Submit", "-Id", "qd7e", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1)
+Check "D7 table: and the REGISTERED developer still gets through (exit 0)" `
+    (($r.code -eq 0) -and ((Get-QItem $f7e "qd7e").state -eq "ready-to-test")) ("exit=" + $r.code)
 
 # ======================================================================================
 Step "R  the behaviours this change must NOT have altered"
