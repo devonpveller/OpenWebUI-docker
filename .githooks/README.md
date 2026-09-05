@@ -66,6 +66,15 @@ commits made before the column existed, and does not pretend to.
 `check-hook-attestation.ps1` prints the distinct gating hooks for the commits it checks.
 It **reports** them; the pass/fail verdict is still attested-vs-not and nothing else.
 
+A fourth column is not always a hash. **The checker's own output is where the four states
+are named and told apart** — a hash, the `?` sentinel, an absent column, and anything else
+(quoted verbatim as `MALFORMED`, which is what the four 2026-08-30 lines from the reverted
+commit-msg attester read as, their fourth column being a branch name) — and it is also
+where a merge line explains why it carries `pre-commit`'s hash rather than
+`pre-merge-commit`'s. That is deliberate: those are answers a reader needs *at* the line
+they are staring at, not in a reference they would have to know to go and find. This
+paragraph is a pointer to it, not a second copy of it.
+
 A clean `git merge` never runs `pre-commit`, so `pre-merge-commit` delegates to it —
 the merge commit's tree passes the same eight checks (and a gitlink merge therefore
 needs the OB1 working tree moved to the incoming pin *before* merging).
