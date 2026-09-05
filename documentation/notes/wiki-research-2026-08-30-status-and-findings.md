@@ -530,3 +530,45 @@ its own, not a defect in what merged.
 The lesson worth keeping separately: **a finding is filed when it is in the
 sink, not when it is in the evidence file.** Queue evidence is per-attempt and
 nobody reads it again; this file is the thing that survives.
+
+**Both are fixed as of 2026-09-05, anchor `emitters`.** Each now routes its
+alias through `linkSafeLabel`, the way the `Grounded by` emitter does, with
+tests that drive the emitted markdown through Quartz's own `wikilinkRegex`
+rather than asserting on the source of `generate-wiki.mjs`. The line numbers
+above are pre-fix and have since drifted; find them by name, not by number.
+
+### 3. The two probes in section 1 measure the SAME population - run them as a PAIR
+
+Section 1 prints a still-unhealed probe (the `...|Daily #[0-9]+...` one, counted
+with `wc -l`) and, above it, the merged `^Daily #` command (every `Grounded by`
+alias, `sed`'d down to the alias text, filtered to those starting `Daily #`).
+Different shapes, different tools - and the same population: `Grounded by`
+aliases that are still `Daily #NNN`. Therefore:
+
+**They must return the same number in the same run. A disagreement means one of
+them is BROKEN. It does not mean the vault moved.**
+
+That is the durable thing this section can offer, and it is exactly why the
+probes carry no figures. Every count here decays within the hour, because the
+merged fix heals a page only when that page is regenerated and the vault
+regenerates continuously - section 1 records 1111 -> 1087 over about six hours
+of one day. A figure written beside a probe is stale before the next reader
+arrives; an invariant BETWEEN two probes never is.
+
+Use it as a self-check, in this order:
+
+1. Run BOTH in the same session, in `openbrain-wiki-viewer` at `/wiki` - NOT
+   `openbrain-wiki`, which is BusyBox: it has no `--include`, so it silently
+   matches nothing and prints `0`. A `0` from the wrong container reads exactly
+   like a fully-healed vault.
+2. Run them AS PRINTED. The one-wrapped/two-single-line distinction recorded in
+   section 1 is load-bearing; re-wrapping a command is how a backslash gets
+   eaten, which has happened three times in this file already.
+3. Equal -> both probes are sound, and the number is this moment's snapshot,
+   good until roughly the next regeneration. Unequal -> stop and repair the
+   probe. Do not average them, do not take the one that fits the story, and do
+   not write the difference down as vault movement.
+
+Run as a pair on 2026-09-05 under anchor `emitters` - GNU grep 3.8 in
+`openbrain-wiki-viewer`, both commands as printed - and they agreed. The figure
+they agreed on is deliberately not recorded here.
