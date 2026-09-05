@@ -75,3 +75,43 @@ explicitly and say which of the two hooks it was exercising. The anchor rules a 
 of scope, correctly - it changes how every agent in this repo commits and needs its own
 decision. The new column at least makes the confusion *visible* after the fact instead of
 requiring reflog archaeology to notice.
+
+## 8. `verify-merge-protocol.ps1` is RED on this line, for the same root cause
+
+Measured 2026-09-04 on `work/attestid` (base `af974d1`): **60/66**, six failures, all
+cascading from one. Established as PRE-EXISTING by an A/B run - the identical 60/66 with
+this item's `check-hook-attestation.ps1` replaced by the base version, so the change did
+not cause it.
+
+The first failure is `two divergent commits exist`, and the drill's own output says why:
+
+```
+=== 2. both edit THE SAME file with conflicting intent, and commit ===
+The argument './scripts/checks/check-corpus-exposure-producers.ps1' to the -File
+parameter does not exist.
+Pre-commit validation failed (a corpus insert does not state its plane)!
+```
+
+The drill cuts `drill/verify-d` from **`development`**, and `development` has neither
+check 3b's script nor the hook line that calls it:
+
+```
+git cat-file -e development:scripts/checks/check-corpus-exposure-producers.ps1  -> absent
+git show development:.githooks/pre-commit | grep -c check-corpus-exposure-producers -> 0
+```
+
+But the commit inside that worktree runs the hook at **`core.hooksPath`**, which is an
+absolute path to the main checkout - currently on `refactor/ai-stack-cleanup`, which
+*does* have 3b. So the newer hook runs against the older tree, calls a script that is not
+there, and refuses both of the drill's commits. Every later failure follows from those two
+commits never existing.
+
+This is finding 7 with teeth: a hook is paired with a checkout, not with the tree it is
+checking, and the two can be from different lines. Note that the failure mode is
+LOUD here only by luck - `powershell.exe -File <missing>` exits non-zero, so it read as
+"the check failed". A check that exited 0 when its script was missing would have read as
+"the check passed", on a tree it never looked at.
+
+Not fixed here: it is neither this item's artifact nor a change this item is allowed to
+make (the anchor rules out touching the checks, and relativising `core.hooksPath` needs
+its own decision). Filed so the next person to run the drill knows the red is not theirs.
