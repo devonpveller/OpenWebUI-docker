@@ -219,7 +219,29 @@ function Test-KnownAgent([string]$who) {
     if (-not (Test-Path $reg)) { return $true }
     try { $rows = (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees } catch { return $true }
     if (-not $rows) { return $true }
-    $known = @($rows.PSObject.Properties.Name | ForEach-Object { Normalize-Id $_ })
+    # A registry with NO ROWS is 'cannot check', exactly like a missing one - and the two
+    # lines above only catch the missing and the null spellings. The empty one is what
+    # ORDINARY CLEANUP LEAVES BEHIND: remove-worktree.ps1 rewrites the whole file from a
+    # hashtable, so retiring the LAST worktree - or -PruneRegistry dropping the last dead
+    # row - writes {"worktrees":{}}: present, non-null, and empty. `-not $rows` is FALSE for
+    # that object, so the check fell through to a membership test against nothing and
+    # refused EVERY developer, including agents who never owned a worktree. Correct cleanup
+    # bricked -Submit for the whole queue, telling each victim to provision a worktree they
+    # already had.
+    #
+    # The guard belongs HERE and not in remove-worktree.ps1: a hand-edited registry, an
+    # external prune, or a fresh state dir seeded with an empty object all produce the same
+    # file, and only this function decides what it means. Nothing is given away - a registry
+    # naming nobody excludes nobody, which is the same position as no registry at all. One
+    # real row and the membership test below enforces again.
+    #
+    # Count the PROPERTIES, not the projected names. PS5.1 member enumeration over an empty
+    # collection returns $null rather than nothing, so `@($rows.PSObject.Properties.Name)`
+    # on an empty object is a ONE-element array holding $null and its .Count is 1 - a guard
+    # written that way looks right, reads right, and does not fire. Found by running it.
+    $props = @($rows.PSObject.Properties)
+    if ($props.Count -eq 0) { return $true }
+    $known = @($props.Name | ForEach-Object { Normalize-Id $_ })
     return ($known -contains (Normalize-Id $who))
 }
 

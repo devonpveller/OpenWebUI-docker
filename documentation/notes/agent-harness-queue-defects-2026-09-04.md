@@ -91,3 +91,36 @@ Deliberately **not** changed by `harnessq`: that item's anchor scopes the artifa
 item. The tool tells you about the path (`-Requeue` refuses from other states with a message
 naming both journeys, and `README.md` carries a one-line note), so nothing is unreachable —
 but the protocol doc is the place an agent looks first, and it is now incomplete.
+
+---
+
+## F4 - a MALFORMED worktrees value still refuses everybody (found while fixing the empty one)
+
+Filed by queue item `regempty`, whose anchor scopes it to the EMPTY-but-present registry.
+This is the neighbouring shape, verified by running it, and deliberately left alone.
+
+`queue.ps1` `Test-KnownAgent` now reads the registry as: missing -> exempt, unparseable ->
+exempt, null -> exempt, zero rows -> exempt, one or more rows -> enforce. "One or more rows"
+is `@($rows.PSObject.Properties).Count`, and PowerShell hands out .NET intrinsic members for
+anything that is not an object:
+
+```
+PS> $rows = ('{"worktrees":"qdev"}'   | ConvertFrom-Json).worktrees; @($rows.PSObject.Properties).Name
+Length
+PS> $rows = ('{"worktrees":["qdev"]}' | ConvertFrom-Json).worktrees; @($rows.PSObject.Properties).Name
+Count Length LongLength Rank SyncRoot IsReadOnly IsFixedSize IsSynchronized
+```
+
+So a registry whose `worktrees` is a STRING or an ARRAY - a hand-edit, a half-written file, a
+future writer that stores rows as a list - parses fine, counts as populated, and enforces
+membership against `Length` / `Count` / `Rank`. Every `-Submit` is refused with exit 4 and a
+message telling the developer to provision a worktree they already have: the exact failure
+`regempty` fixed, reached by a different door.
+
+Not fixed there because `regempty`'s anchor names one condition and one shape, and its
+acceptance forbids trading the availability fix for a weaker authorization check - and the
+right answer here is not obvious. Exempting anything non-object turns a corrupt registry into
+a silently-open door; the better shape is probably to REFUSE LOUDLY on a registry that is
+present but not an object ("your registry is malformed", not "you are not registered"), which
+is a new third outcome and its own red-first test. Nobody has hit it yet: every writer in the
+tree (`new-worktree.ps1`, `remove-worktree.ps1`) writes a hashtable.
