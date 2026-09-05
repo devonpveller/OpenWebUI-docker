@@ -113,3 +113,89 @@ unreviewed-hook hazard depending on who you ask).
   link-enrich.ts` with the lock removed created no `deno.lock`, because the
   recipe has no `deno.json`). The gate still passes `--no-lock` so that a
   future `deno.json` cannot start dirtying the OB1 submodule and tripping 5b.
+## 7. `gate2` (2026-09-04): four residuals closed, and what the probes turned up
+
+Findings sink for harness item `gate2` (the four residuals the `gatesee`
+tester and reviewer left on the table). Everything below was measured in
+`.claude/worktrees/wt-gate2` with `git -c core.hooksPath=.githooks commit`.
+
+### 7.1 Baselines, so a future reader knows SILENCE is correct
+
+Both new behaviours are expected to say NOTHING on today's corpus. Written
+down so nobody reads correct silence as a broken warning:
+
+- **Lexical case count == node's `# tests` == 48** at OB1 `48c0363` AND at
+  `a18e2ca` (8 test files at both). Measured twice: by hand
+  (`git ls-tree` + the same regex), and hook-real - the 5b run for a bump
+  `48c0363 -> a18e2ca` printed `test CASES 48 -> 48` and `# tests 48` with no
+  step-3c warning between them. The 3c warning firing today would be NEWS.
+- **Zero untracked `.ts` under `OB1/recipes/daily-digest`** -
+  `git ls-files --others --exclude-standard -- recipes/daily-digest` returns
+  0 lines, including ignored files. 36 non-test `.ts` on disk, all tracked.
+  So 5c's new untracked NOTE cannot fire today either, and its green path is
+  byte-identical to the pre-change script (same md5 over captured stdout).
+
+### 7.2 `git show` with an EMPTY argument shows HEAD and exits 0
+
+Found by this item's own quotepath proof, in this item's own first patch.
+The rewritten counter read `if ($e -match '<mode> blob <sha>\t<path>')` and
+then `if ($Matches[2] -match '\.test\.mjs$') { $blobs += $Matches[1] }`.
+`$Matches` is ONE automatic variable that every `-match` overwrites, so the
+inner match destroyed the outer captures and `$blobs` filled with `$null`.
+`git show $null` then printed the HEAD COMMIT, exited 0, and contributed zero
+`test(` lines - so the gate reported `test CASES 0 -> 0` while the file count
+was right. Two general lessons, both cheap to reuse:
+
+- Copy every capture group out of `$Matches` before the next `-match` runs.
+- A git plumbing call given a blank ref does not fail loudly; it answers about
+  something else and exits 0. Any lookup whose argument is computed should
+  validate the argument before shelling out. The fixed counter refuses to run
+  `git show` on anything that is not 40 hex characters.
+
+### 7.3 The quotepath drop and the 3c warning are two detectors for one defect
+
+In the scratch-tree proof, the PRE-fix counter under-counted the non-ASCII
+test file (`FILES 1 -> 1, CASES 2 -> 2`) while node ran 3 tests. That is the
+3c disagreement signature. So had 3c existed alone, it would have flagged the
+quotepath bug as "lexical 2, node 3" without naming the cause; had the
+quotepath fix landed alone, the count would simply have been right. They are
+independent, which is the useful property: a future silent-drop in the LEXICAL
+half is now visible as a disagreement with node even before anyone knows why.
+
+### 7.4 Residual limits of the pair, stated so nobody over-reads a green
+
+- **3c cannot see an equal-count swap.** Delete a real case, add a different
+  real case: lexical 48, node 48, no warning, and that is correct behaviour -
+  the counts agree because both are true. The floor detects SHRINK; 3c detects
+  DISAGREEMENT; neither detects substitution. Reading the OB1 diff is still
+  the only thing that does.
+- **An untracked `*.test.mjs` inside OB1 now surfaces as a 3c disagreement.**
+  5b's dirty check is `--untracked-files=no` (deliberate, documented in its
+  header), so an untracked test file is invisible to it - but node RUNS it off
+  disk while the lexical floor reads git objects and cannot see it. The two
+  counts then disagree and 3c warns. That is a happy accident, not a designed
+  guard: it fires only when the untracked file actually contains cases.
+- **5c's untracked NOTE compares against OB1's INDEX**, not against the staged
+  commit (`git ls-files`). A file `git add`ed inside OB1 but not committed
+  therefore reads as "tracked" and is not named - but 5b has already refused
+  that commit by then (a staged-in-OB1 change is a tracked dirty change), so
+  the case is unreachable in the hook chain. It would matter to anyone
+  invoking 5c standalone.
+
+### 7.5 Out of scope, left alone deliberately
+
+- **`core.hooksPath` is still an absolute path to the main checkout** (section
+  5 above). Unchanged by this item, and every verdict here was therefore taken
+  with the explicit `git -c core.hooksPath=.githooks` override.
+- **`AI_STACK_OB1_TESTS_ALLOW_SHRINK`.** The `gatesee` reviewer ruled the
+  smuggle non-blocking BECAUSE this override is a louder, cheaper bypass. That
+  ruling now has a second leg (3c warns on the smuggle's signature), but the
+  first leg still holds and must: make ALLOW_SHRINK quiet and both arguments
+  weaken at once.
+- **The line's current OB1 pin `b69cdbf`** (as of parent `08c4ae1`) measures
+  the same: 8 test files, 48 lexical cases, `# tests 48`, 0 untracked `.ts`
+  under `recipes/daily-digest`. So silence is also correct one pin ahead of
+  this branch's base. Recorded because the first measurement pass could not
+  see `b69cdbf` at all - the worktree's submodule object store did not have it
+  until the worktree was re-provisioned. "Not in my object store" is not
+  "does not exist", and a count you could not take is not a count of 48.
