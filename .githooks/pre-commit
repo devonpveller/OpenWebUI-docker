@@ -135,20 +135,51 @@ fi
 # guard that false-positives on legitimate work gets switched off, and then it
 # protects nothing.
 #
+# AND WE ATTEST WHICH HOOK DID IT (2026-09-04). "The hooks ran" was never the
+# question anyone actually had; the question is "did the hook that ran contain
+# the check this evidence claims?". Those came apart on item wiki-mirror-
+# hardening: three commits carried honest attestations written by a genuinely
+# executing hook, and the hook executing was the PRE-5b one - the main checkout
+# did not gain check 5b until 28 minutes after the last of them. Establishing
+# that took a reviewer an hour of reflog archaeology, because the ledger
+# recorded that A hook ran and nothing about WHICH.
+#
+# "$0" is the hook file git is executing RIGHT NOW. Not a path this script
+# computed - that is the entire point. core.hooksPath is an absolute path to
+# one checkout, so a worktree's own edited .githooks/pre-commit is NOT what
+# runs for its commits; any path we derived from the repo would record the file
+# we wish had run instead of the one that did. `git hash-object` on it yields
+# the blob hash of that exact content, which is the same hash the file has in
+# any commit that carries it - so `git cat-file -p <hash>` reads the hook back
+# whenever that state was ever committed, and grepping it answers "was tree X
+# gated by a hook containing check Y". A hash that resolves to nothing is also
+# an answer: the gating hook was an uncommitted local edit. See .githooks/README.md.
+#
+# The lookup DEGRADES TO '?' and can never fail the commit - bookkeeping that
+# can reject work gets switched off, and then none of this exists. Anything that
+# is not a bare hex hash (an error message, an empty result, a git that cannot see
+# the file) becomes '?' rather than corrupting the ledger's column layout.
+#
 # This runs LAST, after every check above has passed, so a rejected commit is
 # never attested - attesting a tree the checks refused would launder it.
 #
 # The ledger lives in the SHARED git dir (--git-common-dir), never the worktree:
 # it must not be committable, and every worktree of this repo must read one
 # ledger, or a reviewer in another worktree could not verify a developer's work.
+# It is APPEND-ONLY (>>): a line is a historical fact and is never rewritten.
 _attest_tree=$(git write-tree 2>/dev/null)
 if [ -n "$_attest_tree" ]; then
     _git_common=$(git rev-parse --git-common-dir 2>/dev/null)
     if [ -n "$_git_common" ]; then
-        printf '%s %s %s\n' \
+        _attest_hook=$(git hash-object "$0" 2>/dev/null)
+        case "$_attest_hook" in
+            "" | *[!0-9a-f]* ) _attest_hook='?' ;;
+        esac
+        printf '%s %s %s %s\n' \
             "$_attest_tree" \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')" \
+            "$_attest_hook" \
             >> "$_git_common/hook-attest.log" 2>/dev/null || true
     fi
 fi
