@@ -5,18 +5,108 @@ re-checked on **2026-09-05** against a named artifact, and the check is written
 next to the claim so the next reader can re-run it rather than trust it. Where a
 claim cannot be checked from those artifacts, it says so.
 
-An earlier draft of this note (branch `work/podfall`, 2026-09-04) was rebuilt
-rather than merged - see section 6. Several of its claims did not survive
-re-checking and are corrected in place, each correction labelled where it sits:
-two factual reversals (sections 2 and 4), a temporal offset that was wrong in
-both magnitude and **direction** (section 3), a quoted `lastFailure` string and a
-sample log line that no stated method reproduced (section 5), two `file:line`
-citations that pointed one construct off (sections 5 and 7), and a count in
-section 6 that could not be re-derived from any command. The pattern is worth
-naming: **every one of them was a detail offered in support of a conclusion that
-was itself correct.** A findings note is acted on without re-derivation, so a
-wrong supporting number is a worse defect here than in code, where a test would
-have caught it.
+This note has had two earlier versions and its corrections come from **both** of
+them. That is the part worth being careful about: an error history that pins every
+mistake on the draft that was thrown away is itself a detail that flatters the
+document, and it is the exact class of defect this note exists to record. The two
+are the discarded draft `7d9dce2` (branch `work/podfall`, 2026-09-04, rebuilt
+rather than merged - see section 6; kept on the local branch
+`backup/podfall-stale-20260905`) and the note this item's first attempt submitted,
+`0bbdbe9` (2026-09-05; `355731b` before an amend that added one subsection - the
+five attempt-1 errors below are already in `355731b`). Recover either with
+`git show <rev>:documentation/notes/daily-podcast-reliability-findings.md`.
+
+**Thirteen claims have been corrected** - counting every claim that appeared in a
+committed earlier version and was wrong. Two further changes were *strengthenings*
+(a recomputation gave a better fact than the note had, rather than replacing a
+wrong one) and are deliberately not counted here.
+
+**Eight came from the 2026-09-04 draft:**
+
+- **Section 2** - "no other row in the table ever has" that prompt size; an
+  absolute claim where the evidence supported a specific one (`7d9dce2:73`).
+  Corrected in `0bbdbe9:97`.
+- **Section 1** - "the last fourteen filenames read
+  `the-article-is-a-substack-post-by-nate-published-aug-28-2026` and the healthy
+  ones read `ai-industry-news`" (`7d9dce2:56-58`). Both halves are plural claims
+  that the disk refutes: `ls /d/_data/0*-daily-*.md` shows only **two** files with
+  that slug (083 and 084) and **twelve distinct** slugs across the fourteen
+  degraded episodes, while the four healthy ones in the window read
+  `ai-privacy-and-security`, `ai-industry-news`, `new-ai-model-releases` and
+  `ai-in-education`. The same shape as the section 2 error above - one observed
+  case generalised to "all of them". Corrected in `0bbdbe9:67-70`, which names
+  083, 075 and 091 individually.
+- **Section 4** - "The fallback is still happening. The fix is not deployed."
+  (`7d9dce2:125`). True when written and stale by the time it was carried, which
+  is a different failure from being wrong - but it was carried without being
+  re-checked. Corrected in `0bbdbe9:146`.
+- **Section 3** - "nine seconds after", wrong in magnitude and in **direction**
+  (`7d9dce2:119`; carried to `0bbdbe9:137`).
+- **Section 3** - the ledger query printed with a single 401 line beneath it,
+  though the predicate as written returns 201,869 rows across seven error codes
+  (`7d9dce2:106-111`; carried to `0bbdbe9:127-131`).
+- **Section 1** - the fallback marker quoted with a hyphen where the source has an
+  em dash (`script-renderer.ts:439`); `7d9dce2:20`, carried to `0bbdbe9:24`, where
+  attempt 1 added "(with an em dash)" *beside the hyphen* and turned a misquote
+  into a contradiction.
+- **Section 5** - the gap-dive warning quoted as "N candidate(s)" where the source
+  reads `${pool.length} candidate(s)` (`gap-dive.ts:198`); `7d9dce2:188`, carried
+  to `0bbdbe9:217`.
+- **Section 7** - the `env("LOCAL_LLM_BEARER", "no-key")` default attributed to
+  `clients/llm.ts`; it is in `send-digest.ts:63`. `7d9dce2:207-208`, carried to
+  `0bbdbe9:300-301` - and the whole six-line passage is byte-identical between the
+  two (`diff <(sed -n '207,212p' d0) <(sed -n '300,305p' d1)` is empty).
+
+**Five were introduced by this item's own first attempt.** They are this line of
+work's own errors, not the discarded draft's, and each is absent from `7d9dce2` by
+a check anyone can re-run:
+
+- **Section 5** - `lastFailure = "TRUNCATED at max_tokens=32 with the ceiling (32)
+  reached"`, a string no stated method produces. The draft records no such value:
+  `grep -c lastFailure` over the whole of `7d9dce2` -> `0`, and `grep -c TRUNCATED`
+  -> `0`. (It does use the word *truncated* once, at `7d9dce2:99`, about the
+  transcript stage - a different subject.) Introduced at `0bbdbe9:211`.
+- **Section 5** - the sample DEGRADED line's `206 chars`. The draft's sample is a
+  different line, for episode 083, reading `(200 chars`; `grep -c "206 chars"` on
+  `7d9dce2` -> `0`. Introduced at `0bbdbe9:188`.
+- **Section 5** - the citation `link-enrich.ts:158`. The draft cites that file
+  with no line number at all; `grep -c "link-enrich.ts:158"` -> `0`. Introduced at
+  `0bbdbe9:222`.
+- **Section 6** - "an OB1 pin four merged items old", a count no command
+  re-derives. The draft has no process-findings section for it to sit in: its
+  section 6 is "Adjacent, verified elsewhere, not acted on". Introduced at
+  `0bbdbe9:238`.
+- **Section 4** - "The live code is the fixed code", which named no fix. The
+  *key* fix is live; this item's DEGRADED logging is not. Introduced at
+  `0bbdbe9:169` - the draft had said the opposite, so this one replaced a stale
+  claim with an imprecise one.
+
+**Who corrected what, since the counts do not divide evenly.** Attempt 1 corrected
+three of the draft's eight, carried the other five forward unchecked, and added
+five of its own; this version corrected the ten that were left. So the pass that
+was cleaning up a predecessor introduced five fresh errors of the same kind while
+doing it. That is the finding, and it is about this item.
+
+**Five of the thirteen carry a correction label where they sit** - sections 2, 3
+(the offset), 4 (the heading), 5 (the `:158` citation) and 7. **Eight do not:**
+section 1's dash and its filename claim, section 3's query, section 4's live-code
+line, section 5's `lastFailure` string, its sample line and its gap-dive quote,
+and section 6's count all simply read correctly now, with nothing beside them
+saying what they used to say. This list is the label for those eight - one
+inventory that can be checked in a single pass was judged better than eight more
+markers scattered through the body, but the trade is recorded here rather than
+left implicit.
+
+The two citation defects are also not the same defect: section 5's was one
+construct off (it named the `makeScriptChat({` call, not the `label:` line inside
+it), while section 7's named the wrong **file**.
+
+The pattern worth naming is therefore not that a stale draft was tidied up. It is
+that **twelve of the thirteen were a detail offered in support of a conclusion
+that was itself correct** - the exception being section 4's heading, which was a
+conclusion rather than a supporting detail, and which was true when it was
+written. A findings note is acted on without re-derivation, so a wrong supporting
+number is a worse defect here than in code, where a test would have caught it.
 
 Artifacts used:
 
@@ -254,18 +344,36 @@ Changed in `OB1/recipes/daily-digest/src/podcast/script-renderer.ts`:
 - **`renderEpisode` emits a DEGRADED line** on the fallback path, naming the
   stage, the episode, the SIZE of the dump (it becomes the transcript prompt
   downstream - that is the number that killed 083) and the cause carried out of
-  `chat()`. Observed verbatim (line wrapped here, single line in the log), for
-  the exact input below - a one-item episode 092 whose only synthesis is
-  `"[SOURCED] The article is a substack post about model releases."`, rendered
-  through a real `makeScriptChat` pointed at a stub gateway that returns 401:
+  `chat()`. Observed verbatim (line wrapped here, single line in the log) for the
+  WHOLE input below - not the synthesis alone - rendered through a real
+  `makeScriptChat` pointed at a stub gateway that returns 401. The input:
+
+      { date: "2026-09-05", episodeNumber: 92, segments: [{ label: "l", items: [{
+        title: "", url: "u",
+        synthesis: "[SOURCED] The article is a substack post about model releases." }] }] }
+
+  and the line it produces:
 
       [script] DEGRADED: episode 092 "Daily #092 — the article is a substack post
       about model releases" is shipping RAW GROUNDED MATERIAL instead of a written
       script (194 chars, which becomes the transcript prompt downstream).
       Stage: script generation (renderEpisode/S4a). Cause: HTTP 401 after 1 attempt(s)
 
-  The `194` is the length of the fallback dump *for that one-item input*, not a
-  constant; episode 083's was 47,296. Swap the stub for a hand-rolled
+  The `194` is a property of that WHOLE input, not of the synthesis: the dump is
+  `SCRIPT_UNAVAILABLE` plus the rendered segment block
+  (`script-renderer.ts:461`), and the block carries the segment `label` and the
+  item `title` as well as the synthesis. The empty `title` is why this minimal
+  input is not the shortest one: the heading falls back to the whole 52-character
+  `[SOURCED]` sentence. For a one-item, one-segment episode carrying THIS
+  62-character synthesis the count is `141 + len(label) + len(heading)` - the 141
+  being 59 for the marker, 2 for the blank line, 18 for the two headers' fixed
+  text and newlines, and 62 for the synthesis itself. Re-measured 2026-09-05 by
+  varying one field at a time: a 31-char `title` gives `173`, a 13-char `label` gives `206`,
+  the two together give `185`, and `url` is not in the dump at all and changes
+  nothing. **None of these four numbers identifies its input uniquely** - any
+  label/heading pair with the same sum gives the same count - so quote the input
+  beside the number rather than the number alone. Episode 083's was 47,296. Swap
+  the stub for a hand-rolled
   `() => Promise.resolve(null)` and the same line ends
   `Cause: reason not recorded by this chat function` instead.
 
