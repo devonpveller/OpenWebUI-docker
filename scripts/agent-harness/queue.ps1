@@ -55,6 +55,12 @@
 #     enough to kill the process never reaches us - write the file yourself.
 #   .\queue.ps1 -Fail  -Id mem-readme -By wt-tester-1 -Reason "case 3 fails on a cold cache"
 #   .\queue.ps1 -Resubmit -Id mem-readme -By wt-mem-readme [-TestPlan <path>]  # after a -Fail
+#   .\queue.ps1 -Requeue -Id mem-readme -By wt-mem-readme -Reason "..."
+#     (THE DEVELOPER'S way back from 'test-passed' when the ARTIFACT itself must change.
+#      Lands on 'anchor-confirmed' - the same "back with the developer" state -AmendAnchor
+#      uses - so the way forward is the ordinary -Submit. The REVIEWER's -Requeue is the
+#      stale-pass rule and goes to 'ready-to-test'. Both bump `attempt`, and both take an
+#      optional -TestPlan.)
 #   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
@@ -220,6 +226,40 @@ function Test-KnownAgent([string]$who) {
 function Drop-Claim([string]$i, [string]$role) {
     $c = ClaimPath $i $role
     if (Test-Path $c) { Remove-Item $c -Force }
+}
+
+function Copy-IntoQueue([string]$Source, [string]$Destination, [string]$Flag, [string]$What) {
+    # THE ONE PLACE a caller-supplied path is copied into the queue directory.
+    #
+    # Every such copy is `<something the caller typed>` -> `<QueueDir>\<id>....`, and if the
+    # caller typed the destination itself, Copy-Item refuses to overwrite a file with itself
+    # and THROWS. Under this script's ErrorActionPreference=Stop that ends the run - so the
+    # verdict, the plan or the anchor is not recorded, and what the operator sees is
+    # "Copy-Item : Cannot overwrite the item ... with itself", which names a cmdlet and not a
+    # cause. Nobody reads that as "your pass was not recorded".
+    #
+    # Found twice on 2026-09-04, in two different commands (-Pass -Evidence, and -Submit
+    # -TestPlan) by two different agents, which is what makes it a CLASS rather than a bug:
+    # writing your evidence or your plan straight into the queue dir is a reasonable thing to
+    # do, because that is visibly where it ends up. So the guard lives here, once, and every
+    # copy site goes through it - a second copy of this reasoning in a third command is a
+    # third chance to get it wrong.
+    #
+    # It refuses BEFORE copying and before any caller writes the item, so a refusal never
+    # leaves half a mutation behind. Compared on resolved full paths: `.\x.md` and
+    # `C:\...\x.md` are the same file, and a guard that only catches the spelling the
+    # reporter happened to use is not a guard.
+    $srcFull = $Source
+    try { $srcFull = (Resolve-Path -LiteralPath $Source -ErrorAction Stop).Path } catch { }
+    $dstFull = $Destination
+    try { $dstFull = [System.IO.Path]::GetFullPath($Destination) } catch { }
+    if ($srcFull -eq $dstFull) {
+        Die (("{0} points at the queue's own {1} ({2}) - the very file this command COPIES " +
+              "it to. A file cannot be copied onto itself, so nothing has been recorded and " +
+              "nothing has changed. Keep your own copy OUTSIDE {3} and pass that path; this " +
+              "command puts it here for you.") -f $Flag, $What, $dstFull, $QueueDir)
+    }
+    Copy-Item -LiteralPath $srcFull -Destination $dstFull -Force
 }
 
 function Invoke-OracleOnStall([string]$i) {
@@ -596,7 +636,7 @@ if ($Propose) {
     # worktree is deleted at the end, and a tester or reviewer reading a dangling path is
     # exactly the failure this whole mechanism exists to prevent.
     $anchorDest = Join-Path $QueueDir "$Id.anchor.json"
-    Copy-Item -Path $Anchor -Destination $anchorDest -Force
+    Copy-IntoQueue $Anchor $anchorDest "-Anchor" "anchor file for this item"
     $item = [ordered]@{
         id = $Id; branch = ""; line = ""; developer = $Developer
         state = "anchor-draft"; anchor = $anchorObj; anchor_file = $anchorDest
@@ -628,7 +668,7 @@ if ($ConfirmAnchor) {
     # work is for, and the record must show what was actually agreed, not what was asked.
     if ($Anchor) {
         try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
-        Copy-Item -Path $Anchor -Destination $item.anchor_file -Force
+        Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
         $item.anchor = $anchorObj
         Add-History $item "anchor amended on confirmation" $By
     }
@@ -666,7 +706,7 @@ if ($AmendAnchor) {
     if ($item.state -in @("merged", "rejected")) { Die "'$Id' is '$($item.state)' - open a new item" }
     if ($item.state -eq "anchor-draft") { Die "'$Id' is not confirmed yet - amend it on -ConfirmAnchor instead" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
-    Copy-Item -Path $Anchor -Destination $item.anchor_file -Force
+    Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
     Set-Field $item "anchor" $anchorObj
     Set-Field $item "anchor_confirmed_by" $By
     Set-Field $item "anchor_confirmed_at" (Now)
@@ -710,10 +750,34 @@ if ($Submit) {
              "passing and what would count as failing. A plan that cannot fail is not a plan, " +
              "and 'I tested it myself' is not one either.")
     }
+    # A DEVELOPER ID THAT MATCHES NO WORKTREE IS A GUARD SWITCHED OFF. Refused here, at the
+    # door, rather than warned about at the very end (2026-09-04).
+    #
+    # Separation of duties is a NAME comparison (Normalize-Id): a tester or reviewer is
+    # refused because their -By equals the recorded developer, and an id nobody holds equals
+    # nobody. So a typo does not weaken the check a little - it removes it, silently, for
+    # this item. The old behaviour printed a WARNING after the item was already queued, which
+    # is the worst arrangement available: the trap sprung AND the door shut, because a second
+    # -Submit came back "already exists". The correction path below is the other half of this
+    # fix; a refusal with no way forward would just move the dead end.
+    #
+    # Test-KnownAgent stays advisory-by-construction where there is no registry at all (a
+    # fresh clone, a hermetic fixture) - that is "cannot check", not "checked and passed",
+    # and refusing there would break every environment before it had a chance to work.
+    if (-not (Test-KnownAgent $Developer)) {
+        Die (("-Developer '{0}' matches no worktree in the registry ({1}), so it is refused, " +
+              "not warned about. Separation of duties is a NAME comparison - an id nobody " +
+              "holds excludes nobody, and this item would then accept its own author as its " +
+              "tester and its reviewer. Use the id the worktree was registered under (the " +
+              "'wt-' prefix is optional), or provision it first:`n" +
+              "    scripts\agent-harness\new-worktree.ps1 -Id <short-id>") -f
+             $Developer, (Join-Path (Get-SharedStateDir) "worktrees.json")) 4
+    }
     # The anchor gate. An item that was proposed and confirmed is ADVANCED here; creating
     # one on the fly is only allowed when the operator has turned the gate off, and then it
     # is a stated configuration choice rather than a silent bypass.
     $anchorRequired = [bool](Get-HarnessSetting "pipeline.anchor_required" $true)
+    $correcting = $false
     $existing = if (Test-Path (ItemPath $Id)) { Read-Item $Id } else { $null }
     if ($existing) {
         if ($existing.state -eq "anchor-draft") {
@@ -741,7 +805,30 @@ if ($Submit) {
             Write-Host ("Anchor AUTO-PASSED for '{0}' under gate profile '{1}' - NO HUMAN CONFIRMED IT." -f $Id, $gd.profile) -ForegroundColor Yellow
             $existing = Read-Item $Id
         }
-        if ($existing.state -ne "anchor-confirmed") {
+        # THE CORRECTION PATH (2026-09-04). A second -Submit used to be refused outright, so
+        # anything typed wrong at submission - the developer id, the branch, the plan path -
+        # was permanent, and the only way out was a NEW id: which scatters one piece of work
+        # across two items, orphans the confirmed anchor, and loses the history. An item that
+        # is queued but that NOBODY HAS CLAIMED has no one standing on it; re-stating what
+        # was submitted is a correction to a record, not a state change, so the attempt is
+        # deliberately NOT bumped and no verdict is disturbed.
+        if ($existing.state -eq "ready-to-test") {
+            if (Test-Path (ClaimPath $Id "tester")) {
+                $holder = (Get-Content -Raw -Path (ClaimPath $Id "tester") | ConvertFrom-Json).by
+                Die (("'{0}' is claimed by {1} right now. Re-submitting would move the ground " +
+                      "under a tester mid-run - the plan and the branch they are executing " +
+                      "against would change without their knowing. Wait for the verdict, or " +
+                      "ask them to -Unclaim it.") -f $Id, $holder) 3
+            }
+            $correcting = $true
+            # CAPTURED NOW, not later. $item and $existing are the SAME object below, so by
+            # the time the history line is written Set-Field has already overwritten both
+            # fields with the new values and the "what changed" line would read "same values
+            # re-stated" for every correction - a record that is worse than none.
+            $wasDeveloper = $existing.developer
+            $wasBranch = $existing.branch
+        }
+        if (-not $correcting -and $existing.state -ne "anchor-confirmed") {
             Die ("queue item '$Id' already exists in state '$($existing.state)' (use a new -Id, or -Show it)")
         }
     } elseif ($anchorRequired) {
@@ -762,7 +849,7 @@ if ($Submit) {
     # item in the shared state dir, which outlives the worktree. Both agents independently
     # improvised this same location; two agents guessing alike is luck, not a protocol.
     $planDest = Join-Path $QueueDir "$Id.plan.md"
-    Copy-Item -Path $TestPlan -Destination $planDest -Force
+    Copy-IntoQueue $TestPlan $planDest "-TestPlan" "test plan for this item"
     $line = Resolve-WorkLine
     $sha = (Invoke-GitCapture @("rev-parse", $Branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
@@ -825,6 +912,16 @@ if ($Submit) {
             results = @(); history = @()
         }
     }
+    if ($correcting) {
+        # Say WHAT was corrected, not just that something was: the whole point of allowing a
+        # second -Submit is that the first one recorded the wrong thing, and a history line
+        # that does not name it leaves the next reader guessing which field moved.
+        $changes = @()
+        if ($wasDeveloper -ne $Developer) { $changes += ("developer '{0}' -> '{1}'" -f $wasDeveloper, $Developer) }
+        if ($wasBranch -ne $Branch) { $changes += ("branch '{0}' -> '{1}'" -f $wasBranch, $Branch) }
+        if (@($changes).Count -eq 0) { $changes += "same values re-stated" }
+        Add-History $item ("re-submitted before testing: " + ($changes -join "; ")) $Developer
+    }
     Add-History $item "submitted for testing" $Developer
     Write-Item $item
     Write-Host ("Queued '{0}' for TESTING (branch {1} -> {2})." -f $Id, $Branch, $line) -ForegroundColor Green
@@ -834,10 +931,12 @@ if ($Submit) {
         Write-Host ("  NOTE: '{0}' is checked out in the main checkout, so the reviewer will have to" -f $line) -ForegroundColor Yellow
         Write-Host "        hand the merge back to the operator. Known now rather than at landing time." -ForegroundColor Yellow
     }
-    if (-not (Test-KnownAgent $Developer)) {
-        Write-Host ("  WARNING: '{0}' matches no worktree in the registry. Separation of duties is a" -f $Developer) -ForegroundColor Yellow
-        Write-Host "           name comparison - a mistyped id silently weakens it." -ForegroundColor Yellow
+    if ($correcting) {
+        Write-Host "  This CORRECTED an item that was already queued and unclaimed; the attempt is unchanged." -ForegroundColor Yellow
     }
+    # The unregistered-developer WARNING that used to sit here was replaced by a refusal at
+    # the top of this handler (2026-09-04). It warned after the item was queued, which is
+    # after the only moment the warning could have helped.
     exit 0
 }
 
@@ -971,7 +1070,7 @@ if ($Pass -or $Fail) {
         catch { $isFile = $false }
     }
     if ($isFile) {
-        Copy-Item -LiteralPath $Evidence -Destination $evDest -Force
+        Copy-IntoQueue $Evidence $evDest "-Evidence" "evidence file for this attempt"
         $evidenceText = $evDest
     } elseif ($Evidence.Length -gt 2000) {
         # Inline-but-long: spill the FULL text to the evidence file and record the path,
@@ -1093,11 +1192,29 @@ if ($Merged) {
     # said "merged" while nothing had merged. A pipeline whose terminal state can be reached
     # without the thing happening is worse than no pipeline, because everyone downstream
     # trusts it.
-    $reach = Invoke-GitCapture @("merge-base", "--is-ancestor", $item.branch, $Sha)
+    #
+    # ASKED ABOUT tested_at_sha, NOT $item.branch (2026-09-04). This used to resolve the
+    # BRANCH as a live ref - and the success message ten lines below tells the developer to
+    # retire the worktree, which is what deletes that ref. Item `wiki-gate-polish` followed
+    # that instruction and then could not be recorded as merged at all: the tool refused a
+    # true statement because of a step the tool itself had asked for, and the only ways out
+    # were to recreate a branch nobody needed or to leave the queue lying about what landed.
+    #
+    # tested_at_sha is written once, by -Pass, and never rewritten. It cannot be deleted out
+    # from under this check, and it is the STRONGER question anyway: not "does this merge
+    # contain whatever that branch points at now?" but "does it contain the commit somebody
+    # actually tested?" A branch tip can move after the pass; the tested commit cannot.
+    if (-not $item.tested_at_sha) {
+        Die ("'$Id' records no tested_at_sha, so there is no commit to prove this merge " +
+             "contains. Only a tested item reaches review - if this one did not, it must not " +
+             "be recorded as merged. Nothing has been recorded.") 1
+    }
+    [void](Invoke-GitCapture @("merge-base", "--is-ancestor", $item.tested_at_sha, $Sha))
     if ($LASTEXITCODE -ne 0) {
-        Die ("'$Sha' does not contain '$($item.branch)' - that is not a merge of this item. " +
-             "If the merge command failed, it failed silently: check its exit code before " +
-             "recording the outcome. Nothing has been recorded.") 1
+        Die ("'$Sha' does not contain '$($item.tested_at_sha)' - the commit this item's tests " +
+             "passed at - so that is not a merge of this item. If the merge command failed, " +
+             "it failed silently: check its exit code before recording the outcome. Nothing " +
+             "has been recorded.") 1
     }
     # Items merged before 2026-08-29 carry `fits_anchor` instead. That recorded the answer to
     # a DIFFERENT question (did this match the intent?), so do not read the two as one field.
@@ -1163,7 +1280,7 @@ if ($Resubmit) {
         if (-not (Test-Path $TestPlan)) {
             Die ("-TestPlan must be a path to a file that exists (got '$TestPlan')")
         }
-        Copy-Item -Path $TestPlan -Destination $item.test_plan -Force
+        Copy-IntoQueue $TestPlan $item.test_plan "-TestPlan" "test plan for this item"
         Add-History $item "test plan revised for attempt $([int]$item.attempt)" $By
     }
     Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
@@ -1178,18 +1295,75 @@ if ($Resubmit) {
 }
 
 if ($Requeue) {
-    # The stale-pass rule. Tests passed at `tested_at_sha`; if the reviewer's rebase moved
-    # the content, that verdict no longer describes what would land. Back to test - NOT a
-    # rejection, because nothing is wrong with the work.
+    # TWO WAYS BACK, and they are different journeys with the same name.
+    #
+    # THE REVIEWER'S - the stale-pass rule. Tests passed at `tested_at_sha`; if the
+    # reviewer's rebase moved the content, that verdict no longer describes what would land.
+    # Back to 'ready-to-test' - NOT a rejection, because nothing is wrong with the work.
+    #
+    # THE DEVELOPER'S - added 2026-09-04, because there was no way back from 'test-passed'
+    # for the person best placed to use one. A developer who realises at the human gate that
+    # the ARTIFACT is wrong could only wait to be told: spending an operator's release and a
+    # reviewer's round to be handed back work its own author already knew was wrong. It lands
+    # on 'anchor-confirmed', which is where -AmendAnchor already puts an item that is "back
+    # with the developer", so the way forward is the ordinary -Submit and no new state is
+    # invented. Deliberately NARROW: only the developer of the item, and only from
+    # 'test-passed'. Once a reviewer holds it, it is theirs to return.
     if (-not $Id -or -not $By -or -not $Reason) { Die "-Requeue needs -Id, -By and -Reason" }
     $item = Read-Item $Id
-    Assert-Claim $item "reviewer" $By
-    $item.state = "ready-to-test"
-    $item.tested_at_sha = ""
-    Add-History $item "returned to test: $Reason" $By
-    Drop-Claim $Id "reviewer"
-    Write-Item $item
-    Write-Host ("'{0}' returned to TESTING - {1}" -f $Id, $Reason) -ForegroundColor Yellow
+    $byDeveloper = (($item.developer) -and ((Normalize-Id $By) -eq (Normalize-Id $item.developer)))
+    if ($byDeveloper) {
+        if ($item.state -ne "test-passed") {
+            Die (("'{0}' is '{1}'. A developer withdraws their OWN work only from " +
+                  "'test-passed' - before it is released, nothing is holding it up but you " +
+                  "(just keep working and -Submit or -Resubmit); after review starts it " +
+                  "belongs to the reviewer, who returns it with -Requeue or -Reject.") -f $Id, $item.state)
+        }
+    } else {
+        Assert-Claim $item "reviewer" $By
+    }
+    # VALIDATE BEFORE MUTATING. A bad -TestPlan path must leave the item exactly as it was,
+    # claim included - the failure mode this whole item is about is a command that half-runs.
+    if ($TestPlan -and -not (Test-Path $TestPlan)) {
+        Die ("-TestPlan must be a path to a file that exists (got '$TestPlan'). Nothing has been changed.")
+    }
+    # BUMP THE ATTEMPT. The evidence filename is `<id>.attempt<N>.evidence.md`, so leaving N
+    # alone means the NEXT tester's -Pass copies straight over the LAST tester's evidence.
+    # That happened on item `wikinote` (2026-09-04): the verdict survived in results[], the
+    # evidence it rested on did not, and nobody noticed until the file was read for the
+    # review. -Resubmit has bumped it since the same argument was made about a failed round;
+    # a return to test is the same lap by another name, and so is a developer's withdrawal.
+    Set-Field $item "attempt" ([int]$item.attempt + 1)
+    Set-Field $item "tested_at_sha" ""
+    # AND CARRY THE REVISED PLAN. A stale-pass return is exactly when a case is most likely
+    # to be missing - the reviewer is the one who knows what the rebase changed - and until
+    # now -Requeue took no -TestPlan at all, so the revision stayed on the reviewer's disk
+    # and the next tester executed the plan already known to be incomplete (same item, same
+    # day). -Submit and -Resubmit both take one; this is the third door into the same room.
+    if ($TestPlan) {
+        $planDest = if ($item.test_plan) { $item.test_plan } else { Join-Path $QueueDir "$Id.plan.md" }
+        Copy-IntoQueue $TestPlan $planDest "-TestPlan" "test plan for this item"
+        Set-Field $item "test_plan" $planDest
+        Add-History $item "test plan revised for attempt $([int]$item.attempt)" $By
+    }
+    if ($byDeveloper) {
+        Set-Field $item "state" "anchor-confirmed"
+        Add-History $item "developer WITHDREW it from test-passed (now attempt $($item.attempt)): $Reason" $By
+        Write-Item $item
+        Write-Host ("'{0}' WITHDRAWN by its developer - {1}" -f $Id, $Reason) -ForegroundColor Yellow
+        Write-Host ("  It is back with you at 'anchor-confirmed', attempt {0}. The confirmed anchor still stands." -f $item.attempt)
+        Write-Host ("  Change the artifact, then: queue.ps1 -Submit -Id {0} -Branch {1} -Developer {2} -TestPlan <path>" -f $Id, $item.branch, $item.developer)
+    } else {
+        Set-Field $item "state" "ready-to-test"
+        Add-History $item "returned to test (now attempt $($item.attempt)): $Reason" $By
+        Drop-Claim $Id "reviewer"
+        Write-Item $item
+        Write-Host ("'{0}' returned to TESTING as attempt {1} - {2}" -f $Id, $item.attempt, $Reason) -ForegroundColor Yellow
+        if (-not $TestPlan) {
+            Write-Host "  Plan unchanged. If what you rebased over needs a new case, re-run with" -ForegroundColor Yellow
+            Write-Host "  -TestPlan <path> - the tester reads the queued copy, not yours." -ForegroundColor Yellow
+        }
+    }
     exit 0
 }
 

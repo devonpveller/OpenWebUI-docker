@@ -1,0 +1,93 @@
+# Findings — agent-harness queue.ps1 defects, 2026-09-04
+
+The `findings_sink` for queue item `harnessq`. True problems in `scripts/agent-harness/`
+found while fixing the six defects that item names, which are **not** among those six.
+Checked against `work/harnessq`; every line below was read in the file at the line cited,
+not inferred from a sibling.
+
+---
+
+## F1 — `-Unclaim` verifies nothing, and can silently destroy a recorded pass
+
+`queue.ps1`, the `if ($Unclaim)` handler (currently ~line 1019):
+
+```powershell
+if (-not $Id -or -not $Role) { Die "-Unclaim needs -Id and -Role" }
+$item = Read-Item $Id
+Drop-Claim $Id $Role
+$item.state = $RoleRules[$Role].ready
+```
+
+Two things are wrong, and they are separate.
+
+**It does not ask who you are.** `-By` is not required and is never compared with the claim
+holder, so any agent can release any other agent's claim on any item. Every other verdict
+path calls `Assert-Claim` for exactly this reason (`-Pass`, `-Fail`, `-Merged`, `-Requeue`,
+`-Reject`); `-Unclaim` is the one that does not. It is the mirror of the reason `-Claim`
+uses `CreateNew`: exclusivity that anybody can revoke is not exclusivity.
+
+**It rewrites the state unconditionally, whether or not a claim existed.** `Drop-Claim` is a
+no-op when there is no claim file, and the very next line still assigns
+`$RoleRules[$Role].ready`. So `-Unclaim -Id <x> -Role tester` against an item sitting at
+`test-passed` moves it back to `ready-to-test` — discarding a tester's verdict and the
+operator's release gate, with no claim involved and nothing in the output saying so. The
+history line reads "released the tester claim", which is not what happened.
+
+**Out of scope for `harnessq`** — its anchor names six defects and this is not one of them,
+and the state-machine clause puts "redesigning the queue state machine" out of bounds. But
+this is the same class as defect 5 (a command that half-applies and reports success), and it
+is reachable by a typo.
+
+Suggested shape when someone picks it up: require `-By`, `Assert-Claim` before dropping, and
+only move the state when a claim was actually held.
+
+## F2 — `verify-merge-protocol.ps1` cuts its scratch line from `development`, and the operator's hooks no longer run there
+
+Reproduced 2026-09-04 while running the drill for `harnessq`, and reproduced again with the
+UNMODIFIED `queue.ps1` from the main checkout, so it is not caused by that item.
+
+`core.hooksPath` in this repository is an **absolute** path into the operator's checkout:
+
+```
+$ git config --show-origin --get core.hooksPath
+file:.git/config        D:\Open WebUI\ai-stack\.githooks
+```
+
+So every worktree runs the hook that is checked out in the MAIN checkout — currently
+`refactor/ai-stack-cleanup` — while `verify-merge-protocol.ps1:100` cuts its scratch line
+from `development`:
+
+```powershell
+Invoke-DrillGit branch drill/verify-d development
+```
+
+That hook invokes `./scripts/checks/check-corpus-exposure-producers.ps1`, which exists on
+`refactor/ai-stack-cleanup` and **not** on `development`. The path is CWD-relative, and the
+CWD is the drill's worktree, so the hook cannot find it, exits non-zero, and the pre-commit
+step reports "Pre-commit validation failed (a corpus insert does not state its plane)!".
+
+Both developers' commits in the drill's step 2 are refused. Nothing is ever committed, so
+six checks fail in a cascade — step 2's "two divergent commits exist", step 8's "rebase
+produced a real conflict" and "the tested sha is no longer what would land", and all three
+of step 11's outcome checks. **The 60 checks that do pass are unaffected**, including every
+queue.ps1 assertion, "development NEVER moved", "operator checkout still on its own branch"
+and the cleanup checks.
+
+The mismatch is structural, not a one-off: any hook the operator adds ahead of `development`
+breaks the drill the same way. The obvious fix is for the drill to cut `drill/verify-d` from
+`Resolve-WorkLine` (the same branch every agent worktree is cut from) rather than from the
+literal string `development` — but that is a change to a coordination script several agents
+depend on, it is not one of the six defects `harnessq` names, and its anchor scopes the
+artifact to `queue.ps1` and its test suite. Filed here rather than done.
+
+## F3 — MERGE-PROTOCOL.md does not know about the developer's way back
+
+`documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md:305` documents
+`-Requeue` as the reviewer's stale-pass move only. `harnessq` defect 6 adds a second caller —
+the developer, from `test-passed` — and the protocol is what agents actually read.
+
+Deliberately **not** changed by `harnessq`: that item's anchor scopes the artifact to
+`queue.ps1` and its test suite, and explicitly says documenting a rule elsewhere is not the
+item. The tool tells you about the path (`-Requeue` refuses from other states with a message
+naming both journeys, and `README.md` carries a one-line note), so nothing is unreachable —
+but the protocol doc is the place an agent looks first, and it is now incomplete.
