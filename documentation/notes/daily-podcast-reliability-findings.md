@@ -6,8 +6,17 @@ next to the claim so the next reader can re-run it rather than trust it. Where a
 claim cannot be checked from those artifacts, it says so.
 
 An earlier draft of this note (branch `work/podfall`, 2026-09-04) was rebuilt
-rather than merged - see section 6. Two of its claims did not survive re-checking
-and are corrected here.
+rather than merged - see section 6. Several of its claims did not survive
+re-checking and are corrected in place, each correction labelled where it sits:
+two factual reversals (sections 2 and 4), a temporal offset that was wrong in
+both magnitude and **direction** (section 3), a quoted `lastFailure` string and a
+sample log line that no stated method reproduced (section 5), two `file:line`
+citations that pointed one construct off (sections 5 and 7), and a count in
+section 6 that could not be re-derived from any command. The pattern is worth
+naming: **every one of them was a detail offered in support of a conclusion that
+was itself correct.** A findings note is acted on without re-derivation, so a
+wrong supporting number is a worse defect here than in code, where a test would
+have caught it.
 
 Artifacts used:
 
@@ -21,11 +30,12 @@ Artifacts used:
 
 ## 1. The fallback marker, episode by episode
 
-`renderEpisode` substitutes `(script generation unavailable - grounded material
-follows)` (with an em dash) plus the raw prompt block when the script LLM call
-returns null. That string is a reliable marker of a degraded episode, because
-nothing else writes it. Since this item it has one definition, exported as
-`SCRIPT_UNAVAILABLE`.
+`renderEpisode` substitutes `(script generation unavailable — grounded material
+follows)` plus the raw prompt block when the script LLM call returns null. That
+string is a reliable marker of a degraded episode, because nothing else writes it.
+Since this item it has one definition, exported as `SCRIPT_UNAVAILABLE`
+(`script-renderer.ts:439`). **The dash in it is an em dash, not a hyphen** - which
+is why the grep below stops before it rather than trying to match it:
 
     cd D:\_data
     grep -l "script generation unavailable" 0*-daily-*.md
@@ -54,8 +64,12 @@ nothing else writes it. Since this item it has one definition, exported as
 The anchor asked about **080-083**; all four took the fallback. The true range is
 wider: **076 through 089, fourteen consecutive episodes, unbroken.** 075
 (2026-08-21) is the last episode with a real script before the outage, which puts
-the first failure on the night of the J.1 virtual-key flip. **090 is the first
-recovered episode** - see section 4.
+the first failure on the night of the J.1 virtual-key flip. The ledger brackets
+that flip exactly, and the signs are worth stating: the earliest 401 the
+placeholder key ever produced is `2026-08-21 12:09:32` UTC (section 3), which is
+**5 h 38 min AFTER** healthy 075 was written (`06:31:11` UTC) and **17 h 44 min
+BEFORE** degraded 076 was (`2026-08-22 05:53:36` UTC). No episode was written
+between those two. **090 is the first recovered episode** - see section 4.
 
 (There is one older, unrelated hit: `015-daily-tutorial-replace-your-2k-month-...`
 from 2026-06. It predates this failure mode and is not attributed here.)
@@ -100,10 +114,13 @@ The claim that mattered - the three same-day rows at the cap - survives; the
 absolute one did not, and it was the kind of "and nothing else" flourish that adds
 nothing to the argument and can only ever be wrong.
 
-Episode 083's report was written 01:29 EDT = 05:29 UTC; the three rows are 6, 9
-and 12 minutes later, in the audio stage that follows. 47,296 chars / 21,822
-tokens is 2.17 chars per token, which is what a tag-dense English prompt costs on
-this tokenizer. **Marked as inference, not proof:** the arithmetic and the timing
+Episode 083's report was written `01:29:38.602584` EDT = `05:29:38.602584` UTC;
+the three rows are 6, 9 and 12 minutes **after** it (signed deltas
+**+372.9 s**, **+557.9 s**, **+731.1 s**), in the audio stage that follows -
+the opposite direction from the 401s in section 3, which precede the file.
+47,296 chars / 21,822 tokens is 2.17 chars per token, which is what a tag-dense
+English prompt costs on this tokenizer.
+**Marked as inference, not proof:** the arithmetic and the timing
 are consistent with these three rows being the transcript segments built from that
 dump, but the ledger does not store prompt text, so the identity is not
 demonstrable from these artifacts alone.
@@ -125,17 +142,50 @@ what killed the episode.
 `LiteLLM_SpendLogs.metadata` records the key the caller presented. The pre-fix
 `makeScriptChat` sent the literal placeholder `not-needed`:
 
-    SELECT "startTime", metadata->'error_information'->>'error_code',
+    SELECT DISTINCT metadata->'error_information'->>'error_code',
            left(metadata->'error_information'->>'error_message', 120)
-    FROM "LiteLLM_SpendLogs" WHERE metadata->>'user_api_key' = 'not-needed';
+    FROM "LiteLLM_SpendLogs"
+    WHERE metadata->>'user_api_key' = 'not-needed'
+      AND metadata->'error_information'->>'error_code' = '401';
 
     401 | 401: LiteLLM Virtual Key expected. Received=not-****eded, expected to start with 'sk-'.
 
-(The gateway masks the value it received; the note quotes the masked form.)
+(The gateway masks the value it received; the note quotes the masked form. One
+row exactly, re-run 2026-09-05.)
+
+**The `401` filter in that query is load-bearing, not decoration.** The bare
+predicate `user_api_key = 'not-needed'` matches **201,869** rows going back to
+2026-06-12, because before the J.1 virtual-key flip `not-needed` was the
+*accepted* key: 182,460 of those rows have no error at all. Only **2,446** rows
+are 401s, and they run `2026-08-21 12:09:32` to `2026-09-04 14:16:52` UTC. That
+is also why the placeholder survived so long in the source - until 2026-08-21 it
+worked. From 2026-08-22 onward every `not-needed` row is a 401, which is what
+makes the daily count in section 4 readable as a rejection count.
 
 On 2026-08-29 three such rows land at `05:29:38` UTC with `prompt_tokens=0` and
-`status=failure` - rejected at the door before any inference, nine seconds after
-episode 083's report was written.
+`status=failure` - rejected at the door before any inference. **All three land
+BEFORE episode 083's report was written, by less than a tenth of a second:**
+
+| ledger row (`startTime`, UTC) | signed delta vs the report file |
+|---|---|
+| `05:29:38.534` | **-0.069 s** (before) |
+| `05:29:38.567` | **-0.036 s** (before) |
+| `05:29:38.597` | **-0.006 s** (before) |
+
+The report's mtime, to sub-second: `2026-08-29 01:29:38.602584100 -0400` =
+`05:29:38.602584` UTC (`stat -c '%y' /d/_data/083-daily-*.md`; the host clock is
+EDT). Read the ledger side with
+`to_char("startTime",'YYYY-MM-DD HH24:MI:SS.US')` - `psql`'s default rendering
+hides the precision this comparison needs.
+
+**An earlier draft of this note said "nine seconds after", which was wrong in
+magnitude and in DIRECTION**, and the direction is the argument. The mechanism
+claimed here - the 401s cause the degraded report - requires the rejections to
+PRECEDE the file. They do. The correction makes the evidence *stronger*, not
+weaker: the last rejection lands **6 milliseconds** before `renderEpisode`'s
+fallback text reaches the disk. A nine-second gap would have been two events in
+the same minute; six milliseconds is one call stack - the 401 returning null and
+the fallback being written by the same run.
 
 This is the strongest single piece of evidence in the file: the ledger names the
 placeholder string from the source, so the link from "the code sent
@@ -155,6 +205,12 @@ Daily count of rows presenting the placeholder key:
     ... 2026-08-31 | 4    2026-09-02 | 18    2026-09-03 | 11
         2026-09-04 | 14   2026-09-05 | (no row)
 
+(The leading `...` elides 2026-06-12 through 2026-08-30; the full result is 84
+rows. Per section 3, only rows from **2026-08-22 onward** are all 401s, which is
+the range quoted here - the earlier days are dominated by the era when
+`not-needed` was the accepted key and the calls succeeded. There is no 2026-09-01
+row either.)
+
 `max("startTime")` is `2026-09-05 06:29:05` UTC, so the ledger is live and today's
 zero is an absence, not a gap in collection.
 
@@ -163,12 +219,28 @@ The mechanism, matching [`deno-recipe-bind-mount-delivery-gap.md`](deno-recipe-b
 - `openbrain-podcast` bind-mounts `D:\Open WebUI\ai-stack\OB1\recipes\daily-digest`
   as `/app` and runs `deno run` as PID 1, so it imports the entry module once at
   process start. Moving the submodule changes the file, not the running module.
-- The container's `StartedAt` is `2026-09-04T19:09:16Z` = **15:09 EDT**.
-- Episode 090 was written at **15:48 EDT**, 39 minutes later, and is the first
-  episode since 075 with a real script.
-- The live code is the fixed code:
+- The container's `StartedAt` is `2026-09-04T19:09:16.359Z` = **15:09:16 EDT**.
+- Episode 090 was written at **15:48:36 EDT**, **+39 min 20 s AFTER** the restart,
+  and is the first episode since 075 with a real script.
+- The last 401 the placeholder key ever produced is `2026-09-04 14:16:52` UTC =
+  **10:16 EDT**, i.e. **-4 h 52 min BEFORE** the restart - it is the last of
+  2026-09-04's 14 placeholder rows, and every one of the 14 falls on the
+  pre-restart side. So the zero on 09-05 is not the only evidence: the rejections
+  stop at the restart boundary, from the correct side of it.
+- The live code carries the **key** fix:
   `docker exec openbrain-podcast grep -n CHAT_API_KEY /app/src/podcast/script-renderer.ts`
   gives `115:  const apiKey = cfg.apiKey || Deno.env.get("CHAT_API_KEY") || "";`
+
+  **To be precise about which fix is deployed:** that line is the sibling item's
+  (`podcast-delivery-key`), which is what ended the outage. The DEGRADED logging
+  described in section 5 is **not** deployed at the time of writing - the live
+  `/app/src/podcast/script-renderer.ts` is 392 lines with **zero** occurrences of
+  `DEGRADED` (`docker exec openbrain-podcast sh -c 'wc -l ...; grep -c DEGRADED ...'`),
+  i.e. it is still the pre-`df7d543` file. Picking up `df7d543` is a deliberate
+  operator recreate, not something this item performed. Note also that this grep
+  reads the bind-mounted file, which by the bullet above is not proof of what the
+  running process loaded - it is only conclusive here because the file predates
+  `StartedAt` and episode 090 came out healthy.
 
 **The general point, which is why this section is kept rather than deleted:** a
 merge is not a deploy for this service, and the note that said so was right to say
@@ -182,12 +254,20 @@ Changed in `OB1/recipes/daily-digest/src/podcast/script-renderer.ts`:
 - **`renderEpisode` emits a DEGRADED line** on the fallback path, naming the
   stage, the episode, the SIZE of the dump (it becomes the transcript prompt
   downstream - that is the number that killed 083) and the cause carried out of
-  `chat()`. Observed, forcing a 401 against a stub gateway:
+  `chat()`. Observed verbatim (line wrapped here, single line in the log), for
+  the exact input below - a one-item episode 092 whose only synthesis is
+  `"[SOURCED] The article is a substack post about model releases."`, rendered
+  through a real `makeScriptChat` pointed at a stub gateway that returns 401:
 
-      [script] DEGRADED: episode 092 "Daily #092 - ..." is shipping RAW GROUNDED
-      MATERIAL instead of a written script (206 chars, which becomes the transcript
-      prompt downstream). Stage: script generation (renderEpisode/S4a).
-      Cause: HTTP 401 after 1 attempt(s)
+      [script] DEGRADED: episode 092 "Daily #092 — the article is a substack post
+      about model releases" is shipping RAW GROUNDED MATERIAL instead of a written
+      script (194 chars, which becomes the transcript prompt downstream).
+      Stage: script generation (renderEpisode/S4a). Cause: HTTP 401 after 1 attempt(s)
+
+  The `194` is the length of the fallback dump *for that one-item input*, not a
+  constant; episode 083's was 47,296. Swap the stub for a hand-rolled
+  `() => Promise.resolve(null)` and the same line ends
+  `Cause: reason not recorded by this chat function` instead.
 
 - **`primaryTopic` warns on its own heuristic fallback**, so the sentence-shaped
   filename has a log line to go with it.
@@ -206,20 +286,38 @@ because a degraded episode beats no episode. It is now audible.
 because a truncated classifier reply is worse than none - it still parses.
 Recording a reason is the only change on that path; the return value is still
 null. Verified by driving the real `isPromoBody` through a real `makeScriptChat`
-configured as `bodyClassifyChat` is, against a gateway that truncates at
-`max_tokens`: verdict **KEEP** (the safe default), with
-`lastFailure = "TRUNCATED at max_tokens=32 with the ceiling (32) reached"`.
+configured exactly as `bodyClassifyChat` is (`link-enrich.ts:199-205`), against a
+stub gateway that returns `finish_reason: "length"` on a body that still parses
+(`VERDICT: KEEP` then an unterminated sentence): verdict **KEEP** (the safe
+default), with
+
+    lastFailure = "TRUNCATED at max_tokens=4400 with the ceiling (4400) reached"
+
+Those numbers follow from the config and are not free parameters:
+`bodyClassifyChat` sets **no** `maxTokens`, so `makeScriptChat` takes its default
+`baseTokens = 2200` and `ceiling = 2 x baseTokens = 4400`
+(`script-renderer.ts:149-150`), and with the default `attempts = 3` the budget
+escalates once - the stub sees `max_tokens` `[2200, 4400]` - before the ceiling
+is reached and null is returned. A run with a smaller hand-set budget prints that
+budget instead; the suite's own case pins `maxTokens: 10, maxTokensCeiling: 10`
+and so reads `...max_tokens=10 with the ceiling (10) reached`
+(`script-renderer.test.ts:544-547`). Quote whichever you ran - they are different
+harnesses, not different behaviour.
 
 **The gap-dive triage path was left alone, deliberately.** The anchor allows this
 if the reason is written down.
 `OB1/recipes/daily-digest/src/enrich/gap-dive.ts:198` already warns:
 
-    [gap-dive] triage LLM returned null (call failed/timed out); N candidate(s) left unscored.
+    [gap-dive] triage LLM returned null (call failed/timed out); ${pool.length} candidate(s) left unscored.
+
+(Quoted from the source, so the count is still its template expression.)
 
 That predates this work - it came in with the feature, not with the 2026-08-29
 fix - and it already names the stage and the consequence. Since the sibling item
 the underlying cause arrives immediately above it on its own line, because
-`link-enrich.ts:158` gives that chat `label: "gap-triage"`. Adding
+`link-enrich.ts:164` gives that chat `label: "gap-triage"` - line 164 is the
+`label:` property itself; the `makeScriptChat({` call it belongs to opens at
+`:158`, which is where an earlier draft of this note pointed. Adding
 `failureReason()` there would inline the same text one line lower and change no
 outcome, so it was not touched. If it is ever revisited, the cheap version is the
 same one-line `failureReason(chat)` interpolation.
@@ -235,8 +333,14 @@ same one-line `failureReason(chat)` interpolation.
 
 ### A stale branch was REBUILT, not merged (2026-09-05)
 
-`work/podfall` sat 33 commits behind its line with an OB1 pin four merged items
-old. The two lineages had each restructured `makeScriptChat`'s internals and each
+`work/podfall` sat **33 commits** behind its line
+(`git rev-list --count 7d9dce2..14c3d14`, where `7d9dce2` is the old tip from the
+branch reflog and `14c3d14` the line tip it was reset to). Its OB1 pin was
+`0c9d50a`; the line's was `b69cdbf`, which the line had reached through **eight**
+gitlink bumps in that window (`git log --oneline 7d9dce2..14c3d14 -- OB1`), and
+which carries **10** OB1 commits - three of them merges - that `0c9d50a` does not
+(`git -C OB1 log --oneline 0c9d50a..b69cdbf`).
+The two lineages had each restructured `makeScriptChat`'s internals and each
 added a `giveUp` helper - a **semantic** conflict that a textual merge would have
 resolved into something neither side had tested. The branch was reset to the line
 tip, its OB1 re-provisioned at the current pin, and the anchor's *intent*
@@ -280,8 +384,17 @@ The gitlink bump ran both OB1 gates and both went green, and neither one looked 
 - **5b `check-ob1-recipe-tests`** globs `*.test.mjs` and runs `node --test`. This
   recipe is Deno TypeScript, so its suite is not in the set. The gate reported
   `test FILES 8 -> 8, test CASES 48 -> 48` across the bump that took this file from
-  24 cases to 34: those 48 belong to other recipes entirely. **The shrink floor
-  cannot detect a revert of this suite**, because it has never counted it.
+  24 cases to 34: those 48 belong to other recipes entirely. Re-derive both halves
+  independently of the gate -
+
+      node --test $(find OB1/recipes -name '*.test.mjs' -not -path '*/node_modules/*')
+      # -> 8 files, "# tests 48"; script-renderer.test.ts is not among them
+      grep -c 'Deno\.test(' OB1/recipes/daily-digest/src/podcast/script-renderer.test.ts   # 34
+      git -C OB1 show b69cdbf:recipes/daily-digest/src/podcast/script-renderer.test.ts \
+        | grep -c 'Deno\.test('                                                            # 24
+
+  **The shrink floor cannot detect a revert of this suite**, because it has never
+  counted it.
 - **5c `check-ob1-deno-recipes`** does cover this recipe, but `deno check` only,
   and it excludes `*.test.ts` explicitly (`check-ob1-deno-recipes.ps1:198`) for a
   stated reason - the remote `jsr:` import. Its own output says so: "Type check
@@ -297,9 +410,20 @@ reason.
 
 ## 7. Adjacent, verified elsewhere, not acted on
 
-`recipes/daily-digest/src/clients/llm.ts` carries the same shape of latent trap -
-a `"no-key"` bearer default behind `env("LOCAL_LLM_BEARER", "no-key")` - which is
-**not** firing, because the env var is set. Checked and written up in
+The digest path carries the same shape of latent trap - a `"no-key"` bearer
+default - which is **not** firing, because the env var is set. The two halves are
+in different files, and an earlier draft of this note put both in the wrong one:
+
+- `recipes/daily-digest/send-digest.ts:63` - `bearer: env("LOCAL_LLM_BEARER", "no-key")`.
+  This is the *only* reference to `LOCAL_LLM_BEARER` anywhere in the recipe
+  (`grep -rn LOCAL_LLM_BEARER OB1/recipes/daily-digest/`).
+- `recipes/daily-digest/src/clients/llm.ts:37` - `this.bearer = opts.bearer ?? "no-key"`,
+  the constructor fallback a *missing* `bearer` would land on. `llm.ts` does not
+  call `env()` at all.
+
+Re-checked here 2026-09-05: `docker inspect openbrain-digest` shows
+`LOCAL_LLM_BEARER=sk-...` set, so neither default is reached. (`openbrain-podcast`
+does not have it set, and does not need it - it does not run `send-digest.ts`; it
+carries `CHAT_API_KEY` instead.) Written up first in
 [`daily-podcast-delivery-findings.md`](daily-podcast-delivery-findings.md) by the
-sibling item `podcast-delivery-key`; not independently re-verified here, and
-cross-referenced rather than duplicated.
+sibling item `podcast-delivery-key`, and cross-referenced rather than duplicated.
