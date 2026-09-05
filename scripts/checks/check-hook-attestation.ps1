@@ -105,13 +105,26 @@ if ($AllowLedgerOverride -and $env:AI_STACK_ATTEST_LEDGER) {
 # The ledger is a set of attested tree hashes. It is append-only and one line per
 # validated tree; duplicates are expected (the same content committed twice) and harmless.
 $attested = @{}
+$hookOf   = @{}
+$hookUnrecorded = '(not recorded - ledger line predates hook identity)'
 if (Test-Path $ledgerPath) {
     foreach ($line in (Get-Content -Path $ledgerPath -ErrorAction SilentlyContinue)) {
-        # Only the tree hash is read. The timestamp column is kept in the ledger for a
-        # human reading it, but nothing branches on it any more - see the note at the
-        # exemption site for why a caller-controlled date cannot gate this.
-        $t = ($line -split '\s+')[0]
-        if ($t) { $attested[$t] = $true }
+        # Column 1 is the tree, and it is the only column the PASS/FAIL verdict reads. The
+        # timestamp is kept for a human, but nothing branches on it any more - see the note
+        # at the exemption site for why a caller-controlled date cannot gate this.
+        $f = @(($line -split '\s+') | Where-Object { $_ })
+        $t = if ($f.Count -ge 1) { $f[0] } else { '' }
+        if (-not $t) { continue }
+        $attested[$t] = $true
+        # Column 4 (added 2026-09-04) is `git hash-object` of the hook file that actually
+        # executed - which hook gated this tree, not merely that one did. Lines written
+        # before it have three columns; they are still perfectly valid attestations and are
+        # REPORTED AS SUCH rather than failed. A hook that could not hash itself wrote '?'.
+        # Both are carried through verbatim: inventing an identity for them would undo the
+        # entire point of recording one.
+        $h = if ($f.Count -ge 4) { $f[3] } else { $hookUnrecorded }
+        if (-not $hookOf.ContainsKey($t)) { $hookOf[$t] = @() }
+        if ($hookOf[$t] -notcontains $h) { $hookOf[$t] += $h }
     }
 }
 
@@ -177,13 +190,17 @@ $revArgs = @("rev-list", "$Base..$Branch")
 if (-not $mergeGateActive) { $revArgs = @("rev-list", "--no-merges", "$Base..$Branch") }
 $revs = Invoke-GitLines $revArgs
 $unattested = @()
+$gatedBy = @()
 $checked = 0
 
 foreach ($sha in $revs) {
     if (-not $sha) { continue }
     $checked++
     $tree = (Invoke-GitLines @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
-    if ($tree -and $attested.ContainsKey($tree)) { continue }
+    if ($tree -and $attested.ContainsKey($tree)) {
+        $gatedBy += [pscustomobject]@{ Sha = $sha; Tree = $tree; Hooks = @($hookOf[$tree]) }
+        continue
+    }
 
     # NO DATE-BASED EXEMPTION. There used to be one: commits whose committer date preceded
     # the ledger's first entry were skipped, so that a branch predating attestation was not
@@ -211,6 +228,7 @@ if ($Json) {
         mergesChecked = $mergeGateActive
         ledger      = $ledgerPath
         ledgerFound = (Test-Path $ledgerPath)
+        gatedBy     = @($gatedBy | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; hooks = @($_.Hooks) } })
         unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject; isMerge = $_.IsMerge } })
     } | ConvertTo-Json -Depth 5 -Compress
     exit ($(if ($unattested.Count) { 1 } else { 0 }))
@@ -218,6 +236,16 @@ if ($Json) {
 
 Write-Host ("Hook attestation: {0} commit(s) on {1} not in {2} ({3})" -f $checked, $Branch, $Base, $(if ($mergeGateActive) { "merges included" } else { "merges skipped - no pre-merge-commit at the fork point" }))
 Write-Host ("  ledger: {0}{1}" -f $ledgerPath, $(if (Test-Path $ledgerPath) { "" } else { "  (NOT FOUND)" }))
+if ($gatedBy.Count) {
+    # WHICH hook, not just that one ran. Reported, never enforced: this script's exit code
+    # still turns on attested-vs-not and nothing else. Deciding that a particular hook hash
+    # is the RIGHT one is the reader's call, and it is one command away (below).
+    $distinctHooks = @($gatedBy | ForEach-Object { $_.Hooks } | Sort-Object -Unique)
+    Write-Host ("  gated by {0} distinct hook file(s):" -f $distinctHooks.Count)
+    foreach ($h in $distinctHooks) { Write-Host ("    {0}" -f $h) }
+    Write-Host "  Read one back with:  git cat-file -p <hook-hash>"
+    Write-Host "  (that fails for a hook state never committed - itself an answer)"
+}
 if ($unattested.Count -eq 0) {
     Write-Host "  [OK] every commit's tree was validated by the pre-commit hooks." -ForegroundColor Green
     exit 0

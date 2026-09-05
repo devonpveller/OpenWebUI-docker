@@ -27,7 +27,44 @@ git config --get core.hooksPath   # -> .githooks
 | 5 | env_file scope | `scripts/checks/check-env-file-scope.ps1` | a commit ADDING a service that grants itself a shared .env (pre-existing grants are reported, not blocked) |
 | 5b | OB1 recipe tests | `scripts/checks/check-ob1-recipe-tests.ps1` | a staged OB1 gitlink bump whose tree fails any `*.test.mjs` under `OB1/recipes` — or whose tree the gate cannot honestly prove (staged≠disk SHA, dirty tracked OB1 files, missing node, zero tests, or fewer test **files or cases** than the pin it replaces; the case count is what catches a revert that removes a fix together with its own catching test) |
 | 5c | OB1 Deno recipe type-check | `scripts/checks/check-ob1-deno-recipes.ps1` | a staged OB1 gitlink bump whose `OB1/recipes/daily-digest` does not `deno check` — the Deno recipe 5b's `*.test.mjs` glob cannot see. Type check only, not the test suite; skips instantly with no gitlink staged; **refuses** rather than skipping when `deno` is missing |
-| 6 | Attestation | (inline in the hook) | nothing — records the checked tree in `<git-common-dir>/hook-attest.log` so `--no-verify` leaves an absence that `check-hook-attestation.ps1` can read back |
+| 6 | Attestation | (inline in the hook) | nothing — records the checked tree **and the hash of the hook file that checked it** in `<git-common-dir>/hook-attest.log`, so `--no-verify` leaves an absence that `check-hook-attestation.ps1` can read back, and a passing gate can be traced to the hook that ran it (see [Which hook gated this tree?](#which-hook-gated-this-tree)) |
+
+## Which hook gated this tree?
+
+Each attestation line is `<tree> <utc-timestamp> <branch> <hook-blob-hash>`, appended by
+step 6. The fourth column is `git hash-object "$0"` — the hook file git was *executing*,
+not a path the hook computed. That distinction is the whole feature: `core.hooksPath` is an
+**absolute** path to one checkout, so a worktree's own edited `.githooks/pre-commit` is not
+what runs for that worktree's commits, and any derived path would record the hook we wish
+had run.
+
+Ask which hook gated a commit:
+
+```bash
+LEDGER="$(git rev-parse --git-common-dir)/hook-attest.log"
+grep "^$(git rev-parse '<rev>^{tree}')" "$LEDGER"
+```
+
+Ask whether that hook contained a given check — e.g. 5b, the OB1 recipe-test gate:
+
+```bash
+git cat-file -p <hook-blob-hash> | grep -c 'check-ob1-recipe-tests'
+```
+
+`1` (or more) means the gate really was in the hook that ran; `0` means the commit was
+validated, but not by that check. A `git cat-file` that fails means the gating hook was an
+**uncommitted local edit** — also an answer, and a more interesting one. A `?` in the
+fourth column means the hash lookup itself failed; the attestation still stands, the hook
+identity is simply unknown. Three-column lines predate 2026-09-04.
+
+This exists because "the hooks ran" and "the check you are relying on ran" came apart:
+item `wiki-mirror-hardening` produced three honest attestations from a genuinely executing
+hook that did not yet contain check 5b, and establishing that afterwards cost a reviewer an
+hour of reflog archaeology. It answers going forward only — the ledger cannot speak for
+commits made before the column existed, and does not pretend to.
+
+`check-hook-attestation.ps1` prints the distinct gating hooks for the commits it checks.
+It **reports** them; the pass/fail verdict is still attested-vs-not and nothing else.
 
 A clean `git merge` never runs `pre-commit`, so `pre-merge-commit` delegates to it —
 the merge commit's tree passes the same eight checks (and a gitlink merge therefore
