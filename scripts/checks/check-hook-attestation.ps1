@@ -106,7 +106,41 @@ if ($AllowLedgerOverride -and $env:AI_STACK_ATTEST_LEDGER) {
 # validated tree; duplicates are expected (the same content committed twice) and harmless.
 $attested = @{}
 $hookOf   = @{}
-$hookUnrecorded = '(not recorded - ledger line predates hook identity)'
+
+# COLUMN 4 HAS FOUR STATES, AND THIS SCRIPT USED TO RENDER THEM AS ONE.
+#
+# The hook VALIDATES WHAT IT WRITES (step 6 rewrites anything non-hex to '?'), and this
+# script trusted that on the way back IN: whatever sat in column 4 was printed as though
+# it were a hook hash. It is not always one. The naive repair - "not 40 hex, therefore the
+# line predates the column" - is wrong in two directions, and each replaces a visibly odd
+# value with a confident falsehood:
+#
+#   '?'           is the hook's OWN degradation sentinel. It means the hook RAN and could
+#                 not hash itself, which is the opposite of "no hook identity was recorded".
+#   a branch name is what four real 2026-08-30 lines carry, from the reverted commit-msg
+#                 attester (bd4d891), whose shape was <tree> <msg-hash> <ts> <branch>.
+#                 They are genuine attestations written by a hook that genuinely ran.
+#
+# The reader comes to this output for an answer and will accept the one they are given, so
+# a plausible false explanation is worse than a value that visibly does not fit. Hence four
+# distinct renderings, and MALFORMED QUOTES THE OFFENDING VALUE VERBATIM instead of
+# explaining it away.
+#
+# RENDERING ONLY. All four still set $attested[$tree] below; the PASS/FAIL verdict reads
+# column 1 and nothing else. A malformed column 4 still attests - only its description
+# changes. Anything that makes one of these stop attesting is a different (and wrong) change.
+$hookAbsent   = '(not recorded - predates the hook-identity column)'
+$hookSentinel = "? (hook could not hash itself - the hook's own degradation sentinel; this line still attests)"
+function Get-HookIdentity {
+    param([string[]]$Fields)
+    if (@($Fields).Count -lt 4) { return $script:hookAbsent }
+    $v = [string]$Fields[3]
+    # -match used ONLY as a boolean. PS 5.1 clobbers the automatic $Matches on every -match
+    # anywhere in the call stack, so a capture group read afterwards is a silent $null.
+    if ($v -match '^[0-9a-f]{40}$') { return $v }
+    if ($v -eq '?') { return $script:hookSentinel }
+    return ("MALFORMED: '{0}' (column 4 is not a hook hash; this line still attests, its hook identity is unreadable)" -f $v)
+}
 if (Test-Path $ledgerPath) {
     foreach ($line in (Get-Content -Path $ledgerPath -ErrorAction SilentlyContinue)) {
         # Column 1 is the tree, and it is the only column the PASS/FAIL verdict reads. The
@@ -119,10 +153,10 @@ if (Test-Path $ledgerPath) {
         # Column 4 (added 2026-09-04) is `git hash-object` of the hook file that actually
         # executed - which hook gated this tree, not merely that one did. Lines written
         # before it have three columns; they are still perfectly valid attestations and are
-        # REPORTED AS SUCH rather than failed. A hook that could not hash itself wrote '?'.
-        # Both are carried through verbatim: inventing an identity for them would undo the
-        # entire point of recording one.
-        $h = if ($f.Count -ge 4) { $f[3] } else { $hookUnrecorded }
+        # REPORTED AS SUCH rather than failed. Get-HookIdentity above decides which of the
+        # four things column 4 actually is; nothing is invented for a line that does not
+        # carry a hash, because inventing an identity would undo the point of recording one.
+        $h = Get-HookIdentity -Fields $f
         if (-not $hookOf.ContainsKey($t)) { $hookOf[$t] = @() }
         if ($hookOf[$t] -notcontains $h) { $hookOf[$t] += $h }
     }
@@ -197,8 +231,12 @@ foreach ($sha in $revs) {
     if (-not $sha) { continue }
     $checked++
     $tree = (Invoke-GitLines @("rev-parse", "$sha^{tree}") | Select-Object -First 1)
+    # Parents are read for EVERY commit, not only the unattested ones. An ATTESTED merge is
+    # exactly the commit whose hook hash raises the question the report block below answers.
+    $parents = (Invoke-GitLines @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
+    $isMerge = (@(($parents -split '\s+') | Where-Object { $_ }).Count -gt 1)
     if ($tree -and $attested.ContainsKey($tree)) {
-        $gatedBy += [pscustomobject]@{ Sha = $sha; Tree = $tree; Hooks = @($hookOf[$tree]) }
+        $gatedBy += [pscustomobject]@{ Sha = $sha; Tree = $tree; Hooks = @($hookOf[$tree]); IsMerge = $isMerge }
         continue
     }
 
@@ -215,8 +253,6 @@ foreach ($sha in $revs) {
     # not from the environment. A branch that can attest has no excuse for a commit that
     # is not attested.
     $subject = (Invoke-GitLines @("log", "-1", "--format=%s", $sha) | Select-Object -First 1)
-    $parents = (Invoke-GitLines @("log", "-1", "--format=%P", $sha) | Select-Object -First 1)
-    $isMerge = (($parents -split '\s+' | Where-Object { $_ }).Count -gt 1)
     $unattested += [pscustomobject]@{ Sha = $sha; Tree = $tree; Subject = $subject; IsMerge = $isMerge }
 }
 
@@ -228,7 +264,7 @@ if ($Json) {
         mergesChecked = $mergeGateActive
         ledger      = $ledgerPath
         ledgerFound = (Test-Path $ledgerPath)
-        gatedBy     = @($gatedBy | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; hooks = @($_.Hooks) } })
+        gatedBy     = @($gatedBy | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; hooks = @($_.Hooks); isMerge = $_.IsMerge } })
         unattested  = @($unattested | ForEach-Object { @{ sha = $_.Sha; tree = $_.Tree; subject = $_.Subject; isMerge = $_.IsMerge } })
     } | ConvertTo-Json -Depth 5 -Compress
     exit ($(if ($unattested.Count) { 1 } else { 0 }))
@@ -240,11 +276,42 @@ if ($gatedBy.Count) {
     # WHICH hook, not just that one ran. Reported, never enforced: this script's exit code
     # still turns on attested-vs-not and nothing else. Deciding that a particular hook hash
     # is the RIGHT one is the reader's call, and it is one command away (below).
+    #
+    # ONE REGION, ONE READ. The odd column-4 states and the merge note below print HERE,
+    # beside the hashes they qualify, and not into a separate warning stream. A reader who
+    # must find a second block in order not to be misled by the first has already been
+    # misled by the first - the false belief forms while they are looking at the line.
     $distinctHooks = @($gatedBy | ForEach-Object { $_.Hooks } | Sort-Object -Unique)
     Write-Host ("  gated by {0} distinct hook file(s):" -f $distinctHooks.Count)
     foreach ($h in $distinctHooks) { Write-Host ("    {0}" -f $h) }
     Write-Host "  Read one back with:  git cat-file -p <hook-hash>"
     Write-Host "  (that fails for a hook state never committed - itself an answer)"
+    if ($distinctHooks -contains $hookSentinel) {
+        Write-Host "  A '?' above is the HOOK'S OWN sentinel, written by step 6 when git hash-object on"
+        Write-Host "  the running hook failed. The hook ran and could not name itself. That is not a"
+        Write-Host "  line predating the column, and it is not malformed - it is a recorded degradation."
+    }
+    $malformedHooks = @($distinctHooks | Where-Object { $_ -like 'MALFORMED:*' })
+    if ($malformedHooks.Count) {
+        Write-Host ("  {0} value(s) above are quoted verbatim: they are neither a 40-hex hook hash nor" -f $malformedHooks.Count)
+        Write-Host "  the '?' sentinel, so this script will not tell you what they mean. The line still"
+        Write-Host "  ATTESTS - only the hook identity is unreadable. One known writer: the reverted"
+        Write-Host "  commit-msg attester (bd4d891, 2026-08-30) wrote <tree> <msg-hash> <ts> <branch>,"
+        Write-Host "  so its fourth column is a BRANCH NAME. Anything else there is unexplained."
+    }
+    $gatedMerges = @($gatedBy | Where-Object { $_.IsMerge })
+    if ($gatedMerges.Count) {
+        Write-Host ("  {0} of the commit(s) above is a MERGE. Its hook hash names .githooks/PRE-COMMIT," -f $gatedMerges.Count)
+        Write-Host "  never pre-merge-commit, and that is correct rather than a mismatch to chase:"
+        Write-Host '  .githooks/pre-merge-commit ends in an exec of pre-commit, and exec REPLACES the'
+        Write-Host '  process, so $0 inside the hook that is running - and therefore the hash step 6'
+        Write-Host '  records - is pre-commit. Expect pre-commit here:'
+        foreach ($m in $gatedMerges) {
+            foreach ($h in @($m.Hooks)) {
+                Write-Host ("    {0} (merge)  {1}" -f $m.Sha.Substring(0, 8), $h)
+            }
+        }
+    }
 }
 if ($unattested.Count -eq 0) {
     Write-Host "  [OK] every commit's tree was validated by the pre-commit hooks." -ForegroundColor Green
