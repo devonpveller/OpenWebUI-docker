@@ -29,6 +29,12 @@
        revert removes a fix together with its own catching test, leaving
        the file count untouched. Override: AI_STACK_OB1_TESTS_ALLOW_SHRINK=1,
        printed loudly. See the block comment on 3b for the measured instance.
+    3c. Self-consistency: 3b's case count is LEXICAL (a regex over the staged
+       tree) and node's "# tests" below is the runtime truth, and until
+       2026-09-04 the same run printed both without ever comparing them.
+       They can disagree honestly, so a disagreement WARNS on the green path;
+       it does not refuse. See the block comment on 3c for the smuggle that
+       walked through the gap.
 
   The tests are Node-builtins-only by OB1 convention (no npm install), so
   host node is sufficient. Exit code 0 = clean or not applicable, 1 = refuse.
@@ -165,38 +171,87 @@ if ($testFiles.Count -eq 0) {
 #
 # The case count is LEXICAL: lines starting (after optional whitespace and an
 # optional `await`) with test( / it( / t.test(. That approximates what
-# `node --test` reports - a case generated in a loop counts once, a
-# commented-out case still counts - so it is deliberately never presented as a
-# coverage number. It is applied IDENTICALLY to both trees, so what the floor
-# actually reads is the DELTA, and a revert is exactly what moves the delta.
+# `node --test` reports, and the approximation is ASYMMETRIC. The text here
+# used to say flatly "a commented-out case still counts", which is true of one
+# comment syntax and false of the other (corrected 2026-09-04):
+#   - a case generated in a loop counts ONCE here and runs many times;
+#   - a case inside a /* block comment */ COUNTS here and never runs - the
+#     regex sees the test( line and knows nothing about the enclosing block;
+#   - a case behind a // line comment does NOT count, because only whitespace
+#     and an optional `await` may precede test( and // is neither. Commenting
+#     a case out with // therefore LOWERS this count.
+# So it is deliberately never presented as a coverage number. It is applied
+# IDENTICALLY to both trees, so what the floor actually reads is the DELTA,
+# and a revert is exactly what moves the delta. Which of the two comment
+# syntaxes you use stops being trivia at step 3c: a block-commented test( line
+# is precisely how you put back a lexical count you just reverted away.
 #
 # Deliberate removals: AI_STACK_OB1_TESTS_ALLOW_SHRINK=1 for that one commit.
 # An env var leaves no git trace (the --no-verify lesson), so the override is
 # PRINTED loudly here and the shrink itself is visible in the OB1 diff forever.
+#
+# The counter is defined out here, and the STAGED tree is counted
+# unconditionally, because step 3c needs the staged count even on the
+# first-bump path where there is no old pin to compare it against.
+$countTests = {
+    param($sha)
+    # A failed ls-tree/show yields an EMPTY array, and 0 would read as "no
+    # tests" - making the floor silently vacuous exactly when it cannot see.
+    # Return the -1 sentinel in BOTH fields so the caller can tell "could not
+    # look" from "looked, found none": a failed lookup must never read as a pass.
+    $blind = [pscustomobject]@{ Files = -1; Cases = -1 }
+    # QUOTEPATH (fixed 2026-09-04; latent, not live - no non-ASCII test
+    # filename exists yet, which is the only reason it is being fixed calmly).
+    # This used to be `ls-tree -r --name-only` followed by `git show "$sha:$path"`.
+    # core.quotepath is unset in this repo and therefore ON, so git C-quotes any
+    # path containing a byte above 0x7f: a test file whose name carries an
+    # accented letter comes back as the LITERAL text
+    #     "recipes/_shared/caf\303\251.test.mjs"
+    # - surrounding double quotes included. The filter below anchors on
+    # `.test.mjs$`; that string ends in a double quote, so the file fell out of
+    # the list, and the floor went on to print a clean, lower total. A floor
+    # that silently counts less than it claims is worse than no floor at all.
+    # Two changes, and both are needed:
+    #   -c core.quotepath=false  - the name comes back raw, so the suffix matches.
+    #   read each blob BY OBJECT ID, not by "$sha:$path" - even with quotepath
+    #     off, a non-ASCII name still round-trips out through the console
+    #     codepage and back into git as an argument, and a mojibaked name is a
+    #     FAILED lookup (the -1 sentinel: loud, but still not a count). A blob
+    #     id is 40 ASCII hex characters and no codepage can mangle it.
+    $entries = @(Git-InOB1 @('-c', 'core.quotepath=false', 'ls-tree', '-r', $sha, 'recipes'))
+    if ($LASTEXITCODE -ne 0) { return $blind }
+    $blobs = @()
+    foreach ($e in $entries) {
+        if ($e -match '^\d{6}\s+blob\s+([0-9a-f]{40})\t(.+)$') {
+            # Copy BOTH groups out before the next -match runs: $Matches is a
+            # single automatic variable that every -match overwrites, so
+            # `if ($Matches[2] -match ...) { $blobs += $Matches[1] }` appends
+            # $null - and `git show` with a null argument shows HEAD, exits 0,
+            # and contributes 0 cases. Written that way first; the scratch-tree
+            # proof for this very fix reported "CASES 0 -> 0" and caught it.
+            $blobSha = $Matches[1]
+            $blobPath = $Matches[2]
+            if ($blobPath -match '\.test\.mjs$') { $blobs += $blobSha }
+        }
+    }
+    $cases = 0
+    foreach ($b in $blobs) {
+        # A blank id here would make `git show` print HEAD and exit 0 - a lookup
+        # that failed while looking like it worked. Refuse to guess.
+        if ($b -notmatch '^[0-9a-f]{40}$') { return $blind }
+        $lines = @(Git-InOB1 @('show', $b))
+        if ($LASTEXITCODE -ne 0) { return $blind }
+        $cases += @($lines | Where-Object { $_ -match '^\s*(await\s+)?(t\.)?(test|it)\s*\(' }).Count
+    }
+    [pscustomobject]@{ Files = $blobs.Count; Cases = $cases }
+}
+$new = & $countTests $stagedSha
+$newShort = $stagedSha.Substring(0, 7)
+
 $oldPin = (& git -C $Root rev-parse -q --verify 'HEAD:OB1' 2>$null)
 if ($oldPin -and $oldPin -match '^[0-9a-f]{40}$') {
-    $countTests = {
-        param($sha)
-        # A failed ls-tree/show yields an EMPTY array, and 0 would read as "no
-        # tests" - making the floor silently vacuous exactly when it cannot see.
-        # Return the -1 sentinel in BOTH fields so the caller can tell "could not
-        # look" from "looked, found none": a failed lookup must never read as a pass.
-        $blind = [pscustomobject]@{ Files = -1; Cases = -1 }
-        $names = @(Git-InOB1 @('ls-tree', '-r', '--name-only', $sha, 'recipes'))
-        if ($LASTEXITCODE -ne 0) { return $blind }
-        $files = @($names | Where-Object { $_ -match '\.test\.mjs$' })
-        $cases = 0
-        foreach ($f in $files) {
-            $lines = @(Git-InOB1 @('show', "$($sha):$f"))
-            if ($LASTEXITCODE -ne 0) { return $blind }
-            $cases += @($lines | Where-Object { $_ -match '^\s*(await\s+)?(t\.)?(test|it)\s*\(' }).Count
-        }
-        [pscustomobject]@{ Files = $files.Count; Cases = $cases }
-    }
     $old = & $countTests $oldPin
-    $new = & $countTests $stagedSha
     $oldShort = $oldPin.Substring(0, 7)
-    $newShort = $stagedSha.Substring(0, 7)
     if ($old.Files -lt 0 -or $new.Files -lt 0) {
         # Best-effort floor: an unreadable tree must not refuse legitimate bumps,
         # but it must never look like a passed comparison either.
@@ -236,6 +291,40 @@ if ($code -ne 0) {
         Select-Object -First 12 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
     Fail ("recipe tests FAILED ($summary) for staged OB1 $($stagedSha.Substring(0,7)). " +
           "Fix the tree (or the test) in OB1, push, re-stage the gitlink, and commit again.")
+}
+
+# --- 3c. Self-consistency: does node agree with the lexical count? ---------
+# Until 2026-09-04 this script printed two counts of the same thing and never
+# compared them. The tester's smuggle rode straight through the gap: a revert
+# that removed one real case, plus a block-commented test( line put back in
+# its place, restored the LEXICAL count to 48 - so 3b printed
+# "test CASES 48 -> 48" and passed - while node, two lines further down,
+# printed "# tests 47". Both numbers were on the operator's screen at once.
+#
+# This CANNOT be an equality gate. The two numbers diverge honestly: a case
+# generated in a loop is one lexical line and many runtime tests, test.skip
+# still counts as a test to node, a block-commented case is lexical only. So a
+# disagreement is a WARNING - it says "look at the diff", not "you are wrong".
+#
+# GREEN PATH ONLY, deliberately: on a red run the commit is already refused
+# and the operator has real failures to read, and a file that throws on import
+# makes the two counts disagree for a reason that is already on screen.
+$nodeTests = $null
+foreach ($line in $out) {
+    if ([string]$line -match '^# tests ([0-9]+)\s*$') { $nodeTests = [int]$Matches[1] }
+}
+if ($null -eq $nodeTests -or $new.Cases -lt 0) {
+    Write-Host ("[check-ob1-recipe-tests] WARNING: self-consistency check DID NOT RUN - " +
+        "lexical case count " + $(if ($new.Cases -lt 0) { 'unreadable' } else { "$($new.Cases)" }) +
+        ", node '# tests' " + $(if ($null -eq $nodeTests) { 'not found in the TAP output' } else { "$nodeTests" }) +
+        ". The two counts below were not compared.") -ForegroundColor Yellow
+} elseif ($nodeTests -ne $new.Cases) {
+    Write-Host ("[check-ob1-recipe-tests] WARNING: the lexical case count and node DISAGREE - " +
+        "3b counted $($new.Cases) test case(s) in staged OB1 $newShort, node ran $nodeTests. " +
+        "This is not proof of anything on its own (loops, test.skip and /* block-commented */ " +
+        "cases all diverge honestly), but it is the ONE signal that separates an honest " +
+        "refactor from a revert with a commented-out case pasted in to hold the count up. " +
+        "Read the OB1 diff for this bump before you accept the OK below.") -ForegroundColor Yellow
 }
 
 Write-Host "[check-ob1-recipe-tests] OK - $($testFiles.Count) test file(s), $summary (staged OB1 $($stagedSha.Substring(0,7)))."

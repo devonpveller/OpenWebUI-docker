@@ -27,8 +27,12 @@
     2. If the staged gitlink SHA differs from the OB1 working tree's HEAD,
        FAIL: `deno check` reads the DISK, so a green run would prove the wrong
        tree. (Same clause, same reason, as 5b.)
-    3. `deno check` every non-test *.ts under OB1/recipes/daily-digest. Any
-       type error - or a missing deno - fails the commit.
+    3. `deno check` every non-test *.ts under OB1/recipes/daily-digest,
+       enumerated FROM DISK (see DELIBERATE LIMITS below - that is a choice,
+       not an oversight). Any type error - or a missing deno - fails the
+       commit. On the FAILURE path only, the gate additionally names any
+       enumerated file that is UNTRACKED in OB1, because the standard "re-stage
+       the gitlink" advice is wrong for those and loops forever.
 
   DELIBERATE LIMITS, stated here so a green is not read as more than it is:
 
@@ -50,6 +54,31 @@
     files; it is not deployed by this stack's bind mounts and is deliberately
     outside this gate's scope. If a SECOND Deno recipe is ever deployed here,
     add it to $RecipeRels below - this gate will not find it on its own.
+
+  * ENUMERATION IS FROM DISK, NOT FROM THE STAGED TREE - deliberately, and
+    NOT for symmetry with 5b (recorded 2026-09-04, after 5b had to fix a
+    quotepath silent-drop that this gate would inherit wholesale). 5b reads
+    git objects because it COMPARES TWO TREES and disk cannot be trusted to be
+    either of them; this gate compares nothing, it compiles one tree, and
+    step 2 above has already refused the commit unless disk IS the staged
+    tree. Switching to `git ls-tree` here would change almost nothing and cost
+    something real:
+      - `deno check` follows the IMPORT GRAPH out from the roots it is handed,
+        so enumeration only picks ROOTS. Any file that a checked file imports
+        is checked whether or not git can see it. The only difference ls-tree
+        would make is whether an ORPHAN untracked .ts - one that nothing
+        imports - is also a root.
+      - Reading names out of git re-opens the exact hole 5b closed on
+        2026-09-04: core.quotepath is on by default, a non-ASCII path comes
+        back C-quoted, the `*.ts` filter stops matching it, and the gate
+        type-checks less than it reports while still printing a count.
+    The two failure modes are NOT symmetric, and that is the whole argument.
+    Disk enumeration can only over-refuse: a stray untracked .ts with a type
+    error refuses a commit that would in fact have deployed fine. That is
+    LOUD, it lands on one operator, and the failure path below names the
+    untracked files so it cannot masquerade as a real defect. ls-tree
+    enumeration fails the other way - it under-checks, silently, and ships.
+    A loud over-refusal beats a silent under-check.
 
   * NO "subtree unchanged" SKIP. Comparing the daily-digest subtree between
     the old pin and the staged one and skipping when equal would be cheaper,
@@ -203,6 +232,46 @@ foreach ($rel in $RecipeRels) {
             else { [string]$o }
         }
         $lines | Select-Object -First 40 | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+
+        # UNTRACKED CULPRITS (added 2026-09-04). Enumeration is from DISK by
+        # design (see DELIBERATE LIMITS in the header), so a .ts that exists
+        # only in the working tree IS type-checked and CAN be the thing that
+        # just failed. For that file every word of the advice below is wrong:
+        # `git add OB1` re-stages the identical gitlink, the gate re-enumerates
+        # the identical untracked file, and the operator goes round again with
+        # no state changing. Name them, and say plainly that the loop is a loop.
+        # Diagnosis only - it never changes the verdict, and never runs on the
+        # green path, which is byte-identical to what it was before.
+        $tracked = @(Git-InOB1 @('-c', 'core.quotepath=false', 'ls-files', '--', $rel))
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ("  NOTE: could not list OB1's tracked files, so this gate cannot say " +
+                "whether an UNTRACKED file is the culprit. If re-staging the gitlink does not " +
+                "change this failure, look for .ts files that exist only on disk.") -ForegroundColor Yellow
+        }
+        else {
+            $trackedSet = @{}
+            foreach ($tr in $tracked) { $trackedSet[$tr] = $true }
+            $ob1Root = (Join-Path $Root 'OB1')
+            $untracked = @()
+            foreach ($tsf in $tsFiles) {
+                if (-not $tsf.StartsWith($ob1Root, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                $relPath = $tsf.Substring($ob1Root.Length).TrimStart('\', '/') -replace '\\', '/'
+                if (-not $trackedSet.ContainsKey($relPath)) { $untracked += $relPath }
+            }
+            if ($untracked.Count -gt 0) {
+                Write-Host ("  NOTE: $($untracked.Count) of the $($tsFiles.Count) type-checked " +
+                    "file(s) are UNTRACKED in OB1 - present on disk, absent from commit " +
+                    "$shortSha :") -ForegroundColor Yellow
+                $untracked | Select-Object -First 10 | ForEach-Object {
+                    Write-Host "    $_" -ForegroundColor Yellow
+                }
+                Write-Host ("  RE-STAGING THE GITLINK WILL NOT HELP if one of those is the " +
+                    "culprit: this gate enumerates from DISK, so 'git add OB1' pins the same " +
+                    "commit and the same untracked file gets checked again. Commit them inside " +
+                    "OB1 and bump the gitlink to that commit, or delete them.") -ForegroundColor Yellow
+            }
+        }
+
         Fail ("deno check FAILED for OB1/$rel in staged OB1 $shortSha. This is a COMPILE error, " +
               "not a test failure - the code above would not have run at all. Fix it in OB1, " +
               "push, re-stage the gitlink, and commit again.")
