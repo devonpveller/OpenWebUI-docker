@@ -551,8 +551,8 @@ them is BROKEN. It does not mean the vault moved.**
 That is the durable thing this section can offer, and it is exactly why the
 probes carry no figures. Every count here decays within the hour, because the
 merged fix heals a page only when that page is regenerated and the vault
-regenerates continuously - section 1 records 1111 -> 1087 -> 1076 measured in a
-single evening. A figure written beside a probe is stale before the next reader
+regenerates continuously - section 1 records 1111 -> 1087 over about six hours
+of one day. A figure written beside a probe is stale before the next reader
 arrives; an invariant BETWEEN two probes never is.
 
 Use it as a self-check, in this order:
