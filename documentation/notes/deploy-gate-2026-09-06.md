@@ -723,7 +723,7 @@ cites: a line-ending claim needs a byte count, not a pattern match.
 
 ### CONSEQUENCE: `stack.ps1 health` now exits non-zero on this stack
 
-The new probe (`scripts/stack/stack.ps1:146-147`) reports the drifted count and
+The new probe (`scripts/stack/stack.ps1:142-171`) reports the drifted count and
 fails when it is not 0, so today's run ends `1 probe(s) FAILED` (exit 1) where
 it previously ended `ALL HEALTH PROBES PASSED`. That is the true state - two
 plugin snapshots do not match what OWUI is running - and it returns to green
@@ -749,3 +749,101 @@ loud because `stack.ps1 health`'s exit code is used as a smoke test elsewhere.
   `C:/Users/.../Temp/fake.db` before PowerShell sees it (MSYS path conversion),
   which turns a container-path test into a refusal for the wrong reason. Drive
   those cases from PowerShell, or prefix `MSYS_NO_PATHCONV=1`.
+
+### ATTEMPT 1 FAILED: the workaround was written in the check and not applied at its call site
+
+Attempt 1 (`3e9eeba`) failed testing on T8(a). The check itself was sound on
+every path the tester attacked; the defect was in its six-line integration into
+`scripts/stack/stack.ps1`, and it is worth recording because the fix was already
+written, in a comment, twenty lines away.
+
+`$owuiDrift = (& powershell ... -CountOnly 2>$null)` sat OUTSIDE any `Probe`
+scriptblock - so outside `Probe`'s `try`/`catch` - while `stack.ps1:34` sets
+`$ErrorActionPreference = "Stop"`. On a refusal the check writes its sentence to
+stderr, and under `Stop` PowerShell 5.1 turns a native command's stderr into a
+TERMINATING `NativeCommandError`; `2>$null` does not prevent it. Measured by the
+tester with the probe pointed at an absent container and at a stopped one:
+**5 of 14 probe lines printed, no owui probe line, no summary, exit 1**, and the
+eight downstream probes (memory, search, coder, OB1 x4, agent-org) never ran.
+
+So a stopped `openwebui` blinded the workspace's one-command smoke test to five
+other planes - strictly worse than the warn-and-pass the anchor forbids, and it
+wore exit 1, which is indistinguishable from "one probe failed".
+
+The same trap is documented in `scripts/checks/check-owui-drift.ps1:125-131` and
+worked around INSIDE that script (drop to `'Continue'` around each native call).
+It was not applied at the call site. **A trap you have already met, written down
+and defeated in one file is not defeated in the file that calls it.** The fix
+(`stack.ps1:142-171`) saves `$ErrorActionPreference`, sets `'Continue'` for the
+`& powershell` call inside a `try`/`catch`, restores it, merges stderr with
+`2>&1` and reads it back as `ErrorRecord`s so the refusal REASON reaches the
+probe name. Verified in three live states (healthy-with-drift, absent container,
+stopped throwaway): 14 probe lines, one `[FAIL]` owui line, summary present,
+exit 1, in all three.
+
+Second plan defect, same root: T8(a) offered "or trust T4(e)" as an alternative
+to running it. T4(e) proves the `-CountOnly` CONTRACT, which says nothing about
+the CALL SITE - the comparison inside the scriptblock is never reached. **A case
+that lets the tester reason instead of run is how this shipped**; the tester ran
+it anyway and caught it. T8(a) now requires three live runs and forbids the
+shortcut.
+
+Third, unrelated to the defect but same shape of self-inflicted wound: three of
+T1's `docker exec` one-liners used `\"`-escaped double quotes, which PowerShell
+5.1 strips before the native call - each returned a python `SyntaxError` and no
+data. Measured here: `-c "... c.execute(\"select ...\")"` arrives as
+`c.execute(" select id,content from tool where id in deep_research mnemory \)`.
+Embedded DOUBLE quotes are mangled even inside a single-quoted PowerShell
+string. What works, and what `check-owui-drift.ps1:148` itself does: single
+quotes ONLY inside the python, held in a PowerShell here-string, passed as one
+argument (`Get-Content prog.py | docker exec -i openwebui python3 -` also
+works). The plan already warned about a DIFFERENT quoting trap on this same
+command shape and missed its own.
+
+### Four things the tester verified that the deliverable should say out loud
+
+Recorded here at the coordinator's instruction; all four are the tester's
+measurements, re-checked here against the live schema.
+
+1. **Scope wording was inconsistent.** The script header and the exit-0 summary
+   both say the check is manifest-scoped ("...or about live rows the manifest
+   does not name"), but the exit-1 `DRIFT:` sentence and the `stack.ps1` probe
+   line did not - a reader could take either as a statement about the whole live
+   DB. Fixed: the DRIFT sentence now reads "N of M MANIFEST rows do not match the
+   live content. This says nothing about live rows the manifest does not name",
+   and the probe reads "owui/ manifest rows drifted from live webui.db".
+2. **A SQL NULL live `content` would read IN SYNC against a 0-byte repo file**,
+   because the in-container python coerces `(x or '')` - "no content stored" is
+   not "empty content". Unreachable against this schema: `content` is TEXT NOT
+   NULL on `tool`, `function` and `skill`, and no manifest row's repo file is
+   empty. Same family: a repo file consisting only of CR bytes hashes equal to an
+   empty live row, inherent to CR-stripping and equally unreachable. Recorded in
+   the script header so a schema change re-opens the question.
+3. **A live row whose `updated_at` is not an integer, or whose id contains a
+   `|`, is dropped by the line filter and then reported MISSING LIVE** even
+   though the row exists with matching content. Fail-SAFE in direction (it
+   reports drift, never a clean bill) but the STATUS is wrong. Unreachable live:
+   `updated_at` is NOT NULL integer on all three tables and no live id contains a
+   pipe. Also recorded in the script header.
+4. **Live `function` holds 9 ids against the manifest's 8**, the extra being
+   `add_web_sources_to_knowledge` (retired from the manifest at `e94a6d9`,
+   2026-08-21, still present in `webui.db`). `tool` (5) and `skill` (8) match the
+   manifest exactly, so that is the only live row invisible to this check. Same
+   ground as FINDING 3 above, now confirmed by a second party.
+
+The tester also established from git, rather than from my say-so, that the
+"16 rows" figure is stale - and the arithmetic holds (16 - 3 retired + 8 skills
+= 21) - but their reconstruction of WHERE it happened does not, and the
+correction is recorded here rather than passed on. Their evidence line reads
+"the diff at `e94a6d9` shows exactly `add_web_sources_to_knowledge`,
+`code_agent` and `code_agent_tools` removed and the 8 `skills/*.md` rows added".
+Checked at this pin: `git show e94a6d9 -- owui/manifest.csv` removes exactly TWO
+rows, `pipes/code_agent.py` and `tools/code_agent_tools.py`, taking the file from
+23 rows to 21. The other two moves are separate commits - `4ef2891` added the 8
+skills rows ("owui: catalog the Skills deploy-artifact class; export all 8 live
+skills") and `98c0317` removed `add_web_sources_to_knowledge`. The tester's
+`git log -S code_agent` listed only the commits touching that STRING, so the
+16 -> 21 gap it spans was attributed to the last commit in the list. A verdict
+this reached the right answer; the mechanism it cites is wrong. (`-S` lists
+commits where the string's occurrence COUNT changed - it is not a history of the
+file's row count.)

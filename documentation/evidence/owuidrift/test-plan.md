@@ -38,10 +38,26 @@ worktree `wt-owuidrift`, base `7614556`.
 - The anchor says **16 rows**. `owui/manifest.csv` has **21** data rows: 13
   tool/function files + 8 skills. 16 was the count before
   `add_web_sources_to_knowledge`, `code_agent` and `code_agent_tools` were
-  retired in August 2026 and the total was never recomputed;
-  `owui/README.md` carried the same stale 16 and is corrected in this change.
-  21 is the number to expect everywhere. Verify it: `git log --oneline -S
-  code_agent -- owui/manifest.csv`, and count the file.
+  retired and the 8 `skills/*.md` rows added, all in August 2026, and the total
+  was never recomputed; `owui/README.md` carried the same stale 16 and is
+  corrected in this change. 21 is the number to expect everywhere.
+  Verify it by counting rows at each commit that CHANGED the count, not by
+  reading a `-S` log (`-S` lists commits where one string's occurrence count
+  moved; it is not a history of the file's length, and reading it as one
+  attributes every row change in the gap to the last commit listed):
+
+  ```powershell
+  git log --oneline -- owui/manifest.csv | ForEach-Object {
+    $c = ($_ -split ' ')[0]
+    "{0}  rows={1}" -f $c, ((git show "${c}:owui/manifest.csv") | Select-Object -Skip 1 | Measure-Object).Count
+  }
+  ```
+
+  Expect 16 for every commit from `223ebbc` up to `6f1b059`, then 24 at
+  `4ef2891` (the 8 skills added), 23 at `98c0317`
+  (`add_web_sources_to_knowledge` out), 21 at `e94a6d9` (`pipes/code_agent.py`
+  and `tools/code_agent_tools.py` out - that commit removes those TWO rows and
+  nothing else), and 21 at the tip. 16 - 3 + 8 = 21.
 - The anchor names tables `tool` and `function` only. 8 of the 21 manifest rows
   are **skills**, which live in their own `skill` table with its own `content`
   column. Leaving them uncompared would have been a silent hole, so the script
@@ -138,8 +154,26 @@ foreach ($p in 'owui\tools\deep_research.py','owui\tools\mnemory.py') {
   "{0}  {1}" -f ([BitConverter]::ToString($h).Replace('-','').ToLower()), $p
 }
 # live side, CR dropped, hashed INSIDE the container
-docker exec openwebui python3 -c "import sqlite3,hashlib;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,hashlib.sha256(x.encode('utf-8').replace(b'\r',b'')).hexdigest()) for i,x in c.execute(\"select id,content from tool where id in ('deep_research','mnemory')\")])"
+$py = @'
+import sqlite3,hashlib;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,hashlib.sha256(x.encode('utf-8').replace(b'\r',b'')).hexdigest()) for i,x in c.execute('select id,content from tool') if i in ('deep_research','mnemory')])
+'@
+docker exec openwebui python3 -c $py
 ```
+
+> **Quoting trap - this is why the commands below look the way they do.**
+> PowerShell 5.1 mangles a `\"`-escaped double quote on its way to a native
+> command: `-c "... c.execute(\"select ...\")"` reaches python as
+> `c.execute(" select id,content from tool where id in deep_research mnemory \)`
+> and dies with `SyntaxError: unterminated string literal`. Attempt 1 of this
+> plan shipped that form in T1(a)/(b)/(c) and each returned no data. Embedded
+> DOUBLE quotes are mangled the same way even inside a single-quoted PowerShell
+> string. The form that works - and the form `check-owui-drift.ps1:148` itself
+> uses - is: **single quotes ONLY inside the python, held in a PowerShell
+> here-string, passed as one argument**; filter in python (`if i in (...)`)
+> rather than with a quoted SQL literal. (`Get-Content prog.py | docker exec -i
+> openwebui python3 -` also works if you prefer a file.) Every `docker exec`
+> below is in the working form; if you rewrite one, re-verify it returns data
+> rather than a SyntaxError before you trust its output.
 
 Expect `deep_research` to be `631db708e570d57d138ccf2ef4b7509e0a8fc1f6cf4692f69c34572c06b200f2`
 on BOTH sides; `mnemory` to be `9d57b7f6efcc4a29337dce8febb0b9a4cbdb7eb4c4b7ef3ce0c2e107edde75be`
@@ -150,7 +184,10 @@ on BOTH sides; `mnemory` to be `9d57b7f6efcc4a29337dce8febb0b9a4cbdb7eb4c4b7ef3c
 the sizes differ too (numbers only, never content):
 
 ```powershell
-docker exec openwebui python3 -c "import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,len(x.replace(chr(13),'')),len(x.replace(chr(13),'').encode('utf-8')),x.replace(chr(13),'').count(chr(10))+1) for i,x in c.execute(\"select id,content from tool where id='mnemory'\")])"
+$py = @'
+import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,len(x.replace(chr(13),'')),len(x.replace(chr(13),'').encode('utf-8')),x.replace(chr(13),'').count(chr(10))+1) for i,x in c.execute('select id,content from tool') if i=='mnemory'])
+'@
+docker exec openwebui python3 -c $py
 python -c "b=open(r'owui/tools/mnemory.py','rb').read().replace(b'\r',b''); s=b.decode('utf-8'); print(('mnemory-repo',len(s),len(b),s.count(chr(10))+1))"
 ```
 
@@ -172,14 +209,17 @@ all 21 rows as drifted. Show it:
 
 ```powershell
 (Get-Item owui\tools\deep_research.py).Length     # 17215 bytes on disk, CRLF
-docker exec openwebui python3 -c "import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,len(x.encode('utf-8')),x.count(chr(13))) for i,x in c.execute(\"select id,content from tool where id='deep_research'\")])"
-docker exec openwebui python3 -c "import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,x.count(chr(13)),x.count(chr(10))) for i,x in c.execute(\"select id,content from skill where id='docx'\")])"
+$py = @'
+import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);print([(i,len(x.encode('utf-8')),x.count(chr(13))) for i,x in c.execute('select id,content from tool') if i=='deep_research']+[(i,x.count(chr(13)),x.count(chr(10))) for i,x in c.execute('select id,content from skill') if i=='docx'])
+'@
+docker exec openwebui python3 -c $py
 ```
 
-Expect `17215` bytes on disk against `('deep_research', 16882, 0)` live - the
-same 16882 bytes once the file's 333 CRs are dropped, and zero CRs live. The
-skill row goes the other way: `('docx', 590, 590)` - CRLF live, while
-`owui/skills/docx.md` on disk has 0 CRs (`.gitattributes`: `*.md text eol=lf`).
+Expect `17215` bytes on disk and, from the one `docker exec`,
+`[('deep_research', 16882, 0), ('docx', 590, 590)]` - the same 16882 bytes once
+the file's 333 CRs are dropped, and zero CRs live. The skill row goes the other
+way: 590 CRs and 590 LFs live (CRLF), while `owui/skills/docx.md` on disk has
+0 CRs (`.gitattributes`: `*.md text eol=lf`).
 Both directions occur in the real data; T3 pins them with a constructed pair.
 
 (d) The run must not crash on any row, and every one of the 21 rows must carry
@@ -489,24 +529,92 @@ committed by the time you test it, so `git stash` would not remove the probe):
 git diff 7614556 -- scripts/stack/stack.ps1
 ```
 
-Expected: 13 probes before, 14 after; the diff adds one `Probe` line, one
-`$owuiDrift` line that feeds it, and a comment - and touches nothing else in the
-file. The health run prints exactly one more `[OK]`/`[FAIL]` line than the 13 at
-the base:
-`  [FAIL] frontend: owui/ snapshots drifted from live webui.db: 2`, positioned
-between the tailnet-routes probe and the memory cloud-door probe. The count in
-that line must equal the `differ + missing + unknown` total from T1. The probe
-reports the COUNT and no file names.
+Expected: 13 probes before, 14 after; the diff adds one `Probe` line, the block
+that computes `$owuiDrift` for it, and a comment - and touches nothing else in
+the file. The health run prints exactly one more `[OK]`/`[FAIL]` line than the
+13 at the base:
+`  [FAIL] frontend: owui/ manifest rows drifted from live webui.db: 2`,
+positioned between the tailnet-routes probe and the memory cloud-door probe. The
+count in that line must equal the `differ + missing + unknown` total from T1. The
+probe reports the COUNT and no file names.
 
 `[FAIL]` is correct today: 2 rows really are drifted. The failing probe raises
 the health exit code by one; confirm the final line moves from
 `ALL HEALTH PROBES PASSED` to `1 probe(s) FAILED` and that no other probe
 changed state.
 
-(a) A refusal must read as FAIL, not as 0 drifted. Point the probe at a dead
-container name by temporarily editing the `-Container` argument into the
-`$owuiDrift` line, or trust T4(e) - which already proves `-CountOnly` prints
-`REFUSED`, and `"REFUSED" -eq '0'` is false. State which you did.
+### T8(a) - a refusal costs ONE probe line, not the rest of the sweep
+
+**RUN THIS. Do not reason from T4(e).** Attempt 1 of this plan offered "or trust
+T4(e)" as an alternative, and that shortcut is exactly how the defect shipped:
+T4(e) proves the `-CountOnly` CONTRACT (`REFUSED`, exit 2), which says nothing
+about the CALL SITE. In attempt 1 the invocation sat outside the `Probe`
+scriptblock, and `stack.ps1:34` sets `$ErrorActionPreference = "Stop"`, under
+which PowerShell 5.1 turns a native command's stderr into a TERMINATING
+`NativeCommandError` (`2>$null` does not prevent it). A refusal therefore killed
+the sweep: **5 of 14 probe lines, no owui line, no summary, exit 1** - and the
+eight downstream probes (memory, search, coder, OB1 x4, agent-org) never ran. A
+stopped `openwebui` blinding the workspace's one-command smoke test to five
+other planes is strictly worse than the warn-and-pass the anchor forbids. The
+comparison inside the scriptblock is never reached, so reasoning about it proves
+nothing.
+
+Run the FULL `stack.ps1 health` in **three states** and paste all three tails
+including the summary line and the probe-line count. States 2 and 3 need the
+probe pointed elsewhere: copy `scripts\stack\stack.ps1` to a scratch name
+**inside `scripts\stack\`** (so `$PSScriptRoot` still resolves), add
+`-Container <name>` to the `check-owui-drift.ps1` invocation in the copy, run the
+copy, then delete it and confirm `git status` is clean. **`openwebui` is never
+stopped** - state 3 uses a throwaway container you stop yourself.
+
+```powershell
+# state 1 - openwebui healthy, real drift (today's state)
+powershell -NoProfile -File scripts\stack\stack.ps1 health
+"EXIT=$LASTEXITCODE"
+
+# state 2 - the check pointed at a container that does not exist
+(Get-Content scripts\stack\stack.ps1) -replace "-CountOnly 2>&1\)", "-CountOnly -Container zzz-absent-container 2>&1)" | Set-Content scripts\stack\stack-t8a-absent.ps1
+powershell -NoProfile -File scripts\stack\stack-t8a-absent.ps1 health
+"EXIT=$LASTEXITCODE"
+
+# state 3 - the check pointed at a container that exists but is STOPPED
+docker run -d --name owuidrift-refuse --network none --entrypoint sleep python:3-slim 600
+docker stop owuidrift-refuse
+docker ps --filter name=openwebui --format "{{.Names}} {{.Status}}"    # must still be Up (healthy)
+(Get-Content scripts\stack\stack.ps1) -replace "-CountOnly 2>&1\)", "-CountOnly -Container owuidrift-refuse 2>&1)" | Set-Content scripts\stack\stack-t8a-stopped.ps1
+powershell -NoProfile -File scripts\stack\stack-t8a-stopped.ps1 health
+"EXIT=$LASTEXITCODE"
+
+Remove-Item scripts\stack\stack-t8a-absent.ps1, scripts\stack\stack-t8a-stopped.ps1
+docker rm -f owuidrift-refuse
+git status --short
+```
+
+All three states must satisfy ALL FOUR of:
+
+1. **14 `[OK]`/`[FAIL]` probe lines** - count them
+   (`(... | Select-String '^\s+\[(OK|FAIL)\]').Count`). Anything less than 14
+   means the sweep was cut short; that is the defect, and it is a FAIL.
+2. **The owui probe line is present, exactly once, and reads `[FAIL]`** - with
+   the COUNT (`: 2`) in state 1, and `REFUSED - <reason>` in states 2 and 3.
+   Never a count of `0` on a refusal.
+3. **The summary line prints** (`1 probe(s) FAILED`), and `EXIT=1`. A missing
+   summary with exit 1 is the terminated sweep wearing the same exit code.
+4. **No file names** in the probe line, in any state.
+
+Expected verbatim owui lines:
+
+```
+  [FAIL] frontend: owui/ manifest rows drifted from live webui.db: 2
+  [FAIL] frontend: owui/ manifest rows drifted from live webui.db: REFUSED - container 'zzz-absent-container' was not found by docker inspect, so the live database cannot be read.
+  [FAIL] frontend: owui/ manifest rows drifted from live webui.db: REFUSED - container 'owuidrift-refuse' exists but is not running (State.Running=false), so the live database cannot be read.
+```
+
+Read `scripts/stack/stack.ps1:142-171` as well as running it: the invocation is
+wrapped in `try`/`catch` with `$ErrorActionPreference` dropped to `'Continue'`
+for the native call and restored afterwards, and stderr is merged with `2>&1`
+and read back as `ErrorRecord`s so the refusal REASON reaches the probe name.
+If a future edit removes that wrapper, state 2 fails immediately.
 
 ## T9 - the documentation claims are true
 

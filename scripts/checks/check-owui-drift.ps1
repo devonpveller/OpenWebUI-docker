@@ -54,6 +54,19 @@
     - anything at all about a run that REFUSED. A refusal is exit 2 and a
       sentence; it is never a clean bill.
 
+  TWO EDGES THAT ARE WRONG IN PRINCIPLE AND UNREACHABLE AGAINST THIS SCHEMA
+  (measured by the tester 2026-09-06; recorded so a schema change re-opens them):
+    - a SQL NULL live `content` is coerced to '' by `(x or '')`, so it would read
+      IN SYNC against a 0-byte repo file - "no content stored" is not "empty
+      content". Unreachable: `content` is TEXT NOT NULL on tool, function and
+      skill, and no manifest row's file is empty.
+    - a live row whose `updated_at` is not an integer, or whose id contains a
+      `|`, fails the line filter below and is then reported MISSING LIVE even
+      though the row exists with matching content. Fail-SAFE in direction (it
+      reports drift, never a clean bill) but the STATUS is wrong. Unreachable:
+      `updated_at` is NOT NULL integer on all three tables and no live id
+      contains a pipe.
+
   EXIT CODES
     0  every manifest row IN SYNC
     1  at least one row DIFFERS / MISSING LIVE / MISSING REPO / UNKNOWN TYPE
@@ -231,7 +244,7 @@ Say ("$($rows.Count) manifest rows: $inSync in sync, $differs differ, $missingLi
 if ($drifted -eq 0) {
     Say 'IN SYNC: every manifest row matches the live content. This says nothing about valves, about whether the plugin works, or about live rows the manifest does not name.'
 } else {
-    Say "DRIFT: $drifted of $($rows.Count) rows do not match. Content alone cannot say which side is newer - the live updated_at is above; the operator decides."
+    Say "DRIFT: $drifted of $($rows.Count) MANIFEST rows do not match the live content. This says nothing about live rows the manifest does not name. Content alone cannot say which side is newer - the live updated_at is above; the operator decides."
 }
 if ($CountOnly) { Write-Output $drifted }
 if ($drifted -gt 0) { exit 1 }
