@@ -847,3 +847,211 @@ skills") and `98c0317` removed `add_web_sources_to_knowledge`. The tester's
 this reached the right answer; the mechanism it cites is wrong. (`-S` lists
 commits where the string's occurrence COUNT changed - it is not a history of the
 file's row count.)
+
+## deploystate
+
+- **The six pre-existing `verify-merge-protocol.ps1` reds have a second half the passplan
+  entry above does not name: `core.hooksPath` is an ABSOLUTE path into the operator's
+  checkout.** `git config --get core.hooksPath` returns `D:\Open WebUI\ai-stack\.githooks`
+  (checked 2026-09-06 from `wt-deploystate`), so EVERY worktree runs the hook file that the
+  OPERATOR's branch has loaded, whatever branch the worktree itself holds - while that hook
+  invokes `./scripts/checks/*.ps1` relative to the COMMITTING worktree. `development`'s own
+  `.githooks/pre-commit` names only three checkers and never mentions
+  `check-corpus-exposure-producers.ps1` (`git show development:.githooks/pre-commit`); the
+  line that fails, `.githooks/pre-commit:67`, comes from `refactor/ai-stack-cleanup`. The
+  consequence is general, not a drill artefact: **any worktree on a branch that lacks a
+  checker the operator's branch added cannot commit at all**, and the error names a file
+  that does exist - in the other checkout. Out of scope here; the fix is a decision (make
+  the hook tolerate a missing checker, or resolve the checker path from the hook's own
+  directory), not a patch this item may take.
+
+  *Corrected 2026-09-06 after attempt 1's tester ran the command this entry cites.* The
+  sentence above said `development`'s hook "names only three checkers"; it names **four**.
+  `git show development:.githooks/pre-commit | grep -n powershell.exe`, re-run before this
+  correction was written:
+
+      18: ... -File './scripts/checks/check-staged-secrets.ps1'
+      25: ... -File './scripts/checks/validate-lineendings.ps1'
+      34: ... -File './scripts/checks/check-llm-gateway-routing.ps1'
+      43: ... -File './scripts/checks/check-project-configs.ps1'
+
+  Four uncommented invocations (`grep -cE '^[[:space:]]*powershell\.exe'` -> `4`; the same
+  count on the work line is `9`). The material half - that it never mentions
+  `check-corpus-exposure-producers.ps1` - is unchanged and is what the entry rests on. The
+  wrong number was written from memory of an earlier grep whose output I had narrowed with a
+  second pattern; the command was cited but not re-run against the sentence. That is the
+  same defect class this file exists to catch, in this file, by its author.
+
+- **Four merged items on the live board shipped an image or a paste and the board records
+  no surface for any of them.** Re-deriving history is out of scope by this item's anchor,
+  so this is the list, produced by replaying each merge through the new derivation in a
+  hermetic state dir (2026-09-06):
+
+  | item | merge | what its merge range ships |
+  |---|---|---|
+  | `curatorimg` | `e72c678` | `image:openbrain-curator` |
+  | `curator2` | `08c4ae1` | `image:openbrain-curator`, `image:openbrain-research`, `paste:owui/tools/deep_research.py` |
+  | `opsdoor` | `b06057f` | `image:openbrain-curator`, `image:openbrain-research` |
+  | `researchretry` | `7614556` | `image:openbrain-research` |
+
+  `gate5d` (`5b79731`) ships nothing, which is why the anchor names it as the negative. The
+  last two landed AFTER this item's anchor was written and are named here so the list is
+  complete rather than as-of-Tuesday. Whether those deploys happened is recorded somewhere
+  else or nowhere; this queue does not know, and after this change it would.
+
+- **`[needs hand-off]` was one true instance in thirty-two, counted three times on the same
+  day as the board moved.** All three counts are over the 42 item files directly, not over
+  the tool's output:
+
+  | when | `line_mergeable=false` | terminal | non-terminal |
+  |---|---|---|---|
+  | mid-afternoon (developer) | 30 | 30 | 0 |
+  | ~an hour later (developer) | 31 | 30 | 1 - `owuidrift`, `testing` |
+  | during attempt 1's test (tester) | 32 | 31 | 1 - `deploystate`, `testing` |
+
+  The arithmetic reconciles exactly: this item's own `-Submit` added the 32nd row, and
+  `owuidrift` moved from `testing` to `merged` mid-run, carrying one row from the
+  non-terminal column to the terminal one. **The tester's 32/31 is the figure of record**,
+  and `queue.ps1`, `verify-queue-defects.ps1` and the harness README now all cite it and
+  point back at this table rather than each carrying a reading of their own (they held the
+  developer's 31/30 until attempt 3; each was true when taken, and three sources quoting
+  three moments of a moving count is how a reader concludes one of them is wrong);
+  the substance is unchanged in all three readings - one true instance hidden among thirty
+  or thirty-one stale ones, which is the whole reason the flag carried no signal. The figure
+  `25` that an earlier draft comment and the phase PLAN
+  (`documentation/implementation-guide/deploy-gate-and-curator-recovery/PLAN.md:56`)
+  carried was not measured at all; `queue.ps1`, `verify-queue-defects.ps1` and the harness
+  README now carry counted numbers. A count over a live board is a measurement with a
+  timestamp, not a constant - so each of these says when it was taken.
+
+- **`verify-merge-protocol.ps1` had no way to assert on what `queue.ps1` PRINTS, and the
+  first check that tried was silently blind.** Every other `& $queue ...` in that drill ends
+  in `| Out-Null` and asserts against the item file on disk; the `-List` check added by this
+  item captured with `(& $queue -List 2>&1 | Out-String)` and got the empty string, because
+  `queue.ps1` prints through `Write-Host`, which in PS5.1 does not flow into a pipeline. It
+  read FAIL against a perfectly clean row. Fixed inside this item (a `Get-QueueBoard` helper
+  that runs a child `powershell.exe`), and recorded because the failure mode is the
+  workspace's recurring one - a check that runs and checks nothing - and the next assertion
+  on printed text in that drill will meet it again unless it uses the helper.
+
+- **`remove-worktree.ps1` counts a parent work branch's commits as this worktree's unmerged
+  work.** `remove-worktree.ps1:115` asks `git log --oneline $MergedInto..$branch`, where
+  `$MergedInto` defaults to the resolved WORK LINE (`:32`, `Resolve-WorkLine`) rather than
+  to the branch the worktree was actually cut from. For a worktree cut from another work
+  branch, everything inherited from that branch is reachable from `$branch` and not from
+  the work line, so it is counted, printed as `commits not in <line>` and used to REFUSE
+  the removal (`:128`). The registry records the real base, and two rows are of this shape
+  today - `h2v2` and `h2v2b`, both `base: work/u8h2`
+  (`.git/agent-worktrees/worktrees.json`, read 2026-09-06). **Not reproduced** - this is a
+  reading of that code path, named in this item's anchor as out of scope and left for a
+  separate item, which should start by running `remove-worktree.ps1 -WhatIfOnly -Id h2v2`
+  and comparing the count against `work/u8h2..work/h2v2`.
+
+- **This worktree's copy of THIS file is behind the line.** `work/deploystate` is cut from
+  `49bb2db`, and `opsdoor` (`b06057f`) and `researchretry` (`7614556`) both appended
+  sections to this file afterwards (`## opsdoor` and `## researchretry`, both present at
+  `7614556`). The `## deploystate` section above is appended to the base version, so the reviewer's rebase will
+  meet a tail conflict here; every section involved is append-only, so the resolution is to
+  keep all of them in landing order.
+
+### From attempt 1's test (tester-deploystate-sub1, 2026-09-06)
+
+- **The `-Deployed` evidence check is LINE-SCOPED, not entity-scoped - deliberately, and it
+  stays that way.** The tester wrote `openbrain-curator rebuilt from 6fba6b3 - checked
+  openbrain-research instead: State.Health.Status=healthy` with
+  `-Surface image:openbrain-curator` and it was ACCEPTED (exit 0). The check asks that some
+  line mentioning the surface also carries a pin and a health state; it cannot ask that all
+  three are *about* the same container, because that is a judgement about English prose and
+  not something a regular expression settles. Tightening it would refuse far more honest
+  evidence than it would catch dishonest evidence. Recorded rather than fixed, and now said
+  out loud in `Test-DeployEvidence`'s own header, in MERGE-PROTOCOL step 6 and in the harness
+  README, so nobody reads the check as stronger than it is. What it does guarantee is that
+  the surface's own name must appear: evidence naming only the other container is refused
+  with `no line of the evidence names it` (the tester confirmed that half too).
+
+- **A `.ps1` written back in text mode on Windows silently doubles its carriage returns, and
+  `git status` will not tell you.** `.gitattributes` has `*.ps1 text eol=crlf`, so the blob
+  is stored LF and the checkout carries CRLF. A patch script that reads the CRLF working
+  copy, inserts text containing CRLF and writes it back through a text-mode handle produces
+  `CR CR LF`; git's clean filter strips exactly one CR and stores a literal CR in the blob,
+  and the damage round-trips, so `git status` reads clean. Commit `ff34eda` of this item put
+  **376 literal CR bytes** into `queue.ps1`'s blob that way: piping
+  `git cat-file blob ff34eda:scripts/agent-harness/queue.ps1` through `tr -cd '\r' | wc -c`
+  gives 376, and the same command on `49bb2db:...` gives 0 (both re-run 2026-09-06).
+  PowerShell parses it, every drill stayed green, and nothing noticed. Fixed inside this item
+  by rebuilding the file from the blob with every CR removed and the lines rejoined with one
+  CRLF; the blob is pure LF again from `af6f483` onward.
+
+  **How to check that the repair carried nothing else, from the tip.** An earlier version of
+  this entry said the rebuilt file was "proven byte-equal to the previous blob with CRs
+  stripped". That equality held at the repair STEP - a working state - and it is not what
+  landed: the commit carrying the repair also carries attempt 2's changes, so **no revision
+  in this branch satisfies it**. `7b5beb9`'s blob with CRs stripped hashes to `1d43a129`; the
+  landed blob `af6f483:scripts/agent-harness/queue.ps1` is `0735e9fc`. The substance was
+  true; the wording was stronger than any surviving artifact, which is exactly what this file
+  is held to. The check that DOES survive, and the one to run - pure git, no temp files
+  and no PowerShell traps (`diff` aliases `Compare-Object`, and `>` re-encodes):
+
+      git diff --ignore-cr-at-eol 7b5beb9 af6f483 -- scripts/agent-harness/queue.ps1
+
+  A CR anywhere but end-of-line would still show as a change, so this doubles as the check
+  that the strip was lossless; all 376 CRs at `7b5beb9` were in fact CRLF pairs (bare CR 0,
+  `CR CR LF` 0). The residual is **86 changed lines (9 removed, 77 added) in FOUR hunks**,
+  each nameable from attempt 2's stated scope:
+
+  | hunk | what it is |
+  |---|---|
+  | `@@ -493,9 +493,18 @@` | the derivation section header, rewritten for the manifest rule |
+  | `@@ -773,16 +782,56 @@` | the `ls-tree` probe replacing `cat-file -e`, and the manifest-driven paste block replacing the `owui/`-path one |
+  | `@@ -836,6 +885,16 @@` | a COMMENT block documenting the line-scoped evidence limit - no code |
+  | `@@ -845,9 +904,18 @@` | the pin regex (hex, not merely `[0-9a-f]` with a digit) and the refusal message that states the rule |
+
+  Nothing else rode in on the 376 whitespace-only lines. (Verified independently by attempt
+  2's tester, who reported the same four hunks; the hunk headers move if the file does, so
+  re-run the diff rather than trusting the offsets.)
+
+  *That figure was 88 for one revision of this entry, and 88 is what attempt 2's tester
+  reported too.* Both of us counted `diff -u ... | grep -c '^[-+]'`, which also matches the
+  `--- old` and `+++ new` header lines: 88 minus 2. It is 86, and
+  `git diff --ignore-cr-at-eol ... | grep -cE '^[-+][^-+]'` agrees. Nothing rests on the
+  number - the claim is "four hunks, all nameable" - but two people produced the same wrong
+  figure from the same lazy pattern, which is worth more than the two lines it cost.
+
+  A related trap, found while writing the plan case for this one: **a PowerShell pipeline
+  re-encodes a native command's bytes.** `git cat-file blob <rev>:<path> | tr -d '\r' |
+  git hash-object --stdin` returns `1d43a129` in Git Bash and `5cae3219` in PowerShell 5.1,
+  because PS decodes the first process's stdout into text lines and re-emits them with CRLF
+  before `tr` ever runs. Any byte-level check of this kind belongs in bash, and any command
+  quoted for one must say which shell it was measured in.
+
+  Two standing lessons: write files as BINARY with the line ending chosen explicitly, and
+  `git status` clean is not evidence that a file's bytes are what you meant
+  (`git cat-file blob :<path>` is). A third, from the wording above: an equality asserted
+  against a state that will not survive the commit is not a claim a reader can check - say
+  what they can run at the tip. The first attempt at the repair was itself wrong - two
+  chained `.replace()`s turned `CR CR LF` into a blank line, 376 of them - which is why the
+  fix was asserted against the previous blob rather than eyeballed.
+
+- **`queue.ps1 -Merged` printed git's `fatal:` above its own success message.** The probe for
+  "does this OB1 integration directory have a Dockerfile?" was `git cat-file -e`, which
+  writes `fatal: path 'integrations/<dir>/Dockerfile' does not exist in '<pin>'` to stderr
+  for the ordinary absent case, and `Invoke-GitCapture` does not redirect stderr. Found by
+  the tester replaying the real `de42243`. Fixed here (`ls-tree --name-only`, which exits 0
+  either way and prints nothing when the path is absent) rather than recorded, because an
+  operator taught to ignore a `fatal:` line is being taught the wrong lesson.
+
+- **Two rules changed on the operator's call after attempt 1, both because the tester found
+  a real false positive.** (a) A paste surface is now derived only for an `owui/` file that
+  `owui/manifest.csv` LISTS. The rule was `any owui/** path`, and the real `owuidrift` merge
+  `e989265` derived `paste:owui/manifest.csv` and `paste:owui/README.md` - two surfaces that
+  could only ever be closed by inventing a container health state for a markdown file. The
+  manifest is the file-to-OWUI-id map, so it already answers the question exactly; it is read
+  from the merged tree, its `file` column is resolved by header name (the real manifest's
+  last column moved from `bytes` to `sha256` between `08c4ae1` and `e989265`), and an
+  unlisted `owui/` path is reported as a NOTE rather than dropped in silence. (b) A pin in
+  `-Deployed` evidence must be HEX: the tester closed a real surface with
+  `openbrain-research deployed at 1788720066 State.Status=running`, because a decimal epoch
+  satisfies `[0-9a-f]{7,64}`. It is now 7-40 hex that is not simply a decimal number, or a
+  labelled `sha256:<hex>`; a hex id that merely starts with a digit is still a pin. Both are
+  drilled (D12's fixture carries a manifest and an unlisted `owui/README.md`; D13 refuses an
+  epoch and a run number and proves the digit-leading hex id is still accepted).

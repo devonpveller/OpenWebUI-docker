@@ -52,6 +52,21 @@ function Get-DrillGit {
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try { return (& git.exe @args) } finally { $ErrorActionPreference = $prev }
 }
+function Get-QueueBoard {
+    # THE BOARD AS TEXT, FROM A CHILD PROCESS. queue.ps1 prints through Write-Host, which in
+    # PS5.1 writes to the host and NOT into a pipeline: an in-process
+    # `& $queue -List 2>&1 | Out-String` captures the empty string while the whole board
+    # scrolls past on the console, and every assertion made on it is an assertion about
+    # nothing - this drill's own -List check read FAIL against a perfectly clean row that
+    # way. A child powershell writes the same text to its stdout, which this process reads.
+    $psExe = Join-Path $PSHOME "powershell.exe"
+    if (-not (Test-Path $psExe)) { $psExe = "powershell" }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $out = & $psExe -NoProfile -NonInteractive -File $queue -List 2>&1 }
+    finally { $ErrorActionPreference = $prev }
+    return (($out | ForEach-Object { "$_" }) -join "`n")
+}
+
 function Get-QueueState([string]$id) {
     $f = Join-Path $QueueDir "$id.json"
     if (-not (Test-Path $f)) { return "(missing)" }
@@ -516,6 +531,19 @@ Check "a nonexistent sha is refused, not recorded" ((Get-QueueState "drill-a") -
 Check "drill-a merged by the reviewer" ((Get-QueueState "drill-a") -eq "merged")
 Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
     (Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).fits_codebase -eq $true)
+# WHAT THE MERGE SHIPPED (deploystate, 2026-09-06). -Merged derives deploy_pending[] from
+# the merge range; the drill's branch changes one note at the root, which is no OB1 image,
+# no owui/ paste and no :local build context, so the derived list is EMPTY - present, and
+# empty. An item whose merge DID ship something reads [UNDEPLOYED: ...] in -List until
+# -Deployed closes it; that path is drilled hermetically in verify-queue-defects.ps1 (D12/D13).
+$aMerged = Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") -Encoding UTF8 | ConvertFrom-Json
+Check "-Merged derived deploy_pending (present) and it is EMPTY for the drill's synthetic branch" `
+    (($aMerged.PSObject.Properties.Name -contains "deploy_pending") -and (@($aMerged.deploy_pending | Where-Object { $_ }).Count -eq 0)) `
+    ("pending=" + (@($aMerged.deploy_pending) -join ","))
+Check "the merged row carries no [needs hand-off] and no [UNDEPLOYED] in -List" $(
+    $board = Get-QueueBoard
+    $rowA = @($board -split "`n" | Where-Object { $_ -match "^drill-a\s" })
+    ($rowA.Count -eq 1) -and -not ($rowA[0] -match "needs hand-off|UNDEPLOYED"))
 
 Step 8 "the second item's rebase CONFLICTS - the later merger adapts"
 & $queue -Claim -Id drill-b -Role reviewer -By wt-reviewer | Out-Null

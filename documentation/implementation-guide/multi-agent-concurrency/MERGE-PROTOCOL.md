@@ -274,7 +274,7 @@ verdicts are stored in `results[]` as `{case, verdict, line}` and `-Show` prints
 the attempt, so a failure names the case rather than the item. `-Fail` records whatever
 per-case lines your evidence carries and refuses nothing.
 
-Three edges, decided: **ids are literal** after one normalisation (`t2` = `T2`, `case 3` =
+Six edges, decided: **ids are literal** after one normalisation (`t2` = `T2`, `case 3` =
 `Case 3`), so `## T05` is not `T5` and `## Case 5` is not `T5` - write the plan's id as the
 plan wrote it. **Fenced code blocks (``` or ~~~) count for nothing** on either side: a
 heading quoted inside a fence - this section's example, pasted - is a quotation, not a
@@ -282,6 +282,18 @@ verdict, and a fenced `## T9` in a plan is not a case. **Inline `-Evidence` text
 the case verdicts** - it is recorded verbatim exactly as a file is, and long text is spilled
 to the item's evidence file; the file form is still the one to prefer, because a long inline
 string dies at the process boundary before the tool ever sees it.
+
+And three about the FILES the tool reads and writes (2026-09-06). **An unterminated fence in
+a plan is warned by line number.** A ``` that is never closed swallows every heading after
+it - CommonMark-correct, and the one fence shape that makes a pass prove LESS - so
+`-Submit`, `-Resubmit -TestPlan` and `-Requeue -TestPlan` each print
+`WARNING: ... opens a code fence at line <n> that is never closed` together with
+`Recognised <k> case(s): ...`, the list the tool will actually enforce. It warns rather than
+refuses, because a plan may genuinely end inside a fence - but a plan shorter than it reads
+is no longer a surprise. **A TAB-indented ``` is not a fence**: CommonMark counts a tab as
+four columns, which makes that line indented code, and the tool reads it the same way.
+**Long inline `-Evidence` spills to a file with no BOM** - UTF-8 without a byte-order mark,
+like the item file beside it, so the same readers (and Python) get the same bytes.
 
 One of `-PlanAdequate` / `-PlanInadequate` is **required** on both verdicts. It is a
 judgement, not a formality: the plan was written by the developer, so
@@ -383,7 +395,86 @@ quotes for native commands - a developer agent had `git commit -m` split its mes
 into pathspecs. Write the message to a file and use `-F <file>`, for `git commit` as
 well as `git merge`.
 
-**Step 6 - the developer retires the worktree.**
+**Step 6 - what the merge SHIPPED, and recording the deploy.**
+
+A merge lands code. It does not restart a container, rebuild an image or paste a file into
+Open WebUI - so for some items `merged` is not yet live, and until 2026-09-06 the board had
+no way to say which ones (the reviewer's merge message said "must be after deploy" and
+nothing else did). `-Merged` now answers that itself, from
+`git diff --name-only <first parent>..<merge sha>` - never from a list you type - and prints
+what it found:
+
+| What the merge range contains | The surface it derives |
+|---|---|
+| An `OB1` gitlink move whose OB1 diff touches `integrations/<dir>/`, and that directory has a `Dockerfile` at the new pin | `image:<the compose service in OB1/docker/docker-compose.yml that builds it>` |
+| A changed `owui/` file that **`owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
+| A changed build context of a `:local`-tagged service in this repository's compose files (where the context IS the repository root, its Dockerfile and what that Dockerfile `COPY`s) | `image:<the service>` |
+
+Nothing else derives a surface, and a merge that ships none records an empty list - the
+normal case for docs, scripts and the harness itself. A change to `owui/manifest.csv` or
+`owui/README.md` derives nothing, because neither is pasted into anything: the rule was
+`any owui/** path` until 2026-09-06, and the real `owuidrift` merge `e989265` derived
+`paste:owui/manifest.csv` and `paste:owui/README.md` - two surfaces nobody could ever close
+honestly. An `owui/` file the manifest does not list is reported as a NOTE, not silently
+dropped. A merge whose OB1 pin exists in no
+clone this tool can reach is REFUSED rather than recorded: that pin is the zombie `-List`
+flags as `[UNRESOLVABLE]`, and pushing it to OB1's remote is the fix (CLAUDE.md: never bump
+the gitlink to a commit that is not there).
+
+While a surface is open, `-List` shows the item as
+`merged ... [UNDEPLOYED: image:openbrain-curator, paste:owui/tools/deep_research.py]`, and
+`-Show` prints a DEPLOY block naming each surface OPEN or CLOSED. **The deploy itself is
+still the gated, human step it always was (§4) - this verb RECORDS one, it never performs
+one.** When the deploy has happened and the thing is running:
+
+```powershell
+# all open surfaces at once, or one of them with -Surface
+.\scripts\agent-harness\queue.ps1 -Deployed -Id <id> -By <the person> -Evidence <path or text>
+.\scripts\agent-harness\queue.ps1 -Deployed -Id <id> -By <the person> -Evidence <path> -Surface image:openbrain-curator
+```
+
+`-By` must be a person - the reserved `auto:` namespace is refused here exactly as it is at
+the two gates. `-Evidence` is a file path or inline text, and it must say, **per surface**,
+both what is running and that it is healthy: a line naming the surface and carrying (a) the
+pin - for an image the running container's `org.opencontainers.image.revision` label or its
+image id, for a paste the `sha256` of the file as pasted - and (b) a health state,
+`State.Health.Status=healthy`, or `State.Status=running` for a container with no
+healthcheck. One line per surface, like this:
+
+```text
+openbrain-curator: label org.opencontainers.image.revision=d89c126, State.Health.Status=healthy, RestartCount=0
+```
+
+**A pin is HEX**: 7-40 hex characters, or a labelled `sha256:<hex>` / `sha256 <hex>`. An
+all-digit token is not a pin - `deployed at 1788720066` closed a surface until 2026-09-06,
+and an epoch, a run number or a ticket id all have that shape. A hex id that merely starts
+with a digit still is one.
+
+Evidence that names no health state, names `unhealthy`, or carries no pin is refused and
+nothing is recorded. **The check is line-scoped, not entity-scoped**: it asks that some line
+mentioning the surface also carries a pin and a health state, not that all three are *about*
+the same container - so `openbrain-curator rebuilt from 6fba6b3 - checked openbrain-research
+instead: ...healthy` is accepted. That is deliberate and stays: separating those two is a
+judgement about English, not something a pattern decides, and a stricter rule would refuse
+far more honest evidence than it would catch. What the check does guarantee is that the
+surface's own name appears - evidence naming only the other container is refused. A surface closes once - a second `-Deployed` on it is refused, because
+a redeploy is a new item's evidence, not a second closure of this one. When the last open
+surface closes, the item moves to the terminal state `deployed`; `-Deployed` on an item that
+derived no surfaces is refused rather than recorded against nothing.
+
+Two other flags on the board read alongside it. `[UNRESOLVABLE: submitted_sha f71772b]` /
+`[UNRESOLVABLE: OB1 22f41b6]` means a commit this row records, or the OB1 commit it pins,
+exists in no clone the tool can reach - that row is not live work, and it sorts first.
+`[needs hand-off]` means the reviewer will not be able to merge this because the work line is
+checked out elsewhere; it appears only on items still moving, never on a terminal one. Both
+are resolved in one batched pass and neither command writes anything - a board of a few dozen
+items reads in a couple of seconds. **No range is quoted here on purpose:** two people
+measuring the same board on the same day landed outside each other's spans at both ends
+without anything changing, and a number printed in a protocol reads as a bound. The observed
+figures, attributed and dated, are in the harness README; what the test plan actually holds
+the tool to is that it finishes well inside five seconds and mutates nothing.
+
+**Step 7 - the developer retires the worktree.**
 
 ```powershell
 .\scripts\agent-harness\remove-worktree.ps1 -Id <id>
@@ -427,6 +518,7 @@ by force-push; `development` history is append-only.
 | Merge into `development` with evidence | **Agents** (this protocol) |
 | Promotion of `development` → `main` | Operator, deliberately |
 | Deploying to prod containers / retagging `:local` | Gated step; operator-approved |
+| Recording that deploy in the queue (`queue.ps1 -Deployed`) | The person who verified it - the `auto:` namespace is refused |
 | `git push` | Only when the operator asks |
 | Resolving a Tier-3 disagreement | Operator |
 
@@ -453,5 +545,11 @@ by force-push; `development` history is append-only.
   then a reviewer. That is the price of not merging your own work on a live-service
   codebase, and it is paid deliberately - `queue.ps1 -List` is where you see what is
   waiting on whom.
-- **This protocol does not cover deploy verification.** Anything that must be proven
-  through the real caddy/tailnet chain happens after the merge, serially, by nature.
+- **A merge is not a deploy, and the board now says which merges are not yet live.** Anything
+  that must be proven through the real caddy/tailnet chain still happens after the merge,
+  serially, by nature - what changed on 2026-09-06 is that `-Merged` derives from the merge
+  range what the item SHIPS (an OB1 integration image, a `:local` build context, an `owui/`
+  file OWUI only sees by paste), `-List` shows that item as `[UNDEPLOYED: ...]` until each
+  surface is closed, and `-Deployed` closes one with per-surface evidence naming the pin and
+  the container's health state (step 6). Performing the deploy is still human and still
+  gated (§4): the queue records it, and refuses to call it done on prose.

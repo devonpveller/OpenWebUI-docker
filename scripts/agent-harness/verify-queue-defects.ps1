@@ -60,6 +60,39 @@
 #       (the protocol's own example, pasted); a fenced `## T9` in a plan became a phantom
 #       case; a plan whose only heading was fenced was accepted at -Submit. Fences (``` and
 #       ~~~) count for nothing on either side now.
+# ADDED 2026-09-06 (item `deploystate`), from the board and from passplan's attempt-2 tester:
+#   D12 `merged` read as finished for items that shipped an OB1 image (curatorimg) or an
+#       image plus an owui/ paste (curator2). -Merged now DERIVES deploy_pending[] from
+#       `git diff --name-only <first parent>..<merge>` - never from a list the author typed;
+#       a value planted on the item is overwritten - and refuses a merge whose OB1 pin no
+#       clone holds. A fixture with an embedded OB1 clone, a :local plane service, a
+#       root-context service and an owui/ file exercises every rule. AMENDED 2026-09-06
+#       (attempt 1's tester): a paste surface comes from owui/manifest.csv, not from the
+#       path - the real owuidrift merge e989265 derived paste:owui/README.md and
+#       paste:owui/manifest.csv, two surfaces nobody could ever close - so the fixture now
+#       carries a manifest and an unlisted owui/ file that must derive NOTHING.
+#   D13 -Deployed: refused without a health state, without a pin, on 'unhealthy', on an
+#       auto: principal, on a surface not derived, on a surface already closed, on an item
+#       with nothing to close, on an item not merged; accepted with the anchor's example
+#       line; closes one surface with -Surface or all at once; the item reaches `deployed`.
+#       AMENDED 2026-09-06 (attempt 1's tester closed a real surface with `deployed at
+#       1788720066`): a pin is HEX, so an all-digit token - an epoch, a run number, a
+#       ticket id - is refused, while a hex id that merely STARTS with a digit is not.
+#   D14 A recorded commit that does not exist, or an OB1 gitlink at it that the item's clone
+#       does not hold (curatorpool: f71772b pins OB1 22f41b6, held nowhere), is flagged
+#       [UNRESOLVABLE: ...] by -List (sorting first) and -Show - and neither writes a byte.
+#   D15 [needs hand-off] came from line_mergeable, set at -Submit and never cleared, so 32 of
+#       the live board's 42 rows wore it and 31 of those were terminal - the one row where it
+#       was TRUE was one in thirty-two (counted 2026-09-06; the reconciliation of three
+#       readings is the table in documentation/notes/deploy-gate-2026-09-06.md, which is the
+#       figure of record). Terminal states never show it now; moving ones still do.
+#   D16 -Submit after -AmendAnchor left `attempt` alone, so the next -Pass would overwrite
+#       the previous attempt's evidence file (D1 through another door). It bumps now, and
+#       only when a verdict already stands at the current attempt.
+#   D17 An UNTERMINATED fence in a plan silently shrank the enforced case list; every door
+#       now warns by line number and prints the cases it recognised. A TAB-indented ``` is
+#       not a fence (CommonMark). The >2000-char inline evidence spill is written UTF-8
+#       without a BOM, like the item file.
 
 [CmdletBinding()]
 param(
@@ -916,6 +949,500 @@ $r = Invoke-Q $f11c @("-Resubmit", "-Id", "qd11c", "-By", "qdev", "-TestPlan", $
 $it = Get-QItem $f11c "qd11c"
 Check "D11: -Resubmit -TestPlan with a fenced-only plan is refused, nothing half-applied (test-failed, attempt 1)" `
     (($r.code -ne 0) -and ($r.out -match "no case headings") -and ($it.state -eq "test-failed") -and ([int]$it.attempt -eq 1)) ("exit=" + $r.code)
+
+# ======================================================================================
+Step "D12  deploy surfaces are DERIVED from the merge range at -Merged, never declared"
+# ======================================================================================
+# THE INCIDENT (curator2, 2026-09-04; curatorimg, 2026-09-06): both merges bumped OB1 to a
+# pin that rebuilt an image, one also changed owui/tools/deep_research.py, and both items
+# read `merged` - which everyone downstream reads as finished. The reviewer's merge message
+# said "must be after deploy"; nothing else did. The list of what a merge ships is now read
+# off `git diff --name-only <first parent>..<merge>` by the tool. A fixture repository with
+# an embedded OB1 clone, a :local plane service, a root-context service and an owui/ file
+# exercises every rule, and a value PLANTED in the item before -Merged proves the author's
+# list is overwritten by git's.
+function New-DeployFixture([string]$name, [string]$badGitlink = "") {
+    # base: OB1 gitlink at pinA, a :local plane service, a :local root-context service.
+    # work/qd: OB1 -> pinB (touches integrations/curatorish which has a Dockerfile, and
+    # integrations/nodocker which has none), an owui/ file, the plane service's context, the
+    # root service's COPY source, a README line and a doc - the last two must derive nothing.
+    $repo = Join-Path $Root $name
+    New-Item -ItemType Directory -Force -Path $repo | Out-Null
+    $ob1 = Join-Path $repo "OB1"
+    New-Item -ItemType Directory -Force -Path (Join-Path $ob1 "docker") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $ob1 "integrations\curatorish") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $ob1 "integrations\nodocker") | Out-Null
+    Push-Location $ob1
+    try {
+        Invoke-Git init -q -b main | Out-Null
+        Invoke-Git config user.email "qdrill@example.invalid" | Out-Null
+        Invoke-Git config user.name "queue defect drill" | Out-Null
+        Set-Content -Path (Join-Path $ob1 "docker\docker-compose.yml") -Encoding ascii -Value @(
+            "services:",
+            "  openbrain-db:",
+            "    image: pgvector/pgvector:pg16",
+            "  openbrain-curatorish:",
+            "    build:",
+            "      context: ../integrations/curatorish",
+            "      dockerfile: Dockerfile",
+            "    image: openbrain-curatorish:local",
+            "    container_name: openbrain-curatorish")
+        Set-Content -Path (Join-Path $ob1 "integrations\curatorish\Dockerfile") -Encoding ascii -Value @("FROM scratch", "COPY index.ts ./")
+        Set-Content -Path (Join-Path $ob1 "integrations\curatorish\index.ts") -Encoding ascii -Value "export const v = 1;"
+        Set-Content -Path (Join-Path $ob1 "integrations\nodocker\x.ts") -Encoding ascii -Value "export const w = 1;"
+        Invoke-Git -GitArgs @("add", "-A") | Out-Null
+        Invoke-Git commit -q -m "OB1 pin A" | Out-Null
+        $pinA = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+        Set-Content -Path (Join-Path $ob1 "integrations\curatorish\index.ts") -Encoding ascii -Value "export const v = 2;"
+        Set-Content -Path (Join-Path $ob1 "integrations\nodocker\x.ts") -Encoding ascii -Value "export const w = 2;"
+        Invoke-Git -GitArgs @("add", "-A") | Out-Null
+        Invoke-Git commit -q -m "OB1 pin B: curatorish and nodocker change" | Out-Null
+        $pinB = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+    } finally { Pop-Location }
+    Push-Location $repo
+    try {
+        Invoke-Git init -q -b base | Out-Null
+        Invoke-Git config user.email "qdrill@example.invalid" | Out-Null
+        Invoke-Git config user.name "queue defect drill" | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "plane") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "thingsrc") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "othersrc") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "rootplane") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "rootsrc") | Out-Null
+        Set-Content -Path (Join-Path $repo "README.md") -Encoding ascii -Value "scratch"
+        Set-Content -Path (Join-Path $repo "plane\docker-compose.yml") -Encoding ascii -Value @(
+            "name: plane",
+            "services:",
+            "  thing:",
+            "    build:",
+            "      context: ../thingsrc",
+            "    image: thing:local",
+            "  other:",
+            "    build:",
+            "      context: ../othersrc",
+            "    image: ghcr.io/example/other:1.0")
+        Set-Content -Path (Join-Path $repo "rootplane\docker-compose.yml") -Encoding ascii -Value @(
+            "services:",
+            "  rooty:",
+            "    build:",
+            "      context: ..",
+            "      dockerfile: Dockerfile.rooty",
+            "    image: rooty:local")
+        Set-Content -Path (Join-Path $repo "Dockerfile.rooty") -Encoding ascii -Value @("FROM scratch", "COPY rootsrc/ /app/")
+        Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v1"
+        Set-Content -Path (Join-Path $repo "othersrc\o.txt") -Encoding ascii -Value "v1"
+        Set-Content -Path (Join-Path $repo "rootsrc\a.txt") -Encoding ascii -Value "v1"
+        # owui/manifest.csv IS the authority on what gets pasted into OWUI. It lists
+        # tools/deep.py and NOT owui/README.md, so a merge touching both must derive one
+        # surface, not two. The column set is deliberately the shape the real manifest moved
+        # to (`sha256`, not `bytes`), so the reader is exercised resolving `file` BY NAME.
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui") | Out-Null
+        Set-Content -Path (Join-Path $repo "owui\manifest.csv") -Encoding ascii -Value @(
+            "file,type,name,owui_id,sha256",
+            "tools/deep.py,tool,Deep,deep,0000000000000000000000000000000000000000000000000000000000000000")
+        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted"
+        Invoke-Git add README.md plane rootplane Dockerfile.rooty thingsrc othersrc rootsrc owui | Out-Null
+        Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,$pinA,OB1") | Out-Null
+        Invoke-Git commit -q -m "scratch base with OB1 at pin A" | Out-Null
+        Invoke-Git checkout -q -b work/qd | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui\tools") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "documentation") | Out-Null
+        Set-Content -Path (Join-Path $repo "owui\tools\deep.py") -Encoding ascii -Value "# pasted into OWUI"
+        # changed in the SAME merge and NOT in the manifest: documentation about pasting is
+        # not itself pasted, and a surface derived for it could never be honestly closed.
+        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted, revised"
+        Set-Content -Path (Join-Path $repo "documentation\x.md") -Encoding ascii -Value "a doc"
+        Set-Content -Path (Join-Path $repo "README.md") -Encoding ascii -Value "scratch, edited at the root"
+        Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v2"
+        Set-Content -Path (Join-Path $repo "othersrc\o.txt") -Encoding ascii -Value "v2"
+        Set-Content -Path (Join-Path $repo "rootsrc\a.txt") -Encoding ascii -Value "v2"
+        Set-Content -Path (Join-Path $repo "WORK.md") -Encoding ascii -Value "the work"
+        Invoke-Git add README.md owui documentation thingsrc othersrc rootsrc WORK.md | Out-Null
+        $pin = if ($badGitlink) { $badGitlink } else { $pinB }
+        Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,$pin,OB1") | Out-Null
+        Invoke-Git commit -q -m "the work: OB1 to pin B, a paste, a context, a root COPY source" | Out-Null
+        Invoke-Git checkout -q base | Out-Null
+    } finally { Pop-Location }
+    $state = Join-Path $Root ("state-" + $name)
+    New-Item -ItemType Directory -Force -Path $state | Out-Null
+    return @{ repo = $repo; state = $state; name = $name; pinA = $pinA; pinB = $pinB; ob1 = $ob1 }
+}
+function Merge-Work($fix, [string]$id) {
+    # The reviewer's merge, --no-ff, so the sha -Merged records is a merge commit whose first
+    # parent is the line before.
+    Push-Location $fix.repo
+    try {
+        Invoke-Git merge --no-ff -q work/qd -m ("merge " + $id + " (evidence: drill)") | Out-Null
+        return (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+    } finally { Pop-Location }
+}
+$f12 = New-DeployFixture "d12"
+$ev = Join-Path $Root "d12-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f12 "qd12" "qdev" $ev
+# THE PLANTED LIST: an author-typed value already on the item when -Merged runs.
+$planted = Get-QItem $f12 "qd12"
+$planted | Add-Member -NotePropertyName deploy_pending -NotePropertyValue @("image:typed-by-the-author")
+[System.IO.File]::WriteAllText((Get-QFile $f12 "qd12.json"), ($planted | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+Check "setup: the item carries a PLANTED deploy_pending before the merge is recorded" `
+    (@((Get-QItem $f12 "qd12").deploy_pending) -contains "image:typed-by-the-author")
+$merge12 = Merge-Work $f12 "qd12"
+$r = Invoke-Q $f12 @("-Merged", "-Id", "qd12", "-By", "qrev", "-Sha", $merge12, "-FitsCodebase")
+$it = Get-QItem $f12 "qd12"
+Check "D12: -Merged still records the merge (exit 0, merged)" (($r.code -eq 0) -and ($it.state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+$pending12 = @($it.deploy_pending)
+$expected12 = @("image:openbrain-curatorish", "image:rooty", "image:thing", "paste:owui/tools/deep.py")
+Check "D12: deploy_pending is EXACTLY the four surfaces git saw - OB1 integration image (by compose service name), root-context COPY source, :local context, owui paste" `
+    (($pending12 -join ",") -eq ($expected12 -join ",")) ("pending=" + ($pending12 -join ","))
+Check "D12: the PLANTED author value is gone - the list came from the merge range, not the item" `
+    ($pending12 -notcontains "image:typed-by-the-author")
+Check "D12: integrations/nodocker (no Dockerfile) and the non-:local 'other' service derive NOTHING" `
+    (-not (($pending12 -join ",") -match "nodocker|other"))
+# THE MANIFEST DECIDES WHICH owui/ FILES ARE PASTED. Both owui/tools/deep.py and
+# owui/README.md changed in this merge; only the first is listed in owui/manifest.csv.
+Check "D12: an owui/ file the manifest does NOT list derives no paste surface" `
+    (-not (($pending12 -join ",") -match "owui/README\.md")) ("pending=" + ($pending12 -join ","))
+Check "D12: ... and -Merged says WHY, naming the file and the manifest" `
+    ($r.out -match "owui/README\.md changed but owui/manifest\.csv does not list it") (First-Line $r.out)
+Check "D12: the file the manifest DOES list still derives its paste surface" `
+    ($pending12 -contains "paste:owui/tools/deep.py")
+Check "D12: deploy_derived records the line-before (a full sha) and the merge sha the list was read from" `
+    (($it.deploy_derived.line_before -match "^[0-9a-f]{40}$") -and ($it.deploy_derived.merge -eq $merge12))
+Check "D12: deploy_surfaces (immutable record) equals deploy_pending at merge time, deployed[] is empty" `
+    (((@($it.deploy_surfaces) -join ",") -eq ($expected12 -join ",")) -and (@($it.deployed).Count -eq 0))
+Check "D12: -Merged prints the surfaces and says NOT LIVE" (($r.out -match "NOT LIVE") -and ($r.out -match "image:openbrain-curatorish"))
+$r = Invoke-Q $f12 @("-List")
+Check "D12: -List flags the merged item [UNDEPLOYED: <the four>]" `
+    ($r.out -match "qd12\s+merged\s+.*\[UNDEPLOYED: image:openbrain-curatorish, image:rooty, image:thing, paste:owui/tools/deep\.py\]") (First-Line $r.out)
+$r = Invoke-Q $f12 @("-Show", "-Id", "qd12")
+Check "D12: -Show prints a DEPLOY block with each surface OPEN" (($r.out -match "--- DEPLOY ---") -and ($r.out -match "(?m)^\s+image:thing\s+OPEN"))
+# A ROOT-CONTEXT service (frontend builds from `..`) is not "every file in the repository":
+# a merge that edits only README.md at the root derives nothing for rooty - rooty above came
+# from rootsrc/, the Dockerfile's COPY source.
+Push-Location $f12.repo
+try {
+    Invoke-Git checkout -q -b work/readme-only base | Out-Null
+    Set-Content -Path (Join-Path $f12.repo "README.md") -Encoding ascii -Value "scratch, edited at the root again"
+    Invoke-Git add README.md | Out-Null
+    Invoke-Git commit -q -m "readme only" | Out-Null
+    Invoke-Git checkout -q base | Out-Null
+} finally { Pop-Location }
+Invoke-Q $f12 @("-Propose", "-Id", "qd12r", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f12 @("-ConfirmAnchor", "-Id", "qd12r", "-By", "qoperator") | Out-Null
+Invoke-Q $f12 @("-Submit", "-Id", "qd12r", "-Branch", "work/readme-only", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Invoke-Q $f12 @("-Claim", "-Id", "qd12r", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $f12 @("-Pass", "-Id", "qd12r", "-By", "qtester", "-Evidence", $ev, "-PlanAdequate") | Out-Null
+Invoke-Q $f12 @("-Approve", "-Id", "qd12r", "-By", "qoperator") | Out-Null
+Invoke-Q $f12 @("-Claim", "-Id", "qd12r", "-Role", "reviewer", "-By", "qrev") | Out-Null
+Push-Location $f12.repo
+try { Invoke-Git merge --no-ff -q work/readme-only -m "merge readme only (evidence: drill)" | Out-Null; $merge12r = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim() } finally { Pop-Location }
+$r = Invoke-Q $f12 @("-Merged", "-Id", "qd12r", "-By", "qrev", "-Sha", $merge12r, "-FitsCodebase")
+$it = Get-QItem $f12 "qd12r"
+Check "D12: a merge editing ONLY README.md at the root derives NOTHING - a root build context is its Dockerfile's COPY sources, not the whole tree" `
+    (($r.code -eq 0) -and ($it.state -eq "merged") -and (@($it.deploy_pending).Count -eq 0)) ("exit=" + $r.code + " pending=" + (@($it.deploy_pending) -join ","))
+# A merge that ships nothing derives an EMPTY list and no flag.
+$f12b = New-Fixture "d12b"
+$ev = Join-Path $Root "d12b-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f12b "qd12b" "qdev" $ev
+$merge12b = Merge-Work $f12b "qd12b"
+$r = Invoke-Q $f12b @("-Merged", "-Id", "qd12b", "-By", "qrev", "-Sha", $merge12b, "-FitsCodebase")
+$it = Get-QItem $f12b "qd12b"
+Check "D12: a merge that touches no image and no owui/ file derives an EMPTY list (field present, zero surfaces)" `
+    (($r.code -eq 0) -and ($it.PSObject.Properties.Name -contains "deploy_pending") -and (@($it.deploy_pending).Count -eq 0)) ("exit=" + $r.code)
+Check "D12: ... and -Merged says so" ($r.out -match "No deploy surface derived")
+$r = Invoke-Q $f12b @("-List")
+Check "D12: ... and -List shows it as plain merged, no [UNDEPLOYED]" (($r.out -match "qd12b\s+merged") -and -not ($r.out -match "UNDEPLOYED"))
+# A merge whose OB1 pin exists in NO clone cannot be derived, so it cannot be recorded.
+$f12c = New-DeployFixture "d12c" "1111111111111111111111111111111111111111"
+$ev = Join-Path $Root "d12c-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f12c "qd12c" "qdev" $ev
+$merge12c = Merge-Work $f12c "qd12c"
+$r = Invoke-Q $f12c @("-Merged", "-Id", "qd12c", "-By", "qrev", "-Sha", $merge12c, "-FitsCodebase")
+$it = Get-QItem $f12c "qd12c"
+Check "D12: a merge pinning an OB1 commit no clone holds is REFUSED at -Merged, naming the pin" `
+    (($r.code -ne 0) -and ($r.out -match "gitlink 1111111") -and ($r.out -match "exists in no OB1 clone")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "D12: ... and nothing was recorded (still reviewing, claim held, no merged_sha)" `
+    (($it.state -eq "reviewing") -and ([string]$it.merged_sha -eq "") -and (Test-Path (Get-QFile $f12c "qd12c.reviewer.claim"))) ("state=" + $it.state)
+
+# ======================================================================================
+Step "D13  -Deployed is refused without health evidence, accepted with it, and closes each surface once"
+# ======================================================================================
+# Deploy stays HUMAN-GATED (MERGE-PROTOCOL section 4): -Deployed records that a person
+# looked at the running thing. So -By must be a person (the auto: namespace is refused like
+# the two gates), and the evidence must say, per surface, what is running (the image label
+# or pin, or the pasted file's hash) and that it is healthy.
+$noHealth = Write-Ev "d13-nohealth.md" @("openbrain-curatorish: label org.opencontainers.image.revision=" + $f12.pinB.Substring(0, 12) + ", RestartCount=0")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $noHealth)
+$it = Get-QItem $f12 "qd12"
+Check "D13: evidence that names NO health state is refused, naming the surface" `
+    (($r.code -ne 0) -and ($r.out -match "image:openbrain-curatorish: names no health state")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "D13: ... and nothing was recorded (still merged, four open, no deploy evidence file)" `
+    (($it.state -eq "merged") -and (@($it.deploy_pending).Count -eq 4) -and (@($it.deployed).Count -eq 0) -and -not (Test-Path (Get-QFile $f12 "qd12.deploy1.evidence.md")))
+$unhealthy = Write-Ev "d13-unhealthy.md" @("openbrain-curatorish: label org.opencontainers.image.revision=" + $f12.pinB.Substring(0, 12) + ", State.Health.Status=unhealthy, RestartCount=0")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $unhealthy)
+Check "D13: a health state of 'unhealthy' is refused by name - a deploy does not close on it" `
+    (($r.code -ne 0) -and ($r.out -match "health state 'unhealthy'")) (First-Line $r.out)
+$noPin = Write-Ev "d13-nopin.md" @("openbrain-curatorish: State.Health.Status=healthy, RestartCount=0")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $noPin)
+Check "D13: evidence with a health state but NO pin (no label, no revision) is refused" `
+    (($r.code -ne 0) -and ($r.out -match "names no pin")) (First-Line $r.out)
+# A PIN IS HEX, AND A DECIMAL NUMBER IS NOT ONE. attempt 1's tester closed a real surface
+# with `deployed at 1788720066` - an epoch satisfied the old [0-9a-f]{7,64}. A run number and
+# a ticket id have the same shape.
+$epoch = Write-Ev "d13-epoch.md" @("openbrain-curatorish deployed at 1788720066 State.Status=running")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $epoch)
+Check "D13: an all-DIGIT token (a timestamp) is not a pin - refused, and the refusal says so" `
+    (($r.code -ne 0) -and ($r.out -match "names no pin") -and ($r.out -match "all-digit token")) (First-Line $r.out)
+$runNo = Write-Ev "d13-runno.md" @("openbrain-curatorish: run 12345678, State.Health.Status=healthy")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $runNo)
+Check "D13: ... and neither is a run number" (($r.code -ne 0) -and ($r.out -match "names no pin")) (First-Line $r.out)
+# The NEGATIVE of that rule, asserted WITHOUT closing anything: a hex id that merely starts
+# with a digit IS a pin, so the only complaint left is the missing health state. (Asserting it
+# by acceptance would close the surface the cases below still need open.)
+$digitHex = Write-Ev "d13-digithex.md" @("openbrain-curatorish: label org.opencontainers.image.revision=0a1b2c3")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $digitHex)
+Check "D13: a hex revision that STARTS with a digit IS a pin - the refusal names only the missing health state" `
+    (($r.code -ne 0) -and ($r.out -match "names no health state") -and -not ($r.out -match "names no pin")) (First-Line $r.out)
+$it = Get-QItem $f12 "qd12"
+Check "D13: those four refusals still recorded nothing (four surfaces open, none closed)" `
+    ((@($it.deploy_pending).Count -eq 4) -and (@($it.deployed).Count -eq 0))
+$good = Write-Ev "d13-good.md" @("openbrain-curatorish: label org.opencontainers.image.revision=" + $f12.pinB.Substring(0, 12) + ", State.Health.Status=healthy, RestartCount=0")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "auto:dark", "-Surface", "image:openbrain-curatorish", "-Evidence", $good)
+Check "D13: -By in the reserved auto: namespace is refused (exit 4) - deploy is a human's record" ($r.code -eq 4) ("exit=" + $r.code)
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:not-a-surface", "-Evidence", $good)
+Check "D13: a -Surface the merge did not derive is refused, listing the open ones" `
+    (($r.code -ne 0) -and ($r.out -match "not an open deploy surface") -and ($r.out -match "image:thing")) (First-Line $r.out)
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $good)
+$it = Get-QItem $f12 "qd12"
+Check "D13: the anchor's example line (label revision + State.Health.Status=healthy + RestartCount) is ACCEPTED for one surface" `
+    (($r.code -eq 0) -and (@($it.deployed).Count -eq 1) -and ($it.deployed[0].surface -eq "image:openbrain-curatorish") -and ($it.deployed[0].by -eq "qoperator")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "D13: the item stays 'merged' while three surfaces are open, and the evidence file sits beside it" `
+    (($it.state -eq "merged") -and (@($it.deploy_pending).Count -eq 3) -and (Test-Path (Get-QFile $f12 "qd12.deploy1.evidence.md")))
+$r = Invoke-Q $f12 @("-List")
+Check "D13: -List now flags only the three still open" `
+    (($r.out -match "\[UNDEPLOYED: image:rooty, image:thing, paste:owui/tools/deep\.py\]") -and -not ($r.out -match "UNDEPLOYED: image:openbrain-curatorish"))
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $good)
+Check "D13: a SECOND -Deployed on the same surface is refused as already closed" `
+    (($r.code -ne 0) -and ($r.out -match "already closed")) (First-Line $r.out)
+# Close the rest in one go: every open surface must be named, with its own pin and health.
+$partial = Write-Ev "d13-partial.md" @(
+    "thing: image id sha256:" + ("ab" * 16) + ", State.Status=running",
+    "rooty: image id " + ("c4" * 20) + ", State.Status=running")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Evidence", $partial)
+Check "D13: closing ALL open surfaces with evidence that names only two of three is refused, naming the third" `
+    (($r.code -ne 0) -and ($r.out -match "paste:owui/tools/deep\.py: no line of the evidence names it")) (First-Line $r.out)
+$rest = Write-Ev "d13-rest.md" @(
+    "thing: image id sha256:" + ("ab" * 16) + ", State.Status=running",
+    "rooty: image id " + ("c4" * 20) + ", State.Status=running",
+    "deep.py pasted into OWUI as tool 'deep'; sha256 " + ("3f" * 32) + "; openwebui State.Health.Status=healthy")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Evidence", $rest)
+$it = Get-QItem $f12 "qd12"
+Check "D13: closing the remaining three at once moves the item to 'deployed' (terminal)" `
+    (($r.code -eq 0) -and ($it.state -eq "deployed") -and (@($it.deploy_pending).Count -eq 0) -and (@($it.deployed).Count -eq 4)) ("exit=" + $r.code + " state=" + $it.state)
+Check "D13: a paste surface is matched by its file name (deep.py) and its sha256" (@($it.deployed | Where-Object { $_.surface -eq "paste:owui/tools/deep.py" }).Count -eq 1)
+$r = Invoke-Q $f12 @("-List")
+Check "D13: -List shows 'deployed' with no [UNDEPLOYED] and no [needs hand-off]" `
+    (($r.out -match "qd12\s+deployed") -and -not ($r.out -match "UNDEPLOYED|needs hand-off"))
+$r = Invoke-Q $f12 @("-Show", "-Id", "qd12")
+Check "D13: -Show's DEPLOY block reads CLOSED on every surface" `
+    (($r.out -match "(?m)^\s+image:openbrain-curatorish\s+CLOSED by qoperator") -and -not ($r.out -match "\sOPEN\s"))
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Evidence", $rest)
+Check "D13: -Deployed on a 'deployed' item is refused" (($r.code -ne 0) -and ($r.out -match "already 'deployed'")) (First-Line $r.out)
+$r = Invoke-Q $f12b @("-Deployed", "-Id", "qd12b", "-By", "qoperator", "-Evidence", $rest)
+Check "D13: -Deployed on a merged item with NO deploy surfaces is refused" `
+    (($r.code -ne 0) -and ($r.out -match "records no deploy surface")) (First-Line $r.out)
+Check "D13: ... and that item is still plain 'merged'" ((Get-QItem $f12b "qd12b").state -eq "merged")
+$f13 = New-Fixture "d13"
+Invoke-Q $f13 @("-Propose", "-Id", "qd13", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f13 @("-ConfirmAnchor", "-Id", "qd13", "-By", "qoperator") | Out-Null
+Invoke-Q $f13 @("-Submit", "-Id", "qd13", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+$r = Invoke-Q $f13 @("-Deployed", "-Id", "qd13", "-By", "qoperator", "-Evidence", $rest)
+Check "D13: -Deployed on an item that is not merged is refused (a deploy follows the merge)" `
+    (($r.code -ne 0) -and ($r.out -match "not 'merged'") -and ((Get-QItem $f13 "qd13").state -eq "ready-to-test")) (First-Line $r.out)
+$r = Invoke-Q $f13 @("-Deployed", "-Id", "qd13", "-By", "qoperator")
+Check "D13: -Deployed without -Evidence is refused" ($r.code -ne 0) ("exit=" + $r.code)
+
+# ======================================================================================
+Step "D14  a recorded commit, or the OB1 pin at it, that exists nowhere is flagged and sorts first"
+# ======================================================================================
+# THE INCIDENT (curatorpool): submitted_sha f71772b pins OB1 22f41b6, a commit that exists in
+# no clone on this machine, and the row read like live work. -List and -Show now ask git:
+# does each recorded commit exist, and does the OB1 gitlink at it exist in the item's clone
+# (its worktree's, or the main checkout's when the worktree is gone)? Read-only - both
+# commands are proven not to write a byte.
+$f14 = New-DeployFixture "d14"
+Push-Location $f14.repo
+try {
+    # A parent commit on a side branch whose gitlink names an OB1 commit the clone does not hold.
+    Invoke-Git checkout -q -b zombie base | Out-Null
+    Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,2222222222222222222222222222222222222222,OB1") | Out-Null
+    Invoke-Git commit -q -m "zombie: OB1 pinned at a commit nobody holds" | Out-Null
+    $zombieSha = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim()
+    Invoke-Git checkout -q base | Out-Null
+    $workSha = (Invoke-Git rev-parse work/qd | Select-Object -First 1).Trim()
+} finally { Pop-Location }
+foreach ($id in @("aaa-fine", "bbb-nocommit", "ccc-nopin")) {
+    Invoke-Q $f14 @("-Propose", "-Id", $id, "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+    Invoke-Q $f14 @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $f14 @("-Submit", "-Id", $id, "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+}
+function Set-QField($fix, [string]$id, [string]$name, $value) {
+    $o = Get-QItem $fix $id
+    if ($o.PSObject.Properties.Name -contains $name) { $o.$name = $value } else { $o | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+    [System.IO.File]::WriteAllText((Get-QFile $fix ($id + ".json")), ($o | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
+}
+Set-QField $f14 "bbb-nocommit" "submitted_sha" "3333333333333333333333333333333333333333"
+Set-QField $f14 "ccc-nopin" "tested_at_sha" $zombieSha
+Check "setup: aaa-fine's submitted_sha is the real work/qd tip whose OB1 pin the embedded clone holds" ((Get-QItem $f14 "aaa-fine").submitted_sha -eq $workSha)
+$before14 = @(Get-ChildItem (Join-Path $f14.state "queue") -Filter "*.json" | ForEach-Object { $_.Name + "=" + (Get-Sha256 $_.FullName) }) -join ";"
+$r = Invoke-Q $f14 @("-List")
+Check "D14: -List exits 0 and lists all three" (($r.code -eq 0) -and ($r.out -match "aaa-fine") -and ($r.out -match "bbb-nocommit") -and ($r.out -match "ccc-nopin")) ("exit=" + $r.code)
+Check "D14: a submitted_sha that is no commit is flagged [UNRESOLVABLE: submitted_sha 3333333]" ($r.out -match "bbb-nocommit\s+.*\[UNRESOLVABLE: submitted_sha 3333333\]")
+Check "D14: a tested_at_sha whose OB1 gitlink the clone does not hold is flagged [UNRESOLVABLE: OB1 2222222]" ($r.out -match "ccc-nopin\s+.*\[UNRESOLVABLE: OB1 2222222\]")
+Check "D14: the item whose commit and pin both resolve carries NO flag" (-not ($r.out -match "aaa-fine\s+.*UNRESOLVABLE"))
+$lines14 = @($r.out -split "`n" | Where-Object { $_ -match "^(aaa-fine|bbb-nocommit|ccc-nopin)\s" } | ForEach-Object { ($_ -split "\s+")[0] })
+Check "D14: the flagged rows sort FIRST, ahead of the alphabetically-earlier clean row" `
+    (($lines14.Count -eq 3) -and ($lines14[2] -eq "aaa-fine")) ("order=" + ($lines14 -join ","))
+$r = Invoke-Q $f14 @("-Show", "-Id", "ccc-nopin")
+Check "D14: -Show prints a RESOLUTION block naming the pin" (($r.out -match "--- RESOLUTION ---") -and ($r.out -match "\[UNRESOLVABLE: OB1 2222222\]"))
+$r = Invoke-Q $f14 @("-Show", "-Id", "aaa-fine")
+Check "D14: -Show on the clean item prints no RESOLUTION block" (-not ($r.out -match "--- RESOLUTION ---"))
+$after14 = @(Get-ChildItem (Join-Path $f14.state "queue") -Filter "*.json" | ForEach-Object { $_.Name + "=" + (Get-Sha256 $_.FullName) }) -join ";"
+Check "D14: -List and -Show mutated NOTHING - every item file is byte-identical" ($before14 -eq $after14)
+
+# ======================================================================================
+Step "D15  [needs hand-off] is for rows still moving - never on a terminal state"
+# ======================================================================================
+# line_mergeable is written at -Submit and never cleared, so every merged item wore the
+# flag forever (25 on the live board) and the one non-terminal row where it was true had
+# no signal left. The flag now depends on the state as well as the field.
+$f15 = New-Fixture "d15"
+Add-Registry $f15 @("qdev")
+$states15 = @{ "t-merged" = "merged"; "t-deployed" = "deployed"; "t-rejected" = "rejected"; "t-closed" = "closed-outside-gates"; "m-testing" = "testing"; "m-review" = "reviewing"; "m-ready" = "ready-to-test" }
+foreach ($id in ($states15.Keys | Sort-Object)) {
+    Invoke-Q $f15 @("-Propose", "-Id", $id, "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+    Invoke-Q $f15 @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $f15 @("-Submit", "-Id", $id, "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+    Set-QField $f15 $id "line_mergeable" $false
+    Set-QField $f15 $id "state" $states15[$id]
+}
+$r = Invoke-Q $f15 @("-List")
+$flagged15 = @($r.out -split "`n" | Where-Object { $_ -match "needs hand-off" } | ForEach-Object { ($_ -split "\s+")[0] } | Sort-Object)
+Check "D15: the four TERMINAL states (merged, deployed, rejected, closed-outside-gates) carry NO [needs hand-off]" `
+    (-not ($flagged15 -match "^t-")) ("flagged=" + ($flagged15 -join ","))
+Check "D15: the three NON-terminal states with line_mergeable=false still carry it" `
+    (($flagged15 -join ",") -eq "m-ready,m-review,m-testing") ("flagged=" + ($flagged15 -join ","))
+
+# ======================================================================================
+Step "D16  -Submit after -AmendAnchor bumps the attempt, so a re-test cannot overwrite the last evidence"
+# ======================================================================================
+# -AmendAnchor sends a tested item back to the developer without touching `attempt`, and
+# the evidence filename derives from it - the D1 incident through another door. -Submit now
+# moves on when a verdict already stands at the current attempt; a plain first -Submit, the
+# correction path (D4) and the developer's -Requeue (D6, which bumps itself) are unchanged.
+$f16 = New-Fixture "d16"
+$ev = Join-Path $Root "d16-evidence-1.md"
+Set-Content -Path $ev -Encoding ascii -Value @("# attempt 1 evidence", $case1Pass, "ran case 1.")
+Invoke-Q $f16 @("-Propose", "-Id", "qd16", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f16 @("-ConfirmAnchor", "-Id", "qd16", "-By", "qoperator") | Out-Null
+Invoke-Q $f16 @("-Submit", "-Id", "qd16", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Invoke-Q $f16 @("-Claim", "-Id", "qd16", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $f16 @("-Pass", "-Id", "qd16", "-By", "qtester", "-Evidence", $ev, "-PlanAdequate") | Out-Null
+$att1 = Get-QFile $f16 "qd16.attempt1.evidence.md"
+Check "setup: passed at attempt 1, evidence beside the item" (((Get-QItem $f16 "qd16").state -eq "test-passed") -and (Test-Path $att1))
+$att1Hash = Get-Sha256 $att1
+Invoke-Q $f16 @("-AmendAnchor", "-Id", "qd16", "-By", "qoperator", "-Anchor", $anchorFile, "-Reason", "the world turned out different") | Out-Null
+Check "setup: amended back to anchor-confirmed, attempt still 1" (((Get-QItem $f16 "qd16").state -eq "anchor-confirmed") -and ([int](Get-QItem $f16 "qd16").attempt -eq 1))
+$r = Invoke-Q $f16 @("-Submit", "-Id", "qd16", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1)
+$it = Get-QItem $f16 "qd16"
+Check "D16: -Submit after the amendment BUMPS the attempt to 2 and says so" `
+    (($r.code -eq 0) -and ([int]$it.attempt -eq 2) -and ($r.out -match "Attempt 2:")) ("exit=" + $r.code + " attempt=" + $it.attempt)
+Check "D16: the bump is in the history" ((Get-QRaw $f16 "qd16") -match "attempt bumped to 2")
+$ev2 = Join-Path $Root "d16-evidence-2.md"
+Set-Content -Path $ev2 -Encoding ascii -Value @("# attempt 2 evidence", $case1Pass, "re-ran case 1 against the amended anchor.")
+Invoke-Q $f16 @("-Claim", "-Id", "qd16", "-Role", "tester", "-By", "qtester2") | Out-Null
+$r = Invoke-Q $f16 @("-Pass", "-Id", "qd16", "-By", "qtester2", "-Evidence", $ev2, "-PlanAdequate")
+$it = Get-QItem $f16 "qd16"
+Check "D16: the second pass lands in attempt2's OWN file; attempt1's is byte-identical" `
+    (($r.code -eq 0) -and (Test-Path (Get-QFile $f16 "qd16.attempt2.evidence.md")) -and ((Get-Sha256 $att1) -eq $att1Hash))
+Check "D16: both results rows are present, attempts 1 and 2" `
+    ((@($it.results).Count -eq 2) -and ([int]$it.results[0].attempt -eq 1) -and ([int]$it.results[1].attempt -eq 2)) ("rows=" + @($it.results).Count)
+# The negative: an amendment BEFORE any verdict does not bump.
+$f16b = New-Fixture "d16b"
+Invoke-Q $f16b @("-Propose", "-Id", "qd16b", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f16b @("-ConfirmAnchor", "-Id", "qd16b", "-By", "qoperator") | Out-Null
+Invoke-Q $f16b @("-Submit", "-Id", "qd16b", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Invoke-Q $f16b @("-AmendAnchor", "-Id", "qd16b", "-By", "qoperator", "-Anchor", $anchorFile, "-Reason", "amended before any test ran") | Out-Null
+Invoke-Q $f16b @("-Submit", "-Id", "qd16b", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Check "D16: an amendment with NO verdict at the current attempt does not bump (still attempt 1)" ([int](Get-QItem $f16b "qd16b").attempt -eq 1) ("attempt=" + (Get-QItem $f16b "qd16b").attempt)
+
+# ======================================================================================
+Step "D17  an unterminated fence is WARNED by line, a TAB-indented one is not a fence, a spill has no BOM"
+# ======================================================================================
+# Carried from passplan's attempt-2 tester. An unclosed ``` in a PLAN hides every heading
+# after it - CommonMark-correct, and the one fence shape that makes a pass easier - so every
+# door a plan enters by now says which line opened it and which cases survived. A TAB before
+# ``` is an indented code line in CommonMark, not a fence, and is read that way. And the
+# >2000-char inline evidence spill used Set-Content -Encoding UTF8, which writes a BOM.
+$planOpen = Join-Path $Root "plan-open-fence.md"
+Set-Content -Path $planOpen -Encoding ascii -Value @("# plan", "## T0 - the first", "run x", '```', "## T1 - the second", "## T2 - the third")
+$planClosed = Join-Path $Root "plan-closed-fence.md"
+Set-Content -Path $planClosed -Encoding ascii -Value @("# plan", "## T0 - the first", "run x", '```', "quoted", '```', "## T1 - the second", "## T2 - the third")
+$planTab = Join-Path $Root "plan-tab-fence.md"
+Set-Content -Path $planTab -Encoding ascii -Value @("# plan", "## T0 - the first", ("`t" + '```'), "## T1 - the second", "## T2 - the third")
+$f17 = New-Fixture "d17"
+foreach ($id in @("qd17", "qd17c", "qd17t")) {
+    Invoke-Q $f17 @("-Propose", "-Id", $id, "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+    Invoke-Q $f17 @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+}
+$r = Invoke-Q $f17 @("-Submit", "-Id", "qd17", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planOpen)
+Check "D17: -Submit with an UNTERMINATED fence still queues (exit 0) but WARNS, naming line 4" `
+    (($r.code -eq 0) -and ($r.out -match "WARNING") -and ($r.out -match "code fence at line 4")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+Check "D17: ... and prints the case list it recognised: 'Recognised 1 case(s): T0'" ($r.out -match "Recognised 1 case\(s\): T0")
+Check "D17: ... and the enforced count on the -Submit line agrees (1 case: T0)" ($r.out -match "1 case\(s\) the tester must execute: T0\s")
+$r = Invoke-Q $f17 @("-Submit", "-Id", "qd17c", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planClosed)
+Check "D17: the same plan with the fence CLOSED recognises three and prints no WARNING" `
+    (($r.code -eq 0) -and ($r.out -match "3 case\(s\) the tester must execute: T0, T1, T2") -and -not ($r.out -match "WARNING")) (First-Line $r.out)
+$r = Invoke-Q $f17 @("-Submit", "-Id", "qd17t", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planTab)
+Check "D17: a TAB-indented ``` is NOT a fence - three cases, no WARNING" `
+    (($r.code -eq 0) -and ($r.out -match "3 case\(s\) the tester must execute: T0, T1, T2") -and -not ($r.out -match "WARNING")) (First-Line $r.out)
+# The other two doors.
+Invoke-Q $f17 @("-Claim", "-Id", "qd17c", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $f17 @("-Fail", "-Id", "qd17c", "-By", "qtester", "-Reason", "T1", "-Evidence", "## T1 - the second  FAIL", "-PlanInadequate") | Out-Null
+$r = Invoke-Q $f17 @("-Resubmit", "-Id", "qd17c", "-By", "qdev", "-TestPlan", $planOpen)
+Check "D17: -Resubmit -TestPlan warns about the unterminated fence too" (($r.code -eq 0) -and ($r.out -match "code fence at line 4") -and ($r.out -match "Recognised 1 case\(s\): T0")) (First-Line $r.out)
+$f17b = New-Fixture "d17b"
+$ev = Join-Path $Root "d17b-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f17b "qd17b" "qdev" $ev
+$r = Invoke-Q $f17b @("-Requeue", "-Id", "qd17b", "-By", "qrev", "-Reason", "rebase moved it", "-TestPlan", $planOpen)
+Check "D17: -Requeue -TestPlan warns about the unterminated fence too" (($r.code -eq 0) -and ($r.out -match "code fence at line 4") -and ($r.out -match "Recognised 1 case\(s\): T0")) (First-Line $r.out)
+# A plan whose ONLY headings sit after an unclosed fence is still refused - and the refusal names the fence.
+$planOnlyAfter = Join-Path $Root "plan-only-after-fence.md"
+Set-Content -Path $planOnlyAfter -Encoding ascii -Value @("# plan", '```', "## T0 - hidden", "## T1 - hidden")
+Invoke-Q $f17 @("-Propose", "-Id", "qd17z", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f17 @("-ConfirmAnchor", "-Id", "qd17z", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f17 @("-Submit", "-Id", "qd17z", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planOnlyAfter)
+Check "D17: a plan whose every heading is behind an unclosed fence is refused, and the refusal names the fence line" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ($r.out -match "fence opened at line 2")) (First-Line $r.out)
+# The spill: inline evidence over 2000 chars lands in a file with NO BOM.
+$f17s = New-Fixture "d17s"
+Invoke-Q $f17s @("-Propose", "-Id", "qd17s", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f17s @("-ConfirmAnchor", "-Id", "qd17s", "-By", "qoperator") | Out-Null
+Invoke-Q $f17s @("-Submit", "-Id", "qd17s", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+Invoke-Q $f17s @("-Claim", "-Id", "qd17s", "-Role", "tester", "-By", "qtester") | Out-Null
+$long = $case1Pass + "`n" + ("ran case 1; the output was long. " * 80)
+Check "setup: the inline evidence is over 2000 chars" ($long.Length -gt 2000) ("len=" + $long.Length)
+$r = Invoke-Q $f17s @("-Pass", "-Id", "qd17s", "-By", "qtester", "-Evidence", $long, "-PlanAdequate")
+$spill = Get-QFile $f17s "qd17s.attempt1.evidence.md"
+$it = Get-QItem $f17s "qd17s"
+Check "D17: the long inline evidence is accepted and spilled to the attempt's evidence file" `
+    (($r.code -eq 0) -and ($r.out -match "spilled to") -and (Test-Path $spill) -and ([string]$it.results[0].evidence -eq $spill)) ("exit=" + $r.code)
+$spillBytes = [System.IO.File]::ReadAllBytes($spill)
+Check "D17: the spilled file has NO BOM (byte0 != EF)" (($spillBytes.Length -gt 0) -and ($spillBytes[0] -ne 0xEF)) ("byte0=" + $spillBytes[0].ToString("X2"))
+Check "D17: ... and carries the text verbatim" ((Get-Content -Raw -Encoding UTF8 $spill) -match "ran case 1; the output was long")
 
 # ======================================================================================
 Step "R  the behaviours this change must NOT have altered"
