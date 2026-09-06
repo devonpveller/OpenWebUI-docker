@@ -150,6 +150,11 @@ switch ($Action) {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:5055/api/config).StatusCode -eq 200 }
         Probe "OB1: ops door :8062/health" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8062/health).StatusCode -eq 200 }
+        # The curator answers 503 with {"ok":false,"db":false} when its DB is gone and
+        # nothing at all while crash-looping (2026-09-05: "Module not found pool.ts",
+        # noticed 14 h late from a disk check). Either reads as FAIL here.
+        Probe "OB1: research-curator http://127.0.0.1:8816/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8816/health).StatusCode -eq 200 }
         Probe "OB1: openbrain-db accepting connections" {
             docker exec openbrain-db pg_isready -U postgres -d openbrain -t 5 2>$null | Out-Null
             $LASTEXITCODE -eq 0 }
