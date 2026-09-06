@@ -37,6 +37,29 @@
 #       'cannot check' is not 'checked and failed' - but not an EMPTY-but-present one.
 #       remove-worktree.ps1 writes exactly that when the LAST worktree is retired, so
 #       ordinary correct cleanup refused EVERY developer's -Submit with exit 4.
+#
+# ADDED 2026-09-06 (item `passplan`), from a defect found by READING a merged item:
+#   D8  -Pass never opened the plan or the evidence. Item `curator2` merged on evidence
+#       whose T5 and T6 headings read `PASS (scoped ...)` and `PASS (... chat half NOT
+#       run)` - the tester wrote the truth on the line and the tool recorded one word for
+#       the whole item. The REAL curator2 plan and evidence are replayed here, unedited,
+#       from documentation/evidence/passplan/fixtures/, and must be refused naming T5 and
+#       T6. Then the synthetic matrix: absent, FAIL, SKIPPED, 'PASS (scoped', 'PASS
+#       (partial', anything after PASS - each refused by name; all-bare-PASS accepted; the
+#       per-case rows land in results[] and -Show prints them; -Fail records them without
+#       refusing; a plan with no case headings is refused at every door it can enter by.
+#   D9  Nothing tied a verdict to the plan it was written against. -Submit now records
+#       plan_sha256; -Pass re-hashes the queued file and refuses on drift naming both
+#       hashes; -Resubmit -TestPlan and -Requeue -TestPlan re-record it.
+# FOUND BY THE TESTER OF passplan ATTEMPT 1 (2026-09-06):
+#   D10 Write-Item wrote the item with `Set-Content -Encoding ASCII`, and PS5.1's
+#       ConvertTo-Json does not escape non-ASCII, so the em-dash in every real evidence
+#       heading was stored as `?` in the per-case `line` - the record no longer quoted the
+#       tester. Items are UTF-8 (no BOM) now, and every reader says so.
+#   D11 A `## T2 ... PASS` inside a fenced code block in the evidence satisfied plan case T2
+#       (the protocol's own example, pasted); a fenced `## T9` in a plan became a phantom
+#       case; a plan whose only heading was fenced was accepted at -Submit. Fences (``` and
+#       ~~~) count for nothing on either side now.
 
 [CmdletBinding()]
 param(
@@ -127,12 +150,38 @@ function Invoke-Q($fix, [string[]]$QArgs) {
 }
 
 function Get-QItem($fix, [string]$id) {
+    # Items are UTF-8 (no BOM) since D10; PS5.1's default is the ANSI code page.
     $p = Join-Path $fix.state "queue\$id.json"
     if (-not (Test-Path $p)) { return $null }
-    return (Get-Content -Raw -Path $p | ConvertFrom-Json)
+    return (Get-Content -Raw -Path $p -Encoding UTF8 | ConvertFrom-Json)
 }
 function Get-QFile($fix, [string]$leaf) { return (Join-Path $fix.state ("queue\" + $leaf)) }
-function Get-QRaw($fix, [string]$id) { return (Get-Content -Raw -Path (Join-Path $fix.state "queue\$id.json")) }
+function Get-QRaw($fix, [string]$id) { return (Get-Content -Raw -Path (Join-Path $fix.state "queue\$id.json") -Encoding UTF8) }
+function Invoke-QUtf8($fix, [string[]]$QArgs) {
+    # Like Invoke-Q, but the child's console output and the parent's decoding of it are both
+    # UTF-8, so a non-ASCII character the tool PRINTS (-Show) can be asserted on. Without this
+    # the OEM code page on both ends turns an em-dash into `?` in transit and a check on the
+    # printed line would be a check on the console, not on the tool.
+    $prevState = $env:AI_STACK_WORKTREE_STATE; $prevLine = $env:AI_STACK_WORK_LINE
+    $env:AI_STACK_WORKTREE_STATE = $fix.state
+    $env:AI_STACK_WORK_LINE = "base"
+    $prevOut = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    # Switches (-Show, -Id) stay bare - quoted, '-Show' would reach the script as a string
+    # argument and bind to nothing. Values are single-quoted.
+    $quoted = @($QArgs | ForEach-Object { if ($_ -match '^-[A-Za-z]') { $_ } else { "'" + ($_ -replace "'", "''") + "'" } }) -join " "
+    $cmd = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; & '" + $Script + "' " + $quoted
+    Push-Location $fix.repo
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try { $out = & $PsExe -NoProfile -NonInteractive -Command $cmd 2>&1 }
+    finally {
+        $ErrorActionPreference = $prev
+        Pop-Location
+        [Console]::OutputEncoding = $prevOut
+        $env:AI_STACK_WORKTREE_STATE = $prevState; $env:AI_STACK_WORK_LINE = $prevLine
+    }
+    return @{ code = $LASTEXITCODE; out = (($out | ForEach-Object { "$_" }) -join "`n") }
+}
 function Get-Sha256([string]$path) {
     if (-not (Test-Path $path)) { return "(absent)" }
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
@@ -157,14 +206,20 @@ Set-Content -Path $anchorFile -Encoding ascii -Value @(
     '  "out_of_scope": ["Anything outside WORK.md."],',
     '  "findings_sink": "documentation/notes/queue-defect-drill.md"',
     '}')
+# Plans carry CASE HEADINGS (`## Case <n>` / `## T<n>`) since D8: -Submit refuses a plan
+# the case parser cannot read, and -Pass checks the evidence against these headings. The
+# evidence fixtures below carry the matching `## Case 1 ... PASS` line for the same reason -
+# under the D8 rule, evidence that names no case cannot pass. That every fixture in this
+# file had to change is the contract working.
 $planV1 = Join-Path $Root "plan-v1.md"
 Set-Content -Path $planV1 -Encoding ascii -Value @(
     "# Test plan, attempt 1",
-    "Case 1: WORK.md exists. Fail: it is absent.")
+    "## Case 1 - WORK.md exists. Fail: it is absent.")
 $planV2 = Join-Path $Root "plan-v2.md"
 Set-Content -Path $planV2 -Encoding ascii -Value @(
     "# Test plan, REVISED after the return to test",
-    "Case 2 (new): the case the first plan was missing.")
+    "## Case 2 - (new) the case the first plan was missing.")
+$case1Pass = "## Case 1 - WORK.md exists   PASS"
 
 function Initialize-ToReview($fix, [string]$id, [string]$dev, [string]$evidence) {
     # Drive an item from nothing to `reviewing`, the state every review-side case starts in.
@@ -186,7 +241,7 @@ Step "D1  -Requeue bumps the attempt, so the next pass cannot overwrite the last
 # rested on did not.
 $f1 = New-Fixture "d1"
 $ev1 = Join-Path $Root "d1-evidence-attempt1.md"
-Set-Content -Path $ev1 -Encoding ascii -Value @("# attempt 1 evidence", "ran case 1: WORK.md present.")
+Set-Content -Path $ev1 -Encoding ascii -Value @("# attempt 1 evidence", $case1Pass, "ran case 1: WORK.md present.")
 Initialize-ToReview $f1 "qd1" "qdev" $ev1
 $att1Path = Get-QFile $f1 "qd1.attempt1.evidence.md"
 Check "setup: attempt 1's evidence is beside the item" (Test-Path $att1Path) $att1Path
@@ -198,7 +253,7 @@ $it = Get-QItem $f1 "qd1"
 Check "D1: -Requeue BUMPED attempt to 2" ([int]$it.attempt -eq 2) ("attempt=" + $it.attempt)
 
 $ev2 = Join-Path $Root "d1-evidence-attempt2.md"
-Set-Content -Path $ev2 -Encoding ascii -Value @("# attempt 2 evidence", "re-ran case 1 on the adapted content.")
+Set-Content -Path $ev2 -Encoding ascii -Value @("# attempt 2 evidence", $case1Pass, "re-ran case 1 on the adapted content.")
 Invoke-Q $f1 @("-Claim", "-Id", "qd1", "-Role", "tester", "-By", "qtester2") | Out-Null
 $r = Invoke-Q $f1 @("-Pass", "-Id", "qd1", "-By", "qtester2", "-Evidence", $ev2, "-PlanAdequate")
 Check "the second tester's pass is recorded" ($r.code -eq 0) ("exit=" + $r.code)
@@ -218,7 +273,7 @@ Step "D2  -Requeue carries a REVISED test plan into the queue"
 # reviewer's hands and the next tester read the old plan.
 $f2 = New-Fixture "d2"
 $ev = Join-Path $Root "d2-evidence.md"
-Set-Content -Path $ev -Encoding ascii -Value "ran case 1."
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
 Initialize-ToReview $f2 "qd2" "qdev" $ev
 $planDest = Get-QFile $f2 "qd2.plan.md"
 Check "setup: the queued plan is attempt 1's" ((Get-Content -Raw $planDest) -match "attempt 1")
@@ -247,7 +302,7 @@ Step "D3  -Merged proves containment against the IMMUTABLE tested_at_sha, not a 
 # is both immutable and a STRONGER question: does the merge contain what was TESTED?
 $f3 = New-Fixture "d3"
 $ev = Join-Path $Root "d3-evidence.md"
-Set-Content -Path $ev -Encoding ascii -Value "ran case 1."
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
 Initialize-ToReview $f3 "qd3" "qdev" $ev
 $it = Get-QItem $f3 "qd3"
 $testedAt = $it.tested_at_sha
@@ -337,7 +392,7 @@ Invoke-Q $f5 @("-ConfirmAnchor", "-Id", "qd5", "-By", "qoperator") | Out-Null
 Invoke-Q $f5 @("-Submit", "-Id", "qd5", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
 Invoke-Q $f5 @("-Claim", "-Id", "qd5", "-Role", "tester", "-By", "qtester") | Out-Null
 $dest = Get-QFile $f5 "qd5.attempt1.evidence.md"
-Set-Content -Path $dest -Encoding ascii -Value @("# evidence written straight to the queue", "case 1 green.")
+Set-Content -Path $dest -Encoding ascii -Value @("# evidence written straight to the queue", $case1Pass, "case 1 green.")
 $destBefore = Get-Sha256 $dest
 $r = Invoke-Q $f5 @("-Pass", "-Id", "qd5", "-By", "qtester", "-Evidence", $dest, "-PlanAdequate")
 Check "D5: the verdict is refused (non-zero exit)" ($r.code -ne 0) ("exit=" + $r.code)
@@ -406,7 +461,7 @@ Check "D5b: the refused -Resubmit did NOT half-apply (state and attempt unchange
 # -Requeue -TestPlan, the door added by D2, through the same guard.
 $f5c = New-Fixture "d5c"
 $ev = Join-Path $Root "d5c-evidence.md"
-Set-Content -Path $ev -Encoding ascii -Value "ran case 1."
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
 Initialize-ToReview $f5c "qd5c" "qdev" $ev
 $planDest5c = Get-QFile $f5c "qd5c.plan.md"
 $r = Invoke-Q $f5c @("-Requeue", "-Id", "qd5c", "-By", "qrev", "-Reason", "rebase moved it", "-TestPlan", $planDest5c)
@@ -427,7 +482,7 @@ Step "D6  the DEVELOPER can send their own test-passed item back when the artifa
 # and no new state is invented.
 $f6 = New-Fixture "d6"
 $ev = Join-Path $Root "d6-evidence.md"
-Set-Content -Path $ev -Encoding ascii -Value "ran case 1."
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
 Invoke-Q $f6 @("-Propose", "-Id", "qd6", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
 Invoke-Q $f6 @("-ConfirmAnchor", "-Id", "qd6", "-By", "qoperator") | Out-Null
 Invoke-Q $f6 @("-Submit", "-Id", "qd6", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
@@ -546,6 +601,323 @@ Check "D7 table: and the REGISTERED developer still gets through (exit 0)" `
     (($r.code -eq 0) -and ((Get-QItem $f7e "qd7e").state -eq "ready-to-test")) ("exit=" + $r.code)
 
 # ======================================================================================
+Step "D8  a scoped, skipped, failed or MISSING case cannot become a pass"
+# ======================================================================================
+# THE INCIDENT (curator2, 2026-09-04): eight cases in the plan; the tester's evidence file
+# put the verdict on each case heading, and two of them read `PASS (scoped - read the
+# caveat)` and `PASS (blocking path driven; chat half NOT run)`. -Pass never opened the
+# plan or the evidence, so the item recorded one word - pass - and merged; the image those
+# two cases existed to exercise had never been built. The tester told the truth on the
+# heading line. The tool did not read it.
+#
+# THE REPLAY IS THE REAL FILES. documentation/evidence/passplan/fixtures/ holds the
+# curator2 plan and evidence byte-for-byte as they sit in the live queue. Their headings are
+# the fixture: the checks below prove the two lines are still there BEFORE driving them
+# through -Pass, so an edit that made the case easier makes this drill red instead.
+$fixDir = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "documentation\evidence\passplan\fixtures"
+$c2Plan = Join-Path $fixDir "curator2.plan.md"
+$c2Ev = Join-Path $fixDir "curator2.attempt1.evidence.md"
+Check "D8 fixture: the real curator2 plan and evidence are committed beside this drill" `
+    ((Test-Path $c2Plan) -and (Test-Path $c2Ev)) $fixDir
+$c2Text = ""
+if (Test-Path $c2Ev) { $c2Text = [System.IO.File]::ReadAllText($c2Ev, [System.Text.Encoding]::UTF8) }
+Check "D8 fixture: T5's heading still reads 'PASS (scoped'" ($c2Text -match "(?m)^## T5 .*PASS \(scoped")
+Check "D8 fixture: T6's heading still reads '... chat half NOT run)'" ($c2Text -match "(?m)^## T6 .*chat half NOT run\)\s*$")
+$f8 = New-Fixture "d8"
+Invoke-Q $f8 @("-Propose", "-Id", "qd8", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f8 @("-ConfirmAnchor", "-Id", "qd8", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f8 @("-Submit", "-Id", "qd8", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $c2Plan)
+Check "D8: the real curator2 plan submits, and -Submit counts its 8 cases (T0..T7)" `
+    (($r.code -eq 0) -and ($r.out -match "8 case\(s\) the tester must execute: T0, T1, T2, T3, T4, T5, T6, T7")) ("exit=" + $r.code)
+Invoke-Q $f8 @("-Claim", "-Id", "qd8", "-Role", "tester", "-By", "qtester") | Out-Null
+$r = Invoke-Q $f8 @("-Pass", "-Id", "qd8", "-By", "qtester", "-Evidence", $c2Ev, "-PlanAdequate")
+Check "D8 REPLAY: the real curator2 evidence is REFUSED (non-zero exit)" ($r.code -ne 0) ("exit=" + $r.code)
+Check "D8 REPLAY: the refusal names T5 and quotes its line's verdict" ($r.out -match "T5: PASS \(scoped")
+Check "D8 REPLAY: the refusal names T6 and quotes its line's verdict" ($r.out -match "T6: PASS \(blocking path driven; chat half NOT run\)")
+Check "D8 REPLAY: T1's 'PASS (with caveats)' mutation line is refused too - a parenthetical after PASS is not a pass" `
+    ($r.out -match "T1: PASS \(with caveats\)")
+# T7 has NO heading in the real evidence: the tester wrote "T7's happy path is covered here
+# at the same (scoped) level" inside T5's caveat. A case covered inside another case's
+# caveat was never executed as a case, and the parser says so.
+Check "D8 REPLAY: T7 is refused as MISSING (it was folded into T5's caveat, never run as a case)" ($r.out -match "T7: MISSING")
+Check "D8 REPLAY: the cases that DID pass (T0, T2, T3, T4) are not listed as problems" `
+    (-not ($r.out -match "(?m)^\s+T(0|2|3|4):"))
+$it = Get-QItem $f8 "qd8"
+Check "D8 REPLAY: NOTHING recorded - results empty, still 'testing', claim held, no evidence file copied" `
+    ((@($it.results).Count -eq 0) -and ($it.state -eq "testing") -and (Test-Path (Get-QFile $f8 "qd8.tester.claim")) `
+     -and -not (Test-Path (Get-QFile $f8 "qd8.attempt1.evidence.md"))) `
+    ("results=" + @($it.results).Count + " state=" + $it.state)
+
+# --- the synthetic matrix, on a three-case plan ------------------------------------------
+# One item, one claim: a refused -Pass leaves the claim held, so every refusal is driven
+# against the same item and the accepted evidence goes last. Each refusal proves the exit,
+# the NAME in the message and the untouched state - a refusal that half-applied would be
+# worse than the old behaviour.
+$plan3 = Join-Path $Root "plan-3cases.md"
+Set-Content -Path $plan3 -Encoding ascii -Value @(
+    "# three cases", "", "## T0 - the first", "run x; expect y", "", "## T1 - the second", "", "## T2 - the third",
+    "", "## Out of scope", "not a case: no id after the hashes")
+function Write-Ev([string]$leaf, [string[]]$lines) {
+    # UTF-8 WITHOUT a BOM - what a tester's editor writes, and what carries the em-dash in T1.
+    $p = Join-Path $Root $leaf
+    [System.IO.File]::WriteAllText($p, (($lines -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+    return $p
+}
+$f8b = New-Fixture "d8b"
+Invoke-Q $f8b @("-Propose", "-Id", "qd8b", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f8b @("-ConfirmAnchor", "-Id", "qd8b", "-By", "qoperator") | Out-Null
+Invoke-Q $f8b @("-Submit", "-Id", "qd8b", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+Invoke-Q $f8b @("-Claim", "-Id", "qd8b", "-Role", "tester", "-By", "qtester") | Out-Null
+$emDash = [string][char]0x2014
+$matrix = @(
+    @{ name = "one case ABSENT (T2 never named)";      lines = @("## T0 - the first  PASS", "## T1 $emDash the second  PASS");                              expect = "T2: MISSING" },
+    @{ name = "one heading reads FAIL";                 lines = @("## T0 - the first  PASS", "## T1 - the second  FAIL", "## T2 - the third  PASS");        expect = "T1: FAIL" },
+    @{ name = "one heading reads SKIPPED";              lines = @("## T0 - the first  PASS", "## T1 - the second  SKIPPED", "## T2 - the third  PASS");     expect = "T1: SKIPPED" },
+    @{ name = "'PASS (scoped' after the verdict";       lines = @("## T0 - the first  PASS", "## T1 - the second  PASS", "## T2 - the third  PASS (scoped - could not stage it)"); expect = "T2: PASS \(scoped - could not stage it\)" },
+    @{ name = "'PASS (partial' after the verdict";      lines = @("## T0 - the first  PASS", "## T1 - the second  PASS", "## T2 - the third  PASS (partial)"); expect = "T2: PASS \(partial\)" },
+    @{ name = "anything after PASS (a dash and words)"; lines = @("## T0 - the first  PASS - but see below", "## T1 - the second  PASS", "## T2 - the third  PASS"); expect = "T0: PASS - but see below" },
+    @{ name = "lower-case 'pass' is prose, not a verdict"; lines = @("## T0 - the first  PASS", "## T1 - the second  pass", "## T2 - the third  PASS"); expect = "T1: \(no verdict on the heading line\)" },
+    @{ name = "a heading with no verdict at all";       lines = @("## T0 - the first  PASS", "## T1 - the second", "## T2 - the third  PASS");             expect = "T1: \(no verdict on the heading line\)" }
+)
+$i = 0
+foreach ($m in $matrix) {
+    $i++
+    $evp = Write-Ev ("d8b-ev-" + $i + ".md") $m.lines
+    $r = Invoke-Q $f8b @("-Pass", "-Id", "qd8b", "-By", "qtester", "-Evidence", $evp, "-PlanAdequate")
+    $it = Get-QItem $f8b "qd8b"
+    Check ("D8: " + $m.name + " -> refused, named") (($r.code -ne 0) -and ($r.out -match $m.expect)) ("exit=" + $r.code + " | " + (First-Line $r.out))
+    Check ("D8: " + $m.name + " -> nothing recorded") ((@($it.results).Count -eq 0) -and ($it.state -eq "testing")) ("state=" + $it.state)
+}
+# The refusal lists EVERY problem, not the first one found.
+$evp = Write-Ev "d8b-ev-multi.md" @("## T0 - the first  FAIL", "## T1 - the second  PASS (scoped)")
+$r = Invoke-Q $f8b @("-Pass", "-Id", "qd8b", "-By", "qtester", "-Evidence", $evp, "-PlanAdequate")
+Check "D8: a refusal lists ALL the offending cases (FAIL + scoped + MISSING in one message)" `
+    (($r.code -ne 0) -and ($r.out -match "T0: FAIL") -and ($r.out -match "T1: PASS \(scoped\)") -and ($r.out -match "T2: MISSING")) (First-Line $r.out)
+# Inline evidence is parsed the same way as a file.
+$r = Invoke-Q $f8b @("-Pass", "-Id", "qd8b", "-By", "qtester", "-Evidence", "## T0 - x  PASS`n## T1 - y  PASS`n## T2 - z  SKIPPED", "-PlanAdequate")
+Check "D8: INLINE evidence is held to the same rule" (($r.code -ne 0) -and ($r.out -match "T2: SKIPPED")) ("exit=" + $r.code)
+# And the one shape that IS a pass: every plan case, bare PASS last on the line. T1 uses an
+# em-dash and T2 a lower-case id, because real evidence does and the parser must not care.
+$evOk = Write-Ev "d8b-ev-ok.md" @("# evidence", "## T0 - the first  PASS", "", "    ran x, got y", "", "## T1 $emDash the second   PASS  ", "## t2 - the third  PASS", "", "## T1 $emDash RED mutation of the second  PASS")
+$r = Invoke-Q $f8b @("-Pass", "-Id", "qd8b", "-By", "qtester", "-Evidence", $evOk, "-PlanAdequate")
+$it = Get-QItem $f8b "qd8b"
+Check "D8: evidence with bare PASS on every plan case is ACCEPTED (exit 0, test-passed)" `
+    (($r.code -eq 0) -and ($it.state -eq "test-passed")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+$rows = @()
+if (@($it.results).Count -gt 0 -and ($it.results[0].PSObject.Properties.Name -contains "cases")) { $rows = @($it.results[0].cases) }
+Check "D8: per-case verdicts landed in results[0].cases as {case, verdict, line} - one row per evidence heading (4)" `
+    (($rows.Count -eq 4) -and (@($rows | Where-Object { $_.verdict -eq "PASS" }).Count -eq 4) `
+     -and (@($rows | ForEach-Object { $_.case }) -join ",") -eq "T0,T1,T2,T1" `
+     -and ($rows[1].line -match "^## T1 . the second\s+PASS$")) `
+    ("rows=" + $rows.Count + " cases=" + ((@($rows | ForEach-Object { $_.case })) -join ","))
+Check "D8: the verdict record says which attempt it was (attempt=1)" ([int]$it.results[0].attempt -eq 1)
+$r = Invoke-Q $f8b @("-Show", "-Id", "qd8b")
+Check "D8: -Show prints the per-case verdicts under the attempt" `
+    (($r.out -match "--- VERDICTS ---") -and ($r.out -match "(?m)^attempt 1: PASS by qtester") -and ($r.out -match "(?m)^\s+T2\s+PASS\s*$")) (First-Line $r.out)
+
+# -Fail RECORDS the per-case rows and refuses nothing - the developer needs to know which
+# case failed, and a fail is never held to the all-PASS rule.
+$f8c = New-Fixture "d8c"
+Invoke-Q $f8c @("-Propose", "-Id", "qd8c", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f8c @("-ConfirmAnchor", "-Id", "qd8c", "-By", "qoperator") | Out-Null
+Invoke-Q $f8c @("-Submit", "-Id", "qd8c", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+Invoke-Q $f8c @("-Claim", "-Id", "qd8c", "-Role", "tester", "-By", "qtester") | Out-Null
+$evFail = Write-Ev "d8c-ev-fail.md" @("## T0 - the first  PASS", "## T1 - the second  FAIL", "(T2 not reached)")
+$r = Invoke-Q $f8c @("-Fail", "-Id", "qd8c", "-By", "qtester", "-Reason", "T1 fails", "-Evidence", $evFail, "-PlanInadequate")
+$it = Get-QItem $f8c "qd8c"
+$rows = @(); if (@($it.results).Count -gt 0) { $rows = @($it.results[0].cases) }
+Check "D8: -Fail is recorded (exit 0, test-failed) with the per-case rows it found (T0 PASS, T1 FAIL)" `
+    (($r.code -eq 0) -and ($it.state -eq "test-failed") -and ($rows.Count -eq 2) -and ($rows[1].case -eq "T1") -and ($rows[1].verdict -eq "FAIL")) `
+    ("exit=" + $r.code + " state=" + $it.state + " rows=" + $rows.Count)
+$r = Invoke-Q $f8c @("-Show", "-Id", "qd8c")
+Check "D8: -Show names the FAILED case, not just the verdict" ($r.out -match "(?m)^\s+T1\s+FAIL\s*$")
+
+# A plan the parser cannot read is refused at EVERY door a plan enters by.
+$planNoCases = Join-Path $Root "plan-no-cases.md"
+Set-Content -Path $planNoCases -Encoding ascii -Value @("# Test plan", "Case 1: WORK.md exists. Fail: it is absent.", "T2: something else.")
+$f8d = New-Fixture "d8d"
+Invoke-Q $f8d @("-Propose", "-Id", "qd8d", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f8d @("-ConfirmAnchor", "-Id", "qd8d", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f8d @("-Submit", "-Id", "qd8d", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planNoCases)
+Check "D8: -Submit REFUSES a plan with zero case headings (non-zero)" ($r.code -ne 0) ("exit=" + $r.code)
+Check "D8: ... and the message says what a heading looks like ('## T0' and '## Case 1')" `
+    (($r.out -match "no case headings") -and ($r.out -match "## T0 - what it checks") -and ($r.out -match "## Case 1 - what it checks")) (First-Line $r.out)
+Check "D8: ... and nothing was queued (still anchor-confirmed, no plan copied)" `
+    (((Get-QItem $f8d "qd8d").state -eq "anchor-confirmed") -and -not (Test-Path (Get-QFile $f8d "qd8d.plan.md")))
+$r = Invoke-Q $f8c @("-Resubmit", "-Id", "qd8c", "-By", "qdev", "-TestPlan", $planNoCases)
+$it = Get-QItem $f8c "qd8c"
+Check "D8: -Resubmit -TestPlan with zero case headings is refused, nothing half-applied (test-failed, attempt 1)" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ($it.state -eq "test-failed") -and ([int]$it.attempt -eq 1)) ("exit=" + $r.code)
+$f8e = New-Fixture "d8e"
+$ev = Join-Path $Root "d8e-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f8e "qd8e" "qdev" $ev
+$r = Invoke-Q $f8e @("-Requeue", "-Id", "qd8e", "-By", "qrev", "-Reason", "x", "-TestPlan", $planNoCases)
+$it = Get-QItem $f8e "qd8e"
+Check "D8: -Requeue -TestPlan with zero case headings is refused, nothing half-applied (reviewing, attempt 1)" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ($it.state -eq "reviewing") -and ([int]$it.attempt -eq 1)) ("exit=" + $r.code)
+
+# ======================================================================================
+Step "D9  evidence for a plan that CHANGED since submit cannot be recorded"
+# ======================================================================================
+# A pass describes the cases that were agreed at submit. Nothing tied the verdict to that
+# file: the queued plan could be rewritten by hand (or by a stray copy) between submit and
+# pass, and -Pass would happily check the evidence against the new one. -Submit records the
+# hash of the QUEUED copy; -Pass re-hashes the same file and refuses on drift naming both;
+# the two legitimate revision doors (-Resubmit -TestPlan, -Requeue -TestPlan) re-record it.
+$f9 = New-Fixture "d9"
+Invoke-Q $f9 @("-Propose", "-Id", "qd9", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f9 @("-ConfirmAnchor", "-Id", "qd9", "-By", "qoperator") | Out-Null
+Invoke-Q $f9 @("-Submit", "-Id", "qd9", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+$it = Get-QItem $f9 "qd9"
+$queued9 = Get-QFile $f9 "qd9.plan.md"
+$recorded9 = [string]$it.plan_sha256
+Check "D9: -Submit recorded plan_sha256, and it is the sha256 of the QUEUED plan file" `
+    (($recorded9 -match "^[0-9a-f]{64}$") -and ($recorded9 -eq (Get-Sha256 $queued9).ToLower())) ("plan_sha256=" + $recorded9)
+# THE DRIFT: the queued file is rewritten underneath the item - here, a case is dropped,
+# which is the direction that turns a refusal into a pass.
+Set-Content -Path $queued9 -Encoding ascii -Value @("# three cases, one quietly removed", "## T0 - the first", "## T1 - the second")
+$drifted9 = (Get-Sha256 $queued9).ToLower()
+Check "setup: the queued plan now hashes differently" ($drifted9 -ne $recorded9)
+Invoke-Q $f9 @("-Claim", "-Id", "qd9", "-Role", "tester", "-By", "qtester") | Out-Null
+$evTwo = Write-Ev "d9-ev-two.md" @("## T0 - the first  PASS", "## T1 - the second  PASS")
+$r = Invoke-Q $f9 @("-Pass", "-Id", "qd9", "-By", "qtester", "-Evidence", $evTwo, "-PlanAdequate")
+$it = Get-QItem $f9 "qd9"
+Check "D9: -Pass against the drifted plan is REFUSED (non-zero) even though the evidence matches the file on disk" `
+    ($r.code -ne 0) ("exit=" + $r.code)
+Check "D9: the refusal names BOTH hashes - the one recorded at submit and the one on disk now" `
+    (($r.out -match $recorded9) -and ($r.out -match $drifted9)) (First-Line $r.out)
+Check "D9: nothing recorded - results empty, still 'testing', claim held" `
+    ((@($it.results).Count -eq 0) -and ($it.state -eq "testing") -and (Test-Path (Get-QFile $f9 "qd9.tester.claim"))) ("state=" + $it.state)
+# THE LEGITIMATE DOOR: a failed round, then -Resubmit -TestPlan. The hash follows the plan.
+Invoke-Q $f9 @("-Fail", "-Id", "qd9", "-By", "qtester", "-Reason", "plan drifted", "-Evidence", "the queued plan is not the submitted one", "-PlanInadequate") | Out-Null
+$plan3b = Join-Path $Root "plan-3cases-b.md"
+Set-Content -Path $plan3b -Encoding ascii -Value @("# three cases, revised", "## T0 - the first", "## T1 - the second", "## T2 - the third, reworded")
+$r = Invoke-Q $f9 @("-Resubmit", "-Id", "qd9", "-By", "qdev", "-TestPlan", $plan3b)
+$it = Get-QItem $f9 "qd9"
+Check "D9: -Resubmit -TestPlan re-records plan_sha256 as the hash of the newly queued plan" `
+    (($r.code -eq 0) -and ([string]$it.plan_sha256 -eq (Get-Sha256 $queued9).ToLower()) -and ([string]$it.plan_sha256 -ne $recorded9)) `
+    ("plan_sha256=" + $it.plan_sha256)
+Invoke-Q $f9 @("-Claim", "-Id", "qd9", "-Role", "tester", "-By", "qtester") | Out-Null
+$evThree = Write-Ev "d9-ev-three.md" @("## T0 - the first  PASS", "## T1 - the second  PASS", "## T2 - the third  PASS")
+$r = Invoke-Q $f9 @("-Pass", "-Id", "qd9", "-By", "qtester", "-Evidence", $evThree, "-PlanAdequate")
+Check "D9: ... and a pass against the re-recorded plan is accepted (exit 0, test-passed)" `
+    (($r.code -eq 0) -and ((Get-QItem $f9 "qd9").state -eq "test-passed")) ("exit=" + $r.code + " | " + (First-Line $r.out))
+# The other door: the reviewer's -Requeue -TestPlan.
+$f9b = New-Fixture "d9b"
+$ev = Join-Path $Root "d9b-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f9b "qd9b" "qdev" $ev
+$before9b = [string](Get-QItem $f9b "qd9b").plan_sha256
+$r = Invoke-Q $f9b @("-Requeue", "-Id", "qd9b", "-By", "qrev", "-Reason", "rebase changed the file", "-TestPlan", $plan3)
+$it = Get-QItem $f9b "qd9b"
+Check "D9: -Requeue -TestPlan re-records plan_sha256 as the hash of the newly queued plan" `
+    (($r.code -eq 0) -and ([string]$it.plan_sha256 -eq (Get-Sha256 (Get-QFile $f9b "qd9b.plan.md")).ToLower()) -and ([string]$it.plan_sha256 -ne $before9b)) `
+    ("before=" + $before9b + " after=" + $it.plan_sha256)
+# And a -Requeue WITHOUT -TestPlan leaves the hash exactly where it was.
+$f9c = New-Fixture "d9c"
+$ev = Join-Path $Root "d9c-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f9c "qd9c" "qdev" $ev
+$before9c = [string](Get-QItem $f9c "qd9c").plan_sha256
+Invoke-Q $f9c @("-Requeue", "-Id", "qd9c", "-By", "qrev", "-Reason", "rebase moved it, plan unchanged") | Out-Null
+Check "D9: -Requeue without -TestPlan leaves plan_sha256 untouched" ([string](Get-QItem $f9c "qd9c").plan_sha256 -eq $before9c)
+
+# ======================================================================================
+Step "D10  an em-dash in an evidence heading round-trips through -Pass, the record and -Show"
+# ======================================================================================
+# THE INCIDENT (passplan attempt 1): the stored per-case `line` read `## T1 ? b   PASS`.
+# Write-Item wrote ASCII; the record that exists to quote the tester dropped their character.
+# Byte-level on disk (E2 80 94, no BOM), then through the UTF-8 reader, then through -Show.
+$f10 = New-Fixture "d10"
+Invoke-Q $f10 @("-Propose", "-Id", "qd10", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f10 @("-ConfirmAnchor", "-Id", "qd10", "-By", "qoperator") | Out-Null
+Invoke-Q $f10 @("-Submit", "-Id", "qd10", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+Invoke-Q $f10 @("-Claim", "-Id", "qd10", "-Role", "tester", "-By", "qtester") | Out-Null
+$dashLine = "## T1 " + $emDash + " the second  PASS"
+$evDash = Write-Ev "d10-ev.md" @("## T0 - the first  PASS", $dashLine, "## T2 - the third  PASS")
+$r = Invoke-Q $f10 @("-Pass", "-Id", "qd10", "-By", "qtester", "-Evidence", $evDash, "-PlanAdequate")
+Check "D10: the pass with an em-dash heading is accepted" ($r.code -eq 0) ("exit=" + $r.code)
+$itemBytes = [System.IO.File]::ReadAllBytes((Get-QFile $f10 "qd10.json"))
+$hex = ($itemBytes | ForEach-Object { $_.ToString("X2") }) -join " "
+Check "D10: the item file carries the em-dash as UTF-8 bytes E2 80 94 (not '?' = 3F)" `
+    ($hex -match "E2 80 94") ("first bytes: " + $hex.Substring(0, [Math]::Min(24, $hex.Length)))
+Check "D10: ... and has no BOM" (-not ($itemBytes[0] -eq 0xEF -and $itemBytes[1] -eq 0xBB)) ("byte0=" + $itemBytes[0].ToString("X2"))
+$it = Get-QItem $f10 "qd10"
+Check "D10: read back through the UTF-8 reader, results[0].cases[1].line is the heading verbatim" `
+    ([string]$it.results[0].cases[1].line -eq $dashLine) ("line=" + $it.results[0].cases[1].line)
+$r = Invoke-QUtf8 $f10 @("-Show", "-Id", "qd10")
+Check "D10: -Show prints the heading with the em-dash intact" ($r.out.Contains($dashLine)) `
+    ("exit=" + $r.code + " has verdicts block=" + $r.out.Contains("--- VERDICTS ---") + " | " + (First-Line $r.out))
+$r = Invoke-Q $f10 @("-List")
+Check "D10: -List still reads the UTF-8 item (exit 0, item listed)" (($r.code -eq 0) -and ($r.out -match "qd10\s+test-passed")) ("exit=" + $r.code)
+# The FAIL path stores the tester's words too: a curator2-style row survives verbatim.
+$f10b = New-Fixture "d10b"
+Invoke-Q $f10b @("-Propose", "-Id", "qd10b", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f10b @("-ConfirmAnchor", "-Id", "qd10b", "-By", "qoperator") | Out-Null
+Invoke-Q $f10b @("-Submit", "-Id", "qd10b", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+Invoke-Q $f10b @("-Claim", "-Id", "qd10b", "-Role", "tester", "-By", "qtester") | Out-Null
+$scopedLine = "## T2 " + $emDash + " the third  PASS (scoped " + $emDash + " read the caveat)"
+$evScoped = Write-Ev "d10b-ev.md" @("## T0 - the first  PASS", "## T1 - the second  FAIL", $scopedLine)
+Invoke-Q $f10b @("-Fail", "-Id", "qd10b", "-By", "qtester", "-Reason", "T1", "-Evidence", $evScoped, "-PlanInadequate") | Out-Null
+$it = Get-QItem $f10b "qd10b"
+Check "D10: a -Fail row's verdict keeps its em-dashes: 'PASS (scoped - read the caveat)' as written" `
+    ([string]$it.results[0].cases[2].verdict -eq ("PASS (scoped " + $emDash + " read the caveat)")) ("verdict=" + $it.results[0].cases[2].verdict)
+
+# ======================================================================================
+Step "D11  a heading inside a fenced code block counts for nothing - plan and evidence, every door"
+# ======================================================================================
+# THE INCIDENT (passplan attempt 1): the protocol's fenced example, pasted into evidence,
+# satisfied a plan case; a fenced `## T9` in a plan became a case -Pass then demanded; a plan
+# whose only heading was fenced was accepted at -Submit.
+$planFencedOnly = Join-Path $Root "plan-fenced-only.md"
+Set-Content -Path $planFencedOnly -Encoding ascii -Value @("# plan", "An example of a heading:", '```', "## T0 - looks like a case", '```')
+$planPhantom = Join-Path $Root "plan-phantom.md"
+Set-Content -Path $planPhantom -Encoding ascii -Value @(
+    "# plan", "## T0 - the first", "## T1 - the second", "", "Headings look like this:", '   ```markdown', "## T9 - phantom", '   ```',
+    "", "~~~", "## T8 - phantom too", "~~~", "", "Case 7: not a heading either")
+$f11 = New-Fixture "d11"
+Invoke-Q $f11 @("-Propose", "-Id", "qd11", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f11 @("-ConfirmAnchor", "-Id", "qd11", "-By", "qoperator") | Out-Null
+$r = Invoke-Q $f11 @("-Submit", "-Id", "qd11", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planFencedOnly)
+Check "D11: -Submit REFUSES a plan whose only heading is inside a fence" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ((Get-QItem $f11 "qd11").state -eq "anchor-confirmed")) ("exit=" + $r.code)
+$r = Invoke-Q $f11 @("-Submit", "-Id", "qd11", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $planPhantom)
+Check "D11: -Submit counts the two REAL cases and neither fenced phantom (T0, T1 - not T8, T9)" `
+    (($r.code -eq 0) -and ($r.out -match "2 case\(s\) the tester must execute: T0, T1\s")) (First-Line $r.out)
+Invoke-Q $f11 @("-Claim", "-Id", "qd11", "-Role", "tester", "-By", "qtester") | Out-Null
+$evFencedBacktick = Write-Ev "d11-ev-bt.md" @("## T0 - the first  PASS", "the shape that counts:", '```markdown', "## T1 - the second  PASS", '```')
+$r = Invoke-Q $f11 @("-Pass", "-Id", "qd11", "-By", "qtester", "-Evidence", $evFencedBacktick, "-PlanAdequate")
+Check "D11: a backtick-fenced '## T1 ... PASS' in the evidence does NOT satisfy T1 (refused: T1 MISSING)" `
+    (($r.code -ne 0) -and ($r.out -match "T1: MISSING")) ("exit=" + $r.code)
+$evFencedTilde = Write-Ev "d11-ev-tilde.md" @("## T0 - the first  PASS", "~~~", "## T1 - the second  PASS", "~~~")
+$r = Invoke-Q $f11 @("-Pass", "-Id", "qd11", "-By", "qtester", "-Evidence", $evFencedTilde, "-PlanAdequate")
+Check "D11: a ~~~ fenced '## T1 ... PASS' does not satisfy it either" (($r.code -ne 0) -and ($r.out -match "T1: MISSING")) ("exit=" + $r.code)
+$evFencedFail = Write-Ev "d11-ev-fail.md" @("## T0 - the first  PASS", "## T1 - the second  PASS", '```', "## T1 - quoted from a draft  FAIL", '```')
+$r = Invoke-Q $f11 @("-Pass", "-Id", "qd11", "-By", "qtester", "-Evidence", $evFencedFail, "-PlanAdequate")
+$it = Get-QItem $f11 "qd11"
+Check "D11: a fenced FAIL is a quotation, not a verdict - real T0/T1 PASS headings are accepted, 2 rows recorded" `
+    (($r.code -eq 0) -and ($it.state -eq "test-passed") -and (@($it.results[0].cases).Count -eq 2)) ("exit=" + $r.code + " rows=" + @($it.results[0].cases).Count)
+# The other two doors a plan enters by.
+$f11b = New-Fixture "d11b"
+$ev = Join-Path $Root "d11b-evidence.md"
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
+Initialize-ToReview $f11b "qd11b" "qdev" $ev
+$r = Invoke-Q $f11b @("-Requeue", "-Id", "qd11b", "-By", "qrev", "-Reason", "x", "-TestPlan", $planFencedOnly)
+Check "D11: -Requeue -TestPlan with a fenced-only plan is refused, nothing half-applied" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ((Get-QItem $f11b "qd11b").state -eq "reviewing")) ("exit=" + $r.code)
+$f11c = New-Fixture "d11c"
+Invoke-Q $f11c @("-Propose", "-Id", "qd11c", "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+Invoke-Q $f11c @("-ConfirmAnchor", "-Id", "qd11c", "-By", "qoperator") | Out-Null
+Invoke-Q $f11c @("-Submit", "-Id", "qd11c", "-Branch", "work/qd", "-Developer", "qdev", "-TestPlan", $plan3) | Out-Null
+Invoke-Q $f11c @("-Claim", "-Id", "qd11c", "-Role", "tester", "-By", "qtester") | Out-Null
+Invoke-Q $f11c @("-Fail", "-Id", "qd11c", "-By", "qtester", "-Reason", "T0", "-Evidence", "## T0 - the first  FAIL", "-PlanInadequate") | Out-Null
+$r = Invoke-Q $f11c @("-Resubmit", "-Id", "qd11c", "-By", "qdev", "-TestPlan", $planFencedOnly)
+$it = Get-QItem $f11c "qd11c"
+Check "D11: -Resubmit -TestPlan with a fenced-only plan is refused, nothing half-applied (test-failed, attempt 1)" `
+    (($r.code -ne 0) -and ($r.out -match "no case headings") -and ($it.state -eq "test-failed") -and ([int]$it.attempt -eq 1)) ("exit=" + $r.code)
+
+# ======================================================================================
 Step "R  the behaviours this change must NOT have altered"
 # ======================================================================================
 # The regression column. Each of these was true before the six fixes and has to stay true:
@@ -565,7 +937,7 @@ $r = Invoke-Q $fr @("-Claim", "-Id", "qr2", "-Role", "reviewer", "-By", "wt-qdev
 Check "R: the prefixed form of the developer's own id is also refused (exit 4)" ($r.code -eq 4) ("exit=" + $r.code)
 Invoke-Q $fr @("-Claim", "-Id", "qr2", "-Role", "tester", "-By", "qtester") | Out-Null
 $ev = Join-Path $Root "reg-evidence.md"
-Set-Content -Path $ev -Encoding ascii -Value "ran case 1."
+Set-Content -Path $ev -Encoding ascii -Value @($case1Pass, "ran case 1.")
 Invoke-Q $fr @("-Pass", "-Id", "qr2", "-By", "qtester", "-Evidence", $ev, "-PlanAdequate") | Out-Null
 $r = Invoke-Q $fr @("-Approve", "-Id", "qr2", "-By", "qdev")
 Check "R: the developer cannot release their OWN work for review (exit 4)" ($r.code -eq 4) ("exit=" + $r.code)

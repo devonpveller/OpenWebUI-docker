@@ -121,11 +121,27 @@ Check "two divergent commits exist" ((Get-DrillGit -C $wtA rev-parse HEAD) -ne (
 Step 3 "developers QUEUE their work with a test plan - they never merge it themselves"
 # The plan must be a FILE that exists - queue.ps1 now proves it, so the drill writes one
 # rather than passing a sentence. That the drill had to change is the contract working.
+# And its cases are HEADINGS (`## Case <n>`), because -Pass now checks the evidence against
+# them case by case (passplan, 2026-09-06) and -Submit refuses a plan it cannot read. The
+# evidence files further down carry the matching `## Case <n> ... PASS` lines - the drill
+# had to change again, and again that is the contract working.
 $planFile = Join-Path $env:TEMP "drill-test-plan.md"
 Set-Content -Path $planFile -Encoding ascii -Value @(
     "# Drill test plan",
-    "Case 1: DRILL-NOTE.md exists and states a timeout. Pass: it does. Fail: absent or silent.",
-    "Case 2: the file names exactly one owner. Pass: one. Fail: contradictory owners.")
+    "## Case 1 - DRILL-NOTE.md exists and states a timeout. Pass: it does. Fail: absent or silent.",
+    "## Case 2 - the file names exactly one owner. Pass: one. Fail: contradictory owners.")
+function Write-DrillEvidence([string]$leaf, [string[]]$lines) {
+    $p = Join-Path $env:TEMP $leaf
+    Set-Content -Path $p -Encoding ascii -Value $lines
+    return $p
+}
+# Evidence for the two-case plan: every case, bare PASS last on the heading line.
+$evidenceBoth = Write-DrillEvidence "drill-evidence-both.md" @(
+    "# drill evidence",
+    "## Case 1 - DRILL-NOTE.md exists and states a timeout   PASS",
+    "    read the file at HEAD: one line, names 60s",
+    "## Case 2 - exactly one owner   PASS",
+    "    one owner line")
 # THE ANCHOR GATE comes first: work is agreed before it is built. A submit with no anchor,
 # and a submit against an UNCONFIRMED anchor, must both be refused with exit 5.
 & $queue -Submit -Id "drill-a" -Branch "work/drilla" -Developer "wt-drilla" -TestPlan $planFile 2>&1 | Out-Null
@@ -431,18 +447,37 @@ Check "only the DEVELOPER may re-submit their item" ($LASTEXITCODE -eq 4)
 $revisedPlan = Join-Path $env:TEMP "drill-test-plan-v2.md"
 Set-Content -Path $revisedPlan -Encoding ascii -Value @(
     "# Drill test plan, attempt 2",
-    "Case 3 (new): the case attempt 1's plan was missing.")
+    "## Case 3 - (new) the case attempt 1's plan was missing: the note states a UNIT.")
 & $queue -Resubmit -Id drill-a -By wt-drilla -TestPlan $revisedPlan | Out-Null
 Check "-Resubmit REPLACES the queued plan when one is offered" `
     ((Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.plan.md")) -match "attempt 2")
 Check "the developer re-submits on the SAME item (attempt 2)" ((Get-QueueState "drill-a") -eq "ready-to-test")
 
 Step 6 "the tester passes both - and they STOP at the human gate"
-foreach ($id in @("a", "b")) {
-    & $queue -Claim -Id "drill-$id" -Role tester -By wt-tester | Out-Null
-    & $queue -Pass -Id "drill-$id" -By wt-tester -Evidence "every case green" -PlanAdequate | Out-Null
-}
+# THE PASS RULE ON THE HARNESS'S OWN DRILL (passplan, 2026-09-06). "every case green" was
+# this drill's evidence for two years of runs, and it names no case: under the rule it is
+# refused, and the drill proves that before it proves the pass. drill-a is on the REVISED
+# plan (Case 3 only); drill-b is on the original (Cases 1 and 2). Each gets evidence for
+# ITS plan - a pass is checked against the plan the item actually carries.
+& $queue -Claim -Id drill-a -Role tester -By wt-tester | Out-Null
+& $queue -Pass -Id drill-a -By wt-tester -Evidence "every case green" -PlanAdequate 2>&1 | Out-Null
+Check "evidence that names no case is REFUSED - the pass rule holds on the drill itself" `
+    (($LASTEXITCODE -ne 0) -and ((Get-QueueState "drill-a") -eq "testing"))
+$evidenceScoped = Write-DrillEvidence "drill-evidence-scoped.md" @("## Case 3 - the note states a unit   PASS (scoped - did not open the file)")
+& $queue -Pass -Id drill-a -By wt-tester -Evidence $evidenceScoped -PlanAdequate 2>&1 | Out-Null
+Check "a 'PASS (scoped' case is REFUSED, and the claim survives the refusal" `
+    (($LASTEXITCODE -ne 0) -and (Test-Path (Join-Path $QueueDir "drill-a.tester.claim")))
+$evidenceCase3 = Write-DrillEvidence "drill-evidence-case3.md" @("## Case 3 - the note states a unit   PASS", "    60s - seconds, stated")
+& $queue -Pass -Id drill-a -By wt-tester -Evidence $evidenceCase3 -PlanAdequate | Out-Null
+& $queue -Claim -Id drill-b -Role tester -By wt-tester | Out-Null
+& $queue -Pass -Id drill-b -By wt-tester -Evidence $evidenceBoth -PlanAdequate | Out-Null
 Check "a pass does NOT queue for review by itself" ((Get-QueueState "drill-a") -eq "test-passed" -and (Get-QueueState "drill-b") -eq "test-passed")
+$aRecord = Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json
+$aCases = @(@($aRecord.results | Where-Object { $_.verdict -eq "pass" } | Select-Object -Last 1).cases)
+Check "the pass carries per-case verdicts in results[] ({case, verdict, line})" `
+    (($aCases.Count -eq 1) -and ($aCases[0].case -eq "Case 3") -and ($aCases[0].verdict -eq "PASS") -and ($aCases[0].line -match "PASS$"))
+Check "plan_sha256 was recorded at submit and matches the queued plan" `
+    ($aRecord.plan_sha256 -eq (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $QueueDir "drill-a.plan.md")).Hash.ToLower())
 & $queue -Claim -Id drill-a -Role reviewer -By wt-reviewer 2>&1 | Out-Null
 Check "a reviewer cannot claim before the operator releases it" ($LASTEXITCODE -ne 0)
 & $queue -Approve -Id drill-a -By wt-drilla 2>&1 | Out-Null
@@ -504,7 +539,13 @@ Check "the tested sha is no longer what would land" ($afterRebase -ne $testedAt)
 & $queue -Requeue -Id drill-b -By wt-reviewer -Reason "rebase onto A's merge changed the file; the pass no longer describes it" | Out-Null
 Check "reviewer returned it to testing rather than merging" ((Get-QueueState "drill-b") -eq "ready-to-test")
 & $queue -Claim -Id drill-b -Role tester -By wt-tester | Out-Null
-& $queue -Pass -Id drill-b -By wt-tester -Evidence "re-read the adapted file; both intents present" -PlanAdequate | Out-Null
+$evidenceRetest = Write-DrillEvidence "drill-evidence-retest.md" @(
+    "# re-test after the rebase",
+    "## Case 1 - DRILL-NOTE.md exists and states a timeout   PASS",
+    "    re-read the adapted file; 60s present",
+    "## Case 2 - exactly one owner   PASS",
+    "    both intents present, one owner line")
+& $queue -Pass -Id drill-b -By wt-tester -Evidence $evidenceRetest -PlanAdequate | Out-Null
 & $queue -Approve -Id drill-b -By profnovice | Out-Null
 Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
 
@@ -531,6 +572,7 @@ foreach ($id in @("drilla", "drillb")) {
 Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
 Clear-DrillQueue
+Get-ChildItem -Path $env:TEMP -Filter "drill-evidence-*.md" -ErrorAction SilentlyContinue | Remove-Item -Force
 # Scoped to the DRILL's own artifacts. These asserted the whole worktree directory was
 # empty, which failed the moment real agents had work in flight - the drill must not
 # require an idle repo to pass, and must never look like it cleaned up someone else's work.

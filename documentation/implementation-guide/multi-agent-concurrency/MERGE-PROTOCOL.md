@@ -223,6 +223,18 @@ by a tester after every case in that plan had passed):
 - **Read the blob, not the working tree** (`git show <branch>:<path>`). `core.autocrlf`
   makes every text file CRLF locally, and the operator's checkout may hold uncommitted
   edits that are not on your branch - score the branch against the branch.
+- **A case the tester cannot execute in their environment is a plan inadequacy
+  (`-PlanInadequate`), never a scoped pass.** Write cases the tester can actually run
+  from a worktree, and if one needs a plane, an image or a lease, say so in the case -
+  `-Pass` now refuses any case whose evidence heading is not a bare `PASS` (item
+  `curator2`, 2026-09-04: two `PASS (scoped ...)` headings let an unbuilt image ship).
+
+**Which headings are cases.** `queue.ps1` reads the plan: a case is a Markdown H2 that
+starts with the case id - `## T0 - ...` or `## Case 1 - ...` - and `-Submit` refuses a plan
+with none (a plan the tool cannot read must not be able to pass by having nothing to
+check). The plan file is hashed at submit; `-Resubmit -TestPlan` and `-Requeue -TestPlan`
+re-record the hash, and a `-Pass` against a queued plan that no longer hashes to what was
+submitted is refused.
 
 Expect cycles. A case failing is the plan doing its job: the tester reports what it revealed,
 you fix the finding in the same worktree, and `-Resubmit` starts the next attempt on the same
@@ -241,6 +253,35 @@ involved change that finds nothing on the first pass is a reason to doubt the pl
 `-Evidence` is required on **both** verdicts, and may be a path to a file - long evidence
 does not fit a PS5.1 argument, and it is copied beside the item. A failure is exactly when
 the next person needs your evidence most.
+
+**The evidence line shape that counts (2026-09-06).** `-Pass` reads your evidence against
+the plan's case headings and refuses unless **every** plan case appears as a heading whose
+**last word is the bare token `PASS`**:
+
+```markdown
+## T5 - criterion 2, the job row                         PASS
+    <what you ran, what it printed>
+## Case 3 - the note states a unit                       PASS
+```
+
+Same id as the plan (`## T5` / `## Case 3`; a dash, an em-dash or nothing after it), anything
+in between, `PASS` last, nothing after it. `PASS (scoped - ...)`, `PASS (partial)`,
+`PASS - see caveat`, `SKIPPED`, `FAIL`, a lower-case `pass`, or a plan case with no heading
+at all are each a refusal that names the case and quotes the line - nothing is recorded and
+you keep the claim. A case you could not execute is recorded with `-Fail -PlanInadequate`
+and what the plan should have made runnable; it is never a scoped pass. The per-case
+verdicts are stored in `results[]` as `{case, verdict, line}` and `-Show` prints them under
+the attempt, so a failure names the case rather than the item. `-Fail` records whatever
+per-case lines your evidence carries and refuses nothing.
+
+Three edges, decided: **ids are literal** after one normalisation (`t2` = `T2`, `case 3` =
+`Case 3`), so `## T05` is not `T5` and `## Case 5` is not `T5` - write the plan's id as the
+plan wrote it. **Fenced code blocks (``` or ~~~) count for nothing** on either side: a
+heading quoted inside a fence - this section's example, pasted - is a quotation, not a
+verdict, and a fenced `## T9` in a plan is not a case. **Inline `-Evidence` text may carry
+the case verdicts** - it is recorded verbatim exactly as a file is, and long text is spilled
+to the item's evidence file; the file form is still the one to prefer, because a long inline
+string dies at the process boundary before the tool ever sees it.
 
 One of `-PlanAdequate` / `-PlanInadequate` is **required** on both verdicts. It is a
 judgement, not a formality: the plan was written by the developer, so

@@ -175,13 +175,26 @@ function Die([string]$m, [int]$code = 1) { Write-Host "ERROR: $m" -ForegroundCol
 function Read-Item([string]$i) {
     $p = ItemPath $i
     if (-not (Test-Path $p)) { Die "no queue item '$i'" }
-    return (Get-Content -Raw -Path $p | ConvertFrom-Json)
+    return (Read-ItemFile $p)
+}
+
+function Read-ItemFile([string]$p) {
+    # UTF-8, stated. PS5.1's Get-Content default is the ANSI code page, which would read the
+    # UTF-8 bytes Write-Item now produces as three characters per em-dash.
+    return (Get-Content -Raw -Path $p -Encoding UTF8 | ConvertFrom-Json)
 }
 
 function Write-Item($item) {
     $p = ItemPath $item.id
     $tmp = "$p.tmp"
-    ($item | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding ASCII
+    # UTF-8 WITHOUT a BOM (passplan attempt 2, 2026-09-06). This was `Set-Content -Encoding
+    # ASCII`, and PS5.1's ConvertTo-Json does not escape non-ASCII, so every em-dash in a
+    # recorded per-case `line` - which is to say every real evidence heading - was stored as
+    # `?`. A record that exists to quote what the tester wrote cannot drop their characters.
+    # The ASCII rule in CLAUDE.md is for scripts PS5.1 PARSES, not for data files; a BOM-less
+    # UTF-8 file is what Python's json.load (the bridge, oracle_on_stall.py) and the
+    # -Encoding UTF8 readers here both expect.
+    [System.IO.File]::WriteAllText($tmp, ($item | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -Path $tmp -Destination $p -Force
 }
 
@@ -282,6 +295,139 @@ function Copy-IntoQueue([string]$Source, [string]$Destination, [string]$Flag, [s
               "command puts it here for you.") -f $Flag, $What, $dstFull, $QueueDir)
     }
     Copy-Item -LiteralPath $srcFull -Destination $dstFull -Force
+}
+
+# --- the plan's cases, and what the evidence says about each (passplan, 2026-09-06) ------
+#
+# WHY. Item curator2 (2026-09-04) merged on a -Pass whose evidence file carried, on two of
+# its eight case headings, `PASS (scoped - read the caveat)` and `PASS (blocking path
+# driven; chat half NOT run)`. The tester wrote the truth on the heading line; the tool never
+# read it. -Pass opened neither the plan nor the evidence - the only thing between a scoped
+# case and a green item was the tester's willingness to type -Fail instead, and the image
+# those two cases existed to exercise had never been built. So the tool reads both now.
+#
+# A CASE is a Markdown H2 that starts with the case id - `## T3 - ...` or `## Case 3 - ...`,
+# the two shapes every real plan in the queue already uses. A case PASSES only when the
+# evidence carries a heading with the same id whose LAST word is the bare token PASS.
+# Anything after PASS - a parenthetical, a dash, a caveat - is the tester telling us it was
+# not a pass, and the tool now agrees with them. A case the tester could not execute is a
+# plan inadequacy (-Fail -PlanInadequate), never a scoped pass.
+#
+# The plan is also hashed at -Submit (and re-hashed by the two plan-revision doors), and
+# -Pass refuses when the queued file no longer hashes to what was submitted: a pass
+# describes the cases that were agreed, and a plan that changed underneath is not those.
+$CaseHeadingPattern = '^##\s+(T\d+|Case\s+\d+)\b'
+$CaseHeadingShape = ("a case heading is a Markdown H2 that STARTS with the case id - " +
+                     "'## T0 - what it checks' or '## Case 1 - what it checks' - the id first, " +
+                     "then anything")
+
+function Read-Utf8Text([string]$path) {
+    # Evidence carries em-dashes and the like. PS5.1's Get-Content default is the ANSI code
+    # page, which turns those into several characters and can move what "the last word" is.
+    return [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+}
+
+function Get-PlanSha256([string]$path) {
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLower()
+}
+
+function Normalize-CaseId([string]$raw) {
+    # `T5`, `t5`, `Case 5`, `case  5` are one case: the plan's spelling and the evidence's
+    # must compare equal, and a refusal must not fire on capitalisation.
+    $r = ($raw -replace '\s+', ' ').Trim()
+    if ($r -match '^[Tt](\d+)$') { return ("T" + $matches[1]) }
+    if ($r -match '^[Cc][Aa][Ss][Ee] (\d+)$') { return ("Case " + $matches[1]) }
+    return $r
+}
+
+function Get-UnfencedLines([string]$text) {
+    # The lines of a Markdown document OUTSIDE fenced code blocks (``` or ~~~, any indent up
+    # to three spaces, any info string). A `## T2 ... PASS` quoted inside a fence - the
+    # protocol's own example pasted into evidence, say - is a quotation, not a verdict; a
+    # fenced `## T9` in a plan is not a case. Found by the tester of attempt 1: without this
+    # a fenced heading satisfied a plan case, and a plan whose only heading was fenced was
+    # accepted at -Submit. The fence lines themselves are dropped too.
+    $out = New-Object System.Collections.ArrayList
+    $fence = ""
+    foreach ($line in ($text -split "`r?`n")) {
+        if ($line -match '^\s{0,3}(`{3,}|~{3,})') {
+            $marker = $matches[1].Substring(0, 1)
+            if (-not $fence) { $fence = $marker; continue }
+            if ($fence -eq $marker) { $fence = ""; continue }
+        }
+        if (-not $fence) { [void]$out.Add($line) }
+    }
+    return @($out)
+}
+
+function Get-PlanCases([string]$text) {
+    # The plan's case ids, in plan order, each once. Fenced blocks count for nothing.
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($line in (Get-UnfencedLines $text)) {
+        if ($line -match $CaseHeadingPattern) {
+            $id = Normalize-CaseId $matches[1]
+            if (-not $ids.Contains($id)) { [void]$ids.Add($id) }
+        }
+    }
+    return @($ids)
+}
+
+function Get-EvidenceVerdicts([string]$text) {
+    # One row per case heading in the evidence: {case, verdict, line}. The verdict is PASS
+    # only when the heading ENDS in the bare token PASS (case-sensitive - `Pass` and `pass`
+    # are prose, not verdicts). Otherwise it is the tail of the line from the first
+    # verdict-like word, so a refusal can quote what the tester actually wrote; a heading
+    # that carries no verdict word says so. A case that appears on several headings (a RED
+    # mutation and a GREEN run, say) yields several rows, and every one of them must pass.
+    # Fenced blocks count for nothing - see Get-UnfencedLines.
+    $rows = @()
+    foreach ($line in (Get-UnfencedLines $text)) {
+        if ($line -match $CaseHeadingPattern) {
+            $id = Normalize-CaseId $matches[1]
+            $trimmed = $line.TrimEnd()
+            $verdict = "(no verdict on the heading line)"
+            if ($trimmed -cmatch '(^|\s)PASS$') { $verdict = "PASS" }
+            elseif ($trimmed -cmatch '(^|\s)(PASS|FAIL|FAILED|SKIP|SKIPPED|SCOPED|PARTIAL|BLOCKED|DEFERRED|NOT RUN|N/A)\b.*$') {
+                $verdict = $matches[0].Trim()
+            }
+            $rows += [ordered]@{ case = $id; verdict = $verdict; line = $trimmed }
+        }
+    }
+    return @($rows)
+}
+
+function Compare-EvidenceToPlan([string[]]$planCases, $rows) {
+    # Returns @{ ok; problems; cases }. `cases` is what results[] stores: every evidence row
+    # in evidence order, plus a MISSING row for each plan case the evidence never names.
+    # `problems` is one line per case that stops a pass, quoting the verdict as written.
+    $problems = @()
+    $cases = @()
+    foreach ($r in @($rows)) {
+        $cases += $r
+        if ($r.verdict -ne "PASS") { $problems += ("{0}: {1}" -f $r.case, $r.verdict) }
+    }
+    $seen = @(@($rows) | ForEach-Object { $_.case })
+    foreach ($c in @($planCases)) {
+        if ($seen -notcontains $c) {
+            $problems += ("{0}: MISSING - no '## {0}' heading in the evidence at all" -f $c)
+            $cases += [ordered]@{ case = $c; verdict = "MISSING"; line = "" }
+        }
+    }
+    return @{ ok = (@($problems).Count -eq 0); problems = @($problems); cases = @($cases) }
+}
+
+function Assert-PlanReadable([string]$path, [string]$flag) {
+    # A plan the parser cannot read must not be able to produce a pass by having nothing to
+    # check - so it is refused at the door it arrives through, not discovered at -Pass by a
+    # tester who has already done the work.
+    $cases = Get-PlanCases (Read-Utf8Text $path)
+    if (@($cases).Count -eq 0) {
+        Die (("{0} '{1}' has no case headings a verdict can be checked against: {2}. Every " +
+              "case the tester must execute is one such heading, and -Pass is refused unless " +
+              "the evidence carries each of them with PASS as the last word on its heading " +
+              "line. Nothing has been recorded.") -f $flag, $path, $CaseHeadingShape)
+    }
+    return @($cases)
 }
 
 function Invoke-OracleOnStall([string]$i) {
@@ -469,7 +615,7 @@ if ($CloseOut) {
     if (-not $Reason) { Die "-CloseOut needs -Reason - a row closed without one is a row nobody can account for" }
     $f = Join-Path $QueueDir "$Id.json"
     if (-not (Test-Path $f)) { Die "no queue item '$Id'" }
-    $item = Get-Content -Raw -Path $f | ConvertFrom-Json
+    $item = Read-ItemFile $f
     if ($item.state -in @("merged", "rejected", "closed-outside-gates")) {
         Write-Host "'$Id' is already terminal ('$($item.state)') - nothing to close." -ForegroundColor Yellow
         exit 0
@@ -536,7 +682,7 @@ if ($List) {
         # `<id>.anchor.json` sits beside `<id>.json` in this directory. Ids are
         # [a-z0-9-], so a dot in the base name means a sidecar file, not a work item.
         if ($f.BaseName.Contains(".")) { continue }
-        $it = Get-Content -Raw -Path $f.FullName | ConvertFrom-Json
+        $it = Read-ItemFile $f.FullName
         if ($State -and $it.state -ne $State) { continue }
         $held = ""
         foreach ($r in @("tester", "reviewer")) {
@@ -569,8 +715,36 @@ if ($Show) {
                else { "NOT YET CONFIRMED" }
         Write-Host ("(" + $who + ")")
         Write-Host ""
-        Write-Host "--- RECORD ---" -ForegroundColor Cyan
     }
+    # THE VERDICTS, case by case. The operator reading this used to see one word per
+    # attempt; the tester's own headings said more, and now the record carries them.
+    $verdicts = @()
+    if ($it.PSObject.Properties.Name -contains "results") { $verdicts = @($it.results) }
+    if ($verdicts.Count -gt 0) {
+        Write-Host "--- VERDICTS ---" -ForegroundColor Cyan
+        $n = 0
+        foreach ($r in $verdicts) {
+            $n++
+            $att = if ($r.PSObject.Properties.Name -contains "attempt") { "attempt " + $r.attempt } else { "verdict #" + $n }
+            $shaShort = if ($r.sha -and ([string]$r.sha).Length -ge 8) { ([string]$r.sha).Substring(0, 8) } else { [string]$r.sha }
+            $colour = if ($r.verdict -eq "pass") { "Green" } else { "Yellow" }
+            Write-Host ("{0}: {1} by {2} at {3} (plan_adequate={4})" -f $att, ([string]$r.verdict).ToUpper(), $r.by, $shaShort, $r.plan_adequate) -ForegroundColor $colour
+            $rows = @()
+            if ($r.PSObject.Properties.Name -contains "cases") { $rows = @($r.cases) }
+            if ($rows.Count -eq 0) {
+                Write-Host "    (no per-case verdicts recorded - evidence predates the case parser, or carried no case headings)" -ForegroundColor DarkGray
+                continue
+            }
+            foreach ($c in $rows) {
+                $cc = if ($c.verdict -eq "PASS") { "Green" } elseif ($c.verdict -eq "MISSING") { "Red" } else { "Yellow" }
+                Write-Host ("    {0,-8} {1}" -f $c.case, $c.verdict) -ForegroundColor $cc
+                # The heading as written, for every row - the record quotes the tester.
+                if ($c.line) { Write-Host ("             " + $c.line) -ForegroundColor DarkGray }
+            }
+        }
+        Write-Host ""
+    }
+    Write-Host "--- RECORD ---" -ForegroundColor Cyan
     $it | ConvertTo-Json -Depth 8
     exit 0
 }
@@ -606,7 +780,7 @@ if ($VerifyAudit) {
     # is just a halt mechanism with a nicer name. The rules are in gate-audit.ps1.
     $items = @()
     foreach ($f in (Get-ChildItem -Path $QueueDir -Filter "*.json" -File | Where-Object { $_.Name -notlike "*.anchor.json" })) {
-        try { $items += (Get-Content -Raw -Path $f.FullName | ConvertFrom-Json) } catch { }
+        try { $items += (Read-ItemFile $f.FullName) } catch { }
     }
     $only = @()
     if ($Id) { $only = @($Id) }
@@ -866,12 +1040,16 @@ if ($Submit) {
         Die ("-TestPlan must be a path to a file that exists (got '$TestPlan'). Write the plan " +
              "down first - the tester executes it, and a sentence is not a plan.")
     }
+    # And it needs CASES the verdict can be checked against - see the helpers above.
+    $planCaseIds = Assert-PlanReadable $TestPlan "-TestPlan"
     # And it needs a HOME. The obvious place is the developer's worktree, which is exactly
     # what gets deleted at the end - leaving the item pointing at nothing. Copy it beside the
     # item in the shared state dir, which outlives the worktree. Both agents independently
     # improvised this same location; two agents guessing alike is luck, not a protocol.
     $planDest = Join-Path $QueueDir "$Id.plan.md"
     Copy-IntoQueue $TestPlan $planDest "-TestPlan" "test plan for this item"
+    # Hashed from the QUEUED copy - the file -Pass will re-hash - not the developer's.
+    $planHash = Get-PlanSha256 $planDest
     $line = Resolve-WorkLine
     $sha = (Invoke-GitCapture @("rev-parse", $Branch) | Select-Object -First 1)
     if ($LASTEXITCODE -ne 0 -or -not $sha) { Die "branch '$Branch' not found" }
@@ -914,6 +1092,7 @@ if ($Submit) {
         Set-Field $item "branch" $Branch; Set-Field $item "line" $line
         Set-Field $item "developer" $Developer
         Set-Field $item "state" "ready-to-test"; Set-Field $item "test_plan" $planDest
+        Set-Field $item "plan_sha256" $planHash
         if ($Thread) { Set-Field $item "thread" $Thread }
         if ($RunnerProfile) { Set-Field $item "profile" $RunnerProfile }
         Set-Field $item "line_mergeable" (-not (Test-LineCheckedOutElsewhere -Line $line))
@@ -923,7 +1102,7 @@ if ($Submit) {
             id = $Id; branch = $Branch; line = $line; developer = $Developer
             state = "ready-to-test"; anchor = $null; anchor_file = ""
             anchor_confirmed_by = ""; anchor_confirmed_at = 0; gates = (Get-EmptyGateMap)
-            test_plan = $planDest; thread = $Thread; attempt = 1
+            test_plan = $planDest; plan_sha256 = $planHash; thread = $Thread; attempt = 1
             # Which runner profile this item is being worked under. Recorded so the stall
             # detector can name the runner that stalled and resolve the oracle ABOVE it
             # (U4). Empty means "whatever the surface's default profile is at the time",
@@ -948,6 +1127,7 @@ if ($Submit) {
     Write-Item $item
     Write-Host ("Queued '{0}' for TESTING (branch {1} -> {2})." -f $Id, $Branch, $line) -ForegroundColor Green
     Write-Host ("  Plan copied to {0}" -f $planDest)
+    Write-Host ("  {0} case(s) the tester must execute: {1}  (sha256 {2})" -f @($planCaseIds).Count, (@($planCaseIds) -join ", "), $planHash.Substring(0, 12))
     Write-Host "  A tester who is NOT the developer must claim and execute the plan."
     if (-not $item.line_mergeable) {
         Write-Host ("  NOTE: '{0}' is checked out in the main checkout, so the reviewer will have to" -f $line) -ForegroundColor Yellow
@@ -1091,6 +1271,64 @@ if ($Pass -or $Fail) {
         try { $isFile = Test-Path -LiteralPath $Evidence -PathType Leaf -ErrorAction Stop }
         catch { $isFile = $false }
     }
+    # READ THE PLAN, AND READ THE EVIDENCE (passplan, 2026-09-06 - the helpers above say
+    # why). Everything in this block is a check, not a change: it runs before the evidence
+    # is copied beside the item, before the branch is resolved, before results[] moves, so a
+    # refusal leaves the tester holding the claim with nothing recorded and a message that
+    # names the cases. The pre_review auto-gate further down runs AFTER the verdict is
+    # written and is untouched - a refused verdict never reaches it.
+    $evidenceBody = $Evidence
+    if ($isFile) { $evidenceBody = Read-Utf8Text $Evidence }
+    $caseRows = @(Get-EvidenceVerdicts $evidenceBody)
+    if ($Pass) {
+        $planPath = [string]$item.test_plan
+        if (-not $planPath -or -not (Test-Path -LiteralPath $planPath)) {
+            Die (("'{0}' has no queued test plan at '{1}', so there is nothing to check the " +
+                  "evidence against and no pass can be recorded. -Submit puts the plan there; " +
+                  "if it was removed, the developer re-submits with -TestPlan.") -f $Id, $planPath)
+        }
+        # THE HASH. Recorded at -Submit and by the two plan-revision doors; anything else
+        # that changed the queued file changed the ground the tester stood on.
+        $planNow = Get-PlanSha256 $planPath
+        $planThen = ""
+        if ($item.PSObject.Properties.Name -contains "plan_sha256") { $planThen = [string]$item.plan_sha256 }
+        if ($planThen) {
+            if ($planThen -ne $planNow) {
+                Die (("the queued plan for '{0}' is not the plan that was submitted. Recorded at " +
+                      "submit: sha256 {1}. The file at {2} now hashes to {3}. Evidence written " +
+                      "against a plan that changed since submit cannot be recorded - a pass " +
+                      "describes the cases that were agreed, and these are not those. A plan " +
+                      "revision goes through -Resubmit -TestPlan or -Requeue -TestPlan, which " +
+                      "re-record the hash. Nothing has been recorded; you still hold the claim.") -f
+                     $Id, $planThen, $planPath, $planNow)
+            }
+        } else {
+            Write-Host "  NOTE: no plan hash was recorded at submit (the item predates 2026-09-06), so plan drift cannot be checked." -ForegroundColor Yellow
+        }
+        $planCases = @(Get-PlanCases (Read-Utf8Text $planPath))
+        if ($planCases.Count -eq 0) {
+            Die (("the queued plan for '{0}' ({1}) has no case headings a pass can be checked " +
+                  "against: {2}. A plan the tool cannot read cannot produce a pass by having " +
+                  "nothing to check. Record what you found with -Fail -PlanInadequate so the " +
+                  "developer re-submits a plan with cases. Nothing has been recorded.") -f
+                 $Id, $planPath, $CaseHeadingShape)
+        }
+        $compared = Compare-EvidenceToPlan $planCases $caseRows
+        if (-not $compared.ok) {
+            Die (("-Pass on '{0}' is REFUSED. A pass means EVERY case in the plan was executed " +
+                  "and passed, and the evidence does not say that.`n" +
+                  "  plan cases : {1}`n" +
+                  "  the evidence says:`n{2}`n" +
+                  "A case reads PASS only when its heading line ends in the bare word PASS - " +
+                  "'## T5 - what it checks   PASS' - with nothing after it. A parenthetical, a " +
+                  "caveat or a 'scoped' after PASS is not a pass. A case you could not execute " +
+                  "in your environment is a plan inadequacy: record what you did run with " +
+                  "-Fail -PlanInadequate and say what the plan should have made runnable. " +
+                  "Nothing has been recorded; you still hold the claim.") -f
+                 $Id, ($planCases -join ", "), (($compared.problems | ForEach-Object { "    " + $_ }) -join "`n"))
+        }
+        $caseRows = @($compared.cases)
+    }
     if ($isFile) {
         Copy-IntoQueue $Evidence $evDest "-Evidence" "evidence file for this attempt"
         $evidenceText = $evDest
@@ -1122,11 +1360,22 @@ if ($Pass -or $Fail) {
     }
     $item.results += [ordered]@{
         at = Now; by = $By; verdict = $(if ($Pass) { "pass" } else { "fail" })
+        attempt = [int]$item.attempt
         sha = $headSha.Trim(); evidence = $evidenceText; reason = $Reason
         # The plan was written by the DEVELOPER. A tester who only reports pass/fail is
         # grading someone else's exam without reading the syllabus - say whether the plan
         # actually covered the change.
         plan_adequate = [bool]$PlanAdequate
+        # Per-case verdicts as READ from the evidence headings: {case, verdict, line}. On a
+        # pass every row is PASS and every plan case is present (or it was refused above);
+        # on a fail they are whatever the tester wrote, recorded so -Show can say WHICH
+        # case failed rather than one word for the whole item.
+        cases = @($caseRows)
+    }
+    if ($Pass) {
+        Write-Host ("  {0} case(s) checked against the plan, every one PASS." -f @($caseRows).Count)
+    } elseif (@($caseRows).Count -gt 0) {
+        Write-Host ("  {0} per-case verdict line(s) recorded from the evidence." -f @($caseRows).Count)
     }
     if ($PlanInadequate) {
         Write-Host "  Plan marked INADEQUATE - say in your report what it should have covered." -ForegroundColor Yellow
@@ -1302,7 +1551,11 @@ if ($Resubmit) {
         if (-not (Test-Path $TestPlan)) {
             Die ("-TestPlan must be a path to a file that exists (got '$TestPlan')")
         }
+        [void](Assert-PlanReadable $TestPlan "-TestPlan")
         Copy-IntoQueue $TestPlan $item.test_plan "-TestPlan" "test plan for this item"
+        # A revised plan is the plan the next pass is checked against, so its hash replaces
+        # the submit-time one - the drift check compares against what was last agreed.
+        Set-Field $item "plan_sha256" (Get-PlanSha256 $item.test_plan)
         Add-History $item "test plan revised for attempt $([int]$item.attempt)" $By
     }
     Add-History $item "re-submitted for testing (attempt $($item.attempt))" $By
@@ -1349,6 +1602,7 @@ if ($Requeue) {
     if ($TestPlan -and -not (Test-Path $TestPlan)) {
         Die ("-TestPlan must be a path to a file that exists (got '$TestPlan'). Nothing has been changed.")
     }
+    if ($TestPlan) { [void](Assert-PlanReadable $TestPlan "-TestPlan") }
     # BUMP THE ATTEMPT. The evidence filename is `<id>.attempt<N>.evidence.md`, so leaving N
     # alone means the NEXT tester's -Pass copies straight over the LAST tester's evidence.
     # That happened on item `wikinote` (2026-09-04): the verdict survived in results[], the
@@ -1366,6 +1620,7 @@ if ($Requeue) {
         $planDest = if ($item.test_plan) { $item.test_plan } else { Join-Path $QueueDir "$Id.plan.md" }
         Copy-IntoQueue $TestPlan $planDest "-TestPlan" "test plan for this item"
         Set-Field $item "test_plan" $planDest
+        Set-Field $item "plan_sha256" (Get-PlanSha256 $planDest)
         Add-History $item "test plan revised for attempt $([int]$item.attempt)" $By
     }
     if ($byDeveloper) {
