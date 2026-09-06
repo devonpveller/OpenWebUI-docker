@@ -121,7 +121,7 @@ fi
 # --- 5d. OB1 integration images on gitlink bumps ---------------------------
 # 5b runs recipe tests, 5c type-checks the Deno recipe - neither looks at a
 # Dockerfile. OB1/integrations/research-curator crash-looped in production a
-# day after its bump landed (2026-09-05): index.ts had gained `./pool.ts`, the
+# day after its bump landed: index.ts had gained `./pool.ts`, the
 # Dockerfile COPYs sources BY NAME and never listed it, `docker build` cannot
 # fail on that, and "Module not found" surfaced at CONTAINER START. This gate
 # refuses that at the commit: for every image-bearing integrations/<svc>/ the
