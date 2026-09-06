@@ -1,22 +1,22 @@
-file,type,name,owui_id,bytes
-actions/copy_research_note.py,action,Copy Research Note,copy_research_note,13178
-actions/copy_sources.py,action,Copy Sources,copy_sources,7728
-filters/context_window_manager.py,filter,Context Window Manager,context_window_manager,11902
-filters/mnemory_persistent_memory.py,filter,Mnemory Persistent Memory,mnemory_persistent_memory,41836
-pipes/server_status.py,pipe,Server Status,ai_stack_unified_pipe_function,20317
-pipes/githelper.py,pipe,GitHelper,githelper,27607
-pipes/github_chat_mcp.py,pipe,GitHub Chat MCP,github_chat_mcp,10953
-pipes/little_coder.py,pipe,Little Coder,little_coder,32467
-tools/deep_research.py,tool,Deep Research,deep_research,15452
-tools/fileshed.py,tool,FileShed,fileshed,438768
-tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,50690
-tools/mnemory.py,tool,mnemory,mnemory,23789
-tools/superpowers_tool.py,tool,superpowers_tool,superpowers_tool,149450
-skills/skill-creator.md,skill,Skill Creator,skill-creator,33653
-skills/docx.md,skill,Docx,docx,20674
-skills/canvas-design.md,skill,Canvas Design,canvas-design,12068
-skills/doc-coauthoring.md,skill,Doc Coauthoring,doc-coauthoring,16190
-skills/github-repo-analyzer.md,skill,GitHub Repo Analyzer,github-repo-analyzer,29506
-skills/feature-validation-workflow.md,skill,Feature Validation Workflow,feature-validation-workflow,6923
-skills/github-repo-expert.md,skill,Github Repo Expert,github-repo-expert,4466
-skills/openwebui-tools.md,skill,Openwebui Tools,openwebui-tools,14502
+file,type,name,owui_id,sha256
+actions/copy_research_note.py,action,Copy Research Note,copy_research_note,a4037677750d2ed23e6245caf9165411c4b980cb5e5fe7bbc8d50e07d73787c4
+actions/copy_sources.py,action,Copy Sources,copy_sources,61515e8bb69d4ba1a83ed05164bb54d90f05d4cc16e02c62041881ba4e241415
+filters/context_window_manager.py,filter,Context Window Manager,context_window_manager,e3a60186cc66bfbaee3672359cc3aacc146c6e97b0cac33d64896d83ee6bc308
+filters/mnemory_persistent_memory.py,filter,Mnemory Persistent Memory,mnemory_persistent_memory,a4542e32f323c43762676ae557c8e9e9fadda67fad8cff265078a00aad234753
+pipes/server_status.py,pipe,Server Status,ai_stack_unified_pipe_function,0650f263921afb18dba24bf9f096fffee54f3711635d86ba865ff66fcadee165
+pipes/githelper.py,pipe,GitHelper,githelper,1e4d27cfe16efa6a6d39b6ea6805155f67738b1e22158db7ce4e607536a89eaa
+pipes/github_chat_mcp.py,pipe,GitHub Chat MCP,github_chat_mcp,76c316c3c79d7fc3de7cec6a1f7d61d45f56d88d8a15ca54308ab6fe80ca43c1
+pipes/little_coder.py,pipe,Little Coder,little_coder,90897748215ad5819dfb02b737efd6d82b7823d6a10588eb0ec4206fb2e00516
+tools/deep_research.py,tool,Deep Research,deep_research,631db708e570d57d138ccf2ef4b7509e0a8fc1f6cf4692f69c34572c06b200f2
+tools/fileshed.py,tool,FileShed,fileshed,deb7ec64d91d34908c3b74ce8cae2017d51659d10b289236cf1eb8a3e5477f14
+tools/github_chat_mcp_tools.py,tool,GitHub Repo Analyzer,github_chat_mcp_tools,d760c90da403b2180f63f8b99fd8c362afe4b3618da44b62757dd1d038b7beed
+tools/mnemory.py,tool,mnemory,mnemory,9d57b7f6efcc4a29337dce8febb0b9a4cbdb7eb4c4b7ef3ce0c2e107edde75be
+tools/superpowers_tool.py,tool,superpowers_tool,superpowers_tool,2f150769da1fb25c2c0bffcd67d4eac52e1159b3eb1bb9b442ab967895c27f82
+skills/skill-creator.md,skill,Skill Creator,skill-creator,dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf
+skills/docx.md,skill,Docx,docx,cfbabd72b1aec7dfaad988fb6e5e16b27dc744b9a00cae15db9045e95f53903e
+skills/canvas-design.md,skill,Canvas Design,canvas-design,a1f288079624402f30682753c1d43920b6664785698d21d3e7aa197450a6448b
+skills/doc-coauthoring.md,skill,Doc Coauthoring,doc-coauthoring,2e47d78846faeea4a56e9809c52700087a15a2155a3f293a3efbaded81398ef4
+skills/github-repo-analyzer.md,skill,GitHub Repo Analyzer,github-repo-analyzer,0a0034aaa0fe809e4b834cb56ce9efac30e79da83a860b570028d2a0a2bd8191
+skills/feature-validation-workflow.md,skill,Feature Validation Workflow,feature-validation-workflow,73d857f1523e884f152f99308e5f0c09de143b6abf8377d32bb935ade8a3c21a
+skills/github-repo-expert.md,skill,Github Repo Expert,github-repo-expert,2c72be7ce3c862afc9283e82dc2fbd4a5d244c6fd15696e66df6409bd611428f
+skills/openwebui-tools.md,skill,Openwebui Tools,openwebui-tools,7d5cac3fb0425eb37701f21595416e1f8548e8b4d10659dab9ee44b908504f6f

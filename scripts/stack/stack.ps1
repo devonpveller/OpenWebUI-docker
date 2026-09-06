@@ -139,6 +139,36 @@ switch ($Action) {
         Probe "frontend: 8 tailnet serve routes" {
             $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
             [int]$r -ge 8 }
+        # owui/ plugins deploy BY PASTE: nothing links the repo file to the live
+        # webui.db row, so a committed fix can sit unpasted for weeks (the
+        # deep_research banner, 2026-09-04..06). Count only - the names are in
+        # scripts\checks\check-owui-drift.ps1's own output. REFUSED reads as FAIL.
+        #
+        # The 'Continue' dance is not optional. The check REFUSES (exit 2, sentence
+        # on stderr) rather than reporting a clean bill, and PowerShell 5.1 turns a
+        # native command's stderr into a TERMINATING NativeCommandError under this
+        # script's 'Stop' preference - `2>$null` does not prevent it. The first
+        # version of this probe assigned outside any Probe scriptblock and so DIED
+        # here whenever openwebui was down: 5 of 14 probe lines, no summary, and the
+        # eight later probes (memory, search, coder, OB1 x4, agent-org) never ran.
+        # A stopped openwebui must cost one FAILED line, not the rest of the sweep.
+        $owuiEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $owuiOut = @()
+        try {
+            $owuiOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\checks\check-owui-drift.ps1') -CountOnly 2>&1)
+        } catch { }
+        $ErrorActionPreference = $owuiEap
+        $owuiVals = @($owuiOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+        $owuiErrs = @($owuiOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+        $owuiDrift = 'REFUSED'
+        if ($owuiVals.Count -gt 0) { $owuiDrift = "$($owuiVals[$owuiVals.Count - 1])".Trim() }
+        if ($owuiDrift -notmatch '^\d+$') {
+            $owuiWhy = 'the check produced no answer'
+            if ($owuiErrs.Count -gt 0) { $owuiWhy = ("$($owuiErrs[0])" -replace '^REFUSED:\s*', '').Trim() }
+            $owuiDrift = "REFUSED - $owuiWhy"
+        }
+        Probe "frontend: owui/ manifest rows drifted from live webui.db: $owuiDrift" { $owuiDrift -eq '0' }
         Probe "memory: cloud door http://127.0.0.1:8060/health" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8060/health).StatusCode -eq 200 }
         Probe "search: gateway http://127.0.0.1:8085/healthz" {
