@@ -122,6 +122,16 @@ Negative half: a pinned-image service is refused as not this door's job:
 Expected: exit `2`, one line `FAIL: service 'openbrain-db' has no 'build:' - it
 is a pinned image (pgvector/pgvector:pg16) ...`.
 
+Label notice (rev 2, from the tester's R3): a `build:` service whose
+Dockerfile carries no `ARG OB1_SHA` is told so IN THE PLAN, before any build:
+
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-workbench -WhatIfOnly | Select-String 'NOTE'
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-curator -WhatIfOnly | Select-String 'NOTE'
+
+Expected: the first prints one line
+`NOTE       : <WT>\OB1\docker\workbench\Dockerfile carries no 'ARG OB1_SHA' + 'LABEL org.opencontainers.image.revision' - the label will be EMPTY after this deploy ...`;
+the second prints nothing (the curator's Dockerfile has both).
+
 ## T2 - the refusal when OB1 on disk is not the gitlink (acceptance 2)
 
     git -C OB1 checkout -q d89c126d9b65b39f9b31d49392f62604becb3485
@@ -306,13 +316,24 @@ forward-slash `WT` must not trip it); the plan block; `build:`; `up:`;
 
     pin        : 6fba6b38a789806ade45dd8e4a1b2c76ba118c9f
     service    : container=wt-test-opsdoor-openbrain-curator image=openbrain-curator:wt-test-opsdoor status=running health=healthy restarts=0  recreated (<old StartedAt> -> <new StartedAt>)
+    rule       : fresh container: any restart fails -> watched clean
     label      : 6fba6b38a789806ade45dd8e4a1b2c76ba118c9f vs pin 6fba6b38a789806ade45dd8e4a1b2c76ba118c9f -> MATCH
-    recreated  : openbrain-research  StartedAt moved (<old> -> <new>)  status=running health=none restarts=0
+    recreated  : openbrain-research  StartedAt moved (<old> -> <new>)  status=running health=none restarts=0  rule: fresh container: any restart fails
     result     : OK - openbrain-curator deployed at 6fba6b3, watched 60 s clean
 
 exit `0`; ~130-140 s; the last command prints the pin (the developer's run:
-exit 0, 135 s, both StartedAt values moved). Anything short of `MATCH`, or
-`StartedAt UNCHANGED` for research, or a `restarts=` above 0, is a FAIL.
+exit 0, 135 s, both StartedAt values moved). The `watch:` step lines read
+`(loop window 60 s; fresh container - any restart fails)` for the curator
+and `(force-recreated - fresh container, any restart fails)` for research.
+Anything short of `MATCH`, or `StartedAt UNCHANGED` for research, or a
+`restarts=` above 0, is a FAIL. Also read the research label afterwards:
+
+    (docker inspect wt-test-opsdoor-openbrain-research | ConvertFrom-Json).Config.Labels.'org.opencontainers.image.revision'
+
+Expected: EMPTY. Recreate is not rebuild - the -Recreate dependent runs on
+the image its tag already held (the baseline build, no arg). That is the
+documented rule (UPDATE-MANAGEMENT.md, "one door call per service whose
+image changed"), not a defect; T6 checks the runbook says so.
 
 ### T3b - a broken Dockerfile in a scratch copy fails AT BUILD, exit 4
 
@@ -358,19 +379,109 @@ Then (PowerShell):
     echo $LASTEXITCODE; $t.TotalSeconds
     docker ps -a --filter "name=wt-test-opsdoor-" --format "{{.Names}}|{{.Status}}"
 
-Expected: `watch: openbrain-curator (loop window 60 s)` then, within seconds,
-`FAIL: RESTART LOOP: wt-test-opsdoor-openbrain-curator status=restarting
-restarts=<n> after <k> s` followed by the container's last log lines
+Expected: `watch: openbrain-curator (loop window 60 s; fresh container - any
+restart fails)` then, within seconds, `FAIL: RESTART LOOP:
+wt-test-opsdoor-openbrain-curator status=<restarting|running> restarts=<n>
+after <k> s (fresh container: any restart fails)` - `restarts=1` at the very
+first sample is enough under the fresh rule, the count need not rise - followed
+by the container's last log lines
 (`synthetic crash: DB_HOST unreachable`, up to 20 of them), then
 `WARN: dependents NOT recreated because openbrain-curator failed its watch:
 openbrain-research`, and a summary whose `recreated` line says
-`openbrain-research  StartedAt UNCHANGED (...)` and whose `result` line is
+`openbrain-research  StartedAt UNCHANGED (...) (not recreated - the service
+failed first)`, whose `rule` line reads `fresh container: any restart fails ->
+FAILED`, and whose `result` line is
 `FAILED - wt-test-opsdoor-openbrain-curator`; exit `6`; total well under 60 s
 (the developer's run: 11 s). `docker ps -a` shows the curator cycling
 (`Restarting (1) ...` or `Up Less than a second (health: starting)`), research
 still `Up` from T3a. Note what compose itself printed just before: `Container
 wt-test-opsdoor-openbrain-curator Started` - compose reports creation, not
 survival; the watch is the only thing that saw the loop.
+
+### T3d - the two restart rules: a once-flap on a FRESH container fails; on a PRE-EXISTING one only an increase fails (rev 2)
+
+This is the case attempt 1 was missing. The door's header states two rules
+and the summary's `rule :` line says which applied:
+
+- **FRESH** - the container this run created or recreated (a new container
+  id after `up -d`; every `-Recreate` dependent). Docker starts it at
+  RestartCount 0, so ANY count above 0 during the watch fails, including a
+  crash-and-restart that happened before the first sample.
+- **PRE-EXISTING** - compose found nothing to recreate (same container id).
+  Its old RestartCount is history; only an INCREASE during the watch fails.
+
+A tiny alpine service in its own scratch project: boot 1 exits once on
+purpose (marker on a named volume), later boots stay up until
+`/state/flap-now` appears, then exit once more. Write with Git Bash `printf`
+so the shell script is LF (a CRLF `#!/bin/sh` does not run):
+
+    mkdir -p "<S>/onceflap"
+    printf '#!/bin/sh\nif [ ! -f /state/booted-once ]; then\n  touch /state/booted-once\n  echo "first boot: exiting once on purpose"\n  exit 1\nfi\nrm -f /state/flap-now\necho "later boot: stable until /state/flap-now appears"\nwhile [ ! -f /state/flap-now ]; do sleep 1; done\necho "flap requested: exiting once"\nexit 1\n' > "<S>/onceflap/entrypoint.sh"
+    printf 'FROM alpine:3.20\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod +x /entrypoint.sh\nCMD ["/entrypoint.sh"]\n' > "<S>/onceflap/Dockerfile"
+    printf 'name: wt-test-opsdoor-flap\nservices:\n  openbrain-onceflap:\n    build:\n      context: ./onceflap\n    image: openbrain-onceflap:wt-test-opsdoor\n    container_name: wt-test-opsdoor-openbrain-onceflap\n    volumes:\n      - onceflap-state:/state\n    restart: unless-stopped\nvolumes:\n  onceflap-state:\n' > "<S>/docker-compose.flap.yml"
+    file "<S>/onceflap/entrypoint.sh"      # "POSIX shell script, ASCII text executable" - no CRLF
+
+**T3d-1, fresh rule** (PowerShell; the `WARN: build context ... OUTSIDE` line
+is expected - the context is a scratch dir):
+
+    docker compose -f "<S>\docker-compose.flap.yml" down -v 2>&1 | Out-Null
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-onceflap -ComposeFile "<S>\docker-compose.flap.yml" | Select-String 'watch:|FAIL|first boot|rule  |result' | ForEach-Object { $_.Line }; echo $LASTEXITCODE
+    docker inspect wt-test-opsdoor-openbrain-onceflap --format "{{.State.Status}} restarts={{.RestartCount}}"
+
+Expected: `watch: openbrain-onceflap (loop window 60 s; fresh container - any
+restart fails)`, then `FAIL: RESTART LOOP: wt-test-opsdoor-openbrain-onceflap
+status=running restarts=1 after <0-4> s (fresh container: any restart fails)`,
+the log line `first boot: exiting once on purpose`, `rule : fresh container:
+any restart fails -> FAILED`, `result : FAILED - wt-test-opsdoor-openbrain-onceflap`;
+exit `6` within ~10 s. The inspect afterwards reads `running restarts=1` - the
+container is UP and stable, and the door still refused it: that is the rule
+(attempt 1 called this "watched 60 s clean", exit 0).
+
+**T3d-2, pre-existing rule, no increase** - the same command again. Compose
+finds nothing to recreate (same image, same config, same container id):
+
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-onceflap -ComposeFile "<S>\docker-compose.flap.yml" | Select-String 'watch:|FAIL|rule  |result|service  ' | ForEach-Object { $_.Line }; echo $LASTEXITCODE
+
+Expected: `watch: openbrain-onceflap (loop window 60 s; container NOT
+recreated by compose - only an increase in restarts fails)`, watch lines with
+`restarts=1` throughout, summary `service : ... restarts=1  NOT recreated
+(compose found nothing changed) (<same StartedAt> -> <same StartedAt>)`,
+`rule : pre-existing container (not recreated): only an increase above 1
+fails -> watched clean`, `result : OK ... watched 60 s clean`; exit `0`,
+~65-70 s. The history (`restarts=1`) is tolerated because this run did not
+create the container - and the summary SAYS which rule it applied.
+
+**T3d-3, pre-existing rule, with an increase** - run the door in a
+PowerShell job and make the container flap at ~20 s (it exits on its own
+when the marker appears; `docker kill` would NOT do - the daemon treats a
+CLI kill as operator intent and does not apply the restart policy):
+
+    $job = Start-Job -ScriptBlock { param($wt, $f) Set-Location $wt; powershell -NoProfile -File scripts\stack\ob1-deploy.ps1 -Service openbrain-onceflap -ComposeFile $f 2>&1 | ForEach-Object { "$_" }; "JOBEXIT=$LASTEXITCODE" } -ArgumentList (Get-Location).Path, "<S>\docker-compose.flap.yml"
+    Start-Sleep -Seconds 20
+    docker exec wt-test-opsdoor-openbrain-onceflap touch /state/flap-now
+    $o3 = Receive-Job -Job $job -Wait
+    $o3 | Select-String 'watch:|FAIL|rule  |result|JOBEXIT|flap requested|restarts=' | ForEach-Object { "$_" }
+    docker inspect wt-test-opsdoor-openbrain-onceflap --format "{{.State.Status}} restarts={{.RestartCount}}"
+
+Expected: the `NOT recreated ... only an increase` watch line, `restarts=1`
+samples until the marker, then `FAIL: RESTART LOOP:
+wt-test-opsdoor-openbrain-onceflap status=<running|restarting> restarts=2
+after <~18-25> s (pre-existing container (not recreated): only an increase
+above 1 fails)` (an `EXITED:` sighting instead is equally a FAIL of the
+watch - the sample landed between exit and restart), the log line `flap
+requested: exiting once`, `rule : pre-existing ... -> FAILED`, `result :
+FAILED - wt-test-opsdoor-openbrain-onceflap`, `JOBEXIT=6`; the inspect
+afterwards reads `running restarts=2`. (Start-Job is an in-process job you
+`Receive-Job -Wait` on in the same command - not a tool-level background
+task.)
+
+Teardown for this project:
+
+    docker compose -f "<S>\docker-compose.flap.yml" down -v
+    docker rmi openbrain-onceflap:wt-test-opsdoor
+
+Expected: container, volume `wt-test-opsdoor-flap_onceflap-state` and network
+`wt-test-opsdoor-flap_default` Removed; one `Untagged`.
 
 ### Teardown
 
@@ -438,8 +549,22 @@ that logs `...running; RESTART LOOP: <names>` from `State -eq "restarting"`
 in the `docker compose ps --format json` it already parses; a new
 `$Script:OB1Project = "open-brain"`. Nothing else in the file changes
 (`git diff --stat e72c678..HEAD -- scripts/recovery/emergency-recovery.ps1` names that one file), in
-particular NO `build` is added anywhere (rebuild is a deploy, out of scope):
-`git diff e72c678..HEAD -- scripts/recovery/emergency-recovery.ps1 | grep '^+.*build'` is empty.
+particular NO build INVOCATION is added anywhere (rebuild is a deploy, out of
+scope). Rev 2: the old `grep '^+.*build'` matched the function's own comment
+("Rebuilding an image is a DEPLOY") and could never pass; assert on
+invocations with comment lines excluded (Git Bash):
+
+    git diff e72c678..HEAD -- scripts/recovery/emergency-recovery.ps1 | grep -E '^\+' | grep -vE '^\+\s*#' | grep -E 'docker compose .*build|docker build|--build'; echo "grep exit=$?"
+
+Expected: no output and `grep exit=1` (no match). Then read the same diff's
+added comment lines and confirm the function header states the once-flap
+difference (`WHAT THIS DOES NOT SEE, by design: a container that flapped
+ONCE ...` naming the deploy door) - the door's own header carries the mirror
+paragraph (`A once-flap that predates the watch on a PRE-EXISTING container
+...`); both must be present:
+
+    git show HEAD:scripts/recovery/emergency-recovery.ps1 | Select-String 'flapped ONCE'
+    git show HEAD:scripts/stack/ob1-deploy.ps1 | Select-String 'once-flap differently'
 Parse gate: the pre-commit's PSParser tokenize -
 
     $e = $null; [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw scripts\recovery\emergency-recovery.ps1), [ref]$e) | Out-Null; @($e).Count
@@ -515,7 +640,10 @@ check its described effect against the script.** The paragraph claims the door
 OB1_SHA=<pin>` - T3a's `build:` line; (c) force-recreates the dependents you
 name - T3a's `recreate:` line; (d) waits for healthy and exits non-zero naming
 a looping container within 60 s - T3c; (e) the health script "also names
-research_jobs rows that ended in error in the last 24 h" - T5b. Any claim you
+research_jobs rows that ended in error in the last 24 h" - T5b; (f) rev 2:
+"**Recreate is not rebuild** ... one door call per service whose image
+changed, then `-Recreate` for the depends_on-only dependents" - T3a's empty
+research label after the door reported MATCH for the curator. Any claim you
 cannot tie to a case above is a FAIL of this case, with the sentence quoted.
 
 ## T7 - the two Dockerfiles carry the label and build without it (acceptance 7)
@@ -546,10 +674,35 @@ else after it.
 
 ---
 
+## Revision history
+
+- **Rev 1** (attempt 1, tester-opsdoor-sub1): T0-T8 all passed as written;
+  FAILED on refutation R4 - the door's header promised "any RestartCount
+  above 0 fails" while the body baselined every container on its first
+  sample, so a fresh once-flap ended `OK ... watched 60 s clean`. Plan
+  defects: no case for a restart before the first sample; T4c's grep could
+  never pass.
+- **Rev 2** (this file): two restart rules in code, header and summary
+  (`rule :` line); new T3d (three halves) exercising both; T1 label NOTICE
+  case; T3a/T3c expectations carry the `rule` lines and the empty research
+  label; T4c grep fixed and the two mirrored header paragraphs checked; T6
+  gains claim (f). Developer re-ran T3d-1/2/3, T1's NOTE half and the T4c
+  grep before submitting (see below).
+
 ## Developer's self-verification (2026-09-06, wt-opsdoor)
 
 Not the tester's evidence - recorded so the tester knows what a pass looked
-like. Every command above was run here first; the outputs quoted in the
+like. Rev 2 additions: T3d-1 `FAIL: RESTART LOOP: wt-opsdoor-openbrain-onceflap
+status=running restarts=1 after 0 s (fresh container: any restart fails)`,
+exit 6 in 7 s, inspect `running restarts=1`; T3d-2 `rule : pre-existing
+container (not recreated): only an increase above 1 fails -> watched clean`,
+exit 0 in 67 s; T3d-3 marker at 20 s -> `FAIL: RESTART LOOP: ... status=running
+restarts=2 after 18 s (pre-existing container (not recreated): only an
+increase above 1 fails)`, `JOBEXIT=6`, inspect `running restarts=2` (an
+earlier try with `docker kill` produced `EXITED ... after 16 s`, exit 6, and
+`exited restarts=1` - the daemon does not restart a CLI-killed container,
+hence the marker design). T1 NOTE: printed for openbrain-workbench, absent
+for openbrain-curator. T4c grep: exit 1, no output. Every command above was run here first; the outputs quoted in the
 "Expected" blocks are from these runs (the isolated project was named
 `wt-opsdoor`, containers `wt-opsdoor-openbrain-*`, in this worktree's
 scratchpad). Results: T1 exit 0 / `$before -eq $after` True / exit 2 for

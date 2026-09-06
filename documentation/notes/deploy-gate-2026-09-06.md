@@ -292,3 +292,73 @@ what was checked and how.
   the first and not the second; one that starts looping later shows only in
   the second. Neither is wrong; they answer "did it come up?" and "is it up
   now?" respectively.
+
+### Attempt 1 (tester-opsdoor-sub1, 2026-09-06): what the test found, and what changed
+
+Every plan case T0-T8 passed as written; the item FAILED on the tester's
+refutation R4 and the plan was marked inadequate. Recorded here with the
+resolution, so the second attempt's reader knows what moved and why.
+
+- **The door's header promised a rule its body did not apply (FIXED).**
+  `ob1-deploy.ps1` said "a RestartCount above 0 fails the deploy the moment
+  it is seen"; `Watch-Service` baselined RestartCount on its first sample and
+  failed only on an increase, so a container that crashed and restarted in
+  the gap between `up -d` returning and the first inspect printed
+  `restarts=1` on every line and still ended `OK ... watched 60 s clean`,
+  exit 0 (tester R4a, a once-flap alpine service; the same `restarts=1 (0 s)`
+  is visible at the top of T3c's watch in the tester's evidence). Decision
+  (delegated seat): two rules, stated in the header and in the summary's
+  `rule :` line. FRESH (the container this run created or recreated - a
+  new container id after `up -d`, and every -Recreate dependent): any
+  RestartCount above 0 fails, naming the container and quoting its log
+  tail. PRE-EXISTING (compose found nothing to recreate, same id): only an
+  increase during the watch fails. Plan case T3d exercises both rules.
+- **`docker kill` does not exercise the restart policy.** While building
+  T3d's "increase" half: `docker kill <container>` under
+  `restart: unless-stopped` left the container `exited restarts=1` - the
+  daemon treats a kill from the CLI as operator intent and does not
+  restart it (the door still failed the watch, as `EXITED`). And a process
+  inside the container cannot kill PID 1 either (a pid namespace's init
+  ignores signals it has no handler for). The case therefore makes the
+  entrypoint exit on its own when a marker file appears on its volume
+  (`docker exec <c> touch /state/flap-now`). Trap for anyone writing a
+  restart-policy test.
+- **Recreate is not rebuild (runbook FIXED, door header states it).** In the
+  tester's T3a the -Recreate'd research kept the baseline image
+  (`research-label=''` after the door reported MATCH for the curator). A
+  dependent named in -Recreate is `up -d --force-recreate`d on whatever image
+  its tag holds. UPDATE-MANAGEMENT now says: one door call per service whose
+  image changed, then -Recreate for the depends_on-only dependents; a bump
+  touching both research services is `-Service openbrain-research` first,
+  then `-Service openbrain-curator -Recreate openbrain-research`.
+- **`-WhatIfOnly` now says up front when the Dockerfile carries no label
+  (FIXED).** Tester R3: `-Service openbrain-workbench -WhatIfOnly` printed a
+  clean plan and the operator would have learned of the EMPTY label only
+  after deploying. The plan block now prints a `NOTE :` naming the Dockerfile
+  when it lacks `ARG OB1_SHA` + the LABEL; verified on openbrain-workbench
+  (NOTE printed) and openbrain-curator (no NOTE).
+- **The dirty-tree refusal is per BUILD CONTEXT, not per OB1 tree** (tester
+  R1b/R1c, not changed). A tracked edit in `research-service/index.ts` does
+  not refuse a curator deploy (the curator's build cannot read it) and does
+  refuse a research deploy. A `.gitignore`d file inside a context is
+  invisible to `git status --porcelain` and WOULD be copied by
+  `COPY *.ts ./` if it matched; none exists today. Left as is: the refusal
+  guards "the image is the pin", and a file outside the context is not in
+  the image.
+- **Door and recovery judge a once-flap differently, by design (both headers
+  now say so).** Tester R4b: the recovery function's `docker ps` sampling
+  never sees a sub-second restart as `Restarting`, so a once-flap is not
+  named there; the door now fails it on a fresh container. Recovery asks
+  "is anything looping now?" over pre-existing containers; the door asks
+  "did what I just started stay up?".
+- **Production fact at test time (read-only, tester T5d): 4 `research_jobs`
+  rows ended `status='error'` in the last 24 h**, newest
+  `7eebcaee-c347-489c-9644-b19c3ab2dc00` at 05:12Z with `curator: the
+  research completed but was NOT filed into Open Brain - error sendin...`.
+  That is the health line doing its job on the first day; the failure it
+  names (research done, persist to the curator failed) is a research/curator
+  defect outside this item and is not diagnosed here.
+- **Plan defect (FIXED in plan rev 2):** T4c's `grep '^+.*build'` "is empty"
+  could never pass - it matched the new function's own comment "Rebuilding an
+  image is a DEPLOY". The assertion now excludes comment lines and matches
+  build invocations only.

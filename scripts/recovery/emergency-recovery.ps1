@@ -295,6 +295,14 @@ function Wait-ForRestartLoops {
     # stub log command with -Seconds 0. Returns the sorted looping names
     # (an empty array means clean). Rebuilding an image is a DEPLOY
     # (scripts/stack/ob1-deploy.ps1), never something recovery does.
+    #
+    # WHAT THIS DOES NOT SEE, by design: a container that flapped ONCE - a
+    # sub-second crash-and-restart that never shows as "Restarting" in any
+    # sample - is not named. This watches PRE-EXISTING containers by their
+    # `docker ps` status and asks "is anything looping NOW?". The deploy
+    # door watches the FRESH container it just created by RestartCount and
+    # fails on any restart at all ("did what I just started stay up?"). The
+    # two answer a once-flap differently on purpose; neither is the other.
     param(
         [int]$Seconds = 60,
         [int]$PollSeconds = 5,

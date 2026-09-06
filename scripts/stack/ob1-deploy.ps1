@@ -32,8 +32,17 @@
        Dockerfiles carry `ARG OB1_SHA` + `LABEL org.opencontainers.image.revision`.
     5. `docker compose up -d <svc>`, then watches the container: healthy
        (or, with no healthcheck, running) for the whole loop window, no
-       restart. A container seen `restarting`, `exited`, or with a
-       RestartCount above 0 fails the deploy the moment it is seen.
+       restart. Two restart rules, and the summary says which applied:
+         FRESH (this run created or recreated the container - the service
+         when `up -d` replaced it, every -Recreate dependent): RestartCount
+         starts at 0, so ANY RestartCount above 0 fails the deploy the moment
+         it is seen - including a crash-and-restart that happened before the
+         first sample.
+         PRE-EXISTING (compose found nothing to recreate, the old container
+         and its old RestartCount survived): only an INCREASE during the
+         watch fails; the count it started with is history, not a loop.
+       In both rules a `restarting`/`exited` sighting fails immediately, the
+       failing container is named and its last 20 log lines are printed.
     6. For each -Recreate dependent: `up -d --no-deps --force-recreate <dep>`
        (--no-deps because the service is already proven healthy above; a
        plain --force-recreate would recreate the dependencies too), then the
@@ -55,6 +64,18 @@
       explain it.
     * Anything about services this script did not touch. A dependent not
       named in -Recreate keeps running the old image/config.
+    * RECREATE IS NOT REBUILD. A -Recreate dependent is `up -d
+      --force-recreate`d on whatever image its tag already holds; if its
+      own source moved in the same bump, deploy it through its own door
+      call. One call per service whose image changed, then -Recreate for
+      depends_on-only dependents.
+    * A once-flap that predates the watch on a PRE-EXISTING container is
+      not reported (rule above). The recovery script's Wait-ForRestartLoops
+      watches pre-existing containers by their `docker ps` status and
+      never samples a sub-second restart either; this door watches FRESH
+      containers by RestartCount and fails on any restart. The two answer a
+      once-flap differently by design - the door asks "did what I just
+      started stay up?", recovery asks "is anything looping now?".
 
   EXIT CODES: 0 deployed and watched clean; 2 usage/compose problem;
   3 pin refusal; 4 build failed; 5 `up` failed; 6 a container failed the
@@ -225,6 +246,15 @@ $svcBound = Get-HealthBound $svcCfg
 $depBounds = @{}
 foreach ($d in $dependents) { $depBounds[$d] = Get-HealthBound $cfg.services.$d }
 
+# Will the image carry the label at all? Say so BEFORE the build, not after.
+$dockerfileRel = 'Dockerfile'; if ($svcCfg.build.dockerfile) { $dockerfileRel = [string]$svcCfg.build.dockerfile }
+$dockerfilePath = Join-Path $context $dockerfileRel
+$dockerfileHasLabel = $false
+if (Test-Path $dockerfilePath) {
+    $df = Get-Content $dockerfilePath -Raw
+    $dockerfileHasLabel = ($df -match '(?m)^\s*ARG\s+OB1_SHA') -and ($df -match 'org\.opencontainers\.image\.revision')
+}
+
 # ---- 3. The plan -----------------------------------------------------------
 $composeCmd = "docker compose $($composeArgs -join ' ')"
 Write-Host ""
@@ -251,6 +281,9 @@ if ($notRecreated.Count -gt 0) {
     Write-Host ("    NOT recreated (depends_on {0} but not in -Recreate): {1}" -f $Service, ($notRecreated -join ', ')) -ForegroundColor Yellow
 }
 Write-Host ("    label      : docker inspect -> Config.Labels[org.opencontainers.image.revision] must equal the pin")
+if (-not $dockerfileHasLabel) {
+    Write-Host ("    NOTE       : {0} carries no 'ARG OB1_SHA' + 'LABEL org.opencontainers.image.revision' - the label will be EMPTY after this deploy (copy research-curator's two lines; follow-up in documentation/notes/deploy-gate-2026-09-06.md)" -f $dockerfilePath) -ForegroundColor Yellow
+}
 Write-Host ""
 if ($WhatIfOnly) {
     Write-Step "-WhatIfOnly: nothing was built, started or recreated (only git ls-tree/rev-parse/status and docker compose config ran)."
@@ -276,33 +309,45 @@ function Get-ContainerFacts {
     $health = 'none'; if ($o.State.Health) { $health = [string]$o.State.Health.Status }
     $label = ''
     if ($o.Config.Labels) { $lp = $o.Config.Labels.PSObject.Properties['org.opencontainers.image.revision']; if ($lp) { $label = [string]$lp.Value } }
-    return @{ Name = ([string]$o.Name).TrimStart('/'); Status = [string]$o.State.Status; Health = $health
+    return @{ Id = [string]$o.Id; Name = ([string]$o.Name).TrimStart('/'); Status = [string]$o.State.Status; Health = $health
               RestartCount = [int]$o.RestartCount; StartedAt = [string]$o.State.StartedAt; Label = $label; Image = [string]$o.Config.Image }
 }
 function Watch-Service {
     # Watches one service's container until it is believed or has failed.
     # Believed = healthy (or running when there is no healthcheck) AND the whole
-    # loop window elapsed with RestartCount still 0 and no restarting/exited
-    # sighting. Fails immediately on the first bad sighting - a loop is
+    # loop window elapsed with no restart under the rule and no restarting/
+    # exited sighting. Fails immediately on the first bad sighting - a loop is
     # named within seconds, never after the bound.
-    param([string]$Svc, $Bound)
+    #
+    # THE RESTART RULE (the header's guarantee, so keep them in step):
+    #   -Fresh $true  : this run created/recreated the container. Docker starts
+    #                   a new container at RestartCount 0, so ANY count above 0
+    #                   is a crash-and-restart of the thing we just deployed,
+    #                   even one that happened before the first sample.
+    #   -Fresh $false : compose found nothing to recreate; the old container
+    #                   and its old RestartCount survived. Only an INCREASE
+    #                   during the watch is a failure - the number it started
+    #                   with is history (attempt 1 baselined EVERY container
+    #                   this way and let a fresh once-flap pass as clean).
+    param([string]$Svc, $Bound, [bool]$Fresh = $true)
     $deadline = $LoopWindowSeconds
     if ($Bound -and $Bound.Seconds -gt $deadline) { $deadline = $Bound.Seconds }
     $t0 = Get-Date; $lastLine = ''; $good = $false; $facts = $null; $reason = ''
-    # RestartCount baseline: a fresh container starts at 0, but when compose
-    # found nothing to recreate the old container (and its old count) survives,
-    # so a loop is an INCREASE, not a non-zero.
     $baseRestarts = $null
+    $rule = if ($Fresh) { 'fresh container: any restart fails' } else { 'pre-existing container (not recreated): only an increase fails' }
     while ($true) {
         $elapsed = [int]((Get-Date) - $t0).TotalSeconds
         $id = Get-ServiceContainer $Svc
         $facts = Get-ContainerFacts $id
-        if ($facts -and $null -eq $baseRestarts) { $baseRestarts = $facts.RestartCount }
+        if ($facts -and $null -eq $baseRestarts) {
+            $baseRestarts = if ($Fresh) { 0 } else { $facts.RestartCount }
+            if (-not $Fresh) { $rule = "pre-existing container (not recreated): only an increase above $baseRestarts fails" }
+        }
         if (-not $facts) {
             $reason = "no container for service $Svc after $elapsed s"
         }
         elseif ($facts.Status -eq 'restarting' -or $facts.RestartCount -gt $baseRestarts) {
-            $reason = "RESTART LOOP: $($facts.Name) status=$($facts.Status) restarts=$($facts.RestartCount) after $elapsed s"
+            $reason = "RESTART LOOP: $($facts.Name) status=$($facts.Status) restarts=$($facts.RestartCount) after $elapsed s ($rule)"
             break
         }
         elseif ($facts.Status -in @('exited', 'dead', 'removing')) {
@@ -324,7 +369,7 @@ function Watch-Service {
         if ($elapsed -ge $deadline) { break }
         Start-Sleep -Seconds $PollSeconds
     }
-    return @{ Service = $Svc; Good = $good; Reason = $reason; Facts = $facts }
+    return @{ Service = $Svc; Good = $good; Reason = $reason; Facts = $facts; Rule = $rule }
 }
 
 # ---- 4. build ---------------------------------------------------------------
@@ -342,9 +387,13 @@ Write-Step "up: $composeCmd up -d $Service"
 & docker compose @composeArgs up -d $Service
 if ($LASTEXITCODE -ne 0) { Exit-With 5 "'up -d $Service' failed (exit $LASTEXITCODE)." }
 
-Write-Step "watch: $Service (loop window $LoopWindowSeconds s)"
+# Fresh or pre-existing? A recreate gives a NEW container id; the same id
+# means compose found nothing to do and the old RestartCount is history.
+$svcAfterFacts = Get-ContainerFacts (Get-ServiceContainer $Service)
+$svcFresh = (-not $svcBeforeFacts) -or (-not $svcAfterFacts) -or ($svcAfterFacts.Id -ne $svcBeforeFacts.Id)
+Write-Step ("watch: {0} (loop window {1} s; {2})" -f $Service, $LoopWindowSeconds, $(if ($svcFresh) { 'fresh container - any restart fails' } else { 'container NOT recreated by compose - only an increase in restarts fails' }))
 $results = @()
-$svcResult = Watch-Service $Service $svcBound
+$svcResult = Watch-Service $Service $svcBound $svcFresh
 $results += $svcResult
 
 $failed = @()
@@ -355,7 +404,7 @@ if (-not $svcResult.Good) {
         Write-Host "  --- docker logs --tail 20 $($svcResult.Facts.Name) ---" -ForegroundColor Yellow
         & docker logs --tail 20 $svcResult.Facts.Name 2>&1 | ForEach-Object { "  $_" }
     }
-    Write-Warn "dependents NOT recreated because $Service failed its watch: $($dependents -join ', ')"
+    if ($dependents.Count -gt 0) { Write-Warn "dependents NOT recreated because $Service failed its watch: $($dependents -join ', ')" }
 }
 else {
     # ---- 6. recreate dependents ------------------------------------------
@@ -366,8 +415,8 @@ else {
             $results += @{ Service = $d; Good = $false; Reason = "'up -d --no-deps --force-recreate $d' failed (exit $LASTEXITCODE)"; Facts = $null }
             continue
         }
-        Write-Step "watch: $d"
-        $r = Watch-Service $d $depBounds[$d]
+        Write-Step "watch: $d (force-recreated - fresh container, any restart fails)"
+        $r = Watch-Service $d $depBounds[$d] $true
         $results += $r
     }
     $failed = @($results | Where-Object { -not $_.Good })
@@ -390,9 +439,10 @@ Write-Host ""
 Write-Host "==> ob1-deploy summary (project $project)" -ForegroundColor Cyan
 Write-Host ("    pin        : {0}" -f $pin)
 if ($svcFacts) {
-    $svcMoved = if ($svcBefore -ne $svcFacts.StartedAt) { 'recreated' } else { 'NOT recreated (compose found nothing changed)' }
-    # ($svcBefore is captured before `up -d` so this line can say whether the container moved.)
+    # Recreated = a NEW container id (a restart moves StartedAt too, so that alone cannot say).
+    $svcMoved = if ($svcFresh) { 'recreated' } else { 'NOT recreated (compose found nothing changed)' }
     Write-Host ("    {0,-10} : container={1} image={2} status={3} health={4} restarts={5}  {6} ({7} -> {8})" -f 'service', $svcFacts.Name, $svcFacts.Image, $svcFacts.Status, $svcFacts.Health, $svcFacts.RestartCount, $svcMoved, $svcBefore, $svcFacts.StartedAt)
+    Write-Host ("    rule       : {0} -> {1}" -f $svcResult.Rule, $(if ($svcResult.Good) { 'watched clean' } else { 'FAILED' }))
 } else {
     Write-Host ("    service    : {0} - no container" -f $Service)
 }
@@ -402,7 +452,9 @@ foreach ($d in $dependents) {
     $after = if ($f) { $f.StartedAt } else { '(absent)' }
     $moved = if ($depBefore[$d] -ne $after) { 'StartedAt moved' } else { 'StartedAt UNCHANGED' }
     $st = if ($f) { "status=$($f.Status) health=$($f.Health) restarts=$($f.RestartCount)" } else { 'no container' }
-    Write-Host ("    recreated  : {0}  {1} ({2} -> {3})  {4}" -f $d, $moved, $depBefore[$d], $after, $st)
+    $dr = $results | Where-Object { $_.Service -eq $d } | Select-Object -First 1
+    $ruleTxt = if ($dr -and $dr.Rule) { "  rule: $($dr.Rule)" } elseif ($moved -eq 'StartedAt UNCHANGED') { '  (not recreated - the service failed first)' } else { '' }
+    Write-Host ("    recreated  : {0}  {1} ({2} -> {3})  {4}{5}" -f $d, $moved, $depBefore[$d], $after, $st, $ruleTxt)
 }
 if ($failed.Count -eq 0 -and -not $labelBad) {
     Write-Host ("    result     : OK - {0} deployed at {1}, watched {2} s clean" -f $Service, $pin.Substring(0,7), $LoopWindowSeconds) -ForegroundColor Green

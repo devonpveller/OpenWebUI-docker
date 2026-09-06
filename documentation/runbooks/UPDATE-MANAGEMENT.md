@@ -58,6 +58,15 @@ gitlink (the rule gates 5b/5c/5d apply at the commit), builds with
 force-recreates the dependents you name (`up -d` after a depends_on-only
 change does NOT recreate them - seen on the 2026-09-06 curator deploy), waits
 for healthy and exits non-zero naming any container that loops within 60 s.
+**Recreate is not rebuild**: a dependent named in `-Recreate` is recreated on
+the image its tag already holds. So the rule is **one door call per service
+whose image changed, then `-Recreate` for the depends_on-only dependents** -
+a bump that touches both research-curator and research-service is
+`-Service openbrain-research` first (nothing depends on it), then
+`-Service openbrain-curator -Recreate openbrain-research`; the example above
+is the depends_on-only case (only the curator's image moved). The summary
+prints the label of the service it built; check a co-bumped dependent's
+label yourself.
 A bare `docker compose up -d` reuses whatever image is cached under the
 `:local` tag and says nothing about any of that. Verify afterwards with
 `scripts/checks/check-openbrain-health.ps1`, which also names `research_jobs`
