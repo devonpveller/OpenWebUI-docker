@@ -175,13 +175,26 @@ function Die([string]$m, [int]$code = 1) { Write-Host "ERROR: $m" -ForegroundCol
 function Read-Item([string]$i) {
     $p = ItemPath $i
     if (-not (Test-Path $p)) { Die "no queue item '$i'" }
-    return (Get-Content -Raw -Path $p | ConvertFrom-Json)
+    return (Read-ItemFile $p)
+}
+
+function Read-ItemFile([string]$p) {
+    # UTF-8, stated. PS5.1's Get-Content default is the ANSI code page, which would read the
+    # UTF-8 bytes Write-Item now produces as three characters per em-dash.
+    return (Get-Content -Raw -Path $p -Encoding UTF8 | ConvertFrom-Json)
 }
 
 function Write-Item($item) {
     $p = ItemPath $item.id
     $tmp = "$p.tmp"
-    ($item | ConvertTo-Json -Depth 8) | Set-Content -Path $tmp -Encoding ASCII
+    # UTF-8 WITHOUT a BOM (passplan attempt 2, 2026-09-06). This was `Set-Content -Encoding
+    # ASCII`, and PS5.1's ConvertTo-Json does not escape non-ASCII, so every em-dash in a
+    # recorded per-case `line` - which is to say every real evidence heading - was stored as
+    # `?`. A record that exists to quote what the tester wrote cannot drop their characters.
+    # The ASCII rule in CLAUDE.md is for scripts PS5.1 PARSES, not for data files; a BOM-less
+    # UTF-8 file is what Python's json.load (the bridge, oracle_on_stall.py) and the
+    # -Encoding UTF8 readers here both expect.
+    [System.IO.File]::WriteAllText($tmp, ($item | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -Path $tmp -Destination $p -Force
 }
 
@@ -327,10 +340,30 @@ function Normalize-CaseId([string]$raw) {
     return $r
 }
 
-function Get-PlanCases([string]$text) {
-    # The plan's case ids, in plan order, each once.
-    $ids = New-Object System.Collections.ArrayList
+function Get-UnfencedLines([string]$text) {
+    # The lines of a Markdown document OUTSIDE fenced code blocks (``` or ~~~, any indent up
+    # to three spaces, any info string). A `## T2 ... PASS` quoted inside a fence - the
+    # protocol's own example pasted into evidence, say - is a quotation, not a verdict; a
+    # fenced `## T9` in a plan is not a case. Found by the tester of attempt 1: without this
+    # a fenced heading satisfied a plan case, and a plan whose only heading was fenced was
+    # accepted at -Submit. The fence lines themselves are dropped too.
+    $out = New-Object System.Collections.ArrayList
+    $fence = ""
     foreach ($line in ($text -split "`r?`n")) {
+        if ($line -match '^\s{0,3}(`{3,}|~{3,})') {
+            $marker = $matches[1].Substring(0, 1)
+            if (-not $fence) { $fence = $marker; continue }
+            if ($fence -eq $marker) { $fence = ""; continue }
+        }
+        if (-not $fence) { [void]$out.Add($line) }
+    }
+    return @($out)
+}
+
+function Get-PlanCases([string]$text) {
+    # The plan's case ids, in plan order, each once. Fenced blocks count for nothing.
+    $ids = New-Object System.Collections.ArrayList
+    foreach ($line in (Get-UnfencedLines $text)) {
         if ($line -match $CaseHeadingPattern) {
             $id = Normalize-CaseId $matches[1]
             if (-not $ids.Contains($id)) { [void]$ids.Add($id) }
@@ -346,8 +379,9 @@ function Get-EvidenceVerdicts([string]$text) {
     # verdict-like word, so a refusal can quote what the tester actually wrote; a heading
     # that carries no verdict word says so. A case that appears on several headings (a RED
     # mutation and a GREEN run, say) yields several rows, and every one of them must pass.
+    # Fenced blocks count for nothing - see Get-UnfencedLines.
     $rows = @()
-    foreach ($line in ($text -split "`r?`n")) {
+    foreach ($line in (Get-UnfencedLines $text)) {
         if ($line -match $CaseHeadingPattern) {
             $id = Normalize-CaseId $matches[1]
             $trimmed = $line.TrimEnd()
@@ -581,7 +615,7 @@ if ($CloseOut) {
     if (-not $Reason) { Die "-CloseOut needs -Reason - a row closed without one is a row nobody can account for" }
     $f = Join-Path $QueueDir "$Id.json"
     if (-not (Test-Path $f)) { Die "no queue item '$Id'" }
-    $item = Get-Content -Raw -Path $f | ConvertFrom-Json
+    $item = Read-ItemFile $f
     if ($item.state -in @("merged", "rejected", "closed-outside-gates")) {
         Write-Host "'$Id' is already terminal ('$($item.state)') - nothing to close." -ForegroundColor Yellow
         exit 0
@@ -648,7 +682,7 @@ if ($List) {
         # `<id>.anchor.json` sits beside `<id>.json` in this directory. Ids are
         # [a-z0-9-], so a dot in the base name means a sidecar file, not a work item.
         if ($f.BaseName.Contains(".")) { continue }
-        $it = Get-Content -Raw -Path $f.FullName | ConvertFrom-Json
+        $it = Read-ItemFile $f.FullName
         if ($State -and $it.state -ne $State) { continue }
         $held = ""
         foreach ($r in @("tester", "reviewer")) {
@@ -704,7 +738,8 @@ if ($Show) {
             foreach ($c in $rows) {
                 $cc = if ($c.verdict -eq "PASS") { "Green" } elseif ($c.verdict -eq "MISSING") { "Red" } else { "Yellow" }
                 Write-Host ("    {0,-8} {1}" -f $c.case, $c.verdict) -ForegroundColor $cc
-                if ($c.verdict -ne "PASS" -and $c.line) { Write-Host ("             " + $c.line) -ForegroundColor DarkGray }
+                # The heading as written, for every row - the record quotes the tester.
+                if ($c.line) { Write-Host ("             " + $c.line) -ForegroundColor DarkGray }
             }
         }
         Write-Host ""
@@ -745,7 +780,7 @@ if ($VerifyAudit) {
     # is just a halt mechanism with a nicer name. The rules are in gate-audit.ps1.
     $items = @()
     foreach ($f in (Get-ChildItem -Path $QueueDir -Filter "*.json" -File | Where-Object { $_.Name -notlike "*.anchor.json" })) {
-        try { $items += (Get-Content -Raw -Path $f.FullName | ConvertFrom-Json) } catch { }
+        try { $items += (Read-ItemFile $f.FullName) } catch { }
     }
     $only = @()
     if ($Id) { $only = @($Id) }

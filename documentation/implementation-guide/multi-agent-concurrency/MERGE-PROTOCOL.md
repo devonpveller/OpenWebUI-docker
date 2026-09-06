@@ -274,6 +274,15 @@ verdicts are stored in `results[]` as `{case, verdict, line}` and `-Show` prints
 the attempt, so a failure names the case rather than the item. `-Fail` records whatever
 per-case lines your evidence carries and refuses nothing.
 
+Three edges, decided: **ids are literal** after one normalisation (`t2` = `T2`, `case 3` =
+`Case 3`), so `## T05` is not `T5` and `## Case 5` is not `T5` - write the plan's id as the
+plan wrote it. **Fenced code blocks (``` or ~~~) count for nothing** on either side: a
+heading quoted inside a fence - this section's example, pasted - is a quotation, not a
+verdict, and a fenced `## T9` in a plan is not a case. **Inline `-Evidence` text may carry
+the case verdicts** - it is recorded verbatim exactly as a file is, and long text is spilled
+to the item's evidence file; the file form is still the one to prefer, because a long inline
+string dies at the process boundary before the tool ever sees it.
+
 One of `-PlanAdequate` / `-PlanInadequate` is **required** on both verdicts. It is a
 judgement, not a formality: the plan was written by the developer, so
 a tester who only reports pass/fail is grading an exam without reading the syllabus. If the

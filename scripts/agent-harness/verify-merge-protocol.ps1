@@ -572,6 +572,7 @@ foreach ($id in @("drilla", "drillb")) {
 Invoke-DrillGit branch -D drill/verify-d
 Invoke-DrillGit worktree prune
 Clear-DrillQueue
+Get-ChildItem -Path $env:TEMP -Filter "drill-evidence-*.md" -ErrorAction SilentlyContinue | Remove-Item -Force
 # Scoped to the DRILL's own artifacts. These asserted the whole worktree directory was
 # empty, which failed the moment real agents had work in flight - the drill must not
 # require an idle repo to pass, and must never look like it cleaned up someone else's work.

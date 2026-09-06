@@ -225,6 +225,28 @@ worktree on a not-yet-merged developer branch can only be removed with
   checks PASS. Fix candidates (out of scope here): step 3b skipping when the script is
   absent in the committing tree, or the drill basing on the work line rather than
   `development`.
+- **`verify-merge-protocol.ps1` left `drill-evidence-*.md` in `%TEMP%`** (attempt 1's four
+  evidence files; found by the tester). Fixed in attempt 2 with one line in step 12. It
+  still leaves its OWN pre-existing temp files behind - `drill-test-plan.md`,
+  `drill-test-plan-v2.md`, `drill-anchor.json`, `drill-anchor-vague.json`,
+  `drill-attest-absent.log` - all written to `$env:TEMP` by name and never removed
+  (checked 2026-09-06: `Get-ChildItem $env:TEMP -Filter "drill-*"` lists them from earlier
+  runs). Harmless and idempotent; not this item's.
+- **Legacy-item behaviours under the new rule** (each driven by attempt 1's tester in a
+  hermetic state dir, `passplan.evidence.md` "Refutations attempted"): an item with no
+  `plan_sha256` gets a yellow NOTE, not a refusal, and the case rule still applies; a legacy
+  item whose queued plan has drifted AND whose evidence is all-PASS passes silently (drift is
+  unverifiable without the hash - accepted); a legacy item whose queued plan has no case
+  headings is refused at `-Pass` (`has no case headings`) and needs `-Fail -PlanInadequate`
+  then `-Resubmit -TestPlan` with a headed plan before it can ever pass. Live items in flight
+  on 2026-09-06 (`passplan`, `gate5d`, `curatorimg`) all carry `## T<n>` plans and no
+  `plan_sha256`; no live item has a heading-less plan except the merged `gate2`.
+- **`## T05` and `## Case 5` do not match plan case `T5` - intended.** Ids are literal after
+  one normalisation (case of the letter, whitespace in `Case <n>`); `T05` is a different
+  string from `T5`, and `Case`/`T` are two namespaces. Documented in MERGE-PROTOCOL Step 3
+  ("Three edges, decided") in attempt 2. A tester who retypes an id differently from the
+  plan gets `T5: MISSING`, which names the case, so the cost of the strictness is one
+  readable refusal.
 - **`verify-merge-protocol.ps1` is not hermetic** - it runs in the main checkout's git
   (`Get-MainCheckout`, `Set-Location $repo`), provisions `wt-drilla`/`wt-drillb` under the
   main `.claude/worktrees/`, and writes `drill-*` items into the SHARED queue directory.
