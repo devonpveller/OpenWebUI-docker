@@ -82,6 +82,69 @@ The claim holds and is slightly UNDER-stated: `fired=3`, not 2. The third is
 matching the claim; `protected-ref-moved` read `no baseline recorded - run:
 andon.ps1 -Baseline`. Nothing in this item changes any of the four conditions.
 
+### Tester attempt 1 (2026-09-06): two tensions, recorded verbatim
+
+The tester passed all nine cases and marked the plan inadequate (four plan
+defects, fixed in plan rev 2 on this branch). Two things the tester raised
+were not plan defects but tensions; both are recorded here as findings.
+
+**(a) The dead-DB curator is UNHEALTHY under the new healthcheck, and
+research waits behind it.** Tester, Refutation 4, verbatim:
+
+> The anchor says "answers GET /health with {"ok":..., "db":false} - the
+> process is up even when the database is not"; T3 confirms the process
+> stays up (RestartCount 0). But with the new healthcheck
+> (`Deno.exit(r.ok?0:1)`, refutation 2) that same state is `unhealthy`, and
+> `openbrain-research` now has `condition: service_healthy` on the curator,
+> so a curator with a dead DB at `up` time keeps openbrain-research from
+> STARTING (compose does not stop it later - an up-time gate only). [...] the
+> tension is between the anchor's wording and the healthcheck's semantics,
+> and the operator should confirm that research-not-starting behind a
+> db-dead curator is acceptable
+
+The tester also proved, with a throwaway `pgvector/pgvector:pg16` on the
+default bridge, that the healthcheck CAN go healthy against a live DB
+(research is not blocked forever) and reads `health=unhealthy failing=3
+restarts=0 status=running` against a dead one.
+
+DECIDED in the amended anchor (delegated operator seat, 2026-09-06),
+acceptance line 3, verbatim:
+
+> DECIDED 2026-09-06 (delegated operator seat): under the new healthcheck
+> that state is UNHEALTHY, and openbrain-research (service_healthy) waits
+> behind it. That is intended: a curator that cannot reach its database
+> cannot file research, and research uses the same database and
+> credentials, so nothing is lost by waiting; what is gained is that the
+> state is VISIBLE (docker ps, stack.ps1 health) instead of masked as
+> 'running'.
+
+So the posture is settled, not open. What remains true and out of scope:
+`restart: unless-stopped` does not restart an unhealthy container, so a
+stale-pool curator stays unhealthy until `check-openbrain-health.ps1 -Repair`
+restarts it - the same posture research already has (Phase C/D).
+
+**(b) `remove-worktree.ps1` refused the tester's worktree for the base
+branch's own commits.** Tester, cleanup section, verbatim:
+
+> `remove-worktree.ps1 -Id test-curatorimg` REFUSED (exit 2): "commits not
+> in refactor/ai-stack-cleanup: 2" - those are the base branch's own
+> `fb8d2b0`/`af0faad`, not tester work (0 uncommitted files), but I did not
+> `-Force`; the worktree `wt-test-curatorimg` (branch `work/test-curatorimg`)
+> is left for the operator to remove.
+
+Harness gap, verified at `scripts/agent-harness/remove-worktree.ps1:112-135`:
+the "what would be lost" check is `git log --oneline $MergedInto..$branch`
+(`:115`), where `$MergedInto` defaults to the resolved work line (`:18`,
+`:32` -> `Resolve-WorkLine`, i.e. `refactor/ai-stack-cleanup`). A tester
+worktree is cut FROM the developer's branch, so `work/curatorimg`'s own
+unmerged commits are in that range and count as the tester's "work that is
+nowhere else" (`:128`, `:134`). The check has no notion of the branch the
+worktree was cut from; comparing against `$(git merge-base <base-branch>
+$branch)..$branch` - or against the `-Base` the worktree was created with -
+would count only commits made IN that worktree. Until then, a tester
+worktree on a not-yet-merged developer branch can only be removed with
+`-Force` or by the operator, which is what happened here.
+
 ### Small things seen in passing
 
 - `deno check` with `pool.ts` missing reports a SECOND error, `TS7006

@@ -33,6 +33,7 @@
 | `ai-stack-user-created-automations/` | 📝 design (n8n), not built | |
 | `vllm-inference-exploration/` | 📝 draft, nothing built | |
 | `quartz-production-build-migration/` | 📝 plan, not started | Genuinely outstanding (viewer still dev-serve). |
+| `deploy-gate-and-curator-recovery/` | 📝 draft 2026-09-06 | Incident plan (openbrain-curator crash loop, gate 5d); Phase A/B in flight via harness items `gate5d`, `curatorimg`, `passplan`. |
 | `wsl-resource-governance/` | 📝 drafted, not applied | Pairs with `C:\Users\yamao\.wslconfig` header. |
 | `reaching-level-4-autonomy/` | 💡 ideas only | Not committed scope. |
 | `Jupyter/` | 💡 captured, not built | |
