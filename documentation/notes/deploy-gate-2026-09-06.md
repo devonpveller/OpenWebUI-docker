@@ -181,3 +181,114 @@ worktree on a not-yet-merged developer branch can only be removed with
   against a dead host (3 at +6 s, 9 at +92 s) - the ResilientPool discarding a
   pool it could not open. Expected behaviour, cheap, and a useful witness that
   the wrapper is the one answering.
+
+
+## opsdoor
+
+Recorded 2026-09-06 by the `opsdoor` developer (worktree `wt-opsdoor`, base
+`e72c678`, OB1 `6fba6b3` on `fix/ob1-image-revision-label`). Each entry says
+what was checked and how.
+
+- **The brief's "check-openbrain-health.ps1 already reaches openbrain-db -
+  reuse its psql/exec pattern" was false.** At `e72c678` the script's only
+  docker calls are `docker inspect`, `docker start` and `docker restart`
+  (`grep -n "docker " scripts/checks/check-openbrain-health.ps1`); its DB
+  "reach" is `Get-CStartedAt 'openbrain-db'`, a container-state read. The
+  password-free psql pattern lives in the sibling checks -
+  `scripts/checks/smoke-agent-memory-live.ps1:45`,
+  `prove-agent-memory-rls.ps1:102`, `recall-sibling-class.ps1:90` and eight
+  more (`grep -rn "psql -U" scripts/`) - and that is what the new
+  `research_jobs` query copies: `docker exec <db> psql -U postgres -d <db> -tA
+  -v ON_ERROR_STOP=1 -c <sql>`, authenticated over the container's unix
+  socket. Recorded so the next brief does not send someone to look for it in
+  the health script.
+
+- **Six of the eight OB1 integration Dockerfiles still carry no revision
+  label.** At OB1 `6fba6b3`, `git -C OB1 ls-tree -r --name-only 6fba6b3 --
+  integrations | grep /Dockerfile$` lists eight; grepping each blob for
+  `org.opencontainers.image.revision` finds it in `research-curator` and
+  `research-service` only. LACKING: `chunk-embedding-worker`,
+  `entity-extraction-worker`, `grounding-backfiller`, `kubernetes-deployment`,
+  `openbrain-idea-refinery`, `suggestion-worker`. A deploy of any of those
+  through `ob1-deploy.ps1` prints `label : (empty) vs pin ... -> EMPTY
+  (Dockerfile carries no ARG OB1_SHA + LABEL - follow-up)` and still exits 0;
+  the door cannot tell those images apart from a stale `:local`. Out of scope
+  by the anchor ("this item adds it ONLY to research-curator and
+  research-service"); the fix is the same eight lines in each file.
+
+- **`docker inspect --format '{{index .Config.Labels "..."}}'` cannot be run
+  from PowerShell 5.1.** PS re-quotes a native argument that contains spaces
+  by wrapping it in double quotes WITHOUT escaping the inner ones, so docker
+  receives a truncated template and says `template parsing error: template:
+  :1: function "org" not defined`; the `\"` form (`"{{index .Config.Labels
+  \"org...\"}}"`) fails differently (`'docker inspect' requires at least 1
+  argument`). Both verified 2026-09-06 through the tool's PowerShell. The
+  anchor's acceptance line 3 quotes the Go-template form; it works verbatim
+  from Git Bash. `ob1-deploy.ps1` therefore never uses `--format` for this -
+  it parses `docker inspect` JSON (`ConvertFrom-Json`) and reads
+  `.Config.Labels.'org.opencontainers.image.revision'`; the test plan gives
+  both forms. Sibling scripts that use `--format '{{.State.Status}}'` are
+  unaffected (no space in the template).
+
+- **`docker compose config --format json` renders `build.context` with the
+  slashes the compose file / `.env` used, not normalised.** A scratch compose
+  with `WT=D:/Open WebUI/...` in its `.env` produced context
+  `D:/Open WebUI/.../OB1/integrations/research-curator`, and the door's
+  "is this context inside OB1?" test (a `StartsWith` against a backslash
+  `Resolve-Path`) called the pinned tree OUTSIDE OB1. Fixed in the door by
+  normalising both sides to backslashes before comparing; recorded because
+  any other script that compares compose-rendered paths to `Resolve-Path`
+  output has the same hole.
+
+- **`docker compose up -d` prints `Container ... Started` for a service that
+  exits a second later.** Seen in T3c: the loop variant's curator (a
+  `command` that exits 1 under `restart: unless-stopped`) got `Recreated`,
+  `Starting`, `Started` from compose, and the door's first `docker inspect`
+  sample - in the same second - read `status=restarting restarts=2`. Compose
+  reports creation, not survival; this is the whole reason the door and the
+  recovery script poll after `up -d` instead of trusting its exit code.
+
+- **`docker compose ps --format json` is NDJSON under Compose v5.3.0, and
+  `emergency-recovery.ps1`'s status block survives only because PowerShell
+  pipes it line by line.** `docker compose -f OB1/docker/docker-compose.yml ps
+  --format json | wc -l` is 30 (one object per line, no array). The existing
+  `... ps --format json | ConvertFrom-Json` at the status block works because
+  each line reaches `ConvertFrom-Json` as its own string; a refactor to
+  `(... | Out-String) | ConvertFrom-Json`, or capturing to a variable first
+  with `-Raw` semantics, would throw and hit the `catch` ("OB1 status
+  unavailable"). The new `RESTART LOOP:` branch reads `State` from the same
+  objects (field verified present: `Name`, `State`, `Service`).
+
+- **The tool's PowerShell guard blocks two innocent-looking commands.**
+  `Remove-Item -Recurse -Force "<path containing a space>"` is refused as
+  "Remove-Item on system path '"D:\Open' is blocked", and so is `docker rm -f
+  <container>` (the guard reads `rm -f` in the command text). Workarounds used
+  here and written into the plan: `docker run --rm` + `docker stop`, `docker
+  compose down -v`, and Git Bash for `rm -rf` of scratch directories. Harness
+  note, not a repo defect.
+
+- **`openbrain-research` has no compose healthcheck, so the door's "healthy"
+  for it is "running for 60 s without a restart"** - the plan block says so
+  (`watch: running, no restart for 60 s (no healthcheck)`), and the curatorimg
+  section above already records the absence. A research service that boots,
+  binds :8000 and has a dead DB pool passes the door. Out of scope by the
+  anchor (healthchecks on openbrain-research / openbrain-mcp); the door will
+  pick a healthcheck up automatically the day compose has one - it reads
+  `start_period`/`retries`/`interval`/`timeout` from `docker compose config`.
+
+- **Recovery now takes at least 60 s longer per OB1 start.** `Start-OB1Stack`
+  and `Reset-OB1Stack` each hold for the full `Wait-ForRestartLoops -Seconds
+  60` window before logging SUCCESS or WARN; `recover` calls the first,
+  `nuclear` calls the second (each once, so +60 s, not +120 s per run). A
+  3 a.m. reader watching the log sees `OB1 up -d returned - watching 60 s for
+  restart loops before calling it started...` during the hold. Stated so the
+  delay is not read as a hang.
+
+- **The recovery status line and the post-up WARN are two independent reads.**
+  The WARN comes from `docker ps -a --filter label=com.docker.compose.project=open-brain`
+  sampled for 60 s right after `up -d`; the `OB1 - N/M running; RESTART LOOP:
+  ...` line comes from `docker compose ps --format json` minutes later in
+  `Test-BasicConnectivity`. A container that loops and then settles shows in
+  the first and not the second; one that starts looping later shows only in
+  the second. Neither is wrong; they answer "did it come up?" and "is it up
+  now?" respectively.

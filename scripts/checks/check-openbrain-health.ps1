@@ -34,6 +34,11 @@
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
+#   - research_jobs         status='error' rows in the last 24 h -> WARN naming count +
+#                           newest id + left(error,80); none -> OK. Queried with
+#                           `docker exec <db> psql -U postgres` over the container's
+#                           unix socket - no password leaves this script (the same
+#                           pattern scripts/checks/smoke-agent-memory-live.ps1 uses).
 #
 # Usage:
 #   .\scripts\check-openbrain-health.ps1            # detect + report, exit 0/1
@@ -49,7 +54,13 @@ param(
   # When set, non-suppressed status lines are ALSO appended (timestamped) to this
   # file. The autonomous monitor passes its own logs\tailscale-health.log so the
   # per-container detail survives — Write-Host output is not capturable via 2>&1.
-  [string]$LogPath
+  [string]$LogPath,
+  # The Postgres container the research_jobs query runs in. Defaults to the
+  # production database; a tester points it at an isolated copy so no production
+  # row is ever created. The liveness / stale-pool probes stay on 'openbrain-db'
+  # - they describe THIS stack, the query describes a table.
+  [string]$DbContainer = 'openbrain-db',
+  [string]$DbName = 'openbrain'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -127,6 +138,31 @@ Write-Host "==> Open Brain stack health (project: open-brain)" -ForegroundColor 
 
 # ---- 1. Database (the dependency the stale-pool bug hinges on) --------------
 $dbUp = Confirm-ObContainer 'openbrain-db' -Critical
+
+# ---- 1b. Failed research runs --------------------------------------------
+# A research job that ended status='error' is invisible on every surface above:
+# the service is running, /health says db:true, the job row just sits there.
+# One query, newest error first; updated_at is stamped by the table's touch
+# trigger when the status flips, so "last 24 h" means "failed in the last 24 h",
+# not "was submitted then". A query failure (table missing, psql absent) is a
+# fault too - an unreadable table is not a clean one.
+if ((Get-CState $DbContainer) -eq 'running') {
+  $rjSql = "SELECT count(*) OVER (), id, left(regexp_replace(coalesce(error, ''), '[[:space:]|]+', ' ', 'g'), 80) FROM public.research_jobs WHERE status = 'error' AND updated_at >= now() - interval '24 hours' ORDER BY updated_at DESC LIMIT 1"
+  $rjOut = (& docker exec $DbContainer psql -U postgres -d $DbName -tA -v ON_ERROR_STOP=1 -c $rjSql 2>&1 | Out-String)
+  $rjRow = ($rjOut -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+  if ($LASTEXITCODE -ne 0) {
+    # (a native stderr line arrives as 'docker.exe : ERROR: ...' under 2>&1 - drop the prefix)
+    $rjRow = $rjRow -replace '^docker(\.exe)? : ', ''
+    Write-Ob 'research_jobs' warn "query failed on ${DbContainer}: $rjRow"; $script:Faults++
+  } elseif (-not $rjRow) {
+    Write-Ob 'research_jobs' ok "no status='error' rows in 24 h ($DbContainer)"
+  } else {
+    $rjF = $rjRow -split '\|', 3
+    Write-Ob 'research_jobs' warn ("{0} error(s) in 24 h; newest {1}: {2}" -f $rjF[0], $rjF[1], $rjF[2]); $script:Faults++
+  }
+} else {
+  Write-Ob 'research_jobs' warn "not queried ($DbContainer is not running)"; $script:Faults++
+}
 
 # ---- 2. MCP server + the stale-pool guard (today's failure mode) -----------
 $mcpUp = Confirm-ObContainer 'openbrain-mcp' -Critical
