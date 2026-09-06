@@ -43,6 +43,38 @@ bump the pin → `docker compose up -d <service>` → verify via
 applies to anything that adds/removes/renames a service: compose + recovery
 scripts + stack-map doc change together.
 
+**A service with `build:` is not a pinned image - it deploys through the
+door, never `up -d` alone.** Today that is the OB1 integrations in
+`OB1/docker/docker-compose.yml` (openbrain-curator, openbrain-research, the
+workers). After a gitlink bump lands on the deployment line:
+
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-curator -Recreate openbrain-research -WhatIfOnly
+    powershell -NoProfile -File scripts/stack/ob1-deploy.ps1 -Service openbrain-curator -Recreate openbrain-research
+
+`scripts/stack/ob1-deploy.ps1` refuses when OB1 on disk is not the parent's
+gitlink (the rule gates 5b/5c/5d apply at the commit), builds with
+`--build-arg OB1_SHA=<pin>` so the image label
+`org.opencontainers.image.revision` names the commit, brings the service up,
+force-recreates the dependents you name (`up -d` after a depends_on-only
+change does NOT recreate them - seen on the 2026-09-06 curator deploy), waits
+for healthy and exits non-zero naming any container that loops within 60 s.
+**Recreate is not rebuild**: a dependent named in `-Recreate` is recreated on
+the image its tag already holds. So the rule is **one door call per service
+whose image changed, then `-Recreate` for the depends_on-only dependents** -
+a bump that touches both research-curator and research-service is
+`-Service openbrain-research` first (nothing depends on it), then
+`-Service openbrain-curator -Recreate openbrain-research`; the example above
+is the depends_on-only case (only the curator's image moved). The summary
+prints the label of the service it built; check a co-bumped dependent's
+label yourself.
+A bare `docker compose up -d` reuses whatever image is cached under the
+`:local` tag and says nothing about any of that. Verify afterwards with
+`scripts/checks/check-openbrain-health.ps1`, which also names `research_jobs`
+rows that ended in `error` in the last 24 h. Only research-curator and
+research-service carry the label today (2026-09-06); the other six
+integration Dockerfiles are a recorded follow-up
+(`documentation/notes/deploy-gate-2026-09-06.md`).
+
 ## After any update
 
 1. `mcp` sysadmin `stack_health` or `scripts/recovery/status_check.py` — everything
