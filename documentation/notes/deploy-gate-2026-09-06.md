@@ -433,3 +433,157 @@ resolution, so the second attempt's reader knows what moved and why.
   could never pass - it matched the new function's own comment "Rebuilding an
   image is a DEPLOY". The assertion now excludes comment lines and matches
   build invocations only.
+
+## researchretry
+
+Recorded 2026-09-06 by the `researchretry` developer (worktree
+`wt-researchretry`). Pins: attempt 2 = parent `8554c97` / OB1 `20ed84b` on
+`fix/research-curator-call-timeout-retry`; attempt 1 = parent `995c0c7` /
+OB1 `6197bc7`; the first cut before the anchor amendment = `dfac66c` /
+`d0c8a65`. Everything below was verified by reading the named file at the
+named line at the named pin, or by running the named command, or - where it
+says so - is the tester's measurement from attempt 1's evidence
+(`researchretry.evidence.md`, tester-researchretry-sub1). Nothing here is in
+the deliverable's scope; the deliverable fixes the RESEARCH side of the
+call, the curator, its compose wiring and the deploy are out of scope.
+
+### DECIDED IN THE ANCHOR: the first cut's 15 s default would have clipped healthy ingests; a timeout is never resent
+
+This was finding 1 of the first cut, raised against the original anchor
+(default `CURATOR_TIMEOUT_MS = FETCH_TIMEOUT_MS`, 15 000 ms, timeouts
+retried). The operator amended the anchor the same day; the amended artifact
+line reads:
+
+> gains AbortSignal.timeout(CURATOR_TIMEOUT_MS, default 180000 - an ingest
+> awaits an embedding, an LLM thread decision, a persist and a claims pass,
+> so a 15 s default would abort healthy work) and a bounded retry with
+> backoff (CURATOR_RETRIES total attempts, default 3) on CONNECTION-LEVEL
+> errors only (refused, reset, EPIPE, host unreachable, 'error sending
+> request' before any response) - NEVER on a timeout (the curator may still
+> be working; a resend would double-ingest) and never on a 4xx/5xx JSON
+> answer, which is the curator's verdict. A timeout fails once, loudly,
+> naming the elapsed time.
+
+and its out-of-scope list adds: "Measuring real ingest durations in
+production and tuning CURATOR_TIMEOUT_MS below the default - recorded as a
+follow-up; the default is deliberately generous because the goal is 'cannot
+hang forever', not 'fail fast'." At `20ed84b`: `lib.ts:448` default 180 000;
+`lib.ts:518-531` `shouldRetryCuratorError` returns false for AbortError /
+TimeoutError / the Curator* classes; `lib.ts:639-642` throws
+`CuratorTimeoutError` on the first timeout with the elapsed ms. The evidence
+the decision rested on stays below, because the follow-up (measuring real
+ingests) needs it.
+
+The curator's ingest handler answers only after, in order: `embed`
+(`research-curator/index.ts:543`), `resolve` (`:545`), which awaits an LLM
+chat completion at `:238` (`chatJson`, a bare fetch at `:155` with no
+signal) and, when it refreshes a thread, a second one at `:284`;
+`delegatePersist` to openbrain-mcp (`:551`, bare fetch at `:388`); then
+`writeClaims` (`:421`) with a per-conflict LLM judge at `:462`. `grep -n
+signal research-curator/index.ts` at the pin matches nothing: none of the
+curator's three outbound fetches (`:131`, `:155`, `:388`) carries a timeout,
+and nothing cancels the handler when the research side aborts its request.
+Under the shipped policy the residual exposure is one aborted client waiting
+on a curator that may still file the package; the job says `timed out ...
+the curator may still be working`, which is honest, and the 180 s default
+makes it rare. Dedupe that IS verified: claims go through
+`find_or_create_claim` and count `was_duplicate`
+(`research-curator/claims.ts:214-224`); sources are described as going
+through `find_or_create_source` (`research-curator/index.ts:18`, a comment -
+the function lives in openbrain-mcp and was not read). The synthesis row and
+the thread decision were not checked for idempotency.
+
+How long a real ingest takes is NOT retained anywhere: `research_jobs.progress`
+holds only the last `{phase, message}` (`research-service/index.ts:625` at
+`d0c8a65`; `:634` at `20ed84b`), and the curator logs one summary line per
+ingest with no duration (`research-curator/index.ts:620`). The one completed
+job on 2026-09-06 (`0b3b1bfa`, 13:36:12 -> 13:43:12, 420 s total) shows the
+ingest END (curator line 13:43:12.022, `finished_at` 13:43:12.025), not its
+start. Follow-up: stamp `started`/`finished` per stage in `progress`, or log
+the ingest duration in the curator's summary line, before tuning the default.
+
+### DECIDED IN THE DELEGATED SEAT (attempt 1 -> 2): the tester's refutations, and what each became
+
+The tester's attempt-1 evidence carried eight observations. Where one changed
+the code, the pin-exact line is given; the rest are recorded as-is.
+
+1. **`(SendRequest)` closes were retried - the package resent after it was
+   received.** Tester's `rr-reset2` listener (reads the request, then closes)
+   logged the same 227-byte package THREE times under `6197bc7`'s regex,
+   which matched Deno's generic `error sending request` prefix for both
+   `client error (Connect)` and `client error (SendRequest)`. FIXED at
+   `20ed84b`: `lib.ts:515-516` `CONNECT_PHASE_RE` matches only the
+   `(Connect)` family + ECONNREFUSED/EHOSTUNREACH/ENETUNREACH/EAI_AGAIN;
+   `lib.ts:643-653` turns a post-send transport failure into
+   `CuratorAfterSendError` (one attempt, "the package may have been
+   received"). Developer's `rr-close` listener at attempt 2 logged the
+   package exactly once (plan T3(e)).
+2. **A 2xx with a non-JSON / truncated body read as filed with error NULL**
+   (`OK after 10 ms: {}` for a `text/html` 200). FIXED: `lib.ts:634-636`
+   throws `CuratorNoVerdictError` `curator answered <status> with no JSON
+   verdict (<n> bytes)`; a non-JSON 4xx/5xx keeps `curator <status>: {}`
+   (`lib.ts:629-633`).
+3. **THE attempt-1 FAIL (refutation 2b): a timeout during the body read of a
+   2xx resolved `{}` silently** - `OK after 5003 ms: {}` from a listener that
+   sent 200 headers then stalled. The old `r.json().catch(() => ({}))`
+   swallowed the TimeoutError. At `d89c126` that shape hung forever; at
+   `6197bc7` it was reported as success - the outcome the item exists to
+   prevent. FIXED: the body is read as text inside the same signal
+   (`lib.ts:626-628`) and a timeout there is `CuratorTimeoutError ... while
+   reading its answer` (`lib.ts:639-642`). Reachability today: the real
+   curator never streams (7x `Response.json(...)` in
+   `research-curator/index.ts`, no ReadableStream), so this needed an
+   intermediary or a future streaming curator; the policy function's
+   contract was wrong regardless.
+4. **`CURATOR_TIMEOUT_MS=-1` was passed through to `AbortSignal.timeout`**
+   and threw `Argument 1 is outside the accepted range` on every attempt
+   (loud, not a hang; every job failed). FIXED: `curatorTimeoutMsFromEnv`
+   (`lib.ts:452-455`) and `curatorRetriesFromEnv` (`:458-461`) fall back to
+   the defaults for <= 0 / non-numeric / unset, and the wrapper clamps a
+   non-positive `timeoutMs` (`lib.ts:615`). `index.ts:115-116` uses them.
+   Tester's other edge values were already sane: `CURATOR_RETRIES=0|abc|-2`
+   -> 1 attempt, `2.7` -> 2; `CURATOR_TIMEOUT_MS=0|abc|""` -> 180000,
+   `5000abc` -> 5000.
+5. **A just-died host with a CACHED ARP entry reads as a "may still be
+   working" timeout** at the 5 s test timeout: SYNs to the dead IP are
+   silently dropped, the AbortSignal fires, and the code cannot tell a dead
+   curator from a slow one. With an UNCACHED unreachable IP (172.17.0.250)
+   the kernel answers `No route to host (os error 113)` after ~3 s and that
+   IS retried (`(Connect)`). The tester's statement that at the 180 s
+   default the OS connect timeout (~127 s) would fire first and turn the
+   cached-ARP case into a retried connect failure is an INFERENCE, not
+   measured (it would take >2 min); recorded as such. Not changed: the
+   policy cannot distinguish the two without a probe, and a probe is out of
+   scope.
+6. **Backoff cap and the real sleep** hold: `curatorBackoffMs(50|1e9|Infinity)
+   = 10000`, `(NaN|-3) = 2000`; `curatorRefusedWorstCaseMs(50, 5) = 474250`;
+   with the real `setTimeout` the gaps were never below the wait (Windows
+   timer granularity added ~10 ms). No change.
+7. **The suite runs with `--allow-env` only** (no `--allow-net`), as the
+   anchor's acceptance command says. No change.
+8. **`research_jobs.error` is `TEXT`** (`init-research-jobs.sql:41`): no
+   column limit truncates the longer messages. No change.
+
+Also from attempt 1, unchanged: `harness.ts` diff empty between pins;
+`lib.ts:332-359` md5-identical at both pins (T5).
+
+### Smaller facts
+
+- `lib.test.ts` had 25 cases at d89c126 (`deno test`), not the 24 the brief
+  quoted; 38 at `20ed84b`.
+- On Docker Desktop's default bridge a just-STOPPED container's former IP
+  answers with a TCP reset: Deno reports `Connection refused (os error 111)`,
+  not `EHOSTUNREACH`. Retried either way (`(Connect)`).
+- Deno's own message for a refused connect repeats the cause (`... tcp
+  connect error: Connection refused (os error 111): Connection refused (os
+  error 111)`); that is the runtime's text, not the wrapper's.
+- OB1 commit `20ed84b`'s message miscounts the mutation kills ("signal
+  removed -> 3 fail; timeouts retryable -> 3 fail"). Measured: retry removed
+  2, signal removed 4, timeouts retryable 3 (with the three-edit mutation
+  the plan specifies; the one-edit version the message counted only un-wraps
+  the timeout and kills 2), body errors swallowed 2. Not amended: a force-push
+  is a human line; the plan and the parent commit `8554c97` carry the
+  measured counts.
+- A PowerShell command that contains both `docker ... rm` (or `--rm`) and a
+  path under `D:\Open` is blocked by the agent tool guard as a file removal;
+  the live cases were driven from Git Bash with `MSYS_NO_PATHCONV=1`.
