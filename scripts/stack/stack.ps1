@@ -139,6 +139,12 @@ switch ($Action) {
         Probe "frontend: 8 tailnet serve routes" {
             $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
             [int]$r -ge 8 }
+        # owui/ plugins deploy BY PASTE: nothing links the repo file to the live
+        # webui.db row, so a committed fix can sit unpasted for weeks (the
+        # deep_research banner, 2026-09-04..06). Count only - the names are in
+        # scripts\checks\check-owui-drift.ps1's own output. REFUSED reads as FAIL.
+        $owuiDrift = (& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\checks\check-owui-drift.ps1') -CountOnly 2>$null)
+        Probe "frontend: owui/ snapshots drifted from live webui.db: $owuiDrift" { "$owuiDrift" -eq '0' }
         Probe "memory: cloud door http://127.0.0.1:8060/health" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8060/health).StatusCode -eq 200 }
         Probe "search: gateway http://127.0.0.1:8085/healthz" {
