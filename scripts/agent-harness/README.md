@@ -199,7 +199,8 @@ surface closes once. When the last one closes the item reaches the terminal stat
 recorded against nothing - there is nothing there that could fail to be live.
 
 `-List` and `-Show` are read-only and stay so: they resolve every recorded commit in one
-batched pass (1.64 s measured on the 42-item live board) and write nothing.
+batched pass (1.6 s in-process, 2.0 s counting the child-process spawn, measured on the
+42-item live board) and write nothing.
 
 ## Running it unattended (`dark` gate profile)
 

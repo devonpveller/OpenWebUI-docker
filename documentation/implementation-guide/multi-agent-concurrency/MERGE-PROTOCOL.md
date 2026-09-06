@@ -450,7 +450,9 @@ Two other flags on the board read alongside it. `[UNRESOLVABLE: submitted_sha f7
 `[UNRESOLVABLE: OB1 22f41b6]` means a commit this row records, or the OB1 commit it pins,
 exists in no clone the tool can reach - that row is not live work, and it sorts first.
 `[needs hand-off]` means the reviewer will not be able to merge this because the work line is
-checked out elsewhere; it appears only on items still moving, never on a terminal one.
+checked out elsewhere; it appears only on items still moving, never on a terminal one. Both
+are resolved in one batched pass, so `-List` stays under two seconds on a 42-item board and
+writes nothing.
 
 **Step 7 - the developer retires the worktree.**
 

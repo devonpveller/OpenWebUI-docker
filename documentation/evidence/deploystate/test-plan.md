@@ -247,8 +247,10 @@ which would make the flag wrong.
     (Get-ChildItem $LIVE -Filter *.json).Count
 
 PASS: `$before -eq $after` is `True` (every item file byte-identical), the list time is under
-5 s (1.64 s measured by the developer on a 42-item board) and the show time is under 5 s.
-FAIL: any file changed, or either command takes 5 s or more.
+5 s and the show time is under 5 s. The developer measured, on a 42-item board, 1.64 s for
+`-List` timed in-process and 2.00 s timed around the child `powershell.exe` the `Q` helper
+spawns (the difference is process start-up, not resolution); `-Show` 1.39 s. FAIL: any file
+changed, or either command takes 5 s or more.
 
     Q -Show -Id curatorpool
 
