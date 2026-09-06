@@ -40,6 +40,7 @@ DECLINED: Dict[str, str] = {
 #: calling unfinished work 'done' is the error that matters.
 _STATUS = {
     "merged": "done",
+    "deployed": "done",   # after merged: every deploy surface the merge derived is closed
     "rejected": "blocked",
     "failed": "blocked",
 }

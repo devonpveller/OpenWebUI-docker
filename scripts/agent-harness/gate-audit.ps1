@@ -298,7 +298,8 @@ function Get-CrossedGates($item) {
     $hasAnchor = ($item.PSObject.Properties.Name -contains "anchor_file" -and $item.anchor_file) -or
                  ($item.PSObject.Properties.Name -contains "anchor" -and $item.anchor)
     if ($item.state -ne "anchor-draft" -and ($hasAnchor -or $anchorRequired)) { $crossed += "anchor" }
-    if (@("ready-review", "reviewing", "merged") -contains $item.state) { $crossed += "pre_review" }
+    # `deployed` (2026-09-06) follows `merged`; an item there crossed pre_review on its way.
+    if (@("ready-review", "reviewing", "merged", "deployed") -contains $item.state) { $crossed += "pre_review" }
     return @($crossed)
 }
 

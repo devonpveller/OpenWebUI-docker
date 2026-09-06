@@ -253,3 +253,79 @@ worktree on a not-yet-merged developer branch can only be removed with
   That is its documented design (header lines 16-18), and the anchor's acceptance names
   running it. Noted because the item brief for this worktree said never to run git against
   the operator's checkout; the drill does, by construction, on its own branches only.
+
+## deploystate
+
+- **The six pre-existing `verify-merge-protocol.ps1` reds have a second half the passplan
+  entry above does not name: `core.hooksPath` is an ABSOLUTE path into the operator's
+  checkout.** `git config --get core.hooksPath` returns `D:\Open WebUI\ai-stack\.githooks`
+  (checked 2026-09-06 from `wt-deploystate`), so EVERY worktree runs the hook file that the
+  OPERATOR's branch has loaded, whatever branch the worktree itself holds - while that hook
+  invokes `./scripts/checks/*.ps1` relative to the COMMITTING worktree. `development`'s own
+  `.githooks/pre-commit` names only three checkers and never mentions
+  `check-corpus-exposure-producers.ps1` (`git show development:.githooks/pre-commit`); the
+  line that fails, `.githooks/pre-commit:67`, comes from `refactor/ai-stack-cleanup`. The
+  consequence is general, not a drill artefact: **any worktree on a branch that lacks a
+  checker the operator's branch added cannot commit at all**, and the error names a file
+  that does exist - in the other checkout. Out of scope here; the fix is a decision (make
+  the hook tolerate a missing checker, or resolve the checker path from the hook's own
+  directory), not a patch this item may take.
+
+- **Four merged items on the live board shipped an image or a paste and the board records
+  no surface for any of them.** Re-deriving history is out of scope by this item's anchor,
+  so this is the list, produced by replaying each merge through the new derivation in a
+  hermetic state dir (2026-09-06):
+
+  | item | merge | what its merge range ships |
+  |---|---|---|
+  | `curatorimg` | `e72c678` | `image:openbrain-curator` |
+  | `curator2` | `08c4ae1` | `image:openbrain-curator`, `image:openbrain-research`, `paste:owui/tools/deep_research.py` |
+  | `opsdoor` | `b06057f` | `image:openbrain-curator`, `image:openbrain-research` |
+  | `researchretry` | `7614556` | `image:openbrain-research` |
+
+  `gate5d` (`5b79731`) ships nothing, which is why the anchor names it as the negative. The
+  last two landed AFTER this item's anchor was written and are named here so the list is
+  complete rather than as-of-Tuesday. Whether those deploys happened is recorded somewhere
+  else or nowhere; this queue does not know, and after this change it would.
+
+- **`[needs hand-off]` was one true instance in thirty-one, measured twice on the same
+  day.** First read (2026-09-06, mid-afternoon): 30 of the 42 rows had
+  `line_mergeable=false` and **all 30 were terminal** (`merged`, `rejected`,
+  `closed-outside-gates`) - every instance of the flag on the board was stale. Second read,
+  a few hours later: 31 flagged, of which 30 terminal and one NOT - `owuidrift`, in
+  `testing`, whose line genuinely is checked out elsewhere. That row is exactly what the
+  thirty stale copies were hiding, and it appeared while this item was being built. The
+  figure `25` that an earlier draft comment and the phase PLAN
+  (`documentation/implementation-guide/deploy-gate-and-curator-recovery/PLAN.md:56`)
+  carried was not measured; it has been corrected in `queue.ps1`,
+  `verify-queue-defects.ps1` and the harness README to the counted numbers.
+
+- **`verify-merge-protocol.ps1` had no way to assert on what `queue.ps1` PRINTS, and the
+  first check that tried was silently blind.** Every other `& $queue ...` in that drill ends
+  in `| Out-Null` and asserts against the item file on disk; the `-List` check added by this
+  item captured with `(& $queue -List 2>&1 | Out-String)` and got the empty string, because
+  `queue.ps1` prints through `Write-Host`, which in PS5.1 does not flow into a pipeline. It
+  read FAIL against a perfectly clean row. Fixed inside this item (a `Get-QueueBoard` helper
+  that runs a child `powershell.exe`), and recorded because the failure mode is the
+  workspace's recurring one - a check that runs and checks nothing - and the next assertion
+  on printed text in that drill will meet it again unless it uses the helper.
+
+- **`remove-worktree.ps1` counts a parent work branch's commits as this worktree's unmerged
+  work.** `remove-worktree.ps1:115` asks `git log --oneline $MergedInto..$branch`, where
+  `$MergedInto` defaults to the resolved WORK LINE (`:32`, `Resolve-WorkLine`) rather than
+  to the branch the worktree was actually cut from. For a worktree cut from another work
+  branch, everything inherited from that branch is reachable from `$branch` and not from
+  the work line, so it is counted, printed as `commits not in <line>` and used to REFUSE
+  the removal (`:128`). The registry records the real base, and two rows are of this shape
+  today - `h2v2` and `h2v2b`, both `base: work/u8h2`
+  (`.git/agent-worktrees/worktrees.json`, read 2026-09-06). **Not reproduced** - this is a
+  reading of that code path, named in this item's anchor as out of scope and left for a
+  separate item, which should start by running `remove-worktree.ps1 -WhatIfOnly -Id h2v2`
+  and comparing the count against `work/u8h2..work/h2v2`.
+
+- **This worktree's copy of THIS file is behind the line.** `work/deploystate` is cut from
+  `49bb2db`, and `opsdoor` (`b06057f`) and `researchretry` (`7614556`) both appended
+  sections to this file afterwards (`## opsdoor` and `## researchretry`, both present at
+  `7614556`). The `## deploystate` section above is appended to the base version, so the reviewer's rebase will
+  meet a tail conflict here; every section involved is append-only, so the resolution is to
+  keep all of them in landing order.

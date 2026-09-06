@@ -23,9 +23,9 @@ The wider design (test containers, bridge integration):
 | `config.ps1` / `config.py` | The configuration, read the same way from PowerShell and from the bridge: `harness.config.json` < `harness.local.json` < environment. Holds the role/model profiles, the TTLs, the paths, and the on/off switches. `test_harness_config.py` asks both readers the same questions so they cannot drift |
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
-| `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 45 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol |
-| `verify-queue-defects.ps1` | Executable proof for the seven `queue.ps1` defects found by USE on 2026-09-04, D8/D9 from 2026-09-06 (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `documentation/evidence/passplan/fixtures/`, and plan-hash drift), plus the regression column they must not have broken. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
-| `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Reject` / `-List`. Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule. `-Requeue` is also the DEVELOPER's way back from `test-passed` when the artifact itself must change |
+| `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 72 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol. It cuts that scratch line FROM `development`, so it inherits that branch's pre-commit hooks: while `scripts/checks/check-corpus-exposure-producers.ps1` is absent there the hook fails and SIX checks go red (`two divergent commits exist` and the five that depend on those commits existing) - a fact about the base, not about the protocol |
+| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `documentation/evidence/passplan/fixtures/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 206 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
+| `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Deployed` / `-Reject` / `-List` / `-Show`. `-Merged` derives from the merge range what the item SHIPS, and `-Deployed -By <person> -Evidence <...> [-Surface <one>]` closes those surfaces with health evidence - see [what a merge SHIPS](#what-a-merge-ships-undeployed-and--deployed). Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule. `-Requeue` is also the DEVELOPER's way back from `test-passed` when the artifact itself must change |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
 `lease.ps1` is deliberately **generic mechanism** with zero repo coupling (its only
@@ -137,8 +137,69 @@ a per-worktree `info/exclude` is **not** honored — verified).
 # hand it to the pipeline - you do not test or merge your own work:
 .\scripts\agent-harness\queue.ps1 -Submit -Id wiki-perf -Branch work/wiki-perf -Developer wiki-perf -TestPlan <path>
 #   a tester claims + executes the plan; a reviewer rebases, merges --no-ff, and records it
+#   -Merged prints what that merge SHIPS; the item reads [UNDEPLOYED: ...] on -List until
+#   a person deploys it and records that, with health evidence:
+.\scripts\agent-harness\queue.ps1 -Deployed -Id wiki-perf -By <them> -Evidence <path>
 .\scripts\agent-harness\remove-worktree.ps1 -Id wiki-perf
 ```
+
+## What a merge SHIPS: `[UNDEPLOYED]` and `-Deployed`
+
+`merged` used to be the last thing the board said about an item, and for some items that
+is a lie: a merge that bumps the OB1 gitlink does not rebuild the image, and a merge that
+changes a file under `owui/` does not paste it into Open WebUI. Since 2026-09-06 `-Merged`
+works out what the merge SHIPS and records it, so `-List` can say `merged, not live`:
+
+```text
+curatorimg         merged            wt-curatorimg         [UNDEPLOYED: image:openbrain-curator]
+curatorpool        closed-outside-gates wt-curatorpool     [UNRESOLVABLE: OB1 22f41b6]
+```
+
+Three flags, in the operator's terms:
+
+- **`[UNDEPLOYED: image:<service>, paste:<file>]`** - this merged item is not live yet.
+  The list is DERIVED at `-Merged` from `git diff --name-only <first parent>..<merge sha>`,
+  never from anything the author typed: an OB1 gitlink move whose OB1 diff touches an
+  `integrations/<dir>/` that has a `Dockerfile` becomes `image:<the compose service that
+  builds it>`; any `owui/**` file becomes `paste:<that file>`; a changed build context of
+  a `:local`-tagged service in this repository becomes `image:<that service>`. Most merges
+  derive nothing and record an empty list. Items merged before that date have no surfaces
+  and read as plain `merged`.
+- **`[UNRESOLVABLE: submitted_sha <sha>]` / `[UNRESOLVABLE: OB1 <sha>]`** - a commit this
+  row records, or the OB1 commit pinned at it, exists in no clone the tool can reach (the
+  item's worktree, the main checkout, the current repository). That row is not live work,
+  so it sorts to the top of the board. `-Show` prints the same under `--- RESOLUTION ---`.
+- **`[needs hand-off]`** - the reviewer cannot merge this because the work line is checked
+  out elsewhere. It appears only on items still moving; a terminal one has nothing left to
+  merge (before 2026-09-06 the flag was written at `-Submit` and never cleared: 31 of the 42
+  rows on the live board carried it and 30 of those were terminal, so the one row where it
+  was true was one in thirty-one).
+
+Closing a surface is a RECORD of a deploy, never a deploy:
+
+```powershell
+# who: a person. The reserved auto: namespace is refused here, as at the two gates.
+.\scripts\agent-harness\queue.ps1 -Deployed -Id <id> -By <them> -Evidence <path or text>
+# one surface at a time, when they land separately:
+.\scripts\agent-harness\queue.ps1 -Deployed -Id <id> -By <them> -Evidence <path> -Surface image:openbrain-curator
+```
+
+The evidence must carry, for EVERY surface it closes, a line that names the surface and
+gives the pin - the running container's `org.opencontainers.image.revision` label or its
+image id, or the pasted file's `sha256` - and a health state (`State.Health.Status=healthy`,
+or `State.Status=running` for a container with no healthcheck):
+
+```text
+openbrain-curator: label org.opencontainers.image.revision=d89c126, State.Health.Status=healthy, RestartCount=0
+```
+
+No health state, an `unhealthy` one, or no pin is a refusal with nothing recorded. A
+surface closes once. When the last one closes the item reaches the terminal state
+`deployed`. `-Deployed` on an item that derived no surfaces is refused rather than
+recorded against nothing - there is nothing there that could fail to be live.
+
+`-List` and `-Show` are read-only and stay so: they resolve every recorded commit in one
+batched pass (1.64 s measured on the 42-item live board) and write nothing.
 
 ## Running it unattended (`dark` gate profile)
 

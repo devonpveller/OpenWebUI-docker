@@ -30,7 +30,13 @@
 #                  have moved, and review is the last cheap moment to say so.
 #   ready-review   the operator released it for review
 #   reviewing      a reviewer holds it
-#   merged         landed by the reviewer (terminal)
+#   merged         landed by the reviewer. TERMINAL unless the merge derived deploy
+#                  surfaces (an OB1 integration image, a :local build context, an owui/ file
+#                  OWUI only sees by paste) - then -List shows [UNDEPLOYED: ...] until each is
+#                  closed by -Deployed with health evidence. The list is DERIVED from the
+#                  merge range at -Merged, never typed by the author (deploystate, 2026-09-06).
+#   deployed       every derived surface closed with evidence (terminal). Deploy itself stays
+#                  human-gated (MERGE-PROTOCOL section 4): -Deployed records one, never performs one.
 #   (a reviewer whose rebase CHANGES the tested content sends it back with -Requeue:
 #    a pass earned at one base is not a pass at another - that is the stale-pass rule)
 #   rejected       reviewer sent it back (terminal for this item; open a new one)
@@ -64,6 +70,8 @@
 #   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
+#   .\queue.ps1 -Deployed -Id mem-readme -By profnovice -Evidence <path> [-Surface image:openbrain-curator]
+#     (closes the surfaces -Merged derived; -By is a person - the auto: namespace is refused)
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
 #             | 4 refused (duties) | 5 refused (no confirmed anchor) | 6 ANDON not clear.
@@ -100,6 +108,7 @@ param(
     [switch]$Pass,
     [switch]$Fail,
     [switch]$Merged,
+    [switch]$Deployed,
     [switch]$Reject,
     [switch]$Requeue,
     [switch]$Approve,
@@ -123,6 +132,8 @@ param(
     [string]$Sha = "",
     [string]$Thread = "",
     [string]$State = "",
+    # -Deployed: close ONE derived surface (image:<svc> / paste:<path>) instead of all of them.
+    [string]$Surface = "",
     # NOT -Profile: $Profile is a PowerShell automatic variable (the profile script path),
     # and a param of that name shadows it for the whole script scope: a script declaring
     # `param([string]$Profile)` sees "" inside, not the profile path. The name also reads
@@ -163,6 +174,12 @@ $RoleRules = [ordered]@{
     tester   = @{ ready = "ready-to-test"; busy = "testing";   duty = "execute the plan" }
     reviewer = @{ ready = "ready-review";  busy = "reviewing"; duty = "review and merge" }
 }
+
+# The states nothing moves out of. Named ONCE: the hand-off flag, -CloseOut and -AmendAnchor
+# each used to carry their own list, and `deployed` (2026-09-06) would have been a fourth
+# place to forget. `closed-outside-gates` is terminal too - the work landed, this queue did not
+# adjudicate it (see -CloseOut).
+$TerminalStates = @("merged", "deployed", "rejected", "closed-outside-gates")
 
 $QueueDir = Join-Path (Get-SharedStateDir) "queue"
 if (-not (Test-Path $QueueDir)) { New-Item -ItemType Directory -Force -Path $QueueDir | Out-Null }
@@ -340,24 +357,41 @@ function Normalize-CaseId([string]$raw) {
     return $r
 }
 
-function Get-UnfencedLines([string]$text) {
-    # The lines of a Markdown document OUTSIDE fenced code blocks (``` or ~~~, any indent up
-    # to three spaces, any info string). A `## T2 ... PASS` quoted inside a fence - the
+function Get-FenceWalk([string]$text) {
+    # ONE walk over a Markdown document that answers two questions: which lines are OUTSIDE
+    # fenced code blocks (``` or ~~~, indented up to three SPACES, any info string), and
+    # whether a fence was left open. A `## T2 ... PASS` quoted inside a fence - the
     # protocol's own example pasted into evidence, say - is a quotation, not a verdict; a
     # fenced `## T9` in a plan is not a case. Found by the tester of attempt 1: without this
     # a fenced heading satisfied a plan case, and a plan whose only heading was fenced was
     # accepted at -Submit. The fence lines themselves are dropped too.
+    #
+    # Two edges decided by passplan's attempt-2 tester (carried to deploystate): a
+    # TAB-indented ``` is NOT a fence - CommonMark reads a tab as four columns, which is an
+    # indented code line - so the pattern says ' {0,3}' and not '\s{0,3}'; and an UNTERMINATED
+    # fence swallows every line after it, which in a PLAN silently shrinks the enforced case
+    # list. That is CommonMark-correct and stays so, but it is reported: `open_at` is the
+    # 1-based line of the fence still open at the end of the text, 0 when none is.
     $out = New-Object System.Collections.ArrayList
-    $fence = ""
+    $fence = ""; $openAt = 0; $n = 0
     foreach ($line in ($text -split "`r?`n")) {
-        if ($line -match '^\s{0,3}(`{3,}|~{3,})') {
+        $n++
+        if ($line -match '^ {0,3}(`{3,}|~{3,})') {
             $marker = $matches[1].Substring(0, 1)
-            if (-not $fence) { $fence = $marker; continue }
-            if ($fence -eq $marker) { $fence = ""; continue }
+            if (-not $fence) { $fence = $marker; $openAt = $n; continue }
+            if ($fence -eq $marker) { $fence = ""; $openAt = 0; continue }
         }
         if (-not $fence) { [void]$out.Add($line) }
     }
-    return @($out)
+    return @{ lines = @($out); open_at = $openAt }
+}
+
+function Get-UnfencedLines([string]$text) {
+    return @((Get-FenceWalk $text).lines)
+}
+
+function Get-UnterminatedFenceLine([string]$text) {
+    return [int](Get-FenceWalk $text).open_at
 }
 
 function Get-PlanCases([string]$text) {
@@ -420,14 +454,406 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
     # A plan the parser cannot read must not be able to produce a pass by having nothing to
     # check - so it is refused at the door it arrives through, not discovered at -Pass by a
     # tester who has already done the work.
-    $cases = Get-PlanCases (Read-Utf8Text $path)
+    $text = Read-Utf8Text $path
+    $cases = Get-PlanCases $text
+    $openAt = Get-UnterminatedFenceLine $text
     if (@($cases).Count -eq 0) {
-        Die (("{0} '{1}' has no case headings a verdict can be checked against: {2}. Every " +
+        $fenceHint = ""
+        if ($openAt -gt 0) { $fenceHint = (" A code fence opened at line {0} is never closed, so everything after it is inside a fence and counts for nothing." -f $openAt) }
+        Die (("{0} '{1}' has no case headings a verdict can be checked against: {2}.{3} Every " +
               "case the tester must execute is one such heading, and -Pass is refused unless " +
               "the evidence carries each of them with PASS as the last word on its heading " +
-              "line. Nothing has been recorded.") -f $flag, $path, $CaseHeadingShape)
+              "line. Nothing has been recorded.") -f $flag, $path, $CaseHeadingShape, $fenceHint)
+    }
+    if ($openAt -gt 0) {
+        # THE ONE FENCE SHAPE THAT REDUCES WHAT A PASS MUST PROVE. A fence that never closes
+        # hides every heading after it, and the only signal used to be the case count on the
+        # -Submit line. Warned, not refused: the plan may genuinely end in a fenced block. But
+        # it is warned BY LINE NUMBER at every door a plan enters through, with the list the
+        # tool will actually enforce, so a shorter-than-it-reads plan is never a surprise.
+        Write-Host ("  WARNING: {0} '{1}' opens a code fence at line {2} that is never closed. Every line after it is" -f $flag, $path, $openAt) -ForegroundColor Yellow
+        Write-Host ("           inside the fence and counts for nothing, so the enforced case list may be SHORTER than the plan reads.") -ForegroundColor Yellow
+        Write-Host ("           Recognised {0} case(s): {1}. Close the fence if those are not all the cases the tester must execute." -f @($cases).Count, (@($cases) -join ", ")) -ForegroundColor Yellow
     }
     return @($cases)
+}
+
+# --- what a merge SHIPS, and whether the queue's commits exist (deploystate, 2026-09-06) ---
+#
+# WHY. Three things the board could not say. (1) `merged` read as finished, and for an item
+# that bumped an OB1 image or changed a file OWUI only sees by paste it is not - the reviewer's
+# merge message said "must be after deploy" and that sentence had nowhere to land. (2) A row
+# whose recorded commit, or whose OB1 pin at that commit, exists in no clone (curatorpool:
+# submitted_sha f71772b pins OB1 22f41b6, a commit nobody holds) read as live work. (3)
+# [needs hand-off] was set at -Submit and never cleared, so 31 of the live board's 42 rows
+# wore it on 2026-09-06 and 30 of those were TERMINAL - one true instance in thirty-one - a
+# flag that
+# means "the reviewer cannot merge this", and the one row where it was true was invisible.
+#
+# THE SURFACES ARE DERIVED FROM THE MERGE RANGE, NEVER DECLARED. `git diff --name-only
+# <first parent>..<merge>` is the only input: an OB1 gitlink move whose OB1 diff touches
+# integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
+# builds ../integrations/<dir>>; any owui/** path -> paste:<path>; a changed build context of a
+# :local-tagged service in this repository's compose files -> image:<service>. A list the
+# author typed is the list the author remembered; this one is what git saw.
+
+function Get-ArrayField($item, [string]$name) {
+    # An array field read back from JSON: `[]` comes back as an empty array, an absent field
+    # as nothing, and `@($null)` has Count 1 - so every reader goes through this.
+    # CONVENTION for every array-returning helper here: the function returns a PLAIN array
+    # and the CALLER wraps the call in @(). A `return ,@(x)`
+    # wrapped in @() by the caller is a one-element array holding the array - which is how
+    # -List printed "[UNDEPLOYED: System.Object[]]" on its first run.
+    if (-not ($item.PSObject.Properties.Name -contains $name)) { return @() }
+    $v = $item.$name
+    if ($null -eq $v) { return @() }
+    return @(@($v) | Where-Object { $null -ne $_ })
+}
+
+function Get-DeployPending($item) { return @(Get-ArrayField $item "deploy_pending") }
+
+function Convert-RepoRelative([string]$BaseDir, [string]$Rel) {
+    # Combine a compose file's directory with a build context (or a context with a Dockerfile
+    # name) and return the REPOSITORY-relative, forward-slash path - "" for the root, $null
+    # when it escapes the repository (memory/docker-compose.yml builds ../../mnemory, which is
+    # a sibling checkout, not this tree). Pure string arithmetic against a fake root: nothing
+    # here touches the working directory, because the derivation reads the MERGED tree.
+    $fake = "C:\__repo_root__\"
+    $full = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($fake, $BaseDir, $Rel))
+    # `frontend` + `..` normalises to the root WITHOUT its trailing separator (found by the
+    # curatorimg replay: both frontend services read as "outside this repository").
+    if ($full.TrimEnd('\') -eq $fake.TrimEnd('\')) { return "" }
+    if (-not $full.StartsWith($fake, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return ($full.Substring($fake.Length) -replace '\\', '/').Trim('/')
+}
+
+function Remove-YamlQuotes([string]$s) {
+    $t = $s.Trim()
+    if ($t.Length -ge 2 -and (($t[0] -eq '"' -and $t[-1] -eq '"') -or ($t[0] -eq "'" -and $t[-1] -eq "'"))) { $t = $t.Substring(1, $t.Length - 2) }
+    return $t
+}
+
+function Get-ComposeServices([string[]]$Lines) {
+    # A deliberately SMALL reader of the compose shape every file in this tree is written in:
+    # `services:` at column 0, one service per two-space key, `image:` and `build:` at four,
+    # `context:` and `dockerfile:` at six. It is not a YAML parser, and it does not need to be
+    # - what it answers is "which service builds which directory into which :local image".
+    $svcs = @()
+    $inServices = $false; $cur = $null; $inBuild = $false
+    foreach ($raw in @($Lines)) {
+        $line = ([string]$raw -replace '\s+#.*$', '').TrimEnd()
+        if ($line.Trim() -eq '' -or $line -match '^\s*#') { continue }
+        if ($line -match '^\S') { $inServices = ($line -match '^services:\s*$'); $cur = $null; $inBuild = $false; continue }
+        if (-not $inServices) { continue }
+        if ($line -match '^  ([A-Za-z0-9_.-]+):\s*$') {
+            $cur = [ordered]@{ name = $matches[1]; image = ""; context = ""; dockerfile = "" }
+            $svcs += $cur; $inBuild = $false; continue
+        }
+        if ($null -eq $cur) { continue }
+        if ($line -match '^    image:\s*(.+)$') { $cur.image = Remove-YamlQuotes $matches[1]; $inBuild = $false; continue }
+        if ($line -match '^    build:\s*(\S.*)$') { $cur.context = Remove-YamlQuotes $matches[1]; $inBuild = $false; continue }
+        if ($line -match '^    build:\s*$') { $inBuild = $true; continue }
+        if ($line -match '^    \S') { $inBuild = $false; continue }
+        if ($inBuild -and $line -match '^      context:\s*(.+)$') { $cur.context = Remove-YamlQuotes $matches[1]; continue }
+        if ($inBuild -and $line -match '^      dockerfile:\s*(.+)$') { $cur.dockerfile = Remove-YamlQuotes $matches[1]; continue }
+    }
+    return @($svcs)
+}
+
+function Get-WorktreeRegistry {
+    $reg = Join-Path (Get-SharedStateDir) "worktrees.json"
+    if (-not (Test-Path $reg)) { return $null }
+    try { return (Get-Content -Raw -Path $reg | ConvertFrom-Json).worktrees } catch { return $null }
+}
+
+$script:RepoAnchors = $null
+function Get-RepoAnchors {
+    # The main checkout and the current repository's top level, asked ONCE per run: -List
+    # resolves every row, and a git process per row for a fact that does not change across
+    # rows is what pushed the first version of the board past its 5 s budget.
+    if ($null -eq $script:RepoAnchors) {
+        $top = (Invoke-GitCapture @("rev-parse", "--show-toplevel") | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0 -or -not $top) { $top = "" } else { $top = ([string]$top).Trim() }
+        $script:RepoAnchors = @{ main = (Get-MainCheckout); top = $top }
+    }
+    return $script:RepoAnchors
+}
+
+function Get-Ob1CloneCandidates($item, $registry) {
+    # The item's own worktree clone first (each worktree carries a full OB1 checkout under
+    # .git/worktrees/<wt>/modules/OB1), then the main checkout's, then the OB1 beside the
+    # current working directory's repository. Only directories that ARE clones are returned.
+    $anchors = Get-RepoAnchors
+    $cands = @()
+    $dev = ""
+    if ($item.PSObject.Properties.Name -contains "developer") { $dev = Normalize-Id ([string]$item.developer) }
+    if ($dev -and $registry -and ($registry.PSObject.Properties.Name -contains $dev)) {
+        $row = $registry.$dev
+        if ($row -and ($row.PSObject.Properties.Name -contains "path") -and $row.path) { $cands += (Join-Path ([string]$row.path) "OB1") }
+    }
+    if ($anchors.main) { $cands += (Join-Path $anchors.main "OB1") }
+    if ($anchors.top) { $cands += (Join-Path $anchors.top "OB1") }
+    $out = @()
+    foreach ($c in $cands) {
+        if ((Test-Path -LiteralPath (Join-Path $c ".git")) -and ($out -notcontains $c)) { $out += $c }
+    }
+    return @($out)
+}
+
+function Get-ExistingCommits([string]$RepoPath, [string[]]$Shas) {
+    # Which of these FULL commit shas exist in the repository at $RepoPath ("" = here)?
+    # Returns a hashtable keyed by lower-case oid; ONE git process for any number of shas.
+    #
+    # `git rev-list --no-walk=unsorted --ignore-missing <sha>...` prints the ones that exist
+    # and silently drops the rest - which is what makes it the right tool: a per-object
+    # answer on ARGUMENTS, no stdin. `git cat-file --batch-check` over stdin was the first
+    # version, and it reported the FIRST object of every batch missing whenever the console
+    # is UTF-8 (chcp 65001: the extension's terminal, the bridge): .NET Framework's Process
+    # builds the child's stdin writer on Console.InputEncoding and its AutoFlush setter
+    # writes that encoding's preamble, so git read "<BOM>sha^{commit}" - and the reader on
+    # the other side stripped the BOM from the echo, so the transcript showed a clean sha
+    # marked missing. PowerShell's own `$list | & git` pipe does the same. Found on this
+    # feature's first run: the first sha of the board, the first OB1 pin of every clone and
+    # the merge's own gitlink in -Merged all read UNRESOLVABLE from the extension and
+    # resolved from Git Bash. Nothing here touches stdin now.
+    $found = @{}
+    $list = @($Shas | ForEach-Object { ([string]$_).Trim().ToLower() } | Where-Object { $_ -match '^[0-9a-f]{40}$' } | Select-Object -Unique)
+    for ($start = 0; $start -lt $list.Count; $start += 200) {
+        $chunk = @($list[$start..([Math]::Min($start + 199, $list.Count - 1))])
+        $gitArgs = @()
+        if ($RepoPath) { $gitArgs += @("-C", $RepoPath) }
+        $gitArgs += @("rev-list", "--no-walk=unsorted", "--ignore-missing") + $chunk
+        $out = @(Invoke-GitCapture $gitArgs)
+        if ($LASTEXITCODE -ne 0) { return $null }
+        foreach ($l in $out) { $t = ([string]$l).Trim().ToLower(); if ($t -match '^[0-9a-f]{40}$') { $found[$t] = $true } }
+    }
+    return $found
+}
+
+function Resolve-ItemShas($items) {
+    # For every item: does each recorded commit (submitted_sha / tested_at_sha / merged_sha)
+    # exist, and does the OB1 gitlink at that commit exist in an OB1 clone the item can be
+    # asked about? Returns a hashtable id -> string[] of flags, empty when everything
+    # resolves. BATCHED, one pass for the whole board: a per-item `git cat-file -e` is
+    # 40 items x 3 shas x 3 processes on Windows, which is the wrong side of the 5 s the
+    # board is allowed. Here it is one cat-file for the commits, one rev-parse for the
+    # gitlinks, and one cat-file per OB1 clone. Read-only throughout: nothing is written.
+    $out = @{}
+    $wanted = @{}
+    foreach ($it in @($items)) {
+        $out[$it.id] = @()
+        foreach ($f in @("submitted_sha", "tested_at_sha", "merged_sha")) {
+            $v = ""
+            if ($it.PSObject.Properties.Name -contains $f) { $v = ([string]$it.$f).Trim() }
+            if (-not $v) { continue }
+            if (-not $wanted.ContainsKey($v)) { $wanted[$v] = @() }
+            $wanted[$v] += ,@($it.id, $f)
+        }
+    }
+    if ($wanted.Count -eq 0) { return $out }
+    $shas = @($wanted.Keys)
+    $short = @{}
+    foreach ($s in $shas) { $short[$s] = $(if ($s.Length -ge 7) { $s.Substring(0, 7) } else { $s }) }
+    # 1. the commits, one process. A recorded sha that is not a full oid (nothing live
+    #    records one, but a hand-edited item could) is asked about on its own.
+    $exists = @{}
+    $found = Get-ExistingCommits "" $shas
+    if ($null -eq $found) {
+        foreach ($id in @($out.Keys)) { $out[$id] = @("UNCHECKED: git rev-list could not run here, so no recorded commit was resolved") }
+        return $out
+    }
+    foreach ($s in $shas) {
+        if ($s -match '^[0-9a-f]{40}$') { $exists[$s] = $found.ContainsKey($s.ToLower()) }
+        else {
+            [void](Invoke-GitCapture @("rev-parse", "--verify", "--quiet", "$s^{commit}"))
+            $exists[$s] = ($LASTEXITCODE -eq 0)
+        }
+    }
+    # 2. the OB1 gitlink at each existing commit, one process (chunked well under the
+    #    Windows command-line limit). rev-parse prints one stdout line per argument in
+    #    order, echoing the ARGUMENT for one it cannot resolve (a tree with no OB1 entry),
+    #    so the mapping is positional and a non-oid line means "no gitlink".
+    $link = @{}
+    $present = @($shas | Where-Object { $exists[$_] })
+    for ($start = 0; $start -lt $present.Count; $start += 200) {
+        $chunk = @($present[$start..([Math]::Min($start + 199, $present.Count - 1))])
+        $rp = @(Invoke-GitCapture (@("rev-parse") + @($chunk | ForEach-Object { $_ + ":OB1" })))
+        for ($i = 0; $i -lt $chunk.Count; $i++) {
+            $l = if ($i -lt $rp.Count) { ([string]$rp[$i]).Trim() } else { "" }
+            if ($l -match '^[0-9a-f]{40}$') { $link[$chunk[$i]] = $l }
+        }
+    }
+    # 3. which clone each item is asked about, then one cat-file per clone
+    $registry = Get-WorktreeRegistry
+    $itemClone = @{}
+    foreach ($it in @($items)) {
+        $c = @(Get-Ob1CloneCandidates $it $registry)
+        $itemClone[$it.id] = $(if ($c.Count -gt 0) { $c[0] } else { "" })
+    }
+    $byClone = @{}
+    foreach ($s in $link.Keys) {
+        foreach ($pair in $wanted[$s]) {
+            $c = $itemClone[$pair[0]]
+            if (-not $c) { continue }
+            if (-not $byClone.ContainsKey($c)) { $byClone[$c] = @() }
+            if ($byClone[$c] -notcontains $link[$s]) { $byClone[$c] += $link[$s] }
+        }
+    }
+    $linkOk = @{}
+    foreach ($c in $byClone.Keys) {
+        $objs = @($byClone[$c])
+        $held = Get-ExistingCommits $c $objs
+        foreach ($g in $objs) { $linkOk["$c|$g"] = (($null -ne $held) -and $held.ContainsKey($g.ToLower())) }
+    }
+    # 4. the flags
+    foreach ($s in $shas) {
+        foreach ($pair in $wanted[$s]) {
+            $id = $pair[0]; $field = $pair[1]
+            if (-not $exists[$s]) { $out[$id] += ("UNRESOLVABLE: {0} {1}" -f $field, $short[$s]); continue }
+            if (-not $link.ContainsKey($s)) { continue }
+            $g = $link[$s]; $g7 = $g.Substring(0, 7)
+            $c = $itemClone[$id]
+            if (-not $c) { $out[$id] += ("OB1 {0} UNCHECKED: no OB1 clone to ask" -f $g7); continue }
+            if (-not $linkOk["$c|$g"]) { $out[$id] += ("UNRESOLVABLE: OB1 {0}" -f $g7) }
+        }
+    }
+    foreach ($id in @($out.Keys)) { $out[$id] = @($out[$id] | Select-Object -Unique) }
+    return $out
+}
+
+function Find-Ob1CloneHolding($item, [string[]]$Needed) {
+    $registry = Get-WorktreeRegistry
+    foreach ($c in @(Get-Ob1CloneCandidates $item $registry)) {
+        $held = Get-ExistingCommits $c $Needed
+        if ($null -eq $held) { continue }
+        $all = $true
+        foreach ($n in @($Needed)) { if (-not $held.ContainsKey(([string]$n).ToLower())) { $all = $false } }
+        if ($all) { return $c }
+    }
+    return ""
+}
+
+function Get-DeploySurfaces($item, [string]$Sha) {
+    # See the section comment. Returns @{ surfaces; notes; skipped; line_before }. `notes` is
+    # printed at -Merged; `skipped` names the services the rule cannot reach (a build context
+    # outside this repository - memory/ builds mnemory from a sibling checkout) and is only
+    # recorded, because a NOTE printed on every merge is a note nobody reads. Every git
+    # question is asked of the MERGED tree (`git show <sha>:<path>`), never of a working directory.
+    $notes = @(); $skipped = @()
+    $head = (Invoke-GitCapture @("rev-list", "--parents", "-n", "1", $Sha) | Select-Object -First 1)
+    $parts = @(([string]$head).Trim() -split '\s+' | Where-Object { $_ })
+    if ($parts.Count -lt 2) { return @{ surfaces = @(); notes = @("'$Sha' has no parent - nothing to derive a deploy surface from"); skipped = @(); line_before = "" } }
+    $lineBefore = $parts[1]
+    if ($parts.Count -lt 3) { $notes += ("'{0}' is not a merge commit; surfaces derived from its single parent {1}" -f $Sha.Substring(0, 7), $lineBefore.Substring(0, 7)) }
+    $changed = @(Invoke-GitCapture @("diff-tree", "-r", "--name-only", "--no-commit-id", $lineBefore, $Sha) | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+    $images = @(); $pastes = @()
+    # (1) an OB1 gitlink move
+    if ($changed -contains "OB1") {
+        $old = (Invoke-GitCapture @("rev-parse", "--verify", "--quiet", "$lineBefore`:OB1") | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) { $old = "" } else { $old = ([string]$old).Trim() }
+        $new = (Invoke-GitCapture @("rev-parse", "--verify", "--quiet", "$Sha`:OB1") | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) { $new = "" } else { $new = ([string]$new).Trim() }
+        if ($new) {
+            $need = @($new); if ($old) { $need += $old }
+            $clone = Find-Ob1CloneHolding $item $need
+            if (-not $clone) {
+                Die (("cannot derive the deploy surfaces of '{0}': its OB1 gitlink {1}{2} exists in no OB1 clone " +
+                      "this tool can reach (the item's worktree, the main checkout, the current repository). A " +
+                      "merge that pins an OB1 commit nobody holds is exactly the zombie -List flags as " +
+                      "[UNRESOLVABLE]. Push it to OB1's remote (CLAUDE.md: never bump the gitlink to a commit " +
+                      "that is not there) and fetch it into a clone, then record the merge again. Nothing has " +
+                      "been recorded.") -f $Sha, $new.Substring(0, 7), $(if ($old) { " (from " + $old.Substring(0, 7) + ")" } else { "" }))
+            }
+            if ($old) { $ob1Changed = @(Invoke-GitCapture @("-C", $clone, "diff-tree", "-r", "--name-only", "--no-commit-id", $old, $new)) }
+            else { $ob1Changed = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "-r", "--name-only", $new)) }
+            $ob1Changed = @($ob1Changed | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+            $dirs = @($ob1Changed | ForEach-Object { if ($_ -match '^integrations/([^/]+)/') { $matches[1] } } | Where-Object { $_ } | Select-Object -Unique)
+            $svcs = @()
+            $composeText = @(Invoke-GitCapture @("-C", $clone, "show", "$new`:docker/docker-compose.yml"))
+            if ($LASTEXITCODE -eq 0) { $svcs = @(Get-ComposeServices $composeText) }
+            else { $notes += ("OB1 {0} has no docker/docker-compose.yml - integration images are recorded by directory" -f $new.Substring(0, 7)) }
+            foreach ($d in $dirs) {
+                [void](Invoke-GitCapture @("-C", $clone, "cat-file", "-e", "$new`:integrations/$d/Dockerfile"))
+                if ($LASTEXITCODE -ne 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
+                $svc = @($svcs | Where-Object { $_.context -and ((Convert-RepoRelative "docker" $_.context) -eq "integrations/$d") } | Select-Object -First 1)
+                if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name) }
+                else { $images += ("image:integrations/" + $d); $notes += ("no compose service builds integrations/{0} at OB1 {1} - recorded by directory" -f $d, $new.Substring(0, 7)) }
+            }
+        }
+    }
+    # (2) anything OWUI only sees by paste
+    foreach ($p in $changed) { if ($p -match '^owui/') { $pastes += ("paste:" + $p) } }
+    # (3) a :local-tagged service of this repository whose build context changed
+    $tree = @(Invoke-GitCapture @("ls-tree", "-r", "--name-only", $Sha) | ForEach-Object { ([string]$_).Trim() })
+    $composeFiles = @($tree | Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -and $_ -notmatch '^scripts/archive/' })
+    foreach ($cf in $composeFiles) {
+        $text = @(Invoke-GitCapture @("show", "$Sha`:$cf"))
+        if ($LASTEXITCODE -ne 0) { continue }
+        $dir = if ($cf.Contains("/")) { $cf.Substring(0, $cf.LastIndexOf("/")) } else { "" }
+        foreach ($s in @(Get-ComposeServices $text)) {
+            if (-not $s.context) { continue }
+            if ($s.image -notmatch ':local(\}|\s|$)') { continue }
+            $ctx = Convert-RepoRelative $dir $s.context
+            if ($null -eq $ctx) { $skipped += ("{0} service {1}: build context {2} lies outside this repository - not derivable" -f $cf, $s.name, $s.context); continue }
+            $df = if ($s.dockerfile) { $s.dockerfile } else { "Dockerfile" }
+            $dfPath = Convert-RepoRelative $ctx $df
+            $roots = @()
+            if ($ctx -eq "") {
+                # A context that is the REPOSITORY ROOT is not a build context, it is the
+                # repository (frontend builds openwebui and tailscale from `..`): counting every
+                # merge as a rebuild of both would say nothing. For those the surface is the
+                # Dockerfile itself plus what it COPY/ADDs from the context.
+                if ($dfPath) { $roots += $dfPath }
+                $dfText = @(Invoke-GitCapture @("show", "$Sha`:$dfPath"))
+                if ($LASTEXITCODE -eq 0) {
+                    foreach ($dl in $dfText) {
+                        if ([string]$dl -notmatch '^\s*(COPY|ADD)\s+(.*)$') { continue }
+                        $rest = $matches[2]
+                        if ($rest -match '--from=') { continue }
+                        $toks = @($rest -split '\s+' | Where-Object { $_ -and ($_ -notlike '--*') })
+                        if ($toks.Count -lt 2) { continue }
+                        foreach ($src in $toks[0..($toks.Count - 2)]) {
+                            if ($src -in @(".", "./", "*")) { $roots += "" } else { $r = Convert-RepoRelative "" $src; if ($null -ne $r) { $roots += $r } }
+                        }
+                    }
+                } else { $notes += ("{0} service {1}: Dockerfile {2} not found at {3} - only the Dockerfile path is watched" -f $cf, $s.name, $dfPath, $Sha.Substring(0, 7)) }
+            } else { $roots += $ctx }
+            $hit = $false
+            foreach ($p in $changed) {
+                foreach ($r in $roots) {
+                    if (($r -eq "") -or ($p -eq $r) -or $p.StartsWith($r + "/")) { $hit = $true; break }
+                }
+                if ($hit) { break }
+            }
+            if ($hit) { $images += ("image:" + $s.name) }
+        }
+    }
+    $surfaces = @(@($images | Select-Object -Unique | Sort-Object) + @($pastes | Select-Object -Unique | Sort-Object))
+    return @{ surfaces = $surfaces; notes = @($notes); skipped = @($skipped); line_before = $lineBefore }
+}
+
+function Test-DeployEvidence([string[]]$Surfaces, [string]$Body) {
+    # What -Deployed demands of its evidence, PER SURFACE: a line that names the surface, and
+    # on the lines that do, a pin (an image label or revision sha, or the pasted file's hash)
+    # and a health state a deploy can close on. Returns @{ ok; problems }.
+    $problems = @()
+    $lines = @($Body -split "`r?`n")
+    foreach ($s in @($Surfaces)) {
+        $kind = ($s -split ':', 2)[0]; $name = ($s -split ':', 2)[1]
+        $needles = @($name)
+        if ($kind -eq "paste") { $needles += ($name -split '/')[-1] }
+        $hit = @($lines | Where-Object { $l = $_; @($needles | Where-Object { $l.IndexOf($_, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0 })
+        if ($hit.Count -eq 0) { $problems += ("{0}: no line of the evidence names it" -f $s); continue }
+        $text = $hit -join "`n"
+        $pinOk = ($text -match '(?i)sha256:[0-9a-f]{7,}') -or ($text -match '(?i)(?<![0-9a-z])(?=[0-9a-f]*\d)[0-9a-f]{7,64}(?![0-9a-z])')
+        if (-not $pinOk) {
+            $problems += ("{0}: names no pin - {1}" -f $s, $(if ($kind -eq "image") { "the running container's image label or revision (org.opencontainers.image.revision=<sha>, or the image id)" } else { "the sha256 of the file as pasted" }))
+        }
+        $m = [regex]::Match($text, '(?i)(State\.Health\.Status|Health\.Status|health(?:_status)?|State\.Status|status)\s*[=:]\s*"?([A-Za-z]+)')
+        if (-not $m.Success) { $problems += ("{0}: names no health state (State.Health.Status=healthy, or State.Status=running for a container with no healthcheck)" -f $s) }
+        elseif (@("healthy", "running") -notcontains $m.Groups[2].Value.ToLower()) { $problems += ("{0}: health state '{1}' is not one a deploy closes on (healthy, or running)" -f $s, $m.Groups[2].Value) }
+    }
+    return @{ ok = (@($problems).Count -eq 0); problems = @($problems) }
 }
 
 function Invoke-OracleOnStall([string]$i) {
@@ -616,7 +1042,7 @@ if ($CloseOut) {
     $f = Join-Path $QueueDir "$Id.json"
     if (-not (Test-Path $f)) { Die "no queue item '$Id'" }
     $item = Read-ItemFile $f
-    if ($item.state -in @("merged", "rejected", "closed-outside-gates")) {
+    if ($item.state -in $TerminalStates) {
         Write-Host "'$Id' is already terminal ('$($item.state)') - nothing to close." -ForegroundColor Yellow
         exit 0
     }
@@ -677,23 +1103,46 @@ if ($Oracle) {
 if ($List) {
     $items = @(Get-ChildItem -Path $QueueDir -Filter "*.json" -ErrorAction SilentlyContinue)
     if (-not $items.Count) { Write-Host "queue empty" -ForegroundColor Green; exit 0 }
-    Write-Host ("{0,-18} {1,-17} {2,-20} {3}" -f "ID", "STATE", "DEVELOPER", "HELD BY")
+    $rows = @()
     foreach ($f in ($items | Sort-Object Name)) {
         # `<id>.anchor.json` sits beside `<id>.json` in this directory. Ids are
         # [a-z0-9-], so a dot in the base name means a sidecar file, not a work item.
         if ($f.BaseName.Contains(".")) { continue }
         $it = Read-ItemFile $f.FullName
         if ($State -and $it.state -ne $State) { continue }
+        $rows += $it
+    }
+    # DOES THE RECORD DESCRIBE COMMITS THAT EXIST? One batched pass for the whole board (see
+    # Resolve-ItemShas); a row with an unresolvable commit or OB1 pin is flagged and sorts
+    # FIRST, because a queue row that names nothing is the one thing on this board that is
+    # not live work and reads exactly like it. Read-only: -List writes nothing, ever.
+    $resolution = Resolve-ItemShas $rows
+    $ordered = @($rows | Sort-Object -Property @{ Expression = { if (@($resolution[$_.id] | Where-Object { $_ -like "UNRESOLVABLE:*" }).Count -gt 0) { 0 } else { 1 } } }, @{ Expression = { $_.id } })
+    Write-Host ("{0,-18} {1,-17} {2,-20} {3}" -f "ID", "STATE", "DEVELOPER", "HELD BY")
+    foreach ($it in $ordered) {
         $held = ""
         foreach ($r in @("tester", "reviewer")) {
             $c = ClaimPath $it.id $r
             if (Test-Path $c) { $held = "$r=" + (Get-Content -Raw -Path $c | ConvertFrom-Json).by }
         }
-        $flag = if ($it.PSObject.Properties.Name -contains "line_mergeable" -and -not $it.line_mergeable) { " [needs hand-off]" } else { "" }
+        $flag = ""
+        foreach ($u in @($resolution[$it.id])) { $flag += " [" + $u + "]" }
+        # [needs hand-off] means "the reviewer will not be able to merge this". line_mergeable is
+        # written at -Submit and never cleared, so until 2026-09-06 every merged item wore it
+        # forever: 31 of the 42 rows on the live board carried it on 2026-09-06 and 30 of them
+        # were terminal, so the one row where it was true was one in thirty-one.
+        # A terminal item has nothing left to merge; the flag is for the rows still moving.
+        if (($it.state -notin $TerminalStates) -and ($it.PSObject.Properties.Name -contains "line_mergeable") -and -not $it.line_mergeable) { $flag += " [needs hand-off]" }
         # The two states that are waiting on a PERSON are called out: an unread queue is
         # how a human gate quietly becomes a human bottleneck.
         if ($it.state -eq "anchor-draft") { $flag += " [waiting: operator to confirm the anchor]" }
         if ($it.state -eq "test-passed")  { $flag += " [waiting: operator to release for review]" }
+        # MERGED IS NOT LIVE while a derived surface is open. Items merged before the derivation
+        # existed carry no surfaces and read as plain `merged` - re-deriving them is out of scope.
+        if ($it.state -eq "merged") {
+            $pending = @(Get-DeployPending $it)
+            if ($pending.Count -gt 0) { $flag += (" [UNDEPLOYED: " + ($pending -join ", ") + "]") }
+        }
         if ($it.PSObject.Properties.Name -contains "gates" -and $it.gates) {
             $autoGates = @(Get-GateNames | Where-Object { $it.gates.$_ -and $it.gates.$_.kind -eq "auto" })
             if ($autoGates.Count -gt 0) { $flag += (" [AUTO-PASSED: " + ($autoGates -join ", ") + "]") }
@@ -714,6 +1163,37 @@ if ($Show) {
                } elseif ($it.anchor_confirmed_by) { "confirmed by " + $it.anchor_confirmed_by }
                else { "NOT YET CONFIRMED" }
         Write-Host ("(" + $who + ")")
+        Write-Host ""
+    }
+    # DO THE RECORDED COMMITS EXIST? Same batched resolution -List uses, for this one item.
+    $resolution = Resolve-ItemShas @($it)
+    $flags = @($resolution[$it.id])
+    if ($flags.Count -gt 0) {
+        Write-Host "--- RESOLUTION ---" -ForegroundColor Red
+        foreach ($u in $flags) { Write-Host ("  [" + $u + "]") -ForegroundColor Red }
+        Write-Host "  A recorded commit, or the OB1 commit it pins, exists in no clone this tool can reach. The row is" -ForegroundColor DarkGray
+        Write-Host "  not live work until that object is fetched or the record corrected." -ForegroundColor DarkGray
+        Write-Host ""
+    }
+    # WHAT THE MERGE SHIPPED, and whether it is live. Present only on items merged since the
+    # derivation existed (2026-09-06); older merged items have no surfaces to show.
+    if ($it.PSObject.Properties.Name -contains "deploy_surfaces") {
+        $all = @(Get-ArrayField $it "deploy_surfaces")
+        $pending = @(Get-DeployPending $it)
+        $done = @(Get-ArrayField $it "deployed")
+        Write-Host "--- DEPLOY ---" -ForegroundColor Cyan
+        if ($all.Count -eq 0) { Write-Host "  no deploy surface derived from the merge range (no image, no paste)" }
+        foreach ($s in $all) {
+            $row = @($done | Where-Object { $_.surface -eq $s } | Select-Object -First 1)
+            if ($row.Count -gt 0) { Write-Host ("  {0,-45} CLOSED by {1} at {2}" -f $s, $row[0].by, $row[0].at) -ForegroundColor Green }
+            elseif ($pending -contains $s) { Write-Host ("  {0,-45} OPEN - not live until -Deployed records it" -f $s) -ForegroundColor Yellow }
+            else { Write-Host ("  {0,-45} (neither open nor closed - record inconsistent)" -f $s) -ForegroundColor Red }
+        }
+        if ($it.PSObject.Properties.Name -contains "deploy_derived" -and $it.deploy_derived) {
+            $dd = $it.deploy_derived
+            Write-Host ("  derived from git diff --name-only {0}..{1}" -f ([string]$dd.line_before).Substring(0, [Math]::Min(7, ([string]$dd.line_before).Length)), ([string]$dd.merge).Substring(0, [Math]::Min(7, ([string]$dd.merge).Length))) -ForegroundColor DarkGray
+            foreach ($n in @(Get-ArrayField $dd "notes")) { Write-Host ("  NOTE: " + $n) -ForegroundColor DarkGray }
+        }
         Write-Host ""
     }
     # THE VERDICTS, case by case. The operator reading this used to see one word per
@@ -899,7 +1379,7 @@ if ($AmendAnchor) {
         Die "-AmendAnchor needs -Id, -By, -Anchor <path> and -Reason (what changed about the world)"
     }
     $item = Read-Item $Id
-    if ($item.state -in @("merged", "rejected")) { Die "'$Id' is '$($item.state)' - open a new item" }
+    if ($item.state -in @("merged", "deployed", "rejected")) { Die "'$Id' is '$($item.state)' - open a new item" }
     if ($item.state -eq "anchor-draft") { Die "'$Id' is not confirmed yet - amend it on -ConfirmAnchor instead" }
     try { $anchorObj = Read-AnchorFile $Anchor } catch { Die $_.Exception.Message }
     Copy-IntoQueue $Anchor $item.anchor_file "-Anchor" "anchor file for this item"
@@ -974,6 +1454,7 @@ if ($Submit) {
     # is a stated configuration choice rather than a silent bypass.
     $anchorRequired = [bool](Get-HarnessSetting "pipeline.anchor_required" $true)
     $correcting = $false
+    $bumped = $false
     $existing = if (Test-Path (ItemPath $Id)) { Read-Item $Id } else { $null }
     if ($existing) {
         if ($existing.state -eq "anchor-draft") {
@@ -1089,6 +1570,24 @@ if ($Submit) {
     }
     if ($existing) {
         $item = $existing
+        # A VERDICT ALREADY STANDS AT THIS ATTEMPT -> the attempt moves on (deploystate,
+        # 2026-09-06). -AmendAnchor sends a tested item back to 'anchor-confirmed' without
+        # touching `attempt`, and the evidence filename is <id>.attempt<N>.evidence.md, so the
+        # next tester's -Pass would copy straight over the file the previous verdict rests on -
+        # the D1 incident through another door. Two signals, either is enough: a results[] row
+        # recorded at this attempt, or that attempt's evidence file beside the item. The
+        # correction path (re-stating an unclaimed submission) has neither and stays put (D4);
+        # a developer's -Requeue already bumped, so nothing here double-counts it (D6).
+        if (-not $correcting) {
+            $att = [int]$item.attempt
+            $rowsHere = @(@(Get-ArrayField $item "results") | Where-Object { ($_.PSObject.Properties.Name -contains "attempt") -and ([int]$_.attempt -eq $att) })
+            $evHere = Join-Path $QueueDir ("{0}.attempt{1}.evidence.md" -f $Id, $att)
+            if (($rowsHere.Count -gt 0) -or (Test-Path -LiteralPath $evHere)) {
+                Set-Field $item "attempt" ($att + 1)
+                Add-History $item ("attempt bumped to {0}: attempt {1} already carries a verdict, and its evidence file stays where it is" -f ($att + 1), $att) $Developer
+                $bumped = $true
+            }
+        }
         Set-Field $item "branch" $Branch; Set-Field $item "line" $line
         Set-Field $item "developer" $Developer
         Set-Field $item "state" "ready-to-test"; Set-Field $item "test_plan" $planDest
@@ -1135,6 +1634,9 @@ if ($Submit) {
     }
     if ($correcting) {
         Write-Host "  This CORRECTED an item that was already queued and unclaimed; the attempt is unchanged." -ForegroundColor Yellow
+    }
+    if ($bumped) {
+        Write-Host ("  Attempt {0}: the previous attempt already carries a verdict, so its evidence file is kept, not overwritten." -f $item.attempt) -ForegroundColor Yellow
     }
     # The unregistered-developer WARNING that used to sit here was replaced by a refusal at
     # the top of this handler (2026-09-04). It warned after the item was queued, which is
@@ -1337,7 +1839,10 @@ if ($Pass -or $Fail) {
         # so the record stays readable and nothing is truncated. (2026-09-03: a tester's
         # long inline evidence died at the process boundary and the retry stored a
         # placeholder - this branch keeps the survivable version of that mistake lossless.)
-        Set-Content -Path $evDest -Value $Evidence -Encoding UTF8
+        # UTF-8 WITHOUT a BOM, like the item file (deploystate, 2026-09-06): Set-Content
+        # -Encoding UTF8 prefixes EF BB BF, and a spilled evidence file is read back by the
+        # same UTF-8 readers - and by Python - as the item beside it.
+        [System.IO.File]::WriteAllText($evDest, $Evidence, (New-Object System.Text.UTF8Encoding($false)))
         $evidenceText = $evDest
         Write-Host ("  Inline evidence ({0} chars) spilled to {1}" -f $Evidence.Length, $evDest)
     }
@@ -1487,15 +1992,119 @@ if ($Merged) {
              "it failed silently: check its exit code before recording the outcome. Nothing " +
              "has been recorded.") 1
     }
+    # WHAT DID THIS MERGE SHIP? Derived from the merge range - never from a list the author
+    # typed - BEFORE the state changes, so a derivation that cannot complete (an OB1 pin no
+    # clone holds) refuses the record rather than leaving a merged item with no surfaces.
+    $derived = Get-DeploySurfaces $item $Sha
     # Items merged before 2026-08-29 carry `fits_anchor` instead. That recorded the answer to
     # a DIFFERENT question (did this match the intent?), so do not read the two as one field.
     Set-Field $item "fits_codebase" ([bool]$FitsCodebase)
     $item.state = "merged"; $item.merged_sha = $Sha
+    Set-Field $item "deploy_surfaces" @($derived.surfaces)
+    Set-Field $item "deploy_pending" @($derived.surfaces)
+    Set-Field $item "deployed" @()
+    Set-Field $item "deploy_derived" ([ordered]@{ line_before = $derived.line_before; merge = $Sha; at = (Now); notes = @($derived.notes); skipped = @($derived.skipped) })
     Add-History $item "merged as $Sha" $By
+    if (@($derived.surfaces).Count -gt 0) { Add-History $item ("deploy surfaces derived: " + (@($derived.surfaces) -join ", ")) $By }
     Drop-Claim $Id "reviewer"
     Write-Item $item
     Write-Host ("'{0}' MERGED as {1} by {2}." -f $Id, $Sha, $By) -ForegroundColor Green
+    $lb7 = if ($derived.line_before) { ([string]$derived.line_before).Substring(0, 7) } else { "?" }
+    if (@($derived.surfaces).Count -gt 0) {
+        Write-Host ("  {0} deploy surface(s) derived from git diff --name-only {1}..{2} - NOT LIVE until each is closed:" -f @($derived.surfaces).Count, $lb7, $Sha.Substring(0, 7)) -ForegroundColor Yellow
+        foreach ($s in @($derived.surfaces)) { Write-Host ("    - " + $s) -ForegroundColor Yellow }
+        Write-Host ("  Deploy stays human-gated. When it is done and healthy: queue.ps1 -Deployed -Id {0} -By <operator> -Evidence <path> [-Surface <one of them>]" -f $Id)
+    } else {
+        Write-Host ("  No deploy surface derived from {0}..{1}: no OB1 integration image, no owui/ paste, no :local build context changed." -f $lb7, $Sha.Substring(0, 7))
+    }
+    foreach ($n in @($derived.notes)) { Write-Host ("  NOTE: " + $n) -ForegroundColor DarkGray }
     Write-Host ("  {0} can now retire the worktree (remove-worktree.ps1 -Id ...)." -f $item.developer)
+    exit 0
+}
+
+if ($Deployed) {
+    # THE DEPLOY IS RECORDED, NOT PERFORMED. MERGE-PROTOCOL section 4 keeps deploying to prod
+    # containers and retagging :local a human-gated step, and this verb does not move that
+    # line: it takes -By (a person - the auto: namespace is refused, as at the two gates) and
+    # evidence that, PER SURFACE, names the image label or pin (or the pasted file's hash) and
+    # the container's health state. A merged item that shipped an image or a paste cannot read
+    # as finished until someone has looked at the running thing and written down what they saw.
+    if (-not $Id -or -not $By -or -not $Evidence) {
+        Die ("-Deployed needs -Id, -By (who verified the deploy) and -Evidence (per surface: the image " +
+             "label or revision, or the pasted file's sha256, and the container's health state - a file " +
+             "path or inline text). -Surface <name> closes one surface; without it, all open ones.")
+    }
+    Assert-HumanPrincipal $By "-Deployed"
+    $item = Read-Item $Id
+    if ($item.state -eq "deployed") { Die "'$Id' is already 'deployed' - every surface it derived is closed; there is nothing left to record" }
+    if ($item.state -ne "merged") {
+        Die (("'{0}' is '{1}', not 'merged'. A deploy is recorded on a merged item only - it follows the " +
+              "merge, and -Merged is what derives the surfaces this closes.") -f $Id, $item.state)
+    }
+    $all = @(Get-ArrayField $item "deploy_surfaces")
+    $pending = @(Get-DeployPending $item)
+    if (-not ($item.PSObject.Properties.Name -contains "deploy_pending") -or ($all.Count -eq 0)) {
+        Die (("'{0}' records no deploy surface: it merged before -Merged derived them (2026-09-06), or its " +
+              "merge range changed no OB1 integration image, no :local build context and no owui/ file. There " +
+              "is nothing to close, so -Deployed is refused rather than recorded against nothing.") -f $Id)
+    }
+    if ($pending.Count -eq 0) { Die "'$Id' has no deploy surface left open - its record is inconsistent (state merged, nothing pending); -Show it" }
+    $closed = @(Get-ArrayField $item "deployed")
+    $targets = $pending
+    if ($Surface) {
+        $prior = @($closed | Where-Object { $_.surface -eq $Surface } | Select-Object -First 1)
+        if ($prior.Count -gt 0) {
+            Die (("surface '{0}' on '{1}' is already closed - recorded by {2} at {3}. A surface is closed once; " +
+                  "if the deploy was redone, that is a new item's evidence, not a second closure of this one.") -f $Surface, $Id, $prior[0].by, $prior[0].at)
+        }
+        if ($pending -notcontains $Surface) {
+            Die (("'{0}' is not an open deploy surface of '{1}'. Open: {2}. The names are the ones -Merged " +
+                  "derived (image:<compose service> / paste:<path>), not free text.") -f $Surface, $Id, ($pending -join ", "))
+        }
+        $targets = @($Surface)
+    }
+    # A FILE PATH OR INLINE TEXT, decided the way -Pass decides it (see the note there on
+    # Test-Path and prose), and read as UTF-8.
+    $isFile = $false
+    if ($Evidence.Length -le 4096 -and $Evidence -notmatch "[`r`n]") {
+        try { $isFile = Test-Path -LiteralPath $Evidence -PathType Leaf -ErrorAction Stop } catch { $isFile = $false }
+    }
+    $body = $Evidence
+    if ($isFile) { $body = Read-Utf8Text $Evidence }
+    $check = Test-DeployEvidence $targets $body
+    if (-not $check.ok) {
+        Die (("-Deployed on '{0}' is REFUSED - the evidence does not say, for every surface it closes, what " +
+              "is running and that it is healthy:`n{1}`n" +
+              "Per surface, one line that names it and carries (a) the pin - for an image the running " +
+              "container's org.opencontainers.image.revision label or image id, for a paste the sha256 of " +
+              "the file as pasted - and (b) the container's health state: State.Health.Status=healthy, or " +
+              "State.Status=running for a container with no healthcheck. For example:`n" +
+              "    openbrain-curator: label org.opencontainers.image.revision=d89c126, State.Health.Status=healthy, RestartCount=0`n" +
+              "Nothing has been recorded.") -f $Id, (($check.problems | ForEach-Object { "    " + $_ }) -join "`n"))
+    }
+    # Every check above is before every change below.
+    $n = $closed.Count + 1
+    $evDest = Join-Path $QueueDir ("{0}.deploy{1}.evidence.md" -f $Id, $n)
+    $evText = $Evidence
+    if ($isFile) { Copy-IntoQueue $Evidence $evDest "-Evidence" "deploy evidence file for this item"; $evText = $evDest }
+    elseif ($Evidence.Length -gt 2000) {
+        [System.IO.File]::WriteAllText($evDest, $Evidence, (New-Object System.Text.UTF8Encoding($false)))
+        $evText = $evDest
+    }
+    $rows = @($closed)
+    foreach ($t in $targets) { $rows += [ordered]@{ surface = $t; by = $By; at = (Now); evidence = $evText } }
+    Set-Field $item "deployed" @($rows)
+    $remaining = @($pending | Where-Object { $targets -notcontains $_ })
+    Set-Field $item "deploy_pending" @($remaining)
+    Add-History $item ("deploy recorded for " + ($targets -join ", ")) $By
+    if ($remaining.Count -eq 0) {
+        Set-Field $item "state" "deployed"
+        Add-History $item ("deployed - every derived surface closed ({0})" -f $all.Count) $By
+    }
+    Write-Item $item
+    Write-Host ("'{0}': deploy recorded for {1} by {2}." -f $Id, ($targets -join ", "), $By) -ForegroundColor Green
+    if ($remaining.Count -eq 0) { Write-Host ("  Every derived surface is closed - '{0}' is DEPLOYED." -f $Id) -ForegroundColor Green }
+    else { Write-Host ("  Still open: {0}. The item stays 'merged' and -List keeps flagging it until those are closed." -f ($remaining -join ", ")) -ForegroundColor Yellow }
     exit 0
 }
 
@@ -1659,4 +2268,4 @@ if ($Reject) {
     exit 0
 }
 
-Die "pass one of -Submit | -Resubmit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Approve | -Merged | -Requeue | -Reject | -Audit | -VerifyAudit"
+Die "pass one of -Submit | -Resubmit | -List | -Show | -Claim | -Unclaim | -Pass | -Fail | -Approve | -Merged | -Deployed | -Requeue | -Reject | -Audit | -VerifyAudit"

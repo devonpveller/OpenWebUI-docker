@@ -97,6 +97,7 @@ def test_a_malformed_anchor_does_not_raise():
 # ── status mapping ───────────────────────────────────────────────────────────
 @pytest.mark.parametrize("state,expected", [
     ("merged", "done"),
+    ("deployed", "done"),
     ("rejected", "blocked"),
     ("failed", "blocked"),
     ("queued", "open"),
