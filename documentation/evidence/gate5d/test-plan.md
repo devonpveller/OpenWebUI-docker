@@ -317,6 +317,139 @@ During T3, `docker ps` in a second shell must never show a container on an `ai-s
 network (the check container is short-lived; `docker events --filter type=container` during
 the run shows its create/start/die with no network attach beyond `none`).
 
+## T11 - the walk beyond the first hop (acceptance #2, transitive; attempt-2 addition)
+
+Attempt 1 failed on refutation R3: a one-line intermediate module
+(`export * from "./deep.ts";`) was walked as CHARACTERS because PowerShell unrolled the
+one-element array `Read-AtPin` returned, so the static half printed "covers all 4 file(s)"
+and only the build half refused. Every case below runs WITHOUT Docker: a refusal comes from
+the static half before the docker probe, and the two controls are run with `DOCKER_HOST`
+pointed at a dead port so the static verdict is printed and the run then stops at the
+docker probe (the `Docker is not reachable` sentence is EXPECTED there and is not the thing
+under test).
+
+Setup: mint the scratch commits with a temporary index (OB1 working tree untouched). Save
+this as `mint.sh` and run it from `<WT>/OB1` in Git Bash:
+
+```
+#!/bin/sh
+# mint.sh <branch> <parent> [<repo-path>=<local-file>]...
+set -e
+branch="$1"; parent="$2"; shift 2
+export GIT_INDEX_FILE="$(pwd)/../.gate5d-mint-index"
+git read-tree "$parent"
+for pair in "$@"; do
+  p="${pair%%=*}"; f="${pair#*=}"
+  blob=$(git hash-object -w "$f")
+  git update-index --add --cacheinfo 100644,$blob,"$p"
+done
+tree=$(git write-tree)
+c=$(git commit-tree "$tree" -p "$parent" -m "scratch(gate5d): $branch - local only, never pushed")
+git branch -f "$branch" "$c"
+unset GIT_INDEX_FILE; rm -f ../.gate5d-mint-index
+echo "$branch=$(git rev-parse --short $c)"
+```
+
+Then, from `<WT>/OB1` (`S` = any scratch directory; `C=integrations/research-curator`):
+
+```
+C=integrations/research-curator; S=/tmp/gate5d; mkdir -p $S
+git show a07103b:$C/Dockerfile | sed 's#^COPY claims.ts ./#COPY claims.ts ./\nCOPY pool.ts ./#' > $S/Dockerfile.fixed
+git show a07103b:$C/index.ts > $S/index.base.ts        # 642 lines at a07103b
+sh mint.sh scratch/gate5d-fixed a07103b "$C/Dockerfile=$S/Dockerfile.fixed"
+
+# (a) two-hop: index.ts -> a.ts -> b.ts; a.ts COPYed, b.ts not
+{ cat $S/index.base.ts; echo 'import "./a.ts";'; } > $S/index.c1.ts
+printf '// hop one\nimport { b } from "./b.ts";\nexport const a = b;\n' > $S/a.ts
+printf 'export const b = 1;\n' > $S/b.ts
+sed 's#^COPY pool.ts ./#COPY pool.ts ./\nCOPY a.ts ./#' $S/Dockerfile.fixed > $S/Dockerfile.c1
+sh mint.sh scratch/gate5d-c1-twohop scratch/gate5d-fixed "$C/index.ts=$S/index.c1.ts" "$C/a.ts=$S/a.ts" "$C/b.ts=$S/b.ts" "$C/Dockerfile=$S/Dockerfile.c1"
+
+# (b) ONE-LINE barrel, no trailing newline: index.ts -> one.ts -> deep.ts; one.ts COPYed, deep.ts not
+{ cat $S/index.base.ts; echo 'import "./one.ts";'; } > $S/index.c2.ts
+printf 'export * from "./deep.ts";' > $S/one.ts
+printf 'export const deep = 1;\n' > $S/deep.ts
+sed 's#^COPY pool.ts ./#COPY pool.ts ./\nCOPY one.ts ./#' $S/Dockerfile.fixed > $S/Dockerfile.c2
+sh mint.sh scratch/gate5d-c2-oneline scratch/gate5d-fixed "$C/index.ts=$S/index.c2.ts" "$C/one.ts=$S/one.ts" "$C/deep.ts=$S/deep.ts" "$C/Dockerfile=$S/Dockerfile.c2"
+
+# (c) forms: import type / export * from / export { } from - files exist, none COPYed
+{ cat $S/index.base.ts; echo 'import type { T } from "./t.ts";'; echo 'export * from "./star.ts";'; echo 'export { s } from "./s.ts";'; } > $S/index.c3.ts
+printf 'export type T = number;\n' > $S/t.ts; printf 'export const star = 1;\n' > $S/star.ts; printf 'export const s = 1;\n' > $S/s.ts
+sh mint.sh scratch/gate5d-c3-forms scratch/gate5d-fixed "$C/index.ts=$S/index.c3.ts" "$C/t.ts=$S/t.ts" "$C/star.ts=$S/star.ts" "$C/s.ts=$S/s.ts"
+
+# (d) control: (b) with deep.ts ALSO COPYed
+sed 's#^COPY one.ts ./#COPY one.ts ./\nCOPY deep.ts ./#' $S/Dockerfile.c2 > $S/Dockerfile.c4
+sh mint.sh scratch/gate5d-c4-control scratch/gate5d-c2-oneline "$C/Dockerfile=$S/Dockerfile.c4"
+
+# (e) commented-out imports of files that do not exist (line, block, block-continuation, trailing)
+{ cat $S/index.base.ts; echo '// import { old } from "./gone.ts";'; echo '/* import "./gone2.ts"'; echo '   import "./gone3.ts" */'; echo 'const keep = 1; // import "./gone4.ts"'; } > $S/index.c5.ts
+sh mint.sh scratch/gate5d-c5-comments scratch/gate5d-fixed "$C/index.ts=$S/index.c5.ts"
+
+# (f) wrong-case COPY on the incident pin itself
+sed 's#^COPY pool.ts ./#COPY Pool.ts ./#' $S/Dockerfile.fixed > $S/Dockerfile.c6
+sh mint.sh scratch/gate5d-c6-case a07103b "$C/Dockerfile=$S/Dockerfile.c6"
+git rev-parse --short HEAD; git status --short | wc -l     # a07103b, 0
+```
+
+Run each from the worktree root. `<sha7>` is whatever mint printed for that branch.
+
+### T11a two-hop chain
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-c1-twohop; echo $LASTEXITCODE
+```
+Expect exit 1, no `static: ... covers` line, no `build:` line, and the refusal
+`research-curator/a.ts:2 imports 'b.ts', and the Dockerfile never COPYs it (it lists: deno.json, index.ts, claims.ts, pool.ts, a.ts, ...)` ... `FIX in OB1: add 'COPY b.ts ./'`,
+then `FAIL: 1 relative import(s) ... No docker build was attempted`.
+Developer's run: exactly that, exit 1.
+
+### T11b one-line intermediate module (the attempt-1 regression)
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-c2-oneline; echo $LASTEXITCODE
+```
+Expect exit 1 and the refusal `research-curator/one.ts:1 imports 'deep.ts', and the Dockerfile never COPYs it` ... `FIX in OB1: add 'COPY deep.ts ./'`, `No docker build was attempted`.
+NOT acceptable: `covers all 4 file(s)` (the attempt-1 output), or a refusal that comes from
+`deno check` inside an image. Developer's run: refused at `one.ts:1`, exit 1, 2057 ms.
+
+### T11c import forms
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-c3-forms; echo $LASTEXITCODE
+```
+Expect exit 1 and THREE refusals: `index.ts:643 imports 't.ts'` (`import type`),
+`index.ts:644 imports 'star.ts'` (`export * from`), `index.ts:645 imports 's.ts'`
+(`export { } from`), then `FAIL: 3 relative import(s)`. Developer's run: all three, exit 1.
+
+### T11d control - the whole chain COPYed
+```
+$env:DOCKER_HOST='tcp://127.0.0.1:9'
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-c4-control; echo $LASTEXITCODE
+Remove-Item Env:DOCKER_HOST
+```
+Expect `static: integrations/research-curator/Dockerfile covers all 5 file(s) reachable from index.ts`
+(index.ts, claims.ts, pool.ts, one.ts, deep.ts) followed by the `Docker is not reachable`
+refusal, exit 1. The 5 is the assertion: 4 means deep.ts was not walked. Developer's run: 5.
+
+### T11e commented-out imports are not imports
+```
+$env:DOCKER_HOST='tcp://127.0.0.1:9'
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-c5-comments; echo $LASTEXITCODE
+Remove-Item Env:DOCKER_HOST
+```
+Expect `covers all 3 file(s)` and then the docker refusal; NOT acceptable: any line naming
+`gone.ts`, `gone2.ts`, `gone3.ts` or `gone4.ts`. Developer's run: covers all 3.
+
+### T11f wrong-case COPY does not cover
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin a07103b -NewPin scratch/gate5d-c6-case; echo $LASTEXITCODE
+```
+Expect exit 1 and the refusal `index.ts:39 imports 'pool.ts'` with the list showing
+`Pool.ts`, `No docker build was attempted`. Developer's run: exactly that.
+
+### T11 teardown
+```
+git -C OB1 branch -D scratch/gate5d-fixed scratch/gate5d-c1-twohop scratch/gate5d-c2-oneline scratch/gate5d-c3-forms scratch/gate5d-c4-control scratch/gate5d-c5-comments scratch/gate5d-c6-case
+git -C OB1 status --short | Measure-Object     # 0
+```
+
 ## Result format
 
 For each T: PASS / FAIL, the exact command run, the verbatim output (trimmed to the lines

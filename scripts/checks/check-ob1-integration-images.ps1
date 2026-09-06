@@ -86,9 +86,15 @@
     covering, treats a directory source as covering everything beneath it,
     does not model a COPY that RENAMES its destination, and reads import
     specifiers with a regex (`from "./x.ts"`, `import "./x.ts"`,
-    `import("./x.ts")`). It exists so that the curator class is refused in
-    seconds with the importing line named; anything it cannot see, `deno
-    check` inside the built image sees.
+    `import("./x.ts")`) after blanking `//` and `/* */` comments (a `/*`
+    inside a string literal is still taken for a comment). Paths compare
+    CASE-SENSITIVELY, as the Linux image does: `COPY Pool.ts` does not cover
+    `./pool.ts`. It exists so that the curator class is refused in seconds
+    with the importing line named; anything it cannot see, `deno check`
+    inside the built image sees. Its walk is TRANSITIVE - a one-line barrel
+    `export * from "./deep.ts"` two hops from the entrypoint is followed
+    (tester refutation R3, 2026-09-06, found the first version dropping
+    exactly that file; see the `return ,$x` note above Read-AtPin).
   * THE BUILD HALF NEEDS DOCKER AND, ON A COLD LAYER CACHE, THE NETWORK:
     every integration Dockerfile runs `deno install` against deno.json, which
     downloads on the first build of that layer. With the base image and the
@@ -266,7 +272,8 @@ else {
     if ($LASTEXITCODE -ne 0) { Fail "git diff $old7..$new7 -- integrations/ failed in the OB1 clone." }
 }
 
-$svcNames = @{}
+# A case-SENSITIVE hashtable (the `@{}` literal is not): the pin is a Linux tree.
+$svcNames = New-Object System.Collections.Hashtable
 foreach ($p in $changed) {
     if ($p -match '^integrations/([^/]+)/') { $svcNames[$Matches[1]] = $true }
 }
@@ -284,10 +291,18 @@ Write-Host ("$Tag OB1 $old7..$new7 touches image-bearing integration(s): " +
     ($candidates -join ', '))
 
 # --- 3. STATIC HALF -----------------------------------------------------------
+# EVERY ARRAY RETURN BELOW IS `return ,$x`. PowerShell unrolls a returned
+# array onto the pipeline, so a ONE-element array comes back as its element:
+# a one-line file returned as a String, which the caller then indexes as
+# CHARACTERS. That is exactly what happened on 2026-09-06 (tester refutation
+# R3): a one-line barrel module `export * from "./deep.ts";` was walked as
+# 'e','x','p',... and its import vanished - the static half printed "covers
+# all 4 file(s)" and only the build half caught the missing COPY. The unary
+# comma wraps the array so it survives the unroll.
 function Read-AtPin([string]$RelPath) {
     $lines = @(Git-InOB1 @('show', "${newSha}:$RelPath"))
     if ($LASTEXITCODE -ne 0) { return $null }
-    return $lines
+    return ,$lines
 }
 
 function Join-Continuations([string[]]$Lines) {
@@ -298,7 +313,53 @@ function Join-Continuations([string[]]$Lines) {
         $out += ($acc + $l); $acc = ''
     }
     if ($acc) { $out += $acc }
-    return $out
+    return ,$out
+}
+
+# Blank out comments so a commented-out `// import ... from "./gone.ts"` is not
+# read as a live import (tester refutation R6, a false red). Line count and
+# line numbers are preserved. `//` counts as a comment only at line start or
+# after whitespace / `;` so the `//` inside "https://..." specifiers survives
+# (those are non-relative and skipped anyway). Block comments are tracked
+# across lines. Not a parser: a `/*` inside a string literal will be taken
+# for a comment - the build half is the authority, this half is the fast one.
+function Strip-Comments([string[]]$Lines) {
+    $out = @()
+    $inBlock = $false
+    foreach ($raw in $Lines) {
+        $s = [string]$raw
+        $sb = New-Object System.Text.StringBuilder
+        $i = 0
+        while ($i -lt $s.Length) {
+            if ($inBlock) {
+                $end = $s.IndexOf('*/', $i)
+                if ($end -lt 0) { $i = $s.Length; break }
+                $i = $end + 2; $inBlock = $false; continue
+            }
+            $blk = $s.IndexOf('/*', $i)
+            $ln = -1
+            $m = [regex]::Match($s.Substring($i), '(^|[\s;])//')
+            if ($m.Success) { $ln = $i + $m.Index + $m.Groups[1].Length }
+            if ($ln -ge 0 -and ($blk -lt 0 -or $ln -lt $blk)) {
+                [void]$sb.Append($s.Substring($i, $ln - $i)); $i = $s.Length; break
+            }
+            if ($blk -ge 0) {
+                [void]$sb.Append($s.Substring($i, $blk - $i)); $i = $blk + 2; $inBlock = $true; continue
+            }
+            [void]$sb.Append($s.Substring($i)); $i = $s.Length
+        }
+        $out += $sb.ToString()
+    }
+    return ,$out
+}
+
+# Case-SENSITIVE set: the image is Linux, where Pool.ts and pool.ts are two
+# files. PowerShell's `@{}` literal and `-contains` compare case-insensitively
+# (tester refutation R7: `COPY Pool.ts ./` passed the static half).
+function New-CaseSet([string[]]$Items) {
+    $h = New-Object System.Collections.Hashtable
+    foreach ($t in $Items) { $h[$t] = $true }
+    return $h
 }
 
 function Normalize-Rel([string]$Path) {
@@ -321,10 +382,12 @@ function Normalize-Rel([string]$Path) {
 function Parse-Dockerfile([string[]]$Raw, [string[]]$TreePaths) {
     $res = @{ Glob = $false; Files = @(); Dirs = @(); Entry = 'index.ts'; EntryFrom = 'default' }
     foreach ($line in (Join-Continuations $Raw)) {
-        if ($line -match '^\s*CMD\s+(\[.*\])\s*$') {
-            $cmdArgs = @([regex]::Matches($Matches[1], '"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
+        # CMD or ENTRYPOINT (exec form): the last *.ts argument is the entrypoint.
+        if ($line -match '^\s*(CMD|ENTRYPOINT)\s+(\[.*\])\s*$') {
+            $kw = $Matches[1]
+            $cmdArgs = @([regex]::Matches($Matches[2], '"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
             $ts = @($cmdArgs | Where-Object { $_ -match '\.(ts|js|mjs|tsx)$' })
-            if ($ts.Count -gt 0) { $res.Entry = ($ts[-1] -replace '^\./', ''); $res.EntryFrom = 'CMD' }
+            if ($ts.Count -gt 0) { $res.Entry = ($ts[-1] -replace '^\./', ''); $res.EntryFrom = $kw }
             continue
         }
         if ($line -notmatch '^\s*(COPY|ADD)\s+(.*)$') { continue }
@@ -344,7 +407,7 @@ function Parse-Dockerfile([string[]]$Raw, [string[]]$TreePaths) {
             $n = Normalize-Rel $s
             if ($n -eq '' -or $s -match '[\*\?\[]') { $res.Glob = $true; continue }
             $isDir = $false
-            foreach ($t in $TreePaths) { if ($t.StartsWith("$n/")) { $isDir = $true; break } }
+            foreach ($t in $TreePaths) { if ($t.StartsWith("$n/", [StringComparison]::Ordinal)) { $isDir = $true; break } }
             if ($isDir) { $res.Dirs += $n } else { $res.Files += $n }
         }
     }
@@ -357,9 +420,8 @@ $importRx = [regex]'(?:\bfrom\s+["'']([^"'']+)["'']|^\s*import\s+["'']([^"'']+)[
 # Walk relative imports out from the entrypoint. Returns a list of
 # @{ File; Importer; Line; Exists; Escapes } - one entry per distinct file.
 function Walk-Imports([string]$Svc, [string]$Entry, [string[]]$TreePaths) {
-    $treeSet = @{}
-    foreach ($t in $TreePaths) { $treeSet[$t] = $true }
-    $seen = @{}
+    $treeSet = New-CaseSet $TreePaths
+    $seen = New-CaseSet @()
     $found = @()
     $queue = New-Object System.Collections.Queue
     $queue.Enqueue(@{ File = $Entry; Importer = '(entrypoint)'; Line = 0 })
@@ -373,8 +435,9 @@ function Walk-Imports([string]$Svc, [string]$Entry, [string[]]$TreePaths) {
         $found += @{ File = $f; Importer = $item.Importer; Line = $item.Line; Exists = $exists; Escapes = $escapes }
         if (-not $exists) { continue }
         if ($f -notmatch '\.(ts|tsx|js|mjs)$') { continue }
-        $src = Read-AtPin "integrations/$Svc/$f"
+        [string[]]$src = Read-AtPin "integrations/$Svc/$f"
         if ($null -eq $src) { continue }
+        [string[]]$src = Strip-Comments $src
         $dir = ''
         if ($f.Contains('/')) { $dir = $f.Substring(0, $f.LastIndexOf('/')) }
         for ($i = 0; $i -lt $src.Count; $i++) {
@@ -389,7 +452,7 @@ function Walk-Imports([string]$Svc, [string]$Entry, [string[]]$TreePaths) {
             }
         }
     }
-    return $found
+    return ,$found
 }
 
 $staticFailures = @()
@@ -417,9 +480,10 @@ foreach ($svc in $candidates) {
                 "the build context; the static half cannot see it - the build half decides.") -ForegroundColor Yellow
             continue
         }
+        # Case-sensitive on purpose: the image is Linux (refutation R7).
         $isCovered = $false
-        if ($df.Files -contains $r.File) { $isCovered = $true }
-        else { foreach ($d in $df.Dirs) { if ($r.File.StartsWith("$d/")) { $isCovered = $true; break } } }
+        if ($df.Files -ccontains $r.File) { $isCovered = $true }
+        else { foreach ($d in $df.Dirs) { if ($r.File.StartsWith("$d/", [StringComparison]::Ordinal)) { $isCovered = $true; break } } }
         if (-not $r.Exists) {
             $staticFailures += ("OB1 ${new7}:$dockerfileRel - $svc/$($r.Importer):$($r.Line) imports " +
                 "'$($r.File)', which DOES NOT EXIST at $new7 (no COPY can cover it).")
