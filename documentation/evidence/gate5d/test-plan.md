@@ -444,6 +444,93 @@ powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -Old
 Expect exit 1 and the refusal `index.ts:39 imports 'pool.ts'` with the list showing
 `Pool.ts`, `No docker build was attempted`. Developer's run: exactly that.
 
+### T12 - the entrypoint comes from ENTRYPOINT too (attempt-3 addition; tester N4/N5)
+
+A new service directory with an ENTRYPOINT-only Dockerfile; Docker-free (the static half
+refuses before the docker probe). From `<WT>/OB1`, `E=integrations/gate5d-ep`:
+
+```
+E=integrations/gate5d-ep
+printf 'FROM denoland/deno:2.3.3\nWORKDIR /app\nCOPY main.ts ./\nENTRYPOINT ["deno", "run", "main.ts"]\n' > $S/Dockerfile.ep
+printf 'import { lib } from "./lib.ts";\nconsole.log(lib);\n' > $S/main.ts
+printf 'export const lib = 1;\n' > $S/lib.ts
+sh mint.sh scratch/gate5d-t12a a07103b "$E/Dockerfile=$S/Dockerfile.ep" "$E/main.ts=$S/main.ts" "$E/lib.ts=$S/lib.ts"
+printf 'FROM denoland/deno:2.3.3\nWORKDIR /app\nCOPY main.ts ./\nENTRYPOINT ["deno", "run", "main.ts"]\nCMD ["--port", "8000"]\n' > $S/Dockerfile.ep2
+sh mint.sh scratch/gate5d-t12b a07103b "$E/Dockerfile=$S/Dockerfile.ep2" "$E/main.ts=$S/main.ts" "$E/lib.ts=$S/lib.ts"
+```
+
+#### T12a ENTRYPOINT, no CMD
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin a07103b -NewPin scratch/gate5d-t12a; echo $LASTEXITCODE
+```
+Expect exit 1, `touches image-bearing integration(s): gate5d-ep`, and the refusal
+`gate5d-ep/main.ts:1 imports 'lib.ts', and the Dockerfile never COPYs it (it lists: main.ts)`.
+NOT acceptable: any line naming `index.ts` (that would mean the entry defaulted instead of
+being read from ENTRYPOINT). Developer's run: refused at `main.ts:1`, exit 1.
+
+#### T12b ENTRYPOINT + flag-only CMD
+```
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin a07103b -NewPin scratch/gate5d-t12b; echo $LASTEXITCODE
+```
+Expect the identical refusal at `main.ts:1` - a CMD carrying no `*.ts` argument does not
+clobber the ENTRYPOINT entry. Developer's run: identical, exit 1.
+
+### T13 - the comment stripper's declared limits (attempt-3 addition; tester N1b/N2/N3)
+
+THESE ARE LIMIT CASES. The expected STATIC result is a SILENT GREEN (`covers all 3 file(s)`)
+and the expected BUILD result is a refusal (`deno check` TS2307 inside the image). A case
+PASSES only when BOTH halves behave as stated; a static refusal here would mean the
+stripper changed and the header's limits list is stale. Read the point plainly: a green
+static half is NOT evidence on its own - the build half is the authority, and it runs on
+every candidate the static half passes. Each case is run twice: first with `DOCKER_HOST`
+dead to isolate the static verdict (Docker-free), then with Docker live for the build half.
+
+Mint (parent `scratch/gate5d-fixed`, so only the injected line can refuse; each n*.ts exists
+and is NOT COPYed):
+
+```
+{ cat $S/index.base.ts; echo 'const sep = " // "; import "./n1.ts";'; } > $S/index.t13a.ts
+printf 'export const n1 = 1;\n' > $S/n1.ts
+sh mint.sh scratch/gate5d-t13a scratch/gate5d-fixed "$C/index.ts=$S/index.t13a.ts" "$C/n1.ts=$S/n1.ts"
+{ cat $S/index.base.ts; echo 'const g = "**/*.ts";'; echo 'import "./n2.ts";'; } > $S/index.t13b.ts
+printf 'export const n2 = 1;\n' > $S/n2.ts
+sh mint.sh scratch/gate5d-t13b scratch/gate5d-fixed "$C/index.ts=$S/index.t13b.ts" "$C/n2.ts=$S/n2.ts"
+{ cat $S/index.base.ts; echo 'import { s3 } from'; echo '  "./n3.ts";'; echo 'console.log(s3);'; } > $S/index.t13c.ts
+printf 'export const s3 = 1;\n' > $S/n3.ts
+sh mint.sh scratch/gate5d-t13c scratch/gate5d-fixed "$C/index.ts=$S/index.t13c.ts" "$C/n3.ts=$S/n3.ts"
+```
+
+For each of a/b/c, run BOTH:
+```
+$env:DOCKER_HOST='tcp://127.0.0.1:9'
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-t13<x>; echo $LASTEXITCODE
+Remove-Item Env:DOCKER_HOST
+powershell -NoProfile -File scripts/checks/check-ob1-integration-images.ps1 -OldPin scratch/gate5d-fixed -NewPin scratch/gate5d-t13<x>; echo $LASTEXITCODE
+docker image ls --format '{{.Repository}}:{{.Tag}}' | Select-String '^ob1-gate/'
+```
+
+#### T13a ` // ` inside a string literal on the import's line
+Dead-docker run: `covers all 3 file(s)` then the `Docker is not reachable` sentence, exit 1;
+NO line naming `n1.ts`. Live run: `--- last N of M log line(s) ---` containing
+`TS2307 [ERROR]: Cannot find module 'file:///app/n1.ts'` and `at file:///app/index.ts:643`,
+then `FAIL: 'deno check index.ts' inside ob1-gate/research-curator:<sha7> FAILED`, exit 1,
+no tag left. Developer's run: both as stated.
+
+#### T13b a `"**/*.ts"` glob string opens a block comment that never closes
+Dead-docker run: `covers all 3 file(s)` (the import on line 644 is blanked to EOF), no
+`n2.ts` named. Live run: `TS2307 ... 'file:///app/n2.ts'` `at file:///app/index.ts:644`,
+FAIL, exit 1. Developer's run: both as stated.
+
+#### T13c `from` split from its specifier across lines
+Dead-docker run: `covers all 3 file(s)`, no `n3.ts` named. Live run:
+`TS2307 ... 'file:///app/n3.ts'` `at file:///app/index.ts:644`, FAIL, exit 1.
+Developer's run: both as stated.
+
+### T11-T13 teardown
+```
+git -C OB1 branch -D scratch/gate5d-t12a scratch/gate5d-t12b scratch/gate5d-t13a scratch/gate5d-t13b scratch/gate5d-t13c
+```
+
 ### T11 teardown
 ```
 git -C OB1 branch -D scratch/gate5d-fixed scratch/gate5d-c1-twohop scratch/gate5d-c2-oneline scratch/gate5d-c3-forms scratch/gate5d-c4-control scratch/gate5d-c5-comments scratch/gate5d-c6-case

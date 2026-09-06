@@ -95,6 +95,20 @@
     `export * from "./deep.ts"` two hops from the entrypoint is followed
     (tester refutation R3, 2026-09-06, found the first version dropping
     exactly that file; see the `return ,$x` note above Read-AtPin).
+  * KNOWN STATIC-HALF BLIND SPOTS - measured by the attempt-2 tester
+    (N1b/N2/N3, 2026-09-06), each one a SILENT GREEN in the static half and
+    a refusal in the build half. (1) A ` //` INSIDE A STRING LITERAL on the
+    same line as an import (`const sep = " // "; import "./n1.ts";`) is
+    taken for a line comment and the import after it vanishes. (2) A `/*`
+    inside a string literal - `"**/*.ts"`, a realistic Deno glob - opens a
+    block comment that never closes, so the blanking RUNS TO END OF FILE and
+    every import below that line is invisible. (3) The import regex is
+    single-line: `from` split from its specifier across lines
+    (`import { s } from` / `"./n3.ts";`) is not seen; deno fmt does not
+    produce that shape, a hand edit can. A GREEN STATIC HALF IS THEREFORE
+    NOT EVIDENCE ON ITS OWN - it is the fast path that names the line for
+    the common case. `deno check` inside the built image is the authority,
+    and it runs on every candidate the static half passes.
   * THE BUILD HALF NEEDS DOCKER AND, ON A COLD LAYER CACHE, THE NETWORK:
     every integration Dockerfile runs `deno install` against deno.json, which
     downloads on the first build of that layer. With the base image and the
