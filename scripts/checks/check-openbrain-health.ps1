@@ -29,6 +29,7 @@
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
 #   - openbrain-mcpo[-ext]  running               (the Open WebUI tool bridge)
 #   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)
+#   - openbrain-curator     http://127.0.0.1:8816/health "db":true  (same guard; absent = the 2026-09-05 loop)
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
@@ -184,6 +185,34 @@ if ((Get-CState 'openbrain-research') -eq 'running') {
   }
 } else {
   Confirm-ObContainer 'openbrain-research' | Out-Null
+}
+
+# openbrain-curator /health is the same shape as research's (`SELECT 1` through
+# the ResilientPool -> {"ok","db"}, 503 when the pool is dead) and it publishes
+# 127.0.0.1:8816 unauthenticated. It was absent from this script entirely while
+# it crash-looped for 14 h on 2026-09-05 ("Module not found file:///app/pool.ts",
+# an image built without a module index.ts imports) -- the operator learned of
+# it from an unrelated disk check. A looping container is never `running`, so
+# the Confirm-ObContainer branch catches that case; the /health branch catches a
+# running curator whose DB pool has gone stale.
+if ((Get-CState 'openbrain-curator') -eq 'running') {
+  if (Test-HttpOk 'http://127.0.0.1:8816/health' 5 '"db":true') {
+    Write-Ob 'openbrain-curator' ok '/health db ok (:8816)'
+  } else {
+    Write-Ob 'openbrain-curator' warn 'STALE DB POOL: /health not db-ok on :8816'
+    if ($Repair) {
+      Write-Ob 'openbrain-curator' fix 'docker restart openbrain-curator (re-open DB pool)'
+      docker restart openbrain-curator 2>&1 | Out-Null
+      Start-Sleep 5
+      if (Test-HttpOk 'http://127.0.0.1:8816/health' 5 '"db":true') { Write-Ob 'openbrain-curator' ok '/health recovered' }
+      else { Write-Ob 'openbrain-curator' down '/health still failing'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-curator' warn 'run with -Repair to restart (fixes research ingest 5xx / stale pool)'
+      $script:Faults++
+    }
+  }
+} else {
+  Confirm-ObContainer 'openbrain-curator' | Out-Null
 }
 
 # Gateway /health is the privacy proxy Claude/cloud clients reach at :8061.

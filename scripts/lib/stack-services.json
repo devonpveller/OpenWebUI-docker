@@ -278,7 +278,8 @@
       {
         "container": "openbrain-curator",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "host_health": "http://127.0.0.1:8816/health"
       },
       {
         "container": "openbrain-chunk-worker",
