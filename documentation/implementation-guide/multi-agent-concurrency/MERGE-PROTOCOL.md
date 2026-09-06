@@ -467,10 +467,12 @@ Two other flags on the board read alongside it. `[UNRESOLVABLE: submitted_sha f7
 exists in no clone the tool can reach - that row is not live work, and it sorts first.
 `[needs hand-off]` means the reviewer will not be able to merge this because the work line is
 checked out elsewhere; it appears only on items still moving, never on a terminal one. Both
-are resolved in one batched pass and neither command writes anything. On the 42-row live
-board that is 1.2-1.9 s timed in-process and **2.0-2.3 s measured around the child
-`powershell.exe`** an agent actually spawns - the higher figure is the one you will see, and
-the one the harness README quotes.
+are resolved in one batched pass and neither command writes anything - a board of a few dozen
+items reads in a couple of seconds. **No range is quoted here on purpose:** two people
+measuring the same board on the same day landed outside each other's spans at both ends
+without anything changing, and a number printed in a protocol reads as a bound. The observed
+figures, attributed and dated, are in the harness README; what the test plan actually holds
+the tool to is that it finishes well inside five seconds and mutates nothing.
 
 **Step 7 - the developer retires the worktree.**
 

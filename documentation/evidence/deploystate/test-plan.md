@@ -13,7 +13,15 @@ warning, the BOM-free evidence spill), `verify-queue-defects.ps1` (D12-D17),
 edges), `scripts/agent-harness/README.md` (three table rows, the typical session, a new
 section), `documentation/notes/deploy-gate-2026-09-06.md` (findings sink), this plan.
 
-**Attempt 2** (this revision) additionally: the paste rule is manifest-driven, the
+**Attempt 3** (this revision) is documentation and plan only - `queue.ps1`'s behaviour is
+deliberately untouched. It rewrites the sink's line-ending sentence to something reproducible
+at the tip, makes `queue.ps1`, `verify-queue-defects.ps1` and the README agree with the sink
+on the hand-off count, stops quoting a timing range as though it were a bound, widens T12's
+enumerator and declares what it still cannot see, and adds **T13**, which asks the question
+attempt 2's tester had to be told to ask: does a line-ending repair carry anything besides
+the repair?
+
+**Attempt 2** additionally: the paste rule is manifest-driven, the
 `-Deployed` pin must be hex, the Dockerfile probe no longer prints git's `fatal:`,
 `queue.ps1`'s line endings were repaired, and three false or stale claims in the docs and
 the sink were corrected. T1 gains a sixth replay, T2 gains the epoch refusal, and **T12 is
@@ -265,8 +273,10 @@ PASS: the first count is **`0`** - not one terminal row carries the flag. The se
 prints the rows that DO carry it, and every one of them is in a non-terminal state; when the
 developer measured, that was one row, `owuidrift  testing  ... [needs hand-off]`, which is a
 genuine hand-off (its line is checked out elsewhere) and is the positive control for the
-whole change - before it, 31 of 42 rows wore the flag and 30 of those were terminal, so this
-one true instance was one in thirty-one. An empty second list is also a pass (no hand-off is
+whole change - the figure of record, counted by attempt 1's tester, is 32 of 42 rows wearing
+the flag with 31 of those terminal, so the one true instance was one in thirty-two; the
+reconciliation of the three readings taken hours apart is the table in the findings sink, and
+T12 checks it. An empty second list is also a pass (no hand-off is
 pending right now); D15 in `verify-queue-defects.ps1`, run in T5, is what proves the flag
 still appears on a non-terminal row regardless of what the live board happens to hold. FAIL:
 the first count is not 0.
@@ -292,9 +302,11 @@ which would make the flag wrong.
     (Get-ChildItem $LIVE -Filter *.json).Count
 
 PASS: `$before -eq $after` is `True` (every item file byte-identical), the list time is under
-5 s and the show time is under 5 s. The developer measured, on a 42-item board, 1.64 s for
-`-List` timed in-process and 2.00 s timed around the child `powershell.exe` the `Q` helper
-spawns (the difference is process start-up, not resolution); `-Show` 1.39 s. FAIL: any file
+5 s and the show time is under 5 s. **Five seconds is the bar; anything tighter is not.**
+Observed so far on a 42-row board: 1.19-1.88 s in-process / 2.00-2.27 s around the child
+process over three runs each (developer), and 1.02-2.18 / 2.03-2.39 over eight runs each
+(attempt 2's tester) - two honest measurers straddling each other at both ends, which is why
+neither this case nor the docs quote a narrower range. Record what you saw. FAIL: any file
 changed, or either command takes 5 s or more.
 
     Q -Show -Id curatorpool
@@ -525,22 +537,31 @@ paste it into the evidence file.
 
 ---
 
-## T12 - every checkable claim in the FINDINGS SINK is re-run, and the list is derived, not typed
+## T12 - the FINDINGS SINK is checked: a derived claim list, and a by-eye pass over what it cannot see
 
 Attempt 1 shipped a findings note saying `development`'s pre-commit hook "names only three
 checkers"; the command the sentence itself cites returns **four**. It reached a tester because
-the plan listed the sink among the changed files and had no case that opened it. The sink is
-held to the artifact's standard (MERGE-PROTOCOL section 2) precisely because it is what the
-next item reads.
+the plan listed the sink among the changed files and had no case that opened it. Attempt 2
+then shipped a sentence in that same section - *"proven byte-equal to the previous blob with
+CRs stripped"* - that no surviving revision satisfies, and **this case did not catch it**,
+because the sentence sits in plain prose with no code span and no number. Both halves below
+exist for that: a derived list, and a declared blind spot with a by-eye step over it.
+
+### T12a - the derived list
 
 **The list of claims is DERIVED FROM THE SECTION, not enumerated here.** A plan that lists the
 claims by hand can only check the ones its author remembered - which is the same failure one
 level up. Save as `$TMP\claims.ps1` and run it:
 
     param([string]$Wt = "D:\Open WebUI\ai-stack\.claude\worktrees\wt-deploystate")
-    # Enumerate every CHECKABLE claim in the findings sink's own `## deploystate` section.
+    # Enumerate the checkable claims in the findings sink's own `## deploystate` section.
     # The list is DERIVED from the section, never typed out here: if a claim is added to the sink
     # and this prints one more row, the plan has grown a case without anyone editing the plan.
+    #
+    # WHAT IT CANNOT SEE is printed at the bottom, and is not a small print: attempt 2's tester
+    # found that the one sink sentence that did not hold sat in plain prose with no code span at
+    # all. A derived list that silently under-enumerates is the failure this case exists to catch,
+    # one level up - so the limits are declared, and the plan pairs them with a by-eye step.
     $sink  = Join-Path $Wt "documentation\notes\deploy-gate-2026-09-06.md"
     $lines = [System.IO.File]::ReadAllLines($sink)
     $start = -1; $end = $lines.Count
@@ -561,16 +582,24 @@ level up. Save as `$TMP\claims.ps1` and run it:
             $kind = $null
             if ($v -match '^(git|grep|powershell|queue\.ps1|\.\\|tr |python)\b' -or $v -match '\bgit (show|cat-file|config|rev-parse|diff-tree|log)\b') { $kind = "COMMAND" }
             elseif ($v -match '^[\w./\\-]+\.(ps1|py|md|json|csv|yml|conf):\d+$') { $kind = "FILE:LINE" }
+            elseif ($v -match '^[0-9a-f]{7,40}$') { $kind = "SHA" }
+            elseif ($v -match '^\d+$') { $kind = "FIGURE" }              # a bare number in a code span
             elseif ($v -match '^[\w./\\-]+\.(ps1|py|md|json|csv|yml|conf)$' -or $v -match '^[\w./-]+/$') { $kind = "PATH" }
             if ($kind) { $rows += [pscustomobject]@{ n = 0; line = $ln; kind = $kind; claim = $v } }
         }
-        # ISO dates are not claims about the world, they are timestamps on claims.
+        # ISO dates are not claims about the world, they are timestamps on claims. Everything else
+        # numeric counts, INCLUDING single digits - attempt 2's tester found `9` invisible to a
+        # `\d{2,}` pattern, and a one-digit count is exactly as checkable as a two-digit one.
         $tn = [regex]::Replace($t, '\d{4}-\d{2}-\d{2}', '<date>')
-        foreach ($m in [regex]::Matches($tn, '(?<![\w.])\*{0,2}(\d{2,})\*{0,2}(?![\w.])')) {
+        $tn = [regex]::Replace($tn, '`[^`]+`', '<code>')          # already covered above
+        foreach ($m in [regex]::Matches($tn, '(?<![\w.\-])\*{0,2}(\d+)\*{0,2}(?![\w.\-])')) {
             $rows += [pscustomobject]@{ n = 0; line = $ln; kind = "FIGURE"; claim = $m.Groups[1].Value }
         }
+        # numbers written as words, which no digit pattern can see
+        foreach ($m in [regex]::Matches($t, '(?i)(?<![\w])(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|thirty-one|thirty-two|forty)(?![\w])')) {
+            $rows += [pscustomobject]@{ n = 0; line = $ln; kind = "WORD-NUM"; claim = $m.Groups[1].Value.ToLower() }
+        }
     }
-    # de-duplicate on kind+claim, keep the first line each appears on
     $seen = @{}; $out = @()
     foreach ($r in $rows) {
         $k = $r.kind + "|" + $r.claim
@@ -578,44 +607,76 @@ level up. Save as `$TMP\claims.ps1` and run it:
         $seen[$k] = $true; $r.n = $out.Count + 1; $out += $r
     }
     $out | Format-Table n, line, kind, claim -AutoSize -Wrap
-    Write-Host ("TOTAL CHECKABLE CLAIMS: {0}  (COMMAND {1}, FILE:LINE {2}, PATH {3}, FIGURE {4})" -f `
+    Write-Host ("TOTAL ENUMERATED CLAIMS: {0}  (COMMAND {1}, FILE:LINE {2}, PATH {3}, SHA {4}, FIGURE {5}, WORD-NUM {6})" -f `
         $out.Count,
         @($out | Where-Object { $_.kind -eq "COMMAND" }).Count,
         @($out | Where-Object { $_.kind -eq "FILE:LINE" }).Count,
         @($out | Where-Object { $_.kind -eq "PATH" }).Count,
-        @($out | Where-Object { $_.kind -eq "FIGURE" }).Count)
+        @($out | Where-Object { $_.kind -eq "SHA" }).Count,
+        @($out | Where-Object { $_.kind -eq "FIGURE" }).Count,
+        @($out | Where-Object { $_.kind -eq "WORD-NUM" }).Count)
+    Write-Host ""
+    Write-Host "DECLARED LIMIT - this list is NOT every checkable claim in the section. It cannot see:"
+    Write-Host "  * an assertion stated in plain prose with no code span, no number and no word-number"
+    Write-Host "    (attempt 2's tester found the ONE sentence that did not hold in exactly that class);"
+    Write-Host "  * a quantity implied rather than written ('the damage was confined to one file');"
+    Write-Host "  * whether a sentence's CONCLUSION follows from figures that each check out."
+    Write-Host "Read the section by eye for those three, and record what you found - see the plan case."
 
     powershell -NoProfile -NonInteractive -File "$TMP\claims.ps1" -Wt $WT
 
-It prints one numbered row per checkable claim in the `## deploystate` section: every inline
-code span that is a COMMAND, a FILE:LINE citation or a PATH, and every FIGURE (a number of two
-or more digits, with ISO dates removed - a timestamp is not a claim about the world). The
-developer measured **39 rows (COMMAND 12, FILE:LINE 2, PATH 8, FIGURE 17)**; the count moves
-whenever the section does, which is the point.
+It prints one numbered row per enumerated claim in the `## deploystate` section: every inline
+code span that is a COMMAND, a FILE:LINE, a SHA or a PATH; every FIGURE (any number, including
+a single digit and including a bare number inside a code span - ISO dates excluded, since a
+timestamp is not a claim about the world); and every WORD-NUM (a count written as a word). The
+developer measured **61 rows (COMMAND 13, FILE:LINE 2, PATH 8, SHA 13, FIGURE 19, WORD-NUM
+6)** against the sink as committed at this attempt's tip; the count moves whenever the section
+does, which is the point - if yours differs, say so and reconcile it against the section rather
+than against this number. Attempt 2's enumerator
+was narrower - `\d{2,}` only, no SHA, no WORD-NUM, and it double-counted line numbers out of
+FILE:LINE spans - and its tester named each of those gaps; they are closed here.
 
 **Now work the table, top to bottom, and record a result for EVERY row.** For each row:
 
 - **COMMAND** - run it, in the tester's worktree, and paste enough of the output to settle the
   sentence it appears in. A command that is a template (`git cat-file blob :<path>`) is
-  recorded as `TEMPLATE - not runnable as written`, which is a result.
+  recorded as `TEMPLATE` with a real path substituted, which is a result.
 - **FILE:LINE** - open that file at that line and say what is there, in the sink's own terms.
-  `remove-worktree.ps1:115` must be the `git log --oneline $MergedInto..$branch` the sentence
-  says it is; if the line has moved, the citation is wrong even though the code is right.
-- **PATH** - confirm it exists (or, for a path the sentence says is ABSENT, that it is absent).
-- **FIGURE** - re-derive it. `376` is
-  `git cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c`; `42`,
-  `30`, `31` and `32` are counts over the live queue's item files; `18/25/34/43` are line
-  numbers in `development`'s hook. A figure the sink states as measured at a moment (the
+  If the line has moved, the citation is wrong even though the code is right.
+- **SHA** - resolve it (`git cat-file -t`, or the replay/diff the sentence uses it in) and say
+  the object is what the sentence calls it.
+- **PATH** - confirm it exists, or - for a path the sentence says is ABSENT - that it is.
+- **FIGURE / WORD-NUM** - re-derive it. A figure the sink states as measured at a moment (the
   hand-off counts) is checked as "the arithmetic reconciles and the sentence says when", not
   as "it is still that number now" - a live board moves.
 
-PASS: every row of the table has a recorded result, and every result agrees with the sentence
-the claim sits in. **A claim whose command you did not re-run is a FAIL, not a skip** - the
-defect this case exists for was a cited command that the author did not run, and "it looked
-right" is how it survived. FAIL: any row unaddressed, or any sentence the re-run contradicts.
+PASS: every row has a recorded result and every result agrees with the sentence the claim sits
+in. **A claim whose command you did not re-run is a FAIL, not a skip.** FAIL: any row
+unaddressed, or any sentence the re-run contradicts.
 
-Two rows are worth naming, because they are the corrections attempt 1 forced and a tester
-should confirm the fix rather than the bug:
+### T12b - the declared blind spot, read by eye
+
+The enumerator prints its own limits at the end of its output, and they are not small print.
+It cannot see: an assertion in plain prose carrying no code span, no digit and no word-number;
+a quantity implied rather than written; and whether a sentence's CONCLUSION follows from
+figures that each check out. **Read the `## deploystate` section straight through, hunting
+only those three classes, and record what you found - including "nothing".**
+
+Two shapes to hunt for by name, because each has already occurred here:
+
+- **an equality or a proof asserted against a state that did not survive the commit.** Attempt
+  2's "proven byte-equal to the previous blob with CRs stripped" was true of a working state
+  and false at the tip; a reader checking it finds it false. Any sentence of the form "proven
+  X" must name something runnable at the tip.
+- **a count or a comparison stated without saying when it was taken**, where the thing counted
+  moves (the live queue, a worktree registry, a branch tip).
+
+PASS: the by-eye pass is recorded, every sentence of those shapes is named with its verdict,
+and each one either resolves or is reported. FAIL: the section is not read, or a sentence of
+either shape is left unexamined - "the table was all green" is exactly the answer that let the
+last one through.
+
+### T12c - the two rows that are attempt 1's and attempt 2's corrections
 
     git -C $WT show development:.githooks/pre-commit | Select-String "powershell.exe"
 
@@ -624,16 +685,88 @@ PASS: FOUR invocations, at lines 18, 25, 34 and 43, and none of them is
 conclusion that rests on it still holds. FAIL: any other count, or the missing checker turns
 out to be there.
 
-    powershell -NoProfile -NonInteractive -Command "(git -C '$WT' cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | Out-String).Length"
     git -C $WT cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
     git -C $WT cat-file blob 49bb2db:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
-    git -C $WT cat-file blob HEAD:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
+    git -C $WT cat-file blob HEAD:scripts/agent-harness/queue.ps1     | tr -cd '\r' | wc -c
 
 PASS: `376` at `ff34eda`, `0` at the base `49bb2db`, and **`0` at HEAD** - the line-ending
 damage the sink describes is real, and it is repaired on the tip you are testing. (`tr` and
 `wc` come from Git's `usr/bin`; if they are not on your PATH, count with
 `([regex]::Matches((Get-Content -Raw ...), "`r")).Count` and say which you used.) FAIL: HEAD
-still carries a CR.
+still carries a CR. **These three numbers are necessary and NOT sufficient** - they read the
+same whether the repair commit repairs the file or repairs it and smuggles something in. T13
+is the sufficient half.
+
+---
+
+## T13 - a line-ending repair carries the repair and NOTHING ELSE
+
+A whitespace-only diff of several hundred lines is the ideal hiding place, and CR counts
+cannot see into it: `376 / 0 / 0` is what you get whether the commit only strips CRs or strips
+CRs and changes behaviour. This case is general - **run it for any commit on this branch whose
+message claims a line-ending repair** - and it is the case attempt 2's tester ran only because
+they were told to, not because the plan asked.
+
+Identify the repair commit `$FIX` and the commit before it `$PREV` from the branch's history
+(`git -C $WT log --oneline`; here `$FIX` = `af6f483` and `$PREV` = `7b5beb9`), and the file
+`$F` the repair names (`scripts/agent-harness/queue.ps1`). Then:
+
+    $F = "scripts/agent-harness/queue.ps1"; $PREV = "7b5beb9"; $FIX = "af6f483"
+    git -C $WT diff --ignore-cr-at-eol $PREV $FIX -- $F | Set-Content "$TMP\residual.diff" -Encoding UTF8
+    "hunks         : " + (Select-String -Path "$TMP\residual.diff" -Pattern '^@@').Count
+    "changed lines : " + (Select-String -Path "$TMP\residual.diff" -Pattern '^[-+][^-+]').Count
+    Select-String -Path "$TMP\residual.diff" -Pattern '^@@' | ForEach-Object { $_.Line }
+    Get-Content "$TMP\residual.diff"
+
+**Use `git diff --ignore-cr-at-eol`, not a shell pipeline** - the developer wrote this case
+with `git cat-file blob ... | tr -d '\r' > old.txt` and `diff -u`, ran it, and it failed
+twice over: in PowerShell `diff` is an alias for `Compare-Object` (`A parameter cannot be
+found that matches parameter name 'u'`), and `>` writes through PowerShell's text encoder,
+which turned every LF back into CRLF and made the byte counts read `bare CR 2271`. Git does
+the whole job in one process with no encoding in the middle. If you want the raw byte counts
+as well, take them in Git Bash (`git cat-file blob "$PREV:$F" | tr -cd '\r' | wc -c`), not
+in PowerShell, and say which shell you used.
+
+PASS, in three parts:
+
+1. `--ignore-cr-at-eol` ignores a CR only at END of line, so a CR anywhere else would appear
+   in the residual as a real change. The residual containing no such line IS the proof that
+   the strip was lossless. FAIL: a hunk whose only content is an invisible character.
+2. The residual is non-empty only where the attempt says it should be, and **every hunk is
+   nameable from that attempt's stated scope**. For `af6f483` that is **86 changed lines (9
+   removed, 77 added) in FOUR hunks**: the derivation section header rewritten for the
+   manifest rule; the `ls-tree` probe plus the manifest-driven paste block; a comment block
+   documenting the line-scoped evidence limit (no code); and the pin regex with its refusal
+   message. Read the whole residual diff - not the hunk headers, whose offsets move - and
+   write down what each hunk is. (If you count with `grep -c '^[-+]'` you will get 88: that
+   pattern also matches the `---`/`+++` file headers. The developer and attempt 2's tester
+   both did, and both reported 88.)
+3. **A hunk nobody can name is a FAIL**, not a curiosity: it is a change that entered the
+   repository inside a whitespace diff, which is the failure mode this case exists for. Say
+   which hunk and what it does; do not pass the case by finding it plausible.
+
+Also confirm the repair is described where a reader will look:
+
+    Select-String -Path "$WT\documentation\notes\deploy-gate-2026-09-06.md" -Pattern "1d43a129|0735e9fc|FOUR hunks"
+
+PASS: the sink names both blob ids and the four-hunk residual, and does NOT claim the landed
+blob equals the previous blob with CRs stripped (it does not - `1d43a129` vs `0735e9fc`).
+Those two ids are checkable. The second is shell-agnostic; **the first must be run in Git
+Bash**, and the plan says so because the developer ran it in PowerShell while writing this
+very case and got a third id:
+
+    # Git Bash:
+    git cat-file blob 7b5beb9:scripts/agent-harness/queue.ps1 | tr -d '\r' | git hash-object --stdin
+    # either shell:
+    git -C $WT rev-parse af6f483:scripts/agent-harness/queue.ps1
+
+PASS: `1d43a129...` and `0735e9fc...`, and they differ - which is the whole point of the
+rewritten sentence. **In PowerShell the same first pipeline returns `5cae3219...`**, because
+PS5.1 decodes a native command's stdout into text lines and re-emits them with CRLF before
+the next process sees them - so `hash-object` hashes bytes that never existed. If you get
+`5cae3219`, you are in the wrong shell, and that is a demonstration of the very trap the
+sink entry is about rather than a failure of the case. FAIL: the sink still asserts an
+equality no revision satisfies, or the landed blob is not `0735e9fc`.
 
 ---
 ## What a PASS costs
@@ -641,6 +774,9 @@ still carries a CR.
 Every heading above must appear in your evidence with the bare word `PASS` as the last word
 on the heading line. A case you could not execute is `-Fail -PlanInadequate` with what the
 plan should have made runnable - never a scoped pass. If the drill in T5 reports fewer than
-213 checks, that is a FAIL even at `0 failed`. And in T12, a claim whose command you did not
-re-run is a FAIL rather than a row left blank - attempt 1 passed every case it had and still
-shipped a false, checkable sentence, because no case opened the file it was in.
+213 checks, that is a FAIL even at `0 failed`. In T12a, a claim whose command you did not
+re-run is a FAIL rather than a row left blank; in T12b, "the table was all green" is not a
+result - attempt 1 passed every case it had and shipped a false checkable sentence because no
+case opened the file it was in, and attempt 2 passed T12 and shipped an unsupportable one
+because the sentence carried nothing the enumerator could see. In T13, a hunk nobody can name
+is a FAIL.

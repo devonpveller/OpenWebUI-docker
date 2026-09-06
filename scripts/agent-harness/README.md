@@ -174,9 +174,10 @@ Three flags, in the operator's terms:
   so it sorts to the top of the board. `-Show` prints the same under `--- RESOLUTION ---`.
 - **`[needs hand-off]`** - the reviewer cannot merge this because the work line is checked
   out elsewhere. It appears only on items still moving; a terminal one has nothing left to
-  merge (before 2026-09-06 the flag was written at `-Submit` and never cleared: 31 of the 42
-  rows on the live board carried it and 30 of those were terminal, so the one row where it
-  was true was one in thirty-one).
+  merge (before 2026-09-06 the flag was written at `-Submit` and never cleared: 32 of the 42
+  rows on the live board carried it and 31 of those were terminal, so the one row where it
+  was true was one in thirty-two - the count moved three times in a day as the board did,
+  and `documentation/notes/deploy-gate-2026-09-06.md` reconciles the three readings).
 
 Closing a surface is a RECORD of a deploy, never a deploy:
 
@@ -207,8 +208,14 @@ surface closes once. When the last one closes the item reaches the terminal stat
 recorded against nothing - there is nothing there that could fail to be live.
 
 `-List` and `-Show` are read-only and stay so: they resolve every recorded commit in one
-batched pass (1.2-1.9 s in-process, 2.0-2.3 s counting the child-process spawn an agent
-actually pays, measured over three runs each on the 42-row live board) and write nothing.
+batched pass and write nothing. On the 42-row live board that has been a couple of seconds
+every time it has been measured - **observations, not a bound**: 1.19-1.88 s in-process and
+2.00-2.27 s around the child process over three runs each (developer, 2026-09-06), and
+1.02-2.18 s / 2.03-2.39 s over eight runs each (tester, same day, different machine state).
+Two honest measurers straddled the narrower of those at both ends without anything changing,
+which is why no range is quoted as a promise anywhere: the only claim worth holding the tool
+to is the one the test plan checks, that it finishes well inside five seconds and mutates
+nothing.
 
 ## Running it unattended (`dark` gate profile)
 

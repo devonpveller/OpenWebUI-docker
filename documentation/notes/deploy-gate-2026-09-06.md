@@ -317,7 +317,11 @@ worktree on a not-yet-merged developer branch can only be removed with
 
   The arithmetic reconciles exactly: this item's own `-Submit` added the 32nd row, and
   `owuidrift` moved from `testing` to `merged` mid-run, carrying one row from the
-  non-terminal column to the terminal one. **The tester's 32/31 is the figure of record**;
+  non-terminal column to the terminal one. **The tester's 32/31 is the figure of record**,
+  and `queue.ps1`, `verify-queue-defects.ps1` and the harness README now all cite it and
+  point back at this table rather than each carrying a reading of their own (they held the
+  developer's 31/30 until attempt 3; each was true when taken, and three sources quoting
+  three moments of a moving count is how a reader concludes one of them is wrong);
   the substance is unchanged in all three readings - one true instance hidden among thirty
   or thirty-one stale ones, which is the whole reason the flag carried no signal. The figure
   `25` that an earlier draft comment and the phase PLAN
@@ -382,12 +386,57 @@ worktree on a not-yet-merged developer branch can only be removed with
   gives 376, and the same command on `49bb2db:...` gives 0 (both re-run 2026-09-06).
   PowerShell parses it, every drill stayed green, and nothing noticed. Fixed inside this item
   by rebuilding the file from the blob with every CR removed and the lines rejoined with one
-  CRLF - proven byte-equal to the previous blob with CRs stripped, and the index blob is now
-  pure LF. Two standing lessons: write files as BINARY with the line ending chosen
-  explicitly, and `git status` clean is not evidence that a file's bytes are what you meant
-  (`git cat-file blob :<path>` is). The first attempt at the repair was itself wrong - two
+  CRLF; the blob is pure LF again from `af6f483` onward.
+
+  **How to check that the repair carried nothing else, from the tip.** An earlier version of
+  this entry said the rebuilt file was "proven byte-equal to the previous blob with CRs
+  stripped". That equality held at the repair STEP - a working state - and it is not what
+  landed: the commit carrying the repair also carries attempt 2's changes, so **no revision
+  in this branch satisfies it**. `7b5beb9`'s blob with CRs stripped hashes to `1d43a129`; the
+  landed blob `af6f483:scripts/agent-harness/queue.ps1` is `0735e9fc`. The substance was
+  true; the wording was stronger than any surviving artifact, which is exactly what this file
+  is held to. The check that DOES survive, and the one to run - pure git, no temp files
+  and no PowerShell traps (`diff` aliases `Compare-Object`, and `>` re-encodes):
+
+      git diff --ignore-cr-at-eol 7b5beb9 af6f483 -- scripts/agent-harness/queue.ps1
+
+  A CR anywhere but end-of-line would still show as a change, so this doubles as the check
+  that the strip was lossless; all 376 CRs at `7b5beb9` were in fact CRLF pairs (bare CR 0,
+  `CR CR LF` 0). The residual is **86 changed lines (9 removed, 77 added) in FOUR hunks**,
+  each nameable from attempt 2's stated scope:
+
+  | hunk | what it is |
+  |---|---|
+  | `@@ -493,9 +493,18 @@` | the derivation section header, rewritten for the manifest rule |
+  | `@@ -773,16 +782,56 @@` | the `ls-tree` probe replacing `cat-file -e`, and the manifest-driven paste block replacing the `owui/`-path one |
+  | `@@ -836,6 +885,16 @@` | a COMMENT block documenting the line-scoped evidence limit - no code |
+  | `@@ -845,9 +904,18 @@` | the pin regex (hex, not merely `[0-9a-f]` with a digit) and the refusal message that states the rule |
+
+  Nothing else rode in on the 376 whitespace-only lines. (Verified independently by attempt
+  2's tester, who reported the same four hunks; the hunk headers move if the file does, so
+  re-run the diff rather than trusting the offsets.)
+
+  *That figure was 88 for one revision of this entry, and 88 is what attempt 2's tester
+  reported too.* Both of us counted `diff -u ... | grep -c '^[-+]'`, which also matches the
+  `--- old` and `+++ new` header lines: 88 minus 2. It is 86, and
+  `git diff --ignore-cr-at-eol ... | grep -cE '^[-+][^-+]'` agrees. Nothing rests on the
+  number - the claim is "four hunks, all nameable" - but two people produced the same wrong
+  figure from the same lazy pattern, which is worth more than the two lines it cost.
+
+  A related trap, found while writing the plan case for this one: **a PowerShell pipeline
+  re-encodes a native command's bytes.** `git cat-file blob <rev>:<path> | tr -d '\r' |
+  git hash-object --stdin` returns `1d43a129` in Git Bash and `5cae3219` in PowerShell 5.1,
+  because PS decodes the first process's stdout into text lines and re-emits them with CRLF
+  before `tr` ever runs. Any byte-level check of this kind belongs in bash, and any command
+  quoted for one must say which shell it was measured in.
+
+  Two standing lessons: write files as BINARY with the line ending chosen explicitly, and
+  `git status` clean is not evidence that a file's bytes are what you meant
+  (`git cat-file blob :<path>` is). A third, from the wording above: an equality asserted
+  against a state that will not survive the commit is not a claim a reader can check - say
+  what they can run at the tip. The first attempt at the repair was itself wrong - two
   chained `.replace()`s turned `CR CR LF` into a blank line, 376 of them - which is why the
-  fix is asserted against the previous blob rather than eyeballed.
+  fix was asserted against the previous blob rather than eyeballed.
 
 - **`queue.ps1 -Merged` printed git's `fatal:` above its own success message.** The probe for
   "does this OB1 integration directory have a Dockerfile?" was `git cat-file -e`, which

@@ -485,10 +485,12 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # merge message said "must be after deploy" and that sentence had nowhere to land. (2) A row
 # whose recorded commit, or whose OB1 pin at that commit, exists in no clone (curatorpool:
 # submitted_sha f71772b pins OB1 22f41b6, a commit nobody holds) read as live work. (3)
-# [needs hand-off] was set at -Submit and never cleared, so 31 of the live board's 42 rows
-# wore it on 2026-09-06 and 30 of those were TERMINAL - one true instance in thirty-one - a
-# flag that
-# means "the reviewer cannot merge this", and the one row where it was true was invisible.
+# [needs hand-off] was set at -Submit and never cleared, so 32 of the live board's 42 rows
+# wore it and 31 of those were TERMINAL (counted 2026-09-06 by this item's tester; the
+# reconciliation of three readings taken hours apart is the table in
+# documentation/notes/deploy-gate-2026-09-06.md, which is the figure of record). A flag
+# meaning "the reviewer cannot merge this", worn by 32 rows and TRUE of one, is a flag that
+# hides the row it is for.
 #
 # THE SURFACES ARE DERIVED FROM THE MERGE RANGE, NEVER DECLARED. `git diff --name-only
 # <first parent>..<merge>` is the only input: an OB1 gitlink move whose OB1 diff touches
@@ -1197,8 +1199,9 @@ if ($List) {
         foreach ($u in @($resolution[$it.id])) { $flag += " [" + $u + "]" }
         # [needs hand-off] means "the reviewer will not be able to merge this". line_mergeable is
         # written at -Submit and never cleared, so until 2026-09-06 every merged item wore it
-        # forever: 31 of the 42 rows on the live board carried it on 2026-09-06 and 30 of them
-        # were terminal, so the one row where it was true was one in thirty-one.
+        # forever: 32 of the 42 rows on the live board carried it and 31 of those were terminal,
+        # so the one row where it was TRUE was one in thirty-two. (Figure of record and the
+        # reconciliation of three readings: documentation/notes/deploy-gate-2026-09-06.md.)
         # A terminal item has nothing left to merge; the flag is for the rows still moving.
         if (($it.state -notin $TerminalStates) -and ($it.PSObject.Properties.Name -contains "line_mergeable") -and -not $it.line_mergeable) { $flag += " [needs hand-off]" }
         # The two states that are waiting on a PERSON are called out: an unread queue is

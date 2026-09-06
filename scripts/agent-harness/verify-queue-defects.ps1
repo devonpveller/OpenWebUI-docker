@@ -81,10 +81,11 @@
 #   D14 A recorded commit that does not exist, or an OB1 gitlink at it that the item's clone
 #       does not hold (curatorpool: f71772b pins OB1 22f41b6, held nowhere), is flagged
 #       [UNRESOLVABLE: ...] by -List (sorting first) and -Show - and neither writes a byte.
-#   D15 [needs hand-off] came from line_mergeable, set at -Submit and never cleared, so 31 of
-#       the live board's 42 rows wore it on 2026-09-06 and 30 of those were terminal - the one
-#       row where it was TRUE was one in thirty-one. Terminal states never show it now;
-#       moving ones still do.
+#   D15 [needs hand-off] came from line_mergeable, set at -Submit and never cleared, so 32 of
+#       the live board's 42 rows wore it and 31 of those were terminal - the one row where it
+#       was TRUE was one in thirty-two (counted 2026-09-06; the reconciliation of three
+#       readings is the table in documentation/notes/deploy-gate-2026-09-06.md, which is the
+#       figure of record). Terminal states never show it now; moving ones still do.
 #   D16 -Submit after -AmendAnchor left `attempt` alone, so the next -Pass would overwrite
 #       the previous attempt's evidence file (D1 through another door). It bumps now, and
 #       only when a verdict already stands at the current attempt.
