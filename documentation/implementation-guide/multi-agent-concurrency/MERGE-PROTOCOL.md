@@ -407,11 +407,16 @@ what it found:
 | What the merge range contains | The surface it derives |
 |---|---|
 | An `OB1` gitlink move whose OB1 diff touches `integrations/<dir>/`, and that directory has a `Dockerfile` at the new pin | `image:<the compose service in OB1/docker/docker-compose.yml that builds it>` |
-| Any `owui/**` path - OWUI only ever sees these by paste | `paste:<the file>` |
+| A changed `owui/` file that **`owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
 | A changed build context of a `:local`-tagged service in this repository's compose files (where the context IS the repository root, its Dockerfile and what that Dockerfile `COPY`s) | `image:<the service>` |
 
 Nothing else derives a surface, and a merge that ships none records an empty list - the
-normal case for docs, scripts and the harness itself. A merge whose OB1 pin exists in no
+normal case for docs, scripts and the harness itself. A change to `owui/manifest.csv` or
+`owui/README.md` derives nothing, because neither is pasted into anything: the rule was
+`any owui/** path` until 2026-09-06, and the real `owuidrift` merge `e989265` derived
+`paste:owui/manifest.csv` and `paste:owui/README.md` - two surfaces nobody could ever close
+honestly. An `owui/` file the manifest does not list is reported as a NOTE, not silently
+dropped. A merge whose OB1 pin exists in no
 clone this tool can reach is REFUSED rather than recorded: that pin is the zombie `-List`
 flags as `[UNRESOLVABLE]`, and pushing it to OB1's remote is the fix (CLAUDE.md: never bump
 the gitlink to a commit that is not there).
@@ -440,8 +445,19 @@ healthcheck. One line per surface, like this:
 openbrain-curator: label org.opencontainers.image.revision=d89c126, State.Health.Status=healthy, RestartCount=0
 ```
 
+**A pin is HEX**: 7-40 hex characters, or a labelled `sha256:<hex>` / `sha256 <hex>`. An
+all-digit token is not a pin - `deployed at 1788720066` closed a surface until 2026-09-06,
+and an epoch, a run number or a ticket id all have that shape. A hex id that merely starts
+with a digit still is one.
+
 Evidence that names no health state, names `unhealthy`, or carries no pin is refused and
-nothing is recorded. A surface closes once - a second `-Deployed` on it is refused, because
+nothing is recorded. **The check is line-scoped, not entity-scoped**: it asks that some line
+mentioning the surface also carries a pin and a health state, not that all three are *about*
+the same container - so `openbrain-curator rebuilt from 6fba6b3 - checked openbrain-research
+instead: ...healthy` is accepted. That is deliberate and stays: separating those two is a
+judgement about English, not something a pattern decides, and a stricter rule would refuse
+far more honest evidence than it would catch. What the check does guarantee is that the
+surface's own name appears - evidence naming only the other container is refused. A surface closes once - a second `-Deployed` on it is refused, because
 a redeploy is a new item's evidence, not a second closure of this one. When the last open
 surface closes, the item moves to the terminal state `deployed`; `-Deployed` on an item that
 derived no surfaces is refused rather than recorded against nothing.
@@ -451,8 +467,10 @@ Two other flags on the board read alongside it. `[UNRESOLVABLE: submitted_sha f7
 exists in no clone the tool can reach - that row is not live work, and it sorts first.
 `[needs hand-off]` means the reviewer will not be able to merge this because the work line is
 checked out elsewhere; it appears only on items still moving, never on a terminal one. Both
-are resolved in one batched pass, so `-List` stays under two seconds on a 42-item board and
-writes nothing.
+are resolved in one batched pass and neither command writes anything. On the 42-row live
+board that is 1.2-1.9 s timed in-process and **2.0-2.3 s measured around the child
+`powershell.exe`** an agent actually spawns - the higher figure is the one you will see, and
+the one the harness README quotes.
 
 **Step 7 - the developer retires the worktree.**
 

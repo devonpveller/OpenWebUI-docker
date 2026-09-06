@@ -24,7 +24,7 @@ The wider design (test containers, bridge integration):
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
 | `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 72 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol. It cuts that scratch line FROM `development`, so it inherits that branch's pre-commit hooks: while `scripts/checks/check-corpus-exposure-producers.ps1` is absent there the hook fails and SIX checks go red (`two divergent commits exist` and the five that depend on those commits existing) - a fact about the base, not about the protocol |
-| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `documentation/evidence/passplan/fixtures/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 206 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
+| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `documentation/evidence/passplan/fixtures/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 213 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
 | `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Deployed` / `-Reject` / `-List` / `-Show`. `-Merged` derives from the merge range what the item SHIPS, and `-Deployed -By <person> -Evidence <...> [-Surface <one>]` closes those surfaces with health evidence - see [what a merge SHIPS](#what-a-merge-ships-undeployed-and--deployed). Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule. `-Requeue` is also the DEVELOPER's way back from `test-passed` when the artifact itself must change |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
@@ -161,7 +161,10 @@ Three flags, in the operator's terms:
   The list is DERIVED at `-Merged` from `git diff --name-only <first parent>..<merge sha>`,
   never from anything the author typed: an OB1 gitlink move whose OB1 diff touches an
   `integrations/<dir>/` that has a `Dockerfile` becomes `image:<the compose service that
-  builds it>`; any `owui/**` file becomes `paste:<that file>`; a changed build context of
+  builds it>`; a changed `owui/` file **that `owui/manifest.csv` lists** becomes
+  `paste:<that file>` (the manifest is the file-to-OWUI-id map, so it is the authority on
+  what is pasteable at all - a change to the manifest or to `owui/README.md` derives
+  nothing, and an unlisted `owui/` file is reported as a NOTE); a changed build context of
   a `:local`-tagged service in this repository becomes `image:<that service>`. Most merges
   derive nothing and record an empty list. Items merged before that date have no surfaces
   and read as plain `merged`.
@@ -193,14 +196,19 @@ or `State.Status=running` for a container with no healthcheck):
 openbrain-curator: label org.opencontainers.image.revision=d89c126, State.Health.Status=healthy, RestartCount=0
 ```
 
+A pin is **hex** - 7-40 hex characters, or a labelled `sha256:<hex>`; an all-digit token
+(an epoch, a run number, a ticket id) is not a pin. The check is line-scoped: it asks that a
+line naming the surface also carries a pin and a health state, not that the three are about
+the same container - deliberately, because separating them is a judgement about prose.
+
 No health state, an `unhealthy` one, or no pin is a refusal with nothing recorded. A
 surface closes once. When the last one closes the item reaches the terminal state
 `deployed`. `-Deployed` on an item that derived no surfaces is refused rather than
 recorded against nothing - there is nothing there that could fail to be live.
 
 `-List` and `-Show` are read-only and stay so: they resolve every recorded commit in one
-batched pass (1.6 s in-process, 2.0 s counting the child-process spawn, measured on the
-42-item live board) and write nothing.
+batched pass (1.2-1.9 s in-process, 2.0-2.3 s counting the child-process spawn an agent
+actually pays, measured over three runs each on the 42-row live board) and write nothing.
 
 ## Running it unattended (`dark` gate profile)
 

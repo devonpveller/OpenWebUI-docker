@@ -66,11 +66,18 @@
 #       `git diff --name-only <first parent>..<merge>` - never from a list the author typed;
 #       a value planted on the item is overwritten - and refuses a merge whose OB1 pin no
 #       clone holds. A fixture with an embedded OB1 clone, a :local plane service, a
-#       root-context service and an owui/ file exercises every rule.
+#       root-context service and an owui/ file exercises every rule. AMENDED 2026-09-06
+#       (attempt 1's tester): a paste surface comes from owui/manifest.csv, not from the
+#       path - the real owuidrift merge e989265 derived paste:owui/README.md and
+#       paste:owui/manifest.csv, two surfaces nobody could ever close - so the fixture now
+#       carries a manifest and an unlisted owui/ file that must derive NOTHING.
 #   D13 -Deployed: refused without a health state, without a pin, on 'unhealthy', on an
 #       auto: principal, on a surface not derived, on a surface already closed, on an item
 #       with nothing to close, on an item not merged; accepted with the anchor's example
 #       line; closes one surface with -Surface or all at once; the item reaches `deployed`.
+#       AMENDED 2026-09-06 (attempt 1's tester closed a real surface with `deployed at
+#       1788720066`): a pin is HEX, so an all-digit token - an epoch, a run number, a
+#       ticket id - is refused, while a hex id that merely STARTS with a digit is not.
 #   D14 A recorded commit that does not exist, or an OB1 gitlink at it that the item's clone
 #       does not hold (curatorpool: f71772b pins OB1 22f41b6, held nowhere), is flagged
 #       [UNRESOLVABLE: ...] by -List (sorting first) and -Show - and neither writes a byte.
@@ -1024,13 +1031,25 @@ function New-DeployFixture([string]$name, [string]$badGitlink = "") {
         Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v1"
         Set-Content -Path (Join-Path $repo "othersrc\o.txt") -Encoding ascii -Value "v1"
         Set-Content -Path (Join-Path $repo "rootsrc\a.txt") -Encoding ascii -Value "v1"
-        Invoke-Git add README.md plane rootplane Dockerfile.rooty thingsrc othersrc rootsrc | Out-Null
+        # owui/manifest.csv IS the authority on what gets pasted into OWUI. It lists
+        # tools/deep.py and NOT owui/README.md, so a merge touching both must derive one
+        # surface, not two. The column set is deliberately the shape the real manifest moved
+        # to (`sha256`, not `bytes`), so the reader is exercised resolving `file` BY NAME.
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui") | Out-Null
+        Set-Content -Path (Join-Path $repo "owui\manifest.csv") -Encoding ascii -Value @(
+            "file,type,name,owui_id,sha256",
+            "tools/deep.py,tool,Deep,deep,0000000000000000000000000000000000000000000000000000000000000000")
+        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted"
+        Invoke-Git add README.md plane rootplane Dockerfile.rooty thingsrc othersrc rootsrc owui | Out-Null
         Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,$pinA,OB1") | Out-Null
         Invoke-Git commit -q -m "scratch base with OB1 at pin A" | Out-Null
         Invoke-Git checkout -q -b work/qd | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui\tools") | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $repo "documentation") | Out-Null
         Set-Content -Path (Join-Path $repo "owui\tools\deep.py") -Encoding ascii -Value "# pasted into OWUI"
+        # changed in the SAME merge and NOT in the manifest: documentation about pasting is
+        # not itself pasted, and a surface derived for it could never be honestly closed.
+        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted, revised"
         Set-Content -Path (Join-Path $repo "documentation\x.md") -Encoding ascii -Value "a doc"
         Set-Content -Path (Join-Path $repo "README.md") -Encoding ascii -Value "scratch, edited at the root"
         Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v2"
@@ -1078,6 +1097,14 @@ Check "D12: the PLANTED author value is gone - the list came from the merge rang
     ($pending12 -notcontains "image:typed-by-the-author")
 Check "D12: integrations/nodocker (no Dockerfile) and the non-:local 'other' service derive NOTHING" `
     (-not (($pending12 -join ",") -match "nodocker|other"))
+# THE MANIFEST DECIDES WHICH owui/ FILES ARE PASTED. Both owui/tools/deep.py and
+# owui/README.md changed in this merge; only the first is listed in owui/manifest.csv.
+Check "D12: an owui/ file the manifest does NOT list derives no paste surface" `
+    (-not (($pending12 -join ",") -match "owui/README\.md")) ("pending=" + ($pending12 -join ","))
+Check "D12: ... and -Merged says WHY, naming the file and the manifest" `
+    ($r.out -match "owui/README\.md changed but owui/manifest\.csv does not list it") (First-Line $r.out)
+Check "D12: the file the manifest DOES list still derives its paste surface" `
+    ($pending12 -contains "paste:owui/tools/deep.py")
 Check "D12: deploy_derived records the line-before (a full sha) and the merge sha the list was read from" `
     (($it.deploy_derived.line_before -match "^[0-9a-f]{40}$") -and ($it.deploy_derived.merge -eq $merge12))
 Check "D12: deploy_surfaces (immutable record) equals deploy_pending at merge time, deployed[] is empty" `
@@ -1160,6 +1187,26 @@ $noPin = Write-Ev "d13-nopin.md" @("openbrain-curatorish: State.Health.Status=he
 $r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $noPin)
 Check "D13: evidence with a health state but NO pin (no label, no revision) is refused" `
     (($r.code -ne 0) -and ($r.out -match "names no pin")) (First-Line $r.out)
+# A PIN IS HEX, AND A DECIMAL NUMBER IS NOT ONE. attempt 1's tester closed a real surface
+# with `deployed at 1788720066` - an epoch satisfied the old [0-9a-f]{7,64}. A run number and
+# a ticket id have the same shape.
+$epoch = Write-Ev "d13-epoch.md" @("openbrain-curatorish deployed at 1788720066 State.Status=running")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $epoch)
+Check "D13: an all-DIGIT token (a timestamp) is not a pin - refused, and the refusal says so" `
+    (($r.code -ne 0) -and ($r.out -match "names no pin") -and ($r.out -match "all-digit token")) (First-Line $r.out)
+$runNo = Write-Ev "d13-runno.md" @("openbrain-curatorish: run 12345678, State.Health.Status=healthy")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $runNo)
+Check "D13: ... and neither is a run number" (($r.code -ne 0) -and ($r.out -match "names no pin")) (First-Line $r.out)
+# The NEGATIVE of that rule, asserted WITHOUT closing anything: a hex id that merely starts
+# with a digit IS a pin, so the only complaint left is the missing health state. (Asserting it
+# by acceptance would close the surface the cases below still need open.)
+$digitHex = Write-Ev "d13-digithex.md" @("openbrain-curatorish: label org.opencontainers.image.revision=0a1b2c3")
+$r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $digitHex)
+Check "D13: a hex revision that STARTS with a digit IS a pin - the refusal names only the missing health state" `
+    (($r.code -ne 0) -and ($r.out -match "names no health state") -and -not ($r.out -match "names no pin")) (First-Line $r.out)
+$it = Get-QItem $f12 "qd12"
+Check "D13: those four refusals still recorded nothing (four surfaces open, none closed)" `
+    ((@($it.deploy_pending).Count -eq 4) -and (@($it.deployed).Count -eq 0))
 $good = Write-Ev "d13-good.md" @("openbrain-curatorish: label org.opencontainers.image.revision=" + $f12.pinB.Substring(0, 12) + ", State.Health.Status=healthy, RestartCount=0")
 $r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "auto:dark", "-Surface", "image:openbrain-curatorish", "-Evidence", $good)
 Check "D13: -By in the reserved auto: namespace is refused (exit 4) - deploy is a human's record" ($r.code -eq 4) ("exit=" + $r.code)

@@ -13,6 +13,13 @@ warning, the BOM-free evidence spill), `verify-queue-defects.ps1` (D12-D17),
 edges), `scripts/agent-harness/README.md` (three table rows, the typical session, a new
 section), `documentation/notes/deploy-gate-2026-09-06.md` (findings sink), this plan.
 
+**Attempt 2** (this revision) additionally: the paste rule is manifest-driven, the
+`-Deployed` pin must be hex, the Dockerfile probe no longer prints git's `fatal:`,
+`queue.ps1`'s line endings were repaired, and three false or stale claims in the docs and
+the sink were corrected. T1 gains a sixth replay, T2 gains the epoch refusal, and **T12 is
+new**: it checks the findings sink, which attempt 1 had no case for - which is exactly how
+the false claim reached a tester.
+
 **You are testing whether a merged item that shipped an image or a paste can still read as
 finished, whether a row naming commits that exist nowhere can still read as live work, and
 whether anything else about the pipeline moved.** No containers, no images, no leases, no
@@ -71,7 +78,7 @@ PASS: prints `0` - `queue.ps1` parses. FAIL: any other number.
 
 ---
 
-## T1 - the surfaces are DERIVED from real merges: the three the anchor names
+## T1 - the surfaces are DERIVED from real merges, and the manifest says what is pasteable
 
 This replays merges that already happened on this line through the derivation, in a hermetic
 state dir. It never touches the live queue and it deploys nothing. Save as
@@ -92,7 +99,8 @@ state dir. It never touches the live queue and it deploys nothing. Save as
         @{ id = "rp-curatorimg";    sha = "e72c678499793a4ee3c1d9eb5e6d5b6ed1680320" },
         @{ id = "rp-curator2";      sha = "08c4ae1a71801319846ecbb7d167cf2d12008eb4" },
         @{ id = "rp-opsdoor";       sha = "b06057f0bf564f28b5c59f7d537f451a620b2b6a" },
-        @{ id = "rp-researchretry"; sha = "76145568064df9d590d3acd883fc78d207ce0224" }
+        @{ id = "rp-researchretry"; sha = "76145568064df9d590d3acd883fc78d207ce0224" },
+        @{ id = "rp-owuidrift";     sha = "e98926562e190b7adb0472ca08e1314d1e7e74d2" }
     )
     foreach ($c in $cases) {
         $parents = @((& git.exe rev-list --parents -n 1 $c.sha) -split '\s+' | Where-Object { $_ })
@@ -115,18 +123,38 @@ state dir. It never touches the live queue and it deploys nothing. Save as
 
     powershell -NoProfile -NonInteractive -File "$TMP\replay.ps1" -Wt $WT
 
-PASS: exactly these five DERIVED lines - the anchor's three merges, plus the two that landed
-on the line after the anchor was written -
+PASS: exactly these six DERIVED lines - the anchor's three merges, the two that landed on the
+line after the anchor was written, and the `owui/`-metadata merge attempt 1's tester found -
 
     rp-gate5d        DERIVED: []
     rp-curatorimg    DERIVED: [image:openbrain-curator]
     rp-curator2      DERIVED: [image:openbrain-curator, image:openbrain-research, paste:owui/tools/deep_research.py]
     rp-opsdoor       DERIVED: [image:openbrain-curator, image:openbrain-research]
     rp-researchretry DERIVED: [image:openbrain-research]
+    rp-owuidrift     DERIVED: []
+
+and `rp-owuidrift` must additionally print, as NOTEs rather than surfaces:
+
+    NOTE: owui/README.md changed but owui/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface
+    NOTE: owui/manifest.csv changed but owui/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface
 
 FAIL: any list differs. In particular `rp-curatorimg` must NOT contain
-`image:openbrain-research` (that merge changed research code but not its Dockerfile's
-context) and must not contain a `paste:`; `rp-gate5d` must be empty.
+`image:openbrain-research` and must not contain a `paste:`; `rp-gate5d` must be empty; and
+`rp-owuidrift` must derive NOTHING - it is the merge that, under the path-based rule this
+item started with, derived `paste:owui/manifest.csv` and `paste:owui/README.md`, two surfaces
+nobody could ever close honestly. `rp-curator2` must still derive its paste, because
+`owui/tools/deep_research.py` IS listed in the manifest at that tree - so the case
+discriminates the rule rather than just switching pastes off:
+
+    git -C $WT show 08c4ae1:owui/manifest.csv | Select-String "tools/deep_research.py"
+    git -C $WT show e989265:owui/manifest.csv | Select-String "README"
+
+PASS: the first prints a row, the second prints nothing.
+
+No `fatal:` line may appear anywhere in the six replays' output. `-Merged` used to probe for
+an OB1 Dockerfile with `git cat-file -e`, whose stderr printed
+`fatal: path ... does not exist` ABOVE a successful merge record. FAIL: any `fatal:` in a run
+that exits 0.
 
 Confirm two of them independently, so the derivation is not just agreeing with itself:
 
@@ -161,8 +189,25 @@ Hermetic; uses T1's replayed `rp-curatorimg` (one surface, `image:openbrain-cura
 
 PASS, in order: `names no health state` (exit non-zero); `names no pin` (exit non-zero);
 `health state 'unhealthy' is not one a deploy closes on` (exit non-zero); the `auto:`
-principal refused with exit **4**. Each refusal names the surface
-`image:openbrain-curator`. FAIL: any of the four is accepted, or a refusal names no surface.
+principal refused with exit **4**. FAIL: any of the four is accepted. Each of the FIRST
+THREE - the ones that reach surface resolution - must also name the surface
+`image:openbrain-curator`; the fourth must not be held to that, because the principal is
+refused before any surface is looked at, and a clause a correct tool trips is a clause that
+teaches testers to read past the plan (attempt 1's tester raised exactly this).
+
+Then the pin, which must be HEX - attempt 1's tester closed a real surface with a decimal
+epoch:
+
+    Set-Content -Path "$TMP\ev-epoch.md" -Encoding ascii -Value "openbrain-curator deployed at 1788720066 State.Status=running"
+    Q -Deployed -Id rp-curatorimg -By profnovice -Evidence "$TMP\ev-epoch.md"; $QExit
+    Set-Content -Path "$TMP\ev-digithex.md" -Encoding ascii -Value "openbrain-curator: label org.opencontainers.image.revision=0a1b2c3"
+    Q -Deployed -Id rp-curatorimg -By profnovice -Evidence "$TMP\ev-digithex.md"; $QExit
+
+PASS: the epoch is REFUSED with `names no pin` and the refusal says `an all-digit token such
+as a timestamp is not a pin`; the second is also refused, but ONLY for `names no health
+state` and NOT for `names no pin` - a hex id that merely starts with a digit is still a pin,
+and this asserts that without closing the surface the rest of the case needs open. FAIL: the
+epoch is accepted, or the digit-leading hex id is reported as no pin.
 
     (Get-Content -Raw "$ST\queue\rp-curatorimg.json" -Encoding UTF8 | ConvertFrom-Json) |
         Select-Object state, @{n="pending";e={@($_.deploy_pending) -join ","}}, @{n="closed";e={@($_.deployed).Count}}
@@ -265,10 +310,11 @@ PASS: a `--- RESOLUTION ---` block naming `[UNRESOLVABLE: OB1 22f41b6]`. FAIL: n
     ($LASTEXITCODE)
     (Select-String -Path "$TMP\drill.txt" -Pattern "\[FAIL\]").Count
 
-PASS: the last line reads `<N> check(s), 0 failed.` with **N >= 206** (the developer measured
-206; the passplan tally this must not fall below was 140), exit code `0`, and zero `[FAIL]`
-lines. FAIL: any failure, or N < 206 - a shrinking count means checks were removed, which is
-the one way this drill can go green by proving less.
+PASS: the last line reads `<N> check(s), 0 failed.` with **N >= 213** (the developer measured
+213 at attempt 2, up from 206 at attempt 1 - D12 gained three manifest checks and D13 four
+pin checks; the passplan tally this must never fall below was 140), exit code `0`, and zero
+`[FAIL]` lines. FAIL: any failure, or N < 213 - a shrinking count means checks were removed,
+which is the one way this drill can go green by proving less.
 
     Select-String -Path "$TMP\drill.txt" -Pattern "^=== D1[2-7] " | ForEach-Object { $_.Line }
 
@@ -386,10 +432,12 @@ dir per case - so no mutant can reach the live queue.
     powershell -NoProfile -NonInteractive -File "$WT\scripts\agent-harness\verify-queue-defects.ps1" -Script $m1 2>&1 | Tee-Object "$TMP\mutant.txt" | Select-Object -Last 2
     Select-String -Path "$TMP\mutant.txt" -Pattern "^  \[FAIL\]" | ForEach-Object { $_.Line } | Select-Object -First 3
 
-PASS: the mutation lands on exactly ONE line (the developer measured line 1018), the run
-ends `<N> check(s), <M> failed.` with **M >= 1** (15 when the developer ran it), and the
-FIRST failure is the D12 check named `deploy_pending is EXACTLY the four surfaces git saw
-...` whose detail reads
+PASS: the mutation lands on exactly ONE line - print it rather than trusting a number, since
+any line citation drifts with the next edit (attempt 1's plan said "line 1018", which was
+wrong: it was 751 then and 760 now, and 1018 is unrelated andon code). The run ends
+`<N> check(s), <M> failed.` with **M >= 1** (15 when the developer ran it at attempt 1), and
+the FIRST failure is the D12 check named `deploy_pending is EXACTLY the four surfaces git
+saw ...` whose detail reads
 
     pending=image:rooty,image:thing,paste:owui/tools/deep.py
 
@@ -477,9 +525,122 @@ paste it into the evidence file.
 
 ---
 
+## T12 - every checkable claim in the FINDINGS SINK is re-run, and the list is derived, not typed
+
+Attempt 1 shipped a findings note saying `development`'s pre-commit hook "names only three
+checkers"; the command the sentence itself cites returns **four**. It reached a tester because
+the plan listed the sink among the changed files and had no case that opened it. The sink is
+held to the artifact's standard (MERGE-PROTOCOL section 2) precisely because it is what the
+next item reads.
+
+**The list of claims is DERIVED FROM THE SECTION, not enumerated here.** A plan that lists the
+claims by hand can only check the ones its author remembered - which is the same failure one
+level up. Save as `$TMP\claims.ps1` and run it:
+
+    param([string]$Wt = "D:\Open WebUI\ai-stack\.claude\worktrees\wt-deploystate")
+    # Enumerate every CHECKABLE claim in the findings sink's own `## deploystate` section.
+    # The list is DERIVED from the section, never typed out here: if a claim is added to the sink
+    # and this prints one more row, the plan has grown a case without anyone editing the plan.
+    $sink  = Join-Path $Wt "documentation\notes\deploy-gate-2026-09-06.md"
+    $lines = [System.IO.File]::ReadAllLines($sink)
+    $start = -1; $end = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -eq "## deploystate") { $start = $i; continue }
+        if ($start -ge 0 -and $lines[$i] -match '^## ') { $end = $i; break }
+    }
+    if ($start -lt 0) { Write-Host "FAIL: no '## deploystate' section in $sink"; exit 1 }
+    $body = $lines[($start + 1)..($end - 1)]
+    Write-Host ("section: lines {0}-{1} of {2}" -f ($start + 1), $end, (Split-Path -Leaf $sink))
+
+    $rows = @()
+    for ($i = 0; $i -lt $body.Count; $i++) {
+        $ln = $start + 2 + $i          # 1-based line number in the file
+        $t  = $body[$i]
+        foreach ($m in [regex]::Matches($t, '`([^`]+)`')) {
+            $v = $m.Groups[1].Value
+            $kind = $null
+            if ($v -match '^(git|grep|powershell|queue\.ps1|\.\\|tr |python)\b' -or $v -match '\bgit (show|cat-file|config|rev-parse|diff-tree|log)\b') { $kind = "COMMAND" }
+            elseif ($v -match '^[\w./\\-]+\.(ps1|py|md|json|csv|yml|conf):\d+$') { $kind = "FILE:LINE" }
+            elseif ($v -match '^[\w./\\-]+\.(ps1|py|md|json|csv|yml|conf)$' -or $v -match '^[\w./-]+/$') { $kind = "PATH" }
+            if ($kind) { $rows += [pscustomobject]@{ n = 0; line = $ln; kind = $kind; claim = $v } }
+        }
+        # ISO dates are not claims about the world, they are timestamps on claims.
+        $tn = [regex]::Replace($t, '\d{4}-\d{2}-\d{2}', '<date>')
+        foreach ($m in [regex]::Matches($tn, '(?<![\w.])\*{0,2}(\d{2,})\*{0,2}(?![\w.])')) {
+            $rows += [pscustomobject]@{ n = 0; line = $ln; kind = "FIGURE"; claim = $m.Groups[1].Value }
+        }
+    }
+    # de-duplicate on kind+claim, keep the first line each appears on
+    $seen = @{}; $out = @()
+    foreach ($r in $rows) {
+        $k = $r.kind + "|" + $r.claim
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true; $r.n = $out.Count + 1; $out += $r
+    }
+    $out | Format-Table n, line, kind, claim -AutoSize -Wrap
+    Write-Host ("TOTAL CHECKABLE CLAIMS: {0}  (COMMAND {1}, FILE:LINE {2}, PATH {3}, FIGURE {4})" -f `
+        $out.Count,
+        @($out | Where-Object { $_.kind -eq "COMMAND" }).Count,
+        @($out | Where-Object { $_.kind -eq "FILE:LINE" }).Count,
+        @($out | Where-Object { $_.kind -eq "PATH" }).Count,
+        @($out | Where-Object { $_.kind -eq "FIGURE" }).Count)
+
+    powershell -NoProfile -NonInteractive -File "$TMP\claims.ps1" -Wt $WT
+
+It prints one numbered row per checkable claim in the `## deploystate` section: every inline
+code span that is a COMMAND, a FILE:LINE citation or a PATH, and every FIGURE (a number of two
+or more digits, with ISO dates removed - a timestamp is not a claim about the world). The
+developer measured **39 rows (COMMAND 12, FILE:LINE 2, PATH 8, FIGURE 17)**; the count moves
+whenever the section does, which is the point.
+
+**Now work the table, top to bottom, and record a result for EVERY row.** For each row:
+
+- **COMMAND** - run it, in the tester's worktree, and paste enough of the output to settle the
+  sentence it appears in. A command that is a template (`git cat-file blob :<path>`) is
+  recorded as `TEMPLATE - not runnable as written`, which is a result.
+- **FILE:LINE** - open that file at that line and say what is there, in the sink's own terms.
+  `remove-worktree.ps1:115` must be the `git log --oneline $MergedInto..$branch` the sentence
+  says it is; if the line has moved, the citation is wrong even though the code is right.
+- **PATH** - confirm it exists (or, for a path the sentence says is ABSENT, that it is absent).
+- **FIGURE** - re-derive it. `376` is
+  `git cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c`; `42`,
+  `30`, `31` and `32` are counts over the live queue's item files; `18/25/34/43` are line
+  numbers in `development`'s hook. A figure the sink states as measured at a moment (the
+  hand-off counts) is checked as "the arithmetic reconciles and the sentence says when", not
+  as "it is still that number now" - a live board moves.
+
+PASS: every row of the table has a recorded result, and every result agrees with the sentence
+the claim sits in. **A claim whose command you did not re-run is a FAIL, not a skip** - the
+defect this case exists for was a cited command that the author did not run, and "it looked
+right" is how it survived. FAIL: any row unaddressed, or any sentence the re-run contradicts.
+
+Two rows are worth naming, because they are the corrections attempt 1 forced and a tester
+should confirm the fix rather than the bug:
+
+    git -C $WT show development:.githooks/pre-commit | Select-String "powershell.exe"
+
+PASS: FOUR invocations, at lines 18, 25, 34 and 43, and none of them is
+`check-corpus-exposure-producers.ps1` - so the sink's corrected count is right AND the
+conclusion that rests on it still holds. FAIL: any other count, or the missing checker turns
+out to be there.
+
+    powershell -NoProfile -NonInteractive -Command "(git -C '$WT' cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | Out-String).Length"
+    git -C $WT cat-file blob ff34eda:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
+    git -C $WT cat-file blob 49bb2db:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
+    git -C $WT cat-file blob HEAD:scripts/agent-harness/queue.ps1 | tr -cd '\r' | wc -c
+
+PASS: `376` at `ff34eda`, `0` at the base `49bb2db`, and **`0` at HEAD** - the line-ending
+damage the sink describes is real, and it is repaired on the tip you are testing. (`tr` and
+`wc` come from Git's `usr/bin`; if they are not on your PATH, count with
+`([regex]::Matches((Get-Content -Raw ...), "`r")).Count` and say which you used.) FAIL: HEAD
+still carries a CR.
+
+---
 ## What a PASS costs
 
 Every heading above must appear in your evidence with the bare word `PASS` as the last word
 on the heading line. A case you could not execute is `-Fail -PlanInadequate` with what the
 plan should have made runnable - never a scoped pass. If the drill in T5 reports fewer than
-206 checks, that is a FAIL even at `0 failed`.
+213 checks, that is a FAIL even at `0 failed`. And in T12, a claim whose command you did not
+re-run is a FAIL rather than a row left blank - attempt 1 passed every case it had and still
+shipped a false, checkable sentence, because no case opened the file it was in.

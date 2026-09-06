@@ -493,9 +493,18 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # THE SURFACES ARE DERIVED FROM THE MERGE RANGE, NEVER DECLARED. `git diff --name-only
 # <first parent>..<merge>` is the only input: an OB1 gitlink move whose OB1 diff touches
 # integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
-# builds ../integrations/<dir>>; any owui/** path -> paste:<path>; a changed build context of a
-# :local-tagged service in this repository's compose files -> image:<service>. A list the
-# author typed is the list the author remembered; this one is what git saw.
+# builds ../integrations/<dir>>; a changed owui/ file THAT owui/manifest.csv LISTS ->
+# paste:<path>; a changed build context of a :local-tagged service in this repository's
+# compose files -> image:<service>. A list the author typed is the list the author
+# remembered; this one is what git saw.
+#
+# THE MANIFEST IS THE AUTHORITY ON WHAT IS PASTEABLE (2026-09-06, attempt 1's tester). The
+# rule was `any owui/** path`, and owui/ also holds its own README and the manifest itself:
+# the real owuidrift merge e989265 derived paste:owui/manifest.csv and paste:owui/README.md,
+# two surfaces nobody can ever close honestly, because neither is pasted into anything.
+# owui/manifest.csv is the file -> OWUI id map, so it already answers the question exactly;
+# it is read from the MERGED tree, and an owui/ path it does not list derives nothing and
+# says so in a note.
 
 function Get-ArrayField($item, [string]$name) {
     # An array field read back from JSON: `[]` comes back as an empty array, an absent field
@@ -773,16 +782,56 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             if ($LASTEXITCODE -eq 0) { $svcs = @(Get-ComposeServices $composeText) }
             else { $notes += ("OB1 {0} has no docker/docker-compose.yml - integration images are recorded by directory" -f $new.Substring(0, 7)) }
             foreach ($d in $dirs) {
-                [void](Invoke-GitCapture @("-C", $clone, "cat-file", "-e", "$new`:integrations/$d/Dockerfile"))
-                if ($LASTEXITCODE -ne 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
+                # ls-tree, NOT `cat-file -e`: cat-file writes `fatal: path ... does not exist` to
+                # stderr for the ordinary absent-Dockerfile case, and Invoke-GitCapture does not
+                # redirect stderr - so a perfectly successful -Merged printed a `fatal:` line above
+                # its own success message (found by attempt 1's tester on the real de42243 replay).
+                # An operator taught to ignore a `fatal:` is being taught the wrong lesson. ls-tree
+                # exits 0 either way and prints the path only when it is there.
+                $dfHit = @(Invoke-GitCapture @("-C", $clone, "ls-tree", "--name-only", $new, "integrations/$d/Dockerfile") | Where-Object { ([string]$_).Trim() })
+                if ($dfHit.Count -eq 0) { $notes += ("OB1 integrations/{0} changed but has no Dockerfile at {1} - not an image" -f $d, $new.Substring(0, 7)); continue }
                 $svc = @($svcs | Where-Object { $_.context -and ((Convert-RepoRelative "docker" $_.context) -eq "integrations/$d") } | Select-Object -First 1)
                 if ($svc.Count -gt 0) { $images += ("image:" + $svc[0].name) }
                 else { $images += ("image:integrations/" + $d); $notes += ("no compose service builds integrations/{0} at OB1 {1} - recorded by directory" -f $d, $new.Substring(0, 7)) }
             }
         }
     }
-    # (2) anything OWUI only sees by paste
-    foreach ($p in $changed) { if ($p -match '^owui/') { $pastes += ("paste:" + $p) } }
+    # (2) the files OWUI only sees by paste - and owui/manifest.csv says which those are.
+    #     See the section header: `any owui/** path` derived surfaces for the manifest and the
+    #     README, which are not pasted into anything. The manifest of the MERGED tree is read,
+    #     never the working copy, and its `file` column is resolved BY HEADER NAME (the column
+    #     set moved from `bytes` to `sha256` between 08c4ae1 and e989265; the position did not,
+    #     but reading it by name means the next move costs nothing). Paths carry no commas, so
+    #     a plain split is enough here - this is not a general CSV reader.
+    $owuiChanged = @($changed | Where-Object { $_ -match '^owui/' })
+    if ($owuiChanged.Count -gt 0) {
+        $manifest = @(Invoke-GitCapture @("show", "$Sha`:owui/manifest.csv"))
+        if ($LASTEXITCODE -ne 0) {
+            $notes += ("owui/ changed but the merged tree has no owui/manifest.csv, which is what says a file is pasted - no paste surface derived for: " + ($owuiChanged -join ", "))
+        } else {
+            $pasteable = @{}
+            $fileCol = -1
+            foreach ($row in $manifest) {
+                $cells = @(([string]$row) -split ',')
+                if ($fileCol -lt 0) {
+                    $fileCol = [array]::IndexOf(@($cells | ForEach-Object { ([string]$_).Trim().ToLower() }), "file")
+                    if ($fileCol -lt 0) { break }
+                    continue
+                }
+                if ($fileCol -ge $cells.Count) { continue }
+                $f = ([string]$cells[$fileCol]).Trim() -replace '\\', '/'
+                if ($f) { $pasteable["owui/" + $f.TrimStart('/')] = $true }
+            }
+            if ($fileCol -lt 0) {
+                $notes += ("owui/manifest.csv at {0} has no 'file' column - no paste surface derived for: {1}" -f $Sha.Substring(0, 7), ($owuiChanged -join ", "))
+            } else {
+                foreach ($p in $owuiChanged) {
+                    if ($pasteable.ContainsKey($p)) { $pastes += ("paste:" + $p) }
+                    else { $notes += ("{0} changed but owui/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface" -f $p) }
+                }
+            }
+        }
+    }
     # (3) a :local-tagged service of this repository whose build context changed
     $tree = @(Invoke-GitCapture @("ls-tree", "-r", "--name-only", $Sha) | ForEach-Object { ([string]$_).Trim() })
     $composeFiles = @($tree | Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -and $_ -notmatch '^scripts/archive/' })
@@ -836,6 +885,16 @@ function Test-DeployEvidence([string[]]$Surfaces, [string]$Body) {
     # What -Deployed demands of its evidence, PER SURFACE: a line that names the surface, and
     # on the lines that do, a pin (an image label or revision sha, or the pasted file's hash)
     # and a health state a deploy can close on. Returns @{ ok; problems }.
+    #
+    # THE CHECK IS LINE-SCOPED, NOT ENTITY-SCOPED, AND STAYS SO. It asks "some line mentioning
+    # this surface also carries a pin and a health state", not "the pin and the health state
+    # are ABOUT this surface". So
+    #     openbrain-curator rebuilt from 6fba6b3 - checked openbrain-research instead: ...healthy
+    # is accepted (attempt 1's tester wrote it deliberately). Named rather than fixed: telling
+    # those two apart is a judgement about English prose, not something a regex decides, and a
+    # tighter pattern would refuse honest evidence far more often than it would catch this.
+    # What the check does buy is that the surface's own name must appear - evidence naming only
+    # the other container is refused with `no line of the evidence names it`.
     $problems = @()
     $lines = @($Body -split "`r?`n")
     foreach ($s in @($Surfaces)) {
@@ -845,9 +904,18 @@ function Test-DeployEvidence([string[]]$Surfaces, [string]$Body) {
         $hit = @($lines | Where-Object { $l = $_; @($needles | Where-Object { $l.IndexOf($_, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0 })
         if ($hit.Count -eq 0) { $problems += ("{0}: no line of the evidence names it" -f $s); continue }
         $text = $hit -join "`n"
-        $pinOk = ($text -match '(?i)sha256:[0-9a-f]{7,}') -or ($text -match '(?i)(?<![0-9a-z])(?=[0-9a-f]*\d)[0-9a-f]{7,64}(?![0-9a-z])')
+        # A PIN IS HEX, AND A DECIMAL NUMBER IS NOT A PIN. The old test was
+        # `[0-9a-f]{7,64}` requiring at least one DIGIT, so `deployed at 1788720066` closed a
+        # surface: an epoch, a run number or a ticket id read as an image revision (found by
+        # attempt 1's tester, who closed rp-researchretry with a timestamp). Two shapes now:
+        # a LABELLED digest (`sha256:<hex>` / `sha256 <hex>` / `sha256=<hex>`, 7-64 - this is
+        # how a paste's 64-char hash and an image id arrive), or a BARE token of 7-40 hex that
+        # is not simply a decimal number - the leading `(?![0-9]+(?![0-9a-z]))` is what refuses
+        # an all-digits run, and 40 is the length of a git object id.
+        $pinOk = ($text -match '(?i)sha256\s*[:=]?\s*[0-9a-f]{7,64}(?![0-9a-z])') -or
+                 ($text -match '(?i)(?<![0-9a-z])(?![0-9]+(?![0-9a-z]))[0-9a-f]{7,40}(?![0-9a-z])')
         if (-not $pinOk) {
-            $problems += ("{0}: names no pin - {1}" -f $s, $(if ($kind -eq "image") { "the running container's image label or revision (org.opencontainers.image.revision=<sha>, or the image id)" } else { "the sha256 of the file as pasted" }))
+            $problems += ("{0}: names no pin - {1} (7-40 hex characters, or sha256:<hex>; an all-digit token such as a timestamp is not a pin)" -f $s, $(if ($kind -eq "image") { "the running container's image label or revision (org.opencontainers.image.revision=<sha>, or the image id)" } else { "the sha256 of the file as pasted" }))
         }
         $m = [regex]::Match($text, '(?i)(State\.Health\.Status|Health\.Status|health(?:_status)?|State\.Status|status)\s*[=:]\s*"?([A-Za-z]+)')
         if (-not $m.Success) { $problems += ("{0}: names no health state (State.Health.Status=healthy, or State.Status=running for a container with no healthcheck)" -f $s) }
