@@ -185,18 +185,42 @@ worktree on a not-yet-merged developer branch can only be removed with
 ## researchretry
 
 Recorded 2026-09-06 by the `researchretry` developer (worktree
-`wt-researchretry`, parent `dfac66c`, OB1 `d0c8a65` on
-`fix/research-curator-call-timeout-retry`). Everything below was verified by
-reading the named file at the named line at the named pin, or by running the
-named command; nothing here is in the deliverable's scope (the anchor fixes
-the RESEARCH side of the call and names the timeout default; the curator, its
-compose wiring and the deploy are out of scope).
+`wt-researchretry`, parent `995c0c7`, OB1 `6197bc7` on
+`fix/research-curator-call-timeout-retry`; the first cut was parent `dfac66c`
+/ OB1 `d0c8a65`, before the anchor was amended). Everything below was
+verified by reading the named file at the named line at the named pin, or by
+running the named command; nothing here is in the deliverable's scope (the
+anchor fixes the RESEARCH side of the call and names the timeout default; the
+curator, its compose wiring and the deploy are out of scope).
 
-### The anchor's timeout default can clip a healthy ingest, and the curator cannot be cancelled
+### DECIDED IN THE ANCHOR: the first cut's 15 s default would have clipped healthy ingests; a timeout is never resent
 
-`CURATOR_TIMEOUT_MS` defaults to `FETCH_TIMEOUT_MS` (15 000 ms) per the anchor
-(`research-service/index.ts:107` at d0c8a65). The curator's ingest handler
-answers only after, in order: `embed` (`research-curator/index.ts:543`),
+This was finding 1 of the first cut, raised against the original anchor
+(default `CURATOR_TIMEOUT_MS = FETCH_TIMEOUT_MS`, 15 000 ms, timeouts
+retried). The operator amended the anchor the same day; the amended artifact
+line reads:
+
+> gains AbortSignal.timeout(CURATOR_TIMEOUT_MS, default 180000 - an ingest
+> awaits an embedding, an LLM thread decision, a persist and a claims pass,
+> so a 15 s default would abort healthy work) and a bounded retry with
+> backoff (CURATOR_RETRIES total attempts, default 3) on CONNECTION-LEVEL
+> errors only (refused, reset, EPIPE, host unreachable, 'error sending
+> request' before any response) - NEVER on a timeout (the curator may still
+> be working; a resend would double-ingest) and never on a 4xx/5xx JSON
+> answer, which is the curator's verdict. A timeout fails once, loudly,
+> naming the elapsed time.
+
+and its out-of-scope list adds: "Measuring real ingest durations in
+production and tuning CURATOR_TIMEOUT_MS below the default - recorded as a
+follow-up; the default is deliberately generous because the goal is 'cannot
+hang forever', not 'fail fast'." The rework (OB1 `6197bc7`) implements
+exactly that: `research-service/index.ts:113` defaults to 180 000;
+`lib.ts:463-473` returns false for AbortError / TimeoutError /
+CuratorTimeoutError; `lib.ts:562-565` throws `CuratorTimeoutError` on the
+first timeout with the elapsed ms. The evidence the decision rested on
+stays below, because the follow-up (measuring real ingests) needs it.
+
+The curator's ingest handler answers only after, in order: `embed` (`research-curator/index.ts:543`),
 `resolve` (`:545`), which awaits an LLM chat completion at `:238`
 (`chatJson`, a bare fetch at `:155` with no signal) and, when it refreshes a
 thread, a second one at `:284`; `delegatePersist` to openbrain-mcp (`:551`,
@@ -206,11 +230,15 @@ matches nothing: none of the curator's three outbound fetches (`:131`,
 `:155`, `:388`) carries a timeout, and nothing cancels the handler when the
 research side aborts its request.
 
-Consequence, at the default: an ingest that spends more than 15 s in
-resolve/persist/claims is aborted client-side, re-sent after 2 s, and again
-after 4 s, while the curator keeps processing the first request - up to three
-concurrent ingests of one package, and a run recorded as `NOT filed` that the
-curator may well have filed. Dedupe that IS verified: claims go through
+Consequence under the FIRST cut's policy (now retired): an ingest that spent
+more than 15 s in resolve/persist/claims was aborted client-side, re-sent
+after 2 s, and again after 4 s, while the curator kept processing the first
+request - up to three concurrent ingests of one package, and a run recorded
+as `NOT filed` that the curator may well have filed. Under the amended
+policy a timeout is never resent, so the residual exposure is one aborted
+client waiting on a curator that may still file the package: the job says
+`timed out ... the curator may still be working`, which is honest, and the
+180 s default makes it rare. Dedupe that IS verified: claims go through
 `find_or_create_claim` and count `was_duplicate` (`research-curator/claims.ts:214-224`);
 sources are described as going through `find_or_create_source`
 (`research-curator/index.ts:18`, a comment - the function lives in
@@ -246,7 +274,7 @@ and healthcheck, which landed with curatorimg/gate5d.
 
 ### A 2xx whose body read is aborted returns `{}` and reads as `filed`
 
-`lib.ts:512` keeps the old `r.json().catch(() => ({}))` (old
+`lib.ts:558` (at `6197bc7`) keeps the old `r.json().catch(() => ({}))` (old
 `index.ts:358` at d89c126): if the per-attempt signal fires DURING the body
 read of a 2xx, the wrapper resolves with `{}`, `classifyCuratorOutcome`
 returns `state: "filed"`, and the job's `error` is NULL. Not retrying is
