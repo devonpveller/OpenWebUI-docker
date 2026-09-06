@@ -118,6 +118,30 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- 5d. OB1 integration images on gitlink bumps ---------------------------
+# 5b runs recipe tests, 5c type-checks the Deno recipe - neither looks at a
+# Dockerfile. OB1/integrations/research-curator crash-looped in production a
+# day after its bump landed (2026-09-05): index.ts had gained `./pool.ts`, the
+# Dockerfile COPYs sources BY NAME and never listed it, `docker build` cannot
+# fail on that, and "Module not found" surfaced at CONTAINER START. This gate
+# refuses that at the commit: for every image-bearing integrations/<svc>/ the
+# pin diff touches, the relative-import graph of the entrypoint must be
+# covered by the Dockerfile's COPYs (seconds, no docker), then the image is
+# built under a throwaway ob1-gate/<svc>:<sha7> tag and `deno check` runs
+# inside it (--network none, never :local, tag removed after).
+#
+# Green means "the image builds and its module graph resolves" - NOT that the
+# service starts against a real database or that env/compose wiring is right;
+# the script header lists what it does not prove. Skips instantly when no OB1
+# gitlink is staged or the bump touches no Dockerfile-bearing integration;
+# REFUSES (does not warn-and-pass) when Docker is unreachable. pre-merge-commit
+# execs this file, so a clean merge that bumps the gitlink gets it too.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-integration-images.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (an OB1 integration image does not build or resolve for the staged gitlink)!"
+    exit 1
+fi
+
 # --- 6. ATTESTATION -------------------------------------------------------
 # Record that these checks actually ran, because otherwise nobody can tell.
 #
