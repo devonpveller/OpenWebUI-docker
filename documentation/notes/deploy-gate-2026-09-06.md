@@ -181,3 +181,86 @@ worktree on a not-yet-merged developer branch can only be removed with
   against a dead host (3 at +6 s, 9 at +92 s) - the ResilientPool discarding a
   pool it could not open. Expected behaviour, cheap, and a useful witness that
   the wrapper is the one answering.
+
+## researchretry
+
+Recorded 2026-09-06 by the `researchretry` developer (worktree
+`wt-researchretry`, parent `dfac66c`, OB1 `d0c8a65` on
+`fix/research-curator-call-timeout-retry`). Everything below was verified by
+reading the named file at the named line at the named pin, or by running the
+named command; nothing here is in the deliverable's scope (the anchor fixes
+the RESEARCH side of the call and names the timeout default; the curator, its
+compose wiring and the deploy are out of scope).
+
+### The anchor's timeout default can clip a healthy ingest, and the curator cannot be cancelled
+
+`CURATOR_TIMEOUT_MS` defaults to `FETCH_TIMEOUT_MS` (15 000 ms) per the anchor
+(`research-service/index.ts:107` at d0c8a65). The curator's ingest handler
+answers only after, in order: `embed` (`research-curator/index.ts:543`),
+`resolve` (`:545`), which awaits an LLM chat completion at `:238`
+(`chatJson`, a bare fetch at `:155` with no signal) and, when it refreshes a
+thread, a second one at `:284`; `delegatePersist` to openbrain-mcp (`:551`,
+bare fetch at `:388`); then `writeClaims` (`:421`) with a per-conflict LLM
+judge at `:462`. `grep -n signal research-curator/index.ts` at the pin
+matches nothing: none of the curator's three outbound fetches (`:131`,
+`:155`, `:388`) carries a timeout, and nothing cancels the handler when the
+research side aborts its request.
+
+Consequence, at the default: an ingest that spends more than 15 s in
+resolve/persist/claims is aborted client-side, re-sent after 2 s, and again
+after 4 s, while the curator keeps processing the first request - up to three
+concurrent ingests of one package, and a run recorded as `NOT filed` that the
+curator may well have filed. Dedupe that IS verified: claims go through
+`find_or_create_claim` and count `was_duplicate` (`research-curator/claims.ts:214-224`);
+sources are described as going through `find_or_create_source`
+(`research-curator/index.ts:18`, a comment - the function lives in
+openbrain-mcp and was not read). The synthesis row and the thread decision
+were not checked for idempotency; do not read "dedupes" as "re-send is free".
+
+How long a real ingest takes is NOT retained anywhere: `research_jobs.progress`
+holds only the last `{phase, message}` (`research-service/index.ts:625`),
+and the curator logs one summary line per ingest with no duration
+(`research-curator/index.ts:620`). Today's one completed job
+(`0b3b1bfa`, 13:36:12 -> 13:43:12, 420 s total) shows the ingest END
+(curator line at 13:43:12.022, `finished_at` 13:43:12.025), not its start.
+
+Suggested, for the operator's seat: set `CURATOR_TIMEOUT_MS` explicitly on
+`openbrain-research` in `OB1/docker/docker-compose.yml` at deploy (a value
+above the longest ingest you are willing to wait for - the curator's own
+LLM calls sit behind the llm-queue), and/or amend the anchor's default; the
+retry stays correct either way because a REFUSED connection is what it is
+for. Longer-term the curator should answer after persist and decompose
+claims asynchronously, so the research side never waits on an LLM call.
+
+### What the retry would and would not have saved today
+
+`research_jobs` (read-only `psql` on `openbrain-db`, 2026-09-06): the four
+`error` jobs at 05:01-05:12 UTC (`7f156a12`, `9f4a3f6b`, `abf7d66e`,
+`7eebcaee`) all carry `curator: the research completed but was NOT filed into
+Open Brain - error sendin[g request ...]` - the connection-level class this
+item retries. The curator was crash-looping for hours (item curatorimg), so
+three attempts over ~6 s would have failed the same way; the research would
+still have been lost. The retry fixes a restart-window blip, not an outage;
+what would have saved those four runs is the curator's own image gate (5d)
+and healthcheck, which landed with curatorimg/gate5d.
+
+### A 2xx whose body read is aborted returns `{}` and reads as `filed`
+
+`lib.ts:512` keeps the old `r.json().catch(() => ({}))` (old
+`index.ts:358` at d89c126): if the per-attempt signal fires DURING the body
+read of a 2xx, the wrapper resolves with `{}`, `classifyCuratorOutcome`
+returns `state: "filed"`, and the job's `error` is NULL. Not retrying is
+right (the curator did answer 2xx); the gap is that the answer's content was
+lost silently. Pre-existing behaviour, carried over unchanged; noted so it is
+not mistaken for a retry-policy bug later.
+
+### Smaller facts
+
+- `lib.test.ts` had 25 cases at d89c126 (`deno test`), not the 24 the brief
+  quoted; 33 at d0c8a65.
+- On Docker Desktop's default bridge a STOPPED container's former IP answers
+  with a TCP reset: Deno reports `Connection refused (os error 111)`, not
+  `EHOSTUNREACH`. Either is retried; the plan quotes what was observed.
+- Deno's own message for a refused connect repeats the cause (`... tcp
+  connect error: Connection refused (os error 111): Connection refused (os
+  error 111)`); that is the runtime's text, not the wrapper's.
