@@ -324,9 +324,13 @@ instead.** Git refuses a second checkout of one branch, and force-moving the ref
 leave that working tree's index lying about its contents. With the work line defaulting to
 the operator's active branch this is the normal case, so it is a supported outcome, not a
 failure: leave the branch rebased and green, release the claim, and report the exact command
-for them to run. `new-worktree.ps1` warns about this at provisioning time so it is never a
-surprise at landing time. Never merge inside the operator's checkout - it is their working
-copy and a bridge turn could be running in it.
+for them to run. "Them" includes the operator's interactive session executing that command at
+their direction (2026-09-05: a session relayed the command back for the operator to paste and
+was corrected - it had already been running the operator's gates all session). The constraint
+is that the REVIEWER never merges inside the operator's checkout - it is their working copy
+and a bridge turn could be running in it - not that landing needs the operator's own hands.
+`new-worktree.ps1` warns about this at provisioning time so it is never a
+surprise at landing time.
 
 `--no-ff` keeps the branch visible in history, and the merge message carries the evidence -
 the operator's branch policy made mechanical, and what makes a later bisect readable. If the
