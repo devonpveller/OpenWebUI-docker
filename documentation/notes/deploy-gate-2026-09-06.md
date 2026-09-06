@@ -181,3 +181,53 @@ worktree on a not-yet-merged developer branch can only be removed with
   against a dead host (3 at +6 s, 9 at +92 s) - the ResilientPool discarding a
   pool it could not open. Expected behaviour, cheap, and a useful witness that
   the wrapper is the one answering.
+
+## passplan
+
+- **`gate2.plan.md` in the live queue has zero recognisable case headings** (checked
+  2026-09-06: `grep -cE '^##\s+(T[0-9]+|Case\s+[0-9]+)\b'` over every `*.plan.md` in
+  `.git/agent-worktrees/queue/` - 30 plans have 5-18 case headings, `gate2.plan.md` has 0).
+  `gate2` is `merged`, so nothing acts on it; it is the one existing item whose plan the
+  new parser could not have checked. Re-grading is out of scope by the anchor. No item was
+  in `ready-to-test` or `testing` at the time of the check, so the new `-Pass` rule met no
+  in-flight item.
+- **The real `curator2` evidence has no `## T7` heading at all.** The tester wrote "T7's
+  happy path is covered here at the same (scoped) level" inside T5's caveat
+  (`documentation/evidence/passplan/fixtures/curator2.attempt1.evidence.md:242`, in the T5
+  section that runs from line 213 to the T6 heading at line 245). The
+  anchor names T5 and T6 as the two scoped cases; the parser also refuses T1 (one of its
+  three headings reads `PASS (with caveats)`, line 46) and T7 (missing). Four of eight
+  cases in a merged item's evidence were not bare passes. Re-grading is out of scope.
+- **Items submitted before this change carry no `plan_sha256`.** `-Pass` on such an item
+  prints a yellow NOTE and skips the drift check rather than refusing (queue.ps1, the
+  `$planThen` branch in the -Pass handler) - refusing would strand a tester on an item
+  already in `testing`, which has no door that re-records the hash. Every item is either
+  terminal or pre-submit today (see the first entry), so the branch has no live subject;
+  it exists for a queue that still has one when this merges.
+- **`-Fail` does not check the plan hash.** Kept deliberately: the anchor limits the
+  `-Fail` change to recording per-case verdicts, and a fail against a drifted plan still
+  sends the item back to the developer, who re-submits a plan (which re-records the hash).
+- **`verify-merge-protocol.ps1` cannot go fully green on this machine today, with or
+  without this change - six checks fail on the BASE too.** Mechanism, verified by reading
+  the drill output: `.githooks/pre-commit` step 3b (`refactor/ai-stack-cleanup`) runs
+  `./scripts/checks/check-corpus-exposure-producers.ps1` relative to the committing
+  worktree; the drill cuts `drill/verify-d` from `development` (hard-coded,
+  `verify-merge-protocol.ps1:102`), and `git cat-file -e
+  development:scripts/checks/check-corpus-exposure-producers.ps1` fails (the script was
+  added in `d596426`, which `development` at `104d8f0` does not contain). `core.hooksPath`
+  is the absolute path to the main checkout's `.githooks`, so the drill's two commits in
+  step 2 are refused by a hook that cannot find its own script ("Pre-commit validation
+  failed (a corpus insert does not state its plane)!"), `two divergent commits exist` fails,
+  and five downstream checks (conflict, stale sha, both intents, two merge commits) fail
+  with it. Evidence: the base checkout's OWN copy, `D:\Open WebUI\ai-stack\scripts\
+  agent-harness\verify-merge-protocol.ps1`, run 2026-09-06 = `60/66 checks passed`, those
+  six FAIL; this branch's copy = `64/70`, the same six FAIL and the four new pass-rule
+  checks PASS. Fix candidates (out of scope here): step 3b skipping when the script is
+  absent in the committing tree, or the drill basing on the work line rather than
+  `development`.
+- **`verify-merge-protocol.ps1` is not hermetic** - it runs in the main checkout's git
+  (`Get-MainCheckout`, `Set-Location $repo`), provisions `wt-drilla`/`wt-drillb` under the
+  main `.claude/worktrees/`, and writes `drill-*` items into the SHARED queue directory.
+  That is its documented design (header lines 16-18), and the anchor's acceptance names
+  running it. Noted because the item brief for this worktree said never to run git against
+  the operator's checkout; the drill does, by construction, on its own branches only.
