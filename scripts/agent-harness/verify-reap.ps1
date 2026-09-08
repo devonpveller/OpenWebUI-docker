@@ -84,6 +84,24 @@ function Check([string]$What, [bool]$Ok, [string]$Detail) {
 function Docker {
     # Same PS5.1 rule reap.ps1 and git-io.ps1 record: capturing a native command's output
     # under 'Stop' makes its stderr a terminating error.
+    #
+    # A bare `@()` returned here EMITS NOTHING, so a docker command that matched nothing
+    # hands the caller `$null`. On attempt 6 a call site did
+    # `([string](Docker ... | Select-Object -First 1)).Trim()` on exactly that and threw
+    # "You cannot call a method on a null-valued expression", taking out the
+    # `-KeepOnFailure` teardown hint midway: 8 of 13 `docker rm -f` lines, no
+    # `docker network rm` lines at all, no summary, 18 containers and 2 networks abandoned
+    # by the block whose whole job was naming them.
+    #
+    # THE FIX IS AT THE CALL SITE, NOT HERE, and the reason is worth knowing because
+    # `reap.ps1`'s Get-DockerIds solves the same problem the OPPOSITE way. Its callers
+    # ASSIGN the result and test `if ($null -eq $names)`, so it returns `,@(...)` to keep an
+    # empty result distinguishable from a failure. EVERY caller of THIS helper PIPES the
+    # result - `Docker @(...) | ForEach-Object { ([string]$_).Trim() }` - and a `,@(...)`
+    # wrap sends the pipeline ONE object, which `[string]` then joins with spaces into a
+    # single line. Measured while fixing this: 22 network names became 1, and CASE 4's
+    # anchor-network check went red. Same idiom, opposite correct answer, decided by what
+    # the caller does with the value.
     param([string[]]$DockerArgs)
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -466,9 +484,15 @@ finally {
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) {
             $ref = $m.Name
             if ($m.Name -match '^[0-9a-f]{64}$') {
-                $own = ([string]((Docker @("ps", "-a", "--no-trunc", "--filter", "name=^$($m.Name)$", "--format", "{{.ID}}")) | Select-Object -First 1)).Trim()
+                # Belt as well as braces: the helper above now returns an array even when
+                # nothing matched, and this still does not assume a match. By teardown time
+                # the decoy is usually ALREADY GONE, so "no match" is the normal case here,
+                # not the exceptional one - which is exactly why the unguarded version fired
+                # on essentially every failing run rather than on a rare edge.
+                $own = @(Docker @("ps", "-a", "--no-trunc", "--filter", "name=^$($m.Name)$", "--format", "{{.ID}}")) |
+                       ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ } | Select-Object -First 1
                 if ($own) { $ref = $own }
-                Write-Host  "      # next one is named with another container's id - removing by ID:" -ForegroundColor Yellow
+                Write-Host  "      # next one is named with another container's id - removing by ID where one was found:" -ForegroundColor Yellow
             }
             Write-Host ("      docker rm -f {0}" -f $ref) -ForegroundColor Yellow
         }

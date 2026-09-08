@@ -33,11 +33,17 @@
 # stray `labels:` block under a service would otherwise point this script at prod. The guard
 # is the mechanism, not a belt over braces.
 #
-# SCOPE (operator, 2026-09-07): CONTAINERS and NETWORKS are reaped. Images and volumes are
-# REPORTED and never deleted - `docker volume prune` is a standing hazard in this stack, and
-# a deleted test image costs a rebuild nobody asked for. That split lives here in code
-# rather than in harness.config.json on purpose: widening it should show up in a diff and
-# pass a reviewer, which a config key would not.
+# SCOPE (operator, 2026-09-07): CONTAINERS and NETWORKS are reaped. IMAGES are counted in
+# the report and never deleted - a deleted test image costs a rebuild nobody asked for.
+# VOLUMES are neither reaped NOR reported: this script makes no `docker volume` call at all,
+# and the anchor permits that ("reported at most, never deleted"). The header said "images
+# and volumes are REPORTED", which overstated it - `grep -i volume reap.ps1` finds only
+# comments. `docker volume prune` is a standing hazard in this stack, so the deliberate
+# choice is to leave volumes entirely alone rather than to build a reporting path nobody
+# asked for.
+#
+# WHICH KINDS ARE REAPABLE LIVES HERE IN CODE, not in harness.config.json, on purpose:
+# widening it should show up in a diff and pass a reviewer, which a config key would not.
 #
 # ORPHANS - resources with NO compose project and NO owner label - are reported with their
 # age and never auto-deleted. Something unlabelled may be an operator's hand-run sidecar.
@@ -522,8 +528,9 @@ if ($mislabelled.Count) {
     foreach ($row in $mislabelled) { Show-Row $row ("owner={0}  PROTECTED: {1}" -f $row.OwnerId, $row.Protection) Yellow }
 }
 
-# Images and volumes: counted, never touched. Reporting them is how the operator learns the
-# disk cost without this script acquiring the authority to delete either.
+# IMAGES: counted, never touched. Reporting them is how the operator learns the disk cost
+# without this script acquiring the authority to delete them. Volumes are NOT counted here -
+# see the scope note in the header for why they are left alone entirely.
 $imgOut = Invoke-DockerCapture @("images", "--format", "{{.Repository}}:{{.Tag}}")
 $testTag = [string](Get-HarnessSetting "worktree.test_image_tag_prefix" "wt-")
 $testImgs = @($imgOut | Where-Object { $_ -match [regex]::Escape(":$testTag") })
