@@ -12,9 +12,18 @@
 # exist; CASE 7f builds a pair where BOTH must survive. If you are checking this claim,
 # `Select-String "New-Test" -Context` over each case body is the way.
 #
-# IT NEVER TOUCHES A PLANE. Every resource it creates is a stopped `alpine` container or an
-# empty bridge network with a `reapv-` name, on no plane network, using no prod
+# IT NEVER TOUCHES A PLANE. Everything it creates is built by this script from
+# `alpine:3.21`, attached to NO `ai-stack_*` network, and reuses NO production
 # container_name - the pointwise sandbox shape MERGE-PROTOCOL.md permits without a lease.
+# Those three are the safety properties; nothing else about the fixtures is promised here.
+#
+# In particular this used to add "a stopped container or an empty bridge network with a
+# `reapv-` name", which was false three ways and contradicted line 45 below twenty lines
+# later: CASE 5's occupant is deliberately STARTED (that is what makes the in-use check
+# non-vacuous), CASE 7c's decoy is deliberately named with another container's 64-hex id
+# (that is the shadowing it tests), and CASE 7f's network is deliberately occupied. Seventh
+# completeness claim in this change to be wrong, caught by the seventh tester. The lesson
+# has been learned twice and written down once: state the INVARIANT, never the inventory.
 # Read-only questions about the live stack (does any compose container appear as a
 # candidate?) are answered by looking, never by changing.
 #

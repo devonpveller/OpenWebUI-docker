@@ -219,8 +219,9 @@ and editing the conf.
   volumes are never touched, and unlabelled leftovers are reported, never auto-deleted.
   Proof: `scripts/agent-harness/verify-reap.ps1` - **run it for the count; no number is
   written here on purpose.** This sentence carried one (`37 passed`) and was stale within
-  a day, in the very clause warning against hardcoded counts, and `u4quad-findings.md:342`
-  records the same doc going stale twice before that.
+  a day, in the very clause warning against hardcoded counts. `u4quad-findings.md:342`
+  records the same failure happening twice elsewhere in this REPO - it says nothing about
+  this document, and an earlier version of this sentence claimed it did.
 - **Contention on hot planes is physics.** A 25-min wiki build holds `open-brain`
   for 25 min; cloning couldn't have parallelized the GPU or the vault either.
   `-TtlMin` + `-Refresh` handle long holds.
