@@ -88,6 +88,13 @@ $RedRest = "u5rls-red-rest-$RunId"
 $GrnRest = "u5rls-green-rest-$RunId"
 $Net     = "u5rls-net-$RunId"
 
+# Marks every persistent resource this run creates so a KILLED run - the one case the
+# finally below cannot cover - leaves leftovers `reap.ps1 -Owner u5rls-<runid>` can collect.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$Owner   = "u5rls-$RunId"
+# Printed before the long setup, so the id is on the screen even for a run that dies early.
+Write-Host (Format-HarnessOwnerBanner $Owner)
+
 $script:Pass = 0
 $script:Fail = 0
 function Section([string]$t) { Write-Host ""; Write-Host "== $t" -ForegroundColor Cyan }
@@ -186,9 +193,9 @@ if ($nGreen -eq $chain.Count -and $nRed -eq $chain.Count - $BOUNDARY.Count) {
     throw "staging"
 }
 
-docker network create $Net | Out-Null
+docker network create (Get-HarnessOwnerLabel $Owner) $Net | Out-Null
 foreach ($pair in @(@($GreenDb, $greenDir), @($RedDb, $redDir))) {
-    if (-not (Start-ObInitdb -Name $pair[0] -InitDir $pair[1] -DockerArgs @("--network", $Net))) {
+    if (-not (Start-ObInitdb -Name $pair[0] -InitDir $pair[1] -DockerArgs @("--network", $Net) -Owner $Owner)) {
         Fail "initdb did not complete for $($pair[0]) - nothing below is trustworthy"; throw "initdb"
     }
     $errs = Get-ObInitdbErrors -Name $pair[0]
@@ -424,7 +431,7 @@ else { Fail "$leftovers write-contract probe row(s) survived their ROLLBACK" }
 # ------------------------------------------------------------------------------------------
 Section "through PostgREST - anon role = service_role, the production configuration untouched"
 foreach ($p in @(@($RedRest, $RedDb), @($GrnRest, $GreenDb))) {
-    docker run -d --name $p[0] --network $Net `
+    docker run -d --name $p[0] (Get-HarnessOwnerLabel $Owner) --network $Net `
         -e "PGRST_DB_URI=postgres://postgres:test@$($p[1]):5432/openbrain" `
         -e "PGRST_DB_SCHEMAS=public" `
         -e "PGRST_DB_ANON_ROLE=service_role" `

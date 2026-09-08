@@ -172,6 +172,19 @@ named in the anchor's out-of-scope list. Doing so is a small, well-defined follo
 their leftovers become reapable without touching the existing `finally` at all. Until then
 their droppings are ORPHANS, which `reap.ps1 -Report` lists but never auto-deletes.
 
+> **CORRECTED 2026-09-07 by item `drilllabel`, and the correction matters.** The heading
+> above ("that is still the leak") reads as if these scripts clean up badly. They do not.
+> Surveyed across all six scripts that create persistent resources: three use a `finally`,
+> three use a script-level `trap` calling a `Cleanup` function, and **both constructs run on
+> a normal exit and on an exception**. `drill-mcp-door-not-superuser.ps1` additionally calls
+> `Cleanup` on every one of its ten abort paths.
+>
+> The real gap is structural and applies to all of them equally: **no in-process construct
+> survives the process being killed** - not `finally`, not `trap`, not a `Cleanup` you
+> remembered to call everywhere. A kill is what happened. So the fix is not better teardown,
+> and an item framed as "these scripts are careless" would have been solving the wrong
+> problem. Retrofit landed in item `drilllabel`.
+
 ---
 
 ## 6. ~5 GB of test images remain, by decision
@@ -244,6 +257,49 @@ Networks (both with zero attached containers):
 
 Nothing else was touched. The IMAGES those containers referenced were NOT removed - the
 `:drill-5e705d0f` and `:graphsel` tags remain, per finding 6.
+
+---
+
+## 9. Why the drills use the single-token `--label=k=v` form
+
+> **This finding originally claimed a third PowerShell array behaviour: that an array
+> written INLINE in a native call is space-joined into one argument. That is FALSE, and
+> finding 2 above carries the correction.** Measured on the work line:
+> `& docker create --name x @("--label","k=v") alpine true` exits 0 and applies the label.
+> PowerShell expands a plain inline array into separate arguments for a native command.
+>
+> What actually failed, and produced the wrong diagnosis, was a NESTED array of my own
+> making: a helper returning `,@("--label","k=v")` - the comma-wrap that stops an empty
+> array vanishing - called as `@(Get-Args ...)`, which yields an array CONTAINING an array.
+> A native call flattens that inner array into one space-joined argument,
+> `--label ai-stack.harness.owner=x`, which docker rejects as an unknown flag. One level of
+> self-inflicted nesting, mistaken for a language rule.
+
+So the single-token form is a CHOICE, not a necessity. `lib/harness-owner.ps1` returns
+`--label=k=v` as one argument because it splices inline anywhere without caring how the
+surrounding call is built - the six drills assemble their `docker run` lines very
+differently, several across backtick continuations, and a two-token flag would have meant
+touching each of those constructions. `docker run`, `docker create` and
+`docker network create` all accept it (verified).
+
+The alternative - rewriting each multi-line `docker run -d ... -e ... -e ...` into an args
+array so it could be splatted from a variable - is a large, risky diff to add one label, and
+`docker @args` splatting into an executable is the form that does work (finding 2, row 2 of
+the native cases). Either would have been correct; this one is smaller.
+
+---
+
+## 10. `docker run --rm` does not need a label, and labelling it would be noise
+
+`--rm` sets `AutoRemove` on the container; the DAEMON removes it when it exits, so it
+survives its client being killed and needs no help from a reaper. That is why
+`lib/harness-owner.ps1` states the rule as "persistent creation sites are labelled,
+`--rm` sites are not" rather than labelling everything.
+
+The residual case, stated so nobody reads more into the rule than it carries: a `--rm`
+container whose client is killed while the container is still RUNNING keeps running, and is
+only auto-removed when it eventually exits. For the sites here that is a `curl` finishing in
+seconds. A long-lived `--rm` container would deserve a label after all.
 
 ---
 
