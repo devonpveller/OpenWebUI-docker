@@ -27,9 +27,12 @@
 # owner, and the teardown block prints the actual owner ids and the actual unlabelled names.
 # Read that, not a sentence up here that nobody re-counts.
 #
-# Every fixture name is prefixed `reapv-<pid>-`, so `docker ps -a --filter name=reapv-` finds
-# the lot regardless of labelling - which is the recovery of last resort if this run is
-# killed.
+# MOST fixture names are prefixed `reapv-<pid>-`, and `docker ps -a --filter name=reapv-`
+# finds those. It does NOT find all of them: CASE 7c deliberately names its decoy with
+# another container's 64-hex id, because that is the shadowing it exists to test. A tester
+# caught this sentence claiming "every" on attempt 3 - the third count-or-completeness claim
+# in this header to be wrong, which is why the teardown block below ENUMERATES what was
+# actually made instead of describing it.
 #
 # Usage:
 #   .\verify-reap.ps1                      (exit 0 = every case passed, 1 = something failed)
@@ -82,14 +85,20 @@ function Test-Exists([string]$Kind, [string]$Name) {
     return ($LASTEXITCODE -eq 0)
 }
 
-function Get-FixtureOwner([string[]]$Labels) {
-    # The owner this fixture was created with, or "" if it is one of the deliberately
-    # unlabelled ones. Derived from what was actually passed to docker, so the teardown
-    # report cannot drift from the fixtures the way a hand-maintained list does.
+function Get-FixtureLabelling([string[]]$Labels) {
+    # Returns @{ Labelled = <bool>; Owner = <string> }.
+    #
+    # LABELLED AND OWNER ARE TWO QUESTIONS, and conflating them is the exact bug this item
+    # fixed in reap.ps1 - then reproduced here. `ai-stack.harness.owner=` (empty value) IS
+    # labelled; returning "" for it made the teardown file CASE 7d's fixture under
+    # "unlabelled by design" while CASE 7d itself asserts and proves the opposite. A tester
+    # found the verifier contradicting its own passing case on attempt 3.
     foreach ($l in $Labels) {
-        if ($l -like "ai-stack.harness.owner=*") { return $l.Substring("ai-stack.harness.owner=".Length) }
+        if ($l -like "ai-stack.harness.owner=*") {
+            return @{ Labelled = $true; Owner = $l.Substring("ai-stack.harness.owner=".Length) }
+        }
     }
-    return ""
+    return @{ Labelled = $false; Owner = "" }
 }
 
 function New-TestContainer([string]$Name, [string[]]$Labels, [string]$Network, [string[]]$Command) {
@@ -106,7 +115,8 @@ function New-TestContainer([string]$Name, [string[]]$Labels, [string]$Network, [
     $dockerArgs += $Command
     $null = Docker $dockerArgs
     if ($LASTEXITCODE -ne 0) { throw "could not create test container $Name" }
-    $script:Made += @{ Kind = "container"; Name = $Name; Owner = (Get-FixtureOwner $Labels) }
+    $lab = Get-FixtureLabelling $Labels
+    $script:Made += @{ Kind = "container"; Name = $Name; Labelled = $lab.Labelled; Owner = $lab.Owner }
 }
 
 function New-TestNetwork([string]$Name, [string[]]$Labels) {
@@ -115,7 +125,8 @@ function New-TestNetwork([string]$Name, [string[]]$Labels) {
     $dockerArgs += $Name
     $null = Docker $dockerArgs
     if ($LASTEXITCODE -ne 0) { throw "could not create test network $Name" }
-    $script:Made += @{ Kind = "network"; Name = $Name; Owner = (Get-FixtureOwner $Labels) }
+    $lab = Get-FixtureLabelling $Labels
+    $script:Made += @{ Kind = "network"; Name = $Name; Labelled = $lab.Labelled; Owner = $lab.Owner }
 }
 
 function Invoke-Reap {
@@ -348,6 +359,42 @@ try {
     Check "-RemoveOrphan refuses it" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
     Check "and it survives" (Test-Exists "container" "$tag-emptyowner") "$tag-emptyowner was deleted through the orphan path"
 
+    # --- CASE 7e: docker names are CASE-SENSITIVE, PowerShell comparison is not -----
+    # Found by a tester on attempt 3. `-eq` and `-contains` ignore case, docker does not, and
+    # both spellings can exist at once - so the lookup resolved to whichever row `docker ps`
+    # listed first and the guards were then applied to a resource the caller never named.
+    Write-Host "`nCASE 7e  a name differing only in case is a DIFFERENT resource" -ForegroundColor Cyan
+    New-TestContainer "$tag-case" @("$ownLabel=$OwnerB")          # labelled: must be refused
+    New-TestContainer "$tag-CASE".ToUpper() @()                    # unlabelled: a real orphan
+    $r = Invoke-Reap -Orphan "$tag-case"
+    Check "naming the LABELLED lower-case one is refused" ($r.Code -ne 0) ("exit {0}: {1}" -f $r.Code, $r.Text)
+    Check "the labelled one survives" (Test-Exists "container" "$tag-case") "$tag-case was deleted"
+    Check "and the DIFFERENTLY-CASED one was not touched instead" (Test-Exists "container" "$tag-CASE".ToUpper()) `
+        "the upper-case container was deleted while the lower-case one was named"
+    # And the owner match is case-sensitive too.
+    $r = Invoke-Reap -OwnerId $OwnerB.ToUpper()
+    Check "-Owner with the wrong case reaps nothing" (Test-Exists "container" "$tag-case") `
+        "$tag-case was reaped by an owner id differing only in case"
+
+    # --- CASE 7f: exit 0 is not proof the resource went ------------------------------
+    # `docker container rm --force <missing id>` prints an error and EXITS 0 on this daemon.
+    # Remove-Resource trusted the exit code, so a delete that removed nothing reported
+    # "removed" - and that line is the only evidence anyone reads. Measured on attempt 3.
+    Write-Host "`nCASE 7f  a delete that removes nothing is not reported as success" -ForegroundColor Cyan
+    $missing = "0000000000000000000000000000000000000000000000000000000000000000"
+    $null = Docker @("container", "rm", "--force", $missing)
+    Check "docker really does exit 0 on a missing container (the case is not vacuous)" `
+        ($LASTEXITCODE -eq 0) ("docker exited {0} - this daemon differs; the guard is still correct" -f $LASTEXITCODE)
+    # An ambiguous name must be refused rather than resolved by list order.
+    New-TestContainer "$tag-dual" @()
+    New-TestNetwork "$tag-dual" @()
+    $r = Invoke-Reap -Orphan "$tag-dual"
+    Check "a name shared by a container and a network is refused as AMBIGUOUS" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
+    Assert-NonEmpty "the CASE 7f ambiguity refusal" $r.Text
+    Check "the refusal offers ids to disambiguate with" ($r.Text -match "AMBIGUOUS") $r.Text
+    Check "both survive" ((Test-Exists "container" "$tag-dual") -and (Test-Exists "network" "$tag-dual")) `
+        "one of the $tag-dual pair was removed"
+
     # --- CASE 8: an unreachable daemon is loud, not silently clean -----------------
     Write-Host "`nCASE 8  an unreachable daemon exits 4 and says so" -ForegroundColor Cyan
     $prevHost = $env:DOCKER_HOST
@@ -382,9 +429,13 @@ finally {
         # earlier version hardcoded one owner id while the fixtures used three, and read as
         # a complete recovery instruction while leaving two owners' resources behind.
         $owners = @($script:Made | Where-Object { $_.Owner } | ForEach-Object { $_.Owner } | Select-Object -Unique | Sort-Object)
-        $bare = @($script:Made | Where-Object { -not $_.Owner } | ForEach-Object { $_.Name })
-        Write-Host ("  Labelled ({0} owner id(s)): {1}" -f $owners.Count,
+        $bare   = @($script:Made | Where-Object { -not $_.Labelled } | ForEach-Object { $_.Name })
+        $emptyv = @($script:Made | Where-Object { $_.Labelled -and -not $_.Owner } | ForEach-Object { $_.Name })
+        Write-Host ("  Labelled, reapable ({0} owner id(s)): {1}" -f $owners.Count,
                     (($owners | ForEach-Object { "reap.ps1 -Owner $_" }) -join " ; ")) -ForegroundColor Yellow
+        if ($emptyv.Count) {
+            Write-Host ("  Labelled with an EMPTY owner ({0}) - no -Owner reaches these: {1}" -f $emptyv.Count, ($emptyv -join ", ")) -ForegroundColor Yellow
+        }
         Write-Host ("  Unlabelled by design ({0}): {1}" -f $bare.Count, ($bare -join ", ")) -ForegroundColor Yellow
         Write-Host ("      docker ps -a --filter name={0} -q | ForEach-Object {{ docker rm -f `$_ }}" -f $tag) -ForegroundColor Yellow
     } else {

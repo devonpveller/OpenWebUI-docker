@@ -198,9 +198,16 @@ having to remember to look for it.
 
 The other ten leftovers map to a drill script by name prefix. `bundlegen`
 (`openbrain-wiki-viewer:graphsel`, never started, 10 days old) and `amtest`
-(`pgvector/pgvector:pg16`, 9 days old) do not: a grep over `scripts/` and `documentation/`
-for either name returns nothing. They were hand-run, by a person or an agent working
-interactively, and nothing in the repository records why.
+(`pgvector/pgvector:pg16`, 9 days old) do not: **as of 2026-09-07, before this item was
+written**, a grep over `scripts/` and `documentation/` for either name returned nothing.
+They were hand-run, by a person or an agent working interactively, and nothing in the
+repository recorded why.
+
+> The measurement no longer reproduces, and that is this item's own doing: the names now
+> appear in this note, in `documentation/evidence/reap/test-plan.md` and in
+> `scripts/agent-harness/README.md`. A tester flagged the bare claim on attempt 3. The
+> SUBSTANCE - no script creates them - still holds; re-check it by excluding the files this
+> item added.
 
 That is the case the ownership label is for, and also the case where an orphan must never
 be auto-deleted - which is why `-RemoveOrphan` requires the name to be typed.
@@ -281,3 +288,49 @@ Use `Out-String -Width <n>` with a width larger than any line you care about (th
 scripts print well under 200 columns), or match against the array of lines before joining
 them. It sits beside finding 1: those are the two ways a text assertion silently stops
 meaning what it says.
+
+---
+
+## 13. PowerShell compares strings case-INSENSITIVELY; docker is case-SENSITIVE
+
+`-eq`, `-ne`, `-contains` and `-like` all ignore case by default. Docker resource names and
+label values do not. Both spellings can exist at once. Measured 2026-09-07:
+
+```
+'atk-case' -eq 'ATK-CASE'   -> True
+@('t4c') -contains 'T4C'    -> True
+docker create --name atk-case ... ; docker create --name ATK-CASE ...   -> both exit 0
+```
+
+So a script that looks a resource up by name with `-eq` resolves to **whichever docker
+listed first**, not to the one the caller named. In `reap.ps1` that meant `-RemoveOrphan`
+picked the wrong row and then evaluated its safety guards against it: a tester named the
+labelled `t12-owned` and watched the unlabelled `T12-OWNED` be deleted, exit 0, no refusal.
+Reversing the creation order produced the opposite outcome, a refusal citing an owner that
+belonged to a different container.
+
+The case-sensitive operators are `-ceq`, `-cne`, `-ccontains`, `-clike`. `reap.ps1` now uses
+those for every name and owner comparison. **Any script here that matches a docker name,
+image tag or label value with a bare `-eq` has this bug**; the operators look identical at a
+glance, which is what makes it worth writing down.
+
+---
+
+## 14. `docker rm --force` EXITS 0 when the resource does not exist
+
+Measured 2026-09-07 on this daemon:
+
+```
+docker container rm --force 0000...0000
+  Error response from daemon: No such container: 0000...0000     (on stderr)
+  exit code: 0
+```
+
+So `$LASTEXITCODE -eq 0` after a delete means "docker had no objection", NOT "the resource
+is gone". `reap.ps1` trusted it and printed `removed` for a delete that removed nothing -
+and that printed line is the only evidence anyone reads afterwards. It now re-inspects by id
+and reports a failure if the resource is still there.
+
+Note the interaction with finding 1: the error text goes to STDERR, so a caller that
+captured only stdout would see neither the message nor a non-zero exit. Two independent
+signals, both absent.

@@ -204,8 +204,8 @@ failure mode the script was rewritten to prevent.
 
 ## T8 - the verifier is not vacuous
 
-Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`49 passed, 0 failed`**
-(measured 2026-09-07, attempt 3). If the total differs, do not stop at the number -
+Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`58 passed, 0 failed`**
+(measured 2026-09-07, attempt 4). If the total differs, do not stop at the number -
 check WHICH assertions ran and whether any is missing; a count is a weak assertion and
 this repo has a record of hardcoded ones going stale
 (`documentation/notes/u4quad-findings.md:342`). A different total with every case
@@ -222,12 +222,12 @@ original and delete it afterwards.
 Seed A - remove the compose guard in `Get-Inventory`:
 
 ```powershell
-(Get-Content reap.ps1) -replace 'if \(\$compose -contains \$name\) \{ \$protection = "compose-managed - deleting it is a deploy, not a cleanup" \}', 'if ($false) { $protection = "x" }' |
+(Get-Content reap.ps1) -replace 'if \(\$compose -contains \$id\) \{ \$protection = "compose-managed - deleting it is a deploy, not a cleanup" \}', 'if ($false) { $protection = "x" }' |
   Set-Content reap.red-guard.ps1 -Encoding ascii
 .\verify-reap.ps1 -Script .\reap.red-guard.ps1
 ```
 
-Expect **42 passed, 7 failed** (2026-09-07, attempt 3) - the CASE 3, CASE 4 and CASE 7
+Expect **51 passed, 7 failed** (2026-09-07, attempt 4) - the CASE 3, CASE 4 and CASE 7
 compose assertions. What matters is WHICH, not the total.
 
 Seed B - narrow `Get-OwnerAliases` to the bare id:
@@ -238,7 +238,7 @@ Seed B - narrow `Get-OwnerAliases` to the bare id:
 .\verify-reap.ps1 -Script .\reap.red-alias.ps1
 ```
 
-Expect **48 passed, 1 failed** (2026-09-07, attempt 3) - CASE 2 alone.
+Expect **57 passed, 1 failed** (2026-09-07, attempt 4) - CASE 2 alone.
 
 Seed C - revert the delete to being aimed by NAME instead of by id:
 
@@ -248,8 +248,8 @@ Seed C - revert the delete to being aimed by NAME instead of by id:
 .\verify-reap.ps1 -Script .\reap.red-byname.ps1
 ```
 
-Expect **47 passed, 2 failed** - both CASE 7c assertions, and read them: the VICTIM
-is destroyed and the decoy survives. That is the production-deletion behaviour this
+Expect **55 passed, 3 failed** (2026-09-07, attempt 4) - the CASE 7c assertions plus
+the CASE 7f ambiguity check, and read them: the VICTIM is destroyed and the decoy survives. That is the production-deletion behaviour this
 guard exists to stop, reproduced on throwaway fixtures.
 
 PASS = green on the real script, and both seeds fail exactly the cases named above.
@@ -266,7 +266,12 @@ them; a figure that does not reproduce is a FAIL of this case, not a rounding no
   (The 44 will drift as queue rows are added - what must hold is **0 versus
   non-zero**. Check the sign of the claim, not the digit.)
 - Finding 2 is a FOUR-ROW TABLE and every row is a separate measurement. Run all four
-  against `param([CmdletBinding()] [string]$Owner="", [string]$RemoveOrphan="")`:
+  against the probe script the note QUOTES, which has the attribute ABOVE `param(...)`:
+  `[CmdletBinding()] param([string]$Owner="",[string]$RemoveOrphan="")`. Writing it as
+  `param([CmdletBinding()] [string]$Owner...)` puts the attribute on the parameter instead
+  of the script and row 1 then returns `Owner=[-Owner x]` rather than failing - an earlier
+  version of this bullet said exactly that, and following it literally would have produced
+  a false failure. Rows to check:
   the inline array literal `& $s @("-Owner","x")` (NOT a splat - fails the string
   cast); `$a=@("-Owner","x"); & $s @a` (splat a variable - `Owner=[-Owner]
   RemoveOrphan=[x]`, the trap); `& $s @{Owner="x"}` (inline hashtable, NOT a splat -
@@ -346,6 +351,21 @@ Check each of these against what the code actually does:
   exist reads as complete and is not.
 - `README.md`'s rows for `reap.ps1` and `verify-reap.ps1`, and the "Label what you
   create" section, must describe the behaviour the code has.
+- **`documentation/implementation-guide/multi-agent-concurrency/PLAN.md` section 4.2**,
+  which this change rewrote. Earlier attempts left it carrying a hardcoded verifier
+  count that was stale within a day - inside the clause warning against hardcoded
+  counts. It was omitted from this case's list until attempt 3, which is how it
+  survived; check it now.
+- `MERGE-PROTOCOL.md`'s labelling rule.
+
+**Enumerate the surfaces yourself before checking them.** Every attempt so far has
+failed a claim on a surface the previous list did not name. `grep -rn "verify-reap\|
+reap.ps1" scripts/agent-harness/*.md documentation/` finds them; a claim on a surface
+missing from this list is still a FAIL of this case.
+
+The recurring shape, so you know what to look for: a COUNT ("three fixtures", "37
+passed") or a COMPLETENESS word ("every fixture name is prefixed", "returns nothing")
+that was true when written and is not checked by anything. Prefer to distrust those.
 
 PASS = every claim checks out against the code.
 FAIL = any statement about the change's own behaviour that the code contradicts.
@@ -407,6 +427,60 @@ unlabelled leftovers, and a resource carrying the key with an empty value is lab
 just badly.
 
 Clean up: `docker rm -f t16-empty`.
+
+## T17 - a name differing only in case is a DIFFERENT resource
+
+PowerShell compares strings case-insensitively; docker names are case-sensitive and
+both spellings can coexist. `-RemoveOrphan` used to resolve to whichever docker listed
+first and then apply its guards to a resource the caller never named.
+
+```powershell
+docker create --name t17-x --label ai-stack.harness.owner=t17-owner alpine:3.21 true
+docker create --name T17-X alpine:3.21 true
+.\scripts\agent-harness\reap.ps1 -RemoveOrphan t17-x
+docker ps -a --format '{{.Names}}' | Select-String -CaseSensitive 't17-x|T17-X'
+```
+
+PASS = refused (it is labelled, hence not an orphan), non-zero exit, and **both**
+containers survive.
+FAIL = either is deleted. Deleting `T17-X` while `t17-x` was named is the defect;
+deleting `t17-x` means the not-an-orphan guard did not fire.
+
+Then run it the other way round - create `T17-X` first - and confirm the outcome is the
+same. It used to depend on `docker ps -a` ordering.
+
+Also check the owner match: `.\reap.ps1 -Owner T17-OWNER` must reap nothing, since the
+label value is `t17-owner`.
+
+Clean up: `docker rm -f t17-x T17-X`.
+
+## T18 - a delete that removes nothing is not reported as success
+
+`docker container rm --force <missing id>` prints an error and **exits 0** on this
+daemon. Confirm that first, because if your daemon differs the rest of the case reads
+differently:
+
+```powershell
+docker container rm --force 0000000000000000000000000000000000000000000000000000000000000000
+$LASTEXITCODE      # expect 0, with an error on stderr
+```
+
+Then the ambiguity path, which is where a false success actually surfaced:
+
+```powershell
+docker create --name t18-dual alpine:3.21 true
+docker network create t18-dual
+.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String -Width 250
+.\scripts\agent-harness\reap.ps1 -RemoveOrphan t18-dual
+```
+
+PASS = the `-RemoveOrphan` hint in the report does not name `t18-dual` twice (it should
+print ids where a name is ambiguous), the removal call refuses it as AMBIGUOUS with a
+non-zero exit and offers the ids, and **both** the container and the network survive.
+FAIL = `removed` is printed twice for one delete, or either resource goes, or the hint
+as printed cannot be pasted and run correctly.
+
+Clean up: `docker rm -f t18-dual; docker network rm t18-dual`.
 
 ## What is deliberately NOT in scope
 

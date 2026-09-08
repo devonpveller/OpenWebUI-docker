@@ -217,9 +217,10 @@ and editing the conf.
   worktree. A label outlives whatever killed its creator, so cleanup needs no
   cooperation from the thing being cleaned up. Compose-managed resources, images and
   volumes are never touched, and unlabelled leftovers are reported, never auto-deleted.
-  Proof: `scripts/agent-harness/verify-reap.ps1` - run it for the count rather than
-  trusting one written here (37 passed / 0 failed on 2026-09-07; `u4quad-findings.md`
-  records the same doc going stale on a hardcoded check count twice).
+  Proof: `scripts/agent-harness/verify-reap.ps1` - **run it for the count; no number is
+  written here on purpose.** This sentence carried one (`37 passed`) and was stale within
+  a day, in the very clause warning against hardcoded counts, and `u4quad-findings.md:342`
+  records the same doc going stale twice before that.
 - **Contention on hot planes is physics.** A 25-min wiki build holds `open-brain`
   for 25 min; cloning couldn't have parallelized the GPU or the vault either.
   `-TtlMin` + `-Refresh` handle long holds.

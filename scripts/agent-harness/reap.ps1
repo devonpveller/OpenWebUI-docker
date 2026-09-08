@@ -256,6 +256,12 @@ function Get-NetworkAttachedCount([string]$Id) {
     return -1
 }
 
+function Test-ResourceGone($Row) {
+    if ($Row.Kind -eq "container") { $null = Invoke-DockerCapture @("inspect", "--type", "container", $Row.Id) }
+    else { $null = Invoke-DockerCapture @("network", "inspect", $Row.Id) }
+    return ($LASTEXITCODE -ne 0)
+}
+
 function Remove-Resource($Row) {
     # Returns "" on success or the failure text. Never throws: one stuck resource must not
     # abandon the rest of the sweep.
@@ -263,6 +269,15 @@ function Remove-Resource($Row) {
     if ($Row.Kind -eq "container") { $out = Invoke-DockerCapture @("rm", "-f", $Row.Id) }
     else { $out = Invoke-DockerCapture @("network", "rm", $Row.Id) }
     if ($LASTEXITCODE -ne 0) { return (($out -join " ").Trim()) }
+    # EXIT 0 IS NOT PROOF IT WENT. Measured 2026-09-07 on this daemon:
+    # `docker container rm --force <id that does not exist>` prints
+    # "Error response from daemon: No such container: ..." to stderr AND EXITS 0. Trusting
+    # the exit code alone made this function report "removed" for a resource it had not
+    # touched - and the report line is the only evidence anyone reads afterwards. Found by a
+    # tester on attempt 3, where one ambiguous name printed "removed" twice for one delete.
+    if (-not (Test-ResourceGone $Row)) {
+        return ("docker exited 0 but the {0} is still there: {1}" -f $Row.Kind, (($out -join " ").Trim()))
+    }
     return ""
 }
 
@@ -316,8 +331,28 @@ if ($RemoveOrphan) {
     $wanted = @($RemoveOrphan.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $failed = 0
     foreach ($name in $wanted) {
-        $row = @($resources | Where-Object { $_.Name -eq $name }) | Select-Object -First 1
-        if (-not $row) { Say ("    not found: {0}" -f $name) Yellow; continue }
+        # -ceq, CASE-SENSITIVE, and every match considered rather than the first.
+        #
+        # POWERSHELL COMPARES STRINGS CASE-INSENSITIVELY; DOCKER NAMES ARE CASE-SENSITIVE.
+        # Both `atk-case` and `ATK-CASE` can exist at once (measured 2026-09-07), and `-eq`
+        # matched whichever `docker ps -a` happened to list first. So this resolved to a row
+        # the caller had not named, and BOTH guards below were then evaluated against the
+        # wrong resource: a tester deleted an unlabelled `T12-OWNED` while naming the
+        # labelled `t12-owned`, exit 0, no refusal - and in the other creation order got a
+        # refusal citing an owner belonging to a different container. Found on attempt 3.
+        #
+        # A name can also be ambiguous ACROSS KINDS - a container and a network may share
+        # one - so an ambiguous name is refused and its ids printed rather than resolved by
+        # list order. An id may be given instead of a name, which is never ambiguous.
+        $matched = @($resources | Where-Object { $_.Name -ceq $name -or $_.Id -ceq $name -or $_.Id.StartsWith($name) })
+        if (-not $matched.Count) { Say ("    not found: {0}" -f $name) Yellow; continue }
+        if ($matched.Count -gt 1) {
+            Write-Host ("    AMBIGUOUS {0} - {1} resources share that name. Name one of these ids instead:" -f $name, $matched.Count) -ForegroundColor Red
+            foreach ($m in $matched) { Write-Host ("        {0,-9} {1}" -f $m.Kind, $m.Id) -ForegroundColor Red }
+            $failed++
+            continue
+        }
+        $row = $matched[0]
         # AN ORPHAN IS UNLABELLED. This flag is documented, here and in README.md, as the way
         # to remove leftovers that carry no owner - and it used to remove ANY named resource
         # the compose guard allowed, including a live fixture belonging to another worktree.
@@ -345,7 +380,10 @@ if ($Owner) {
     # the thing worth shouting about, and selecting on Bucket -eq "owned" would have skipped
     # it silently and exited 0. The report's buckets partition for COUNTING; this is
     # selection for ACTING, and they are different questions.
-    $mine = @($resources | Where-Object { $_.Labelled -and $_.OwnerId -and ($aliases -contains $_.OwnerId) })
+    # -ccontains, CASE-SENSITIVE: `-Owner T4C` used to reap a container labelled `t4c`,
+    # which contradicts "deletes exactly the resources labelled with the owner you asked
+    # for". Same PowerShell-vs-docker mismatch the -RemoveOrphan lookup had.
+    $mine = @($resources | Where-Object { $_.Labelled -and $_.OwnerId -and ($aliases -ccontains $_.OwnerId) })
     if (-not $mine.Count) {
         Say ("Reap {0}: nothing labelled {1}={2}." -f $Owner, $OwnerLabel, ($aliases -join "|")) Green
         exit 0
@@ -398,7 +436,15 @@ foreach ($row in $orphans) {
 }
 if ($orphans.Count) {
     Write-Host ""
-    Write-Host ("  Remove them deliberately:  .\reap.ps1 -RemoveOrphan {0}" -f (($orphans | ForEach-Object { $_.Name }) -join ",")) -ForegroundColor Gray
+    # A name that is not unique across the inventory is printed as an ID instead. Names can
+    # collide between a container and a network, and the hint used to emit such a name TWICE
+    # - and running the hint verbatim then reported "removed" twice for one delete. The hint
+    # has to be a command that does the right thing when pasted, or it should not be printed.
+    $hint = foreach ($row in $orphans) {
+        $clash = @($resources | Where-Object { $_.Name -ceq $row.Name })
+        if ($clash.Count -gt 1) { $row.Id } else { $row.Name }
+    }
+    Write-Host ("  Remove them deliberately:  .\reap.ps1 -RemoveOrphan {0}" -f ($hint -join ",")) -ForegroundColor Gray
 }
 
 # The protected count is printed rather than the list: it is the number this script REFUSED
