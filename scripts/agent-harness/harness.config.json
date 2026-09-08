@@ -442,7 +442,7 @@
       "outlives the script, an `finally` block does not.",
       "WHICH KINDS get reaped (containers and networks, never images or volumes) is",
       "deliberately NOT a key here. Widening it should be a code change that shows up in",
-      "a diff and passes a reviewer, the same reasoning common.ps1 records for",
+      "a diff and passes a reviewer, the same reasoning config.ps1 records for",
       "$script:RequiredAndonConditions."
     ],
     "owner_label": "ai-stack.harness.owner"

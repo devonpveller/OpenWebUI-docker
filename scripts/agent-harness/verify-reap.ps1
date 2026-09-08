@@ -2,8 +2,15 @@
 #
 # WHY THIS EXISTS AS A SCRIPT. A reaper is a delete button pointed at a live daemon, and
 # the only convincing evidence that it is aimed correctly is a run where the wrong thing
-# was RIGHT THERE and survived. So every case below builds the thing that must not be
-# deleted, next to the thing that must, and checks both afterwards.
+# was RIGHT THERE and survived. So WHEREVER A CASE IS ABOUT WHAT GETS DELETED, it builds the
+# thing that must not go beside the thing that must, and checks both afterwards.
+#
+# Not every case is about that, and this sentence used to say "every case" - the sixth
+# completeness word in this change to be wrong, caught by the fifth tester, four lines above
+# the paragraph explaining why this header stopped making them. CASE 4 reads the live stack
+# and builds nothing; CASE 8 takes the daemon away; CASE 9 asks about an owner that does not
+# exist; CASE 7f builds a pair where BOTH must survive. If you are checking this claim,
+# `Select-String "New-Test" -Context` over each case body is the way.
 #
 # IT NEVER TOUCHES A PLANE. Every resource it creates is a stopped `alpine` container or an
 # empty bridge network with a `reapv-` name, on no plane network, using no prod
@@ -451,8 +458,19 @@ finally {
         # twice with no way to tell which was which. It is the same ambiguous-name defect
         # this item had just fixed in reap.ps1's own hint and did not carry across.
         Write-Host "  Or remove them one by one - names are case-sensitive and networks are not containers:" -ForegroundColor Yellow
+        # BY ID where the fixture's NAME is another container's id - CASE 7c creates exactly
+        # that, and `docker rm -f <the decoy's name>` resolves to the VICTIM. The subject of
+        # this drill was fixed for that on attempt 2; the drill's own recovery hint was not,
+        # and printed a command aimed at the wrong container. Same sibling-path shape, found
+        # on attempt 5.
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) {
-            Write-Host ("      docker rm -f {0}" -f $m.Name) -ForegroundColor Yellow
+            $ref = $m.Name
+            if ($m.Name -match '^[0-9a-f]{64}$') {
+                $own = ([string]((Docker @("ps", "-a", "--no-trunc", "--filter", "name=^$($m.Name)$", "--format", "{{.ID}}")) | Select-Object -First 1)).Trim()
+                if ($own) { $ref = $own }
+                Write-Host  "      # next one is named with another container's id - removing by ID:" -ForegroundColor Yellow
+            }
+            Write-Host ("      docker rm -f {0}" -f $ref) -ForegroundColor Yellow
         }
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "network" })) {
             Write-Host ("      docker network rm {0}" -f $m.Name) -ForegroundColor Yellow

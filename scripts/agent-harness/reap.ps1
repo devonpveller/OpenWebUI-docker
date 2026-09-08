@@ -339,6 +339,18 @@ if (-not $Owner -and -not $Report -and -not $RemoveOrphan) {
     Write-Host "ERROR: pass -Owner <id>, -Report, or -RemoveOrphan <names>" -ForegroundColor Red
     exit 1
 }
+# THE MODES ARE EXCLUSIVE, and saying so out loud closes a silent half-job. `-RemoveOrphan
+# a b` (spaces, not commas) binds `a` to -RemoveOrphan and `b` POSITIONALLY to -Owner, so
+# the run removed one orphan, reaped a different owner, and exited 0 - reporting success for
+# a command that did something other than what was typed. Found by a tester on attempt 5.
+if (($Owner -and $RemoveOrphan) -or ($Owner -and $Report) -or ($RemoveOrphan -and $Report)) {
+    Write-Host "ERROR: -Owner, -Report and -RemoveOrphan are separate modes - pass exactly one." -ForegroundColor Red
+    Write-Host ("       Got: {0}{1}{2}" -f $(if ($Owner) { "-Owner $Owner  " } else { "" }),
+                                          $(if ($Report) { "-Report  " } else { "" }),
+                                          $(if ($RemoveOrphan) { "-RemoveOrphan $($RemoveOrphan -join ',')" } else { "" })) -ForegroundColor Red
+    Write-Host  "       A space-separated list binds its second name to -Owner; use commas: -RemoveOrphan a,b" -ForegroundColor Red
+    exit 1
+}
 if (-not (Test-DockerReachable)) {
     Say "NOTE: the docker daemon is not reachable - nothing was reaped and nothing was lost." Yellow
     Say "      Re-run reap.ps1 with the same arguments once it is up." Yellow
@@ -388,7 +400,16 @@ if ($RemoveOrphan) {
         # costs a labelled resource's owner nothing (they have -Owner) and stops one agent
         # deleting another's running test by name.
         if ($row.Labelled) {
-            Write-Host ("    REFUSED {0} - not an orphan: it belongs to '{1}'. Reap it with -Owner {1}" -f $name, $(if ($row.OwnerId) { $row.OwnerId } else { "<empty owner - remove it by hand>" })) -ForegroundColor Red
+            # Two different refusals, because they need two different next steps. A resource
+            # with a real owner is reaped with -Owner; one carrying the key with an EMPTY
+            # value is reachable by no -Owner at all, so telling the reader to run
+            # `-Owner <empty owner - remove it by hand>` is a command that cannot be typed.
+            if ($row.OwnerId) {
+                Write-Host ("    REFUSED {0} - not an orphan: it belongs to '{1}'. Reap it with:  .\reap.ps1 -Owner {1}" -f $name, $row.OwnerId) -ForegroundColor Red
+            } else {
+                Write-Host ("    REFUSED {0} - labelled {1} with an EMPTY value, so no -Owner reaches it." -f $name, $OwnerLabel) -ForegroundColor Red
+                Write-Host ("              Remove it by hand:  docker {0} rm {1}{2}" -f $(if ($row.Kind -eq "container") { "container" } else { "network" }), $(if ($row.Kind -eq "container") { "-f " } else { "" }), $row.Id) -ForegroundColor Red
+            }
             $failed++
             continue
         }

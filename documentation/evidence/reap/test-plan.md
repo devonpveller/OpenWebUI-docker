@@ -165,10 +165,23 @@ Clean up: `docker rm -f t5-owned t5-orphan t5-both`.
 
 ## T6 - a REFUSED worktree removal reaps nothing
 
+**Worktrees land under the MAIN checkout, not under yours.** From `wt-reap`,
+`.claude\worktrees` does not exist, so a relative path here silently does the wrong
+thing: an earlier version of T6 wrote its dirty file to a path that errored (so the
+worktree was never dirtied and the refusal being tested could not fire), and T7's
+`Test-Path .claude\worktrees\wt-t7 # MUST be False` passed *before the worktree was
+ever created* - a check that passes while checking nothing, in the plan. Resolve the
+path from git first and use `$WT` in every case below:
+
+```powershell
+$WT = Join-Path (Split-Path -Parent (git rev-parse --path-format=absolute --git-common-dir)) ".claude\worktrees"
+Test-Path $WT      # sanity: MUST be True before you rely on it
+```
+
 ```powershell
 .\scripts\agent-harness\new-worktree.ps1 -Id t6
 docker create --name t6-c --label ai-stack.harness.owner=t6 alpine:3.21 true
-Set-Content .claude\worktrees\wt-t6\DIRTY.txt "x"
+Set-Content (Join-Path $WT "wt-t6\DIRTY.txt") "x"
 .\scripts\agent-harness\remove-worktree.ps1 -Id t6           # must REFUSE, exit 2
 docker inspect --type container t6-c --format '{{.Name}}'    # must still exist
 .\scripts\agent-harness\remove-worktree.ps1 -Id t6 -WhatIfOnly   # previews the reap
@@ -191,7 +204,7 @@ $env:DOCKER_HOST = "tcp://127.0.0.1:1"
 .\scripts\agent-harness\remove-worktree.ps1 -Id t7
 $LASTEXITCODE                    # MUST be 0
 Remove-Item Env:\DOCKER_HOST
-Test-Path .claude\worktrees\wt-t7    # MUST be False
+Test-Path (Join-Path $WT "wt-t7")    # MUST be False - confirm it was TRUE first
 ```
 
 PASS = exit 0, the worktree is gone, and the output says out loud that reap exited 4
@@ -219,7 +232,7 @@ $noDocker = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Docker' }) -joi
 $sc = "`$env:PATH='$noDocker'; & '<abs path>\remove-worktree.ps1' -Id t7b; exit `$LASTEXITCODE"
 powershell -NoProfile -Command $sc
 $LASTEXITCODE                                  # MUST be 0
-Test-Path .claude\worktrees\wt-t7b             # MUST be False
+Test-Path (Join-Path $WT "wt-t7b")             # MUST be False - confirm it was TRUE first
 git branch --list work/t7b                     # MUST be empty
 ```
 
@@ -540,6 +553,10 @@ For each changed file, say which case checks it. Four were uncovered as of attem
 them carried a claim the code contradicted (`MODULE.md` called `reap.ps1` "the ONLY
 script here that deletes anything outside git" while `verify-reap.ps1`, in the row
 below, deletes docker resources).
+
+Work only from what `git diff` returns. `scripts/checks/lib/harness-owner.ps1` is NOT
+on this branch - it belongs to `work/drilllabel`, a separate item - and an earlier
+version of this case named it, which is not checkable here.
 
 Check at minimum:
 - `MODULE.md`'s rows for `reap.ps1` and `verify-reap.ps1` describe what the code does.
