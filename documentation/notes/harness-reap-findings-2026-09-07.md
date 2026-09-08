@@ -56,26 +56,43 @@ were not searched.
 
 ## 2. Array splatting into a PowerShell SCRIPT binds POSITIONALLY, not by name
 
-```powershell
-& $script @("-Owner", "x")
-```
+> **CORRECTED 2026-09-07 after a tester failed this section.** The first version of this
+> finding illustrated it with `& $script @("-Owner", "x")` and attributed the measured
+> output to that line. **That line is not splatting at all.** `@( ... )` after a command
+> is the array SUBEXPRESSION operator producing one array-valued argument; only
+> `@variableName` splats. The measurement was real but was taken with a variable, and the
+> snippet beside it was not the thing measured - so anyone pasting the note's own example
+> got a different result. The corrected table below was re-measured line by line.
 
-does not set `-Owner`. It sets the first positional parameter to the literal string
-`"-Owner"` and the second to `"x"`.
+Four forms, and they do four different things. Measured 2026-09-07 against a script
+declaring `param([CmdletBinding()] [string]$Owner="", [string]$RemoveOrphan="")`:
 
-**Measured 2026-09-07:** a script declaring `param([string]$Owner, [string]$RemoveOrphan)`
-invoked that way printed `Owner=[-Owner] RemoveOrphan=[x]`.
+| What you write | What the script receives |
+|---|---|
+| `& $s @("-Owner","x")` — inline array LITERAL, not a splat | one array-valued argument for `$Owner`; with `[string]$Owner` it fails the cast: `Cannot process argument transformation on parameter 'Owner'` |
+| `$a = @("-Owner","x"); & $s @a` — splat a VARIABLE | `Owner=[-Owner] RemoveOrphan=[x]` — **binds POSITIONALLY; this is the trap** |
+| `& $s @{Owner="x"}` — inline hashtable LITERAL, not a splat | `Owner=[System.Collections.Hashtable] RemoveOrphan=[]` |
+| `$h = @{Owner="x"}; & $s @h` — splat a HASHTABLE VARIABLE | `Owner=[x] RemoveOrphan=[]` — **the only form that binds by name** |
+
+So the rule is not "arrays bad, hashtables good". It is: **splatting requires a variable,
+and only the hashtable form carries parameter NAMES.** An array splat passes values in
+order, and a leading `"-Owner"` is just the first value - which is why it lands in the
+first positional parameter instead of naming it.
 
 Consequence in this item: `verify-reap.ps1` spent its first run silently exercising
 `-RemoveOrphan` in every case that claimed to test `-Owner`. Fixed there by naming the
-parameters explicitly.
+parameters explicitly at each call site.
 
-**Hashtable splatting is unaffected** - `@{ Owner = "x" }` binds by name correctly, which
-is why `observe-oracle-on-stall.ps1` (a `[hashtable]$QArgs`) does not have this bug.
+`observe-oracle-on-stall.ps1` does NOT have this bug: its `$QArgs` is a `[hashtable]` and
+it splats the variable (`& $queue @QArgs`), which is row 4 above.
+
 Splatting an array into a native **.exe** is also fine: each element becomes one
 command-line argument, which is the intent at `drill-dark-factory.ps1:195`,
 `gate-audit.ps1:123`, `check-ob1-integration-images.ps1:188`, `dfu-done.ps1:292` and
-`verify-dfu-done.ps1:100`. Those five were checked and are correct as written.
+`verify-dfu-done.ps1:100`. Those five were checked and are correct as written. Note that an
+array appearing INLINE in a native call (not splatted from a variable) is different again:
+`& docker create --name x @("--label","k=v") alpine true` space-joins the elements into ONE
+argument and docker rejects it as `unknown flag: --label ai-stack.harness.owner`.
 
 No other in-repo instance of array-splatting into a `.ps1` was found.
 

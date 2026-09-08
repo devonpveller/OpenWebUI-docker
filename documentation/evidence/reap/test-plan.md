@@ -183,7 +183,12 @@ failure mode the script was rewritten to prevent.
 
 ## T8 - the verifier is not vacuous
 
-Run `.\scripts\agent-harness\verify-reap.ps1`. It must print `33 passed, 0 failed`.
+Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`37 passed, 0 failed`**
+(measured 2026-09-07, attempt 2). If the total differs, do not stop at the number -
+check WHICH assertions ran and whether any is missing; a count is a weak assertion and
+this repo has a record of hardcoded ones going stale
+(`documentation/notes/u4quad-findings.md:342`). A different total with every case
+present is a note; a missing case is a finding.
 
 Then break the subject deliberately and confirm the verifier goes RED. A verifier that
 passes against a broken reaper is worth nothing, and `-Script <path>` exists for this.
@@ -201,8 +206,9 @@ Seed A - remove the compose guard in `Get-Inventory`:
 .\verify-reap.ps1 -Script .\reap.red-guard.ps1
 ```
 
-Expect **27 passed, 6 failed** - the two CASE 3 assertions, the two CASE 4 leak
-assertions, and both CASE 7 assertions.
+Expect **31 passed, 6 failed** (2026-09-07): the two CASE 3 assertions, the two
+CASE 4 leak assertions, and both CASE 7 assertions. What matters is WHICH six, not the
+total.
 
 Seed B - narrow `Get-OwnerAliases` to the bare id:
 
@@ -212,7 +218,7 @@ Seed B - narrow `Get-OwnerAliases` to the bare id:
 .\verify-reap.ps1 -Script .\reap.red-alias.ps1
 ```
 
-Expect **32 passed, 1 failed** - CASE 2 alone.
+Expect **36 passed, 1 failed** (2026-09-07) - CASE 2 alone.
 
 PASS = green on the real script, and both seeds fail exactly the cases named above.
 FAIL = a seed that stays green (the verifier does not actually test that behaviour),
@@ -227,8 +233,18 @@ them; a figure that does not reproduce is a FAIL of this case, not a rounding no
 - Finding 1: `@(& queue.ps1 -List 2>&1)` gives 0 lines and `2>&1 6>&1` gives 44.
   (The 44 will drift as queue rows are added - what must hold is **0 versus
   non-zero**. Check the sign of the claim, not the digit.)
-- Finding 2: a script with `param([string]$Owner,[string]$RemoveOrphan)` invoked as
-  `& $s @("-Owner","x")` reports `Owner=[-Owner] RemoveOrphan=[x]`.
+- Finding 2 is a FOUR-ROW TABLE and every row is a separate measurement. Run all four
+  against `param([CmdletBinding()] [string]$Owner="", [string]$RemoveOrphan="")`:
+  the inline array literal `& $s @("-Owner","x")` (NOT a splat - fails the string
+  cast); `$a=@("-Owner","x"); & $s @a` (splat a variable - `Owner=[-Owner]
+  RemoveOrphan=[x]`, the trap); `& $s @{Owner="x"}` (inline hashtable, NOT a splat -
+  `Owner=[System.Collections.Hashtable]`); `$h=@{Owner="x"}; & $s @h` (splat a
+  hashtable variable - `Owner=[x]`, the only by-name form).
+
+  **Attempt 1 of this item failed on exactly this.** The note used to show the inline
+  literal while quoting the measurement taken with a variable, so its own example did
+  not reproduce. Check that every snippet is the thing that was measured - a plausible
+  snippet beside a real number is the failure mode here, not a wrong number.
 - Finding 3: `docker ps --format '{{index .Labels "com.docker.compose.project"}}'`
   from PowerShell fails with `function "com" not defined`.
 - Finding 4: a stopped container attached to a network is not counted by
@@ -261,6 +277,59 @@ backwards.
   zero containers without a compose project label. Confirm, and confirm the count
   of running containers is unchanged at 81 - the sweep must not have cost the
   operator a service.
+
+## T12 - `-RemoveOrphan` refuses anything that is NOT an orphan
+
+Added at attempt 2, from a tester finding: the flag is documented as removing
+UNLABELLED leftovers, and it used to remove any named resource the compose guard
+allowed - including another worktree's live, labelled fixture.
+
+```powershell
+docker create --name t12-owned --label ai-stack.harness.owner=someone-else alpine:3.21 true
+.\scripts\agent-harness\reap.ps1 -RemoveOrphan t12-owned
+docker inspect --type container t12-owned --format '{{.Name}}'   # must still exist
+```
+
+PASS = refused, non-zero exit, the refusal names the owner `someone-else` AND the
+`-Owner` command to use instead, and the container survives.
+FAIL = it is deleted, or the refusal exits 0, or the message does not tell the caller
+what to do instead.
+
+Clean up: `docker rm -f t12-owned`.
+
+## T13 - the CODE and README make no claim about themselves that is false
+
+T9-T11 hold the findings note to account. This case holds the change's own prose to
+the same standard - attempt 1 shipped a false statement about labelling inside the
+change whose whole thesis is that unlabelled resources are the problem.
+
+Check each of these against what the code actually does:
+
+- `verify-reap.ps1`'s header describes which of its own fixtures carry the ownership
+  label and which deliberately do not. Enumerate the fixtures it creates and confirm
+  the header is right about every one. (Its own CASE 5 and CASE 6 need UNLABELLED
+  fixtures to test anything, so "all of them are labelled" cannot be true.)
+- Its `-KeepOnFailure` recovery hint must name every owner id its fixtures use, and
+  say how to remove the unlabelled ones. A hint that names one owner while three
+  exist reads as complete and is not.
+- `README.md`'s rows for `reap.ps1` and `verify-reap.ps1`, and the "Label what you
+  create" section, must describe the behaviour the code has.
+
+PASS = every claim checks out against the code.
+FAIL = any statement about the change's own behaviour that the code contradicts.
+
+## T14 - the anchor's documentation criteria
+
+The anchor's last acceptance criterion says README.md and MERGE-PROTOCOL.md state the
+marking rule "in the place an agent actually reads before running a test", and that
+PLAN.md 4.2's "state pollution stays convention" is corrected to point at the
+mechanism. No earlier case checked these.
+
+PASS = the MERGE-PROTOCOL.md rule sits in section 1 (the "before you touch anything"
+section, not an appendix); README.md carries the rule; PLAN.md 4.2 no longer claims
+convention covers containers and networks.
+FAIL = any of the three is missing, or sits somewhere a reader would reach only after
+already running their test.
 
 ## What is deliberately NOT in scope
 

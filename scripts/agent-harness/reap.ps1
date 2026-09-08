@@ -275,6 +275,18 @@ if ($RemoveOrphan) {
     foreach ($name in $wanted) {
         $row = @($resources | Where-Object { $_.Name -eq $name }) | Select-Object -First 1
         if (-not $row) { Say ("    not found: {0}" -f $name) Yellow; continue }
+        # AN ORPHAN IS UNLABELLED. This flag is documented, here and in README.md, as the way
+        # to remove leftovers that carry no owner - and it used to remove ANY named resource
+        # the compose guard allowed, including a live fixture belonging to another worktree.
+        # A tester found that on 2026-09-07: the code and the documentation disagreed about
+        # what the flag does, and the code was the more dangerous of the two. Refusing here
+        # costs a labelled resource's owner nothing (they have -Owner) and stops one agent
+        # deleting another's running test by name.
+        if ($row.OwnerId) {
+            Write-Host ("    REFUSED {0} - not an orphan: it belongs to '{1}'. Reap it with -Owner {1}" -f $name, $row.OwnerId) -ForegroundColor Red
+            $failed++
+            continue
+        }
         if (-not (Remove-OneRow $row "    ")) { $failed++ }
     }
     if ($failed) { exit 1 }
@@ -320,10 +332,17 @@ Write-Host ""
 Write-Host ("ORPHANS - {0} (unlabelled, no compose project - NEVER auto-deleted)" -f $orphans.Count) -ForegroundColor Yellow
 if (-not $orphans.Count) { Say "    (none)" }
 foreach ($row in $orphans) {
+    # `docker ps` prints a local timestamp with a numeric offset ("2026-09-02 06:33:11 -0400
+    # EDT") while `docker network ls` prints UTC ("2026-09-08 00:17:14.206 +0000 UTC").
+    # Stripping the trailing zone NAME and letting DateTimeOffset read the numeric OFFSET
+    # handles both; the first cut dropped the offset too and read every network's UTC stamp
+    # as local time, overstating network ages by the UTC offset. Cosmetic - nothing acts on
+    # this number - but a displayed figure that is wrong is still wrong.
     $age = "age unknown"
     try {
-        $created = [datetime]::Parse(($row.Created -replace "\s+[A-Z]{2,5}$", ""))
-        $age = "{0:N0}d old" -f ((Get-Date) - $created).TotalDays
+        $stamp = ($row.Created -replace "\s+[A-Za-z]{2,5}$", "").Trim()
+        $created = [datetimeoffset]::Parse($stamp)
+        $age = "{0:N0}d old" -f ([datetimeoffset]::Now - $created).TotalDays
     } catch { $age = "age unknown" }
     $state = if ($row.State) { $row.State } else { "-" }
     Show-Row $row ("{0,-8} {1}" -f $state, $age) Yellow

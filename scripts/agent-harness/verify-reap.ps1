@@ -11,10 +11,21 @@
 # Read-only questions about the live stack (does any compose container appear as a
 # candidate?) are answered by looking, never by changing.
 #
-# ITS OWN RESOURCES CARRY THE OWNERSHIP LABEL, which is the point of the design: if this
-# script is killed halfway - the exact accident that left ten containers on the daemon and
-# caused this whole item - the leftovers are labelled, and `reap.ps1 -Owner verify-reap`
-# collects them. A verifier that could leak would be arguing against its own subject.
+# MOST of its resources carry the ownership label, and THREE DELIBERATELY DO NOT. That
+# distinction was stated wrongly here until a tester caught it on 2026-09-07: this comment
+# claimed every fixture was labelled and therefore reapable, in the verifier for a change
+# whose entire thesis is that unlabelled resources are the problem. CASE 6 of this very
+# script disproves it - it needs an UNLABELLED container to test the orphan path, and
+# `$tag-occupant` (CASE 5) is unlabelled for the same reason.
+#
+# So, honestly: if this script is killed halfway, `reap.ps1 -Owner <each id>` collects the
+# labelled ones and the unlabelled ones need `docker rm -f` by name. The teardown block at
+# the end prints every name it made, and the ids are listed there rather than assumed to be
+# one. The fixtures span THREE owner ids ($OwnerA, $OwnerB and CASE 5's own), which is also
+# why the recovery hint names all of them.
+#
+# Every fixture name is prefixed `reapv-<pid>-`, so `docker ps -a --filter name=reapv-` finds
+# the lot regardless of labelling.
 #
 # Usage:
 #   .\verify-reap.ps1                      (exit 0 = every case passed, 1 = something failed)
@@ -99,13 +110,17 @@ function Invoke-Reap {
     # TWO PS5.1 TRAPS, both of which made this verifier LIE before they were fixed, and
     # both worth the explicit shape rather than the terse one:
     #
-    #   1. ARRAY SPLATTING INTO A SCRIPT BINDS POSITIONALLY. `& $script @("-Owner","x")`
-    #      does NOT set -Owner; it sets the first positional parameter to the literal
-    #      string "-Owner" and the second to "x". Measured: a script with
+    #   1. ARRAY SPLATTING INTO A SCRIPT BINDS POSITIONALLY. Splatting needs a VARIABLE -
+    #      `$a = @("-Owner","x"); & $script @a` - and an array splat passes values in ORDER
+    #      with no parameter names, so the leading "-Owner" is simply the first value and
+    #      lands in the first positional parameter. Measured: a script with
     #      `param([string]$Owner,[string]$RemoveOrphan)` invoked that way reports
     #      Owner=[-Owner] RemoveOrphan=[x]. So every case below was silently running the
-    #      -RemoveOrphan path while claiming to test -Owner. Parameters are named here,
-    #      explicitly, one call site per mode.
+    #      -RemoveOrphan path while claiming to test -Owner.
+    #      (`@(...)` written inline after a command is NOT a splat at all - it is the array
+    #      subexpression operator, passing ONE array-valued argument. Only the HASHTABLE
+    #      splat of a variable, `$h = @{Owner="x"}; & $script @h`, binds by name.)
+    #      Parameters are named here, explicitly, one call site per mode.
     #
     #   2. `2>&1` DOES NOT CAPTURE Write-Host. It writes to the INFORMATION stream (6),
     #      not stdout, so `& $script 2>&1 | Out-String` returned an empty string and every
@@ -250,6 +265,19 @@ try {
     Check "naming a compose-managed resource is refused, not obeyed" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
     Check "it still exists" (Test-Exists "container" "$tag-compose") "$tag-compose was deleted by name"
 
+    # --- CASE 7b: -RemoveOrphan refuses a resource that is NOT an orphan -----------
+    # Found by a tester on 2026-09-07: this flag is documented as removing UNLABELLED
+    # leftovers, and it used to remove any named resource the compose guard allowed -
+    # including another worktree's live, labelled fixture. Code and documentation
+    # disagreed, and the code was the more dangerous of the two.
+    Write-Host "`nCASE 7b  -RemoveOrphan refuses a LABELLED resource (it is not an orphan)" -ForegroundColor Cyan
+    $r = Invoke-Reap -Orphan "$tag-b"      # labelled $OwnerB, created in CASE 1
+    Check "naming another owner's labelled resource is refused" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
+    Check "that resource survives" (Test-Exists "container" "$tag-b") "$tag-b was deleted through the orphan path"
+    Assert-NonEmpty "the CASE 7b refusal" $r.Text
+    Check "the refusal names the owner and the -Owner command to use" `
+        (($r.Text -match [regex]::Escape($OwnerB)) -and ($r.Text -match "-Owner")) $r.Text
+
     # --- CASE 8: an unreachable daemon is loud, not silently clean -----------------
     Write-Host "`nCASE 8  an unreachable daemon exits 4 and says so" -ForegroundColor Cyan
     $prevHost = $env:DOCKER_HOST
@@ -280,7 +308,12 @@ finally {
     if ($script:Fail -and $KeepOnFailure) {
         Write-Host "`n-KeepOnFailure: leaving test resources for inspection:" -ForegroundColor Yellow
         foreach ($m in $script:Made) { Write-Host ("    {0} {1}" -f $m.Kind, $m.Name) -ForegroundColor Yellow }
-        Write-Host ("  Sweep them with: reap.ps1 -Owner {0}  (and docker rm -f for the unlabelled ones)" -f $OwnerA) -ForegroundColor Yellow
+        # Names all THREE owner ids, not just the first. The earlier hint named $OwnerA
+        # alone, which would have left the other two owners' fixtures behind while reading
+        # as a complete recovery instruction.
+        Write-Host ("  Labelled ones: reap.ps1 -Owner {0} ; -Owner {1} ; -Owner verify-reap-net" -f $OwnerA, $OwnerB) -ForegroundColor Yellow
+        Write-Host  "  Unlabelled ones (CASE 5's occupant, CASE 6's orphan) carry no label by design:" -ForegroundColor Yellow
+        Write-Host ("      docker ps -a --filter name={0} -q | ForEach-Object {{ docker rm -f `$_ }}" -f $tag) -ForegroundColor Yellow
     } else {
         # Containers before networks - a network with an occupant will not delete.
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) { $null = Docker @("rm", "-f", $m.Name) }
