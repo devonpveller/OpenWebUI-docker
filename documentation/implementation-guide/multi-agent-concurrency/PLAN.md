@@ -203,9 +203,21 @@ and editing the conf.
 ### 4.2 What leases do NOT solve, said plainly
 
 - **State pollution.** Serialization stops *concurrent* interference, not a test
-  leaving droppings for the next agent. That stays convention, already practiced
-  here: test-prefixed data (`testing-*` notes), test image tags `:wt-<id>` (never
+  leaving droppings for the next agent. For DATA and IMAGES that stays convention:
+  test-prefixed data (`testing-*` notes), test image tags `:wt-<id>` (never
   `:local` — retagging is the deploy, which stays gated), clean up before release.
+
+  For CONTAINERS and NETWORKS it is no longer convention (2026-09-07). Convention was
+  measured and it failed: ten dead containers and two orphan networks, the oldest ten
+  days, every one from a drill whose own `finally` teardown never ran because the run
+  was killed first. Per-script cleanup cannot cover the case that leaks, because that
+  case is precisely "the script did not reach its last line". So ownership is recorded
+  at CREATION instead — `--label ai-stack.harness.owner=<wt-id>` — and
+  `scripts/agent-harness/reap.ps1` collects it when `remove-worktree.ps1` retires the
+  worktree. A label outlives whatever killed its creator, so cleanup needs no
+  cooperation from the thing being cleaned up. Compose-managed resources, images and
+  volumes are never touched, and unlabelled leftovers are reported, never auto-deleted.
+  Proof: `verify-reap.ps1` (33 checks, 9 cases).
 - **Contention on hot planes is physics.** A 25-min wiki build holds `open-brain`
   for 25 min; cloning couldn't have parallelized the GPU or the vault either.
   `-TtlMin` + `-Refresh` handle long holds.

@@ -281,6 +281,7 @@ def test_powershell_and_python_readers_agree():
         + "$o.root=(Get-HarnessSetting 'worktree.root');"
         + "$o.branch_prefix=(Get-HarnessSetting 'worktree.branch_prefix');"
         + "$o.env_files=@(Get-HarnessSetting 'worktree.env_files');"
+        + "$o.reap_label=(Get-HarnessSetting 'reap.owner_label');"
         + "$o.profiles=@(Get-HarnessProfileNames);"
         + "$o.runners=@(Get-HarnessRunnerNames);"
         + "$lc=Get-HarnessRunner -Name 'little-coder';"
@@ -306,6 +307,11 @@ def test_powershell_and_python_readers_agree():
     assert ps["root"] == config.get("worktree.root")
     assert ps["branch_prefix"] == config.get("worktree.branch_prefix")
     assert list(ps["env_files"]) == list(config.get("worktree.env_files"))
+    # The ownership label is read by reap.ps1 and written by every agent that creates a
+    # test container. Two readers disagreeing about its spelling would mean resources
+    # labelled under one name and reaped under another - a sweep that silently finds
+    # nothing, which is the exact shape of failure reap.ps1 was written to end.
+    assert ps["reap_label"] == config.get("reap.owner_label")
     assert sorted(ps["profiles"]) == sorted(config.profile_names())
     # The RUNNER RECORD has to agree too, not just the policy answer. It is what a
     # dispatcher calls, and it is now the only place the transport is written down.

@@ -431,5 +431,20 @@
   "leases": {
     "names_file": "lease-names.conf",
     "default_ttl_minutes": 30
+  },
+  "reap": {
+    "_note": [
+      "The docker label a worker puts on anything it creates to prove out its work:",
+      "  docker run --label ai-stack.harness.owner=<your-wt-id> ...",
+      "reap.ps1 reads it, and remove-worktree.ps1 reaps that owner's containers and",
+      "networks when the worktree is retired. Ownership is recorded at CREATION because",
+      "the runs that leak are the ones killed before their own cleanup line - a label",
+      "outlives the script, an `finally` block does not.",
+      "WHICH KINDS get reaped (containers and networks, never images or volumes) is",
+      "deliberately NOT a key here. Widening it should be a code change that shows up in",
+      "a diff and passes a reviewer, the same reasoning common.ps1 records for",
+      "$script:RequiredAndonConditions."
+    ],
+    "owner_label": "ai-stack.harness.owner"
   }
 }

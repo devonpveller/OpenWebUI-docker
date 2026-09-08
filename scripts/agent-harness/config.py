@@ -65,6 +65,9 @@ DEFAULTS: Dict[str, Any] = {
         "test_image_tag_prefix": "wt-",
     },
     "leases": {"names_file": "lease-names.conf", "default_ttl_minutes": 30},
+    # The docker label reap.ps1 reads to know who created a test container or network.
+    # Which KINDS are reapable is not a setting - see the note in harness.config.json.
+    "reap": {"owner_label": "ai-stack.harness.owner"},
 }
 
 ROLES = ("worker", "tester", "reviewer")
