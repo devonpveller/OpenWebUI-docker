@@ -2,8 +2,8 @@
 
 Anchor: `queue.ps1 -Show -Id drilllabel` (confirmed 2026-09-07 by profnovice, amended
 twice - read the amendment reasons, they change what this item claims). Branch
-`work/drilllabel`, worktree `wt-drilllabel`, base **`bf8f775` on `work/reap`, not the
-work line**.
+`work/drilllabel`, worktree `wt-drilllabel`, base **`177da6d` - the work line, which now
+contains `reap`**.
 
 **You are testing three claims:**
 
@@ -17,9 +17,13 @@ work line**.
 
 ## Read this before you plan your run
 
-- **This branch is cut from `work/reap`, not from the work line.** `reap.ps1` and
-  `harness.config.json`'s `reap.owner_label` do not exist on the work line. Item
-  `reap` must land first. If you are reviewing, do not treat this as independent.
+- **The `reap` dependency is now SATISFIED, and that changed what you are testing.**
+  This branch was cut from `work/reap` at `bf8f775`. `reap` has since landed on the
+  work line as merge `177da6d`, and this branch was rebased onto it, so `reap.ps1` here
+  is the MERGED version - the one that deletes by docker ID. The `bf8f775` version
+  deleted by NAME and had a production-deletion path; if you find yourself testing
+  against that, the rebase did not take and you should stop. Check:
+  `Select-String -Pattern 'Row.Id' -Path scripts/agent-harness/reap.ps1` must return matches (5 now).
 - **These scripts are NOT sloppy, and the change does not claim they are.** All six
   tear down correctly on a normal exit and on an exception - three via `finally`,
   three via a script-level `trap` calling `Cleanup`. The gap is that no in-process
