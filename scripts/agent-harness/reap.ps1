@@ -71,6 +71,7 @@
 #   .\reap.ps1 -Owner wt-x -WhatIfOnly      # ... report only
 #   .\reap.ps1 -Report                      # full report: owned, orphaned, and out of scope
 #   .\reap.ps1 -RemoveOrphan a,b            # delete named unlabelled leftovers, deliberately
+#   .\reap.ps1 -RemoveOrphan "a,b"          # same - both forms work, see the note on the param
 #
 # Exit codes: 0 ok | 1 usage/config/partial failure | 2 harness off | 4 docker unreachable
 #   Callers that must not fail because of docker (remove-worktree.ps1) ignore this exit
@@ -82,7 +83,13 @@ param(
     [string]$Owner = "",
     [switch]$Report,
     [switch]$WhatIfOnly,
-    [string]$RemoveOrphan = "",
+    # [string[]], not [string]. PowerShell parses a bare `-RemoveOrphan a,b` as an ARRAY,
+    # which fails to bind to a [string] with ParameterArgumentTransformationError, removes
+    # nothing, and leaves $LASTEXITCODE untouched - so the failure is silent. The usage line
+    # above and the hint this script PRINTS both used that form, and a tester pasted the
+    # printed hint on attempt 4 and it quietly did nothing. Accepting an array makes both
+    # `a,b` and `"a,b"` work, which removes the trap rather than documenting it.
+    [string[]]$RemoveOrphan = @(),
     [switch]$Quiet
 )
 
@@ -108,13 +115,31 @@ function Invoke-DockerCapture {
     # under $ErrorActionPreference='Stop' turns ordinary stderr into a TERMINATING error,
     # which would kill this script at the docker line - before the error handling written
     # for that call can run. Flip it only around the native call and trust $LASTEXITCODE.
+    #
+    # AND CATCH CommandNotFoundException, because $ErrorActionPreference DOES NOT COVER IT.
+    # A missing executable is a terminating error however the preference is set - measured
+    # 2026-09-07: `$ErrorActionPreference='Continue'; & nosuchexe.exe` still throws. So on a
+    # machine with no docker CLI on PATH this function threw straight past every exit-code
+    # check in the file, past reap.ps1's own "docker unreachable" handling, and out through
+    # `remove-worktree.ps1`, which then exited 1 and left the worktree, its branch and its
+    # registry row in place - the exact outcome the anchor forbids, and there was no exit
+    # code for the caller to ignore because the process never got that far. Found by a
+    # tester on attempt 4. 127 is the shell convention for "command not found".
     param([string[]]$DockerArgs)
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    try { return @(& docker.exe @DockerArgs 2>&1) } finally { $ErrorActionPreference = $prevEap }
+    try { return @(& docker.exe @DockerArgs 2>&1) }
+    catch [System.Management.Automation.CommandNotFoundException] {
+        $global:LASTEXITCODE = 127
+        return @("docker.exe is not on PATH: $($_.Exception.Message)")
+    }
+    finally { $ErrorActionPreference = $prevEap }
 }
 
 function Test-DockerReachable {
+    # Asked in two parts because they fail differently: a MISSING CLI throws (handled
+    # above), a present CLI with a dead daemon exits non-zero.
+    if (-not (Get-Command docker.exe -ErrorAction SilentlyContinue)) { return $false }
     $null = Invoke-DockerCapture @("version", "--format", "{{.Server.Version}}")
     return ($LASTEXITCODE -eq 0)
 }
@@ -328,7 +353,9 @@ catch {
 
 # --- mode: remove named orphans ---------------------------------------------------
 if ($RemoveOrphan) {
-    $wanted = @($RemoveOrphan.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    # Each element may itself be a comma list, so `a,b` (two elements) and `"a,b"` (one
+    # element containing a comma) both reduce to the same set of names.
+    $wanted = @($RemoveOrphan | ForEach-Object { $_.Split(",") } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     $failed = 0
     foreach ($name in $wanted) {
         # -ceq, CASE-SENSITIVE, and every match considered rather than the first.
@@ -444,7 +471,10 @@ if ($orphans.Count) {
         $clash = @($resources | Where-Object { $_.Name -ceq $row.Name })
         if ($clash.Count -gt 1) { $row.Id } else { $row.Name }
     }
-    Write-Host ("  Remove them deliberately:  .\reap.ps1 -RemoveOrphan {0}" -f ($hint -join ",")) -ForegroundColor Gray
+    # Quoted, and the parameter also accepts an array, so this line survives being pasted
+    # either way. It used to print a bare comma list that refused to bind and removed
+    # nothing - a hint that exists to be pasted has to work when pasted.
+    Write-Host ("  Remove them deliberately:  .\reap.ps1 -RemoveOrphan `"{0}`"" -f ($hint -join ",")) -ForegroundColor Gray
 }
 
 # The protected count is printed rather than the list: it is the number this script REFUSED

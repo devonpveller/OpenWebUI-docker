@@ -27,12 +27,16 @@
 # owner, and the teardown block prints the actual owner ids and the actual unlabelled names.
 # Read that, not a sentence up here that nobody re-counts.
 #
-# MOST fixture names are prefixed `reapv-<pid>-`, and `docker ps -a --filter name=reapv-`
-# finds those. It does NOT find all of them: CASE 7c deliberately names its decoy with
-# another container's 64-hex id, because that is the shadowing it exists to test. A tester
-# caught this sentence claiming "every" on attempt 3 - the third count-or-completeness claim
-# in this header to be wrong, which is why the teardown block below ENUMERATES what was
-# actually made instead of describing it.
+# DO NOT RECOVER FROM A KILLED RUN WITH A NAME SWEEP. `docker ps -a --filter name=reapv-`
+# looks like it would find everything and does not, three ways: docker's name filter is
+# CASE-SENSITIVE and CASE 7e creates an upper-case fixture; `docker ps` does not list
+# NETWORKS, and two fixtures are networks; and CASE 7c names its decoy with another
+# container's 64-hex id on purpose, because that shadowing is what it tests.
+#
+# This header has now had a count or a completeness word wrong on three separate attempts,
+# each caught by a tester. That is why nothing here describes the fixture set any more: the
+# teardown block ENUMERATES what the run actually made, kind by kind, as runnable commands.
+# Read that.
 #
 # Usage:
 #   .\verify-reap.ps1                      (exit 0 = every case passed, 1 = something failed)
@@ -437,7 +441,22 @@ finally {
             Write-Host ("  Labelled with an EMPTY owner ({0}) - no -Owner reaches these: {1}" -f $emptyv.Count, ($emptyv -join ", ")) -ForegroundColor Yellow
         }
         Write-Host ("  Unlabelled by design ({0}): {1}" -f $bare.Count, ($bare -join ", ")) -ForegroundColor Yellow
-        Write-Host ("      docker ps -a --filter name={0} -q | ForEach-Object {{ docker rm -f `$_ }}" -f $tag) -ForegroundColor Yellow
+        # THE EXACT COMMANDS, built from what was made, one per resource, kind included.
+        #
+        # This used to print `docker ps -a --filter name=<tag>` as the recovery sweep, and
+        # that command was wrong three ways at once, all found by a tester on attempt 4:
+        # docker's name filter is CASE-SENSITIVE so it missed CASE 7e's upper-case fixture;
+        # `docker ps` never sees NETWORKS, so both test networks were unreachable by it; and
+        # CASE 7f creates a container and a network sharing one name, which the sweep listed
+        # twice with no way to tell which was which. It is the same ambiguous-name defect
+        # this item had just fixed in reap.ps1's own hint and did not carry across.
+        Write-Host "  Or remove them one by one - names are case-sensitive and networks are not containers:" -ForegroundColor Yellow
+        foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) {
+            Write-Host ("      docker rm -f {0}" -f $m.Name) -ForegroundColor Yellow
+        }
+        foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "network" })) {
+            Write-Host ("      docker network rm {0}" -f $m.Name) -ForegroundColor Yellow
+        }
     } else {
         # Containers before networks - a network with an occupant will not delete.
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) { $null = Docker @("rm", "-f", $m.Name) }

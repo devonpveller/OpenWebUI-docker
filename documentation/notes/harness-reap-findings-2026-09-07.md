@@ -269,7 +269,10 @@ removed by its own id afterwards; `openbrain-research` was never touched.
 run `docker rm -f <that name>` and destroyed a production container. It now keys its entire
 inventory on the id and deletes by id; `verify-reap.ps1` CASE 7c builds the shadowing pair
 out of its own throwaway fixtures and asserts the victim survives. Seeding the old
-name-based delete back in turns exactly that case red (measured: 47 passed / 2 failed).
+name-based delete back in turns exactly that case red. **Run the seed for the count** - a
+figure written here went stale within one attempt, which is the fourth time a hardcoded
+number in this change has done so; `documentation/evidence/reap/test-plan.md` seed C carries
+the current expectation and is re-derived whenever the verifier changes.
 
 **The general rule for any script that deletes docker resources:** enumerate with
 `--no-trunc --format {{.ID}}`, carry the id, and act on the id. A name is a display string,

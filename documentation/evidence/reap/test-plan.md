@@ -202,6 +202,34 @@ Also check `reap.ps1 -Owner anything` on its own under the same `DOCKER_HOST`: i
 must exit **4**, not 0. An unreachable daemon reporting "nothing to reap" is the
 failure mode the script was rewritten to prevent.
 
+**THEN THE OTHER DOCKER FAILURE, which is the one that actually broke.** The
+criterion says "a docker daemon that is down, **or a delete that errors**". A dead
+`DOCKER_HOST` tests a reachable CLI talking to a dead daemon. A MISSING CLI is a
+different failure: `CommandNotFoundException` is terminating whatever
+`$ErrorActionPreference` says, so it throws past every exit-code check and there is
+no exit code left for a caller to ignore. On attempt 4 that killed
+`remove-worktree.ps1` before `git worktree remove` and left the worktree, its branch
+and its registry row behind, at exit 1.
+
+Run it in a CHILD process so the PATH edit cannot leak into your session:
+
+```powershell
+.\scripts\agent-harness\new-worktree.ps1 -Id t7b
+$noDocker = ($env:PATH -split ';' | Where-Object { $_ -notmatch 'Docker' }) -join ';'
+$sc = "`$env:PATH='$noDocker'; & '<abs path>\remove-worktree.ps1' -Id t7b; exit `$LASTEXITCODE"
+powershell -NoProfile -Command $sc
+$LASTEXITCODE                                  # MUST be 0
+Test-Path .claude\worktrees\wt-t7b             # MUST be False
+git branch --list work/t7b                     # MUST be empty
+```
+
+PASS = exit 0, worktree and branch gone, and the output says the reap was skipped.
+FAIL = any non-zero exit, or anything left behind. Also confirm `reap.ps1` alone
+under the same PATH exits **4** rather than throwing.
+
+Try `-WhatIfOnly` under the same conditions too - a report-only run must not die
+either.
+
 ## T8 - the verifier is not vacuous
 
 Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`58 passed, 0 failed`**
@@ -248,8 +276,11 @@ Seed C - revert the delete to being aimed by NAME instead of by id:
 .\verify-reap.ps1 -Script .\reap.red-byname.ps1
 ```
 
-Expect **55 passed, 3 failed** (2026-09-07, attempt 4) - the CASE 7c assertions plus
-the CASE 7f ambiguity check, and read them: the VICTIM is destroyed and the decoy survives. That is the production-deletion behaviour this
+Expect **55 passed, 3 failed** (2026-09-07, attempt 5) - **all three in CASE 7c**
+(`the reap exits 0`, `THE VICTIM SURVIVES`, `and the decoy itself is gone`). An earlier
+version of this line said CASE 7f was among them; it is not, and a WHICH that does not
+reproduce is worse than no WHICH. Read the failures: the VICTIM is destroyed and the
+decoy survives - the production-deletion behaviour, on fixtures. That is the production-deletion behaviour this
 guard exists to stop, reproduced on throwaway fixtures.
 
 PASS = green on the real script, and both seeds fail exactly the cases named above.
@@ -261,6 +292,11 @@ Report T8 on the green run alone as a plan inadequacy, not a pass.
 
 `documentation/notes/harness-reap-findings-2026-09-07.md` states measurements. Re-run
 them; a figure that does not reproduce is a FAIL of this case, not a rounding note.
+
+**Go through EVERY numbered finding in the note, not the ones listed here.** Attempt 2
+failed a figure sitting in a finding this case did not enumerate, and attempt 4 failed
+another one - both times because the case accepted the author's selection. Count the
+findings in the file first, then check each. The ones below are examples, not the set.
 
 - Finding 1: `@(& queue.ps1 -List 2>&1)` gives 0 lines and `2>&1 6>&1` gives 44.
   (The 44 will drift as queue rows are added - what must hold is **0 versus
@@ -289,12 +325,20 @@ them; a figure that does not reproduce is a FAIL of this case, not a rounding no
 
 ## T10 - the findings note's citations resolve
 
-Every file:line in the note must point at what the note says is there. Check each:
-`observe-oracle-on-stall.ps1:139` and `:110`; `drill-personal-plane-exclusion.ps1`
-803-807, 2791, 672; `prove-agent-memory-rls.ps1` 82-89, 126, 731;
-`drill-dark-factory.ps1:195`; `gate-audit.ps1:123`;
-`check-ob1-integration-images.ps1:188`; `dfu-done.ps1:292`;
-`verify-dfu-done.ps1:100`.
+Every file:line in the note must point at what the note says is there.
+
+**Extract the citations from the note yourself; do not work from a list here.** An
+earlier version of this case listed `prove-agent-memory-rls.ps1` 126 and 731, which
+the note does not contain - a hardcoded list that had drifted from its subject, in the
+case whose whole job is checking that citations resolve.
+
+```powershell
+Select-String -Path documentation
+otes\harness-reap-findings-2026-09-07.md `
+  -Pattern '[A-Za-z0-9_.-]+\.(ps1|py|md|json):\d+|[A-Za-z0-9_.-]+\.ps1`? (?:line )?\d+'
+```
+
+Check every hit.
 
 FAIL = any citation points somewhere else, or the line does not support the claim
 made about it. Finding 2 in particular claims those five array-splat sites are
@@ -481,6 +525,32 @@ FAIL = `removed` is printed twice for one delete, or either resource goes, or th
 as printed cannot be pasted and run correctly.
 
 Clean up: `docker rm -f t18-dual; docker network rm t18-dual`.
+
+## T19 - every changed file is covered by some case
+
+Attempts 1-4 each failed a claim on a surface no case named. So stop trusting the
+lists in this plan and derive the set:
+
+```powershell
+git diff --name-status 6e46abe..HEAD
+```
+
+For each changed file, say which case checks it. Four were uncovered as of attempt 4 -
+`MODULE.md`, `harness.config.json`, `config.py`, `test_harness_config.py` - and one of
+them carried a claim the code contradicted (`MODULE.md` called `reap.ps1` "the ONLY
+script here that deletes anything outside git" while `verify-reap.ps1`, in the row
+below, deletes docker resources).
+
+Check at minimum:
+- `MODULE.md`'s rows for `reap.ps1` and `verify-reap.ps1` describe what the code does.
+- `harness.config.json`'s `reap.owner_label` matches what `reap.ps1` and
+  `scripts/checks/lib/harness-owner.ps1` actually read, and `config.py` agrees -
+  `python -m pytest scripts/agent-harness/test_harness_config.py -q` is the executable
+  form of that.
+
+PASS = every changed file is named by some case, and nothing in the uncovered ones
+contradicts the code.
+FAIL = a changed file no case covers, or a claim in one that does not hold.
 
 ## What is deliberately NOT in scope
 
