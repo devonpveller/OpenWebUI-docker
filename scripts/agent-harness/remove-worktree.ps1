@@ -128,6 +128,15 @@ foreach ($line in ($unmerged | Select-Object -First 8)) { Write-Host ("      " +
 $blocked = ($dirty.Count -gt 0 -or $unmerged.Count -gt 0)
 if ($WhatIfOnly) {
     Write-Host ("  verdict         : " + $(if ($blocked) { "WOULD REFUSE (needs -Force)" } else { "safe to remove" })) -ForegroundColor $(if ($blocked) { "Yellow" } else { "Green" })
+    # A preview that mentioned only files would be a misleading preview: removal also
+    # reaps this owner's test containers and networks.
+    $reapPreview = Join-Path $PSScriptRoot "reap.ps1"
+    # try/catch for the same reason the real reap below has one: a throw from here would
+    # kill a REPORT-ONLY invocation, which must never fail for a reason outside git.
+    if (Test-Path $reapPreview) {
+        try { & $reapPreview -Owner $Id -WhatIfOnly }
+        catch { Write-Host ("  NOTE: reap preview unavailable ({0})" -f $_.Exception.Message) -ForegroundColor Yellow }
+    }
     exit 0
 }
 if ($blocked -and -not $Force) {
@@ -137,6 +146,47 @@ if ($blocked -and -not $Force) {
 }
 if ($blocked -and $Force) {
     Write-Host "  -Force given: discarding the above deliberately." -ForegroundColor Yellow
+}
+
+# --- reap this owner's test containers and networks -------------------------------
+#
+# HERE, and not one line earlier. Everything above can still REFUSE - a dirty tree or
+# unlanded commits exit before this point - and a run that refuses to remove the worktree
+# must not have deleted the containers the next attempt may still need. Every git decision
+# is made; from here the removal proceeds.
+#
+# And it cannot make a successful removal fail: reap.ps1's exit code is deliberately
+# ignored. A docker daemon that is down, or a container something else has a handle on, is
+# a leftover to sweep later - the same judgement this script already makes about a
+# directory Windows will not delete. It says so out loud rather than swallowing it.
+#
+# Its output is NOT captured and re-printed. reap.ps1 reports with Write-Host, which in
+# PS5.1 goes to the information stream rather than stdout - so `$out = & $reap ... 2>&1`
+# collects an empty string while the text appears on the console anyway, and any code that
+# then reasons about `$out` is reasoning about nothing. Letting the child write straight to
+# the host is both simpler and honest; only its exit code is read here.
+#
+# WRAPPED IN try/catch, and that is not belt-and-braces - it is the criterion. "The reap
+# step cannot turn a successful worktree removal into a failure" cannot be delivered by
+# ignoring an exit code alone, because a THROW never produces one. A missing docker CLI
+# raises CommandNotFoundException, which is terminating whatever $ErrorActionPreference
+# says; on attempt 4 that killed this script HERE, before `git worktree remove`, and left
+# the worktree, its branch and its registry row behind while exiting 1. reap.ps1 now handles
+# that case itself, and this catch means the next unanticipated one cannot do it again.
+$reap = Join-Path $PSScriptRoot "reap.ps1"
+if (Test-Path $reap) {
+    $reapExit = 0
+    try {
+        & $reap -Owner $Id
+        $reapExit = $LASTEXITCODE
+    } catch {
+        Write-Host ("  NOTE: reap.ps1 threw ({0}) - continuing with the worktree removal." -f $_.Exception.Message) -ForegroundColor Yellow
+        $reapExit = -1
+    }
+    if ($reapExit -ne 0) {
+        Write-Host ("  NOTE: reap.ps1 exited {0} - docker resources labelled '{1}' may remain." -f $reapExit, $Id) -ForegroundColor Yellow
+        Write-Host  "        Removing the worktree anyway; sweep them with reap.ps1 -Report." -ForegroundColor Yellow
+    }
 }
 
 $removeExit = Invoke-GitQuiet @('worktree','remove','--force',$path)

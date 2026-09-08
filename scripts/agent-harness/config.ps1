@@ -58,6 +58,7 @@ $script:Defaults = [ordered]@{
         test_image_tag_prefix = "wt-"
     }
     leases          = [ordered]@{ names_file = "lease-names.conf"; default_ttl_minutes = 30 }
+    reap            = [ordered]@{ owner_label = "ai-stack.harness.owner" }
 }
 
 $script:Cache = $null

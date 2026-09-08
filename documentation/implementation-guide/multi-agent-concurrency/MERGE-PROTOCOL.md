@@ -121,6 +121,22 @@ Rules while you work:
      interference, it does not clean up after you. Test data stays test-prefixed
      (`testing-*`), test images tag `:wt-<id>` and never touch `:local` (retagging
      IS the deploy, which stays gated).
+- **LABEL EVERY CONTAINER AND NETWORK YOU CREATE.** One rule, and the cleanup is then
+  not your problem:
+
+  ```powershell
+  docker run    --label ai-stack.harness.owner=<your-wt-id> ...
+  docker network create --label ai-stack.harness.owner=<your-wt-id> ...
+  ```
+
+  `remove-worktree.ps1` reaps exactly those when your worktree is retired, and
+  `scripts/agent-harness/reap.ps1 -Report` shows what exists and whose it is. Keep any
+  teardown you already wrote — but do not rely on it: a `finally` block does not run
+  when the script is killed, which is how ten dead containers and two orphan networks
+  reached ten days old on this daemon (2026-09-07). The label is recorded at creation
+  and outlives whatever kills the creator. It never touches compose-managed resources,
+  images or volumes, and an UNLABELLED leftover is only ever reported — deleting one
+  takes `reap.ps1 -RemoveOrphan <name>`, typed by hand.
 - **Never mutate prod containers, `:local` tags, or prod volumes** — that is a
   *deploy*, a separate gated step. Where a container-level sandbox is cheap, use
   the proven sidecar shape (`docker run --entrypoint ... ` on a private/no

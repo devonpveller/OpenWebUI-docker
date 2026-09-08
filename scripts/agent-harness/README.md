@@ -19,7 +19,9 @@ The wider design (test containers, bridge integration):
 |---|---|
 | `new-worktree.ps1` | Provision `.claude/worktrees/wt-<id>` on `work/<id>` from the work line, init the OB1 submodule, copy runtime env files, CRLF-check, register it |
 | `sync-worktree-env.ps1` | Re-copy `.env` / `.env.test` / `OB1/docker/.env` into worktrees when the main checkout's copy is newer (`-WhatIfOnly` reports drift) |
-| `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone |
+| `remove-worktree.ps1` | Retire a worktree, **refusing** while it holds uncommitted or unmerged work (`-Force` to discard deliberately); `-PruneRegistry` drops rows whose path is gone. On a removal that proceeds it also **reaps that owner's test containers and networks** (see below) |
+| `reap.ps1` | Remove the docker resources an owner created to prove out its work: `-Owner <id>` (delete that owner's containers + networks), `-Report` (owned / orphaned / protected / out-of-scope), `-RemoveOrphan <names>` (delete named UNLABELLED leftovers - a named resource that turns out to carry an owner is refused, with the `-Owner` command to use instead), `-WhatIfOnly`. Never touches a compose-managed resource, an image or a volume |
+| `verify-reap.ps1` | Executable proof for `reap.ps1`: most cases build the thing that must survive next to the thing that must go; others take the daemon away, or read the live stack and build nothing. Self-cleaning; `-Script <path>` drives a modified copy so you can watch it go red. Run it for the case and check counts rather than trusting a number written here - this row stated one and was wrong. Some fixtures deliberately carry NO ownership label (the orphan and in-use cases need unlabelled resources) and one is deliberately named with another container's id (the shadowing case); the teardown block enumerates what a run actually made |
 | `config.ps1` / `config.py` | The configuration, read the same way from PowerShell and from the bridge: `harness.config.json` < `harness.local.json` < environment. Holds the role/model profiles, the TTLs, the paths, and the on/off switches. `test_harness_config.py` asks both readers the same questions so they cannot drift |
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
@@ -37,6 +39,40 @@ the conf. `AI_STACK_LEASE_DIR` / `AI_STACK_LEASE_NAMES_FILE` override the defaul
 **no merge lock at all**. Merging needs no mutex - a worktree isolates files and git
 refuses two worktrees on one branch - so landing is governed by `queue.ps1`'s separated
 roles instead. Leases now cover only the shared runtime.)
+
+## Label what you create, and cleanup happens to you
+
+**One rule.** Anything you `docker run` or `docker network create` to prove out your work
+carries your worktree id:
+
+```powershell
+docker run    --label ai-stack.harness.owner=<your-wt-id> ...
+docker network create --label ai-stack.harness.owner=<your-wt-id> ...
+```
+
+`remove-worktree.ps1` then deletes exactly those when your worktree is retired, and
+`reap.ps1 -Report` says at any time what test junk exists and whose it is. Both spellings
+of your id work (`x` and `wt-x`).
+
+**Why the label and not a cleanup block at the end of your script.** The runs that leak are
+the runs that never reach their own last line. Every drill here already tears down in a
+PowerShell `finally`, and a `finally` does not run when the script is killed - Ctrl+C, a
+crashed turn, or a background task killed when a turn ends. On 2026-09-07 that had left ten
+dead containers and two orphan networks on the daemon, the oldest ten days. A label is
+recorded at CREATION and survives everything that can kill the creator, so cleanup needs no
+cooperation from the thing being cleaned up. Keep your `finally` - it is still the fastest
+path - but the label is what makes the leak recoverable.
+
+**What it will never touch.** Compose-managed containers and networks (checked positively,
+by the `com.docker.compose.project` label, so writing the ownership label into a plane's
+compose file gets a REFUSAL rather than a deleted prod service), docker's built-in networks,
+and every image and volume - those are reported and left alone. `docker volume prune` is a
+standing hazard in this stack, and a deleted test image costs a rebuild nobody asked for.
+
+**Unlabelled leftovers are never auto-deleted.** They are listed by `-Report` with their
+age, and removing one takes `reap.ps1 -RemoveOrphan <name>` - it has to be typed. Something
+unlabelled may be an operator's hand-run sidecar, and two of the ten found on 2026-09-07
+(`amtest`, `bundlegen`) matched no script in the repository at all.
 
 Runtime state lives in **`<git-common-dir>/agent-worktrees/`** (`worktrees.json`
 registry + `locks/<name>.json` leases) - anchored on the repository, NOT on this
