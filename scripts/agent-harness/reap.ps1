@@ -57,8 +57,14 @@
 #   2. A FAILED QUERY MUST NOT LOOK LIKE AN EMPTY ONE. The first cut of this script returned
 #      `@()` when docker errored, so the broken template above produced a clean, confident,
 #      completely empty report - a check that passes while checking nothing, which is the
-#      failure mode this repository keeps finding. `Get-DockerNames` returns `$null` on a
+#      failure mode this repository keeps finding. `Get-DockerIds` returns `$null` on a
 #      non-zero exit, and every caller treats `$null` as a hard stop.
+#
+#   3. A NAME CAN BE ANOTHER RESOURCE'S ID. Docker resolves a reference by id before it
+#      consults the name index, so a container NAMED with a live container's full 64-char id
+#      shadows it: `docker rm -f <that name>` deletes the live one. This script therefore
+#      keys its whole inventory on the id and deletes by id. It deleted by name until a
+#      tester demonstrated the shadowing against `openbrain-research` on 2026-09-07.
 #
 # Usage:
 #   .\reap.ps1 -Owner wt-x                  # delete wt-x's containers + networks
@@ -123,13 +129,20 @@ function Get-OwnerAliases([string]$Id) {
     return , @(@($bare, "$DirPrefix$bare") | Select-Object -Unique)
 }
 
-function Get-DockerNames([string]$Kind, [string[]]$Filters) {
-    # Returns the names matching every filter, or $NULL if docker refused the question.
+function Get-DockerIds([string]$Kind, [string[]]$Filters) {
+    # Returns the full IDs matching every filter, or $NULL if docker refused the question.
     # The null is load-bearing - see trap 2 in the header.
+    #
+    # IDS, NOT NAMES, AND THAT IS A SAFETY PROPERTY, not a style preference. Docker resolves
+    # a reference by ID before it consults the name index, so a container whose NAME is a
+    # live container's full 64-char ID shadows it. Measured 2026-09-07: a throwaway named
+    # with `openbrain-research`'s id made `docker inspect <that string>` return
+    # openbrain-research itself. This script used to delete by name, so a labelled decoy
+    # named that way would have had `docker rm -f` aimed straight at a production container.
+    # Found by a tester on attempt 2; everything below keys on the id.
     $dockerArgs = if ($Kind -eq "container") { @("ps", "-a") } else { @("network", "ls") }
     foreach ($f in $Filters) { $dockerArgs += "--filter"; $dockerArgs += $f }
-    $dockerArgs += "--format"
-    $dockerArgs += $(if ($Kind -eq "container") { "{{.Names}}" } else { "{{.Name}}" })
+    $dockerArgs += @("--no-trunc", "--format", "{{.ID}}")
     $out = Invoke-DockerCapture $dockerArgs
     if ($LASTEXITCODE -ne 0) { return $null }
     # `,@(...)` - the leading comma is load-bearing, and this file learned it the hard way
@@ -141,25 +154,28 @@ function Get-DockerNames([string]$Kind, [string[]]$Filters) {
 }
 
 function Get-DockerMeta([string]$Kind) {
-    # name -> "state|created". Separator is a pipe because no docker name, state or
-    # timestamp can contain one, and unlike a tab it needs no quoting to reach the exe.
-    $dockerArgs = if ($Kind -eq "container") { @("ps", "-a", "--format", "{{.Names}}|{{.State}}|{{.CreatedAt}}") }
-                  else { @("network", "ls", "--format", "{{.Name}}||{{.CreatedAt}}") }
+    # id -> name/state/created. Keyed on the FULL id for the same reason everything else
+    # here is: a name can be another resource's id. Separator is a pipe because no docker
+    # id, name, state or timestamp can contain one, and unlike a tab it needs no quoting to
+    # reach the exe.
+    $dockerArgs = if ($Kind -eq "container") { @("ps", "-a", "--no-trunc", "--format", "{{.ID}}|{{.Names}}|{{.State}}|{{.CreatedAt}}") }
+                  else { @("network", "ls", "--no-trunc", "--format", "{{.ID}}|{{.Name}}||{{.CreatedAt}}") }
     $out = Invoke-DockerCapture $dockerArgs
     $meta = @{}
     if ($LASTEXITCODE -ne 0) { return $meta }
     foreach ($line in $out) {
         $parts = ([string]$line).Split("|")
-        if ($parts.Count -lt 3) { continue }
-        $meta[$parts[0]] = [pscustomobject]@{ State = $parts[1]; Created = $parts[2] }
+        if ($parts.Count -lt 4) { continue }
+        $meta[$parts[0]] = [pscustomobject]@{ Name = $parts[1]; State = $parts[2]; Created = $parts[3] }
     }
     return $meta
 }
 
-function Get-OwnerValue([string]$Kind, [string]$Name) {
-    # The label VALUE, fetched as a whole JSON map so no quoted key ever reaches docker.
-    $dockerArgs = if ($Kind -eq "container") { @("inspect", "--type", "container", $Name, "--format", "{{json .Config.Labels}}") }
-                  else { @("network", "inspect", $Name, "--format", "{{json .Labels}}") }
+function Get-OwnerValue([string]$Kind, [string]$Id) {
+    # The label VALUE, fetched as a whole JSON map so no quoted key ever reaches docker,
+    # and addressed BY ID so it cannot be answered about a different resource.
+    $dockerArgs = if ($Kind -eq "container") { @("inspect", "--type", "container", $Id, "--format", "{{json .Config.Labels}}") }
+                  else { @("network", "inspect", $Id, "--format", "{{json .Labels}}") }
     $out = Invoke-DockerCapture $dockerArgs
     if ($LASTEXITCODE -ne 0) { return "" }
     $raw = ($out | Select-Object -First 1)
@@ -172,28 +188,54 @@ function Get-OwnerValue([string]$Kind, [string]$Name) {
 }
 
 function Get-Inventory {
-    # Every container and network, each classified exactly once: compose-managed (never
-    # touched), harness-owned (reapable by its owner), built-in, or orphan.
+    # Every container and network, each classified into EXACTLY ONE bucket.
+    #
+    # `Bucket` is computed here, once, and every reader uses it. It used to be derived at
+    # each display site from `OwnerId` and `Protection` independently, so a resource
+    # carrying BOTH labels appeared under HARNESS-OWNED and again under PROTECTED, and the
+    # printed counts summed to more than the number of resources (measured on attempt 2:
+    # sum=112 over 111 resources). That blunts the whole point of printing the PROTECTED
+    # count - it is meant to be a tripwire you can watch for movement, and a number that
+    # double-counts cannot be one.
+    #
+    # Precedence is protection first, deliberately: a resource that is BOTH compose-managed
+    # and harness-labelled is a protected resource that someone mislabelled, not an owned
+    # one with a caveat.
     $rows = @()
     foreach ($kind in @("container", "network")) {
-        $names = Get-DockerNames $kind @()
-        if ($null -eq $names) { throw "docker could not list ${kind}s - refusing to report an empty sweep as a clean one" }
-        $compose = Get-DockerNames $kind @("label=$ComposeLabel")
+        $ids = Get-DockerIds $kind @()
+        if ($null -eq $ids) { throw "docker could not list ${kind}s - refusing to report an empty sweep as a clean one" }
+        $compose = Get-DockerIds $kind @("label=$ComposeLabel")
         if ($null -eq $compose) { throw "docker could not list compose-managed ${kind}s - refusing to reap without the protection set" }
-        $labelled = Get-DockerNames $kind @("label=$OwnerLabel")
+        $labelled = Get-DockerIds $kind @("label=$OwnerLabel")
         if ($null -eq $labelled) { throw "docker could not list harness-labelled ${kind}s" }
         $meta = Get-DockerMeta $kind
-        foreach ($name in $names) {
+        foreach ($id in $ids) {
+            $m = $meta[$id]
+            $name = $(if ($m) { $m.Name } else { $id })
             $protection = ""
-            if ($compose -contains $name) { $protection = "compose-managed - deleting it is a deploy, not a cleanup" }
-            elseif ($kind -eq "network" -and ($BuiltinNetworks -contains $name)) { $protection = "docker built-in network" }
-            $owner = if ($labelled -contains $name) { Get-OwnerValue $kind $name } else { "" }
-            $m = $meta[$name]
+            if ($compose -contains $id) { $protection = "compose-managed - deleting it is a deploy, not a cleanup" }
+            # -ccontains, case-SENSITIVE. Docker network names are case-sensitive, so a
+            # network called `Bridge` is not the built-in `bridge`; the case-insensitive
+            # form protected it anyway and gave "docker built-in network" as the reason,
+            # which is a wrong answer even though it errs safe.
+            elseif ($kind -eq "network" -and ($BuiltinNetworks -ccontains $name)) { $protection = "docker built-in network" }
+            # LABELLED is key PRESENCE, from docker's own filter - not "the value is
+            # non-empty". A resource carrying `ai-stack.harness.owner=` (empty value) is
+            # labelled, and treating it as unlabelled made it an orphan that -RemoveOrphan
+            # would delete, contradicting the documented contract. Its owner is unusable,
+            # so it is reported as such rather than silently reaped.
+            $isLabelled = ($labelled -contains $id)
+            $owner = if ($isLabelled) { Get-OwnerValue $kind $id } else { "" }
+            $bucket = if ($protection) { "protected" } elseif ($isLabelled) { "owned" } else { "orphan" }
             $rows += [pscustomobject]@{
                 Kind       = $kind
+                Id         = $id
                 Name       = $name
                 OwnerId    = $owner
+                Labelled   = $isLabelled
                 Protection = $protection
+                Bucket     = $bucket
                 State      = $(if ($m) { $m.State } else { "" })
                 Created    = $(if ($m) { $m.Created } else { "" })
             }
@@ -202,11 +244,11 @@ function Get-Inventory {
     return $rows
 }
 
-function Get-NetworkAttachedCount([string]$Name) {
+function Get-NetworkAttachedCount([string]$Id) {
     # A network with containers attached cannot be removed, and `docker network rm` failing
     # must not be reported as a successful reap. Returns -1 when the count is unknown, which
     # is treated as "in use" - refusing on unknown is the safe direction.
-    $out = Invoke-DockerCapture @("network", "inspect", $Name, "--format", "{{len .Containers}}")
+    $out = Invoke-DockerCapture @("network", "inspect", $Id, "--format", "{{len .Containers}}")
     if ($LASTEXITCODE -ne 0) { return -1 }
     $n = 0
     $first = ([string]($out | Select-Object -First 1)).Trim()
@@ -217,8 +259,9 @@ function Get-NetworkAttachedCount([string]$Name) {
 function Remove-Resource($Row) {
     # Returns "" on success or the failure text. Never throws: one stuck resource must not
     # abandon the rest of the sweep.
-    if ($Row.Kind -eq "container") { $out = Invoke-DockerCapture @("rm", "-f", $Row.Name) }
-    else { $out = Invoke-DockerCapture @("network", "rm", $Row.Name) }
+    # BY ID. See Get-DockerIds for why deleting by name was a production-deletion path.
+    if ($Row.Kind -eq "container") { $out = Invoke-DockerCapture @("rm", "-f", $Row.Id) }
+    else { $out = Invoke-DockerCapture @("network", "rm", $Row.Id) }
     if ($LASTEXITCODE -ne 0) { return (($out -join " ").Trim()) }
     return ""
 }
@@ -238,7 +281,7 @@ function Remove-OneRow($Row, [string]$Indent) {
         return $false
     }
     if ($Row.Kind -eq "network") {
-        $n = Get-NetworkAttachedCount $Row.Name
+        $n = Get-NetworkAttachedCount $Row.Id
         if ($n -ne 0) {
             Show-Row $Row ("IN USE - {0} container(s) attached; NOT removed" -f $(if ($n -lt 0) { "unknown" } else { $n })) Yellow
             return $false
@@ -282,8 +325,8 @@ if ($RemoveOrphan) {
         # what the flag does, and the code was the more dangerous of the two. Refusing here
         # costs a labelled resource's owner nothing (they have -Owner) and stops one agent
         # deleting another's running test by name.
-        if ($row.OwnerId) {
-            Write-Host ("    REFUSED {0} - not an orphan: it belongs to '{1}'. Reap it with -Owner {1}" -f $name, $row.OwnerId) -ForegroundColor Red
+        if ($row.Labelled) {
+            Write-Host ("    REFUSED {0} - not an orphan: it belongs to '{1}'. Reap it with -Owner {1}" -f $name, $(if ($row.OwnerId) { $row.OwnerId } else { "<empty owner - remove it by hand>" })) -ForegroundColor Red
             $failed++
             continue
         }
@@ -296,7 +339,13 @@ if ($RemoveOrphan) {
 # --- mode: reap one owner ---------------------------------------------------------
 if ($Owner) {
     $aliases = Get-OwnerAliases $Owner
-    $mine = @($resources | Where-Object { $_.OwnerId -and ($aliases -contains $_.OwnerId) })
+    # Selected on LABELLED, not on Bucket. A resource that is compose-managed AND carries
+    # this owner's label must still be MATCHED here so that Remove-OneRow can refuse it out
+    # loud - somebody having written the harness label into a plane's compose file is exactly
+    # the thing worth shouting about, and selecting on Bucket -eq "owned" would have skipped
+    # it silently and exited 0. The report's buckets partition for COUNTING; this is
+    # selection for ACTING, and they are different questions.
+    $mine = @($resources | Where-Object { $_.Labelled -and $_.OwnerId -and ($aliases -contains $_.OwnerId) })
     if (-not $mine.Count) {
         Say ("Reap {0}: nothing labelled {1}={2}." -f $Owner, $OwnerLabel, ($aliases -join "|")) Green
         exit 0
@@ -317,15 +366,15 @@ if ($Owner) {
 }
 
 # --- mode: report -----------------------------------------------------------------
-$owned = @($resources | Where-Object { $_.OwnerId })
-$orphans = @($resources | Where-Object { -not $_.OwnerId -and -not $_.Protection })
-$protected = @($resources | Where-Object { $_.Protection })
+$owned = @($resources | Where-Object { $_.Bucket -eq "owned" })
+$orphans = @($resources | Where-Object { $_.Bucket -eq "orphan" })
+$protected = @($resources | Where-Object { $_.Bucket -eq "protected" })
 
 Write-Host ("HARNESS-OWNED - {0} (reaped when their worktree is removed)" -f $owned.Count) -ForegroundColor Cyan
 if (-not $owned.Count) { Say "    (none)" }
 foreach ($row in $owned) {
-    if ($row.Protection) { Show-Row $row ("owner={0}  PROTECTED: {1}" -f $row.OwnerId, $row.Protection) Red }
-    else { Show-Row $row ("owner={0}  {1}" -f $row.OwnerId, $row.Created) Gray }
+    $who = if ($row.OwnerId) { $row.OwnerId } else { "(empty - unreapable, remove by hand)" }
+    Show-Row $row ("owner={0}  {1}" -f $who, $row.Created) Gray
 }
 
 Write-Host ""
@@ -353,9 +402,28 @@ if ($orphans.Count) {
 }
 
 # The protected count is printed rather than the list: it is the number this script REFUSED
-# to consider, and seeing it move is how an operator notices the guard being eroded.
+# to consider, and seeing it move is how an operator notices the guard being eroded. That
+# only works if the three buckets PARTITION the inventory, so the total is asserted here
+# rather than assumed - they were derived independently once, and a resource carrying both
+# labels was counted twice (sum 112 over 111 resources, found by a tester 2026-09-07).
 Write-Host ""
 Write-Host ("PROTECTED - {0} compose-managed or built-in resource(s), never candidates" -f $protected.Count) -ForegroundColor Green
+$sum = $owned.Count + $orphans.Count + $protected.Count
+if ($sum -ne $resources.Count) {
+    Write-Host ("  BUG: {0} + {1} + {2} = {3}, but the daemon has {4} resource(s). The buckets do not partition." `
+        -f $owned.Count, $orphans.Count, $protected.Count, $sum, $resources.Count) -ForegroundColor Red
+}
+# A compose-managed resource that ALSO carries the ownership label is not a routine sight -
+# it means somebody wrote the harness label into a plane's compose file. It is protected
+# either way, and it is worth naming rather than folding into a count.
+$mislabelled = @($protected | Where-Object { $_.Labelled })
+if ($mislabelled.Count) {
+    Write-Host ("  {0} of them ALSO carry {1} - protected anyway, but somebody labelled a compose resource:" -f $mislabelled.Count, $OwnerLabel) -ForegroundColor Yellow
+    # "PROTECTED" goes on the LINE, not only in the heading above it. A reader - or a test -
+    # scanning for compose-managed names offered up for deletion looks line by line, and a
+    # name on a bare line reads as a candidate however reassuring the section header is.
+    foreach ($row in $mislabelled) { Show-Row $row ("owner={0}  PROTECTED: {1}" -f $row.OwnerId, $row.Protection) Yellow }
+}
 
 # Images and volumes: counted, never touched. Reporting them is how the operator learns the
 # disk cost without this script acquiring the authority to delete either.

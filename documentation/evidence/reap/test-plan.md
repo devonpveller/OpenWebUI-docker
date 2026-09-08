@@ -122,10 +122,24 @@ label on a network instead of a container. Report anything that gets through.
 
 ## T5 - nothing from the live stack is ever a candidate
 
+**Build fixtures FIRST - on a clean daemon this case is vacuous.** Both candidate
+sections print `(none)`, so the leak check passes by matching nothing and the
+arithmetic reconciles trivially. A tester flagged that on attempt 2. Create at least:
+one owned container, one orphan, and one carrying BOTH the ownership and a compose
+label, so all three buckets are non-empty before you read the report.
+
 ```powershell
-$r = (.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String)
+docker create --name t5-owned  --label ai-stack.harness.owner=t5 alpine:3.21 true
+docker create --name t5-orphan alpine:3.21 true
+docker create --name t5-both   --label ai-stack.harness.owner=t5 `
+  --label com.docker.compose.project=t5-fake alpine:3.21 true
+$r = (.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String -Width 250)
 $r.Length            # must be > 0 before you conclude anything
 ```
+
+**`-Width 250` is not decoration.** Bare `Out-String` wraps at the console width, so a
+long line becomes two and a `-match` sweep can hit a fragment that was never a line.
+That produced a phantom entry for a tester on attempt 2 (finding 12 in the sink).
 
 Then, for every name in `docker ps -a --filter label=com.docker.compose.project
 --format '{{.Names}}'` and `docker network ls --filter
@@ -140,7 +154,14 @@ you concluded it was clean anyway.
 
 Also confirm the arithmetic reconciles: `HARNESS-OWNED + ORPHANS + PROTECTED` must
 equal `(docker ps -a | count) + (docker network ls | count)`. A resource classified
-into no bucket is a hole in the report.
+into no bucket is a hole in the report; one classified into two inflates the PROTECTED
+count that is supposed to work as a tripwire. `t5-both` above is exactly the resource
+that used to be counted twice (attempt 2 measured sum=112 over 111 resources), so with
+it present this check is real. `reap.ps1` also asserts the partition itself and prints
+a `BUG:` line if it fails - a run that prints one is a FAIL of this case even if your
+own arithmetic agrees.
+
+Clean up: `docker rm -f t5-owned t5-orphan t5-both`.
 
 ## T6 - a REFUSED worktree removal reaps nothing
 
@@ -183,8 +204,8 @@ failure mode the script was rewritten to prevent.
 
 ## T8 - the verifier is not vacuous
 
-Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`37 passed, 0 failed`**
-(measured 2026-09-07, attempt 2). If the total differs, do not stop at the number -
+Run `.\scripts\agent-harness\verify-reap.ps1`. It must print **`49 passed, 0 failed`**
+(measured 2026-09-07, attempt 3). If the total differs, do not stop at the number -
 check WHICH assertions ran and whether any is missing; a count is a weak assertion and
 this repo has a record of hardcoded ones going stale
 (`documentation/notes/u4quad-findings.md:342`). A different total with every case
@@ -206,9 +227,8 @@ Seed A - remove the compose guard in `Get-Inventory`:
 .\verify-reap.ps1 -Script .\reap.red-guard.ps1
 ```
 
-Expect **31 passed, 6 failed** (2026-09-07): the two CASE 3 assertions, the two
-CASE 4 leak assertions, and both CASE 7 assertions. What matters is WHICH six, not the
-total.
+Expect **42 passed, 7 failed** (2026-09-07, attempt 3) - the CASE 3, CASE 4 and CASE 7
+compose assertions. What matters is WHICH, not the total.
 
 Seed B - narrow `Get-OwnerAliases` to the bare id:
 
@@ -218,7 +238,19 @@ Seed B - narrow `Get-OwnerAliases` to the bare id:
 .\verify-reap.ps1 -Script .\reap.red-alias.ps1
 ```
 
-Expect **36 passed, 1 failed** (2026-09-07) - CASE 2 alone.
+Expect **48 passed, 1 failed** (2026-09-07, attempt 3) - CASE 2 alone.
+
+Seed C - revert the delete to being aimed by NAME instead of by id:
+
+```powershell
+(Get-Content reap.ps1) -replace 'Invoke-DockerCapture @\("rm", "-f", \$Row.Id\)', 'Invoke-DockerCapture @("rm", "-f", $Row.Name)' |
+  Set-Content reap.red-byname.ps1 -Encoding ascii
+.\verify-reap.ps1 -Script .\reap.red-byname.ps1
+```
+
+Expect **47 passed, 2 failed** - both CASE 7c assertions, and read them: the VICTIM
+is destroyed and the decoy survives. That is the production-deletion behaviour this
+guard exists to stop, reproduced on throwaway fixtures.
 
 PASS = green on the real script, and both seeds fail exactly the cases named above.
 FAIL = a seed that stays green (the verifier does not actually test that behaviour),
@@ -330,6 +362,51 @@ section, not an appendix); README.md carries the rule; PLAN.md 4.2 no longer cla
 convention covers containers and networks.
 FAIL = any of the three is missing, or sits somewhere a reader would reach only after
 already running their test.
+
+## T15 - a NAME is not an IDENTITY
+
+The most dangerous defect found in this item. Docker resolves a reference by id before
+the name index, so a container NAMED with a live container's full 64-char id shadows
+it - and `reap.ps1` deleted by name until attempt 2.
+
+**Use your OWN throwaway as the victim. Never a production container.** The point is
+provable entirely on fixtures you created.
+
+```powershell
+docker create --name t15-victim alpine:3.21 true
+$vid = docker inspect --type container t15-victim --format '{{.Id}}'
+docker create --name $vid --label ai-stack.harness.owner=t15 alpine:3.21 true
+docker inspect $vid --format '{{.Name}}'      # MUST print /t15-victim - the shadow is real
+$decoy = docker ps -a --no-trunc --filter label=ai-stack.harness.owner=t15 --format '{{.ID}}'
+.\scripts\agent-harness\reap.ps1 -Owner t15
+docker inspect --type container t15-victim --format '{{.Name}}'   # MUST still exist
+docker inspect --type container $decoy                            # MUST be gone
+```
+
+PASS = the shadow is demonstrated (`{{.Name}}` prints `/t15-victim`), the reap exits 0,
+**the victim survives**, and the decoy is gone.
+FAIL = the victim is deleted - that is the production-deletion path, on a fixture.
+
+Note you cannot check the decoy's fate by its name: that name resolves to the victim.
+Capture the decoy's own id first, as above.
+
+Clean up: `docker rm -f t15-victim` (and the decoy by id if it survived).
+
+## T16 - an empty owner VALUE is labelled, not an orphan
+
+```powershell
+docker create --name t16-empty --label ai-stack.harness.owner= alpine:3.21 true
+.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String -Width 250
+.\scripts\agent-harness\reap.ps1 -RemoveOrphan t16-empty
+docker inspect --type container t16-empty --format '{{.Name}}'
+```
+
+PASS = it is NOT listed under ORPHANS, `-RemoveOrphan` refuses it, and it survives.
+FAIL = it is offered as an orphan or deleted - `-RemoveOrphan`'s documented contract is
+unlabelled leftovers, and a resource carrying the key with an empty value is labelled,
+just badly.
+
+Clean up: `docker rm -f t16-empty`.
 
 ## What is deliberately NOT in scope
 

@@ -56,20 +56,27 @@ were not searched.
 
 ## 2. Array splatting into a PowerShell SCRIPT binds POSITIONALLY, not by name
 
-> **CORRECTED 2026-09-07 after a tester failed this section.** The first version of this
-> finding illustrated it with `& $script @("-Owner", "x")` and attributed the measured
-> output to that line. **That line is not splatting at all.** `@( ... )` after a command
-> is the array SUBEXPRESSION operator producing one array-valued argument; only
-> `@variableName` splats. The measurement was real but was taken with a variable, and the
-> snippet beside it was not the thing measured - so anyone pasting the note's own example
-> got a different result. The corrected table below was re-measured line by line.
+> **CORRECTED TWICE, on attempts 1 and 2, each time by a tester.** Round 1: the finding
+> illustrated the trap with `& $script @("-Owner", "x")` and attributed a measured output
+> to that line, when the measurement had been taken with a variable - the snippet beside
+> the number was not the thing measured. Round 2: the correction's own first row named a
+> DIFFERENT param declaration from the one measured (`[CmdletBinding()]` written INSIDE
+> `param(...)` rather than above it), and that changes the result. Every row below states
+> the exact script it was run against, because that is what went wrong both times.
 
-Four forms, and they do four different things. Measured 2026-09-07 against a script
-declaring `param([CmdletBinding()] [string]$Owner="", [string]$RemoveOrphan="")`:
+**The script measured against**, written exactly, `bindprobe.ps1`:
+
+```powershell
+[CmdletBinding()] param([string]$Owner="",[string]$RemoveOrphan="") "Owner=[$Owner] RemoveOrphan=[$RemoveOrphan]"
+```
+
+The attribute is ABOVE `param(...)`. That matters: `param([CmdletBinding()] [string]$Owner...)`
+puts the attribute on the PARAMETER instead of the script, and row 1 then returns
+`Owner=[-Owner x]` rather than failing. Measured 2026-09-07:
 
 | What you write | What the script receives |
 |---|---|
-| `& $s @("-Owner","x")` — inline array LITERAL, not a splat | one array-valued argument for `$Owner`; with `[string]$Owner` it fails the cast: `Cannot process argument transformation on parameter 'Owner'` |
+| `& $s @("-Owner","x")` — inline array LITERAL, not a splat | one array-valued argument for `$Owner`; against the script above it fails the cast: `Cannot process argument transformation on parameter 'Owner'` |
 | `$a = @("-Owner","x"); & $s @a` — splat a VARIABLE | `Owner=[-Owner] RemoveOrphan=[x]` — **binds POSITIONALLY; this is the trap** |
 | `& $s @{Owner="x"}` — inline hashtable LITERAL, not a splat | `Owner=[System.Collections.Hashtable] RemoveOrphan=[]` |
 | `$h = @{Owner="x"}; & $s @h` — splat a HASHTABLE VARIABLE | `Owner=[x] RemoveOrphan=[]` — **the only form that binds by name** |
@@ -89,12 +96,24 @@ it splats the variable (`& $queue @QArgs`), which is row 4 above.
 Splatting an array into a native **.exe** is also fine: each element becomes one
 command-line argument, which is the intent at `drill-dark-factory.ps1:195`,
 `gate-audit.ps1:123`, `check-ob1-integration-images.ps1:188`, `dfu-done.ps1:292` and
-`verify-dfu-done.ps1:100`. Those five were checked and are correct as written. Note that an
-array appearing INLINE in a native call (not splatted from a variable) is different again:
-`& docker create --name x @("--label","k=v") alpine true` space-joins the elements into ONE
-argument and docker rejects it as `unknown flag: --label ai-stack.harness.owner`.
+`verify-dfu-done.ps1:100`. Those five were checked and are correct as written.
+
+> **A claim that used to sit here was FALSE, with the sign inverted, and a tester caught
+> it.** It said an array appearing inline in a native call space-joins into one argument:
+> `& docker create --name x @("--label","k=v") alpine true` was supposed to fail. It does
+> not. Measured 2026-09-07: exit 0, and `docker inspect` shows `{"k":"v"}` - PowerShell
+> expands a plain inline array into separate arguments for a native command, which is the
+> convenient behaviour, not a trap.
+>
+> The real cause of the failure that produced that claim was a NESTED array of my own
+> making: a helper returning `,@("--label","k=v")` (the comma-wrap that stops an empty
+> array vanishing) called as `@(Get-Args ...)` yields an array CONTAINING an array, and a
+> native call flattens that inner array to one space-joined argument -
+> `--label ai-stack.harness.owner=x` - which docker rejects as an unknown flag. One level
+> of nesting, entirely self-inflicted, misdiagnosed as a language rule.
 
 No other in-repo instance of array-splatting into a `.ps1` was found.
+
 
 ---
 
@@ -162,9 +181,13 @@ them. Present on the daemon at the time of the sweep:
 
 - 9 tags matching `:wt-*` (largest: `openbrain-wiki-viewer:wt-tester-note-width` and
   `:wt-wiki-note-width`, 866 MB each)
-- 6 tags matching `:drill*` (`openbrain-gateway`, `openbrain-mcp-server`,
-  `openbrain-ext-server`)
+- **7** tags matching `:drill*` (`openbrain-gateway`, `openbrain-mcp-server`,
+  `openbrain-ext-server`). This said 6 until a tester counted them on 2026-09-07; it was an
+  undercount from the start, not drift - all seven were 6-8 days old at both readings.
 - 2 `:test` tags, 10 dangling images
+
+Counts as of 2026-09-07. Re-derive rather than trusting them:
+`docker images --format '{{.Repository}}:{{.Tag}}' | Select-String ':drill'`.
 
 `reap.ps1 -Report` prints the counts on every run, so the number is visible without anyone
 having to remember to look for it.
@@ -214,3 +237,47 @@ Networks (both with zero attached containers):
 
 Nothing else was touched. The IMAGES those containers referenced were NOT removed - the
 `:drill-5e705d0f` and `:graphsel` tags remain, per finding 6.
+
+---
+
+## 11. A docker NAME can be another resource's ID, and the id wins
+
+Docker resolves a reference by id before it consults the name index. So a container whose
+NAME is a live container's full 64-char id **shadows that container**: every `docker
+inspect` / `rm` / `stop` naming that string hits the live one.
+
+**Measured 2026-09-07**, non-destructively, against `openbrain-research`:
+
+```
+docker create --name <openbrain-research's full 64-char id> \
+       --label ai-stack.harness.owner=t9probe alpine:3.21 true
+docker inspect <that same 64-char string> --format '{{.Name}} (image {{.Config.Image}})'
+  -> /openbrain-research (image openbrain-research:local)
+```
+
+The decoy exists, is a legitimate reap candidate, and is unreachable by its own name. It was
+removed by its own id afterwards; `openbrain-research` was never touched.
+
+`reap.ps1` deleted by NAME until this was found by a tester, so `-Owner t9probe` would have
+run `docker rm -f <that name>` and destroyed a production container. It now keys its entire
+inventory on the id and deletes by id; `verify-reap.ps1` CASE 7c builds the shadowing pair
+out of its own throwaway fixtures and asserts the victim survives. Seeding the old
+name-based delete back in turns exactly that case red (measured: 47 passed / 2 failed).
+
+**The general rule for any script that deletes docker resources:** enumerate with
+`--no-trunc --format {{.ID}}`, carry the id, and act on the id. A name is a display string,
+not an identity.
+
+---
+
+## 12. `Out-String` wraps at the console width and can manufacture a line
+
+`... | Out-String` breaks long lines at the host's width, so one output line becomes two and
+a `Select-String` / `-match` sweep over the result can match a fragment that never existed
+as a line. A tester hit this on attempt 2 while sweeping `-Report` output and saw a phantom
+entry.
+
+Use `Out-String -Width <n>` with a width larger than any line you care about (this repo's
+scripts print well under 200 columns), or match against the array of lines before joining
+them. It sits beside finding 1: those are the two ways a text assertion silently stops
+meaning what it says.

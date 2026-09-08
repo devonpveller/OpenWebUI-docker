@@ -11,21 +11,25 @@
 # Read-only questions about the live stack (does any compose container appear as a
 # candidate?) are answered by looking, never by changing.
 #
-# MOST of its resources carry the ownership label, and THREE DELIBERATELY DO NOT. That
-# distinction was stated wrongly here until a tester caught it on 2026-09-07: this comment
-# claimed every fixture was labelled and therefore reapable, in the verifier for a change
-# whose entire thesis is that unlabelled resources are the problem. CASE 6 of this very
-# script disproves it - it needs an UNLABELLED container to test the orphan path, and
-# `$tag-occupant` (CASE 5) is unlabelled for the same reason.
+# MOST fixtures carry the ownership label; SOME DELIBERATELY DO NOT, because the cases that
+# test the unlabelled paths need unlabelled resources - CASE 6 needs an orphan, and CASE 5
+# needs an occupant that is not the network's owner. The fixtures also span several owner
+# ids, so that one case's leftovers cannot supply another case's exit code.
 #
-# So, honestly: if this script is killed halfway, `reap.ps1 -Owner <each id>` collects the
-# labelled ones and the unlabelled ones need `docker rm -f` by name. The teardown block at
-# the end prints every name it made, and the ids are listed there rather than assumed to be
-# one. The fixtures span THREE owner ids ($OwnerA, $OwnerB and CASE 5's own), which is also
-# why the recovery hint names all of them.
+# NO COUNTS ARE WRITTEN HERE, deliberately. This comment asserted a count twice and was
+# wrong both times, in a file whose entire subject is labelling: first "all fixtures are
+# labelled" (disproved by this script's own passing CASE 6), then "three are unlabelled"
+# (there were two, and the next sentence named them). Both were caught by testers, one each
+# on attempts 1 and 2. `documentation/notes/u4quad-findings.md:342` records the same repo
+# going stale on a hardcoded count twice over.
+#
+# So the numbers are DERIVED instead: every fixture is registered in `$script:Made` with its
+# owner, and the teardown block prints the actual owner ids and the actual unlabelled names.
+# Read that, not a sentence up here that nobody re-counts.
 #
 # Every fixture name is prefixed `reapv-<pid>-`, so `docker ps -a --filter name=reapv-` finds
-# the lot regardless of labelling.
+# the lot regardless of labelling - which is the recovery of last resort if this run is
+# killed.
 #
 # Usage:
 #   .\verify-reap.ps1                      (exit 0 = every case passed, 1 = something failed)
@@ -78,6 +82,16 @@ function Test-Exists([string]$Kind, [string]$Name) {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Get-FixtureOwner([string[]]$Labels) {
+    # The owner this fixture was created with, or "" if it is one of the deliberately
+    # unlabelled ones. Derived from what was actually passed to docker, so the teardown
+    # report cannot drift from the fixtures the way a hand-maintained list does.
+    foreach ($l in $Labels) {
+        if ($l -like "ai-stack.harness.owner=*") { return $l.Substring("ai-stack.harness.owner=".Length) }
+    }
+    return ""
+}
+
 function New-TestContainer([string]$Name, [string[]]$Labels, [string]$Network, [string[]]$Command) {
     # The default command exits immediately, which is what a cheap "does it exist" fixture
     # wants. An occupant that must hold a network open needs one that BLOCKS - see CASE 5,
@@ -92,7 +106,7 @@ function New-TestContainer([string]$Name, [string[]]$Labels, [string]$Network, [
     $dockerArgs += $Command
     $null = Docker $dockerArgs
     if ($LASTEXITCODE -ne 0) { throw "could not create test container $Name" }
-    $script:Made += @{ Kind = "container"; Name = $Name }
+    $script:Made += @{ Kind = "container"; Name = $Name; Owner = (Get-FixtureOwner $Labels) }
 }
 
 function New-TestNetwork([string]$Name, [string[]]$Labels) {
@@ -101,7 +115,7 @@ function New-TestNetwork([string]$Name, [string[]]$Labels) {
     $dockerArgs += $Name
     $null = Docker $dockerArgs
     if ($LASTEXITCODE -ne 0) { throw "could not create test network $Name" }
-    $script:Made += @{ Kind = "network"; Name = $Name }
+    $script:Made += @{ Kind = "network"; Name = $Name; Owner = (Get-FixtureOwner $Labels) }
 }
 
 function Invoke-Reap {
@@ -260,10 +274,18 @@ try {
     Check "and leaves the other owner's container alone" (Test-Exists "container" "$tag-b") "$tag-b vanished during -RemoveOrphan"
 
     # --- CASE 7: -RemoveOrphan refuses a compose-managed name ----------------------
+    # The fixture carries the compose label and NO owner label, so this reaches the COMPOSE
+    # branch. It used to name `$tag-compose`, which carries both - and once CASE 7b's owner
+    # check was added that check fired first, so CASE 7 passed without ever exercising the
+    # guard it is named for. A tester found it passing for the wrong reason on attempt 2.
     Write-Host "`nCASE 7  -RemoveOrphan refuses a compose-managed name" -ForegroundColor Cyan
-    $r = Invoke-Reap -Orphan "$tag-compose"
+    New-TestContainer "$tag-composeonly" @("com.docker.compose.project=verify-reap-fake")
+    $r = Invoke-Reap -Orphan "$tag-composeonly"
     Check "naming a compose-managed resource is refused, not obeyed" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
-    Check "it still exists" (Test-Exists "container" "$tag-compose") "$tag-compose was deleted by name"
+    Check "it still exists" (Test-Exists "container" "$tag-composeonly") "$tag-composeonly was deleted by name"
+    Assert-NonEmpty "the CASE 7 refusal" $r.Text
+    Check "the refusal gives the COMPOSE reason, not the not-an-orphan reason" `
+        ($r.Text -match "compose-managed") $r.Text
 
     # --- CASE 7b: -RemoveOrphan refuses a resource that is NOT an orphan -----------
     # Found by a tester on 2026-09-07: this flag is documented as removing UNLABELLED
@@ -277,6 +299,54 @@ try {
     Assert-NonEmpty "the CASE 7b refusal" $r.Text
     Check "the refusal names the owner and the -Owner command to use" `
         (($r.Text -match [regex]::Escape($OwnerB)) -and ($r.Text -match "-Owner")) $r.Text
+
+    # --- CASE 7c: A NAME IS NOT AN IDENTITY -----------------------------------------
+    # THE most dangerous defect found in this item, by a tester on attempt 2. Docker resolves
+    # a reference by id BEFORE the name index, so a container NAMED with another container's
+    # full 64-char id shadows it: `docker rm -f <that name>` deletes the OTHER one. reap.ps1
+    # deleted by name, so a labelled decoy named after a production container's id would have
+    # aimed the delete at production. Demonstrated here entirely on this script's own
+    # fixtures - the victim is an unlabelled throwaway, never anything real.
+    Write-Host "`nCASE 7c  a decoy NAMED with another container's id does not shadow it" -ForegroundColor Cyan
+    $ownerD = "verify-reap-id"
+    New-TestContainer "$tag-victim" @()
+    $victimId = ([string]((Docker @("inspect", "--type", "container", "$tag-victim", "--format", "{{.Id}}")) | Select-Object -First 1)).Trim()
+    Check "got the victim's full id" ($victimId.Length -ge 64) "id was '$victimId'"
+    # A container whose NAME is that id, and which IS a legitimate reap candidate.
+    # Its OWN owner id. CASE 3 deliberately leaves a compose-labelled $OwnerA container
+    # alive, and reaping $OwnerA therefore exits 1 on that refusal - which would be
+    # attributed to this case. Same confounder CASE 5 already avoids this way.
+    New-TestContainer $victimId @("$ownLabel=$ownerD")
+    # Its OWN id, captured now: after this point the decoy cannot be addressed by its name -
+    # that name resolves to the victim, which is the entire point of the case. Checking the
+    # decoy's fate by name would ask docker about the victim and report the decoy as alive
+    # forever. (That is what the first version of this case did.)
+    $decoyId = ([string]((Docker @("ps", "-a", "--no-trunc", "--filter", "label=$ownLabel=$ownerD", "--format", "{{.ID}}")) |
+                Where-Object { $_ -and ([string]$_).Trim() -ne $victimId } | Select-Object -First 1)).Trim()
+    Check "got the decoy's own id, distinct from the victim's" ($decoyId -and $decoyId -ne $victimId) "decoy id was '$decoyId'"
+    $shadowCheck = ([string]((Docker @("inspect", "$victimId", "--format", "{{.Name}}")) | Select-Object -First 1)).Trim()
+    Check "docker really does resolve that string to the VICTIM (the case is not vacuous)" `
+        ($shadowCheck -like "*$tag-victim*") "docker resolved it to '$shadowCheck'"
+    $r = Invoke-Reap -OwnerId $ownerD
+    Check "the reap exits 0" ($r.Code -eq 0) ("exit {0}: {1}" -f $r.Code, $r.Text)
+    Check "THE VICTIM SURVIVES - the delete was aimed by id, not by name" (Test-Exists "container" "$tag-victim") `
+        "$tag-victim was deleted: reap.ps1 is deleting by name and a name shadowed it"
+    $null = Docker @("inspect", "--type", "container", $decoyId)
+    Check "and the decoy itself is gone" ($LASTEXITCODE -ne 0) "the decoy ($decoyId) survived"
+
+    # --- CASE 7d: an EMPTY owner value is labelled, not an orphan --------------------
+    # `ai-stack.harness.owner=` is a resource somebody labelled badly. It is not unlabelled,
+    # so the orphan path must refuse it rather than delete it - the documented contract for
+    # -RemoveOrphan is "unlabelled leftovers". Found by a tester on attempt 2.
+    Write-Host "`nCASE 7d  an empty owner VALUE is still labelled" -ForegroundColor Cyan
+    New-TestContainer "$tag-emptyowner" @("$ownLabel=")
+    $report = (Invoke-Reap -ReportMode).Text
+    Assert-NonEmpty "the CASE 7d report" $report
+    Check "it is NOT listed as an orphan" `
+        (-not (($report -split "`r?`n" | Where-Object { $_ -match [regex]::Escape("$tag-emptyowner") }) -match "^\s+container\s+\S+\s+(created|exited)")) $report
+    $r = Invoke-Reap -Orphan "$tag-emptyowner"
+    Check "-RemoveOrphan refuses it" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
+    Check "and it survives" (Test-Exists "container" "$tag-emptyowner") "$tag-emptyowner was deleted through the orphan path"
 
     # --- CASE 8: an unreachable daemon is loud, not silently clean -----------------
     Write-Host "`nCASE 8  an unreachable daemon exits 4 and says so" -ForegroundColor Cyan
@@ -308,11 +378,14 @@ finally {
     if ($script:Fail -and $KeepOnFailure) {
         Write-Host "`n-KeepOnFailure: leaving test resources for inspection:" -ForegroundColor Yellow
         foreach ($m in $script:Made) { Write-Host ("    {0} {1}" -f $m.Kind, $m.Name) -ForegroundColor Yellow }
-        # Names all THREE owner ids, not just the first. The earlier hint named $OwnerA
-        # alone, which would have left the other two owners' fixtures behind while reading
-        # as a complete recovery instruction.
-        Write-Host ("  Labelled ones: reap.ps1 -Owner {0} ; -Owner {1} ; -Owner verify-reap-net" -f $OwnerA, $OwnerB) -ForegroundColor Yellow
-        Write-Host  "  Unlabelled ones (CASE 5's occupant, CASE 6's orphan) carry no label by design:" -ForegroundColor Yellow
+        # DERIVED from what was actually created, so it cannot name the wrong set. An
+        # earlier version hardcoded one owner id while the fixtures used three, and read as
+        # a complete recovery instruction while leaving two owners' resources behind.
+        $owners = @($script:Made | Where-Object { $_.Owner } | ForEach-Object { $_.Owner } | Select-Object -Unique | Sort-Object)
+        $bare = @($script:Made | Where-Object { -not $_.Owner } | ForEach-Object { $_.Name })
+        Write-Host ("  Labelled ({0} owner id(s)): {1}" -f $owners.Count,
+                    (($owners | ForEach-Object { "reap.ps1 -Owner $_" }) -join " ; ")) -ForegroundColor Yellow
+        Write-Host ("  Unlabelled by design ({0}): {1}" -f $bare.Count, ($bare -join ", ")) -ForegroundColor Yellow
         Write-Host ("      docker ps -a --filter name={0} -q | ForEach-Object {{ docker rm -f `$_ }}" -f $tag) -ForegroundColor Yellow
     } else {
         # Containers before networks - a network with an occupant will not delete.
