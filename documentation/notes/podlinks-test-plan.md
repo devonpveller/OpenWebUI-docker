@@ -14,14 +14,31 @@ PATH; nothing needs the stack up except T7, which says so.
 
 ---
 
+## ATTEMPT 2 — what the first round found
+
+Attempt 1 PASSED every case and the tester withheld `-PlanAdequate`, then wrote up
+two defects no case here would ever have surfaced. Both are fixed; both are now
+cases.
+
+| Finding | Fix | New case |
+|---|---|---|
+| F3: marking an unresolved wrapper was right, but FILTERING IT OUT of research lost links the pre-fix code kept — `isRedirectWrapper` matches bare substrings (`click.`, `links.`, `email.`, `trk.`) against the whole URL, so a genuine article can trip it; and a real tracker whose unwrap merely TIMED OUT was dropped where `extract.ts` used to follow it at fetch time | keep the candidate, keep the log line | T11 |
+| F2: `scriptedLocationTarget` ran over raw HTML with no script context — it read `<div data-location = "eu-west">` and `window.analytics.location = "…"` as client-side redirects | search only inside `<script>` elements, and require a real global | T12 |
+| F4: `decodeSubstackRedirect` cited at links.ts:184; it is at 188 (184 is `NOISE_TEXT_RE`) | corrected, and both citations now name the SHA they are relative to | T10 |
+
+The tester also MEASURED F3's incidence across 95 historical link reports and got
+zero. That is real and it is **not** why the fix is safe — the population moves
+once wrappers resolve again, so a count taken before the fix does not predict
+behaviour after it. Do not let a zero stand in for the argument.
+
 ## T1 — the suite is green
 
 ```
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 14 passed, 0 failed.
-FAIL: any failure, or fewer than 14 tests (a case was deleted rather than fixed).
+PASS: 19 passed, 0 failed.
+FAIL: any failure, or fewer than 19 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -183,6 +200,51 @@ FAIL: any figure that does not reproduce from the command that allegedly
 produced it.
 
 ---
+
+## T11 — an unresolved wrapper is SAID, not dropped (the F3 regression)
+
+The item's goal is that more links get researched. Attempt 1 had a path that
+researched fewer. This case exists so that path cannot come back.
+
+Read `link-enrich.ts` at the `gatherAnchors` call site. The filter must be
+`c.domain && !c.domain.endsWith("substack.com")` — `unresolvedWrapper` must NOT
+appear in it. The log line must still fire for marked candidates.
+
+Then prove it behaviourally rather than by reading:
+
+```
+deno test --allow-net --allow-env --filter "marked but NOT dropped" src/enrich/links.test.ts
+```
+
+Now attack it: edit `link-enrich.ts`'s filter to add `&& !c.unresolvedWrapper`
+back, and confirm the test in `links.test.ts` that asserts the filter expression
+FAILS. (It asserts against a copy of the expression, so if it still passes, the
+test is not actually pinned to the shipping filter — that is a finding.) Restore
+the file and confirm `git status` is clean.
+
+PASS: the filter does not mention the mark; the test passes; re-adding the drop
+makes a test fail.
+FAIL: the mark is back in the filter, or nothing fails when you put it back.
+
+## T12 — a page that is not trying to redirect is not followed (the F2 regression)
+
+```
+deno test --allow-net --allow-env --filter "NOT a scripted redirect" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "OUTSIDE any script" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "IS still followed" src/enrich/links.test.ts
+```
+
+PASS: all three green. The third is the one that stops the fix from being a
+blanket disable — a real `window.location.replace` inside a `<script>` must still
+resolve, which is what the whole item depends on.
+
+Then try to break it yourself. Write a document that is a redirect shell by every
+other measure (tiny, no visible text) and get `interstitialTarget` to follow
+something from a context that is not a script — an inline event handler
+(`onclick="location.href='…'"`), a `<template>`, an HTML comment, an attribute
+whose name merely ends in `location`. Report anything that resolves.
+
+FAIL: any non-script context that still steers the resolver.
 
 ## Out of scope for this plan
 
