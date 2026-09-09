@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`d399335`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`1f4101a`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -112,8 +112,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 49 passed, 0 failed.
-FAIL: any failure, or fewer than 49 tests (a case was deleted rather than fixed).
+PASS: 54 passed, 0 failed.
+FAIL: any failure, or fewer than 54 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -378,6 +378,60 @@ answer or the wrong one.
 
 FAIL: any inert or unparseable context that produces a target, or any genuinely
 executable one that stops producing one.
+
+## T13 - the fallback lever, and what it costs
+
+The operator required a fallback before this lands. It must degrade to the OLD
+behaviour, not to a hole.
+
+```
+deno test --allow-net --allow-env --filter "INTERSTITIAL_FOLLOW" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "lever OFF" src/enrich/links.test.ts
+```
+
+PASS: with `INTERSTITIAL_FOLLOW=0` the wrapper is NOT followed and unwrapRedirect
+returns it unchanged; with it restored, it resolves; and a marked wrapper is
+still `isResearchable`.
+
+Then check the DOCUMENTED procedure is real, because a lever nobody can find is
+not a lever. `documentation/notes/podcast-audio-outage-2026-09-09.md` must carry
+the variable name, the file it goes in, the recreate command, and what pulling it
+costs. FAIL if the note names a variable the code does not read - grep
+`INTERSTITIAL_FOLLOW` in `links.ts` and confirm it is read PER CALL, not cached
+at import (a lever needing a restart is not a lever).
+
+## T14 - where a resolved target may point
+
+The redirect target is chosen by the page we just fetched, and we then fetch it.
+
+```
+deno test --allow-net --allow-env --filter "internal infrastructure" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "may not point" src/enrich/links.test.ts
+```
+
+PASS: docker service names (no dot), loopback, RFC1918, 169.254 metadata,
+100.64/10, bracketed IPv6 loopback, `.local`/`.internal`, and non-http schemes
+are all refused; public URLs still resolve; and the `Location` hop is screened
+too, not just the interstitial one.
+
+ATTACK IT, because this is a security control and a green here is worth little
+on its own:
+- Confirm `RESEARCH_ALLOW_PRIVATE_TARGETS` is NOT set in any deployed env
+  (`grep -rn RESEARCH_ALLOW_PRIVATE_TARGETS` across the repo and
+  `docker exec openbrain-podcast env`). It exists only so the suite's loopback
+  stubs work. FAIL if it appears anywhere outside the test file.
+- Verify the two screen cases DELETE that variable before asserting - otherwise
+  they are testing the hatch, not the policy.
+- Try to get a private target past it: decimal/octal/hex IPv4
+  (`http://2130706433/`, `http://0177.0.0.1/`), IPv4-mapped IPv6
+  (`http://[::ffff:127.0.0.1]/`), a trailing-dot FQDN, userinfo
+  (`http://public.example@127.0.0.1/`), and a public hostname that RESOLVES to a
+  private address. Report each. The last one is DNS-time and this screen is
+  textual - if it gets through, say so plainly rather than treating the case as
+  passed.
+- Confirm no JavaScript is executed: `grep -nE "eval\(|new Function|import\(|jsdom|puppeteer|playwright" src/enrich/*.ts` must be empty.
+
+FAIL: any private/internal target that resolves, or any evidence of execution.
 
 ## Out of scope for this plan
 
