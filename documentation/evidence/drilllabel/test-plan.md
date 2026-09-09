@@ -155,7 +155,9 @@ PASS = after the kill the resources exist and are listed under **HARNESS-OWNED**
 or network.
 FAIL = they appear as ORPHANS (the label did not land), or anything survives.
 
-**Prove the counterfactual too**: check out the merge-base `177da6d`, repeat the
+**Prove the counterfactual too** — but do NOT check out the merge-base: you are barred
+from mutating git in the only worktree of this branch. Use `git show 177da6d:<path>` into
+a temporary copy instead, which yields the same evidence. Repeat the
 kill, and confirm the same leftovers appear under **ORPHANS** with no owner. Without
 that half you have not shown the change did anything.
 
@@ -243,9 +245,22 @@ docker ps -aq --filter label=com.docker.compose.project | Measure-Object
 docker ps -aq --filter label=com.docker.compose.config-hash | Measure-Object
 ```
 
-PASS = the two counts are EQUAL (every compose-managed container carries the runtime
-keys, so none qualifies for the inheritance exception), the PROTECTED count is unchanged
-from before this change, and no production container appears as a candidate.
+**Compare the SETS, not the counts.** Equal counts are not equal sets, and a tester on
+attempt 2 had to work around this case being written in counts. Run the difference in
+both directions for each runtime key:
+
+```powershell
+$proj = @(docker ps -aq --filter label=com.docker.compose.project)
+foreach ($k in 'config-hash','container-number','oneoff') {
+  $rt = @(docker ps -aq --filter "label=com.docker.compose.$k")
+  "only-project ($k): " + (@(Compare-Object $proj $rt | Where-Object SideIndicator -eq '<=').Count)
+  "only-runtime ($k): " + (@(Compare-Object $proj $rt | Where-Object SideIndicator -eq '=>').Count)
+}
+```
+
+PASS = every difference is EMPTY in both directions (so no compose-managed container
+qualifies for the inheritance exception), the PROTECTED count is unchanged from before
+this change, and no production container appears as a candidate.
 FAIL = the counts differ — then say WHICH containers carry `project` without the runtime
 keys, because each of those is one owner-label away from being reapable, and the guard
 needs rethinking rather than patching.

@@ -1,10 +1,17 @@
 # harness-owner.ps1 - one place that knows how a check script marks the docker resources
 # it creates, so `scripts/agent-harness/reap.ps1` can collect them afterwards.
 #
-# WHY THE MARK EXISTS, and it is NOT that these scripts clean up badly. Surveyed 2026-09-07:
-# every drill here tears down correctly, three through a `finally` and three through a
-# script-level `trap` calling a `Cleanup` function, and both constructs run on a normal exit
-# AND on an exception. They are careful scripts.
+# WHY THE MARK EXISTS, and it is NOT that these scripts clean up badly. The six this library
+# is wired into all tear down on a normal exit AND on an exception - three through a
+# `finally`, three through a script-level `trap` calling a `Cleanup` function. They are
+# careful scripts.
+#
+# Do not read a count into that. This comment said "every drill here ... three and three",
+# which was a claim about NINE scripts made from a survey of six, and the findings note's
+# version of it was corrected twice more before it was right. The current numbers live in
+# finding 5 of documentation/notes/harness-reap-findings-2026-09-07.md, with the enumeration
+# they came from; the last correction happened because a grep for `} finally {` missed a
+# `finally` written at column 0 and the miss was reported as a fact about the script.
 #
 # The gap is structural. NO in-process construct survives the process being KILLED - not
 # `finally`, not `trap`, not a `Cleanup` you remembered to call on every abort path. And a

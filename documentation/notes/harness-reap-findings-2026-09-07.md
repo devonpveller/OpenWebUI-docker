@@ -190,19 +190,28 @@ their droppings are ORPHANS, which `reap.ps1 -Report` lists but never auto-delet
 > | `redprove-census-cannot-measure.ps1` | `trap` |
 > | `redprove-fixture-cleanup.ps1` | `trap` |
 > | `drill-app-role-not-superuser.ps1` | `trap` |
-> | `drill-rls-boot-assertion.ps1` | neither `trap` nor a `} finally {` |
+> | `drill-rls-boot-assertion.ps1` | `finally` (at column 0, after a `catch` - see the note below) |
 > | `test-quartz4-offline.ps1` | **neither** - it force-deletes at the end of the happy path only |
 >
-> So the split among the six THIS ITEM EDITED is 3/3, and across all nine it is 4/3 plus two
-> that do not tear down on an exception at all. `test-quartz4-offline.ps1` is the clear case:
-> no `trap`, no `finally`, a bare force-delete at line 429.
+> So the split among the six THIS ITEM EDITED is 3/3, and across all nine it is **4 `trap`,
+> 4 `finally`, and exactly ONE with neither**: `test-quartz4-offline.ps1`, which force-deletes
+> at line 429 on the happy path only.
+>
+> **The row above was wrong once more, and the way it was wrong is the point.** It said
+> `drill-rls-boot-assertion.ps1` had "neither `trap` nor a `} finally {`" - which was a true
+> statement about a GREP PATTERN and a false one about the script. Its `try` is at line 161,
+> its `catch` at 728 and its `finally` at 736, with the braces at column 0, so the literal
+> `} finally {` does not appear. That `finally` removes every container the run registered
+> (`$containers += ...` before each creation) and sweeps both compose projects by run id. A
+> tester caught it on attempt 2 by reading the file instead of the grep. A search is not
+> evidence about code until someone has looked at what it missed.
 >
 > The structural point still stands and is the reason for the whole item: **no in-process
 > construct survives the process being KILLED** - not `finally`, not `trap`, not a `Cleanup`
 > you remembered to call everywhere. That is what happened. But "these scripts are all
-> careful" was an overstatement, and the two that are not careful are outside this item's
-> six, still unlabelled, and still leak on an exception. They are the obvious next
-> candidates for the retrofit.
+> careful" was an overstatement: ONE script, outside this item's six, is still unlabelled and
+> leaks on an exception as well as on a kill. It is the obvious next candidate for the
+> retrofit.
 
 ---
 
