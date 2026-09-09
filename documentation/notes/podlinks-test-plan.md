@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`df83254`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`8becc14`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -14,9 +14,37 @@ PATH; nothing needs the stack up except T7, which says so.
 
 ---
 
-## ATTEMPT 2 — what the first round found
+## ATTEMPT 3 — what round 2 found
 
-Attempt 1 PASSED every case and the tester withheld `-PlanAdequate`, then wrote up
+Round 2 FAILED (T5, T9, T10, T11, T12). Read this before the cases; four of those
+five were defects in THIS PLAN or in my test, not in the resolver, and the plan
+you are holding has been corrected for each.
+
+- **T11 was decorative.** The tester put the F3 regression back into the real
+  filter and the whole suite stayed green — the test asserted a hand-typed COPY,
+  and `link-enrich.ts` is a top-level script no test can import. The rule now
+  lives in exported `isResearchable()`; T11 now demands you prove the attack
+  bites.
+- **T12 was half a fix.** `metaRefreshTarget` had never been narrowed and runs
+  FIRST, so seven inert contexts still steered the resolver. Worse, the
+  visible-text guard strips comments before counting, so a mostly-commented
+  document read as a shell to the guard and as a redirect to the matcher. Both
+  now see the same document.
+- **The narrowing had broken real shapes**: the prefix class omitted `)` and `>`,
+  so minified `setTimeout(()=>location.replace(…))` and `if(!a)location.href=…`
+  stopped resolving. Fixed with a negative lookbehind.
+- **T4 said `HEAD~1`**, which by attempt 2 was already a fixed version — following
+  it literally met the case's own FAIL clause. Now pinned to `970cae8`.
+- **T9 contradicted T11** outright: it required the filter to consult
+  `unresolvedWrapper`, which T11 forbids. My error; corrected.
+- **T5's inference was wrong** — its fixture is rejected on context, not on the
+  size/text guards it claimed to be testing.
+- **T10 caught a false claim in my commit message**: "five new tests, all of which
+  fail on attempt 1's code" — only three of five do.
+
+## What round 1 found (still relevant)
+
+Attempt 1 PASSED every case and its tester withheld `-PlanAdequate`, then wrote up
 two defects no case here would ever have surfaced. Both are fixed; both are now
 cases.
 
@@ -37,8 +65,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 19 passed, 0 failed.
-FAIL: any failure, or fewer than 19 tests (a case was deleted rather than fixed).
+PASS: 33 passed, 0 failed.
+FAIL: any failure, or fewer than 33 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -68,7 +96,13 @@ A test that passes on the new code proves nothing on its own. Do this one by
 hand; it is the case that decides whether the change is the thing that fixes it.
 
 1. From `<worktree>/OB1`, get the pre-fix file:
-   `git show HEAD~1:recipes/daily-digest/src/enrich/links.ts > /tmp/links.orig.ts`
+   `git show 970cae8:recipes/daily-digest/src/enrich/links.ts > /tmp/links.orig.ts`
+
+   **Use the SHA, not `HEAD~n`.** This plan said `HEAD~1` through attempt 2, by
+   which point `HEAD~1` was the *first* fix — which already resolves
+   interstitials, so following the plan literally printed FOLLOWED at step 4 and
+   met the plan's own FAIL clause. `970cae8` is the pre-fix commit and stays
+   correct however many attempts this item takes.
 2. Copy `recipes/daily-digest/src/enrich/links.ts` somewhere safe.
 3. Save this as `redproof.ts` in `recipes/daily-digest` — it imports ONLY
    `unwrapRedirect`, which exists in both versions, so the same script runs
@@ -110,15 +144,30 @@ mentions `location.replace`, or carries a meta refresh, must be left alone.
 T1 covers this with `an article containing location.replace is NOT followed`
 and `a large page with a head meta-refresh is not treated as a shell`.
 
-Verify by attacking it: edit the article fixture in `links.test.ts` to make the
-document SMALLER (drop the `.repeat(40)` bodies to `.repeat(1)`) and re-run.
+CORRECTED for attempt 3. Through attempt 2 this case said: shrink the article
+fixture's `.repeat(40)` bodies to `.repeat(1)` and the test should then FAIL,
+proving the size/text guards are load-bearing. A tester ran it, it did NOT fail,
+and the plan's inference ("then the guard is decorative") was WRONG — the fixture
+puts its `location.replace` inside `<pre><code>`, which is not a `<script>`, so
+the change rejects it on CONTEXT before size or text is ever consulted. The case
+was attributing the rejection to the wrong guard.
 
-PASS: the test now FAILS — a small, near-empty document with a
-`location.replace` IS a shell by this design, which is the intended trade-off.
-FAIL: it still passes, which would mean the size/text conditions are not
-actually load-bearing and the guard is decorative.
+So attack the size and text guards where they are actually the deciding factor —
+put the redirect in a REAL script and vary only the document:
 
-Restore the fixture afterwards.
+```ts
+// a) shell-sized, no visible text  -> followed
+`<html><head><script>location.replace("https://good.example/a")</script></head></html>`
+// b) same script, 300+ chars of visible prose in the body -> NOT followed
+// c) same script, body padded past 16KB                   -> NOT followed
+```
+
+PASS: (a) resolves, (b) and (c) return null. That isolates each guard: (b) can
+only be the text limit, (c) can only be the byte cap.
+FAIL: (b) or (c) still resolves — then that guard is decorative.
+
+Do NOT conclude anything about the guards from the `<pre><code>` fixture; it is
+testing the context rule (T12), not these.
 
 ## T6 — the hop cap terminates
 
@@ -175,15 +224,23 @@ container work happened under `/tmp`.
 
 ## T9 — the log line an operator would actually see
 
-The unresolved-wrapper warning is the thing that would have made this failure
-visible on day one, so it has to be reachable, not just present in source.
+CORRECTED for attempt 3. This case previously required `external` to filter on
+`!c.unresolvedWrapper` — which is the exact regression T11 forbids. The two cases
+contradicted each other and a tester caught it; whichever way the code went, one
+of them had to fail. That was my error in revising the plan, not a defect in the
+change.
 
-Read `link-enrich.ts` around the `gatherAnchors` call and confirm the
-`⚠ unresolved redirect wrapper` line is inside the same loop that feeds
-`external`, and that `external` filters on `!c.unresolvedWrapper`.
+The warning is the thing that would have made the outage visible on day one, so
+it must be REACHABLE — and it must be the only consequence of the mark.
 
-FAIL: if the log line can be reached for a candidate that is nonetheless still
-researched, or if it is unreachable because the filter drops the candidate first.
+Read `link-enrich.ts` around the `gatherAnchors` call and confirm:
+- the `⚠ unresolved redirect wrapper` line runs over the candidates BEFORE any
+  filtering, so a marked candidate always reaches it;
+- `external` is `gathered.filter(isResearchable)` and `isResearchable` does NOT
+  consult `unresolvedWrapper` (that is T11's job to prove behaviourally).
+
+PASS: a marked candidate is both LOGGED and RESEARCHED.
+FAIL: the log line is unreachable, or the mark changes what gets researched.
 
 ## T10 — claims in the commit message and the findings note
 
@@ -204,27 +261,26 @@ produced it.
 ## T11 — an unresolved wrapper is SAID, not dropped (the F3 regression)
 
 The item's goal is that more links get researched. Attempt 1 had a path that
-researched fewer. This case exists so that path cannot come back.
+researched fewer, and attempt 2's guard against it DID NOT WORK: a tester put the
+regression back and the whole suite stayed green, because the test asserted a
+hand-typed COPY of the filter and `link-enrich.ts` is a top-level script no test
+can import.
 
-Read `link-enrich.ts` at the `gatherAnchors` call site. The filter must be
-`c.domain && !c.domain.endsWith("substack.com")` — `unresolvedWrapper` must NOT
-appear in it. The log line must still fire for marked candidates.
+The rule now lives in `isResearchable()` in `links.ts`. Do the attack, and this
+time it must bite:
 
-Then prove it behaviourally rather than by reading:
+1. In `src/enrich/links.ts`, add `if (c.unresolvedWrapper) return false;` to
+   `isResearchable`.
+2. `deno test --allow-net --allow-env src/enrich/links.test.ts`
+3. Restore the file; confirm `git status` in OB1 is clean.
 
-```
-deno test --allow-net --allow-env --filter "marked but NOT dropped" src/enrich/links.test.ts
-```
+PASS: step 2 FAILS, naming `isResearchable: a marked wrapper is still researched`.
+FAIL: step 2 stays green — the guard is decorative again, and everything else in
+this case is worthless.
 
-Now attack it: edit `link-enrich.ts`'s filter to add `&& !c.unresolvedWrapper`
-back, and confirm the test in `links.test.ts` that asserts the filter expression
-FAILS. (It asserts against a copy of the expression, so if it still passes, the
-test is not actually pinned to the shipping filter — that is a finding.) Restore
-the file and confirm `git status` is clean.
-
-PASS: the filter does not mention the mark; the test passes; re-adding the drop
-makes a test fail.
-FAIL: the mark is back in the filter, or nothing fails when you put it back.
+Then confirm the shipping caller actually uses it: `link-enrich.ts` must read
+`gathered.filter(isResearchable)`. FAIL if the filter has been re-inlined, since
+that would route around the rule the test pins.
 
 ## T12 — a page that is not trying to redirect is not followed (the F2 regression)
 
@@ -238,13 +294,50 @@ PASS: all three green. The third is the one that stops the fix from being a
 blanket disable — a real `window.location.replace` inside a `<script>` must still
 resolve, which is what the whole item depends on.
 
-Then try to break it yourself. Write a document that is a redirect shell by every
-other measure (tiny, no visible text) and get `interstitialTarget` to follow
-something from a context that is not a script — an inline event handler
-(`onclick="location.href='…'"`), a `<template>`, an HTML comment, an attribute
-whose name merely ends in `location`. Report anything that resolves.
+Round 2 found seven inert contexts that still steered it, and they are now cases
+of their own. Run them:
 
-FAIL: any non-script context that still steers the resolver.
+```
+deno test --allow-net --allow-env --filter "an inert context" src/enrich/links.test.ts
+```
+
+PASS: eight green — comment/template/textarea × meta and script, plus two
+non-executing `type` values. Note that BOTH matchers must be covered:
+`metaRefreshTarget` runs first and had never been narrowed, so a `<meta refresh>`
+inside a comment was the live bypass, not just a scripted one.
+
+Then the guard-vs-matcher agreement case, which is the subtle one:
+
+```
+deno test --allow-net --allow-env --filter "mostly-commented" src/enrich/links.test.ts
+```
+
+`extractTextFromHtml` STRIPS comments before counting visible text, so a document
+that is almost entirely one commented-out block reads as "no visible text" to the
+size guard. If the matcher can still read inside that comment, the two disagree
+about what the document contains and the guard protects nothing.
+
+And confirm the fix did not become a blanket disable — round 2 found it had, for
+the shapes that matter most:
+
+```
+deno test --allow-net --allow-env --filter "IS followed" src/enrich/links.test.ts
+```
+
+PASS: an arrow function (`setTimeout(()=>location.replace(…),0)`), a bare
+`if(!a)location.href=…`, and a `<script data-x="a>b">` all still resolve. A
+minified interstitial looks exactly like these, so failing them would defeat the
+anchor's "next publisher" goal while passing every substack case.
+
+Then try to break it yourself. Build a document that is a shell by every other
+measure and get `interstitialTarget` to follow something from a context a browser
+would not execute: an inline event handler (`onclick="location.href='…'"`), an
+SVG `<script>`, a `<script>` inside `<noscript>`, a `srcdoc` iframe, a
+`<script type="module">` (which IS executable — it must still resolve). Report
+anything that resolves and anything real that stops resolving.
+
+FAIL: any inert context that steers the resolver, or any executable one that no
+longer does.
 
 ## Out of scope for this plan
 
