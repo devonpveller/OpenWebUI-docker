@@ -172,18 +172,37 @@ named in the anchor's out-of-scope list. Doing so is a small, well-defined follo
 their leftovers become reapable without touching the existing `finally` at all. Until then
 their droppings are ORPHANS, which `reap.ps1 -Report` lists but never auto-deletes.
 
-> **CORRECTED 2026-09-07 by item `drilllabel`, and the correction matters.** The heading
-> above ("that is still the leak") reads as if these scripts clean up badly. They do not.
-> Surveyed across all six scripts that create persistent resources: three use a `finally`,
-> three use a script-level `trap` calling a `Cleanup` function, and **both constructs run on
-> a normal exit and on an exception**. `drill-mcp-door-not-superuser.ps1` additionally calls
-> `Cleanup` on every one of its ten abort paths.
+> **CORRECTED 2026-09-07 by item `drilllabel`, then corrected again 2026-09-08 by its
+> tester.** The heading above ("that is still the leak") reads as if these scripts clean up
+> badly. Mostly they do not - but "all six" and "every drill here" were both wrong, and the
+> second version of this block asserted them.
 >
-> The real gap is structural and applies to all of them equally: **no in-process construct
-> survives the process being killed** - not `finally`, not `trap`, not a `Cleanup` you
-> remembered to call everywhere. A kill is what happened. So the fix is not better teardown,
-> and an item framed as "these scripts are careless" would have been solving the wrong
-> problem. Retrofit landed in item `drilllabel`.
+> **NINE scripts in `scripts/checks/` create a persistent docker resource, not six.**
+> Enumerated 2026-09-08 over `docker run -d` / `docker create` / `docker network create` /
+> `Start-ObInitdb*`:
+>
+> | script | teardown construct |
+> |---|---|
+> | `drill-personal-plane-exclusion.ps1` | `finally` |
+> | `prove-agent-memory-rls.ps1` | `finally` |
+> | `smoke-agent-memory.ps1` | `finally` |
+> | `drill-mcp-door-not-superuser.ps1` | `trap` + `Cleanup` on all ten abort paths |
+> | `redprove-census-cannot-measure.ps1` | `trap` |
+> | `redprove-fixture-cleanup.ps1` | `trap` |
+> | `drill-app-role-not-superuser.ps1` | `trap` |
+> | `drill-rls-boot-assertion.ps1` | neither `trap` nor a `} finally {` |
+> | `test-quartz4-offline.ps1` | **neither** - it force-deletes at the end of the happy path only |
+>
+> So the split among the six THIS ITEM EDITED is 3/3, and across all nine it is 4/3 plus two
+> that do not tear down on an exception at all. `test-quartz4-offline.ps1` is the clear case:
+> no `trap`, no `finally`, a bare force-delete at line 429.
+>
+> The structural point still stands and is the reason for the whole item: **no in-process
+> construct survives the process being KILLED** - not `finally`, not `trap`, not a `Cleanup`
+> you remembered to call everywhere. That is what happened. But "these scripts are all
+> careful" was an overstatement, and the two that are not careful are outside this item's
+> six, still unlabelled, and still leak on an exception. They are the obvious next
+> candidates for the retrofit.
 
 ---
 
@@ -393,3 +412,51 @@ and reports a failure if the resource is still there.
 Note the interaction with finding 1: the error text goes to STDERR, so a caller that
 captured only stdout would see neither the message nor a non-zero exit. Two independent
 signals, both absent.
+
+---
+
+## 15. A compose label on a CONTAINER may have come from its IMAGE
+
+Docker labels are inherited. Several `:local` images in this stack were built BY compose, so
+they carry compose's labels and stamp them on every container run from them:
+
+```
+docker image inspect openbrain-mcp-server:local --format '{{json .Config.Labels}}'
+  {"com.docker.compose.project":"open-brain",
+   "com.docker.compose.service":"openbrain-mcp",
+   "com.docker.compose.version":"5.3.0"}
+```
+
+So `reap.ps1`'s original key-presence guard - protect anything carrying
+`com.docker.compose.project` - refused `drill-mcp-door-not-superuser.ps1`'s own throwaway
+container, and the network it occupied survived with it. Found 2026-09-08 by the first real
+consumer of the labelling convention, on the very drill the `drilllabel` anchor names as its
+demonstration case.
+
+**No edit at the creation site can fix it.** `--label com.docker.compose.project=` produces
+`{"com.docker.compose.project":""}` and `docker ps -aq --filter label=com.docker.compose.project`
+still matches it - the filter tests the KEY, not the value.
+
+**The discriminator, measured 2026-09-08 across all 81 production containers on this host:**
+every one carries `com.docker.compose.config-hash`, `com.docker.compose.container-number`
+AND `com.docker.compose.oneoff`. Zero exceptions. A compose-built IMAGE carries none of the
+three - only `{project, service, version}`. Compose writes the runtime keys when it starts a
+container; they cannot be inherited from an image because no image has them.
+
+`reap.ps1`'s exception is therefore narrow and FAILS CLOSED. All three must hold:
+
+1. the resource carries THIS harness's owner label - a production container never does, and
+   that alone is the load-bearing gate;
+2. it carries NONE of the compose runtime keys;
+3. its IMAGE carries the same `project` value, proving the label was inherited.
+
+Miss any one and it stays protected. If compose ever stops writing the runtime keys, rule 1
+still holds the line. `verify-reap.ps1` CASE 7g covers both directions, and BOTH halves are
+seeded red: restoring the key-presence guard fails "the INHERITED-label container is
+reaped", and removing the runtime-key check fails "the RUNTIME-KEYED container is REFUSED".
+
+**The second seed is why the case is trustworthy.** Its first version built the
+runtime-keyed fixture from plain `alpine`, whose image carries no compose label - so rule 3
+refused it on its own and the runtime-key check was never what kept it alive. Seeding that
+check out left the verifier GREEN. The fixture is now built from the same compose-labelled
+image, so only the runtime keys stand between it and deletion.

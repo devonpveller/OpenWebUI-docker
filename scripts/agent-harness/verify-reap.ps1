@@ -433,6 +433,65 @@ try {
     Check "both survive" ((Test-Exists "container" "$tag-dual") -and (Test-Exists "network" "$tag-dual")) `
         "one of the $tag-dual pair was removed"
 
+    # --- CASE 7g: a compose label INHERITED FROM THE IMAGE is not compose management --
+    # Found 2026-09-08 by the first real consumer of the labelling convention. Several
+    # `:local` images here were built BY compose, so they carry {project, service, version}
+    # and stamp them on every container run from them - and the reaper refused to clean up a
+    # drill's own throwaway. The exception added for it is narrow and must FAIL CLOSED, so
+    # this case builds BOTH sides: the inherited one must be reaped, and one carrying the
+    # compose RUNTIME keys must still be refused even with an owner label on it.
+    Write-Host "`nCASE 7g  an image-inherited compose label does not protect; a runtime-keyed one does" -ForegroundColor Cyan
+    $ownerE = "verify-reap-inherit"
+    # Build a throwaway image that carries a compose project label, exactly as a
+    # compose-built `:local` image does. No compose involved - just the label.
+    $imgTag = "reapv-inherit:$PID"
+    $dockerfile = Join-Path $env:TEMP "reapv-inherit-$PID.Dockerfile"
+    Set-Content -Path $dockerfile -Encoding ascii -Value @(
+        "FROM $Image",
+        'LABEL com.docker.compose.project=verify-reap-fake-project',
+        'LABEL com.docker.compose.service=verify-reap-fake-service'
+    )
+    $null = Docker @("build", "-t", $imgTag, "-f", $dockerfile, (Split-Path -Parent $dockerfile))
+    $builtOk = ($LASTEXITCODE -eq 0)
+    Check "built an image carrying a compose project label (the case is not vacuous)" $builtOk "docker build exited $LASTEXITCODE"
+    if ($builtOk) {
+        $script:Made += @{ Kind = "image"; Name = $imgTag; Labelled = $false; Owner = "" }
+        # (a) inherited only - must be REAPED
+        $prevImage = $Image
+        $Image = $imgTag
+        New-TestContainer "$tag-inherit" @("$ownLabel=$ownerE")
+        $Image = $prevImage
+        $inheritLabels = ([string]((Docker @("inspect", "--type", "container", "$tag-inherit", "--format", "{{json .Config.Labels}}")) | Select-Object -First 1))
+        Check "the container really inherited the compose project label" ($inheritLabels -match "com\.docker\.compose\.project") $inheritLabels
+        Check "and carries NONE of the compose runtime keys" `
+            (($inheritLabels -notmatch "config-hash") -and ($inheritLabels -notmatch "container-number") -and ($inheritLabels -notmatch "oneoff")) $inheritLabels
+        # (b) runtime-keyed - must still be REFUSED, even though it carries an owner label.
+        #
+        # BUILT FROM THE SAME COMPOSE-LABELLED IMAGE, and that is what makes this assertion
+        # mean anything. The first version built it from plain `alpine`, whose image carries
+        # no compose label - so `Test-ComposeInherited` refused it on its own and the
+        # runtime-key check was never the thing keeping it alive. Seeding that check out
+        # left the verifier GREEN: a check passing while checking nothing, in the case added
+        # to cover a guard. From this image, inheritance is satisfied and ONLY the runtime
+        # keys stand between it and deletion, so removing that check turns this red.
+        $prevImage2 = $Image
+        $Image = $imgTag
+        New-TestContainer "$tag-runtimekeys" @("$ownLabel=$ownerE",
+            "com.docker.compose.config-hash=deadbeef",
+            "com.docker.compose.container-number=1",
+            "com.docker.compose.oneoff=False")
+        $Image = $prevImage2
+        $r = Invoke-Reap -OwnerId $ownerE
+        Assert-NonEmpty "the CASE 7g reap" $r.Text
+        Check "the INHERITED-label container is reaped" (-not (Test-Exists "container" "$tag-inherit")) `
+            "$tag-inherit survived - the image-inheritance exception did not fire"
+        Check "the RUNTIME-KEYED container is REFUSED and survives" (Test-Exists "container" "$tag-runtimekeys") `
+            "$tag-runtimekeys was deleted - a genuinely compose-managed container was reaped"
+        Check "the refusal names it as compose-managed" ($r.Text -match "compose-managed") $r.Text
+        Check "and the run reports the refusal rather than success" ($r.Code -ne 0) ("exit {0}" -f $r.Code)
+    }
+    Remove-Item $dockerfile -ErrorAction SilentlyContinue
+
     # --- CASE 8: an unreachable daemon is loud, not silently clean -----------------
     Write-Host "`nCASE 8  an unreachable daemon exits 4 and says so" -ForegroundColor Cyan
     $prevHost = $env:DOCKER_HOST
@@ -508,10 +567,18 @@ finally {
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "network" })) {
             Write-Host ("      docker network rm {0}" -f $m.Name) -ForegroundColor Yellow
         }
+        # CASE 7g builds a throwaway IMAGE. It is a third kind, and a teardown that enumerated
+        # only two would leak exactly the sort of resource this whole change exists to stop.
+        foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "image" })) {
+            Write-Host ("      docker rmi -f {0}" -f $m.Name) -ForegroundColor Yellow
+        }
     } else {
         # Containers before networks - a network with an occupant will not delete.
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "container" })) { $null = Docker @("rm", "-f", $m.Name) }
         foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "network" })) { $null = Docker @("network", "rm", $m.Name) }
+        # Images last: a container built from one holds it, so this only succeeds after the
+        # containers above are gone.
+        foreach ($m in @($script:Made | Where-Object { $_.Kind -eq "image" })) { $null = Docker @("rmi", "-f", $m.Name) }
     }
 }
 

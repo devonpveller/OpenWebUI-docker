@@ -111,6 +111,16 @@ $ComposeLabel = "com.docker.compose.project"
 # Docker's built-ins. They carry no compose project label, so without naming them here a
 # network called `bridge` would be classified as an orphan and offered up for removal.
 $BuiltinNetworks = @("bridge", "host", "none")
+# Labels compose writes onto a CONTAINER when it starts one. A compose-built IMAGE carries
+# {project, service, version} and NONE of these, which is the only thing separating a real
+# compose-managed container from one merely run from such an image. Measured 2026-09-08:
+# all 81 production containers on this host carry all three. Declared in CODE, like the
+# reapable kinds, because widening or narrowing the compose guard must show up in a diff.
+$ComposeRuntimeLabels = @(
+    "com.docker.compose.config-hash",
+    "com.docker.compose.container-number",
+    "com.docker.compose.oneoff"
+)
 
 function Say([string]$Message, [string]$Colour = "Gray") {
     if (-not $Quiet) { Write-Host $Message -ForegroundColor $Colour }
@@ -203,6 +213,10 @@ function Get-DockerMeta([string]$Kind) {
 }
 
 function Get-OwnerValue([string]$Kind, [string]$Id) {
+    return Get-OwnerValueFor $Kind $Id $OwnerLabel
+}
+
+function Get-OwnerValueFor([string]$Kind, [string]$Id, [string]$Key) {
     # The label VALUE, fetched as a whole JSON map so no quoted key ever reaches docker,
     # and addressed BY ID so it cannot be answered about a different resource.
     $dockerArgs = if ($Kind -eq "container") { @("inspect", "--type", "container", $Id, "--format", "{{json .Config.Labels}}") }
@@ -213,7 +227,7 @@ function Get-OwnerValue([string]$Kind, [string]$Id) {
     if (-not $raw) { return "" }
     try { $map = [string]$raw | ConvertFrom-Json } catch { return "" }
     if (-not $map) { return "" }
-    $prop = $map.PSObject.Properties[$OwnerLabel]
+    $prop = $map.PSObject.Properties[$Key]
     if (-not $prop) { return "" }
     return [string]$prop.Value
 }
@@ -238,14 +252,55 @@ function Get-Inventory {
         if ($null -eq $ids) { throw "docker could not list ${kind}s - refusing to report an empty sweep as a clean one" }
         $compose = Get-DockerIds $kind @("label=$ComposeLabel")
         if ($null -eq $compose) { throw "docker could not list compose-managed ${kind}s - refusing to reap without the protection set" }
+        # THE COMPOSE RUNTIME KEYS. Compose writes these onto a CONTAINER when it starts it;
+        # a compose-built IMAGE does not carry them. That difference is what separates a real
+        # compose-managed container from one merely RUN FROM an image compose built - see
+        # Test-ComposeInherited below for why that distinction had to be made.
+        $composeRuntime = @()
+        if ($kind -eq "container") {
+            foreach ($key in $ComposeRuntimeLabels) {
+                $hit = Get-DockerIds $kind @("label=$key")
+                if ($null -eq $hit) { throw "docker could not list ${kind}s carrying $key - refusing to weaken the compose guard on an unanswered question" }
+                $composeRuntime += $hit
+            }
+        }
         $labelled = Get-DockerIds $kind @("label=$OwnerLabel")
         if ($null -eq $labelled) { throw "docker could not list harness-labelled ${kind}s" }
         $meta = Get-DockerMeta $kind
         foreach ($id in $ids) {
             $m = $meta[$id]
             $name = $(if ($m) { $m.Name } else { $id })
+            $isLabelled = ($labelled -contains $id)
             $protection = ""
-            if ($compose -contains $id) { $protection = "compose-managed - deleting it is a deploy, not a cleanup" }
+            if ($compose -contains $id) {
+                # A COMPOSE LABEL IS NOT ALWAYS COMPOSE MANAGEMENT. Labels are INHERITED from
+                # the image, and several `:local` images in this stack were built BY compose,
+                # so they carry {project, service, version} and stamp them on every container
+                # run from them. `drill-mcp-door-not-superuser.ps1` runs
+                # `openbrain-mcp-server:local`, so its own throwaway looked compose-managed and
+                # the reaper refused to clean it up - found 2026-09-08 by the first real
+                # consumer of the labelling convention, on the very drill the anchor names as
+                # its demonstration case. No edit at the creation site can fix it: an empty
+                # `--label com.docker.compose.project=` still matches a key-presence filter.
+                #
+                # THE EXCEPTION IS NARROW AND FAILS CLOSED. Three things must ALL hold before
+                # a compose-labelled resource is reapable, and any doubt keeps it protected:
+                #   1. it carries THIS harness's owner label - a production container never
+                #      does, and that alone is the load-bearing gate;
+                #   2. it carries NONE of the compose RUNTIME keys - measured 2026-09-08,
+                #      all 81 production containers carry config-hash AND container-number AND
+                #      oneoff, and a compose-built image carries none of the three;
+                #   3. its IMAGE carries the same project value, so the label is demonstrably
+                #      inherited rather than set by compose at run time.
+                # Miss any one and it stays protected. If compose ever stops writing the
+                # runtime keys, rule 1 still holds the line, because prod containers do not
+                # carry the ownership label.
+                if ($isLabelled -and ($kind -eq "container") -and ($composeRuntime -notcontains $id) -and (Test-ComposeInherited $id)) {
+                    $protection = ""
+                } else {
+                    $protection = "compose-managed - deleting it is a deploy, not a cleanup"
+                }
+            }
             # -ccontains, case-SENSITIVE. Docker network names are case-sensitive, so a
             # network called `Bridge` is not the built-in `bridge`; the case-insensitive
             # form protected it anyway and gave "docker built-in network" as the reason,
@@ -256,7 +311,6 @@ function Get-Inventory {
             # labelled, and treating it as unlabelled made it an orphan that -RemoveOrphan
             # would delete, contradicting the documented contract. Its owner is unusable,
             # so it is reported as such rather than silently reaped.
-            $isLabelled = ($labelled -contains $id)
             $owner = if ($isLabelled) { Get-OwnerValue $kind $id } else { "" }
             $bucket = if ($protection) { "protected" } elseif ($isLabelled) { "owned" } else { "orphan" }
             $rows += [pscustomobject]@{
@@ -273,6 +327,28 @@ function Get-Inventory {
         }
     }
     return $rows
+}
+
+function Test-ComposeInherited([string]$ContainerId) {
+    # True when the container's compose project label is EXPLAINED BY ITS IMAGE - the image
+    # carries the same key with the same value, so the container inherited it rather than
+    # having it written by compose. Any doubt returns $false, which keeps the resource
+    # protected: an unreadable image, an unparseable label map and a mismatched value are
+    # all "no".
+    $imgOut = Invoke-DockerCapture @("inspect", "--type", "container", $ContainerId, "--format", "{{.Image}}")
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $imageId = ([string]($imgOut | Select-Object -First 1)).Trim()
+    if (-not $imageId) { return $false }
+    $ownVal = Get-OwnerValueFor "container" $ContainerId $ComposeLabel
+    $labOut = Invoke-DockerCapture @("image", "inspect", $imageId, "--format", "{{json .Config.Labels}}")
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $raw = ($labOut | Select-Object -First 1)
+    if (-not $raw) { return $false }
+    try { $map = [string]$raw | ConvertFrom-Json } catch { return $false }
+    if (-not $map) { return $false }
+    $prop = $map.PSObject.Properties[$ComposeLabel]
+    if (-not $prop) { return $false }
+    return ([string]$prop.Value -ceq $ownVal)
 }
 
 function Get-NetworkAttachedCount([string]$Id) {

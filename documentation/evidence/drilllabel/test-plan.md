@@ -106,7 +106,8 @@ must still have told you its id.
 ## T3 - the drills still pass
 
 Run each of the six to completion and compare against the same script at the base
-commit `bf8f775`. The label must change nothing about the verdict.
+the work-line commit `177da6d` (the merge-base, i.e. this branch minus its own
+commits). The label must change nothing about the verdict.
 
 PASS = each script's pass/fail counts and exit code match the base run.
 FAIL = any difference. If a script fails at BOTH commits, that is a pre-existing
@@ -154,20 +155,28 @@ PASS = after the kill the resources exist and are listed under **HARNESS-OWNED**
 or network.
 FAIL = they appear as ORPHANS (the label did not land), or anything survives.
 
-**Prove the counterfactual too**: check out the base commit `bf8f775`, repeat the
+**Prove the counterfactual too**: check out the merge-base `177da6d`, repeat the
 kill, and confirm the same leftovers appear under **ORPHANS** with no owner. Without
 that half you have not shown the change did anything.
 
 ## T6 - the findings note's new claims
 
-Finding 9 states three PowerShell array behaviours with a measurement each. Re-run
-them; a table that does not reproduce is a FAIL:
+**Finding 9 was REWRITTEN in this change**, because `reap`'s own later testing
+disproved its original claim. It used to assert a third PowerShell array behaviour -
+that an array written INLINE in a native call is space-joined into one argument. That
+is FALSE with the sign inverted, and finding 2 above carries the correction. Verify
+the REWRITE, not the retracted claim:
 
 - `& $script @("-Owner","x")` into a `.ps1` binds POSITIONALLY.
 - `& $exe @argv` splatted into an `.exe` expands correctly.
-- `& docker create --name x @("--label","k=v") alpine true` fails with
-  `unknown flag: --label ai-stack.harness.owner` (the elements space-joined into one
-  argument).
+- `& docker create --name x @("--label","k=v") alpine true` **exits 0 and applies the
+  label** - a plain inline array expands into separate arguments. If you record this as
+  failing with `unknown flag`, you have tested the retracted claim.
+- The NESTED form is what actually fails: a helper returning `,@("--label","k=v")` called
+  as `@(Get-Args ...)` yields an array containing an array, which a native call flattens
+  into one space-joined argument and docker rejects as an unknown flag.
+- `scripts/checks/lib/harness-owner.ps1`'s header must no longer carry the old false
+  justification - it should state the single-token form as a CHOICE, and cite finding 9.
 - `--label=k=v` as a single token is accepted by `run`, `create` and
   `network create`.
 
@@ -183,3 +192,79 @@ is not what the note says it is.
 Do not label the `--rm` sites. Do not touch `scripts/agent-harness/` - item `reap`
 is in testing there. Do not rewrite any script's `trap` into a `finally` or vice
 versa; both work and neither survives a kill, so swapping them fixes nothing.
+
+## T7 - a compose label INHERITED FROM THE IMAGE does not protect
+
+This is what attempt 1 failed on, and the fix changes `reap.ps1` — the guard between
+this tooling and 81 production containers. Test it as such.
+
+Several `:local` images here were built BY compose, so they carry
+`com.docker.compose.project` and stamp it on every container run from them.
+`reap.ps1`'s original key-presence guard refused `drill-mcp-door-not-superuser.ps1`'s
+own throwaway because of it.
+
+```powershell
+docker image inspect openbrain-mcp-server:local --format '{{json .Config.Labels}}'
+# expect {project, service, version} - and NONE of config-hash / container-number / oneoff
+
+docker create --name t7-inherit --label ai-stack.harness.owner=t7 openbrain-mcp-server:local sleep 1
+.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String -Width 250
+.\scripts\agent-harness\reap.ps1 -Owner t7
+```
+
+PASS = `t7-inherit` is listed under HARNESS-OWNED (not PROTECTED), is reaped, exit 0.
+FAIL = it is refused as compose-managed — the fix did not take.
+
+**Then the half that matters more.** Confirm the exception fails CLOSED:
+
+```powershell
+docker create --name t7-runtime --label ai-stack.harness.owner=t7b `
+  --label com.docker.compose.config-hash=deadbeef `
+  --label com.docker.compose.container-number=1 `
+  --label com.docker.compose.oneoff=False openbrain-mcp-server:local sleep 1
+.\scripts\agent-harness\reap.ps1 -Owner t7b
+```
+
+PASS = REFUSED as compose-managed, non-zero exit, container survives. This one is built
+from the SAME compose-labelled image, so image-inheritance is satisfied and ONLY the
+runtime-key check stands between it and deletion.
+FAIL = it is deleted. That is a genuinely compose-managed container being reaped.
+
+Clean up: `docker rm -f t7-runtime` (and `t7-inherit` if it survived).
+
+## T8 - the live stack did not become reapable
+
+The single most important check in this plan. Run it AFTER T7.
+
+```powershell
+$r = (.\scripts\agent-harness\reap.ps1 -Report 2>&1 6>&1 | Out-String -Width 250)
+# every compose-managed name must appear only on a PROTECTED line, or not at all
+docker ps -aq --filter label=com.docker.compose.project | Measure-Object
+docker ps -aq --filter label=com.docker.compose.config-hash | Measure-Object
+```
+
+PASS = the two counts are EQUAL (every compose-managed container carries the runtime
+keys, so none qualifies for the inheritance exception), the PROTECTED count is unchanged
+from before this change, and no production container appears as a candidate.
+FAIL = the counts differ — then say WHICH containers carry `project` without the runtime
+keys, because each of those is one owner-label away from being reapable, and the guard
+needs rethinking rather than patching.
+
+Also seed the verifier red both ways and confirm each turns CASE 7g red:
+
+```powershell
+# restore the old key-presence guard
+(Get-Content reap.ps1) -replace 'if \(\$isLabelled -and \(\$kind -eq "container"\) -and \(\$composeRuntime -notcontains \$id\) -and \(Test-ComposeInherited \$id\)\) \{', 'if ($false) {' | Set-Content reap.red-inherit.ps1 -Encoding ascii
+.\verify-reap.ps1 -Script .\reap.red-inherit.ps1     # expect 65/1, "the INHERITED-label container is reaped"
+
+# remove the fail-closed half
+(Get-Content reap.ps1) -replace '\$composeRuntime -notcontains \$id', '$true' | Set-Content reap.red-noruntime.ps1 -Encoding ascii
+.\verify-reap.ps1 -Script .\reap.red-noruntime.ps1   # expect 63/3, "the RUNTIME-KEYED container is REFUSED and survives"
+```
+
+Green run: **66 passed, 0 failed** (2026-09-08). Delete both copies afterwards.
+
+FAIL = either seed stays green. The second one already did once: the runtime-keyed
+fixture was built from plain `alpine`, whose image carries no compose label, so
+inheritance refused it on its own and the runtime-key check was never what kept it
+alive. A seed that stays green means the case is not testing the guard it names.
