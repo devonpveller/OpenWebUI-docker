@@ -148,3 +148,43 @@ Both failures ran green. Gaps found while investigating (all verified above):
 
 - 095 (2026-09-09) resubmitted to ON from its already-rendered script at
   `/reports/095-daily-gpt-6-astra.md`, job `command:l0lh7cslwu8th815egsk`.
+  Completed: 26m32s of audio.
+- 094 (2026-09-08) resubmitted the same way, job `command:0bqh2v8giabn5xqyy8ov`.
+  Completed: 25m2s of audio.
+
+Both were re-rendered from the scripts the failed runs had ALREADY written, so
+no LLM script generation was repeated - only the TTS stage that had failed.
+
+---
+
+## 4. The pre-commit gate cannot see the tests that were just added
+
+**Provenance: read from source at `scripts/checks/check-ob1-recipe-tests.ps1:149`,
+and observed live in the `podlinks` commit output, 2026-09-09.**
+
+Committing the `podlinks` fix printed:
+
+    [check-ob1-recipe-tests] shrink floor OK - test FILES 8 -> 8, test CASES 54 -> 54 (970cae8 -> df83254).
+    [check-ob1-recipe-tests] OK - 8 test file(s), # tests 54 | # pass 54 | # fail 0
+
+That commit ADDED a test file with 14 cases. The counts did not move because the
+gate globs `-Filter '*.test.mjs'` (line 149) and the daily-digest recipe's suites
+are Deno `*.test.ts`. Its sibling `check-ob1-deno-recipes` runs `deno check` over
+"36 **non-test** *.ts" and says so itself: "Type check only - the test suite is
+NOT run."
+
+So **no pre-commit gate runs the daily-digest Deno tests**, and the shrink floor
+that exists to stop tests being quietly deleted does not cover them either:
+deleting all 34 cases in `script-renderer.test.ts` and all 14 in
+`links.test.ts` would print the same reassuring `54 -> 54`.
+
+This matters twice over. A reader of that output would reasonably conclude the
+new tests were run — they were not; they were run by hand
+(`deno test --allow-net --allow-env`). And the protection the floor is meant to
+give the `script-renderer.test.ts` suite, written after the 2026-09-04
+five-defect run, does not exist.
+
+Not fixed here: it is a gate change, not a link-resolver change, and it belongs
+with the `crashloop` family of "reports green while checking nothing". The same
+open item is already recorded in the `agent-harness-findings-note-audit` memory
+as "Deno suite ungated by 5b AND 5c" — this is a second, independent sighting.
