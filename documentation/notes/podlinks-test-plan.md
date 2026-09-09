@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`8becc14`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`d399335`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -14,7 +14,54 @@ PATH; nothing needs the stack up except T7, which says so.
 
 ---
 
-## ATTEMPT 3 — what round 2 found
+## BEFORE YOU RUN ANYTHING — set MSYS_NO_PATHCONV=1
+
+Two testers in a row have hit this. Under Git Bash, a `docker exec … mkdir -p
+/tmp/x` gets its path mangled and creates a directory called `C:\Users\…`
+**inside the `/app` bind mount, which is the MAIN CHECKOUT**. Round 3's tester
+found the debris from round 2's still sitting there, 4.5 hours old.
+
+Prefix every `docker exec` / `docker cp` with `MSYS_NO_PATHCONV=1`, and before
+you finish, check:
+
+```powershell
+Get-ChildItem -LiteralPath "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest" -Directory |
+  Where-Object { $_.Name -match '^[A-Za-z]:' }
+```
+
+Anything listed is yours or a predecessor's; remove it and say so in your report.
+
+## ATTEMPT 4 — what round 3 found
+
+Round 3 FAILED T12 with **twelve** bypasses, and marked the plan ADEQUATE: the
+plan was right and the code was wrong. Five of the twelve drove the REAL path —
+`unwrapRedirect` followed them and `gatherAnchors` emitted the attacker's URL as
+an ordinary candidate with `unresolvedWrapper=false`.
+
+`stripInertRegions` was closing-tag-anchored regex, so every UNTERMINATED inert
+region survived it, NESTED templates survived it, and it had never heard of
+`<style>`, `<title>`, `<noscript>`, an iframe `srcdoc`, or a `<script>` inside an
+attribute VALUE. For `<style>`/`<noscript>` the guard and the matcher still
+disagreed in exactly the direction the previous commit claimed to have fixed for
+comments.
+
+**The fix is a different tool, not twelve more patterns:** one left-to-right scan
+(`scanDocument`) that tracks quoted attribute values, counts template nesting,
+and treats `<noscript>` as transparent for `<meta>` but never executes scripts in
+it — and, when it meets something it cannot place, reports `ambiguous` so the
+caller REFUSES to treat the document as a redirect at all.
+
+Failing closed is the load-bearing decision. Refusing costs one unresolved
+wrapper, which is logged and still researched. Guessing costs a wrong URL
+entering the research corpus silently. **T12 now tests both directions**, because
+a fix that fails closed is worthless if it closes on the document this item
+exists for.
+
+Round 3's other results, all still relevant: T11's attack now genuinely bites,
+T4 with `970cae8` is properly RED, T7 resolved cleanly through the VPN, and every
+figure in every OB1 commit message reproduced.
+
+## What round 2 found
 
 Round 2 FAILED (T5, T9, T10, T11, T12). Read this before the cases; four of those
 five were defects in THIS PLAN or in my test, not in the resolver, and the plan
@@ -65,8 +112,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 33 passed, 0 failed.
-FAIL: any failure, or fewer than 33 tests (a case was deleted rather than fixed).
+PASS: 49 passed, 0 failed.
+FAIL: any failure, or fewer than 49 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -294,50 +341,43 @@ PASS: all three green. The third is the one that stops the fix from being a
 blanket disable — a real `window.location.replace` inside a `<script>` must still
 resolve, which is what the whole item depends on.
 
-Round 2 found seven inert contexts that still steered it, and they are now cases
-of their own. Run them:
+Round 3 found TWELVE contexts that still steered it, and they are now cases:
 
 ```
+deno test --allow-net --allow-env --filter "a browser would not navigate" src/enrich/links.test.ts
+```
+
+PASS: twelve green — `<script>` in `<noscript>`, iframe `srcdoc` (script and
+meta), nested `<template>` (script and meta), unterminated comment (script and
+meta), unterminated `<textarea>`, unterminated `<template>`, `<script>` in
+`<title>`, `<meta refresh>` in `<style>`, and a `<script>` inside an attribute
+VALUE.
+
+**Now the other direction, which matters just as much.** The fix works by FAILING
+CLOSED on an ambiguous document, and a fix that fails closed is worthless if it
+closes on the document this item exists for:
+
+```
+deno test --allow-net --allow-env --filter "failing closed did not break" src/enrich/links.test.ts
 deno test --allow-net --allow-env --filter "an inert context" src/enrich/links.test.ts
-```
-
-PASS: eight green — comment/template/textarea × meta and script, plus two
-non-executing `type` values. Note that BOTH matchers must be covered:
-`metaRefreshTarget` runs first and had never been narrowed, so a `<meta refresh>`
-inside a comment was the live bypass, not just a scripted one.
-
-Then the guard-vs-matcher agreement case, which is the subtle one:
-
-```
-deno test --allow-net --allow-env --filter "mostly-commented" src/enrich/links.test.ts
-```
-
-`extractTextFromHtml` STRIPS comments before counting visible text, so a document
-that is almost entirely one commented-out block reads as "no visible text" to the
-size guard. If the matcher can still read inside that comment, the two disagree
-about what the document contains and the guard protects nothing.
-
-And confirm the fix did not become a blanket disable — round 2 found it had, for
-the shapes that matter most:
-
-```
 deno test --allow-net --allow-env --filter "IS followed" src/enrich/links.test.ts
 ```
 
-PASS: an arrow function (`setTimeout(()=>location.replace(…),0)`), a bare
-`if(!a)location.href=…`, and a `<script data-x="a>b">` all still resolve. A
-minified interstitial looks exactly like these, so failing them would defeat the
-anchor's "next publisher" goal while passing every substack case.
+PASS: the real Substack `<noscript>` meta, a plain head meta, `type=module` and
+`type=MODULE`, the minified arrow-function and bare-`if` shapes, and
+`<script data-x="a>b">` all still resolve.
+FAIL: any of those returning null — that is the fix eating its own purpose, and
+it would pass every bypass case while breaking the feature.
 
-Then try to break it yourself. Build a document that is a shell by every other
-measure and get `interstitialTarget` to follow something from a context a browser
-would not execute: an inline event handler (`onclick="location.href='…'"`), an
-SVG `<script>`, a `<script>` inside `<noscript>`, a `srcdoc` iframe, a
-`<script type="module">` (which IS executable — it must still resolve). Report
-anything that resolves and anything real that stops resolving.
+Then attack it yourself, which is what found the last twelve. The scanner is in
+`scanDocument`. Try: a `<script>` whose closing tag sits inside a JS string; SVG
+foreign content; `<!-->` and other degenerate comment forms; a tag with an
+unterminated attribute quote; `<plaintext>`; a `srcdoc` with entity-encoded
+markup; CDATA. For each, say whether it resolves, and whether that is the safe
+answer or the wrong one.
 
-FAIL: any inert context that steers the resolver, or any executable one that no
-longer does.
+FAIL: any inert or unparseable context that produces a target, or any genuinely
+executable one that stops producing one.
 
 ## Out of scope for this plan
 
