@@ -25,13 +25,30 @@
 # one. A label is one convention, declared once, that a script written next month gets for
 # free.
 #
-# WHAT IT WILL NOT TOUCH, and why that is checked POSITIVELY. A compose-managed resource is
-# never reaped: containers carrying `com.docker.compose.project`, networks carrying it (that
-# is every plane network including the `ai-stack_*` anchors), and docker's built-in
-# bridge/host/none. The lazy argument is that a prod container "would not have our label
-# anyway" - but a plane's compose file can carry any label an agent writes into it, and one
-# stray `labels:` block under a service would otherwise point this script at prod. The guard
-# is the mechanism, not a belt over braces.
+# WHAT IT WILL NOT TOUCH, and why that is checked POSITIVELY. A compose-MANAGED resource is
+# never reaped. Docker's built-in bridge/host/none are never reaped. NETWORKS are judged on
+# `com.docker.compose.project` alone - carrying it is disqualifying, which covers every plane
+# network including the `ai-stack_*` anchors.
+#
+# CONTAINERS need one more distinction, because docker labels are INHERITED FROM THE IMAGE
+# and several `:local` images here were built BY compose, so they stamp
+# `com.docker.compose.project` onto everything run from them. A container carrying that label
+# is therefore protected UNLESS all three hold:
+#
+#   1. it carries this harness's ownership label;
+#   2. it carries NONE of the compose RUNTIME labels ($ComposeRuntimeLabels below) - compose
+#      writes those when it STARTS a container, and no image can supply them;
+#   3. its image carries the same project value, so the label is demonstrably inherited.
+#
+# Miss any one and it stays protected. See finding 15 in the sink for the measurement.
+#
+# THE THREAT THIS GUARD EXISTS FOR IS RULE 2, NOT RULE 1. The lazy argument is that a prod
+# container "would not have our ownership label anyway" - and that is exactly the argument
+# this file refuses to rest on, because a plane's compose file can carry any label an agent
+# writes into it, and one stray `labels:` block under a service would otherwise point this
+# script at prod. But such a container is compose-STARTED, so it carries the runtime labels,
+# so rule 2 refuses it. That is what makes the exception safe: the guard is still a
+# mechanism, not a belt over braces.
 #
 # SCOPE (operator, 2026-09-07): CONTAINERS and NETWORKS are reaped. IMAGES are counted in
 # the report and never deleted - a deleted test image costs a rebuild nobody asked for.
@@ -284,17 +301,22 @@ function Get-Inventory {
                 # `--label com.docker.compose.project=` still matches a key-presence filter.
                 #
                 # THE EXCEPTION IS NARROW AND FAILS CLOSED. Three things must ALL hold before
-                # a compose-labelled resource is reapable, and any doubt keeps it protected:
-                #   1. it carries THIS harness's owner label - a production container never
-                #      does, and that alone is the load-bearing gate;
+                # a compose-labelled container is reapable, and any doubt keeps it protected:
+                #   1. it carries THIS harness's owner label;
                 #   2. it carries NONE of the compose RUNTIME keys - measured 2026-09-08,
                 #      all 81 production containers carry config-hash AND container-number AND
                 #      oneoff, and a compose-built image carries none of the three;
                 #   3. its IMAGE carries the same project value, so the label is demonstrably
                 #      inherited rather than set by compose at run time.
-                # Miss any one and it stays protected. If compose ever stops writing the
-                # runtime keys, rule 1 still holds the line, because prod containers do not
-                # carry the ownership label.
+                #
+                # RULE 2 IS THE ONE DOING THE SAFETY WORK, and it is worth being precise about
+                # that. It would be easy to say rule 1 carries the guard because "a production
+                # container never has our ownership label" - but the header names that as the
+                # LAZY ARGUMENT and refuses to rest on it, for a good reason: a plane's compose
+                # file can carry any label an agent writes into it. In exactly that case the
+                # container is compose-STARTED, so it has the runtime keys, so rule 2 refuses
+                # it - which is why this exception does not reopen the hole the guard was
+                # built to close. Rule 1 narrows the blast radius; rule 2 is the mechanism.
                 if ($isLabelled -and ($kind -eq "container") -and ($composeRuntime -notcontains $id) -and (Test-ComposeInherited $id)) {
                     $protection = ""
                 } else {

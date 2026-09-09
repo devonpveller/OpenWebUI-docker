@@ -283,3 +283,38 @@ FAIL = either seed stays green. The second one already did once: the runtime-key
 fixture was built from plain `alpine`, whose image carries no compose label, so
 inheritance refused it on its own and the runtime-key check was never what kept it
 alive. A seed that stays green means the case is not testing the guard it names.
+
+## T9 - the CHANGED FILE's own documentation still describes it
+
+T6 holds the findings NOTE to account. Nothing held the changed file's own header to
+account, and that is exactly the hole a header contradiction slipped through: three
+testers passed it and a reviewer rejected the item for it.
+
+`reap.ps1`'s header said "A compose-managed resource is never reaped: containers
+carrying `com.docker.compose.project`" while line 298 reaped exactly those. Worse, the
+header names "a prod container would not have our label anyway" as THE LAZY ARGUMENT and
+refuses to rest on it — and the new comment called the ownership label "the load-bearing
+gate", resting on it.
+
+For every file whose BEHAVIOUR this branch changes, read its own header and doc comments
+and ask whether they describe the code as it now is:
+
+```powershell
+git diff refactor/ai-stack-cleanup...work/drilllabel --name-only
+```
+
+For each, check specifically:
+
+- Does any sentence state a CRITERION (what is protected, what is deleted, when) that the
+  code no longer implements?
+- Does any new comment rest on reasoning the surrounding file explicitly rejects? A file
+  that argues against an argument and then uses it is incoherent even when both halves
+  are individually defensible.
+- Does `README.md`'s description of the same behaviour agree with the code and with the
+  file's header?
+
+PASS = every behavioural claim in a changed file matches that file's code.
+FAIL = any file whose documentation would make a reader predict the wrong behaviour.
+This is not a wording case — a safety contract that says the tool never deletes what it
+now deletes is a defect, in a script that runs `docker rm -f` against a host with 81
+production containers.

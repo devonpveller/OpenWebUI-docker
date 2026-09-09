@@ -469,3 +469,26 @@ runtime-keyed fixture from plain `alpine`, whose image carries no compose label 
 refused it on its own and the runtime-key check was never what kept it alive. Seeding that
 check out left the verifier GREEN. The fixture is now built from the same compose-labelled
 image, so only the runtime keys stand between it and deletion.
+
+---
+
+## 16. `lib/harness-owner.ps1` reads the config by a second route (latent, not yet divergent)
+
+`scripts/checks/lib/harness-owner.ps1` resolves the ownership label by raw-reading
+`scripts/agent-harness/harness.config.json` at a fixed relative path. `reap.ps1` resolves it
+through `Get-HarnessSetting`, which layers **built-in defaults < harness.config.json <
+harness.local.json < environment** (`config.ps1`).
+
+So the library ignores `harness.local.json` and `AI_STACK_HARNESS_CONFIG`. Set either and
+the drills would label with one key while the reaper swept for another.
+
+**There is no divergence today**, verified 2026-09-08: no `harness.local.json` exists, and
+`config.ps1`, `config.py`, `harness.config.json` and the library's own fallback literal all
+say `ai-stack.harness.owner`.
+
+It is still a second spelling by another route - the exact failure the library's own comment
+says it exists to prevent ("does not fail loudly, it just makes every sweep quietly find
+nothing"). Found by the `drilllabel` reviewer 2026-09-08 and left for its own item, because
+fixing it changes behaviour: the library would have to dot-source `config.ps1`, which pulls
+the whole harness module into `scripts/checks/`, or reimplement the layering. Neither is a
+documentation change, and the item that surfaced it was a documentation fix.

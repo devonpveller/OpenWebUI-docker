@@ -63,11 +63,20 @@ recorded at CREATION and survives everything that can kill the creator, so clean
 cooperation from the thing being cleaned up. Keep your `finally` - it is still the fastest
 path - but the label is what makes the leak recoverable.
 
-**What it will never touch.** Compose-managed containers and networks (checked positively,
-by the `com.docker.compose.project` label, so writing the ownership label into a plane's
-compose file gets a REFUSAL rather than a deleted prod service), docker's built-in networks,
-and every image and volume - those are reported and left alone. `docker volume prune` is a
-standing hazard in this stack, and a deleted test image costs a rebuild nobody asked for.
+**What it will never touch.** Compose-managed containers and networks, docker's built-in
+networks, and every image and volume - those are reported and left alone. `docker volume
+prune` is a standing hazard in this stack, and a deleted test image costs a rebuild nobody
+asked for.
+
+Networks are judged on the `com.docker.compose.project` label alone: carrying it disqualifies
+them. Containers need one distinction more, because docker labels are **inherited from the
+image** and several `:local` images here were built by compose, so they stamp that label onto
+everything run from them. A container carrying it is protected unless ALL THREE hold - it
+carries the ownership label, it carries none of compose's RUNTIME labels (`config-hash`,
+`container-number`, `oneoff`), and its image carries the same project value. Writing the
+ownership label into a plane's compose file still gets a REFUSAL rather than a deleted prod
+service, and the rule that delivers that is the RUNTIME-label one: such a container is
+compose-started, so it carries those keys. `reap.ps1`'s header has the full reasoning.
 
 **Unlabelled leftovers are never auto-deleted.** They are listed by `-Report` with their
 age, and removing one takes `reap.ps1 -RemoveOrphan <name>` - it has to be typed. Something
