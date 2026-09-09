@@ -1,0 +1,150 @@
+# Daily-digest podcast: two mornings with no audio (2026-09-08, 2026-09-09)
+
+Investigation + recovery notes. Provenance is stated per claim: *observed live*
+means a command was run against the running stack on 2026-09-09 and its output
+read; *read from source at file:line* means the code was opened, not the comment
+above it.
+
+Two INDEPENDENT problems were found. Only the first caused the missing audio.
+
+---
+
+## 1. No audio — the TTS server was unreachable, not broken
+
+**Symptom (observed live, `docker logs openbrain-podcast`):** on both mornings the
+run reached the audio stage, ON returned `failed` twice, and link-enrich exited 0:
+
+```
+[link-enrich] ON job ended 'failed' - resubmitting.
+[link-enrich] ON job ended 'failed' - no audio.
+[podcast] run finished (exit 0).
+```
+
+**Cause chain (observed live):**
+
+| Layer | Evidence |
+|---|---|
+| ON's TTS credential | `credential:xbhle1zrpx8g7vkganpk.base_url = http://host.docker.internal:8000/v1` (SurrealDB query, 2026-09-09) |
+| Host :8000 is published by | `stt-tts-tailscale`, in compose project `realtimeaudiochat_local_stt_llm_tts` (`C:\_git\realtimeAudioChat_Local_STT_LLM_TTS\docker-compose.yml`) |
+| That container | `RestartCount=5091`, `ExitCode=0`, restarting every ~23s |
+| Why it exits | `Received error: invalid key: API key does not exist` then `boot: failed to auth tailscale: tailscale up failed: exit status 1`. The repo `.env` carries the comment `# expires aug 8, 2026` above `TS_AUTHKEY`. |
+| Why that killed TTS | `stt-tts-server` ran with `network_mode: "service:tailscale"` — it JOINED the sidecar's netns. Each sidecar restart rebuilt the namespace; the server's listener stayed in the old one. |
+| What a caller saw | TCP accept then immediate close = `httpx.RemoteProtocolError: Server disconnected without sending a response.` — verbatim the error in `open_notebook` logs at 05:45:41 (09-08) and 05:48:14 (09-09). |
+
+**Onset (observed live):** boots per hour from `docker logs -t stt-tts-tailscale`
+go `1` on 09-06T07, then `32` at 09-07T23, then ~155/hour continuously. The loop
+started **2026-09-07 23:48 UTC** — after episode 093 (09-07 05:04, 25m33s audio,
+succeeded) and before 094.
+
+**The server itself was never broken.** `curl` on its own loopback returned a
+200 and 8,300 bytes of WAV during the outage. Its healthcheck ran inside the same
+namespace, so Docker reported `stt-tts-server  Up 33 hours (healthy)` throughout.
+**A healthcheck that runs inside the namespace it is testing cannot see a netns
+break.** Nothing in `scripts/checks/stack-watchdog.ps1` probes this project at
+all (grep for `stt-tts` across `scripts/`: zero hits).
+
+### Fix applied 2026-09-09 (netns ownership inverted)
+
+`C:\_git\realtimeAudioChat_Local_STT_LLM_TTS\docker-compose.yml`: `stt-tts-server`
+now owns the namespace and publishes `8000:8000`; the `tailscale` sidecar joins it
+via `network_mode: "service:stt-tts-server"` with `depends_on: service_healthy`.
+This is the arrangement ai-stack already uses for openwebui/tailscale. A failing
+or absent Tailscale key now costs the tailnet node only.
+
+**Verified behaviourally, not structurally** — over 64s the sidecar restarted 4
+times (`RestartCount` 0 to 4) while `http://host.docker.internal:8000/health`
+polled from inside `open_notebook` returned 200 on every attempt. A TTS synthesis
+POST from `open_notebook` returned 12,166 bytes of audio.
+
+**STILL OPEN:** the sidecar keeps crash-looping until a fresh `TS_AUTHKEY` is put
+in that repo's `.env` (operator action — login.tailscale.com/admin/settings/keys,
+reusable + ephemeral). The tailnet HTTPS endpoint for the STT/TTS server is down
+until then. The podcast no longer cares.
+
+---
+
+## 2. Research yield collapsed — Substack stopped 302-ing
+
+Independent of the audio failure, and NOT the cause of the shorter episodes.
+
+**The episode-length story (observed live, SurrealDB `episode.duration_seconds`):**
+
+```
+075  2026-08-21  24m31s     <- last episode before the raw-dump bug
+076-089 (Aug 22 - Sep 4)    29m - 62m, mean ~42m
+090  2026-09-04  24m15s     <- first episode after the podkey2 fix
+091  28m15s   092  10m8s   093  25m33s
+```
+
+The ~1h episodes were the **bug**, not the baseline: 076-089 shipped a 14-47KB
+raw grounded-material dump to ON instead of a written script (the J.1 401, see the
+`podcast-json-structured-output-fix` memory). 24-28 min matches 075. So "shorter
+since 5 days ago" is the pipeline working correctly again.
+
+**But there IS a real regression underneath it.** Every email on 09-07, 09-08 and
+09-09 logged `0 ext link(s), 0 selected + body-fallback`. Not one external article
+was researched on any of those days; every source was the newsletter body.
+
+**Cause (reproduced live 2026-09-09, both direct and through `FETCH_PROXY_URL=http://vpn:8888`):**
+`https://substack.com/redirect/<uuid>?j=e` now answers **200 with a JS +
+`<noscript>` meta-refresh interstitial**, not a 302:
+
+```
+status 200  len 1515  location: null
+<head><noscript><META http-equiv="refresh" content="0;URL=https://blog.google/...">
+</head><script>window.opener = null; location.replace("https://blog.google/...")</script>
+```
+
+`unwrapRedirect()` (read from source at
+`OB1/recipes/daily-digest/src/enrich/links.ts:145-179`) only follows a `Location`
+header on a 3xx; on a 200 it returns `res.url` — i.e. the substack URL unchanged.
+`link-enrich.ts:374` then drops it:
+`.filter(c => c.domain && !c.domain.endsWith("substack.com"))`.
+That filter exists to drop the newsletter's own posts, and it cannot tell an
+unresolved wrapper from a genuine self-link. Result: **every external link in
+every Substack newsletter is silently discarded.**
+
+`decodeSubstackRedirect()` (links.ts:184) handles only the `/redirect/2/<base64>`
+form. The links in these newsletters are the `/redirect/<uuid>?j=e` form, which it
+returns `null` for.
+
+Proof the same URL used to work: `40874a4f-3ed1-44f8-82bd-1ea1c10c30b4` appears in
+`/reports/podcast-link-report-2026-09-04.json` with `status: "enriched"`, and
+returns the 200 interstitial today.
+
+**Not yet fixed** — routed through the agent harness. The fix should be GENERAL,
+not substack-specific: follow an interstitial (meta-refresh / `location.replace`)
+as another redirect hop, so the next publisher that does this does not silently
+zero the day's research. A wrapper that could not be resolved should also be
+distinguishable from a real self-link rather than being swallowed by the same
+`endsWith` filter.
+
+---
+
+## 3. What was silent that should not have been
+
+Both failures ran green. Gaps found while investigating (all verified above):
+
+1. **No crash-loop detection anywhere.** 5,091 restarts of one container over 33
+   hours drew no attention. A generic `RestartCount`-delta check across all
+   containers would have caught this within one watchdog pass (60s).
+2. **The stt-tts project is not monitored at all** even though the daily podcast
+   hard-depends on it. It is a separate compose project outside this repo.
+3. **A netns-joined container's healthcheck lies.** `stt-tts-server` reported
+   healthy for the entire outage. Any joined pair needs a probe from OUTSIDE the
+   namespace — this applies to openwebui/tailscale too.
+4. **Podcast delivery has no outcome check.** `openbrain-podcast` exits 0 whether
+   or not audio exists. Same shape as the sidecar problem `Test-BackupRecency`
+   already solves ("a running sidecar that produces nothing is invisible to
+   container checks", stack-watchdog.ps1:1683).
+5. **Expiring credentials are tracked only in a comment.** `# expires aug 8, 2026`
+   above `TS_AUTHKEY`. Same class as the digest's 7-day OAuth token.
+6. **Research yield has no floor.** Three consecutive days of `0 ext link(s)` on
+   every email is a total content-sourcing failure with a green pipeline.
+
+---
+
+## Recovery performed
+
+- 095 (2026-09-09) resubmitted to ON from its already-rendered script at
+  `/reports/095-daily-gpt-6-astra.md`, job `command:l0lh7cslwu8th815egsk`.
