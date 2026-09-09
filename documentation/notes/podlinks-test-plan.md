@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`1f4101a`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`58ef169`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -31,7 +31,41 @@ Get-ChildItem -LiteralPath "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest" -Di
 
 Anything listed is yours or a predecessor's; remove it and say so in your report.
 
-## ATTEMPT 4 — what round 3 found
+## ATTEMPT 5 — what round 4 found
+
+Round 4 confirmed the twelve round-3 bypasses are closed, then found four more,
+a ONE-CHARACTER defeat of the host screen, and the guard/matcher disagreement
+still open for six elements.
+
+**The security finding is the serious one.** `http://openbrain-curator.:8000/` -
+the exact target a test asserts is refused - RESOLVED, because a trailing dot
+makes the root label satisfy `host.includes(".")` and breaks every exact/suffix
+comparison. The tester pointed `http://localhost.:PORT/` at a live loopback
+listener and CONNECTED. IPv4-mapped IPv6 leaked too, and my first fix for THAT
+also leaked because the URL parser normalises `[::ffff:127.0.0.1]` to
+`[::ffff:7f00:1]`. Both are fixed and both are cases now.
+
+**`<plaintext>` was a regression I introduced** - its tokenizer state is terminal
+and the regex version handled it; the scanner dropped it. Plus bogus comments
+(`<?foo`, `</3`) which run to the next `>` - the swallowed meta's own - and
+`<math>`/`<select>`/`<svg>` subtrees.
+
+**The guard/matcher disagreement is now closed by construction**, not by
+agreement: `extractTextFromHtml` erases `<nav>`, `<header>`, `<footer>`,
+`<aside>`, `<form>` and `<svg>` before counting, so text there was invisible to
+the guard and the document read as a shell. The guard now measures `liveText`
+from the SAME walk that decides what is live.
+
+**T4 in this plan was self-contradictory** and round 4 was right to mark the plan
+inadequate: its `redproof.ts` targets loopback, and T14's screen refuses
+loopback, so step 5 could not print FOLLOWED on correct code. Corrected below to
+use a public destination, which needs no hatch and is the stronger form.
+
+Round 4 also reported, correctly and unprompted, that the DNS-time case
+(`localtest.me` resolving to 127.0.0.1) reaches loopback and that a textual
+screen cannot close it. That is recorded as a KNOWN LIMIT, not a pass.
+
+## What round 3 found
 
 Round 3 FAILED T12 with **twelve** bypasses, and marked the plan ADEQUATE: the
 plan was right and the code was wrong. Five of the twelve drove the REAL path —
@@ -112,8 +146,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 54 passed, 0 failed.
-FAIL: any failure, or fewer than 54 tests (a case was deleted rather than fixed).
+PASS: 69 passed, 0 failed.
+FAIL: any failure, or fewer than 69 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -153,10 +187,20 @@ hand; it is the case that decides whether the change is the thing that fixes it.
 2. Copy `recipes/daily-digest/src/enrich/links.ts` somewhere safe.
 3. Save this as `redproof.ts` in `recipes/daily-digest` — it imports ONLY
    `unwrapRedirect`, which exists in both versions, so the same script runs
-   against either:
+   against either.
+
+   **CORRECTED after round 4.** This script used a loopback stub, and T14's host
+   screen — added in the same revision — refuses loopback, so step 5 could not
+   print FOLLOWED on correct code and the case produced a spurious failure.
+   Round 4 was right to call the plan inadequate for it. Two of my own changes
+   contradicted each other and neither was wrong on its own.
+
+   The fix is to set the loopback hatch for this proof, since it is exercising
+   the RESOLVER and not the screen:
 
 ```ts
 Deno.env.set("FETCH_PROXY_URL", "");
+Deno.env.set("RESEARCH_ALLOW_PRIVATE_TARGETS", "1");  // stub servers are loopback
 const { unwrapRedirect } = await import("./src/enrich/links.ts");
 const ac1 = new AbortController(), ac2 = new AbortController();
 const dest = Deno.serve({ port: 0, signal: ac1.signal, onListen: () => {} },

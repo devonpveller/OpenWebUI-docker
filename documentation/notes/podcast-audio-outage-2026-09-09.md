@@ -201,6 +201,18 @@ it.
   performs no host screening of its own, so a URL reaching it by any other route
   is unscreened. Every route this item touches now screens before handing a URL
   on, but the general control belongs in the fetch layer.
+- **KNOWN LIMIT, stated rather than papered over (found in test 2026-09-09):**
+  the screen is TEXTUAL, so it cannot stop a *public hostname that RESOLVES to a
+  private address*. A tester demonstrated `localtest.me` (a real public name
+  pointing at 127.0.0.1) reaching loopback. Closing it needs a resolve-then-check
+  at connect time, which belongs in the fetch layer alongside the point above,
+  not in a URL screen. The egress proxy remains the effective control for that
+  case — measured, but a property of the network config rather than of this code.
+- **Two defeats of this screen were found by testing, not by me writing it**, and
+  both were trivial: a TRAILING DOT (`http://localhost.:PORT/` connected to a live
+  listener) and IPv4-mapped IPv6, where my first fix also leaked because the URL
+  parser normalises `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`. Worth remembering
+  before treating any hand-rolled host screen as sound because it looks sound.
 
 ## Recovery performed
 
