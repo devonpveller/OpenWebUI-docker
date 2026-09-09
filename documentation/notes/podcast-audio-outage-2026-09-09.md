@@ -147,6 +147,61 @@ Both failures ran green. Gaps found while investigating (all verified above):
 
 ---
 
+## Rollback lever for the link-resolution change (`podlinks`)
+
+**If the daily digest starts researching wrong or unexpected URLs, or the link
+stage misbehaves in any way, pull this first — it does not need a revert, a
+rebuild or a redeploy:**
+
+```
+# OB1/recipes/daily-digest/.env   (gitignored)
+INTERSTITIAL_FOLLOW=0
+```
+
+then `docker compose -f OB1/docker/docker-compose.yml up -d --force-recreate openbrain-podcast`.
+
+That restores the pre-2026-09-09 behaviour exactly: `Location` headers are
+followed, 200 redirect shells are not. It degrades to the OLD behaviour rather
+than to a hole — an unresolved wrapper is still marked, logged and **still
+researched**.
+
+**What it costs:** precisely the outage described in section 2 — Substack
+wrappers stop resolving and every email falls back to its newsletter body, so
+episodes are built from bodies alone. A thin morning, not a missing one. Set it
+back to `1` (or delete the line) to re-enable.
+
+**A related switch, for tests only:** `RESEARCH_ALLOW_PRIVATE_TARGETS=1` disables
+the host screen that stops a resolved redirect pointing at internal
+infrastructure. `links.test.ts` sets it because its stub servers are loopback.
+**It must never be set in production**, and nothing in the deployed config sets
+it.
+
+## Security posture of the link stage (asked 2026-09-09)
+
+- **No JavaScript is ever executed.** The scanner reads the document as text and
+  lifts a URL *string* out of a script body; nothing evaluates it. There is no
+  `eval`, no `new Function`, no DOM and no headless browser in
+  `OB1/recipes/daily-digest/src/enrich/` — verified by grep, not by assumption.
+- **The response body is bounded** at 16KB and is discarded undecoded past that,
+  so a hostile page cannot make the link stage buffer arbitrarily.
+- **Where a resolved URL may point is now screened** (`isPubliclyRoutableUrl`),
+  because that URL is chosen by the page we just fetched and we then fetch it.
+  Denied by shape: non-http(s), loopback, RFC1918, `169.254.x` (cloud metadata),
+  `100.64/10` (CGNAT — and the tailnet), multicast, `.local`/`.internal`, and any
+  hostname with no dot, which is what every docker service name looks like.
+  Applied to the `Location` hop as well as the interstitial one.
+- **The egress proxy was already a boundary, measured on 2026-09-09:**
+  `openbrain-curator:8000`, `llama-cpp:8080`, `openbrain-db:5432` and
+  `127.0.0.1` all returned 500 through `http://vpn:8888` while public URLs
+  resolved normally. The code screen is defence in depth — it makes that a
+  property the code asserts rather than one the network configuration happens to
+  provide, which matters because `egress.ts` documents `FETCH_PROXY_URL=""` as a
+  supported opt-out to direct fetching.
+- **Still true and NOT closed by this item:** `fetchAndExtract` in `extract.ts`
+  performs no host screening of its own, so a URL reaching it by any other route
+  is unscreened. Every route this item touches now screens before handing a URL
+  on, but the general control belongs in the fetch layer.
+
 ## Recovery performed
 
 - 095 (2026-09-09) resubmitted to ON from its already-rendered script at
