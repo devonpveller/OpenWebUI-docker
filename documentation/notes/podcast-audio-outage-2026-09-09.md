@@ -96,17 +96,20 @@ status 200  len 1515  location: null
 ```
 
 `unwrapRedirect()` (read from source at
-`OB1/recipes/daily-digest/src/enrich/links.ts:145-179`) only follows a `Location`
-header on a 3xx; on a 200 it returns `res.url` — i.e. the substack URL unchanged.
+`OB1/recipes/daily-digest/src/enrich/links.ts:145-179` **at OB1 `970cae8`, the
+pre-fix commit** — the line moves once the fix lands, so the SHA is part of the
+citation) only follows a `Location` header on a 3xx; on a 200 it returns
+`res.url` — i.e. the substack URL unchanged.
 `link-enrich.ts:374` then drops it:
 `.filter(c => c.domain && !c.domain.endsWith("substack.com"))`.
 That filter exists to drop the newsletter's own posts, and it cannot tell an
 unresolved wrapper from a genuine self-link. Result: **every external link in
 every Substack newsletter is silently discarded.**
 
-`decodeSubstackRedirect()` (links.ts:184) handles only the `/redirect/2/<base64>`
-form. The links in these newsletters are the `/redirect/<uuid>?j=e` form, which it
-returns `null` for.
+`decodeSubstackRedirect()` (links.ts:**188** at OB1 `970cae8` — this note first
+said 184, which is the `NOISE_TEXT_RE` regex; corrected after a tester resolved
+the citation) handles only the `/redirect/2/<base64>` form. The links in these
+newsletters are the `/redirect/<uuid>?j=e` form, which it returns `null` for.
 
 Proof the same URL used to work: `40874a4f-3ed1-44f8-82bd-1ea1c10c30b4` appears in
 `/reports/podcast-link-report-2026-09-04.json` with `status: "enriched"`, and
