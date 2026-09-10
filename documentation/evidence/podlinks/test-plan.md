@@ -1,7 +1,11 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`ab89394`).
+Branch: `work/podlinks`. The OB1 commit under test is **whatever the parent tip
+pins** - read it, never copy it from here:
+`git -C <worktree> rev-parse HEAD:OB1`. (This line used to name `ab89394`, which
+by round 9 was the commit a round had FAILED and the branch had already moved
+past. A tester following it literally would have tested the regressed code.)
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -605,6 +609,43 @@ on its own:
 - Confirm no JavaScript is executed: `grep -nE "eval\(|new Function|import\(|jsdom|puppeteer|playwright" src/enrich/*.ts` must be empty.
 
 FAIL: any private/internal target that resolves, or any evidence of execution.
+
+## T15 - a figure in a shipped CODE COMMENT is a claim too
+
+T10 covers the commit message and the findings note. It does NOT cover source
+comments, and round 9 landed a review block there: `links.ts` still told the
+reader that four internal targets "all came back 500 from the proxy ... so the
+Mullvad tunnel is ALREADY an SSRF boundary", while the findings note IN THE SAME
+DIFF corrected that figure to 404 and called it load-bearing. The diff
+contradicted itself and the wrong half was in the code - which is the surface the
+anchor names as the audience ("understand FROM THE CODE").
+
+The measurement is the same one T10 makes for the note; what is new is WHERE you
+look.
+
+```
+# every number, and every "measured"/"probed"/"came back" claim, in the changed source
+git -C <worktree>/OB1 diff 970cae8..HEAD -- recipes/daily-digest/src recipes/daily-digest/link-enrich.ts |
+  grep -n '^+.*\(measured\|probed\|came back\|returned\|all four\|always\|never\|every\)'
+```
+
+For each hit, re-derive it or find where it is derived. Specifically:
+
+- the 404-not-500 egress figure, re-measured inside `openbrain-podcast` through
+  `http://vpn:8888` (404 is the gluetun control server answering - the proxy
+  CONNECTED to loopback; 500 is a refusal, and the difference is the whole point)
+- `INTERSTITIAL_MAX_BYTES` and the claim about what is buffered
+- the "no JavaScript is ever executed" claim (grep the path, do not read the
+  comment that asserts it)
+- the "every docker network name here carries a hyphen or an underscore" claim,
+  against live `docker network ls`
+- any claim of the form "all N", "every", "never" - this item has produced four
+  false universals across nine rounds and every one of them was in a place a
+  reader would trust
+
+FAIL: any figure in shipped source that does not reproduce, OR a source comment
+that contradicts the findings note shipping in the same diff. A claim that is
+merely IMPRECISE is a note in your report, not a FAIL - say which you found.
 
 ## Out of scope for this plan
 
