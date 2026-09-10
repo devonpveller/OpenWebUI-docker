@@ -271,8 +271,10 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 96 passed, 0 failed.
-FAIL: any failure, or fewer than 96 tests (a case was deleted rather than fixed).
+PASS: 98 passed, 0 failed.
+FAIL: any failure, or fewer than 98 tests (a case was deleted rather than fixed).
+(A floor, not an equality - the count moves every round a case is added, and it
+has been reported stale twice.)
 
 ## T2 — the pre-existing suite did not regress
 
@@ -391,11 +393,22 @@ PASS: (a) resolves, (b) and (c) return null. That isolates each guard: (b) can
 only be the text limit, (c) can only be the byte cap.
 FAIL: (b) or (c) still resolves — then that guard is decorative.
 
-NOW REMOVE THE CAP AND WATCH IT FAIL. In a SCRATCH COPY, set
-`INTERSTITIAL_MAX_BYTES` to `999_999_999` and re-run the suite: `the BYTE cap
-refuses a big document whose visible text is tiny` must be the failure, and it
-must be the ONLY one (measured: 96 passed, 1 failed). If the suite stays green,
-the cap is unpinned again and (c) has drifted back to testing the text limit.
+NOW BREAK IT TWO WAYS AND WATCH EACH FAIL. The anchor bullet has two halves -
+"reads a bounded prefix" AND "a large page does not get buffered whole" - and
+round 16 proved a case can pin one while the other is asserted by nothing. In a
+SCRATCH COPY, one at a time:
+
+1. `INTERSTITIAL_MAX_BYTES` -> `999_999_999`. `the BYTE cap refuses a big
+   document whose visible text is tiny` must fail, and be the ONLY failure.
+2. `while (total <= maxBytes)` -> `while (true)` AND delete the
+   `if (total > maxBytes) return null;` line - a genuinely unbounded read.
+   `a large body is NOT streamed whole` must fail, and be the ONLY failure.
+   **Before round 16 this mutation left the suite 97/0 green while a 64 MiB body
+   was buffered whole**, which is exactly what the bullet forbids.
+
+If either mutation leaves the suite green, that half of the bullet is unpinned
+again. Note that (1) alone is not sufficient evidence: the constant is read at
+two sites, so changing it disables both at once and can look like coverage.
 
 Do NOT conclude anything about the guards from the `<pre><code>` fixture; it is
 testing the context rule (T12), not these.
