@@ -357,7 +357,10 @@ meant was the "five times" partial-enumeration tally in the method note above.)
   and this entry was WRONG to carry it.** The guard no longer calls
   `extractTextFromHtml`; it measures the `liveText` produced by the same walk as
   the matcher, so the two cannot disagree about any element. Pinned by tests at
-  `links.test.ts:487-506`, including a non-vacuity case. Re-measured with a
+  `links.test.ts:487-506` **as of `bd9f1db`** (the block has since moved, and
+  this note's own rule is that a line citation names the commit it resolves
+  at — round 18 caught this one relying on a reader's luck), including a
+  non-vacuity case. Re-measured with a
   CONTROL: `<nav>`, `<header>`, `<footer>`, `<aside>` and `<form>` behave
   identically to `<div>` and `<span>` — empty shells resolve for all seven, and
   336 characters of text inside any of them returns `null`. The element is
