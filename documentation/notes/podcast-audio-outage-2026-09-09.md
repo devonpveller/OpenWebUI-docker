@@ -389,28 +389,28 @@ meant was the "five times" partial-enumeration tally in the method note above.)
 
   **CORRECTIONS (rounds 22 and 23).** The chunk-count rule above is also wrong -
   it holds from 64 KiB up and collapses below, and an attempt to patch it with a
-  `max(chunks, bytes)` fit failed at 48 KiB. Then the paragraph written to say so
-  carried a seven-row table of its own, of which two rows were wrong and one was
-  not stable run to run. So no figures for unexecuted configurations are recorded
-  here or in the code any more, and this paragraph states no rule either.
+  `max(chunks, bytes)` fit failed. Then the paragraph written to say so carried
+  a table of its own, and rows of it were wrong. So no figures for unexecuted
+  configurations are recorded here or in the code any more, and this paragraph
+  states no rule either.
 
-  What the repository holds instead: the three numbers the streaming case
-  re-proves on every run (2.25 MiB read against a 16 MiB threshold and a 64 MiB
-  body), and a guard that PINS that case's two constants - refusing any other
+  What the repository holds instead: the streaming case, which checks that the
+  bytes read stay under a quarter of the body, and a guard that PINS that case's
+  two constants - refusing any other
   pair, including pairs that would work fine, because the transport's readahead
   cannot be predicted from them. `git log -- links.test.ts` holds the
   measurements that falsified each attempted rule.
 
   What the guard does NOT do, stated because an earlier version of this sentence
   claimed it did: it does not detect "a chunk size where the method stops
-  discriminating". It cannot - it is a tautology over two literals. Five chunk
-  sizes it refuses would discriminate perfectly well, and a change in the
-  transport at the pinned size would not trip it at all. It buys one thing, and
+  discriminating". It cannot - it is a tautology over two literals. Chunk sizes
+  it refuses would discriminate perfectly well, and a change in the transport at
+  the pinned size would not trip it at all. It buys one thing, and
   that is that nobody changes those constants without re-measuring.
 
-  Six consecutive test rounds found this comment wrong, every time in a
-  configuration nothing executes, and three of those errors were introduced by
-  the repair for the previous one. The lesson is not about care: **prose that
+  Repeated test rounds found this comment wrong, in configurations nothing
+  executes, and some of those errors were introduced by the repair for the
+  previous one. The lesson is not about care: **prose that
   quantifies over configurations a test does not run will drift, and the only
   stable fix is to stop quantifying.**
 
