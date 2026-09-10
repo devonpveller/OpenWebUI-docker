@@ -203,7 +203,7 @@ it.
   has a dot and docker's embedded DNS answers it. The rule that closes the class
   is the TLD SHAPE test — the `looksLikeTld` check in `isPubliclyRoutableUrl`
   (cited by name: `:274-278` is the COMMENT that states the rule, the code is
-  twenty lines below it — measured 274 to 292, so eighteen; round 22 restored
+  twenty lines below it — measured 274 to 292, so eighteen; round 23 restored
   this after I "corrected" it to "about 370", which is the distance for a
   DIFFERENT pair (`readHtmlPrefix` from `INTERSTITIAL_MAX_BYTES`, in a commit
   message) that I conflated with it. A repair that deletes a true sentence and
@@ -387,24 +387,32 @@ meant was the "five times" partial-enumeration tally in the method note above.)
   (before or after the server's `shutdown()`), by a little at small chunk sizes
   and a lot at large ones.
 
-  **CORRECTION (round 22): even that is not a rule.** The chunk count is 340 /
-  170 / 90 / 54 / 54 / 36 / 36 at 4 / 8 / 16 / 32 / 48 / 64 / 512 KiB — neither
-  byte-constant nor chunk-constant, and 48 KiB breaks the obvious
-  `max(36 × CHUNK, ~1.7 MiB)` fit that covers every other point. So the code no
-  longer states a mechanism at all: the test pins its two constants and refuses
-  any other pair, telling the next person to re-measure. That is the third
-  attempt at this paragraph and the first that claims nothing beyond what one
-  run checks.
+  **CORRECTIONS (rounds 22 and 23).** The chunk-count rule above is also wrong -
+  it holds from 64 KiB up and collapses below, and an attempt to patch it with a
+  `max(chunks, bytes)` fit failed at 48 KiB. Then the paragraph written to say so
+  carried a seven-row table of its own, of which two rows were wrong and one was
+  not stable run to run. So no figures for unexecuted configurations are recorded
+  here or in the code any more, and this paragraph states no rule either.
 
-  The exact byte figures are deliberately NOT recorded here any more. Five test
-  rounds in a row found a different one of them wrong, always in a configuration
-  nothing executes, and each correction added prose that the next round falsified
-  — a self-referential changelog, which does not converge. What the repository
-  now holds instead is one measured margin for the configuration the test
-  actually runs, plus a guard in the test that refuses a chunk size where the
-  method stops discriminating (`links.test.ts`, `a large body is NOT streamed
-  whole`). A mechanism can be reasoned about; a machine-and-day byte figure
-  decays the moment it is written.
+  What the repository holds instead: the three numbers the streaming case
+  re-proves on every run (2.25 MiB read against a 16 MiB threshold and a 64 MiB
+  body), and a guard that PINS that case's two constants - refusing any other
+  pair, including pairs that would work fine, because the transport's readahead
+  cannot be predicted from them. `git log -- links.test.ts` holds the
+  measurements that falsified each attempted rule.
+
+  What the guard does NOT do, stated because an earlier version of this sentence
+  claimed it did: it does not detect "a chunk size where the method stops
+  discriminating". It cannot - it is a tautology over two literals. Five chunk
+  sizes it refuses would discriminate perfectly well, and a change in the
+  transport at the pinned size would not trip it at all. It buys one thing, and
+  that is that nobody changes those constants without re-measuring.
+
+  Six consecutive test rounds found this comment wrong, every time in a
+  configuration nothing executes, and three of those errors were introduced by
+  the repair for the previous one. The lesson is not about care: **prose that
+  quantifies over configurations a test does not run will drift, and the only
+  stable fix is to stop quantifying.**
 
 - **The stated cost "a numeric rightmost label on a genuinely public host would
   be refused" is vacuous** (attempt 6; measured today: `new URL("http://example.123/")`
