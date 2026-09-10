@@ -124,3 +124,51 @@ a silently-open door; the better shape is probably to REFUSE LOUDLY on a registr
 present but not an object ("your registry is malformed", not "you are not registered"), which
 is a new third outcome and its own red-first test. Nobody has hit it yet: every writer in the
 tree (`new-worktree.ps1`, `remove-worktree.ps1`) writes a hashtable.
+
+## F5 - once an item is back at `ready-to-test`, NOTHING can revise its plan or its SHA
+
+Found 2026-09-10 while running `podlinks` and `crashloop` through nine and eight
+rounds. It bit twice in one session, from opposite directions, and the second
+time it left a tester pointed at a stale plan and a superseded commit.
+
+`-Submit`, `-Resubmit` and `-Requeue` all accept `-TestPlan`, and the comment on
+the third calls itself "the third door into the same room". There is no door
+from `ready-to-test`:
+
+- **From the developer.** `-Resubmit` moves `test-failed` -> `ready-to-test` and
+  prints, on success, "if the failure showed the plan missed a case, add it and
+  re-submit with `-TestPlan`". A second `-Resubmit` is then refused - "only a
+  test-failed item is re-submitted" - so the advice it prints is unreachable by
+  the person it is printed to. (Workable once you know: pass `-TestPlan` on the
+  FIRST call. Nothing says so.)
+- **From the reviewer.** `-Requeue` lands the item at `ready-to-test` and does
+  NOT re-read `submitted_sha`. But a reviewer's return exists precisely because
+  the DEVELOPER must change something first, so the recorded SHA is stale by
+  construction the moment the developer commits the fix - and the developer has
+  no verb that updates it, because of the bullet above.
+
+Consequence, measured: after review returned `podlinks` at attempt 10, the queue
+held a plan snapshot at the OLD path with the old content, and `submitted_sha`
+36db16d while the branch tip was 71762ae with the review fix in it. A tester
+executing the queued copy literally would test a superseded commit against a plan
+that predates the reason it was returned. The workaround is to tell the tester in
+its dispatch that the queued copy is stale and to execute the plan ON THE BRANCH
+IT CHECKS OUT - which works only because the plan ships in the repo, and which
+puts the developer back in the loop of instructing the tester, exactly what the
+queued copy exists to prevent.
+
+FIX SHAPE, smallest first:
+1. `-Resubmit` accepts `-TestPlan` from `ready-to-test` when the caller is the
+   developer AND the item is unclaimed, revising the plan and `submitted_sha`
+   without bumping the attempt. Cheap, and closes both directions.
+2. `-Requeue` by a reviewer should leave the item where the developer can act -
+   or at minimum blank `submitted_sha` so a tester cannot silently test the
+   commit that was returned.
+3. A PLAN HASH recorded next to the verdict, so "the plan the tester executed"
+   is checkable after the fact rather than assumed. Already wanted for other
+   reasons ([[agent-harness-findings-note-audit]]).
+
+Related: F3 records that MERGE-PROTOCOL.md does not describe the developer's way
+back. This is the same seam - the pipeline is well specified going forwards and
+under-specified going backwards, and every round that returns work travels
+backwards.
