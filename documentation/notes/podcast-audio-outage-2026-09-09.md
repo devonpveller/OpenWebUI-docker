@@ -203,9 +203,12 @@ it.
   has a dot and docker's embedded DNS answers it. The rule that closes the class
   is the TLD SHAPE test — the `looksLikeTld` check in `isPubliclyRoutableUrl`
   (cited by name: `:274-278` is the COMMENT that states the rule, the code is
-  below it — cited without a distance, because "twenty lines" was itself wrong
-  (it is about 370) and line numbers in this file have now been wrong three
-  times) —
+  twenty lines below it — measured 274 to 292, so eighteen; round 22 restored
+  this after I "corrected" it to "about 370", which is the distance for a
+  DIFFERENT pair (`readHtmlPrefix` from `INTERSTITIAL_MAX_BYTES`, in a commit
+  message) that I conflated with it. A repair that deletes a true sentence and
+  ships a false figure in its place is worse than the imprecision it was aimed
+  at, and this is the second time a "fix" here has done that) —
   where the rightmost label must look like
   a public suffix, which a docker network name does not. Describing the screen by
   the rule it OUTGREW made this note contradict the code it documents.
@@ -383,6 +386,15 @@ meant was the "five times" partial-enumeration tally in the method note above.)
   still and scales the moment you change it. It also differs by where you sample
   (before or after the server's `shutdown()`), by a little at small chunk sizes
   and a lot at large ones.
+
+  **CORRECTION (round 22): even that is not a rule.** The chunk count is 340 /
+  170 / 90 / 54 / 54 / 36 / 36 at 4 / 8 / 16 / 32 / 48 / 64 / 512 KiB — neither
+  byte-constant nor chunk-constant, and 48 KiB breaks the obvious
+  `max(36 × CHUNK, ~1.7 MiB)` fit that covers every other point. So the code no
+  longer states a mechanism at all: the test pins its two constants and refuses
+  any other pair, telling the next person to re-measure. That is the third
+  attempt at this paragraph and the first that claims nothing beyond what one
+  run checks.
 
   The exact byte figures are deliberately NOT recorded here any more. Five test
   rounds in a row found a different one of them wrong, always in a configuration
