@@ -191,9 +191,15 @@ it.
   hostname with no dot, which is what every docker service name looks like.
   Applied to the `Location` hop as well as the interstitial one.
 - **The egress proxy was already a boundary, measured on 2026-09-09:**
-  `openbrain-curator:8000`, `llama-cpp:8080`, `openbrain-db:5432` and
-  `127.0.0.1` all returned 500 through `http://vpn:8888` while public URLs
-  resolved normally. The code screen is defence in depth — it makes that a
+  `openbrain-curator:8000`, `llama-cpp:8080` and `openbrain-db:5432` all
+  returned 500 through `http://vpn:8888` while public URLs resolved normally.
+  **CORRECTED 2026-09-10:** this list originally included `127.0.0.1`, and that
+  half does NOT reproduce — re-measured through the same mechanism `egress.ts`
+  uses, it returns **404**, because the proxy connects to its OWN loopback
+  (`search-vpn` listens on `:::8000`). The service-name 500s do reproduce. No
+  exploitable path through this code — `isPubliclyRoutableUrl` refuses literal
+  `127.0.0.1` outright — but the figure was wrong and it was being used as the
+  stated mitigation for the DNS-time limit below, so it mattered. The code screen is defence in depth — it makes that a
   property the code asserts rather than one the network configuration happens to
   provide, which matters because `egress.ts` documents `FETCH_PROXY_URL=""` as a
   supported opt-out to direct fetching.

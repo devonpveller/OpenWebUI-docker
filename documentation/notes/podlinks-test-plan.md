@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`c13fa1c`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`ab89394`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -45,6 +45,32 @@ Get-ChildItem -LiteralPath "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest" -Di
 ```
 
 Anything listed is yours or a predecessor's; remove it and say so in your report.
+
+## ATTEMPT 7 — what round 6 found
+
+Round 6 FAILED T12 at HIGH severity, and marked the plan ADEQUATE — the plan named
+`scanDocument`, told the tester to attack it, and its FAIL clause covered exactly
+what was found.
+
+`scanDocument`'s main loop is context-aware; the two DEPTH COUNTERS inside it were
+not. Skipping `<template>` and the inert subtrees used raw-string regex token
+counts, so they counted `</template>` / `</select>` occurring inside comments,
+attribute values, script bodies and `<textarea>`. Ten inert documents produced a
+target **on the real path**, with `unresolvedWrapper=false` — not even marked, so
+the operator log line never fired and the URL entered research silently. The same
+counter over-swallowed in the other direction, hiding rendered prose from the
+guard so a full article resolved.
+
+That was round 3's nested-template finding in a new spelling: fixing the nesting
+reintroduced the context blindness. Both counters are gone — the walk now
+maintains a suppression STACK, closed only by a close tag the same walk reached,
+so exactly one mechanism decides what is inside what.
+
+Round 6 also confirmed **the TLD rule holds** under 57 attacking URLs, and found
+one documentation defect worth knowing: the note's claim that `127.0.0.1` returns
+500 through `vpn:8888` does not reproduce — it returns **404**, because the proxy
+connects to its own loopback. The service-name 500s do reproduce. Corrected in
+the note.
 
 ## ATTEMPT 5 — what round 4 found
 
@@ -161,8 +187,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 77 passed, 0 failed.
-FAIL: any failure, or fewer than 77 tests (a case was deleted rather than fixed).
+PASS: 89 passed, 0 failed.
+FAIL: any failure, or fewer than 89 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
