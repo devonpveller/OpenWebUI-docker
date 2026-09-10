@@ -334,8 +334,11 @@ time — the same fix the `localtest.me` DNS-time limit needs, in the same place
 safe direction or thin.** (This heading read "none fixed" until round 14, which
 is a universal sitting directly above its own struck-through counterexample. It
 was defensible — strikethrough means retracted, so it quantified over the live
-bullets — and in a document that has failed four times on universals, "defensible
-if you know the convention" is not the bar.)
+bullets — and in a document whose claims have failed four test rounds (6, 10, 12,
+13; two of those were universals, one a figure, one an omission), "defensible if
+you know the convention" is not the bar. Round 15 caught the replacement
+quantifier being loose about which four, which is a fair thing to be caught on
+seventy lines under a count that enumerates exactly.)
 
 - **An UNQUOTED `content=` on a meta refresh is never followed** (attempt 4;
   measured today: `null`). `metaRefreshTarget` requires quotes; browsers honour

@@ -375,12 +375,27 @@ put the redirect in a REAL script and vary only the document:
 // a) shell-sized, no visible text  -> followed
 `<html><head><script>location.replace("https://good.example/a")</script></head></html>`
 // b) same script, 300+ chars of visible prose in the body -> NOT followed
-// c) same script, body padded past 16KB                   -> NOT followed
+// c) same script, padded past 16KB INSIDE AN HTML COMMENT -> NOT followed
 ```
+
+**(c)'s padding must be INVISIBLE, and round 15 is why.** The fixture used to
+pad with 40,000 visible `x`s, which trips `INTERSTITIAL_MAX_TEXT` first and says
+nothing whatever about bytes — the same misattribution round 3 corrected once
+already, for a `<pre><code>` fixture. Proved by control: raising
+`INTERSTITIAL_MAX_BYTES` to `999_999_999` — removing the cap outright — left all
+96 tests green, so the anchor's own acceptance bullet ("no unbounded body read")
+was asserted by NOTHING. Padding inside `<!-- ... -->` keeps visible text at ~0,
+so size is the only thing that can refuse the document.
 
 PASS: (a) resolves, (b) and (c) return null. That isolates each guard: (b) can
 only be the text limit, (c) can only be the byte cap.
 FAIL: (b) or (c) still resolves — then that guard is decorative.
+
+NOW REMOVE THE CAP AND WATCH IT FAIL. In a SCRATCH COPY, set
+`INTERSTITIAL_MAX_BYTES` to `999_999_999` and re-run the suite: `the BYTE cap
+refuses a big document whose visible text is tiny` must be the failure, and it
+must be the ONLY one (measured: 96 passed, 1 failed). If the suite stays green,
+the cap is unpinned again and (c) has drifted back to testing the text limit.
 
 Do NOT conclude anything about the guards from the `<pre><code>` fixture; it is
 testing the context rule (T12), not these.
