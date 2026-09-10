@@ -46,7 +46,44 @@ Get-ChildItem -LiteralPath "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest" -Di
 
 Anything listed is yours or a predecessor's; remove it and say so in your report.
 
-## ATTEMPT 7 — what round 6 found
+## ATTEMPT 8 - what round 7 found
+
+Round 7 FAILED T12 and nothing else, at MEDIUM-LOW and REACHABLE, on a regression
+the round-6 fix introduced. It marked the plan ADEQUATE.
+
+The round-6 fix let a trailing solidus self-close a suppressing element. That is
+true ONLY in foreign content: the HTML parser IGNORES a trailing solidus on an
+HTML element, so `<select/>` and `<template/>` DO open a region. Treating them as
+self-closed meant an inert `<meta refresh>` or `<script>` after one was read as
+LIVE, followed on the real path, and emitted by `gatherAnchors` with
+`unresolvedWrapper=false` - unmarked and silent. The exemption is now `svg`/`math`
+only, and both directions are permanent cases.
+
+HOW ROUND 7 FOUND IT is the part to repeat, and the case list below now says so:
+the tester ran the resolver against **parse5**, a spec-compliant parser, in both
+scripting modes, over 51 attack documents. Reading the spec's prose is what got
+the solidus rule backwards in the first place. **If you are attacking T12, use an
+oracle, not an argument.** (`npm:parse5` is reachable from the recipe container;
+`deno run -A --node-modules-dir=none` will fetch it. If it is not reachable in
+your environment, say so in your report rather than substituting your own reading
+of the spec - that substitution is the defect this round found.)
+
+That same comparison is also EVIDENCE FOR the rest of the stack, and you do not
+have to redo it: all 51 documents matched the oracle - `</template>` inside style,
+title, textarea, iframe, xmp, noembed, a script body, a comment, a comment inside
+an svg inside the template, quoted and unquoted attributes, a bogus comment, an
+entity, a nested template, plaintext, `</script>` inside a JS string, `<!-->`,
+unterminated quotes, entity-encoded srcdoc, CDATA, foreignObject. Unterminated
+regions fail closed. Spend this round's attack budget somewhere the previous
+rounds did NOT reach.
+
+Round 7's Finding 2 was accepted: the `INERT_SUBTREE_ELEMENTS` comment claimed a
+`<meta>` in `svg`/`math` "is not a document-level meta". It is - `<meta>` is on
+the HTML breakout list. The code still refuses it, deliberately; the comment now
+says that is a CHOSEN fail-closed trade rather than a claim about parsing. T10
+covers whether the note and commit message state it that way.
+
+## ATTEMPT 7 - what round 6 found
 
 Round 6 FAILED T12 at HIGH severity, and marked the plan ADEQUATE — the plan named
 `scanDocument`, told the tester to attack it, and its FAIL clause covered exactly
@@ -187,8 +224,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 89 passed, 0 failed.
-FAIL: any failure, or fewer than 89 tests (a case was deleted rather than fixed).
+PASS: 96 passed, 0 failed.
+FAIL: any failure, or fewer than 96 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
@@ -420,7 +457,15 @@ that would route around the rule the test pins.
 deno test --allow-net --allow-env --filter "NOT a scripted redirect" src/enrich/links.test.ts
 deno test --allow-net --allow-env --filter "OUTSIDE any script" src/enrich/links.test.ts
 deno test --allow-net --allow-env --filter "IS still followed" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "solidus" src/enrich/links.test.ts
+deno test --allow-net --allow-env --filter "still suppresses its subtree" src/enrich/links.test.ts
 ```
+
+The last two are round 7's regression: 4 + 2 cases, all green. They are the pair
+that stops the self-closing exemption from widening again - one direction proves
+`<select/>` and `<template/>` still suppress, the other proves `<svg/>`, `<math/>`
+and a NON self-closed `<svg>`/`<math>` still behave. A fix that makes either
+direction pass alone is not a fix.
 
 PASS: all three green. The third is the one that stops the fix from being a
 blanket disable — a real `window.location.replace` inside a `<script>` must still
