@@ -139,7 +139,11 @@ Both failures ran green. Gaps found while investigating (all verified above):
 4. **Podcast delivery has no outcome check.** `openbrain-podcast` exits 0 whether
    or not audio exists. Same shape as the sidecar problem `Test-BackupRecency`
    already solves ("a running sidecar that produces nothing is invisible to
-   container checks", stack-watchdog.ps1:1683).
+   container checks" — search `stack-watchdog.ps1` for `Test-BackupRecency`).
+   Cited by NAME rather than by line: this said `:1683`, the line was 1685 even
+   in the commit that wrote the citation, and the `crashloop` item is moving that
+   file's line numbers as this lands. A line number in a note about another
+   branch's file is stale on arrival.
 5. **Expiring credentials are tracked only in a comment.** `# expires aug 8, 2026`
    above `TS_AUTHKEY`. Same class as the digest's 7-day OAuth token.
 6. **Research yield has no floor.** Three consecutive days of `0 ext link(s)` on
@@ -182,8 +186,12 @@ it.
   lifts a URL *string* out of a script body; nothing evaluates it. There is no
   `eval`, no `new Function`, no DOM and no headless browser in
   `OB1/recipes/daily-digest/src/enrich/` — verified by grep, not by assumption.
-- **The response body is bounded** at 16KB and is discarded undecoded past that,
-  so a hostile page cannot make the link stage buffer arbitrarily.
+- **The response body is bounded** at 16KB: the read stops once that much has
+  arrived and anything over it is discarded undecoded rather than parsed, so a
+  hostile page cannot make the link stage buffer arbitrarily. The cut is a
+  ceiling on what is KEPT and can overshoot by at most one read chunk, because a
+  stream does not hand out partial ones — `readHtmlPrefix` was made precise about
+  that in OB1 `53f014c` and this bullet had kept the exact-cut phrasing.
 - **Where a resolved URL may point is now screened** (`isPubliclyRoutableUrl`),
   because that URL is chosen by the page we just fetched and we then fetch it.
   Denied by shape: non-http(s), loopback, RFC1918, `169.254.x` (cloud metadata),
@@ -246,6 +254,35 @@ it.
   non-trivial defeat into no defeat at all, in the document a future reader would
   consult before trusting the screen.
 
+### Residual: three IPv6 spellings the screen still allows
+
+Recorded here because this file is the item's findings sink and these belong in
+it. They were reported by TWO independent testers (attempts 5 and 6) and, until
+now, lived only in a parent commit message — not in the note, the code, the tests
+or the plan. A finding that exists only in a commit message is one `git log`
+away from nobody ever seeing it again.
+
+`isPubliclyRoutableUrl` allows all three of these, measured live 2026-09-10
+against OB1 `b0cc0af` with the `INTERSTITIAL_FOLLOW` hatch deleted:
+
+- `[::ffff:0:7f00:1]` — IPv4-mapped, in the alternate `::ffff:0:a.b.c.d` form
+- `[64:ff9b::7f00:1]` — the NAT64 well-known prefix
+- `[2002:7f00:1::]` — 6to4
+
+They are RESIDUAL rather than live: reaching 127.0.0.1 through any of them needs
+a NAT64 or 6to4 relay, and this host has neither, so none of them connects here
+today. That is why they were not treated as defeats alongside the three above —
+those three reached a real target on this machine. The distinction is worth
+keeping, and so is the fact that it is a distinction about THIS network, not
+about the code: the same URL on a host with a relay would be a live defeat.
+
+The underlying shape is the one attempt 6's tester named: the IPv6 branch denies
+by an explicit list and ALLOWS by default, while the IPv4 branch denies by range.
+An allow-by-default screen is one unlisted prefix away from wrong, permanently.
+Closing it properly means screening the RESOLVED ADDRESS at connect time, which
+is the same fix the `localtest.me` DNS-time limit needs and belongs in the same
+place — the fetch layer, not a function handed a string.
+
 ## Recovery performed
 
 - 095 (2026-09-09) resubmitted to ON from its already-rendered script at
@@ -277,8 +314,12 @@ NOT run."
 
 So **no pre-commit gate runs the daily-digest Deno tests**, and the shrink floor
 that exists to stop tests being quietly deleted does not cover them either:
-deleting all 34 cases in `script-renderer.test.ts` and all 14 in
-`links.test.ts` would print the same reassuring `54 -> 54`.
+deleting all 34 cases in `script-renderer.test.ts` and all 96 in
+`links.test.ts` would print the same reassuring `54 -> 54`. (This said 14, which
+was correct at `df83254` and now understates the exposure by a factor of seven —
+the figure grows every round this item runs, which is exactly why a count in
+prose about a moving suite should be read as a date-stamped measurement and not
+as a fact.)
 
 This matters twice over. A reader of that output would reasonably conclude the
 new tests were run — they were not; they were run by hand

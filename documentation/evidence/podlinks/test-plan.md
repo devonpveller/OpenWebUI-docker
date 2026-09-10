@@ -639,6 +639,26 @@ superseded (round 10 found one of those too: the note described the screen as
 denying "any hostname with no dot", the exact rule `links.ts:265` records as not
 being enough).
 
+### ...and two shapes the addendum did not reach (round 11)
+
+The addendum worked - it is what made round 11 enumerate independently - but it
+has the same defect one level down, twice:
+
+1. **T10 names ONE citation to resolve.** Resolve them ALL. Round 11 found a
+   citation that was wrong the day it was written (`stack-watchdog.ps1:1683`; the
+   quoted line was 1685 even in the commit that added the reference). Sweep:
+   every `file:line` in the note, checked against the file AT THE COMMIT THE NOTE
+   CITES, not only at HEAD.
+2. **Nothing asks whether the SINK HOLDS WHAT THE RECORD SHOWS.** The anchor names
+   `documentation/notes/podcast-audio-outage-2026-09-09.md` as the findings sink.
+   Round 11 found three IPv6 spellings that two independent testers had reported
+   (attempts 5 and 6) living only in a parent COMMIT MESSAGE - not in the note,
+   the code, the tests or the plan. So: read every attempt's evidence file and
+   every verdict `reason` in `queue.ps1 -Show`, list what was reported as true
+   but out of scope, and check each one appears in the sink. FAIL on anything a
+   tester reported that the sink does not carry - a finding that exists only in a
+   commit message is one `git log` away from being lost.
+
 ## T15 - a figure in a shipped CODE COMMENT is a claim too
 
 T10 covers the commit message and the findings note. It does NOT cover source
