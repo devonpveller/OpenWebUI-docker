@@ -357,10 +357,13 @@ meant was the "five times" partial-enumeration tally in the method note above.)
   and this entry was WRONG to carry it.** The guard no longer calls
   `extractTextFromHtml`; it measures the `liveText` produced by the same walk as
   the matcher, so the two cannot disagree about any element. Pinned by tests at
-  `links.test.ts:487-506` **as of `bd9f1db`** (the block has since moved, and
-  this note's own rule is that a line citation names the commit it resolves
-  at — round 18 caught this one relying on a reader's luck), including a
-  non-vacuity case. Re-measured with a
+  `links.test.ts` — the five per-element tests plus the non-vacuity case
+  `the same shape with NO text still resolves`. **Cited by test NAME, not by
+  line**: this said `:487-506`, then `:487-506 as of bd9f1db`, and at `bd9f1db`
+  that range is a different block entirely (the guard tests begin at 587 there).
+  A stamp added to stop a citation relying on a reader's luck instead asserted a
+  specific commit at which it is verifiably wrong. A test name survives every
+  edit that a line number does not. Re-measured with a
   CONTROL: `<nav>`, `<header>`, `<footer>`, `<aside>` and `<form>` behave
   identically to `<div>` and `<span>` — empty shells resolve for all seven, and
   336 characters of text inside any of them returns `null`. The element is
@@ -428,12 +431,14 @@ NOT run."
 
 So **no pre-commit gate runs the daily-digest Deno tests**, and the shrink floor
 that exists to stop tests being quietly deleted does not cover them either:
-deleting all 34 cases in `script-renderer.test.ts` and all 96 in
-`links.test.ts` would print the same reassuring `54 -> 54`. (This said 14, which
-was correct at `df83254` and now understates the exposure by a factor of seven —
-the figure grows every round this item runs, which is exactly why a count in
-prose about a moving suite should be read as a date-stamped measurement and not
-as a fact.)
+deleting **every case** in `script-renderer.test.ts` and **every case** in
+`links.test.ts` would print the same reassuring `54 -> 54`. (This carried a count
+twice — 14, then 96 — and both went stale, the second inside the sentence added
+to explain why counts about a moving suite go stale. Worse, a commit message
+claimed this very fix had been made a round before it was: the patch that made it
+aborted on a later error and never wrote the file, and I described the intent
+rather than checking the diff. The third version carries no count, because the
+true claim is "all of them" and that cannot rot.)
 
 This matters twice over. A reader of that output would reasonably conclude the
 new tests were run — they were not; they were run by hand
