@@ -203,7 +203,9 @@ it.
   has a dot and docker's embedded DNS answers it. The rule that closes the class
   is the TLD SHAPE test — the `looksLikeTld` check in `isPubliclyRoutableUrl`
   (cited by name: `:274-278` is the COMMENT that states the rule, the code is
-  twenty lines below it, and line numbers in this file have been wrong twice) —
+  below it — cited without a distance, because "twenty lines" was itself wrong
+  (it is about 370) and line numbers in this file have now been wrong three
+  times) —
   where the rightmost label must look like
   a public suffix, which a docker network name does not. Describing the screen by
   the rule it OUTGREW made this note contradict the code it documents.
@@ -375,23 +377,23 @@ meant was the "five times" partial-enumeration tally in the method note above.)
 
   Left visible instead of deleted, because how it got here is the finding.
   Round 13 caught it. See the note under the method above.
-- **The readahead figure is chunk-size AND sample-time dependent** (attempts 15
-  and 17; re-measured here). The transport's readahead is ABSOLUTE rather than
-  proportional to the body - 1.58 MiB at 16 KiB chunks, 1.69 at 64 KiB, 6.75 at
-  256 KiB under `deno run`, the same whether the body is 16 MiB or 64 MiB.
+- **The transport's readahead is a fixed CHUNK COUNT, not a fixed byte count**
+  (attempts 15, 17-21). About 36 read chunks under `deno test`, 27 under
+  `deno run` - which is why it looks "absolute" when you hold the chunk size
+  still and scales the moment you change it. It also differs by where you sample
+  (before or after the server's `shutdown()`), by a little at small chunk sizes
+  and a lot at large ones.
 
-  TWO variables move it and they are separate. The HARNESS: `deno test` reads
-  roughly 4/3 of `deno run`, wherever the body ceiling does not bind. The SAMPLE
-  POINT: reading after `srv.shutdown()` rather than before adds +3.5-3.7% at
-  4-256 KiB chunks but **+59% at 1 MiB**, where it also stops being
-  deterministic (57-58 MiB across three runs). The earlier "~4% higher if
-  sampled a few hundred ms later" is true only of the small-chunk end.
+  The exact byte figures are deliberately NOT recorded here any more. Five test
+  rounds in a row found a different one of them wrong, always in a configuration
+  nothing executes, and each correction added prose that the next round falsified
+  — a self-referential changelog, which does not converge. What the repository
+  now holds instead is one measured margin for the configuration the test
+  actually runs, plus a guard in the test that refuses a chunk size where the
+  method stops discriminating (`links.test.ts`, `a large body is NOT streamed
+  whole`). A mechanism can be reasoned about; a machine-and-day byte figure
+  decays the moment it is written.
 
-  At a 16 MiB body and 1 MiB chunks the whole body arrives before the reader
-  stops, so a server-side byte count stops discriminating up there; at a 64 MiB
-  body that point moves to 2 MiB chunks. It is recorded here as well as in the code
-  because it is the measurement that refuted the first threshold this item
-  shipped for that test, and Residuals is where a reader would look for it.
 - **The stated cost "a numeric rightmost label on a genuinely public host would
   be refused" is vacuous** (attempt 6; measured today: `new URL("http://example.123/")`
   THROWS). The URL parser refuses those before the TLD rule is consulted. The
