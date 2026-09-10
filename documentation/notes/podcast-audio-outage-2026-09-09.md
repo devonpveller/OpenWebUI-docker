@@ -366,7 +366,11 @@ meant was the "five times" partial-enumeration tally in the method note above.)
   edit that a line number does not. Re-measured with a
   CONTROL: `<nav>`, `<header>`, `<footer>`, `<aside>` and `<form>` behave
   identically to `<div>` and `<span>` — empty shells resolve for all seven, and
-  336 characters of text inside any of them returns `null`. The element is
+  336 characters of text inside any of them returns `null` - that is
+  `"Lorem ipsum dolor sit amet, "` repeated twelve times, stated exactly because
+  round 20 measured a 366-character string against this sentence and rounds 18
+  and 19 both flagged the bare number. A control is a string, not a length. The
+  element is
   scenery.
 
   Left visible instead of deleted, because how it got here is the finding.
@@ -374,10 +378,18 @@ meant was the "five times" partial-enumeration tally in the method note above.)
 - **The readahead figure is chunk-size AND sample-time dependent** (attempts 15
   and 17; re-measured here). The transport's readahead is ABSOLUTE rather than
   proportional to the body - 1.58 MiB at 16 KiB chunks, 1.69 at 64 KiB, 6.75 at
-  256 KiB, the same whether the body is 16 MiB or 64 MiB - and it reads ~4%
-  higher if sampled a few hundred ms later. At 1 MiB chunks the whole 16 MiB
-  body arrives before the reader stops, so a server-side byte count stops
-  discriminating entirely up there. It is recorded here as well as in the code
+  256 KiB under `deno run`, the same whether the body is 16 MiB or 64 MiB.
+
+  TWO variables move it and they are separate. The HARNESS: `deno test` reads
+  roughly 4/3 of `deno run`, wherever the body ceiling does not bind. The SAMPLE
+  POINT: reading after `srv.shutdown()` rather than before adds +3.5-3.7% at
+  4-256 KiB chunks but **+59% at 1 MiB**, where it also stops being
+  deterministic (57-58 MiB across three runs). The earlier "~4% higher if
+  sampled a few hundred ms later" is true only of the small-chunk end.
+
+  At a 16 MiB body and 1 MiB chunks the whole body arrives before the reader
+  stops, so a server-side byte count stops discriminating up there; at a 64 MiB
+  body that point moves to 2 MiB chunks. It is recorded here as well as in the code
   because it is the measurement that refuted the first threshold this item
   shipped for that test, and Residuals is where a reader would look for it.
 - **The stated cost "a numeric rightmost label on a genuinely public host would
