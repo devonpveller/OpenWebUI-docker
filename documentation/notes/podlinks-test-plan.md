@@ -46,6 +46,40 @@ Get-ChildItem -LiteralPath "D:\Open WebUI\ai-stack\OB1\recipes\daily-digest" -Di
 
 Anything listed is yours or a predecessor's; remove it and say so in your report.
 
+## ATTEMPT 9 - what round 8 found
+
+Round 8 FAILED **T10 alone**, on a false figure in this document and in OB1
+commit 2f5a351: "all 51 matched the oracle". Four did not - the four documents
+that round exists to fix. The correction is in the ATTEMPT 8 section below.
+It is the same class as attempt 2's "five new tests, all of which fail" (3 of 5)
+and attempt 6's 500-vs-404, and it is the fifth time a claim about this item's
+own evidence has been the failure rather than the code. **Read T10 as the case
+most likely to fail, not the formality at the end of the list.**
+
+Everything else passed, and the round produced evidence worth not repeating:
+
+- **T4 is a genuine red-green.** The restored 970cae8 contains no occurrence of
+  `interstitial|metaRefresh|scanDocument`; it prints STOPPED where the patched
+  file prints FOLLOWED.
+- **The regression sign is right.** The four solidus documents: c13fa1c -> all
+  null, ab89394 -> all `https://evil.example/pwn`, 2f5a351 -> all null.
+- **An INDEPENDENT parse5 oracle, both scripting modes**, over 52 targeted plus
+  4,000 seeded-random documents: **0 unsafe divergences**, every divergence
+  fail-closed. The exemption is not too NARROW either - the captured Substack
+  `<noscript>` META, plain head meta, `type="module"`, minified arrow and
+  bare-`if` shapes and `<script data-x="a>b">` all still resolve.
+- **The rewritten `INERT_SUBTREE_ELEMENTS` comment is true**, checked against
+  parse5, and the "chosen fail-closed trade" is what the code does: a refused
+  document drove the real path to `unresolvedWrapper=true, isResearchable=true`.
+- **The 404 correction reproduces** independently inside `openbrain-podcast`.
+
+METHOD NOTE, AND IT IS A TRAP - keep it if you write an oracle for T12:
+**parse5 defaults to `scriptingEnabled: true`, under which `<noscript>` content
+is RAW TEXT.** Round 8's first fuzz run against that default alone reported 27
+"unsafe" hits, all `<noscript><meta refresh>` - the exact shape this item exists
+to follow. The oracle was wrong, not the code. Run BOTH scripting modes, or an
+oracle-based T12 will manufacture a finding against the feature itself.
+
 ## ATTEMPT 8 - what round 7 found
 
 Round 7 FAILED T12 and nothing else, at MEDIUM-LOW and REACHABLE, on a regression
@@ -69,7 +103,16 @@ your environment, say so in your report rather than substituting your own readin
 of the spec - that substitution is the defect this round found.)
 
 That same comparison is also EVIDENCE FOR the rest of the stack, and you do not
-have to redo it: all 51 documents matched the oracle - `</template>` inside style,
+have to redo it - but read the count carefully, because the first version of this
+paragraph got it wrong. **47 of the 51 matched. The four that did NOT are the
+four `<select/>`/`<template/>` documents this round fixes** - they are listed as
+mismatches in that run's own evidence table. "All 51 matched" appeared in OB1
+commit 2f5a351 and in this section, and it is false: it turns the one divergence
+the run found into zero, while being used to tell the next tester they need not
+repeat the run. Round 8 caught it; this is the correction, and the commit message
+cannot be rewritten because its SHA is already pinned by the parent.
+
+What the 47 cover - `</template>` inside style,
 title, textarea, iframe, xmp, noembed, a script body, a comment, a comment inside
 an svg inside the template, quoted and unquoted attributes, a bogus comment, an
 entity, a nested template, plaintext, `</script>` inside a JS string, `<!-->`,
