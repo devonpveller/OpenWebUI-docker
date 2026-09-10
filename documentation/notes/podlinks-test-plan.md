@@ -1,7 +1,7 @@
 # Test plan — `podlinks` (redirect-shell resolution)
 
 Anchor: `queue.ps1 -Show -Id podlinks`.
-Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`58ef169`).
+Branch: `work/podlinks` (parent) + `work/podlinks` in the OB1 submodule (`c13fa1c`).
 
 **What changed, in one line:** a tracker URL that answers 200 with a redirect
 shell is now followed like any other hop, and a wrapper that could NOT be
@@ -14,7 +14,22 @@ PATH; nothing needs the stack up except T7, which says so.
 
 ---
 
-## BEFORE YOU RUN ANYTHING — set MSYS_NO_PATHCONV=1
+## BEFORE YOU RUN ANYTHING — two rules that protect the operator's checkout
+
+**1. Every destructive step uses an ABSOLUTE path in YOUR worktree.**
+Round 4's tester ran a plan step that said `Add-Content scripts\checks\...` with
+its cwd set to the operator's MAIN CHECKOUT, and left the planted line there. That is a plan defect, not a tester error: a destructive step
+should never carry a relative path when two trees have identical layouts. So:
+
+- write/delete/`git checkout --` only via
+  `<repo>\.claude\worktrees\wt-podtest\...`
+- before any write, assert `(Resolve-Path .).Path` starts with `...\wt-podtest`
+- before you finish, check BOTH trees:
+  `git status --porcelain` in the MAIN checkout must show only
+  `M system-prompts/general-system-prompt.md` and untracked notes under
+  `documentation/notes/`. Anything else is yours — revert it and say so.
+
+**2. Set MSYS_NO_PATHCONV=1**
 
 Two testers in a row have hit this. Under Git Bash, a `docker exec … mkdir -p
 /tmp/x` gets its path mangled and creates a directory called `C:\Users\…`
@@ -146,8 +161,8 @@ behaviour after it. Do not let a zero stand in for the argument.
 deno test --allow-net --allow-env src/enrich/links.test.ts
 ```
 
-PASS: 69 passed, 0 failed.
-FAIL: any failure, or fewer than 69 tests (a case was deleted rather than fixed).
+PASS: 77 passed, 0 failed.
+FAIL: any failure, or fewer than 77 tests (a case was deleted rather than fixed).
 
 ## T2 — the pre-existing suite did not regress
 
