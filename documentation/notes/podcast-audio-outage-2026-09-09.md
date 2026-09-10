@@ -307,9 +307,17 @@ Refused, for contrast, all measured the same run: `127.0.0.1`, `[::1]`,
 The three IPv6 spellings are RESIDUAL rather than live, and round 12 measured
 that rather than reasoning about it: against a loopback listener inside
 `openbrain-podcast`, `[::ffff:127.0.0.1]` CONNECTED 200 while all three allowed
-spellings failed to connect — they need a NAT64 or 6to4 relay this host does not
-have. That is a fact about THIS network, not about the code: the same URL on a
-host with a relay is a live defeat.
+spellings failed to connect. For `[64:ff9b::7f00:1]` and `[2002:7f00:1::]` the
+reason is a missing relay — NAT64 and 6to4 both need one, and this host has
+neither, so on a host that HAS one the same URL is a live defeat. That is a fact
+about this network, not about the code.
+
+  `[::ffff:0:7f00:1]` is inert for a different reason and there is no relay in
+  its story at all: it is the deprecated RFC 2765 IPv4-translated prefix, which
+  nothing routes. Round 12 reported this distinction and round 13 folded it in
+  wrongly, lumping all three under "needs a relay" — which UNDERSTATES how inert
+  that one is, the opposite of this item's usual failure direction, and is still
+  worth being right about.
 
 The tailnet entry deserves its own sentence, because this note offers
 `100.64/10` as tailnet coverage: that is an ADDRESS check, and MagicDNS names are
@@ -323,7 +331,11 @@ time — the same fix the `localtest.me` DNS-time limit needs, in the same place
 (the fetch layer, not a function handed a string).
 
 **Interstitial matching — silent false negatives and false positives, all in the
-safe direction or thin, none fixed.**
+safe direction or thin.** (This heading read "none fixed" until round 14, which
+is a universal sitting directly above its own struck-through counterexample. It
+was defensible — strikethrough means retracted, so it quantified over the live
+bullets — and in a document that has failed four times on universals, "defensible
+if you know the convention" is not the bar.)
 
 - **An UNQUOTED `content=` on a meta refresh is never followed** (attempt 4;
   measured today: `null`). `metaRefreshTarget` requires quotes; browsers honour
