@@ -659,6 +659,18 @@ has the same defect one level down, twice:
    tester reported that the sink does not carry - a finding that exists only in a
    commit message is one `git log` away from being lost.
 
+   **AND FAIL ON A CARRIED ENTRY THAT NO LONGER REPRODUCES**, which round 13
+   found and this clause did not previously cover. An omission is a gap; an entry
+   that is present, stale and labelled "re-measured" is worse, because it is
+   presented as current. Round 13's case: the `<nav>` guard/matcher finding was
+   reported in round 4, CLOSED in round 5 by OB1 `58ef169`, and written into the
+   sink by round 13 as open. So for every entry, ask both questions - *was it
+   reported?* and *is it still true?* - and answer the second **with a control**.
+   Re-running the original fixture is not enough: round 13's `<nav>` document
+   resolved, and so did a `<div>` version of it, because the document had no text
+   and was a legitimate shell. The element was scenery. A measurement without a
+   control is an anecdote.
+
 ## T15 - a figure in a shipped CODE COMMENT is a claim too
 
 T10 covers the commit message and the findings note. It does NOT cover source

@@ -269,9 +269,21 @@ re-run: read the *out-of-scope / findings / residuals* section of EVERY
 verdict `reason` in `queue.ps1 -Show -Id podlinks`, and carry across everything a
 tester reported as true-but-not-a-failure. Every entry below names the round that
 found it and was RE-MEASURED against OB1 `b0cc0af` on 2026-09-10 before being
-written here. One of them (the `<nav>` guard/matcher gap, round 4) was not on the
-list round 12 handed me — enumerating from the record found it, which is the
-whole argument for enumerating from the record.
+written here. **AND THE METHOD HAS A FAILURE MODE OF ITS OWN, which it produced immediately.**
+Reading forward from the record carries entries that a LATER round closed. The
+`<nav>` gap below is exactly that: found in round 4, fixed in round 5 by
+`58ef169`, and written into this section by round 13 as an open, "re-measured"
+residual. So each entry needs a second question after "was it reported?" —
+**"is it still true?"** — and that question needs a CONTROL, not a repetition.
+
+The way it fooled me is worth stating plainly, because it is subtle and it will
+recur: I re-ran round 4's literal fixture, it resolved, and I called that a
+reproduction. It resolves because the document has no text and is a legitimate
+shell — a `<div>` version resolves identically. Without the `<div>` control the
+measurement showed nothing about `<nav>` at all, and the second half of the claim
+(`extractTextFromHtml` returning 0) measured a function the guard had stopped
+consulting four rounds earlier. **A measurement without a control is an
+anecdote**, and re-running a fixture is not the same as re-testing a finding.
 
 The escape hatch referred to below is `RESEARCH_ALLOW_PRIVATE_TARGETS`, which is
 the lever for the host screen (`INTERSTITIAL_FOLLOW=0` is the separate kill
@@ -282,9 +294,9 @@ wrong one).
 
 | Spelling | Found | Measured today |
 |---|---|---|
-| `[::ffff:0:7f00:1]` — IPv4-**translated** (RFC 2765), the `::ffff:0:a.b.c.d` form | attempt 5 | ALLOWED |
-| `[64:ff9b::7f00:1]` — NAT64 well-known prefix | attempt 6 | ALLOWED |
-| `[2002:7f00:1::]` — 6to4 | attempt 6 | ALLOWED |
+| `[::ffff:0:7f00:1]` — IPv4-**translated** (RFC 2765), a different `/96` from the mapped one the code decodes | attempt 5 | ALLOWED |
+| `[64:ff9b::7f00:1]` — NAT64 well-known prefix | attempt 5 (re-reported 6) | ALLOWED |
+| `[2002:7f00:1::]` — 6to4 | attempt 5 (re-reported 6) | ALLOWED |
 | `a.lan`, `a.corp`, `a.intranet`, `a.home.arpa` — private-use suffixes | attempt 6 | ALLOWED (`.local`/`.internal` are refused) |
 | `mybox.tail1a2b3c.ts.net` — MagicDNS | attempt 6 | ALLOWED |
 | `svc.mynet`, `svc.bridge` — single-word alphabetic docker network | attempt 6 | ALLOWED (disclosed in `links.ts`; docker's DNS does answer `<svc>.<bare-net>` on a network so named, and none exists here) |
@@ -323,25 +335,38 @@ safe direction or thin, none fixed.**
   controls the page can redirect for real — but a small legitimate page carrying
   a commented-out redirect would be followed, if it were under 16KB with under
   200 visible characters.
-- **The guard and the matcher still disagree about `<nav>`, `<header>`,
-  `<footer>`, `<aside>` and `<form>`** (attempt 4; measured today: the `<nav>`
-  document resolves while `extractTextFromHtml` returns 0 characters). Those
-  elements are erased before visible text is counted but are ordinary containers
-  to the scanner, so a page whose body sits inside one reads as "shell-like" to
-  the size guard while the matcher reads its markup. This is the disagreement
-  that WAS closed for comments, `<style>` and `<noscript>`; it is open for these
-  five. The wrong half is the guard being blinded, not the context rule — a
-  browser would honour a meta in `<nav>` too.
+- ~~The guard and the matcher disagree about `<nav>`, `<header>`, `<footer>`,
+  `<aside>` and `<form>`~~ (attempt 4) — **CLOSED in round 5 by OB1 `58ef169`,
+  and this entry was WRONG to carry it.** The guard no longer calls
+  `extractTextFromHtml`; it measures the `liveText` produced by the same walk as
+  the matcher, so the two cannot disagree about any element. Pinned by tests at
+  `links.test.ts:487-506`, including a non-vacuity case. Re-measured with a
+  CONTROL: `<nav>`, `<header>`, `<footer>`, `<aside>` and `<form>` behave
+  identically to `<div>` and `<span>` — empty shells resolve for all seven, and
+  336 characters of text inside any of them returns `null`. The element is
+  scenery.
+
+  Left visible instead of deleted, because how it got here is the finding.
+  Round 13 caught it. See the note under the method above.
 - **The stated cost "a numeric rightmost label on a genuinely public host would
   be refused" is vacuous** (attempt 6; measured today: `new URL("http://example.123/")`
   THROWS). The URL parser refuses those before the TLD rule is consulted. The
   underscored half of that claim is real; the numeric half is not.
 
-**Fail-closed costs, measured rather than assumed** (attempt 4): the refusals a
-battery of plausible shells produced were `<!-->`/`<!--->` (legal empty comments,
-refused as unterminated), an unquoted attribute containing an apostrophe
-(`class=don't`), and a malformed `<iframe/>` with no closing tag. All three are
-rare in machine-generated interstitials and all fail in the safe direction.
+**Fail-closed costs, measured rather than assumed.** From attempt 4: `<!-->` and
+`<!--->` (legal empty comments, refused as unterminated), an unquoted attribute
+containing an apostrophe (`class=don't`), and a malformed `<iframe/>` with no
+closing tag. From attempt 7, which listed them "for completeness" and which this
+section omitted until round 13 pointed it out — all still refusing at `b0cc0af`:
+an `<svg>` broken out of by `<p>`, `<svg><foreignObject><meta>`,
+`<svg><desc><meta>` and `<math><mtext><meta>` (both integration points),
+`<svg><![CDATA[…]]>`, a `<select>` implicitly closed by `<textarea>`, and the
+degenerate comments `<!-->` and `<!-- --!>`.
+
+All of them are contrived for a tracker interstitial, all fail in the safe
+direction, and each costs at most one unresolved wrapper — which is logged and
+still researched. That last clause is why this whole list is a cost sheet rather
+than a defect list.
 
 ## Recovery performed
 
