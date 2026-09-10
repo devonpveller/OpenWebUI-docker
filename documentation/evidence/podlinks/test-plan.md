@@ -398,17 +398,23 @@ NOW BREAK IT TWO WAYS AND WATCH EACH FAIL. The anchor bullet has two halves -
 round 16 proved a case can pin one while the other is asserted by nothing. In a
 SCRATCH COPY, one at a time:
 
-1. `INTERSTITIAL_MAX_BYTES` -> `999_999_999`. `the BYTE cap refuses a big
-   document whose visible text is tiny` must fail, and be the ONLY failure.
+1. `INTERSTITIAL_MAX_BYTES` -> `999_999_999`. Measured: **96 passed, 2 failed**
+   - the BYTE-cap case AND the streaming case. TWO, not one: that constant is
+   also the loop bound, so raising it disables both halves at once. (The plan
+   said "the ONLY failure" here for one round; round 17 measured two and was
+   right. A step whose expected result is wrong trains the next tester to
+   discount what they see.)
 2. `while (total <= maxBytes)` -> `while (true)` AND delete the
-   `if (total > maxBytes) return null;` line - a genuinely unbounded read.
-   `a large body is NOT streamed whole` must fail, and be the ONLY failure.
-   **Before round 16 this mutation left the suite 97/0 green while a 64 MiB body
-   was buffered whole**, which is exactly what the bullet forbids.
+   `if (total > maxBytes) return null;` line - a genuinely unbounded read that
+   leaves the constant alone. Measured: **97 passed, 1 failed**, the streaming
+   case and only it. **Before round 16 this same mutation left the suite green
+   at 97/0 while a 64 MiB body was buffered whole**, which is exactly what the
+   bullet forbids.
 
-If either mutation leaves the suite green, that half of the bullet is unpinned
-again. Note that (1) alone is not sufficient evidence: the constant is read at
-two sites, so changing it disables both at once and can look like coverage.
+(2) is the load-bearing one, because it isolates the read bound from the
+constant. (1) moves both halves together and so cannot tell you which is
+pinned - which is precisely how the gap survived to round 16. If either
+mutation leaves the suite green, that half of the bullet is unpinned again.
 
 Do NOT conclude anything about the guards from the `<pre><code>` fixture; it is
 testing the context rule (T12), not these.

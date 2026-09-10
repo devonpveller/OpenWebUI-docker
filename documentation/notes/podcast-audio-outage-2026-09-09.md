@@ -365,6 +365,15 @@ meant was the "five times" partial-enumeration tally in the method note above.)
 
   Left visible instead of deleted, because how it got here is the finding.
   Round 13 caught it. See the note under the method above.
+- **The readahead figure is chunk-size AND sample-time dependent** (attempts 15
+  and 17; re-measured here). The transport's readahead is ABSOLUTE rather than
+  proportional to the body - 1.58 MiB at 16 KiB chunks, 1.69 at 64 KiB, 6.75 at
+  256 KiB, the same whether the body is 16 MiB or 64 MiB - and it reads ~4%
+  higher if sampled a few hundred ms later. At 1 MiB chunks the whole 16 MiB
+  body arrives before the reader stops, so a server-side byte count stops
+  discriminating entirely up there. It is recorded here as well as in the code
+  because it is the measurement that refuted the first threshold this item
+  shipped for that test, and Residuals is where a reader would look for it.
 - **The stated cost "a numeric rightmost label on a genuinely public host would
   be refused" is vacuous** (attempt 6; measured today: `new URL("http://example.123/")`
   THROWS). The URL parser refuses those before the TLD rule is consulted. The
