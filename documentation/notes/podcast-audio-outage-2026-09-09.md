@@ -187,8 +187,15 @@ it.
 - **Where a resolved URL may point is now screened** (`isPubliclyRoutableUrl`),
   because that URL is chosen by the page we just fetched and we then fetch it.
   Denied by shape: non-http(s), loopback, RFC1918, `169.254.x` (cloud metadata),
-  `100.64/10` (CGNAT — and the tailnet), multicast, `.local`/`.internal`, and any
-  hostname with no dot, which is what every docker service name looks like.
+  `100.64/10` (CGNAT — and the tailnet), multicast, `.local`/`.internal`, and a
+  hostname with no dot.
+  **CORRECTED 2026-09-10:** this bullet used to stop at "no dot, which is what
+  every docker service name looks like". That is precisely the reasoning
+  `links.ts:265` records as *not enough* — `openbrain-curator.open-brain_obnet`
+  has a dot and docker's embedded DNS answers it. The rule that closes the class
+  is the TLD SHAPE test at `links.ts:274-278`: the rightmost label must look like
+  a public suffix, which a docker network name does not. Describing the screen by
+  the rule it OUTGREW made this note contradict the code it documents.
   Applied to the `Location` hop as well as the interstitial one.
 - **The egress proxy was already a boundary, measured on 2026-09-09:**
   `openbrain-curator:8000`, `llama-cpp:8080` and `openbrain-db:5432` all
@@ -214,11 +221,30 @@ it.
   at connect time, which belongs in the fetch layer alongside the point above,
   not in a URL screen. The egress proxy remains the effective control for that
   case — measured, but a property of the network config rather than of this code.
-- **Two defeats of this screen were found by testing, not by me writing it**, and
-  both were trivial: a TRAILING DOT (`http://localhost.:PORT/` connected to a live
-  listener) and IPv4-mapped IPv6, where my first fix also leaked because the URL
-  parser normalises `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]`. Worth remembering
-  before treating any hand-rolled host screen as sound because it looks sound.
+- **THREE defeats of this screen were found by testing, not by me writing it**,
+  and the third is the one that mattered. **CORRECTED 2026-09-10:** this said
+  "two" and "both were trivial", and that count is what a reader would have
+  trusted. In order:
+  1. a TRAILING DOT — `http://localhost.:PORT/` connected to a live listener,
+     because the trailing root label satisfies a `host.includes('.')` test.
+  2. IPv4-MAPPED IPv6 — and my first fix leaked too, because the URL parser
+     normalises `[::ffff:127.0.0.1]` to `[::ffff:7f00:1]` before the screen sees
+     it.
+  3. **`<service>.<network>` — NOT trivial, and it was never written down here
+     at all.** Round 5's tester proved live, at the shipping default, that
+     `unwrapRedirect` FOLLOWED `http://openbrain-curator.open-brain_obnet:8000/`
+     and the target answered `200 {ok:true,db:true}`; `llama-cpp.ai-stack_llm-net:8080`
+     answered 401. A docker `<service>.<network>` name HAS a dot, so every
+     dot-based test passed it and docker's embedded DNS resolved it (172.25.0.18).
+     Fixed in OB1 `c13fa1c` by the TLD-shape rule, and `links.ts:265` calls it
+     "the miss that matters most" — while this note, its own findings sink,
+     omitted it and kept describing the superseded rule. Found by round 10's
+     tester.
+
+  The lesson is not "host screens are hard", it is the one this item keeps
+  paying for: **a count is a claim.** "Two, both trivial" turned the one
+  non-trivial defeat into no defeat at all, in the document a future reader would
+  consult before trusting the screen.
 
 ## Recovery performed
 

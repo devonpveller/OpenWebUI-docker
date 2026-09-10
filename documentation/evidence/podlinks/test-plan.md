@@ -610,6 +610,35 @@ on its own:
 
 FAIL: any private/internal target that resolves, or any evidence of execution.
 
+## T10 addendum - run T15's sweep over the NOTE, not the author's list
+
+Round 10's failure, and the reason T10 keeps letting one through. T10 names the
+specific claims to check; that list is written by the person whose claims are
+being checked, and **a check that accepts the author's enumeration is not a
+check** - this repository has recorded that rule three times now.
+
+Three of this item's evidence-claim failures have been COUNTS AND ENUMERATIONS in
+the findings note, not in the items T10 lists. Round 10 found the note saying
+"**Two** defeats of this screen were found ... and both were trivial". There were
+three, and the third - `<service>.<network>`, which `links.ts:265` calls "the
+miss that matters most" - appeared nowhere in the note at all. A count turned the
+one non-trivial defeat into no defeat.
+
+So run T15's sweep over `documentation/notes/podcast-audio-outage-2026-09-09.md`
+as well as over the source:
+
+```
+grep -nE '(two|three|four|both|all|every|never|always|only|no other)' documentation/notes/podcast-audio-outage-2026-09-09.md
+```
+
+For each hit that quantifies something, ENUMERATE THE THING YOURSELF from the
+queue history (`queue.ps1 -Show -Id podlinks`), the OB1 log, and the code -
+never from the note's own list. FAIL on any count that does not match what you
+can enumerate, and on any bullet that describes a rule the code has since
+superseded (round 10 found one of those too: the note described the screen as
+denying "any hostname with no dot", the exact rule `links.ts:265` records as not
+being enough).
+
 ## T15 - a figure in a shipped CODE COMMENT is a claim too
 
 T10 covers the commit message and the findings note. It does NOT cover source
