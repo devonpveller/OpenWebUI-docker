@@ -201,7 +201,10 @@ it.
   every docker service name looks like". That is precisely the reasoning
   `links.ts:265` records as *not enough* — `openbrain-curator.open-brain_obnet`
   has a dot and docker's embedded DNS answers it. The rule that closes the class
-  is the TLD SHAPE test at `links.ts:274-278`: the rightmost label must look like
+  is the TLD SHAPE test — the `looksLikeTld` check in `isPubliclyRoutableUrl`
+  (cited by name: `:274-278` is the COMMENT that states the rule, the code is
+  twenty lines below it, and line numbers in this file have been wrong twice) —
+  where the rightmost label must look like
   a public suffix, which a docker network name does not. Describing the screen by
   the rule it OUTGREW made this note contradict the code it documents.
   Applied to the `Location` hop as well as the interstitial one.
@@ -254,34 +257,91 @@ it.
   non-trivial defeat into no defeat at all, in the document a future reader would
   consult before trusting the screen.
 
-### Residual: three IPv6 spellings the screen still allows
+### Residuals: everything a tester reported and did not fail us on
 
-Recorded here because this file is the item's findings sink and these belong in
-it. They were reported by TWO independent testers (attempts 5 and 6) and, until
-now, lived only in a parent commit message — not in the note, the code, the tests
-or the plan. A finding that exists only in a commit message is one `git log`
-away from nobody ever seeing it again.
+**HOW THIS LIST WAS BUILT, so its completeness is checkable rather than
+asserted.** Round 12 failed this note for saying "reported by TWO independent
+testers" about a numbered list of four, from which the previous round had taken
+item 2 and left its siblings. Partial enumeration presented as complete — the
+defect this item has now produced five times. So the method, which anyone can
+re-run: read the *out-of-scope / findings / residuals* section of EVERY
+`podlinks.attemptN.evidence.md` in `.git/agent-worktrees/queue/`, plus every
+verdict `reason` in `queue.ps1 -Show -Id podlinks`, and carry across everything a
+tester reported as true-but-not-a-failure. Every entry below names the round that
+found it and was RE-MEASURED against OB1 `b0cc0af` on 2026-09-10 before being
+written here. One of them (the `<nav>` guard/matcher gap, round 4) was not on the
+list round 12 handed me — enumerating from the record found it, which is the
+whole argument for enumerating from the record.
 
-`isPubliclyRoutableUrl` allows all three of these, measured live 2026-09-10
-against OB1 `b0cc0af` with the `INTERSTITIAL_FOLLOW` hatch deleted:
+The escape hatch referred to below is `RESEARCH_ALLOW_PRIVATE_TARGETS`, which is
+the lever for the host screen (`INTERSTITIAL_FOLLOW=0` is the separate kill
+switch for interstitial following, and an earlier draft of this section named the
+wrong one).
 
-- `[::ffff:0:7f00:1]` — IPv4-mapped, in the alternate `::ffff:0:a.b.c.d` form
-- `[64:ff9b::7f00:1]` — the NAT64 well-known prefix
-- `[2002:7f00:1::]` — 6to4
+**Host screen — allowed, none of them a demonstrated reach here.**
 
-They are RESIDUAL rather than live: reaching 127.0.0.1 through any of them needs
-a NAT64 or 6to4 relay, and this host has neither, so none of them connects here
-today. That is why they were not treated as defeats alongside the three above —
-those three reached a real target on this machine. The distinction is worth
-keeping, and so is the fact that it is a distinction about THIS network, not
-about the code: the same URL on a host with a relay would be a live defeat.
+| Spelling | Found | Measured today |
+|---|---|---|
+| `[::ffff:0:7f00:1]` — IPv4-**translated** (RFC 2765), the `::ffff:0:a.b.c.d` form | attempt 5 | ALLOWED |
+| `[64:ff9b::7f00:1]` — NAT64 well-known prefix | attempt 6 | ALLOWED |
+| `[2002:7f00:1::]` — 6to4 | attempt 6 | ALLOWED |
+| `a.lan`, `a.corp`, `a.intranet`, `a.home.arpa` — private-use suffixes | attempt 6 | ALLOWED (`.local`/`.internal` are refused) |
+| `mybox.tail1a2b3c.ts.net` — MagicDNS | attempt 6 | ALLOWED |
+| `svc.mynet`, `svc.bridge` — single-word alphabetic docker network | attempt 6 | ALLOWED (disclosed in `links.ts`; docker's DNS does answer `<svc>.<bare-net>` on a network so named, and none exists here) |
 
-The underlying shape is the one attempt 6's tester named: the IPv6 branch denies
-by an explicit list and ALLOWS by default, while the IPv4 branch denies by range.
-An allow-by-default screen is one unlisted prefix away from wrong, permanently.
-Closing it properly means screening the RESOLVED ADDRESS at connect time, which
-is the same fix the `localtest.me` DNS-time limit needs and belongs in the same
-place — the fetch layer, not a function handed a string.
+Refused, for contrast, all measured the same run: `127.0.0.1`, `[::1]`,
+`10.0.0.5`, `[::ffff:127.0.0.1]`.
+
+The three IPv6 spellings are RESIDUAL rather than live, and round 12 measured
+that rather than reasoning about it: against a loopback listener inside
+`openbrain-podcast`, `[::ffff:127.0.0.1]` CONNECTED 200 while all three allowed
+spellings failed to connect — they need a NAT64 or 6to4 relay this host does not
+have. That is a fact about THIS network, not about the code: the same URL on a
+host with a relay is a live defeat.
+
+The tailnet entry deserves its own sentence, because this note offers
+`100.64/10` as tailnet coverage: that is an ADDRESS check, and MagicDNS names are
+TLD-shaped, so the name form is not covered by it.
+
+The shape under all of these is the one attempt 6 named: **the IPv6 branch denies
+by an explicit list and ALLOWS by default, while the IPv4 branch denies by
+range.** An allow-by-default screen is one unlisted prefix away from wrong,
+permanently. Closing it properly means screening the RESOLVED ADDRESS at connect
+time — the same fix the `localtest.me` DNS-time limit needs, in the same place
+(the fetch layer, not a function handed a string).
+
+**Interstitial matching — silent false negatives and false positives, all in the
+safe direction or thin, none fixed.**
+
+- **An UNQUOTED `content=` on a meta refresh is never followed** (attempt 4;
+  measured today: `null`). `metaRefreshTarget` requires quotes; browsers honour
+  the unquoted form. Substack quotes it, so this did not affect the outage — it
+  is a false negative waiting for a future publisher.
+- **`LOCATION_ASSIGN_RE` fires inside JS comments and string literals** (attempt
+  4; measured today: both resolve). `// location.replace("…")` and
+  `var d = 'location.replace("…")'` are followed. Not a bypass — anyone who
+  controls the page can redirect for real — but a small legitimate page carrying
+  a commented-out redirect would be followed, if it were under 16KB with under
+  200 visible characters.
+- **The guard and the matcher still disagree about `<nav>`, `<header>`,
+  `<footer>`, `<aside>` and `<form>`** (attempt 4; measured today: the `<nav>`
+  document resolves while `extractTextFromHtml` returns 0 characters). Those
+  elements are erased before visible text is counted but are ordinary containers
+  to the scanner, so a page whose body sits inside one reads as "shell-like" to
+  the size guard while the matcher reads its markup. This is the disagreement
+  that WAS closed for comments, `<style>` and `<noscript>`; it is open for these
+  five. The wrong half is the guard being blinded, not the context rule — a
+  browser would honour a meta in `<nav>` too.
+- **The stated cost "a numeric rightmost label on a genuinely public host would
+  be refused" is vacuous** (attempt 6; measured today: `new URL("http://example.123/")`
+  THROWS). The URL parser refuses those before the TLD rule is consulted. The
+  underscored half of that claim is real; the numeric half is not.
+
+**Fail-closed costs, measured rather than assumed** (attempt 4): the refusals a
+battery of plausible shells produced were `<!-->`/`<!--->` (legal empty comments,
+refused as unterminated), an unquoted attribute containing an apostrophe
+(`class=don't`), and a malformed `<iframe/>` with no closing tag. All three are
+rare in machine-generated interstitials and all fail in the safe direction.
 
 ## Recovery performed
 
