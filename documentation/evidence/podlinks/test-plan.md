@@ -734,9 +734,17 @@ For each hit, re-derive it or find where it is derived. Specifically:
   comment that asserts it)
 - the "every docker network name here carries a hyphen or an underscore" claim,
   against live `docker network ls`
-- any claim of the form "all N", "every", "never" - this item has produced four
-  false universals across nine rounds and every one of them was in a place a
-  reader would trust
+- any claim of the form "all N", "every", "never" - this item has produced false
+  universals in a majority of its rounds, every one in a place a reader would
+  trust
+- **SWEEP CARDINALS DIRECTLY, not through the grep above.** Round 25 found
+  `FOUR WAYS ... all found in round 5` heading six fixtures - a false count AND a
+  false attribution - which the grep cannot match, and which T15 had passed over
+  at attempts 14, 15 and 20 for that reason. Its own instruction had been read as
+  "run this grep". So: `grep -nE '(one|two|three|four|five|six|seven|eight|
+  nine|ten|eleven|twelve|[0-9]+)'` over the CHANGED FILES, and for each hit
+  ask what it counts and count that thing yourself. The history comment blocks
+  are in scope; no round before 25 had swept them.
 
 FAIL: any figure in shipped source that does not reproduce, OR a source comment
 that contradicts the findings note shipping in the same diff. A claim that is
