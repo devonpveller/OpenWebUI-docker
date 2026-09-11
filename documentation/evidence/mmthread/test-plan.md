@@ -227,8 +227,15 @@ each setting and report the per-round numbers, not a summary.
 concurrency case that has never been seen to fail is not evidence of a lock; it is
 evidence that your harness is not exercising the code.
 
-Settings to cover, each over >= 12 rounds (fewer for the slow ones is fine, say how
-many): N=10 with an instant API; N=10 with ~1s per call; N=3 with ~5s per call.
+Settings to cover, each over >= 12 rounds (fewer for the slow ones is fine, say
+how many): **N=2 with an instant API**, N=3, N=10, N=10 with ~1s per call, and
+N=3 with ~5s per call.
+
+**N=2 IS THE REAL CASE AND WAS MISSING FOR THREE ROUNDS.** The item exists
+because a permission request and a turn completion from ONE session overlap -
+that is two, not ten. N=10 is a stress test; N=2 is the scenario. The parent
+opens two roots in 12 of 12 rounds at N=2, so it is also a perfectly good red
+control.
 
 USE A SHIM. Copy the script into a throwaway root (it derives `ROOT_DIR` from its
 own location), put a fake `curl` earlier on `PATH`, and count from its log.
@@ -258,9 +265,17 @@ message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
    `timeout 40` at `MM_DEADLINE_SECS` 10, 15, 20 and 30. **PASS: every one returns.**
    An earlier version span forever here, forking a process per turn, and did not
    return in TEN MINUTES at 20 - so `timeout` is mandatory, and a case that "hangs"
-   must be reported as a FAIL rather than waited out. Note the wall time: at 20 and
-   30 this pathological case runs ~16s, past a Stop hook's 15s limit, which is why
-   the plan does not ask you to raise the variable in any other case.
+   must be reported as a FAIL rather than waited out. Note the wall time: at 20
+   and 30 this pathological case runs ~19s, past a Stop hook's 15s limit, which is
+   why the plan does not ask you to raise the variable in any other case.
+
+   **THIS CASE IS EXEMPT FROM THE "no lock directory left behind" RULE**, and the
+   exemption is the point: the case works by making `rm` unable to remove the
+   directory, so requiring it to be gone asks for something impossible by
+   construction. A tester reported that contradiction. A case that cannot be
+   passed is not a strict test, it is a broken one - and the usual way it gets
+   "passed" is by someone quietly not checking that clause. What this case asserts
+   is TERMINATION and DELIVERY: it returns, and it still sends.
 2. **Stale, readable.** A lock whose `at` holds an old epoch. PASS: broken, run
    proceeds.
 3. **Stale, unreadable.** No `at` file at all (a holder that died between its
@@ -304,6 +319,49 @@ separate times, and each time it looked like a result about the code:
 
 If a measurement surprises you, suspect the harness first, and say in your report
 how you ruled it out. A number you cannot defend is worse than no number.
+
+## T19 — the notifier must not be slower at the operator's expense
+
+**The item exists to END a silence. A version that threads perfectly and drops a
+message the parent delivers has made things worse, and three rounds of cases
+could not see that** - they all measured threading, never delivery against a
+baseline. This case exists because a tester found the locked version delivering
+0 of 6 where the parent delivered 6 of 6, in a SINGLE run with no lock present
+and no concurrency at all.
+
+Run parent and tip ALTERNATELY, round by round, so both meet the same machine
+load. Single runs, no concurrency, fresh map each time, at `MM_DEADLINE_SECS` 5
+and 8. Count delivered messages (threaded + flat) and mean wall time.
+
+PASS: at every setting, tip delivered >= parent delivered.
+FAIL: any setting where the parent delivers a message the tip does not. Report
+mean wall time either way - a tip that is slower but delivers is a finding, not a
+failure, and the number is what lets the next round tell those apart.
+
+A useful sanity check: at a tight budget the tip should deliver MORE than the
+parent and announce LESS, because it declines to spend the message's budget on a
+thread header. If it announces just as often and delivers less, the budget rule
+is not working.
+
+## T20 — exactly once
+
+Every case in this plan before now counted "at least N" or "at least 1". A path
+that sent the operator the SAME message twice passed all of them, and one did:
+the recovery path posted flat when it could not take the lock and then fell
+through to the unconditional send.
+
+Drive the recovery path with a map that already holds a root and a shim that
+REJECTS any post carrying it (HTTP 400, the real `root_id.app_error` shape) while
+accepting everything else. Run it twice: with the lock free, and with the lock
+held by a live process.
+
+PASS: **exactly one** copy of the message is delivered in each case - not one or
+more. Count copies, not calls; the announce and the rejected attempt are not
+copies.
+FAIL: two copies in any case, or none.
+
+Check the parent too. It sends exactly one in both, so this is a regression test,
+not an aspiration.
 
 ## T17 — the removed allowlist's backup cannot be swept into a commit
 

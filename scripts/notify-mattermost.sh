@@ -56,11 +56,50 @@ MENTION="${MM_OPERATOR_MENTION:-@profnovice}"
 # the single-call version could not exceed its 8s. Every call draws from this,
 # and a call with no budget left is skipped rather than started.
 MM_DEADLINE_SECS="${MM_DEADLINE_SECS:-10}"
-_started=$(date +%s 2>/dev/null || echo 0)
+
+# A CLOCK THAT DOES NOT FORK. `date +%s` costs a process every time it is read,
+# and `remaining` is read before every HTTP call; on Windows a fork is tens of
+# milliseconds and this script's whole overhead budget is a fraction of a second.
+# A tester measured the locked version 0.6s slower per run UNCONTENDED, where no
+# waiting happens at all - that gap is process spawns, not waiting, and at a small
+# MM_DEADLINE_SECS it was enough to lose the message entirely. bash 5 exposes
+# EPOCHSECONDS as a variable; older shells fall back to the fork.
+now_s() {
+  if [ -n "${EPOCHSECONDS:-}" ]; then printf '%s' "$EPOCHSECONDS"
+  else date +%s 2>/dev/null || echo 0; fi
+}
+_started=$(now_s)
+
+# TIME SPENT WAITING FOR THE LOCK IS NOT TIME SPENT POSTING, and charging it to
+# the same clock is what made this version drop messages the unlocked parent
+# delivered. The budget exists to bound HTTP work so the hook returns; local
+# waiting is real elapsed time but it is not the server's fault and must not eat
+# the send allowance. It is credited back here, capped, so the total stays inside
+# the hook's own timeout.
+_lock_spent=0
+LOCK_SPEND_CAP=3
+_post_skipped=""      # set when a send was abandoned for want of budget
+_recovered=""         # set when the recovery path has already sent the message
+
+# THE ANNOUNCE IS A LUXURY; THE MESSAGE IS NOT. Opening a thread costs a SECOND
+# API call, and when the budget cannot cover both, spending it on the header and
+# losing the message is precisely backwards - it leaves the operator a thread
+# title announcing a session that then says nothing. That is the failure this
+# whole item exists to end, rebuilt one layer up.
+#
+# So a thread is only opened when there is room for the announce AND the message
+# after it. `post` refuses a call under 2s, so two calls need 4; asking for a
+# little more stops a slow announce from eating the message's share. Below that
+# the run posts FLAT - unthreaded and delivered, which is the trade this item is
+# allowed to make. Measured at MM_DEADLINE_SECS=5: without this the locked
+# version delivered 5 of 6 where the unlocked parent delivered 6 of 6.
+ANNOUNCE_MIN_BUDGET=5
+can_announce() { [ "$(remaining)" -ge "$ANNOUNCE_MIN_BUDGET" ]; }
+
 remaining() {
   local _now _left
-  _now=$(date +%s 2>/dev/null || echo 0)
-  _left=$(( MM_DEADLINE_SECS - (_now - _started) ))
+  _now=$(now_s)
+  _left=$(( MM_DEADLINE_SECS + _lock_spent - (_now - _started) ))
   [ "$_left" -lt 0 ] && _left=0
   printf '%s' "$_left"
 }
@@ -197,7 +236,15 @@ if r:
 print(json.dumps(d))' 2>/dev/null)
   [ -z "$_payload" ] && return 1
   _budget=$(remaining)
-  [ "$_budget" -lt 2 ] && return 1
+  # OUT OF BUDGET IS NOT A DEAD ROOT. Both used to return an empty string, so the
+  # caller could not tell "the server rejected this root" from "there was no time
+  # left to ask" - and the recovery path fired on the second, spending the little
+  # time that remained on an announce plus a retry, which is the most expensive
+  # possible response to being short of time. The flag lets the caller skip it.
+  if [ "$_budget" -lt 2 ]; then
+    _post_skipped=1
+    return 1
+  fi
   _resp=$(curl -s -m "$_budget" -w '\n%{http_code}' \
     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
     -X POST "$API" -d "$_payload" 2>/dev/null)
@@ -273,9 +320,21 @@ LOCK_BLIND_TRIES=3
 [ "$LOCK_BLIND_TRIES" -ge "$LOCK_MAX_TRIES" ] && LOCK_BLIND_TRIES=$(( LOCK_MAX_TRIES - 1 ))
 [ "$LOCK_BLIND_TRIES" -lt 1 ] && LOCK_BLIND_TRIES=1
 
+# Accounts for its own elapsed time, so `remaining` can give it back. Every exit
+# path goes through _lock_done, because a credit that only some returns apply is
+# worse than none - it would make the budget depend on which branch was taken.
+lock_done() {
+  local _spent=$(( $(now_s) - _lock_t0 ))
+  [ "$_spent" -lt 0 ] && _spent=0
+  [ "$_spent" -gt "$LOCK_SPEND_CAP" ] && _spent="$LOCK_SPEND_CAP"
+  _lock_spent=$(( _lock_spent + _spent ))
+  return "$1"
+}
+
 lock_take() {
   [ -z "$key" ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
+  _lock_t0=$(now_s)
   # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
   # of writing it this way. The previous version bounded itself with `rm -rf; continue`,
   # which skipped BOTH the budget check and the sleep - so when mkdir failed for any
@@ -291,8 +350,9 @@ lock_take() {
       # command substitution silences the command; the warning bash itself prints
       # about a NUL byte in the captured output escapes it, and that leak reaches
       # the hook's stderr.
-      { printf '%s' "$(date +%s 2>/dev/null || echo 0)" > "$_d/at"; } 2>/dev/null
+      { printf '%s' "$(now_s)" > "$_d/at"; } 2>/dev/null
       LOCK="$_d"
+      lock_done 0
       return 0
     fi
     # WE WANT THE ROOT, NOT THE LOCK. The moment the holder publishes its map
@@ -303,12 +363,12 @@ lock_take() {
     # waiting for the release lost 2 messages in 200 where the unlocked parent
     # lost none, and that is the wrong way to buy one thread per session.
     root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
-    [ -n "$root" ] && return 1
+    [ -n "$root" ] && { lock_done 1; return 1; }
 
     { _at=$(cat "$_d/at" 2>/dev/null); } 2>/dev/null
     case "$_at" in
       ''|*[!0-9]*) _age=-1 ;;
-      *) _age=$(( $(date +%s 2>/dev/null || echo 0) - _at )) ;;
+      *) _age=$(( $(now_s) - _at )) ;;
     esac
     # Expire a lock whose holder died, two ways, because it can die two ways:
     #   readable and older than the whole budget -> cannot be a live run;
@@ -330,9 +390,10 @@ lock_take() {
     _backstop=$(( MM_DEADLINE_SECS / 2 ))
     [ "$_backstop" -gt 3 ] && _backstop=3
     [ "$_backstop" -lt 1 ] && _backstop=1
-    [ "$(remaining)" -le "$_backstop" ] && return 1
+    [ "$(remaining)" -le "$_backstop" ] && { lock_done 1; return 1; }
     sleep 0.2 2>/dev/null || sleep 1
   done
+  lock_done 1
   return 1
 }
 
@@ -372,7 +433,7 @@ fi
 # degradation: one message, unthreaded, in the channel. Never a competing root, and
 # never a dropped message - an unthreaded message beats no message, and this file
 # says so in three other places.
-if [ -z "$root" ] && [ -n "$key" ] && [ -n "$LOCK" ]; then
+if [ -z "$root" ] && [ -n "$key" ] && [ -n "$LOCK" ] && can_announce; then
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — started $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
   if [ -n "$root" ] && [ -n "$key" ]; then
@@ -393,7 +454,10 @@ out=$(post "${MENTION:+$MENTION }$MSG" "$root")
 # 6) A root that no longer exists (post deleted, channel purged) must not wedge the session
 #    into silence for the rest of its life. Drop the stale mapping and retry as a new thread,
 #    once. Anything still failing after that is Mattermost's problem, not this turn's.
-if [ -z "$out" ] && [ -n "$root" ]; then
+# `-z "$_post_skipped"`: a send that never happened for want of time is not
+# evidence that the root is dead, and recovering from it costs two more calls we
+# already know we cannot afford.
+if [ -z "$out" ] && [ -n "$root" ] && [ -z "$_post_skipped" ]; then
   if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
@@ -412,21 +476,31 @@ if [ -z "$out" ] && [ -n "$root" ]; then
   # Same invariant as step 4: without the lock we do not open a thread. A recovery
   # that cannot take it retries the message flat rather than racing a second root.
   if [ -z "$LOCK" ]; then
+    # Post FLAT and stop. This used to send here and then fall through to the
+    # unconditional send below, so every recovery that could not take the lock
+    # delivered the operator the SAME message twice - measured 3 of 3 runs by a
+    # tester, and invisible to every case in the plan because they all counted
+    # "at least N" rather than "exactly N".
     root=""
     post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
+    _recovered=1
   elif [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
     # Another run already recovered this session while we waited. Use its root
     # rather than opening a third thread.
     lock_release
-  else
+  elif can_announce; then
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
   if [ -n "$root" ] && [ -n "$key" ]; then
     { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
   fi
   lock_release
+  else
+    # No budget for a header and a message both. Send the message.
+    root=""
+    lock_release
   fi
-  post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
+  [ -z "$_recovered" ] && post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
 fi
 
 exit 0

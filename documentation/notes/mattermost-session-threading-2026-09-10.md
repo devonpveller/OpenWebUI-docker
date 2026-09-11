@@ -37,12 +37,15 @@ returned 200. Three separate things were:
 
 2. **Nothing mentioned the operator.** Nothing bolded the channel, so nothing
    pushed. `mention_count` for another user comes from
-   `GET /api/v4/channels/{channel_id}/members/{user_id}`, which `bot-claude`
-   cannot read for the operator (403). **An earlier draft of this line cited
-   `GET /api/v4/users/me/teams/{team}/channels/members` instead, which returns
-   200** — it is the caller's OWN membership rows, not the operator's, so it could
-   never have carried the figure and the 403 it blamed was never there. Caught by
-   a tester actually issuing both calls. Treat the 0 as CORROBORATED, NOT READ:
+   `GET /api/v4/channels/{channel_id}/members/{user_id}`. **Two drafts of this
+   line were wrong about it and the second was wrong in a more interesting way.**
+   The first cited `GET /users/me/teams/{team}/channels/members`, which returns
+   200 and carries the caller's OWN rows — it could never have held the figure.
+   The second said `bot-claude` "cannot read it for the operator (403)", which is
+   not a property of the endpoint at all: a tester got **200** on
+   `#claude-sessions`, `mention_count=2`. It 403s on `#claude-code` and ONLY
+   there, because `bot-claude` is not a member of that channel. Membership, not
+   permission; the channel, not the API. Treat the 0 as CORROBORATED, NOT READ:
    what is directly checkable is that none of the 241 posts then in `#claude-code`
    contained a mention token at all, which is the same conclusion by a route that
    does not need the operator's own membership row. (`last_viewed_at` read NEVER
@@ -129,7 +132,7 @@ returned 200. Three separate things were:
   script exits 0 having sent nothing. Pre-existing; this item added further
   invocations. Counted with a PATH shim, and the figure depends on whether stdin
   is redirected — the deciding line is `[ -z "$sid" ] && [ ! -t 0 ]` at
-  `scripts/notify-mattermost.sh:81`:
+  `scripts/notify-mattermost.sh:125`:
   stdin redirected (both real hooks, since `</dev/null` is not a tty) **3 steady,
   5 on a first notification**; stdin skipped, as when a person runs it by hand or
   sets `MM_SESSION_ID`, **2 and 4**; the parent, **2**. Two earlier measurements
@@ -150,7 +153,7 @@ returned 200. Three separate things were:
   inheritance.** The parent compared the whole line —
   `grep -qxF "$sid" "$ALLOW"` at `6829474:scripts/notify-mattermost.sh:36` — so
   only an exact uuid passed. This version compares the 8-character key
-  (`scripts/notify-mattermost.sh:147`), so a DIFFERENT uuid sharing its first
+  (`scripts/notify-mattermost.sh:196`), so a DIFFERENT uuid sharing its first
   eight hex characters both passes the gate and joins the listed session's
   thread: verified with `beef0011-ffff-…` against a list naming
   `beef0011-26f9-…`, which the branch posts and the parent refuses.
@@ -200,20 +203,64 @@ A runtime-state path is never one file for long — it acquires a backup, a lock
 `.tmp`, a `.bak` — so an ignore rule pinned to the exact name is a rule that will
 be wrong later, quietly, at whatever moment someone runs `git add -A`.
 
+## THE LOCK COST MESSAGES, AND THE FIX WAS A RULE, NOT AN OPTIMISATION
+
+A tester measured the locked version losing messages the unlocked parent
+delivered — 17 of 140 at ten concurrent runs where the parent lost none — and
+found the cleanest form needs no concurrency at all: **one run, no lock present,
+`MM_DEADLINE_SECS=5`, parent 6 of 6 delivered and the locked version 0 of 6.**
+Uncontended, where nothing waits. That killed the excuse that this was contention.
+
+Two causes, and the second is the one worth remembering.
+
+**Process spawns.** `date +%s` forks, and `remaining` is read before every call;
+the lock added a `mkdir`, a `date` and an `rm`. On Windows a fork is tens of
+milliseconds and the measured gap was ~1.0s per run. bash 5 exposes
+`EPOCHSECONDS` as a variable, so the clock no longer forks at all. That closed
+about two thirds of it (1002ms -> 355ms) and was still not enough.
+
+**THE ANNOUNCE IS A LUXURY; THE MESSAGE IS NOT.** Opening a thread costs a SECOND
+API call. When the budget could not cover both, the run spent it on the header
+and lost the message — leaving the operator a thread title announcing a session
+that then says nothing, which is this item's own failure rebuilt one layer up. A
+thread is now only opened when there is room for the announce AND the message
+after it; below that the run posts flat. Measured at `MM_DEADLINE_SECS=5`, single
+runs:
+
+| | delivered | announces | mean wall |
+|---|---|---|---|
+| parent | 5 of 8 | 8 | 4770ms |
+| attempt 10 | 4 of 6 | 6 | 5186ms |
+| now | **8 of 8** | 0 | **3104ms** |
+
+It is faster BECAUSE it sends less: one call instead of two. And at
+`MM_DEADLINE_SECS=8` both deliver 8 of 8 and both announce 8 times, so nothing
+was traded away at a normal budget.
+
+The general lesson: the overhead of a feature is not paid by the feature. It is
+paid by whatever runs last, and here that was the only thing anybody wanted.
+
+## The recovery path sent the operator the same message twice
+
+When `lock_take` failed during recovery, the no-lock branch posted flat and then
+fell through to the unconditional send below it. Measured 3 of 3 runs by a
+tester, and **invisible to every case in the plan, because all of them counted
+"at least N"**. A test that cannot distinguish one from two is not a delivery
+test. Now fixed, with a case that counts exactly-once against parent and tip.
+
 ## What the lock still does not do, measured
 
-- **A ~5s-per-call API still loses about one message in twelve** at 3 concurrent
-  runs. Two calls do not fit a 10s budget at that latency, with or without a lock;
-  the parent survives it only because every run announces its own root and never
-  waits. This is the budget, not the lock, and the honest summary is that
-  `MM_DEADLINE_SECS` must exceed twice the API's worst call time or some runs
-  cannot both announce and speak. Nothing here degrades toward silence by design —
-  it degrades toward an unthreaded message — but a budget too small for one call
-  is silence whatever the design.
+- **At ~5s per call the budget cannot fit two calls**, and some messages are lost
+  — but LESS than before. Measured, 6 rounds of 3 concurrent runs at 5s per call:
+  this version loses 4 of 18 and opens ONE root; the parent loses **15 of 18** and
+  opens three roots every round. An earlier draft of this note claimed the parent
+  "survives it" and that the loss here was about one in twelve. Both were wrong,
+  and in the flattering direction.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
-  case (a lock directory `rm` cannot clear) returns in 8s at the default 10, but
-  16s at 20 or 30 — past the Stop hook's 15s. The default is safe; raising this
-  variable above the hook limit is not, and nothing in the script can detect that.
+  case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
+  and **19s at 20 or 30**, past a Stop hook's 15s limit. (An earlier draft said
+  16s; re-measured on this build.) The default is safe; raising the variable above
+  the hook limit is not, and nothing in the script can detect that.
 
 ## A pre-existing stderr leak, now fixed anyway
 
