@@ -129,7 +129,9 @@ returned 200. Three separate things were:
 - **`MM_OPERATOR_MENTION=` cannot disable the mention**; `${VAR:-default}` treats
   empty as unset. To suppress it the variable must be set to something harmless.
 - **The thread map is never pruned.** It grows for the life of the machine. The
-  cost is a linear `awk` scan per notification, and because the deadline is
+  cost is a linear scan per notification - **fork-free bash now, not `awk`; that
+  clause described the code this item replaced and survived the round that
+  replaced it** - and because the deadline is
   wall-clock from script start, file work eats the HTTP budget rather than adding
   to it — so a large map cannot push the hook past its timeout, it can only
   shorten the time left to post. No figure here: two independent measurements of
@@ -277,7 +279,7 @@ tester, and **invisible to every case in the plan, because all of them counted
 "at least N"**. A test that cannot distinguish one from two is not a delivery
 test. Now fixed, with a case that counts exactly-once against parent and tip.
 
-## Threading holds to about 3 seconds a call, and that is a hard trade
+## Threading holds to about 2 seconds a call, and that is a hard trade
 
 Measured at N=2, 12 rounds per setting: an API answering instantly, at 1s, 2s or
 3s per call gives ONE thread every round. At 4s it splits in half the rounds, at
@@ -288,12 +290,20 @@ allowed to fail in.
 The cause is arithmetic and cannot be tuned away. A losing run has to wait for
 the winner to publish its map line, which cannot happen until the winner's post
 RETURNS. The wait is 10 turns of about 380ms - 3.8 seconds - so it covers a call
-of up to about 3 seconds and not one of 4. Lengthening it to cover 5 would put the
-worst case at roughly 15.2s against the Stop hook's 15, and shortening it is what
-two earlier attempts did to lose the guarantee at 2s.
+of up to about 2 seconds and not one of 3. Lengthening it puts the worst case
+past the Stop hook's 15, and shortening it is what two earlier attempts did to
+lose the guarantee entirely.
+
+**THE WAIT IS BOUNDED BY A DEADLINE, NOT BY A TURN COUNT, and the difference is
+the whole reason the figure kept being wrong.** It was ten turns of a constant
+measured at 356ms - measured on an idle machine with nothing contending. A tester
+traced real contended runs at 550-650ms a turn, so the wait was 6.1s where this
+file said 3.8s. A per-turn constant is precisely the wrong thing to measure,
+because what varies under load IS the cost of a turn. A deadline does not care
+what a turn costs.
 
 So the ceiling is stated rather than hidden: **one thread per session for an API
-answering within about 3 seconds**, which is what a local Mattermost does. Beyond
+answering within about 2 seconds**, which is what a local Mattermost does. Beyond
 that the operator gets more than one thread and every message.
 
 ## Concurrency: solved at the sizes this actually sees, NOT at ten
@@ -338,7 +348,7 @@ for is a permission request against a turn completion — two.
 **"At two and three the result is exact and stable" contradicted a line a few
 paragraphs above it**, which says N=3 is reported at 1 in 30 and NOT claimed
 exact - a tester found the pair. The accurate statement: N=2 is exact for an API
-answering within about 3 seconds, N=3 is reported rather than claimed, and
+answering within about 2 seconds, N=3 is reported rather than claimed, and
 neither is unconditional. If you think a synthetic N=10 should block a fix for a
 real N=2, that is a legitimate position and the numbers above are what it turns
 on - but read them with the latency ceiling attached, because a figure taken
@@ -372,9 +382,22 @@ against an instant API is not a figure about this notifier in use.
 
   Measured with a shim verified to honour `-m`, live-held lock and an API that
   never answers, three passes: **14s, 14s, 13s**, against the pre-item sender's
-  8-9s. The terms are startup (~1.5s), the lock wait (3.8s) and one floored call
-  (8s). A tester measured a different path - a stale root and a server that takes
-  6s before rejecting it - at 15.6-16.1s, which is over.
+  8-9s. The terms are startup (~1.4s), the lock wait (now a 4s DEADLINE) and one
+  floored call (8s, plus whatever a hung server takes to reach that timeout).
+  Re-measured after the wait became time-bounded: **12s, 12s, 13s, 14s, 14s**.
+
+  **AN ATTEMPT-16 TESTER REFUTED THE PREVIOUS VERSION OF THIS PARAGRAPH USING
+  REAL `curl` AGAINST A REAL BLACK-HOLE LISTENER - no shim anywhere in the path.**
+  On the then-current build they measured 16.8s once in ten concurrent runs and
+  17.3s in a solo run with the lock pre-held, against a published "14s, 14s, 13s"
+  that was a three-sample undercount of a distribution with a tail past 15. Three
+  passes cannot characterise a tail, and this file demanded 12 to 30 rounds for
+  concurrency while letting three stand for timing.
+
+  Scoping the residual honestly: this needs an UNRESPONSIVE Mattermost - one that
+  accepts a connection and never answers, as a restarting container does. A server
+  that is DOWN returns in 3.6-7.6s. The shape this plan actually named, a stale
+  root plus a slow-then-rejecting server, measured 9.0-11.1s and is fixed.
 
   **THIS IS THE THIRD FIGURE IN THIS ITEM PRODUCED BY A HARNESS RATHER THAN BY
   THE CODE**, after a python fork-count and a delivery count. The shared cause is
@@ -393,7 +416,10 @@ against an instant API is not a figure about this notifier in use.
   neither reproduces on a third run either, which is what a figure with no control
   beside it is worth. What matters and does hold: the worst case exceeds a Stop
   hook's 15s limit for any MM_DEADLINE_SECS at or above about 12, and the default
-  of 10 stays inside it. (An earlier draft said
+  of 10 stays inside it **for a server that is down or slow, and NOT reliably for
+  one that accepts and never answers** - a tester found the tail past 15s there
+  with real curl, and the operator's lever is to lower `MM_DEADLINE_SECS` or raise
+  the Stop hook's timeout. (An earlier draft said
   16s; re-measured on this build.) The default is safe; raising the variable above
   the hook limit is not, and nothing in the script can detect that.
 

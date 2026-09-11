@@ -322,11 +322,27 @@ print(json.dumps(d))' 2>/dev/null)
   _resp=$(curl -s -m "$_budget" -w '\n%{http_code}' \
     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
     -X POST "$API" -d "$_payload" 2>/dev/null)
+  # A DEAD ROOT AND A BAD MINUTE ARE DIFFERENT ANSWERS, and this used to give the
+  # same one for both: empty. So a single transient 500, 503 or 429 on a LIVE root
+  # made the caller conclude the root was dead, open a NEW thread and append it to
+  # the map - and every later message followed the new root, abandoning the
+  # operator's thread mid-conversation. A tester demonstrated it end to end.
+  #
+  # Mattermost names this failure precisely: the error body for a deleted or
+  # invalid root carries `root_id` in its id. That is the only response that
+  # justifies re-rooting, so it is the only one that says so, by printing a
+  # sentinel the caller can test. Everything else stays empty and means "not this
+  # time" rather than "never again".
   printf '%s' "$_resp" | python -c \
     'import json,sys
 raw = sys.stdin.read().rsplit("\n", 1)
 if len(raw) != 2 or raw[1].strip() not in ("200", "201"):
-    print("")
+    body = raw[0] if raw else ""
+    try:
+        eid = json.loads(body).get("id") or ""
+    except Exception:
+        eid = ""
+    print("!deadroot" if "root_id" in eid else "")
 else:
     try:
         d = json.loads(raw[0])
@@ -398,6 +414,11 @@ LOCK_MAX_TRIES=$(( (MM_DEADLINE_SECS * 3) / 2 ))
 # With the floor applied only to the first send, the same worst case loses a whole
 # call. The wall-time problem was never the wait.
 [ "$LOCK_MAX_TRIES" -gt 10 ] && LOCK_MAX_TRIES=10
+# THE WAIT'S REAL BOUND, in seconds. Three terms have to fit inside the Stop
+# hook's 15s: startup (~1.4s), this, and the floored first send (8s, plus the
+# time a hung server takes to reach that timeout). Three leaves room for the
+# measured tail; four did not.
+LOCK_WAIT_SECS=4
 # THE COST OF A TURN, MEASURED, because every figure derived from it was wrong
 # while it was assumed. A turn is `mkdir` + `cat` + `sleep 0.2`, and the two forks
 # are not free on this platform: ten turns take 3.56s, not the 2s that "0.2s per
@@ -487,7 +508,9 @@ lock_take() {
   # unaffordable, which is the only case this gate is for.
   # Derived from the measured turn cost, not from the old 0.2s assumption: the
   # wait can take LOCK_MAX_TRIES turns, and a post needs 2 seconds after it.
-  _gate=$(( (LOCK_MAX_TRIES * LOCK_TURN_MS + 999) / 1000 + 2 ))
+  # From the wait's own bound plus one post, rather than from a per-turn constant
+  # that was measured idle and wrong under load.
+  _gate=$(( LOCK_WAIT_SECS + 2 ))
   [ "$(remaining)" -lt "$_gate" ] && return 1
   # AND A FLOOR ON THE WHOLE BUDGET, not just on what is left of it. Threading
   # costs a lock directory and a map line - two syscalls that are not free on this
@@ -500,6 +523,17 @@ lock_take() {
   [ "$MM_DEADLINE_SECS" -lt 8 ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
   _lock_t0=$(now_s)
+  # BOUNDED BY TIME, NOT BY TURNS. The turn count was sized from a measured cost
+  # of 356ms - measured on an IDLE machine, with no lock actually contended. A
+  # tester traced real runs and found 550-650ms a turn under the contention the
+  # lock exists for, so ten turns took 6.1s where this file claimed 3.8s and the
+  # worst case ran past the Stop hook's 15 seconds.
+  #
+  # A per-turn constant is the wrong thing to measure, because the cost of a turn
+  # is exactly what varies under load. A deadline does not care: whatever a turn
+  # costs, the wait ends when the clock says so. The turn cap stays as a second
+  # bound so the loop terminates even if the clock misbehaves.
+  local _wait_until=$(( $(now_s) + LOCK_WAIT_SECS ))
   # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
   # of writing it this way. The previous version bounded itself with `rm -rf; continue`,
   # which skipped BOTH the budget check and the sleep - so when mkdir failed for any
@@ -508,7 +542,7 @@ lock_take() {
   # hook that never returns is worse than the silence this item exists to end, and a
   # loop whose termination depends on the filesystem behaving is not bounded at all.
   # Nothing below uses `continue`; every path falls through to the sleep.
-  while [ "$_i" -lt "$LOCK_MAX_TRIES" ]; do
+  while [ "$_i" -lt "$LOCK_MAX_TRIES" ] && [ "$(now_s)" -lt "$_wait_until" ]; do
     _i=$(( _i + 1 ))
     # THE MAP FIRST, BECAUSE READING IT IS FREE AND `mkdir` IS A PROCESS. A run
     # waiting here wants the ROOT, not the lock, and once the winner has published
@@ -657,7 +691,7 @@ fi
 #    call returns becomes that root.
 _dead_root="$root"
 out=$(post "${MENTION:+$MENTION }$MSG" "$root" "$POST_FLOOR")
-if [ -n "$out" ] && [ -n "$_make_root" ] && [ -n "$key" ]; then
+if [ -n "$out" ] && [ "$out" != '!deadroot' ] && [ -n "$_make_root" ] && [ -n "$key" ]; then
   { printf '%s %s\n' "$key" "$out" >> "$THREADS"; } 2>/dev/null
 fi
 
@@ -677,7 +711,9 @@ fi
 # written. A tester proved it by instrumenting the caller. The budget is readable
 # here directly, in this shell, which needs no flag at all: if there is not enough
 # left to have made the call, the empty result says nothing about the root.
-if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
+# Only `!deadroot` recovers. An empty `out` now means the send did not land for
+# some other reason, and re-rooting on that is how a transient blip cost a thread.
+if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
   if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
@@ -693,9 +729,22 @@ if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
   # a different hat.
   lock_take "$_dead_root" || :
   map_root; root="$MAP_ROOT"
-  # Same invariant as step 4: without the lock we do not open a thread. A recovery
-  # that cannot take it retries the message flat rather than racing a second root.
-  if [ -z "$LOCK" ]; then
+  # A ROOT WE FOUND IS A ROOT WE USE, whether or not we hold the lock. This tested
+  # `-z "$LOCK"` FIRST, and `lock_take` deliberately returns WITHOUT the lock when
+  # it finds a published root - so the caller threw away a perfectly good root it
+  # had just been handed and posted flat. A tester measured 6 of 6 concurrent
+  # recoveries doing that, and the branch written for exactly this case fired 0 of
+  # 18 rounds: it was reachable only in the window between the map read and the
+  # mkdir.
+  #
+  # Ordering IS the logic here. The lock decides who may CREATE a thread; it has
+  # never had anything to do with who may USE one.
+  if [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
+    # Someone else recovered this session while we waited. Use their root.
+    lock_release
+    post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
+    _recovered=1
+  elif [ -z "$LOCK" ]; then
     # Post FLAT and stop. This used to send here and then fall through to the
     # unconditional send below, so every recovery that could not take the lock
     # delivered the operator the SAME message twice - measured 3 of 3 runs by a
@@ -708,9 +757,10 @@ if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
     # tester instrumented `-m` per call and measured [8,8] at every budget.
     post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
     _recovered=1
-  elif [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
-    # Another run already recovered this session while we waited. Use its root
-    # rather than opening a third thread.
+  elif [ -n "$LOCK" ] && [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
+    # Unreachable in practice now that the case above runs first; kept because a
+    # future edit could reorder them, and a redundant branch is cheaper than a
+    # second round of this bug.
     lock_release
   else
     # Same rule as the first notification: the retry itself becomes the new root.
