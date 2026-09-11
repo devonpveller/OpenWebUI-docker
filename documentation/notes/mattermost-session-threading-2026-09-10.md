@@ -57,8 +57,14 @@ returned 200. Three separate things were:
    agent-bridge threads its own posts
    (`agent-org/agent-bridge/app/adapters/mattermost.py:100`), as do
    `scripts/claude-sessions-bridge/bridge.py:499` and
-   `scripts/mattermost-mcp/server.py:200`. The IDE notifier was the one sender
-   that did not.
+   `scripts/mattermost-mcp/server.py:200`.
+
+   **"The IDE notifier was the one sender that did not" is false**, and a tester
+   found three counterexamples: `restart_bridge.py:111`, `check_disk.py:126` and
+   `mm_post.py:30` all post without a `root_id`. What is true and was the actual
+   point: the notifier was the one sender whose THREADING MATTERED to the operator
+   here, because it is the one that pages them about their own sessions. A
+   universal was used to carry an argument that never needed one.
 
 ## Residuals — true, measured, NOT fixed
 
@@ -271,6 +277,25 @@ tester, and **invisible to every case in the plan, because all of them counted
 "at least N"**. A test that cannot distinguish one from two is not a delivery
 test. Now fixed, with a case that counts exactly-once against parent and tip.
 
+## Threading holds to about 3 seconds a call, and that is a hard trade
+
+Measured at N=2, 12 rounds per setting: an API answering instantly, at 1s, 2s or
+3s per call gives ONE thread every round. At 4s it splits in half the rounds, at
+5s in most of them. **No message is lost at any latency** - the degradation is
+toward an extra thread, never toward silence, which is the direction this item is
+allowed to fail in.
+
+The cause is arithmetic and cannot be tuned away. A losing run has to wait for
+the winner to publish its map line, which cannot happen until the winner's post
+RETURNS. The wait is 10 turns of about 380ms - 3.8 seconds - so it covers a call
+of up to about 3 seconds and not one of 4. Lengthening it to cover 5 would put the
+worst case at roughly 15.2s against the Stop hook's 15, and shortening it is what
+two earlier attempts did to lose the guarantee at 2s.
+
+So the ceiling is stated rather than hidden: **one thread per session for an API
+answering within about 3 seconds**, which is what a local Mattermost does. Beyond
+that the operator gets more than one thread and every message.
+
 ## Concurrency: solved at the sizes this actually sees, NOT at ten
 
 The lock now has to be held across the root-creating POST, because the map line
@@ -308,10 +333,16 @@ number worth quoting to one significant figure.
 
 The reason for shipping anyway, stated so it can be disagreed with: **a session
 cannot emit ten simultaneous first notifications.** The overlap this item exists
-for is a permission request against a turn completion — two. At two and three the
-result is exact and stable. If you think a synthetic N=10 should block a fix for
-a real N=2, that is a legitimate position and the numbers above are what it turns
-on.
+for is a permission request against a turn completion — two.
+
+**"At two and three the result is exact and stable" contradicted a line a few
+paragraphs above it**, which says N=3 is reported at 1 in 30 and NOT claimed
+exact - a tester found the pair. The accurate statement: N=2 is exact for an API
+answering within about 3 seconds, N=3 is reported rather than claimed, and
+neither is unconditional. If you think a synthetic N=10 should block a fix for a
+real N=2, that is a legitimate position and the numbers above are what it turns
+on - but read them with the latency ceiling attached, because a figure taken
+against an instant API is not a figure about this notifier in use.
 
 ## What the lock still does not do, measured
 
@@ -331,20 +362,26 @@ on.
   two successive rounds measured 0 to 2 of 6. An earlier draft of this note claimed the parent
   "survives it" and that the loss here was about one in twelve. Both were wrong,
   and in the flattering direction.
-- **THE WORST CASE WAS 13-16.5s AND IS NOW ABOUT 5s, because the cause was a
-  BUG rather than the design.** `POST_FLOOR` was applied by a flag set inside
-  `post`, which every reading caller invokes as `$(post ...)` - a subshell - so
-  the flag never arrived and EVERY call was floored at 8 seconds. A dead-root
-  retry therefore cost a second 8 seconds. A tester instrumented it and measured
-  `curl -m 8` twice where the comment beside it promised "later calls still draw
-  on what is left".
-  The floor is a PARAMETER now, passed by the caller that knows whether this is
-  the first send, which puts the decision where the knowledge is and leaves
-  nowhere to keep a flag that cannot survive. Measured after, live-held lock and
-  an API that never answers, four passes at the default budget: 5s, 5s, 5s, 5s.
-  **That is the third time this subshell trap has been hit in this file**, twice
-  after it was written up in a comment a few dozen lines away. Reading about a
-  trap is not the same as being unable to fall into it; only the parameter is.
+- **THE WORST CASE IS 13-14s, AND THE "ABOUT 5s" PUBLISHED HERE WAS MEASURED
+  WITH A BROKEN INSTRUMENT.** The shim was written with an UNQUOTED heredoc, so
+  `$@`, `$m` and `$want` were expanded when the file was written and it reduced to
+  `sleep ""`. It never slept, honoured no `-m`, and the figure was startup plus
+  the lock loop with zero network time - which the arithmetic should have given
+  away, since the floor alone guarantees 8 seconds. A tester caught it and pointed
+  out it was impossible.
+
+  Measured with a shim verified to honour `-m`, live-held lock and an API that
+  never answers, three passes: **14s, 14s, 13s**, against the pre-item sender's
+  8-9s. The terms are startup (~1.5s), the lock wait (3.8s) and one floored call
+  (8s). A tester measured a different path - a stale root and a server that takes
+  6s before rejecting it - at 15.6-16.1s, which is over.
+
+  **THIS IS THE THIRD FIGURE IN THIS ITEM PRODUCED BY A HARNESS RATHER THAN BY
+  THE CODE**, after a python fork-count and a delivery count. The shared cause is
+  a stub that does not implement the behaviour under test: a `curl` that ignores
+  `-m` cannot measure a timeout, and one written with an unquoted heredoc is not
+  the program you read. Verify the instrument against a case whose answer you
+  already know, before trusting it on one you do not.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
   case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
   **and that scaling is NOT the lock's doing.** A tester ran the same black-hole

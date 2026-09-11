@@ -458,8 +458,11 @@ map_root() {
   return 0
 }
 
+# $1, when given, is a root this caller has ALREADY PROVEN DEAD. The map check
+# below must not hand it back.
 lock_take() {
   [ -z "$key" ] && return 1
+  local _known_dead="${1:-}"
   # ARRIVING ALREADY STARVED? DO NOT THREAD AT ALL.
   #
   # Threading is worth a little time and no messages. A run whose startup has
@@ -512,8 +515,22 @@ lock_take() {
     # one there is nothing left to compete for - so checking costs nothing and
     # saves a syscall per turn. With the lock attempted first, every losing run
     # spent up to eight spawns discovering it had already lost.
+    # THE MAP CHECK MUST SKIP A ROOT THE CALLER KNOWS IS DEAD, or the recovery
+    # path can never re-thread. Without this the dead-root case was unfixable by
+    # construction: the stale line is still in the map, nothing removes it (the
+    # map is append-only by design), so this short-circuit fired every time, the
+    # lock was never taken, and the branches that append a NEW root were
+    # unreachable. Measured by an attempt-15 tester: three consecutive runs each
+    # burned a call on the dead root, posted flat, and left the map unchanged
+    # forever - a session wedged out of its own thread for good.
+    #
+    # This is the optimisation that fixed concurrency ("wait for the root, not the
+    # lock") breaking the case beside it. A short-circuit is a claim that the thing
+    # you found is the thing you wanted, and here it was not.
     map_root
-    if [ -n "$MAP_ROOT" ]; then root="$MAP_ROOT"; lock_done 1; return 1; fi
+    if [ -n "$MAP_ROOT" ] && [ "$MAP_ROOT" != "$_known_dead" ]; then
+      root="$MAP_ROOT"; lock_done 1; return 1
+    fi
     if mkdir "$_d" 2>/dev/null; then
       # The brace wraps the ASSIGNMENT, not just `cat`. A `2>/dev/null` inside a
       # command substitution silences the command; the warning bash itself prints
@@ -674,7 +691,7 @@ if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
   # Same read-then-act as step 4, so the same lock. Without it two concurrent
   # recoveries of one session re-announce twice, which is the T15 defect wearing
   # a different hat.
-  lock_take || :
+  lock_take "$_dead_root" || :
   map_root; root="$MAP_ROOT"
   # Same invariant as step 4: without the lock we do not open a thread. A recovery
   # that cannot take it retries the message flat rather than racing a second root.
@@ -685,7 +702,11 @@ if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
     # tester, and invisible to every case in the plan because they all counted
     # "at least N" rather than "exactly N".
     root=""
-    post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
+    # NOT floored: by this point a call has already been spent discovering the
+    # root was dead, so this is a LATER call by the plan's own definition, and
+    # flooring it is what pushed the worst case over the Stop hook's 15s. A
+    # tester instrumented `-m` per call and measured [8,8] at every budget.
+    post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
     _recovered=1
   elif [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
     # Another run already recovered this session while we waited. Use its root

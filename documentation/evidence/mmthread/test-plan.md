@@ -134,6 +134,12 @@ What to check now:
   retry does not happen at all.
 - the budget is clamped at BOTH ends (1 and 60) and a non-integer falls back to
   the default, all with zero stderr.
+- **THE SHAPE THAT IS DETERMINISTICALLY OVER 15s: a first call that is SLOW AND
+  THEN FAILS.** A stale root plus a server taking ~6s before rejecting it costs
+  the floored first call, the failure, and then the recovery - and a tester
+  measured 15.6-16.1s, five of five over the Stop hook's limit, at the DEFAULT
+  budget. This case named only the hung-API shape, which is cheaper. Drive a
+  server that is slow AND rejects, not one that merely hangs.
 
 FAIL: any non-zero exit, any stderr reaching the caller, a first send that does
 not happen, a later call that is floored, or a run that could exceed 15s.
@@ -352,6 +358,29 @@ separate times, and each time it looked like a result about the code:
 If a measurement surprises you, suspect the harness first, and say in your report
 how you ruled it out. A number you cannot defend is worse than no number.
 
+## T6a — a dead root must be recoverable MORE THAN ONCE, and the map must show it
+
+T6 asks whether a dead root wedges the session, and answers it by looking at
+whether a message got through. That is not enough, and the gap hid a real defect
+for several rounds: the recovery path could post flat every time while never
+re-threading, so a tester watching only delivery saw success while the session was
+permanently out of its own thread.
+
+Drive a map that already holds a root the shim REJECTS (HTTP 400, the real
+`root_id.app_error` shape), then send THREE notifications in a row.
+
+PASS:
+- run 1 spends two calls (the dead root, then a retry) and **appends a NEW line to
+  the map file**;
+- runs 2 and 3 spend ONE call each and reply under that new root;
+- the map is never rewritten - it is append-only, and the lookup takes the LAST
+  match.
+
+FAIL: the map unchanged after run 1; or runs 2 and 3 still burning a call on the
+dead root. **Read the map file. Do not infer it from the posts** - "a message was
+delivered" is true in both the working and the broken case, which is exactly why
+this needed its own case.
+
 ## T19 — the notifier must not be slower at the operator's expense
 
 **The item exists to END a silence. A version that threads perfectly and drops a
@@ -397,9 +426,26 @@ run of twelve has roughly an 11% chance even when the true split rate is one in
 five. Run **at least 30 rounds** per setting, and if you report a rate, say what
 your sample can and cannot exclude.
 
-Measured now: N=2 is 30 of 30 with one root; N=3 is 29 of 30; N=10 splits in
-about half. Nothing is lost at any of them. **N=2 is claimed. N=3 is reported at
-1 in 30 and NOT claimed exact. N=10 is not claimed at all.**
+**AND N=2 MUST BE RUN ACROSS THE LATENCY AXIS, not only at an instant API.**
+This is the gap that let a real defect ship: T15 listed latency only at N=3 and
+N=10, and T15a said "N=2 is 30 of 30" naming no latency at all - so a tester
+following it literally runs an instant API, gets 30 of 30, and ships. The plan
+supplies the missing reasoning itself in T19 ("the latency axis is where three
+successive designs failed") and confined it to delivery. An attempt-15 tester
+crossed the two axes anyway and found N=2 splitting in 18 of 30 rounds at 5s per
+call.
+
+Run N=2 at 0s, 1s, 2s, 3s, 4s and 5s per call, at least 12 rounds each.
+
+Measured now: one thread every round up to 3s per call; at 4s about half the
+rounds split and at 5s most do; **no message is lost at any latency**. The cause
+is arithmetic - a loser waits 3.8s for the winner to publish, which cannot happen
+until the winner's post returns - and lengthening the wait to cover 5s puts the
+worst case past the Stop hook. **The claim is therefore: one thread per session
+for an API answering within about 3 seconds.** Beyond that, more than one thread
+and every message.
+
+N=3 is reported, not claimed exact. N=10 is not claimed at all.
 
 The reason offered for N=10 being out of scope is that a session cannot emit ten
 simultaneous FIRST notifications - the overlap this item exists for is a
