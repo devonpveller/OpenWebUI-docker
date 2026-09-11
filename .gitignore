@@ -98,3 +98,4 @@ documentation/issue-plans/
 # on is COMMITTED - see documentation/evidence/README.md - and only the working state below
 # is ignored. If a row cites it, it does not belong here.
 .quadrant/
+scripts/.mm-session-threads
