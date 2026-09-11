@@ -227,6 +227,30 @@ PASS: one root, one map line, three replies.
 FAIL: more than one root — report it as a finding with the count; this is a known
 residual and the plan records it so a future fix has a case waiting.
 
+## T17 — the removed allowlist's backup cannot be swept into a commit
+
+Attempt 7 found `scripts/.mm-notify-sessions.removed-2026-09-11.bak` untracked and
+NOT ignored: `.gitignore` covered only the exact path `scripts/.mm-notify-sessions`,
+so a broad `git add` in the operator's checkout could commit a session uuid. Do not
+take the fix on the commit message's word.
+
+Run, in YOUR worktree (never in the operator's checkout, and never `git add` there):
+
+    git check-ignore -v scripts/.mm-notify-sessions.removed-2026-09-11.bak
+    touch scripts/.mm-notify-sessions.anything && git status --porcelain scripts/ ; rm scripts/.mm-notify-sessions.anything
+
+PASS: `check-ignore` names the new `.gitignore` rule, and a freshly created
+`scripts/.mm-notify-sessions.*` file does NOT appear in `git status`.
+
+FAIL: the file is still untracked-and-visible; OR the rule is wide enough to hide
+something that should be tracked — check that `scripts/.mm-notify-sessions` itself
+is the only other path the pattern can reach, and that no TRACKED file matches it
+(`git ls-files scripts/ | grep mm-notify` must stay empty).
+
+The second half is the real risk here: an ignore rule that silently stops git from
+seeing a file someone later intends to commit is a worse failure than the leak it
+was added to prevent.
+
 ## Out of scope for this plan
 
 The inbound direction (replying from Mattermost into a session), Telegram, the
