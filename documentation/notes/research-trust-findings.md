@@ -152,7 +152,70 @@ string to delete. The guarantee that the OptiPlex replay never prints it comes
 from Phase 4.2/4.3: a `no_relevant_sources` run bypasses template rendering
 entirely and emits a fixed failure notice.
 
-### 3.6 The collapse detector is wired in the HARNESS, not in `index.ts` — [read-from-source]
+### 3.6 A digit-only meta-claim pattern ate two real world claims — [observed-live 2026-09-11]
+
+The Phase 3.4 sweep is not only a list of poison; it is the only honest test of
+the filter's PRECISION, because a filter that silently deletes knowledge is
+worse than the poison it removes. Running the *shipped* `classifyMetaClaim`
+over all **7 744 active claims** (read-only export) matched **45**. Reading all
+45 found two clear false positives:
+
+- `d97ce55d` — "…the consent mechanism is embedded within the ChatGPT
+  application's own settings interface …, though the exact UI pattern (toggle,
+  checkbox, modal) **is not confirmed**." A world claim with an honest caveat.
+  Caused by a bare `is not confirmed` pattern — **removed**; only
+  `not confirmed as|for|in` (the "documented for X, not for what you asked"
+  shape) survives, which still catches poison claim `7f2ac93b`.
+- `1d448429` — "…the author found **no Sources** sheet and no Checks sheet…".
+  A fact about a spreadsheet. Caused by a bare `no sources?` — **narrowed** to
+  require a reporting verb within two words (`no source states/mentions/…`) or
+  sentence-initial position.
+
+After both narrowings: **43 of 7 744 match (0.56 %)**, all 8 named poison ids
+still caught, and both false positives are pinned as regression tests in
+`meta-claims.test.ts`. The first version of this filter would have deleted two
+true claims — found only because the sweep was actually run and read.
+
+**The sweep also exposed two claims that are the synthesizer's own prompt text**
+(`7e126f61` "…Check constraints: - \"Write a thorough answer to the QUESTION
+using ONLY the KNOWN CLAIMS and SOURCES provided.\"…" and `4ea270b6`
+"`<a single assertion>. \" I will ensure the period is before the citation…`").
+Prompt and reasoning leakage is being stored as grounded knowledge. Out of
+scope here, recorded — a separate defect from meta-claims.
+
+The full 43 are in the test plan's deploy section as an operator decision; only
+the 8 the audit names get retraction SQL from this branch.
+
+### 3.7 A sweep script that "found 0" — the failure this whole item is about
+
+The first run of that sweep printed `active claims scanned: 7744 / matched: 0`.
+The script was reading an NDJSON file line-by-line, and a botched edit left it
+iterating over STRINGS: `c.text` was `undefined`, `classifyMetaClaim(undefined)`
+returned `"world"`, and the scan count came out right because the file had one
+line per claim. A check that passes while checking nothing, produced inside the
+work item written to stop checks that pass while checking nothing. It was caught
+only because 0 contradicted a known fact (the 8 poison claims are active). The
+rewritten script asserts its input shape before scanning
+(`if (!Array.isArray(rows) || typeof rows[0]?.text !== "string") throw`).
+
+### 3.8 `orchestrator.test.ts` has been failing on a CORRECT database — [observed-live 2026-09-11]
+
+Phase 5.3 built a throwaway `pgvector/pgvector:pg16` with all 30 init scripts
+from `OB1/docker/docker-compose.yml` (56 tables; `find_or_create_claim`,
+`link_claim_to_source`, `retract_claim`, `find_or_create_source` all present).
+The integration test still failed — on the BASE commit as well as on this
+branch, identically, at `FAIL: reused the grounded 'cats are mammals' claim`.
+
+Cause: the test's `fakeEmbed` hashes a string to a single hot dimension, so
+`"cats are mammals"` and `"Tell me about cats"` are near-ORTHOGONAL (distance
+≈ 1.0), and `REUSE_MAX_DISTANCE` (0.55, added by change #5 after this test was
+written) drops the claim before `decideReuse` is reached. With
+`REUSE_MAX_DISTANCE=1.1 KB_SOURCES_MAX_DISTANCE=1.1` the BASE commit passes all
+assertions, and so does this branch. **Pre-existing, not a regression**, and the
+env override is in the test plan. Not fixed here: changing a shared recall
+default to suit a test is how a test starts validating itself.
+
+### 3.9 The collapse detector is wired in the HARNESS, not in `index.ts` — [read-from-source]
 
 Phase 1.1 says "wire it into the `searchWeb` wrapper in `index.ts`". `searchWeb`
 in `index.ts:324` is a `Deps` seam with no access to the run's counters, and
@@ -194,17 +257,90 @@ call site in `harness.ts` instead. Same contract, one testable place.
 
 ---
 
-## 6. Test counts, RED → GREEN
+## 6. Test counts, RED → GREEN — [observed-live 2026-09-11]
 
-| module | before | after | new tests |
+| suite | before | after | delta |
 |---|---|---|---|
-| research-service | 79 passed / 1 env-failed | (see TEST-PLAN §1) | `search-quality.test.ts`, `grounding.test.ts`, `harness-trust.test.ts`, `report.test.ts` |
-| research-curator | 17 passed | (see TEST-PLAN §1) | `meta-claims.test.ts` |
+| `research-service` `deno test -A` | **79 passed, 1 failed** | **121 passed, 1 failed** | **+42** |
+| `research-curator` `deno test -A` | **17 passed, 0 failed** | **28 passed, 0 failed** | **+11** |
+| `search-gateway/gateway` `pytest tests/test_engine_health.py` | n/a (new file) | **8 passed** | **+8** |
+| `ruff check .` (parent) | clean | **clean** | — |
 
-Filled in at §7 below as each phase lands.
+The one `research-service` failure is `orchestrator.test.ts` in both columns and
+is §3.8 — it needs a database, and with one it needs
+`REUSE_MAX_DISTANCE=1.1`. Under those conditions it passes on this branch AND on
+the base commit (Phase 5.3, verified 2026-09-11).
+
+New test files: `search-quality.test.ts` (9), `grounding.test.ts` (7),
+`report.test.ts` (7), `harness-trust.test.ts` (13), additions to
+`templates.test.ts` (3) and `lib.test.ts` (3);
+`research-curator/meta-claims.test.ts` (11);
+`search-gateway/gateway/tests/test_engine_health.py` (8).
+
+RED was shown before GREEN for every one of these: the module-absent type-check
+failure for `search-quality.ts`, `grounding.ts`, `report.ts` (report.ts was
+moved aside and the suite re-run to demonstrate it) and `meta-claims.test.ts`,
+and named assertion failures for the harness replays before the harness changes
+landed.
 
 ---
 
 ## 7. Phase-by-phase record
 
-(appended as the work lands)
+| phase | state | where |
+|---|---|---|
+| 0.1 fixtures | done | `OB1/integrations/research-service/fixtures/` (6), `research-curator/fixtures/` (2) |
+| 0.2 baseline | done | §1.2 above |
+| 0.3 scaffolding | done | §1.1, §6 |
+| 1.1 collapse detector | done | `search-quality.ts:classifyHits`, wired at `harness.ts` `runSearch` |
+| 1.2 keyword round 1 | done | `harness.ts:KEYWORDIZE_SYS`, `search-quality.ts:keywordQuery/reformulate` |
+| 1.3 engine health + measured change | done | `engine_health.py`, `routes/health.py:/health`, `stack.ps1`, `settings.yml`, `search/docker-compose.yml`, `.env.example`; §2 |
+| 1.4 yield target + collapse streak | done | `harness.ts` gather loop, `RELEVANT_TARGET`, `COLLAPSE_STREAK_MAX` |
+| 1.5 readable vs relevant vs absent | done | `FetchOutcome` split in `index.ts`/`harness.ts`, `fetch_degraded`, `FETCH_MAX_CHARS` 8000→16000, slice 2000→4000 |
+| 2.1 gate recall pages | done | `harness.ts` `kbRecalled` + `gateAndKeep` (topic path only) |
+| 2.2 `no_relevant_sources` | done | `harness.ts` early return; `lib.ts:classifyCuratorOutcome` skipped branch |
+| 2.3 numeric grounding | done | `grounding.ts`, wired before `buildCitedAndRenumber` |
+| **2.4 Skeptic trial** | **NOT DONE — deferred** | see §8 |
+| 3.1 meta-claim filter | done | `claims.ts:classifyMetaClaim` + `writeClaims`; judge in `research-curator/index.ts` |
+| 3.2 omnibus downgrade | done | `claims.ts:isOmnibusCitation` |
+| **3.3 retraction** | **NOT RUN — post-deploy** | SQL shipped in TEST-PLAN §D |
+| 3.4 sweep | done (read-only) | §3.6; 43 of 7 744 |
+| 4.1 honest coverage | done | `report.ts:coverageFooter`, `lib.ts:renderResult`, `deep_research.py` |
+| 4.2 template by evidence | done | `report.ts:shouldClassifyTemplate`, `harness.ts` |
+| 4.3 answer-first structure | done | `templates.ts`, `report.ts:failureNotice` |
+| 4.4 OWUI parity | done | `owui/tools/deep_research.py` v1.3.0 (operator must re-paste) |
+| 5.1 unit + lint | done | §6 |
+| 5.2 replay | done | `harness-trust.test.ts` replays both audited runs from fixtures |
+| 5.3 test images + throwaway DB | done | images `openbrain-research:wt-research-trust`, `openbrain-curator:wt-research-trust` built; `deno check index.ts` passes in both; all three new modules verified present in the image (`COPY *.ts` — checked, because a COPY-by-name list is a repeat failure here) |
+| **5.4 live dry_run** | **NOT MINE — post-deploy** | TEST-PLAN §D |
+| 5.6 land | tester/reviewer | TEST-PLAN §E |
+| 5.7 docs | done | `documentation/implementation-guide/README.md` row |
+
+---
+
+## 8. What could NOT be done, and why
+
+1. **Phase 2.4 — the Skeptic trial.** It requires setting `SKEPTIC_ENABLED=1` on
+   a running image and replaying two audited jobs plus three notebook jobs
+   through a real LLM. Every test in this branch runs on mocked chat/search/fetch
+   seams by instruction; a Skeptic trial is by definition a live-model
+   experiment, and the two audited jobs cannot be re-run without the deployed
+   service. `SKEPTIC_ENABLED` is therefore UNCHANGED (still `0`) and nothing in
+   this branch turns it on. Deferred to the post-deploy step, with the plan's own
+   adoption rule intact: adopt only if it downgrades the 95 °C line and
+   downgrades none of the verified 100 Hz lines. — [not-verifiable-here]
+2. **Phase 3.3 — the retraction.** A `retract_claim` is a write to the live
+   knowledge base and a post-deploy step by the plan's own ordering (it must run
+   AFTER 3.1 is deployed, or the next run re-creates the poison). The exact SQL
+   for all 8 ids is in TEST-PLAN §D.
+3. **Phase 5.4 — live dry-run jobs.** Requires the rebuilt images running under
+   the Open Brain plane lease. Not a development step.
+4. **Whether the new engine mix survives production pacing.** brave rate-limited
+   after ~5 burst queries on the rig, as the exploration note also found. The
+   collapse detector is what catches it if it regresses — that is the point of
+   shipping both together. — [not-verifiable-here]
+5. **The `/health` route itself is not covered by an HTTP test.** `pytest` for
+   the gateway needs `redis` and `respx`, which are not installed on the host
+   python; installing them would mutate the operator's environment. The LOGIC is
+   pure and fully tested (`test_engine_health.py`, 8 cases); the route is thin
+   wiring. TEST-PLAN case 12 has the tester curl it after deploy.

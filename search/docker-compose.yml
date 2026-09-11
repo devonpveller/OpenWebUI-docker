@@ -77,7 +77,14 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
   searxng:
-    image: ${SEARXNG_IMAGE:-searxng/searxng:latest}
+    # PINNED, not :latest (research-trust 2026-09-11). Two reasons, both
+    # measured: (1) watchtower.enable=false exists so privacy infrastructure
+    # is never silently swapped, and a floating tag does exactly that;
+    # (2) the engine policy in search-gateway/searxng/settings.yml REQUIRES
+    # this image - on the 2026-05-17 build that :latest resolved to until
+    # today, google/brave/qwant return nothing (TLS fingerprint rejection /
+    # CAPTCHA) and `duckduckgo web` does not exist. .env overrides this.
+    image: ${SEARXNG_IMAGE:-searxng/searxng:2026.9.11-61d660276}
     container_name: searxng
     networks:
       - search-net

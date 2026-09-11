@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import httpx
 
+from gateway.engine_health import EngineHealth
 from gateway.models import SearchRequest, SearchResult
 from gateway.normalizer import normalize_searxng_payload
 from gateway.providers.base import (
@@ -22,6 +23,10 @@ class SearxngProvider(SearchProvider):
 
     def __init__(self, base_url: str, timeout_seconds: float) -> None:
         self._base_url = base_url.rstrip("/")
+        # research-trust 2026-09-11: which engines are actually ANSWERING, read
+        # off the payloads we already parse. Engine errors cannot tell us: the
+        # engine that broke the research runs never raised one.
+        self.engine_health = EngineHealth()
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_seconds),
             follow_redirects=True,
@@ -64,6 +69,7 @@ class SearxngProvider(SearchProvider):
         except ValueError as exc:
             raise TransientProviderError("searxng returned non-JSON body") from exc
 
+        self.engine_health.record(payload)
         return normalize_searxng_payload(payload, self.name, req.max_results)
 
     async def health(self) -> bool:

@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.2.0
+version: 1.3.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -34,6 +34,7 @@ description: >
 
 import asyncio
 import json
+import re
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
@@ -321,12 +322,34 @@ def _render(result: dict[str, Any]) -> str:
             f"open unknowns."
         )
 
-    reuse_ratio = result.get("reuse_ratio")
+    # Footer parity with lib.ts renderResult (research-trust 2026-09-11).
+    # `coverage NN%` is GONE from both renderers: it was 1 - gap_ratio over
+    # synthesis LINES, printed where a reader looks for how much of the QUESTION
+    # was answered. Job ce398d06 printed "coverage 22%" having answered 0 of 6
+    # needs. A job recorded before this change carries no needs_status and now
+    # gets no coverage number at all, rather than the old misleading one.
     foot = []
-    if reuse_ratio is not None:
-        foot.append(f"coverage {round(float(reuse_ratio) * 100)}%")
+    needs_status = result.get("needs_status")
+    if isinstance(needs_status, list) and needs_status:
+        answered = sum(
+            1 for n in needs_status
+            if isinstance(n, dict) and n.get("status") == "answered"
+        )
+        foot.append(f"needs answered {answered} of {len(needs_status)}")
+        rec = result.get("search_record")
+        if isinstance(rec, dict) and isinstance(rec.get("fetched"), int):
+            hit_bits = [f"{rec.get('hits', 0)} hits"]
+            if rec.get("collapsed"):
+                hit_bits.append(f"{rec['collapsed']} collapsed")
+            foot.append(
+                f"sources {rec.get('relevant', 0)} relevant of {rec['fetched']} "
+                f"fetched ({', '.join(hit_bits)})"
+            )
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")
+    # The harness stamps this footer onto `prose`; do not print it twice.
+    if foot and re.search(r"needs answered \d+ of \d+", "\n".join(parts)):
+        foot = []
     if foot:
         parts.append(f"\n\n_— {' · '.join(foot)}_")
 
