@@ -174,7 +174,7 @@ the run* rather than about the world. Two layers: deterministic patterns
 (`^the (provided )?sources? (contain|do(es)? not|lack)`, `^no (provided )?source`, `not confirmed for`,
 `pertain(s)? to .+, not `, `documented for .+; this is not`), then a nothink LLM judge for the rest
 ("WORLD or META, one word", fail-open = keep). Rejections are counted (`claims.metaSkipped`) and logged with text.
-- RED: all 8 texts in `claims-poison.json` → META; the 13 factual 100 Hz claims → WORLD. GREEN after.
+- RED: all 8 texts in `claims-poison.json` → META; the 10 factual 100 Hz claims (13 were written; 3 are among the 8 poison) → WORLD. GREEN after.
 
 **3.2 Omnibus-citation downgrade.** A single line citing more than 4 sources is a smell (the 0.85 "all eleven
 sources say nothing" claim). Parse it as [UNCERTAIN] at most; never write `states` edges for more than 4 sources
