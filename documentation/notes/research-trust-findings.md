@@ -627,3 +627,48 @@ landed.
    python; installing them would mutate the operator's environment. The LOGIC is
    pure and fully tested (`test_engine_health.py`, 8 cases); the route is thin
    wiring. TEST-PLAN case 12 has the tester curl it after deploy.
+
+## Deploy 2026-09-11 (section D executed by the operator's session) - findings
+
+Provenance: observed-live on 2026-09-11 via `POST :8818/research` dry runs
+8f875b10 (OptiPlex, before retraction), 1f2ff740 (OptiPlex, after), b7e701ef (100 Hz),
+and gateway replays via `GET :8085/search`.
+
+- **D.1 exposed a latent compose defect, not this branch's.** Commit d504e9e (2026-08-28)
+  removed `env_file` from the search gateway and named only `SEARXNG_URL`/`REDIS_URL`;
+  `Settings.gateway_api_key` is `Field(...)` (required), so the first recreate crash-looped
+  on `GATEWAY_API_KEY Field required`. Fixed in `search/docker-compose.yml` (208f384) under
+  the search lease. The old container had survived on the pre-d504e9e environment.
+- **Search plane after D.1:** `GET /health` -> 4 engines answering (google, brave, yandex,
+  duckduckgo web; qwant unresponsive once); the OptiPlex capacitor query returns 20 on-topic
+  pages (Dell support, CNET capacitor-plague, repair forums). `stack.ps1 health`:
+  `search: ok - 4 engine(s) answering`.
+- **D.3 OptiPlex: criterion MET on branch 1** - 11 (then 9) relevant OptiPlex sources cited
+  (Dell diagnose pages, manuals, defect DB, a used-OptiPlex blog). Post-retraction the reuse
+  pass no longer recalls 0c2b7c4e. Concerns: (a) the Answer block and TITLE were built on the
+  weakest cited source (a Walmart review page, 21 ratings, "38% one-star"); the answer-first
+  template needs source weighting. (b) `needs answered 0 of 6` while 12 relevant sources were
+  cited and the report states findings - the COVERAGE_STAGED judge marks nothing answered;
+  footer and body disagree. (c) 2 of 6 searches were called `collapsed onto "dell"` because
+  the entity was "Dell OptiPlex 3050" and hits say "OptiPlex 3050" without the brand.
+  (d) reuse recall still pulls 12 semantically-near DGX-Spark claims at distance <= 0.55.
+- **D.3 100 Hz: retrieval criterion NOT MET, and the search plane is not why.** All 3
+  searches were classified `collapsed onto "motion"/"sickness"` -> `search_degraded`, 0
+  fetched, honest footer + no absence title (that part held). Replaying the same queries
+  through the gateway: 20 hits each, 8-9 of 20 contain "100 Hz", and PMC11955832 /
+  J-STAGE "Just 1-min exposure to a pure tone at 100 Hz" (the Nagoya paper) is hit #1 in two
+  of them. Deployed `classifyHits` on those exact hits: entity "100Hz audio" -> share 0.00,
+  "100Hz" -> 0.15, "100 Hz" -> 0.45 (< the 0.5 line), "motion sickness" -> 0.95 ok. The
+  entity phrase is matched too literally (no `100Hz`~`100 Hz` normalisation, no core-token
+  fallback, brand/qualifier words included), and ENTITY_SHARE=0.5 sits ON a real edge
+  (0.45), not in an empty gap as the fixtures suggested. This is the tester's X2 doubt
+  materialised from the other side: the input to the rule was an over-specific model output.
+  Failure direction is over-caution (nothing fabricated, curator skipped) - but it turns a
+  working search into "search failure", which is exactly the outcome the anchor exists to
+  prevent. FOLLOW-UP ITEM REQUIRED (not a re-open of research-trust): normalise unit/number
+  spacing and hyphens, match on the entity's distinctive core tokens (drop brand/qualifier
+  words: Dell, audio, VR), validate/log the KEYWORDIZE entity, and re-measure ENTITY_SHARE
+  against these two live sets before choosing a threshold.
+- **D.4:** all 8 ids `retracted` with reason `research-audit 2026-09-11: ...`; count 8.
+- **D.5:** deep_research.py v1.3.0 written through `POST /api/v1/tools/id/deep_research/update`
+  (the API path refreshes OWUI's tool cache; valves compared before/after).
