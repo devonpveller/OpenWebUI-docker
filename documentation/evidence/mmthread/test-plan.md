@@ -215,50 +215,95 @@ being bypassed by anything that fails to name itself.
 
 ## T15 — one session, started twice at once
 
-Three notifications from the SAME session id, fired concurrently, must not open
-three threads. **This is no longer a known residual — attempt 9 added a per-session
-`mkdir` lock around the lookup-and-announce, so a failure here is a REGRESSION, not
-a finding.** Attempts 5 and 8 both measured three roots; do not accept a green
-without having seen this go red on the parent.
+Concurrent notifications from the SAME session id must not open more than one
+thread, and must not cost a message to do it. **Not a known residual: a failure
+here is a REGRESSION.**
 
-PREFER THE SHIM, NOT THE REAL CHANNEL. A concurrency case that fails posts three
-roots to the operator's channel, and the whole point is that it might. Copy the
-script into a throwaway root (it derives `ROOT_DIR` from its own location, so it
-will read that root's `.env` and write that root's state), put a fake `curl`
-earlier on `PATH` that records each call's `root_id` and echoes
-`{"id":"<unique>"}` then `201`, and count roots from the log. A call with an EMPTY
-`root_id` is an announce. Remember the trap: a `PATH` entry written `C:/Users/...`
-is silently ignored by Git Bash — it must be `/c/Users/...`, or your shim never
-runs and you will be measuring the real thing.
+**ONE ROUND PROVES NOTHING.** Attempt 9 shipped on a single green round at N=10 and
+a tester found 8 of 14 rounds opening extra roots. Run **at least 12 rounds** at
+each setting and report the per-round numbers, not a summary.
 
-Run it against the PARENT too. A concurrency case that has not been seen to fail
-is not evidence of a lock.
+**PROVE IT RED ON THE PARENT, at the same N and the same round count.** A
+concurrency case that has never been seen to fail is not evidence of a lock; it is
+evidence that your harness is not exercising the code.
 
-PASS: one root, one map line, N replies all under that one root — at 3 concurrent
-AND at 10. The parent must show N roots at the same N.
-FAIL: more than one root on the branch; or the parent also showing one, which
-means your harness is not exercising what you think it is.
+Settings to cover, each over >= 12 rounds (fewer for the slow ones is fine, say how
+many): N=10 with an instant API; N=10 with ~1s per call; N=3 with ~5s per call.
 
-## T18 — the lock cannot become a new way to go silent
+USE A SHIM. Copy the script into a throwaway root (it derives `ROOT_DIR` from its
+own location), put a fake `curl` earlier on `PATH`, and count from its log.
 
-A lock with no expiry is a single point of silence, which is the exact shape of the
-two-month outage this whole item exists to fix. Four cases, all in the shim lab:
+PASS, per round: exactly **one announce**, and **delivered == N**.
+FAIL: more than one announce in any round; any message not delivered that the
+PARENT delivers under the same conditions; or a parent that is not red.
 
-1. **Stale, readable.** `mkdir scripts/.mm-session-threads.lock.<key>` and write an
-   old epoch into its `at`. PASS: the run breaks it, posts, exits 0.
-2. **Stale, unreadable.** Same but create NO `at` file (a holder that died between
-   its `mkdir` and its write). PASS: same.
-3. **Held by something alive.** Take the lock and hold it past the wall-clock
-   budget. PASS: the run gives up waiting and posts ANYWAY — unthreaded is
-   acceptable, silent is not — and still exits 0.
-4. **Different sessions do not queue.** Three DIFFERENT session ids concurrently
-   must still produce three roots. A global lock would pass every case above and
-   fail this one.
+**Classify posts properly or you will measure nothing.** An announce and a flat
+message BOTH have an empty `root_id` - the script deliberately posts flat when it
+cannot take the lock, and counting empty roots as threads reports that correct
+behaviour as a failure. Classify:
+  announce = no `root_id` AND the message begins with the thread marker
+  threaded = has `root_id`
+  flat     = no `root_id`, no marker  -> DELIVERED, just unthreaded
+delivered = threaded + flat. That is the number that must never drop.
 
-PASS: every case exits 0 and sends its message; no lock directory survives the run.
-FAIL: any case where the script exits non-zero, sends nothing, or leaves a lock
-behind — and specifically any case where waiting eats the budget so completely that
-no post is attempted.
+## T18 — the lock cannot become a new way to go silent, and must always return
+
+A lock with no expiry is a single point of silence, which is the shape of the
+two-month outage this item exists to fix; a lock that never returns is worse. Every
+case below runs in the shim lab and asserts FOUR things at once: **exit 0**, **>= 1
+message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
+
+1. **Termination.** Make `mkdir` fail in a way `rm` cannot fix - put a fake `rm`
+   that does nothing earlier on `PATH`, with the lock directory present. Run under
+   `timeout 40` at `MM_DEADLINE_SECS` 10, 15, 20 and 30. **PASS: every one returns.**
+   An earlier version span forever here, forking a process per turn, and did not
+   return in TEN MINUTES at 20 - so `timeout` is mandatory, and a case that "hangs"
+   must be reported as a FAIL rather than waited out. Note the wall time: at 20 and
+   30 this pathological case runs ~16s, past a Stop hook's 15s limit, which is why
+   the plan does not ask you to raise the variable in any other case.
+2. **Stale, readable.** A lock whose `at` holds an old epoch. PASS: broken, run
+   proceeds.
+3. **Stale, unreadable.** No `at` file at all (a holder that died between its
+   `mkdir` and its write). Attempt 9 FAILED this: the lock was never broken and
+   survived three consecutive runs, permanently disabling threading for that key.
+4. **Stale, malformed.** `at` holding garbage, `at` holding a NUL byte, `at` dated
+   in the future, and `at` that is a DIRECTORY. None may wedge the session.
+5. **Held by something alive.** Hold the lock past the whole budget from another
+   process. PASS: the run stops waiting and posts ANYWAY - unthreaded is
+   acceptable, silent is not.
+6. **Different sessions do not queue.** Three DIFFERENT session ids concurrently
+   must still produce three roots. A global lock passes every case above and fails
+   this one.
+
+Run 1-5 at the default `MM_DEADLINE_SECS=10` and again at 5. Below 5 the script's
+own startup consumes most of the budget and it cannot reliably send at all, lock or
+no lock; that is a property of the budget, not of the lock, and is out of scope.
+
+**STDERR IS AN ASSERTION, not a nicety.** Attempt 9 leaked 2180 bytes of bash NUL
+warnings from the lock's `at` read with every case still passing. A `2>/dev/null`
+INSIDE a command substitution silences the command, not the warning bash prints
+about the captured output; the fix is to wrap the assignment. Capture stderr in
+every case above and require 0 bytes.
+
+## A WARNING ABOUT YOUR OWN HARNESS
+
+In the round that produced this plan, the measuring instrument was wrong four
+separate times, and each time it looked like a result about the code:
+
+- **A python forked per call inside the curl shim.** Under 10-way concurrency some
+  failed to start, their calls vanished from the log, and the harness reported the
+  PARENT delivering 3 of 10 - not credible, which is the only reason it was caught.
+  Append the raw payload from the shim and classify ONCE, afterwards. A measuring
+  instrument that is itself racy cannot measure a race.
+- **Counting empty `root_id` as a thread root** - see T15 above.
+- **`grep -c` prints 0 AND exits 1**, so `$(grep -c ... || echo 0)` yields two
+  zeros and every arithmetic test downstream dies.
+- **A variable collision** between a round counter and a newly added counter zeroed
+  the results, printing an empty summary beside "worst=10" - two numbers that
+  cannot both be true.
+
+If a measurement surprises you, suspect the harness first, and say in your report
+how you ruled it out. A number you cannot defend is worse than no number.
 
 ## T17 — the removed allowlist's backup cannot be swept into a commit
 

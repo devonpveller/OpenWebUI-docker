@@ -84,7 +84,12 @@ PROJECT="$(basename "$ROOT_DIR")"
 #    script cannot depend on it being changed.
 sid="${MM_SESSION_ID:-}"
 if [ -z "$sid" ] && [ ! -t 0 ]; then
-  hook_json=$(cat 2>/dev/null)
+  # Same brace-the-assignment fix as the lock's read below: a `2>/dev/null` INSIDE
+  # a command substitution silences the command, but the warning bash itself prints
+  # about a NUL byte in the captured output escapes it and reaches the hook's
+  # stderr. This one is PRE-EXISTING - the parent leaks here too - and is fixed
+  # anyway, because it is one line and the identical defect to the one I added.
+  { hook_json=$(cat 2>/dev/null); } 2>/dev/null
   sid=$(printf '%s' "$hook_json" | python -c 'import json,sys
 try:
     print((json.load(sys.stdin).get("session_id") or ""))
@@ -241,48 +246,94 @@ lock_release() {
 }
 trap 'lock_release' EXIT INT TERM
 
+# HOW LONG TO WAIT, and it is NOT the posting budget. The previous version tied
+# the two together and they pull in opposite directions: raising the reserve so a
+# contended lock could not eat the send budget ALSO meant a run that started
+# slowly gave up without waiting at all - a tester measured 5 to 7 of 10 runs
+# abandoning the lock instantly, and ten concurrent runs opening up to ten roots.
+# Fixing the silence broke the waiting, because one number was doing both jobs.
+#
+# So: the WAIT is bounded by its own try count, and the budget is only a backstop
+# that stops us waiting past being able to send at all.
+LOCK_MAX_TRIES=$(( (MM_DEADLINE_SECS * 3) / 2 ))
+[ "$LOCK_MAX_TRIES" -gt 15 ] && LOCK_MAX_TRIES=15
+[ "$LOCK_MAX_TRIES" -lt 2 ] && LOCK_MAX_TRIES=2
+# THREE turns, about 0.6s. The holder writes `at` in the microseconds after its
+# mkdir, so this is already a margin of roughly a thousand times the window it has
+# to distinguish; the reason it is not larger is that a bigger number needs slack a
+# small budget does not have, and then the expiry never fires at all. Measured: at 5
+# it left a blind lock behind at MM_DEADLINE_SECS=5, at 3 it does not.
+LOCK_BLIND_TRIES=3
+# ...but never at or beyond the loop bound, or the blind expiry is unreachable and
+# an `at`-less lock survives the run forever - which silently disables threading for
+# that session, the failure mode this whole item exists to remove. At the default
+# budget the two are 15 and 5 and this clamp does nothing; at MM_DEADLINE_SECS=3 the
+# bound is 4, and without the clamp a blind lock was measured surviving every run.
+# Two constants that must stay ordered cannot be left to whoever edits one of them.
+[ "$LOCK_BLIND_TRIES" -ge "$LOCK_MAX_TRIES" ] && LOCK_BLIND_TRIES=$(( LOCK_MAX_TRIES - 1 ))
+[ "$LOCK_BLIND_TRIES" -lt 1 ] && LOCK_BLIND_TRIES=1
+
 lock_take() {
   [ -z "$key" ] && return 1
-  local _d="$THREADS.lock.$key" _at _age _blind=0
-  while :; do
+  local _d="$THREADS.lock.$key" _at _age _i=0
+  # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
+  # of writing it this way. The previous version bounded itself with `rm -rf; continue`,
+  # which skipped BOTH the budget check and the sleep - so when mkdir failed for any
+  # reason the rm could not clear, it span forever, forking `date` and `cat` every
+  # turn. Measured: it did not return in TEN MINUTES at MM_DEADLINE_SECS=20. A Stop
+  # hook that never returns is worse than the silence this item exists to end, and a
+  # loop whose termination depends on the filesystem behaving is not bounded at all.
+  # Nothing below uses `continue`; every path falls through to the sleep.
+  while [ "$_i" -lt "$LOCK_MAX_TRIES" ]; do
+    _i=$(( _i + 1 ))
     if mkdir "$_d" 2>/dev/null; then
-      printf '%s' "$(date +%s 2>/dev/null || echo 0)" > "$_d/at" 2>/dev/null
+      # The brace wraps the ASSIGNMENT, not just `cat`. A `2>/dev/null` inside a
+      # command substitution silences the command; the warning bash itself prints
+      # about a NUL byte in the captured output escapes it, and that leak reaches
+      # the hook's stderr.
+      { printf '%s' "$(date +%s 2>/dev/null || echo 0)" > "$_d/at"; } 2>/dev/null
       LOCK="$_d"
       return 0
     fi
-    # BREAK A LOCK WHOSE HOLDER DIED, or this wedges the session permanently -
-    # which is precisely how the allowlist silenced everything for two months. A
-    # lock with no expiry is a new single point of silence, so it gets two age
-    # tests, because it can die in two distinguishable ways:
-    #   readable and old  -> the holder ran past the entire wall-clock budget, so
-    #                        it cannot still be alive;
-    #   unreadable for    -> the holder died between its mkdir and its write. That
-    #   seconds              window is microseconds wide for anything running, so
-    #                        seconds of it means nothing is.
-    _at=$(cat "$_d/at" 2>/dev/null)
+    # WE WANT THE ROOT, NOT THE LOCK. The moment the holder publishes its map
+    # line we have everything we came for, so stop waiting - every turn spent
+    # here is taken from the budget that has to carry the actual message, and
+    # waiting for the holder to RELEASE rather than to PUBLISH is waiting for
+    # something we do not need. Measured over 20 rounds of 10 concurrent runs:
+    # waiting for the release lost 2 messages in 200 where the unlocked parent
+    # lost none, and that is the wrong way to buy one thread per session.
+    root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
+    [ -n "$root" ] && return 1
+
+    { _at=$(cat "$_d/at" 2>/dev/null); } 2>/dev/null
     case "$_at" in
       ''|*[!0-9]*) _age=-1 ;;
       *) _age=$(( $(date +%s 2>/dev/null || echo 0) - _at )) ;;
     esac
-    if [ "$_age" -ge "$MM_DEADLINE_SECS" ]; then rm -rf "$_d" 2>/dev/null; continue; fi
-    if [ "$_age" -lt 0 ]; then
-      _blind=$((_blind + 1))
-      [ "$_blind" -gt 10 ] && { rm -rf "$_d" 2>/dev/null; continue; }
+    # Expire a lock whose holder died, two ways, because it can die two ways:
+    #   readable and older than the whole budget -> cannot be a live run;
+    #   unreadable after LOCK_BLIND_TRIES turns  -> the holder died between its
+    #     mkdir and its write, a window microseconds wide for anything alive.
+    # Both merely REMOVE the directory and fall through; the next turn's mkdir is
+    # what acquires it. One extra sleep is cheaper than a special exit path.
+    if [ "$_age" -ge "$MM_DEADLINE_SECS" ] || { [ "$_age" -lt 0 ] && [ "$_i" -ge "$LOCK_BLIND_TRIES" ]; }; then
+      rm -rf "$_d" 2>/dev/null
     fi
-    # KEEP MOST OF THE BUDGET FOR POSTING. This said "-le 3" and that was wrong in
-    # the direction that matters: a held lock ate 7 of the 10 seconds, and the 3
-    # left had to cover an announce AND a message. Against a real server `post`
-    # skips a call with under 2s, so the run would have waited patiently and then
-    # said NOTHING - rebuilding the exact failure this item exists to fix, inside
-    # the fix for it. Measured in the held-lock case before this line changed.
+    # THE BACKSTOP, not the bound. Only a run that has already lost most of its
+    # budget elsewhere reaches this, and for such a run an unthreaded message
+    # beats a threaded silence.
     #
-    # Waiting longer buys nothing anyway: the winner holds the lock for ONE api
-    # call, so a contended lock frees in about a second or never.
-    _reserve=$(( (MM_DEADLINE_SECS * 2) / 3 ))
-    [ "$_reserve" -lt 2 ] && _reserve=2
-    [ "$(remaining)" -le "$_reserve" ] && return 1
+    # PROPORTIONAL, because a fixed 3 is the entire budget when MM_DEADLINE_SECS is
+    # small: it fired on the first turn, the loop exited before the blind expiry
+    # could ever run, and an `at`-less lock survived every run - measured at
+    # MM_DEADLINE_SECS=3, leftover_lock=YES on five of seven cases.
+    _backstop=$(( MM_DEADLINE_SECS / 2 ))
+    [ "$_backstop" -gt 3 ] && _backstop=3
+    [ "$_backstop" -lt 1 ] && _backstop=1
+    [ "$(remaining)" -le "$_backstop" ] && return 1
     sleep 0.2 2>/dev/null || sleep 1
   done
+  return 1
 }
 
 # The lookup MUST happen inside the lock: a run that loses the race re-reads the
@@ -308,7 +359,20 @@ fi
 # Only a real session gets a thread. A manual one-off invocation with no session id
 # posts flat: giving it an announce root would double every ad-hoc message into a
 # two-post thread nobody will ever reply to, which is the noise this item exists to cut.
-if [ -z "$root" ] && [ -n "$key" ]; then
+# ONLY THE LOCK HOLDER MAY CREATE A ROOT. `-n "$LOCK"` is the whole invariant, and
+# without it the lock leaked its cost back into the failure it prevents: a run that
+# waited and then gave up went on to announce anyway, so under a slow API three
+# concurrent runs still opened three roots AND lost three messages - the announce is
+# a second API call, and the budget spent waiting is gone from the one that carries
+# the actual message. Measured at 5s per call: 2 of 3 rounds split the thread and 3
+# messages were dropped; the unlocked parent dropped none, which made the lock worse
+# than nothing exactly where it mattered.
+#
+# A run that could not take the lock therefore posts FLAT. That is the honest
+# degradation: one message, unthreaded, in the channel. Never a competing root, and
+# never a dropped message - an unthreaded message beats no message, and this file
+# says so in three other places.
+if [ -z "$root" ] && [ -n "$key" ] && [ -n "$LOCK" ]; then
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — started $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
   if [ -n "$root" ] && [ -n "$key" ]; then
@@ -345,7 +409,12 @@ if [ -z "$out" ] && [ -n "$root" ]; then
   # a different hat.
   lock_take || :
   root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
-  if [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
+  # Same invariant as step 4: without the lock we do not open a thread. A recovery
+  # that cannot take it retries the message flat rather than racing a second root.
+  if [ -z "$LOCK" ]; then
+    root=""
+    post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
+  elif [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
     # Another run already recovered this session while we waited. Use its root
     # rather than opening a third thread.
     lock_release

@@ -36,9 +36,13 @@ returned 200. Three separate things were:
    00:07:41, in `#claude-code`.
 
 2. **Nothing mentioned the operator.** Nothing bolded the channel, so nothing
-   pushed. `mention_count` comes from
-   `GET /api/v4/users/me/teams/{team}/channels/members` — which `bot-claude`
-   cannot read for the operator (403), so treat the 0 as CORROBORATED, NOT READ:
+   pushed. `mention_count` for another user comes from
+   `GET /api/v4/channels/{channel_id}/members/{user_id}`, which `bot-claude`
+   cannot read for the operator (403). **An earlier draft of this line cited
+   `GET /api/v4/users/me/teams/{team}/channels/members` instead, which returns
+   200** — it is the caller's OWN membership rows, not the operator's, so it could
+   never have carried the figure and the 403 it blamed was never there. Caught by
+   a tester actually issuing both calls. Treat the 0 as CORROBORATED, NOT READ:
    what is directly checkable is that none of the 241 posts then in `#claude-code`
    contained a mention token at all, which is the same conclusion by a route that
    does not need the operator's own membership row. (`last_viewed_at` read NEVER
@@ -66,21 +70,48 @@ returned 200. Three separate things were:
   per session precisely so they do. Two conflicts that touch the same file are not
   therefore the same conflict.
 
-  The lock is also a new way to go silent, so it expires two ways: a readable
-  timestamp older than the whole wall-clock budget cannot belong to a live run, and
-  an unreadable one persisting for seconds means the holder died between its
-  `mkdir` and its write. Failing to take it is never fatal — the run proceeds
-  unlocked, which is exactly the behaviour it replaces.
+  **THE LOCK TOOK FOUR GOES, AND EVERY FAILURE WAS THE SAME MISTAKE: BUYING THE
+  THREAD WITH THE MESSAGE.** Each version was a correct synchronisation primitive
+  and a worse notifier, which is why "the lock works" was never the question.
 
-  **And the first version of the lock rebuilt the outage inside the fix for it.**
-  It waited until 3 seconds of the 10-second budget remained, which left one
-  announce and one message to share 3 seconds; `post` skips a call with under 2
-  seconds left, so a contended lock would have waited politely and then said
-  NOTHING. Measured, then fixed by reserving two thirds of the budget for posting —
-  waiting longer bought nothing anyway, since the winner holds the lock for a
-  single API call. A correct synchronisation primitive is not the same thing as a
-  correct message, and the case that caught it was the one that asked what happens
-  when the lock is held by something still alive.
+  1. *Gave up at 3s of the 10s budget left.* An announce and a message then had to
+     share 3 seconds, and `post` skips a call with under 2 — so a contended lock
+     waited politely and said NOTHING.
+  2. *So the reserve went up to two thirds.* Now runs that started slowly arrived
+     with less than the reserve and gave up INSTANTLY: a tester measured 5 to 7 of
+     10 runs abandoning the lock without waiting, and ten concurrent runs opening
+     up to ten roots. One number was doing two jobs, and raising it for one broke
+     the other. The wait is now bounded by its own try count, and the budget is
+     only a backstop.
+  3. *A run that gave up still announced.* So under a slow API three concurrent
+     runs opened three roots AND dropped three messages, because the announce is a
+     second API call. Now **only the lock holder may create a root** — a run
+     without it posts FLAT. One message, unthreaded, never a competing root and
+     never a dropped one.
+  4. *Losers waited for the lock to be RELEASED.* But a loser does not want the
+     lock, it wants the ROOT. Waiting for the wrong event cost 2 messages in 200
+     across 20 rounds of 10 concurrent runs, where the unlocked parent lost none.
+     The wait now ends the moment the winner's map line appears.
+
+  Measured at the end, 20 rounds of 10 concurrent runs each: **parent — 10 roots
+  every round, 20 of 20; this version — 1 root every round, 0 of 20, and 200 of
+  200 messages delivered.** Also 1 root at 10-way concurrency with a 1s-per-call
+  API, and three DIFFERENT sessions still open three threads.
+
+  **Termination is a property of the code, not of the filesystem.** An earlier
+  version bounded itself with `rm -rf; continue`, which skipped both the budget
+  check and the sleep: when `mkdir` failed for anything the `rm` could not fix, it
+  span forever forking `date` and `cat`, and did not return in TEN MINUTES at
+  `MM_DEADLINE_SECS=20`. A Stop hook that never returns is worse than the silence
+  this item exists to end. The loop is now bounded by an unconditional try count
+  and nothing in it uses `continue`.
+
+  The lock expires two ways so a dead holder cannot wedge a session: a readable
+  timestamp older than the whole budget, or an unreadable one after three turns.
+  Both bounds are clamped to stay reachable inside the loop bound — at
+  `MM_DEADLINE_SECS=3` the loop is 4 turns long, and an expiry set at 5 could never
+  fire, which left a blind lock surviving every run and silently disabled threading
+  for that session.
 - **A whitespace-only allowlist silences everything** — `-s` sees a non-empty
   file and every entry normalises away. An empty-but-present file is now the
   operator's foot-gun rather than the notifier's.
@@ -169,13 +200,54 @@ A runtime-state path is never one file for long — it acquires a backup, a lock
 `.tmp`, a `.bak` — so an ignore rule pinned to the exact name is a rule that will
 be wrong later, quietly, at whatever moment someone runs `git add -A`.
 
-## A pre-existing stderr leak, reported by a tester and left alone
+## What the lock still does not do, measured
 
-At `scripts/notify-mattermost.sh`, the `2>/dev/null` on the stdin read guards
-`cat`, not the command substitution around it, so a literal NUL byte arriving on
-stdin leaks one bash warning to stderr. Exit is still 0 and the message is still
-sent. The parent does the identical thing, and neither real hook can deliver a NUL
-— it is recorded because it was found, not because it needs fixing.
+- **A ~5s-per-call API still loses about one message in twelve** at 3 concurrent
+  runs. Two calls do not fit a 10s budget at that latency, with or without a lock;
+  the parent survives it only because every run announces its own root and never
+  waits. This is the budget, not the lock, and the honest summary is that
+  `MM_DEADLINE_SECS` must exceed twice the API's worst call time or some runs
+  cannot both announce and speak. Nothing here degrades toward silence by design —
+  it degrades toward an unthreaded message — but a budget too small for one call
+  is silence whatever the design.
+- **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
+  case (a lock directory `rm` cannot clear) returns in 8s at the default 10, but
+  16s at 20 or 30 — past the Stop hook's 15s. The default is safe; raising this
+  variable above the hook limit is not, and nothing in the script can detect that.
+
+## A pre-existing stderr leak, now fixed anyway
+
+The `2>/dev/null` inside a command substitution silences the COMMAND; the warning
+bash itself prints about a NUL byte in the captured output escapes it and reaches
+the hook's stderr. A tester measured 2180 bytes from the lock's `at` read — which
+this item introduced — and 217 bytes from the stdin read, which is pre-existing and
+which an earlier version of this note excused on exactly that ground. Both are now
+wrapped as `{ var=$(...); } 2>/dev/null`, because it is one line and the same
+defect, and "the parent does it too" is a reason to check whether the parent is
+right, not a reason to keep it. Measured after: 0 bytes on a NUL stdin.
+
+## A trap for whoever tests this, part two: the harness
+
+Every wrong answer in this round came from the measuring instrument, not the code,
+and each looked like a result:
+
+- **A python forked per call, inside the curl shim.** Under 10-way concurrency some
+  failed to start, those calls vanished from the log, and the harness reported the
+  PARENT delivering 3 of 10 — not credible, which is the only reason it was caught.
+  The shim now appends the raw payload and nothing else; classification happens once,
+  afterwards. A measuring instrument that is itself racy cannot measure a race.
+- **A flat post and an announce both have an empty `root_id`.** Counting empty
+  roots as threads reported the fix's own correct behaviour as a failure. Classify
+  by what the post IS, not by one field being empty.
+- **`grep -c` prints 0 AND exits 1**, so `$(grep -c ... || echo 0)` yields "0\n0"
+  and every arithmetic test downstream dies.
+- **A variable collision** between the round counter and a newly added corrupt-line
+  counter silently zeroed the results, printing an empty summary next to
+  "worst=10" — two numbers that cannot both be true, which is what gave it away.
+
+If a measurement here surprises you, suspect the harness first. It was wrong four
+times in one round; the script was wrong four times too, and telling those apart is
+most of the work.
 
 ## A trap for whoever tests this
 
