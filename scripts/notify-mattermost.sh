@@ -133,6 +133,13 @@ key=$(normkey "$sid")
 #    traffic would have gone to ZERO.
 #
 #    Matching on the prefix makes a full-uuid entry and a short-form id agree.
+# AN EMPTY KEY MUST NOT BYPASS THE GATE. `[ -n "$key" ]` meant a session id that
+# normalises to nothing - `-----`, or anything with no alphanumerics - skipped the
+# allowlist entirely and posted. Found in test, attempt 5. If a list exists and we
+# cannot identify ourselves, we are not on it.
+if [ -s "$ALLOW" ] && [ -z "$key" ]; then
+  exit 0
+fi
 if [ -s "$ALLOW" ] && [ -n "$key" ]; then
   _hit=""
   while IFS= read -r _entry || [ -n "$_entry" ]; do

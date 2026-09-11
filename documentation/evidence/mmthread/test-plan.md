@@ -45,9 +45,13 @@ FAIL: any message is a top-level post, or the two sessions share a root.
 
 ## T2 — it is genuinely RED on the current code
 
-The point of the item is that today every message is top-level. Check out the
-parent commit's version of the script, run T1's three commands against it, and
-show that all three posts have no `root_id`.
+The point of the item is that today every message is top-level.
+
+**The parent hardcodes `#claude-code` and the agent-org bot**, so running it
+verbatim violates T4 and T11. Retarget its `CHANNEL` and token to
+`#claude-sessions` and `CLAUDE_MM_BOT_TOKEN` in a SCRATCH COPY, say in your
+report that you did, and delete the posts like any other. Two attempts reported
+this as a plan defect before it was written down.
 
 PASS: parent produces three roots and zero replies; the branch produces two roots
 and three replies.
@@ -99,7 +103,9 @@ caller:
   closed port)
 - a session id that is not in the map and an unwritable state file
 - garbage on stdin instead of hook JSON
-- no arguments at all
+- no arguments at all — note this one forces the DEFAULT message, which cannot
+  carry the label this plan otherwise mandates. Send it, then delete it like the
+  rest; do not skip the case to keep the labelling rule intact.
 
 PASS: exit 0 in every case, and the whole run finishes inside
 `MM_DEADLINE_SECS` (default 10) plus a second or so of process overhead —
@@ -191,6 +197,20 @@ FAIL: the allowed session is silenced — that is the outage.
 Attempt 2 proved a body containing `session <8 hex>` steers the post into that
 session's thread. Check the hook's own prefix still wins when both are present,
 and say plainly in your report how bad the hijack is.
+
+## T15 — one session, started twice at once
+
+Three notifications from the SAME session id, fired concurrently, must not open
+three threads. The map race is fixed (append-only, last-wins) but the announce is
+not synchronised, and attempt 5 measured three roots.
+
+```bash
+for i in 1 2 3; do ( echo '{"session_id":"race0001-0000-0000-0000-000000000000"}'   | bash scripts/notify-mattermost.sh "TEST (mmthread tester, ignore) $i" ) & done; wait
+```
+
+PASS: one root, one map line, three replies.
+FAIL: more than one root — report it as a finding with the count; this is a known
+residual and the plan records it so a future fix has a case waiting.
 
 ## Out of scope for this plan
 
