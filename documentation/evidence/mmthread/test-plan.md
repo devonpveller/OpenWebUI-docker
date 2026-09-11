@@ -101,8 +101,16 @@ caller:
 - garbage on stdin instead of hook JSON
 - no arguments at all
 
-PASS: exit 0 in every case.
-FAIL: any non-zero exit, or a hang longer than the 8s curl bound.
+PASS: exit 0 in every case, and the whole run finishes inside
+`MM_DEADLINE_SECS` (default 10) plus a second or so of process overhead —
+measured 10.2–11.4s against a black hole in attempt 2. The number that matters is
+the HOOK timeout: 15s on Stop and 20s on Notification in the operator's
+`.claude/settings.local.json`. **This case used to say "the 8s curl bound", which
+was the pre-threading figure and was never updated when threading made it up to
+four calls.** Check the budget is honoured, not a fixed 8s: set
+`MM_DEADLINE_SECS=3` and confirm later calls are SKIPPED rather than started.
+FAIL: any non-zero exit, any stderr reaching the caller, or a run that could
+exceed 15s.
 
 ## T8 — the allowlist still works
 
@@ -116,10 +124,12 @@ session on the machine.
 
 ## T9 — the watchdog is untouched
 
-PASS: `git diff` shows no change to `scripts/checks/stack-watchdog.ps1`, and
-`scripts/checks/verify-crashloop-detection.ps1` still runs green (its own floor is
-in the `crashloop` plan; just confirm this item did not move it).
-FAIL: either changed by this item.
+PASS: `git diff` shows no change to anything under `scripts/checks/`.
+**That is the whole case.** It used to also ask you to run
+`verify-crashloop-detection.ps1`, which does not exist on this line — it lives on
+the unmerged `crashloop` branch, so the instruction was unexecutable and two
+attempts reported it as a plan defect.
+FAIL: anything under `scripts/checks/` changed by this item.
 
 ## T10 — claims in the commit message and the findings note
 
@@ -136,6 +146,51 @@ any universal ("every", "always", "all N") you can find a counterexample to.
 PASS: `git status` is clean in your worktree; the main checkout shows only its
 pre-existing entries; the channel contains none of your posts; the
 `#claude-code` channel is unchanged.
+
+## T12 — one session, ONE thread, whichever hook posted
+
+The Stop hook supplies a 36-char uuid on stdin; the Notification hook supplies
+only the 8 hex characters it printed into the message text. Attempt 2 drove both
+for one session and got TWO threads, both announcing the same short id.
+
+Drive both shapes for the same session:
+
+```bash
+UUID="beef0011-26f9-44c5-b923-ba0597393188"
+bash scripts/notify-mattermost.sh "🔔 Claude Code (ai-stack) session beef0011 - TEST …" < /dev/null
+echo "{\"session_id\":\"$UUID\"}" | bash scripts/notify-mattermost.sh "TEST …"
+```
+
+PASS: the map holds ONE line, and both posts are replies under one root.
+FAIL: two roots, or two map entries.
+
+## T13 — the allowlist must not silence the messages this item exists to deliver
+
+**The case that nearly shipped an outage.** `scripts/.mm-notify-sessions` gates
+pings. The gate only fires when a session id is KNOWN — so before this item, the
+Notification hook's permission requests skipped it entirely and posted. Making
+the id recoverable from the text subjects them to the gate for the first time,
+and an allowlist entry is a 36-char uuid which can never equal an 8-hex id.
+Attempt 2 measured the consequence on the operator's real machine: IDE traffic to
+zero.
+
+Use a PRODUCTION-SHAPED allowlist — a full 36-char uuid, which is what the real
+file contains:
+
+```bash
+printf '%s
+' "beef0011-26f9-44c5-b923-ba0597393188" > scripts/.mm-notify-sessions
+```
+
+PASS: a Notification-shaped call for that session POSTS; a Stop-shaped call for
+it POSTS; a call for a session NOT in the file posts nothing and exits 0.
+FAIL: the allowed session is silenced — that is the outage.
+
+## T14 — a message cannot hijack another session's thread
+
+Attempt 2 proved a body containing `session <8 hex>` steers the post into that
+session's thread. Check the hook's own prefix still wins when both are present,
+and say plainly in your report how bad the hijack is.
 
 ## Out of scope for this plan
 

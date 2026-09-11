@@ -96,6 +96,42 @@ it looks like an answer.
 It is out of scope here and it is the strongest argument for doing the inbound
 half deliberately rather than letting the channel choice imply it.
 
+## THE REAL REASON THE OPERATOR HEARD NOTHING — and it predates this item
+
+`scripts/.mm-notify-sessions` in the main checkout is 37 bytes holding ONE
+session uuid, `f233ba99-…`, mtime **2026-07-04 13:18**. The gate at the top of
+the notifier is: if that file is non-empty AND we know the session id, the
+session must be listed or we exit silently.
+
+So every Claude Code session since 4 July has been suppressed. Measured: across
+the last 200 posts in `#claude-code` there are **zero** "finished a turn"
+messages. The only IDE traffic still arriving is the permission notifications —
+28 of the last 40 — and they arrive *because* they carried no session id and
+therefore skipped the gate entirely.
+
+The operator's report was "no Mattermost messages in nearly a week". For
+turn-completion pings it has been **over two months**, and the cause is a stale
+allowlist, not this item and not the sender.
+
+**AND THIS ITEM NEARLY CLOSED THE LAST GAP.** Recovering the session id from the
+message text made the permission notifications subject to the gate for the first
+time; an allowlist entry is a 36-char uuid, the recovered id is 8 hex characters,
+and they can never be equal. Attempt 2 measured it on the real machine: IDE
+traffic to zero. The gate now compares on the same 8-hex prefix, so a full-uuid
+entry and a short-form id agree.
+
+**The allowlist file itself is the operator's and is left alone.** Deleting it
+would restore turn pings for every session on the machine, which is a choice
+about interruption, not a bug fix. It is flagged here so the decision is theirs.
+
+## The id has two forms, and keying on the raw one splits a session in half
+
+The Stop hook supplies a 36-char uuid on stdin; the Notification hook supplies
+only the 8 hex characters it formatted into the text. Keyed as-is, one session
+opened TWO threads — both announcing the same short id — which breaks the
+anchor's first criterion. The canonical key is the 8-hex prefix, because it is
+the one form every path can produce.
+
 ## A trap for whoever tests this
 
 There is no staging Mattermost. Tests post to the operator's real channel. Label

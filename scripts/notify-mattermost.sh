@@ -95,12 +95,32 @@ if [ -z "$sid" ] && [ -n "$1" ]; then
   sid=$(printf '%s' "$1" | grep -oiE 'session [0-9a-f]{8}' | head -1 | awk '{print $2}')
 fi
 
+# 1b) ONE CANONICAL KEY. The Stop hook gives a 36-char uuid on stdin; the
+#     Notification hook gives only the 8 hex characters it printed into the text.
+#     Keyed as-is, ONE session opens TWO threads - both announcing the same short
+#     id - which breaks the anchor's first criterion. Found in test, attempt 2.
+#     The 8-hex prefix is the one form every path can produce, so it is the key.
+key=$(printf '%s' "$sid" | tr 'A-Z' 'a-z' | tr -cd '0-9a-f' | cut -c1-8)
+
 # 2) Session allowlist: when it exists and is non-empty, only registered sessions ping.
-if [ -s "$ALLOW" ] && [ -n "$sid" ]; then
-  grep -qxF "$sid" "$ALLOW" 2>/dev/null || exit 0
+#    COMPARED ON THE SAME PREFIX, for a reason that nearly shipped as an outage.
+#    The gate only fires when a session id is KNOWN. The Notification hook used to
+#    supply none, so its messages - the permission requests, the ones the operator
+#    must answer - skipped the gate entirely. Recovering the id from the text made
+#    them subject to it for the first time, and an allowlist holding a 36-char uuid
+#    can never equal an 8-hex id, so every one of them would have been silently
+#    dropped. Measured on the operator's real machine in test, attempt 2: IDE
+#    traffic would have gone to ZERO.
+#
+#    Matching on the prefix makes a full-uuid entry and a short-form id agree.
+if [ -s "$ALLOW" ] && [ -n "$key" ]; then
+  awk -v k="$key" '
+    { line = tolower($0); gsub(/[^0-9a-f]/, "", line)
+      if (substr(line, 1, 8) == k) { found = 1; exit } }
+    END { exit(found ? 0 : 1) }' "$ALLOW" 2>/dev/null || exit 0
 fi
 
-short="${sid:0:8}"
+short="${key:-${sid:0:8}}"
 MSG="${1:-🤖 Claude Code finished a turn in ${PROJECT}${short:+ · session \`$short\`} — your move.}"
 
 # bot-claude first, so IDE sessions and bridge sessions share one identity in one channel.
@@ -153,11 +173,9 @@ else:
 
 # 3) Find this session's thread root, if it has one.
 root=""
-if [ -n "$sid" ] && [ -f "$THREADS" ]; then
-  # -x: the whole LINE must match the pattern built from this session id, so
-  # `xtestsess-1` cannot answer for `testsess-1`. Harmless with fixed-length
-  # UUIDs today; free to close.
-  root=$(awk -v s="$sid" '$1 == s {print $2; exit}' "$THREADS" 2>/dev/null)
+if [ -n "$key" ] && [ -f "$THREADS" ]; then
+  # Field-exact, not a substring: `xbeef0011` cannot answer for `beef0011`.
+  root=$(awk -v s="$key" '$1 == s {print $2; exit}' "$THREADS" 2>/dev/null)
 fi
 
 # 4) No root yet → announce the session and remember the post we can reply under.
@@ -166,11 +184,11 @@ fi
 # Only a real session gets a thread. A manual one-off invocation with no session id
 # posts flat: giving it an announce root would double every ad-hoc message into a
 # two-post thread nobody will ever reply to, which is the noise this item exists to cut.
-if [ -z "$root" ] && [ -n "$sid" ]; then
+if [ -z "$root" ] && [ -n "$key" ]; then
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — started $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
-  if [ -n "$root" ] && [ -n "$sid" ]; then
-    { printf '%s %s\n' "$sid" "$root" >> "$THREADS"; } 2>/dev/null
+  if [ -n "$root" ] && [ -n "$key" ]; then
+    { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
   fi
 fi
 
@@ -182,18 +200,18 @@ out=$(post "${MENTION:+$MENTION }$MSG" "$root")
 #    into silence for the rest of its life. Drop the stale mapping and retry as a new thread,
 #    once. Anything still failing after that is Mattermost's problem, not this turn's.
 if [ -z "$out" ] && [ -n "$root" ]; then
-  if [ -n "$sid" ] && [ -f "$THREADS" ]; then
+  if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
     # survives - so the append below produced a DUPLICATE and the dead root was
     # still found first. Found in test, attempt 1.
-    awk -v s="$sid" '$1 != s' "$THREADS" > "$THREADS.tmp" 2>/dev/null
+    awk -v s="$key" '$1 != s' "$THREADS" > "$THREADS.tmp" 2>/dev/null
     mv "$THREADS.tmp" "$THREADS" 2>/dev/null
   fi
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
-  if [ -n "$root" ] && [ -n "$sid" ]; then
-    { printf '%s %s\n' "$sid" "$root" >> "$THREADS"; } 2>/dev/null
+  if [ -n "$root" ] && [ -n "$key" ]; then
+    { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
   fi
   post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
 fi
