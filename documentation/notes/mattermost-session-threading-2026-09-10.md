@@ -2,6 +2,13 @@
 
 Sink for the `mmthread` item.
 
+**A BARE NUMBER DOES NOT SHIP FROM THIS NOTE.** Every figure must name the
+command or file it came from, so a reader can re-run it. That rule exists because
+the claims here that carried citations all re-derived exactly, and the ones that
+failed carried none — twice a figure was lifted from a tester's report and
+restated as this note's own measurement. If a number cannot be cited, state the
+property instead and say how to measure it.
+
 **This note carries no history of its own attempts.** It used to, and that is why
 its claims failed five test rounds running: a figure was found wrong, the
 correction went into a commit message, and the wrong line stayed here. A running
@@ -50,26 +57,43 @@ returned 200. Three separate things were:
   operator's foot-gun rather than the notifier's.
 - **`MM_OPERATOR_MENTION=` cannot disable the mention**; `${VAR:-default}` treats
   empty as unset. To suppress it the variable must be set to something harmless.
-- **The thread map is never pruned.** It grows for the life of the machine.
-  Measured harmless: 200k lines costs ~2.8s, and because the deadline is
+- **The thread map is never pruned.** It grows for the life of the machine. The
+  cost is a linear `awk` scan per notification, and because the deadline is
   wall-clock from script start, file work eats the HTTP budget rather than adding
-  to it.
-- **Three python invocations per post.** If `python` leaves `PATH`, the script
-  exits 0 having sent nothing. Pre-existing, widened by this item from one to
-  three.
+  to it — so a large map cannot push the hook past its timeout, it can only
+  shorten the time left to post. No figure here: two independent measurements of
+  the scan disagreed, and neither is worth carrying. Measure it if you need it:
+  `seq 200000 | awk '{print "k"$1" r"$1}' > map && time awk -v s=k1 '$1==s{v=$2}
+  END{print v}' map`.
+- **The script cannot work without `python` on `PATH`**, and if it is missing the
+  script exits 0 having sent nothing. Pre-existing; this item added further
+  invocations. Again no count: a shim-based count taken here and one taken by a
+  tester disagreed, and the number is not what matters — the dependency is.
 - **A message body containing `session <8 hex>` steers the post into that
   session's thread.** Where the Notification hook supplies its own prefix, the
   prefix wins.
 - **IPv6-style ids, ids under 8 characters, and ids with no alphanumerics** all
   normalise to something usable or, in the last case, to nothing — and an
   unidentifiable session is treated as not-on-the-list when a list exists.
+- **An allowlist path that is a DIRECTORY fails open.** `[ -s "$ALLOW" ]` is
+  false for a directory, so the gate is skipped and an unlisted session posts.
+  Pre-existing — the same test passes against the parent — but worth knowing
+  before someone `mkdir`s that path.
+- **Allowlist entries match on the same 8-character key as everything else**, so
+  a DIFFERENT uuid sharing its first eight hex characters both passes the gate
+  and joins the listed session's thread. Verified with
+  `beef0011-ffff-…` against a list naming `beef0011-26f9-…`. The odds are
+  negligible for real uuids and the consequence is bounded, but it is the
+  allowlist half of the short-key trade and the note previously documented only
+  the message-text half.
 
 ## The inbound half does not exist, and the channel choice has a consequence
 
 The operator can now reply in a thread, but the IDE session cannot read the
 reply. Worse, in `#claude-sessions` a reply is consumed by the **bridge**, which
 starts a new headless session under it — observed when the operator replied to a
-test post and session `9fae8f75` appeared (`state/audit.jsonl:5533`). So a reply
+test post and session `9fae8f75` appeared
+(`scripts/claude-sessions-bridge/state/audit.jsonl:5533`). So a reply
 looks answered and is answered by something else. Threading makes replying
 possible; it does not make it effective.
 

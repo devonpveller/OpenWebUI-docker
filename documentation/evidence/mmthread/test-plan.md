@@ -198,6 +198,21 @@ Attempt 2 proved a body containing `session <8 hex>` steers the post into that
 session's thread. Check the hook's own prefix still wins when both are present,
 and say plainly in your report how bad the hijack is.
 
+## T16 — an unidentifiable session is not on the list
+
+The defect attempt 5 fixed, which attempt 6 had to write its own case for because
+the plan gained a case for a known RESIDUAL and none for the change that round
+actually made. **A plan revised for an attempt must cover that attempt's change.**
+
+With a one-line allowlist naming some other session, drive an id that normalises
+to nothing — `-----`, `::::`, and the same via `MM_SESSION_ID` — plus a call with
+no id at all.
+
+PASS: all silent, exit 0, channel unchanged. Then remove the allowlist and drive
+`-----` again: it POSTS, because with no list there is nothing to be absent from.
+FAIL: an unidentifiable session posts while a list exists — that is the gate
+being bypassed by anything that fails to name itself.
+
 ## T15 — one session, started twice at once
 
 Three notifications from the SAME session id, fired concurrently, must not open
