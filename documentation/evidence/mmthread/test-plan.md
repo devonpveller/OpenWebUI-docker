@@ -113,10 +113,30 @@ measured 10.2–11.4s against a black hole in attempt 2. The number that matters
 the HOOK timeout: 15s on Stop and 20s on Notification in the operator's
 `.claude/settings.local.json`. **This case used to say "the 8s curl bound", which
 was the pre-threading figure and was never updated when threading made it up to
-four calls.** Check the budget is honoured, not a fixed 8s: set
-`MM_DEADLINE_SECS=3` and confirm later calls are SKIPPED rather than started.
-FAIL: any non-zero exit, any stderr reaching the caller, or a run that could
-exceed 15s.
+four calls.**
+
+**AND THEN THIS CASE WENT STALE IN THE OPPOSITE DIRECTION.** It went on to say
+"check the budget is honoured, not a fixed 8s: set `MM_DEADLINE_SECS=3` and
+confirm later calls are SKIPPED rather than started" - and attempt 14
+deliberately made the FIRST send ignore the budget, because rationing it is what
+was losing messages. A tester ran the case as written and correctly failed the
+code for doing the thing the same round had been revised to do. **A plan revised
+for a change must be revised for the change**, and this one was edited in the
+round that made the contradiction.
+
+What to check now:
+- the FIRST send always goes out, with `-m` at least the floor (8), even at
+  `MM_DEADLINE_SECS=3`. A budget too small to send is not a reason not to send;
+  the pre-item sender has no budget at all and always uses `-m 8`.
+- LATER calls - the recovery retry - draw on what is left and ARE skipped when
+  there is nothing left. Verify by instrumenting `-m` per call, not by timing:
+  at `MM_DEADLINE_SECS=20` a dead-root retry shows `-m 19` then `-m 16`; at 3 the
+  retry does not happen at all.
+- the budget is clamped at BOTH ends (1 and 60) and a non-integer falls back to
+  the default, all with zero stderr.
+
+FAIL: any non-zero exit, any stderr reaching the caller, a first send that does
+not happen, a later call that is floored, or a run that could exceed 15s.
 
 ## T8 — the allowlist still works
 

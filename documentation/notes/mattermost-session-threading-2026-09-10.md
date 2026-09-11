@@ -135,17 +135,24 @@ returned 200. Three separate things were:
   invocations. Counted with a PATH shim, and the figure depends on whether stdin
   is redirected — the deciding line is `[ -z "$sid" ] && [ ! -t 0 ]` at
   `scripts/notify-mattermost.sh`, the `[ -z "$sid" ] && [ ! -t 0 ]` test:
-  **THE COUNTS THAT STOOD HERE WERE INVALIDATED BY THIS ITEM'S OWN CHANGE, and
-  the line stayed anyway.** They read "3 steady, 5 on a first notification; 2 and
-  4 without stdin", measured before the startup path was made fork-free. A tester
-  re-ran them with a PATH counter and measured **2 in all four cases** - the
-  python interpreter is now launched only when the bash regex fails to find the
-  session id, which none of the real shapes do. The parent's 2 still reproduces.
+  **NO COUNT SHIPS FROM THIS LINE, and the reason is the history of trying.** It
+  has carried three different figures. The first ("3 steady, 5 on a first
+  notification; 2 and 4 without stdin") was invalidated by this item's own change
+  when startup was made fork-free, and the line stayed. The replacement ("2 in all
+  four cases") was measured by a tester as 3 on the no-stdin shapes, and by me as
+  1, 2, 1, 1 on a third run. Three attempts, three answers, on a figure nobody
+  needs.
 
-  This is the failure the preamble at the top of this note exists to prevent,
-  committed in the round that edited the very code the figure describes: when you
-  change a thing, the numbers ABOUT that thing are stale until re-measured, and
-  nobody reads a findings note looking for figures their own commit broke.
+  The PROPERTY is stable and is what matters: python is forked for JSON work on
+  the posting path, and once more at startup only when the bash regex fails to
+  find a session id. Count it yourself if you need a number -- put a wrapper
+  earlier on `PATH` that appends a line to a file and then `exec`s the real
+  interpreter, and run the shape you care about.
+
+  The lesson underneath is the one the preamble already states, in its sharpest
+  form: when you change a thing, the numbers ABOUT that thing are stale until
+  re-measured, and a figure that three careful measurements disagree about should
+  be replaced by the method, not by a fourth number.
 - **A message body containing `session <8 hex>` steers the post into that
   session's thread.** Where the Notification hook supplies its own prefix, the
   prefix wins.
@@ -324,14 +331,20 @@ on.
   two successive rounds measured 0 to 2 of 6. An earlier draft of this note claimed the parent
   "survives it" and that the loss here was about one in twelve. Both were wrong,
   and in the flattering direction.
-- **THE WORST CASE STRADDLES THE STOP HOOK'S 15 SECONDS and is not fixed.**
-  With a lock held by a live process and an API that never answers, measured 13s
-  and 16s on two runs at the default budget. The three terms are startup (~3s),
-  the lock wait (2s) and the floor the first send is guaranteed (8s), and the
-  floor is not negotiable - removing it is what lost messages. The pre-item sender
-  has only the last term. Trimming the wait from 3s to 2s bought a second and did
-  not settle it. A hook killed at 15s has usually already sent, because the send
-  starts at about 5s; what is lost is the recovery retry.
+- **THE WORST CASE WAS 13-16.5s AND IS NOW ABOUT 5s, because the cause was a
+  BUG rather than the design.** `POST_FLOOR` was applied by a flag set inside
+  `post`, which every reading caller invokes as `$(post ...)` - a subshell - so
+  the flag never arrived and EVERY call was floored at 8 seconds. A dead-root
+  retry therefore cost a second 8 seconds. A tester instrumented it and measured
+  `curl -m 8` twice where the comment beside it promised "later calls still draw
+  on what is left".
+  The floor is a PARAMETER now, passed by the caller that knows whether this is
+  the first send, which puts the decision where the knowledge is and leaves
+  nowhere to keep a flag that cannot survive. Measured after, live-held lock and
+  an API that never answers, four passes at the default budget: 5s, 5s, 5s, 5s.
+  **That is the third time this subshell trap has been hit in this file**, twice
+  after it was written up in a comment a few dozen lines away. Reading about a
+  trap is not the same as being unable to fall into it; only the parameter is.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
   case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
   **and that scaling is NOT the lock's doing.** A tester ran the same black-hole
@@ -372,6 +385,21 @@ Resolving to be careful did not work the first time. The mechanical rule is: any
 behaviour check goes through the shim lab - a copied script root, a fake `curl`
 first on `PATH` - and the live script is never invoked to observe anything,
 including something as small as how many bytes it writes to stderr.
+
+## Test harnesses here leave runaway processes, and they poison the next reading
+
+An attempt-14 tester found **five orphaned `spin` processes from an earlier
+round's shim lab still running hours later, roughly 2,600 CPU-seconds each**.
+They were mine. Every timing taken while they ran is inflated by about 3.7x - the
+lock loop read 13.7-16.7s alive and 4.0-4.3s after they were killed - which means
+a worst-case figure published from this item was measuring its own leftovers.
+
+Two things follow. Kill what you start, with a trap rather than a last line,
+because the case that leaks is exactly the case where the script does not reach
+its last line - the same argument `scripts/agent-harness/reap.ps1` is built on.
+And before trusting any timing here, check what else is running: a figure taken
+on a machine somebody else's test is still burning is not a figure about this
+code.
 
 ## A trap for whoever tests this, part two: the harness
 

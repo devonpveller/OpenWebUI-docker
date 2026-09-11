@@ -69,11 +69,21 @@ case "$MM_DEADLINE_SECS" in
   # ALL DIGITS IS NOT ENOUGH. A tester passed 9223372036854775808 - every
   # character a digit - and bash's arithmetic overflowed, leaking 423 bytes of
   # "integer expression expected" to the hook's stderr from two separate lines.
-  # The digit test closed the "10s" case and not this one; length closes both,
-  # since no sane budget has five digits.
-  ????????*) MM_DEADLINE_SECS=10 ;;
+  # The digit test closed the "10s" case and not this one.
+  #
+  # The guard that replaced it said "no sane budget has five digits" and was an
+  # EIGHT-character test, so 99999 sailed through and produced `curl -m 99998` -
+  # a comment describing a stricter rule than the code it sits on, which is the
+  # defect this item keeps finding in prose and had not yet made in code. Both
+  # ends are bounded now, and the bound is stated as the number it is.
+  ??????*) MM_DEADLINE_SECS=10 ;;
 esac
 [ "$MM_DEADLINE_SECS" -lt 1 ] && MM_DEADLINE_SECS=10
+# AND AN UPPER BOUND, for the same reason the lower one exists: the budget becomes
+# a curl timeout, so an absurd value is an absurd timeout inside a hook that has
+# its own limit. 60 is far above any real setting and far below anything that
+# could wedge a turn.
+[ "$MM_DEADLINE_SECS" -gt 60 ] && MM_DEADLINE_SECS=60
 
 # A CLOCK THAT DOES NOT FORK. `date +%s` costs a process every time it is read,
 # and `remaining` is read before every HTTP call; on Windows a fork is tens of
@@ -98,7 +108,6 @@ _started=$(now_s)
 # this replaces. Worst case is startup + this + the lock wait, which stays inside
 # the Stop hook's 15 seconds at the default budget.
 POST_FLOOR=8
-_first_send_done=""
 _lock_spent=0
 # 2, not 3. The credit is real time the run spends, so it extends the worst case:
 # MM_DEADLINE_SECS + this + startup. A tester measured 14.9-15.8s against the Stop
@@ -264,7 +273,7 @@ tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- 
 # session's root, silencing that session for the rest of its life. Found in test,
 # attempt 1, against a real deleted root.
 post() {
-  local _msg="$1" _root="$2" _payload _budget _resp
+  local _msg="$1" _root="$2" _floor="${3:-0}" _payload _budget _resp
   _payload=$(CHANNEL="$CHANNEL" MSG="$_msg" ROOT="$_root" python -c \
     'import json,os
 d = {"channel_id": os.environ["CHANNEL"], "message": os.environ["MSG"]}
@@ -286,10 +295,19 @@ print(json.dumps(d))' 2>/dev/null)
   # draw on what is left, because by then the operator already has the message and
   # a second attempt is worth only the time actually available.
   _budget=$(remaining)
-  if [ -z "$_first_send_done" ]; then
-    [ "$_budget" -lt "$POST_FLOOR" ] && _budget="$POST_FLOOR"
-    _first_send_done=1
-  fi
+  # THE CALLER DECIDES, because a flag set here cannot reach it. The previous
+  # version tracked "is this the first send?" in a variable assigned INSIDE this
+  # function - and every reading call site invokes it as `$(post ...)`, a
+  # subshell, so the assignment died with it and EVERY call got the floor. That is
+  # the third time this exact trap has been hit in this file, twice after it was
+  # written up in a comment a few dozen lines away. A tester instrumented it:
+  # `curl -m 8` AND `curl -m 8` on a dead-root retry, where the comment promised
+  # "later calls still draw on what is left".
+  #
+  # Writing it as a parameter makes the mistake unavailable: there is nowhere to
+  # put a flag that does not survive, because the decision is made where the
+  # knowledge is.
+  [ "$_floor" -gt 0 ] && [ "$_budget" -lt "$_floor" ] && _budget="$_floor"
   # OUT OF BUDGET IS NOT A DEAD ROOT. Both used to return an empty string, so the
   # caller could not tell "the server rejected this root" from "there was no time
   # left to ask" - and the recovery path fired on the second, spending the little
@@ -366,13 +384,26 @@ LOCK_MAX_TRIES=$(( (MM_DEADLINE_SECS * 3) / 2 ))
 # throughout. 5 is too short to see the winner publish and falls back to flat
 # more often; 8 is where waiting still usually works and no longer costs the
 # message. A loser that times out posts flat, which delivers.
-# 10 turns, about 2 seconds - enough to cover one API round-trip, which is what
-# the wait is FOR, and no more. It was 8 (~1.6s) while waiting still competed with
-# the send, then 15 (~3s) once the send was floored; 15 put the worst case at 16s
-# against the Stop hook's 15, measured with a live-held lock and a hanging API.
-# The budget here is wall time, and the three terms are startup (~3s), this, and
-# POST_FLOOR (8). Ten keeps the total inside the limit with a second to spare.
+# 10 turns, about 3.6 SECONDS AT THE MEASURED COST of a turn - sized to cover one
+# API round-trip, which is what the wait is FOR.
+#
+# IT WAS BRIEFLY 6, AND 6 BROKE THE THING THE WAIT EXISTS FOR: with a 2s API,
+# 9 of 15 rounds at N=2 split, because the wait expired before the winner could
+# publish. That is the same mistake three earlier attempts made - shortening the
+# wait to buy wall time, and paying for it in the guarantee.
+#
+# What made 10 affordable is the floor fix beside it. While the POST_FLOOR flag
+# was dying in a subshell, EVERY call was floored at 8s, so a dead-root retry cost
+# a second 8 seconds and the worst case ran 13-16.5s against a Stop hook's 15.
+# With the floor applied only to the first send, the same worst case loses a whole
+# call. The wall-time problem was never the wait.
 [ "$LOCK_MAX_TRIES" -gt 10 ] && LOCK_MAX_TRIES=10
+# THE COST OF A TURN, MEASURED, because every figure derived from it was wrong
+# while it was assumed. A turn is `mkdir` + `cat` + `sleep 0.2`, and the two forks
+# are not free on this platform: ten turns take 3.56s, not the 2s that "0.2s per
+# turn" implies. A tester measured 4.0-4.3s independently. Every claim about the
+# wait, and the entry gate below, were computed from the assumption.
+LOCK_TURN_MS=356
 [ "$LOCK_MAX_TRIES" -lt 2 ] && LOCK_MAX_TRIES=2
 # THREE turns, about 0.6s. The holder writes `at` in the microseconds after its
 # mkdir, so this is already a margin of roughly a thousand times the window it has
@@ -451,7 +482,9 @@ lock_take() {
   # What actually has to fit is the wait (LOCK_MAX_TRIES turns of 0.2s) plus one
   # post (`post` refuses under 2s). Anything less and threading is genuinely
   # unaffordable, which is the only case this gate is for.
-  _gate=$(( (LOCK_MAX_TRIES / 5) + 2 ))
+  # Derived from the measured turn cost, not from the old 0.2s assumption: the
+  # wait can take LOCK_MAX_TRIES turns, and a post needs 2 seconds after it.
+  _gate=$(( (LOCK_MAX_TRIES * LOCK_TURN_MS + 999) / 1000 + 2 ))
   [ "$(remaining)" -lt "$_gate" ] && return 1
   # AND A FLOOR ON THE WHOLE BUDGET, not just on what is left of it. Threading
   # costs a lock directory and a map line - two syscalls that are not free on this
@@ -606,7 +639,7 @@ fi
 #    otherwise - and when this run is the one creating the thread, the id this
 #    call returns becomes that root.
 _dead_root="$root"
-out=$(post "${MENTION:+$MENTION }$MSG" "$root")
+out=$(post "${MENTION:+$MENTION }$MSG" "$root" "$POST_FLOOR")
 if [ -n "$out" ] && [ -n "$_make_root" ] && [ -n "$key" ]; then
   { printf '%s %s\n' "$key" "$out" >> "$THREADS"; } 2>/dev/null
 fi
@@ -652,7 +685,7 @@ if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
     # tester, and invisible to every case in the plan because they all counted
     # "at least N" rather than "exactly N".
     root=""
-    post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
+    post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
     _recovered=1
   elif [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
     # Another run already recovered this session while we waited. Use its root
