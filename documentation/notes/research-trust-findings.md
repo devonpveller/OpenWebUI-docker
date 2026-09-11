@@ -226,6 +226,169 @@ call site in `harness.ts` instead. Same contract, one testable place.
 
 ---
 
+## 3b. Attempt 2 — what the tester found, and what it changed (2026-09-11)
+
+The tester FAILED the item on T7 and raised six beyond-plan findings. All were reproduced or
+read before being acted on. Every fix below is RED → GREEN with the tester's own inputs as the
+test data.
+
+### 3b.1 T7 FAIL — the filter was eating real facts with an honest tail — [observed-live]
+
+Five live claims, all `active` at 0.51, were being deleted whole because each ends in an
+epistemic caveat: `51254103` (six-month wait after dissolution), `219dbaa6` (SR01 form
+fields), `c1e411e4` (registered-office ordering), `d039348b` (Conventional Commits keywords),
+`70f6a17c` (WSO2 licence). Each is the shape
+`<a fact about the world>, but/though/; <the sources do not confirm it>`.
+
+Two of the seven source-referential patterns — `sources (provided|given|available|held)` and
+`sources (do|does) not` — accounted for 14 of the 43 live matches and caught **zero** of the 8
+poison texts. That is where the precision was being spent.
+
+**The rule now:** `headClause()` splits at the first `;` / `, but` / `, though` /
+`, although` / `, however`, and the two families that can appear as a caveat
+(`SOURCE_SUBJECT`, `EVIDENCE_ABSENCE`) are judged on the HEAD only. Only
+`TRANSFER_DISCLAIMER` — the sentence whose whole point is that the evidence is about something
+else — is judged on the whole text, because its head IS an ordinary world sentence (poison
+`7f2ac93b` and `1306bb5a` both look like plain facts until the second clause).
+
+Every honest claim is entitled to one caveat. A filter that deletes the claim because of it is
+worse than the poison it removes.
+
+### 3b.2 The second sweep, and three more false positives I found myself — [observed-live]
+
+Re-running the rewritten classifier over all 7 744 active claims gave **28** matches. Reading
+all 28 found three that are ordinary attributions, not transfer disclaimers:
+
+- `2b508cd0` "The article notes that in August 2026, several AI browsers were demonstrated
+  vulnerable…"
+- `fd3e1a6d` "…(as noted in CNN's coverage) that commercial AI operators must license content…"
+- `8683c8d3` "OpenAI stated that for Astra specifically, it 'invested in unspecified new
+  techniques'…"
+
+All three came from the transfer heuristic's `in` branch and its optional `that`. Reporting
+what a named party said is not a transfer disclaimer; the poison shape is always "the evidence
+covers X, and X is not what you asked about". Narrowed to `<verb> (this) FOR <Named thing>`
+plus a contrast marker.
+
+**Final sweep: 25 matches on 7 744 active claims (0.32 %), down from 43.** All 8 poison ids
+are among them. I read all 25 and judge every one to be about the evidence set, a retrieved
+page, or an explicit transfer disclaimer — the closest calls are listed in TEST-PLAN T7 so a
+reader can disagree with a named claim rather than with a number.
+
+Sweep precision across the three iterations: 43 (2 known false positives) → 28 (3 found by
+reading) → **25 (none I can name)**. Each round found its errors by reading the list, not by
+running the tests.
+
+### 3b.3 B1 — the detector condemned a search that worked — [reproduced]
+
+`classifyHits("Kubernetes CrashLoopBackOff diagnose", <5 perfect hits>)` returned
+`{"verdict":"collapsed","overlap":0,"collapsedOn":"crashloopbackoff"}`. `overlapRatio`
+demanded two DISTINCT query terms per hit, so a query whose subject is one strong token plus
+generic words scored 0.00 on a flawless result set — and the dominance test then found that
+token in 100 % of titles, which is the collapse signature exactly. The run would have ended
+`search_degraded` and told the user a working search had failed.
+
+Fix: a hit carrying the query's LONGEST term counts as overlapping even alone, when that term
+is ≥ `ANCHOR_MIN_LEN` (7) characters. The threshold is the safety argument and it is drawn
+from the measurement: the audited collapse tokens are `dell` (4), `most` (4) and `100` (3),
+all below 7, so no recorded failure can be rescued by it. All three collapse fixtures still
+classify `collapsed` (pinned as its own test).
+
+### 3b.4 B2 — ten pages of noise were a "successful search" — [reproduced]
+
+`classifyHits("OptiPlex 3050 capacitor bulging repair", <10 "Best Buy Deals" hits>)` returned
+`{"verdict":"ok","overlap":0}`: with no single QUERY token dominating the titles, the old rule
+had nothing to say. Those ten pages were then fetched, judged by the relevance gate, and
+counted in `SearchStats.ok` as engine health.
+
+New verdict `offtopic`: overlap 0 across at least `OFFTOPIC_MIN_HITS` (5) hits. It yields no
+pages, feeds the degraded streak, and is folded into "junk" by `searchHealthLabel` and the
+footer. A THIN set (3 hits) is still `ok` — three hits is not a verdict about an engine.
+
+### 3b.5 B3 — the empty-pool guarantee covered one of four paths — [read, then reproduced]
+
+`no_relevant_sources` was gated on `topicPath`, so article / sources-only /
+`disable_web_search` runs with an empty pool still asked the synthesizer to write from nothing
+(`synthCalls=1` on all four), and with one recalled claim still reached the curator with
+`sources: []` and the poison sentence as the package's headline claim. The anchor states
+criterion 1 unconditionally.
+
+The decision is now made on the CITABLE POOL — staged pages with content, plus the grounding
+sources of any reused claim — on every path. That required hoisting `getReuseSources()` above
+the decision, since the decision has to know whether a reused claim brings a source with it. A
+non-empty pool behaves exactly as before on all four paths; the integration test (which
+exercises the reuse path end to end against the real schema) still passes.
+
+### 3b.6 B5 — the grounding check was checking digit presence — [read, then reproduced]
+
+`[Source N]` was stripped from the LINE and never from the SOURCE text, so a fabricated
+"95 °C" was grounded by `[Source 95]`, `Source 95`, `page 95`, a bare `[95]` reference marker,
+or "95 mm" — and real pages are full of those. The word table was worse: `100` → "hundred",
+`1` → "one", `2` → "two" made the check weakest on exactly the integers a fabrication is most
+likely to use.
+
+Fixes: pointer spans (citations, page/figure/table/section numbers) are cut out of the source
+text before comparison; a figure that carries a UNIT must match that unit in the source; the
+word table now runs 3..90 only. "thirty" still grounds 30 — the 100 Hz CAREN line is why the
+table exists — and all ten of that run's `[SOURCED]` lines still survive.
+
+**Over-tightening is the risk here and it bit once during the fix:** the first unit rule ended
+in a word boundary, which needs a word character after the unit, so "26% motion sickness"
+failed to ground the claim's own "26%" and downgraded the verified GVS line. Caught by the
+existing 100 Hz regression test.
+
+### 3b.7 B7 — and the second defect it exposed — [observed]
+
+The test named "recall pages are gated too" ran against a stub returning zero rows: the
+audited failure's actual mechanism had no test. It now runs against a client serving the
+audited run's own three recalls (DGX Spark guide, Compaq d220 manual, ASUS BIOS FAQ) and
+asserts the gate was ASKED about each by name.
+
+Writing that test exposed a real defect: **the fail-safe floor was re-admitting the recalls.**
+They are gated before round 1, when the collapse counters are still zero, so the floor's "the
+gate would empty the pool" branch fired and put the DGX Spark pages straight back —
+reproducing the audited failure through the mechanism added to prevent it. The floor now never
+applies to recalls: their only credential is vector proximity, and the floor exists to
+second-guess a model verdict about a page the run went out and FETCHED for this question.
+
+### 3b.8 A field that was read and never written — [read-from-source]
+
+Found while wiring `offtopic` through: `SearchRecord.ok/collapsed/empty/errors` were declared
+in attempt 1, read by `searchHealthLabel()` and `coverageFooter()`, and **never assigned by
+the harness**. No real run could have printed `search: DEGRADED`; only the hand-built fixtures
+in `report.test.ts` ever did. The harness now copies the counters into the record, and a test
+asserts the RUN's own record carries them and that the footer says DEGRADED.
+
+Nobody's test caught this, including the tester's. It is the same failure class as the sweep
+script that reported 0 matches: a check that passes while checking nothing.
+
+### 3b.9 Test counts after attempt 2 — [observed-live 2026-09-11]
+
+| suite | baseline | attempt 1 | attempt 2 |
+|---|---|---|---|
+| `research-service` | 79 passed / 1 env-failed | 121 / 1 | **136 / 1** |
+| `research-curator` | 17 passed | 28 | **33** |
+| `gateway` `test_engine_health.py` | n/a | 8 | 8 |
+| `ruff check .` | clean | clean | clean |
+| integration (`orchestrator.test.ts`, throwaway DB) | pre-existing fail | PASSED | **PASSED** |
+
+The one `research-service` failure is `orchestrator.test.ts` in every column (§3.8).
+
+### 3b.10 Tester notes taken as-is
+
+- **D.1 pinned a tag, not a digest, and had no pre-pull check.** Added: compare
+  `RepoDigests` before and after `docker pull`, with the digest-pin form offered as the better
+  option.
+- **D.2 had no rollback where D.1 did.** Added: tag the `:local` images to
+  `:pre-research-trust` BEFORE the rebuild, with the note that a rollback does not undo a
+  retraction if D.4 has already run.
+- **The plan's "Declared" section quoted the pre-amendment anchor.** Rewritten: the anchor now
+  says 10 and the section records why the number changed rather than raising a dispute.
+- **T5's changed `coverage 75%` assertion** — the tester judged the replacement strictly
+  stronger. Kept as is.
+
+---
+
 ## 4. Out of scope, recorded rather than built
 
 - **The `engines=` fallback hazard.** `search-engine-alternatives-2026-09-11.md`

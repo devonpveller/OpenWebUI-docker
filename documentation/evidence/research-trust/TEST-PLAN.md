@@ -38,27 +38,21 @@ plane lease, and the **search** plane lease for the SearXNG change
 
 ---
 
-## Declared - an acceptance criterion that is itself wrong
+## Declared - the anchor criterion that was amended, and what T7 tests
 
-**Anchor criterion 4** says: *"The curator meta-claim filter rejects all 8 texts in
-claims-poison.json and **keeps the 13 factual 100 Hz claims**."*
+**Anchor criterion 4 was AMENDED after attempt 1** and now reads: "...rejects all 8 texts in
+claims-poison.json and keeps the **10** factual 100 Hz claims (the run wrote 13; 3 of them are
+among the 8 poison)". Nothing is in dispute any more; this section records why the number
+changed, because the fixtures are split on it.
 
-The 100 Hz run (`8c9b4f1d`) wrote **13 claims in total**, and **3 of those 13 are among the
-8 poison claims** (`eea04dc2`, `cd1d66fb`, `32061b2c` — the audit names them in both
-places). The number that must survive the filter is therefore **10**, not 13. Verify it
-yourself before deciding:
+The 100 Hz run (`8c9b4f1d`) wrote 13 claims in total, and `eea04dc2`, `cd1d66fb` and
+`32061b2c` are among them *and* among the 8 poison. Verify, read-only:
 
 ```bash
 docker exec openbrain-db psql -U postgres -d openbrain -Atc "select count(*) from claims where id in ('eea04dc2-d88c-47bc-b23d-65867813324e','cd1d66fb-b4f5-4496-8090-33568126be7d','32061b2c-a641-4ed3-a4d4-869a6c3d6ab2')"
 ```
-→ `3`. These are read-only SELECTs.
-
-The fixtures are split accordingly: `claims-poison.json` (8, must be REJECTED) and
-`claims-100hz-world.json` (10, must be KEPT). **T7 tests the criterion's arithmetic as
-corrected, not as written.** This is a disagreement the gate is entitled to decide: either
-amend the anchor to say 10, or reject the item. It was not worked around silently.
-
----
+-> `3`. So 8 must be rejected and **10** kept: `claims-poison.json` (8) and
+`claims-100hz-world.json` (10).
 
 ## T1 - Unit suites, and the one failure that is not this branch's
 
@@ -71,7 +65,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/search-gateway/ga
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust" && ruff check .
 ```
 
-**PASS:** research-service `121 passed | 1 failed`; research-curator `28 passed | 0 failed`;
+**PASS:** research-service `136 passed | 1 failed`; research-curator `33 passed | 0 failed`;
 pytest `8 passed`; ruff `All checks passed!`.
 
 The single research-service failure must be **`./orchestrator.test.ts (uncaught error)` …
@@ -79,9 +73,10 @@ The single research-service failure must be **`./orchestrator.test.ts (uncaught 
 `ob-claims-test`) at module load. It fails identically on the base commit; T9 runs it
 properly.
 
-**FAIL:** any other failing test; a research-service count **below 121**; a curator count
-**below 28**; any ruff error. A count below the baseline (79 / 17) means tests were removed,
-which is a fail regardless of the colour of the output.
+**FAIL:** any other failing test; a research-service count **below 136**; a curator count
+**below 33**; any ruff error. A count below the baseline (79 / 17) means tests were removed,
+which is a fail regardless of the colour of the output. (Attempt 1 stood at 121 / 28; the
+extra 20 are the tester's B1-B5/B7 findings.)
 
 ---
 
@@ -93,7 +88,7 @@ deno test -A search-quality.test.ts
 deno test -A harness-trust.test.ts --filter "entity"
 ```
 
-**PASS:** `9 passed | 0 failed` from `search-quality.test.ts`, including all three
+**PASS:** `13 passed | 0 failed` from `search-quality.test.ts`, including all three
 `collapsed fixture:` cases and `good fixture: a real multi-engine OptiPlex result set is ok`;
 and the round-1 test passes, proving every round-1 query contains `optiplex 3050` and is
 ≤ 10 tokens even though the mocked model returned queries WITHOUT the entity.
@@ -122,7 +117,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/
 deno test -A grounding.test.ts
 ```
 
-**PASS:** `7 passed | 0 failed`. In particular the audited line is flagged with
+**PASS:** `10 passed | 0 failed`. In particular the audited line is flagged with
 `missing: ["95", "3050"]` and the 100 Hz `26% / 56% / p = 0.0055 [Source 2]` line is `ok`,
 and **no [SOURCED] line of the 100 Hz run is downgraded**.
 
@@ -150,7 +145,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/
 deno test -A harness-trust.test.ts
 ```
 
-**PASS:** `13 passed | 0 failed`. The four `REPLAY ce398d06:` cases must all pass:
+**PASS:** `21 passed | 0 failed`. The `REPLAY ce398d06:` cases must all pass:
 `outcome === "no_relevant_sources"`, **zero** `delegateToCurator` calls, **zero**
 `deps.chat` synthesizer calls, zero cited sources, and the rendered text contains
 `search failure, not evidence of absence`. Also assert-by-reading: the case
@@ -232,33 +227,91 @@ have deleted a string that was never there.
 
 ---
 
-## T7 - The curator refuses statements about the run (anchor criterion 4, as corrected in Declared)
+## T7 - The curator refuses statements about the run (anchor criterion 4)
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/research-curator"
 deno test -A meta-claims.test.ts
 ```
 
-**PASS:** `11 passed | 0 failed`. All 8 `claims-poison.json` texts classify `meta`; all 10
+**PASS:** `16 passed | 0 failed`. All 8 `claims-poison.json` texts classify `meta`; all 10
 `claims-100hz-world.json` texts classify `world`; `writeClaims` writes 0 of the 8 and
 records `metaSkipped: 8`; the LLM judge is asked ONLY about what the patterns did not
 recognise and **fails open** on an error.
 
-**Now try to break the filter's precision, because that is where it can do harm.** The
-developer ran the shipped classifier over all 7 744 active claims and found 43 matches
-(0.56 %), two of which were false positives that were then fixed and pinned as regression
-tests (`world claims the FIRST version of these patterns wrongly ate`). Re-run it yourself
-on live, read-only:
+### What changed after attempt 1, and the rule you are checking
+
+The tester failed this case by running the sweep below and reading it: five live claims were
+being deleted whole because each ended in an honest epistemic tail. The filter now judges the
+**HEAD CLAUSE** — the text before the first `;` or `, but` / `, though` / `, although` /
+`, however` — for the two families that CAN appear as a caveat, and the whole text only for
+the family that cannot:
+
+| family | scope | what it recognises |
+|---|---|---|
+| `SOURCE_SUBJECT` | head clause | the sentence's subject IS the evidence set: "The sources…", "No source…", "The retrieved pages…", "This report could not…" |
+| `EVIDENCE_ABSENCE` | head clause | absence of EVIDENCE without the word "source": "No evidence exists that…", "The literature is silent on…", "No study has tested…" |
+| `TRANSFER_DISCLAIMER` | whole text | the sentence's point is that the evidence is about something ELSE: "documented for the DGX Spark … NOT confirmed for the OptiPlex", "pertain to X, not Y", an inline "(Source 3)" |
+
+Read the rule and satisfy yourself it is a rule and not a fit to the eight strings:
+
+```powershell
+git -C OB1 show research-trust:integrations/research-curator/claims.ts | Select-String -Pattern "headClause" -Context 0,12
+```
+
+**PASS:** `headClause()` splits on the first caveat marker; `SOURCE_SUBJECT` and
+`EVIDENCE_ABSENCE` are applied to the head only; `TRANSFER_DISCLAIMER` to the whole text. The
+two whole-text families the tester named as spending the precision — `sources provided|given`
+and `sources do|does not` as free-floating patterns, and `but no source` — are **gone**.
+
+Confirm the five the tester found are kept, and the B4 shapes are caught:
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/research-curator"
+deno test -A meta-claims.test.ts --filter "tail"
+deno test -A meta-claims.test.ts --filter "B4"
+```
+
+**PASS:** `a world fact with an epistemic TAIL survives (the five the tester found)`,
+`the head clause is what is judged, and a tail alone never condemns a claim`,
+`B4: absence-of-EVIDENCE statements are meta even without the word 'source'` and
+`B4: absence in the WORLD is not absence of evidence` all pass. The five live ids are in the
+test file with their stored text, so you can check them against the DB:
+
+```bash
+docker exec openbrain-db psql -U postgres -d openbrain -Atc "select id, left(text,70) from claims where id in ('51254103-920b-4446-87e0-08babb5ad6ea','219dbaa6-c81c-4c29-b6e1-9991f55601c6','c1e411e4-5035-4114-bd6a-2ca036595721','d039348b-d38a-4fc5-a8e0-3e66c3f18e45','70f6a17c-1edb-4587-9624-41841e607679')"
+```
+
+### The live precision sweep — this is the part that failed last time
 
 ```bash
 docker exec openbrain-db psql -U postgres -d openbrain -Atc "select coalesce(json_agg(json_build_object('id',id,'text',text,'created_at',created_at))::text,'[]') from claims where status='active'" > "$TMP/active.json"
 ```
-then classify with `classifyMetaClaim` (a five-line deno script importing `./claims.ts`),
-**and read every match**. Expect ~43 on 7 744.
 
-**FAIL:** any of the 8 kept; any of the 10 rejected; a judge failure dropping a claim; or —
-the case that matters most — a match list containing a claim you judge to be about the
-world. Report it: a filter that eats knowledge is a worse outcome than the poison.
+Classify every row with the SHIPPED `classifyMetaClaim` (a short deno script importing
+`./claims.ts`; make it assert its input is an array of objects before scanning — the
+developer's first version silently scanned strings and reported 0 matches), **and read every
+match**.
+
+**Expected: 25 matches on 7 744 active claims (0.32 %), down from 43.** All 8 poison ids are
+among them. The developer's judgement of the other 17: every one has the evidence set, a
+retrieved page, or an explicit transfer disclaimer as its subject. The closest calls, stated
+so you can disagree with them:
+
+- `ea96affc`, `e195acb0`, `c93f70ca`, `a67b9130`, `216046b8` — "The sources note/confirm/
+  reference/suggest that <world content>". The world content is real, but the sentence's
+  subject is the evidence set, which is poison `cd1d66fb`'s exact shape. The developer's
+  position: the fact should have been asserted directly, and attributing it to "the sources"
+  makes the claim about the sources.
+- `8ed6a678` — "The tabbit.com page (Source 6) features testimonials … indicating real users
+  are already operating the product". Carries a world inference, but its subject is a page
+  and it cites a source index inline.
+- `7c895760`, `6fbbb70c` — "The (provided) source is a Google Scholar profile page for X".
+  A description of a retrieved artefact.
+
+**FAIL:** any of the 8 kept; any of the 10 rejected; a judge failure dropping a claim; a
+sweep that is not clean **by your own reading** — that is, a match you judge to be about the
+world. This clause is unchanged from attempt 1 and it is the one that caught the defect.
 
 ---
 
@@ -403,6 +456,209 @@ no replacement and no note; the gitlink bumped in the parent.
 
 ---
 
+---
+
+## T11 - B1: the detector does not condemn a search that worked
+
+The mirror image of the failure this item exists for. `overlapRatio` required TWO distinct
+query terms per hit, so a query whose subject is one strong multi-word token plus generic
+words scored 0.00 on a PERFECT result set, and the dominance test then found that token in
+100 % of titles - the collapse signature exactly. The run would have ended
+`search_degraded` -> `no_relevant_sources` and told the user "search failure, not evidence of
+absence" about a search that worked.
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/research-service"
+deno test -A search-quality.test.ts --filter "B1"
+```
+
+**PASS:** `B1: a hit set carrying only the ANCHOR term is ok, not collapsed` - the tester's
+own five CrashLoopBackOff hits classify `ok` with overlap 1 - and
+`B1: the anchor term must be DISTINCTIVE - 'dell' cannot rescue the Dell junk`, which re-runs
+all three recorded collapse fixtures through the new scorer.
+
+Read the rule: a hit counts as overlapping if it carries the query's LONGEST term and that
+term is at least `ANCHOR_MIN_LEN` (7) characters.
+
+```powershell
+git -C OB1 show research-trust:integrations/research-service/search-quality.ts | Select-String -Pattern "ANCHOR_MIN_LEN" -Context 6,2
+```
+
+**Try to break it.** The threshold is the whole safety argument: the audited collapse tokens
+are `dell` (4), `most` (4) and `100` (3), all below 7. Construct a query whose longest term is
+>= 7 characters and whose junk result set contains that term in every title - for example
+`q = "capacitor bulging OptiPlex"` against ten titles all containing "capacitor" but about
+something else entirely. If you can make a genuinely collapsed set classify `ok`, that is a
+FAIL and worth more than the rest of this case.
+
+**FAIL:** any recorded collapse fixture classifying `ok`; the CrashLoopBackOff set classifying
+`collapsed`; an anchor shorter than 7 characters vouching for a hit.
+
+---
+
+## T12 - B2: a page of pure noise is not a successful search
+
+Ten hits with zero query-term overlap were classified `ok` and counted in `SearchStats.ok`, so
+they spent the fetch and relevance-gate budget while reporting the search as healthy. An
+engine that drifts semantically rather than collapsing onto a token was invisible.
+
+```bash
+deno test -A search-quality.test.ts --filter "B2"
+deno test -A harness-trust.test.ts --filter "B2"
+```
+
+**PASS:** four cases. `B2: zero overlap across a full page of hits is never 'ok'` returns
+verdict `offtopic` for the tester's own "Best Buy Deals" set; `B2: a THIN result set is not
+condemned` keeps a 3-hit set `ok` (below `OFFTOPIC_MIN_HITS` = 5, because three hits is not a
+verdict about an engine); `B2: a weak-but-not-empty set stays 'ok'` keeps a set where 3 of 10
+hits do mention the subject; and the harness case shows an off-topic set yields NO pages,
+increments `fetchStats.search.offtopic`, leaves `search.ok` at 0, feeds the degraded streak
+and ends the run `search_degraded` / `no_relevant_sources`.
+
+**FAIL:** `offtopic` sets still counted in `search.ok`; an off-topic set being fetched; a
+3-hit set condemned; `searchHealthLabel` or the footer ignoring `offtopic` (it is folded in as
+"junk" - `report.ts`).
+
+---
+
+## T13 - B3: the empty-pool guarantee holds on EVERY path
+
+Anchor criterion 1 is unconditional; the implementation gated it on `topicPath`, so on the
+article / sources-only / `disable_web_search` paths an empty pool still reached the
+synthesizer ("write from nothing") and, with one recalled claim, still reached the curator
+with `sources: []` and "The provided sources contain no information..." as its headline claim.
+
+```bash
+deno test -A harness-trust.test.ts --filter "B3"
+```
+
+**PASS:** five cases. Four modes - article with empty seed content, sources-only with empty
+seed content, `disableWebSearch` with no seeds, article with no seeds - each assert
+`outcome === "no_relevant_sources"`, **zero** synthesizer calls, **zero** curator calls, zero
+cited sources, a backstop other than `complete`, and the failure notice in the prose. The
+fifth is the tester's worst case: an empty pool WITH a recalled reuse claim, asserting the
+claim really was recalled (`reuseClaims.length === 1`) and the curator still refused.
+
+Then confirm the NON-empty paths are untouched:
+
+```bash
+deno test -A harness-trust.test.ts --filter "still"
+```
+plus the T9 integration run.
+
+**PASS:** `sources-only mode still grounds strictly from the caller's seeds` and `article mode
+still stages the seed article and is never gated away` both pass, and the T9 run still prints
+`ALL ORCHESTRATOR ASSERTIONS PASSED` - that run exercises the reuse path, which this change
+restructured (the reuse-source lookup moved ABOVE the empty-pool decision, because the
+decision has to know whether a reused claim brings a citable source with it).
+
+**FAIL:** any mode returning `outcome: "complete"` with zero cited sources; any synthesizer
+call on an empty pool; any curator call with `sources: []`; a digest/article run with a REAL
+pool behaving differently from the base commit.
+
+---
+
+## T14 - B5: the grounding check checks grounding, not digit presence
+
+`[Source N]` was stripped from the LINE but never from the SOURCE text, so a fabricated
+"95 C" was grounded by any stray `[95]`, `page 95`, `Source 95` or `95 mm` - and the word
+table grounded `100` from "several hundred", `1` from "no one" and `2` from "two engineers",
+which are among the commonest words in English.
+
+```bash
+deno test -A grounding.test.ts
+```
+
+**PASS:** `10 passed | 0 failed`, including the three B5 cases:
+`a citation index in the SOURCE text does not ground a figure` (five pointer shapes),
+`a figure with a UNIT must match that unit in the source` (95 mm does NOT ground 95 C;
+"95 C", "95C" and "95 C." all do), and `the commonest words in English no longer ground small
+integers` (0, 1, 2, hundred and thousand removed from the word table; **"thirty" still grounds
+30**, which is the 100 Hz CAREN line the word table exists for).
+
+**The regression that matters** is in the same file: `applyNumericGrounding leaves the 100 Hz
+[SOURCED] lines alone` must still pass. A stricter check is easy to over-tighten - the unit
+rule initially downgraded the verified GVS line, because a `\b` after `%` needs a word
+character next to it and "26% motion sickness" has a space.
+
+**FAIL:** any of the five pointer shapes grounding a figure; a unit mismatch grounding a
+figure; "thirty" no longer grounding 30; any of the ten 100 Hz `[SOURCED]` lines downgraded.
+
+---
+
+## T15 - B7: the recall-gating test now exercises recall
+
+`harness-trust.test.ts` had a case named "recall pages are gated too" that ran against a stub
+returning zero rows, so the audited failure's actual mechanism - months-old pages about a
+different computer being EXEMPT from the relevance gate and becoming the whole cited pool -
+had no test anywhere.
+
+```bash
+deno test -A harness-trust.test.ts --filter "recall"
+```
+
+**PASS:** two cases. `REPLAY ce398d06: KB-recall pages face the gate and none survives` runs
+against a client that serves the audited run's own three recalls (the DGX Spark maintenance
+guide, the Compaq d220 manual, the ASUS BIOS FAQ), asserts the gate was actually ASKED about
+each of them by name, and asserts zero cited sources, zero curator calls,
+`outcome: "no_relevant_sources"` and `fetchStats.reused === 3`. `a recall page that IS on
+topic survives the gate and is citable` proves the gate is about relevance, not provenance.
+
+This case also found a second defect - check that you believe the fix. The **fail-safe floor
+was re-admitting the recalls**: they are gated before round 1, when the collapse counters are
+still zero, so the floor's "the gate would empty the pool" branch fired and put the DGX Spark
+pages straight back into the pool. The floor now never applies to recalls at all
+(`gateAndKeep(..., floorMayApply=false)`), because a recall's only credential is vector
+proximity and re-admitting it on an empty pool IS the audited failure.
+
+```powershell
+git -C OB1 show research-trust:integrations/research-service/harness.ts | Select-String -Pattern "floorMayApply" -Context 2,4
+```
+
+**FAIL:** an off-topic recall reaching `citedSources`; the gate not being asked about the
+recalls (check `relevanceAsked`); an on-topic recall being dropped.
+
+---
+
+## T16 - The OWUI tool's fallback renderer, executed rather than read
+
+`owui/tools/deep_research.py` is a paste-deploy surface (D.5) carrying hand-written parity
+logic against `lib.ts`. T5 only reads its diff. Execute it - save this as `t16.py` in the
+worktree root and run `python t16.py`:
+
+```python
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("dr", "owui/tools/deep_research.py")
+m = importlib.util.module_from_spec(spec); sys.modules["dr"] = m; spec.loader.exec_module(m)
+
+new = m._render({
+    "synthesis": "Answer [1].",
+    "cited_sources": [{"url": "https://a.example", "title": "A"}],
+    "gaps": [], "backstop": "complete", "reuse_ratio": 0.22,
+    "needs_status": [{"need": "a", "status": "answered"}, {"need": "b", "status": "open"}],
+    "search_record": {"hits": 40, "fetched": 30, "readable": 28, "relevant": 9, "collapsed": 0},
+})
+print("NEW   :", "needs answered 1 of 2" in new, "| sources line:",
+      "sources 9 relevant of 30 fetched" in new, "| no coverage:", "coverage " not in new)
+
+legacy = m._render({"synthesis": "Answer [1].", "cited_sources": [], "gaps": [],
+                    "backstop": "complete", "reuse_ratio": 0.22})
+print("LEGACY:", "coverage" not in legacy and "needs answered" not in legacy)
+
+dup = m._render({"prose": "# R\nBody.\n\n_- needs answered 1 of 2_",
+                 "needs_status": [{"need": "a", "status": "answered"}], "backstop": "complete"})
+print("NO DUP:", dup.count("needs answered") == 1)
+```
+
+**PASS:** every printed boolean is `True`. `_render` prefers `result["rendered"]` when present,
+so this exercises the FALLBACK path - what OWUI shows for any job written before this change
+or whose `rendered` field is missing.
+
+**FAIL:** `coverage NN%` appearing anywhere; a legacy row printing a coverage number; the
+footer printed twice; an exception. (The module imports `aiohttp` and `pydantic` at top level;
+if they are absent in your environment that is a plan inadequacy, not a pass - say so, and
+`pip install aiohttp pydantic` into a throwaway venv rather than the operator's python.)
+
 # D. Deploy (AFTER this plan passes — operator or reviewer, under leases)
 
 These steps change live systems and are **not part of the test pass**.
@@ -412,6 +668,21 @@ These steps change live systems and are **not part of the test pass**.
 1. `.\scripts\agent-harness\lease.ps1 -Acquire -Name search`
 2. Set the pin in the **live `.env` line 169**: `SEARXNG_IMAGE=searxng/searxng:2026.9.11-61d660276`
    (the compose default now matches, but `.env` overrides it, so the file must change).
+2a. **Verify the digest before bringing it up** (tester's gap, attempt 1). A tag is mutable
+   and this is a privacy-critical container on a kill-switched network: if the tag were ever
+   re-pushed, `up -d` would silently get different bytes than the ones measured on
+   2026-09-11. Compare before and after a pull:
+
+   ```bash
+   docker image inspect searxng/searxng:2026.9.11-61d660276 --format '{{index .RepoDigests 0}}'
+   docker pull searxng/searxng:2026.9.11-61d660276
+   docker image inspect searxng/searxng:2026.9.11-61d660276 --format '{{index .RepoDigests 0}}'
+   ```
+
+   If the digest moved, STOP: the measurement in the findings note no longer describes what
+   you are about to run. Setting `SEARXNG_IMAGE` to the `searxng/searxng@sha256:...` form
+   instead of the tag removes the question permanently and is the better choice if the
+   operator wants it.
 3. Per `search-gateway/README.md`'s own rule for an image bump: diff the new image's
    `settings.template.yml` against ours and re-verify `routes/searxng_compat.py` still
    matches the new payload shape. This is a **4-month** jump on privacy infrastructure and
@@ -436,6 +707,20 @@ These steps change live systems and are **not part of the test pass**.
    **OB1 reads `OB1/docker/.env`, not the main `.env`** — the new `RESEARCH_*` overrides go
    there if you want anything other than the compose defaults.
 3. `.\scripts\stack\stack.ps1 health` → curator `:8816/health` 200, research service up.
+
+**Rollback — capture this BEFORE step 2** (tester's gap, attempt 1: D.1 had a rollback and
+this did not). The previous `:local` images are the only fallback and the rebuild retags
+them, so tag them first:
+
+```bash
+docker tag openbrain-research:local openbrain-research:pre-research-trust
+docker tag openbrain-curator:local  openbrain-curator:pre-research-trust
+```
+
+To roll back: retag `:pre-research-trust` back to `:local` for both, then
+`docker compose -f OB1/docker/docker-compose.yml up -d openbrain-research openbrain-curator`.
+No schema change ships in this item, so a rollback needs no database step — and if D.4 has
+already run, note that a retraction is NOT undone by rolling back the image.
 
 ### D.3 The live dry runs (anchor criterion 6 — POST-DEPLOY, not in this plan)
 
