@@ -66,6 +66,12 @@ MM_DEADLINE_SECS="${MM_DEADLINE_SECS:-10}"
 # default rather than propagating.
 case "$MM_DEADLINE_SECS" in
   ''|*[!0-9]*) MM_DEADLINE_SECS=10 ;;
+  # ALL DIGITS IS NOT ENOUGH. A tester passed 9223372036854775808 - every
+  # character a digit - and bash's arithmetic overflowed, leaking 423 bytes of
+  # "integer expression expected" to the hook's stderr from two separate lines.
+  # The digit test closed the "10s" case and not this one; length closes both,
+  # since no sane budget has five digits.
+  ????????*) MM_DEADLINE_SECS=10 ;;
 esac
 [ "$MM_DEADLINE_SECS" -lt 1 ] && MM_DEADLINE_SECS=10
 
@@ -88,6 +94,11 @@ _started=$(now_s)
 # waiting is real elapsed time but it is not the server's fault and must not eat
 # the send allowance. It is credited back here, capped, so the total stays inside
 # the hook's own timeout.
+# The floor a first send is guaranteed, matching the fixed `-m 8` of the sender
+# this replaces. Worst case is startup + this + the lock wait, which stays inside
+# the Stop hook's 15 seconds at the default budget.
+POST_FLOOR=8
+_first_send_done=""
 _lock_spent=0
 # 2, not 3. The credit is real time the run spends, so it extends the worst case:
 # MM_DEADLINE_SECS + this + startup. A tester measured 14.9-15.8s against the Stop
@@ -262,16 +273,33 @@ if r:
     d["root_id"] = r
 print(json.dumps(d))' 2>/dev/null)
   [ -z "$_payload" ] && return 1
+  # THE MESSAGE GETS A FLOOR, LIKE THE SENDER THIS REPLACES. The parent gives
+  # every call a fixed `curl -m 8`; this gave each call whatever was left of a
+  # wall-clock budget that its own startup had already spent 3-4 seconds of. So
+  # the timeout shrank as overhead accumulated, and at MM_DEADLINE_SECS=5 a tester
+  # measured 9 of 18 runs making NO HTTP CALL AT ALL - `post` returned at the
+  # "under 2 seconds" test. That is not the lock and not the threading: it is the
+  # budget design, and it lost messages the code being replaced delivers.
+  #
+  # The FIRST send therefore gets at least POST_FLOOR seconds no matter what the
+  # budget says, and is never skipped. Later calls - the recovery retry - still
+  # draw on what is left, because by then the operator already has the message and
+  # a second attempt is worth only the time actually available.
   _budget=$(remaining)
+  if [ -z "$_first_send_done" ]; then
+    [ "$_budget" -lt "$POST_FLOOR" ] && _budget="$POST_FLOOR"
+    _first_send_done=1
+  fi
   # OUT OF BUDGET IS NOT A DEAD ROOT. Both used to return an empty string, so the
   # caller could not tell "the server rejected this root" from "there was no time
   # left to ask" - and the recovery path fired on the second, spending the little
   # time that remained on an announce plus a retry, which is the most expensive
   # possible response to being short of time. The flag lets the caller skip it.
-  # No flag here. An earlier version set one for the caller to read, but `post` is
-  # always invoked as `$(post ...)` and a command substitution is a subshell, so
-  # the assignment died with it - dead code from the moment it was written. The
-  # caller reads `remaining` itself.
+  # A call that has been given the floor above is never refused here; only a later
+  # one can be. (No flag is set for the caller: `post` is invoked as
+  # `$(post ...)` at the sites that read its result, and a command substitution is
+  # a subshell, so an assignment would die with it. The caller reads `remaining`
+  # itself.)
   [ "$_budget" -lt 2 ] && return 1
   _resp=$(curl -s -m "$_budget" -w '\n%{http_code}' \
     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
@@ -338,7 +366,13 @@ LOCK_MAX_TRIES=$(( (MM_DEADLINE_SECS * 3) / 2 ))
 # throughout. 5 is too short to see the winner publish and falls back to flat
 # more often; 8 is where waiting still usually works and no longer costs the
 # message. A loser that times out posts flat, which delivers.
-[ "$LOCK_MAX_TRIES" -gt 8 ] && LOCK_MAX_TRIES=8
+# 10 turns, about 2 seconds - enough to cover one API round-trip, which is what
+# the wait is FOR, and no more. It was 8 (~1.6s) while waiting still competed with
+# the send, then 15 (~3s) once the send was floored; 15 put the worst case at 16s
+# against the Stop hook's 15, measured with a live-held lock and a hanging API.
+# The budget here is wall time, and the three terms are startup (~3s), this, and
+# POST_FLOOR (8). Ten keeps the total inside the limit with a second to spare.
+[ "$LOCK_MAX_TRIES" -gt 10 ] && LOCK_MAX_TRIES=10
 [ "$LOCK_MAX_TRIES" -lt 2 ] && LOCK_MAX_TRIES=2
 # THREE turns, about 0.6s. The holder writes `at` in the microseconds after its
 # mkdir, so this is already a margin of roughly a thousand times the window it has
@@ -479,35 +513,16 @@ lock_take() {
     if [ "$_age" -ge "$MM_DEADLINE_SECS" ] || { [ "$_age" -lt 0 ] && [ "$_i" -ge "$LOCK_BLIND_TRIES" ]; }; then
       rm -rf "$_d" 2>/dev/null
     fi
-    # THE BACKSTOP, not the bound. Only a run that has already lost most of its
-    # budget elsewhere reaches this, and for such a run an unthreaded message
-    # beats a threaded silence.
+    # THE BACKSTOP IS GONE. It ended the wait at `remaining <= min(budget/2,3)`,
+    # which with 3-4 seconds of startup already spent meant every loser left after
+    # two to four turns - about 0.6s, shorter than a single API round-trip, so the
+    # winner had not written the map line yet and the thread split anyway. A
+    # tester traced 36 rounds and found zero exits at the entry gate and all of
+    # them here: the early exit had moved, not gone.
     #
-    # PROPORTIONAL, because a fixed 3 is the entire budget when MM_DEADLINE_SECS is
-    # small: it fired on the first turn, the loop exited before the blind expiry
-    # could ever run, and an `at`-less lock survived every run - measured at
-    # MM_DEADLINE_SECS=3, leftover_lock=YES on five of seven cases.
-    _backstop=$(( MM_DEADLINE_SECS / 2 ))
-    [ "$_backstop" -gt 3 ] && _backstop=3
-    [ "$_backstop" -lt 1 ] && _backstop=1
-    if [ "$(remaining)" -le "$_backstop" ]; then
-      # ON THE WAY OUT, BREAK A LOCK NOBODY CAN BE HOLDING. At a small budget the
-      # backstop ends this loop on the first turn, so the blind expiry above -
-      # which needs LOCK_BLIND_TRIES turns - never fires, and an `at`-less lock
-      # survived EVERY run and silently disabled threading for that session. A
-      # tester measured that at MM_DEADLINE_SECS=5. Clamping the two try-counts
-      # against each other did not help, because the loop does not end at the try
-      # count, it ends here. Removing it costs one `rm` and cannot orphan a live
-      # holder: a live holder has a readable `at`.
-      # Unreadable OR dated in the FUTURE. A future timestamp is all digits, so
-      # a test that only looked for non-numeric text left that one case holding
-      # the lock forever - the single survivor when the rest were fixed. `_age`
-      # is negative for both, which is the property that actually matters: no
-      # live holder can have written a start time this run has not reached.
-      [ "$_age" -lt 0 ] && rm -rf "$_d" 2>/dev/null
-      lock_done 1
-      return 1
-    fi
+    # It existed to stop waiting from eating the send. The send now has a floor it
+    # is always given, so waiting cannot take the message any more, and the try
+    # count is the only bound needed.
     sleep 0.2 2>/dev/null || sleep 1
   done
   lock_done 1

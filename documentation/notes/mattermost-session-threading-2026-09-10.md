@@ -135,12 +135,17 @@ returned 200. Three separate things were:
   invocations. Counted with a PATH shim, and the figure depends on whether stdin
   is redirected — the deciding line is `[ -z "$sid" ] && [ ! -t 0 ]` at
   `scripts/notify-mattermost.sh`, the `[ -z "$sid" ] && [ ! -t 0 ]` test:
-  stdin redirected (both real hooks, since `</dev/null` is not a tty) **3 steady,
-  5 on a first notification**; stdin skipped, as when a person runs it by hand or
-  sets `MM_SESSION_ID`, **2 and 4**; the parent, **2**. Two earlier measurements
-  disagreed because of exactly this, and because a shim directory written
-  `C:/Users/…` is silently ignored by Git Bash — it must be `/c/Users/…`, or the
-  counter reads zero and the run looks cheaper than it is.
+  **THE COUNTS THAT STOOD HERE WERE INVALIDATED BY THIS ITEM'S OWN CHANGE, and
+  the line stayed anyway.** They read "3 steady, 5 on a first notification; 2 and
+  4 without stdin", measured before the startup path was made fork-free. A tester
+  re-ran them with a PATH counter and measured **2 in all four cases** - the
+  python interpreter is now launched only when the bash regex fails to find the
+  session id, which none of the real shapes do. The parent's 2 still reproduces.
+
+  This is the failure the preamble at the top of this note exists to prevent,
+  committed in the round that edited the very code the figure describes: when you
+  change a thing, the numbers ABOUT that thing are stale until re-measured, and
+  nobody reads a findings note looking for figures their own commit broke.
 - **A message body containing `session <8 hex>` steers the post into that
   session's thread.** Where the Notification hook supplies its own prefix, the
   prefix wins.
@@ -266,7 +271,8 @@ cannot exist until that call returns. Releasing before it left the critical
 section covering nothing — measured the moment the change was made, 12 of 12
 rounds at N=2 opened two roots, indistinguishable from the unlocked code.
 
-Measured, 12 rounds each, against the pre-item notifier:
+Measured against the pre-item notifier, 20 to 30 rounds per setting (the sample
+size the plan now requires, after twelve was shown to establish nothing):
 
 | concurrent first notifications | this version | pre-item |
 |---|---|---|
@@ -304,10 +310,28 @@ on.
 
 - **At ~5s per call the budget cannot fit two calls**, and some messages are lost
   — but LESS than before. Measured, 6 rounds of 3 concurrent runs at 5s per call:
-  this version loses 4 of 18 and opens ONE root; the parent loses **15 of 18** and
-  opens three roots every round. An earlier draft of this note claimed the parent
+  this version lost 4 of 18 and the parent 15 of 18. **BOTH FIGURES WERE WRONG AND
+  THE SIGN WAS INVERTED** - a tester re-measured the same setting at tip 13 of 18
+  lost against the parent's 0 of 18, i.e. the opposite of what was published, in a
+  paragraph offered as evidence that the trade was acceptable. It was not
+  acceptable, and the figure was flattering in exactly the direction that would
+  have let it ship.
+
+  That regression is now fixed at the root rather than re-measured: the first send
+  is given a floor timeout the way the pre-item sender's fixed `curl -m 8` is, so
+  it is never skipped for want of budget. Delivery at 3s and 5s per call is 6 of 6
+  against the parent's 6 of 6 at MM_DEADLINE_SECS 5, 8 and 10 - the settings where
+  two successive rounds measured 0 to 2 of 6. An earlier draft of this note claimed the parent
   "survives it" and that the loss here was about one in twelve. Both were wrong,
   and in the flattering direction.
+- **THE WORST CASE STRADDLES THE STOP HOOK'S 15 SECONDS and is not fixed.**
+  With a lock held by a live process and an API that never answers, measured 13s
+  and 16s on two runs at the default budget. The three terms are startup (~3s),
+  the lock wait (2s) and the floor the first send is guaranteed (8s), and the
+  floor is not negotiable - removing it is what lost messages. The pre-item sender
+  has only the last term. Trimming the wait from 3s to 2s bought a second and did
+  not settle it. A hook killed at 15s has usually already sent, because the send
+  starts at about 5s; what is lost is the recovery retry.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
   case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
   **and that scaling is NOT the lock's doing.** A tester ran the same black-hole
