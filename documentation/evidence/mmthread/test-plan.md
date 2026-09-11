@@ -290,9 +290,21 @@ message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
    must still produce three roots. A global lock passes every case above and fails
    this one.
 
-Run 1-5 at the default `MM_DEADLINE_SECS=10` and again at 5. Below 5 the script's
-own startup consumes most of the budget and it cannot reliably send at all, lock or
-no lock; that is a property of the budget, not of the lock, and is out of scope.
+Run 1-5 at the default `MM_DEADLINE_SECS=10` and again at 8.
+
+**BELOW `MM_DEADLINE_SECS=8` THE SCRIPT DOES NOT THREAD AT ALL** - no lock is
+taken, no map line is written, and it behaves exactly like the pre-item sender.
+That floor exists because threading costs two syscalls that are not free on this
+platform, and at 5s per call a budget of 5 delivered 4 of 6 where the pre-item
+sender delivered 6, while 8 and 10 were at parity. So at a budget below 8 the
+"no lock directory left behind" clause does NOT apply: a run that never touches
+the locking cannot tidy it either, and a stale lock is cleared by the next run at
+a normal budget. Every other clause still applies at every budget - exit 0, a
+message sent, zero stderr.
+
+The alternative was to tune the gate one more notch and keep claiming threading
+everywhere, which is how the previous three rounds each produced a version that
+failed at a setting the last one had not been measured at.
 
 **STDERR IS AN ASSERTION, not a nicety.** Attempt 9 leaked 2180 bytes of bash NUL
 warnings from the lock's `at` read with every case still passing. A `2>/dev/null`
@@ -354,25 +366,35 @@ is not working.
 
 ## T15a — how far the threading guarantee is claimed to hold
 
-**The developer claims one-thread-per-session at N=2 and N=3, and explicitly does
-NOT claim it at N=10.** Measured there: about half the rounds open more than one
-root, and between 0 and 11 messages per 100 are lost where the pre-item notifier
-loses none. Three cost reductions narrowed it and none closed it.
+**THE CLAIM IS NOW N=2 ONLY, and the previous round's wider claim was refuted by
+measurement rather than argument.** A tester ran 30 rounds and found N=3 splitting
+in 5 of them, then built a SECOND independent harness - real `curl` against a
+long-lived fake server, no per-call forks - and got 8 of 30. The developer had
+called N=3 exact on twelve green rounds.
 
-The stated reason is that a session cannot emit ten simultaneous FIRST
-notifications - the overlap this item exists for is a permission request against
-a turn completion, which is two.
+**TWELVE ROUNDS CANNOT ESTABLISH THIS, and that is the reusable lesson.** A clean
+run of twelve has roughly an 11% chance even when the true split rate is one in
+five. Run **at least 30 rounds** per setting, and if you report a rate, say what
+your sample can and cannot exclude.
 
-**Your job is to decide whether that scoping is honest, not to assume it.** Two
-things would refute it: showing a realistic path to many simultaneous first
-notifications from ONE session, or showing that N=2/N=3 are not in fact stable
-over a long run. If instead you agree the scoping holds, say so explicitly -
-"narrowed the test to fit the code" and "scoped a claim to what was measured" look
-identical in a diff and differ only in whether the reasoning survives contact with
-someone trying to break it.
+Measured now: N=2 is 30 of 30 with one root; N=3 is 29 of 30; N=10 splits in
+about half. Nothing is lost at any of them. **N=2 is claimed. N=3 is reported at
+1 in 30 and NOT claimed exact. N=10 is not claimed at all.**
 
-FAIL: N=2 or N=3 showing more than one root, or losing a message the pre-item
-notifier delivers, in any round.
+The reason offered for N=10 being out of scope is that a session cannot emit ten
+simultaneous FIRST notifications - the overlap this item exists for is a
+permission request against a turn completion, which is two. The previous tester
+checked `.claude/settings.local.json`, found only `Stop` and `Notification` wired
+and no `SubagentStop`, and agreed. That reasoning is now on the record and can be
+attacked the same way the N=3 claim was.
+
+**Your job is to decide whether the remaining scoping is honest, not to assume
+it.** "Narrowed the test to fit the code" and "scoped a claim to what was
+measured" look identical in a diff, and differ only in whether the reasoning
+survives someone trying to break it.
+
+FAIL: N=2 showing more than one root in any of 30 rounds; N=3 materially worse
+than 1 in 30; or any N losing a message the pre-item notifier delivers.
 
 ## T20 — exactly once
 

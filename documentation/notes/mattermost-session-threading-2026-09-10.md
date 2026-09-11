@@ -134,7 +134,7 @@ returned 200. Three separate things were:
   script exits 0 having sent nothing. Pre-existing; this item added further
   invocations. Counted with a PATH shim, and the figure depends on whether stdin
   is redirected — the deciding line is `[ -z "$sid" ] && [ ! -t 0 ]` at
-  `scripts/notify-mattermost.sh:125`:
+  `scripts/notify-mattermost.sh`, the `[ -z "$sid" ] && [ ! -t 0 ]` test:
   stdin redirected (both real hooks, since `</dev/null` is not a tty) **3 steady,
   5 on a first notification**; stdin skipped, as when a person runs it by hand or
   sets `MM_SESSION_ID`, **2 and 4**; the parent, **2**. Two earlier measurements
@@ -155,7 +155,8 @@ returned 200. Three separate things were:
   inheritance.** The parent compared the whole line —
   `grep -qxF "$sid" "$ALLOW"` at `6829474:scripts/notify-mattermost.sh:36` — so
   only an exact uuid passed. This version compares the 8-character key
-  (`scripts/notify-mattermost.sh:196`), so a DIFFERENT uuid sharing its first
+  (the `normkey "$_entry"` comparison inside the allowlist gate in
+  `scripts/notify-mattermost.sh`), so a DIFFERENT uuid sharing its first
   eight hex characters both passes the gate and joins the listed session's
   thread: verified with `beef0011-ffff-…` against a list naming
   `beef0011-26f9-…`, which the branch posts and the parent refuses.
@@ -269,9 +270,20 @@ Measured, 12 rounds each, against the pre-item notifier:
 
 | concurrent first notifications | this version | pre-item |
 |---|---|---|
-| 2 | **1 root every round, 0 messages lost** | 2 roots every round |
-| 3 | **1 root every round, 0 messages lost** | 3 roots every round |
-| 10 | 1 root in about half the rounds; **0 to 11 messages lost per 100** | 10 roots every round, 0 lost |
+| 2 | **1 root in 30 of 30 rounds, 0 messages lost** | 2 roots every round |
+| 3 | 1 root in **29 of 30** rounds, 0 messages lost | 3 roots every round |
+| 10 | 1 root in about half the rounds, some messages lost | 10 roots every round, 0 lost |
+
+**THE N=3 CLAIM WAS WRONG AND A TESTER MEASURED IT WRONG WITH TWO INDEPENDENT
+HARNESSES** — 5 of 30 rounds split, and 8 of 30 on a second instrument built to
+rule out the first. Twelve rounds of green had been taken as exact; twelve rounds
+cannot exclude a one-in-five rate, and the arithmetic to check that was never
+done. The diagnosis was theirs too: losing runs never entered the lock's wait at
+all, because the ENTRY gate still tested half the budget while the wait itself
+had been decoupled from it — and startup alone spends three to four seconds of
+ten. With the gate sized to what actually has to fit (the wait plus one post) and
+startup made fork-free, N=3 measures 1 of 30. Better, and still not exact, so it
+is not claimed as exact.
 
 **N=10 IS NOT FIXED AND IS NOT CLAIMED TO BE.** Ten runs of one session starting
 at the same instant saturate this machine, and the losers' waiting costs some of
@@ -298,8 +310,16 @@ on.
   and in the flattering direction.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
   case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
-  **19.3s at 20 and 28.5s at 30** — it scales with the variable rather than
-  plateauing, and both are past a Stop hook's 15s limit. (An earlier draft said
+  **and that scaling is NOT the lock's doing.** A tester ran the same black-hole
+  API with the locking removed entirely and got 13.4s / 21.7s / 32.0s at 10 / 20 /
+  30 — the same shape. It is `curl -m $(remaining)`: the budget IS the timeout, so
+  raising the budget raises the worst case whether anything is locked or not. Two
+  figures previously published here as evidence about the lock (19s, then 19.3s
+  and 28.5s) measured the API timeout and were attributed to the wrong cause;
+  neither reproduces on a third run either, which is what a figure with no control
+  beside it is worth. What matters and does hold: the worst case exceeds a Stop
+  hook's 15s limit for any MM_DEADLINE_SECS at or above about 12, and the default
+  of 10 stays inside it. (An earlier draft said
   16s; re-measured on this build.) The default is safe; raising the variable above
   the hook limit is not, and nothing in the script can detect that.
 

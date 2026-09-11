@@ -56,6 +56,18 @@ MENTION="${MM_OPERATOR_MENTION:-@profnovice}"
 # the single-call version could not exceed its 8s. Every call draws from this,
 # and a call with no budget left is skipped rather than started.
 MM_DEADLINE_SECS="${MM_DEADLINE_SECS:-10}"
+# VALIDATED, because it is an environment variable and every arithmetic test in
+# this file consumes it. A tester set it to "10s" and got 1694 bytes of bash
+# arithmetic errors on the hook's stderr; "abc" was worse - bash reads a bare
+# identifier as 0, so the budget became zero, every call was skipped for want of
+# time and the run sent NOTHING while exiting 0. A knob that can silence the
+# notifier by typo is the same failure this item exists to end, reachable from a
+# shell profile. Anything that is not a positive integer falls back to the
+# default rather than propagating.
+case "$MM_DEADLINE_SECS" in
+  ''|*[!0-9]*) MM_DEADLINE_SECS=10 ;;
+esac
+[ "$MM_DEADLINE_SECS" -lt 1 ] && MM_DEADLINE_SECS=10
 
 # A CLOCK THAT DOES NOT FORK. `date +%s` costs a process every time it is read,
 # and `remaining` is read before every HTTP call; on Windows a fork is tens of
@@ -125,18 +137,37 @@ if [ -z "$sid" ] && [ ! -t 0 ]; then
   # stderr. This one is PRE-EXISTING - the parent leaks here too - and is fixed
   # anyway, because it is one line and the identical defect to the one I added.
   { hook_json=$(cat 2>/dev/null); } 2>/dev/null
-  sid=$(printf '%s' "$hook_json" | python -c 'import json,sys
+  # BASH, NOT PYTHON. Every process this script spawns before its first API call
+  # comes out of the SAME wall-clock budget the message has to fit in, and on
+  # Windows a fork is tens of milliseconds. A tester measured 3-4 seconds of fixed
+  # startup charged to a 10-second budget, which is why runs arrived at the lock
+  # too poor to wait and why the budget ran out entirely at smaller settings. This
+  # was a python interpreter launched to read ONE field.
+  #
+  # The field is a uuid in a flat hook payload, so a regex is enough; python stays
+  # as the fallback for a shape this does not match, which costs a fork only when
+  # the cheap path fails.
+  if [[ "$hook_json" =~ \"session_id\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]]; then
+    sid="${BASH_REMATCH[1]}"
+  else
+    sid=$(printf '%s' "$hook_json" | python -c 'import json,sys
 try:
     print((json.load(sys.stdin).get("session_id") or ""))
 except Exception:
     print("")' 2>/dev/null)
+  fi
 fi
 # ...and last, recover it from the message itself. The Notification hook formats
 # "session <8 hex> - ..." into the text it passes, so the id is right there even
 # when stdin is gone. Narrow on purpose: 8 hex characters after the word
 # "session", nothing else.
 if [ -z "$sid" ] && [ -n "$1" ]; then
-  sid=$(printf '%s' "$1" | grep -oiE 'session [0-9a-f]{8}' | head -1 | awk '{print $2}')
+  # Three more processes for one substring - grep, head and awk - on the path that
+  # serves the Notification hook, which is the majority of notifications. Bash can
+  # do this without leaving the shell.
+  if [[ "$1" =~ [Ss][Ee][Ss][Ss][Ii][Oo][Nn][[:space:]]+([0-9a-fA-F]{8}) ]]; then
+    sid="${BASH_REMATCH[1]}"
+  fi
 fi
 
 # 1b) ONE CANONICAL KEY. The Stop hook gives a 36-char uuid on stdin; the
@@ -375,7 +406,28 @@ lock_take() {
   #
   # This is the one decision the rest of the file keeps re-learning: when the
   # budget is short, spend it on the message.
-  [ "$(remaining)" -lt $(( MM_DEADLINE_SECS / 2 )) ] && return 1
+  # THE GATE ASKS WHETHER THE WAIT AND THE SEND BOTH FIT, not whether half the
+  # budget survives. `MM_DEADLINE_SECS / 2` was arbitrary and far too strict: a
+  # tester measured losing runs arriving here with 3 or 4 seconds of a 10-second
+  # budget - startup alone spends 3-4 - so the gate fired on EVERY loser, none of
+  # them ever entered the wait loop, and they all posted flat against a map the
+  # winner had not written yet. The wait had been decoupled from the budget; the
+  # ENTRY had not. That is why N=3 split in 5 of 30 rounds while N=2 held.
+  #
+  # What actually has to fit is the wait (LOCK_MAX_TRIES turns of 0.2s) plus one
+  # post (`post` refuses under 2s). Anything less and threading is genuinely
+  # unaffordable, which is the only case this gate is for.
+  _gate=$(( (LOCK_MAX_TRIES / 5) + 2 ))
+  [ "$(remaining)" -lt "$_gate" ] && return 1
+  # AND A FLOOR ON THE WHOLE BUDGET, not just on what is left of it. Threading
+  # costs a lock directory and a map line - two syscalls that are not free on this
+  # platform - and below a certain budget those cost the message instead. Measured
+  # at 5s per call: MM_DEADLINE_SECS=5 delivered 4 of 6 where the pre-item sender
+  # delivered 6, while 8 and 10 were at full parity. So under 8 this does not
+  # thread AT ALL and the run behaves exactly like the sender it replaces - which
+  # is better than threading badly, and honest in a way that tuning the gate one
+  # more notch would not have been.
+  [ "$MM_DEADLINE_SECS" -lt 8 ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
   _lock_t0=$(now_s)
   # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
