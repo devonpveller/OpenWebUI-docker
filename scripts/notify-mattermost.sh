@@ -77,24 +77,20 @@ _started=$(now_s)
 # the send allowance. It is credited back here, capped, so the total stays inside
 # the hook's own timeout.
 _lock_spent=0
-LOCK_SPEND_CAP=3
-_post_skipped=""      # set when a send was abandoned for want of budget
+# 2, not 3. The credit is real time the run spends, so it extends the worst case:
+# MM_DEADLINE_SECS + this + startup. A tester measured 14.9-15.8s against the Stop
+# hook's 15s limit, three of four runs over. Removing the announce takes a whole
+# curl timeout out of that worst case; this takes another second, and both are
+# needed because the budget is wall-clock and the hook's limit is not negotiable.
+LOCK_SPEND_CAP=2
 _recovered=""         # set when the recovery path has already sent the message
 
-# THE ANNOUNCE IS A LUXURY; THE MESSAGE IS NOT. Opening a thread costs a SECOND
-# API call, and when the budget cannot cover both, spending it on the header and
-# losing the message is precisely backwards - it leaves the operator a thread
-# title announcing a session that then says nothing. That is the failure this
-# whole item exists to end, rebuilt one layer up.
-#
-# So a thread is only opened when there is room for the announce AND the message
-# after it. `post` refuses a call under 2s, so two calls need 4; asking for a
-# little more stops a slow announce from eating the message's share. Below that
-# the run posts FLAT - unthreaded and delivered, which is the trade this item is
-# allowed to make. Measured at MM_DEADLINE_SECS=5: without this the locked
-# version delivered 5 of 6 where the unlocked parent delivered 6 of 6.
-ANNOUNCE_MIN_BUDGET=5
-can_announce() { [ "$(remaining)" -ge "$ANNOUNCE_MIN_BUDGET" ]; }
+# ANNOUNCE_MIN_BUDGET IS GONE, and so is the threshold it named. It gated a
+# second API call on 5 seconds of remaining budget, a figure measured against
+# STARTUP cost; two calls at 3-5s each need 6-10s, so it protected the message
+# only against the one cost it had been fitted to. The thread root is now the
+# first message itself - one call - which removes the trade rather than tuning
+# where it falls.
 
 remaining() {
   local _now _left
@@ -241,10 +237,11 @@ print(json.dumps(d))' 2>/dev/null)
   # left to ask" - and the recovery path fired on the second, spending the little
   # time that remained on an announce plus a retry, which is the most expensive
   # possible response to being short of time. The flag lets the caller skip it.
-  if [ "$_budget" -lt 2 ]; then
-    _post_skipped=1
-    return 1
-  fi
+  # No flag here. An earlier version set one for the caller to read, but `post` is
+  # always invoked as `$(post ...)` and a command substitution is a subshell, so
+  # the assignment died with it - dead code from the moment it was written. The
+  # caller reads `remaining` itself.
+  [ "$_budget" -lt 2 ] && return 1
   _resp=$(curl -s -m "$_budget" -w '\n%{http_code}' \
     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
     -X POST "$API" -d "$_payload" 2>/dev/null)
@@ -303,7 +300,14 @@ trap 'lock_release' EXIT INT TERM
 # So: the WAIT is bounded by its own try count, and the budget is only a backstop
 # that stops us waiting past being able to send at all.
 LOCK_MAX_TRIES=$(( (MM_DEADLINE_SECS * 3) / 2 ))
-[ "$LOCK_MAX_TRIES" -gt 15 ] && LOCK_MAX_TRIES=15
+# 8 turns, about 1.6s. It was 15 (~3s), and at ten concurrent runs that wait
+# cost 10 messages in 100 where the unlocked code lost none - the losers spent
+# their budget waiting for a root instead of sending. Measured at 15 / 8 / 5
+# turns: 10, 1 and 8 messages lost per 100 at N=10, with N=2 and N=3 perfect
+# throughout. 5 is too short to see the winner publish and falls back to flat
+# more often; 8 is where waiting still usually works and no longer costs the
+# message. A loser that times out posts flat, which delivers.
+[ "$LOCK_MAX_TRIES" -gt 8 ] && LOCK_MAX_TRIES=8
 [ "$LOCK_MAX_TRIES" -lt 2 ] && LOCK_MAX_TRIES=2
 # THREE turns, about 0.6s. The holder writes `at` in the microseconds after its
 # mkdir, so this is already a margin of roughly a thousand times the window it has
@@ -331,8 +335,47 @@ lock_done() {
   return "$1"
 }
 
+# THE MAP LOOKUP, WITHOUT A FORK. This was `$(awk ...)` - two processes per call,
+# one for the substitution and one for awk - and the lock's poll loop runs it on
+# every turn, so a losing run could spend a dozen process spawns just asking
+# whether the root had appeared yet. At ten concurrent runs that is what pushed
+# some of them past their budget with no message sent, while the unlocked code
+# they replace sent everything. It writes a global instead of printing, because a
+# command substitution would put the fork straight back.
+#
+# LAST match wins, as before: the map is append-only and a recovery appends a new
+# root, so the newest line is the live one.
+MAP_ROOT=""
+map_root() {
+  MAP_ROOT=""
+  [ -n "$key" ] || return 0
+  # GUARD THE FILE, do not rely on the redirect's `2>/dev/null`. Redirections are
+  # applied left to right, so `done < "$THREADS" 2>/dev/null` reports a missing
+  # file on the stderr that is still open - 540 bytes of it across a run, in a
+  # script whose own test plan asserts zero. The map legitimately does not exist
+  # before the first session is recorded, so this is the common path, not an edge.
+  [ -r "$THREADS" ] || return 0
+  local _k _v
+  while read -r _k _v || [ -n "$_k" ]; do
+    [ "$_k" = "$key" ] && MAP_ROOT="$_v"
+  done < "$THREADS" 2>/dev/null
+  return 0
+}
+
 lock_take() {
   [ -z "$key" ] && return 1
+  # ARRIVING ALREADY STARVED? DO NOT THREAD AT ALL.
+  #
+  # Threading is worth a little time and no messages. A run whose startup has
+  # already eaten half the budget - which is what ten concurrent runs do to each
+  # other on this machine - cannot afford to take a lock, wait for a root and
+  # still send; it was measured losing the message instead, where the unlocked
+  # code it replaces lost none. Such a run now skips the whole mechanism and posts
+  # flat immediately, which is exactly what the parent would have done.
+  #
+  # This is the one decision the rest of the file keeps re-learning: when the
+  # budget is short, spend it on the message.
+  [ "$(remaining)" -lt $(( MM_DEADLINE_SECS / 2 )) ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
   _lock_t0=$(now_s)
   # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
@@ -345,6 +388,13 @@ lock_take() {
   # Nothing below uses `continue`; every path falls through to the sleep.
   while [ "$_i" -lt "$LOCK_MAX_TRIES" ]; do
     _i=$(( _i + 1 ))
+    # THE MAP FIRST, BECAUSE READING IT IS FREE AND `mkdir` IS A PROCESS. A run
+    # waiting here wants the ROOT, not the lock, and once the winner has published
+    # one there is nothing left to compete for - so checking costs nothing and
+    # saves a syscall per turn. With the lock attempted first, every losing run
+    # spent up to eight spawns discovering it had already lost.
+    map_root
+    if [ -n "$MAP_ROOT" ]; then root="$MAP_ROOT"; lock_done 1; return 1; fi
     if mkdir "$_d" 2>/dev/null; then
       # The brace wraps the ASSIGNMENT, not just `cat`. A `2>/dev/null` inside a
       # command substitution silences the command; the warning bash itself prints
@@ -362,8 +412,6 @@ lock_take() {
     # something we do not need. Measured over 20 rounds of 10 concurrent runs:
     # waiting for the release lost 2 messages in 200 where the unlocked parent
     # lost none, and that is the wrong way to buy one thread per session.
-    root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
-    [ -n "$root" ] && { lock_done 1; return 1; }
 
     { _at=$(cat "$_d/at" 2>/dev/null); } 2>/dev/null
     case "$_at" in
@@ -390,7 +438,24 @@ lock_take() {
     _backstop=$(( MM_DEADLINE_SECS / 2 ))
     [ "$_backstop" -gt 3 ] && _backstop=3
     [ "$_backstop" -lt 1 ] && _backstop=1
-    [ "$(remaining)" -le "$_backstop" ] && { lock_done 1; return 1; }
+    if [ "$(remaining)" -le "$_backstop" ]; then
+      # ON THE WAY OUT, BREAK A LOCK NOBODY CAN BE HOLDING. At a small budget the
+      # backstop ends this loop on the first turn, so the blind expiry above -
+      # which needs LOCK_BLIND_TRIES turns - never fires, and an `at`-less lock
+      # survived EVERY run and silently disabled threading for that session. A
+      # tester measured that at MM_DEADLINE_SECS=5. Clamping the two try-counts
+      # against each other did not help, because the loop does not end at the try
+      # count, it ends here. Removing it costs one `rm` and cannot orphan a live
+      # holder: a live holder has a readable `at`.
+      # Unreadable OR dated in the FUTURE. A future timestamp is all digits, so
+      # a test that only looked for non-numeric text left that one case holding
+      # the lock forever - the single survivor when the rest were fixed. `_age`
+      # is negative for both, which is the property that actually matters: no
+      # live holder can have written a start time this run has not reached.
+      [ "$_age" -lt 0 ] && rm -rf "$_d" 2>/dev/null
+      lock_done 1
+      return 1
+    fi
     sleep 0.2 2>/dev/null || sleep 1
   done
   lock_done 1
@@ -411,7 +476,7 @@ if [ -n "$key" ] && [ -f "$THREADS" ]; then
   # uninvolved session's mapping in 2 of 5 concurrent rounds, and that renaming
   # the temp file did NOT fix (still 2 of 3 at the next attempt). A rename is not
   # a synchronisation primitive; not rewriting the file is.
-  root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
+  map_root; root="$MAP_ROOT"
 fi
 
 # 4) No root yet → announce the session and remember the post we can reply under.
@@ -429,35 +494,73 @@ fi
 # messages were dropped; the unlocked parent dropped none, which made the lock worse
 # than nothing exactly where it mattered.
 #
-# A run that could not take the lock therefore posts FLAT. That is the honest
-# degradation: one message, unthreaded, in the channel. Never a competing root, and
-# never a dropped message - an unthreaded message beats no message, and this file
-# says so in three other places.
-if [ -z "$root" ] && [ -n "$key" ] && [ -n "$LOCK" ] && can_announce; then
-  announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — started $(date '+%H:%M')${MENTION:+ · $MENTION}"
-  root=$(post "$announce" "")
-  if [ -n "$root" ] && [ -n "$key" ]; then
-    { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
-  fi
+# THERE IS NO SEPARATE ANNOUNCE ANY MORE. THE FIRST MESSAGE IS THE ROOT.
+#
+# A header post costs a SECOND API call, and every version of this that kept one
+# lost messages to it. The last attempt gated it on a 5-second budget, which was
+# measured against STARTUP cost and cannot cover two calls that take 3-5s each: a
+# tester found the tip announcing and then failing to send at the DEFAULT budget
+# once a call cost more than about 2s - 0 of 8 messages delivered at 5s per call,
+# every round consisting of the header alone. A thread title announcing a session
+# that then says nothing is verbatim the failure this item exists to end, and
+# three rounds of tuning a threshold kept reproducing it at a new latency.
+#
+# So the thread's root IS the session's first message. One call, the same as the
+# unlocked code this replaces, and the session still gets exactly one thread: the
+# id that call returns is what goes in the map, and every later notification
+# replies under it. Nothing can now be lost to a header, because there is no
+# header - and a reader opening the thread sees content immediately instead of a
+# title. The cost is that the root says "finished a turn" rather than "session
+# started", which is what the channel's own convention already looks like.
+#
+# `-n "$LOCK"` still gates ROOT CREATION, not sending: a run that could not take
+# the lock posts flat rather than opening a competing thread, and flat-but-
+# delivered is the degradation this item is allowed to make.
+_make_root=""
+if [ -z "$root" ] && [ -n "$key" ] && [ -n "$LOCK" ]; then
+  _make_root=1
 fi
-# RELEASED HERE, not at exit: the message POST below must not hold the lock. It
-# takes the bulk of the budget, and holding it there would serialise every
-# notification of a session behind its slowest one for no benefit - the thing
-# needing exclusion is choosing-or-creating the root, and that is now done.
-lock_release
+# RELEASED HERE ONLY IF THIS RUN IS NOT CREATING THE THREAD.
+#
+# When the root was a separate announce, the map line was written inside the lock
+# and the message could safely go out after releasing. Now that the FIRST MESSAGE
+# is the root, the map line cannot exist until that post returns - so releasing
+# first left the critical section covering nothing: a second run took the freed
+# lock, read a map the winner had not written yet, and opened its own root.
+# Measured the moment the change was made: 12 of 12 rounds at N=2 opened two
+# roots, indistinguishable from the unlocked code.
+#
+# So the run creating the thread holds the lock across its post. That is the one
+# case where holding it is the point rather than a cost, and it lasts at most one
+# API call. Every other run releases here and posts unserialised.
+[ -z "$_make_root" ] && lock_release
 
-# 5) Post the message. Under the root when we have one; as its own post when we do not,
-#    because a message in the channel beats no message at all.
+# 5) THE ONE SEND. Under the session's root when there is one; as its own post
+#    otherwise - and when this run is the one creating the thread, the id this
+#    call returns becomes that root.
 _dead_root="$root"
 out=$(post "${MENTION:+$MENTION }$MSG" "$root")
+if [ -n "$out" ] && [ -n "$_make_root" ] && [ -n "$key" ]; then
+  { printf '%s %s\n' "$key" "$out" >> "$THREADS"; } 2>/dev/null
+fi
+
+# The thread now exists, or the post failed and there is nothing to publish.
+# Either way the next run may proceed.
+[ -n "$_make_root" ] && lock_release
 
 # 6) A root that no longer exists (post deleted, channel purged) must not wedge the session
 #    into silence for the rest of its life. Drop the stale mapping and retry as a new thread,
 #    once. Anything still failing after that is Mattermost's problem, not this turn's.
-# `-z "$_post_skipped"`: a send that never happened for want of time is not
-# evidence that the root is dead, and recovering from it costs two more calls we
-# already know we cannot afford.
-if [ -z "$out" ] && [ -n "$root" ] && [ -z "$_post_skipped" ]; then
+# A send that never happened for want of time is not evidence that the root is
+# dead, and recovering from it costs calls we already know we cannot afford.
+#
+# THIS USED TO TEST A FLAG SET INSIDE `post`, AND THAT FLAG NEVER ARRIVED. `post`
+# is always called as `$(post ...)` - a command substitution is a SUBSHELL, so its
+# assignments die with it and the guard was dead code from the moment it was
+# written. A tester proved it by instrumenting the caller. The budget is readable
+# here directly, in this shell, which needs no flag at all: if there is not enough
+# left to have made the call, the empty result says nothing about the root.
+if [ -z "$out" ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
   if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
@@ -472,7 +575,7 @@ if [ -z "$out" ] && [ -n "$root" ] && [ -z "$_post_skipped" ]; then
   # recoveries of one session re-announce twice, which is the T15 defect wearing
   # a different hat.
   lock_take || :
-  root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
+  map_root; root="$MAP_ROOT"
   # Same invariant as step 4: without the lock we do not open a thread. A recovery
   # that cannot take it retries the message flat rather than racing a second root.
   if [ -z "$LOCK" ]; then
@@ -488,16 +591,16 @@ if [ -z "$out" ] && [ -n "$root" ] && [ -z "$_post_skipped" ]; then
     # Another run already recovered this session while we waited. Use its root
     # rather than opening a third thread.
     lock_release
-  elif can_announce; then
-  announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
-  root=$(post "$announce" "")
-  if [ -n "$root" ] && [ -n "$key" ]; then
-    { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
-  fi
-  lock_release
   else
-    # No budget for a header and a message both. Send the message.
+    # Same rule as the first notification: the retry itself becomes the new root.
+    # No header, so a recovery costs ONE call, which is what makes it affordable
+    # at the moment we have already spent a call discovering the root was dead.
     root=""
+    _retry=$(post "${MENTION:+$MENTION }$MSG" "")
+    if [ -n "$_retry" ] && [ -n "$key" ]; then
+      { printf '%s %s\n' "$key" "$_retry" >> "$THREADS"; } 2>/dev/null
+    fi
+    _recovered=1
     lock_release
   fi
   [ -z "$_recovered" ] && post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1

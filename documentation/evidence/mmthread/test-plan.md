@@ -244,14 +244,14 @@ PASS, per round: exactly **one announce**, and **delivered == N**.
 FAIL: more than one announce in any round; any message not delivered that the
 PARENT delivers under the same conditions; or a parent that is not red.
 
-**Classify posts properly or you will measure nothing.** An announce and a flat
-message BOTH have an empty `root_id` - the script deliberately posts flat when it
-cannot take the lock, and counting empty roots as threads reports that correct
-behaviour as a failure. Classify:
-  announce = no `root_id` AND the message begins with the thread marker
-  threaded = has `root_id`
-  flat     = no `root_id`, no marker  -> DELIVERED, just unthreaded
-delivered = threaded + flat. That is the number that must never drop.
+**THE CLASSIFICATION CHANGED WITH THE DESIGN. There is no announce post any
+more** - the first message IS the thread root, so nothing is a header and the old
+three-way split no longer applies. For N concurrent runs of ONE session:
+  roots     = posts with an EMPTY `root_id`  -> must be exactly 1
+  delivered = every post                     -> must be exactly N
+A root is now itself a delivered message; they are not separate budgets. A plan
+that still counted "announces" here would report the design as having zero
+threads.
 
 ## T18 — the lock cannot become a new way to go silent, and must always return
 
@@ -329,9 +329,18 @@ baseline. This case exists because a tester found the locked version delivering
 0 of 6 where the parent delivered 6 of 6, in a SINGLE run with no lock present
 and no concurrency at all.
 
+**WHICH PARENT: `6829474`, the pre-item notifier** - flat, no threading, no
+lock. That is what the operator actually has today and what this replaces, and it
+is the same baseline T2 uses. A previous round left this unsaid and the verdict
+differed depending on which commit a tester picked: against the intermediate
+threading versions the tip looked like a clear win, against the pre-item code it
+was a regression. Name the baseline or the result means nothing.
+
 Run parent and tip ALTERNATELY, round by round, so both meet the same machine
 load. Single runs, no concurrency, fresh map each time, at `MM_DEADLINE_SECS` 5
-and 8. Count delivered messages (threaded + flat) and mean wall time.
+and 8, AND at the default 10 with per-call latencies of 2s, 3s and 5s - the
+latency axis is where three successive designs failed while every fixed-budget
+case passed. Count delivered messages and mean wall time.
 
 PASS: at every setting, tip delivered >= parent delivered.
 FAIL: any setting where the parent delivers a message the tip does not. Report
@@ -342,6 +351,28 @@ A useful sanity check: at a tight budget the tip should deliver MORE than the
 parent and announce LESS, because it declines to spend the message's budget on a
 thread header. If it announces just as often and delivers less, the budget rule
 is not working.
+
+## T15a — how far the threading guarantee is claimed to hold
+
+**The developer claims one-thread-per-session at N=2 and N=3, and explicitly does
+NOT claim it at N=10.** Measured there: about half the rounds open more than one
+root, and between 0 and 11 messages per 100 are lost where the pre-item notifier
+loses none. Three cost reductions narrowed it and none closed it.
+
+The stated reason is that a session cannot emit ten simultaneous FIRST
+notifications - the overlap this item exists for is a permission request against
+a turn completion, which is two.
+
+**Your job is to decide whether that scoping is honest, not to assume it.** Two
+things would refute it: showing a realistic path to many simultaneous first
+notifications from ONE session, or showing that N=2/N=3 are not in fact stable
+over a long run. If instead you agree the scoping holds, say so explicitly -
+"narrowed the test to fit the code" and "scoped a claim to what was measured" look
+identical in a diff and differ only in whether the reasoning survives contact with
+someone trying to break it.
+
+FAIL: N=2 or N=3 showing more than one root, or losing a message the pre-item
+notifier delivers, in any round.
 
 ## T20 — exactly once
 

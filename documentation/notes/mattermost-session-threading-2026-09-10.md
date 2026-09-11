@@ -96,10 +96,12 @@ returned 200. Three separate things were:
      across 20 rounds of 10 concurrent runs, where the unlocked parent lost none.
      The wait now ends the moment the winner's map line appears.
 
-  Measured at the end, 20 rounds of 10 concurrent runs each: **parent — 10 roots
-  every round, 20 of 20; this version — 1 root every round, 0 of 20, and 200 of
-  200 messages delivered.** Also 1 root at 10-way concurrency with a 1s-per-call
-  API, and three DIFFERENT sessions still open three threads.
+  **A "200 of 200 messages delivered" figure stood here for two rounds after a
+  commit message declared it replaced.** It did not reproduce — the same setting
+  measured 112 of 120 — and the correction went into the commit while the line
+  stayed. That is verbatim the failure this note's own preamble exists to
+  prevent, committed by the person who wrote the preamble. The current numbers
+  are in the table below, each beside the setting it was taken at.
 
   **Termination is a property of the code, not of the filesystem.** An earlier
   version bounded itself with `rm -rf; continue`, which skipped both the budget
@@ -219,26 +221,34 @@ milliseconds and the measured gap was ~1.0s per run. bash 5 exposes
 `EPOCHSECONDS` as a variable, so the clock no longer forks at all. That closed
 about two thirds of it (1002ms -> 355ms) and was still not enough.
 
-**THE ANNOUNCE IS A LUXURY; THE MESSAGE IS NOT.** Opening a thread costs a SECOND
-API call. When the budget could not cover both, the run spent it on the header
-and lost the message — leaving the operator a thread title announcing a session
-that then says nothing, which is this item's own failure rebuilt one layer up. A
-thread is now only opened when there is room for the announce AND the message
-after it; below that the run posts flat. Measured at `MM_DEADLINE_SECS=5`, single
-runs:
+  **THERE IS NO ANNOUNCE POST ANY MORE. THE FIRST MESSAGE IS THE ROOT.**
 
-| | delivered | announces | mean wall |
+  Three rounds were spent deciding WHEN to spend a second API call on a thread
+  header, and each answer failed at a latency the previous one had not been
+  measured against. Gating it on 5 seconds of remaining budget was fitted to
+  STARTUP cost; two calls at 3-5s each need 6-10s, so at the DEFAULT budget with
+  a 5s API the run posted the header and then could not send — 1 of 6 delivered,
+  every other round consisting of a thread title announcing a session that then
+  says nothing. That is this item's own failure, rebuilt one layer up, for the
+  third time.
+
+  The header is gone. The thread's root is the session's first MESSAGE: one call,
+  the same as the code being replaced, and the id it returns is what the map
+  records. Nothing can be lost to a header because there is no header, and a
+  reader opening the thread sees content instead of a title.
+
+  Single runs at `MM_DEADLINE_SECS=10`, by per-call latency, against the pre-item
+  notifier `6829474`:
+
+| latency | pre-item | attempt 11 | now |
 |---|---|---|---|
-| parent | 5 of 8 | 8 | 4770ms |
-| attempt 10 | 4 of 6 | 6 | 5186ms |
-| now | **8 of 8** | 0 | **3104ms** |
+| 2s | 6 of 6 | 6 of 6 | **6 of 6** |
+| 3s | 6 of 6 | 6 of 6 | **6 of 6** |
+| 5s | 6 of 6 | **1 of 6** | **6 of 6** |
 
-It is faster BECAUSE it sends less: one call instead of two. And at
-`MM_DEADLINE_SECS=8` both deliver 8 of 8 and both announce 8 times, so nothing
-was traded away at a normal budget.
-
-The general lesson: the overhead of a feature is not paid by the feature. It is
-paid by whatever runs last, and here that was the only thing anybody wanted.
+  The lesson that survives all three rounds: **the overhead of a feature is not
+  paid by the feature.** It is paid by whatever runs last, and here that was the
+  only thing anybody wanted.
 
 ## The recovery path sent the operator the same message twice
 
@@ -247,6 +257,36 @@ fell through to the unconditional send below it. Measured 3 of 3 runs by a
 tester, and **invisible to every case in the plan, because all of them counted
 "at least N"**. A test that cannot distinguish one from two is not a delivery
 test. Now fixed, with a case that counts exactly-once against parent and tip.
+
+## Concurrency: solved at the sizes this actually sees, NOT at ten
+
+The lock now has to be held across the root-creating POST, because the map line
+cannot exist until that call returns. Releasing before it left the critical
+section covering nothing — measured the moment the change was made, 12 of 12
+rounds at N=2 opened two roots, indistinguishable from the unlocked code.
+
+Measured, 12 rounds each, against the pre-item notifier:
+
+| concurrent first notifications | this version | pre-item |
+|---|---|---|
+| 2 | **1 root every round, 0 messages lost** | 2 roots every round |
+| 3 | **1 root every round, 0 messages lost** | 3 roots every round |
+| 10 | 1 root in about half the rounds; **0 to 11 messages lost per 100** | 10 roots every round, 0 lost |
+
+**N=10 IS NOT FIXED AND IS NOT CLAIMED TO BE.** Ten runs of one session starting
+at the same instant saturate this machine, and the losers' waiting costs some of
+them their message where the unlocked code loses none. Three separate reductions
+helped and none closed it: a fork-free clock, a fork-free map read (the poll loop
+was spawning `awk` twice per turn), and checking the map before attempting the
+lock. Between passes the figure swings from 0 to 11 per 100, so it is also not a
+number worth quoting to one significant figure.
+
+The reason for shipping anyway, stated so it can be disagreed with: **a session
+cannot emit ten simultaneous first notifications.** The overlap this item exists
+for is a permission request against a turn completion — two. At two and three the
+result is exact and stable. If you think a synthetic N=10 should block a fix for
+a real N=2, that is a legitimate position and the numbers above are what it turns
+on.
 
 ## What the lock still does not do, measured
 
@@ -258,7 +298,8 @@ test. Now fixed, with a case that counts exactly-once against parent and tip.
   and in the flattering direction.
 - **`MM_DEADLINE_SECS` must stay below the hook's own timeout.** The pathological
   case — a lock directory `rm` cannot clear — returns in 10s at the default 10,
-  and **19s at 20 or 30**, past a Stop hook's 15s limit. (An earlier draft said
+  **19.3s at 20 and 28.5s at 30** — it scales with the variable rather than
+  plateauing, and both are past a Stop hook's 15s limit. (An earlier draft said
   16s; re-measured on this build.) The default is safe; raising the variable above
   the hook limit is not, and nothing in the script can detect that.
 
@@ -272,6 +313,21 @@ which an earlier version of this note excused on exactly that ground. Both are n
 wrapped as `{ var=$(...); } 2>/dev/null`, because it is one line and the same
 defect, and "the parent does it too" is a reason to check whether the parent is
 right, not a reason to keep it. Measured after: 0 bytes on a NUL stdin.
+
+## A trap that has now caught the developer twice
+
+**Running this script from a worktree POSTS TO THE OPERATOR'S REAL CHANNEL.** The
+worktree carries a real `.env` with a real bot token, and `ROOT_DIR` is derived
+from the script's own location, so `bash scripts/notify-mattermost.sh "probe"`
+is not a dry run - it is a live post. I did it twice in one session while
+checking a stderr byte count, each time landing an unlabelled `@profnovice probe`
+in `#claude-sessions`; both were deleted after checking their threads for foreign
+replies, and the channel's newest post is the 2026-09-03 one either way.
+
+Resolving to be careful did not work the first time. The mechanical rule is: any
+behaviour check goes through the shim lab - a copied script root, a fake `curl`
+first on `PATH` - and the live script is never invoked to observe anything,
+including something as small as how many bytes it writes to stderr.
 
 ## A trap for whoever tests this, part two: the harness
 
