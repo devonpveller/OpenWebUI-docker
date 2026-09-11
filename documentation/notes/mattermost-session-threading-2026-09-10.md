@@ -149,18 +149,25 @@ check. So this item converts a partial silence into a complete one, and it canno
 honestly be said to deliver what its anchor promises while that file names a
 session from 2026-07-04.
 
-**Three options, and all three are the operator's:**
+**DECIDED by the operator, 2026-09-11: option 1 - every session pings.**
+`scripts/.mm-notify-sessions` was removed, after a copy was taken to
+`scripts/.mm-notify-sessions.removed-2026-09-11.bak` (it held one id,
+`f233ba99-26f9-44c5-b923-ba0597393188`, written 2026-07-04 13:18). Verified
+immediately afterwards through the production notifier: a Stop-shaped
+notification for the live session landed in `#claude-code` at 00:06:10, the first
+turn-completion ping in over two months.
 
-1. `rm scripts/.mm-notify-sessions` - every session on the machine pings.
-2. Replace its contents with the current session id - only that session pings.
-3. Leave it - and accept that IDE notifications stay silent, which is the status
-   quo for turn-completions and would become the status quo for permission
-   requests too.
+The options that were on the table, kept because the decision may be revisited:
+replace the contents with a single session id so only that session pings, or
+leave the file and accept the silence. The choice is about how often the operator
+wants interrupting, not about a defect - the code is correct either way, and this
+change is NOT what fixed the silence. Deleting one stale line was.
 
-Recorded here rather than decided, because it is a choice about how often the
-operator wants interrupting, not a defect. The code change is correct either way;
-what it is NOT is a fix for the silence, and this note should not have implied
-otherwise.
+**This unblocks the item.** With no allowlist, the gate never fires, so nothing
+this item does can suppress a notification. The acceptance criterion about not
+silencing what it delivers is now testable without depending on the operator's
+local file - which is also why T13 should keep testing the gate with a
+deliberately-written allowlist rather than the real one.
 
 ## The fixes that were not fixes
 
