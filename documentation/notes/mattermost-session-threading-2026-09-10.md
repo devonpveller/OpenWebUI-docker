@@ -136,6 +136,50 @@ opened TWO threads — both announcing the same short id — which breaks the
 anchor's first criterion. The canonical key is the 8-hex prefix, because it is
 the one form every path can produce.
 
+## THE ITEM IS BLOCKED ON AN OPERATOR DECISION, not on more code
+
+Attempt 4 measured the thing this note had been describing as a risk, using the
+operator's REAL allowlist and the REAL live session id: **the branch posts
+nothing; the baseline, same file, same message, posts.**
+
+That is not a regression in the fix - it is the fix working. The allowlist says
+"only session `f233ba99` may ping" and honours it. The BASELINE was leaking
+permission requests past the gate only because they carried no session id to
+check. So this item converts a partial silence into a complete one, and it cannot
+honestly be said to deliver what its anchor promises while that file names a
+session from 2026-07-04.
+
+**Three options, and all three are the operator's:**
+
+1. `rm scripts/.mm-notify-sessions` - every session on the machine pings.
+2. Replace its contents with the current session id - only that session pings.
+3. Leave it - and accept that IDE notifications stay silent, which is the status
+   quo for turn-completions and would become the status quo for permission
+   requests too.
+
+Recorded here rather than decided, because it is a choice about how often the
+operator wants interrupting, not a defect. The code change is correct either way;
+what it is NOT is a fix for the silence, and this note should not have implied
+otherwise.
+
+## The fixes that were not fixes
+
+Attempt 4's sharpest finding is about method rather than any single defect: **each
+fix had been validated against the case that exposed it, not against the class.**
+
+- The key was made alphanumeric to stop it collapsing to `e`, and the gate that
+  consumes the key was left filtering hex. A listed session was then silenced.
+- `cut -c1-8` was applied to every id, so two ids sharing an eight-character
+  prefix - `testsess-…-aaa` and `-bbb` - collided where the previous filter had
+  kept them apart. One collision class traded for another.
+- The temp file was given a unique name to stop a race, and the read-modify-write
+  underneath it was left alone. Measured: no improvement.
+
+What actually closed them: ONE normaliser called by both the key and the gate;
+truncation only for strings long enough to be a uuid; and an append-only map read
+last-wins, which removes the rewrite and therefore the race rather than renaming
+it. **A rename is not a synchronisation primitive; not rewriting the file is.**
+
 ## A trap for whoever tests this
 
 There is no staging Mattermost. Tests post to the operator's real channel. Label

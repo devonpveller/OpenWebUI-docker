@@ -104,7 +104,23 @@ fi
 #     with no hex characters reduced to EMPTY - which posts flat AND skips the
 #     allowlist, since the gate needs a key. Measured in test, attempt 3. For real
 #     uuids the two agree exactly, so no hook path changes.
-key=$(printf '%s' "$sid" | tr 'A-Z' 'a-z' | tr -cd '0-9a-z' | cut -c1-8)
+# ONE NORMALISER, used by the key below AND by the allowlist gate. They were
+#     two separate expressions and drifted: attempt 3 made the key alphanumeric
+#     and left the gate filtering hex, so a session listed VERBATIM was silenced
+#     whenever its id was not pure hex. A fix applied to one consumer of a value
+#     and not the other is how this item has failed twice now.
+#
+#     TRUNCATE ONLY WHAT IS LONG ENOUGH TO BE A UUID. `cut -c1-8` on everything
+#     collapsed `testsess-mmtest4-aaa` and `-bbb` to the same `testsess` - the
+#     alphanumeric fix traded one collision class for another, measured in test
+#     attempt 4. A uuid is 32 hex characters once punctuation is stripped, and the
+#     Notification hook emits its first 8; anything shorter is used whole, so two
+#     similar non-uuid ids stay distinct.
+normkey() {
+  printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -cd '0-9a-z' | awk '
+    { if (length($0) >= 32) print substr($0, 1, 8); else print substr($0, 1, 32) }'
+}
+key=$(normkey "$sid")
 
 # 2) Session allowlist: when it exists and is non-empty, only registered sessions ping.
 #    COMPARED ON THE SAME PREFIX, for a reason that nearly shipped as an outage.
@@ -118,10 +134,12 @@ key=$(printf '%s' "$sid" | tr 'A-Z' 'a-z' | tr -cd '0-9a-z' | cut -c1-8)
 #
 #    Matching on the prefix makes a full-uuid entry and a short-form id agree.
 if [ -s "$ALLOW" ] && [ -n "$key" ]; then
-  awk -v k="$key" '
-    { line = tolower($0); gsub(/[^0-9a-f]/, "", line)
-      if (substr(line, 1, 8) == k) { found = 1; exit } }
-    END { exit(found ? 0 : 1) }' "$ALLOW" 2>/dev/null || exit 0
+  _hit=""
+  while IFS= read -r _entry || [ -n "$_entry" ]; do
+    [ -z "$_entry" ] && continue
+    [ "$(normkey "$_entry")" = "$key" ] && { _hit=1; break; }
+  done < "$ALLOW"
+  [ -z "$_hit" ] && exit 0
 fi
 
 short="${key:-${sid:0:8}}"
@@ -136,8 +154,7 @@ MSG="${1:-🤖 Claude Code finished a turn in ${PROJECT}${short:+ · session \`$
 # HTTP 403 (measured, test attempt 3). The fallback bought nothing but a wasted
 # call against this script's wall-clock budget, and a comment telling the next
 # reader something untrue about what happens when the token goes missing.
-tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '
-')
+tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
 [ -z "$tok" ] && exit 0
 
 # post <message> [root_id] → prints the created post id, or NOTHING on failure.
@@ -185,7 +202,13 @@ else:
 root=""
 if [ -n "$key" ] && [ -f "$THREADS" ]; then
   # Field-exact, not a substring: `xbeef0011` cannot answer for `beef0011`.
-  root=$(awk -v s="$key" '$1 == s {print $2; exit}' "$THREADS" 2>/dev/null)
+  # LAST match wins, not first. The map is append-only, so a recovery appends a
+  # new root and the newest line is the live one. That removes the read-modify-
+  # write entirely - and with it the race that measurably destroyed an
+  # uninvolved session's mapping in 2 of 5 concurrent rounds, and that renaming
+  # the temp file did NOT fix (still 2 of 3 at the next attempt). A rename is not
+  # a synchronisation primitive; not rewriting the file is.
+  root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
 fi
 
 # 4) No root yet → announce the session and remember the post we can reply under.
@@ -215,14 +238,10 @@ if [ -z "$out" ] && [ -n "$root" ]; then
     # exits 1, the && short-circuits, the mv never runs and the stale entry
     # survives - so the append below produced a DUPLICATE and the dead root was
     # still found first. Found in test, attempt 1.
-    # A UNIQUE temp name. With a fixed one, two sessions recovering at the same
-    # moment raced: measured over five rounds in test attempt 3, two runs LOST an
-    # uninvolved third session's mapping and two left a duplicate whose first line
-    # was the dead root, re-wedging that session until its next recovery.
-    _tmp="$THREADS.$$.tmp"
-    awk -v s="$key" '$1 != s' "$THREADS" > "$_tmp" 2>/dev/null
-    mv "$_tmp" "$THREADS" 2>/dev/null
-    rm -f "$_tmp" 2>/dev/null
+    # NOTHING TO DO. The stale line is simply superseded by the one appended
+    # below, because the lookup takes the LAST match. No rewrite, no temp file,
+    # no race, and no `.tmp` orphans to gitignore.
+    :
   fi
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
