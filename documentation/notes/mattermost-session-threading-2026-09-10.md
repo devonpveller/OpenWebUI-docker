@@ -10,10 +10,12 @@ restated as this note's own measurement. If a number cannot be cited, state the
 property instead and say how to measure it.
 
 **This note carries no history of its own attempts.** It used to, and that is why
-its claims failed five test rounds running: a figure was found wrong, the
-correction went into a commit message, and the wrong line stayed here. A running
-narrative of its own drafts cannot converge — `git log -- documentation/notes/`
-holds the history and, unlike a document, cannot go stale. What is below is
+its claims kept failing: a figure was found wrong, the correction went into a
+commit message, and the wrong line stayed here. A running narrative of its own
+drafts cannot converge — `git log -- documentation/notes/` holds the history and,
+unlike a document, cannot go stale. (This sentence counted those rounds until a
+tester pointed out that the counter was itself the thing being cut, and went
+stale with every further round. It carries no number now.) What is below is
 either re-derivable today or explicitly marked as a reading taken at a time.
 
 ## What was wrong
@@ -67,8 +69,15 @@ returned 200. Three separate things were:
   END{print v}' map`.
 - **The script cannot work without `python` on `PATH`**, and if it is missing the
   script exits 0 having sent nothing. Pre-existing; this item added further
-  invocations. Again no count: a shim-based count taken here and one taken by a
-  tester disagreed, and the number is not what matters — the dependency is.
+  invocations. Counted with a PATH shim, and the figure depends on whether stdin
+  is redirected — the deciding line is `[ -z "$sid" ] && [ ! -t 0 ]` at
+  `scripts/notify-mattermost.sh:81`:
+  stdin redirected (both real hooks, since `</dev/null` is not a tty) **3 steady,
+  5 on a first notification**; stdin skipped, as when a person runs it by hand or
+  sets `MM_SESSION_ID`, **2 and 4**; the parent, **2**. Two earlier measurements
+  disagreed because of exactly this, and because a shim directory written
+  `C:/Users/…` is silently ignored by Git Bash — it must be `/c/Users/…`, or the
+  counter reads zero and the run looks cheaper than it is.
 - **A message body containing `session <8 hex>` steers the post into that
   session's thread.** Where the Notification hook supplies its own prefix, the
   prefix wins.
@@ -79,13 +88,20 @@ returned 200. Three separate things were:
   false for a directory, so the gate is skipped and an unlisted session posts.
   Pre-existing — the same test passes against the parent — but worth knowing
   before someone `mkdir`s that path.
-- **Allowlist entries match on the same 8-character key as everything else**, so
-  a DIFFERENT uuid sharing its first eight hex characters both passes the gate
-  and joins the listed session's thread. Verified with
-  `beef0011-ffff-…` against a list naming `beef0011-26f9-…`. The odds are
-  negligible for real uuids and the consequence is bounded, but it is the
-  allowlist half of the short-key trade and the note previously documented only
-  the message-text half.
+- **Allowlist matching was NARROWED BY THIS ITEM, and that is a change, not an
+  inheritance.** The parent compared the whole line —
+  `grep -qxF "$sid" "$ALLOW"` at `6829474:scripts/notify-mattermost.sh:36` — so
+  only an exact uuid passed. This version compares the 8-character key
+  (`scripts/notify-mattermost.sh:147`), so a DIFFERENT uuid sharing its first
+  eight hex characters both passes the gate and joins the listed session's
+  thread: verified with `beef0011-ffff-…` against a list naming
+  `beef0011-26f9-…`, which the branch posts and the parent refuses.
+
+  It is deliberate — the gate has to accept the 8-character form the Notification
+  hook can supply, which is the whole of T13 — and the odds are negligible for
+  real uuids. But a commit message of mine called it "pre-existing" alongside the
+  directory residual below, which IS pre-existing. "Pre-existing" is the label
+  that gets a widening waved through, and this one was mine.
 
 ## The inbound half does not exist, and the channel choice has a consequence
 
@@ -104,6 +120,13 @@ moving it is a separate decision. Its known-false `BACKUP STALE` warning — a
 watchdog run from a git worktree looking for backup directories that only exist
 in the main checkout — is recorded with the `crashloop` item, on the branch where
 that file lives.
+
+## The removed allowlist's backup is not gitignored
+
+`scripts/.mm-notify-sessions.removed-2026-09-11.bak` holds a session uuid, is
+untracked, and `.gitignore:65` covers only the exact path
+`scripts/.mm-notify-sessions` — so a broad `git add` in the operator's checkout
+could commit it. The ignore rule is widened to the backup in this item.
 
 ## A trap for whoever tests this
 
