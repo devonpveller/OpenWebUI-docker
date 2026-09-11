@@ -137,6 +137,11 @@ services:
     # THE RULE: a service names the variables it needs. Enforced by
     # scripts/checks/check-env-file-scope.ps1.
     environment:
+      # GATEWAY_API_KEY is the one REQUIRED Settings field (config.py: Field(...)).
+      # The 2026-08-28 env_file removal above named only the two upstreams, and the
+      # running container predated it, so the first recreate (research-trust deploy,
+      # 2026-09-11) crash-looped on 'GATEWAY_API_KEY Field required'.
+      - GATEWAY_API_KEY=${GATEWAY_API_KEY}
       - SEARXNG_URL=http://searxng:8080
       - REDIS_URL=redis://redis:6379/1
     ports:
