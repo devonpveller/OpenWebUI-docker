@@ -72,8 +72,13 @@ PROJECT="$(basename "$ROOT_DIR")"
 #    WHY THREE WAYS (found in test, attempt 1): the Notification hook in
 #    .claude/settings.local.json reads the hook JSON ITSELF and then invokes this
 #    script with `</dev/null`. Those are the "Claude needs your permission"
-#    messages - 28 of the last 40 notifications, and precisely the ones the
-#    operator has to answer. With only the stdin path they arrive with no session
+#    messages - the largest class of notification by volume, and precisely the
+#    ones the operator has to answer. NO COUNT: the figure that stood here was a
+#    reading over a sliding window of recent notifications, and it moved the next
+#    time anyone looked (28 of 40 when written, 24 of 40 when a tester re-measured
+#    it). A number with no command beside it cannot be re-derived, and a number
+#    taken over a window that moves cannot be right for long. The CLASS does not
+#    move, and the class is the argument. With only the stdin path they arrive with no session
 #    id and post FLAT, which defeats this whole item for its most important
 #    message class. That hook file is operator-local and gitignored, so this
 #    script cannot depend on it being changed.
@@ -205,6 +210,85 @@ else:
         print("")' 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# THE ANNOUNCE LOCK.
+#
+# Steps 3 and 4 are a read-then-act: look for this session's root, and if there
+# is none, create it. Two first notifications from the SAME session can both read
+# "no root" and both announce. Measured in test attempt 8: three concurrent runs
+# produced THREE roots and three map lines - which defeats the one-thread-per-
+# session this item exists to deliver. It is reachable in ordinary use because the
+# Notification hook is asynchronous, so a permission request and a turn completion
+# from one session overlap.
+#
+# MAKING THE MAP APPEND-ONLY COULD NEVER HAVE FIXED THIS. That removed the race
+# over the FILE; this is a race over an ACTION. The earlier fix measured clean and
+# was not wrong - it was answering a different question, which is why this survived
+# it. Two conflicts that look alike because they involve the same file are not the
+# same conflict.
+#
+# mkdir, because then the test-and-set IS the syscall rather than two lines of
+# shell. PER SESSION, because two different sessions announcing at the same moment
+# are not in conflict and must not queue behind each other inside a 10s budget.
+#
+# EVERY failure path below falls through to announcing WITHOUT the lock - exactly
+# the behaviour it replaces. So the lock can make the common case correct and
+# cannot make any case worse, and nothing in it may break a turn (T7).
+LOCK=""
+lock_release() {
+  [ -n "$LOCK" ] && rm -rf "$LOCK" 2>/dev/null
+  LOCK=""
+}
+trap 'lock_release' EXIT INT TERM
+
+lock_take() {
+  [ -z "$key" ] && return 1
+  local _d="$THREADS.lock.$key" _at _age _blind=0
+  while :; do
+    if mkdir "$_d" 2>/dev/null; then
+      printf '%s' "$(date +%s 2>/dev/null || echo 0)" > "$_d/at" 2>/dev/null
+      LOCK="$_d"
+      return 0
+    fi
+    # BREAK A LOCK WHOSE HOLDER DIED, or this wedges the session permanently -
+    # which is precisely how the allowlist silenced everything for two months. A
+    # lock with no expiry is a new single point of silence, so it gets two age
+    # tests, because it can die in two distinguishable ways:
+    #   readable and old  -> the holder ran past the entire wall-clock budget, so
+    #                        it cannot still be alive;
+    #   unreadable for    -> the holder died between its mkdir and its write. That
+    #   seconds              window is microseconds wide for anything running, so
+    #                        seconds of it means nothing is.
+    _at=$(cat "$_d/at" 2>/dev/null)
+    case "$_at" in
+      ''|*[!0-9]*) _age=-1 ;;
+      *) _age=$(( $(date +%s 2>/dev/null || echo 0) - _at )) ;;
+    esac
+    if [ "$_age" -ge "$MM_DEADLINE_SECS" ]; then rm -rf "$_d" 2>/dev/null; continue; fi
+    if [ "$_age" -lt 0 ]; then
+      _blind=$((_blind + 1))
+      [ "$_blind" -gt 10 ] && { rm -rf "$_d" 2>/dev/null; continue; }
+    fi
+    # KEEP MOST OF THE BUDGET FOR POSTING. This said "-le 3" and that was wrong in
+    # the direction that matters: a held lock ate 7 of the 10 seconds, and the 3
+    # left had to cover an announce AND a message. Against a real server `post`
+    # skips a call with under 2s, so the run would have waited patiently and then
+    # said NOTHING - rebuilding the exact failure this item exists to fix, inside
+    # the fix for it. Measured in the held-lock case before this line changed.
+    #
+    # Waiting longer buys nothing anyway: the winner holds the lock for ONE api
+    # call, so a contended lock frees in about a second or never.
+    _reserve=$(( (MM_DEADLINE_SECS * 2) / 3 ))
+    [ "$_reserve" -lt 2 ] && _reserve=2
+    [ "$(remaining)" -le "$_reserve" ] && return 1
+    sleep 0.2 2>/dev/null || sleep 1
+  done
+}
+
+# The lookup MUST happen inside the lock: a run that loses the race re-reads the
+# map here and finds the winner's root, instead of announcing a second one.
+lock_take || :
+
 # 3) Find this session's thread root, if it has one.
 root=""
 if [ -n "$key" ] && [ -f "$THREADS" ]; then
@@ -231,9 +315,15 @@ if [ -z "$root" ] && [ -n "$key" ]; then
     { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
   fi
 fi
+# RELEASED HERE, not at exit: the message POST below must not hold the lock. It
+# takes the bulk of the budget, and holding it there would serialise every
+# notification of a session behind its slowest one for no benefit - the thing
+# needing exclusion is choosing-or-creating the root, and that is now done.
+lock_release
 
 # 5) Post the message. Under the root when we have one; as its own post when we do not,
 #    because a message in the channel beats no message at all.
+_dead_root="$root"
 out=$(post "${MENTION:+$MENTION }$MSG" "$root")
 
 # 6) A root that no longer exists (post deleted, channel purged) must not wedge the session
@@ -250,10 +340,22 @@ if [ -z "$out" ] && [ -n "$root" ]; then
     # no race, and no `.tmp` orphans to gitignore.
     :
   fi
+  # Same read-then-act as step 4, so the same lock. Without it two concurrent
+  # recoveries of one session re-announce twice, which is the T15 defect wearing
+  # a different hat.
+  lock_take || :
+  root=$(awk -v s="$key" '$1 == s {v = $2} END { if (v != "") print v }' "$THREADS" 2>/dev/null)
+  if [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
+    # Another run already recovered this session while we waited. Use its root
+    # rather than opening a third thread.
+    lock_release
+  else
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")
   if [ -n "$root" ] && [ -n "$key" ]; then
     { printf '%s %s\n' "$key" "$root" >> "$THREADS"; } 2>/dev/null
+  fi
+  lock_release
   fi
   post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
 fi

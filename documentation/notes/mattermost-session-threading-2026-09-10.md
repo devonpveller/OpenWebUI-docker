@@ -35,10 +35,15 @@ returned 200. Three separate things were:
    `🤖 Claude Code finished a turn in ai-stack · session 5881c42f`, 2026-09-11
    00:07:41, in `#claude-code`.
 
-2. **Nothing mentioned the operator.** `mention_count` on `#claude-code` is 0, so
-   nothing bolded the channel or pushed. (`last_viewed_at` read NEVER when first
-   measured; it has moved several times since and is not re-derivable — Mattermost
-   keeps no history of it.)
+2. **Nothing mentioned the operator.** Nothing bolded the channel, so nothing
+   pushed. `mention_count` comes from
+   `GET /api/v4/users/me/teams/{team}/channels/members` — which `bot-claude`
+   cannot read for the operator (403), so treat the 0 as CORROBORATED, NOT READ:
+   what is directly checkable is that none of the 241 posts then in `#claude-code`
+   contained a mention token at all, which is the same conclusion by a route that
+   does not need the operator's own membership row. (`last_viewed_at` read NEVER
+   when first measured; it has moved several times since and is not re-derivable —
+   Mattermost keeps no history of it.)
 
 3. **Nothing threaded.** `root_id` appeared nowhere in
    `scripts/notify-mattermost.sh`. It was NOT absent from the repo — the
@@ -50,10 +55,32 @@ returned 200. Three separate things were:
 
 ## Residuals — true, measured, NOT fixed
 
-- **Concurrent first notifications from ONE session open several threads.** Three
-  at once produced three roots and three map lines. The map race is gone (the map
-  is append-only and read last-wins), but the announce itself is unsynchronised.
-  Needs a lock, which this item did not add.
+- ~~Concurrent first notifications from ONE session open several threads.~~
+  **FIXED — and the way it survived the previous fix is the point.** Making the map
+  append-only removed the race over the FILE and measured clean; this was a race
+  over an ACTION (announcing), which no property of the file could settle. Three
+  concurrent runs still produced three roots and three map lines, measured at
+  `b71257f`. Now a per-session `mkdir` lock wraps the lookup-and-announce:
+  measured 3 -> 1 root at 3 concurrent and at 10, with all ten messages under the
+  one root, while three DIFFERENT sessions still open three threads. The lock is
+  per session precisely so they do. Two conflicts that touch the same file are not
+  therefore the same conflict.
+
+  The lock is also a new way to go silent, so it expires two ways: a readable
+  timestamp older than the whole wall-clock budget cannot belong to a live run, and
+  an unreadable one persisting for seconds means the holder died between its
+  `mkdir` and its write. Failing to take it is never fatal — the run proceeds
+  unlocked, which is exactly the behaviour it replaces.
+
+  **And the first version of the lock rebuilt the outage inside the fix for it.**
+  It waited until 3 seconds of the 10-second budget remained, which left one
+  announce and one message to share 3 seconds; `post` skips a call with under 2
+  seconds left, so a contended lock would have waited politely and then said
+  NOTHING. Measured, then fixed by reserving two thirds of the budget for posting —
+  waiting longer bought nothing anyway, since the winner holds the lock for a
+  single API call. A correct synchronisation primitive is not the same thing as a
+  correct message, and the case that caught it was the one that asked what happens
+  when the lock is held by something still alive.
 - **A whitespace-only allowlist silences everything** — `-s` sees a non-empty
   file and every entry normalises away. An empty-but-present file is now the
   operator's foot-gun rather than the notifier's.
@@ -109,7 +136,9 @@ The operator can now reply in a thread, but the IDE session cannot read the
 reply. Worse, in `#claude-sessions` a reply is consumed by the **bridge**, which
 starts a new headless session under it — observed when the operator replied to a
 test post and session `9fae8f75` appeared
-(`scripts/claude-sessions-bridge/state/audit.jsonl:5533`). So a reply
+(`scripts/claude-sessions-bridge/state/audit.jsonl:5533` — that file is runtime
+state in the MAIN checkout, not tracked, so the line resolves there and in no
+worktree). So a reply
 looks answered and is answered by something else. Threading makes replying
 possible; it does not make it effective.
 
@@ -121,12 +150,32 @@ watchdog run from a git worktree looking for backup directories that only exist
 in the main checkout — is recorded with the `crashloop` item, on the branch where
 that file lives.
 
-## The removed allowlist's backup is not gitignored
+## Two ignore rules named an exact path where a FAMILY of files lives
 
-`scripts/.mm-notify-sessions.removed-2026-09-11.bak` holds a session uuid, is
-untracked, and `.gitignore:65` covers only the exact path
+Both are fixed here; the pattern is worth more than either fix.
+
+`scripts/.mm-notify-sessions.removed-2026-09-11.bak` holds a session uuid and is
+untracked, and `.gitignore` covered only the exact path
 `scripts/.mm-notify-sessions` — so a broad `git add` in the operator's checkout
-could commit it. The ignore rule is widened to the backup in this item.
+could have committed it. Widened to `scripts/.mm-notify-sessions.*`.
+
+The thread map had the identical hole and nobody had tripped it yet:
+`.gitignore` covered `scripts/.mm-session-threads` exactly, so the lock
+directories this item now creates beside it (`.mm-session-threads.lock.<key>`)
+would have shown up as untracked. Found by asking the question the first one
+taught, not by hitting it. Widened the same way.
+
+A runtime-state path is never one file for long — it acquires a backup, a lock, a
+`.tmp`, a `.bak` — so an ignore rule pinned to the exact name is a rule that will
+be wrong later, quietly, at whatever moment someone runs `git add -A`.
+
+## A pre-existing stderr leak, reported by a tester and left alone
+
+At `scripts/notify-mattermost.sh`, the `2>/dev/null` on the stdin read guards
+`cat`, not the command substitution around it, so a literal NUL byte arriving on
+stdin leaks one bash warning to stderr. Exit is still 0 and the message is still
+sent. The parent does the identical thing, and neither real hook can deliver a NUL
+— it is recorded because it was found, not because it needs fixing.
 
 ## A trap for whoever tests this
 

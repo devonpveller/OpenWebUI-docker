@@ -100,3 +100,4 @@ documentation/issue-plans/
 # is ignored. If a row cites it, it does not belong here.
 .quadrant/
 scripts/.mm-session-threads
+scripts/.mm-session-threads.*

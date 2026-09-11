@@ -216,16 +216,49 @@ being bypassed by anything that fails to name itself.
 ## T15 — one session, started twice at once
 
 Three notifications from the SAME session id, fired concurrently, must not open
-three threads. The map race is fixed (append-only, last-wins) but the announce is
-not synchronised, and attempt 5 measured three roots.
+three threads. **This is no longer a known residual — attempt 9 added a per-session
+`mkdir` lock around the lookup-and-announce, so a failure here is a REGRESSION, not
+a finding.** Attempts 5 and 8 both measured three roots; do not accept a green
+without having seen this go red on the parent.
 
-```bash
-for i in 1 2 3; do ( echo '{"session_id":"race0001-0000-0000-0000-000000000000"}'   | bash scripts/notify-mattermost.sh "TEST (mmthread tester, ignore) $i" ) & done; wait
-```
+PREFER THE SHIM, NOT THE REAL CHANNEL. A concurrency case that fails posts three
+roots to the operator's channel, and the whole point is that it might. Copy the
+script into a throwaway root (it derives `ROOT_DIR` from its own location, so it
+will read that root's `.env` and write that root's state), put a fake `curl`
+earlier on `PATH` that records each call's `root_id` and echoes
+`{"id":"<unique>"}` then `201`, and count roots from the log. A call with an EMPTY
+`root_id` is an announce. Remember the trap: a `PATH` entry written `C:/Users/...`
+is silently ignored by Git Bash — it must be `/c/Users/...`, or your shim never
+runs and you will be measuring the real thing.
 
-PASS: one root, one map line, three replies.
-FAIL: more than one root — report it as a finding with the count; this is a known
-residual and the plan records it so a future fix has a case waiting.
+Run it against the PARENT too. A concurrency case that has not been seen to fail
+is not evidence of a lock.
+
+PASS: one root, one map line, N replies all under that one root — at 3 concurrent
+AND at 10. The parent must show N roots at the same N.
+FAIL: more than one root on the branch; or the parent also showing one, which
+means your harness is not exercising what you think it is.
+
+## T18 — the lock cannot become a new way to go silent
+
+A lock with no expiry is a single point of silence, which is the exact shape of the
+two-month outage this whole item exists to fix. Four cases, all in the shim lab:
+
+1. **Stale, readable.** `mkdir scripts/.mm-session-threads.lock.<key>` and write an
+   old epoch into its `at`. PASS: the run breaks it, posts, exits 0.
+2. **Stale, unreadable.** Same but create NO `at` file (a holder that died between
+   its `mkdir` and its write). PASS: same.
+3. **Held by something alive.** Take the lock and hold it past the wall-clock
+   budget. PASS: the run gives up waiting and posts ANYWAY — unthreaded is
+   acceptable, silent is not — and still exits 0.
+4. **Different sessions do not queue.** Three DIFFERENT session ids concurrently
+   must still produce three roots. A global lock would pass every case above and
+   fail this one.
+
+PASS: every case exits 0 and sends its message; no lock directory survives the run.
+FAIL: any case where the script exits non-zero, sends nothing, or leaves a lock
+behind — and specifically any case where waiting eats the budget so completely that
+no post is attempted.
 
 ## T17 — the removed allowlist's backup cannot be swept into a commit
 
