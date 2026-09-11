@@ -389,6 +389,126 @@ The one `research-service` failure is `orchestrator.test.ts` in every column (§
 
 ---
 
+## 3c. Attempt 3 — the guard stops being a constant (2026-09-11)
+
+The tester failed T11 on attempt 2. Both failed attempts had the same shape: **a guard whose
+safety argument was a constant fitted to the recorded incident** — first an 8-string pattern
+list, then a 7-character token length. The third attempt does not pick a better constant.
+
+### 3c.1 What failed — [reproduced on live]
+
+`ANCHOR_MIN_LEN = 7` separated SHORT collapse tokens from LONG ones, not collapse tokens from
+subject entities. Bing collapses onto the query's first salient token, and the head nouns of
+the questions this engine exists for are long. Four read-only `GET :8085/search` probes,
+re-captured by me today and now shipped as fixtures:
+
+| query | shipped verdict (attempt 2) | what came back |
+|---|---|---|
+| `capacitor bulging OptiPlex 3050 repair` | **ok, overlap 0.90** | Capacitor – Wikipedia, How Capacitors Work |
+| `motherboard VRM failure OptiPlex 3050` | **ok, overlap 0.70** | Motherboard – Wikipedia, Motherboards \| Amazon |
+| `vestibular suppression 100 Hz auditory tone` | collapsed (by luck) | Vestibular Disorders, Vestibular system – Wikipedia |
+| `semaglutide gastroparesis incidence` | collapsed (by luck) | Semaglutide – Wikipedia, Drugs.com |
+
+The first two are the audited failure exactly — one engine, ten pages on topic for a single
+token, nothing about the subject — reported as a healthy search. Downstream that means
+`searchStats.ok++`, so the junk counter never rises, the streak never fires, and ten junk pages
+spend the fetch budget while the operator is told the search worked.
+
+The last two "passed" only because the longest term happened to differ from the collapse token.
+
+### 3c.2 The structural fact that was already there — [read-from-source]
+
+The run already knows its **subject entity**: `KEYWORDIZE_SYS` extracts it and `keywordQuery()`
+forces it into every round-1 and DEEPEN query. Nothing was asking whether the results contained
+it. `classifyHits(query, hits, entity)` now does, and the entity is a property of the question,
+not a number chosen to fit an incident.
+
+### 3c.3 ENTITY_SHARE, measured — [observed-live 2026-09-11]
+
+Entity-phrase share across every fixture in `research-service/fixtures/`:
+
+| set | share | provenance |
+|---|---|---|
+| `search-good-optiplex` | **0.75** (9/12) | throwaway rig, pinned image — 3 hits are 3060/general Dell |
+| `probe-good-oomkilled` | **1.00** | hand-built control (the tester's) |
+| `probe-good-iphone` | **1.00** | hand-built control (the tester's) |
+| `search-collapsed-dell` / `-most` / `-the100` | **0.00** | live gateway, the audited failure |
+| `probe-collapsed-capacitor` / `-motherboard` / `-vestibular` | **0.00** | live gateway, the tester's T11 probes |
+
+`ENTITY_SHARE = 0.5` is the midpoint of a gap that runs from 0.00 to 0.75 — the widest a
+threshold can sit in. Overlap is still computed and reported; it is now secondary evidence
+rather than the gate, which is the whole correction.
+
+### 3c.4 The deliberate exception, stated so it can be argued with
+
+`semaglutide gastroparesis incidence` returns ten real semaglutide pages that never mention
+gastroparesis: entity share 1.00, verdict **`ok`**, overlap 0.00. The engine understood the
+SUBJECT and missed the NEED, and the relevance gate is what rejects a page that does not answer
+a need. Declaring a search broken because the engine returned pages about the right thing would
+be attempt 1's error pointed the other way. Pinned as its own test and written into T11 so a
+reader can disagree with the judgement rather than discover it.
+
+### 3c.5 Where there is no entity
+
+Article-mode preliminary gap searches and any legacy caller pass none, and fall back to the
+old two-term overlap rule — weaker, because without the subject it cannot tell "ten pages about
+capacitors" from "ten pages about this capacitor". The fallback is documented in the code and
+pinned by a test that constructs the set which separates the two rules (overlap 1.00, entity
+share 0.00). The prelim-gap call site now at least *classifies* its results and skips a
+non-`ok` set instead of fetching it. A wrong verdict there costs one tentative paragraph; the
+topic path, where the audited failure lives, always has an entity.
+
+### 3c.6 X1 — the `^` anchor, and the false positive fixing it produced
+
+`SOURCE_SUBJECT` is `^`-anchored on the head clause, which is what makes it test the SUBJECT
+rather than fire on any mention of "the sources" — and a LEADING subordinate clause defeated
+it. The head is now split at a leading `While|Although|Though|Whereas|Even though` and every
+resulting clause is judged.
+
+The first version of that split also stripped `since|because|if|when|given that` **anywhere**
+in the head, and the sweep immediately caught the cost: `083b830e`, "…is architecturally
+distinct from the adversarial-prevention layer, **since the sources describe these as
+independent properties**", went meta. A reason clause is a justification for a world claim —
+the same kind of tail as "but no source confirms it". Only a LEADING contrast subordinator
+restructures the sentence; that is now the rule, and both directions are pinned as tests.
+
+**Sweep: 25 of 7 744, the SAME 25 ids as attempt 2** (verified by diffing the two runs), which
+the tester independently read and judged evidence-side. Recall widened by four reworded poison
+shapes; precision did not move.
+
+### 3c.7 X4 — the two renderers now emit the same string
+
+`offtopic` reached `report.ts` and not `owui/tools/deep_research.py`, so the two disagreed in
+wording ("collapsed" vs "junk") and content (the Python side had no DEGRADED line at all). Both
+now produce, for the same record, byte-identically:
+
+```
+needs answered 0 of 1 · sources 0 relevant of 0 fetched (30 hits, 3 junk) · search: DEGRADED (3 of 3 searches returned junk) · stopped early: search_degraded
+```
+
+Verified by running both and comparing the strings; T16 makes the tester do the same.
+
+### 3c.8 Counts after attempt 3 — [observed-live 2026-09-11]
+
+| suite | baseline | attempt 1 | attempt 2 | attempt 3 |
+|---|---|---|---|---|
+| `research-service` | 79 / 1 | 121 / 1 | 136 / 1 | **143 / 1** |
+| `research-curator` | 17 | 28 | 33 | **36** |
+| `gateway` pytest | n/a | 8 | 8 | 8 |
+| `ruff check .` | clean | clean | clean | clean |
+| integration (throwaway DB) | pre-existing fail | PASSED | PASSED | **PASSED** |
+
+### 3c.9 Plan hygiene the tester flagged
+
+- D.4 quoted the stale "43 of 7 744" — now 25, with the provenance of that number.
+- T8 required `mojeek` in `unresponsive_engines`; it was `[]` on 4 of 4 probes. A suspension is
+  transient state, not a property of this change. Restated as a CONFIGURATION check: mojeek
+  disabled in the shipped `settings.yml` with its contractual reason, and absent from live
+  results.
+- Preconditions said "T1–T9"; there are 16 cases.
+
+---
+
 ## 4. Out of scope, recorded rather than built
 
 - **The `engines=` fallback hazard.** `search-engine-alternatives-2026-09-11.md`

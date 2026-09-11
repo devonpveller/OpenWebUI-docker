@@ -338,13 +338,31 @@ def _render(result: dict[str, Any]) -> str:
         foot.append(f"needs answered {answered} of {len(needs_status)}")
         rec = result.get("search_record")
         if isinstance(rec, dict) and isinstance(rec.get("fetched"), int):
+            # PARITY with report.ts coverageFooter()/searchHealthLabel(). Both
+            # renderers must say the same thing in the same words: this file is
+            # re-pasted into Open WebUI by hand, so a divergence here is a
+            # divergence the operator cannot see. `offtopic` was added to the
+            # TypeScript side and not to this one, which left the two disagreeing
+            # in both wording ("collapsed" vs "junk") and content (no DEGRADED
+            # line at all) — tester, X4.
+            junk = int(rec.get("collapsed") or 0) + int(rec.get("offtopic") or 0)
             hit_bits = [f"{rec.get('hits', 0)} hits"]
-            if rec.get("collapsed"):
-                hit_bits.append(f"{rec['collapsed']} collapsed")
+            if junk:
+                hit_bits.append(f"{junk} junk")
             foot.append(
                 f"sources {rec.get('relevant', 0)} relevant of {rec['fetched']} "
                 f"fetched ({', '.join(hit_bits)})"
             )
+            ok_calls = int(rec.get("ok") or 0)
+            empty_calls = int(rec.get("empty") or 0)
+            degraded = (junk > 0 and junk >= ok_calls) or (
+                ok_calls == 0 and (junk > 0 or empty_calls > 0)
+            )
+            if degraded:
+                foot.append(
+                    f"search: DEGRADED ({junk} of {junk + ok_calls + empty_calls} "
+                    f"searches returned junk)"
+                )
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")
     # The harness stamps this footer onto `prose`; do not print it twice.

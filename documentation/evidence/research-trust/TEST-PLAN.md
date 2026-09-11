@@ -12,7 +12,7 @@ looks like, and what failing looks like. Findings that are true but out of scope
 ## Preconditions - where to run, and what this branch does NOT touch
 
 The developer's worktree is `D:\Open WebUI\ai-stack\.claude\worktrees\wt-research-trust` and
-it holds the branch, so you cannot make a second worktree on it. Cases T1–T9 are **read-only
+it holds the branch, so you cannot make a second worktree on it. Cases T1–T16 are **read-only
 executions** (`deno test`, `pytest`, `git show`) — running them in that directory changes no
 git state and is safe. Do not `git add`, `git commit` or edit anything there.
 
@@ -31,7 +31,7 @@ reconfigured; no claim was retracted; no compose project was brought up or down.
 live access was read-only: `psql` SELECTs, `GET /search`, `docker logs`. Sections D and E
 are the steps that DO touch live, and they are for after this plan passes.
 
-**Leases.** T1–T9 need none (nothing running is touched). Section D needs the **open-brain**
+**Leases.** T1–T16 need none (nothing running is touched). Section D needs the **open-brain**
 plane lease, and the **search** plane lease for the SearXNG change
 (`.\scripts\agent-harness\lease.ps1 -Acquire -Name <plane>`; names in
 `scripts\agent-harness\lease-names.conf`).
@@ -65,7 +65,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/search-gateway/ga
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust" && ruff check .
 ```
 
-**PASS:** research-service `136 passed | 1 failed`; research-curator `33 passed | 0 failed`;
+**PASS:** research-service `143 passed | 1 failed`; research-curator `36 passed | 0 failed`;
 pytest `8 passed`; ruff `All checks passed!`.
 
 The single research-service failure must be **`./orchestrator.test.ts (uncaught error)` …
@@ -73,10 +73,10 @@ The single research-service failure must be **`./orchestrator.test.ts (uncaught 
 `ob-claims-test`) at module load. It fails identically on the base commit; T9 runs it
 properly.
 
-**FAIL:** any other failing test; a research-service count **below 136**; a curator count
-**below 33**; any ruff error. A count below the baseline (79 / 17) means tests were removed,
-which is a fail regardless of the colour of the output. (Attempt 1 stood at 121 / 28; the
-extra 20 are the tester's B1-B5/B7 findings.)
+**FAIL:** any other failing test; a research-service count **below 143**; a curator count
+**below 36**; any ruff error. A count below the baseline (79 / 17) means tests were removed,
+which is a fail regardless of the colour of the output. (Attempt 1 stood at 121 / 28 and attempt 2 at
+136 / 33; the growth is the tester's findings, each pinned as its own case.)
 
 ---
 
@@ -88,7 +88,7 @@ deno test -A search-quality.test.ts
 deno test -A harness-trust.test.ts --filter "entity"
 ```
 
-**PASS:** `13 passed | 0 failed` from `search-quality.test.ts`, including all three
+**PASS:** `19 passed | 0 failed` from `search-quality.test.ts`, including all three
 `collapsed fixture:` cases and `good fixture: a real multi-engine OptiPlex result set is ok`;
 and the round-1 test passes, proving every round-1 query contains `optiplex 3050` and is
 ≤ 10 tokens even though the mocked model returned queries WITHOUT the entity.
@@ -145,7 +145,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/
 deno test -A harness-trust.test.ts
 ```
 
-**PASS:** `21 passed | 0 failed`. The `REPLAY ce398d06:` cases must all pass:
+**PASS:** `22 passed | 0 failed`. The `REPLAY ce398d06:` cases must all pass:
 `outcome === "no_relevant_sources"`, **zero** `delegateToCurator` calls, **zero**
 `deps.chat` synthesizer calls, zero cited sources, and the rendered text contains
 `search failure, not evidence of absence`. Also assert-by-reading: the case
@@ -234,7 +234,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/
 deno test -A meta-claims.test.ts
 ```
 
-**PASS:** `16 passed | 0 failed`. All 8 `claims-poison.json` texts classify `meta`; all 10
+**PASS:** `19 passed | 0 failed`. All 8 `claims-poison.json` texts classify `meta`; all 10
 `claims-100hz-world.json` texts classify `world`; `writeClaims` writes 0 of the 8 and
 records `metaSkipped: 8`; the LLM judge is asked ONLY about what the patterns did not
 recognise and **fails open** on an error.
@@ -263,6 +263,27 @@ git -C OB1 show research-trust:integrations/research-curator/claims.ts | Select-
 `EVIDENCE_ABSENCE` are applied to the head only; `TRANSFER_DISCLAIMER` to the whole text. The
 two whole-text families the tester named as spending the precision — `sources provided|given`
 and `sources do|does not` as free-floating patterns, and `but no source` — are **gone**.
+
+**X1 — every clause of the head sentence is judged, not just the first.** The
+`SOURCE_SUBJECT` patterns are `^`-anchored, which is what makes them test the SUBJECT rather
+than fire on any mention of "the sources" — and a LEADING subordinate clause walked past them:
+"While the provided sources do not address the Dell OptiPlex 3050, they describe the NVIDIA DGX
+Spark…" is a restatement of the 0.85 poison that attempt 1 caught and attempt 2 did not. The
+head is now split at a LEADING `While|Although|Though|Whereas|Even though` and both clauses are
+judged.
+
+A subordinator LATER in the sentence is not split on, and that distinction cost a live false
+positive when it was missing: "…is architecturally distinct from the adversarial-prevention
+layer, **since the sources describe these as independent properties**" (`083b830e`) is a world
+claim with a justification, the same kind of tail as "but no source confirms it".
+
+```bash
+deno test -A meta-claims.test.ts --filter "X1"
+```
+
+**PASS:** three cases — the four leading-subordinate poison rewordings classify `meta`; four
+leading-subordinate WORLD claims stay `world`; and the `since …` / `because …` reason clauses
+stay `world`.
 
 Confirm the five the tester found are kept, and the B4 shapes are caught:
 
@@ -294,7 +315,9 @@ developer's first version silently scanned strings and reported 0 matches), **an
 match**.
 
 **Expected: 25 matches on 7 744 active claims (0.32 %), down from 43.** All 8 poison ids are
-among them. The developer's judgement of the other 17: every one has the evidence set, a
+among them. This is the SAME 25 the tester read and judged evidence-side in attempt 2 — the
+id sets are identical, verified by diffing the two sweeps — even though X1 widened recall.
+Widening recall without losing precision is the thing to check here. The developer's judgement of the other 17: every one has the evidence set, a
 retrieved page, or an explicit transfer disclaimer as its subject. The closest calls, stated
 so you can disagree with them:
 
@@ -330,9 +353,15 @@ print([r['title'][:60] for r in d['results'][:3]])
 print(d.get('unresponsive_engines'))"
 ```
 
-**PASS:** one engine (`bing`) contributes every hit, the titles are about *The 100* (TV
-series), and `mojeek` appears as suspended — i.e. the note's baseline (median overlap 0.00,
-bing only) still describes the live plane.
+**PASS:** one engine (`bing`) contributes every hit and the titles are about *The 100* (TV
+series) — i.e. the note's baseline (median overlap 0.00, bing only) still describes the live
+plane.
+
+**Do NOT require `mojeek` in `unresponsive_engines`.** The attempt-1 plan did, and the tester
+found it empty on 4 of 4 probes: a suspension is transient state, not a property of the
+change. The mojeek claim to check is a CONFIGURATION one — `mojeek: disabled: true` in the
+shipped `settings.yml` with the robots.txt/ToS reason in its comment, and no mojeek hit in any
+live result set.
 
 Check the SHIPPED config against the measurement:
 
@@ -458,41 +487,96 @@ no replacement and no note; the gitlink bumped in the parent.
 
 ---
 
-## T11 - B1: the detector does not condemn a search that worked
+## T11 - The detector judges whether the results are about the SUBJECT
 
-The mirror image of the failure this item exists for. `overlapRatio` required TWO distinct
-query terms per hit, so a query whose subject is one strong multi-word token plus generic
-words scored 0.00 on a PERFECT result set, and the dominance test then found that token in
-100 % of titles - the collapse signature exactly. The run would have ended
-`search_degraded` -> `no_relevant_sources` and told the user "search failure, not evidence of
-absence" about a search that worked.
+This case failed attempt 2, and its FAIL clause below is the one that caught it, unchanged.
+Read the history before running it, because the point is what kind of rule is acceptable here.
+
+- **Attempt 1** required two distinct query terms per hit, so five perfect CrashLoopBackOff
+  results scored 0.00 and were condemned as `collapsed`.
+- **Attempt 2** added `ANCHOR_MIN_LEN = 7`: a hit carrying the query's longest term counted,
+  if that term was at least 7 characters. The tester showed that separates SHORT collapse
+  tokens from LONG ones, not collapse tokens from subject entities — `capacitor`,
+  `motherboard`, `vestibular` and `semaglutide` are the head nouns of exactly the questions
+  this engine is for. Two of four live probes were classified **`ok` at overlap 0.90 and
+  0.70** on ten pages that never mention the OptiPlex.
+- **Attempt 3** stops picking constants. The classifier now takes the **subject entity** —
+  the thing `KEYWORDIZE` already extracts and `keywordQuery` already forces into every query —
+  and asks whether the results contain it. That is a structural fact of the run, not a number
+  fitted to an incident.
+
+### The rule
+
+`classifyHits(query, hits, entity)`. When an entity is supplied, the set is `ok` only if the
+entity PHRASE (tokens adjacent, case-insensitive, tolerant of `-`/spacing) appears in
+title+snippet of at least `ENTITY_SHARE` of hits. Otherwise it is `collapsed` (one query token
+dominates the titles) or `offtopic` (none does). Overlap is still computed and reported, and
+is **secondary evidence, not the gate**. With no entity — article-mode preliminary gaps and
+legacy callers — it falls back to the old overlap rule and says so in the code.
+
+```powershell
+git -C OB1 show research-trust:integrations/research-service/search-quality.ts | Select-String -Pattern "ENTITY_SHARE" -Context 2,22
+git -C OB1 show research-trust:integrations/research-service/harness.ts | Select-String -Pattern "classifyHits" -Context 6,1
+```
+
+**PASS:** `ENTITY_SHARE = 0.5` with the per-fixture measurement in its comment (good sets
+0.75 / 1.00 / 1.00; failed sets 0.00 across six), and the harness passes `subjectEntity` at
+its `searchWeb` call site.
+
+### Run it
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/research-service"
-deno test -A search-quality.test.ts --filter "B1"
+deno test -A search-quality.test.ts
+deno test -A harness-trust.test.ts --filter "T11"
 ```
 
-**PASS:** `B1: a hit set carrying only the ANCHOR term is ok, not collapsed` - the tester's
-own five CrashLoopBackOff hits classify `ok` with overlap 1 - and
-`B1: the anchor term must be DISTINCTIVE - 'dell' cannot rescue the Dell junk`, which re-runs
-all three recorded collapse fixtures through the new scorer.
+**PASS:** `19 passed | 0 failed` and `1 passed`. Specifically:
 
-Read the rule: a hit counts as overlapping if it carries the query's LONGEST term and that
-term is at least `ANCHOR_MIN_LEN` (7) characters.
+- `T11: the tester's live probes are search failures, not 'ok'` — the three probes that were
+  classified `ok` (`capacitor bulging OptiPlex 3050 repair`,
+  `motherboard VRM failure OptiPlex 3050`, `vestibular suppression 100 Hz auditory tone`) are
+  now not-`ok` with `entityShare === 0`. The fixtures are the live payloads, re-captured
+  2026-09-11 with provenance headers naming this as the tester's T11 failure.
+- `T11: entity PRESENT in every hit is never collapsed, whatever the token lengths` — the
+  tester's own `Kubernetes pod evicted OOMKilled` and `iPhone 18 Pro camera sensor` sets pass,
+  plus a property over five entities including 2-character ones.
+- `T11: the three ORIGINAL collapse fixtures still collapse under the entity rule`, naming
+  `dell`, `most`, `100`.
+- `T11: the run's subject entity reaches the classifier` (harness) — the capacitor payload
+  through a real `runResearch`: `search.ok === 0`, nothing fetched, nothing reaching the
+  relevance gate, `search_degraded`, `no_relevant_sources`.
 
-```powershell
-git -C OB1 show research-trust:integrations/research-service/search-quality.ts | Select-String -Pattern "ANCHOR_MIN_LEN" -Context 6,2
+### Re-run the live probes yourself
+
+```bash
+for q in "capacitor bulging OptiPlex 3050 repair" "motherboard VRM failure OptiPlex 3050"          "vestibular suppression 100 Hz auditory tone" "semaglutide gastroparesis incidence"; do
+  curl -s -G "http://127.0.0.1:8085/search" --data-urlencode "q=$q" --data-urlencode "format=json"
+done
 ```
 
-**Try to break it.** The threshold is the whole safety argument: the audited collapse tokens
-are `dell` (4), `most` (4) and `100` (3), all below 7. Construct a query whose longest term is
->= 7 characters and whose junk result set contains that term in every title - for example
-`q = "capacitor bulging OptiPlex"` against ten titles all containing "capacitor" but about
-something else entirely. If you can make a genuinely collapsed set classify `ok`, that is a
-FAIL and worth more than the rest of this case.
+then classify each against its entity (`OptiPlex 3050`, `OptiPlex 3050`, `100 Hz`,
+`semaglutide`). **PASS:** the first three are not `ok`.
 
-**FAIL:** any recorded collapse fixture classifying `ok`; the CrashLoopBackOff set classifying
-`collapsed`; an anchor shorter than 7 characters vouching for a hit.
+**One deliberate exception, and you should push on it.** `semaglutide gastroparesis incidence`
+returns ten real semaglutide pages that never mention gastroparesis, so `entityShare` is 1.00
+and the verdict is **`ok`** — pinned by
+`T11: an entity-present set whose hits miss the NEED is a weak search, not a broken engine`.
+The argument: the engine understood the subject; what it missed is the NEED, and the relevance
+gate is what rejects a page that does not answer a need. Calling that "the search failed"
+would be attempt 1's error pointed the other way. If you disagree, say so — it is a judgement,
+and it is written down here so it can be disagreed with.
+
+**Try to break it.** The safety argument is no longer a constant, so attack the entity instead:
+an entity the KEYWORDIZE pass would plausibly emit, where the entity is PRESENT in junk (the
+semaglutide shape, deliberately allowed) or ABSENT from good results (a page that answers the
+question without naming the subject — a manual titled only "Owner's Manual"). If you can make a
+genuinely collapsed set classify `ok` **for a reason other than the semaglutide exception
+above**, that is a FAIL and worth more than the rest of this case.
+
+**FAIL:** any recorded collapse fixture or live probe classifying `ok` with the entity
+supplied; either good set classifying `collapsed`/`offtopic`; the harness not passing the
+entity; `ENTITY_SHARE` documented without the measurement behind it.
 
 ---
 
@@ -623,8 +707,8 @@ recalls (check `relevanceAsked`); an on-topic recall being dropped.
 ## T16 - The OWUI tool's fallback renderer, executed rather than read
 
 `owui/tools/deep_research.py` is a paste-deploy surface (D.5) carrying hand-written parity
-logic against `lib.ts`. T5 only reads its diff. Execute it - save this as `t16.py` in the
-worktree root and run `python t16.py`:
+logic against `lib.ts`/`report.ts`. T5 only reads its diff. Execute it - save this as `t16.py`
+in the worktree root and run `python t16.py`:
 
 ```python
 import importlib.util, sys
@@ -636,28 +720,59 @@ new = m._render({
     "cited_sources": [{"url": "https://a.example", "title": "A"}],
     "gaps": [], "backstop": "complete", "reuse_ratio": 0.22,
     "needs_status": [{"need": "a", "status": "answered"}, {"need": "b", "status": "open"}],
-    "search_record": {"hits": 40, "fetched": 30, "readable": 28, "relevant": 9, "collapsed": 0},
+    "search_record": {"hits": 40, "fetched": 30, "readable": 28, "relevant": 9,
+                      "collapsed": 0, "offtopic": 0, "ok": 6, "empty": 0},
 })
-print("NEW   :", "needs answered 1 of 2" in new, "| sources line:",
-      "sources 9 relevant of 30 fetched" in new, "| no coverage:", "coverage " not in new)
+print("NEW     :", "needs answered 1 of 2" in new,
+      "| sources line:", "sources 9 relevant of 30 fetched" in new,
+      "| no coverage:", "coverage " not in new,
+      "| not degraded:", "DEGRADED" not in new)
 
 legacy = m._render({"synthesis": "Answer [1].", "cited_sources": [], "gaps": [],
                     "backstop": "complete", "reuse_ratio": 0.22})
-print("LEGACY:", "coverage" not in legacy and "needs answered" not in legacy)
+print("LEGACY  :", "coverage" not in legacy and "needs answered" not in legacy)
 
-dup = m._render({"prose": "# R\nBody.\n\n_- needs answered 1 of 2_",
+dup = m._render({"prose": "# R
+Body.
+
+_- needs answered 1 of 2_",
                  "needs_status": [{"need": "a", "status": "answered"}], "backstop": "complete"})
-print("NO DUP:", dup.count("needs answered") == 1)
+print("NO DUP  :", dup.count("needs answered") == 1)
+
+off = m._render({
+    "synthesis": "", "cited_sources": [], "gaps": [], "backstop": "search_degraded",
+    "needs_status": [{"need": "a", "status": "search_failed"}],
+    "search_record": {"hits": 30, "fetched": 0, "readable": 0, "relevant": 0,
+                      "collapsed": 1, "offtopic": 2, "ok": 0, "empty": 0},
+})
+print("OFFTOPIC:", "3 junk" in off,
+      "| DEGRADED:", "search: DEGRADED (3 of 3 searches returned junk)" in off,
+      "| no stale wording:", "collapsed" not in off)
 ```
 
 **PASS:** every printed boolean is `True`. `_render` prefers `result["rendered"]` when present,
-so this exercises the FALLBACK path - what OWUI shows for any job written before this change
-or whose `rendered` field is missing.
+so this exercises the FALLBACK path - what OWUI shows for any job written before this change or
+whose `rendered` field is missing.
 
-**FAIL:** `coverage NN%` appearing anywhere; a legacy row printing a coverage number; the
-footer printed twice; an exception. (The module imports `aiohttp` and `pydantic` at top level;
-if they are absent in your environment that is a plan inadequacy, not a pass - say so, and
-`pip install aiohttp pydantic` into a throwaway venv rather than the operator's python.)
+**The OFFTOPIC line is X4**, which the tester found in attempt 2: `report.ts` folded `offtopic`
+into the junk count and the DEGRADED label and this file did not, so the two renderers
+disagreed in wording ("collapsed" vs "junk") AND content (no DEGRADED line at all). Check they
+now agree exactly, by running the TypeScript side on the same record:
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust/OB1/integrations/research-service"
+deno eval --ext=ts 'import { coverageFooter } from "./report.ts"; console.log(coverageFooter([{need:"a",status:"search_failed"}],{queries:[],hits:30,fetched:0,readable:0,relevant:0,collapsed:1,offtopic:2,ok:0,empty:0,errors:0},"search_degraded"))'
+```
+
+**PASS:** it prints
+`needs answered 0 of 1 · sources 0 relevant of 0 fetched (30 hits, 3 junk) · search: DEGRADED (3 of 3 searches returned junk) · stopped early: search_degraded`
+and the Python `off` footer line is the SAME STRING.
+
+**FAIL:** `coverage NN%` anywhere; a legacy row printing a coverage number; the footer printed
+twice; the two renderers producing different strings for the same record; an exception. (The
+module imports `aiohttp` and `pydantic` at top level; if they are absent in your environment
+that is a plan inadequacy, not a pass - say so, and `pip install` into a throwaway venv rather
+than the operator's python.)
 
 # D. Deploy (AFTER this plan passes — operator or reviewer, under leases)
 
@@ -770,8 +885,10 @@ SELECT id, status FROM claims WHERE id IN (
 
 **Never DELETE a claim.** `retract_claim` only.
 
-**The wider sweep is an OPERATOR DECISION, not part of this.** 43 of 7 744 active claims
-match the shipped patterns (findings §3.6). Only these 8 are retracted here.
+**The wider sweep is an OPERATOR DECISION, not part of this.** **25** of 7 744 active claims
+match the shipped patterns as of attempt 3 (findings §3b.2; it was 43 when the patterns were
+looser, and the tester independently judged all 25 to be evidence-side). Only these 8 are
+retracted here.
 
 ### D.5 Re-paste the OWUI tool
 
