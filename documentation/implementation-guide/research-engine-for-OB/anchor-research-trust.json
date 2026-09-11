@@ -1,0 +1,22 @@
+{
+  "goal": "Deep-research reports are clear, concise and trustworthy; nothing about a run's own failure reaches Open Brain as a fact; a search that returns junk is reported as a search failure, never as evidence of absence.",
+  "artifact": "documentation/implementation-guide/research-engine-for-OB/PLAN-research-trust-2026-09-11.md executed: patches to OB1/integrations/research-service (search-quality.ts, harness.ts, lib.ts, templates.ts, index.ts), OB1/integrations/research-curator/claims.ts, search-gateway/ (health detail + measured engine changes), OB1/docker/docker-compose.yml tunables, scripts/stack/stack.ps1 health line, owui/tools/deep_research.py fallback renderer; tests RED then GREEN for each; the 8 poison claims retracted.",
+  "audience": "The operator reading a research report in Open WebUI, and the curator/wiki consuming its claims. They know the stack; they do not re-read sources.",
+  "acceptance": [
+    "A replay of job ce398d06 (OptiPlex) with the recorded collapsed search fixtures ends as no_relevant_sources with zero curator calls and zero claims written; a 'complete' run citing 0 relevant sources FAILS.",
+    "search-quality.ts classifies the three recorded collapsed result sets as collapsed and the good set as ok; every round-1 query contains the subject entity.",
+    "groundNumbers flags the audited '95 C [Source 5, 6]' line and passes the '26% / 56% / p = 0.0055 [Source 2]' line.",
+    "The curator meta-claim filter rejects all 8 texts in claims-poison.json and keeps the 10 factual 100 Hz claims (the run wrote 13; 3 of them are among the 8 poison); SELECT status for the 8 ids returns retracted.",
+    "Rendered reports open with an Answer block and a 'needs answered X of N' footer; the OptiPlex replay never prints 'coverage 22%' or the heading 'What the sources actually cover'; a zero-finding run is never titled 'Absence of evidence'.",
+    "Live dry_run of the OptiPlex query after deploy: either at least 5 relevant OptiPlex sources cited, or no_relevant_sources with search.collapsed > 0 and curator.state = skipped.",
+    "Baseline and post-change search measurements (12 queries: overlap ratio, engines answering, readable/relevant counts) are in the findings sink with dates; median overlap >= 0.6, or the measured case for an operator decision on engines.",
+    "deno test -A green in research-service and research-curator with counts at least the Phase 0 baseline; notebook-origin jobs still stage fresh sources after deploy."
+  ],
+  "out_of_scope": [
+    "A second adversarial reviewer beside the dormant Skeptic.",
+    "Source length floors.",
+    "Adding paid search API keys (the case is prepared as an operator decision).",
+    "Open Notebook, wiki purge/erasure, the source-to-proposal-to-claim lifecycle."
+  ],
+  "findings_sink": "documentation/notes/research-trust-findings.md"
+}
