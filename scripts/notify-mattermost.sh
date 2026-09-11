@@ -44,7 +44,6 @@ set +e
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
 [ -z "$ROOT_DIR" ] && ROOT_DIR="d:/Open WebUI/ai-stack"
 ENV_CLAUDE="$ROOT_DIR/.env"                                 # CLAUDE_MM_BOT_TOKEN → bot-claude
-ENV_AO="$ROOT_DIR/agent-org/docker/.env"                    # AO_MATTERMOST_BOT_TOKEN → bot-pm
 CHANNEL="6z9khgkdd7df9q454be6fimw1h"                        # #claude-sessions
 API="http://localhost:8065/api/v4/posts"
 ALLOW="$ROOT_DIR/scripts/.mm-notify-sessions"               # one session_id per line (gitignored)
@@ -100,7 +99,12 @@ fi
 #     Keyed as-is, ONE session opens TWO threads - both announcing the same short
 #     id - which breaks the anchor's first criterion. Found in test, attempt 2.
 #     The 8-hex prefix is the one form every path can produce, so it is the key.
-key=$(printf '%s' "$sid" | tr 'A-Z' 'a-z' | tr -cd '0-9a-f' | cut -c1-8)
+#     Filtered to ALPHANUMERIC, not hex. Hex-only was a filter, not a prefix:
+#     `my-session` and `sess` both reduced to `e` and shared a thread, and an id
+#     with no hex characters reduced to EMPTY - which posts flat AND skips the
+#     allowlist, since the gate needs a key. Measured in test, attempt 3. For real
+#     uuids the two agree exactly, so no hook path changes.
+key=$(printf '%s' "$sid" | tr 'A-Z' 'a-z' | tr -cd '0-9a-z' | cut -c1-8)
 
 # 2) Session allowlist: when it exists and is non-empty, only registered sessions ping.
 #    COMPARED ON THE SAME PREFIX, for a reason that nearly shipped as an outage.
@@ -123,11 +127,17 @@ fi
 short="${key:-${sid:0:8}}"
 MSG="${1:-🤖 Claude Code finished a turn in ${PROJECT}${short:+ · session \`$short\`} — your move.}"
 
-# bot-claude first, so IDE sessions and bridge sessions share one identity in one channel.
-# Falling back to the agent-org bot rather than going silent: a message from the wrong bot
-# is recoverable, a message nobody ever sees is not.
-tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
-[ -z "$tok" ] && tok=$(grep -m1 '^AO_MATTERMOST_BOT_TOKEN=' "$ENV_AO" 2>/dev/null | cut -d= -f2- | tr -d '\r')
+# bot-claude, and ONLY bot-claude, so IDE sessions and bridge sessions share one
+# identity in one channel.
+#
+# There WAS a fallback to the agent-org bot here, justified as "a message from the
+# wrong bot is recoverable, a message nobody sees is not". That justification was
+# false: bot-pm is not a member of #claude-sessions and posting there returns
+# HTTP 403 (measured, test attempt 3). The fallback bought nothing but a wasted
+# call against this script's wall-clock budget, and a comment telling the next
+# reader something untrue about what happens when the token goes missing.
+tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '
+')
 [ -z "$tok" ] && exit 0
 
 # post <message> [root_id] → prints the created post id, or NOTHING on failure.
@@ -205,8 +215,14 @@ if [ -z "$out" ] && [ -n "$root" ]; then
     # exits 1, the && short-circuits, the mv never runs and the stale entry
     # survives - so the append below produced a DUPLICATE and the dead root was
     # still found first. Found in test, attempt 1.
-    awk -v s="$key" '$1 != s' "$THREADS" > "$THREADS.tmp" 2>/dev/null
-    mv "$THREADS.tmp" "$THREADS" 2>/dev/null
+    # A UNIQUE temp name. With a fixed one, two sessions recovering at the same
+    # moment raced: measured over five rounds in test attempt 3, two runs LOST an
+    # uninvolved third session's mapping and two left a duplicate whose first line
+    # was the dead root, re-wedging that session until its next recovery.
+    _tmp="$THREADS.$$.tmp"
+    awk -v s="$key" '$1 != s' "$THREADS" > "$_tmp" 2>/dev/null
+    mv "$_tmp" "$THREADS" 2>/dev/null
+    rm -f "$_tmp" 2>/dev/null
   fi
   announce="🧵 **Claude Code session** \`${short:-unknown}\` · \`${PROJECT}\` — resumed $(date '+%H:%M')${MENTION:+ · $MENTION}"
   root=$(post "$announce" "")

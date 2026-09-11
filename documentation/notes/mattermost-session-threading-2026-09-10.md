@@ -39,7 +39,11 @@ What was wrong is presentation, and it explains both symptoms exactly:
 
 ## Residuals — true, measured, not fixed by this item
 
-- **`#claude-code` keeps its 235 posts and its two members.** This item stops
+- **`#claude-code` keeps its history and its two members.** (Deliberately no
+  count: the live system offers five defensible ones - 238 live, 236 live
+  non-system, 241 DB rows, 239 `total_msg_count`, 231 roots - and an earlier
+  draft picked a sixth, 235, which is none of them. Two commit messages then
+  enumerated the right figures, called 235 wrong, and left this line standing.) This item stops
   adding to it; it does not migrate or archive what is there. If those posts
   matter, that is a separate decision.
 - **The operator's other surfaces were quiet for the same period, and that is
