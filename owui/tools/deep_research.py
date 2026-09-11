@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.3.0
+version: 1.4.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -335,7 +335,19 @@ def _render(result: dict[str, Any]) -> str:
             1 for n in needs_status
             if isinstance(n, dict) and n.get("status") == "answered"
         )
-        foot.append(f"needs answered {answered} of {len(needs_status)}")
+        # Parity with report.ts coverageFooter(). `partial` exists because dry
+        # run 1f2ff740 printed "needs answered 0 of 6" beside a report stating
+        # findings from 11 cited sources: the judge marks a need open, the
+        # synthesis grounds lines about it, and both can be true. The footer
+        # must say the second number or it contradicts its own body.
+        partial = sum(
+            1 for n in needs_status
+            if isinstance(n, dict) and n.get("status") == "partial"
+        )
+        foot.append(
+            f"needs answered {answered} of {len(needs_status)}"
+            + (f" ({partial} partly)" if partial else "")
+        )
         rec = result.get("search_record")
         if isinstance(rec, dict) and isinstance(rec.get("fetched"), int):
             # PARITY with report.ts coverageFooter()/searchHealthLabel(). Both
@@ -362,6 +374,21 @@ def _render(result: dict[str, Any]) -> str:
                 foot.append(
                     f"search: DEGRADED ({junk} of {junk + ok_calls + empty_calls} "
                     f"searches returned junk)"
+                )
+            # Parity with report.ts coverageFooter(): say when the entity gate
+            # could not be applied. A reader who sees "search: ok" is entitled
+            # to know it was decided by the weaker overlap rule.
+            missing = int(rec.get("entity_missing") or 0)
+            rejected = int(rec.get("entity_rejected") or 0)
+            no_gate = missing + rejected
+            if no_gate:
+                why = (
+                    f"{rejected} rejected the run's subject"
+                    if rejected
+                    else f"{missing} had no subject to check"
+                )
+                foot.append(
+                    f"entity gate: {no_gate} search(es) judged without it ({why})"
                 )
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")

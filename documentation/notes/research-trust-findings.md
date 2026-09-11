@@ -672,3 +672,169 @@ and gateway replays via `GET :8085/search`.
 - **D.4:** all 8 ids `retracted` with reason `research-audit 2026-09-11: ...`; count 8.
 - **D.5:** deep_research.py v1.3.0 written through `POST /api/v1/tools/id/deep_research/update`
   (the API path refreshes OWUI's tool cache; valves compared before/after).
+
+---
+
+# research-trust-entity (item 2, 2026-09-11)
+
+Follow-up to the deploy findings above. The deployed detector reported two working
+searches as failures because it compared the subject entity as a literal string.
+
+## E.1 The RED baseline, re-measured on live payloads — [observed-live 2026-09-11]
+
+All five queries re-captured today from `GET :8085/search` (3-4 engines answering) and
+shipped as fixtures with provenance. The DEPLOYED `classifyHits` on them:
+
+| fixture | entity | verdict | share |
+|---|---|---|---|
+| `live-100hz-mechanism` | `100Hz audio` | **collapsed on "motion"** | 0.00 |
+| `live-100hz-mechanism` | `100Hz` | **collapsed on "motion"** | 0.15 |
+| `live-100hz-mechanism` | `100 Hz` | ok | 0.55 |
+| `live-100hz-studies` | `100Hz audio` | **collapsed on "motion"** | 0.00 |
+| `live-100hz-studies` | `100 Hz` | **collapsed on "motion"** | 0.35 |
+| `live-optiplex-thermal` | `Dell OptiPlex 3050` | **collapsed on "dell"** | 0.15 |
+| `live-optiplex-health` | `Dell OptiPlex 3050` | ok | 0.55 |
+
+`live-100hz-mechanism` and `-studies` both carry the Nagoya paper
+("Just 1-min exposure to a pure tone at 100 Hz…", PMC11955832 / J-STAGE) — at rank 1 in
+`-studies`. The pages the run was sent to find were in the results it threw away.
+
+## E.2 The rule: match the distinctive CORE — [read-from-source]
+
+`search-quality.ts` — `entityTokens()`, `entityCore()`, `hitCarriesEntity()`.
+
+1. **Tokenise splitting digit/letter runs**, so `100Hz`, `100 Hz` and `100-Hz` all become
+   `["100","hz"]`. The deployed version tokenised on `[a-z0-9]+`, making `100Hz` the single
+   token `100hz`, which matches nothing a page writes.
+2. **The CORE** is what survives dropping leading and trailing tokens that carry no
+   distinctiveness — a brand (`Dell`), an article, a medium or context word (`audio`, `VR`) —
+   while a distinctive token remains. Distinctive = contains a digit, or ≥5 chars and not in a
+   short closed QUALIFIERS list. Worked: `Dell OptiPlex 3050` → `optiplex 3050`;
+   `100Hz audio` → `100 hz`; `VR motion sickness` → `motion sickness`.
+3. **A unit is never orphaned from its number** — reducing `100 Hz` to `100` would match
+   *The 100* (TV series), which is one of the six collapse fixtures. Only a token of ≤4
+   characters can be a unit: an early version protected `desktop` beside `3050` and left the
+   core as `optiplex 3050 desktop`, which no page writes.
+4. **A numeric final token may carry up to two trailing letters**: the OptiPlex 3050 is
+   written `3050m`, `3050 SFF`, `3050MT`. `3060` is still a different machine, and `3050`
+   still cannot match inside `30500`.
+
+## E.3 ENTITY_SHARE re-measured over ALL recorded sets — [observed-live 2026-09-11]
+
+| share | set | class |
+|---|---|---|
+| 1.00 | `probe-good-oomkilled` | GOOD (control) |
+| 1.00 | `probe-good-iphone` | GOOD (control) |
+| 0.75 | `search-good-optiplex` | GOOD (throwaway rig) |
+| 0.65 | `live-optiplex-health` | GOOD (live, dry run 1f2ff740) |
+| 0.55 | `live-100hz-mechanism` | GOOD (live, dry run b7e701ef) |
+| 0.35 | `live-100hz-studies` | GOOD (live, dry run b7e701ef) |
+| 0.30 | `live-optiplex-thermal` | GOOD (live, dry run 1f2ff740) |
+| **0.175** | — | **ENTITY_SHARE** |
+| 0.05 | `live-100hz-ssq` | OFF-NEED (live; the query is about SSQ scores) |
+| 0.00 | `search-collapsed-dell`, `-most`, `-the100` | COLLAPSED |
+| 0.00 | `probe-collapsed-capacitor`, `-motherboard`, `-vestibular` | COLLAPSED |
+
+(`probe-collapsed-semaglutide` sits at 1.00 and is deliberately `ok` — the entity-present
+weak-search exception decided in the previous item.)
+
+**0.175 is the only value satisfying the anchor's no-edge rule.** The real gap is
+0.05 → 0.30, so a threshold must be >0.15 and <0.20 to keep every recorded set more than 0.1
+away; 0.175 sits 0.125 from each side.
+
+**The thinness is the finding.** Chosen from the curated fixtures alone the gap looked like
+0.00 → 0.75 and 0.5 looked safe. Against live sets the headroom is 0.125, and four GOOD sets
+were below the old line. A threshold measured only on the examples that motivated it will
+look well-separated and be on an edge.
+
+## E.4 Validating the entity itself — [read-from-source]
+
+`entityStatusFor()` returns `used` / `missing` / `rejected`. KEYWORDIZE is a model and can
+return a subject the query never mentioned; gating on that would condemn every search for a
+question it misread. The entity is used only when the QUERY carries its core (core-matched
+too, because a DEEPEN query may carry `OptiPlex 3050` while the entity is branded).
+
+Both non-`used` cases fall back to the overlap rule **and are counted** —
+`fetchStats.search.entity_missing` / `entity_rejected`, carried into `search_record` and
+printed in the footer by both renderers:
+
+```
+… · entity gate: 2 search(es) judged without it (2 rejected the run's subject)
+```
+
+A silent fallback is a gate reporting health it never measured.
+
+## E.5 Coverage vs footer — [observed-live, recorded as a fixture]
+
+Live dry run 1f2ff740 (`fixtures/dryrun-optiplex-1f2ff740.json`): 11 cited sources, 25
+grounded lines, and a footer reading `needs answered 0 of 6`. COVERAGE_STAGED marked every
+need open.
+
+Both halves are true — sources can support many facts without settling any one sub-question —
+and what was false was the footer's silence about the second number. `reconcileNeedsStatus()`
+(`report.ts`) turns an `open` need the synthesis actually grounded into `partial`, and the
+footer prints `needs answered X of N (Y partly)`.
+
+Three things it deliberately does NOT do: manufacture an `answered` (overruling the judge on a
+term overlap would be a worse lie than the one being fixed); reopen a `search_failed` need (a
+line grounded from the reuse pool does not mean the search succeeded); or change anything when
+there is no synthesis.
+
+## E.6 A regex with a literal backspace in it — [observed]
+
+While writing `groundedNeeds()`, an escaping slip put `\x08` where `\b` belonged:
+`/\[Sources?\x08[^\]]*\]/i`. It is invisible in an editor, the file type-checks, and the
+filter it guards silently matched **zero** lines — so `reconcileNeedsStatus` returned every
+need unchanged and looked like it was working. Caught because the test asserted a POSITIVE
+(`partial > 0`), not merely "no exception". Third instance in this workstream of a check that
+passes while checking nothing; the first two were a sweep script iterating over strings and a
+`SearchRecord` field read but never written.
+
+## E.7 Counts — [observed-live 2026-09-11]
+
+| suite | before (merged research-trust) | after |
+|---|---|---|
+| `research-service` `deno test -A` | 143 passed / 1 env-failed | **173 / 1** |
+| `research-curator` | 36 | 36 (untouched) |
+| `ruff check .` | clean | clean |
+| integration (`orchestrator.test.ts`, throwaway DB) | PASSED | **PASSED** |
+
+New files: `entity.test.ts` (22), `coverage.test.ts` (8). New fixtures: five live payloads
+plus the recorded dry-run result.
+
+## E.8 Out of scope, recorded
+
+- **Source weighting for the Answer block.** The OptiPlex report's title and Answer were built
+  on a Walmart review page (21 ratings). Named out of scope in this anchor; still true.
+- **Reuse recall at distance ≤ 0.55** still pulls semantically-near DGX Spark claims.
+- `live-100hz-ssq` (share 0.05) is genuinely off-need: that query asks about Simulator
+  Sickness Questionnaire scores and the engine answered it. Marking that need `search_failed`
+  is correct, not a defect.
+
+## E.9 Attacking my own rule found two more brand-shaped holes — [observed]
+
+The first version of `entityCore` dropped a leading token only when it was under five
+characters. That works for `Dell` **by accident**: it is the length of the brand in the
+incident, not a property of brands. Running the plan's own "try to break it" instructions
+before shipping:
+
+| entity | first core | page it failed to match |
+|---|---|---|
+| `Lenovo ThinkCentre M910q` | `lenovo thinkcentre m 910 q` | "ThinkCentre M910q Tiny teardown" |
+| `NVIDIA GeForce RTX 3050 Ti` | `nvidia geforce rtx 3050 ti` | — |
+| `Microsoft Surface Laptop 5` | `microsoft surface laptop 5` | — |
+
+The rule is now anchored on the MODEL NUMBER: the identity starts at the token immediately
+before the first digit-bearing token, so the brand falls away whatever its length. Two guards
+came out of the same exercise:
+
+- `Apple MacBook Air M2` reduced to `m 2`, which matches **`M.2`** — a string that appears in
+  the OptiPlex fixture's own hit titles. A one-character number is not a model code.
+- `Microsoft Surface Laptop 5` trimmed to `5`, which matches any page with a 5 in it. A bare
+  number is never an identity.
+
+`RTX 3050 benchmark` still does not satisfy `RTX 3050 Ti`, and `OptiPlex 3060` still does not
+satisfy `OptiPlex 3050`. All five are pinned as tests.
+
+This is the fourth time in this workstream that the fix for a fitted constant was itself
+fitted, and the first time it was caught before submission rather than by the tester.
