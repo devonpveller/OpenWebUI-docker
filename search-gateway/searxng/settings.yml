@@ -52,33 +52,60 @@ outgoing:
 redis:
   url: redis://redis:6379/0
 
-# Engine policy (INVERTED 2026-06-14 with the Mullvad egress swap). Empirically,
-# via a Mullvad exit IP: google/bing/mojeek RETURN results (9-10 each), while the
-# privacy trio duckduckgo/brave/startpage CAPTCHA the VPN/datacenter IP range and
-# return nothing. That's the exact opposite of the Tor era (when google/bing were
-# disabled as Tor-hostile and we leaned on ddg/brave/startpage). So: enable the
-# engines that actually work behind Mullvad; disable the three that block it.
-# Queries exit via Mullvad (untraceable to the operator), so google/bing here
-# leak nothing about identity. Names merge into SearXNG defaults by engine name.
+# Engine policy (REMEASURED 2026-09-11 - documentation/notes/search-engine-alternatives-2026-09-11.md).
+#
+# The 2026-06-14 block below this line USED to say google/bing/mojeek work behind
+# Mullvad and ddg/brave/startpage CAPTCHA it. Re-measured on 2026-09-11 over the 12
+# `needs` of two audited research jobs (term-overlap ratio = fraction of hits whose
+# title+snippet carry >= 2 non-stopword query terms), same Mullvad exit, same minute:
+#
+#   - bing answered 12/12 and scored 0.00 on EVERY query. It collapses a query to its
+#     first salient token ("Dell", "most", "100") and returns 10 on-topic-for-that-token
+#     junk hits with HTTP 200 - the failing engine is the one that never reports failure
+#     (upstream issue #4964). PR #6671 (merged 2026-09-11) does NOT fix it from a US exit.
+#   - google returned 0 results with NO error on the 2026-05-17 image (TLS fingerprint
+#     rejection: `[SSL: TLSV1_ALERT_PROTOCOL_VERSION]` in the log), and 0.90 over 12/12
+#     on 2026-09-11 (upstream migrated the network layer httpx -> curl_cffi, be836e6).
+#   - brave 0.95 (7/12; rate-limits after ~7 burst queries), qwant 0.90 (10/12),
+#     yandex 0.60 (12/12 - and it was switched OFF here the whole time),
+#     `duckduckgo web` 1.00 (the NEW engine; the old `duckduckgo` still CAPTCHAs).
+#   - mojeek 403s every call because https://www.mojeek.com/robots.txt Disallows /search
+#     and their terms forbid automated access without an API key. It is a CONTRACTUAL
+#     refusal, not an IP block: no relay change fixes it. Disabled rather than retried.
+#   - startpage and presearch were REMOVED upstream between those images; their entries
+#     are dropped here so settings.yml stops naming engines that do not exist.
+#
+# This block therefore REQUIRES the pinned newer image (SEARXNG_IMAGE in .env; see
+# search/docker-compose.yml). On the 2026-05-17 image only yandex and bing answer.
+#
+# Queries still exit only via Mullvad (untraceable to the operator), so naming
+# google/brave/qwant/yandex here leaks nothing about identity. Names merge into
+# SearXNG's defaults by engine name.
 engines:
   - name: google
-    disabled: false      # works via Mullvad (9 results); best general engine
-  - name: bing
-    disabled: false      # works via Mullvad (10 results)
-  - name: yandex
-    disabled: true       # still flaky/captcha-prone; google+bing+mojeek suffice
-  # ddg/brave/startpage CAPTCHA Mullvad's VPN-IP range — disabled to avoid the
-  # 180s suspension churn + unresponsive-engine noise they'd otherwise add.
-  - name: duckduckgo
-    disabled: true
+    disabled: false      # 0.90 overlap, 12/12, no CAPTCHA in 12 queries (2026-09-11)
   - name: brave
-    disabled: true
-  - name: mojeek
-    disabled: false      # works via Mullvad (10 results)
+    disabled: false      # 0.95 overlap, 7/12 - rate-limits in a burst; redundancy, not immunity
   - name: qwant
-    disabled: true
-  - name: startpage
-    disabled: true
+    disabled: false      # 0.90 overlap, 10/12 (2 CAPTCHAs)
+  - name: yandex
+    disabled: false      # 0.60 overlap, 12/12 - worked all along on the OLD image too
+  - name: duckduckgo web
+    disabled: false      # 1.00 overlap on the 4-query subset; this is the NEW engine
+  - name: duckduckgo
+    disabled: true       # the OLD engine still CAPTCHAs this IP range
+  - name: bing
+    disabled: true       # MEASURED 0.00 on 12/12: every hit set is first-token junk it
+                         # reports as success. Left enabled it contributes only noise to
+                         # the merged set and drags the harness collapse detector's
+                         # overlap ratio DOWN on queries the working engines answered.
+  - name: mojeek
+    disabled: true       # robots.txt Disallow: /search + ToS - 403 is policy, not an IP block
+  - name: google cse
+    disabled: true       # answers ~20 hits/query with NO api_key/cx configured here, which
+                         # nobody has explained. Until it is, it is the same unexamined risk
+                         # as keyless mojeek, and it is ON by upstream default - so name it
+                         # and switch it off rather than inherit it silently.
   - name: wikipedia
     disabled: false
   - name: wikidata
