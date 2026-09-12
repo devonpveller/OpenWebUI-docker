@@ -2074,3 +2074,94 @@ testing.
   the rewriter cannot mend it — there is no grounded line to replace it with. It is in the record
   and in the footer's corrected count only when a repair happened.
 - `entityShare` still reads `title + " " + snippet` and never `url` (ninth item running).
+
+---
+
+## M. research-trust-template attempt 2 — a detector that edited what it inspected (2026-09-12)
+
+### M.1 The defect — [reproduced on the branch, tester 2026-09-12]
+
+`normaliseCitations` ran on the text that SHIPS. It moved a citation from after the full stop to
+before it, and in doing so ate the space that followed:
+
+| written | delivered |
+|---|---|
+| `...across teams and services. [Source 4, 5] The answer...` | `...across teams and services [Source 4, 5].The answer...` |
+| `Check the vents, e.g. [Source 3] dust...` | `Check the vents, e.g [Source 3].dust...` |
+| `The unit draws approx. [Source 2] 180 W...` | `The unit draws approx [Source 2].180 W...` |
+
+On the committed renders: the buyer's guide was untouched (its after-stop citations all sit at
+line end), the scientific paper changed, and the comparison's executive summary acquired one weld
+— T4's own FAIL limb. And the three fixture headers claimed they had been produced through this
+check, while the check still changed two of them: **the path was not idempotent**, which is the
+same statement.
+
+### M.2 The fix is a rule, not a better regex
+
+**Detection may not edit.** Units are derived with a normalised VIEW of each span — the text the
+judge reads — and every unit keeps its ORIGINAL span. Every rewrite and every replacement is
+applied to that span, so a document with nothing to correct is delivered byte for byte.
+
+Two invariants, over all three committed renders **and the approved document**, with a judge that
+answers SAME to everything:
+
+- `INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE`
+- `INVARIANT: running the check on its own output changes nothing (idempotence)`
+- and, in `template-renders.test.ts`,
+  `INVARIANT: the check leaves every COMMITTED render exactly as it is` — the fixtures' headers
+  make a claim about the pipeline, and this executes it.
+
+**The abbreviations need no list.** A citation is moved in the view only when two alphanumerics
+precede the stop AND the citation ENDS the span. A citation with text after it did not close a
+sentence — `approx. [Source 2] 180 W` — so there is nothing to move. `Fig.`, `Inc.`, `vs.`,
+`e.g.` and `approx.` are pinned on one line with two ordinary sentences, and the splitter
+separates the sentences while keeping each abbreviation inside its own.
+
+**The cost, stated:** where a citation sits mid-line between two sentences, the unit now spans
+both. The judge sees both sentences and both sources together — coarser, and the price of never
+touching what ships.
+
+### M.3 The tester's X2, the other half — [measured]
+
+- **A bullet that wraps onto a second line** yielded M = 0: not checked, not counted, not in
+  `U unchecked`. It is one unit spanning both lines now, counted in M and marked unjudgeable, so
+  it is never edited (an edit addressed by line and cell cannot span two lines) and lands in `U`
+  where a reader sees it.
+- **A citation inside a fenced block or an inline code span is not a citation.** A
+  `programming-doc` render is asked for code samples; one was being presented to the judge as a
+  claim and could be rewritten.
+
+### M.4 The same mistake as the last item, in the test that exists to prevent mistakes
+
+The first version of the byte-identity invariant read the approved document from the PARENT repo
+— exactly the defect `research-trust-report` was sent back for one item ago. It passed in the
+worktree and died the moment the suite ran with only the service directory mounted. The approved
+document is a fixture now, and the sweep for other escapes is clean.
+
+### M.5 The section map (tester X3)
+
+The head docblock said "Adding a template = one entry in TEMPLATES"; a template is an entry in
+`SHAPES` with ten fields. Fixed, and the docblock now carries a row per template saying where each
+OLD heading's content went — Verdict, Per-option detail, Decision factors, Risks & mitigations,
+Pitfalls & caveats, Standards & compliance, Abstract, Background, Discussion, Outlook, Target fit,
+What was not found. `templates.test.ts` asserts the map exists, so "nothing was lost" is checkable
+by reading rather than by diffing twenty prompt bodies.
+
+### M.6 The three fixtures, regenerated through the fixed path
+
+| render | fidelity (N of M, corrected, unchecked) | grounding diff |
+|---|---|---|
+| `rendered-64ac38cf-buyers-guide.md` | 48 of 52, 5 corrected, 4 unchecked | `names ["OEM"]` |
+| `rendered-a337520c-scientific-paper.md` | 65 of 67, 9 corrected, 2 unchecked | clean |
+| `rendered-5ab36fe0-product-comparison.md` | 25 of 25, 1 corrected, 0 unchecked | clean |
+
+Their headers now say what they are and what was done to them, and the invariant test proves the
+claim rather than restating it.
+
+### M.7 Counts
+
+| suite | attempt 1 | attempt 2 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 265 / 1 env-failed | **273 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |

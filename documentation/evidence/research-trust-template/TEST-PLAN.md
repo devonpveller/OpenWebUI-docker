@@ -51,7 +51,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-template/OB1/inte
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-template" && ruff check .
 ```
 
-**PASS:** research-service **`265 passed | 1 failed`** (the anchor requires at least 248);
+**PASS:** research-service **`273 passed | 1 failed`** (the anchor requires at least 248);
 research-curator **`40 passed | 0 failed`**; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — postgres at module load, T8 runs it properly.
 
@@ -59,11 +59,14 @@ research-curator **`40 passed | 0 failed`**; ruff `All checks passed!`. The sing
 read-only run after the dependency graph changes dies with `Failed writing lockfile`. The
 alternative is a writable mount, and a writable mount lets a test run edit the code it is testing.
 
-**FAIL:** any other failing test; research-service below 265; curator below 40; any ruff error;
-any file read from outside `/w`.
+**FAIL:** any other failing test; research-service below 273; curator below 40; any ruff error;
+any file read from outside `/w` — attempt 1's invariant test read the approved document from the
+PARENT repo and died the moment the suite ran with only this directory mounted, which is the same
+defect this workstream fixed one item ago, made again by the test written to stop documents being
+edited behind a reader's back. The approved document is a fixture now.
 
-**New files:** `template-renders.test.ts` (5), `fidelity.test.ts` +8 (20), `templates.test.ts` +4
-(12), and `research-curator/meta-judge-prompt.test.ts` (4).
+**New files:** `template-renders.test.ts` (6), `fidelity.test.ts` +14 (26), `templates.test.ts` +5
+(13), and `research-curator/meta-judge-prompt.test.ts` (4).
 
 ---
 
@@ -158,6 +161,49 @@ for (const s of ['## Findings\n\nThe PSU makes it difficult to upgrade. [Source 
 previous item left in this file); the three probes print **1, 1, 1**. Before this item they were
 0, 0, 0.
 
+### T4b — the invariant attempt 1 failed on: DETECTION MAY NOT EDIT
+
+Attempt 1 normalised the text that SHIPS. Moving a citation before the stop also ate the space
+after it, so a delivered document acquired `...services [Source 4, 5].The answer...`,
+`e.g [Source 3].dust` and `approx [Source 2].180 W` — in documents the checker had no correction
+to make to. The fix is structural: detection reads a normalised **view** of each unit, every unit
+keeps its ORIGINAL span, and every rewrite or replacement edits that span.
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-template/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "INVARIANT"
+deno test -A template-renders.test.ts --filter "INVARIANT"
+```
+
+**PASS:** 3 and 1 passed. The three invariant cases are:
+
+| test | what it pins |
+|---|---|
+| `INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE` | all three committed renders **and the approved document**, through a judge that answers SAME to everything |
+| `INVARIANT: running the check on its own output changes nothing (idempotence)` | a second pass over the first pass's output |
+| `INVARIANT: the three shapes the normaliser used to break` | the tester's three strings, plus `Fig.` / `Inc.` / `vs.` / `approx.` / `e.g.` and two ordinary sentences on ONE line |
+| `INVARIANT: the check leaves every COMMITTED render exactly as it is` | the fixtures' headers claim they came through this check; this is that claim, executed |
+
+The product-comparison executive summary, the sentence T4's FAIL limb named:
+
+```
+BEFORE (attempt 1's checker, re-run on the committed file)
+  ...at each level across teams and services [Source 4, 5].The answer would change materially...
+AFTER (this attempt)
+  ...at each level across teams and services. [Source 4, 5] The answer would change materially...
+```
+
+**How the abbreviations are safe without a list:** a stop only closes a sentence when two
+alphanumerics precede it AND the citation ENDS the span. A citation with text after it did not
+close a sentence — it is `approx. [Source 2] 180 W` or a mid-sentence reference — so there is
+nothing to move. The cost is a coarser unit where a citation sits between two sentences on one
+line: the judge sees both sentences and both sources together. Coarser is the price of never
+touching what ships.
+
+**FAIL:** any of the four documents changed by a check that corrects nothing; a second pass
+differing from the first; an abbreviation treated as a sentence end; a citation moved in a
+delivered document.
+
 **How each is closed:** the citation goes back inside its sentence before splitting
 (`normaliseCitations`); an uncited sentence in an evidence section is judged against the nearest
 synthesis lines, and is UNSUPPORTED when nothing is near it; the word floor is gone from table
@@ -182,9 +228,20 @@ deno test -A template-renders.test.ts --filter "ACCEPTANCE 3"
 deno test -A fidelity.test.ts --filter "K.9"
 deno test -A fidelity.test.ts --filter "DELIVERED"
 deno test -A fidelity.test.ts --filter "REPORTED, not deleted"
+deno test -A fidelity.test.ts --filter "wraps onto the next line"
+deno test -A fidelity.test.ts --filter "inside code"
+deno test -A fidelity.test.ts --filter "out loud"
 ```
 
-**PASS:** 1, 1, 1 and 1 passed. The footer reads
+**PASS:** 1, 1, 1, 1, 1, 1 and 1 passed.
+
+**The tester's X2, the other half.** A bullet that wraps onto a second line used to yield
+**M = 0**: not checked, not counted, not in `U unchecked` — the coverage gap this item exists to
+close, wearing a different hat. It is now ONE unit spanning both lines, counted in M, and marked
+unjudgeable so it is never edited (an edit addressed by line and cell cannot span two lines) — so
+it lands in `U`, out loud. A citation inside a fenced block or an inline code span is not a
+citation at all: a `programming-doc` render is ASKED for code samples, and one of them was being
+presented to the judge as a claim. The footer reads
 `render checked: N of M, K corrected, U unchecked`, and **M is `countUnits(delivered)`** — a pure
 function of the document the reader holds. Recompute it yourself on all three renders; the test
 does, and the fixture headers record the same numbers.

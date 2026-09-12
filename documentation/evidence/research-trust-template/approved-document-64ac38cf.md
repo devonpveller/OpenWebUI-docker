@@ -1,3 +1,10 @@
+<!-- The document job 64ac38cf DELIVERED into the chat on 2026-09-12, verbatim, and the one the
+     operator read and approved: "this looks good... set this as a template for future use".
+     It is the exemplar the shared skeleton was taken from, and it is a FIXTURE because an OB1
+     test may never read a file outside OB1 - fidelity.test.ts runs the byte-identity invariant
+     over it. The parent repo keeps a human-facing copy at
+     documentation/evidence/research-trust-template/. Do not edit either. -->
+
 # Dell OptiPlex 3050: A Recurring PSU Failure, Fragile Socket Pins, and BIOS-Modding History Are the Decisive Pre-Purchase Checks
 
 ## Executive summary
