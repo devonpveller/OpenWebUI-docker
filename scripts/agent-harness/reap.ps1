@@ -41,11 +41,37 @@
 #      started, already carries all three - and a compose-BUILT image carries none
 #      of them. (An image CAN be made to carry one by hand: `LABEL
 #      com.docker.compose.oneoff=False` is inherited by its containers, measured.
-#      That is why rule 3 exists and why this is a conjunct, not a guarantee. This
-#      line said compose writes them "when it STARTS a container, and no image can
-#      supply them" - both false, both erring safe, and both slipped through
-#      because T9 holds the header against the CODE and nothing held a claim about
-#      DOCKER to account. The comment at the guard itself was already precise.)
+#      This line said compose writes them "when it STARTS a container, and no
+#      image can supply them" - both false, both erring safe, and both slipped
+#      through because T9 holds the header against the CODE and nothing held a
+#      claim about DOCKER to account. The comment at the guard itself was already
+#      precise.)
+#
+#      THAT DOCKER FACT IS TRUE; THE SENTENCE THAT USED TO FOLLOW IT WAS NOT. It
+#      said "that is why rule 3 exists", and rule 3 is NEVER EVALUATED in the case
+#      named: the test below is a short-circuiting `-and` with rule 2 ahead of
+#      `Test-ComposeInherited`, so an image-supplied runtime key is refused by
+#      rule 2 and execution never reaches rule 3. A tester built the pair - two
+#      containers from images differing by exactly one `LABEL` line - and
+#      confirmed rules 1 AND 3 hold on BOTH, with rule 2 the only one that
+#      separates them.
+#
+#      It cannot be rescued by reading it charitably, either, and that is the part
+#      worth keeping: an image-supplied key can only ADD a key, so it can only
+#      push a resource toward PROTECTED - and a CONJUNCT can only make this test
+#      stricter. **You do not add a conjunct to fix a rule that is already
+#      refusing.** The direction alone refutes the attribution, without running
+#      anything.
+#
+#      Rule 3's real reason is two lines below: a `com.docker.compose.project`
+#      value set BY HAND on a container compose never made. Checking the image
+#      carries the same value is what tells those apart.
+#
+#      This is the second false attribution in this header in two attempts, and it
+#      was written INTO the paragraph correcting the first - by the same move, a
+#      confident "that is why X" attached to a fact that had just been measured.
+#      Measuring the FACT is not measuring the REASON, and having just been caught
+#      doing it is no protection at all.
 #   3. its image carries the same project value, so the label is demonstrably inherited.
 #
 # Miss any one and it stays protected. The measurement is finding 15 of
@@ -322,7 +348,9 @@ function Get-Inventory {
                 #      all 81 production containers carry config-hash AND container-number AND
                 #      oneoff, and a compose-built image carries none of the three;
                 #   3. its IMAGE carries the same project value, so the label is demonstrably
-                #      inherited rather than set by compose at run time.
+                #      inherited rather than set by compose when it created the container.
+                #      ("at run time" - the last un-converted echo of the retracted timing
+                #      model, one line above the guard that model was retracted for.)
                 #
                 # RULE 2 IS THE ONE DOING THE SAFETY WORK, and it is worth being precise about
                 # that. It would be easy to say rule 1 carries the guard because "a production

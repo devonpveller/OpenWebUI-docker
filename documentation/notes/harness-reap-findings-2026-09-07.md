@@ -455,7 +455,25 @@ a container: `docker compose create`, never started, already carries all three (
 **They are not inherited from a compose-BUILT image, because such an image carries none of
 them - but an image CAN be made to carry one by hand**, and `LABEL
 com.docker.compose.oneoff=False` in a Dockerfile is inherited by every container built from
-it, and hits docker's key-presence filter. Measured. That is why rule 3 exists.
+it, and hits docker's key-presence filter. Measured.
+
+**That paragraph used to end "That is why rule 3 exists," and that was false.** Rule 3
+(`Test-ComposeInherited`) sits LAST in a short-circuiting `-and` behind rule 2, so in the
+case just described it is never evaluated: a tester built two containers from images
+differing by one `LABEL` line and found rules 1 and 3 satisfied on BOTH, with rule 2 the
+only rule that refuses. And no charitable reading survives the direction of the effect - an
+image-supplied key can only ADD a key, so it can only push toward PROTECTED, and a conjunct
+can only make the test stricter. A conjunct is not how you fix a rule that is already
+refusing.
+
+Rule 3 exists for the case two lines above it: a `com.docker.compose.project` set BY HAND on
+a container compose never created.
+
+This went into the block written to retract the LAST false attribution in this same guard,
+three paragraphs under this note's own line about a correction that leaves its source
+standing. The move is identical both times - a measured docker FACT, then a confident "that
+is why" hung off it. **Measuring the fact is not measuring the reason**, and the surrounding
+paragraph being a correction of exactly that error bought no protection whatsoever.
 
 This paragraph said "when it starts a container; they cannot be inherited from an image
 because no image has them" - both halves wrong, both erring safe. **`reap.ps1` names this
@@ -539,3 +557,42 @@ nothing"). Found by the `drilllabel` reviewer 2026-09-08 and left for its own it
 fixing it changes behaviour: the library would have to dot-source `config.ps1`, which pulls
 the whole harness module into `scripts/checks/`, or reimplement the layering. Neither is a
 documentation change, and the item that surfaced it was a documentation fix.
+
+---
+
+## `grep -iF` ABORTS ON THIS HOST, PRINTS NOTHING, AND SAYS NOTHING ON STDERR
+
+GNU grep 3.0 under this Git-for-Windows bash:
+
+    grep -iF "compose" scripts/agent-harness/reap.ps1   -> rc=134, 0 lines, stderr EMPTY
+    grep -iE "compose" scripts/agent-harness/reap.ps1   -> rc=0,  66 lines
+    grep -F  "compose" scripts/agent-harness/reap.ps1   -> rc=0,  57 lines
+
+`-i` and `-F` together abort (SIGABRT); either alone is fine. The "Aborted" line is printed
+by BASH'S JOB CONTROL, not by grep - so inside a pipeline, a command substitution or a
+script it never appears at all, and `grep -iF ... | head` shows `rc=0` because the exit code
+read is `head`'s.
+
+**This is the worst possible shape for a search-based check.** A paraphrase hunt is a
+search whose PASS condition is "no matches", and this returns no matches while examining
+nothing - silently, with a clean-looking pipeline. A tester hit it mid-run and only caught
+it because the sweep felt too fast.
+
+The general rule, which is this note's subject in a different costume: **a search that finds
+nothing has to prove it can find something.** Run every hunt pattern against a line you know
+exists before trusting a clean result. That control costs one command and converts "I found
+nothing" from a claim about the repo into a claim about the repo AND the tool.
+
+## `verify-reap.ps1` CASE 4 READS OTHER SESSIONS' CONTAINERS
+
+CASE 4 is not hermetic: it inspects live containers, so an unrelated fixture left running by
+another agent changes its result. A tester's first run read 65/1 from their own leftovers
+rather than from the code under test. Quiesce, or read the failure before believing it.
+
+## THE HARNESS PROVISIONS TESTERS ON THE WORK-LINE TIP, NOT THE ITEM'S SHA
+
+An `mmthread` tester found their worktree created at the work line's tip rather than at the
+attempt's recorded commit, and detached it by hand. A tester who does NOT notice tests
+something other than the attempt, and would report it under the attempt's number. Not this
+item's code - recorded here because the queue is the common dependency and the failure is
+silent on both sides.

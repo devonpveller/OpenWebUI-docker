@@ -421,6 +421,19 @@ Two commands, and they are cheap enough that there is no excuse for skipping the
     #     model, and a clean phrase-grep passed it for two attempts. The note was
     #     the document the corrected header cited BY PATH.
 
+    # 1c. AND PROVE THE SEARCH CAN FIND ANYTHING AT ALL, once per tool invocation
+    #     form, before trusting a clean result:
+    grep <same flags> "<a string you know is in the file>" <file>   # must print it
+
+    #     A paraphrase hunt PASSES on no matches, so a broken search is
+    #     indistinguishable from a clean repo. On this host `grep -iF` ABORTS
+    #     (rc=134) printing nothing, with an EMPTY stderr - the "Aborted" line
+    #     comes from bash's job control, so in a pipeline or `$(...)` it is
+    #     invisible, and `grep -iF ... | head` reports rc=0 because that is
+    #     `head`'s. A tester swept the whole repo with it and got a clean answer
+    #     from a tool that had examined zero bytes.
+    # FAIL: any hunt reported clean without its positive control in the evidence.
+
     # 2. everything the corrected text CITES - by finding number, file name or section -
     #    read each one and check it agrees with the new text, not the old
 
