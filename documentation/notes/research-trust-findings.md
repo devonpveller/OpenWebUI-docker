@@ -2165,3 +2165,61 @@ claim rather than restating it.
 | `research-service` (service directory only, `--no-lock`) | 265 / 1 env-failed | **273 / 1** |
 | `research-curator` | 40 | 40 |
 | `ruff check .` | clean | clean |
+
+### M.8 Two checks looked at the same sentence and neither acted — [measured 2026-09-12, reviewer]
+
+Written at merge time (reviewer rt-reviewer; the item merged as `eb14055`). The tester raised X1
+(a coarse unit's replacement would delete a sibling sentence) and X2 ("OEM" reached the delivered
+document though the synthesis never uses the word). **They are the same sentence**, and putting
+them together says more than either does alone. From the committed
+`fixtures/rendered-64ac38cf-buyers-guide.md`, under "What the evidence does not settle":
+
+    The proprietary connector makes aftermarket substitution difficult [Source 13], but the
+    availability of an OEM replacement part is left open.
+
+Measured against the shipped `citedUnits` at OB1 `e28c974`: the render yields **52 units, all 52
+judgeable, 0 unchecked**, and this sentence is ONE of them - section "What the evidence does not
+settle", citations `[13]`, `judgeable: true`. So:
+
+  * it carries a MID-SENTENCE citation, which is X1's shape: a STRONGER verdict here would have
+    replaced the whole span, taking the honest "is left open" clause with it;
+  * its UNCITED half carries the invented name, and the run's own grounding diff recorded it -
+    `grounding diff : numbers [] urls [] names ["OEM"]`, in the header of that very fixture;
+  * the fidelity judge was given the unit and passed it, correctly by its own rule: the claim is
+    hedged and asserts nothing the source denies.
+
+**Two independent checks saw this sentence; one reported and one approved; neither gates.** That
+is the finding. The gap is not a missing check - it is that "the renderer used a word the
+synthesis never used" is currently only ever an observation. Three items in a row have produced
+one (`BSOD`, then the ATX/SFX pair, now `OEM`), each recorded and none blocked.
+
+The decision the follow-up (`research-trust-names`) should make FIRST, before any work on span
+boundaries: is an unsupported NAME in a delivered document reportable or blocking? Two things
+worth weighing when it is made. The three observed instances were all harmless in substance -
+nothing false was asserted - so a hard gate would have rewritten three good sentences to remove
+three true words. And the names arrive in UNCITED halves of cited sentences, where the fidelity
+judge has nothing to compare against; the grounding diff is the check that can see them, and it
+is the one with no teeth.
+
+### M.9 Two sentences that no longer describe their own code — [read-from-source 2026-09-12, reviewer]
+
+The class this workstream keeps paying for: the code is right, the prose beside it is not. Both
+are one-line fixes and neither changes behaviour.
+
+1. **`fidelity.ts:166`**, in the `citedUnits` docblock: *"A sentence with no citation is not
+   checked. It is summary, structure or a heading, and there is nothing to compare it against"*.
+   This item makes that false - an uncited unit in an evidence section IS checked, against the
+   nearest synthesis lines, which is how the "drop the citation" bypass was closed. The interface
+   doc at `fidelity.ts:88` and the inline comment at `fidelity.ts:234` both state the real rule,
+   so a reader gets the truth inside the same function; the summary sentence above them
+   contradicts it, and a summary is what gets read.
+
+2. **`templates.ts:110-112`**, the WHERE THE OLD HEADINGS WENT map: the `scientific-paper` rows
+   cover Abstract, Background and Discussion, but not its `**Answer.**` lead-in, which the
+   skeleton replaces with `## Executive summary`. The map records exactly that move for
+   `general-report`'s own Answer block at `templates.ts:140`, and the TEST-PLAN's removed-tests
+   table explains it where the corresponding test was rewritten - so nothing is UNACCOUNTED. The
+   defect is only that the map is introduced as the record that "nothing was dropped" and is
+   complete but for that one row. Every other old heading in all ten templates does have a row;
+   the reviewer checked by extracting the base file's headings per template rather than reading
+   the map against itself.
