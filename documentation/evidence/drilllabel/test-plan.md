@@ -52,7 +52,25 @@ contains `reap`**.
 
 ---
 
-## T1 - every persistent creation site is labelled, and the count is shown
+## Cases DISCHARGED by `drilllabel` at `93cec725` - do NOT re-run them here
+
+**These six are `drilllabel`'s, not this item's, and this item's anchor puts them
+out of scope.** They are demoted to `###` deliberately: `queue.ps1` parses a case
+as `^##\s+(T\d+|Case\s+\d+)\b`, and `-Pass` refuses unless EVERY parsed case
+reads PASS - so leaving them at `##` made this item **unpassable inside its own
+anchor**. T3 alone would re-run all six drills, including the plane drill that
+exports OB1 and builds five images under the `open-brain` lease, to re-prove a
+commit that changes no executable line.
+
+An attempt-2 tester found that: not a wrong answer in the plan, an item no
+correct tester could ever pass. They are kept here in full because the reviewer
+needs to see WHAT was discharged and where, not just that something was.
+
+They passed at `93cec725` (drilllabel attempt 3). Re-read them only if this
+item's diff touches the drills - it does not; `git diff 93cec725..HEAD --stat`
+names three documentation files.
+
+### T1 (DISCHARGED) - every persistent creation site is labelled, and the count is shown
 
 For each of the six, enumerate creation sites and labelled sites yourself. Do not
 take the table below on trust - it is the developer's count and reproducing it is the
@@ -84,7 +102,7 @@ Look in particular for a creation built through an args array or inside a helper
 Also confirm the `--rm` sites are NOT labelled and that
 `scripts/checks/lib/harness-owner.ps1` states that rule with its reason.
 
-## T2 - the owner id is on the screen
+### T2 (DISCHARGED) - the owner id is on the screen
 
 Run each of the six (see the cost warning) or, at minimum, the five cheap ones. Each
 must print, near the start and before it creates anything:
@@ -103,7 +121,7 @@ For `drill-personal-plane-exclusion.ps1` specifically, confirm the banner prints
 **before** the OB1 export and image builds - a run that dies during a 10-minute build
 must still have told you its id.
 
-## T3 - the drills still pass
+### T3 (DISCHARGED) - the drills still pass
 
 Run each of the six to completion and compare against the same script at the base
 the work-line commit `177da6d` (the merge-base, i.e. this branch minus its own
@@ -114,7 +132,7 @@ FAIL = any difference. If a script fails at BOTH commits, that is a pre-existing
 condition, not this change - say so explicitly and give both outputs rather than
 recording a pass or a fail.
 
-## T4 - a consumer that does not pass -Owner is unchanged
+### T4 (DISCHARGED) - a consumer that does not pass -Owner is unchanged
 
 `lib/ob-initdb.ps1` gained an `-Owner` parameter and has 8 consumers; only 5 pass it.
 The other 3 (`drill-rls-boot-assertion.ps1`, `drill-app-role-not-superuser.ps1`,
@@ -132,7 +150,7 @@ PASS = `{}` - no label at all, and the container came up. Then run
 `drill-rls-boot-assertion.ps1` and confirm it still passes.
 FAIL = any label appears, or a non-passing consumer changes behaviour.
 
-## T5 - THE CASE THIS ITEM EXISTS FOR: a killed run is recoverable
+### T5 (DISCHARGED) - THE CASE THIS ITEM EXISTS FOR: a killed run is recoverable
 
 Use `drill-mcp-door-not-superuser.ps1` (fixed owner `dfuc3-drill`, so no id to
 capture). **Kill the process - do not Ctrl+C and do not make it throw.** Both of
@@ -161,7 +179,7 @@ a temporary copy instead, which yields the same evidence. Repeat the
 kill, and confirm the same leftovers appear under **ORPHANS** with no owner. Without
 that half you have not shown the change did anything.
 
-## T6 - the findings note's new claims
+### T6 (DISCHARGED) - the findings note's new claims
 
 **Finding 9 was REWRITTEN in this change**, because `reap`'s own later testing
 disproved its original claim. It used to assert a third PowerShell array behaviour -
@@ -188,6 +206,30 @@ by reading each script, and verify the `trap` really does call `Cleanup`.
 
 FAIL = any measurement that does not reproduce, or a script whose cleanup construct
 is not what the note says it is.
+
+## T11 - NOTHING ELSE MOVED, which is what makes the discharge above safe
+
+Six cases are discharged rather than re-run. That is only honest if this item's
+diff really does not reach what they cover, so prove it rather than assert it.
+
+    git diff 93cec725..HEAD --stat
+    git diff 93cec725..HEAD -- '*.ps1' '*.sh' | grep -E '^[-+][^-+]' | grep -vE '^[-+]\s*#'
+
+**Scope the second command to `*.ps1` and `*.sh`, not to `scripts/`.** The first
+draft of this case used `-- scripts/`, which sweeps in
+`scripts/agent-harness/README.md` - a markdown file that lives beside the code -
+and so failed this item on 23 changed lines of prose. I found that by running the
+case against the item it was written for, which is the only way a new case earns
+its place.
+
+PASS: the first names ONLY documentation files plus `scripts/agent-harness/README.md`
+and comment-only changes to `reap.ps1`; the second prints nothing - no non-comment
+line of any SCRIPT changes across the whole item.
+FAIL: any executable line moves. Then the discharge is void and T1-T6 come back,
+because the reason they were safe to skip has gone.
+
+This is the case that makes a discharge auditable instead of a promise, and it is
+cheap: two commands.
 
 ## What is deliberately NOT in scope
 
@@ -284,7 +326,7 @@ fixture was built from plain `alpine`, whose image carries no compose label, so
 inheritance refused it on its own and the runtime-key check was never what kept it
 alive. A seed that stays green means the case is not testing the guard it names.
 
-## T9a - FOLLOW WHAT THE CORRECTION CITES, and grep the retracted words
+## T10 - FOLLOW WHAT THE CORRECTION CITES, and grep the retracted words
 
 T6 holds the findings note to account for what the CODE now does. T9 holds the changed
 file's own header to account. Neither holds a document the corrected text POINTS AT - and

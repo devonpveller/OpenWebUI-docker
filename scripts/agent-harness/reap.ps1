@@ -40,7 +40,10 @@
 #      writes those when it STARTS a container, and no image can supply them;
 #   3. its image carries the same project value, so the label is demonstrably inherited.
 #
-# Miss any one and it stays protected. See finding 15 in the sink for the measurement.
+# Miss any one and it stays protected. The measurement is finding 15 of
+# documentation/notes/harness-reap-findings-2026-09-07.md - **named by path, because a
+# citation that says only "the sink" makes the reader find it, and this file's whole
+# problem was a reader who followed a citation to the wrong model.**
 #
 # THE THREAT THIS GUARD EXISTS FOR IS RULE 2, NOT RULE 1. The lazy argument is that a prod
 # container "would not have our ownership label anyway" - and that is exactly the argument

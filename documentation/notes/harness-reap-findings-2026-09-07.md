@@ -475,8 +475,18 @@ promised fallback covers seventeen real containers in the wrong direction. (Coun
 container's project value against its image's: 17 match, 14 mismatch, 50 have no image
 label.)
 
-The load-bearing gate is the CONJUNCTION. No single rule holds the line, which is why
-`reap.ps1` states all three and says "miss any one".
+The load-bearing gate is the CONJUNCTION - **as a FALLBACK argument.** No rule is safe to
+lean on once the others are gone, which is why `reap.ps1` states all three and says "miss
+any one".
+
+Stated flatly as "no single rule holds the line" this would be its own unqualified claim,
+and an attempt-2 tester said so: measured today, 0 of 81 production containers carry the
+ownership label and 81 of 81 carry all three runtime keys, so rules 1 and 2 EACH hold the
+line alone right now. That is the point of `reap.ps1`'s own emphasis that rule 2 is the
+mechanism. What fails is the FALLBACK reasoning - "if rule 2 goes, rule 1 still has us" -
+because the container this guard exists for is the one where rule 1 is satisfied.
+
+A paragraph retracting an unqualified claim is a poor place to make one.
 
 This correction exists because an attempt-1 tester followed the corrected header's own
 citation and arrived here, at the model the correction was written to retract. **A
