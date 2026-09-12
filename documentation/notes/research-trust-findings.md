@@ -1502,3 +1502,31 @@ d8dfb1e0 (OptiPlex) on `openbrain-research` label 1b88347.
 - Open for the next item (not blockers): H.7 padded-query dependence on the pad word;
   "needs answered 0 of 6 (4 partly)" on a run that clearly answered the mechanism need -
   the coverage judge is still conservative; two 100 Hz searches still collapsed at 0.125/0.
+
+## First live OWUI run on the deployed stack, 2026-09-12 (job 33250e9b) - what the engine recorded
+
+Provenance: observed-live 2026-09-12 04:00-04:03 UTC; `research_jobs.result` for 33250e9b
+(origin owui, callback into chat 2bc45c77 / message 30d5d1bb), `openbrain-curator` log.
+
+- The chat model rewrote the operator's question into a 7-need query ("...motherboard
+  capacitor failures, thermal problems, PSU, BIOS mod, RAM slots, CPU socket, water damage").
+  Subject "OptiPlex 3050"; 7 of 7 searches `ok` (shares 0.5-1.0), 56 hits, 42 fetched, 23
+  readable, 19 relevant (yield target reached), 17 cited (Dell KB/community/manuals,
+  Win-Raid, iFixit, PCWorld, hardware-corner, dfarq). Title states findings (180 W PSU
+  failure, fragile LGA1151 pins, BIOS-mod difficulty); Answer block first; footer
+  `needs answered 0 of 7 (7 partly) - sources 19 relevant of 42 fetched (56 hits)`.
+  Curator filed into thread "Used Desktop Hardware Diagnostics": 18 claims (0.51-0.79),
+  20 edges, 1 meta refused, 0 ungrounded.
+- **Precision miss, meta judge (follow-up):** the LLM judge refused a WORLD claim - "The
+  same used-purchase analysis recommends the Dell OptiPlex 3060 (8th-gen Intel) as a better
+  secondhand option for Windows 11 compatibility..." - attribution phrasing ("the ...
+  analysis recommends") read as being about the sources. A real fact was lost; the
+  deterministic layer did not fire, the judge did. Candidate fix: the judge prompt should
+  treat "<source> recommends/reports/notes <world content>" as WORLD.
+- **Precision miss, groundNumbers (follow-up):** "[UNCERTAIN] ... removing the CMOS battery
+  for 15 minutes did not resolve the issue (unverified figure: 15) [Source 8]" - the figure
+  is very likely in the Dell community thread beyond the 4000-char slice the synthesizer
+  sees, or written as "15 min". Downgrade direction is safe; the held-text window is the
+  limiter.
+- Coverage judge still conservative: "0 of 7 (7 partly)" on a run whose body states seven
+  concrete findings.
