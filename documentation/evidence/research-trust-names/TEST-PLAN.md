@@ -1,0 +1,284 @@
+# TEST-PLAN — harness item `research-trust-names`
+
+**Branch:** `work/research-trust-names` (parent, base `ea6a2e5`) + `research-trust-names`
+(OB1 submodule, base `e28c974`, NOT pushed).
+**Developer:** `wt-research-trust-names`. **Anchor:**
+`.\scripts\agent-harness\queue.ps1 -Show -Id research-trust-names`, copy committed at
+`documentation/implementation-guide/research-engine-for-OB/anchor-research-trust-names.json`.
+
+`renderGroundingDiff` has been REPORTING invented names for three items — ATX and SFX, then BSOD,
+then OEM, and "non-OEM" in live run a205845d — into a field on a job row that the colleague the
+report is written for never opens. This item makes the measurement act on what it finds.
+
+Read `documentation/notes/research-trust-findings.md` section **N** first.
+
+---
+
+## Preconditions
+
+The developer's worktree is `D:\Open WebUI\ai-stack\.claude\worktrees\wt-research-trust-names`.
+Cases T1–T8 are **read-only executions**. Do not `git add`, `git commit` or edit anything.
+
+```powershell
+cd "D:\Open WebUI\ai-stack"
+git diff --stat ea6a2e5..work/research-trust-names
+git -C OB1 diff --stat e28c974..research-trust-names
+```
+
+**What ran against anything live:** the fidelity check (including its judge and rewriter) over the
+three committed renders, through the deployed LiteLLM path, relayed by
+`docker exec -i openbrain-research deno eval`. No container was restarted, rebuilt, retagged or
+reconfigured; no database was written; no job was enqueued. **Leases:** T1–T8 need none; section D
+needs **open-brain**.
+
+---
+
+## T1 — Unit suites and lint, with ONLY the service directory present
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --label ai-stack.harness.owner=<you> \
+  -v "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service:/w:ro" \
+  -w /w denoland/deno:2.3.3 deno test -A --no-lock
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-curator" && deno test -A
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names" && ruff check .
+```
+
+**PASS:** research-service **`281 passed | 1 failed`** (the anchor requires at least 273);
+research-curator `40 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
+`./orchestrator.test.ts (uncaught error)` — postgres at module load, T7 runs it properly.
+
+**FAIL:** any other failing test; research-service below 281; curator below 40; any ruff error;
+any file read from outside `/w`.
+
+---
+
+## T2 — ACCEPTANCE 1: the gate, and the exemption
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "ACCEPTANCE: an abbreviation"
+deno test -A fidelity.test.ts --filter "ACCEPTANCE: a unit using an unearned name"
+deno test -A fidelity.test.ts --filter "the gate BLOCKS the names"
+```
+
+**PASS:** 1, 1 and 1 passed.
+
+- **The gate fires before the judge.** In the second case the judge answers SAME to everything and
+  the unit is corrected anyway: a name no source uses is a fact no source supports, and the judge
+  was asked about the claim, not the vocabulary.
+- **The exemption is an EXPANSION MATCH** (`grounding.ts` `expansionMatch`): a name is earned when
+  the evidence writes it as a whole word, or when consecutive words on one line have initials that
+  spell it. BSOD is earned by "Blue Screen of Death"; HTC is not earned by anything, and is
+  blocked. There is no list of known abbreviations, and there should not be — four items in this
+  workstream have failed on a hand-written list of surface strings.
+- **The two documents kept as RECORDS are not edited to make the suite green**: the operator's
+  approved document (ESR, HDD) and the attempt-1 ATX/SFX render. The third case asserts the gate
+  blocks their names instead.
+
+**Try to break it:** an acronym whose expansion is in a [GAP] line only (it must still be
+blocked); a name that is a common English word; a name inside a code span; an expansion spanning
+two lines (deliberately not matched — a phrase does not span a newline, and letting it would make
+any long document contain every acronym).
+
+**FAIL:** a name the evidence never uses surviving in a corrected document; BSOD blocked; an
+acronym with no expansion passed; either record document edited.
+
+---
+
+## T3 — The [GAP] decision, and what it costs
+
+The judgement this item had to make, stated so you can reject it: **a [GAP] line is the
+synthesizer's account of what it could not find, not a source's**, so the names check reads only
+the GROUNDED lines as evidence and the limitations list is gated like any other section.
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "the synthesizer's words"
+deno test -A fidelity.test.ts --filter "an open question is rewritten"
+```
+
+**PASS:** 1 and 1 passed. Live run a205845d put "non-OEM" in a reader's limitations list because a
+[GAP] line said "a non-OEM fan"; the same shape is in the fixtures (ESR, HDD, TFVC, UI).
+
+**Two rules protect the questions themselves**, and both are asserted:
+
+- an open question is **rewritten or left alone**, never answered with a grounded line;
+- **"blocked" is measured on the delivered document** — the names are recomputed after the
+  corrections, and a rewrite that failed is not a block. A surviving name stays visible in
+  `prose_ungrounded.names`.
+
+**Numbers and URLs keep the whole synthesis as their reference**, deliberately: a figure inside a
+[GAP] question is a question, not an assertion.
+
+**FAIL:** a grounded line pasted over an open question; a name counted as blocked while still in
+the document; a [GAP] question deleted.
+
+---
+
+## T4 — ACCEPTANCE 2: per-sentence correction inside a coarse unit
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "only the failing sentence"
+deno test -A fidelity.test.ts --filter "whose every sentence fails"
+```
+
+**PASS:** 1 and 1 passed. The tester's sample — `The PSU fails with a brief green LED. [Source 7]
+The connector is proprietary [Source 13].` — is ONE coarse unit (the splitter will not break
+before a citation, which is what keeps "…to upgrade. [Source 13]" whole). With a judge condemning
+only the second sentence, the first is byte-identical and only the second is replaced. A span
+whose every sentence fails is still corrected whole, so the fallback pastes one grounded line and
+not two.
+
+**Seen on the real document** — the OEM sentence lived in exactly that shape:
+
+```
+BEFORE  ...is not confirmed by any source. The proprietary connector makes aftermarket
+        substitution difficult [Source 13], but the availability of an OEM replacement part is
+        left open.
+AFTER   ...is not confirmed by any source. The OptiPlex 3050 SFF uses a proprietary power supply
+        and a proprietary power connector, which makes it difficult for users to install
+        aftermarket PSUs to support higher-power GPUs. [Source 13]
+```
+
+**FAIL:** a sibling sentence changed; a span split in a way that separates a citation from the
+sentence it closes.
+
+---
+
+## T5 — ACCEPTANCE 4: the four INVARIANTS still hold
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "INVARIANT"
+deno test -A template-renders.test.ts --filter "INVARIANT"
+```
+
+**PASS:** 3 and 1 passed — byte-identity, idempotence, the welding shapes, and the committed
+renders unchanged.
+
+**Read this, because the fixtures moved.** The three committed renders were regenerated by
+applying the gate to the documents `research-trust-template` committed — not by re-rendering — so
+`git -C OB1 diff e28c974..research-trust-names -- integrations/research-service/fixtures` shows
+exactly what the gate changed. Their headers carry the record, and the invariants are asserted on
+the regenerated files: a document the gate has already cleaned has nothing left to correct.
+
+Each document is now paired with **its own** synthesis in those tests. Pairing all three with one
+synthesis was harmless while the check only judged claims; with a names gate it makes every name
+in a document unearned, and the checker "corrects" a document it should never have been shown.
+
+**FAIL:** any invariant failing; a fixture whose header disagrees with what the check produces.
+
+---
+
+## T6 — The footer, and renderer parity
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "how many names were blocked"
+deno eval --ext=ts "import { renderResult } from './lib.ts'; Deno.writeTextFileSync('/tmp/ts.txt', renderResult({ synthesis: 'BODY [Source 1]', cited_sources: [{url:'https://a.example',title:'A'}], needs_status: [{need:'a',status:'answered'}], search_record: { hits:10, fetched:4, readable:4, relevant:2, ok:1, collapsed:0, offtopic:0, empty:0, errors:0 }, backstop: 'complete', render_fidelity: {checked:44,units:44,unchecked:0,rewritten:2,replaced:1,names_blocked:['ESR','HDD','OEM']} }));"
+```
+
+…and the same record through `deep_research.py` `_render`, then `cmp`. Repeat with
+`names_blocked: []`.
+
+**PASS:** `cmp` silent both times. With names:
+`render checked: 44 of 44, 3 corrected, 0 unchecked · names: 3 blocked`. Without: no `names:`
+clause at all — a counter that says "0 blocked" on every report teaches the reader to skip the
+line. `owui/tools/deep_research.py` is **v1.5.3** and needs a re-paste (D.3).
+
+**FAIL:** any byte of difference; the clause printed at zero; the version not bumped.
+
+---
+
+## T7 — Integration, image, and the run's own record
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --label ai-stack.harness.owner=<you> --network <net> \
+  -e DB_HOST=<db> -e DB_PASSWORD=test -e REUSE_MAX_DISTANCE=1.1 -e KB_SOURCES_MAX_DISTANCE=1.1 \
+  -v "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service:/app:ro" \
+  -w /app denoland/deno:2.3.3 deno test -A --no-check --no-lock orchestrator.test.ts
+docker build --label ai-stack.harness.owner=<you> -t openbrain-research:wt-<you> \
+  "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+docker run --rm openbrain-research:wt-<you> sh -c "ls /app/*.ts; ls /app/*.test.ts 2>/dev/null || echo NO_TESTS_SHIPPED"
+```
+
+**PASS:** the orchestrator suite passes against a real schema; the image builds; `/app` carries the
+source modules and **no** `*.test.ts`. **Clean up:** remove the container, network and image;
+`reap.ps1 -Report` must show nothing owned by you.
+
+---
+
+## T8 — Nothing live changed, and nothing was removed without an account of it
+
+```powershell
+cd "D:\Open WebUI\ai-stack"
+git diff --name-only ea6a2e5..work/research-trust-names
+git diff ea6a2e5..work/research-trust-names -- OB1
+docker inspect openbrain-research --format "{{.Config.Image}} {{.State.StartedAt}} {{.RestartCount}}"
+git -C OB1 diff e28c974..research-trust-names -- integrations | Select-String -Pattern '^-Deno.test'
+```
+
+**PASS:** the parent diff touches only `documentation/` and `owui/tools/deep_research.py`; the OB1
+gitlink diff is EMPTY; the container is untouched; **no** removed `Deno.test` line.
+
+**One expectation CHANGED, and it is the item's own subject:**
+
+| case | file | what happened |
+|---|---|---|
+| `ACCEPTANCE 6: the grounding diff over the re-rendered document` | `report-doc.test.ts` | pinned `names == ["BSOD"]` as the one name that still leaked. BSOD is not a leak — the synthesis writes "Blue Screen of Death" — and the expansion match now says so, so the case pins `[]`. ATX and SFX stay gone; `rendered-AFTER-v1` keeps the render that had them. The reason is in a comment above the assertion. |
+
+**FAIL:** a live container restarted or rebuilt; the gitlink bumped; a test case removed without a
+row here.
+
+---
+
+# D. Deploy (AFTER this plan passes — operator or reviewer)
+
+ONE image changes: `openbrain-research`.
+
+### D.1 Open Brain plane — lease `open-brain`
+
+```powershell
+.\scripts\agent-harness\lease.ps1 -Acquire -Name open-brain -By <you>
+docker tag openbrain-research:local openbrain-research:pre-research-trust-names
+docker build -t openbrain-research:local "D:\Open WebUI\ai-stack\OB1\integrations\research-service"
+docker compose -f OB1\docker\docker-compose.yml up -d openbrain-research
+docker logs --tail 20 openbrain-research
+```
+
+**Rollback:** re-tag `:pre-research-trust-names` back to `:local` and `up -d`.
+
+### D.2 The 100 Hz dry run — unchanged proof
+
+Still cites **PMC11955832**, three searches still `ok`. It now also prints `names: K blocked` if
+the render used a name the evidence did not.
+
+### D.3 The OWUI tool — re-paste (v1.5.2 → v1.5.3)
+
+Paste `owui/tools/deep_research.py` over the existing tool (Workspace → Tools → deep_research),
+keep its id, confirm `1.5.3`, then update the manifest digest, which records what is deployed:
+
+```powershell
+(Get-FileHash "D:\Open WebUI\ai-stack\owui\tools\deep_research.py" -Algorithm SHA256).Hash.ToLower()
+```
+
+### D.4 The live OWUI run — the proof
+
+Ask the deployed tool the OptiPlex question from a chat, then read the delivered document and the
+job row:
+
+```sql
+SELECT id, result->'render_fidelity'->'names_blocked', result->'prose_ungrounded'->'names'
+FROM research_jobs ORDER BY created_at DESC LIMIT 1;
+```
+
+**PASS:** the document's BODY contains no name the grounding diff flags — only expansion-matched
+abbreviations survive — and the footer states the blocked count when any were blocked.
+
+**Read the acceptance's wording with this correction.** A name can survive in a LIMITATIONS
+QUESTION if both rewrite attempts decline: the engine will not answer an open question with
+evidence, and it will not cut words out of someone's question. Such a name is never counted as
+blocked and appears in `prose_ungrounded.names`, so the SQL above is where you see it. A surviving
+name in the body, or a blocked count that does not match what the document lost, is a failure; a
+surviving name in a question, reported, is the documented behaviour.
