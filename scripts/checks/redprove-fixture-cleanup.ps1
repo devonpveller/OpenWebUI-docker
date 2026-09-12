@@ -36,6 +36,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
 
 $script:net     = "wt-dfuc3-rp-net"
+
+# Marks every persistent resource this run creates so a KILLED run - the one case the trap
+# below cannot cover - leaves leftovers `reap.ps1 -Owner dfuc3-rp` can collect. Fixed, like
+# the resource names above: two concurrent runs would collide on those long before the label.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$script:owner   = "dfuc3-rp"
 $script:db      = "wt-dfuc3-rp-db"
 $script:initDir = Join-Path $env:TEMP "dfuc3-rp-initdb"
 $script:target  = Join-Path $PSScriptRoot "dfu-done.ps1"
@@ -98,6 +104,7 @@ function Assert-Case {
 
 # ==========================================================================================
 Say "redprove-fixture-cleanup - can dfu-done.ps1's fixture-cleaned-up probe still fail?"
+Say (Format-HarnessOwnerBanner $script:owner)
 
 if (-not (Test-Path $script:target)) { Say "CANNOT MEASURE - $script:target missing"; exit 2 }
 
@@ -112,8 +119,8 @@ if ($chain.Count -eq 0) { Say "  CANNOT MEASURE - derived no init files from com
 $null = Copy-ObInitChain -Chain $chain -SourceDir (Split-Path $compose -Parent) -TargetDir $script:initDir
 & docker rm -f $script:db 2>&1 | Out-Null
 & docker network rm $script:net 2>&1 | Out-Null
-& docker network create $script:net 2>&1 | Out-Null
-$boot = Start-ObInitdbDetailed -Name $script:db -InitDir $script:initDir -TimeoutSec $DbTimeoutSec -DockerArgs @("--network", $script:net)
+& docker network create (Get-HarnessOwnerLabel $script:owner) $script:net 2>&1 | Out-Null
+$boot = Start-ObInitdbDetailed -Name $script:db -InitDir $script:initDir -TimeoutSec $DbTimeoutSec -DockerArgs @("--network", $script:net) -Owner $script:owner
 if (-not $boot.Ready) { Say "  CANNOT MEASURE - throwaway did not initialise: $($boot.Detail)"; Cleanup; exit 2 }
 Say "  up in $($boot.ElapsedSec)s"
 

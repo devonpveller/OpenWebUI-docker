@@ -49,6 +49,13 @@ $script:mcp = "wt-dfuc3-drill-mcp"
 $script:gw  = "wt-dfuc3-drill-gw"
 $script:initDir = Join-Path $env:TEMP "dfuc3-drill-initdb"
 
+# The owner this run stamps on every persistent docker resource it creates, so a run that is
+# KILLED - the one case the trap below cannot cover - leaves leftovers somebody can collect
+# with `reap.ps1 -Owner dfuc3-drill`. Fixed, not stamped: this drill's resource names are
+# fixed too, so a second concurrent run would collide on the names long before the label.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$script:owner = "dfuc3-drill"
+
 $script:mark    = "DFUC3-DRILL"
 $script:ftype   = "dfuc3-drill-fixture"
 $script:mcpKey  = "drill-mcp-key-not-a-secret"
@@ -141,7 +148,7 @@ function DoorSees {
 function StartMcp {
     param([string]$DbUser, [string]$DbPassword)
     & docker rm -f $script:mcp 2>&1 | Out-Null
-    $null = & docker run -d --name $script:mcp --network $script:net `
+    $null = & docker run -d --name $script:mcp (Get-HarnessOwnerLabel $script:owner) --network $script:net `
         -e "DB_HOST=$script:db" -e "DB_PORT=5432" -e "DB_NAME=openbrain" `
         -e "DB_USER=$DbUser" -e "DB_PASSWORD=$DbPassword" `
         -e "MCP_ACCESS_KEY=$script:mcpKey" -e "PORT=8000" `
@@ -160,6 +167,7 @@ function StartMcp {
 # ==========================================================================================
 Say "drill-mcp-door-not-superuser - DFU C.8 clause 3"
 Say "repo: $script:repo"
+Say (Format-HarnessOwnerBanner $script:owner)
 
 # ------------------------------------------------------------------------------------------
 Head "0. preconditions"
@@ -213,9 +221,9 @@ Say "  staged 210-init-app-role-memory.sql (NOT mounted by compose - the promoti
 Head "2. throwaway database"
 & docker rm -f $script:db 2>&1 | Out-Null
 & docker network rm $script:net 2>&1 | Out-Null
-& docker network create $script:net 2>&1 | Out-Null
+& docker network create (Get-HarnessOwnerLabel $script:owner) $script:net 2>&1 | Out-Null
 $boot = Start-ObInitdbDetailed -Name $script:db -InitDir $script:initDir -TimeoutSec $DbTimeoutSec `
-                               -DockerArgs @("--network", $script:net)
+                               -DockerArgs @("--network", $script:net) -Owner $script:owner
 if (-not $boot.Ready) {
     Say "  ABORT: CANNOT MEASURE - the throwaway did not initialise ($($boot.Outcome)): $($boot.Detail)"
     Cleanup; exit 2
@@ -271,7 +279,7 @@ $body = McpCall -Url "http://${script:mcp}:8000/mcp" -Header "x-brain-key: $scri
 Probe "R2  door-openbrain-mcp-door RETURNS the personal fixture (the live failure)" "http=200 personal=1 ops=1" (DoorSees -Body $body)
 
 & docker rm -f $script:gw 2>&1 | Out-Null
-$null = & docker run -d --name $script:gw --network $script:net `
+$null = & docker run -d --name $script:gw (Get-HarnessOwnerLabel $script:owner) --network $script:net `
     -e "OPENBRAIN_URL=http://${script:mcp}:8000" -e "OPENBRAIN_KEY=$script:mcpKey" -e "GATEWAY_KEY=$script:gwKey" `
     openbrain-gateway:local 2>&1
 Start-Sleep -Seconds 6

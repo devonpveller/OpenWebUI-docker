@@ -47,6 +47,11 @@ $census  = Join-Path $PSScriptRoot "census-db-connection-roles.ps1"
 $dbName  = "wt-$Id-rpdb"
 $ghostNm = "wt-$Id-ghost"
 $netName = "wt-$Id-rpnet"
+
+# Marks every persistent resource this run creates so a KILLED run - the one case the trap
+# below cannot cover - leaves leftovers `reap.ps1 -Owner rpcensus-<id>` can collect.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$owner   = "rpcensus-$Id"
 $root    = Join-Path $env:TEMP "wt-$Id-redprove"
 
 function Say([string]$m) { Write-Host $m }
@@ -66,6 +71,7 @@ function Cleanup {
 trap { Say "HARNESS ERROR: $_"; Cleanup; exit 2 }
 
 Say "H1 red-proof - the census cannot report a verdict it did not measure"
+Say (Format-HarnessOwnerBanner $owner)
 if (-not (Test-Path $census)) {
     Say "ABORT: cannot find the script under test: $census"
     exit 2
@@ -238,8 +244,8 @@ Say "  the re-indented fixture verified: still a valid project, still 2 services
 & cmd /c "docker rm -f $ghostNm 2>nul" | Out-Null
 & cmd /c "docker rm -f $dbName 2>nul" | Out-Null
 & cmd /c "docker network rm $netName 2>nul" | Out-Null
-& docker network create $netName 2>&1 | Out-Null
-& docker run -d --name $dbName --network $netName -e POSTGRES_PASSWORD=redprove `
+& docker network create (Get-HarnessOwnerLabel $owner) $netName 2>&1 | Out-Null
+& docker run -d --name $dbName (Get-HarnessOwnerLabel $owner) --network $netName -e POSTGRES_PASSWORD=redprove `
     -e POSTGRES_DB=openbrain postgres:16-alpine 2>&1 | Out-Null
 $ready = $false
 for ($i = 0; $i -lt 45; $i++) {
@@ -273,7 +279,7 @@ foreach ($c in $cases) {
         & docker exec $dbName psql -U postgres -d openbrain -q -c `
             "CREATE ROLE ob_ghost LOGIN PASSWORD 'redprove';" 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { Say "ABORT: could not create the non-superuser ghost role"; Cleanup; exit 2 }
-        & docker run -d --name $ghostNm --network $netName -e PGPASSWORD=redprove postgres:16-alpine `
+        & docker run -d --name $ghostNm (Get-HarnessOwnerLabel $owner) --network $netName -e PGPASSWORD=redprove postgres:16-alpine `
             psql -h $dbName -U ob_ghost -d openbrain -c "SELECT pg_sleep(300)" 2>&1 | Out-Null
         $seen = $false
         for ($i = 0; $i -lt 30; $i++) {
