@@ -30,7 +30,7 @@ contains `reap`**.
   construct survives a kill. A test that proves "the trap works" proves nothing about
   this change.
 - **Cost warning.** `drill-personal-plane-exclusion.ps1` is the big one: it exports
-  the OB1 gitlink, builds five images and starts ten-plus containers. Budget for it,
+  the OB1 gitlink, builds four images and starts ten-plus containers. Budget for it,
   and take the `open-brain` lease if you intend to run it, since it builds
   `openbrain-*` images. The other five are minutes.
 - **Capture with `2>&1 6>&1`.** These scripts report with `Write-Host`; `2>&1` alone
@@ -59,7 +59,7 @@ out of scope.** They are demoted to `###` deliberately: `queue.ps1` parses a cas
 as `^##\s+(T\d+|Case\s+\d+)\b`, and `-Pass` refuses unless EVERY parsed case
 reads PASS - so leaving them at `##` made this item **unpassable inside its own
 anchor**. T3 alone would re-run all six drills, including the plane drill that
-exports OB1 and builds five images under the `open-brain` lease, to re-prove a
+exports OB1 and builds four images under the `open-brain` lease, to re-prove a
 commit that changes no executable line.
 
 An attempt-2 tester found that: not a wrong answer in the plan, an item no
@@ -72,7 +72,7 @@ files, `scripts/agent-harness/README.md`, and **`scripts/agent-harness/reap.ps1`
 itself** - whose changed lines are every one a comment, which is what T11
 proves rather than asserts.
 
-(This carried the figure "51". It was 51 when written and 59 two commits later,
+(This carried the figure "51". It was 51 when written and 59 at the NEXT commit,
 because each round added comment lines - so the number aged every time the item
 was corrected, in a sentence whose own case computes it on demand. **A count that
 a command beside it derives should not also be typed out.** T11 prints it; this
@@ -305,9 +305,14 @@ it.
 
 ## T13 - EVERY CLAIM THE FILES MAKE ABOUT THEMSELVES
 
-Three of seven attempts (3, 4 and 7) failed on a count, a distance, a direction
-or a history that a changed file asserted about ITSELF. Not one was found by a
-case. T7/T8 test the guard, T9 holds behavioural claims against code, T10 hunts
+FIVE of eight attempts - 3, 4, 5, 7 and 8 - failed on a count, a distance, a
+direction or a history that a changed file asserted about ITSELF. Not one was
+found by a case until this one existed. (The first version of this paragraph said
+"three of seven (3, 4 and 7)", and claimed to have been checked against the
+queue's own evidence files. It had not been: `reapdoc.attempt5.evidence.md`
+carries "BLOCKER 2 (T10) - a count claim in a changed file, stale at the tip". A
+history claim in the case ABOUT history claims, asserted to be verified and not
+verified.) T7/T8 test the guard, T9 holds behavioural claims against code, T10 hunts
 retracted models, T11 proves nothing executable moved, T12 holds docker claims to
 account - and a tester who ran exactly that set and nothing more would have PASSED
 attempt 7. An attempt-7 tester named this gap; the case is theirs.
@@ -323,8 +328,18 @@ Enumerate, from the diff AND from the commit message, every:
 and check each against HEAD and against git.
 
     git diff <base>..HEAD | grep '^+' |
-      grep -inE '\b(two|three|four|[0-9]+) (lines?|paragraphs?|attempts?|testers?|commands?)\b|\b(above|below|beside|under) (it|this|the)\b'
+      grep -inE '\b(two|three|four|[0-9]+) (lines?|paragraphs?|attempts?|testers?|commands?|rules?|bullets?|sites?|images?|files?)\b|\b(above|below|beside|under|next to) (it|this|the)\b'
     # then, for each hit, OPEN the file and count. Do not trust the sentence.
+    #
+    # DO NOT FILTER THE OUTPUT. The first run of this case piped the sweep through
+    # a `grep -v` that dropped anything containing "retract", on the reasoning that
+    # such lines merely QUOTE a figure already withdrawn. One of the lines it
+    # dropped was a live claim - "one line above the guard that model was retracted
+    # for", and the guard is nowhere near one line away - and a tester found it
+    # at hit 513 of the unfiltered sweep, from the regex above, which had caught it
+    # all along. THE FILTER IS PART OF THE CHECK, and a filter written from the
+    # author's belief about which hits matter reproduces the author's blind spot
+    # exactly. Read every hit. There will not be many.
     # for a history claim: read the queue's own json, never the prose
     # for "the same move": quote BOTH originals out of git and compare them
     # and run the T10 positive control first - `grep -iF` aborts silently here
@@ -334,7 +349,8 @@ FAIL: any count is stale, any direction points the wrong way, any history
 contradicts the queue, or any characterisation of a past error does not survive
 reading that error's actual text.
 
-THREE RULES THIS CASE ENCODES, each bought with a failed attempt:
+THE RULES THIS CASE ENCODES, each bought with a failed attempt except the last,
+which was bought by running the case on the change that introduced it:
 
   * **A DIRECTION IS A FIGURE.** "Below" is as checkable as "nine lines below",
     and attempt 7 got the direction itself backwards while also getting the
@@ -343,15 +359,20 @@ THREE RULES THIS CASE ENCODES, each bought with a failed attempt:
     measured against THEIR excerpt, not this layout. Attempt 7 transplanted three
     of them verbatim and all three were wrong here.
   * **A COUNT THAT A COMMAND BESIDE IT DERIVES SHOULD NOT ALSO BE TYPED OUT** -
-    already the doctrine of T11, and "edits that note by 61 lines" had aged to 133
-    by the time a case went looking for it.
+    already the doctrine of T11. "Edits that note by 61 lines" had aged by the
+    time a case went looking, and the correction that reported the new figure aged
+    IN THE SAME COMMIT IT SHIPPED IN - which is the argument for carrying no
+    number here either.
   * **FINDING ONE INSTANCE OF A SHAPE IS NOT FINDING THE SHAPE.** Running this
-    case for the first time, on the change that introduced it, turned up two more
-    the attempt-7 tester had not reached: T10 said "Two commands" while giving
-    THREE - the third added by the same commit, which is attempt 4's "two
-    commands" defect reproduced one case away from where it was corrected - and
-    the findings note carried a SECOND inverted direction whose twin had just been
-    fixed. Sweep mechanically; do not stop at the reported instance.
+    case for the first time, on the change that introduced it, turned up T10
+    saying "Two commands" while giving THREE - the third added by the same commit,
+    which is attempt 4's "two commands" defect reproduced one case away from where
+    it was corrected. Sweep mechanically; do not stop at the reported instance.
+  * **AND THE SWEEP ITSELF MUST NOT BE FILTERED** - see the command above. The
+    same run that found T10's miscount ALSO hid a fourth invented distance behind
+    its own `grep -v`, and shipped a heading reading "THREE RULES" above four
+    bullets. A case is not self-executing: it can be run in a way that reproduces
+    precisely the habit it was written to break.
 
 ## What is deliberately NOT in scope
 

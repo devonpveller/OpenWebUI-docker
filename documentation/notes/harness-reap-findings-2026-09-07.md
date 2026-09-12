@@ -497,10 +497,11 @@ wrong model, in the same document that says further down that a correction leavi
 source standing has been moved rather than made.
 
 (That sentence said "two paragraphs above". The line it points at is BELOW this one, and a
-long way below - the direction was backwards and the distance invented. An attempt-7 tester
-caught its twin, and I corrected the twin and left this one standing, which is the exact
-failure this note is named for happening to a correction OF that failure. T13 exists because
-finding one instance of a shape is not finding the shape.)
+long way below - the direction was backwards and the distance invented. **The attempt-7
+tester reported BOTH of them, by line number, with measurements** - I fixed one and left
+this one standing, then wrote that I had found the survivor myself. An attempt-8 tester read
+the evidence file and caught the credit as well as the omission. Fixing one of two reported
+instances and claiming the second as a discovery is a worse failure than missing it.)
 
 Found by the first outing of T12, the case written after the previous attempt found the
 identical error in the header itself. The phrase-grep in T10 could not reach it: the header

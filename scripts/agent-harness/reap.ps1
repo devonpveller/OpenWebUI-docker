@@ -66,14 +66,16 @@
 #      Rule 3's real reason is the one stated in rule 3 itself, just below: a
 #      `com.docker.compose.project` value set BY HAND on a container compose never
 #      made. Checking the image carries the same value is what tells those apart.
-#      (This said "two lines below" and rule 3 is nine. NO DISTANCE SHIPS FROM
+#      (This said "two lines below". It is not two, and the true figure moved
+#      again while this very correction was being written - which is the argument.
+#      NO DISTANCE SHIPS FROM
 #      THESE FILES - the plan says so in as many words, and this figure came
 #      straight out of a tester's report, where it was true of THEIR quotation and
 #      not of this layout. A figure inherited without re-measuring is an invented
 #      figure wearing someone else's evidence.)
 #
-#      This is the second false attribution in this header in two attempts, and it
-#      was written INTO the paragraph correcting the first. THE TWO ARE NOT THE
+#      This is the second false attribution in this header, and it was written
+#      INTO the paragraph correcting the first. THE TWO ARE NOT THE
 #      SAME MOVE, though this said they were: the first, at `564abad`, was a bare
 #      unmeasured assertion with no premise and no "that is why" anywhere near it;
 #      this one hangs a confident "that is why" off a fact that HAD just been
@@ -359,7 +361,7 @@ function Get-Inventory {
                 #   3. its IMAGE carries the same project value, so the label is demonstrably
                 #      inherited rather than set by compose when it created the container.
                 #      ("at run time" - the last un-converted echo of the retracted timing
-                #      model, one line above the guard that model was retracted for.)
+                #      model, standing above the guard that model was retracted for.)
                 #
                 # RULE 2 IS THE ONE DOING THE SAFETY WORK, and it is worth being precise about
                 # that. It would be easy to say rule 1 carries the guard because "a production
