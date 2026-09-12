@@ -2537,6 +2537,71 @@ orphaned `2aa94dc`. It resolves today because the object survives in the worktre
 work long after it merged. Nothing to do now; a reason for a `-Rebased` verb to re-point both fields
 rather than one.
 
+### N.12 Reviewer's judgement on attempt 5: the judge fits, the lexicon's corpse does not — [read-from-source 2026-09-12, reviewer]
+
+Written at review time (reviewer rt-reviewer), answering the three questions the coordinator put
+to review. The item passed and was landed; none of this blocked it.
+
+**1. A per-correction LLM call is in the right layer and the right shape. FITS.**
+It sits in `fidelity.ts`, which already owns a judge; it goes through `deps.chat`, the same seam
+the fidelity and meta judges use, so the tests mock it rather than reaching a model; and it fails
+in the direction the house always fails - `parseFlip` returns FLIP on anything unparseable, a
+thrown call is a refusal, and every refusal is counted and shown in the footer. The shape is also
+the RIGHT SHAPE for the problem rather than merely a permitted one: attempts 3 and 4 answered a
+semantic question with a word list and were refuted twice, first by synonyms and then by cue
+misses. Replacing a lexicon with a judge is the move this codebase has already made twice - the
+subject rule went from an incident-tuned list to a cited general one, and the meta-claim filter
+went from patterns alone to patterns plus a judge that fails open. A list of surface strings is
+the thing that keeps failing here; the fifth failure would have been the same list with more
+words in it.
+
+Cost is bounded and worth stating: one call per candidate correction, at most `FLIP_JUDGE_TRIES`
+candidates per unit, and corrections are rare (one to five per document across the committed
+renders). This is not a per-sentence tax on every run.
+
+**2. `polarityKeeps` should GO. It is the one thing in the diff that does not fit.**
+Verified rather than assumed: `grep -rn "polarityKeeps" --include=*.ts .` across the module
+returns exactly ONE line - its definition at `fidelity.ts:657`. No product call site, and no test
+either, so it is both dead and unexercised.
+
+Two reasons it is worse than ordinary dead code, and the second is the one that matters:
+
+  * It contradicts the pattern this very workstream set two items ago. `research-trust-core`
+    deleted five superseded helpers - `entityCore`, `corePhrase`, `hitCarriesEntity`,
+    `QUALIFIERS`, `shortenEntity` - and recorded each removal with its reason in H.4/H.5. The
+    established practice here is supersede, delete, record; not supersede and leave exported.
+  * It is a RETIRED RULE LEFT CALLABLE. `polarityKeeps` is the lexical polarity test that
+    attempts 3 and 4 shipped and the tester refuted. An exported symbol is an invitation, and the
+    next person to need "does this correction flip the sentence?" will find a function that
+    answers it with the rule this item exists to abandon - without the tests, the judge, or the
+    footer disclosure that make the shipped answer trustworthy.
+
+`polarityVerdict`/`polarityOf` are a different case and stay: they still decide the CANDIDATE set
+and the `polarity_source` census, so they have live call sites and a purpose. Only the
+flip-decision wrapper is orphaned.
+
+**3. The `polarity_sources` census over-counts, and the mechanism is narrower than "by the number
+of judge calls".** Measured by reading the path end to end:
+
+    fidelity.ts:1053   the census loop runs over `all` and sets `u.polarity` for each
+    fidelity.ts:1080-1092  the NAMES sweep then builds synthetic units for lines no unit covers -
+                       object literals with no `polarity` field at all
+    fidelity.ts:1151   those synthetic units are appended to `bad`
+    fidelity.ts:1203-1207  noteAsked decrements `u.polarity?.source` ONLY if present, and
+                       increments "judge" unconditionally
+
+So a unit that HAS a polarity source moves buckets correctly, and the `WeakSet` at :1198 stops any
+unit moving twice. The over-count is therefore bounded by the number of NAMES-SWEEP units that
+reach the flip judge - the uncovered lines, which is where a `[GAP]` question lives - not by the
+number of judge calls. The docblock immediately above claims "The total is still one entry per
+unit, which is the property that makes the record auditable"; that sentence is false for exactly
+those units, and it is the sentence a later reader would rely on.
+
+It is header-only: the FOOTER the reader sees is computed from the refusal counters and is
+consistent. The fix is one line - give the synthetic units a `polarity` when they are built, or
+make the increment conditional on a successful decrement - and the docblock sentence should move
+with it. Follow-up, not a defect in what the gate does.
+
 ## O. research-trust-names attempt 3 — polarity (2026-09-12)
 
 Attempt 1 passed, merged and deployed. The re-test the reviewer's rebase forced found a defect
