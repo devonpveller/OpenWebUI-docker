@@ -65,12 +65,12 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integr
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report" && ruff check .
 ```
 
-**PASS:** research-service **`233 passed | 1 failed`** (the anchor requires at least 203);
+**PASS:** research-service **`248 passed | 1 failed`** (the anchor requires at least 203);
 research-curator `36 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — it opens a postgres pool at module load and needs the
 throwaway DB of T9. It fails the same way on the base commit.
 
-**FAIL:** any other failing test; research-service below 233; curator below 36; any ruff error;
+**FAIL:** any other failing test; research-service below 248; curator below 36; any ruff error;
 **any file read outside `/w`** — a `NotFound` on a path starting `/documentation` is that defect
 returning.
 
@@ -88,9 +88,9 @@ reads. The parent keeps byte-identical human-facing copies under
 `documentation/evidence/research-trust-report/` with a README saying which is canonical — `cmp`
 them if you want to.
 
-**New file:** `report-doc.test.ts` (21 cases) covers the delivered document end to end. The gap
-pass adds 7 cases to `harness-trust.test.ts` and the renderer 3 to `lib.test.ts` (one of which is
-a REWRITE — see T10).
+**New files:** `report-doc.test.ts` (23 cases) covers the delivered document end to end, and
+`fidelity.test.ts` (12) the per-sentence render check of T11. The gap pass adds 8 cases to
+`harness-trust.test.ts` and the renderer 3 to `lib.test.ts` (one of which is a REWRITE — see T10).
 
 ---
 
@@ -156,8 +156,18 @@ banner — all three gone from the AFTER.
 `[Source N]` numbers, same model as production. Reproduce it if you want to (Preconditions names
 the exact call); the two documents differ only by the template.
 
+**READ IT AGAINST THE SYNTHESIS, SENTENCE BY SENTENCE.** This is the case that found the defect
+attempt 1 shipped, and it found it by reading rather than by running anything: a table cell citing
+[Source 13] said "no off-the-shelf ATX or SFX drop-in available" where its line says the
+proprietary connector "makes it difficult" to fit aftermarket PSUs. Two moves - names the answer
+does not have, and a hedge turned into an absolute - and the engine could only see the first.
+`rendered-AFTER-v1-33250e9b.md` is that render, kept beside the shipped one.
+
 **FAIL:** any required section missing; an uncited table row; two lists of unknowns; the model
-directive in the body; a title asserting absence.
+directive in the body; a title asserting absence; **any sentence or cell that claims more than the
+synthesis lines it cites** - an absolute over a hedge ("is impossible", "none available", "always",
+"all") where the line says "makes it difficult", "one user reported" or "may"; a name, standard,
+product or organisation the cited lines do not contain; a ranking or count the lines do not make.
 
 ---
 
@@ -245,13 +255,18 @@ then `cmp /tmp/py-r.txt /tmp/ts-r.txt`.
 **PASS:** `cmp` is silent. Both end with the `<!-- engine: incomplete … -->` line, both carry
 `gap-closing pass: +3 sources, needs answered 1 of 2 -> 2 of 2`, and neither prints a gap list.
 
+Run it a second time with `render_fidelity` in the record - `{"checked":31,"stronger":1,
+"unsupported":1,"rewritten":1,"replaced":1}` and then `{"checked":0,"error":"..."}` - and both
+renderers must print `render checked: 31 sentences, 2 corrected` and `render check: not run`
+respectively, byte for byte.
+
 **Note a second duplication this item removed.** `lib.ts` carried its OWN footer implementation —
 no partly count, no entity-gate clause, "1 collapsed" where `report.ts` says "2 junk" — and it
 only ran on the fallback path, so nothing ever compared the two. Both renderers now call
 `coverageFooter` (`lib.ts:402`). If you run the T6 commands against the BASE commit you get two
 different footers, which is the RED.
 
-`owui/tools/deep_research.py` is **v1.5.0** and **DOES need a re-paste** (section D.3).
+`owui/tools/deep_research.py` is **v1.5.1** and **DOES need a re-paste** (section D.3).
 
 **FAIL:** any byte of difference; the version not bumped; a renderer carrying its own copy of a
 line the other one also writes.
@@ -291,9 +306,14 @@ exists to refuse (previous item, T7b).
   `applyNumericGrounding` + `buildCitedAndRenumber`, because a pass that adds sources is exactly
   when an uncited figure arrives.
 
+`contract.budget.rounds` bounds the pass as well as the gather loop (tester, X3): a caller who
+caps a job at one round is capping the work it may do, and a second round of searching plus a
+second synthesis is exactly that. `deno test -A harness-trust.test.ts --filter "X3"` pins both
+halves - `rounds: 1` runs no pass, `rounds: 2` still does.
+
 **Try to break it:** a run where the pass's own searches collapse; a run whose gap lines are all
-stopwords; a contract with `rounds: 1`; a synthesis with no `[GAP]` lines at all but an open
-need; a second pass reachable by any path you can find.
+stopwords; a synthesis with no `[GAP]` lines at all but an open need; a second pass reachable by
+any path you can find.
 
 **FAIL:** two passes; a pass with nothing open; a pass past the clock; more than one
 `delegateToCurator` call; an intermediate synthesis persisted; the backstop relabelled; the
@@ -367,11 +387,12 @@ OB1 gitlink diff is **EMPTY** (not bumped); the main checkout is unchanged; the 
 is untouched (the one inference call in Preconditions neither restarts it nor changes its image
 or its start time).
 
-**Removed / rewritten tests — reconcile the CASES, not the source lines.** One case was rewritten
-and none was deleted:
+**Removed / rewritten tests — reconcile the CASES, not the source lines.** Across both attempts one
+case was rewritten, one case's expected value changed, and none was deleted:
 
 | case | file | what happened |
 |---|---|---|
+| `ACCEPTANCE 6: the grounding diff over the re-rendered document` | `report-doc.test.ts` | **EXPECTATION CHANGED, attempt 2.** It pinned `names == ["ATX","SFX"]` - the two standards the render named for a connector its source only calls proprietary. The grounding rules now forbid naming a standard the answer does not name, so the shipped render has neither; the case pins `["BSOD"]`, which is what still leaks (the model abbreviating a phrase the synthesis spells out). The old render is kept as `rendered-AFTER-v1-33250e9b.md` and a new case asserts the defect is in THAT file and absent from the shipped one. |
 | `renderResult: gaps and early stops carry the do-not-fabricate directive` | `lib.test.ts` | **REWRITTEN in place.** It asserted the four-sentence INCOMPLETE banner and the `- what about X?` gap bullets, both of which this item removes. What it protects — an incomplete run still telling the model not to fabricate — is asserted against the line that now carries it, plus two NEW cases: `a complete run emits no machine line at all` and `nothing in the body is addressed to the model`. The reason is in a comment above the case. |
 
 ```powershell
@@ -384,6 +405,60 @@ why the reason for it is written in a comment directly above it, and why this ta
 
 **FAIL:** a live container restarted or rebuilt; the gitlink bumped; any test case removed
 without a row here; a behaviour that disappeared with no entry at all.
+
+---
+
+## T11 — The per-sentence fidelity check
+
+The tester's X1 is why this exists, and its own proof of blindness is why a second guard was
+needed rather than a stricter rule: "It is impossible to install aftermarket PSUs" and "The unit
+always fails within a year" BOTH pass `renderGroundingDiff` clean, because that diff compares
+numbers, URLs and names and modality is none of those.
+
+Two guards now. The GROUNDING RULES forbid strengthening a hedge and naming a standard the
+answer does not name (`templates.ts`); and every rendered sentence or table cell that carries a
+citation is presented to a judge with the synthesis lines it cites, for one word - SAME, WEAKER,
+STRONGER or UNSUPPORTED (`fidelity.ts`). STRONGER and UNSUPPORTED are rewritten once, and anything
+still overstating its sources is REPLACED by the cited line verbatim, tag stripped, citation kept.
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integrations/research-service"
+deno test -A fidelity.test.ts
+deno test -A report-doc.test.ts --filter "X1"
+deno test -A report-doc.test.ts --filter "fidelity check did to it"
+```
+
+**PASS:** 12, 1 and 1 passed. The mocked cases cover: a hedge-to-absolute cell rewritten back to
+its source; the same cell REPLACED verbatim when the rewrite does not fix it; a SAME/WEAKER
+document returned untouched and never sent to the rewriter; a judge that throws, and one that
+answers nonsense, leaving the document byte-for-byte unchanged and recording `error`; a rewriter
+that breaks (the verbatim fallback still fires); and a re-judge that breaks (everything the first
+judge condemned is replaced rather than trusted).
+
+**On the shipped fixture**, from the run itself, in its header:
+
+```
+render fidelity : {"checked":32,"stronger":3,"unsupported":1,"rewritten":2,"replaced":2}
+grounding diff  : numbers [] urls [] names [BSOD]
+```
+
+ATX and SFX are gone from the document; `BSOD` remains, because the model abbreviates a phrase the
+synthesis spells out, and it is disclosed rather than hidden.
+
+**The cost is visible and deliberate.** Two units were REPLACED, and a verbatim grounded line
+reads less smoothly than the sentence it replaced - one executive-summary sentence now ends on a
+market analysis instead of buyer's advice. Truth over polish is the trade; if you think a
+particular replacement made the document worse than the overstatement it removed, say so, because
+that is a judgement about the product and not about the code.
+
+**The footer says it happened:** `render checked: N sentences, K corrected`, byte-identical in
+both renderers (T6 exercises it at a non-zero count and at `error`), so the reader of the document
+knows a machine read it back against its sources. `prose_ungrounded` and `render_fidelity` are on
+the job row; the FOOTER is the half the colleague actually sees.
+
+**FAIL:** a judge failure that changes the document or is not recorded; a rewrite that is trusted
+without being re-judged; a table row whose column count changes; a `[GAP]` question or an uncited
+sentence altered; the footer clause missing when the check ran; the two renderers differing.
 
 ---
 
@@ -412,13 +487,22 @@ its three searches still classify `ok`. Run it exactly as the research-trust-cor
 describes. This item changed the coverage judge, so read the FOOTER too: it should now say more
 needs answered than before, and it must not say fewer.
 
-### D.3 The OWUI tool — re-paste (v1.4.1 → v1.5.0)
+### D.3 The OWUI tool — re-paste (v1.4.1 → v1.5.1)
 
 `owui/tools/deep_research.py` changes in three ways a reader will see: the duplicated gap block
 and the INCOMPLETE banner are gone, the machine line is added, and the hand-off notice now tells
 the model to reply with one exact line (which is what lets the engine replace it). Paste it over
 the existing tool in Open WebUI (Workspace → Tools → deep_research), keeping its id, and confirm
-the header shows `1.5.0`. `owui/manifest.csv` already maps the file; no new row.
+the header shows `1.5.1`. `owui/manifest.csv` already maps the file, but its `sha256` column records the digest of the
+PASTED copy, so update that row when you paste:
+
+```
+tools/deep_research.py,tool,Deep Research,deep_research,ffef4cdec00afc392fd6ed51b664785bb3cb8eee124351934e5d5360a8b1c9c2
+```
+
+The branch deliberately does not touch that row: the digest records what is deployed, and nothing
+is deployed until the paste happens. (This is the workstream's normal state - `295b66c`, `8d480a5`
+and `f6fdb05` are the deploy records that moved it before.)
 
 **If the paste is skipped:** the async path still delivers correctly (the engine renders
 server-side and stores `result.rendered`), but the model will not be told the exact waiting line,

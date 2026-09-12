@@ -1696,3 +1696,128 @@ identically on the base commit.
 - `research_jobs.status` is still `done` with `error` NULL for a run that retrieved nothing.
 - The BEFORE document's own footer is the RED for J.2: it was produced in production, not by a
   test harness, and it says `needs answered 0 of 7 (7 partly)` under seven answered needs.
+
+---
+
+## K. research-trust-report attempt 2 — the sentence that said more than its source (2026-09-12)
+
+Attempt 1 passed all ten cases. The tester sent it back anyway, on something they found by
+READING the document, which is the only way it could have been found.
+
+### K.1 The defect — [read-from-source, tester 2026-09-12]
+
+The failure-modes table, row "Power connector / upgradeability", citing `[Source 13]`:
+
+> Physical connector is non-standard; **no off-the-shelf ATX or SFX drop-in available**
+
+The line it was built from:
+
+> The Dell OptiPlex 3050 SFF uses a proprietary power supply and proprietary power connector,
+> which **makes it difficult** for users to install aftermarket PSUs to support higher-power GPUs.
+
+Two moves in one cell. **ATX** and **SFX** are names the synthesis does not contain —
+`renderGroundingDiff` catches those, and the fixture header disclosed them. And "makes it
+difficult" became "no … available": **a hedge turned into an absolute**, under a citation that
+does not support it. The tester proved the second is invisible by construction:
+
+| sentence, against a synthesis line saying "makes it difficult" | `renderGroundingDiff` |
+|---|---|
+| "No off-the-shelf drop-in is available." | `{numbers:[],urls:[],names:[]}` |
+| "It is impossible to install aftermarket PSUs." | `{numbers:[],urls:[],names:[]}` |
+| "The unit always fails within a year." | `{numbers:[],urls:[],names:[]}` |
+
+The diff compares numbers, URLs and names. Modality is none of those — and `prose_ungrounded` is
+a field on a job row, which the colleague the report is written for never sees.
+
+### K.2 Two guards, because neither is enough
+
+**The rules.** `GROUNDING_RULES` now forbid, in the renderer's own prompt: strengthening a hedge
+(difficult → impossible, some → all, reported → always, may → does, plus rankings and counts the
+answer does not make), and naming a standard, product, model or organisation the grounded answer
+does not name. Measured: re-rendering 33250e9b with the rules alone removed ATX and SFX and
+restored the hedge — the executive summary now says "make it difficult to install aftermarket
+PSUs" and the connector row "proprietary PSU and connector limit aftermarket replacement".
+
+**The check.** `fidelity.ts` presents every rendered sentence or table cell that carries a
+citation, together with the synthesis lines it cites, for one word: SAME / WEAKER / STRONGER /
+UNSUPPORTED. A prompt is an instruction and a judge is a measurement; this workstream has learned
+twice that the instruction alone is not the guard.
+
+Graduated, because the cheapest correction that works is the right one:
+
+1. STRONGER / UNSUPPORTED → **one targeted re-render** of those sentences only, told that usually
+   one clause is the problem and to hedge or cut that clause rather than restate the line.
+2. Still bad on the re-judge → **replaced by the cited line verbatim**, tag stripped, citation
+   kept. This cannot fail, because the replacement IS the evidence.
+
+Fail-open, like the skeptic: a judge that throws, times out or answers nonsense leaves the
+document byte-for-byte as the renderer wrote it and records `error`. A report is never withheld
+because a checker broke. And a rewrite is never trusted unchecked: if the re-judge cannot run,
+everything the first judge condemned is replaced rather than kept.
+
+### K.3 What it did to the real document — [observed-live 2026-09-12]
+
+Rendered through the deployed LiteLLM path and then through the shipped check, exactly as a live
+run does:
+
+    render fidelity : {"checked":32,"stronger":3,"unsupported":1,"rewritten":2,"replaced":2}
+    grounding diff  : numbers [] urls [] names [BSOD]   (was [ATX, SFX])
+
+Both replacements are visible in `rendered-AFTER-33250e9b.md`, and **the cost is visible with
+them**: a table cell that claimed "defective board traces" the sources never mention, and an
+executive-summary sentence that turned "will become less useful after Windows 10 end-of-life"
+into "narrows its practical use to Linux or Windows 10", now carry their grounded lines verbatim.
+The summary reads less smoothly for it. Truth over polish is the trade, and the fixture shows it
+rather than describing it. `rendered-AFTER-v1-33250e9b.md` keeps the attempt-1 render so the
+defect and its fix sit side by side.
+
+`BSOD` is what the name check still reports: the synthesis writes "Blue Screen of Death" and the
+report abbreviates it. Recorded, not hidden.
+
+### K.4 Three things the build got wrong first, all caught by measurement
+
+- **The verbatim fallback pasted every line sharing a citation.** One summary sentence citing
+  `[Source 13, 17]` became five long lines in the executive summary — true, and worse than what it
+  replaced. It is now ONE line for one sentence, chosen by word overlap with the sentence being
+  replaced.
+- **A table row's LABEL was judged as a claim.** "Thermal / fans" was rewritten into a paragraph,
+  which shifted every column of that row. The first populated cell is a label; the claims are
+  after it. (A five-word floor catches the rest.)
+- **The sentence splitter broke "e.g. SSDs".** A break now needs two ordinary characters or a
+  closing bracket before the stop, which separates an abbreviation's full stop from a sentence's
+  without a list of abbreviations.
+
+### K.5 The footer is the half the reader sees
+
+`render checked: N sentences, K corrected`, byte-identical in both renderers, and
+`render check: not run` when the judge failed. The tester's point stands beyond this item: a
+measurement recorded only on the job row is a measurement the audience never gets.
+`deep_research.py` → **1.5.1**.
+
+### K.6 The contract bounds the pass (tester X3)
+
+`contract.budget.rounds: 1` now stops the gap-closing pass. The pass's own bounds — one-shot,
+three queries, 0.6 of the clock, topic path, `backstop === "complete"` — are the engine's, not the
+caller's, and a caller who caps a job at one round is capping the work it may do. A round is what
+the pass spends.
+
+### K.7 Counts
+
+| suite | attempt 1 | attempt 2 |
+|---|---|---|
+| `research-service` (service directory only) | 233 / 1 env-failed | **248 / 1** |
+| `research-curator` | 36 | 36 |
+| `ruff check .` | clean | clean |
+
++15: twelve in `fidelity.test.ts`, two in `report-doc.test.ts` (the v1-versus-shipped comparison
+and the fixture's own record), one in `harness-trust.test.ts` (X3).
+
+### K.8 Carried forward, not fixed
+
+- The tester's **X2**: the answered measure is a bag of words, and two lines *about capacitors*
+  that happen to carry the PSU need's discriminating word plus one more score the PSU need as
+  answered. Constructed, not observed — but "answered" is now a claim the document makes to a
+  colleague, and it rests on overlap rather than aboutness. Recorded for whoever touches coverage
+  next.
+- A need answered completely by ONE thorough line still reads `partial`. Deliberate, and it does
+  mean a well-written single-line answer under-reports.

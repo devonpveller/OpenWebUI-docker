@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.0
+version: 1.5.1
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -420,6 +420,19 @@ def _render(result: dict[str, Any]) -> str:
                     f"entity gate refused {unfloored} search(es): "
                     f"the query had fewer than two content words"
                 )
+    # Parity with report.ts coverageFooter(): the rendered report was checked
+    # sentence by sentence against the lines it cites, and this says how much of
+    # it had to be corrected. The reader this document is written for never sees
+    # a job row - a tester found a hedge turned into an absolute by READING the
+    # report, and this line is what tells the next reader the machine looked.
+    rf = result.get("render_fidelity")
+    if isinstance(rf, dict):
+        checked = int(rf.get("checked") or 0)
+        if checked > 0:
+            corrected = int(rf.get("rewritten") or 0) + int(rf.get("replaced") or 0)
+            foot.append(f"render checked: {checked} sentences, {corrected} corrected")
+        elif rf.get("error"):
+            foot.append("render check: not run")
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")
     # The harness stamps this footer onto `prose`; do not print it twice.
