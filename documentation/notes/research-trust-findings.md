@@ -902,3 +902,509 @@ labelled deno container against the deployed source.
   nothing bounds the entity's length and `entityStatusFor` only checks presence in the query.
   Direction of failure: over-caution (no fabrication, curator skipped) - but the report still
   says "search: DEGRADED" about a healthy search plane. Item `research-trust-core` opened.
+
+---
+
+# research-trust-core (item 3, 2026-09-11)
+
+Follow-up to deploy round 2. The deployed detector reported three healthy searches as
+failures because the subject it was handed was a TOPIC, not a name.
+
+## F.1 The mechanism, reproduced — [observed-live 2026-09-11]
+
+Dry run 6975d982: KEYWORDIZE returned the subject `"100Hz audio VR motion sickness"`. The
+deployed `entityCore` anchors on the token BEFORE the first digit-bearing token; here the
+digit token is FIRST, so nothing was dropped and the core became all six tokens
+`[100 hz audio vr motion sickness]` — a phrase no page carries. Share **0.00** on a hit set
+where "100 Hz" is in 9 of 20 rows and PMC11955832 is rank 1; `collapsed onto "motion"` three
+times; `search_degraded`; nothing fetched. With the entity `"100Hz audio"` the same code gives
+core `[100 hz]` → 0.45 → ok.
+
+Two gaps, not one: the core rule had no case for a digit-first subject, and **nothing bounded
+the entity's length** — `entityStatusFor` only checked that the query contained it.
+
+## F.2 The rule, in one sentence
+
+> A subject of more than a couple of tokens is a TOPIC, not a name, so it is reduced to the
+> shortest window of at most three WORDS around its most distinctive token — the first
+> digit-bearing token that is not a bare year, else the longest token — keeping whatever is
+> glued to that token: its own typed run, a version's second number, a preceding model word,
+> or a following unit.
+
+Three sub-decisions, each **measured against a live hit set** rather than assumed (read-only
+`GET :8085/search`, 2026-09-11, 3 engines answering; fixtures `live-prius`, `live-python312`,
+`live-crashloop`):
+
+| subject | candidate cores and their measured share | chosen |
+|---|---|---|
+| `2026 Toyota Prius` | `toyota prius` **0.95** · `2026 toyota prius` 0.80 · `2026 prius` 0.20 · `prius` 1.00 | `toyota prius` — the year dates a subject, it does not name one |
+| `Python 3.12 asyncio` | `python 3 12` **0.35** · `3 12` 0.55 · `python 3 12 asyncio` 0.05 | `python 3 12` — `3 12` alone matches any 3.12 anywhere; the whole subject is a topic |
+| `Kubernetes CrashLoopBackOff` | `crashloopbackoff` 1.00 · `kubernetes crashloopbackoff` **0.40** | both pass; the rule's job is to pass a good set, not to maximise the share |
+
+`python 3 12` at 0.35 is the thinnest good core measured anywhere in this workstream. It is
+above the 0.175 line, and it is the number to watch if the threshold is ever revisited.
+
+## F.3 The cap counts WORDS, not tokens — [observed]
+
+Written as a three-TOKEN cap first. `HP EliteDesk 800 G4` is three words and five tokens, so
+the cap cut the `G4` off and `RTX 3050 benchmark` then satisfied `RTX 3050 Ti` — undoing the
+neighbouring-model guard the previous item had just built. The window now extends by whole
+runs (words as typed), which also keeps `M910q` intact without a special case.
+
+Two further corrections found by re-running every pinned case after each change:
+
+- **The trim removed anything short, not only qualifiers**, so it undid the window it had been
+  given: `MacBook Air M2` became `m 2`, and `m 2` matches `M.2` — a string in the OptiPlex
+  fixture's own hit titles. The trim now removes QUALIFIERS only.
+- **A measurement is complete at number+unit.** `100Hz tone` was absorbing the trailing word,
+  giving `100 hz tone`, which is narrower than what pages write.
+
+Two expectations from the previous item were CHANGED, not deleted, each with its reason in the
+test: `Lenovo ThinkCentre M910q` now yields `thinkcentre m 910 q` (more specific, still
+brand-free) and `Apple MacBook Air M2` yields `air m 2` (the guard it was written for — never
+the bare `m 2` — still holds and is still asserted against the M.2 string).
+
+## F.4 A label change worth knowing about
+
+With the entity shortened to its name, a round-1 query carries `OptiPlex 3050` rather than
+`Dell OptiPlex 3050`. The recorded Dell junk set therefore no longer piles onto a token the
+QUERY contains, so its verdict moves `collapsed` → `offtopic`. Both are junk, both yield
+nothing, both feed the degraded streak; three replay assertions were widened to accept either
+and say why. Nothing about the outcome changed — only which of the two junk labels is
+reported.
+
+## F.5 The entity is bounded at extraction — [read-from-source]
+
+`KEYWORDIZE_SYS` now states the entity is a NAME of at most 3 words, says what it is NOT
+(the topic, an intent, a bare year), and carries the failing case as its example:
+*for "how 100Hz audio affects VR motion sickness" the entity is "100 Hz", NOT "100Hz audio VR
+motion sickness"*.
+
+A prompt is a request, not a guarantee, so `harness.ts` shortens deterministically with
+`shortenEntity()` — which returns the caller's own spelling (`Python 3.12`, not
+`Python 3 12`), so the progress line and the footer name something a person would recognise.
+
+The correction is **counted only when the raw subject was longer than three words**. Dropping
+a brand (`Dell OptiPlex 3050` → `OptiPlex 3050`) is ordinary core extraction and happens on
+most product runs; counting it would put a line in the footer of nearly every report and bury
+the case that matters.
+
+`fetchStats.search.entity_shortened` → `search_record` → both renderers, byte-identical:
+
+```
+… · subject shortened to its name (1x) · entity gate: 2 search(es) judged without it (…)
+```
+
+## F.6 ENTITY_SHARE re-measured under the new core rule — [observed-live 2026-09-11]
+
+Every recorded set, recomputed:
+
+| share | set | core | class |
+|---|---|---|---|
+| 1.00 | `probe-good-oomkilled` | `oomkilled` | GOOD |
+| 1.00 | `probe-good-iphone` | `iphone 18 pro` | GOOD |
+| 0.95 | `live-prius` | `toyota prius` | GOOD (live, new) |
+| 0.75 | `search-good-optiplex` | `optiplex 3050` | GOOD |
+| 0.65 | `live-optiplex-health` | `optiplex 3050` | GOOD (live) |
+| 0.55 | `live-100hz-mechanism` | `100 hz` | GOOD (live) — **was 0.00** |
+| 0.40 | `live-crashloop` | `kubernetes crashloopbackoff` | GOOD (live, new) |
+| 0.35 | `live-100hz-studies` | `100 hz` | GOOD (live) — **was 0.00** |
+| 0.35 | `live-python312` | `python 3 12` | GOOD (live, new) |
+| 0.30 | `live-optiplex-thermal` | `optiplex 3050` | GOOD (live) |
+| **0.175** | — | — | **ENTITY_SHARE (unchanged)** |
+| 0.05 | `live-100hz-ssq` | `100 hz` | OFF-NEED (live) |
+| 0.00 | six collapse fixtures | `optiplex 3050` / `100 hz` | COLLAPSED |
+
+All three shares measured with the entity the failing run actually produced
+(`100Hz audio VR motion sickness`), not with a cleaned-up one.
+
+**The threshold does not move.** The nearest sets are still 0.05 below and 0.30 above, both
+0.125 away, so the no-set-within-0.1 rule holds unchanged. Two GOOD sets moved from 0.00 to
+0.55 and 0.35 — they were the false failures — and nothing moved toward the line.
+
+## F.7 Counts — [observed-live 2026-09-11]
+
+| suite | before (merged research-trust-entity) | after |
+|---|---|---|
+| `research-service` `deno test -A` | 173 passed / 1 env-failed | **189 / 1** |
+| `research-curator` | 36 | 36 (untouched) |
+| `ruff check .` | clean | clean |
+
+New file: `entity-core.test.ts` (14). New fixtures: `live-prius`, `live-python312`,
+`live-crashloop`.
+
+## F.8 Out of scope, recorded
+
+- The weak-core class of E.10 (`laptop 5`, `model 3`) is unchanged: the new rule does not fix
+  it and the anchor did not ask it to. `Microsoft Surface Laptop 5` still yields `laptop 5`.
+- URL matching in `entityShare` (X3) still not done: a hit whose URL says `optiplex-3050`
+  while its title does not still scores as a miss.
+- The Answer block's source weighting (the Walmart-review headline) remains open.
+
+---
+
+## G. research-trust-core attempt 2 — the set rule (2026-09-11)
+
+The tester failed T7 on attempt 1. Their verdict, which I accept in full: **four rules in four
+items, each picking a surface property to stand in for identity**, each passing every subject
+somebody had written down and failing on the first one nobody had.
+
+| item | the proxy | what broke it |
+|---|---|---|
+| research-trust | 8 pattern strings | 5 live world claims eaten |
+| research-trust (a2) | a 7-character token length | `capacitor`, `motherboard`, `vestibular` |
+| research-trust-entity | the token before the first digit | a digit-first subject |
+| research-trust-core (a1) | the longest token | `50 micrograms semaglutide`, `Nikon Z 6III`, `Mullvad WireGuard port forwarding`, `2026 budget`, `Raspberry Pi 5 NVMe HAT` |
+
+### G.1 The rule, in one sentence
+
+> A subject is its SET of distinctive tokens — those bearing digits (a bare four-digit year
+> excepted), those the planner capitalised, and those that are not common English — and a hit
+> carries the subject when it contains at least half of them, rounded up.
+
+No length test, no single core phrase, no qualifier list, nothing that must appear verbatim.
+`entityCore`, `corePhrase`, `hitCarriesEntity`, the `QUALIFIERS` list and the length tiebreak
+are all **deleted**.
+
+Spelling is handled by expanding BOTH sides: every alphanumeric run yields each contiguous
+stretch of its digit/letter parts, and two runs are also glued when the boundary between them
+is a digit/letter transition. `Z6III` offers `{z6iii, z, 6, iii, z6, 6iii}` and `Z 6III` offers
+the same, so either spelling finds the other. Two guards:
+
+- **A bare number never carries a subject alone.** `100 Hz` is two tokens and half of two is
+  one; every hit in the recorded `the100` fixture carries `100` — *The 100*, the TV series.
+  Without this the founding fixture scored 1.00 and passed.
+- **A three-part version needs a repeated glue.** `17.2.1` came out as `172` + `1` from one
+  global pass, because the two dot-matches overlap on the digit between them.
+
+### G.2 Distinctive sets, measured
+
+| subject | distinctive tokens |
+|---|---|
+| `100Hz audio VR motion sickness` | `100hz vr` |
+| `Dell OptiPlex 3050` | `dell optiplex 3050` |
+| `50 micrograms semaglutide` | `50 semaglutide` |
+| `Nikon Z 6III autofocus firmware` | `nikon z 6iii autofocus` |
+| `Mullvad WireGuard port forwarding` | `mullvad wireguard` |
+| `2026 budget` | *(empty — rejected)* |
+| `Raspberry Pi 5 NVMe HAT` | `raspberry pi 5 nvme hat` |
+| `Kubernetes CrashLoopBackOff` | `kubernetes crashloopbackoff` |
+| `Python 3.12 asyncio` | `python 312 asyncio` |
+| `MacBook Air M2` | `macbook air m2` |
+| `2026 Toyota Prius` | `toyota prius` |
+
+`autofocus` and `asyncio` survive where the coordinator's sketch dropped them — they are not
+common English. It costs nothing: the half rule means an extra token raises the bar by half a
+token and gives one more way to clear it, and both sets score 0.85+ on their live hit sets.
+
+### G.3 The share table, every recorded set — [observed-live 2026-09-11]
+
+| share | set | class |
+|---|---|---|
+| 1.00 | `probe-good-oomkilled`, `probe-good-iphone`, `search-good-optiplex`, `live-prius`, `live-crashloop`, `live-rpi5nvme` | GOOD |
+| 0.95 | `live-mullvad` | GOOD (tester's) |
+| 0.90 | `live-python312`, `live-semaglutide50` | GOOD |
+| 0.85 | `live-100hz-mechanism`, `live-100hz-studies`, `live-nikonz6iii` | GOOD |
+| 0.70 | `live-optiplex-health` | GOOD |
+| 0.55 | `live-optiplex-thermal`, `live-100hz-ssq` | GOOD / see below |
+| **0.175** | — | **ENTITY_SHARE (unchanged)** |
+| 0.00 | all six collapse fixtures | COLLAPSED |
+| n/a | `live-budget2026` | `entity_rejected` — the subject names nothing |
+
+**The threshold does not move.** Nearest sets are 0.00 below and 0.55 above; nothing lands
+within 0.1 of 0.175. The gap is WIDER than under any previous rule (it was 0.05 → 0.30).
+
+`live-100hz-ssq` moves from 0.05 (off-need, collapsed) to 0.55 (ok): its hits are VR
+sickness papers and the subject contains `vr`, so they genuinely carry half of it. That query
+asks about Simulator Sickness Questionnaire scores and the engine answered it; whether those
+pages answer the NEED is the relevance gate's question, not this one.
+
+### G.4 Two costs, declared rather than hidden
+
+1. **Adjacency no longer matters.** `OptiPlex 7080 and the 3050-era chipset` now carries
+   `Dell OptiPlex 3050`. Requiring adjacency is exactly what produced four false search
+   failures; a page naming OptiPlex models and 3050 IS evidence the engine understood the
+   subject, which is the only question this detector asks.
+2. **A sibling model counts.** `OptiPlex 3060` holds 2 of `{dell, optiplex, 3050}`. Same
+   argument, same boundary: Dell's own home page carries only `dell` and is still refused.
+
+Both are pinned as tests named `DECLARED` and `CHANGED` so they cannot be mistaken for
+oversights. The E.10 weak-core class disappears with the QUALIFIERS list that caused it.
+
+### G.5 Test accounting — [observed-live 2026-09-11]
+
+`entity.test.ts` (22) and `entity-core.test.ts` (14) are **deleted**: their subject was
+`entityCore()`, which no longer exists. `subject.test.ts` (41) re-expresses every behavioural
+assertion they made against the set rule — brand omission, neighbouring model, the M.2 guard,
+the spelling variants, the six collapse fixtures, every good set — plus the tester's five live
+sets and the five T7 candidates attempt 1 listed without pinning.
+
+| suite | attempt 1 | attempt 2 |
+|---|---|---|
+| `research-service` | 189 / 1 env-failed | **194 / 1** |
+| `research-curator` | 36 | 36 |
+| `ruff check .` | clean | clean |
+
+### G.6 `shortenEntity` kept, as a display
+
+It now returns the distinctive set joined by spaces — what the run actually searched on — and
+feeds the progress line and the `entity_shortened` footer clause. Kept rather than deleted
+because a reader who sees `search: DEGRADED` is entitled to know which tokens the verdict was
+about; the counter still fires only when the planner's subject was longer than three words.
+
+---
+
+## H. research-trust-core attempt 3 — the evidence floor (2026-09-11)
+
+The set rule was sound and had **no floor on how much evidence "half" is**. `ceil(k/2)` is 1
+when k ≤ 2, and a one-or-two-token subject is exactly what the tightened KEYWORDIZE produces,
+so ONE matched token carried a hit. The tester's live counter-examples, each a real page about
+a different subject sharing a single token:
+
+| subject | junk set | share on attempt 2 |
+|---|---|---|
+| `Signal` | digital-signal-processing pages | **1.00** |
+| `Arc browser` | arc-welding pages | **0.60** |
+| `MacBook M2` | M.2 NVMe heatsink pages | **1.00** |
+
+The last also brought back the **M.2 collision** every previous rule guarded, because the glue
+expansion turns `M.2` into the token `m2`.
+
+### H.1 The rule, with the floor
+
+> A subject is its SET of distinctive tokens — those bearing digits (a bare four-digit year
+> excepted), those the planner capitalised, and those that are not common English — and a hit
+> carries the subject when it contains **at least half of them, rounded up, AND at least two
+> distinct non-stopword terms of the query** (a distinctive subject token counts as one).
+
+The floor uses a signal the run already had: `overlapRatio`'s per-hit test. No fourth list, no
+length rule. One token is not evidence — and no rule can tell "Signal the messenger" from
+"signal processing" when a page offers only that one word.
+
+### H.2 The word list is now general and cited
+
+`COMMON` was a closed list that had grown case by case as each item's findings landed
+(`firmware`, `port`, `forwarding`, `micrograms`, `budget`) — the fourth way this module has
+tried to encode particular incidents into a rule. It is now the **NLTK English stopword list**
+(179 words, `https://www.nltk.org/nltk_data/` → `corpora/stopwords/english`) verbatim, plus the
+closed set of SI and imperial unit names, and nothing else.
+
+Two measured consequences, both accepted:
+
+- **Subjects got bigger.** `100Hz audio VR motion sickness` → `{100hz, audio, vr, motion,
+  sickness}`; `Mullvad WireGuard port forwarding` → all four. It costs nothing: the half rule
+  raises the bar by half a token and gives one more way to clear it, and every live set still
+  scores ≥ 0.35.
+- **`2026 budget` is no longer rejected.** `budget` is not an NLTK stopword, so the subject
+  names something and its live set — genuinely about federal budgets — scores 0.75 and is
+  `ok`. The earlier empty-set rejection was an artifact of the tuned list. The tester's other
+  four attempt-1 cases all still pass.
+
+### H.3 The share table, 28 sets — [observed-live 2026-09-11]
+
+| share | set | class |
+|---|---|---|
+| 1.00 | `probe-good-iphone`, `search-good-optiplex`, `live-prius`, `live-rpi5nvme`, `live-macbookm2` | GOOD |
+| 0.95 | `live-crashloop`, `live-mullvad` | GOOD |
+| 0.90 | `live-python312`, `live-nikonz6iii`, `live-arcbrowser` | GOOD |
+| 0.85 | `live-100hz-mechanism` | GOOD |
+| 0.80 | `live-100hz-studies` | GOOD |
+| 0.75 | `live-signal`, `live-budget2026`, `live-optiplex-health` (0.70) | GOOD |
+| 0.55 | `live-optiplex-thermal` | GOOD |
+| 0.50 | `probe-good-oomkilled` | GOOD |
+| 0.40 | `live-100hz-ssq` | off-need, now ok |
+| 0.35 | `live-semaglutide50` | GOOD — the lowest |
+| **0.175** | — | **ENTITY_SHARE (unchanged)** |
+| 0.00 | `junk-signal-dsp`, `junk-arc-welding`, `junk-macbook-m2-nvme` | JUNK (the tester's) |
+| 0.00 | the six collapse fixtures, `probe-collapsed-semaglutide` | COLLAPSED |
+
+**The threshold does not move.** Nearest sets are 0.00 below and 0.35 above; nothing lands
+within 0.1 of 0.175. Every junk set the tester built is now exactly 0.00.
+
+`live-semaglutide50` fell 0.90 → 0.35: its pages name semaglutide and little else of the
+query. It is still twice the line, and it is the set to watch if the floor is ever revisited.
+
+### H.4 Two reversals and one deletion, declared
+
+- **`probe-collapsed-semaglutide` reverses from `ok` to collapsed.** The previous item declared
+  that set `ok` — the engine understood the subject, the relevance gate would filter per need —
+  and that judgement was made when there was no floor. The tester then produced three live sets
+  of exactly that shape where the shared token meant something else entirely. One token cannot
+  be told from the other, so this set goes with them.
+- **B1's fix changes shape.** A hit whose ONLY query word is the subject no longer carries it.
+  B1 stays fixed because a page really about CrashLoopBackOff says so in more than one word —
+  the live set scores 0.95 — but the synthetic control had to become realistic to pass.
+- **`shortenEntity` and `entity_shortened` are DELETED.** They existed to report a subject
+  shortened to its core phrase. There is no core phrase and no shortening: the subject is used
+  whole, as a set. Keeping a footer clause that could never fire again would be worse than
+  removing it. `deep_research.py` goes back to **1.4.0** and its rendered footer is byte-identical
+  to the deployed version, so **no re-paste is needed**.
+
+### H.5 Removed tests — every case, name → replacement or reason
+
+**36 cases were removed** across attempts 2 and 3: 22 from `entity.test.ts` and 14 from
+`entity-core.test.ts`. All 36 have a row. The attempt-3 table had 14 rows covering 22 cases —
+the tester found the gap, verified each missing case DID have a replacement, and the rows are
+added here. The clause exists because attempt 2 hid two real regressions in exactly this way, so
+a table that covers most of the removals is the same defect one level up.
+
+**From `entity.test.ts` (22 cases):**
+
+| removed test | replacement / reason |
+|---|---|
+| `entityTokens splits a digit/letter run…` | → `tokenSet offers a run, its parts, and the glued neighbours` |
+| `entityCore drops a brand or qualifier…` | → `a hit carries the subject at half its tokens, rounded up` + `REGRESSION: a page that omits the brand still carries the subject` |
+| `entityCore never strips a unit away from its number` | → `a BARE NUMBER never carries a subject on its own` |
+| `entityCore leaves an already-distinctive entity alone` | → `subjectTokens: digits, capitals, and anything uncommon` |
+| `entityCore refuses to reduce an entity to nothing` | → `a subject that names nothing is REJECTED, not guessed at` |
+| `a brand of ANY length is dropped; the product line and model are kept` | → same; a set has no brand to drop |
+| `a page that omits the brand still carries the entity` | → `REGRESSION: a page that omits the brand still carries the subject` (same case, set rule) |
+| `a NEIGHBOURING model is not the same machine` | **WITHDRAWN, declared**: a sibling model now carries the subject — `DECLARED: a sibling model counts as carrying the subject` states it and why |
+| `a one-character model code never becomes the whole identity` (M.2) | → `REGRESSION: an unrelated product does not carry the subject`, and the M.2 case is now covered for ALL subject sizes by `junk-macbook-m2-nvme` (2-token subject), which is what attempt 2 silently narrowed |
+| `a bare number is never an identity` | → `a BARE NUMBER never carries a subject on its own` |
+| `hitCarriesEntity matches the core phrase in the shapes engines write it` | → `tokenSet offers a run, its parts, and the glued neighbours` + `T11: the subject is matched in every spelling engines write it` (`search-quality.test.ts`) |
+| `hitCarriesEntity accepts the core without the brand` | → `REGRESSION: a page that omits the brand still carries the subject` |
+| `ACCEPTANCE 1: the 100 Hz mechanism set is ok for all three spellings` | → `REGRESSION ok: live-100hz-mechanism` (0.85) + `T11: the subject is matched in every spelling engines write it` |
+| `ACCEPTANCE 1: the 100 Hz studies set is ok too` | → `REGRESSION ok: live-100hz-studies` (0.80) |
+| `ACCEPTANCE 2: the OptiPlex thermal set is ok with the branded entity` | → `REGRESSION ok: live-optiplex-thermal` (0.55) |
+| `ACCEPTANCE 2: the OptiPlex health set stays ok` | → `REGRESSION ok: live-optiplex-health` (0.70) |
+| `ACCEPTANCE 3: the six recorded collapse sets still collapse` | → the six `REGRESSION collapse: <fixture>` cases, one per fixture, each asserting share 0.00 — one case per set rather than one case for six |
+| `ACCEPTANCE 3: the two good sets stay ok` | → `REGRESSION ok: search-good-optiplex` + `REGRESSION ok: probe-good-iphone` |
+| `ACCEPTANCE 4: an entity absent from the query is REJECTED, not trusted` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: an empty entity is MISSING, and falls back` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: an entity the query DOES carry is used` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: the query is matched on the CORE too` | → `entityStatusFor accepts a query carrying half the subject` (the set rule's form of the same question: half the subject, not the core) |
+
+**From `entity-core.test.ts` (14 cases):**
+
+| removed test | replacement / reason |
+|---|---|
+| `ACCEPTANCE 1: the five-word subject reduces to the name inside it` | → `subjectTokens: digits, capitals, and anything uncommon` + `REGRESSION: the failing dry run's own subject passes its own hit set` |
+| `ACCEPTANCE 1: and the recorded hit set then satisfies it at >= 0.4` | → `REGRESSION: the failing dry run's own subject passes its own hit set` |
+| `ACCEPTANCE 1: all three of that run's queries classify ok` | → `REGRESSION ok: live-100hz-mechanism` / `-studies` / `-ssq` |
+| `ACCEPTANCE 2: the five named subjects reduce as the rule says` | → `the tester's five subjects, on their own live hit sets` |
+| `ACCEPTANCE 2: a bare YEAR is not the name — measured, not assumed` | → `subjectTokens: a bare YEAR dates a subject, it does not name one` |
+| `ACCEPTANCE 2: a VERSION number keeps its language…` | → `the tester's five subjects…` + `T7 candidate: a three-part version` |
+| `ACCEPTANCE 2: a two-word technical name keeps both words` | → `the tester's five subjects…` + `REGRESSION ok: live-crashloop` |
+| `ACCEPTANCE 2: a product subject with trailing intent keeps the model` | → `the tester's five subjects…` + `REGRESSION ok: live-rpi5nvme` |
+| `a token typed as ONE word is never split across the window boundary` | → `tokenSet offers a run, its parts, and the glued neighbours`: a set has no window to split across, and the glue expansion is what the case was protecting |
+| `the window is bounded, and the bound is in WORDS not tokens` | **no replacement, no longer meaningful**: there is no window |
+| `a subject with no digits and no long word is left alone` | → `subjectTokens: digits, capitals, and anything uncommon` (nothing is "left alone" or not — every token is kept or dropped on its own merits) |
+| `ACCEPTANCE 3: a five-word subject is shortened to the name inside it` | **WITHDRAWN with `shortenEntity`** — H.4: there is no shortening |
+| `ACCEPTANCE 3: shortening keeps the CALLER's spelling` | **WITHDRAWN with `shortenEntity`** — H.4; attempt 2 withdrew it with no reason, which the tester caught |
+| `ACCEPTANCE 3: a subject that IS a name is returned unchanged` | **WITHDRAWN with `shortenEntity`** — H.4; the subject is always used whole now, so "unchanged" is the only behaviour there is |
+
+
+### H.6 Counts
+
+| suite | attempt 2 | attempt 3 | attempt 4 |
+|---|---|---|---|
+| `research-service` | 194 / 1 env-failed | 192 / 1 | **203 / 1** |
+| `research-curator` | 36 | 36 | 36 |
+| `ruff check .` | clean | clean | clean |
+
+The attempt-3 drop is the `shortenEntity` pair going with the function; the attempt-4 rise is
+the eleven cases of section I.
+
+---
+
+## I. research-trust-core attempt 4 — the query side of the floor (2026-09-12)
+
+The floor held everywhere it ran. The tester could not break it with shared query terms, and the
+one attack that looked promising — a constructed set of "group chat app" pages each saying "works
+even on weak signal", share 1.00 — died on live data: the REAL population for
+`best group chat apps for teams` scores 0.00, because real group-chat articles do not say
+"signal". The construction was the artefact.
+
+What broke was the door in front of the floor.
+
+### I.1 The defect — [observed-live 2026-09-12, tester]
+
+    hitCarriesSubject(...):
+      if (qt.length < 2) return true;          // <-- nothing to ask two of
+
+A query with under two content words skipped the floor entirely, and the run's OWN query builder
+produced exactly that whenever a need's every word is a stopword:
+
+    keywordQuery("Signal",     "What is it?")  -> "Signal"      terms ["signal"]     FLOOR SKIPPED
+    keywordQuery("Notion",     "What is it?")  -> "Notion"      terms ["notion"]     FLOOR SKIPPED
+    keywordQuery("Kubernetes", "What is it?")  -> "Kubernetes"  terms ["kubernetes"] FLOOR SKIPPED
+
+End to end through the shipped `runResearch`, serving this branch's own `junk-signal-dsp`:
+
+| | query | share | stats | fetched | backstop |
+|---|---|---|---|---|---|
+| one-word need | `Signal` | **1.00** | ok=1 collapsed=0 | **8 junk pages** | complete |
+| normal need | `Signal disappearing messages` … | 0.00 | ok=0 collapsed=2 | 0 | fetch_degraded / `no_relevant_sources` |
+
+No model misbehaviour anywhere in it. `KEYWORDIZE_SYS` asks for 3–7 terms and nothing enforced it.
+
+### I.2 The fix, at both ends
+
+1. **The query builder guarantees two content words.** `shapeQuery` (which `keywordQuery` now
+   delegates to, and which `reformulate` shares) fills from the NEED's own content words first
+   and appends the class word `overview` only when the need has none — the same KIND of term
+   `REFORMULATION_SUFFIXES` uses, chosen because a FIRST search should not be biased toward
+   "problems". Padding is counted (`search.query_padded`), because a run that had to invent a
+   word to make its query searchable is a fact about the run.
+2. **A query that still cannot carry the floor is refused, not floored true.**
+   `entityStatusFor` returns a fourth status `unfloored`, `classifyHits` returns `offtopic` for
+   it (no fetch, feeds the degraded streak), `search.unfloored` counts it and the footer names
+   it. The `return true` is gone. Falling through to the overlap fallback would have been the
+   same hole one door down: a one-term query scores high overlap on anything carrying that term.
+
+Together these make the branch **unreachable in production and loud if reached** — the harness
+test asserts `unfloored === 0` precisely because the builder guarantees two.
+
+### I.3 What it cost: nothing measurable
+
+The share table is **unchanged, every row**. Verified by computing it twice over the same
+fixtures — once with the attempt-3 module read out of git (`d9cc44f`), once with the fix — and
+diffing: identical, including `live-100hz-mechanism` 0.85, `live-100hz-studies` 0.80,
+`live-100hz-ssq` 0.40, `live-semaglutide50` 0.35, every junk and collapse set 0.00. Nothing
+within 0.1 of 0.175. Every recorded fixture query already has two content words, so the
+guarantee never fires on one: `shapeQuery` returns them unpadded and unchanged.
+
+### I.4 The footer changes, so the tool is re-pasted
+
+`deep_research.py` goes **1.4.0 → 1.4.1**. The new clause fires only when a search was refused,
+so the rendered bytes are identical in every run that has none — but the DEPLOYED copy would not
+render it in a run that does, and the whole point of the counter is to be visible. Both renderers
+verified byte-identical at `unfloored` 0 and 1:
+
+    entity gate refused 1 search(es): the query had fewer than two content words
+
+It is NOT folded into the `judged without it` count: those searches were judged without the gate;
+these were refused BY it.
+
+### I.5 Eleven tests, RED before GREEN
+
+Seven of them fail against the attempt-3 behaviour, measured by restoring the two early returns
+and the un-guaranteed builder and re-running (7 failed / 67 passed), then restoring the fix
+(74 passed). The three that pass either way are the ones that pin behaviour the fix must NOT
+change — the good set, the zero-case footer, and the unpadded fixture queries.
+
+| test | pins |
+|---|---|
+| `T7 query side: a one-term query never floors a hit true` | the reversal itself |
+| `T7 query side: the whole live junk set scores 0.00 on a one-term query` | the tester's set, and the good counterpart unharmed |
+| `T7 query side: an unfloorable query is REFUSED, not judged by overlap` | `unfloored` → `offtopic`, and that the overlap fallback would have said `ok` |
+| `queryCanCarryFloor: two DISTINCT content words, not two words` | "Signal signal" is one word twice |
+| `shapeQuery guarantees two content words for a need that has none` | "What is it?", "Why?", "", stopwords + punctuation, "and then?" |
+| `shapeQuery takes the second word from the NEED when the need has one` | nothing is invented when the need has a word |
+| `keywordQuery and reformulate both emit a floorable query` | six subject/need pairs incl. no-entity |
+| `the guarantee does not disturb a query that already has two` | six recorded fixture queries unchanged |
+| `T7: a stopword-only need cannot produce a query that skips the floor` | the tester's reproduction through `runResearch`: padded, counted, DSP refused, 0 fetched, `unfloored === 0` |
+| `T7: the same subject with a real need still works` | `live-signal` still ok, fetched, unpadded |
+| `the footer names a refused search rather than hiding it` | the clause at 1, silence at 0 |
+
+### I.6 Carried forward, unchanged
+
+`entityShare` still reads `title + " " + snippet` and never `url` (seventh item running);
+`research_jobs.status` is still `done` with `error` NULL for a run that retrieved nothing. Both
+are the tester's, both are outside this item, both are recorded here rather than fixed quietly.
+And the pattern the tester named is worth keeping in view: each rule in this workstream has been
+sound in its body and broken at an edge the body did not cover — the pattern list had no
+head-clause split, the length anchor had no notion of identity, the set rule had no floor, the
+floor had no behaviour when there was nothing to floor against. The edges keep being found by a
+tester rather than by the rule's own construction.
