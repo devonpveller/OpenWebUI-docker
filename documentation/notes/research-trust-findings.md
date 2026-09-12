@@ -2367,3 +2367,29 @@ teaches the reader to skip the line. Byte-identical in both renderers;
   counted as blocked and stays in `prose_ungrounded.names`. The deploy proof should be read that
   way: the body must be clean, and a surviving question-name is visible rather than hidden.
 - `entityShare` still reads `title + " " + snippet` and never `url` (tenth item running).
+
+## Proof run for research-trust-names, 2026-09-12 15:30 UTC (dry run 75490653) - two firsts
+
+Provenance: observed-live; `research_jobs.result` for 75490653 on `openbrain-research` label 8f26c4c.
+
+- **The names gate acted in production:** `names_blocked: ["MTBF"]` - the renderer named a
+  reliability metric no source used; the unit was corrected and the footer reads
+  `names: 1 blocked`. First time the reporter's finding became a correction on a live run.
+- **The gap-closing pass fired live for the first time:** the first pass answered 5 of 6
+  needs, the pass added 2 sources and closed the sixth - footer
+  `gap-closing pass: +2 sources, needs answered 5 of 6 -> 6 of 6`. (Every earlier live run
+  answered everything on pass one, so this path had only unit tests until now.) 24 fetched,
+  12 relevant, 14 cited, buyers-guide, `render checked: 38 of 40, 3 corrected, 2 unchecked`.
+- Superset citations reported (four), as designed.
+
+## Harness finding from landing research-trust-names, 2026-09-12 - rebase vs -Merged
+
+Provenance: observed-live; queue refusal text quoted by the reviewer; ancestry re-checked.
+The work line moved under the branch (16 commits, 13 files, no overlap). MERGE-PROTOCOL tells
+the reviewer to rebase; the rebase replayed the tested commit 2aa94dc as 158c6c3; `-Merged`
+checks `merge-base --is-ancestor <tested_at_sha> <merge sha>` and refused e09cea0, correctly:
+ancestry is not content and the tool cannot see the reviewer's byte-identity proof. Resolution
+taken: reviewer `-Requeue`, tester re-pass at the landed commits, release, `-Merged`. The
+protocol and the verb are in tension; the reviewer's proposal (a `-Rebased` verb that
+re-points tested_at_sha with the equivalence proof attached, or an explicit "non-trivial
+rebase => requeue" rule) is recorded in N.11 of the worktree copy of this file.
