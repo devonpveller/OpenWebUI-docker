@@ -63,8 +63,13 @@ recorded at CREATION and survives everything that can kill the creator, so clean
 cooperation from the thing being cleaned up. Keep your `finally` - it is still the fastest
 path - but the label is what makes the leak recoverable.
 
-**What it will never touch.** Compose-managed containers and networks, docker's built-in
-networks, and every image and volume - those are reported and left alone. `docker volume
+**What it will never touch.** Compose-managed containers and networks (except the narrow
+inherited-label case the tool's own header sets out in full), and docker's built-in
+networks. **IMAGES are reported and left alone. VOLUMES are neither reaped NOR reported** -
+this script makes no `docker volume` call at all, which `grep -i volume reap.ps1` confirms
+finds only comments. This paragraph said "every image and volume - those are reported",
+which overstates the volume half; `reap.ps1`'s own header retracts that wording and this
+one did not follow. `docker volume
 prune` is a standing hazard in this stack, and a deleted test image costs a rebuild nobody
 asked for.
 

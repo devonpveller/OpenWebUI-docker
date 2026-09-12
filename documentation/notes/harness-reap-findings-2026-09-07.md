@@ -454,13 +454,33 @@ container; they cannot be inherited from an image because no image has them.
 
 `reap.ps1`'s exception is therefore narrow and FAILS CLOSED. All three must hold:
 
-1. the resource carries THIS harness's owner label - a production container never does, and
-   that alone is the load-bearing gate;
+1. the resource carries THIS harness's owner label;
 2. it carries NONE of the compose runtime keys;
 3. its IMAGE carries the same `project` value, proving the label was inherited.
 
-Miss any one and it stays protected. If compose ever stops writing the runtime keys, rule 1
-still holds the line. `verify-reap.ps1` CASE 7g covers both directions, and BOTH halves are
+Miss any one and it stays protected.
+
+**TWO SENTENCES THAT STOOD HERE ARE RETRACTED, and the second was inverted.** They said
+rule 1 was "the load-bearing gate" because "a production container never does" carry the
+owner label, and that "if compose ever stops writing the runtime keys, rule 1 still holds
+the line".
+
+The whole reason this guard exists is the container that DOES carry the label - a stray
+`labels:` block in a plane's compose file, which is the scenario `reap.ps1`'s header names.
+For that container rule 1 is SATISFIED, so it protects nothing, and if rule 2 also stopped
+working the outcome would rest on rule 3 alone. **Measured on this host: 17 of 81 live
+containers already satisfy rule 3** - their image carries the same project value - so the
+promised fallback covers seventeen real containers in the wrong direction. (Counted with
+`docker inspect` over every container carrying `com.docker.compose.project`, comparing the
+container's project value against its image's: 17 match, 14 mismatch, 50 have no image
+label.)
+
+The load-bearing gate is the CONJUNCTION. No single rule holds the line, which is why
+`reap.ps1` states all three and says "miss any one".
+
+This correction exists because an attempt-1 tester followed the corrected header's own
+citation and arrived here, at the model the correction was written to retract. **A
+correction that leaves its own source standing has not been made** - it has been moved. `verify-reap.ps1` CASE 7g covers both directions, and BOTH halves are
 seeded red: restoring the key-presence guard fails "the INHERITED-label container is
 reaped", and removing the runtime-key check fails "the RUNTIME-KEYED container is REFUSED".
 

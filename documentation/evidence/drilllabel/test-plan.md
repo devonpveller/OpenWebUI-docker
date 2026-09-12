@@ -284,11 +284,40 @@ fixture was built from plain `alpine`, whose image carries no compose label, so
 inheritance refused it on its own and the runtime-key check was never what kept it
 alive. A seed that stays green means the case is not testing the guard it names.
 
+## T9a - FOLLOW WHAT THE CORRECTION CITES, and grep the retracted words
+
+T6 holds the findings note to account for what the CODE now does. T9 holds the changed
+file's own header to account. Neither holds a document the corrected text POINTS AT - and
+that is the hole attempt 1 fell through: `reap.ps1`'s new header ends "See finding 15 in
+the sink for the measurement", and finding 15 still carried, verbatim, the two sentences
+the same commit had just deleted from `reap.ps1`. A reader following the corrected header's
+own citation arrived at the model the correction exists to retract.
+
+Two commands, and they are cheap enough that there is no excuse for skipping them:
+
+    # 1. every distinctive phrase the correction REMOVED, across the whole repo
+    git diff <base>..HEAD -- <changed file> | grep '^-' | <pick the load-bearing phrases>
+    grep -rn "<phrase>" . --include=*.md --include=*.ps1 --include=*.sh
+
+    # 2. everything the corrected text CITES - by finding number, file name or section -
+    #    read each one and check it agrees with the new text, not the old
+
+PASS: no removed phrase survives anywhere, and every document the correction cites states
+the corrected model.
+FAIL: any survivor. **A correction that leaves its own source standing has not been made,
+it has been moved** - and the citation makes it worse than an ordinary stale sentence,
+because the corrected text actively sends the reader to it.
+
 ## T9 - the CHANGED FILE's own documentation still describes it
 
 T6 holds the findings NOTE to account. Nothing held the changed file's own header to
-account, and that is exactly the hole a header contradiction slipped through: three
-testers passed it and a reviewer rejected the item for it.
+account, and that is exactly the hole a header contradiction slipped through: **one tester
+passed it and a reviewer rejected the item for it.**
+
+(This said "three testers". The queue records FAIL, FAIL, PASSED across `drilllabel`'s
+three attempts - one pass. And the contradiction only existed from `22b9718` onward, so at
+most two testers could have seen it at all. A figure invented to make a case sound better
+justified is the same defect the case is about, written into its own rationale.)
 
 `reap.ps1`'s header said "A compose-managed resource is never reaped: containers
 carrying `com.docker.compose.project`" while line 298 reaped exactly those. Worse, the
