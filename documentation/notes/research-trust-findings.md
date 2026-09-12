@@ -2367,3 +2367,256 @@ teaches the reader to skip the line. Byte-identical in both renderers;
   counted as blocked and stays in `prose_ungrounded.names`. The deploy proof should be read that
   way: the body must be clean, and a surviving question-name is visible rather than hidden.
 - `entityShare` still reads `title + " " + snippet` and never `url` (tenth item running).
+
+### N.9 Should a [GAP] QUESTION be gated at all? — [measured 2026-09-12, reviewer]
+
+Written at merge time (reviewer rt-reviewer; the item landed as `e09cea0`). Not an objection to
+what shipped - the rule is right and the reviewer passed the item on it - but the one design
+question it leaves open, recorded before the next round builds on top of it.
+
+**The specimen.** In the regenerated `rendered-5ab36fe0-product-comparison.md`, the gate rewrote a
+question in the limitations list:
+
+    before: ...the distinction between Azure Repos Git and TFVC (Team Foundation Version Control)?
+    after:  ...the distinction between Azure Repos Git and other version control systems?
+
+`TFVC` is flagged because it appears only in the synthesis's `[GAP]` lines, which this item
+decided do not earn a name - correctly: a `[GAP]` line is the synthesizer's own account of what it
+could not find, not a source's. Note that the original line SPELLS OUT its own expansion in the
+same breath, and `expansionMatch` still does not exempt it, because the match runs against the
+GROUNDED text and not against the document. **That is also correct, and the reason is worth
+keeping:** "define the acronym you just invented" is precisely the move an unconstrained renderer
+would make, so a self-defining document could exempt anything it liked.
+
+**The cost, and why it is not obviously worth paying.** The previous item built
+`LIMITATIONS_SECTION` so a report would ASK for the next run in the reader's terms - "A further
+run focused on <the open thing> would close this". A question generalised from "Git versus TFVC"
+to "Git versus other version control systems" asks for less: the operator who would have typed the
+acronym into the next query no longer has it. So the gate's most expensive correction lands on the
+one mechanism designed to make the following run targeted.
+
+Three options, none free, for whoever picks this up:
+
+1. **Gate `[GAP]` questions as now.** Nothing unearned reaches the reader; open questions get
+   vaguer. The current choice, declared in `fidelity.ts` and in the fixture headers.
+2. **Exempt `[GAP]` questions from the name gate and FLAG them instead** - leave the question
+   intact, and report the unearned name to the operator (the run record already carries
+   `prose_ungrounded.names`, and N.8 notes a surviving question-name stays visible there). The
+   reader sees a name no source used, which is the exact harm the gate exists to stop - but in a
+   QUESTION, where it is asking rather than asserting.
+3. **Gate the assertion and keep the term**: rewrite only the claim-bearing part and let a question
+   keep its noun. No mechanism for this exists yet; it needs the judge to distinguish a question
+   from an assertion, which `citedUnits` does not currently model.
+
+The reviewer's own lean, stated so it can be argued with rather than inherited: (2) for questions
+only, because a question makes no claim about the world and the cost of a vague follow-up is paid
+by every subsequent run, while the cost of a named question is one term a reader can check. But
+this is a judgement about what a report is FOR, which is the operator's call and not a reviewer's.
+
+### N.10 The three ways the exemption can be talked out of firing — [measured 2026-09-12, reviewer]
+
+The tester raised these as X-items; recorded here with the reviewer's own measurements against the
+shipped `expansionMatch` at OB1 `8f26c4c`, so the next reader has the reproduction and not the
+claim. **All three fail toward NOT blocking**, which returns the name to the report-only behaviour
+of the last three items rather than producing a wrong correction - the safe direction for a new
+gate, and the reason none of them blocked this merge.
+
+    expansionMatch("BSOD", "[SOURCED] The Basic System of Diagnostics reports a fault [Source 1]")
+      -> true      INITIALS COINCIDENCE: any phrase whose consecutive initials spell the name
+    expansionMatch("OEM",  "[SOURCED] See https://example.com/parts/oem-replacement/list [Source 2]")
+      -> true      URL PATH: the whole-word test does not care that the match is inside a URL
+    expansionMatch("Arc",    "[SOURCED] arc welding uses a filler rod [Source 1]")      -> true
+    expansionMatch("Signal", "[SOURCED] the signal degrades over distance [Source 1]")  -> true
+    expansionMatch("Notion", "[SOURCED] the notion that X causes Y is unsupported [1]") -> true
+
+The third is the structural one and it deserves its own sentence: **a product whose name is an
+ordinary English word cannot be caught by any token-level name diff.** Arc, Signal and Notion are
+real products, and any evidence set that happens to use the common word exempts the brand. This is
+not a bug in `expansionMatch` and no tightening of it helps - the flagged-name set comes from
+`acronymSet`, which sees tokens, and a token cannot tell a brand from a noun. Whatever the next
+item does, it should not claim this class is covered.
+
+One narrowing that costs nothing and would close the second case: run the whole-word test against
+the grounded text with URLs stripped, as `stripPointers` already does for numbers. The first case
+is harder and may not be worth fixing - requiring the initials to come from capitalised words would
+catch "Basic System of Diagnostics" only until someone writes it in a heading.
+
+### N.11 The protocol tells the reviewer to rebase, and a rebase that replays makes the merge unrecordable — [observed 2026-09-12, reviewer]
+
+A HARNESS finding, not a research-engine one; recorded here because this item is where it happened
+and the next reviewer to meet it will be reading this file.
+
+**What happened.** The work line moved between this branch being cut and the review
+(`refactor/ai-stack-cleanup` ea6a2e5 -> 5bf0d0c, item reapdoc: 16 commits over 13 files). MERGE-
+PROTOCOL §2 step 4 instructs the reviewer to rebase, so I did; it replayed the branch's one commit
+`2aa94dc` as `158c6c3`. The merge landed as `e09cea0`, and then:
+
+    queue.ps1 -Merged -Id research-trust-names -By rt-reviewer -Sha e09cea0 -FitsCodebase
+    ERROR: 'e09cea0' does not contain '2aa94dcb...' - the commit this item's tests passed at -
+    so that is not a merge of this item. ... Nothing has been recorded.       (exit 1)
+
+The check is right and should not be weakened: it asks `git merge-base --is-ancestor
+<tested_at_sha> <merge sha>`, deliberately against the recorded tested commit rather than a live
+branch ref, and its comments carry the two incidents that shaped it. A rebase orphans that commit
+by construction, so a reviewer who follows the protocol's own instruction on a moved work line can
+no longer record the result of following it.
+
+**The equivalence I could prove, and the equivalence the tool can accept, are not the same thing.**
+Before merging I established that the replay was byte-identical to what was tested:
+
+```bash
+# 1. the two changed sets do not intersect (13 incoming files vs this branch's 6)
+comm -12 <(git diff --name-only ea6a2e5..refactor/ai-stack-cleanup | sort) \
+         <(git diff --name-only ea6a2e5..work/research-trust-names | sort)      # empty
+
+# 2. every file this branch touches is unchanged across the rebase
+for f in <the six paths>; do git diff --quiet 2aa94dc 158c6c3 -- "$f" && echo IDENTICAL; done
+
+# 3. and the patch that would land is the same bytes before and after
+git diff ea6a2e5..2aa94dc > old.patch
+git diff refactor/ai-stack-cleanup..158c6c3 > new.patch
+diff old.patch new.patch                                                        # empty
+```
+
+All three held. None of it is visible to `-Merged`, and a check that accepted "the reviewer says
+the bytes match" would be the kind of check this workstream has spent ten items removing. **Ancestry
+is not content** - the same sentence as the OB1 gitlink lesson, pointed the other way: there, a
+commit that was an ancestor did not carry the content; here, content that is identical has no
+ancestry.
+
+**What was done, by the book (operator, 2026-09-12):** `-Requeue` back to test rather than any edit
+to the queue file. The reviewer declined to update `tested_at_sha` by hand: it would have been a
+true statement written into the audit trail by the person whose own action made it necessary, which
+is the shape of every record this project has learned not to trust. The tester re-runs the plan at
+the branch head, `-Pass` records `tested_at_sha` from `git rev-parse <branch>` - verified at
+`queue.ps1:1932` - which is `12d7e67`, an ancestor of `e09cea0`, so the eventual `-Merged` is
+truthful with no special case.
+
+**The two designs worth considering**, neither built:
+
+1. **A `-Rebased` verb.** The reviewer records the replay: old tested sha, new sha, and the
+   equivalence evidence (the three commands above), and the tool re-points `tested_at_sha` itself
+   after verifying `git diff <old> <new>` is empty over the branch's paths. The tool does the
+   check rather than believing the claim, which is the difference that matters.
+2. **An explicit rule in MERGE-PROTOCOL:** a rebase that is not a no-op returns the item to test.
+   Cheaper to write, and it costs a full test cycle on content nobody changed - which is what this
+   item just paid.
+
+Option 1 is the better trade if rebases onto a moved line become common; this was the first in six
+items reviewed by rt-reviewer, so option 2 may simply be honest about the frequency.
+
+**One latent record defect left behind, worth knowing:** the row's `submitted_sha` is still the
+orphaned `2aa94dc`. It resolves today because the object survives in the worktree's reflog, so no
+`[UNRESOLVABLE]` flag appears - but a `git gc` that drops it would make this row read as unresolvable
+work long after it merged. Nothing to do now; a reason for a `-Rebased` verb to re-point both fields
+rather than one.
+
+---
+
+## O. research-trust-names attempt 3 — polarity (2026-09-12)
+
+Attempt 1 passed, merged and deployed. The re-test the reviewer's rebase forced found a defect
+attempt 1 had missed, and by then it was live.
+
+### O.1 What shipped — [observed-live, tester 2026-09-12]
+
+Under "What the evidence does not settle", sentences saying what the sources do NOT establish were
+replaced by verbatim grounded lines asserting what they DO.
+
+| removed | pasted in its place |
+|---|---|
+| "the evidence does not describe the specific Azure DevOps components…" | an `[INFERRED]` line: "The pattern seen in GitLab … is analogous to what Azure DevOps does…" |
+| "The EEG and GVS data … characterize the conflict state but do not trace the resolution pathway." | a background claim about what causes the conflict state |
+| "It is unclear whether the effects are additive, redundant, or potentially antagonistic." | a near-duplicate of the sentence before it, three possibilities flattened to one |
+
+The product-comparison paragraph was left saying "…rather than a bare git host. [Source 2] The
+sources ALSO do not address…" — an "also" pointing back at a negative that is no longer there.
+
+**Two of the three carried no flagged name at all**, so this is not the names gate: it is the
+fidelity judge and its verbatim fallback, live since research-trust-report. The judge reads an
+absence sentence, the lines it cites state positives, the verdict is UNSUPPORTED, and the fallback
+pastes a positive line in. **A polarity inversion under a citation is the worst shape a trust
+document can carry**, and the module built to prevent overstatement produced it.
+
+### O.2 The rule — [read-from-source]
+
+> A correction may never flip a unit's POLARITY. A sentence that denies, doubts or reports an
+> absence in the evidence may only be replaced by text that also does; an assertion may only be
+> replaced by an assertion. In "What the evidence does not settle" and "Limitations", the only
+> permitted corrections are a rewrite that keeps the absence claim or a [GAP]/[UNCERTAIN] line of
+> matching polarity; when neither exists the unit is left exactly as it is and counted
+> `polarity_skipped`, which lands in the footer's `U unchecked`.
+
+`polarityOf` (`fidelity.ts`) reads the SUBJECT, not the grammar: "The PSU never fails" is a
+negative world claim and correcting it is this module's job; "the sources do not describe X" and
+"it is unclear whether Y" are claims about the evidence. A section decides it outright — anything
+under those two headings is an absence claim by the section's own definition. Citations are
+stripped before classifying, because "[Source 7]" contains the word "Source" and with a negation
+anywhere in the sentence that made every cited negative claim look like a statement about the
+evidence.
+
+It is lexical, which this workstream has learned to distrust, and the reason it is acceptable is
+asymmetry: **a missed cue and a false cue both end in "leave the unit alone"**. It can only ever
+make the engine more conservative, never wronger.
+
+Two further guards fell out of building it:
+
+- **The fallback must be about the same thing.** Ranking candidates by word overlap without a
+  FLOOR put a line about the 100 Hz effect in place of a sentence about Azure DevOps components —
+  it was the best of two candidates rather than a good one. Two shared content words, and the
+  citation brackets stripped from both sides first. A unit that cites its own source needs no
+  floor: the citation is a stronger link than overlap.
+- **A replacement already in the document is not a correction.** The 100 Hz render ended with two
+  consecutive sentences making the same point, because the only same-polarity candidate was the
+  sentence above it.
+
+### O.3 One reference for the gate and the reporter — [read-from-source]
+
+`fidelity.ts` passed `query=""` to `renderGroundingDiff` and `harness.ts` passed the real query, so
+the gate blocked `UI` and `TFVC` — words of the question the PERSON asked — that the reader-facing
+report would never flag. The footer's `names: N blocked` and `prose_ungrounded.names` could
+disagree by construction. The query is threaded through now, and it is recorded ON the fixtures
+(`_query_provenance`) so a test that omits it is testing a different check.
+
+Measured on the product comparison: with the query, **nothing is flagged at all** — the two names
+the gate rewrote in attempt 2 were the user's own words, and one of those rewrites is what removed
+"TFVC (Team Foundation Version Control)" from a question that asked about it by name.
+
+### O.4 What the fixed path does to the three documents — [observed-live 2026-09-12]
+
+Applied to the documents research-trust-template committed at `e28c974`:
+
+| render | names | record | hunks |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM → none | 43 of 44, 3 corrected, 1 polarity-skipped | 4 (3 gate, 1 judge) |
+| scientific-paper | HTC → none | 65 of 67, 2 corrected, 1 polarity-skipped | 2 (1 gate, 1 judge) |
+| product-comparison | none → none | 25 of 25, 1 corrected | 1 (judge) |
+
+**Every changed line is attributed in each fixture's header** — line, which half of the check
+changed it, the polarity before and after, the text. The last item's headers claimed "exactly what
+the gate changed and nothing else" and that was false for 3 of 11 hunks. No hunk in these three
+flips a polarity.
+
+### O.5 Two more defects found while building it
+
+- **The check counted its own fixture headers.** `citedUnits` did not skip HTML comments, so the
+  attribution table in a header became units the moment it was written. A comment is apparatus,
+  not the document.
+- **The invariant tests omitted the query**, which was harmless until the gate began reading it.
+
+### O.6 Counts
+
+| suite | attempt 2 | attempt 3 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 281 / 1 env-failed | **287 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
+
+### O.7 What T8 should have said, and now does
+
+The tester ran T8 verbatim at a head the reviewer had rebased, and two of its three PASS conditions
+were false for reasons that were not defects: `ea6a2e5` had stopped being the merge-base, and the
+gitlink HAD moved because the landing commit is what moves it. T8 now derives the base with
+`git merge-base`, scopes the parent-diff assertion to the developer's own commits, and states the
+gitlink expectation BY STAGE — empty before the landing commit, exactly one change after it, with
+the new pin resolvable by `ls-remote`.

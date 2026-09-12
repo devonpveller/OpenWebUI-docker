@@ -1,18 +1,25 @@
 <!-- The `product-comparison` render of recorded job 5ab36fe0 (plain git hosting versus Azure DevOps), as delivered by THIS branch's
-     pipeline: rendered through the template, then through the fidelity check INCLUDING the names
-     gate (research-trust-names). The document is the one committed by research-trust-template with
-     the gate applied to it - not a fresh render - so `git diff` against that commit shows exactly
-     what the gate changed and nothing else.
+     pipeline: the document research-trust-template committed at e28c974, put through the fidelity
+     check with the names gate AND the polarity guard (research-trust-names attempt 3). Not a fresh
+     render - so the diff against e28c974 is the check's work and nothing else.
 
-     TFVC and UI were in the limitations questions, from the synthesis's [GAP] lines.
+     EVERY CHANGED LINE, ATTRIBUTED. The last item's headers said "exactly what the gate changed and
+     nothing else" and that was false for 3 of 11 hunks - two of them polarity inversions the tester
+     found live. Each row below says which half of the check made the change and whether the
+     sentence's polarity survived it:
+
+     | line | changed by       | polarity    | the text that changed |
+     |------|------------------|-------------|-----------------------|
+     | 17   | judge            | assertion -> assertion | | Concurrent CI/CD operation | A project can maintain GitHub Actions w... |
+
+     No hunk flips a sentence's polarity: an absence stays an absence, an assertion stays an assertion.
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":23,"units":24,"unchecked":1,"stronger":1,"unsupported":1,"rewritten":5,"replaced":1,"names_blocked":["TFVC","UI"]}
-       grounding diff  : numbers [] urls [] names []  (was: names [TFVC, UI])
+       render fidelity : {"checked":25,"units":25,"unchecked":0,"stronger":1,"unsupported":0,"rewritten":1,"replaced":0,"polarity_skipped":0,"names_blocked":[]}
+       grounding diff  : names [] -> [] (TFVC and UI are words of the USER'S QUESTION, and the gate reads the same reference the reporter does now)
 
-     Applying the check to THIS file returns it byte for byte - fidelity.test.ts and
-     template-renders.test.ts both assert it, and it is the invariant attempt 1 of the template
-     item failed on. N and M are counted on this file by `countUnits`. -->
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing -
+     fidelity.test.ts and template-renders.test.ts assert both. -->
 
 # Plain Git Hosts and Azure DevOps Share a YAML-in-Repo CI/CD Substrate, with Azure DevOps Positioned as a Broader ALM Platform
 
@@ -31,27 +38,27 @@ The evidence shows that the CI/CD layer of a plain git host (GitHub, GitLab) and
 | Criterion | Plain git host (GitHub / GitLab) | Azure DevOps | Source |
 |---|---|---|---|
 | CI/CD pipeline definition format | GitHub Actions uses in-repo YAML (`.github/workflows/`) [Source 1, 3] | YAML committed in-repo (`.vsts-dotnet-ci.yml`, `azure-pipelines/` folder), version-controlled alongside code [Source 3] | [Source 1, 2, 3] |
-| Concurrent CI/CD operation | A project can maintain GitHub Actions workflows alongside Azure DevOps pipeline definitions in the same repository [Source 3] | Same: the MSBuild repository on GitHub contains both `.github/workflows` and `.azuredevops/azure-pipelines` directories, demonstrating that Azure DevOps pipelines can be defined as YAML files committed within the repository alongside GitHub Actions workflows [Source 3] | [Source 3] |
+| Concurrent CI/CD operation | A project can maintain GitHub Actions workflows alongside Azure DevOps pipeline definitions in the same repository [Source 3] | Same: the MSBuild repository on GitHub contains both `.github/workflows` and `.azuredevops/azure-pipelines` directories, suggesting the two systems can run concurrently [Source 3] | [Source 3] |
 | Platform scope (as described in sources) | GitHub: "at heart a Git repository hosting service" plus code review, project management, integrations, team management, documentation, "social coding" [Source 1]. GitLab: "enterprise-grade DevOps platform that goes beyond Git repository management" integrating issue tracking, CI/CD, code review, security testing, Kubernetes management [Source 2] | Analogous to GitLab's broader ALM approach: Repos/Boards/Pipelines triad representing a broader ALM platform rather than a bare git host [Source 2, inferred] | [Source 1, 2, 3] |
 | Access control model | GitHub provides team management features [Source 1] | Azure Portal provides role-based access control (RBAC) to assign granular permissions and control who manages resources at each level across teams and services [Source 4, 5] | [Source 1, 4, 5] |
 | Underlying version-control model | Distributed: every developer has a full copy of the entire repository (every commit, branch, and file), enabling easy branching and merging [Source 6] | Not separately described in the sources; the pipeline layer is YAML-in-repo [Source 3] | [Source 3, 6] |
 
 ## What the evidence does not settle
 
-The sources confirm that Azure DevOps and plain git hosts share a YAML-in-repo CI/CD substrate and that Azure DevOps is positioned as a broader ALM platform [Source 2, 3]. The pattern seen in GitLab (integrating CI/CD, issue tracking, code review, and security testing into one platform) is analogous to what Azure DevOps does with its Repos/Boards/Pipelines triad, representing a broader ALM platform rather than a bare git host. [Source 2] The sources also do not address how a team's terminal workflow (clone, push, tag, branch) changes on migration, nor the mental-model shift from treating git as a distributed version-control tool to treating Azure DevOps as an end-to-end ALM platform. The one concrete architectural detail the sources do provide—RBAC via Azure Portal [Source 4, 5]—is stated at the portal level and does not specify how it maps to repository-level or pipeline-level permissions within Azure DevOps itself.
+The sources confirm that Azure DevOps and plain git hosts share a YAML-in-repo CI/CD substrate and that Azure DevOps is positioned as a broader ALM platform [Source 2, 3]. However, the evidence does not describe the specific Azure DevOps components that would differentiate day-to-day use: Azure Boards work items and sprints, Azure Pipelines build agents (hosted versus self-hosted), environments and stages, the distinction between YAML pipeline-as-code and classic UI-based release pipelines, service connections, artifact feeds, or service hooks. The sources also do not address how a team's terminal workflow (clone, push, tag, branch) changes on migration, nor the mental-model shift from treating git as a distributed version-control tool to treating Azure DevOps as an end-to-end ALM platform. The one concrete architectural detail the sources do provide—RBAC via Azure Portal [Source 4, 5]—is stated at the portal level and does not specify how it maps to repository-level or pipeline-level permissions within Azure DevOps itself.
 
 ## Limitations and open questions
 
 The evidence is thin on the specific Azure DevOps features, workflow changes, and operational gotchas that the question targets. The following points are not covered by any source:
 
 - What are Azure Boards work items, sprints, backlogs, and the work-item-driven development workflow in practice?
-- What are Azure Repos-specific features such as branch protection rules, pull-request approval policies, and the distinction between Azure Repos Git and other version control systems?
-- How do Azure Pipelines build agents (hosted vs. self-hosted), environments/stages, and the choice between YAML pipeline-as-code and classic release pipelines work?
+- What are Azure Repos-specific features such as branch protection rules, pull-request approval policies, and the distinction between Azure Repos Git and TFVC (Team Foundation Version Control)?
+- How do Azure Pipelines build agents (hosted vs. self-hosted), environments/stages, and the choice between YAML pipeline-as-code and classic UI-based release pipelines work?
 - What are Azure DevOps service connections, artifact feeds (e.g., Azure Artifacts), and service hooks, and how do they function?
 - How does identity and single sign-on integration with Azure AD or Microsoft Entra ID work in the context of Azure DevOps authentication and authorization?
 - How does a team's day-to-day terminal workflow (git clone, git push, git tag, etc.) change when migrating from a pure git + pull-request workflow to Azure DevOps?
 - What is the mental-model shift from treating git as a distributed version-control tool to treating Azure DevOps as an end-to-end ALM/DevOps platform (work-item-driven development, release management, environment promotion)?
 - What are the specific limitations or gotchas of Azure DevOps (branch policy constraints, PR approval policy configuration, pipeline YAML vs. classic release pipeline trade-offs, identity federation issues)?
-- What do developers do differently in the terminal versus the Azure DevOps web interface on a day-to-day basis?
+- What do developers do differently in the terminal versus the Azure DevOps web UI on a day-to-day basis?
 
-A further run focused on the specific Azure DevOps feature set (Boards work items, Pipelines agents and environments, Repos branch policies, service connections, and Entra ID integration) and the resulting day-to-day terminal-versus-web interface workflow would close this.
+A further run focused on the specific Azure DevOps feature set (Boards work items, Pipelines agents and environments, Repos branch policies, service connections, and Entra ID integration) and the resulting day-to-day terminal-versus-UI workflow would close this.

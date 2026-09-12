@@ -43,11 +43,11 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integra
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names" && ruff check .
 ```
 
-**PASS:** research-service **`281 passed | 1 failed`** (the anchor requires at least 273);
+**PASS:** research-service **`287 passed | 1 failed`** (the anchor requires at least 273);
 research-curator `40 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — postgres at module load, T7 runs it properly.
 
-**FAIL:** any other failing test; research-service below 281; curator below 40; any ruff error;
+**FAIL:** any other failing test; research-service below 287; curator below 40; any ruff error;
 any file read from outside `/w`.
 
 ---
@@ -80,8 +80,24 @@ blocked); a name that is a common English word; a name inside a code span; an ex
 two lines (deliberately not matched — a phrase does not span a newline, and letting it would make
 any long document contain every acronym).
 
+**ONE reference for the gate and the reporter.** Attempt 2 passed `query=""` into the gate and the
+real query into the reader-facing reporter, so the gate blocked `UI` and `TFVC` — words of the
+QUESTION THE PERSON ASKED — that the report would never have flagged, and the footer's
+`names: N blocked` could disagree with `prose_ungrounded.names` by construction. A name the person
+asked about is not a name the report invented.
+
+```bash
+deno test -A fidelity.test.ts --filter "USER'S OWN QUESTION"
+deno test -A fidelity.test.ts --filter "cannot disagree"
+```
+
+**PASS:** 1 and 1 passed. The recorded queries are now fields on the fixtures themselves
+(`_query_provenance` says where each came from), so a test that omits the query is testing a
+different check.
+
 **FAIL:** a name the evidence never uses surviving in a corrected document; BSOD blocked; an
-acronym with no expansion passed; either record document edited.
+acronym with no expansion passed; either record document edited; the gate and the reporter reading
+different references.
 
 ---
 
@@ -110,8 +126,54 @@ deno test -A fidelity.test.ts --filter "an open question is rewritten"
 **Numbers and URLs keep the whole synthesis as their reference**, deliberately: a figure inside a
 [GAP] question is a question, not an assertion.
 
-**FAIL:** a grounded line pasted over an open question; a name counted as blocked while still in
-the document; a [GAP] question deleted.
+### T3b — POLARITY: the defect attempt 2 shipped
+
+Attempt 2 passed this case and shipped a polarity inversion. Under "What the evidence does not
+settle", sentences saying what the sources do NOT establish were replaced by verbatim grounded
+lines asserting what they DO — twice in the scientific paper with **no flagged name in the unit at
+all**, so this is the fidelity judge and its fallback, live since research-trust-report, not the
+names gate:
+
+| the sentence that was removed | what replaced it |
+|---|---|
+| "the evidence does not describe the specific Azure DevOps components…" | an [INFERRED] line: "The pattern seen in GitLab … is analogous to what Azure DevOps does" — leaving the next sentence's "The sources ALSO do not address…" with no antecedent |
+| "The EEG and GVS data … do not trace the resolution pathway." | a background claim about what causes the conflict state |
+| "It is unclear whether the effects are additive, redundant, or potentially antagonistic." | a near-duplicate of the sentence before it, three possibilities flattened to one |
+
+**The rule now:** *a correction may never flip a unit's POLARITY. A sentence that denies, doubts or
+reports an absence in the evidence may only be replaced by text that also does; an assertion may
+only be replaced by an assertion. In "What the evidence does not settle" and "Limitations", the
+only permitted corrections are a rewrite that keeps the absence claim or a [GAP]/[UNCERTAIN] line
+of matching polarity; when neither exists the unit is left exactly as it is and counted
+`polarity_skipped`, which lands in the footer's `U unchecked`.*
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "POLARITY"
+```
+
+**PASS:** 4 passed — the product-comparison sentence, both scientific-paper sentences, the
+same-polarity replacement that IS allowed, and the classifier itself.
+
+**Read the classifier before you attack it** (`polarityOf`, `fidelity.ts`). The distinction is the
+SUBJECT, not the grammar: "The PSU never fails" is a negative world claim and correcting it is
+this module's job; "the sources do not describe X" and "it is unclear whether Y" are claims about
+the evidence. A section decides it outright — everything under "What the evidence does not settle"
+and "Limitations" is an absence claim by that section's own definition. It is lexical, which this
+workstream distrusts, and the reason it is acceptable here is asymmetry: **a missed cue and a
+false cue both end in "leave the unit alone"**. It can only make the engine more conservative.
+
+**Try to break it:** a double negative; an absence sentence whose evidence noun is a pronoun ("it
+does not say"); a positive sentence inside the limitations section; a table cell that is an
+absence; a rewrite that keeps the words and flips the meaning ("is not addressed" -> "is
+addressed").
+
+**FAIL:** any corrected unit that asserts what the original denied, or denies what it asserted;
+any grounded [SOURCED]/[INFERRED] line pasted over a sentence about what the evidence lacks; a
+`[GAP]` or `[SOURCED]` tag reaching the reader; a polarity skip not counted.
+
+**FAIL (T3 as a whole):** a grounded line pasted over an open question; a name counted as blocked
+while still in the document; a [GAP] question deleted; **any polarity inversion**.
 
 ---
 
@@ -167,7 +229,17 @@ Each document is now paired with **its own** synthesis in those tests. Pairing a
 synthesis was harmless while the check only judged claims; with a names gate it makes every name
 in a document unearned, and the checker "corrects" a document it should never have been shown.
 
-**FAIL:** any invariant failing; a fixture whose header disagrees with what the check produces.
+**The headers now attribute EVERY changed line.** Attempt 2's headers said "exactly what the gate
+changed and nothing else", and that was false for 3 of 11 hunks — two of them the polarity
+inversions above. Each header carries a table: line, which half of the check changed it (gate /
+judge), the polarity before and after, and the text. Check it against
+
+```powershell
+git -C OB1 diff e28c974..research-trust-names -- integrations/research-service/fixtures
+```
+
+**FAIL:** any invariant failing; a fixture whose header disagrees with what the check produces; a
+changed line missing from its header's table; a row whose polarity column says a flip happened.
 
 ---
 
@@ -211,25 +283,69 @@ source modules and **no** `*.test.ts`. **Clean up:** remove the container, netwo
 
 ## T8 — Nothing live changed, and nothing was removed without an account of it
 
+**Derive the base; do not trust a literal.** Attempt 2's T8 named `ea6a2e5`, which stopped being
+this branch's merge-base when the reviewer rebased, so the case reported 20 changed paths and a
+moved gitlink and neither was a defect. Compute it:
+
 ```powershell
 cd "D:\Open WebUI\ai-stack"
-git diff --name-only ea6a2e5..work/research-trust-names
-git diff ea6a2e5..work/research-trust-names -- OB1
+$base = git merge-base HEAD work/research-trust-names
+git diff --name-only $base..work/research-trust-names
+```
+
+**The assertion is about the DEVELOPER'S OWN commits**, not about everything the work line has
+moved by since. List them and check what they touch:
+
+```powershell
+# the developer's commits on this branch, newest first
+git log --format='%h %s' $base..work/research-trust-names
+# and what each one changes
+git log --format='%h' $base..work/research-trust-names | ForEach-Object { "$_"; git diff --name-only "$_^" "$_" }
+```
+
+**PASS:** every commit authored for THIS item touches only `documentation/` and
+`owui/tools/deep_research.py`. A commit that is the reviewer's landing commit is identified by its
+message and is not the developer's.
+
+**The gitlink expectation, BY STAGE** — this is what attempt 2's T8 got wrong, and the stage is
+visible in the log:
+
+| stage | `git diff $base..HEAD -- OB1` | why |
+|---|---|---|
+| before the landing commit (what the developer submits) | **EMPTY** | the developer never bumps the pin; the OB1 work sits on a local branch |
+| after the reviewer's landing commit | **exactly one** gitlink change | the reviewer pins the submodule as part of landing |
+
+```powershell
+# if a gitlink change is present, the new pin must exist on the OB1 remote
+$pin = (git ls-tree HEAD OB1) -replace '^\S+ \S+ (\S+)\s+OB1$','$1'
+git -C OB1 ls-remote origin | Select-String $pin
+```
+
+**PASS:** at a developer-submitted head, the gitlink diff is empty. At a landed head, there is one
+gitlink change and `ls-remote` resolves the new pin on the OB1 remote. Anything else is a failure.
+
+**The container.** `docker inspect openbrain-research` shows `RestartCount 0` and an image
+`openbrain-research:local`. Its `StartedAt` moves when the item is DEPLOYED, which section D
+schedules after a pass — so a fresh `StartedAt` at a landed head is the deploy, not a test-time
+mutation. What must hold at every stage: **RestartCount 0**, and no image built or retagged by
+this plan's cases.
+
+```powershell
 docker inspect openbrain-research --format "{{.Config.Image}} {{.State.StartedAt}} {{.RestartCount}}"
 git -C OB1 diff e28c974..research-trust-names -- integrations | Select-String -Pattern '^-Deno.test'
 ```
 
-**PASS:** the parent diff touches only `documentation/` and `owui/tools/deep_research.py`; the OB1
-gitlink diff is EMPTY; the container is untouched; **no** removed `Deno.test` line.
+**PASS:** no removed `Deno.test` line.
 
 **One expectation CHANGED, and it is the item's own subject:**
 
 | case | file | what happened |
 |---|---|---|
-| `ACCEPTANCE 6: the grounding diff over the re-rendered document` | `report-doc.test.ts` | pinned `names == ["BSOD"]` as the one name that still leaked. BSOD is not a leak — the synthesis writes "Blue Screen of Death" — and the expansion match now says so, so the case pins `[]`. ATX and SFX stay gone; `rendered-AFTER-v1` keeps the render that had them. The reason is in a comment above the assertion. |
+| `ACCEPTANCE 6: the grounding diff over the re-rendered document` | `report-doc.test.ts` | pinned `names == ["BSOD"]` as the one name that still leaked. BSOD is not a leak — the synthesis writes "Blue Screen of Death" — and the expansion match now says so, so the case pins `[]`. The reason is in a comment above the assertion. |
 
-**FAIL:** a live container restarted or rebuilt; the gitlink bumped; a test case removed without a
-row here.
+**FAIL:** a developer commit touching anything outside those paths; a gitlink change at a
+developer-submitted head; a landed gitlink whose pin `ls-remote` cannot resolve; `RestartCount`
+above 0; a test case removed without a row here.
 
 ---
 

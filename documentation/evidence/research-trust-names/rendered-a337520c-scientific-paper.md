@@ -1,18 +1,26 @@
 <!-- The `scientific-paper` render of dry run a337520c (100 Hz tones and VR motion sickness), as delivered by THIS branch's
-     pipeline: rendered through the template, then through the fidelity check INCLUDING the names
-     gate (research-trust-names). The document is the one committed by research-trust-template with
-     the gate applied to it - not a fresh render - so `git diff` against that commit shows exactly
-     what the gate changed and nothing else.
+     pipeline: the document research-trust-template committed at e28c974, put through the fidelity
+     check with the names gate AND the polarity guard (research-trust-names attempt 3). Not a fresh
+     render - so the diff against e28c974 is the check's work and nothing else.
 
-     HTC - a headset maker the evidence never names - is gone.
+     EVERY CHANGED LINE, ATTRIBUTED. The last item's headers said "exactly what the gate changed and
+     nothing else" and that was false for 3 of 11 hunks - two of them polarity inversions the tester
+     found live. Each row below says which half of the check made the change and whether the
+     sentence's polarity survived it:
+
+     | line | changed by       | polarity    | the text that changed |
+     |------|------------------|-------------|-----------------------|
+     | 61   | judge            | absence -> absence | The interaction between 100 Hz sound stimulation and other VR-specific... |
+     | 71   | gate (HTC)       | absence -> absence | - No source in the provided set reports a controlled experiment that d... |
+
+     No hunk flips a sentence's polarity: an absence stays an absence, an assertion stays an assertion.
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":66,"units":67,"unchecked":1,"stronger":1,"unsupported":2,"rewritten":1,"replaced":2,"names_blocked":["HTC"]}
-       grounding diff  : numbers [] urls [] names []  (was: names [HTC])
+       render fidelity : {"checked":65,"units":67,"unchecked":2,"stronger":1,"unsupported":2,"rewritten":1,"replaced":1,"polarity_skipped":1,"names_blocked":["HTC"]}
+       grounding diff  : names [HTC] -> []
 
-     Applying the check to THIS file returns it byte for byte - fidelity.test.ts and
-     template-renders.test.ts both assert it, and it is the invariant attempt 1 of the template
-     item failed on. N and M are counted on this file by `countUnits`. -->
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing -
+     fidelity.test.ts and template-renders.test.ts assert both. -->
 
 # 100 Hz Bone-Conducted Sound Reduces Motion Sickness Through Otolith Resonance: Human and Murine Evidence and Inferred Relevance to VR Cybersickness
 
@@ -79,7 +87,7 @@ The interaction between 100 Hz sound stimulation and other VR-specific counterme
 
 One sub-experiment in the study had a sample size of only 10 participants, which was noted as a limitation by community reviewers [Source 9]. When the otoliths were surgically removed from the mouse tissue, the 100 Hz–induced activation disappeared, confirming that the otoliths (not the cochlea) were the target of the sound stimulation. [Source 7]
 
-The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. VR motion sickness (cybersickness / VIMS) is attributed to a sensory conflict or mismatch between visual, vestibular, and proprioceptive signals integrated in the brainstem and cerebellum; in VR, the eyes perceive self-motion while the vestibular system detects stillness. [Source 1, 11, 12, 15]
+The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. The EEG and GVS data [Source 1, 2] characterize the conflict state but do not trace the resolution pathway.
 
 ## Limitations and open questions
 
