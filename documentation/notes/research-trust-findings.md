@@ -1919,3 +1919,249 @@ Provenance: observed-live; `research_jobs.result` for 64ac38cf (origin owui, cal
   pointer inside a synthesis line - the first sits outside the held source window, the
   second is a citation-shaped token the number check should skip. Minor; note for the
   fidelity item.
+
+---
+
+## L. research-trust-template — one shape for ten templates, and the coverage the footer claims (2026-09-12)
+
+The operator read the buyer's guide job 64ac38cf delivered and said: "this looks good... set this
+as a template for future use", and separately, on how many templates there should be, "we should
+have about 4-5 now if not more". Both instructions at once: make the approved shape the house
+shape, and keep the templates distinct. None was deleted; there are ten.
+
+### L.1 The skeleton — [read-from-source]
+
+Every template is now one entry in `SHAPES` and `buildStructure` lays the sections out in order
+(`templates.ts`): title stating the finding, Executive summary, a purpose-specific action or
+findings section, a findings-by-area table with a citation per row, What the evidence does not
+settle, the shared LIMITATIONS_SECTION, and the Sources the renderer appends. Each template keeps
+its own audience, hints, tone, and its own names for the two sections that vary:
+
+| template | action / findings section | table | area column |
+|---|---|---|---|
+| buyers-guide | What to check in person | Failure modes by subsystem | Subsystem |
+| scientific-paper | Findings | Findings by theme | Theme |
+| technical-proposal | Recommendation | Technical factors by area | Area |
+| nontechnical-proposal | Recommendation | Factors by area | Area |
+| programming-doc | How to use it | Behaviour by area | Area |
+| engineering-doc | Specifications and constraints | Specifications by subsystem | Subsystem |
+| product-comparison | Comparison at a glance | Options by criterion | Criterion |
+| market-analysis | Key players and trends | Market factors by area | Area |
+| value-proposition | The value offered | Benefits by area | Area |
+| general-report | What the evidence supports | Findings by area | Area |
+
+One rule had to be added after measuring: **every section is written, in order, always**. The
+first re-render of 64ac38cf dropped the failure-modes table entirely — the skeleton listed the
+sections but never said they were mandatory, and a model summarising a long synthesis simply left
+one out. "A section the evidence barely reaches is written thin; it is never dropped" is now in
+every prompt, and the re-render carries all six.
+
+### L.2 Three subjects, three templates — [observed-live 2026-09-12]
+
+Each rendered through the deployed LiteLLM path and then through the SHIPPED fidelity check, in
+that order, exactly as a live run does. Committed as fixtures with the numbers in their headers.
+
+| render | sections | fidelity (N of M, corrected, unchecked) | grounding diff |
+|---|---|---|---|
+| `rendered-64ac38cf-buyers-guide.md` | the approved document's six, in order | 33 of 33, 4 corrected, 0 unchecked | clean |
+| `rendered-a337520c-scientific-paper.md` | Findings / Findings by theme | 57 of 59, 5 corrected, 2 unchecked | clean |
+| `rendered-5ab36fe0-product-comparison.md` | Comparison at a glance / Options by criterion | 25 of 26, 1 corrected, 1 unchecked | `names ["VCS"]` |
+
+The comparison render is the one that shows the skeleton is not a hardware form: its table IS the
+comparison grid, one row per criterion, one column per option, the options' real names in the
+header. The 100 Hz render shows the other end — a literature question divides into themes, and
+the template allows sub-headings INSIDE a section without breaking the skeleton.
+
+**"Keeps every citation" is not literally what a summarising render does**, and the acceptance
+wording is worth correcting rather than testing loosely: measured, the three renders re-cite 15
+of 16, 13 of 16 and 6 of 7 sources. What is true, testable and what matters is that **none
+invents a citation the synthesis does not have** and every number resolves to a source. That is
+what the test asserts, with the ratios recorded above.
+
+### L.3 The coverage the footer claims — [measured 2026-09-12]
+
+The tester's X1/X2/X3/X4 and the reviewer's K.9/K.10, built:
+
+- **A citation after the full stop** ("…to upgrade. [Source 13]") yielded ZERO units: the claim
+  half had no citation, the citation half was two words. `normaliseCitations` puts the bracket
+  back inside the sentence before anything is split. Each of the tester's three probes now yields
+  exactly one unit.
+- **An uncited claim in an evidence section** is judged against the NEAREST synthesis lines by
+  word overlap, and is UNSUPPORTED when nothing reaches the floor — no model needed to say that a
+  sentence resting on nothing is unsupported. The executive summary and the Limitations section
+  are deliberately excluded: the summary compresses many sources by design, and the `[GAP]`
+  questions are uncited by design.
+- **No word floor inside a table.** The floor existed to keep row LABELS out, and the label rule
+  (first populated cell) does that directly. "Fans are proprietary" is a four-word claim.
+- **The footer says `render checked: N of M, K corrected, U unchecked`**, and both N and M are
+  counted on the DELIVERED document by `countUnits`, a pure function the reader can run. This is
+  the direct answer to X4 and K.10, where three artifacts carried four counts of "the same"
+  document and the one in the footer was reproducible from none of them.
+- **Superset citations are reported, not deleted** (`prose_ungrounded.citations`): a row citing
+  four sources where two contribute nothing is a provenance defect a reader can follow, and
+  removing a citation would be the engine editing a claim's evidence.
+- **A long verbatim-replaced table cell** becomes `see Note N below the table` with the sentence
+  whole beneath it (K.9). Nothing is clipped to fit a column, because clipping a grounded sentence
+  can re-create the overstatement the replacement was repairing.
+
+### L.4 Three defects the measurement caught, which no unit test would have
+
+- **`normaliseCitations` ate newlines.** `\s*` after the citation bracket matched the newline at
+  the end of a line ending "…replacement. [Source 11]", and welded nine checklist items and the
+  heading after them into one line. Found by running the shipped check over the approved
+  document; the regression test now plants a whole checklist.
+- **"checked 34 of 32".** The denominator came from the delivered document and the numerator from
+  the pre-correction one. Both are now counted on the same artifact, against the set of texts the
+  check saw or wrote.
+- **The re-judge flip-flopped.** A unit the rewriter never touched was re-asked of the same judge,
+  which said SAME, and ten condemned cells in the comparison render were left standing. Only
+  REWRITTEN units are re-judged now; an unrepaired unit keeps its first verdict.
+
+And one rule the judge needed: **an honest absence statement is SAME.** "Not described in the
+sources" claims nothing about the world, and replacing it with a grounded line about something
+else would have made the comparison grid worse and less true.
+
+### L.5 The meta judge's prompt — [read-from-source + measured]
+
+`META_JUDGE_SYS` moved to `claims.ts`, beside the deterministic half of the same decision, and
+gained WORLD examples for the two shapes that were losing facts: ATTRIBUTED ("<source or user>
+reports / notes / recommends / speculates / argues <content>") and HEDGED ("<thing> may <effect>
+if <condition>"). It also states the precedence explicitly: read the MAIN CLAUSE — a fact with a
+caveat is judged on the fact, and a sentence whose main clause is about the evidence is META
+"however many world-sounding words it contains".
+
+The test mocks the judge **from the prompt**: it extracts the attribution verbs, the hedge markers
+and the META examples out of `META_JUDGE_SYS` and classifies with those alone, so deleting an
+example makes the test fail. The four claims the judge refused across the two live runs:
+
+| claim | run | verdict now |
+|---|---|---|
+| "The same used-purchase analysis **recommends** the OptiPlex 3060…" | 33250e9b | WORLD |
+| "…proprietary PSU connector **may** also limit… **if** the original 180 W unit is failing…" | 64ac38cf | WORLD |
+| "The user in that thread **speculated** that the CPU may have been damaged…" | 64ac38cf | WORLD |
+| "**Whether** the 'Solved!' tag… **is unclear**, as no solution text is visible…" | 64ac38cf | **META, and rightly** |
+
+The anchor says "the four hedged/attributed world claims". Three of the four are world claims; the
+fourth is a genuine meta question and the findings above said so when they recorded it. Turning
+all four into WORLD would have been fixing the number rather than the defect.
+
+**Sweep, re-run over the live claims table** (read-only SELECT, 2026-09-12): **17 of 7 930 active
+claims** match `classifyMetaClaim` (0.21%). I read all seventeen: every one is genuinely
+source-referential ("The provided source is a Google Scholar profile page…", "No source provided
+mentions any separate fee…", "The article's text (Source 1) is heavily truncated…"). No false
+positive. The earlier sweep's 43 of 7 744 (0.56%) was taken before the filter was live; those
+claims are no longer written.
+
+### L.6 Counts
+
+| suite | before | after |
+|---|---|---|
+| `research-service` (service directory only) | 248 / 1 env-failed | **265 / 1** |
+| `research-curator` | 36 | **40** |
+| `ruff check .` | clean | clean |
+
+`deno.lock` is gitignored, so a READ-ONLY mount fails with "Failed writing lockfile" the first
+time the dependency graph changes. T1 runs the suite with `--no-lock`, which is the honest fix:
+the alternative is a writable mount, and a writable mount is how a test run edits the thing it is
+testing.
+
+### L.7 Carried forward
+
+- The tester's X2 remainder: an uncited absolute in the EXECUTIVE SUMMARY is still unchecked, by
+  the same decision that protects the summary's right to compress. The GROUNDING_RULES forbid it;
+  nothing measures it.
+- An uncited sentence with nothing near it is counted UNSUPPORTED and left in the document when
+  the rewriter cannot mend it — there is no grounded line to replace it with. It is in the record
+  and in the footer's corrected count only when a repair happened.
+- `entityShare` still reads `title + " " + snippet` and never `url` (ninth item running).
+
+---
+
+## M. research-trust-template attempt 2 — a detector that edited what it inspected (2026-09-12)
+
+### M.1 The defect — [reproduced on the branch, tester 2026-09-12]
+
+`normaliseCitations` ran on the text that SHIPS. It moved a citation from after the full stop to
+before it, and in doing so ate the space that followed:
+
+| written | delivered |
+|---|---|
+| `...across teams and services. [Source 4, 5] The answer...` | `...across teams and services [Source 4, 5].The answer...` |
+| `Check the vents, e.g. [Source 3] dust...` | `Check the vents, e.g [Source 3].dust...` |
+| `The unit draws approx. [Source 2] 180 W...` | `The unit draws approx [Source 2].180 W...` |
+
+On the committed renders: the buyer's guide was untouched (its after-stop citations all sit at
+line end), the scientific paper changed, and the comparison's executive summary acquired one weld
+— T4's own FAIL limb. And the three fixture headers claimed they had been produced through this
+check, while the check still changed two of them: **the path was not idempotent**, which is the
+same statement.
+
+### M.2 The fix is a rule, not a better regex
+
+**Detection may not edit.** Units are derived with a normalised VIEW of each span — the text the
+judge reads — and every unit keeps its ORIGINAL span. Every rewrite and every replacement is
+applied to that span, so a document with nothing to correct is delivered byte for byte.
+
+Two invariants, over all three committed renders **and the approved document**, with a judge that
+answers SAME to everything:
+
+- `INVARIANT: a document with nothing to correct is returned BYTE-FOR-BYTE`
+- `INVARIANT: running the check on its own output changes nothing (idempotence)`
+- and, in `template-renders.test.ts`,
+  `INVARIANT: the check leaves every COMMITTED render exactly as it is` — the fixtures' headers
+  make a claim about the pipeline, and this executes it.
+
+**The abbreviations need no list.** A citation is moved in the view only when two alphanumerics
+precede the stop AND the citation ENDS the span. A citation with text after it did not close a
+sentence — `approx. [Source 2] 180 W` — so there is nothing to move. `Fig.`, `Inc.`, `vs.`,
+`e.g.` and `approx.` are pinned on one line with two ordinary sentences, and the splitter
+separates the sentences while keeping each abbreviation inside its own.
+
+**The cost, stated:** where a citation sits mid-line between two sentences, the unit now spans
+both. The judge sees both sentences and both sources together — coarser, and the price of never
+touching what ships.
+
+### M.3 The tester's X2, the other half — [measured]
+
+- **A bullet that wraps onto a second line** yielded M = 0: not checked, not counted, not in
+  `U unchecked`. It is one unit spanning both lines now, counted in M and marked unjudgeable, so
+  it is never edited (an edit addressed by line and cell cannot span two lines) and lands in `U`
+  where a reader sees it.
+- **A citation inside a fenced block or an inline code span is not a citation.** A
+  `programming-doc` render is asked for code samples; one was being presented to the judge as a
+  claim and could be rewritten.
+
+### M.4 The same mistake as the last item, in the test that exists to prevent mistakes
+
+The first version of the byte-identity invariant read the approved document from the PARENT repo
+— exactly the defect `research-trust-report` was sent back for one item ago. It passed in the
+worktree and died the moment the suite ran with only the service directory mounted. The approved
+document is a fixture now, and the sweep for other escapes is clean.
+
+### M.5 The section map (tester X3)
+
+The head docblock said "Adding a template = one entry in TEMPLATES"; a template is an entry in
+`SHAPES` with ten fields. Fixed, and the docblock now carries a row per template saying where each
+OLD heading's content went — Verdict, Per-option detail, Decision factors, Risks & mitigations,
+Pitfalls & caveats, Standards & compliance, Abstract, Background, Discussion, Outlook, Target fit,
+What was not found. `templates.test.ts` asserts the map exists, so "nothing was lost" is checkable
+by reading rather than by diffing twenty prompt bodies.
+
+### M.6 The three fixtures, regenerated through the fixed path
+
+| render | fidelity (N of M, corrected, unchecked) | grounding diff |
+|---|---|---|
+| `rendered-64ac38cf-buyers-guide.md` | 48 of 52, 5 corrected, 4 unchecked | `names ["OEM"]` |
+| `rendered-a337520c-scientific-paper.md` | 65 of 67, 9 corrected, 2 unchecked | clean |
+| `rendered-5ab36fe0-product-comparison.md` | 25 of 25, 1 corrected, 0 unchecked | clean |
+
+Their headers now say what they are and what was done to them, and the invariant test proves the
+claim rather than restating it.
+
+### M.7 Counts
+
+| suite | attempt 1 | attempt 2 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 265 / 1 env-failed | **273 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
