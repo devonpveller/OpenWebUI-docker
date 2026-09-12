@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.0
+version: 1.4.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -375,12 +375,8 @@ def _render(result: dict[str, Any]) -> str:
                     f"search: DEGRADED ({junk} of {junk + ok_calls + empty_calls} "
                     f"searches returned junk)"
                 )
-            # Parity with report.ts coverageFooter(): say when the planner's
-            # subject was a topic and the run searched on the name inside it.
-            shortened = int(rec.get("entity_shortened") or 0)
-            if shortened:
-                foot.append(f"subject shortened to its name ({shortened}x)")
-            # …and when the entity gate could not be applied. A reader who sees "search: ok" is entitled
+            # Parity with report.ts coverageFooter(): say when the entity gate
+            # could not be applied. A reader who sees "search: ok" is entitled
             # to know it was decided by the weaker overlap rule.
             missing = int(rec.get("entity_missing") or 0)
             rejected = int(rec.get("entity_rejected") or 0)

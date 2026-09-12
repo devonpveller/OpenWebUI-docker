@@ -41,16 +41,16 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrat
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core" && ruff check .
 ```
 
-**PASS:** research-service **`194 passed | 1 failed`** (the anchor requires at least 173);
+**PASS:** research-service **`192 passed | 1 failed`** (the anchor requires at least 173);
 research-curator `36 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — it opens a postgres pool at module load and needs
 the throwaway DB of T8. It fails the same way on the base commit.
 
-**FAIL:** any other failing test; research-service below 194; curator below 36; any ruff error.
+**FAIL:** any other failing test; research-service below 192; curator below 36; any ruff error.
 
 **Test accounting, because two files were DELETED.** `entity.test.ts` (22) and
 `entity-core.test.ts` (14) tested `entityCore()`, which no longer exists. `subject.test.ts`
-(41) re-expresses every behavioural assertion they made against the set rule — brand omission,
+(40) re-expresses every behavioural assertion they made against the set rule — brand omission,
 neighbouring model, the M.2 guard, the spelling variants, the six collapse fixtures, every good
 set — and adds the tester's five live sets and the five T7 candidates. Check that claim rather
 than taking it: `git -C OB1 show research-trust-core~1:integrations/research-service/entity.test.ts`
@@ -121,7 +121,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrat
 deno test -A subject.test.ts
 ```
 
-**PASS:** `41 passed | 0 failed`, including `subjectTokens: digits, capitals, and anything
+**PASS:** `40 passed | 0 failed`, including `subjectTokens: digits, capitals, and anything
 uncommon`, which pins the distinctive set for all eleven subjects the coordinator named, and
 `tokenSet offers a run, its parts, and the glued neighbours`, which pins that `Z6III` and
 `Z 6III` match each other and `100Hz` matches `100 Hz`.
@@ -137,38 +137,51 @@ uncommon`, which pins the distinctive set for all eleven subjects the coordinato
 **FAIL:** any of the eleven subjects yielding a different set; either guard missing; any
 length or phrase test still in the file.
 
-## T4 - ACCEPTANCE 3: the entity is bounded at extraction and the cut is counted
+## T4 - ACCEPTANCE 3: the subject is bounded at extraction, and nothing else claims to be
 
-```bash
-deno test -A entity-core.test.ts --filter "ACCEPTANCE 3"
-deno test -A harness-trust.test.ts --filter "subject"
+Attempt 2 failed this case twice over: it ran `entity-core.test.ts`, which that attempt had
+deleted, and it asserted `shortenEntity` kept the caller's spelling when the shipped function
+returned the lower-cased token set. Both are fixed by deciding rather than patching.
+
+**`shortenEntity` and `entity_shortened` are DELETED.** They reported a subject shortened to
+its core phrase; there is no core phrase and no shortening, because the subject is used whole
+as a set. A footer clause that can never fire again is worse than no clause.
+
+```powershell
+git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "shortenEntity|entity_shortened"
+git -C OB1 show research-trust-core:integrations/research-service/harness.ts | Select-String -Pattern "shortenEntity|entity_shortened" -Context 0,2
 ```
 
-**PASS:** three unit cases (a five-word subject shortens to the name; the caller's spelling is
-kept, so `Python 3.12` not `Python 3 12`; a subject that IS a name comes back byte-identical)
-and two end-to-end cases: the failing run's own subject is shortened, **counted**
-(`fetchStats.search.entity_shortened === 1`), the search is NOT reported as a failure, pages
-ARE fetched, and the footer carries `subject shortened to its name (1x)`; while an
-already-named subject is not counted.
+**PASS:** no hits in `search-quality.ts`; in `harness.ts` only the comment saying they were
+removed and why. `owui/tools/deep_research.py` is back at **`version: 1.4.0`** and its rendered
+footer is byte-identical to the deployed version, so **no re-paste is needed** — check that
+claim in T8 rather than taking it.
 
-Read the prompt half too — it is the cheaper fix and the one that stops the case arising:
+What DOES still ship, and is what this case now tests:
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
+deno test -A subject.test.ts --filter "entityStatusFor"
+deno test -A subject.test.ts --filter "names nothing"
+```
+
+**PASS:** three cases across two filters. A subject the query is not about is `rejected`; an empty subject is
+`missing`; a query carrying half the subject is `used`; and a rejected subject is not scored.
+Both non-`used` cases fall back to the overlap rule and are counted in `fetchStats.search`
+(`entity_missing` / `entity_rejected`) and shown in the footer — verified in T8.
+
+The prompt half still ships too:
 
 ```powershell
 git -C OB1 show research-trust-core:integrations/research-service/harness.ts | Select-String -Pattern "ENTITY RULES" -Context 3,8
 ```
 
-**PASS:** `KEYWORDIZE_SYS` states the entity is a NAME of at most 3 words, says what it is NOT
-(the topic, an intent, a bare year), and uses the failing case as its own example.
+**PASS:** `KEYWORDIZE_SYS` states the subject is a NAME of at most 3 words, says what it is
+NOT, and uses the failing dry run as its own example.
 
-**A judgement to check:** the counter fires only when the raw subject was longer than three
-words, so stripping a brand (`Dell OptiPlex 3050` → `OptiPlex 3050`) is not reported. The
-argument is that a brand strip happens on most product runs and would bury the case that
-matters. If you think every correction should be visible, that is a real disagreement.
-
-**FAIL:** a five-word entity not shortened; a shortening not counted; the footer silent; the
-two renderers disagreeing (T8).
-
----
+**FAIL:** this case naming a file that does not exist; any assertion about a function that
+does not ship; a fallback that is not counted; the OWUI version bumped when its output did not
+change, or unchanged when it did.
 
 ## T5 - ACCEPTANCE 4: nothing that used to work stopped working
 
@@ -202,9 +215,10 @@ without its reason.
 
 Findings section **G.3**, and `ENTITY_SHARE` in `search-quality.ts`.
 
-**PASS:** `ENTITY_SHARE` is still `0.175`, and the recomputed table covers every recorded set
-including the tester's five: GOOD sets run 1.00 down to 0.55; the six collapse fixtures are all
-0.00; `live-budget2026` is `entity_rejected` rather than scored.
+**PASS:** `ENTITY_SHARE` is still `0.175`, and the recomputed table (findings **H.3**) covers
+all 28 recorded sets including the tester's three junk sets and their three good counterparts:
+GOOD runs 1.00 down to **0.35** (`live-semaglutide50`, the lowest); the six collapse fixtures,
+`probe-collapsed-semaglutide` and all three junk sets are **0.00**.
 
 Recompute it yourself with `subjectTokens` + `entityShare` over every fixture in `fixtures/`.
 
@@ -220,54 +234,57 @@ still read as a search failure, say so — it is a judgement about what this det
 **FAIL:** a set within 0.1 of 0.175 with the threshold unchanged; a table that does not
 reproduce; a set omitted from it.
 
-## T7 - The rule is a rule, and its candidates are PINNED
+## T7 - The rule is a rule, and it now has an evidence FLOOR
 
-Attempt 1 listed candidates here and pinned none, which the tester flagged: a skipped optional
-half reads as clean. All five are now tests, each with the set the rule produces and a
-judgement of whether that set names the thing.
+Attempt 2 failed here. The set rule was sound and had no floor: `ceil(k/2)` is **1** when
+k <= 2, and a one-or-two-token subject is exactly what the tightened KEYWORDIZE produces, so a
+single matched token carried a hit. The tester's three live junk sets, all shipped as fixtures:
+
+| subject | junk set | attempt-2 share | now |
+|---|---|---|---|
+| `Signal` | digital-signal-processing pages | 1.00 | **0.00** |
+| `Arc browser` | arc-welding pages | 0.60 | **0.00** |
+| `MacBook M2` | M.2 NVMe heatsink pages | 1.00 | **0.00** |
+
+The third also brought back the **M.2 collision** every earlier rule guarded, because the glue
+expansion turns `M.2` into the token `m2`.
+
+The rule now reads:
+
+> A subject is its SET of distinctive tokens — digit-bearing (a bare four-digit year excepted),
+> capitalised by the planner, or not common English — and a hit carries it when it contains at
+> least half of them, rounded up, **AND at least two distinct non-stopword terms of the query**
+> (a distinctive subject token counts as one).
 
 ```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
+deno test -A subject.test.ts
 deno test -A subject.test.ts --filter "T7 candidate"
-deno test -A subject.test.ts --filter "tester's five"
 ```
 
-**PASS:** five candidate cases and the tester's five live sets.
+**PASS:** `40 passed | 0 failed`, including the three junk sets at 0.00, their three GOOD
+counterparts (`live-signal` 0.75, `live-arcbrowser` 0.90, `live-macbookm2` 1.00), and the five
+candidates attempt 1 listed without pinning.
 
-| candidate | distinctive set | why it is right |
-|---|---|---|
-| `3050 OptiPlex thermal` | `3050 optiplex thermal` | order is irrelevant to a set — the fourth rule failed precisely because it depended on where the number sat |
-| `100 hertz tone` | `100 hertz tone` | a unit longer than four characters is just a token |
-| `Postgres 17.2.1 logical replication` | `postgres 1721 logical replication` | the version glues; MySQL pages do not carry it |
-| `OptiPlex 3050 versus ThinkCentre M910q` | `optiplex 3050 versus thinkcentre m910q` | a comparison page carries half; an unrelated page carries none |
-| `e-bike 750 W hub motor` | `e bike 750 w hub motor` | hyphens are separators like any other |
+**The floor reverses two earlier judgements. Check you accept both:**
 
-And the tester's five, on their own live hit sets, all captured today with provenance headers
-naming them as the attempt-1 failure: `live-semaglutide50` 0.90, `live-nikonz6iii` 0.85,
-`live-mullvad` 0.95, `live-rpi5nvme` 1.00 — all `ok`, where the previous rule scored them
-0.00, 0.05, 1.00-on-junk and 0.00. `live-budget2026` yields an EMPTY set and is
-`entity_rejected`, which is the honest answer: "2026 budget" names nothing.
+- `probe-collapsed-semaglutide` was declared `ok` by a previous item — the engine understood
+  the subject, the relevance gate would filter per need — and is now refused. That judgement
+  predates the floor; the tester then produced three live sets of exactly that shape where the
+  shared token meant something else. One token cannot be told from the other.
+- **B1 changes shape.** A hit whose only query word is the subject no longer carries it. B1
+  stays fixed because a page really about CrashLoopBackOff says so in more than one word (its
+  live set scores 0.95), but the synthetic control had to become realistic.
 
-**Two costs are DECLARED as tests**, not hidden — check you accept them:
+**Try to break it.** Three moving parts remain: the NLTK word list, the half threshold, and
+the two-term floor. Look for a subject whose tokens are all stopwords; a good set whose pages
+name the subject and nothing else of the query (`live-semaglutide50` is the closest recorded
+case at 0.35 — find a worse one); a junk set that carries two query terms by coincidence. If
+the floor pushes a REAL good set below 0.175, report the set and the numbers — do not assume
+the floor should be weakened.
 
-- `DECLARED: a sibling model counts as carrying the subject`. `OptiPlex 3060` holds 2 of
-  `{dell, optiplex, 3050}`. The phrase rule refused it, and that refusal is what produced four
-  successive false failures. Dell's own home page, carrying only `dell`, is still refused.
-- **Adjacency no longer matters** (`search-quality.test.ts`, the `T11` spelling case):
-  `OptiPlex 7080 and the 3050-era chipset` now carries the subject.
-
-If you think either cost is too high, that is the finding — it is a judgement about which
-direction of error is worse, and four items of history say false FAILURES have been the
-expensive ones.
-
-**Try to break it anyway.** The rule has three moving parts left: the common-word list, the
-half threshold, and the bare-number guard. Look for a subject whose distinctive set is all
-common words (does it reject, as `2026 budget` does?); a two-token subject where one token is
-generic enough that half is too weak; a junk set that happens to carry half a five-token
-subject. Anything that makes a genuinely collapsed set pass, or a genuinely good set fail, is
-a FAIL.
-
-**FAIL:** a candidate whose set names nothing a page would carry; a subject reduced to
-nothing when it does name something; either declared cost appearing without its test.
+**FAIL:** any junk set above 0.00; any recorded good set below the line; a reversal without
+its test and its reason.
 
 ## T8 - Integration, image, and renderer parity
 
@@ -292,7 +309,7 @@ have changed too:
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
-deno eval --ext=ts "import { coverageFooter } from './report.ts'; console.log(coverageFooter([{need:'a',status:'answered'},{need:'b',status:'partial'}],{queries:[],hits:30,fetched:4,readable:4,relevant:2,collapsed:1,offtopic:0,ok:2,empty:0,errors:0,entity_missing:0,entity_rejected:2,entity_shortened:1},'complete'))"
+deno eval --ext=ts "import { coverageFooter } from './report.ts'; console.log(coverageFooter([{need:'a',status:'answered'},{need:'b',status:'partial'}],{queries:[],hits:30,fetched:4,readable:4,relevant:2,collapsed:1,offtopic:0,ok:2,empty:0,errors:0,entity_missing:0,entity_rejected:2},'complete'))"
 ```
 
 then the same record through the Python fallback (`t8.py` in the worktree root):
@@ -305,7 +322,7 @@ out = m._render({"synthesis": "x", "cited_sources": [], "gaps": [], "backstop": 
   "needs_status": [{"need": "a", "status": "answered"}, {"need": "b", "status": "partial"}],
   "search_record": {"hits": 30, "fetched": 4, "readable": 4, "relevant": 2, "collapsed": 1,
                     "offtopic": 0, "ok": 2, "empty": 0, "entity_missing": 0,
-                    "entity_rejected": 2, "entity_shortened": 1}})
+                    "entity_rejected": 2}})
 print([l for l in out.split("\n") if "needs answered" in l][0].strip().strip("_").replace("\u2014 ","").strip())
 ```
 
@@ -315,38 +332,57 @@ print([l for l in out.split("\n") if "needs answered" in l][0].strip().strip("_"
 needs answered 1 of 2 (1 partly) · sources 2 relevant of 4 fetched (30 hits, 1 junk) · subject shortened to its name (1x) · entity gate: 2 search(es) judged without it (2 rejected the run's subject)
 ```
 
-and `owui/tools/deep_research.py` says `version: 1.5.0` (was 1.4.0).
+and `owui/tools/deep_research.py` says **`version: 1.4.0`** — UNCHANGED from the deployed
+version, because the footer clause this item had added was deleted with `shortenEntity` (T4).
+Confirm no re-paste is needed:
+`git diff 8d480a5..work/research-trust-core -- owui/tools/deep_research.py` should show only a
+comment change, no output text.
 
-**FAIL:** a build failure; a missing module; the two renderers differing; the version
-unchanged, since an un-bumped paste surface is one the operator will not re-paste.
+**FAIL:** a build failure; a missing module; the two renderers differing; the version bumped
+when the rendered output did not change, or unchanged when it did.
 
 **Clean up:** remove the container, network and image; `reap.ps1 -Report` must show nothing
 owned by you.
 
 ---
 
-## T9 - Nothing live changed, nothing true was silently removed
+## T9 - Nothing live changed, and nothing was removed without an account of it
 
 ```powershell
-cd "D:\Open WebUI\ai-stack"
+cd "D:\Open WebUIi-stack"
 git diff --name-only 8d480a5..work/research-trust-core
 git diff 8d480a5..work/research-trust-core -- OB1
 git status --short
-git -C OB1 diff 5c189cf..research-trust-core | Select-String -Pattern "^\-" | Select-String -NotMatch "^\-\-\-"
 docker inspect openbrain-research --format "{{.Config.Image}} {{.State.StartedAt}} {{.RestartCount}}"
 ```
 
 **PASS:** the parent diff touches only `documentation/` and `owui/tools/deep_research.py`; the
 OB1 gitlink diff is **EMPTY** (not bumped); the main checkout is unchanged; the running
-container is untouched. Every removed OB1 line is replaced in the same hunk — the substantive
-removals are the old digit-anchored `entityCore` body (replaced by the run-windowed one), the
-old `KEYWORDIZE_SYS` prompt (replaced by the bounded one), and the two changed test
-expectations of T5.
+container is untouched.
 
-**FAIL:** a live container restarted or rebuilt; the gitlink bumped; a removed behaviour with
-no replacement and no note.
+**Then reconcile the deleted TESTS, not only the removed source lines.** Three test files were
+deleted across this item's attempts, and attempt 2 withdrew one case with no replacement and no
+reason and narrowed another in silence — which the tester found and the source-line diff did
+not show.
 
----
+```powershell
+# every test name that existed at the base of this item…
+git -C OB1 show 5c189cf:integrations/research-service/entity.test.ts | Select-String -Pattern '^Deno.test\("' 
+# …and at the tip
+git -C OB1 show research-trust-core:integrations/research-service/subject.test.ts | Select-String -Pattern '^Deno.test\("'
+```
+
+Compare that list against the **removed-tests table in findings section H.5**, which maps each
+removed case to its replacement or states why it has none.
+
+**PASS:** every removed case appears in the table; each row's replacement actually exists in
+`subject.test.ts` (search for it); and the two rows that say WITHDRAWN carry a reason you
+accept — a sibling model now carrying the subject, and `shortenEntity` going with its function.
+
+**FAIL:** a live container restarted or rebuilt; the gitlink bumped; a removed test missing
+from the table; a table row naming a replacement that does not exist; a behaviour that
+disappeared with no entry at all.
+
 
 # D. Deploy (AFTER this plan passes — operator or reviewer)
 
@@ -378,8 +414,8 @@ curl -s -X POST http://127.0.0.1:8818/research -H "x-brain-key: $MCP_ACCESS_KEY"
 Poll `GET /research/jobs/<id>`. **PASS:** the run FETCHES pages and cites a URL matching
 `pubmed.ncbi.nlm.nih.gov/40128952`, `pmc.ncbi.nlm.nih.gov/PMC11955832` or `jstage.jst.go.jp`.
 Anything else fails, including a clean `no_relevant_sources` — that is what the two previous
-deploys produced and what this item exists to stop. Record the subject KEYWORDIZE returned and
-whether `entity_shortened` fired.
+deploys produced and what this item exists to stop. Record the subject KEYWORDIZE returned and its
+distinctive token set (the progress line names it).
 
 Then the OptiPlex query, which PASSED on the previous deploy (dry run 4826d896: 5/5 searches
 ok, 12 cited, footer `needs answered 1 of 6 (5 partly)`). **PASS:** it still cites at least 5
@@ -388,11 +424,12 @@ entity for that run shortens from `Dell OptiPlex 3050`, so it exercises the chan
 
 Record both job ids, the footer lines and the per-search entity shares in the findings sink.
 
-### D.3 Re-paste the OWUI tool
+### D.3 The OWUI tool needs NO re-paste
 
-`owui/tools/deep_research.py` is **v1.5.0** (was 1.4.0): the footer gained the
-`subject shortened to its name` clause. Paste through the tool editor or
-`POST /api/v1/tools/id/deep_research/update`, then check `owui/manifest.csv`.
+`owui/tools/deep_research.py` stays at **v1.4.0**, the deployed version. The clause this item
+had added to its footer was deleted with `shortenEntity` (findings H.4), so its rendered output
+is byte-identical to what is already pasted. Verify with the diff in T8 before skipping the
+step; if it shows any change to emitted text, re-paste it and bump the version.
 
 ---
 

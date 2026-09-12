@@ -1151,3 +1151,120 @@ It now returns the distinctive set joined by spaces — what the run actually se
 feeds the progress line and the `entity_shortened` footer clause. Kept rather than deleted
 because a reader who sees `search: DEGRADED` is entitled to know which tokens the verdict was
 about; the counter still fires only when the planner's subject was longer than three words.
+
+---
+
+## H. research-trust-core attempt 3 — the evidence floor (2026-09-11)
+
+The set rule was sound and had **no floor on how much evidence "half" is**. `ceil(k/2)` is 1
+when k ≤ 2, and a one-or-two-token subject is exactly what the tightened KEYWORDIZE produces,
+so ONE matched token carried a hit. The tester's live counter-examples, each a real page about
+a different subject sharing a single token:
+
+| subject | junk set | share on attempt 2 |
+|---|---|---|
+| `Signal` | digital-signal-processing pages | **1.00** |
+| `Arc browser` | arc-welding pages | **0.60** |
+| `MacBook M2` | M.2 NVMe heatsink pages | **1.00** |
+
+The last also brought back the **M.2 collision** every previous rule guarded, because the glue
+expansion turns `M.2` into the token `m2`.
+
+### H.1 The rule, with the floor
+
+> A subject is its SET of distinctive tokens — those bearing digits (a bare four-digit year
+> excepted), those the planner capitalised, and those that are not common English — and a hit
+> carries the subject when it contains **at least half of them, rounded up, AND at least two
+> distinct non-stopword terms of the query** (a distinctive subject token counts as one).
+
+The floor uses a signal the run already had: `overlapRatio`'s per-hit test. No fourth list, no
+length rule. One token is not evidence — and no rule can tell "Signal the messenger" from
+"signal processing" when a page offers only that one word.
+
+### H.2 The word list is now general and cited
+
+`COMMON` was a closed list that had grown case by case as each item's findings landed
+(`firmware`, `port`, `forwarding`, `micrograms`, `budget`) — the fourth way this module has
+tried to encode particular incidents into a rule. It is now the **NLTK English stopword list**
+(179 words, `https://www.nltk.org/nltk_data/` → `corpora/stopwords/english`) verbatim, plus the
+closed set of SI and imperial unit names, and nothing else.
+
+Two measured consequences, both accepted:
+
+- **Subjects got bigger.** `100Hz audio VR motion sickness` → `{100hz, audio, vr, motion,
+  sickness}`; `Mullvad WireGuard port forwarding` → all four. It costs nothing: the half rule
+  raises the bar by half a token and gives one more way to clear it, and every live set still
+  scores ≥ 0.35.
+- **`2026 budget` is no longer rejected.** `budget` is not an NLTK stopword, so the subject
+  names something and its live set — genuinely about federal budgets — scores 0.75 and is
+  `ok`. The earlier empty-set rejection was an artifact of the tuned list. The tester's other
+  four attempt-1 cases all still pass.
+
+### H.3 The share table, 28 sets — [observed-live 2026-09-11]
+
+| share | set | class |
+|---|---|---|
+| 1.00 | `probe-good-iphone`, `search-good-optiplex`, `live-prius`, `live-rpi5nvme`, `live-macbookm2` | GOOD |
+| 0.95 | `live-crashloop`, `live-mullvad` | GOOD |
+| 0.90 | `live-python312`, `live-nikonz6iii`, `live-arcbrowser` | GOOD |
+| 0.85 | `live-100hz-mechanism` | GOOD |
+| 0.80 | `live-100hz-studies` | GOOD |
+| 0.75 | `live-signal`, `live-budget2026`, `live-optiplex-health` (0.70) | GOOD |
+| 0.55 | `live-optiplex-thermal` | GOOD |
+| 0.50 | `probe-good-oomkilled` | GOOD |
+| 0.40 | `live-100hz-ssq` | off-need, now ok |
+| 0.35 | `live-semaglutide50` | GOOD — the lowest |
+| **0.175** | — | **ENTITY_SHARE (unchanged)** |
+| 0.00 | `junk-signal-dsp`, `junk-arc-welding`, `junk-macbook-m2-nvme` | JUNK (the tester's) |
+| 0.00 | the six collapse fixtures, `probe-collapsed-semaglutide` | COLLAPSED |
+
+**The threshold does not move.** Nearest sets are 0.00 below and 0.35 above; nothing lands
+within 0.1 of 0.175. Every junk set the tester built is now exactly 0.00.
+
+`live-semaglutide50` fell 0.90 → 0.35: its pages name semaglutide and little else of the
+query. It is still twice the line, and it is the set to watch if the floor is ever revisited.
+
+### H.4 Two reversals and one deletion, declared
+
+- **`probe-collapsed-semaglutide` reverses from `ok` to collapsed.** The previous item declared
+  that set `ok` — the engine understood the subject, the relevance gate would filter per need —
+  and that judgement was made when there was no floor. The tester then produced three live sets
+  of exactly that shape where the shared token meant something else entirely. One token cannot
+  be told from the other, so this set goes with them.
+- **B1's fix changes shape.** A hit whose ONLY query word is the subject no longer carries it.
+  B1 stays fixed because a page really about CrashLoopBackOff says so in more than one word —
+  the live set scores 0.95 — but the synthetic control had to become realistic to pass.
+- **`shortenEntity` and `entity_shortened` are DELETED.** They existed to report a subject
+  shortened to its core phrase. There is no core phrase and no shortening: the subject is used
+  whole, as a set. Keeping a footer clause that could never fire again would be worse than
+  removing it. `deep_research.py` goes back to **1.4.0** and its rendered footer is byte-identical
+  to the deployed version, so **no re-paste is needed**.
+
+### H.5 Removed tests — name → replacement or reason
+
+| removed test | from | replacement / reason |
+|---|---|---|
+| `entityTokens splits a digit/letter run…` | `entity.test.ts` | → `tokenSet offers a run, its parts, and the glued neighbours` |
+| `entityCore drops a brand or qualifier…` | `entity.test.ts` | → `a hit carries the subject at half its tokens` + `REGRESSION: a page that omits the brand still carries the subject` |
+| `entityCore never strips a unit away from its number` | `entity.test.ts` | → `a BARE NUMBER never carries a subject on its own` |
+| `entityCore leaves an already-distinctive entity alone` | `entity.test.ts` | → `subjectTokens: digits, capitals, and anything uncommon` |
+| `entityCore refuses to reduce an entity to nothing` | `entity.test.ts` | → `a subject that names nothing is REJECTED, not guessed at` |
+| `hitCarriesEntity matches the core phrase in the shapes engines write it` | `entity.test.ts` | → `tokenSet…` + `T11: the subject is matched in every spelling` |
+| `hitCarriesEntity accepts the core without the brand` | `entity.test.ts` | → `REGRESSION: a page that omits the brand still carries the subject` |
+| `a brand of ANY length is dropped…` | `entity.test.ts` | → same; a set has no brand to drop |
+| `a NEIGHBOURING model is not the same machine` | `entity.test.ts` | **WITHDRAWN, declared**: a sibling model now carries the subject — `DECLARED: a sibling model counts as carrying the subject` states it and why |
+| `a one-character model code never becomes the whole identity` (M.2) | `entity.test.ts` | → `REGRESSION: an unrelated product does not carry the subject`, and the M.2 case is now covered for ALL subject sizes by `junk-macbook-m2-nvme` (2-token subject), which is what attempt 2 silently narrowed |
+| `a bare number is never an identity` | `entity.test.ts` | → `a BARE NUMBER never carries a subject on its own` |
+| ACCEPTANCE 1/2 cases | `entity-core.test.ts` | → `REGRESSION ok: live-*` per fixture, plus `the tester's five subjects` |
+| `the window is bounded…` | `entity-core.test.ts` | **no replacement, no longer meaningful**: there is no window |
+| `shortening keeps the CALLER's spelling` | `entity-core.test.ts` | **WITHDRAWN with the function** — H.4; attempt 2 withdrew it with no reason, which the tester caught |
+
+### H.6 Counts
+
+| suite | attempt 2 | attempt 3 |
+|---|---|---|
+| `research-service` | 194 / 1 env-failed | **192 / 1** |
+| `research-curator` | 36 | 36 |
+| `ruff check .` | clean | clean |
+
+The two-test drop is the `shortenEntity` pair going with the function.
