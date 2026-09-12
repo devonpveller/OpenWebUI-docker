@@ -1530,3 +1530,169 @@ Provenance: observed-live 2026-09-12 04:00-04:03 UTC; `research_jobs.result` for
   limiter.
 - Coverage judge still conservative: "0 of 7 (7 partly)" on a run whose body states seven
   concrete findings.
+
+---
+
+## J. research-trust-report — the document, and closing the gaps before delivering (2026-09-12)
+
+The engine had become trustworthy and was still not USEFUL. The operator, on the first live
+report off the deployed stack: it is "organized only as facts, sources and gaps, which is not a
+greatly formatted report that I could hand off in a professional environment" — the information
+is accurate and must stay that way — and "when the answer isn't complete enough, there should be
+a recommendation to perform an additional run, or better yet, perform the additional run before
+sending an incomplete result back to the end user".
+
+The artefact is job **33250e9b** (a used Dell OptiPlex 3050 buyer's question), kept whole at
+`documentation/evidence/research-trust-report/live-owui-33250e9b.result.json`, with the
+delivered document beside it as `rendered-BEFORE-33250e9b.md` and this branch's render of the
+SAME synthesis as `rendered-AFTER-33250e9b.md`.
+
+### J.1 Four mechanisms, all of them measured — [read-from-source + observed-live 2026-09-12]
+
+| # | What the reader saw | Why |
+|---|---|---|
+| 1 | A bare facts/sources/gaps list for a buyer's question | Template selection ran only at **3 ANSWERED** needs (`shouldClassifyTemplate(answered)`), and the coverage judge had marked all seven needs `partial`, so `answered` was 0 |
+| 2 | `needs answered 0 of 7 (7 partly)` above 26 cited findings | `reconcileNeedsStatus` could only lift a judge's `open` to `partial`, however much the synthesis grounded |
+| 3 | The same seven open questions printed twice, the second copy headed "Open gaps (**NOT grounded**)" | The template writes its own gaps section and `lib.ts:284` appended a second one — mislabelled, because needs the report had partly answered are not ungrounded |
+| 4 | A paragraph telling the reader "Do NOT fill them from your own knowledge… call deep_research again" | `lib.ts:297` — a directive to the MODEL, rendered in the human's document. `deep_research.py` mirrored 3 and 4 at :304/:318 |
+
+### J.2 Coverage: the count, not the flag — and the trap inside it
+
+A need with **≥2 grounded, cited lines** about it is now `answered`; exactly one is `partial`;
+zero leaves the judge's verdict alone; `search_failed` is never reopened
+(`report.ts:180`, `ANSWERED_MIN_LINES` at :166).
+
+The first implementation of that rule was **wrong in the way this workstream keeps being wrong**,
+and the measurement caught it: matching a line to a need by two shared distinctive terms gave
+
+    per-need grounded line counts: 19 17 17 17 18 17 17   (of 19 grounded lines)
+
+— every need "answered" by nearly every line, because `dell`, `optiplex` and `3050` are in all
+seven needs and in almost every line. It was measuring the SUBJECT with a per-need label on it,
+which is the same shape as an entity rule that matches on one shared token, and it would have
+made `answered` free for every run forever.
+
+What ships subtracts the common core: each need's terms MINUS the ones it shares with half the
+other needs, computed from the needs of this run, no list (`discriminatingTerms`, `report.ts:152`).
+A line counts for a need when it carries **one of that need's own discriminating words AND two of
+the need's words overall** — deliberately the same two-part shape as the entity floor from the
+previous item, for the same reason: one distinctive word is a coincidence, corroboration alone is
+the subject. Measured on the recorded synthesis:
+
+| need | grounded lines | verdict |
+|---|---|---|
+| capacitor degradation symptoms | 7 | answered |
+| thermal / fan failure | 5 | answered |
+| PSU reliability | 6 | answered |
+| BIOS modification | 4 | answered |
+| RAM slot problems | 6 | answered |
+| CPU socket / bent pins | 9 | answered |
+| red flags / water damage when buying | **1** | **partial** |
+
+**6 of 7 answered, 1 partly** — against `0 of 7 (7 partly)` in production and the anchor's floor
+of 5. The one that stays `partial` is the need the synthesis really does carry one line about,
+which is the evidence that the measure discriminates at all.
+
+### J.3 The document
+
+`buyers-guide` is one entry in TEMPLATES (`templates.ts:68`) — title stating the finding,
+executive summary, a **What to check in person** checklist, **failure modes by subsystem** as a
+table with a citation in every row, one limitations section, sources. Template selection now
+counts `answered + partial` (`shouldClassifyTemplate`, `report.ts:251`): a need with a grounded
+finding about it is evidence a template can stand on, whether or not the judge called the
+sub-question settled.
+
+`LIMITATIONS_SECTION` (`templates.ts:60`) is one string shared by every template, so there is
+exactly ONE section of unknowns in any report, and it ends by asking for the next run in the
+reader's terms — or, when nothing is open, by saying the question is answered.
+
+The classifier states the reader's PURPOSE (buy / build / learn / compare / decide) and picks a
+template for it in one call (`classifyReport`, `templates.ts:297`). **The purpose is not derived
+from cue words in the question**, and that is deliberate: four items in this workstream have now
+failed on a hand-written list of surface strings, and a list of buying words would be the fifth.
+The model reads the question; `PURPOSE_FALLBACK` (`templates.ts:245`) is used only when the
+returned template id does not exist, so a classifier that says "buy" and misspells the id still
+gets a buyer's guide.
+
+### J.4 The gap-closing pass
+
+When the first synthesis leaves a need open or partly answered and most of the wall clock is
+unspent, the run does one more gather round aimed at the synthesis's own `[GAP]` lines, then
+re-synthesizes over the merged pool (`harness.ts:1261`).
+
+Bounded by construction, not by intention: `gapRound` is set to null before it is awaited, so a
+second pass is unreachable; at most `GAP_PASS_MAX_QUERIES` (3) searches; only while elapsed is
+under `GAP_PASS_MAX_ELAPSED` (0.6) of the budget; only on the topic path, because nothing else
+assigns `gapRound`; and only when `backstop === "complete"` — a run that already tripped a
+backstop has said why it stopped, and a second round of an exhausted budget closes nothing.
+
+Two things the pass had to be prevented from doing, both found by existing tests:
+
+- **Relabelling the run.** The first version let the pass's own `backstopDecision` write
+  `backstop`, and a `fetch_degraded` run — a real diagnosis, "the pages would not read" — came
+  back as `max_fetch`, a budget note. The pass now stops on a budget and never renames the run.
+- **Skipping the numeric gate.** The second synthesis goes through the same
+  `applyNumericGrounding` + `buildCitedAndRenumber` (`harden`), because a pass that ADDS sources
+  is exactly when a new uncited figure can arrive.
+
+The footer says what it cost and what it bought, including when it bought nothing:
+`gap-closing pass: +K sources, needs answered X of N -> Y of N`. The curator is still delegated
+to once, with the final synthesis; no intermediate synthesis is ever persisted.
+
+### J.5 The chat message is rewritten, not appended
+
+`deliverReport` appended, which is why the final message began with the model's "research is
+running in the background" line and why a second write was impossible. It now REWRITES
+(`index.ts:535` via `rewriteChatBody`, `lib.ts:321`), so the callback runs twice: an interim
+`First pass complete: X of N needs answered - running a gap-closing pass to close the rest` when
+the pass starts, then the report.
+
+The waiting line is removed by an **exact-string contract**, not a pattern: `deep_research.py`
+tells the model to reply with `HANDOFF_WAIT_LINE` verbatim, and the engine strips that one string.
+Anything else the model said is kept and the report is appended under it. Deleting "whatever the
+model wrote before the report arrived" on a guess would be deleting a person's assistant's words.
+
+The interim write persists nothing canonical: no result, no job state, no curator — it rewrites
+the chat body, which the final write replaces.
+
+### J.6 The last place a fact can enter ungrounded — [observed-live 2026-09-12]
+
+The template render is a model writing prose, and it is downstream of every grounding gate this
+engine has. Diffing the buyer's-guide render of 33250e9b against its own synthesis found the
+renderer inventing **procedure**: "wait 30 seconds", "repeat three times", and `BSOD` for a
+phrase the answer spells out.
+
+The grounding rules now forbid acronyms the answer does not use and quantities in instructions
+(`templates.ts` GROUNDING RULES), and the re-render is clean of numbers and URLs. What survives
+is two standards: the model wrote "no standard **ATX** or **SFX** connector present" from a
+source that says only "proprietary".
+
+So the run now measures its own report the way it already measures its figures:
+`renderGroundingDiff` (`grounding.ts:269`) records `numbers` / `urls` / `names` the grounded
+answer does not hold, on every run, as `RunResult.proseUngrounded`, with a progress line when it
+is non-empty. Nothing is blocked and nothing is rewritten — a report is not thrown away over an
+acronym — and nothing is hidden. The test pins the two names exactly rather than tolerating a
+threshold: a THIRD name appearing in that document fails it.
+
+| document | numbers | urls | names |
+|---|---|---|---|
+| the render as first written | `30`, and the rest of the header noise | none | `ATX`, `BSOD` |
+| after the tightened rules (shipped) | **none** | **none** | `ATX`, `SFX` |
+
+### J.7 Counts
+
+| suite | before | after |
+|---|---|---|
+| `research-service` | 203 / 1 env-failed | **233 / 1** |
+| `research-curator` | 36 | 36 |
+| `ruff check .` | clean | clean |
+
+The one failure is `orchestrator.test.ts`, which opens a postgres pool at module load; it fails
+identically on the base commit.
+
+### J.8 Out of scope, recorded
+
+- `entityShare` still reads `title + " " + snippet` and never `url` (eighth item running).
+- `research_jobs.status` is still `done` with `error` NULL for a run that retrieved nothing.
+- The BEFORE document's own footer is the RED for J.2: it was produced in production, not by a
+  test harness, and it says `needs answered 0 of 7 (7 partly)` under seven answered needs.

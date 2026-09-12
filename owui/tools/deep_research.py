@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.4.1
+version: 1.5.0
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -259,14 +259,42 @@ def _handoff_notice(job_id: str) -> str:
         f"No findings exist yet; this tool returned nothing to summarise.\n\n"
         f"The grounded report will be appended to this very message when the engine "
         f"finishes (minutes to hours). The user does not need to stay on this page.\n\n"
-        f"YOUR ONLY VALID RESPONSE NOW: one short line telling the user research is "
-        f"running and will appear here when done. Then stop.\n"
+        f"YOUR ONLY VALID RESPONSE NOW: reply with EXACTLY this line and nothing "
+        f"else, then stop:\n"
+        f"_Researching — this message will be replaced by the grounded report when "
+        f"the engine finishes._\n"
+        f"(The engine REPLACES that exact line with the report, so any other wording "
+        f"stays above the findings forever.)\n"
         f"- Do NOT answer the question from your own knowledge - that is the exact "
         f"fabrication this engine exists to prevent, and it will be archived above "
         f"the real answer.\n"
         f"- Do NOT reach for web search, fetch, or any other tool to fill the wait.\n"
         f"- Do NOT call deep_research again for this question - the engine runs jobs "
         f"one at a time, so a duplicate only queues behind this one and doubles the wait."
+    )
+
+
+def _incomplete_directive(result: dict[str, Any]) -> str:
+    """
+    The one machine-addressed line an incomplete run emits.
+
+    BYTE-IDENTICAL to lib.ts `incompleteDirective` - the plan's parity case
+    compares the two renderers' whole output, and this line is the only part of
+    it that is written for the model rather than the reader. An HTML comment:
+    invisible in the chat, in context on the next turn, impossible to mistake
+    for part of the report.
+    """
+    ns = result.get("needs_status")
+    if isinstance(ns, list):
+        open_n = sum(1 for n in ns if not (isinstance(n, dict) and n.get("status") == "answered"))
+    else:
+        open_n = len(result.get("gaps") or [])
+    backstop = result.get("backstop")
+    why = backstop if backstop and backstop != "complete" else "gaps_open"
+    return (
+        f"<!-- engine: incomplete ({why}); {open_n} need(s) not fully answered; "
+        f"do not fill them from your own knowledge - call deep_research with a query "
+        f"targeting the open question -->"
     )
 
 
@@ -299,28 +327,13 @@ def _render(result: dict[str, Any]) -> str:
     backstop = result.get("backstop")
     incomplete = bool(gaps) or (backstop and backstop != "complete")
 
-    if gaps:
-        parts.append(
-            "\n\n**Open gaps** (NOT grounded — recorded for a future run):\n"
-            + "\n".join(f"- {g}" for g in gaps)
-        )
-
-    # Directive to the calling model — keeps it from "finishing" with fabricated
-    # content. The engine is the only grounded path; gaps are pursued by calling
-    # it again, never filled from the model's own knowledge or other tools.
-    if incomplete:
-        reason = (
-            f"stopped early ({backstop})"
-            if backstop and backstop != "complete"
-            else "left gaps open"
-        )
-        parts.append(
-            f"\n\n> ⚠ This research is grounded but INCOMPLETE — it {reason}. The open "
-            f"gaps above are not answered by any source. Do NOT fill them from your own "
-            f"knowledge or other web/fetch tools (that fabricates). To pursue a gap, call "
-            f"deep_research again with a query targeting it; otherwise present the gaps as "
-            f"open unknowns."
-        )
+    # The "Open gaps (NOT grounded)" block and the INCOMPLETE banner that used to
+    # sit here are GONE, in step with lib.ts renderResult. The block printed the
+    # report's own limitations a second time and labelled them "not grounded"
+    # even for needs the report had answered in part; the banner was a paragraph
+    # addressed to a model, printed where a person reads. The directive they
+    # carried is now one machine-addressed line at the very end - see
+    # _incomplete_directive, which is byte-identical to the TypeScript renderer.
 
     # Footer parity with lib.ts renderResult (research-trust 2026-09-11).
     # `coverage NN%` is GONE from both renderers: it was 1 - gap_ratio over
@@ -348,6 +361,15 @@ def _render(result: dict[str, Any]) -> str:
             f"needs answered {answered} of {len(needs_status)}"
             + (f" ({partial} partly)" if partial else "")
         )
+        # Parity with report.ts coverageFooter(): the gap-closing pass states
+        # what it cost and what it bought, including when it bought nothing.
+        gp = result.get("gap_pass")
+        if isinstance(gp, dict):
+            foot.append(
+                f"gap-closing pass: +{gp.get('added', 0)} sources, needs answered "
+                f"{gp.get('answeredBefore', 0)} of {gp.get('total', 0)} -> "
+                f"{gp.get('answeredAfter', 0)} of {gp.get('total', 0)}"
+            )
         rec = result.get("search_record")
         if isinstance(rec, dict) and isinstance(rec.get("fetched"), int):
             # PARITY with report.ts coverageFooter()/searchHealthLabel(). Both
@@ -405,5 +427,8 @@ def _render(result: dict[str, Any]) -> str:
         foot = []
     if foot:
         parts.append(f"\n\n_— {' · '.join(foot)}_")
+
+    if incomplete:
+        parts.append("\n\n" + _incomplete_directive(result))
 
     return "\n".join(parts)
