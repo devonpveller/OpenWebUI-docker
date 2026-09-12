@@ -1,26 +1,28 @@
-<!-- The `buyers-guide` render of live job 64ac38cf (the approved exemplar), as delivered by THIS branch's
-     pipeline: the document research-trust-template committed at e28c974, put through the fidelity
-     check with the names gate, the POLARITY guard and the duplication guard. Not a fresh render -
-     the diff against e28c974 is the check's work and nothing else.
+<!-- The `buyers-guide` render of recorded job 64ac38cf (a used Dell OptiPlex 3050 SFF, bought in person), as delivered by THIS
+     branch's pipeline: the document research-trust-template committed at e28c974, put through
+     the fidelity check with the names gate and the FLIP JUDGE. Not a fresh render - the diff
+     against e28c974 is the check's work and nothing else, and every model call in it went
+     through the deployed LiteLLM path (11 calls, 39s).
 
-     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before and
-     after. No hunk flips a sentence's polarity; an absence stays an absence:
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before
+     and after. No hunk flips a sentence's polarity; an absence stays an absence:
 
      | line | changed by       | polarity               | the text that changed |
      |------|------------------|------------------------|-----------------------|
-     | 39   | gate (OEM)       | absence -> absence     | Whether Dell sells a direct-replacement 180 W SFF PSU separately... |
-     | 49   | gate (ESR)       | assertion -> assertion | - Are there documented capacitor-related failures (bulging, leak... |
-     | 51   | gate (HDD)       | assertion -> assertion | - Are there common storage-drive failure patterns (specific HDD/... |
+     | 40 | names gate (OEM) | absence -> absence | "an OEM replacement" -> "a direct-replacement" |
+     | 50 | names gate (ESR) | absence -> absence | "ESR-degraded" -> "degraded" |
+     | 52 | names gate (HDD) | absence -> absence | "HDD/SSD" -> "drive" |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":43,"units":44,"unchecked":1,"stronger":0,"unsupported":1,"rewritten":2,"replaced":0,"polarity_skipped":1,"polarity_default":0,"duplicate_skipped":0,"names_blocked":["ESR","HDD","OEM"]}
-       polarity decided by : {"no-negation":21,"heading":8,"evidence-noun":6,"default-absence":5,"world-marker":4}
-       grounding diff  : names [ESR, HDD, OEM] -> []
+       render fidelity : {"checked":43,"units":44,"unchecked":1,"stronger":0,"unsupported":1,"rewritten":3,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":1,"no_candidate":0,"names_blocked":["ESR","HDD","OEM"]}
+       polarity decided by : {"no-negation":21,"evidence-noun":6,"default-absence":5,"world-marker":4,"heading":7,"judge":3}
+       grounding diff  : names ["ESR", "HDD", "OEM"] -> []
 
-     `polarity decided by` is the attempt-4 addition: the run that shipped an inversion reported
-     polarity_skipped 0, because the guard had never ENGAGED rather than declining to act. These
-     counts say how every sentence was classified and how many were held by the conservative
-     default rather than by a heading or a named evidence noun.
+     `polarity decided by` follows the DECIDER, not the words: a unit put to the flip judge is
+     recorded as "judge" and leaves the lexical bucket it was provisionally filed under, so
+     what remains under a lexical key is exactly what the check never had to ask about. Three
+     lexicons in a row decided polarity wrongly on delivered documents; nothing lexical decides
+     it now.
 
      Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 

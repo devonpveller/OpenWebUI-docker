@@ -43,11 +43,11 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integra
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names" && ruff check .
 ```
 
-**PASS:** research-service **`294 passed | 1 failed`** (the anchor requires at least 273);
+**PASS:** research-service **`301 passed | 1 failed`** (the anchor requires at least 273);
 research-curator `40 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — postgres at module load, T7 runs it properly.
 
-**FAIL:** any other failing test; research-service below 294; curator below 40; any ruff error;
+**FAIL:** any other failing test; research-service below 301; curator below 40; any ruff error;
 any file read from outside `/w`.
 
 ---
@@ -140,81 +140,96 @@ names gate:
 | "The EEG and GVS data … do not trace the resolution pathway." | a background claim about what causes the conflict state |
 | "It is unclear whether the effects are additive, redundant, or potentially antagonistic." | a near-duplicate of the sentence before it, three possibilities flattened to one |
 
-**The rule now, and the change attempt 4 had to make to it:** *a correction may never flip a
-unit's POLARITY, and **any unit that denies or doubts anything is an ABSENCE by DEFAULT** — the
-only escape is a narrow positive marker for a world claim: a negated NON-epistemic predicate about
-a concrete subject, in a findings section, with no evidence noun anywhere in the unit. An absence
-may only be replaced by an absence — a [GAP]/[UNCERTAIN] line of matching polarity, or a rewrite
-that keeps the denial — and in "What the evidence does not settle" and "Limitations" nothing else
-is permitted at all; when no such correction exists the unit is left exactly as written and
-counted `polarity_skipped`, which lands in the footer's `U unchecked`.*
+**The rule now — and nothing lexical decides it.** *A correction may never flip what a sentence
+claims about the EVIDENCE. Attempts 2, 3 and 4 each tried to decide that with words — evidence
+nouns, then a negation list, then absence-by-default with a narrow world-marker — and a tester
+broke all three on delivered documents. The words are out of the decision path. Before ANY
+correction is applied, rewrite or verbatim, in any section, the FLIP JUDGE is shown the original
+and the proposed correction (with the section heading, and the sentence standing beside it) and
+answers one question. FLIP, an error, or an answer that cannot be parsed leaves the unit exactly
+as written. KEEP applies it. There is no lexical fast path: the first one built for this attempt
+waved "Scarcely any of the sources quantify the failure rate" straight through, because neither it
+nor the [SOURCED] line that would have replaced it carries a negation token.*
 
-**Why the default moved.** Attempt 3 decided absence only when a fixed list of evidence nouns
-fired, and the tester proved a miss was NOT conservative: six of 21 probes were classified
-assertions and went down the ordinary path where a [SOURCED] line replaces them. The sharpest was
-this plan's own pinned sentence with one noun changed — "The EEG and GVS **data** … do not trace
-the resolution pathway" was protected, "…**recordings**…" was not, and the second was replaced by
-"VR motion sickness is attributed to a sensory conflict…". The record said `polarity_skipped: 0`:
-the guard had not declined to act, it had never engaged, and nothing in the footer could say so.
+**The judge's prompt** (`FLIP_JUDGE_SYS`, `fidelity.ts`) draws one distinction and draws it with
+both examples, because the two sides of it look identical grammatically:
 
-**Every unit now records HOW its polarity was decided** — `heading`, `evidence-noun`,
-`default-absence`, `world-marker`, `no-negation` — the counts are on the run, and the footer says
-how many sentences were held back and how many of those the default caught:
+| | ORIGINAL | CORRECTION | verdict |
+|---|---|---|---|
+| about the EVIDENCE | "Scarcely any of the sources quantify the failure rate." | "The failure rate is quantified at three percent across the reported fleet." | **FLIP** — the original says the evidence is thin, the correction says it is settled |
+| about the WORLD | "The PSU is not proprietary." | "The SFF uses a proprietary power supply and a proprietary power connector." | **KEEP** — the report states a fact the sources contradict, and repairing that is what this module is for |
+
+It also answers a second question in the same call: does the correction only repeat the sentence
+BESIDE it (`"duplicate": true`)? The overlap test that exists to catch that shares 6 content words
+of 10 with the pair it missed on the 100 Hz render, and the pair reappeared the moment the judge
+stopped refusing it for polarity.
+
+**One exception, stated because it is the arguable one:** a unit carrying a NAME the evidence never
+uses is corrected even when the judge calls the correction a restatement of its neighbour. A
+reader seeing a point twice is a smaller harm than an invented name shipping, and a gate a
+readability guard can talk out of firing is not a gate. **Polarity has no such exception** — a
+flip is never applied to get rid of a name, and when that happens the name is NOT counted as
+blocked.
+
+**Every condemned unit that ends uncorrected is counted exactly once** — `polarity_skipped`
+(the judge refused), `duplicate_skipped` (the correction was already in the document), or
+`no_candidate` (nothing existed to correct it with) — comes OUT of the checked count, and appears
+in the footer's `U unchecked` with its reason:
 
 ```
-render checked: 43 of 44, 3 corrected, 1 unchecked · polarity: 2 left as written (1 by default) · names: 1 blocked
+render checked: 43 of 44, 3 corrected, 1 unchecked · left as written: 1 (0 would invert, 1 already said, 0 nothing to cite) · names: 3 blocked
 ```
+
+Attempt 4 printed nothing at all on the case where nothing could be corrected: `checked: 0` meant
+the whole clause was skipped, so the disclosure went silent exactly where the reader needed it.
+An EDIT that landed is counted too, even when the unit stays condemned — the buyer's guide changed
+three lines and reported "2 corrected" because the count was booked on the way out of a path a
+refusal never reaches.
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
+deno test -A fidelity.test.ts --filter "FLIP"
 deno test -A fidelity.test.ts --filter "POLARITY"
 deno test -A fidelity.test.ts --filter "duplication is not a polarity refusal"
 deno test -A fidelity.test.ts --filter "NEAR-duplicate"
 ```
 
-**PASS:** 9, 1 and 1 passed. The nine POLARITY cases are: the product-comparison sentence; both
-scientific-paper sentences; the same-polarity replacement that IS allowed; the classifier;
-**the tester's six probes with the SOURCE each verdict came from**; **the "recordings" /
-"measurements" / "traces" / "logs" synonyms driven end to end**; **this plan's own attack list**;
-**the narrow world-marker and every way of falling short of it**; and **the recorded
-polarity_sources**.
+**PASS:** 7, 9, 1 and 1 passed. The seven FLIP cases are: the prompt carries both examples and
+every unusable answer is a refusal; **the five sentences the tester landed plus this plan's own
+escape-hatch example, end to end through a judge answering FLIP**; **the over-protection side —
+"does not support DDR4-3200", "The PSU is not proprietary", and the same claim in a table cell,
+corrected by a judge answering KEEP**; **the condemned sentence nothing could correct ("No bent
+pins were reported" against a synthesis with no absence line), counted and disclosed**; a judge
+that ERRORS refusing; the 100 Hz stutter refused as a duplication by the judge; and the name that
+beats a stutter. The nine POLARITY cases are the attempt-2/3/4 pins, which still hold: the
+lexicon survives only as a recorded classification, never as a decision.
 
-**The tester's six, all now absence:**
+**The five sentences that LANDED, all now refused:**
 
-| probe | decided by |
+| sentence | why every lexicon missed it |
 |---|---|
-| "The manual does not document a replacement procedure." | evidence-noun |
-| "The Owner's Manual does not document the SFF PSU part number." | evidence-noun |
-| "Contamination cannot be ruled out." | default-absence |
-| "It does not say whether the unit was tested." | default-absence |
-| "Nothing in the record confirms the 7th-gen ceiling." | evidence-noun |
-| "The report does not state a figure, but the manual does." | evidence-noun |
+| "Scarcely any of the sources quantify the failure rate." | no negation token |
+| "Whether 100 Hz helps is far from settled." | no negation token |
+| "The resolution pathway is hardly documented anywhere." | no negation token |
+| "Does any provided source trace the resolution pathway?" | an absence written as a question |
+| "The readings do not capture the resolution pathway." | cleared the denial gate, then the world-marker waved it through |
+| "The trace does not include the fault." | this plan's own attack example, same escape hatch |
 
-**A duplication is no longer booked as a polarity refusal** (`duplicate_skipped`), and the
-duplication test is a NEAR-duplicate test now: the third row of this table survived attempt 3
-because the replacement differed from the sentence above it by a parenthetical and a figure
-annotation. All three rows are fixed in the delivered document.
-
-**Read the classifier before you attack it** (`polarityOf`, `fidelity.ts`). The distinction is the
-SUBJECT, not the grammar: "The PSU never fails" is a negative world claim and correcting it is
-this module's job; "the sources do not describe X" and "it is unclear whether Y" are claims about
-the evidence. A section decides it outright — everything under "What the evidence does not settle"
-and "Limitations" is an absence claim by that section's own definition. It is lexical, which this
-workstream distrusts, and the reason it is acceptable here is asymmetry: **a missed cue and a
-false cue both end in "leave the unit alone"**. It can only make the engine more conservative.
-
-**Try to break it — and the bar is higher now.** The claim is no longer "a miss is conservative"
-as an argument; it is a default. To fail this case you need a sentence that DENIES or DOUBTS
-something and is nevertheless corrected into an assertion. The escape hatch is the world-marker,
-so aim there: a concrete subject, a findings section, no evidence noun, and a verb that is not in
-the epistemic list but is doing epistemic work ("the readings do not capture the pathway", "the
-trace does not include the fault"). Also worth attacking: a negation the tokeniser cannot see
-("scarcely any", "far from settled", "hardly documented"); an absence expressed as a question; a
-polarity flip inside a table cell.
+**Try to break it — from BOTH sides.** The judge is a model, so attack it as one: a sentence whose
+subject is ambiguous between the world and the evidence ("the manual is wrong about the PSU"); a
+correction that keeps the denial but changes what is denied; a flip inside a table cell; an
+absence in a language the prompt never mentions. And attack the OTHER side just as hard: a world
+negative that contradicts its own cited line and must still be corrected ("the unit does not
+support DDR4-3200" against a line saying it takes DDR4-2400), a false absence in a section heading
+that says otherwise, a named unit whose only repair looks like its neighbour. Over-protection is
+now a failure, not a safe default.
 
 **FAIL:** any corrected unit that asserts what the original denied, or denies what it asserted;
-any grounded [SOURCED]/[INFERRED] line pasted over a sentence about what the evidence lacks; a
-`[GAP]` or `[SOURCED]` tag reaching the reader; a polarity skip not counted.
+any grounded [SOURCED]/[INFERRED] line pasted over a sentence about what the evidence lacks; **a
+false world negative left as written that contradicts its own cited synthesis lines**; a `[GAP]`
+or `[SOURCED]` tag reaching the reader; a condemned unit that ends uncorrected and is not counted
+in exactly one of the three reasons; a footer that reports fewer corrections than the document has
+changed lines; a name left in the document while the footer calls it blocked.
 
 **FAIL (T3 as a whole):** a grounded line pasted over an open question; a name counted as blocked
 while still in the document; a [GAP] question deleted; **any polarity inversion**.
@@ -242,10 +257,16 @@ not two.
 BEFORE  ...is not confirmed by any source. The proprietary connector makes aftermarket
         substitution difficult [Source 13], but the availability of an OEM replacement part is
         left open.
-AFTER   ...is not confirmed by any source. The OptiPlex 3050 SFF uses a proprietary power supply
-        and a proprietary power connector, which makes it difficult for users to install
-        aftermarket PSUs to support higher-power GPUs. [Source 13]
+AFTER   ...is not confirmed by any source. The proprietary connector makes aftermarket
+        substitution difficult [Source 13], but the availability of a replacement part is
+        left open.
 ```
+
+Attempts 2-4 replaced that sentence with the grounded [Source 13] line instead. Under the judge it
+is the REWRITE that stands: asked about the verbatim paste, the live judge called it a restatement
+of the sentence beside it ("Whether Dell sells a direct-replacement 180 W SFF PSU separately is not
+confirmed by any source") — which it is. The name still goes, because a name the evidence never
+uses is not something a readability verdict may keep; the sentence keeps its own shape.
 
 **FAIL:** a sibling sentence changed; a span split in a way that separates a citation from the
 sentence it closes.
@@ -296,14 +317,21 @@ deno eval --ext=ts "import { renderResult } from './lib.ts'; Deno.writeTextFileS
 ```
 
 …and the same record through `deep_research.py` `_render`, then `cmp`. Repeat with
-`names_blocked: []`.
+`names_blocked: []`, and with the record of a run that could correct NOTHING:
+`{checked:0, units:1, unchecked:1, rewritten:0, replaced:0, polarity_skipped:1,
+duplicate_skipped:0, no_candidate:0, names_blocked:[]}`.
 
-**PASS:** `cmp` silent both times. With names:
+**PASS:** `cmp` silent every time. With names:
 `render checked: 44 of 44, 3 corrected, 0 unchecked · names: 3 blocked`. Without: no `names:`
 clause at all — a counter that says "0 blocked" on every report teaches the reader to skip the
-line. `owui/tools/deep_research.py` is **v1.5.3** and needs a re-paste (D.3).
+line. With nothing correctable:
+`render checked: 0 of 1, 0 corrected, 1 unchecked · left as written: 1 (1 would invert, 0 already
+said, 0 nothing to cite)` — attempt 4 printed NO fidelity clause at all for that record, because
+the whole block was gated on `checked > 0`. `owui/tools/deep_research.py` is **v1.5.5** and needs
+a re-paste (D.3).
 
-**FAIL:** any byte of difference; the clause printed at zero; the version not bumped.
+**FAIL:** any byte of difference; the `names:` clause printed at zero; no clause on a run that
+left something as written; the version not bumped.
 
 ---
 
@@ -425,10 +453,10 @@ docker logs --tail 20 openbrain-research
 Still cites **PMC11955832**, three searches still `ok`. It now also prints `names: K blocked` if
 the render used a name the evidence did not.
 
-### D.3 The OWUI tool — re-paste (v1.5.2 → v1.5.3)
+### D.3 The OWUI tool — re-paste (v1.5.4 → v1.5.5)
 
 Paste `owui/tools/deep_research.py` over the existing tool (Workspace → Tools → deep_research),
-keep its id, confirm `1.5.3`, then update the manifest digest, which records what is deployed:
+keep its id, confirm `1.5.5`, then update the manifest digest, which records what is deployed:
 
 ```powershell
 (Get-FileHash "D:\Open WebUI\ai-stack\owui\tools\deep_research.py" -Algorithm SHA256).Hash.ToLower()

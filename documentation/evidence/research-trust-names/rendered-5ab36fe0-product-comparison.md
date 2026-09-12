@@ -1,24 +1,26 @@
-<!-- The `product-comparison` render of recorded job 5ab36fe0 (plain git hosting versus Azure DevOps), as delivered by THIS branch's
-     pipeline: the document research-trust-template committed at e28c974, put through the fidelity
-     check with the names gate, the POLARITY guard and the duplication guard. Not a fresh render -
-     the diff against e28c974 is the check's work and nothing else.
+<!-- The `product-comparison` render of recorded job 5ab36fe0 (plain git hosting versus Azure DevOps), as delivered by THIS
+     branch's pipeline: the document research-trust-template committed at e28c974, put through
+     the fidelity check with the names gate and the FLIP JUDGE. Not a fresh render - the diff
+     against e28c974 is the check's work and nothing else, and every model call in it went
+     through the deployed LiteLLM path (3 calls, 10s).
 
-     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before and
-     after. No hunk flips a sentence's polarity; an absence stays an absence:
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before
+     and after. No hunk flips a sentence's polarity; an absence stays an absence:
 
-     | line | changed by       | polarity               | the text that changed |
-     |------|------------------|------------------------|-----------------------|
+     | line | changed by | polarity | the text that changed |
+     |------|------------|----------|-----------------------|
      | (none) | - | - | the check had nothing to correct in this document |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":24,"units":25,"unchecked":1,"stronger":1,"unsupported":0,"rewritten":0,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":2,"names_blocked":[]}
-       polarity decided by : {"no-negation":18,"heading":4,"evidence-noun":2,"default-absence":1}
-       grounding diff  : names [] -> [] (TFVC and UI are words of the USER'S QUESTION; the gate reads the same reference the reporter does)
+       render fidelity : {"checked":25,"units":25,"unchecked":0,"stronger":0,"unsupported":0,"rewritten":0,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":0,"no_candidate":0,"names_blocked":[]}
+       polarity decided by : {"no-negation":18,"evidence-noun":2,"default-absence":1,"heading":4}
+       grounding diff  : names [] -> []
 
-     `polarity decided by` is the attempt-4 addition: the run that shipped an inversion reported
-     polarity_skipped 0, because the guard had never ENGAGED rather than declining to act. These
-     counts say how every sentence was classified and how many were held by the conservative
-     default rather than by a heading or a named evidence noun.
+     `polarity decided by` follows the DECIDER, not the words: a unit put to the flip judge is
+     recorded as "judge" and leaves the lexical bucket it was provisionally filed under, so
+     what remains under a lexical key is exactly what the check never had to ask about. Three
+     lexicons in a row decided polarity wrongly on delivered documents; nothing lexical decides
+     it now.
 
      Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 
