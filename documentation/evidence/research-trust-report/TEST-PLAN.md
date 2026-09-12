@@ -16,9 +16,11 @@ recommendation to perform an additional run, or better yet, perform the addition
 sending an incomplete result back to the end user".
 
 Read `documentation/notes/research-trust-findings.md` section **J** first. The artefact is job
-**33250e9b**, whole, at `documentation/evidence/research-trust-report/live-owui-33250e9b.result.json`,
+**33250e9b**, whole, at `OB1/integrations/research-service/fixtures/live-owui-33250e9b.result.json`,
 with the delivered document beside it (`rendered-BEFORE-33250e9b.md`) and this branch's render of
-the SAME synthesis (`rendered-AFTER-33250e9b.md`).
+the SAME synthesis (`rendered-AFTER-33250e9b.md`). The parent repo keeps byte-identical
+human-facing copies under `documentation/evidence/research-trust-report/`; the fixtures are
+canonical, because an OB1 test may never read a file outside OB1.
 
 ---
 
@@ -46,10 +48,19 @@ needs **open-brain**.
 
 ---
 
-## T1 — Unit suites and lint
+## T1 — Unit suites and lint, with ONLY the service directory present
+
+Run the research-service suite in a container that mounts **nothing but that directory**. This is
+how OB1 is built and tested on its own, and it is the only way to see a test that reads a file
+outside the submodule — which is exactly what the first submission of this item did: three
+fixtures loaded from the PARENT repo's `documentation/evidence/`, which passes in a full checkout
+and fails everywhere else (`NotFound: readfile '/documentation/evidence/…'`, 212 passed / 2
+failed). Running it from the worktree cannot catch that class of defect, so do not.
 
 ```bash
-cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integrations/research-service" && deno test -A
+MSYS_NO_PATHCONV=1 docker run --rm --label ai-stack.harness.owner=<you> \
+  -v "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integrations/research-service:/w:ro" \
+  -w /w denoland/deno:2.3.3 deno test -A
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integrations/research-curator" && deno test -A
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report" && ruff check .
 ```
@@ -59,7 +70,23 @@ research-curator `36 passed | 0 failed`; ruff `All checks passed!`. The single f
 `./orchestrator.test.ts (uncaught error)` — it opens a postgres pool at module load and needs the
 throwaway DB of T9. It fails the same way on the base commit.
 
-**FAIL:** any other failing test; research-service below 233; curator below 36; any ruff error.
+**FAIL:** any other failing test; research-service below 233; curator below 36; any ruff error;
+**any file read outside `/w`** — a `NotFound` on a path starting `/documentation` is that defect
+returning.
+
+**Check the fixtures are inside the submodule**, rather than trusting the run:
+
+```powershell
+git -C OB1 ls-files integrations/research-service/fixtures | Select-String -Pattern '33250e9b'
+Select-String -Path OB1\integrations\research-service\*.ts -Pattern 'documentation/evidence'
+```
+
+**PASS:** three fixture files tracked inside OB1 (`live-owui-33250e9b.result.json`,
+`rendered-BEFORE-33250e9b.md`, `rendered-AFTER-33250e9b.md`, each carrying a provenance header);
+the second search returns only a COMMENT in `report-doc.test.ts`'s docblock, never a path a test
+reads. The parent keeps byte-identical human-facing copies under
+`documentation/evidence/research-trust-report/` with a README saying which is canonical — `cmp`
+them if you want to.
 
 **New file:** `report-doc.test.ts` (21 cases) covers the delivered document end to end. The gap
 pass adds 7 cases to `harness-trust.test.ts` and the renderer 3 to `lib.test.ts` (one of which is
@@ -71,13 +98,14 @@ a REWRITE — see T10).
 
 The live run grounded 26 cited lines across seven needs and printed
 **`needs answered 0 of 7 (7 partly)`**. That footer is in the committed BEFORE document; it is
-the RED for this case and it came from production, not from a fixture.
+the RED for this case, and it was written by the engine in production rather than composed for a
+test - the file is a recording, not a construction.
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-report/OB1/integrations/research-service"
 deno test -A report-doc.test.ts --filter "ACCEPTANCE 2"
 deno test -A report-doc.test.ts --filter "grounded lines"
-grep -c "needs answered 0 of 7" ../../../documentation/evidence/research-trust-report/rendered-BEFORE-33250e9b.md
+grep -c "needs answered 0 of 7" fixtures/rendered-BEFORE-33250e9b.md
 ```
 
 **PASS:** 1 and 1 passed; the BEFORE document contains that footer once. Re-reconciling the
@@ -111,8 +139,9 @@ deno test -A report-doc.test.ts --filter "BEFORE document"
 Then **read both documents**, because this case is about whether a person could use one:
 
 ```
-documentation/evidence/research-trust-report/rendered-BEFORE-33250e9b.md
-documentation/evidence/research-trust-report/rendered-AFTER-33250e9b.md
+OB1/integrations/research-service/fixtures/rendered-BEFORE-33250e9b.md
+OB1/integrations/research-service/fixtures/rendered-AFTER-33250e9b.md
+(byte-identical copies under documentation/evidence/research-trust-report/)
 ```
 
 **PASS:** 1 and 1 passed. The AFTER document has: a title stating the finding; `## Executive
@@ -332,7 +361,8 @@ git status --short
 docker inspect openbrain-research --format "{{.Config.Image}} {{.State.StartedAt}} {{.RestartCount}}"
 ```
 
-**PASS:** the parent diff touches only `documentation/` and `owui/tools/deep_research.py`; the
+**PASS:** the parent diff touches only `documentation/` (the plan, the findings, the anchor copy
+and the human-facing evidence copies) and `owui/tools/deep_research.py`; the
 OB1 gitlink diff is **EMPTY** (not bumped); the main checkout is unchanged; the running container
 is untouched (the one inference call in Preconditions neither restarts it nor changes its image
 or its start time).

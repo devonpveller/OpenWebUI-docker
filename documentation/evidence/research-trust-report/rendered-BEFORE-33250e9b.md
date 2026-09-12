@@ -1,3 +1,12 @@
+<!-- The document job 33250e9b actually DELIVERED into the chat on 2026-09-11, verbatim from
+     the run's own `rendered` field. It is kept as the RED for harness item
+     research-trust-report: accurate in every line, shaped as facts/sources/gaps, its open
+     questions printed twice (the second copy headed 'Open gaps (NOT grounded)'), a paragraph
+     addressed to the reading MODEL underneath, and a footer claiming that none of its seven
+     needs were answered above seven needs it answered. Do not tidy it: the defects are why it
+     is kept, and the footer line itself is what T2 greps for - leave it the only copy.
+     The human-facing copy is at documentation/evidence/research-trust-report/ in the parent. -->
+
 # Dell OptiPlex 3050 Shows Documented PSU Failure, Fragile Socket Pins, and BIOS-Modding Difficulty
 
 **Answer.** The evidence establishes a recurring 180 W PSU failure mode (green LED on for 1–2 seconds, then no power), a fragile LGA 1151 socket with reported bent pins, a RAM-slot anomaly where only DIMM slot 2 accepted working modules after a thermal service, and a recognized difficulty area for BIOS modification. Capacitor-failure and thermal-overheating information available is generic to all motherboards and Dell desktops rather than 3050-specific. For used purchases, the 3050 is positioned as a Linux-oriented budget unit that will lose practical value after Windows 10 end-of-life in 2025.

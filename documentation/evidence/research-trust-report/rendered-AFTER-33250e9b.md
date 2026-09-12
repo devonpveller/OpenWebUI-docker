@@ -3,7 +3,9 @@
      from this branch. Same synthesis, same [Source N] numbers; only the template changed. The Sources
      list and the footer are appended by renderResult and are not part of this render. The engine's
      own render-grounding diff over this document: numbers [] urls [] names [ATX, SFX] - the two
-     standards the model named that the grounded answer does not, recorded rather than hidden. -->
+     standards the model named that the grounded answer does not, recorded rather than hidden.
+     The canonical copy is the FIXTURE at OB1/integrations/research-service/fixtures/; this one is
+     the human-facing record. An OB1 test may never read a file outside OB1. -->
 
 # Used Dell OptiPlex 3050: Documented Recurring PSU Failure, Fragile LGA 1151 Socket Pins, and a Proprietary Power Connector Define the Inspection
 
