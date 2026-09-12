@@ -76,9 +76,15 @@ proves rather than asserts.
 `reap.ps1` - the `docker rm -f` tool a discharged case exercises - inside the
 paragraph justifying skipping six cases on a live-host deletion tool. An
 attempt-3 tester ran the command the sentence cites and read a different answer
-from it. **The accurate wording already existed in T11, forty lines below**, so
-this was not a thing nobody knew; it was a summary written from memory next to
-the evidence that contradicted it.)
+from it. **The accurate wording already existed in T11, further down this same file** -
+so this was not a thing nobody knew; it was a summary written from memory next
+to the evidence that contradicted it.
+
+That sentence originally said "forty lines below". It was 154 lines at the commit
+it described and 169 at the next - a figure invented to sharpen a self-criticism,
+inside the paragraph correcting an invented figure, which is what T9's own
+parenthetical calls "the same defect the case is about, written into its own
+rationale". **No distance ships from this file**; a direction cannot go stale.)
 
 ### T1 (DISCHARGED) - every persistent creation site is labelled, and the count is shown
 
@@ -253,11 +259,43 @@ commit that discharged it.
 FAIL: any executable line moves, or either finding's digest differs. Then the
 discharge is void and T1-T6 come back, because the reason they were safe to skip
 has gone.
-FAIL: any executable line moves. Then the discharge is void and T1-T6 come back,
-because the reason they were safe to skip has gone.
 
 This is the case that makes a discharge auditable instead of a promise, and it is
-cheap: two commands.
+cheap: THREE commands.
+
+(Two corrections in this paragraph, both found by an attempt-4 tester and both
+the same shape. It said "two commands" after a third had been added in the very
+commit that wrote the line - so a tester trusting T11's own closing sentence
+would run two of three and skip the digest, which is exactly the omission the
+third command exists to close. And the FAIL clause stood TWICE, the new one and
+the superseded original verbatim beneath it. A case that contradicts itself is
+read by whoever runs it, not by whoever wrote it.)
+
+## T12 - the header's claims about DOCKER, not just about the code
+
+T9 holds `reap.ps1`'s header against the CODE. Nothing held it against DOCKER,
+and two false statements went through four attempts because of it:
+
+- "compose writes those when it STARTS a container" - `docker compose create`,
+  never started, already carries all three runtime keys;
+- "no image can supply them" - `LABEL com.docker.compose.oneoff=False` in a
+  Dockerfile is inherited by every container built from it.
+
+Both erred safe, and both sat in a safety contract read by someone deciding
+whether to run a deletion tool on a live host. An attempt-4 tester found them by
+building the cases; nothing in the plan asked anyone to.
+
+For EVERY factual claim the header makes about docker's own behaviour, build the
+case and measure it. They are cheap - a Dockerfile with a `LABEL` line, a
+`docker compose create` that is never started - and they are the only way a
+sentence about docker gets checked at all.
+
+PASS: every docker-behaviour claim in the header reproduces, or is qualified to
+what you measured.
+FAIL: any claim that does not - **including one that errs safe**. A safety
+contract that is wrong in the protective direction still teaches its reader a
+false model of the tool, and the next person to change the guard will reason from
+it.
 
 ## What is deliberately NOT in scope
 

@@ -37,7 +37,15 @@
 #
 #   1. it carries this harness's ownership label;
 #   2. it carries NONE of the compose RUNTIME labels ($ComposeRuntimeLabels below) - compose
-#      writes those when it STARTS a container, and no image can supply them;
+#      writes those when it CREATES a container - `docker compose create`, never
+#      started, already carries all three - and a compose-BUILT image carries none
+#      of them. (An image CAN be made to carry one by hand: `LABEL
+#      com.docker.compose.oneoff=False` is inherited by its containers, measured.
+#      That is why rule 3 exists and why this is a conjunct, not a guarantee. This
+#      line said compose writes them "when it STARTS a container, and no image can
+#      supply them" - both false, both erring safe, and both slipped through
+#      because T9 holds the header against the CODE and nothing held a claim about
+#      DOCKER to account. The comment at the guard itself was already precise.)
 #   3. its image carries the same project value, so the label is demonstrably inherited.
 #
 # Miss any one and it stays protected. The measurement is finding 15 of
