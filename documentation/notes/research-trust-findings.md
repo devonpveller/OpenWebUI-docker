@@ -2223,3 +2223,28 @@ are one-line fixes and neither changes behaviour.
    complete but for that one row. Every other old heading in all ten templates does have a row;
    the reviewer checked by extracting the base file's headings per template rather than reading
    the map against itself.
+
+## Third live OWUI run, 2026-09-12 14:10 UTC (job a205845d) - the final run on research-trust-template
+
+Provenance: observed-live; `research_jobs.result` for a205845d (origin owui, callback chat
+2bc45c77 / message 608fcca3) on `openbrain-research` + `openbrain-curator` label e28c974;
+`countUnits` recomputed from the delivered body with the deployed source.
+
+- Chat model rewrote the question into 5 needs; reuse recalled 8 claims; 4 searches: 3 `ok`
+  (1.0 / 1.0 / 0.875), 1 `collapsed` (share 0, counted as junk in the footer), 32 hits, 15
+  fetched, 9 relevant (yield target), 12 cited. needs_status 5 of 5 answered -> gap pass
+  correctly not run (still unexercised live). Template buyers-guide. Headings: the six of
+  the approved skeleton, in order. Footer `needs answered 5 of 5 - sources 9 relevant of 15
+  fetched (32 hits, 1 junk) - render checked: 42 of 42, 0 corrected, 0 unchecked`;
+  **countUnits(delivered body) = 42 - the footer's denominator reproduces from the document.**
+- render_fidelity: 42 units, 0 stronger, 0 unsupported, 0 replaced (the tightened GROUNDING_RULES
+  now produce a clean first render); grounding diff: names [] numbers [] urls []; two
+  superset citations reported (`[Source 10]`, `[Source 5]` cited on lines the judge did not
+  need them for) - the reporter added this item, working as designed.
+- Curator: 29 claims (0.51-0.79), 3 deduped, 1 meta refused by PATTERN - a claim that
+  enumerates "(Source 13) ... (Source 12) ... the manual's warning" - genuinely
+  source-referential; no judge false positive this run (the ATTRIBUTED/HEDGED examples
+  landed).
+- Compared with the approved run 64ac38cf (same skeleton, 5 of 5, "17 sentences, 2
+  corrected" with no denominator): this footer names the denominator and it checks out;
+  no verbatim-replaced cells; one collapsed search honestly counted as junk.
