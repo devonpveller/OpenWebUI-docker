@@ -57,7 +57,7 @@
 # container "would not have our ownership label anyway" - and that is exactly the argument
 # this file refuses to rest on, because a plane's compose file can carry any label an agent
 # writes into it, and one stray `labels:` block under a service would otherwise point this
-# script at prod. But such a container is compose-STARTED, so it carries the runtime labels,
+# script at prod. But such a container is compose-CREATED, so it carries the runtime labels,
 # so rule 2 refuses it. That is what makes the exception safe: the guard is still a
 # mechanism, not a belt over braces.
 #
@@ -77,7 +77,11 @@
 # age and never auto-deleted. Something unlabelled may be an operator's hand-run sidecar.
 # Removing one takes `-RemoveOrphan <name>`, which names it out loud.
 #
-# TWO NATIVE-COMMAND TRAPS THIS FILE IS BUILT AROUND, both hit while writing it:
+# THREE NATIVE-COMMAND TRAPS THIS FILE IS BUILT AROUND, each hit while writing it:
+# (It said TWO and listed three. Pre-existing, out of this item's diff, and fixed
+# because an attempt-5 tester counted - which is the whole habit this item is
+# about. A header that cannot count its own list is the same defect as one that
+# describes a guard it does not have, in a smaller dose.)
 #
 #   1. A GO TEMPLATE WITH A QUOTED KEY DOES NOT SURVIVE PS5.1. PowerShell strips the inner
 #      quotes when it hands an argument to a native .exe, so
@@ -139,7 +143,7 @@ $ComposeLabel = "com.docker.compose.project"
 # Docker's built-ins. They carry no compose project label, so without naming them here a
 # network called `bridge` would be classified as an orphan and offered up for removal.
 $BuiltinNetworks = @("bridge", "host", "none")
-# Labels compose writes onto a CONTAINER when it starts one. A compose-built IMAGE carries
+# Labels compose writes onto a CONTAINER when it CREATES one. A compose-built IMAGE carries
 # {project, service, version} and NONE of these, which is the only thing separating a real
 # compose-managed container from one merely run from such an image. Measured 2026-09-08:
 # all 81 production containers on this host carry all three. Declared in CODE, like the
@@ -280,7 +284,7 @@ function Get-Inventory {
         if ($null -eq $ids) { throw "docker could not list ${kind}s - refusing to report an empty sweep as a clean one" }
         $compose = Get-DockerIds $kind @("label=$ComposeLabel")
         if ($null -eq $compose) { throw "docker could not list compose-managed ${kind}s - refusing to reap without the protection set" }
-        # THE COMPOSE RUNTIME KEYS. Compose writes these onto a CONTAINER when it starts it;
+        # THE COMPOSE RUNTIME KEYS. Compose writes these onto a CONTAINER when it CREATES it;
         # a compose-built IMAGE does not carry them. That difference is what separates a real
         # compose-managed container from one merely RUN FROM an image compose built - see
         # Test-ComposeInherited below for why that distinction had to be made.
@@ -325,7 +329,7 @@ function Get-Inventory {
                 # container never has our ownership label" - but the header names that as the
                 # LAZY ARGUMENT and refuses to rest on it, for a good reason: a plane's compose
                 # file can carry any label an agent writes into it. In exactly that case the
-                # container is compose-STARTED, so it has the runtime keys, so rule 2 refuses
+                # container is compose-CREATED, so it has the runtime keys, so rule 2 refuses
                 # it - which is why this exception does not reopen the hole the guard was
                 # built to close. Rule 1 narrows the blast radius; rule 2 is the mechanism.
                 if ($isLabelled -and ($kind -eq "container") -and ($composeRuntime -notcontains $id) -and (Test-ComposeInherited $id)) {

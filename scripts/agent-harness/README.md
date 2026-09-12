@@ -81,7 +81,7 @@ carries the ownership label, it carries none of compose's RUNTIME labels (`confi
 `container-number`, `oneoff`), and its image carries the same project value. Writing the
 ownership label into a plane's compose file still gets a REFUSAL rather than a deleted prod
 service, and the rule that delivers that is the RUNTIME-label one: such a container is
-compose-started, so it carries those keys. `reap.ps1`'s header has the full reasoning.
+compose-CREATED, so it carries those keys. `reap.ps1`'s header has the full reasoning.
 
 **Unlabelled leftovers are never auto-deleted.** They are listed by `-Report` with their
 age, and removing one takes `reap.ps1 -RemoveOrphan <name>` - it has to be typed. Something

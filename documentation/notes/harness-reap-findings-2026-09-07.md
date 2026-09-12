@@ -449,8 +449,25 @@ still matches it - the filter tests the KEY, not the value.
 **The discriminator, measured 2026-09-08 across all 81 production containers on this host:**
 every one carries `com.docker.compose.config-hash`, `com.docker.compose.container-number`
 AND `com.docker.compose.oneoff`. Zero exceptions. A compose-built IMAGE carries none of the
-three - only `{project, service, version}`. Compose writes the runtime keys when it starts a
-container; they cannot be inherited from an image because no image has them.
+three - only `{project, service, version}`. Compose writes the runtime keys when it CREATES
+a container: `docker compose create`, never started, already carries all three (measured).
+
+**They are not inherited from a compose-BUILT image, because such an image carries none of
+them - but an image CAN be made to carry one by hand**, and `LABEL
+com.docker.compose.oneoff=False` in a Dockerfile is inherited by every container built from
+it, and hits docker's key-presence filter. Measured. That is why rule 3 exists.
+
+This paragraph said "when it starts a container; they cannot be inherited from an image
+because no image has them" - both halves wrong, both erring safe. **`reap.ps1` names this
+finding BY PATH as the measurement**, in a sentence added because a reader had followed a
+citation to the wrong model. So the corrected header sent its reader here, to the same
+wrong model, two paragraphs above the line saying a correction that leaves its own source
+standing has been moved rather than made.
+
+Found by the first outing of T12, the case written after the previous attempt found the
+identical error in the header itself. The phrase-grep in T10 could not reach it: the header
+said "no image can supply them" and this said "cannot be inherited from an image because no
+image has them" - the same MODEL in different WORDS.
 
 `reap.ps1`'s exception is therefore narrow and FAILS CLOSED. All three must hold:
 

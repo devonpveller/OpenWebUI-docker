@@ -69,8 +69,14 @@ needs to see WHAT was discharged and where, not just that something was.
 They passed at `93cec725` (drilllabel attempt 3). Re-read them only if this item's diff touches the drills - it does not.
 `git diff 93cec725..HEAD --stat` names **FOUR** files: the two documentation
 files, `scripts/agent-harness/README.md`, and **`scripts/agent-harness/reap.ps1`
-itself** - whose 51 changed lines are every one a comment, which is what T11
+itself** - whose changed lines are every one a comment, which is what T11
 proves rather than asserts.
+
+(This carried the figure "51". It was 51 when written and 59 two commits later,
+because each round added comment lines - so the number aged every time the item
+was corrected, in a sentence whose own case computes it on demand. **A count that
+a command beside it derives should not also be typed out.** T11 prints it; this
+sentence no longer does.)
 
 (This said "three documentation files". It named four, and the omitted one was
 `reap.ps1` - the `docker rm -f` tool a discharged case exercises - inside the
@@ -406,6 +412,14 @@ Two commands, and they are cheap enough that there is no excuse for skipping the
     # 1. every distinctive phrase the correction REMOVED, across the whole repo
     git diff <base>..HEAD -- <changed file> | grep '^-' | <pick the load-bearing phrases>
     grep -rn "<phrase>" . --include=*.md --include=*.ps1 --include=*.sh
+
+    # 1b. AND THE MODEL, not only the phrasing. Write the retracted CLAIM out in
+    #     one sentence, then list the ways it could be said, and grep for each.
+    #     A phrase-grep alone WILL miss a restatement in different words - and did:
+    #     the header said "no image can supply them" while the findings note said
+    #     "cannot be inherited from an image because no image has them", the same
+    #     model, and a clean phrase-grep passed it for two attempts. The note was
+    #     the document the corrected header cited BY PATH.
 
     # 2. everything the corrected text CITES - by finding number, file name or section -
     #    read each one and check it agrees with the new text, not the old
