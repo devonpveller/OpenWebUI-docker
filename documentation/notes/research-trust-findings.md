@@ -2620,3 +2620,106 @@ gitlink HAD moved because the landing commit is what moves it. T8 now derives th
 `git merge-base`, scopes the parent-diff assertion to the developer's own commits, and states the
 gitlink expectation BY STAGE — empty before the landing commit, exactly one change after it, with
 the new pin resolvable by `ls-remote`.
+
+---
+
+## P. research-trust-names attempt 4 — the default, not the cue (2026-09-12)
+
+Attempt 3 built a polarity guard and wrote in its own plan: "a missed cue and a false cue both end
+in leave the unit alone. It can only make the engine more conservative." **That was false as
+built**, and the tester proved it in one line of reasoning: the guard fired on a fixed list of
+evidence nouns, and a miss sent the unit down the ORDINARY path, where a [SOURCED] line replaces
+it. A false absence is harmless; a false ASSERTION is the defect.
+
+### P.1 What the tester found — [measured 2026-09-12]
+
+Six of 21 probes were classified assertions, two of them from the plan's own attack list:
+
+    assertion | The manual does not document a replacement procedure.
+    assertion | The Owner's Manual does not document the SFF PSU part number.
+    assertion | Contamination cannot be ruled out.
+    assertion | It does not say whether the unit was tested.
+    assertion | Nothing in the record confirms the 7th-gen ceiling.
+    assertion | The report does not state a figure, but the manual does.
+
+Driven end to end with this item's own `condemnAll` mock, three of four were REPLACED by positive
+grounded lines. And the sharpest form: **this plan's own pinned sentence with one noun changed** —
+"The EEG and GVS **data** … do not trace the resolution pathway" was protected, "…**recordings**…"
+was not, and it was replaced by "VR motion sickness is attributed to a sensory conflict…". The
+attempt-2 inversion, reproduced by a synonym.
+
+In every one of those runs the record said `polarity_skipped: 0`. The guard had not declined to
+act; it had never engaged. **The check could not see its own blind spot, and neither could a
+reader of the footer.**
+
+### P.2 The rule now — [read-from-source]
+
+> A correction may never flip a unit's POLARITY, and **any unit that denies or doubts anything is
+> an ABSENCE by DEFAULT**. The only escape is a narrow positive marker for a world claim: a
+> negated NON-epistemic predicate about a concrete subject, in a findings section, with no
+> evidence noun anywhere in the unit. An absence may only be replaced by an absence — a
+> [GAP]/[UNCERTAIN] line of matching polarity, or a rewrite that keeps the denial — and in "What
+> the evidence does not settle" and "Limitations" nothing else is permitted at all; when no such
+> correction exists the unit is left exactly as written and counted.
+
+The marker is narrow on purpose, and every way of falling short of it lands on absence:
+
+| sentence | decided by | why |
+|---|---|---|
+| "The PSU never fails." | world-marker | concrete subject, `fails` is not an epistemic verb |
+| "The manual never fails." | evidence-noun | the subject is a source |
+| "It never fails." | default-absence | pronoun subject |
+| "The PSU does not describe the fault." | default-absence | `describe` is what a SOURCE does |
+| "The PSU never fails." (no section) | default-absence | a heading-less document is judged safely |
+| "The recordings do not trace the pathway." | default-absence | `trace` is epistemic — the synonym that broke attempt 3 |
+
+### P.3 The check can see its own blind spot now
+
+Every unit records HOW its polarity was decided — `heading`, `evidence-noun`, `default-absence`,
+`world-marker`, `no-negation` — the counts are on the run, and the footer prints
+`polarity: K left as written (D by default)`. On the three committed documents:
+
+| render | no-negation | heading | evidence-noun | default-absence | world-marker |
+|---|---|---|---|---|---|
+| buyers-guide | 21 | 8 | 6 | 5 | 4 |
+| scientific-paper | 48 | 12 | 2 | 2 | 3 |
+| product-comparison | 18 | 4 | 2 | 1 | 0 |
+
+Nine of 136 units across the three are held by the DEFAULT — sentences no heading and no evidence
+noun would have protected, and attempt 3 would have handed every one of them to the ordinary path.
+
+### P.4 Two smaller things the tester was right about
+
+- **A duplication is not a polarity refusal.** `duplicate_skipped` is its own counter now; attempt
+  3 booked duplications to `polarity_skipped` and over-reported polarity as the cause.
+- **The third row of attempt 3's own defect table was still shipped.** The replacement differed
+  from the sentence above it by a parenthetical and a figure annotation, and an exact-substring
+  test cannot see that. The duplication test now strips citations and figure annotations, compares
+  SIBLING sentences on the same line (a coarse span holds two, which is where that stutter lived),
+  and calls 0.7 word overlap a duplicate. All three rows are fixed in the delivered document.
+
+### P.5 What the fixed path does now — [observed-live 2026-09-12]
+
+| render | names | record | hunks |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM → none | 43 of 44, 2 corrected, 1 polarity-held | 3, all gate |
+| scientific-paper | HTC → none | 67 of 67, 2 corrected | 2 (1 gate, 1 judge) |
+| product-comparison | none | 24 of 25, 2 duplicate-held | 0 |
+
+Every changed line is attributed in each header, with the polarity before and after. No hunk flips
+a polarity.
+
+### P.6 T8's gitlink row could never fail
+
+The tester's other finding: `git merge-base` returns the landing commit itself, so
+`$base..HEAD -- OB1` is empty BY CONSTRUCTION and the "exactly one gitlink change, `ls-remote`
+resolves it" row could never be exercised from this checkout. T8 now checks the branch's HISTORY —
+`git log $base..branch -- OB1` — and says plainly that an empty diff proves nothing on its own.
+
+### P.7 Counts
+
+| suite | attempt 3 | attempt 4 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 287 / 1 env-failed | **294 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |

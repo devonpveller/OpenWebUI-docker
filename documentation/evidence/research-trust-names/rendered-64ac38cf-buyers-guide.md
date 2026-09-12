@@ -1,28 +1,28 @@
 <!-- The `buyers-guide` render of live job 64ac38cf (the approved exemplar), as delivered by THIS branch's
      pipeline: the document research-trust-template committed at e28c974, put through the fidelity
-     check with the names gate AND the polarity guard (research-trust-names attempt 3). Not a fresh
-     render - so the diff against e28c974 is the check's work and nothing else.
+     check with the names gate, the POLARITY guard and the duplication guard. Not a fresh render -
+     the diff against e28c974 is the check's work and nothing else.
 
-     EVERY CHANGED LINE, ATTRIBUTED. The last item's headers said "exactly what the gate changed and
-     nothing else" and that was false for 3 of 11 hunks - two of them polarity inversions the tester
-     found live. Each row below says which half of the check made the change and whether the
-     sentence's polarity survived it:
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before and
+     after. No hunk flips a sentence's polarity; an absence stays an absence:
 
-     | line | changed by       | polarity    | the text that changed |
-     |------|------------------|-------------|-----------------------|
-     | 39   | gate (OEM)       | absence -> absence | Whether Dell sells a direct-replacement 180 W SFF PSU separately is no... |
-     | 43   | judge            | absence -> absence | The sources do not describe a specific method or visual indicator for ... |
-     | 49   | gate (ESR)       | assertion -> assertion | - Are there documented capacitor-related failures (bulging, leaking, o... |
-     | 51   | gate (HDD)       | assertion -> assertion | - Are there common storage-drive failure patterns (specific HDD/SSD mo... |
-
-     No hunk flips a sentence's polarity: an absence stays an absence, an assertion stays an assertion.
+     | line | changed by       | polarity               | the text that changed |
+     |------|------------------|------------------------|-----------------------|
+     | 39   | gate (OEM)       | absence -> absence     | Whether Dell sells a direct-replacement 180 W SFF PSU separately... |
+     | 49   | gate (ESR)       | assertion -> assertion | - Are there documented capacitor-related failures (bulging, leak... |
+     | 51   | gate (HDD)       | assertion -> assertion | - Are there common storage-drive failure patterns (specific HDD/... |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":43,"units":44,"unchecked":1,"stronger":0,"unsupported":2,"rewritten":2,"replaced":1,"polarity_skipped":1,"names_blocked":["ESR","HDD","OEM"]}
+       render fidelity : {"checked":43,"units":44,"unchecked":1,"stronger":0,"unsupported":1,"rewritten":2,"replaced":0,"polarity_skipped":1,"polarity_default":0,"duplicate_skipped":0,"names_blocked":["ESR","HDD","OEM"]}
+       polarity decided by : {"no-negation":21,"heading":8,"evidence-noun":6,"default-absence":5,"world-marker":4}
        grounding diff  : names [ESR, HDD, OEM] -> []
 
-     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing -
-     fidelity.test.ts and template-renders.test.ts assert both. -->
+     `polarity decided by` is the attempt-4 addition: the run that shipped an inversion reported
+     polarity_skipped 0, because the guard had never ENGAGED rather than declining to act. These
+     counts say how every sentence was classified and how many were held by the conservative
+     default rather than by a heading or a named evidence noun.
+
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 
 # Dell OptiPlex 3050: A Recurring 180 W PSU Failure, Fragile Socket Pins, and a Proprietary Connector Define the Pre-Purchase Risk
 
@@ -67,7 +67,7 @@ Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirme
 
 The "Solved!" tag on the DIMM-slot-2-only forum thread does not indicate what specific fix resolved the issue, if any; no solution text is visible in the provided source content [Source 14]. The user's speculation that the CPU may have been damaged during the thermal-paste service remains unconfirmed.
 
-No provided source describes a specific method or visual indicator for detecting prior BIOS tampering (e.g., modified ME region, altered checksums, or non-stock BIOS version) on a used OptiPlex 3050 before purchase. The existence of modding threads under a "Problems" heading and the libreboot-patched ME example establish that modification is a known activity [Source 12], but a pre-purchase detection procedure is not documented.
+The sources do not describe a specific method or visual indicator for detecting prior BIOS tampering (modified ME region, altered checksums, or non-stock BIOS version) on a used OptiPlex 3050 before purchase. The existence of modding threads under a "Problems" heading and the libreboot-patched ME example establish that modification is a known activity [Source 12], but a pre-purchase detection procedure is not documented.
 
 ## Limitations and open questions
 

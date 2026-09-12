@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.3
+version: 1.5.4
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -440,6 +440,12 @@ def _render(result: dict[str, Any]) -> str:
             )
             # Parity with report.ts coverageFooter(): names the evidence never
             # used, removed before the reader saw them. Only when there were any.
+            # Parity with report.ts coverageFooter(): sentences the check
+            # declined to touch because a correction would have inverted them.
+            held = int(rf.get("polarity_skipped") or 0)
+            if held:
+                by_default = int(rf.get("polarity_default") or 0)
+                foot.append(f"polarity: {held} left as written ({by_default} by default)")
             blocked = rf.get("names_blocked") or []
             if isinstance(blocked, list) and blocked:
                 foot.append(f"names: {len(blocked)} blocked")

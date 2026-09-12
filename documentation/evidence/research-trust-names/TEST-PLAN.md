@@ -43,11 +43,11 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integra
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names" && ruff check .
 ```
 
-**PASS:** research-service **`287 passed | 1 failed`** (the anchor requires at least 273);
+**PASS:** research-service **`294 passed | 1 failed`** (the anchor requires at least 273);
 research-curator `40 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — postgres at module load, T7 runs it properly.
 
-**FAIL:** any other failing test; research-service below 287; curator below 40; any ruff error;
+**FAIL:** any other failing test; research-service below 294; curator below 40; any ruff error;
 any file read from outside `/w`.
 
 ---
@@ -140,20 +140,60 @@ names gate:
 | "The EEG and GVS data … do not trace the resolution pathway." | a background claim about what causes the conflict state |
 | "It is unclear whether the effects are additive, redundant, or potentially antagonistic." | a near-duplicate of the sentence before it, three possibilities flattened to one |
 
-**The rule now:** *a correction may never flip a unit's POLARITY. A sentence that denies, doubts or
-reports an absence in the evidence may only be replaced by text that also does; an assertion may
-only be replaced by an assertion. In "What the evidence does not settle" and "Limitations", the
-only permitted corrections are a rewrite that keeps the absence claim or a [GAP]/[UNCERTAIN] line
-of matching polarity; when neither exists the unit is left exactly as it is and counted
-`polarity_skipped`, which lands in the footer's `U unchecked`.*
+**The rule now, and the change attempt 4 had to make to it:** *a correction may never flip a
+unit's POLARITY, and **any unit that denies or doubts anything is an ABSENCE by DEFAULT** — the
+only escape is a narrow positive marker for a world claim: a negated NON-epistemic predicate about
+a concrete subject, in a findings section, with no evidence noun anywhere in the unit. An absence
+may only be replaced by an absence — a [GAP]/[UNCERTAIN] line of matching polarity, or a rewrite
+that keeps the denial — and in "What the evidence does not settle" and "Limitations" nothing else
+is permitted at all; when no such correction exists the unit is left exactly as written and
+counted `polarity_skipped`, which lands in the footer's `U unchecked`.*
+
+**Why the default moved.** Attempt 3 decided absence only when a fixed list of evidence nouns
+fired, and the tester proved a miss was NOT conservative: six of 21 probes were classified
+assertions and went down the ordinary path where a [SOURCED] line replaces them. The sharpest was
+this plan's own pinned sentence with one noun changed — "The EEG and GVS **data** … do not trace
+the resolution pathway" was protected, "…**recordings**…" was not, and the second was replaced by
+"VR motion sickness is attributed to a sensory conflict…". The record said `polarity_skipped: 0`:
+the guard had not declined to act, it had never engaged, and nothing in the footer could say so.
+
+**Every unit now records HOW its polarity was decided** — `heading`, `evidence-noun`,
+`default-absence`, `world-marker`, `no-negation` — the counts are on the run, and the footer says
+how many sentences were held back and how many of those the default caught:
+
+```
+render checked: 43 of 44, 3 corrected, 1 unchecked · polarity: 2 left as written (1 by default) · names: 1 blocked
+```
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-names/OB1/integrations/research-service"
 deno test -A fidelity.test.ts --filter "POLARITY"
+deno test -A fidelity.test.ts --filter "duplication is not a polarity refusal"
+deno test -A fidelity.test.ts --filter "NEAR-duplicate"
 ```
 
-**PASS:** 4 passed — the product-comparison sentence, both scientific-paper sentences, the
-same-polarity replacement that IS allowed, and the classifier itself.
+**PASS:** 9, 1 and 1 passed. The nine POLARITY cases are: the product-comparison sentence; both
+scientific-paper sentences; the same-polarity replacement that IS allowed; the classifier;
+**the tester's six probes with the SOURCE each verdict came from**; **the "recordings" /
+"measurements" / "traces" / "logs" synonyms driven end to end**; **this plan's own attack list**;
+**the narrow world-marker and every way of falling short of it**; and **the recorded
+polarity_sources**.
+
+**The tester's six, all now absence:**
+
+| probe | decided by |
+|---|---|
+| "The manual does not document a replacement procedure." | evidence-noun |
+| "The Owner's Manual does not document the SFF PSU part number." | evidence-noun |
+| "Contamination cannot be ruled out." | default-absence |
+| "It does not say whether the unit was tested." | default-absence |
+| "Nothing in the record confirms the 7th-gen ceiling." | evidence-noun |
+| "The report does not state a figure, but the manual does." | evidence-noun |
+
+**A duplication is no longer booked as a polarity refusal** (`duplicate_skipped`), and the
+duplication test is a NEAR-duplicate test now: the third row of this table survived attempt 3
+because the replacement differed from the sentence above it by a parenthetical and a figure
+annotation. All three rows are fixed in the delivered document.
 
 **Read the classifier before you attack it** (`polarityOf`, `fidelity.ts`). The distinction is the
 SUBJECT, not the grammar: "The PSU never fails" is a negative world claim and correcting it is
@@ -163,10 +203,14 @@ and "Limitations" is an absence claim by that section's own definition. It is le
 workstream distrusts, and the reason it is acceptable here is asymmetry: **a missed cue and a
 false cue both end in "leave the unit alone"**. It can only make the engine more conservative.
 
-**Try to break it:** a double negative; an absence sentence whose evidence noun is a pronoun ("it
-does not say"); a positive sentence inside the limitations section; a table cell that is an
-absence; a rewrite that keeps the words and flips the meaning ("is not addressed" -> "is
-addressed").
+**Try to break it — and the bar is higher now.** The claim is no longer "a miss is conservative"
+as an argument; it is a default. To fail this case you need a sentence that DENIES or DOUBTS
+something and is nevertheless corrected into an assertion. The escape hatch is the world-marker,
+so aim there: a concrete subject, a findings section, no evidence noun, and a verb that is not in
+the epistemic list but is doing epistemic work ("the readings do not capture the pathway", "the
+trace does not include the fault"). Also worth attacking: a negation the tokeniser cannot see
+("scarcely any", "far from settled", "hardly documented"); an absence expressed as a question; a
+polarity flip inside a table cell.
 
 **FAIL:** any corrected unit that asserts what the original denied, or denies what it asserted;
 any grounded [SOURCED]/[INFERRED] line pasted over a sentence about what the evidence lacks; a
@@ -310,19 +354,30 @@ message and is not the developer's.
 **The gitlink expectation, BY STAGE** — this is what attempt 2's T8 got wrong, and the stage is
 visible in the log:
 
-| stage | `git diff $base..HEAD -- OB1` | why |
+| stage | what to check | why |
 |---|---|---|
-| before the landing commit (what the developer submits) | **EMPTY** | the developer never bumps the pin; the OB1 work sits on a local branch |
-| after the reviewer's landing commit | **exactly one** gitlink change | the reviewer pins the submodule as part of landing |
+| before the landing commit (what the developer submits) | `git diff $base..HEAD -- OB1` is **EMPTY** | the developer never bumps the pin; the OB1 work sits on a local branch |
+| the reviewer's landing commit | **exactly one** commit on this branch changes the gitlink, and its new pin resolves on the OB1 remote | the reviewer pins the submodule as part of landing |
+
+**The second row cannot be checked with a diff from the derived base.** The tester found this:
+`git merge-base` returns the landing commit itself, so `$base..HEAD -- OB1` is empty BY
+CONSTRUCTION and the row can never fail. Check the branch's HISTORY instead:
 
 ```powershell
-# if a gitlink change is present, the new pin must exist on the OB1 remote
-$pin = (git ls-tree HEAD OB1) -replace '^\S+ \S+ (\S+)\s+OB1$','$1'
-git -C OB1 ls-remote origin | Select-String $pin
+# every commit on this branch that touches the gitlink, oldest last
+$gitlinkCommits = git log --format='%h %s' $base..work/research-trust-names -- OB1
+$gitlinkCommits            # expect: none from the developer; one from the reviewer, if landed
+# …and for each, the pin it sets must be on the OB1 remote
+foreach ($c in ($gitlinkCommits | ForEach-Object { ($_ -split ' ')[0] })) {
+  $pin = (git ls-tree $c OB1) -replace '^\S+ \S+ (\S+)\s+OB1$','$1'
+  "$c -> $pin"
+  git -C OB1 ls-remote origin | Select-String $pin
+}
 ```
 
-**PASS:** at a developer-submitted head, the gitlink diff is empty. At a landed head, there is one
-gitlink change and `ls-remote` resolves the new pin on the OB1 remote. Anything else is a failure.
+**PASS:** at a developer-submitted head, that log is EMPTY. At a landed head it names exactly one
+commit, that commit is the reviewer's (identified by its message), and `ls-remote` resolves its
+pin. An empty diff proves nothing on its own and is not accepted as evidence for this row.
 
 **The container.** `docker inspect openbrain-research` shows `RestartCount 0` and an image
 `openbrain-research:local`. Its `StartedAt` moves when the item is DEPLOYED, which section D

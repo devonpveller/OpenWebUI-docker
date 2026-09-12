@@ -1,25 +1,26 @@
 <!-- The `product-comparison` render of recorded job 5ab36fe0 (plain git hosting versus Azure DevOps), as delivered by THIS branch's
      pipeline: the document research-trust-template committed at e28c974, put through the fidelity
-     check with the names gate AND the polarity guard (research-trust-names attempt 3). Not a fresh
-     render - so the diff against e28c974 is the check's work and nothing else.
+     check with the names gate, the POLARITY guard and the duplication guard. Not a fresh render -
+     the diff against e28c974 is the check's work and nothing else.
 
-     EVERY CHANGED LINE, ATTRIBUTED. The last item's headers said "exactly what the gate changed and
-     nothing else" and that was false for 3 of 11 hunks - two of them polarity inversions the tester
-     found live. Each row below says which half of the check made the change and whether the
-     sentence's polarity survived it:
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before and
+     after. No hunk flips a sentence's polarity; an absence stays an absence:
 
-     | line | changed by       | polarity    | the text that changed |
-     |------|------------------|-------------|-----------------------|
-     | 17   | judge            | assertion -> assertion | | Concurrent CI/CD operation | A project can maintain GitHub Actions w... |
-
-     No hunk flips a sentence's polarity: an absence stays an absence, an assertion stays an assertion.
+     | line | changed by       | polarity               | the text that changed |
+     |------|------------------|------------------------|-----------------------|
+     | (none) | - | - | the check had nothing to correct in this document |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":25,"units":25,"unchecked":0,"stronger":1,"unsupported":0,"rewritten":1,"replaced":0,"polarity_skipped":0,"names_blocked":[]}
-       grounding diff  : names [] -> [] (TFVC and UI are words of the USER'S QUESTION, and the gate reads the same reference the reporter does now)
+       render fidelity : {"checked":24,"units":25,"unchecked":1,"stronger":1,"unsupported":0,"rewritten":0,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":2,"names_blocked":[]}
+       polarity decided by : {"no-negation":18,"heading":4,"evidence-noun":2,"default-absence":1}
+       grounding diff  : names [] -> [] (TFVC and UI are words of the USER'S QUESTION; the gate reads the same reference the reporter does)
 
-     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing -
-     fidelity.test.ts and template-renders.test.ts assert both. -->
+     `polarity decided by` is the attempt-4 addition: the run that shipped an inversion reported
+     polarity_skipped 0, because the guard had never ENGAGED rather than declining to act. These
+     counts say how every sentence was classified and how many were held by the conservative
+     default rather than by a heading or a named evidence noun.
+
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 
 # Plain Git Hosts and Azure DevOps Share a YAML-in-Repo CI/CD Substrate, with Azure DevOps Positioned as a Broader ALM Platform
 
@@ -38,7 +39,7 @@ The evidence shows that the CI/CD layer of a plain git host (GitHub, GitLab) and
 | Criterion | Plain git host (GitHub / GitLab) | Azure DevOps | Source |
 |---|---|---|---|
 | CI/CD pipeline definition format | GitHub Actions uses in-repo YAML (`.github/workflows/`) [Source 1, 3] | YAML committed in-repo (`.vsts-dotnet-ci.yml`, `azure-pipelines/` folder), version-controlled alongside code [Source 3] | [Source 1, 2, 3] |
-| Concurrent CI/CD operation | A project can maintain GitHub Actions workflows alongside Azure DevOps pipeline definitions in the same repository [Source 3] | Same: the MSBuild repository on GitHub contains both `.github/workflows` and `.azuredevops/azure-pipelines` directories, suggesting the two systems can run concurrently [Source 3] | [Source 3] |
+| Concurrent CI/CD operation | A project can maintain GitHub Actions workflows alongside Azure DevOps pipeline definitions in the same repository [Source 3] | Same: the MSBuild repository on GitHub contains both `.github/workflows` and `.azuredevops/azure-pipelines` directories, showing the two systems can run concurrently [Source 3] | [Source 3] |
 | Platform scope (as described in sources) | GitHub: "at heart a Git repository hosting service" plus code review, project management, integrations, team management, documentation, "social coding" [Source 1]. GitLab: "enterprise-grade DevOps platform that goes beyond Git repository management" integrating issue tracking, CI/CD, code review, security testing, Kubernetes management [Source 2] | Analogous to GitLab's broader ALM approach: Repos/Boards/Pipelines triad representing a broader ALM platform rather than a bare git host [Source 2, inferred] | [Source 1, 2, 3] |
 | Access control model | GitHub provides team management features [Source 1] | Azure Portal provides role-based access control (RBAC) to assign granular permissions and control who manages resources at each level across teams and services [Source 4, 5] | [Source 1, 4, 5] |
 | Underlying version-control model | Distributed: every developer has a full copy of the entire repository (every commit, branch, and file), enabling easy branching and merging [Source 6] | Not separately described in the sources; the pipeline layer is YAML-in-repo [Source 3] | [Source 3, 6] |

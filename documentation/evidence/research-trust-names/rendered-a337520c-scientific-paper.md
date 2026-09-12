@@ -1,26 +1,27 @@
 <!-- The `scientific-paper` render of dry run a337520c (100 Hz tones and VR motion sickness), as delivered by THIS branch's
      pipeline: the document research-trust-template committed at e28c974, put through the fidelity
-     check with the names gate AND the polarity guard (research-trust-names attempt 3). Not a fresh
-     render - so the diff against e28c974 is the check's work and nothing else.
+     check with the names gate, the POLARITY guard and the duplication guard. Not a fresh render -
+     the diff against e28c974 is the check's work and nothing else.
 
-     EVERY CHANGED LINE, ATTRIBUTED. The last item's headers said "exactly what the gate changed and
-     nothing else" and that was false for 3 of 11 hunks - two of them polarity inversions the tester
-     found live. Each row below says which half of the check made the change and whether the
-     sentence's polarity survived it:
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before and
+     after. No hunk flips a sentence's polarity; an absence stays an absence:
 
-     | line | changed by       | polarity    | the text that changed |
-     |------|------------------|-------------|-----------------------|
-     | 61   | judge            | absence -> absence | The interaction between 100 Hz sound stimulation and other VR-specific... |
-     | 71   | gate (HTC)       | absence -> absence | - No source in the provided set reports a controlled experiment that d... |
-
-     No hunk flips a sentence's polarity: an absence stays an absence, an assertion stays an assertion.
+     | line | changed by       | polarity               | the text that changed |
+     |------|------------------|------------------------|-----------------------|
+     | 61   | judge            | absence -> absence     | The interaction between 100 Hz sound stimulation and other VR-sp... |
+     | 71   | gate (HTC)       | absence -> absence     | - No source in the provided set reports a controlled experiment ... |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":65,"units":67,"unchecked":2,"stronger":1,"unsupported":2,"rewritten":1,"replaced":1,"polarity_skipped":1,"names_blocked":["HTC"]}
+       render fidelity : {"checked":67,"units":67,"unchecked":0,"stronger":1,"unsupported":3,"rewritten":2,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":0,"names_blocked":["HTC"]}
+       polarity decided by : {"no-negation":48,"heading":12,"world-marker":3,"evidence-noun":2,"default-absence":2}
        grounding diff  : names [HTC] -> []
 
-     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing -
-     fidelity.test.ts and template-renders.test.ts assert both. -->
+     `polarity decided by` is the attempt-4 addition: the run that shipped an inversion reported
+     polarity_skipped 0, because the guard had never ENGAGED rather than declining to act. These
+     counts say how every sentence was classified and how many were held by the conservative
+     default rather than by a heading or a named evidence noun.
+
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 
 # 100 Hz Bone-Conducted Sound Reduces Motion Sickness Through Otolith Resonance: Human and Murine Evidence and Inferred Relevance to VR Cybersickness
 
@@ -83,7 +84,7 @@ The extension of the 100 Hz effect to a full VR headset experience is inferred f
 
 The long-term efficacy in humans is not established. The ≥120-minute duration was demonstrated only in the mouse beam-balance model [Source 10]; the human studies measured symptoms during a single motion exposure session. Whether the effect persists, wanes, or requires re-administration over hours or days in a human VR session is unknown.
 
-The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. Whether the 100 Hz effect is additive with other VR-specific countermeasures (e.g., high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source. (unverified figure: 100) [Source 11, 12]
+The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. It is unclear whether the 100 Hz effect is additive with other VR-specific countermeasures [Source 11, 12].
 
 One sub-experiment in the study had a sample size of only 10 participants, which was noted as a limitation by community reviewers [Source 9]. When the otoliths were surgically removed from the mouse tissue, the 100 Hz–induced activation disappeared, confirming that the otoliths (not the cochlea) were the target of the sound stimulation. [Source 7]
 
