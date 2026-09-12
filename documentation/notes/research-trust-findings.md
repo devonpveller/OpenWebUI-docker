@@ -1883,3 +1883,39 @@ after the header rule has been seen. A per-line sweep of the shipped render repo
 unchecked" lines, 6 of which are ordinary table rows that the whole-document call checks
 correctly (the seventh is this fixture's own header comment, which quotes a citation). I nearly recorded that as a finding before checking it — the same shape as the
 tester's own X5, where a truncated print statement invented a broken table.
+
+## Second live OWUI run, 2026-09-12 12:13 UTC (job 64ac38cf) - the hand-off document, delivered
+
+Provenance: observed-live; `research_jobs.result` for 64ac38cf (origin owui, callback chat
+2bc45c77 / message c48bec70) on `openbrain-research` label 990a2f5; curator log.
+
+- The chat model rewrote the question into 5 needs; the reuse pass recalled 11 grounded
+  claims from the earlier runs (the KB compounding as designed), leaving 3 gaps to search:
+  3 of 3 searches `ok` (0.875 / 1.0 / 0.375), 24 hits, 19 fetched, 13 relevant, 16 cited.
+  needs_status: 5 of 5 `answered` -> the gap-closing pass correctly did NOT run, so the
+  interim chat write is still unexercised live (unit-tested only). Template: buyers-guide
+  (purpose: buy). Delivered document: title stating the finding; executive summary; 9-item
+  "What to check in person" checklist, every item cited; failure-modes-by-subsystem table
+  (7 rows, all cited); "What the evidence does not settle"; ONE limitations section with 4
+  open questions and one recommendation sentence; footer `needs answered 5 of 5 - sources 13
+  relevant of 19 fetched (24 hits) - render checked: 17 sentences, 2 corrected`. The
+  hand-off notice was stripped; the body starts with the model's one-line lead-in, a rule,
+  then the report. The two "Open gaps"/INCOMPLETE blocks are gone.
+- **Render fidelity in production:** 17 units checked, 2 STRONGER -> 0 rewritten, 2 replaced
+  verbatim. Visible cost exactly as K.9 predicted: the BIOS/firmware row's "What goes wrong"
+  cell and the proprietary-PSU row's "What it looks like" cell now hold long verbatim
+  synthesis lines. The layout fix (marker in the cell, line beneath the table) is in the
+  proposed `research-trust-fidelity` item.
+- **Meta judge precision, third and fourth instances:** refused as META two hedged WORLD
+  claims - "The OptiPlex 3050 SFF's proprietary PSU connector may also limit the ability to
+  replace the PSU with a higher-wattage Dell unit if the original 180 W unit is failing..."
+  and "The user in that thread speculated that the CPU may have been damaged during the
+  thermal-paste service, and the thread was marked Solved! but contained no post..." (the
+  pattern-refused third, "Whether the Solved! tag ... indicates ...", is a genuine meta
+  question). Two runs, four lost facts, all attribution/hedge phrasing. The judge prompt
+  needs the WORLD examples "<source/user> reports/speculates/recommends <content>" and
+  "<thing> may <effect> if <condition>". Add to `research-trust-fidelity` or its own item.
+- `ungrounded_numbers` ["7","17"]: the "7-character" Service Tag figure and a "(Source 17)"
+  pointer inside a synthesis line - the first sits outside the held source window, the
+  second is a citation-shaped token the number check should skip. Minor; note for the
+  fidelity item.
