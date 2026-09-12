@@ -466,21 +466,41 @@ image-supplied key can only ADD a key, so it can only push toward PROTECTED, and
 can only make the test stricter. A conjunct is not how you fix a rule that is already
 refusing.
 
-Rule 3 exists for the case two lines above it: a `com.docker.compose.project` set BY HAND on
-a container compose never created.
+Rule 3 exists for the case rule 3 itself names: a `com.docker.compose.project` set BY HAND
+on a container compose never created.
 
 This went into the block written to retract the LAST false attribution in this same guard,
-three paragraphs under this note's own line about a correction that leaves its source
-standing. The move is identical both times - a measured docker FACT, then a confident "that
-is why" hung off it. **Measuring the fact is not measuring the reason**, and the surrounding
-paragraph being a correction of exactly that error bought no protection whatsoever.
+below this note's own line about a correction that leaves its source standing. **Measuring
+the fact is not measuring the reason**, and the surrounding paragraph being a correction of
+exactly that error bought no protection whatsoever.
+
+Two things this paragraph asserted and should not have. It said "two lines above it" and
+"three paragraphs under", and both were wrong in this layout - rule 3 is below, not above,
+and the line about corrections is a long way further down. Both figures were lifted verbatim
+from the tester's report that found the error, where they described THEIR excerpt. **A
+figure inherited from a report is an invented figure in a different layout**, and it went in
+under a doctrine this very item ships: no distance ships from these files.
+
+And it said "the move is identical both times". It is not. The first, at
+`564abad:scripts/agent-harness/reap.ps1`, reads `writes those when it STARTS a container,
+and no image can supply them;` - a bare unmeasured assertion, with no measured premise and
+no "that is why" anywhere near it. The second hangs a confident attribution off a fact that
+HAD just been measured. What the two actually share is the only thing that needed saying:
+both are false claims about WHY this guard is safe, shipped inside a safety contract. Adding
+"identical" bought the sentence rhetoric and cost it its truth.
 
 This paragraph said "when it starts a container; they cannot be inherited from an image
 because no image has them" - both halves wrong, both erring safe. **`reap.ps1` names this
 finding BY PATH as the measurement**, in a sentence added because a reader had followed a
 citation to the wrong model. So the corrected header sent its reader here, to the same
-wrong model, two paragraphs above the line saying a correction that leaves its own source
-standing has been moved rather than made.
+wrong model, in the same document that says further down that a correction leaving its own
+source standing has been moved rather than made.
+
+(That sentence said "two paragraphs above". The line it points at is BELOW this one, and a
+long way below - the direction was backwards and the distance invented. An attempt-7 tester
+caught its twin, and I corrected the twin and left this one standing, which is the exact
+failure this note is named for happening to a correction OF that failure. T13 exists because
+finding one instance of a shape is not finding the shape.)
 
 Found by the first outing of T12, the case written after the previous attempt found the
 identical error in the header itself. The phrase-grep in T10 could not reach it: the header

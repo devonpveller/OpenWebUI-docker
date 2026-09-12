@@ -63,15 +63,24 @@
 #      refusing.** The direction alone refutes the attribution, without running
 #      anything.
 #
-#      Rule 3's real reason is two lines below: a `com.docker.compose.project`
-#      value set BY HAND on a container compose never made. Checking the image
-#      carries the same value is what tells those apart.
+#      Rule 3's real reason is the one stated in rule 3 itself, just below: a
+#      `com.docker.compose.project` value set BY HAND on a container compose never
+#      made. Checking the image carries the same value is what tells those apart.
+#      (This said "two lines below" and rule 3 is nine. NO DISTANCE SHIPS FROM
+#      THESE FILES - the plan says so in as many words, and this figure came
+#      straight out of a tester's report, where it was true of THEIR quotation and
+#      not of this layout. A figure inherited without re-measuring is an invented
+#      figure wearing someone else's evidence.)
 #
 #      This is the second false attribution in this header in two attempts, and it
-#      was written INTO the paragraph correcting the first - by the same move, a
-#      confident "that is why X" attached to a fact that had just been measured.
-#      Measuring the FACT is not measuring the REASON, and having just been caught
-#      doing it is no protection at all.
+#      was written INTO the paragraph correcting the first. THE TWO ARE NOT THE
+#      SAME MOVE, though this said they were: the first, at `564abad`, was a bare
+#      unmeasured assertion with no premise and no "that is why" anywhere near it;
+#      this one hangs a confident "that is why" off a fact that HAD just been
+#      measured. What they share is the only thing that matters here - both are
+#      false claims about WHY this guard is safe, shipped inside a safety
+#      contract. Measuring the FACT is not measuring the REASON, and having just
+#      been caught doing it is no protection at all.
 #   3. its image carries the same project value, so the label is demonstrably inherited.
 #
 # Miss any one and it stays protected. The measurement is finding 15 of

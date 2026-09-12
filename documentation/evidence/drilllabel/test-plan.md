@@ -247,7 +247,7 @@ its place.
 **AND A THIRD COMMAND, because the first two do not cover T6.** T1-T5 are claims
 about script BEHAVIOUR, and a non-comment diff is exactly the right evidence for
 them. T6 is not: it checks findings 5 and 9 of the findings note, and this item
-edits that note by 61 lines - so the grep above would accept an arbitrary rewrite
+edits that note substantially - so the grep above would accept an arbitrary rewrite
 of the very findings T6 exists to hold to account. An attempt-3 tester spotted
 that the discharge was safe by a command the plan did not contain, and ran it.
 
@@ -302,6 +302,56 @@ FAIL: any claim that does not - **including one that errs safe**. A safety
 contract that is wrong in the protective direction still teaches its reader a
 false model of the tool, and the next person to change the guard will reason from
 it.
+
+## T13 - EVERY CLAIM THE FILES MAKE ABOUT THEMSELVES
+
+Three of seven attempts (3, 4 and 7) failed on a count, a distance, a direction
+or a history that a changed file asserted about ITSELF. Not one was found by a
+case. T7/T8 test the guard, T9 holds behavioural claims against code, T10 hunts
+retracted models, T11 proves nothing executable moved, T12 holds docker claims to
+account - and a tester who ran exactly that set and nothing more would have PASSED
+attempt 7. An attempt-7 tester named this gap; the case is theirs.
+
+Enumerate, from the diff AND from the commit message, every:
+
+  * COUNT - lines, paragraphs, commands, files, sites, testers, attempts, rounds
+  * DISTANCE - "n lines below", "the paragraph above", "further down"
+  * DIRECTION - above / below / beside / under, with no number at all
+  * HISTORY - "the first time", "three rounds running", "two attempts", who passed
+  * CHARACTERISATION OF A PAST ERROR - "the same move", "identical", "the same shape"
+
+and check each against HEAD and against git.
+
+    git diff <base>..HEAD | grep '^+' |
+      grep -inE '\b(two|three|four|[0-9]+) (lines?|paragraphs?|attempts?|testers?|commands?)\b|\b(above|below|beside|under) (it|this|the)\b'
+    # then, for each hit, OPEN the file and count. Do not trust the sentence.
+    # for a history claim: read the queue's own json, never the prose
+    # for "the same move": quote BOTH originals out of git and compare them
+    # and run the T10 positive control first - `grep -iF` aborts silently here
+
+PASS: every one reproduces from the artifact as it stands now.
+FAIL: any count is stale, any direction points the wrong way, any history
+contradicts the queue, or any characterisation of a past error does not survive
+reading that error's actual text.
+
+THREE RULES THIS CASE ENCODES, each bought with a failed attempt:
+
+  * **A DIRECTION IS A FIGURE.** "Below" is as checkable as "nine lines below",
+    and attempt 7 got the direction itself backwards while also getting the
+    number wrong.
+  * **A FIGURE INHERITED FROM A TESTER'S REPORT IS AN INVENTED FIGURE.** It was
+    measured against THEIR excerpt, not this layout. Attempt 7 transplanted three
+    of them verbatim and all three were wrong here.
+  * **A COUNT THAT A COMMAND BESIDE IT DERIVES SHOULD NOT ALSO BE TYPED OUT** -
+    already the doctrine of T11, and "edits that note by 61 lines" had aged to 133
+    by the time a case went looking for it.
+  * **FINDING ONE INSTANCE OF A SHAPE IS NOT FINDING THE SHAPE.** Running this
+    case for the first time, on the change that introduced it, turned up two more
+    the attempt-7 tester had not reached: T10 said "Two commands" while giving
+    THREE - the third added by the same commit, which is attempt 4's "two
+    commands" defect reproduced one case away from where it was corrected - and
+    the findings note carried a SECOND inverted direction whose twin had just been
+    fixed. Sweep mechanically; do not stop at the reported instance.
 
 ## What is deliberately NOT in scope
 
@@ -407,7 +457,7 @@ the sink for the measurement", and finding 15 still carried, verbatim, the two s
 the same commit had just deleted from `reap.ps1`. A reader following the corrected header's
 own citation arrived at the model the correction exists to retract.
 
-Two commands, and they are cheap enough that there is no excuse for skipping them:
+Cheap enough that there is no excuse for skipping any of them:
 
     # 1. every distinctive phrase the correction REMOVED, across the whole repo
     git diff <base>..HEAD -- <changed file> | grep '^-' | <pick the load-bearing phrases>
