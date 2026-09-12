@@ -279,20 +279,39 @@ tester, and **invisible to every case in the plan, because all of them counted
 "at least N"**. A test that cannot distinguish one from two is not a delivery
 test. Now fixed, with a case that counts exactly-once against parent and tip.
 
-## Threading holds to about 2 seconds a call, and that is a hard trade
+## Threading holds to about 3 seconds a call, and it is a CLIFF, not a slope
 
-Measured at N=2, 12 rounds per setting: an API answering instantly, at 1s, 2s or
-3s per call gives ONE thread every round. At 4s it splits in half the rounds, at
-5s in most of them. **No message is lost at any latency** - the degradation is
-toward an extra thread, never toward silence, which is the direction this item is
+**THIS SECTION SHIPPED THE CEILING AT TWO DIFFERENT VALUES.** It said "about 2
+seconds" here while `documentation/evidence/mmthread/test-plan.md` said "about 3",
+and an attempt-17 tester found the pair. One number had to be wrong and neither
+had been re-measured since the wait stopped being a turn count.
+
+Measured at N=2, 10 rounds per setting, on this tip and on the pre-item tip with
+the same instrument:
+
+| API answers in | pre-item tip `c822b5c` | this tip | message lost |
+|---|---|---|---|
+| 0s | - | 10/10 | 0/10 |
+| 1s | - | 9/10 | 0/10 |
+| 2s | 10/10 | 10/10 | 0/10 |
+| 3s | **4/10** | **9/10** | 0/10 |
+| 4s | 0/10 | 0/10 | 0/10 |
+| 5s | 0/10 | 0/10 | 0/10 |
+
+So: **one thread per session for an API answering within about 3 seconds**, and
+this tip is what makes 3 hold - the pre-item tip managed 4 rounds in 10 there.
+The degradation is a CLIFF between 3s and 4s, not the slope this paragraph used to
+describe ("at 4s it splits in half the rounds, at 5s in most"); that wording came
+from a build whose wait was bounded by a turn count, and it never described this
+one. **No message is lost at any latency, on either build** - the failure
+direction is an extra thread, never silence, which is the direction this item is
 allowed to fail in.
 
-The cause is arithmetic and cannot be tuned away. A losing run has to wait for
-the winner to publish its map line, which cannot happen until the winner's post
-RETURNS. The wait is 10 turns of about 380ms - 3.8 seconds - so it covers a call
-of up to about 2 seconds and not one of 3. Lengthening it puts the worst case
-past the Stop hook's 15, and shortening it is what two earlier attempts did to
-lose the guarantee entirely.
+The cause is arithmetic and cannot be tuned away. A losing run has to wait for the
+winner to publish its map line, which cannot happen until the winner's post
+RETURNS - so the wait has to cover a whole call, and the wait is bounded by what
+the Stop hook can afford. Lengthening it puts the worst case past 15s; shortening
+it is what two earlier attempts did to lose the guarantee entirely.
 
 **THE WAIT IS BOUNDED BY A DEADLINE, NOT BY A TURN COUNT, and the difference is
 the whole reason the figure kept being wrong.** It was ten turns of a constant
@@ -303,8 +322,8 @@ because what varies under load IS the cost of a turn. A deadline does not care
 what a turn costs.
 
 So the ceiling is stated rather than hidden: **one thread per session for an API
-answering within about 2 seconds**, which is what a local Mattermost does. Beyond
-that the operator gets more than one thread and every message.
+answering within about 3 seconds**, which a local Mattermost comfortably does.
+Beyond that the operator gets more than one thread and every message.
 
 ## Concurrency: solved at the sizes this actually sees, NOT at ten
 
@@ -348,7 +367,8 @@ for is a permission request against a turn completion — two.
 **"At two and three the result is exact and stable" contradicted a line a few
 paragraphs above it**, which says N=3 is reported at 1 in 30 and NOT claimed
 exact - a tester found the pair. The accurate statement: N=2 is exact for an API
-answering within about 2 seconds, N=3 is reported rather than claimed, and
+answering within about 3 seconds (measured; the table above), N=3 is reported
+rather than claimed, and
 neither is unconditional. If you think a synthetic N=10 should block a fix for a
 real N=2, that is a legitimate position and the numbers above are what it turns
 on - but read them with the latency ceiling attached, because a figure taken
@@ -372,8 +392,14 @@ against an instant API is not a figure about this notifier in use.
   two successive rounds measured 0 to 2 of 6. An earlier draft of this note claimed the parent
   "survives it" and that the loss here was about one in twelve. Both were wrong,
   and in the flattering direction.
-- **THE WORST CASE IS 13-14s, AND THE "ABOUT 5s" PUBLISHED HERE WAS MEASURED
-  WITH A BROKEN INSTRUMENT.** The shim was written with an UNQUOTED heredoc, so
+- **THE WORST CASE IS 12s AT THIS TIP, AND EVERY EARLIER FIGURE IN THIS BULLET
+  WAS MEASURED WITH TOO FEW SAMPLES OR A BROKEN INSTRUMENT.** The heading said
+  "13-14s" and that was a five-sample claim; it is p50 11.78 / max 12.37 over
+  twenty. Read the whole bullet - it is a sequence of four wrong numbers, each
+  corrected by the next tester, and the last correction is the one that stopped
+  adding separately-bounded terms together.
+
+  **"ABOUT 5s" WAS MEASURED WITH A BROKEN INSTRUMENT.** The shim was written with an UNQUOTED heredoc, so
   `$@`, `$m` and `$want` were expanded when the file was written and it reduced to
   `sleep ""`. It never slept, honoured no `-m`, and the figure was startup plus
   the lock loop with zero network time - which the arithmetic should have given
@@ -382,9 +408,29 @@ against an instant API is not a figure about this notifier in use.
 
   Measured with a shim verified to honour `-m`, live-held lock and an API that
   never answers, three passes: **14s, 14s, 13s**, against the pre-item sender's
-  8-9s. The terms are startup (~1.4s), the lock wait (now a 4s DEADLINE) and one
+  8-9s. The terms are startup (~1.4s), the lock wait (a 4s DEADLINE) and one
   floored call (8s, plus whatever a hung server takes to reach that timeout).
   Re-measured after the wait became time-bounded: **12s, 12s, 13s, 14s, 14s**.
+
+  **AND THAT FIVE-SAMPLE FIGURE WAS PUBLISHED AS "DETERMINISTIC", ONE COMMIT AFTER
+  THIS FILE RETRACTED THE SAME MISTAKE MADE WITH THREE.** An attempt-17 tester ran
+  the same worst case TWENTY times with real `curl` against a real hanging
+  listener: min 12.63, p50 13.36, **p90 15.08, max 15.77 - three of twenty past
+  the Stop hook's 15s.** Five samples cannot see a p90 any more than three can,
+  and the paragraph directly above says so.
+
+  **THE FIX WAS NOT A SMALLER NUMBER, IT WAS REMOVING THE SUM.** Startup, the lock
+  wait and the floored send were each bounded separately and then ADDED, and each
+  had been retuned in a different round against a different measurement, so the
+  total only fitted inside 15 on average. There is now one wall-clock ceiling for
+  the whole run (`MM_WALL_SECS`, 11 by default), and both the wait and the send
+  clamp to what is left of it - including the FLOOR, which was previously licensed
+  to raise a timeout above what the hook could afford, and at a hung server did
+  exactly that. The worst case cannot exceed the wall because there is no longer a
+  sum to overflow.
+
+  Re-measured at this tip, same conditions, 20 passes: **min 10.90, p50 11.78,
+  p90 12.29, max 12.37 - 0 of 20 over 15s.**
 
   **AN ATTEMPT-16 TESTER REFUTED THE PREVIOUS VERSION OF THIS PARAGRAPH USING
   REAL `curl` AGAINST A REAL BLACK-HOLE LISTENER - no shim anywhere in the path.**
@@ -512,3 +558,69 @@ What closed them was structural, not another patch: one normaliser called by bot
 consumers, truncation only for uuid-length strings, and an append-only map read
 last-wins — which deletes the race rather than renaming it. **A rename is not a
 synchronisation primitive; not rewriting the file is.**
+
+---
+
+## A DEAD ROOT COULD NOT RE-THREAD ONCE THE API WAS SLOW, AND THE GATE WAS THE REASON
+
+`lock_take` refused rather than shortening. Its entry gate compared what was left
+against the wait's STATIC MAXIMUM plus a post - `LOCK_WAIT_SECS + 2` = 6 - while
+the wait itself has been bounded by a DEADLINE since the round that stopped
+trusting a per-turn constant. So once a single call cost more than about 2.6s
+there was never 6 seconds left, `lock_take` returned without the lock, and the
+`-z "$LOCK"` branch posted FLAT and appended nothing to the map. The session was
+wedged out of its own thread for the rest of its life, which is the failure this
+whole item exists to remove, reached through the recovery written to prevent it.
+
+**Not a regression.** The same arithmetic is in attempt 16. It was invisible
+because T6a had only ever been run against an instant-reject shim, where no call
+is slow enough to close the gate. A case that only ever meets the fast path cannot
+see a budget bug.
+
+**A BOUND THAT IS ALREADY DYNAMIC MUST NOT BE GATED ON ITS STATIC MAXIMUM.** The
+wait now takes what the wall leaves, keeps a post's worth back, and degrades
+smoothly to nothing instead of falling off a cliff at 6.
+
+Dead root, does the map gain a new root (fresh session per pass):
+
+| API answers in | pre-item tip `c822b5c` | this tip |
+|---|---|---|
+| 3.0s | 5/5 | **12/12 and 5/5** |
+| 3.5s | 2/3 | **3/3** |
+| 3.8s | 2/3 | **3/3** |
+| 4s | 2/5 | **5/5** |
+| 5s | 0/5 | 0/5 |
+| 6s | 0/5 | 0/5 |
+
+The 5s and 6s rows are arithmetic, not a defect: re-threading costs TWO calls -
+one to discover the root is dead, one to make a new one - and two 5s calls plus
+startup do not fit inside a 15s hook. The message still goes out, flat; only the
+map stays stale. **An attempt-17 tester measured 5/12 at 3s and 0/3 at 3.5-3.8s
+where this host measures 12/12 and 3/3 - their machine was slower under load. The
+RATES here are host-dependent; the ORDERING and the mechanism are not**, which is
+why this table is a sweep rather than a single operating point.
+
+## A CALL THE SERVER REJECTED IS NOT AN ATTEMPT THE MESSAGE GOT
+
+Delivery parity broke in exactly one shape - dead root, 5s API - where the tip
+must make two calls and the unthreaded parent makes one: tester measured tip 9/10
+against parent 10/10. The recovery's post was deliberately NOT floored, and the
+comment justifying that said "a call has already been spent". True of the CLOCK
+and false of the MESSAGE: the first call came back `!deadroot`, which is the
+server REJECTING the root, not serving the message. It is floored now, and safe to
+floor because the wall clamps it.
+
+Measured at the budgets where the second call is refused for want of time, 15
+passes each, 6s API: budget 8 - both 0/15; budget 9 - pre-item 9/15, **this tip
+12/15**; budget 10 - both 8/8. An earlier 8-pass run of mine read 1/8 against 0/8
+and looked like a REGRESSION; at n=15 it is noise in the other direction. Eight
+passes cannot separate those either.
+
+## `!deadroot` COULD BE WRITTEN INTO THE MAP
+
+The step-5 map write tests for the sentinel; the recovery's `_retry` write did
+not, and they are the same write. A tester forced it and the next run posted with
+`root_id=!deadroot`. Latent rather than live - it needs a ROOTLESS create to
+return a root_id error, which real Mattermost should not do - but two writes with
+one rule between them is one write too many to trust. Guarded.
+

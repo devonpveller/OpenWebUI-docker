@@ -108,6 +108,42 @@ _started=$(now_s)
 # this replaces. Worst case is startup + this + the lock wait, which stays inside
 # the Stop hook's 15 seconds at the default budget.
 POST_FLOOR=8
+# THE HOOK'S LIMIT IS NOT THE HTTP BUDGET, AND ADDING UP SEPARATELY-TUNED TERMS
+# IS NOT A BOUND. Three terms decided the worst case - startup, the lock wait, and
+# the floored first send - each bounded on its own and then SUMMED, each retuned
+# in a different round against a different measurement. 8 + 4 + startup fits
+# inside 15 the way three estimates fit inside a number: on average.
+#
+# A tester ran the worst case TWENTY times instead of five: min 12.63, p50 13.36,
+# p90 15.08, max 15.77 - THREE OF TWENTY over the Stop hook's 15s. My own evidence
+# for this was "12, 12, 13, 14, 14 - deterministic", which is five samples of a
+# distribution with a tail, and the commit immediately before this one RETRACTS
+# THE SAME MISTAKE made with three samples. Twice is not bad luck; a handful of
+# runs cannot see a p90, and I published one as if it could.
+#
+# So the terms stop being independent. This is a wall-clock ceiling for the WHOLE
+# run, and both the wait and the send clamp to what is left of it, rather than
+# each holding a private bound that only sums correctly by luck. The sum cannot
+# exceed the wall because there is no longer a sum.
+#
+# 11, not 15: the Stop hook's limit has to cover interpreter startup before
+# `_started` is even read, plus curl's own overshoot past `-m`. The measured gap
+# between this file's nominal worst case and the wall clock was ~2.4s, so the
+# ceiling is set with that much room and the hook's 15 is never the number being
+# aimed at. Overridable for the Notification hook's 20s.
+MM_WALL_SECS="${MM_WALL_SECS:-11}"
+case "$MM_WALL_SECS" in
+  ''|*[!0-9]*) MM_WALL_SECS=11 ;;
+  ??????*) MM_WALL_SECS=11 ;;
+esac
+[ "$MM_WALL_SECS" -lt 3 ] && MM_WALL_SECS=3
+[ "$MM_WALL_SECS" -gt 60 ] && MM_WALL_SECS=60
+# Fork-free, like `remaining` - it is read before every call and inside the wait.
+wall_left() {
+  local _l=$(( MM_WALL_SECS - ( $(now_s) - _started ) ))
+  [ "$_l" -lt 0 ] && _l=0
+  printf '%s' "$_l"
+}
 _lock_spent=0
 # 2, not 3. The credit is real time the run spends, so it extends the worst case:
 # MM_DEADLINE_SECS + this + startup. A tester measured 14.9-15.8s against the Stop
@@ -273,7 +309,7 @@ tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- 
 # session's root, silencing that session for the rest of its life. Found in test,
 # attempt 1, against a real deleted root.
 post() {
-  local _msg="$1" _root="$2" _floor="${3:-0}" _payload _budget _resp
+  local _msg="$1" _root="$2" _floor="${3:-0}" _payload _budget _resp _wl
   _payload=$(CHANNEL="$CHANNEL" MSG="$_msg" ROOT="$_root" python -c \
     'import json,os
 d = {"channel_id": os.environ["CHANNEL"], "message": os.environ["MSG"]}
@@ -308,6 +344,14 @@ print(json.dumps(d))' 2>/dev/null)
   # put a flag that does not survive, because the decision is made where the
   # knowledge is.
   [ "$_floor" -gt 0 ] && [ "$_budget" -lt "$_floor" ] && _budget="$_floor"
+  # AND THE FLOOR IS CLAMPED BY THE WALL, because a floor that can raise the
+  # timeout ABOVE what the hook can afford is precisely how the worst case got
+  # out. The floor's job is to stop a call being starved by accumulated overhead;
+  # it was also, silently, licensed to overrun the Stop hook, and at a hung server
+  # that is exactly what it did. The message's guarantee is "a real attempt", not
+  # "eight seconds regardless of whether anyone is still listening".
+  _wl=$(wall_left)
+  [ "$_budget" -gt "$_wl" ] && _budget="$_wl"
   # OUT OF BUDGET IS NOT A DEAD ROOT. Both used to return an empty string, so the
   # caller could not tell "the server rejected this root" from "there was no time
   # left to ask" - and the recovery path fired on the second, spending the little
@@ -483,7 +527,7 @@ map_root() {
 # below must not hand it back.
 lock_take() {
   [ -z "$key" ] && return 1
-  local _known_dead="${1:-}"
+  local _known_dead="${1:-}" _avail _wait
   # ARRIVING ALREADY STARVED? DO NOT THREAD AT ALL.
   #
   # Threading is worth a little time and no messages. A run whose startup has
@@ -510,8 +554,27 @@ lock_take() {
   # wait can take LOCK_MAX_TRIES turns, and a post needs 2 seconds after it.
   # From the wait's own bound plus one post, rather than from a per-turn constant
   # that was measured idle and wrong under load.
-  _gate=$(( LOCK_WAIT_SECS + 2 ))
-  [ "$(remaining)" -lt "$_gate" ] && return 1
+  # THIS REFUSED WHERE IT SHOULD HAVE SHORTENED, and refusing meant no thread at
+  # all. The gate compared what was left against the wait's STATIC MAXIMUM plus a
+  # post - `LOCK_WAIT_SECS + 2` = 6 - while the wait itself has been bounded by a
+  # DEADLINE since the round that stopped trusting a per-turn constant. So once a
+  # call cost more than about 2.6s there was never 6 seconds left, `lock_take`
+  # returned without the lock, and the `-z "$LOCK"` branch posted FLAT and
+  # appended nothing to the map: a dead root re-threaded 5 of 12 times at a 3s
+  # API and 0 of 3 at 3.5-3.8s, burning a call on the dead root every time.
+  #
+  # Not a regression - attempt 16's arithmetic is identical. It was invisible
+  # because T6a had only ever been run against an instant-reject shim, where no
+  # call is slow enough to close the gate. A case that only ever meets the fast
+  # path cannot see a budget bug.
+  #
+  # A BOUND THAT IS ALREADY DYNAMIC MUST NOT BE GATED ON ITS STATIC MAXIMUM. Take
+  # what the wall leaves, keep a post's worth back, and wait for that long. The
+  # wait degrades smoothly to nothing instead of falling off a cliff at 6.
+  _avail=$(wall_left)
+  _wait=$(( _avail - 2 ))
+  [ "$_wait" -gt "$LOCK_WAIT_SECS" ] && _wait="$LOCK_WAIT_SECS"
+  [ "$_wait" -lt 1 ] && return 1
   # AND A FLOOR ON THE WHOLE BUDGET, not just on what is left of it. Threading
   # costs a lock directory and a map line - two syscalls that are not free on this
   # platform - and below a certain budget those cost the message instead. Measured
@@ -533,7 +596,7 @@ lock_take() {
   # is exactly what varies under load. A deadline does not care: whatever a turn
   # costs, the wait ends when the clock says so. The turn cap stays as a second
   # bound so the loop terminates even if the clock misbehaves.
-  local _wait_until=$(( $(now_s) + LOCK_WAIT_SECS ))
+  local _wait_until=$(( $(now_s) + _wait ))
   # THE TRY COUNT IS THE LOOP BOUND, unconditionally, and that is the whole point
   # of writing it this way. The previous version bounded itself with `rm -rf; continue`,
   # which skipped BOTH the budget check and the sleep - so when mkdir failed for any
@@ -751,11 +814,18 @@ if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
     # tester, and invisible to every case in the plan because they all counted
     # "at least N" rather than "exactly N".
     root=""
-    # NOT floored: by this point a call has already been spent discovering the
-    # root was dead, so this is a LATER call by the plan's own definition, and
-    # flooring it is what pushed the worst case over the Stop hook's 15s. A
-    # tester instrumented `-m` per call and measured [8,8] at every budget.
-    post "${MENTION:+$MENTION }$MSG" "" >/dev/null 2>&1
+    # FLOORED, and the reasoning here used to say the opposite. "A call has
+    # already been spent" is true of the CLOCK and false of the MESSAGE: the
+    # first call came back `!deadroot`, which is the server REJECTING the root,
+    # not serving the message. This is the message's first real attempt, and
+    # starving it is why parity broke exactly here - a tester measured tip 9/10
+    # against parent 10/10 with a dead root and a 5s server, the one shape where
+    # the tip must make two calls and the unthreaded parent makes one.
+    #
+    # What made flooring unaffordable before was that the floor could overrun the
+    # hook. It is clamped by the wall now, so the guarantee costs what is there
+    # and never more.
+    post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
     _recovered=1
   elif [ -n "$LOCK" ] && [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
     # Unreachable in practice now that the case above runs first; kept because a
@@ -767,8 +837,15 @@ if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
     # No header, so a recovery costs ONE call, which is what makes it affordable
     # at the moment we have already spent a call discovering the root was dead.
     root=""
-    _retry=$(post "${MENTION:+$MENTION }$MSG" "")
-    if [ -n "$_retry" ] && [ -n "$key" ]; then
+    _retry=$(post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR")
+    # `!deadroot` MUST NEVER REACH THE MAP. The step-5 write tests for it; this
+    # one did not, and the two writes are the same write. A rootless create
+    # returning a root_id error is not something real Mattermost does, so this was
+    # latent rather than live - but a tester forced it and the NEXT run posted
+    # with `root_id=!deadroot`, which is the wedged-session failure this whole
+    # item exists to remove, reached through the recovery meant to prevent it.
+    # Two writes with one rule between them is one write too many to trust.
+    if [ -n "$_retry" ] && [ "$_retry" != '!deadroot' ] && [ -n "$key" ]; then
       { printf '%s %s\n' "$key" "$_retry" >> "$THREADS"; } 2>/dev/null
     fi
     _recovered=1

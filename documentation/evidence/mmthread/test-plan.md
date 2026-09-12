@@ -107,13 +107,28 @@ caller:
   carry the label this plan otherwise mandates. Send it, then delete it like the
   rest; do not skip the case to keep the labelling rule intact.
 
-PASS: exit 0 in every case, and the whole run finishes inside
-`MM_DEADLINE_SECS` (default 10) plus a second or so of process overhead —
-measured 10.2–11.4s against a black hole in attempt 2. The number that matters is
-the HOOK timeout: 15s on Stop and 20s on Notification in the operator's
-`.claude/settings.local.json`. **This case used to say "the 8s curl bound", which
-was the pre-threading figure and was never updated when threading made it up to
-four calls.**
+**TWENTY PASSES OF THE WORST CASE, NOT THREE AND NOT FIVE, AND REPORT THE
+DISTRIBUTION.** The worst case is real `curl`, a listener that accepts and never
+answers, the lock held by another process, and the default budget. Report min,
+p50, p90 and max, and the COUNT over 15s - not a range.
+
+This requirement is the whole history of this case. A three-sample "14s, 14s,
+13s" was refuted by a tester at 16.8s and 17.3s. The replacement five-sample
+figure was published as "deterministic" one commit after that retraction, and
+refuted again at p90 15.08 / max 15.77, three of twenty past the Stop hook. **A
+handful of runs cannot see a p90**, and this plan demanded 12 to 30 rounds for
+concurrency while letting three stand for timing. Twenty, and the count over the
+limit, or the case is not executed.
+
+PASS: exit 0 in every case, no stderr reaches the caller, and **0 of 20 runs
+exceed 15s** — measured at the current tip: min 10.90, p50 11.78, p90 12.29, max
+12.37. The number that matters is the HOOK timeout: 15s on Stop and 20s on
+Notification in the operator's `.claude/settings.local.json`.
+FAIL: any run over 15s, or a figure reported as a range or an average instead of
+a distribution with a count.
+
+**This case used to say "the 8s curl bound", which was the pre-threading figure
+and was never updated when threading made it up to four calls.**
 
 **AND THEN THIS CASE WENT STALE IN THE OPPOSITE DIRECTION.** It went on to say
 "check the budget is honoured, not a fixed 8s: set `MM_DEADLINE_SECS=3` and
@@ -360,6 +375,16 @@ how you ruled it out. A number you cannot defend is worse than no number.
 
 ## T6a — a dead root must be recoverable MORE THAN ONCE, and the map must show it
 
+**RUN IT AGAINST A SLOW API, NOT ONLY AN INSTANT ONE — SWEEP THE LATENCY.** For
+every attempt up to 17 this case was run against an instant-reject shim, and so
+never met the budget path at all: the entry gate that made re-threading impossible
+above ~2.6s per call was present from attempt 16 and invisible to every run of
+this case. **A case that only ever meets the fast path cannot see a budget bug.**
+Sweep at least 3s, 4s, 5s and 6s per call and report a rate at each; a single
+operating point is not a result, and the RATES are host-dependent (one tester's
+machine gave 5/12 where another host gives 12/12 — the ordering and the mechanism
+are what reproduce).
+
 T6 asks whether a dead root wedges the session, and answers it by looking at
 whether a message got through. That is not enough, and the gap hid a real defect
 for several rounds: the recovery path could post flat every time while never
@@ -437,13 +462,32 @@ call.
 
 Run N=2 at 0s, 1s, 2s, 3s, 4s and 5s per call, at least 12 rounds each.
 
-Measured now: one thread every round up to 3s per call; at 4s about half the
-rounds split and at 5s most do; **no message is lost at any latency**. The cause
-is arithmetic - a loser waits 3.8s for the winner to publish, which cannot happen
-until the winner's post returns - and lengthening the wait to cover 5s puts the
-worst case past the Stop hook. **The claim is therefore: one thread per session
-for an API answering within about 3 seconds.** Beyond that, more than one thread
-and every message.
+Measured at N=2, 10 rounds per setting, this tip against the pre-item tip on the
+same instrument:
+
+| API answers in | pre-item tip `c822b5c` | this tip | message lost |
+|---|---|---|---|
+| 0s | - | 10/10 | 0/10 |
+| 1s | - | 9/10 | 0/10 |
+| 2s | 10/10 | 10/10 | 0/10 |
+| 3s | **4/10** | **9/10** | 0/10 |
+| 4s | 0/10 | 0/10 | 0/10 |
+| 5s | 0/10 | 0/10 | 0/10 |
+
+**The claim is therefore: one thread per session for an API answering within about
+3 seconds**, and this tip is what makes 3 hold - the pre-item tip gave 4 rounds in
+10 there. Beyond 4s, more than one thread and every message.
+
+Two things this paragraph used to say that the measurement does not support. "At
+4s about half the rounds split and at 5s most do" describes a SLOPE; it is a
+CLIFF, 9/10 at 3s and 0/10 at 4s. And "a loser waits 3.8s" was a turn-count figure
+from a build whose wait is no longer counted in turns. The note stated the same
+ceiling as "about 2 seconds" - the two documents disagreed with each other, which
+is how an attempt-17 tester found that neither had been re-measured.
+
+The cause is arithmetic: a loser waits for the winner to publish its map line,
+which cannot happen until the winner's post returns, so the wait must cover a
+whole call and the wait is bounded by what the Stop hook can afford.
 
 N=3 is reported, not claimed exact. N=10 is not claimed at all.
 
