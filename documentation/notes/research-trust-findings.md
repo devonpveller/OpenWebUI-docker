@@ -2917,3 +2917,19 @@ over-protection side ("does not support DDR4-3200", "The PSU is not proprietary"
 in a table cell) with a KEEP judge; the condemned sentence nothing could correct, counted and
 disclosed in the footer; a judge that errors; the 100 Hz stutter refused by the judge; and the
 name that beats a stutter.
+
+## Proof run for research-trust-names attempt 5, 2026-09-12 18:24 UTC (dry run fb029bfb) - the judge-gated build live
+
+Provenance: observed-live; `research_jobs.result` for fb029bfb on `openbrain-research` label 5005197.
+
+- Buyers-guide, 7 of 7 needs answered, 23 fetched, 13 relevant, 15 cited. Footer:
+  `render checked: 29 of 32, 3 corrected, 3 unchecked - left as written: 2 (0 would invert,
+  2 already said, 0 nothing to cite)`. Names blocked: none; grounding diff names []. Polarity
+  sources: judge 5, heading 4, no-negation 19, world-marker 4, evidence-noun 1, default 3.
+  "What the evidence does not settle" keeps its absence sentences ("the visible source
+  content does not include...", "no source documents a specific socket defect"); no
+  inversion observed. The five judge calls all answered KEEP; two corrections were refused
+  as duplicates and counted.
+- Formatting artefact to watch (not a trust defect): one replacement left a bare
+  `[Source 2]` on its own line before a paragraph break in the does-not-settle section - a
+  citation orphaned when a coarse span was corrected per sentence. Follow-up if it recurs.
