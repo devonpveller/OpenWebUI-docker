@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.1
+version: 1.5.2
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -430,7 +430,14 @@ def _render(result: dict[str, Any]) -> str:
         checked = int(rf.get("checked") or 0)
         if checked > 0:
             corrected = int(rf.get("rewritten") or 0) + int(rf.get("replaced") or 0)
-            foot.append(f"render checked: {checked} sentences, {corrected} corrected")
+            # N OF M, and the units nothing looked at: a coverage number with no
+            # denominator is one a reader cannot reproduce from the document.
+            units = int(rf.get("units") or checked)
+            unchecked = int(rf.get("unchecked") or 0)
+            foot.append(
+                f"render checked: {checked} of {units}, {corrected} corrected, "
+                f"{unchecked} unchecked"
+            )
         elif rf.get("error"):
             foot.append("render check: not run")
     if backstop and backstop != "complete":
