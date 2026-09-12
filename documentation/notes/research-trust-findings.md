@@ -2393,3 +2393,146 @@ taken: reviewer `-Requeue`, tester re-pass at the landed commits, release, `-Mer
 protocol and the verb are in tension; the reviewer's proposal (a `-Rebased` verb that
 re-points tested_at_sha with the equivalence proof attached, or an explicit "non-trivial
 rebase => requeue" rule) is recorded in N.11 of the worktree copy of this file.
+
+### N.9 Should a [GAP] QUESTION be gated at all? — [measured 2026-09-12, reviewer]
+
+Written at merge time (reviewer rt-reviewer; the item landed as `e09cea0`). Not an objection to
+what shipped - the rule is right and the reviewer passed the item on it - but the one design
+question it leaves open, recorded before the next round builds on top of it.
+
+**The specimen.** In the regenerated `rendered-5ab36fe0-product-comparison.md`, the gate rewrote a
+question in the limitations list:
+
+    before: ...the distinction between Azure Repos Git and TFVC (Team Foundation Version Control)?
+    after:  ...the distinction between Azure Repos Git and other version control systems?
+
+`TFVC` is flagged because it appears only in the synthesis's `[GAP]` lines, which this item
+decided do not earn a name - correctly: a `[GAP]` line is the synthesizer's own account of what it
+could not find, not a source's. Note that the original line SPELLS OUT its own expansion in the
+same breath, and `expansionMatch` still does not exempt it, because the match runs against the
+GROUNDED text and not against the document. **That is also correct, and the reason is worth
+keeping:** "define the acronym you just invented" is precisely the move an unconstrained renderer
+would make, so a self-defining document could exempt anything it liked.
+
+**The cost, and why it is not obviously worth paying.** The previous item built
+`LIMITATIONS_SECTION` so a report would ASK for the next run in the reader's terms - "A further
+run focused on <the open thing> would close this". A question generalised from "Git versus TFVC"
+to "Git versus other version control systems" asks for less: the operator who would have typed the
+acronym into the next query no longer has it. So the gate's most expensive correction lands on the
+one mechanism designed to make the following run targeted.
+
+Three options, none free, for whoever picks this up:
+
+1. **Gate `[GAP]` questions as now.** Nothing unearned reaches the reader; open questions get
+   vaguer. The current choice, declared in `fidelity.ts` and in the fixture headers.
+2. **Exempt `[GAP]` questions from the name gate and FLAG them instead** - leave the question
+   intact, and report the unearned name to the operator (the run record already carries
+   `prose_ungrounded.names`, and N.8 notes a surviving question-name stays visible there). The
+   reader sees a name no source used, which is the exact harm the gate exists to stop - but in a
+   QUESTION, where it is asking rather than asserting.
+3. **Gate the assertion and keep the term**: rewrite only the claim-bearing part and let a question
+   keep its noun. No mechanism for this exists yet; it needs the judge to distinguish a question
+   from an assertion, which `citedUnits` does not currently model.
+
+The reviewer's own lean, stated so it can be argued with rather than inherited: (2) for questions
+only, because a question makes no claim about the world and the cost of a vague follow-up is paid
+by every subsequent run, while the cost of a named question is one term a reader can check. But
+this is a judgement about what a report is FOR, which is the operator's call and not a reviewer's.
+
+### N.10 The three ways the exemption can be talked out of firing — [measured 2026-09-12, reviewer]
+
+The tester raised these as X-items; recorded here with the reviewer's own measurements against the
+shipped `expansionMatch` at OB1 `8f26c4c`, so the next reader has the reproduction and not the
+claim. **All three fail toward NOT blocking**, which returns the name to the report-only behaviour
+of the last three items rather than producing a wrong correction - the safe direction for a new
+gate, and the reason none of them blocked this merge.
+
+    expansionMatch("BSOD", "[SOURCED] The Basic System of Diagnostics reports a fault [Source 1]")
+      -> true      INITIALS COINCIDENCE: any phrase whose consecutive initials spell the name
+    expansionMatch("OEM",  "[SOURCED] See https://example.com/parts/oem-replacement/list [Source 2]")
+      -> true      URL PATH: the whole-word test does not care that the match is inside a URL
+    expansionMatch("Arc",    "[SOURCED] arc welding uses a filler rod [Source 1]")      -> true
+    expansionMatch("Signal", "[SOURCED] the signal degrades over distance [Source 1]")  -> true
+    expansionMatch("Notion", "[SOURCED] the notion that X causes Y is unsupported [1]") -> true
+
+The third is the structural one and it deserves its own sentence: **a product whose name is an
+ordinary English word cannot be caught by any token-level name diff.** Arc, Signal and Notion are
+real products, and any evidence set that happens to use the common word exempts the brand. This is
+not a bug in `expansionMatch` and no tightening of it helps - the flagged-name set comes from
+`acronymSet`, which sees tokens, and a token cannot tell a brand from a noun. Whatever the next
+item does, it should not claim this class is covered.
+
+One narrowing that costs nothing and would close the second case: run the whole-word test against
+the grounded text with URLs stripped, as `stripPointers` already does for numbers. The first case
+is harder and may not be worth fixing - requiring the initials to come from capitalised words would
+catch "Basic System of Diagnostics" only until someone writes it in a heading.
+
+### N.11 The protocol tells the reviewer to rebase, and a rebase that replays makes the merge unrecordable — [observed 2026-09-12, reviewer]
+
+A HARNESS finding, not a research-engine one; recorded here because this item is where it happened
+and the next reviewer to meet it will be reading this file.
+
+**What happened.** The work line moved between this branch being cut and the review
+(`refactor/ai-stack-cleanup` ea6a2e5 -> 5bf0d0c, item reapdoc: 16 commits over 13 files). MERGE-
+PROTOCOL §2 step 4 instructs the reviewer to rebase, so I did; it replayed the branch's one commit
+`2aa94dc` as `158c6c3`. The merge landed as `e09cea0`, and then:
+
+    queue.ps1 -Merged -Id research-trust-names -By rt-reviewer -Sha e09cea0 -FitsCodebase
+    ERROR: 'e09cea0' does not contain '2aa94dcb...' - the commit this item's tests passed at -
+    so that is not a merge of this item. ... Nothing has been recorded.       (exit 1)
+
+The check is right and should not be weakened: it asks `git merge-base --is-ancestor
+<tested_at_sha> <merge sha>`, deliberately against the recorded tested commit rather than a live
+branch ref, and its comments carry the two incidents that shaped it. A rebase orphans that commit
+by construction, so a reviewer who follows the protocol's own instruction on a moved work line can
+no longer record the result of following it.
+
+**The equivalence I could prove, and the equivalence the tool can accept, are not the same thing.**
+Before merging I established that the replay was byte-identical to what was tested:
+
+```bash
+# 1. the two changed sets do not intersect (13 incoming files vs this branch's 6)
+comm -12 <(git diff --name-only ea6a2e5..refactor/ai-stack-cleanup | sort) \
+         <(git diff --name-only ea6a2e5..work/research-trust-names | sort)      # empty
+
+# 2. every file this branch touches is unchanged across the rebase
+for f in <the six paths>; do git diff --quiet 2aa94dc 158c6c3 -- "$f" && echo IDENTICAL; done
+
+# 3. and the patch that would land is the same bytes before and after
+git diff ea6a2e5..2aa94dc > old.patch
+git diff refactor/ai-stack-cleanup..158c6c3 > new.patch
+diff old.patch new.patch                                                        # empty
+```
+
+All three held. None of it is visible to `-Merged`, and a check that accepted "the reviewer says
+the bytes match" would be the kind of check this workstream has spent ten items removing. **Ancestry
+is not content** - the same sentence as the OB1 gitlink lesson, pointed the other way: there, a
+commit that was an ancestor did not carry the content; here, content that is identical has no
+ancestry.
+
+**What was done, by the book (operator, 2026-09-12):** `-Requeue` back to test rather than any edit
+to the queue file. The reviewer declined to update `tested_at_sha` by hand: it would have been a
+true statement written into the audit trail by the person whose own action made it necessary, which
+is the shape of every record this project has learned not to trust. The tester re-runs the plan at
+the branch head, `-Pass` records `tested_at_sha` from `git rev-parse <branch>` - verified at
+`queue.ps1:1932` - which is `12d7e67`, an ancestor of `e09cea0`, so the eventual `-Merged` is
+truthful with no special case.
+
+**The two designs worth considering**, neither built:
+
+1. **A `-Rebased` verb.** The reviewer records the replay: old tested sha, new sha, and the
+   equivalence evidence (the three commands above), and the tool re-points `tested_at_sha` itself
+   after verifying `git diff <old> <new>` is empty over the branch's paths. The tool does the
+   check rather than believing the claim, which is the difference that matters.
+2. **An explicit rule in MERGE-PROTOCOL:** a rebase that is not a no-op returns the item to test.
+   Cheaper to write, and it costs a full test cycle on content nobody changed - which is what this
+   item just paid.
+
+Option 1 is the better trade if rebases onto a moved line become common; this was the first in six
+items reviewed by rt-reviewer, so option 2 may simply be honest about the frequency.
+
+**One latent record defect left behind, worth knowing:** the row's `submitted_sha` is still the
+orphaned `2aa94dc`. It resolves today because the object survives in the worktree's reflog, so no
+`[UNRESOLVABLE]` flag appears - but a `git gc` that drops it would make this row read as unresolvable
+work long after it merged. Nothing to do now; a reason for a `-Rebased` verb to re-point both fields
+rather than one.
