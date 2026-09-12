@@ -1408,3 +1408,97 @@ sound in its body and broken at an edge the body did not cover — the pattern l
 head-clause split, the length anchor had no notion of identity, the set rule had no floor, the
 floor had no behaviour when there was nothing to floor against. The edges keep being found by a
 tester rather than by the rule's own construction.
+
+### H.7 On a PADDED query the pad word is the floor's second content word — [reproduced 2026-09-12, reviewer; live measurement observed by the tester 2026-09-12]
+
+Written at merge time (reviewer rt-reviewer, 2026-09-12), from the tester's X1 in
+`.git/agent-worktrees/queue/research-trust-core.attempt4.evidence.md`, so the next item reads it
+without going back to an attempt file. The item merged as `aca6bce`; nothing here is a defect
+report against it.
+
+`shapeQuery` guarantees two content words by appending `QUERY_PAD_SUFFIX` (`overview`) when the
+need supplies none. The evidence floor then asks each hit for two distinct content query terms —
+and on a padded query the second of those two IS the pad word. So the share becomes partly a
+measure of which pages happen to use a word chosen precisely because it has no discriminating
+power.
+
+**What the tester measured, live (theirs, 2026-09-12, not re-run since).** On a freshly captured
+`Signal overview` result set the hits that carried were exactly the hits containing the word
+"overview": `signal.org` — the canonical page for the subject — was REFUSED, while a Linux
+`signal(7)` man page was ACCEPTED. Three captured padded queries landed 0.40–0.50, comfortably
+over the 0.175 line, and the DSP junk stayed at 0.00 because those pages do not use the word
+either.
+
+**What the repository reproduces (reviewer, against the shipped code at OB1 `1b88347`).** The
+same dependence cuts the other way, and the fixture directory demonstrates it:
+
+    live-signal.json, its own recorded query "Signal messenger encryption"  ->  0.75  ok
+    live-signal.json, the padded query "Signal overview"                    ->  0.00  collapsed
+
+None of that set's twenty genuine Signal-messenger pages uses the word "overview", so a padded
+query drops a real, on-subject set to zero. The junk set scores 0.00 on the same query for the
+same reason (0 of 20 hits carry the pad word). **Both directions are the same coin: the pad word
+decides, and neither good nor junk pages reliably carry it.**
+
+The failure is in the SAFE direction — nothing is fetched and the run reports a search failure
+rather than an absence, which is this workstream's whole thesis — but a need whose every word is
+a stopword can now lose a search that would have worked. The shape that crosses the line the
+other way is a subject whose good pages rarely use the pad word while the junk does.
+
+**The missing RED case, for whoever takes this up:** inject "overview" into some titles and
+snippets of `junk-signal-dsp` and assert the verdict. No case in the suite measures a padded
+query against junk that uses the pad word; the reassurance that junk sits at 0.00 comes from
+junk that does not use it.
+
+Two things not to break while fixing it: the pad must stay non-discriminating for a FIRST search
+(the retry list's "problems"/"review" would bias the first look at a subject toward complaints),
+and `query_padded` already counts every padded query, so the population is measurable before
+anyone changes the rule.
+
+**Also note, for anyone reading the regression suite as the specification:** the `REGRESSION ok:`
+loop asserts `share >= 0.3` for every good set, which is stricter than the shipped
+`ENTITY_SHARE = 0.175`. A legitimate future good set landing between the two fails the suite
+while the product classifies it correctly. That is deliberate as a tripwire; it is not the
+threshold.
+
+### H.8 The anchor named two functions this item deleted — [read-from-source 2026-09-12, reviewer]
+
+Recorded so the anchor is not later read as a description of what shipped. Anchor
+`anchor-research-trust-core.json`, confirmed before the work, states:
+
+  * criterion 1 — "`entityCore('100Hz audio VR motion sickness')` yields a core …"
+  * criterion 3 — "KEYWORDIZE's returned entity longer than 3 tokens is shortened
+    deterministically …, counted in `fetchStats.search` (`entity_shortened`) and shown in the
+    footer"
+
+`entityCore` and `shortenEntity`/`entity_shortened` are both DELETED by this item: there is no
+core phrase and no shortening, because the subject is used whole as a token set. The substance of
+criterion 1 is met by a different function (`subjectTokens` + the set rule, measured at 0.85 on
+the recorded set against the anchor's ≥ 0.4), and criterion 3 was withdrawn as no longer
+meaningful — "a footer clause that can never fire again is worse than no clause".
+
+**This was declared, not routed around**: the TEST-PLAN's T4 states both deletions and the reason,
+and H.4/H.5 record them case by case, which is what the merge protocol asks of work that finds an
+acceptance criterion obsolete. What did NOT happen is an amendment of the anchor text itself, so
+the confirmed anchor on the board still names both functions. If a later item diffs the artifact
+against that anchor, this is the entry that explains the gap.
+
+## Deploy round 3, 2026-09-12 (research-trust-core at OB1 1b88347) - the proof is green
+
+Provenance: observed-live via `POST :8818/research` dry runs a337520c (100 Hz) and
+d8dfb1e0 (OptiPlex) on `openbrain-research` label 1b88347.
+
+- **100 Hz (a337520c): acceptance MET.** Subject extracted as `"100Hz"` (the tightened
+  KEYWORDIZE now returns a name). 4 of 6 searches `ok` (shares 0.625 / 0.625 / 0.625 / 0.5),
+  2 collapsed (0.125 / 0), 48 hits, 18 fetched, 14 relevant, 16 cited including
+  pmc.ncbi.nlm.nih.gov/PMC11955832, pure.fujita-hu.ac.jp (the paper's institutional
+  record), sciencedaily, ridecalm, hearinghealthmatters. Title: "100 Hz Bone-Conducted Tone
+  Reduces Motion Sickness via Otolith Stimulation; VR Relevance Is Inferred from a
+  Driving-Simulator Proxy". Footer: `needs answered 0 of 6 (4 partly)`. The same query on
+  2026-09-11 returned "Absence of Evidence..." with 0 fetched.
+- **OptiPlex (d8dfb1e0): acceptance MET.** 5 of 5 searches `ok` (0.75-1.00), 26 fetched,
+  14 cited (Dell diagnose pages, manuals, defect DB, two used-OptiPlex articles), footer
+  `needs answered 1 of 6 (5 partly)` consistent with the body.
+- Open for the next item (not blockers): H.7 padded-query dependence on the pad word;
+  "needs answered 0 of 6 (4 partly)" on a run that clearly answered the mechanism need -
+  the coverage judge is still conservative; two 100 Hz searches still collapsed at 0.125/0.
