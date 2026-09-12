@@ -902,3 +902,141 @@ labelled deno container against the deployed source.
   nothing bounds the entity's length and `entityStatusFor` only checks presence in the query.
   Direction of failure: over-caution (no fabrication, curator skipped) - but the report still
   says "search: DEGRADED" about a healthy search plane. Item `research-trust-core` opened.
+
+---
+
+# research-trust-core (item 3, 2026-09-11)
+
+Follow-up to deploy round 2. The deployed detector reported three healthy searches as
+failures because the subject it was handed was a TOPIC, not a name.
+
+## F.1 The mechanism, reproduced — [observed-live 2026-09-11]
+
+Dry run 6975d982: KEYWORDIZE returned the subject `"100Hz audio VR motion sickness"`. The
+deployed `entityCore` anchors on the token BEFORE the first digit-bearing token; here the
+digit token is FIRST, so nothing was dropped and the core became all six tokens
+`[100 hz audio vr motion sickness]` — a phrase no page carries. Share **0.00** on a hit set
+where "100 Hz" is in 9 of 20 rows and PMC11955832 is rank 1; `collapsed onto "motion"` three
+times; `search_degraded`; nothing fetched. With the entity `"100Hz audio"` the same code gives
+core `[100 hz]` → 0.45 → ok.
+
+Two gaps, not one: the core rule had no case for a digit-first subject, and **nothing bounded
+the entity's length** — `entityStatusFor` only checked that the query contained it.
+
+## F.2 The rule, in one sentence
+
+> A subject of more than a couple of tokens is a TOPIC, not a name, so it is reduced to the
+> shortest window of at most three WORDS around its most distinctive token — the first
+> digit-bearing token that is not a bare year, else the longest token — keeping whatever is
+> glued to that token: its own typed run, a version's second number, a preceding model word,
+> or a following unit.
+
+Three sub-decisions, each **measured against a live hit set** rather than assumed (read-only
+`GET :8085/search`, 2026-09-11, 3 engines answering; fixtures `live-prius`, `live-python312`,
+`live-crashloop`):
+
+| subject | candidate cores and their measured share | chosen |
+|---|---|---|
+| `2026 Toyota Prius` | `toyota prius` **0.95** · `2026 toyota prius` 0.80 · `2026 prius` 0.20 · `prius` 1.00 | `toyota prius` — the year dates a subject, it does not name one |
+| `Python 3.12 asyncio` | `python 3 12` **0.35** · `3 12` 0.55 · `python 3 12 asyncio` 0.05 | `python 3 12` — `3 12` alone matches any 3.12 anywhere; the whole subject is a topic |
+| `Kubernetes CrashLoopBackOff` | `crashloopbackoff` 1.00 · `kubernetes crashloopbackoff` **0.40** | both pass; the rule's job is to pass a good set, not to maximise the share |
+
+`python 3 12` at 0.35 is the thinnest good core measured anywhere in this workstream. It is
+above the 0.175 line, and it is the number to watch if the threshold is ever revisited.
+
+## F.3 The cap counts WORDS, not tokens — [observed]
+
+Written as a three-TOKEN cap first. `HP EliteDesk 800 G4` is three words and five tokens, so
+the cap cut the `G4` off and `RTX 3050 benchmark` then satisfied `RTX 3050 Ti` — undoing the
+neighbouring-model guard the previous item had just built. The window now extends by whole
+runs (words as typed), which also keeps `M910q` intact without a special case.
+
+Two further corrections found by re-running every pinned case after each change:
+
+- **The trim removed anything short, not only qualifiers**, so it undid the window it had been
+  given: `MacBook Air M2` became `m 2`, and `m 2` matches `M.2` — a string in the OptiPlex
+  fixture's own hit titles. The trim now removes QUALIFIERS only.
+- **A measurement is complete at number+unit.** `100Hz tone` was absorbing the trailing word,
+  giving `100 hz tone`, which is narrower than what pages write.
+
+Two expectations from the previous item were CHANGED, not deleted, each with its reason in the
+test: `Lenovo ThinkCentre M910q` now yields `thinkcentre m 910 q` (more specific, still
+brand-free) and `Apple MacBook Air M2` yields `air m 2` (the guard it was written for — never
+the bare `m 2` — still holds and is still asserted against the M.2 string).
+
+## F.4 A label change worth knowing about
+
+With the entity shortened to its name, a round-1 query carries `OptiPlex 3050` rather than
+`Dell OptiPlex 3050`. The recorded Dell junk set therefore no longer piles onto a token the
+QUERY contains, so its verdict moves `collapsed` → `offtopic`. Both are junk, both yield
+nothing, both feed the degraded streak; three replay assertions were widened to accept either
+and say why. Nothing about the outcome changed — only which of the two junk labels is
+reported.
+
+## F.5 The entity is bounded at extraction — [read-from-source]
+
+`KEYWORDIZE_SYS` now states the entity is a NAME of at most 3 words, says what it is NOT
+(the topic, an intent, a bare year), and carries the failing case as its example:
+*for "how 100Hz audio affects VR motion sickness" the entity is "100 Hz", NOT "100Hz audio VR
+motion sickness"*.
+
+A prompt is a request, not a guarantee, so `harness.ts` shortens deterministically with
+`shortenEntity()` — which returns the caller's own spelling (`Python 3.12`, not
+`Python 3 12`), so the progress line and the footer name something a person would recognise.
+
+The correction is **counted only when the raw subject was longer than three words**. Dropping
+a brand (`Dell OptiPlex 3050` → `OptiPlex 3050`) is ordinary core extraction and happens on
+most product runs; counting it would put a line in the footer of nearly every report and bury
+the case that matters.
+
+`fetchStats.search.entity_shortened` → `search_record` → both renderers, byte-identical:
+
+```
+… · subject shortened to its name (1x) · entity gate: 2 search(es) judged without it (…)
+```
+
+## F.6 ENTITY_SHARE re-measured under the new core rule — [observed-live 2026-09-11]
+
+Every recorded set, recomputed:
+
+| share | set | core | class |
+|---|---|---|---|
+| 1.00 | `probe-good-oomkilled` | `oomkilled` | GOOD |
+| 1.00 | `probe-good-iphone` | `iphone 18 pro` | GOOD |
+| 0.95 | `live-prius` | `toyota prius` | GOOD (live, new) |
+| 0.75 | `search-good-optiplex` | `optiplex 3050` | GOOD |
+| 0.65 | `live-optiplex-health` | `optiplex 3050` | GOOD (live) |
+| 0.55 | `live-100hz-mechanism` | `100 hz` | GOOD (live) — **was 0.00** |
+| 0.40 | `live-crashloop` | `kubernetes crashloopbackoff` | GOOD (live, new) |
+| 0.35 | `live-100hz-studies` | `100 hz` | GOOD (live) — **was 0.00** |
+| 0.35 | `live-python312` | `python 3 12` | GOOD (live, new) |
+| 0.30 | `live-optiplex-thermal` | `optiplex 3050` | GOOD (live) |
+| **0.175** | — | — | **ENTITY_SHARE (unchanged)** |
+| 0.05 | `live-100hz-ssq` | `100 hz` | OFF-NEED (live) |
+| 0.00 | six collapse fixtures | `optiplex 3050` / `100 hz` | COLLAPSED |
+
+All three shares measured with the entity the failing run actually produced
+(`100Hz audio VR motion sickness`), not with a cleaned-up one.
+
+**The threshold does not move.** The nearest sets are still 0.05 below and 0.30 above, both
+0.125 away, so the no-set-within-0.1 rule holds unchanged. Two GOOD sets moved from 0.00 to
+0.55 and 0.35 — they were the false failures — and nothing moved toward the line.
+
+## F.7 Counts — [observed-live 2026-09-11]
+
+| suite | before (merged research-trust-entity) | after |
+|---|---|---|
+| `research-service` `deno test -A` | 173 passed / 1 env-failed | **189 / 1** |
+| `research-curator` | 36 | 36 (untouched) |
+| `ruff check .` | clean | clean |
+
+New file: `entity-core.test.ts` (14). New fixtures: `live-prius`, `live-python312`,
+`live-crashloop`.
+
+## F.8 Out of scope, recorded
+
+- The weak-core class of E.10 (`laptop 5`, `model 3`) is unchanged: the new rule does not fix
+  it and the anchor did not ask it to. `Microsoft Surface Laptop 5` still yields `laptop 5`.
+- URL matching in `entityShare` (X3) still not done: a hit whose URL says `optiplex-3050`
+  while its title does not still scores as a miss.
+- The Answer block's source weighting (the Walmart-review headline) remains open.
