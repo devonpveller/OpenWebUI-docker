@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.2
+version: 1.5.3
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -438,6 +438,11 @@ def _render(result: dict[str, Any]) -> str:
                 f"render checked: {checked} of {units}, {corrected} corrected, "
                 f"{unchecked} unchecked"
             )
+            # Parity with report.ts coverageFooter(): names the evidence never
+            # used, removed before the reader saw them. Only when there were any.
+            blocked = rf.get("names_blocked") or []
+            if isinstance(blocked, list) and blocked:
+                foot.append(f"names: {len(blocked)} blocked")
         elif rf.get("error"):
             foot.append("render check: not run")
     if backstop and backstop != "complete":

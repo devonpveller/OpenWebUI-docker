@@ -2248,3 +2248,122 @@ Provenance: observed-live; `research_jobs.result` for a205845d (origin owui, cal
 - Compared with the approved run 64ac38cf (same skeleton, 5 of 5, "17 sentences, 2
   corrected" with no denominator): this footer names the denominator and it checks out;
   no verbatim-replaced cells; one collapsed search honestly counted as junk.
+
+---
+
+## N. research-trust-names — the reporter gets teeth (2026-09-12)
+
+`renderGroundingDiff` has been reporting invented names for three items: ATX and SFX in
+research-trust-report, BSOD in the item after, OEM in the one after that, and "non-OEM" in live
+run a205845d. Every one went into `prose_ungrounded.names` on a job row, which the colleague the
+report is written for never opens. This item makes the measurement act.
+
+### N.1 The gate — [read-from-source]
+
+A unit whose view uses a name the GROUNDED answer never uses is UNSUPPORTED before any judge is
+asked, and is corrected the way every other overstatement is: one targeted rewrite, then the
+verbatim grounded line (`fidelity.ts`). The rewriter is told which name offends, by name.
+
+**The exemption is an EXPANSION MATCH, not a list** (`grounding.ts` `expansionMatch`). A name is
+earned when the evidence writes it as a whole word, or when some run of consecutive words on one
+line has initials that spell it: BSOD is earned by "Blue Screen of Death", and an unrelated
+acronym is not. Four items in this workstream have failed on a hand-written list of surface
+strings; a list of known abbreviations would have been the fifth.
+
+### N.2 The [GAP] decision, stated — [measured]
+
+**A [GAP] line is the synthesizer's account of what it could not find, not a source's**, so the
+names check reads only the GROUNDED lines as evidence, and the limitations list is gated like any
+other section. Live run a205845d put "non-OEM" in front of a reader because a [GAP] line said "a
+non-OEM fan"; the same shape is in the committed fixtures, where ESR and HDD reached the
+limitations questions from [GAP] lines and TFVC and UI did the same in the comparison render.
+
+Numbers and URLs keep the whole synthesis as their reference: a figure inside a [GAP] QUESTION is
+a question, not an assertion, and flagging it would report the report for asking about the thing
+it was asked about.
+
+Two rules protect the questions themselves:
+
+- **An open question is never answered with evidence.** A limitations line is rewritten or left
+  alone; pasting a grounded line over a question about what the evidence lacks would be the worst
+  sentence this module could write.
+- **"Blocked" is measured on the delivered document**, not asserted from intent: the flagged names
+  are recomputed after the corrections and only those that are GONE are counted. A rewrite that
+  failed leaves the name visible in `prose_ungrounded.names`, where the run already reports it.
+
+### N.3 Per-sentence correction inside a coarse unit — [read-from-source]
+
+A mid-line citation gives one span holding two sentences, which is the price the previous item
+paid for never touching what ships. Replacing the whole span because half of it was wrong rewrote
+a sentence nobody complained about. A condemned span is now cut after the citation that closes a
+sentence (`splitCoarseSpan`), each half judged on its own, and only the failing half corrected.
+
+Measured on the committed buyer's guide, where the OEM sentence lived in exactly that shape:
+
+    BEFORE  Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirmed by
+            any source. The proprietary connector makes aftermarket substitution difficult
+            [Source 13], but the availability of an OEM replacement part is left open.
+    AFTER   Whether Dell sells a direct-replacement 180 W SFF PSU separately is not confirmed by
+            any source. The OptiPlex 3050 SFF uses a proprietary power supply and a proprietary
+            power connector, which makes it difficult for users to install aftermarket PSUs to
+            support higher-power GPUs. [Source 13]
+
+The first sentence is byte-identical.
+
+### N.4 Four defects found by running it, not by reading it
+
+- **The check condemned its own apparatus.** A second pass over a document containing
+  `see Note 3 below the table` and its blockquote note judged the marker (no source says "see Note
+  3"), renumbered it, and appended a SECOND copy of every note. The marker and the note lines are
+  the module's own writing and are not units.
+- **The verbatim fallback pasted a [GAP] line.** `nearestLines` scanned every line, so a
+  correction could paste the literal "[GAP]" and an ungrounded sentence into a report - measured
+  on the comparison render, which acquired the name "GAP" that way. It reads grounded lines only.
+- **CRLF.** A checked-out file on Windows is CRLF, and rejoining it with "\n" rewrote every line
+  of a document one sentence of which was wrong - the byte-identity invariant failing by a
+  different mechanism. The document's own line ending survives a correction.
+- **The invariant tests paired every document with ONE synthesis.** Harmless while the check only
+  judged claims; with a names gate, the wrong evidence makes every name in a document unearned and
+  the checker "corrects" a document it should never have been shown. Each document is now paired
+  with its own synthesis.
+
+And one behaviour worth naming: the rewriter silently declines to rewrite an open QUESTION, so a
+named unit it ignored gets **one** more ask, aimed only at those items. Across three documents
+that converted every stubborn case. The alternative was deleting words out of someone's question,
+which is the clipping rule K.9 refused.
+
+### N.5 What the gate did to the three committed renders — [observed-live 2026-09-12]
+
+Applied to the documents `research-trust-template` committed, not to fresh renders, so
+`git diff` shows the gate's work and nothing else:
+
+| render | names before | after | record |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM | none | 44 of 44, 3 corrected, 0 unchecked, **3 blocked** |
+| scientific-paper | HTC | none | 66 of 67, 3 corrected, 1 unchecked, **1 blocked** |
+| product-comparison | TFVC, UI | none | 23 of 24, 6 corrected, 1 unchecked, **2 blocked** |
+
+Two documents are kept EXACTLY as they were, because they are records: the operator's approved
+document (ESR, HDD) and the attempt-1 ATX/SFX render. A test asserts the gate blocks their names
+rather than editing the records to make the suite green.
+
+### N.6 The footer
+
+`names: K blocked`, appended only when K > 0 — a counter that says "0 blocked" on every report
+teaches the reader to skip the line. Byte-identical in both renderers;
+`deep_research.py` → **1.5.3**.
+
+### N.7 Counts
+
+| suite | before | after |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 273 / 1 env-failed | **281 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
+
+### N.8 Carried forward
+
+- A name in a limitations QUESTION can survive if both rewrite attempts decline. It is never
+  counted as blocked and stays in `prose_ungrounded.names`. The deploy proof should be read that
+  way: the body must be clean, and a surviving question-name is visible rather than hidden.
+- `entityShare` still reads `title + " " + snippet` and never `url` (tenth item running).
