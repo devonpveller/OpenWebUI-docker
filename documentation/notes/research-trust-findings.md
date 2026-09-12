@@ -1821,3 +1821,65 @@ and the fixture's own record), one in `harness-trust.test.ts` (X3).
   next.
 - A need answered completely by ONE thorough line still reads `partial`. Deliberate, and it does
   mean a well-written single-line answer under-reports.
+
+### K.9 The verbatim replacement in a table cell: keep it, and fix it in the LAYOUT — [measured 2026-09-12, reviewer]
+
+Written at merge time (reviewer rt-reviewer; the item merged as `f815116`). The question put to
+review was whether `fidelity.ts`'s terminal fallback — replacing a still-wrong unit with the
+cited synthesis line verbatim — is the right house behaviour in a TABLE, or whether a replaced
+cell should be shortened by rule.
+
+**The cost is real and measurable.** Word counts of the `What goes wrong` column in the shipped
+`rendered-AFTER-33250e9b.md`:
+
+    Power supply (PSU)                  10        BIOS / firmware        19
+    CPU socket / processor              21        Thermal / fans         21
+    Motherboard (incl. capacitors)      54        RAM / DIMM slots       64
+
+The 64-word cell opens "A Dell OptiPlex 3050 SFF user reported that after cleaning the unit and
+reapplying thermal paste…" — a narrative sentence in a column whose siblings are clauses. As a
+table it is worse. As evidence it is exactly right.
+
+**Keep the verbatim fallback; a length rule over the words would be a misfit.** The only safe way
+to shorten a grounded sentence is to preserve its MODALITY, and modality is precisely what this
+module exists to protect: a rule that clips "makes it difficult for users to install aftermarket
+PSUs" to fit a column can land on "…install aftermarket PSUs" and re-create the defect the
+replacement was repairing. The house answer already exists one file over — `grounding.ts`
+downgrades an ungrounded figure and annotates the line, and never deletes it, "because the
+sentence around the figure may still be right". True and ugly beats short and wrong, and that
+trade is the whole of this workstream.
+
+**What IS worth doing needs no rule about words.** When a replaced unit is a table cell over some
+length, put a short marker in the cell and the verbatim line beneath the table. The column stays
+readable, the sentence stays exact, and nothing decides where to cut a claim. `applyUnit` already
+addresses a unit by line and cell, so the placement is a rendering choice, not a new judgement.
+
+### K.10 A fourth count of the same document, and where the 32 comes from — [measured 2026-09-12, reviewer]
+
+Extending the tester's X4 (three counts that do not reconcile) with an independent measurement,
+because a number the reader cannot reproduce is what that entry is about. Running the shipped
+`citedUnits` over each committed artifact:
+
+    rendered-AFTER-v1-33250e9b.md    34 units   (9 prose, 25 table cells)
+    rendered-AFTER-33250e9b.md       31 units   (19 prose, 12 table cells)
+    rendered-BEFORE-33250e9b.md      12 units   (12 prose, 0 table cells)
+
+So the tester's 33 for v1 is a fourth number beside my 34, and **neither committed render
+produces 32**. The 32 is recorded in the header of `rendered-AFTER-33250e9b.md` itself
+(`render fidelity : {"checked":32,...}`), captured from the run that produced that document — so
+it was counted on that run's PRE-CHECK input, which is not committed. `rendered-AFTER-v1` is a
+different render (attempt 1's, kept as the defect), not that input. The recorded run JSON
+`live-owui-33250e9b.result.json` carries no `render_fidelity` field at all; it predates the check.
+
+That fully explains the spread and none of it is a defect in the code — but it means three
+artifacts in one directory carry four counts of "the same" document, and the footer invites a
+reader to reproduce the one number that no committed file holds. The fix is a sentence in the
+fixture header naming which document the 32 was counted on, and, in the product, the `not
+checked: M` counter that X1 wants anyway.
+
+**One caution for whoever picks up X1.** Do not count skipped sentences by calling `citedUnits`
+line by line: a table row returns 0 units when judged alone, because cells are only recognised
+after the header rule has been seen. A per-line sweep of the shipped render reports 7 "citing but
+unchecked" lines, 6 of which are ordinary table rows that the whole-document call checks
+correctly (the seventh is this fixture's own header comment, which quotes a citation). I nearly recorded that as a finding before checking it — the same shape as the
+tester's own X5, where a truncated print statement invented a broken table.
