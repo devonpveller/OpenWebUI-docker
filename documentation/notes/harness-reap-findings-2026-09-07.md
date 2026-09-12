@@ -469,8 +469,9 @@ refusing.
 Rule 3 exists for the case rule 3 itself names: a `com.docker.compose.project` set BY HAND
 on a container compose never created.
 
-This went into the block written to retract the LAST false attribution in this same guard,
-below this note's own line about a correction that leaves its source standing. **Measuring
+This went into the block written to retract the LAST false attribution in this same guard -
+the same guard whose own line about a correction that leaves its source standing appears
+elsewhere in this note. **Measuring
 the fact is not measuring the reason**, and the surrounding paragraph being a correction of
 exactly that error bought no protection whatsoever.
 
@@ -585,9 +586,16 @@ documentation change, and the item that surfaced it was a documentation fix.
 
 GNU grep 3.0 under this Git-for-Windows bash:
 
-    grep -iF "compose" scripts/agent-harness/reap.ps1   -> rc=134, 0 lines, stderr EMPTY
-    grep -iE "compose" scripts/agent-harness/reap.ps1   -> rc=0,  66 lines
-    grep -F  "compose" scripts/agent-harness/reap.ps1   -> rc=0,  57 lines
+    grep -iF "compose" scripts/agent-harness/reap.ps1   -> rc=134, NO OUTPUT, stderr EMPTY
+    grep -iE "compose" scripts/agent-harness/reap.ps1   -> rc=0,   matches
+    grep -F  "compose" scripts/agent-harness/reap.ps1   -> rc=0,   matches
+
+(The middle and last lines carried match COUNTS - 66 and 57 - which were right when
+written and 65 and 56 two commits later, because every round adds comment lines to
+`reap.ps1`. A count this note asserts about a DIFFERENT file in the same diff ages
+exactly like a count it asserts about itself; the doctrine did not have a special
+case for it and does not need one. The counts are gone: nothing in the finding
+turns on them, only on rc=134 against rc=0.)
 
 `-i` and `-F` together abort (SIGABRT); either alone is fine. The "Aborted" line is printed
 by BASH'S JOB CONTROL, not by grep - so inside a pipeline, a command substitution or a

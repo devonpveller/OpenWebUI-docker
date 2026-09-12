@@ -305,14 +305,22 @@ it.
 
 ## T13 - EVERY CLAIM THE FILES MAKE ABOUT THEMSELVES
 
-FIVE of eight attempts - 3, 4, 5, 7 and 8 - failed on a count, a distance, a
-direction or a history that a changed file asserted about ITSELF. Not one was
-found by a case until this one existed. (The first version of this paragraph said
-"three of seven (3, 4 and 7)", and claimed to have been checked against the
-queue's own evidence files. It had not been: `reapdoc.attempt5.evidence.md`
-carries "BLOCKER 2 (T10) - a count claim in a changed file, stale at the tip". A
-history claim in the case ABOUT history claims, asserted to be verified and not
-verified.) T7/T8 test the guard, T9 holds behavioural claims against code, T10 hunts
+SEVEN of nine attempts - 1, 3, 4, 5, 7, 8 and 9 - failed on a count, a distance,
+a direction or a history that a changed file asserted about ITSELF.
+
+**THIS SENTENCE HAS NOW BEEN WRONG THREE TIMES RUNNING, which is the best argument
+for the case that exists.** It said "three of seven (3, 4 and 7)" and claimed to
+have been checked against the queue's evidence files; it had not been. Corrected
+to "five of eight (3, 4, 5, 7, 8)", it still missed
+`reapdoc.attempt1.evidence.md` - "DEFECT 2 (BLOCKING): 'three testers passed it'
+does not reproduce" - and attempt 9's own two blockers. Each correction was a
+partial sweep presented as a complete one.
+
+It also said "not one was found by a case until this one existed", and that is
+false: attempt 3's blocker and attempt 5's BLOCKER 2 were both filed under **T10**,
+whose citation half already required checking what a correction cites. T13 widens
+that to claims a file makes about itself with no citation attached; it does not
+invent the idea. T7/T8 test the guard, T9 holds behavioural claims against code, T10 hunts
 retracted models, T11 proves nothing executable moved, T12 holds docker claims to
 account - and a tester who ran exactly that set and nothing more would have PASSED
 attempt 7. An attempt-7 tester named this gap; the case is theirs.
@@ -373,6 +381,19 @@ which was bought by running the case on the change that introduced it:
     its own `grep -v`, and shipped a heading reading "THREE RULES" above four
     bullets. A case is not self-executing: it can be run in a way that reproduces
     precisely the habit it was written to break.
+  * **CHECK THE CLAIM AS WRITTEN, NOT ITS CONVERSE.** Attempt 9's inverted
+    direction was IN the 40-hit sweep and WAS read. The sentence says the BLOCK
+    sits below a LINE; what got measured was whether the LINE sits below the
+    BLOCK, which is true, so the hit was cleared green. Reading a hit is not
+    checking it. Write down which thing the sentence makes the subject before
+    you measure anything, because the converse of a false claim is usually true
+    and will clear it.
+  * **A COUNT ABOUT ANOTHER FILE IN THE SAME DIFF AGES TOO.** Attempt 9's other
+    blocker was this note quoting `grep` match counts for `reap.ps1` - correct
+    when written, stale two commits later because every round adds comments to
+    that file. Also read, also cleared, because it had been verified at the commit
+    that wrote it rather than at the tip. **VERIFY AT THE TIP, ALWAYS**: "it was
+    right when I wrote it" is the definition of the defect, not a defence.
 
 ## What is deliberately NOT in scope
 
