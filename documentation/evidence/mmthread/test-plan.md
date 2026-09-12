@@ -24,6 +24,36 @@ Use throwaway session ids (`testsess-<yourid>-1`), never a real one, and point t
 state file somewhere disposable — the script derives its paths from its own
 location, so running it from your worktree writes your worktree's state.
 
+## HOW TO RUN THE CASES THAT SAY "POST"
+
+**CASES T1-T5 AND T11 AS WRITTEN MANDATE THE OPERATOR'S REAL SERVER, AND A TESTER
+IS FORBIDDEN TO USE IT.** Both attempt-17 and attempt-18 testers hit this; the
+second ran everything against a local fake and said so. The plan was requiring
+what the brief forbids, which makes those cases unrunnable as written rather than
+strict.
+
+**Use a local fake Mattermost** - one long-lived process, real `curl`, loopback
+port - and COPY the script into a lab with the API retargeted and a fake token:
+
+    sed -i "s|API=\"http://localhost:8065/api/v4/posts\"|API=\"http://127.0.0.1:<port>/api/v4/posts\"|" "$LAB/scripts/notify-mattermost.sh"
+    grep -q "127.0.0.1:<port>" "$LAB/scripts/notify-mattermost.sh" || exit 9
+    grep -q "localhost:8065"   "$LAB/scripts/notify-mattermost.sh" && exit 9   # must NOT survive
+
+The error body for a dead root must put `root_id` in the JSON **`id`** field, not
+in `message` - a developer's shim put it in `message`, the `!deadroot` sentinel
+never fired, and the recovery looked dead on BOTH builds. One Python process for
+the whole run, never one per call: a per-call fork dies under concurrency and once
+made a parent look like it delivered 3 of 10.
+
+**The worktree carries a real `.env` with a real bot token.** Running the real
+script posts to the operator's real `#claude-sessions`. That has happened. Also
+check `PATH`: an entry in Windows form (`C:/...`) splits on the drive colon, and a
+shim then silently never loads.
+
+Anything a fake cannot answer - that Mattermost really threads on `root_id`, that
+the channel renders it - is a DEPLOY-time check, not a test-time one. Say so in
+the evidence rather than reaching for the real server.
+
 ## T1 — the shape, against the real API
 
 Run three notifications: two from one fake session id, one from another.
@@ -306,9 +336,11 @@ message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
    `timeout 40` at `MM_DEADLINE_SECS` 10, 15, 20 and 30. **PASS: every one returns.**
    An earlier version span forever here, forking a process per turn, and did not
    return in TEN MINUTES at 20 - so `timeout` is mandatory, and a case that "hangs"
-   must be reported as a FAIL rather than waited out. Note the wall time: at 20
-   and 30 this pathological case runs ~19s, past a Stop hook's 15s limit, which is
-   why the plan does not ask you to raise the variable in any other case.
+   must be reported as a FAIL rather than waited out. **The "~19s at 20 and 30"
+   warning that stood here is STALE** - `MM_WALL_SECS` bounds the whole run now, so
+   an attempt-18 tester measured ~5.4s at EVERY budget. Record what you measure;
+   the reason not to raise the variable elsewhere is that no other case needs it,
+   not a wall time that no longer happens.
 
    **THIS CASE IS EXEMPT FROM THE "no lock directory left behind" RULE**, and the
    exemption is the point: the case works by making `rm` unable to remove the
@@ -327,6 +359,13 @@ message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
 5. **Held by something alive.** Hold the lock past the whole budget from another
    process. PASS: the run stops waiting and posts ANYWAY - unthreaded is
    acceptable, silent is not.
+
+   **ALSO EXEMPT FROM "no lock directory left behind"**, for the same reason case 1
+   is and one an attempt-18 tester had to point out: the lock belongs to ANOTHER
+   LIVE HOLDER. A run that tidied it away would be deleting a lock it does not own,
+   which is the bug, not the pass. The clause means "this run leaves no lock of its
+   own behind". Two exemptions to one clause is the clause being wrong: it is
+   about OWNERSHIP, and it was written as if about existence.
 6. **Different sessions do not queue.** Three DIFFERENT session ids concurrently
    must still produce three roots. A global lock passes every case above and fails
    this one.
@@ -406,6 +445,38 @@ dead root. **Read the map file. Do not infer it from the posts** - "a message wa
 delivered" is true in both the working and the broken case, which is exactly why
 this needed its own case.
 
+## T20a - A DEAD ROOT *AND* A MARGINAL BUDGET, which no case crossed
+
+Every case here varies ONE axis. T6a sweeps latency at the default budget; T19
+sweeps budget with a live root. An attempt-18 tester crossed them and found the
+only real loss of parity in the item:
+
+Measured at 10 rounds per cell, this tip against the same tip WITHOUT the gate
+fix and against the pre-item notifier:
+
+| MM_DEADLINE_SECS | this tip | tip WITHOUT the gate fix | pre-item `6829474` |
+|---|---|---|---|
+| 8 | **10/10** (20 calls) | **1/10** (11 calls) | 10/10 (10 calls) |
+| 9 | **10/10** (20 calls) | **4/10** (14 calls) | 10/10 (10 calls) |
+| 10 | 10/10 (20 calls) | 10/10 (20 calls) | 10/10 (10 calls) |
+
+The call counts are the evidence, not the delivery rate: 11 calls for 10 runs
+means the recovery ran ONCE and nine runs sent nothing at all.
+
+Run it: a stale map entry, a server answering in 6s, and `MM_DEADLINE_SECS` at 8,
+9 and 10, at least 15 passes each, counting messages the SERVER received.
+
+PASS: parity with `6829474` at EVERY budget from 8 up, and two calls per run
+(the dead-root discovery plus the recovery). The shortfall this case was written
+to record is now fixed, so a shortfall is a REGRESSION rather than a known limit.
+FAIL: any loss at any budget, or a run making only one call when its root is
+dead - that is the recovery skipping itself, which is the defect.
+
+**A CASE THAT VARIES ONE VARIABLE AT A TIME CANNOT SEE A TWO-VARIABLE DEFECT**,
+and every case in this plan varied one. The hole sat on the diagonal that neither
+sweep walks. When two axes each have a known weak end, cross them before claiming
+the corner.
+
 ## T19 — the notifier must not be slower at the operator's expense
 
 **The item exists to END a silence. A version that threads perfectly and drops a
@@ -462,28 +533,47 @@ call.
 
 Run N=2 at 0s, 1s, 2s, 3s, 4s and 5s per call, at least 12 rounds each.
 
-Measured at N=2, 10 rounds per setting, this tip against the pre-item tip on the
-same instrument:
+**THE CEILING IS ABOUT 2 SECONDS AND THE LAST ROUND MOVED IT TO 3 IN ERROR.** The
+two documents disagreed - the note said 2, this said 3 - and I resolved it by
+promoting the larger number off a TEN-ROUND sample reading 9/10. An attempt-18
+tester measured 45 rounds per build: this tip 19/45 (42%), attempt 17 16/45 (36%),
+indistinguishable; re-measured at 30 rounds here, this tip is 14/30. A true 90%
+rate yields 19-of-45 with probability about 1e-8.
 
-| API answers in | pre-item tip `c822b5c` | this tip | message lost |
+**And it had no mechanism.** The only lock change between the two builds is the
+entry gate; on a CLEAN map both compute a 4-second wait, so neither can out-thread
+the other there. The gate acts on the DEAD-ROOT path, which is where the gain
+really is. **When two documents disagree, the answer is a measurement, not a
+choice** - and a rate needs the same sample size this plan already demands for a
+latency.
+
+Measured at N=2 with one instrument, this tip against ATTEMPT 17:
+
+| API answers in | attempt 17 `c822b5c` | this tip | message lost |
 |---|---|---|---|
-| 0s | - | 10/10 | 0/10 |
-| 1s | - | 9/10 | 0/10 |
-| 2s | 10/10 | 10/10 | 0/10 |
-| 3s | **4/10** | **9/10** | 0/10 |
-| 4s | 0/10 | 0/10 | 0/10 |
-| 5s | 0/10 | 0/10 | 0/10 |
+| 2s | 15/15 | **30/30** | 0 |
+| 3s | 16/45 (36%), **12/30 here** | 19/45 (42%), **14/30 here** | 0 |
+| 3.5s | - | 1/12 | 0 |
+| 4s | 0/12 | 0/12 | 0 |
+
+**`c822b5c` IS ATTEMPT 17, NOT THE PRE-ITEM TIP** - it is this commit's parent,
+780 lines of threading. The pre-item notifier is `6829474`, 52 lines. T19 below
+states the rule ("name the baseline or the result means nothing") and every table
+added last round broke it, labelling a previous-attempt comparison as a
+comparison against the code being replaced. The plan contradicting itself on the
+baseline is itself a defect an attempt-18 tester filed.
 
 **The claim is therefore: one thread per session for an API answering within about
-3 seconds**, and this tip is what makes 3 hold - the pre-item tip gave 4 rounds in
-10 there. Beyond 4s, more than one thread and every message.
+2 seconds.** At 3s it is a coin flip, at 3.5s rare, at 4s gone - equally on both
+builds. Beyond that, more than one thread and every message.
 
-Two things this paragraph used to say that the measurement does not support. "At
-4s about half the rounds split and at 5s most do" describes a SLOPE; it is a
-CLIFF, 9/10 at 3s and 0/10 at 4s. And "a loser waits 3.8s" was a turn-count figure
-from a build whose wait is no longer counted in turns. The note stated the same
-ceiling as "about 2 seconds" - the two documents disagreed with each other, which
-is how an attempt-17 tester found that neither had been re-measured.
+"A loser waits 3.8s" was also a turn-count figure from a build whose wait is no
+longer counted in turns; it is gone.
+
+**PASS for this case requires at least 30 rounds per setting and a rate reported
+as n/N**, for the same reason T7 requires 20 timed passes: a handful of runs
+cannot separate 40% from 90%, and one round of this item published exactly that
+mistake while the twenty-pass rule sat on the same screen.
 
 The cause is arithmetic: a loser waits for the winner to publish its map line,
 which cannot happen until the winner's post returns, so the wait must cover a
@@ -504,7 +594,11 @@ measured" look identical in a diff, and differ only in whether the reasoning
 survives someone trying to break it.
 
 FAIL: N=2 showing more than one root in any of 30 rounds; N=3 materially worse
-than 1 in 30; or any N losing a message the pre-item notifier delivers.
+than 1 in 30; or any N **in scope** losing a message the pre-item notifier
+delivers. **N=10 IS NOT IN SCOPE** - T15a declares it so, and this clause used to
+demand `delivered == N` at N=10 anyway, which fails the item on a residual it has
+already scoped out. Measured, for honesty rather than as a criterion: N=10 loses 1
+of 12 rounds instant and 3 of 12 at 1s, where the parent loses none.
 
 ## T20 — exactly once
 

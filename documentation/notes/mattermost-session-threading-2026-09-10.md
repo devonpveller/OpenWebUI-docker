@@ -279,33 +279,61 @@ tester, and **invisible to every case in the plan, because all of them counted
 "at least N"**. A test that cannot distinguish one from two is not a delivery
 test. Now fixed, with a case that counts exactly-once against parent and tip.
 
-## Threading holds to about 3 seconds a call, and it is a CLIFF, not a slope
+## Threading holds to about 2 seconds a call
 
-**THIS SECTION SHIPPED THE CEILING AT TWO DIFFERENT VALUES.** It said "about 2
-seconds" here while `documentation/evidence/mmthread/test-plan.md` said "about 3",
-and an attempt-17 tester found the pair. One number had to be wrong and neither
-had been re-measured since the wait stopped being a turn count.
+**THE CEILING IS ABOUT 2 SECONDS. THE PREVIOUS ROUND MOVED IT TO 3 AND THAT WAS
+WRONG** - and wrong in the worst possible way, because it "corrected" a statement
+that had been right. An attempt-18 tester refuted it on two independent legs.
 
-Measured at N=2, 10 rounds per setting, on this tip and on the pre-item tip with
-the same instrument:
+**The measurement.** At 3s, N=2, 45 rounds per build: this tip 19/45 (42%),
+attempt 17 16/45 (36%) - indistinguishable. Re-measured here, 30 rounds per build
+on one instrument in one session: this tip **14/30**, attempt 17 **12/30**. Two
+independent testers, three samples, and the two builds are the same build as far
+as clean-map threading is concerned. The claim that replaced the old ceiling rested on TEN
+rounds reading 9/10, and a true 90% rate produces 19-of-45 with probability
+about 1e-8.
 
-| API answers in | pre-item tip `c822b5c` | this tip | message lost |
+**The mechanism, which needs no instrument at all.** `git diff c822b5c 96f983d`
+changes exactly one thing in the lock: the ENTRY GATE. On a clean map attempt 17
+has `remaining` around 9, passes its `>= 6` gate and waits `LOCK_WAIT_SECS` = 4;
+this tip computes `_wait = min(4, wall_left - 2) = 4` and waits 4. **Both builds
+wait the same four seconds.** There is no code path by which this change can
+improve clean-map N=2 threading, so the claim had no mechanism in its own diff.
+The entry-gate fix is real and it acts on the DEAD-ROOT path - which is exactly
+where the large measured gain is.
+
+I wrote "a handful of runs cannot see a p90" in the commit that made this claim,
+required TWENTY passes for T7 in the same commit, and then read a RATE off ten
+rounds. The rule was applied to timing and not to rates, one screen apart.
+
+The two documents did disagree - this said "about 2" and the plan said "about 3",
+and an attempt-17 tester was right to flag it. Resolving that disagreement by
+promoting the LARGER number, off a ten-round sample, replaced a correct statement
+with an incorrect one. **When two documents disagree, the answer is a
+measurement, not a choice.**
+
+Measured at N=2 with the same instrument, this tip against ATTEMPT 17:
+
+| API answers in | attempt 17 `c822b5c` | this tip | message lost |
 |---|---|---|---|
-| 0s | - | 10/10 | 0/10 |
-| 1s | - | 9/10 | 0/10 |
-| 2s | 10/10 | 10/10 | 0/10 |
-| 3s | **4/10** | **9/10** | 0/10 |
-| 4s | 0/10 | 0/10 | 0/10 |
-| 5s | 0/10 | 0/10 | 0/10 |
+| 2s | 15/15 | **30/30** | 0 |
+| 3s | 16/45 (36%), **12/30 here** | 19/45 (42%), **14/30 here** | 0 |
+| 3.5s | - | 1/12 | 0 |
+| 4s | 0/12 | 0/12 | 0 |
+| 5s | 0/x | 0/x | 0 |
 
-So: **one thread per session for an API answering within about 3 seconds**, and
-this tip is what makes 3 hold - the pre-item tip managed 4 rounds in 10 there.
-The degradation is a CLIFF between 3s and 4s, not the slope this paragraph used to
-describe ("at 4s it splits in half the rounds, at 5s in most"); that wording came
-from a build whose wait was bounded by a turn count, and it never described this
-one. **No message is lost at any latency, on either build** - the failure
-direction is an extra thread, never silence, which is the direction this item is
-allowed to fail in.
+**`c822b5c` IS NOT "THE PRE-ITEM TIP" AND THIS TABLE USED TO SAY IT WAS.** It is
+ATTEMPT 17 - this commit's parent, 780 lines of threading. The pre-item notifier
+is `6829474`, 52 lines, no threading at all. The plan states that rule at T19 in
+as many words ("name the baseline or the result means nothing"), and every
+comparison I added last round broke it: they read as tip-versus-the-thing-being-
+replaced and they are tip-versus-last-attempt.
+
+So: **one thread per session for an API answering within about 2 seconds.** At 3s
+it is a coin flip, at 3.5s rare, at 4s gone - a slope through 3s into a cliff, on
+BOTH builds equally. **No message is lost at any latency, on either build** - the
+failure direction is an extra thread, never silence, which is the direction this
+item is allowed to fail in.
 
 The cause is arithmetic and cannot be tuned away. A losing run has to wait for the
 winner to publish its map line, which cannot happen until the winner's post
@@ -367,7 +395,7 @@ for is a permission request against a turn completion — two.
 **"At two and three the result is exact and stable" contradicted a line a few
 paragraphs above it**, which says N=3 is reported at 1 in 30 and NOT claimed
 exact - a tester found the pair. The accurate statement: N=2 is exact for an API
-answering within about 3 seconds (measured; the table above), N=3 is reported
+answering within about 2 seconds (measured; the table above), N=3 is reported
 rather than claimed, and
 neither is unconditional. If you think a synthetic N=10 should block a fix for a
 real N=2, that is a legitimate position and the numbers above are what it turns
@@ -583,7 +611,7 @@ smoothly to nothing instead of falling off a cliff at 6.
 
 Dead root, does the map gain a new root (fresh session per pass):
 
-| API answers in | pre-item tip `c822b5c` | this tip |
+| API answers in | attempt 17 `c822b5c` | this tip |
 |---|---|---|
 | 3.0s | 5/5 | **12/12 and 5/5** |
 | 3.5s | 2/3 | **3/3** |
@@ -611,8 +639,10 @@ server REJECTING the root, not serving the message. It is floored now, and safe 
 floor because the wall clamps it.
 
 Measured at the budgets where the second call is refused for want of time, 15
-passes each, 6s API: budget 8 - both 0/15; budget 9 - pre-item 9/15, **this tip
-12/15**; budget 10 - both 8/8. An earlier 8-pass run of mine read 1/8 against 0/8
+passes each, 6s API: budget 9 - attempt 17 **5/15**, this tip **8/15**; budget 10
+- both 8/8. (I published 9/15 and 12/15 against "pre-item". An attempt-18 tester
+measured 5/15 and 8/15 against ATTEMPT 17: the ORDERING holds and both magnitudes
+were high, on top of the baseline being mislabelled.) An earlier 8-pass run of mine read 1/8 against 0/8
 and looked like a REGRESSION; at n=15 it is noise in the other direction. Eight
 passes cannot separate those either.
 
@@ -623,4 +653,54 @@ not, and they are the same write. A tester forced it and the next run posted wit
 `root_id=!deadroot`. Latent rather than live - it needs a ROOTLESS create to
 return a root_id error, which real Mattermost should not do - but two writes with
 one rule between them is one write too many to trust. Guarded.
+
+---
+
+## A DELIVERY HOLE AT A MARGINAL BUDGET, AND NO CASE CROSSED THE TWO AXES
+
+Dead root AND a 6s API AND `MM_DEADLINE_SECS` at 8 or 9 lost messages the pre-item
+notifier `6829474` delivers. An attempt-18 tester found it by crossing two axes no
+case crossed. FIXED, and the call counts say exactly what was happening:
+
+| MM_DEADLINE_SECS | this tip | tip WITHOUT the gate fix | pre-item `6829474` |
+|---|---|---|---|
+| 8 | **10/10** (20 calls) | **1/10** (11 calls) | 10/10 (10 calls) |
+| 9 | **10/10** (20 calls) | **4/10** (14 calls) | 10/10 (10 calls) |
+| 10 | 10/10 (20 calls) | 10/10 (20 calls) | 10/10 (10 calls) |
+
+**ELEVEN CALLS FOR TEN RUNS.** Ten of them were the dead-root discovery; the
+recovery ran ONCE. The other nine runs made no second call at all, so the message
+was never sent - a guaranteed loss, not a timeout. With the fix every run makes
+two calls and parity is restored at every budget.
+
+THE GATE WAS ASKING THE WRONG CLOCK. `remaining` is the HTTP budget, spent by the
+time a 6s call has discovered the root is dead; `wall_left` is the hard fact about
+whether the hook can still afford a call. The recovery asked the former and
+skipped itself while seconds of wall were still in hand. The floor and the wall
+clamp inside `post` already size the call correctly once it is allowed to happen -
+one wall, and every decision about whether there is time asks IT.
+
+**No case in the plan crossed a dead root with a marginal budget.** T6a sweeps
+latency at the default budget; T19 sweeps budget with a live root. The hole sits
+exactly on the diagonal neither case walks, which is where a two-variable defect
+always sits. A case that varies one axis at a time cannot see it.
+
+## THREE MORE, RECORDED RATHER THAN FIXED
+
+**`normkey` collapses any two session ids sharing an 8-character prefix.** Its awk
+prints `substr($0, 1, 8)` once the normalised id reaches 32 characters, and a
+36-char uuid always does. Two such sessions share one thread. The collision space
+is 8 hex digits, so this is unlikely rather than impossible, and the truncation is
+deliberate - the allowlist has to compare a uuid against an 8-hex id recovered
+from message text. Recorded because "unlikely" is not "cannot", and because the
+reason it is 8 is documented nowhere near the function.
+
+**N=10 loses a message where the parent loses none** - 1 of 12 rounds instant, 3
+of 12 at 1s. N=10 is declared out of scope and stays so; the point is that the
+scope line now has a measured cost attached instead of an argument.
+
+**A body containing `session <8hex>` steers the post into that thread even with no
+stdin id.** That is inherent to the Notification hook having no other id channel,
+and the blast radius is one misfiled post in the operator's own channel by the
+same bot. Named so the next reader does not rediscover it as a surprise.
 

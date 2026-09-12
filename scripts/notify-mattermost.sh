@@ -776,7 +776,22 @@ fi
 # left to have made the call, the empty result says nothing about the root.
 # Only `!deadroot` recovers. An empty `out` now means the send did not land for
 # some other reason, and re-rooting on that is how a transient blip cost a thread.
-if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(remaining)" -ge 2 ]; then
+# THE WALL DECIDES WHETHER A CALL CAN HAPPEN, NOT THE HTTP BUDGET. This asked
+# `remaining` - the budget clock - and at a marginal budget that clock is spent by
+# the time the dead root has been discovered, so the recovery was skipped and the
+# message was never sent AT ALL. Measured by an attempt-18 tester crossing two axes
+# no case crossed: dead root + a 6s API + MM_DEADLINE_SECS 8 or 9 delivered 1/15
+# and 8/15 where the pre-item notifier `6829474` delivers 15/15. A GUARANTEED LOSS,
+# against the code this replaces, which is the one line this item is not allowed to
+# cross.
+#
+# `remaining` is soft accounting for how much HTTP work has been done; `wall_left`
+# is the hard fact about whether the hook can still afford a call. Asking the
+# former produced "no time left" while there were seconds of wall in hand, and the
+# floor + wall clamp in `post` already sizes the call correctly once it is allowed
+# to happen. Same principle as the rest of this round: one wall, and every decision
+# about whether there is time asks IT.
+if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(wall_left)" -ge 2 ]; then
   if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
