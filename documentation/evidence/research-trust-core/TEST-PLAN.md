@@ -41,12 +41,20 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrat
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core" && ruff check .
 ```
 
-**PASS:** research-service **`189 passed | 1 failed`** (the anchor requires at least 173);
+**PASS:** research-service **`194 passed | 1 failed`** (the anchor requires at least 173);
 research-curator `36 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — it opens a postgres pool at module load and needs
 the throwaway DB of T8. It fails the same way on the base commit.
 
-**FAIL:** any other failing test; research-service below 189; curator below 36; any ruff error.
+**FAIL:** any other failing test; research-service below 194; curator below 36; any ruff error.
+
+**Test accounting, because two files were DELETED.** `entity.test.ts` (22) and
+`entity-core.test.ts` (14) tested `entityCore()`, which no longer exists. `subject.test.ts`
+(41) re-expresses every behavioural assertion they made against the set rule — brand omission,
+neighbouring model, the M.2 guard, the spelling variants, the six collapse fixtures, every good
+set — and adds the tester's five live sets and the five T7 candidates. Check that claim rather
+than taking it: `git -C OB1 show research-trust-core~1:integrations/research-service/entity.test.ts`
+lists what was there.
 
 ---
 
@@ -54,14 +62,14 @@ the throwaway DB of T8. It fails the same way on the base commit.
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
-deno test -A entity-core.test.ts --filter "ACCEPTANCE 1"
+deno test -A subject.test.ts --filter "failing dry run"
+deno test -A subject.test.ts --filter "REGRESSION ok: live-100hz"
 ```
 
-**PASS:** three cases. `entityCore("100Hz audio VR motion sickness")` is `["100","hz"]`; the
-recorded hit set for that run's first query satisfies it at **share ≥ 0.4** and
-`classifyHits` returns `ok`; both of that run's on-need queries classify `ok`. The first case
-also asserts the Nagoya paper is in the set — the point is that the deployed run discarded the
-pages it was sent to find.
+**PASS:** the five-word subject `100Hz audio VR motion sickness` yields the set
+`{100hz, vr}`, its own recorded hit set satisfies it at **0.85** (the anchor asks for ≥ 0.4),
+`classifyHits` returns `ok`, and the Nagoya paper is asserted present in the set — the point
+being that the deployed run discarded the pages it was sent to find.
 
 Check it against the recorded failure rather than taking the test's word:
 
@@ -75,67 +83,59 @@ print(r.get('backstop'), r.get('outcome'))
 ```
 
 **PASS:** the recorded run shows `search_degraded` with three `collapsed` verdicts at share
-`0`, i.e. the state this case exists to invert.
+`0` — the state this case exists to invert.
 
-**FAIL:** any of the three cases failing; a share below 0.4; the recorded evidence not showing
-the failure it is supposed to show.
+**FAIL:** a share below 0.4; any of that run's on-need queries still non-`ok`; the recorded
+evidence not showing the failure it is supposed to show.
 
----
+## T3 - ACCEPTANCE 2: the rule, and it is a SET rule now
 
-## T3 - ACCEPTANCE 2: the rule, stated once and pinned on five subjects
+Attempt 1 failed here, and the tester's verdict is the reason this case is rewritten rather
+than patched: **four rules in four items, each picking a surface property to stand in for
+identity** — eight pattern strings, a seven-character length, the token before the first
+digit, the longest token. Each passed every subject somebody had written down.
 
-The rule is one sentence in the `entityCore` docblock. Read it, then check each of its three
-sub-decisions was **measured**, not asserted:
+The single-core-phrase idea is gone, and with it the length tiebreak and the `QUALIFIERS`
+list. The rule, in one sentence:
+
+> A subject is its SET of distinctive tokens — those bearing digits (a bare four-digit year
+> excepted), those the planner capitalised, and those that are not common English — and a hit
+> carries the subject when it contains at least half of them, rounded up.
 
 ```powershell
-git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "THE RULE" -Context 2,32
+git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "THE RULE, and it is not a phrase" -Context 4,30
 ```
 
-**PASS:** the docblock states the rule in one sentence and carries the measured shares for the
-year, version and two-word-name decisions.
+**PASS:** the docblock states it in one sentence, names the four rules it replaces, and
+carries the tester's five counter-examples. `entityCore`, `corePhrase`, `hitCarriesEntity`,
+`QUALIFIERS` and every length test are **absent from the file**:
+
+```powershell
+git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "entityCore|corePhrase|QUALIFIERS|ANCHOR_MIN_LEN|hitCarriesEntity"
+```
+
+**PASS:** no hits.
 
 ```bash
-deno test -A entity-core.test.ts --filter "ACCEPTANCE 2"
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
+deno test -A subject.test.ts
 ```
 
-**PASS:** five cases. The five subjects the anchor names reduce to
-`100 hz` / `toyota prius` / `python 3 12` / `optiplex 3050` / `kubernetes crashloopbackoff`,
-and each is then run against a **real hit set** with a reasoned verdict in the test's own
-comment.
+**PASS:** `41 passed | 0 failed`, including `subjectTokens: digits, capitals, and anything
+uncommon`, which pins the distinctive set for all eleven subjects the coordinator named, and
+`tokenSet offers a run, its parts, and the glued neighbours`, which pins that `Z6III` and
+`Z 6III` match each other and `100Hz` matches `100 Hz`.
 
-Re-measure the three decisions yourself — this is the part that must not be taken on trust:
+**Two guards to check by hand**, because each was found by a fixture going the wrong way:
 
-```bash
-python -c "
-import json,re
-def share(hits,toks):
-    rx=re.compile('(?<![a-z0-9])'+'[^a-z0-9]{0,2}'.join(toks)+'(?![a-z0-9])',re.I)
-    return round(sum(1 for h in hits if rx.search((h.get('title') or '')+' '+(h.get('snippet') or '')))/len(hits),2)
-for f,cands in [('live-prius',[['toyota','prius'],['2026','toyota','prius'],['2026','prius']]),
-                ('live-python312',[['python','3','12'],['3','12'],['python','3','12','asyncio']]),
-                ('live-crashloop',[['kubernetes','crashloopbackoff'],['crashloopbackoff']])]:
-    d=json.load(open('fixtures/%s.json'%f,encoding='utf-8'))
-    print(f, [(share(d['hits'],c),' '.join(c)) for c in cands])"
-```
+- `a BARE NUMBER never carries a subject on its own`. `100 Hz` is two tokens and half of two
+  is one; every hit in the recorded `the100` fixture carries `100` (*The 100*, the TV
+  series). Without this guard the founding fixture scored **1.00** and passed.
+- `Postgres 17.2.1` glues to one token. A single global replace leaves `172` + `1`, because
+  the two dot-matches overlap on the digit between them.
 
-**PASS:** `toyota prius` 0.95 > `2026 toyota prius` 0.80 > `2026 prius` 0.20;
-`python 3 12` 0.35 against `3 12` 0.55 and 0.05 for the whole subject;
-`kubernetes crashloopbackoff` 0.40 against 1.00 for the bare token. Your numbers should match
-findings F.2.
-
-**The judgements to push on**, because they are judgements:
-
-- `crashloopbackoff` alone scores 1.00 and the rule yields 0.40. The developer's position is
-  that the rule's job is to pass a good set, not to maximise share. If you think the extra
-  0.60 of margin matters more, say so — it changes how aggressively the window shrinks.
-- `python 3 12` at 0.35 is the thinnest good core measured anywhere in this workstream, and
-  `ENTITY_SHARE` is 0.175. That is a factor of two of headroom for a case that will recur
-  (every "library version X" question). Worth an opinion.
-
-**FAIL:** a core no real page carries; a measured share that contradicts the docblock; a
-sub-decision with no measurement behind it.
-
----
+**FAIL:** any of the eleven subjects yielding a different set; either guard missing; any
+length or phrase test still in the file.
 
 ## T4 - ACCEPTANCE 3: the entity is bounded at extraction and the cut is counted
 
@@ -173,96 +173,101 @@ two renderers disagreeing (T8).
 ## T5 - ACCEPTANCE 4: nothing that used to work stopped working
 
 ```bash
-deno test -A entity.test.ts
+deno test -A subject.test.ts --filter "REGRESSION"
 deno test -A search-quality.test.ts
 ```
 
-**PASS:** both green. The six collapse fixtures still classify non-`ok`; the good sets
-(`oomkilled`, `iphone`, `good-optiplex`, `live-100hz-mechanism`, `live-100hz-studies`,
-`live-optiplex-thermal`, `live-optiplex-health`) all still classify `ok`.
+**PASS:** twenty per-fixture regression cases (six `REGRESSION collapse:` and fourteen
+`REGRESSION ok:`, one per set so a failure names the set rather than a loop index) plus
+`search-quality.test.ts` green. Every collapse fixture scores exactly **0.00**; every good set
+scores **≥ 0.5**.
 
-**Two expectations were CHANGED, not deleted** — check the replacements are stronger, not
-weaker:
+**One assertion was CHANGED, and it is the cost of the rule** — check you accept it rather
+than passing over it:
 
 ```powershell
-git -C OB1 diff 5c189cf..research-trust-core -- integrations/research-service/entity.test.ts | Select-String -Pattern "^[-+].*entityCore"
+git -C OB1 diff research-trust-core~1..research-trust-core -- integrations/research-service/search-quality.test.ts | Select-String -Pattern "^[-+]" | Select-String -NotMatch "^[-+][-+]"
 ```
 
-**PASS:** `Lenovo ThinkCentre M910q` moves from `m 910 q` to `thinkcentre m 910 q` (more
-specific, still brand-free, still matches a page writing only "ThinkCentre M910q"), and
-`Apple MacBook Air M2` from `macbook air m 2` to `air m 2` — the guard that test exists for,
-never the bare `m 2`, is unchanged and still asserted against the `M.2` string that appears in
-the OptiPlex fixture's own titles. Both carry their reason in the test.
+**PASS:** the `T11` spelling case keeps its four spelling variants and replaces its adjacency
+assertion — `OptiPlex 7080 and the 3050-era chipset` used to be refused and is now accepted —
+with the reason in the test, plus a new assertion that junk carrying ONE token is still
+refused. Adjacency is what a set rule gives up; four items of false search failures are what
+requiring it cost.
 
-**A label change, not an outcome change:** three replay assertions now accept `collapsed` OR
-`offtopic`. With the entity shortened to its name, a round-1 query carries `OptiPlex 3050`
-rather than `Dell OptiPlex 3050`, so the Dell junk no longer piles onto a token the query
-contains (findings F.4). Satisfy yourself the outcome is identical — nothing fetched, streak
-fed, run degraded.
-
-**FAIL:** any collapse set classifying `ok`; any good set classifying junk; a changed
-expectation that is weaker than what it replaced.
-
----
+**FAIL:** any collapse set scoring above 0.00; any good set below 0.5; a changed assertion
+without its reason.
 
 ## T6 - ACCEPTANCE 5: the share table is recomputed and the threshold still holds
 
-```powershell
-git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "ENTITY_SHARE" -Context 34,2
-```
+Findings section **G.3**, and `ENTITY_SHARE` in `search-quality.ts`.
 
-and findings section **F.6**.
+**PASS:** `ENTITY_SHARE` is still `0.175`, and the recomputed table covers every recorded set
+including the tester's five: GOOD sets run 1.00 down to 0.55; the six collapse fixtures are all
+0.00; `live-budget2026` is `entity_rejected` rather than scored.
 
-**PASS:** `ENTITY_SHARE` is still `0.175`, with the recomputed table showing GOOD sets at
-1.00, 1.00, 0.95, 0.75, 0.65, 0.55, 0.40, 0.35, 0.35, 0.30; the off-need live set at 0.05; the
-six collapse fixtures at 0.00. Nearest sets are 0.05 and 0.30 — both 0.125 away — so the
-no-set-within-0.1 rule holds and the threshold is not re-chosen.
+Recompute it yourself with `subjectTokens` + `entityShare` over every fixture in `fixtures/`.
 
-Recompute it yourself over every fixture with `entityCore` + `entityShare`.
+**PASS:** your numbers match, and **no set lands within 0.1 of 0.175** — the nearest are 0.00
+and 0.55. The gap is wider than under any previous rule (it was 0.05 → 0.30), which is the
+check that matters here: a threshold whose margin grows when the rule improves is a threshold
+that was measuring the right thing.
 
-**PASS:** your numbers match; in particular `live-100hz-mechanism` and `live-100hz-studies`
-moved from 0.00 to 0.55 and 0.35 — they were the false failures — and no set moved TOWARD the
-line.
+Note `live-100hz-ssq` moved 0.05 → 0.55 and is now `ok`. Its hits are VR sickness papers and
+the subject contains `vr`, so they genuinely carry half of it. If you think that query should
+still read as a search failure, say so — it is a judgement about what this detector is for.
 
-**FAIL:** a set within 0.1 of 0.175 with the threshold left unchanged; a table that does not
+**FAIL:** a set within 0.1 of 0.175 with the threshold unchanged; a table that does not
 reproduce; a set omitted from it.
 
----
+## T7 - The rule is a rule, and its candidates are PINNED
 
-## T7 - The rule is a rule, not a fit to these subjects
-
-Three items in a row have failed on a guard fitted to the case in front of it: eight pattern
-strings, then a seven-character token length, then a core anchored on the token before the
-first number. Attack this one the same way.
-
-```powershell
-git -C OB1 show research-trust-core:integrations/research-service/search-quality.ts | Select-String -Pattern "export function entityCore" -Context 0,70
-```
+Attempt 1 listed candidates here and pinned none, which the tester flagged: a skipped optional
+half reads as clean. All five are now tests, each with the set the rule produces and a
+judgement of whether that set names the thing.
 
 ```bash
-deno test -A entity-core.test.ts
+deno test -A subject.test.ts --filter "T7 candidate"
+deno test -A subject.test.ts --filter "tester's five"
 ```
 
-**PASS:** `14 passed | 0 failed`, including the bound case, which asserts the MEASURED core
-length for eight subjects and says why the bound is in words rather than tokens.
+**PASS:** five candidate cases and the tester's five live sets.
 
-**Try to break it.** Candidates the developer did not try:
+| candidate | distinctive set | why it is right |
+|---|---|---|
+| `3050 OptiPlex thermal` | `3050 optiplex thermal` | order is irrelevant to a set — the fourth rule failed precisely because it depended on where the number sat |
+| `100 hertz tone` | `100 hertz tone` | a unit longer than four characters is just a token |
+| `Postgres 17.2.1 logical replication` | `postgres 1721 logical replication` | the version glues; MySQL pages do not carry it |
+| `OptiPlex 3050 versus ThinkCentre M910q` | `optiplex 3050 versus thinkcentre m910q` | a comparison page carries half; an unrelated page carries none |
+| `e-bike 750 W hub motor` | `e bike 750 w hub motor` | hyphens are separators like any other |
 
-- a subject whose model number comes first and is not a year: `3050 OptiPlex thermal`;
-- a unit longer than four characters: `100 hertz tone`, `50 micrograms semaglutide`;
-- a version with three parts: `Postgres 17.2.1 logical replication`;
-- a subject that is two named things: `OptiPlex 3050 versus ThinkCentre M910q`;
-- a non-English or hyphen-heavy subject: `e-bike 750 W hub motor`.
+And the tester's five, on their own live hit sets, all captured today with provenance headers
+naming them as the attempt-1 failure: `live-semaglutide50` 0.90, `live-nikonz6iii` 0.85,
+`live-mullvad` 0.95, `live-rpi5nvme` 1.00 — all `ok`, where the previous rule scored them
+0.00, 0.05, 1.00-on-junk and 0.00. `live-budget2026` yields an EMPTY set and is
+`entity_rejected`, which is the honest answer: "2026 budget" names nothing.
 
-For each, ask two questions: is the core a phrase a real page would carry, and does a
-plausible junk set for that query still classify non-`ok`? Anything that makes a genuinely
-collapsed set pass, or a genuinely good set fail, is a FAIL and worth more than the rest of
-this case.
+**Two costs are DECLARED as tests**, not hidden — check you accept them:
 
-**FAIL:** a core no page would write; an entity reduced to nothing; a rule whose only
-justification is the subjects listed in the anchor.
+- `DECLARED: a sibling model counts as carrying the subject`. `OptiPlex 3060` holds 2 of
+  `{dell, optiplex, 3050}`. The phrase rule refused it, and that refusal is what produced four
+  successive false failures. Dell's own home page, carrying only `dell`, is still refused.
+- **Adjacency no longer matters** (`search-quality.test.ts`, the `T11` spelling case):
+  `OptiPlex 7080 and the 3050-era chipset` now carries the subject.
 
----
+If you think either cost is too high, that is the finding — it is a judgement about which
+direction of error is worse, and four items of history say false FAILURES have been the
+expensive ones.
+
+**Try to break it anyway.** The rule has three moving parts left: the common-word list, the
+half threshold, and the bare-number guard. Look for a subject whose distinctive set is all
+common words (does it reject, as `2026 budget` does?); a two-token subject where one token is
+generic enough that half is too weak; a junk set that happens to carry half a five-token
+subject. Anything that makes a genuinely collapsed set pass, or a genuinely good set fail, is
+a FAIL.
+
+**FAIL:** a candidate whose set names nothing a page would carry; a subject reduced to
+nothing when it does name something; either declared cost appearing without its test.
 
 ## T8 - Integration, image, and renderer parity
 

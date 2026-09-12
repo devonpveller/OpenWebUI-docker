@@ -1040,3 +1040,114 @@ New file: `entity-core.test.ts` (14). New fixtures: `live-prius`, `live-python31
 - URL matching in `entityShare` (X3) still not done: a hit whose URL says `optiplex-3050`
   while its title does not still scores as a miss.
 - The Answer block's source weighting (the Walmart-review headline) remains open.
+
+---
+
+## G. research-trust-core attempt 2 — the set rule (2026-09-11)
+
+The tester failed T7 on attempt 1. Their verdict, which I accept in full: **four rules in four
+items, each picking a surface property to stand in for identity**, each passing every subject
+somebody had written down and failing on the first one nobody had.
+
+| item | the proxy | what broke it |
+|---|---|---|
+| research-trust | 8 pattern strings | 5 live world claims eaten |
+| research-trust (a2) | a 7-character token length | `capacitor`, `motherboard`, `vestibular` |
+| research-trust-entity | the token before the first digit | a digit-first subject |
+| research-trust-core (a1) | the longest token | `50 micrograms semaglutide`, `Nikon Z 6III`, `Mullvad WireGuard port forwarding`, `2026 budget`, `Raspberry Pi 5 NVMe HAT` |
+
+### G.1 The rule, in one sentence
+
+> A subject is its SET of distinctive tokens — those bearing digits (a bare four-digit year
+> excepted), those the planner capitalised, and those that are not common English — and a hit
+> carries the subject when it contains at least half of them, rounded up.
+
+No length test, no single core phrase, no qualifier list, nothing that must appear verbatim.
+`entityCore`, `corePhrase`, `hitCarriesEntity`, the `QUALIFIERS` list and the length tiebreak
+are all **deleted**.
+
+Spelling is handled by expanding BOTH sides: every alphanumeric run yields each contiguous
+stretch of its digit/letter parts, and two runs are also glued when the boundary between them
+is a digit/letter transition. `Z6III` offers `{z6iii, z, 6, iii, z6, 6iii}` and `Z 6III` offers
+the same, so either spelling finds the other. Two guards:
+
+- **A bare number never carries a subject alone.** `100 Hz` is two tokens and half of two is
+  one; every hit in the recorded `the100` fixture carries `100` — *The 100*, the TV series.
+  Without this the founding fixture scored 1.00 and passed.
+- **A three-part version needs a repeated glue.** `17.2.1` came out as `172` + `1` from one
+  global pass, because the two dot-matches overlap on the digit between them.
+
+### G.2 Distinctive sets, measured
+
+| subject | distinctive tokens |
+|---|---|
+| `100Hz audio VR motion sickness` | `100hz vr` |
+| `Dell OptiPlex 3050` | `dell optiplex 3050` |
+| `50 micrograms semaglutide` | `50 semaglutide` |
+| `Nikon Z 6III autofocus firmware` | `nikon z 6iii autofocus` |
+| `Mullvad WireGuard port forwarding` | `mullvad wireguard` |
+| `2026 budget` | *(empty — rejected)* |
+| `Raspberry Pi 5 NVMe HAT` | `raspberry pi 5 nvme hat` |
+| `Kubernetes CrashLoopBackOff` | `kubernetes crashloopbackoff` |
+| `Python 3.12 asyncio` | `python 312 asyncio` |
+| `MacBook Air M2` | `macbook air m2` |
+| `2026 Toyota Prius` | `toyota prius` |
+
+`autofocus` and `asyncio` survive where the coordinator's sketch dropped them — they are not
+common English. It costs nothing: the half rule means an extra token raises the bar by half a
+token and gives one more way to clear it, and both sets score 0.85+ on their live hit sets.
+
+### G.3 The share table, every recorded set — [observed-live 2026-09-11]
+
+| share | set | class |
+|---|---|---|
+| 1.00 | `probe-good-oomkilled`, `probe-good-iphone`, `search-good-optiplex`, `live-prius`, `live-crashloop`, `live-rpi5nvme` | GOOD |
+| 0.95 | `live-mullvad` | GOOD (tester's) |
+| 0.90 | `live-python312`, `live-semaglutide50` | GOOD |
+| 0.85 | `live-100hz-mechanism`, `live-100hz-studies`, `live-nikonz6iii` | GOOD |
+| 0.70 | `live-optiplex-health` | GOOD |
+| 0.55 | `live-optiplex-thermal`, `live-100hz-ssq` | GOOD / see below |
+| **0.175** | — | **ENTITY_SHARE (unchanged)** |
+| 0.00 | all six collapse fixtures | COLLAPSED |
+| n/a | `live-budget2026` | `entity_rejected` — the subject names nothing |
+
+**The threshold does not move.** Nearest sets are 0.00 below and 0.55 above; nothing lands
+within 0.1 of 0.175. The gap is WIDER than under any previous rule (it was 0.05 → 0.30).
+
+`live-100hz-ssq` moves from 0.05 (off-need, collapsed) to 0.55 (ok): its hits are VR
+sickness papers and the subject contains `vr`, so they genuinely carry half of it. That query
+asks about Simulator Sickness Questionnaire scores and the engine answered it; whether those
+pages answer the NEED is the relevance gate's question, not this one.
+
+### G.4 Two costs, declared rather than hidden
+
+1. **Adjacency no longer matters.** `OptiPlex 7080 and the 3050-era chipset` now carries
+   `Dell OptiPlex 3050`. Requiring adjacency is exactly what produced four false search
+   failures; a page naming OptiPlex models and 3050 IS evidence the engine understood the
+   subject, which is the only question this detector asks.
+2. **A sibling model counts.** `OptiPlex 3060` holds 2 of `{dell, optiplex, 3050}`. Same
+   argument, same boundary: Dell's own home page carries only `dell` and is still refused.
+
+Both are pinned as tests named `DECLARED` and `CHANGED` so they cannot be mistaken for
+oversights. The E.10 weak-core class disappears with the QUALIFIERS list that caused it.
+
+### G.5 Test accounting — [observed-live 2026-09-11]
+
+`entity.test.ts` (22) and `entity-core.test.ts` (14) are **deleted**: their subject was
+`entityCore()`, which no longer exists. `subject.test.ts` (41) re-expresses every behavioural
+assertion they made against the set rule — brand omission, neighbouring model, the M.2 guard,
+the spelling variants, the six collapse fixtures, every good set — plus the tester's five live
+sets and the five T7 candidates attempt 1 listed without pinning.
+
+| suite | attempt 1 | attempt 2 |
+|---|---|---|
+| `research-service` | 189 / 1 env-failed | **194 / 1** |
+| `research-curator` | 36 | 36 |
+| `ruff check .` | clean | clean |
+
+### G.6 `shortenEntity` kept, as a display
+
+It now returns the distinctive set joined by spaces — what the run actually searched on — and
+feeds the progress line and the `entity_shortened` footer clause. Kept rather than deleted
+because a reader who sees `search: DEGRADED` is entitled to know which tokens the verdict was
+about; the counter still fires only when the planner's subject was longer than three words.
