@@ -838,3 +838,67 @@ satisfy `OptiPlex 3050`. All five are pinned as tests.
 
 This is the fourth time in this workstream that the fix for a fitted constant was itself
 fitted, and the first time it was caught before submission rather than by the tester.
+
+## E.10 The consequence of the bare-number guard: weak cores that admit unrelated text — [reproduced 2026-09-11, reviewer; live counter-measurement observed by the tester]
+
+Written at merge time (reviewer rt-reviewer, 2026-09-11) because E.9 records the two guards
+and not what one of them leaves behind. The tester raised it as X1 in
+`.git/agent-worktrees/queue/research-trust-entity.attempt1.evidence.md`; it is recorded here so
+the next item reads it without going back to an attempt file.
+
+`entityCore` drops a leading token when it is in the closed `QUALIFIERS` list, and the
+bare-number guard then restores the untrimmed pair rather than the full entity. For a product
+whose token before the model number happens to be a qualifier, the surviving core is not
+distinctive. Reproduced by the reviewer against the shipped `entityCore` at OB1 `5c189cf`:
+
+| entity | core | matches |
+|---|---|---|
+| `Microsoft Surface Laptop 5` | `laptop 5` | "Best laptop 5 years running", "This laptop 5 hour battery test" |
+| `Tesla Model 3` | `model 3` | "Model 3 of the regression showed a weaker effect" |
+| `Dell OptiPlex 3050` | `optiplex 3050` | (unaffected — "optiplex" is not a qualifier) |
+
+A twenty-hit set in which four rows carry such a phrase scores **0.20**, which is above
+`ENTITY_SHARE = 0.175`, so `classifyHits` returns `ok`. The boundary still holds in the other
+direction: `Surface Laptop 6 battery drain` does not match the `laptop 5` core.
+
+**No live harm has been found, and the entry should not be read as a defect report.** The
+tester built the junk sets above by tuning them to sit just over the threshold, then measured
+the real thing: a read-only search for `Microsoft Surface Laptop 5 battery drain fix` returned
+20 hits across brave / duckduckgo web / yandex at share **0.35**, every matching row genuinely
+the right machine (iFixit, r/Surface, Microsoft Q&A). Publishers write the full product string
+far more often than a constructed set assumes. That measurement is the tester's, made
+2026-09-11 against the live gateway, and has not been re-run since.
+
+What this is for: the margin, not the mechanism. `ENTITY_SHARE` sits 0.125 from the nearest
+recorded set on each side (E.3), and this is the shape that eats into the lower half of that
+margin — a brand-qualifier-number subject, of which `Surface Laptop N` and `Model N` are only
+the two that were tried. Anyone re-measuring the threshold, or extending `QUALIFIERS`, should
+start here: widening the list makes MORE entities reduce to a weak core, which is the opposite
+of the intuitive direction.
+
+Not attempted, and worth saying so rather than implying it was ruled out: whether a weak core
+plus a genuinely collapsed engine (the audited first-token failure) can combine to reach 0.175
+on live data. Both halves are documented; nobody has put them together.
+
+## Deploy round 2, 2026-09-11 (research-trust-entity at OB1 5c189cf) - dry-run findings
+
+Provenance: observed-live 2026-09-11 via `POST :8818/research` dry runs 6975d982 (100 Hz)
+and 4826d896 (OptiPlex) on `openbrain-research` label 5c189cf; classifier replays via a
+labelled deno container against the deployed source.
+
+- **OptiPlex (4826d896): acceptance 7 MET.** 5 of 5 searches `ok` (entity shares 0.875 /
+  1.00 / 0.75 / 0.625 / 0.625), 25 fetched, 12 cited, footer `needs answered 1 of 6
+  (5 partly)` beside a body that states findings - consistent. Title leads with documented
+  failure modes (RAM, power cabling, M.2 limitation), not a retail review.
+- **100 Hz (6975d982): acceptance 6 NOT MET - a third mechanism.** KEYWORDIZE returned the
+  subject `"100Hz audio VR motion sickness"` (five words; the prompt's own examples are
+  "OptiPlex 3050", "semaglutide"). `entityCore` anchors on the token before the first
+  digit-bearing token; here the digit token is FIRST, so nothing is dropped and the core is
+  all six tokens `[100 hz audio vr motion sickness]`, a phrase no page carries -> share 0.00
+  on a hit set where "100 Hz" is in 9 of 20 hits and PMC11955832 is hit #1 -> `collapsed
+  onto "motion"` x3 -> `search_degraded`, 0 fetched. Replayed on the deployed source:
+  entity "100Hz audio" -> core `[100 hz]` -> 0.45 ok; the five-word entity -> 0.00 collapsed.
+  So the rule is right for a NAME and wrong for a TOPIC handed to it as if it were a name;
+  nothing bounds the entity's length and `entityStatusFor` only checks presence in the query.
+  Direction of failure: over-caution (no fabrication, curator skipped) - but the report still
+  says "search: DEGRADED" about a healthy search plane. Item `research-trust-core` opened.
