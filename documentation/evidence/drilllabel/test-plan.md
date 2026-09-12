@@ -66,9 +66,19 @@ An attempt-2 tester found that: not a wrong answer in the plan, an item no
 correct tester could ever pass. They are kept here in full because the reviewer
 needs to see WHAT was discharged and where, not just that something was.
 
-They passed at `93cec725` (drilllabel attempt 3). Re-read them only if this
-item's diff touches the drills - it does not; `git diff 93cec725..HEAD --stat`
-names three documentation files.
+They passed at `93cec725` (drilllabel attempt 3). Re-read them only if this item's diff touches the drills - it does not.
+`git diff 93cec725..HEAD --stat` names **FOUR** files: the two documentation
+files, `scripts/agent-harness/README.md`, and **`scripts/agent-harness/reap.ps1`
+itself** - whose 51 changed lines are every one a comment, which is what T11
+proves rather than asserts.
+
+(This said "three documentation files". It named four, and the omitted one was
+`reap.ps1` - the `docker rm -f` tool a discharged case exercises - inside the
+paragraph justifying skipping six cases on a live-host deletion tool. An
+attempt-3 tester ran the command the sentence cites and read a different answer
+from it. **The accurate wording already existed in T11, forty lines below**, so
+this was not a thing nobody knew; it was a summary written from memory next to
+the evidence that contradicted it.)
 
 ### T1 (DISCHARGED) - every persistent creation site is labelled, and the count is shown
 
@@ -222,9 +232,27 @@ and so failed this item on 23 changed lines of prose. I found that by running th
 case against the item it was written for, which is the only way a new case earns
 its place.
 
-PASS: the first names ONLY documentation files plus `scripts/agent-harness/README.md`
-and comment-only changes to `reap.ps1`; the second prints nothing - no non-comment
-line of any SCRIPT changes across the whole item.
+**AND A THIRD COMMAND, because the first two do not cover T6.** T1-T5 are claims
+about script BEHAVIOUR, and a non-comment diff is exactly the right evidence for
+them. T6 is not: it checks findings 5 and 9 of the findings note, and this item
+edits that note by 61 lines - so the grep above would accept an arbitrary rewrite
+of the very findings T6 exists to hold to account. An attempt-3 tester spotted
+that the discharge was safe by a command the plan did not contain, and ran it.
+
+    for f in 5 9; do
+      git show 93cec725:documentation/notes/harness-reap-findings-2026-09-07.md |
+        awk "/^## $f\./,/^## $((f+1))\./" | md5sum
+      awk "/^## $f\./,/^## $((f+1))\./" documentation/notes/harness-reap-findings-2026-09-07.md | md5sum
+    done
+
+PASS: the first names ONLY the two documentation files, `README.md`, and
+comment-only changes to `reap.ps1`; the second prints nothing - no non-comment
+line of any SCRIPT changes across the whole item; and the third gives a matching
+pair of digests for each finding, so T6's subjects are byte-identical to the
+commit that discharged it.
+FAIL: any executable line moves, or either finding's digest differs. Then the
+discharge is void and T1-T6 come back, because the reason they were safe to skip
+has gone.
 FAIL: any executable line moves. Then the discharge is void and T1-T6 come back,
 because the reason they were safe to skip has gone.
 
