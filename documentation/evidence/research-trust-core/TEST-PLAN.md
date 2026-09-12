@@ -41,16 +41,16 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrat
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core" && ruff check .
 ```
 
-**PASS:** research-service **`192 passed | 1 failed`** (the anchor requires at least 173);
+**PASS:** research-service **`203 passed | 1 failed`** (the anchor requires at least 173);
 research-curator `36 passed | 0 failed`; ruff `All checks passed!`. The single failure must be
 `./orchestrator.test.ts (uncaught error)` — it opens a postgres pool at module load and needs
 the throwaway DB of T8. It fails the same way on the base commit.
 
-**FAIL:** any other failing test; research-service below 192; curator below 36; any ruff error.
+**FAIL:** any other failing test; research-service below 203; curator below 36; any ruff error.
 
 **Test accounting, because two files were DELETED.** `entity.test.ts` (22) and
 `entity-core.test.ts` (14) tested `entityCore()`, which no longer exists. `subject.test.ts`
-(40) re-expresses every behavioural assertion they made against the set rule — brand omission,
+(48) re-expresses every behavioural assertion they made against the set rule — brand omission,
 neighbouring model, the M.2 guard, the spelling variants, the six collapse fixtures, every good
 set — and adds the tester's five live sets and the five T7 candidates. Check that claim rather
 than taking it: `git -C OB1 show research-trust-core~1:integrations/research-service/entity.test.ts`
@@ -121,7 +121,7 @@ cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrat
 deno test -A subject.test.ts
 ```
 
-**PASS:** `40 passed | 0 failed`, including `subjectTokens: digits, capitals, and anything
+**PASS:** `48 passed | 0 failed`, including `subjectTokens: digits, capitals, and anything
 uncommon`, which pins the distinctive set for all eleven subjects the coordinator named, and
 `tokenSet offers a run, its parts, and the glued neighbours`, which pins that `Z6III` and
 `Z 6III` match each other and `100Hz` matches `100 Hz`.
@@ -153,9 +153,11 @@ git -C OB1 show research-trust-core:integrations/research-service/harness.ts | S
 ```
 
 **PASS:** no hits in `search-quality.ts`; in `harness.ts` only the comment saying they were
-removed and why. `owui/tools/deep_research.py` is back at **`version: 1.4.0`** and its rendered
-footer is byte-identical to the deployed version, so **no re-paste is needed** — check that
-claim in T8 rather than taking it.
+removed and why. The shortening clause is gone from BOTH renderers — check that in T8 rather
+than taking it. (`deep_research.py` is nevertheless at **v1.4.1**, not the deployed 1.4.0: a
+DIFFERENT clause, the refused-search counter, arrived with T7b. The shortening clause being
+gone and the file needing a paste are both true; attempt 3's "no re-paste" note is superseded
+by D.3.)
 
 What DOES still ship, and is what this case now tests:
 
@@ -262,8 +264,8 @@ deno test -A subject.test.ts
 deno test -A subject.test.ts --filter "T7 candidate"
 ```
 
-**PASS:** `40 passed | 0 failed`, including the three junk sets at 0.00, their three GOOD
-counterparts (`live-signal` 0.75, `live-arcbrowser` 0.90, `live-macbookm2` 1.00), and the five
+**PASS:** `48 passed | 0 failed` (40 of them attempt 3's, 8 added by T7b below), including
+the three junk sets at 0.00, their three GOOD counterparts (`live-signal` 0.75, `live-arcbrowser` 0.90, `live-macbookm2` 1.00), and the five
 candidates attempt 1 listed without pinning.
 
 **The floor reverses two earlier judgements. Check you accept both:**
@@ -285,6 +287,67 @@ the floor should be weakened.
 
 **FAIL:** any junk set above 0.00; any recorded good set below the line; a reversal without
 its test and its reason.
+
+### T7b - the QUERY side of the floor (attempt 3 failed here)
+
+Attempt 3's floor had an unguarded door, and the run's own query builder walked through it. A
+query with under two content words skipped the floor entirely (`if (qt.length < 2) return true`),
+and `keywordQuery` produced exactly that whenever a need's every word is a stopword:
+
+    keywordQuery("Signal", "What is it?")  ->  "Signal"   terms ["signal"]   FLOOR SKIPPED
+
+Through the shipped `runResearch` against this branch's own `junk-signal-dsp`: share **1.00**,
+verdict `ok`, **8 junk pages fetched**, backstop `complete` — versus collapsed twice and
+`no_relevant_sources` with a normal three-term query. No model misbehaviour was involved.
+`KEYWORDIZE_SYS` asks for 3–7 terms and nothing enforced it. **Both ends are fixed:**
+
+1. **`shapeQuery` guarantees two content words** (`keywordQuery` delegates to it; `reformulate`
+   shares it): the NEED's own first content word, or the class word `overview` when the need has
+   none. A padded query is counted as `search.query_padded`.
+2. **A query that still cannot carry the floor is refused**: `entityStatusFor` returns a fourth
+   status `unfloored`, `classifyHits` returns `offtopic` (no fetch, feeds the degraded streak),
+   `search.unfloored` counts it, and the footer names it. The `return true` is gone. The
+   overlap fallback is deliberately NOT used — a one-term query scores high overlap on anything
+   carrying that term, which is the same hole one door down.
+
+```bash
+cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
+deno test -A subject.test.ts --filter "T7 query side"
+deno test -A subject.test.ts --filter "shapeQuery"
+deno test -A subject.test.ts --filter "floorable query"
+deno test -A harness-trust.test.ts --filter "T7:"
+deno test -A harness-trust.test.ts --filter "the footer names a refused search"
+```
+
+**PASS:** `3`, `2`, `2`, `2` and `1` passed (the third filter also matches the *unfloorable*-query case, which is the point of it). The end-to-end case is the tester's own
+reproduction: KEYWORDIZE mocked to return the subject `Signal` with the single need
+`What is it?`, serving the recorded DSP payload, asserting the issued query has two content
+words, `query_padded >= 1`, the set counted collapsed/offtopic, `search.ok === 0`,
+**0 fetched**, backstop not `complete`, and `unfloored === 0` — zero because the builder
+guarantees two, which is what makes the counter a tripwire rather than a routine stat.
+
+**The reproduction, by hand, if you want it without the mocks:**
+
+```bash
+deno eval --ext=ts 'import { keywordQuery, classifyHits, entityShare, subjectTokens } from "file:///D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service/search-quality.ts";
+const f = JSON.parse(Deno.readTextFileSync("D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service/fixtures/junk-signal-dsp.json"));
+console.log(JSON.stringify(keywordQuery("Signal", "What is it?")));
+console.log(entityShare(subjectTokens("Signal"), f.hits, "Signal"), classifyHits("Signal", f.hits, "Signal").verdict, classifyHits("Signal", f.hits, "Signal").entityStatus);'
+```
+
+**PASS:** `"Signal overview"` — two content words, not one — and the one-word query scores
+`0 offtopic unfloored` rather than `1 ok`.
+
+**Break-attempt targets for this half:** a need whose content words are all stopwords in some
+other shape (an empty need, punctuation only, a need that repeats one word); a KEYWORDIZE
+proposal of one word (the mock supplies `["Signal"]` and the harness still pads); a DEEPEN
+proposal of one word (round 2+ goes through the same guarantee); a padded query that no longer
+finds the good set — `T7: the same subject with a real need still works` pins the opposite, so
+find a subject where padding with `overview` costs a real set its hits.
+
+**FAIL:** any path from a need to a search whose query has under two content words; a one-term
+query classified `ok`; `unfloored` counted in a run whose queries were all padded; the padding
+changing any recorded fixture query.
 
 ## T8 - Integration, image, and renderer parity
 
@@ -309,7 +372,7 @@ have changed too:
 
 ```bash
 cd "D:/Open WebUI/ai-stack/.claude/worktrees/wt-research-trust-core/OB1/integrations/research-service"
-deno eval --ext=ts "import { coverageFooter } from './report.ts'; console.log(coverageFooter([{need:'a',status:'answered'},{need:'b',status:'partial'}],{queries:[],hits:30,fetched:4,readable:4,relevant:2,collapsed:1,offtopic:0,ok:2,empty:0,errors:0,entity_missing:0,entity_rejected:2},'complete'))"
+deno eval --ext=ts "import { coverageFooter } from './report.ts'; for (const u of [0,1]) console.log(coverageFooter([{need:'a',status:'answered'},{need:'b',status:'partial'}],{queries:[],hits:30,fetched:4,readable:4,relevant:2,collapsed:1,offtopic:0,ok:2,empty:0,errors:0,entity_missing:0,entity_rejected:2,unfloored:u,query_padded:0},'complete'))"
 ```
 
 then the same record through the Python fallback (`t8.py` in the worktree root):
@@ -322,24 +385,38 @@ out = m._render({"synthesis": "x", "cited_sources": [], "gaps": [], "backstop": 
   "needs_status": [{"need": "a", "status": "answered"}, {"need": "b", "status": "partial"}],
   "search_record": {"hits": 30, "fetched": 4, "readable": 4, "relevant": 2, "collapsed": 1,
                     "offtopic": 0, "ok": 2, "empty": 0, "entity_missing": 0,
-                    "entity_rejected": 2}})
+                    "entity_rejected": 2, "unfloored": U, "query_padded": 0}})
 print([l for l in out.split("\n") if "needs answered" in l][0].strip().strip("_").replace("\u2014 ","").strip())
 ```
 
-**PASS:** both print, character for character:
+Run it twice, `U = 0` then `U = 1` — the second is the new `unfloored` clause, which must match
+the TypeScript side exactly, including whether it appears at all when the count is zero.
+
+**PASS:** both print, character for character — at `U = 0`:
 
 ```
-needs answered 1 of 2 (1 partly) · sources 2 relevant of 4 fetched (30 hits, 1 junk) · subject shortened to its name (1x) · entity gate: 2 search(es) judged without it (2 rejected the run's subject)
+needs answered 1 of 2 (1 partly) · sources 2 relevant of 4 fetched (30 hits, 1 junk) · entity gate: 2 search(es) judged without it (2 rejected the run's subject)
 ```
 
-and `owui/tools/deep_research.py` says **`version: 1.4.0`** — UNCHANGED from the deployed
-version, because the footer clause this item had added was deleted with `shortenEntity` (T4).
-Confirm no re-paste is needed:
-`git diff 8d480a5..work/research-trust-core -- owui/tools/deep_research.py` should show only a
-comment change, no output text.
+and at `U = 1` the same line with one clause appended:
 
-**FAIL:** a build failure; a missing module; the two renderers differing; the version bumped
-when the rendered output did not change, or unchanged when it did.
+```
+ · entity gate refused 1 search(es): the query had fewer than two content words
+```
+
+Note what that clause is NOT: it is not folded into the `judged without it` count. Those
+searches were judged WITHOUT the gate; a refused one was thrown away BY it, and reporting both
+in one number would misstate each.
+
+`owui/tools/deep_research.py` now says **`version: 1.4.1`** and **DOES need a re-paste**
+(section D.3). The rendered bytes differ only in a run that refused a search — zero in every
+run the query guarantee covers — but the deployed copy cannot render the clause at all, and a
+counter whose whole purpose is to be loud is worth the paste. Attempt 3's "no re-paste needed"
+was true of attempt 3; it is stated here as changed rather than left for the diff to reveal.
+
+**FAIL:** a build failure; a missing module; the two renderers differing at either value of
+`U`; the version bumped when the rendered output did not change, or unchanged when it did; the
+refused count folded into the `judged without it` number.
 
 **Clean up:** remove the container, network and image; `reap.ps1 -Report` must show nothing
 owned by you.
@@ -349,7 +426,7 @@ owned by you.
 ## T9 - Nothing live changed, and nothing was removed without an account of it
 
 ```powershell
-cd "D:\Open WebUIi-stack"
+cd "D:\Open WebUI\ai-stack"
 git diff --name-only 8d480a5..work/research-trust-core
 git diff 8d480a5..work/research-trust-core -- OB1
 git status --short
@@ -372,12 +449,21 @@ git -C OB1 show 5c189cf:integrations/research-service/entity.test.ts | Select-St
 git -C OB1 show research-trust-core:integrations/research-service/subject.test.ts | Select-String -Pattern '^Deno.test\("'
 ```
 
-Compare that list against the **removed-tests table in findings section H.5**, which maps each
-removed case to its replacement or states why it has none.
+```powershell
+# ...and the SECOND deleted file, which attempt 3's table covered only in a group
+git -C OB1 show 2d339df:integrations/research-service/entity-core.test.ts | Select-String -Pattern 'Deno.test'
+```
 
-**PASS:** every removed case appears in the table; each row's replacement actually exists in
-`subject.test.ts` (search for it); and the two rows that say WITHDRAWN carry a reason you
-accept — a sibling model now carrying the subject, and `shortenEntity` going with its function.
+Compare those lists against the **removed-tests table in findings section H.5**, which maps each
+removed case to its replacement or states why it has none. It is **36 rows in two tables** — 22
+for `entity.test.ts`, 14 for `entity-core.test.ts` — one row per case, no grouping. Attempt 3
+had 14 rows covering 22 of the 36, with one grouped row scoped to the wrong file; the tester
+verified every uncovered case did have a replacement, and those rows are now written out.
+
+**PASS:** every removed case appears in the table and the counts match (22 + 14 = 36); each
+row's replacement actually exists (search `subject.test.ts`, and `search-quality.test.ts` for
+the `T11:` rows); and the four rows that say WITHDRAWN carry a reason you accept — a sibling
+model now carrying the subject, and the three `shortenEntity` cases going with the function.
 
 **FAIL:** a live container restarted or rebuilt; the gitlink bumped; a removed test missing
 from the table; a table row naming a replacement that does not exist; a behaviour that
@@ -424,12 +510,26 @@ entity for that run shortens from `Dell OptiPlex 3050`, so it exercises the chan
 
 Record both job ids, the footer lines and the per-search entity shares in the findings sink.
 
-### D.3 The OWUI tool needs NO re-paste
+### D.3 The OWUI tool DOES need a re-paste (v1.4.0 -> v1.4.1)
 
-`owui/tools/deep_research.py` stays at **v1.4.0**, the deployed version. The clause this item
-had added to its footer was deleted with `shortenEntity` (findings H.4), so its rendered output
-is byte-identical to what is already pasted. Verify with the diff in T8 before skipping the
-step; if it shows any change to emitted text, re-paste it and bump the version.
+This reverses what attempt 3's plan said, and the reversal is the point: attempt 3 deleted the
+`shortenEntity` footer clause and the file went back to the deployed bytes, so no paste was
+needed. Attempt 4 adds a different clause - the refused-search counter - so the paste is needed
+again.
+
+`owui/tools/deep_research.py` is **v1.4.1**. Paste it over the existing tool in Open WebUI
+(Workspace -> Tools -> deep_research), keeping its id, and confirm the header shows 1.4.1.
+`owui/manifest.csv` already maps the file to its OWUI id; no new row.
+
+**What actually changes for a reader:** nothing, in any run whose queries were all searchable -
+the clause fires only when `search.unfloored` is non-zero, which the query guarantee is built to
+make impossible. It is pasted so that if the tripwire ever does trip, the footer the operator
+reads says so instead of quietly dropping the count. The two renderers are byte-identical at
+both values (T8).
+
+**If the paste is skipped:** nothing breaks. The deployed 1.4.0 renders every other clause
+correctly and simply omits this one; the engine-side footer (report.ts) and the stored
+`result.rendered` already carry it, and that is the path most runs use.
 
 ---
 

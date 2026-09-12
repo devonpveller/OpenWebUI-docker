@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.4.0
+version: 1.4.1
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -389,6 +389,14 @@ def _render(result: dict[str, Any]) -> str:
                 )
                 foot.append(
                     f"entity gate: {no_gate} search(es) judged without it ({why})"
+                )
+            # Not part of no_gate: these searches were refused BY the gate
+            # rather than judged without it. Parity with report.ts.
+            unfloored = int(rec.get("unfloored") or 0)
+            if unfloored:
+                foot.append(
+                    f"entity gate refused {unfloored} search(es): "
+                    f"the query had fewer than two content words"
                 )
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")

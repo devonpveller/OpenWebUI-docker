@@ -1240,31 +1240,171 @@ query. It is still twice the line, and it is the set to watch if the floor is ev
   removing it. `deep_research.py` goes back to **1.4.0** and its rendered footer is byte-identical
   to the deployed version, so **no re-paste is needed**.
 
-### H.5 Removed tests — name → replacement or reason
+### H.5 Removed tests — every case, name → replacement or reason
 
-| removed test | from | replacement / reason |
-|---|---|---|
-| `entityTokens splits a digit/letter run…` | `entity.test.ts` | → `tokenSet offers a run, its parts, and the glued neighbours` |
-| `entityCore drops a brand or qualifier…` | `entity.test.ts` | → `a hit carries the subject at half its tokens` + `REGRESSION: a page that omits the brand still carries the subject` |
-| `entityCore never strips a unit away from its number` | `entity.test.ts` | → `a BARE NUMBER never carries a subject on its own` |
-| `entityCore leaves an already-distinctive entity alone` | `entity.test.ts` | → `subjectTokens: digits, capitals, and anything uncommon` |
-| `entityCore refuses to reduce an entity to nothing` | `entity.test.ts` | → `a subject that names nothing is REJECTED, not guessed at` |
-| `hitCarriesEntity matches the core phrase in the shapes engines write it` | `entity.test.ts` | → `tokenSet…` + `T11: the subject is matched in every spelling` |
-| `hitCarriesEntity accepts the core without the brand` | `entity.test.ts` | → `REGRESSION: a page that omits the brand still carries the subject` |
-| `a brand of ANY length is dropped…` | `entity.test.ts` | → same; a set has no brand to drop |
-| `a NEIGHBOURING model is not the same machine` | `entity.test.ts` | **WITHDRAWN, declared**: a sibling model now carries the subject — `DECLARED: a sibling model counts as carrying the subject` states it and why |
-| `a one-character model code never becomes the whole identity` (M.2) | `entity.test.ts` | → `REGRESSION: an unrelated product does not carry the subject`, and the M.2 case is now covered for ALL subject sizes by `junk-macbook-m2-nvme` (2-token subject), which is what attempt 2 silently narrowed |
-| `a bare number is never an identity` | `entity.test.ts` | → `a BARE NUMBER never carries a subject on its own` |
-| ACCEPTANCE 1/2 cases | `entity-core.test.ts` | → `REGRESSION ok: live-*` per fixture, plus `the tester's five subjects` |
-| `the window is bounded…` | `entity-core.test.ts` | **no replacement, no longer meaningful**: there is no window |
-| `shortening keeps the CALLER's spelling` | `entity-core.test.ts` | **WITHDRAWN with the function** — H.4; attempt 2 withdrew it with no reason, which the tester caught |
+**36 cases were removed** across attempts 2 and 3: 22 from `entity.test.ts` and 14 from
+`entity-core.test.ts`. All 36 have a row. The attempt-3 table had 14 rows covering 22 cases —
+the tester found the gap, verified each missing case DID have a replacement, and the rows are
+added here. The clause exists because attempt 2 hid two real regressions in exactly this way, so
+a table that covers most of the removals is the same defect one level up.
+
+**From `entity.test.ts` (22 cases):**
+
+| removed test | replacement / reason |
+|---|---|
+| `entityTokens splits a digit/letter run…` | → `tokenSet offers a run, its parts, and the glued neighbours` |
+| `entityCore drops a brand or qualifier…` | → `a hit carries the subject at half its tokens, rounded up` + `REGRESSION: a page that omits the brand still carries the subject` |
+| `entityCore never strips a unit away from its number` | → `a BARE NUMBER never carries a subject on its own` |
+| `entityCore leaves an already-distinctive entity alone` | → `subjectTokens: digits, capitals, and anything uncommon` |
+| `entityCore refuses to reduce an entity to nothing` | → `a subject that names nothing is REJECTED, not guessed at` |
+| `a brand of ANY length is dropped; the product line and model are kept` | → same; a set has no brand to drop |
+| `a page that omits the brand still carries the entity` | → `REGRESSION: a page that omits the brand still carries the subject` (same case, set rule) |
+| `a NEIGHBOURING model is not the same machine` | **WITHDRAWN, declared**: a sibling model now carries the subject — `DECLARED: a sibling model counts as carrying the subject` states it and why |
+| `a one-character model code never becomes the whole identity` (M.2) | → `REGRESSION: an unrelated product does not carry the subject`, and the M.2 case is now covered for ALL subject sizes by `junk-macbook-m2-nvme` (2-token subject), which is what attempt 2 silently narrowed |
+| `a bare number is never an identity` | → `a BARE NUMBER never carries a subject on its own` |
+| `hitCarriesEntity matches the core phrase in the shapes engines write it` | → `tokenSet offers a run, its parts, and the glued neighbours` + `T11: the subject is matched in every spelling engines write it` (`search-quality.test.ts`) |
+| `hitCarriesEntity accepts the core without the brand` | → `REGRESSION: a page that omits the brand still carries the subject` |
+| `ACCEPTANCE 1: the 100 Hz mechanism set is ok for all three spellings` | → `REGRESSION ok: live-100hz-mechanism` (0.85) + `T11: the subject is matched in every spelling engines write it` |
+| `ACCEPTANCE 1: the 100 Hz studies set is ok too` | → `REGRESSION ok: live-100hz-studies` (0.80) |
+| `ACCEPTANCE 2: the OptiPlex thermal set is ok with the branded entity` | → `REGRESSION ok: live-optiplex-thermal` (0.55) |
+| `ACCEPTANCE 2: the OptiPlex health set stays ok` | → `REGRESSION ok: live-optiplex-health` (0.70) |
+| `ACCEPTANCE 3: the six recorded collapse sets still collapse` | → the six `REGRESSION collapse: <fixture>` cases, one per fixture, each asserting share 0.00 — one case per set rather than one case for six |
+| `ACCEPTANCE 3: the two good sets stay ok` | → `REGRESSION ok: search-good-optiplex` + `REGRESSION ok: probe-good-iphone` |
+| `ACCEPTANCE 4: an entity absent from the query is REJECTED, not trusted` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: an empty entity is MISSING, and falls back` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: an entity the query DOES carry is used` | → `entityStatusFor: used, missing, rejected` |
+| `ACCEPTANCE 4: the query is matched on the CORE too` | → `entityStatusFor accepts a query carrying half the subject` (the set rule's form of the same question: half the subject, not the core) |
+
+**From `entity-core.test.ts` (14 cases):**
+
+| removed test | replacement / reason |
+|---|---|
+| `ACCEPTANCE 1: the five-word subject reduces to the name inside it` | → `subjectTokens: digits, capitals, and anything uncommon` + `REGRESSION: the failing dry run's own subject passes its own hit set` |
+| `ACCEPTANCE 1: and the recorded hit set then satisfies it at >= 0.4` | → `REGRESSION: the failing dry run's own subject passes its own hit set` |
+| `ACCEPTANCE 1: all three of that run's queries classify ok` | → `REGRESSION ok: live-100hz-mechanism` / `-studies` / `-ssq` |
+| `ACCEPTANCE 2: the five named subjects reduce as the rule says` | → `the tester's five subjects, on their own live hit sets` |
+| `ACCEPTANCE 2: a bare YEAR is not the name — measured, not assumed` | → `subjectTokens: a bare YEAR dates a subject, it does not name one` |
+| `ACCEPTANCE 2: a VERSION number keeps its language…` | → `the tester's five subjects…` + `T7 candidate: a three-part version` |
+| `ACCEPTANCE 2: a two-word technical name keeps both words` | → `the tester's five subjects…` + `REGRESSION ok: live-crashloop` |
+| `ACCEPTANCE 2: a product subject with trailing intent keeps the model` | → `the tester's five subjects…` + `REGRESSION ok: live-rpi5nvme` |
+| `a token typed as ONE word is never split across the window boundary` | → `tokenSet offers a run, its parts, and the glued neighbours`: a set has no window to split across, and the glue expansion is what the case was protecting |
+| `the window is bounded, and the bound is in WORDS not tokens` | **no replacement, no longer meaningful**: there is no window |
+| `a subject with no digits and no long word is left alone` | → `subjectTokens: digits, capitals, and anything uncommon` (nothing is "left alone" or not — every token is kept or dropped on its own merits) |
+| `ACCEPTANCE 3: a five-word subject is shortened to the name inside it` | **WITHDRAWN with `shortenEntity`** — H.4: there is no shortening |
+| `ACCEPTANCE 3: shortening keeps the CALLER's spelling` | **WITHDRAWN with `shortenEntity`** — H.4; attempt 2 withdrew it with no reason, which the tester caught |
+| `ACCEPTANCE 3: a subject that IS a name is returned unchanged` | **WITHDRAWN with `shortenEntity`** — H.4; the subject is always used whole now, so "unchanged" is the only behaviour there is |
+
 
 ### H.6 Counts
 
-| suite | attempt 2 | attempt 3 |
-|---|---|---|
-| `research-service` | 194 / 1 env-failed | **192 / 1** |
-| `research-curator` | 36 | 36 |
-| `ruff check .` | clean | clean |
+| suite | attempt 2 | attempt 3 | attempt 4 |
+|---|---|---|---|
+| `research-service` | 194 / 1 env-failed | 192 / 1 | **203 / 1** |
+| `research-curator` | 36 | 36 | 36 |
+| `ruff check .` | clean | clean | clean |
 
-The two-test drop is the `shortenEntity` pair going with the function.
+The attempt-3 drop is the `shortenEntity` pair going with the function; the attempt-4 rise is
+the eleven cases of section I.
+
+---
+
+## I. research-trust-core attempt 4 — the query side of the floor (2026-09-12)
+
+The floor held everywhere it ran. The tester could not break it with shared query terms, and the
+one attack that looked promising — a constructed set of "group chat app" pages each saying "works
+even on weak signal", share 1.00 — died on live data: the REAL population for
+`best group chat apps for teams` scores 0.00, because real group-chat articles do not say
+"signal". The construction was the artefact.
+
+What broke was the door in front of the floor.
+
+### I.1 The defect — [observed-live 2026-09-12, tester]
+
+    hitCarriesSubject(...):
+      if (qt.length < 2) return true;          // <-- nothing to ask two of
+
+A query with under two content words skipped the floor entirely, and the run's OWN query builder
+produced exactly that whenever a need's every word is a stopword:
+
+    keywordQuery("Signal",     "What is it?")  -> "Signal"      terms ["signal"]     FLOOR SKIPPED
+    keywordQuery("Notion",     "What is it?")  -> "Notion"      terms ["notion"]     FLOOR SKIPPED
+    keywordQuery("Kubernetes", "What is it?")  -> "Kubernetes"  terms ["kubernetes"] FLOOR SKIPPED
+
+End to end through the shipped `runResearch`, serving this branch's own `junk-signal-dsp`:
+
+| | query | share | stats | fetched | backstop |
+|---|---|---|---|---|---|
+| one-word need | `Signal` | **1.00** | ok=1 collapsed=0 | **8 junk pages** | complete |
+| normal need | `Signal disappearing messages` … | 0.00 | ok=0 collapsed=2 | 0 | fetch_degraded / `no_relevant_sources` |
+
+No model misbehaviour anywhere in it. `KEYWORDIZE_SYS` asks for 3–7 terms and nothing enforced it.
+
+### I.2 The fix, at both ends
+
+1. **The query builder guarantees two content words.** `shapeQuery` (which `keywordQuery` now
+   delegates to, and which `reformulate` shares) fills from the NEED's own content words first
+   and appends the class word `overview` only when the need has none — the same KIND of term
+   `REFORMULATION_SUFFIXES` uses, chosen because a FIRST search should not be biased toward
+   "problems". Padding is counted (`search.query_padded`), because a run that had to invent a
+   word to make its query searchable is a fact about the run.
+2. **A query that still cannot carry the floor is refused, not floored true.**
+   `entityStatusFor` returns a fourth status `unfloored`, `classifyHits` returns `offtopic` for
+   it (no fetch, feeds the degraded streak), `search.unfloored` counts it and the footer names
+   it. The `return true` is gone. Falling through to the overlap fallback would have been the
+   same hole one door down: a one-term query scores high overlap on anything carrying that term.
+
+Together these make the branch **unreachable in production and loud if reached** — the harness
+test asserts `unfloored === 0` precisely because the builder guarantees two.
+
+### I.3 What it cost: nothing measurable
+
+The share table is **unchanged, every row**. Verified by computing it twice over the same
+fixtures — once with the attempt-3 module read out of git (`d9cc44f`), once with the fix — and
+diffing: identical, including `live-100hz-mechanism` 0.85, `live-100hz-studies` 0.80,
+`live-100hz-ssq` 0.40, `live-semaglutide50` 0.35, every junk and collapse set 0.00. Nothing
+within 0.1 of 0.175. Every recorded fixture query already has two content words, so the
+guarantee never fires on one: `shapeQuery` returns them unpadded and unchanged.
+
+### I.4 The footer changes, so the tool is re-pasted
+
+`deep_research.py` goes **1.4.0 → 1.4.1**. The new clause fires only when a search was refused,
+so the rendered bytes are identical in every run that has none — but the DEPLOYED copy would not
+render it in a run that does, and the whole point of the counter is to be visible. Both renderers
+verified byte-identical at `unfloored` 0 and 1:
+
+    entity gate refused 1 search(es): the query had fewer than two content words
+
+It is NOT folded into the `judged without it` count: those searches were judged without the gate;
+these were refused BY it.
+
+### I.5 Eleven tests, RED before GREEN
+
+Seven of them fail against the attempt-3 behaviour, measured by restoring the two early returns
+and the un-guaranteed builder and re-running (7 failed / 67 passed), then restoring the fix
+(74 passed). The three that pass either way are the ones that pin behaviour the fix must NOT
+change — the good set, the zero-case footer, and the unpadded fixture queries.
+
+| test | pins |
+|---|---|
+| `T7 query side: a one-term query never floors a hit true` | the reversal itself |
+| `T7 query side: the whole live junk set scores 0.00 on a one-term query` | the tester's set, and the good counterpart unharmed |
+| `T7 query side: an unfloorable query is REFUSED, not judged by overlap` | `unfloored` → `offtopic`, and that the overlap fallback would have said `ok` |
+| `queryCanCarryFloor: two DISTINCT content words, not two words` | "Signal signal" is one word twice |
+| `shapeQuery guarantees two content words for a need that has none` | "What is it?", "Why?", "", stopwords + punctuation, "and then?" |
+| `shapeQuery takes the second word from the NEED when the need has one` | nothing is invented when the need has a word |
+| `keywordQuery and reformulate both emit a floorable query` | six subject/need pairs incl. no-entity |
+| `the guarantee does not disturb a query that already has two` | six recorded fixture queries unchanged |
+| `T7: a stopword-only need cannot produce a query that skips the floor` | the tester's reproduction through `runResearch`: padded, counted, DSP refused, 0 fetched, `unfloored === 0` |
+| `T7: the same subject with a real need still works` | `live-signal` still ok, fetched, unpadded |
+| `the footer names a refused search rather than hiding it` | the clause at 1, silence at 0 |
+
+### I.6 Carried forward, unchanged
+
+`entityShare` still reads `title + " " + snippet` and never `url` (seventh item running);
+`research_jobs.status` is still `done` with `error` NULL for a run that retrieved nothing. Both
+are the tester's, both are outside this item, both are recorded here rather than fixed quietly.
+And the pattern the tester named is worth keeping in view: each rule in this workstream has been
+sound in its body and broken at an edge the body did not cover — the pattern list had no
+head-clause split, the length anchor had no notion of identity, the set rule had no floor, the
+floor had no behaviour when there was nothing to floor against. The edges keep being found by a
+tester rather than by the rule's own construction.
