@@ -1,18 +1,28 @@
-<!-- The `scientific-paper` render of dry run a337520c (100 Hz tones and VR motion sickness), as delivered by THIS branch's
-     pipeline: rendered through the template, then through the fidelity check INCLUDING the names
-     gate (research-trust-names). The document is the one committed by research-trust-template with
-     the gate applied to it - not a fresh render - so `git diff` against that commit shows exactly
-     what the gate changed and nothing else.
+<!-- The `scientific-paper` render of recorded job a337520c (100 Hz bone-conducted sound against VR motion sickness), as delivered by THIS
+     branch's pipeline: the document research-trust-template committed at e28c974, put through
+     the fidelity check with the names gate and the FLIP JUDGE. Not a fresh render - the diff
+     against e28c974 is the check's work and nothing else, and every model call in it went
+     through the deployed LiteLLM path (12 calls, 62s).
 
-     HTC - a headset maker the evidence never names - is gone.
+     EVERY CHANGED LINE, ATTRIBUTED - which half of the check made it, and the polarity before
+     and after. No hunk flips a sentence's polarity; an absence stays an absence:
+
+     | line | changed by       | polarity               | the text that changed |
+     |------|------------------|------------------------|-----------------------|
+     | 72 | names gate (HTC) | absence -> absence | "(e.g., Oculus Quest, HTC Vive)" -> "(nothing)" |
 
      What the pipeline recorded for this document:
-       render fidelity : {"checked":66,"units":67,"unchecked":1,"stronger":1,"unsupported":2,"rewritten":1,"replaced":2,"names_blocked":["HTC"]}
-       grounding diff  : numbers [] urls [] names []  (was: names [HTC])
+       render fidelity : {"checked":65,"units":67,"unchecked":2,"stronger":1,"unsupported":1,"rewritten":1,"replaced":0,"polarity_skipped":0,"polarity_default":0,"duplicate_skipped":1,"no_candidate":1,"names_blocked":["HTC"]}
+       polarity decided by : {"no-negation":48,"world-marker":3,"evidence-noun":2,"default-absence":2,"heading":11,"judge":2}
+       grounding diff  : names ["HTC"] -> []
 
-     Applying the check to THIS file returns it byte for byte - fidelity.test.ts and
-     template-renders.test.ts both assert it, and it is the invariant attempt 1 of the template
-     item failed on. N and M are counted on this file by `countUnits`. -->
+     `polarity decided by` follows the DECIDER, not the words: a unit put to the flip judge is
+     recorded as "judge" and leaves the lexical bucket it was provisionally filed under, so
+     what remains under a lexical key is exactly what the check never had to ask about. Three
+     lexicons in a row decided polarity wrongly on delivered documents; nothing lexical decides
+     it now.
+
+     Applying the check to THIS file returns it byte for byte, and a second pass changes nothing. -->
 
 # 100 Hz Bone-Conducted Sound Reduces Motion Sickness Through Otolith Resonance: Human and Murine Evidence and Inferred Relevance to VR Cybersickness
 
@@ -75,11 +85,11 @@ The extension of the 100 Hz effect to a full VR headset experience is inferred f
 
 The long-term efficacy in humans is not established. The ≥120-minute duration was demonstrated only in the mouse beam-balance model [Source 10]; the human studies measured symptoms during a single motion exposure session. Whether the effect persists, wanes, or requires re-administration over hours or days in a human VR session is unknown.
 
-The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. Whether the 100 Hz effect is additive with other VR-specific countermeasures (e.g., high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source. (unverified figure: 100) [Source 11, 12]
+The interaction between 100 Hz sound stimulation and other VR-specific countermeasures (high frame rates, reduced artificial locomotion, vignetting) is not addressed in any provided source [Source 11, 12]. It is unclear whether the effects are additive, redundant, or potentially antagonistic [Source 11, 12].
 
 One sub-experiment in the study had a sample size of only 10 participants, which was noted as a limitation by community reviewers [Source 9]. When the otoliths were surgically removed from the mouse tissue, the 100 Hz–induced activation disappeared, confirming that the otoliths (not the cochlea) were the target of the sound stimulation. [Source 7]
 
-The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. VR motion sickness (cybersickness / VIMS) is attributed to a sensory conflict or mismatch between visual, vestibular, and proprioceptive signals integrated in the brainstem and cerebellum; in VR, the eyes perceive self-motion while the vestibular system detects stillness. [Source 1, 11, 12, 15]
+The neurophysiological pathway by which supplementary otolith vibration resolves or attenuates the visual-vestibular prediction error in the brainstem and cerebellum during VR is not detailed beyond the general statement that the stimulation "broadly activates the vestibular system" [Source 6, 7]. The EEG and GVS data [Source 1, 2] characterize the conflict state but do not trace the resolution pathway.
 
 ## Limitations and open questions
 

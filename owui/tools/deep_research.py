@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.5.3
+version: 1.5.5
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -428,7 +428,9 @@ def _render(result: dict[str, Any]) -> str:
     rf = result.get("render_fidelity")
     if isinstance(rf, dict):
         checked = int(rf.get("checked") or 0)
-        if checked > 0:
+        # Parity with report.ts coverageFooter(): the line prints whenever the
+        # check RAN, not only when something survived it.
+        if checked > 0 or int(rf.get("units") or 0) > 0:
             corrected = int(rf.get("rewritten") or 0) + int(rf.get("replaced") or 0)
             # N OF M, and the units nothing looked at: a coverage number with no
             # denominator is one a reader cannot reproduce from the document.
@@ -440,6 +442,16 @@ def _render(result: dict[str, Any]) -> str:
             )
             # Parity with report.ts coverageFooter(): names the evidence never
             # used, removed before the reader saw them. Only when there were any.
+            # Parity with report.ts coverageFooter(): sentences the check
+            # declined to touch because a correction would have inverted them.
+            held = int(rf.get("polarity_skipped") or 0)
+            dup = int(rf.get("duplicate_skipped") or 0)
+            none_ = int(rf.get("no_candidate") or 0)
+            if held + dup + none_ > 0:
+                foot.append(
+                    f"left as written: {held + dup + none_} "
+                    f"({held} would invert, {dup} already said, {none_} nothing to cite)"
+                )
             blocked = rf.get("names_blocked") or []
             if isinstance(blocked, list) and blocked:
                 foot.append(f"names: {len(blocked)} blocked")

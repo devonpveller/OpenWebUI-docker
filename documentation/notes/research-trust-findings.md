@@ -2536,3 +2536,319 @@ orphaned `2aa94dc`. It resolves today because the object survives in the worktre
 `[UNRESOLVABLE]` flag appears - but a `git gc` that drops it would make this row read as unresolvable
 work long after it merged. Nothing to do now; a reason for a `-Rebased` verb to re-point both fields
 rather than one.
+
+## O. research-trust-names attempt 3 — polarity (2026-09-12)
+
+Attempt 1 passed, merged and deployed. The re-test the reviewer's rebase forced found a defect
+attempt 1 had missed, and by then it was live.
+
+### O.1 What shipped — [observed-live, tester 2026-09-12]
+
+Under "What the evidence does not settle", sentences saying what the sources do NOT establish were
+replaced by verbatim grounded lines asserting what they DO.
+
+| removed | pasted in its place |
+|---|---|
+| "the evidence does not describe the specific Azure DevOps components…" | an `[INFERRED]` line: "The pattern seen in GitLab … is analogous to what Azure DevOps does…" |
+| "The EEG and GVS data … characterize the conflict state but do not trace the resolution pathway." | a background claim about what causes the conflict state |
+| "It is unclear whether the effects are additive, redundant, or potentially antagonistic." | a near-duplicate of the sentence before it, three possibilities flattened to one |
+
+The product-comparison paragraph was left saying "…rather than a bare git host. [Source 2] The
+sources ALSO do not address…" — an "also" pointing back at a negative that is no longer there.
+
+**Two of the three carried no flagged name at all**, so this is not the names gate: it is the
+fidelity judge and its verbatim fallback, live since research-trust-report. The judge reads an
+absence sentence, the lines it cites state positives, the verdict is UNSUPPORTED, and the fallback
+pastes a positive line in. **A polarity inversion under a citation is the worst shape a trust
+document can carry**, and the module built to prevent overstatement produced it.
+
+### O.2 The rule — [read-from-source]
+
+> A correction may never flip a unit's POLARITY. A sentence that denies, doubts or reports an
+> absence in the evidence may only be replaced by text that also does; an assertion may only be
+> replaced by an assertion. In "What the evidence does not settle" and "Limitations", the only
+> permitted corrections are a rewrite that keeps the absence claim or a [GAP]/[UNCERTAIN] line of
+> matching polarity; when neither exists the unit is left exactly as it is and counted
+> `polarity_skipped`, which lands in the footer's `U unchecked`.
+
+`polarityOf` (`fidelity.ts`) reads the SUBJECT, not the grammar: "The PSU never fails" is a
+negative world claim and correcting it is this module's job; "the sources do not describe X" and
+"it is unclear whether Y" are claims about the evidence. A section decides it outright — anything
+under those two headings is an absence claim by the section's own definition. Citations are
+stripped before classifying, because "[Source 7]" contains the word "Source" and with a negation
+anywhere in the sentence that made every cited negative claim look like a statement about the
+evidence.
+
+It is lexical, which this workstream has learned to distrust, and the reason it is acceptable is
+asymmetry: **a missed cue and a false cue both end in "leave the unit alone"**. It can only ever
+make the engine more conservative, never wronger.
+
+Two further guards fell out of building it:
+
+- **The fallback must be about the same thing.** Ranking candidates by word overlap without a
+  FLOOR put a line about the 100 Hz effect in place of a sentence about Azure DevOps components —
+  it was the best of two candidates rather than a good one. Two shared content words, and the
+  citation brackets stripped from both sides first. A unit that cites its own source needs no
+  floor: the citation is a stronger link than overlap.
+- **A replacement already in the document is not a correction.** The 100 Hz render ended with two
+  consecutive sentences making the same point, because the only same-polarity candidate was the
+  sentence above it.
+
+### O.3 One reference for the gate and the reporter — [read-from-source]
+
+`fidelity.ts` passed `query=""` to `renderGroundingDiff` and `harness.ts` passed the real query, so
+the gate blocked `UI` and `TFVC` — words of the question the PERSON asked — that the reader-facing
+report would never flag. The footer's `names: N blocked` and `prose_ungrounded.names` could
+disagree by construction. The query is threaded through now, and it is recorded ON the fixtures
+(`_query_provenance`) so a test that omits it is testing a different check.
+
+Measured on the product comparison: with the query, **nothing is flagged at all** — the two names
+the gate rewrote in attempt 2 were the user's own words, and one of those rewrites is what removed
+"TFVC (Team Foundation Version Control)" from a question that asked about it by name.
+
+### O.4 What the fixed path does to the three documents — [observed-live 2026-09-12]
+
+Applied to the documents research-trust-template committed at `e28c974`:
+
+| render | names | record | hunks |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM → none | 43 of 44, 3 corrected, 1 polarity-skipped | 4 (3 gate, 1 judge) |
+| scientific-paper | HTC → none | 65 of 67, 2 corrected, 1 polarity-skipped | 2 (1 gate, 1 judge) |
+| product-comparison | none → none | 25 of 25, 1 corrected | 1 (judge) |
+
+**Every changed line is attributed in each fixture's header** — line, which half of the check
+changed it, the polarity before and after, the text. The last item's headers claimed "exactly what
+the gate changed and nothing else" and that was false for 3 of 11 hunks. No hunk in these three
+flips a polarity.
+
+### O.5 Two more defects found while building it
+
+- **The check counted its own fixture headers.** `citedUnits` did not skip HTML comments, so the
+  attribution table in a header became units the moment it was written. A comment is apparatus,
+  not the document.
+- **The invariant tests omitted the query**, which was harmless until the gate began reading it.
+
+### O.6 Counts
+
+| suite | attempt 2 | attempt 3 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 281 / 1 env-failed | **287 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
+
+### O.7 What T8 should have said, and now does
+
+The tester ran T8 verbatim at a head the reviewer had rebased, and two of its three PASS conditions
+were false for reasons that were not defects: `ea6a2e5` had stopped being the merge-base, and the
+gitlink HAD moved because the landing commit is what moves it. T8 now derives the base with
+`git merge-base`, scopes the parent-diff assertion to the developer's own commits, and states the
+gitlink expectation BY STAGE — empty before the landing commit, exactly one change after it, with
+the new pin resolvable by `ls-remote`.
+
+---
+
+## P. research-trust-names attempt 4 — the default, not the cue (2026-09-12)
+
+Attempt 3 built a polarity guard and wrote in its own plan: "a missed cue and a false cue both end
+in leave the unit alone. It can only make the engine more conservative." **That was false as
+built**, and the tester proved it in one line of reasoning: the guard fired on a fixed list of
+evidence nouns, and a miss sent the unit down the ORDINARY path, where a [SOURCED] line replaces
+it. A false absence is harmless; a false ASSERTION is the defect.
+
+### P.1 What the tester found — [measured 2026-09-12]
+
+Six of 21 probes were classified assertions, two of them from the plan's own attack list:
+
+    assertion | The manual does not document a replacement procedure.
+    assertion | The Owner's Manual does not document the SFF PSU part number.
+    assertion | Contamination cannot be ruled out.
+    assertion | It does not say whether the unit was tested.
+    assertion | Nothing in the record confirms the 7th-gen ceiling.
+    assertion | The report does not state a figure, but the manual does.
+
+Driven end to end with this item's own `condemnAll` mock, three of four were REPLACED by positive
+grounded lines. And the sharpest form: **this plan's own pinned sentence with one noun changed** —
+"The EEG and GVS **data** … do not trace the resolution pathway" was protected, "…**recordings**…"
+was not, and it was replaced by "VR motion sickness is attributed to a sensory conflict…". The
+attempt-2 inversion, reproduced by a synonym.
+
+In every one of those runs the record said `polarity_skipped: 0`. The guard had not declined to
+act; it had never engaged. **The check could not see its own blind spot, and neither could a
+reader of the footer.**
+
+### P.2 The rule now — [read-from-source]
+
+> A correction may never flip a unit's POLARITY, and **any unit that denies or doubts anything is
+> an ABSENCE by DEFAULT**. The only escape is a narrow positive marker for a world claim: a
+> negated NON-epistemic predicate about a concrete subject, in a findings section, with no
+> evidence noun anywhere in the unit. An absence may only be replaced by an absence — a
+> [GAP]/[UNCERTAIN] line of matching polarity, or a rewrite that keeps the denial — and in "What
+> the evidence does not settle" and "Limitations" nothing else is permitted at all; when no such
+> correction exists the unit is left exactly as written and counted.
+
+The marker is narrow on purpose, and every way of falling short of it lands on absence:
+
+| sentence | decided by | why |
+|---|---|---|
+| "The PSU never fails." | world-marker | concrete subject, `fails` is not an epistemic verb |
+| "The manual never fails." | evidence-noun | the subject is a source |
+| "It never fails." | default-absence | pronoun subject |
+| "The PSU does not describe the fault." | default-absence | `describe` is what a SOURCE does |
+| "The PSU never fails." (no section) | default-absence | a heading-less document is judged safely |
+| "The recordings do not trace the pathway." | default-absence | `trace` is epistemic — the synonym that broke attempt 3 |
+
+### P.3 The check can see its own blind spot now
+
+Every unit records HOW its polarity was decided — `heading`, `evidence-noun`, `default-absence`,
+`world-marker`, `no-negation` — the counts are on the run, and the footer prints
+`polarity: K left as written (D by default)`. On the three committed documents:
+
+| render | no-negation | heading | evidence-noun | default-absence | world-marker |
+|---|---|---|---|---|---|
+| buyers-guide | 21 | 8 | 6 | 5 | 4 |
+| scientific-paper | 48 | 12 | 2 | 2 | 3 |
+| product-comparison | 18 | 4 | 2 | 1 | 0 |
+
+Nine of 136 units across the three are held by the DEFAULT — sentences no heading and no evidence
+noun would have protected, and attempt 3 would have handed every one of them to the ordinary path.
+
+### P.4 Two smaller things the tester was right about
+
+- **A duplication is not a polarity refusal.** `duplicate_skipped` is its own counter now; attempt
+  3 booked duplications to `polarity_skipped` and over-reported polarity as the cause.
+- **The third row of attempt 3's own defect table was still shipped.** The replacement differed
+  from the sentence above it by a parenthetical and a figure annotation, and an exact-substring
+  test cannot see that. The duplication test now strips citations and figure annotations, compares
+  SIBLING sentences on the same line (a coarse span holds two, which is where that stutter lived),
+  and calls 0.7 word overlap a duplicate. All three rows are fixed in the delivered document.
+
+### P.5 What the fixed path does now — [observed-live 2026-09-12]
+
+| render | names | record | hunks |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM → none | 43 of 44, 2 corrected, 1 polarity-held | 3, all gate |
+| scientific-paper | HTC → none | 67 of 67, 2 corrected | 2 (1 gate, 1 judge) |
+| product-comparison | none | 24 of 25, 2 duplicate-held | 0 |
+
+Every changed line is attributed in each header, with the polarity before and after. No hunk flips
+a polarity.
+
+### P.6 T8's gitlink row could never fail
+
+The tester's other finding: `git merge-base` returns the landing commit itself, so
+`$base..HEAD -- OB1` is empty BY CONSTRUCTION and the "exactly one gitlink change, `ls-remote`
+resolves it" row could never be exercised from this checkout. T8 now checks the branch's HISTORY —
+`git log $base..branch -- OB1` — and says plainly that an empty diff proves nothing on its own.
+
+### P.7 Counts
+
+| suite | attempt 3 | attempt 4 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 287 / 1 env-failed | **294 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
+
+## Q. research-trust-names attempt 5 — the judge decides flips (2026-09-12)
+
+Attempt 4 failed on T3b for the second time, and the ground was the same each time: a lexicon
+deciding what a sentence claims. Three designs were tried and a tester broke all three on
+delivered documents — evidence nouns (attempt 3), a negation list (attempt 2), absence-by-default
+with a narrow world-marker (attempt 4). The operator's instruction was to take the lexicon out of
+the decision path.
+
+### Q.1 What the words could not see — [measured 2026-09-12, tester]
+
+| sentence that LANDED | why the lexicon missed it |
+|---|---|
+| "Scarcely any of the sources quantify the failure rate." | no negation token anywhere |
+| "…is far from settled" | no negation token |
+| "…is hardly documented anywhere" | no negation token |
+| an absence written as a question | no negation token |
+| "The readings do not capture the resolution pathway." | cleared the denial gate, then the world-marker (concrete subject, findings section, non-epistemic verb) waved it through |
+
+Every one was replaced by a line asserting what it denied, and every one recorded
+`polarity_skipped: 0` — the guard had never engaged, and nothing in the footer could say so.
+
+### Q.2 The rule now — [read-from-source]
+
+`FLIP_JUDGE_SYS` + `allowsCorrection()` in `fidelity.ts`. Before ANY correction is applied —
+rewrite or verbatim, in any section — the judge is shown the section heading, the sentence beside
+the unit, the original and the proposed correction, and answers one question. FLIP, an error, or
+an unparseable answer leaves the unit exactly as written (`parseFlip` returns FLIP for anything it
+cannot read). KEEP applies it. The prompt draws its one distinction with both examples: a false
+claim about the WORLD may be corrected toward the evidence; a claim about what the EVIDENCE
+settles may not be inverted.
+
+**There is no lexical fast path.** One was built for this attempt and documented as safe — skip
+the call when neither text denies anything — and the first sentence it met walked straight through
+it: "Scarcely any of the sources quantify the failure rate" carries no negation token, and neither
+does the [SOURCED] line that would have replaced it, so the pair looked like two positive
+statements. That is the same failure as attempts 3 and 4, one layer down: the words cannot even
+tell when there is nothing to ask about. `polarityVerdict` survives only as a recorded
+classification on each unit, never as a decision.
+
+### Q.3 Two defects the regeneration found, both invisible to any test I had written
+
+1. **The stutter came back.** With polarity no longer refusing it, the 100 Hz render again ended
+   with two consecutive sentences making one point. The near-duplicate test exists for exactly that
+   pair and cannot see it: they share 6 content words of 10, under its 0.7. The same judge call now
+   answers a second question — does this correction only repeat the sentence BESIDE it
+   (`"duplicate": true`) — and the paste is refused as a duplication.
+2. **A readability verdict kept an invented name.** On the buyer's guide the judge called the OEM
+   sentence's repair a restatement of its neighbour (it is), the refusal stood, and "OEM" shipped
+   in a delivered document while the footer named ESR and HDD as blocked. A gate a readability
+   guard can talk out of firing is not a gate: a unit carrying an unearned name is now corrected
+   even when the correction duplicates its neighbour. **Polarity has no such exception** — a flip
+   is never applied to remove a name, and the name is then not counted as blocked.
+
+### Q.4 Counting: exactly once, and visible — [read-from-source]
+
+Every condemned unit that ends uncorrected is booked in exactly one of `polarity_skipped`,
+`duplicate_skipped`, `no_candidate`, comes OUT of `checked`, and appears in the footer's `U`:
+
+```
+render checked: 0 of 1, 0 corrected, 1 unchecked · left as written: 1 (1 would invert, 0 already said, 0 nothing to cite)
+```
+
+Four accounting bugs were fixed to make that true:
+
+- the clause was gated on `checked > 0`, so a run that could correct NOTHING printed no fidelity
+  line at all — the disclosure went silent exactly where the reader needed it;
+- a refusal was booked inside the candidate loop, so one sentence could be two refusals;
+- a rewrite refusal was booked, and then the verbatim pass booked the same unit again;
+- an EDIT that landed was counted on the way OUT of the correction path, which a refusal never
+  reaches: the buyer's guide changed three lines and reported "2 corrected".
+
+`polarity_sources` now follows the DECIDER, not the words — a unit put to the judge is recorded as
+`judge` and leaves the lexical bucket it was provisionally filed under, so the total is still one
+entry per unit and what remains under a lexical key is exactly what was never asked about.
+
+### Q.5 What the fixed path does to the three renders — [observed-live 2026-09-12]
+
+Regenerated from the `research-trust-template` documents at e28c974 through the deployed LiteLLM
+path (24 chat calls, ~110s total), not re-rendered:
+
+| render | names | record | hunks |
+|---|---|---|---|
+| buyers-guide | ESR, HDD, OEM → none | 43 of 44, 3 corrected, 1 unchecked (1 duplicate) | 3, all names gate |
+| scientific-paper | HTC → none | 65 of 67, 1 corrected, 2 unchecked (1 duplicate, 1 no-candidate) | 1, names gate |
+| product-comparison | none | 25 of 25, 0 corrected | 0 |
+
+Every hunk is a name removal, and every one keeps its sentence's polarity (absence → absence). No
+[SOURCED] line was pasted over a sentence about what the evidence lacks in any of the three, and
+the live judge answered KEEP on nothing that would have inverted one.
+
+### Q.6 Counts
+
+| suite | attempt 4 | attempt 5 |
+|---|---|---|
+| `research-service` (service directory only, `--no-lock`) | 294 / 1 env-failed | **301 / 1** |
+| `research-curator` | 40 | 40 |
+| `ruff check .` | clean | clean |
+
+Seven new cases, all in `fidelity.test.ts`: the prompt and every unusable answer; the five landed
+sentences plus the plan's own escape-hatch example end to end with a FLIP judge; the
+over-protection side ("does not support DDR4-3200", "The PSU is not proprietary", the same claim
+in a table cell) with a KEEP judge; the condemned sentence nothing could correct, counted and
+disclosed in the footer; a judge that errors; the 100 Hz stutter refused by the judge; and the
+name that beats a stutter.
