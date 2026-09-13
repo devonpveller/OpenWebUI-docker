@@ -197,8 +197,13 @@ What to check now:
   that preceded it.
 - the budget is clamped at BOTH ends (1 and 60) and a non-integer falls back to
   the default, all with zero stderr.
-- **THE SHAPE THAT IS DETERMINISTICALLY OVER 15s: a first call that is SLOW AND
-  THEN FAILS.** A stale root plus a server taking ~6s before rejecting it costs
+- **THE SHAPE THAT WAS DETERMINISTICALLY OVER 15s - a first call that is SLOW AND
+  THEN FAILS - IS FIXED, because it was the recovery's second call.** Measured
+  after the recovery was removed: max 12.09s, 0 of 12 over the limit. Drive it
+  anyway; it is the shape most likely to regress if a second in-run call ever
+  returns.
+
+  The history, since the figure below is what the case was written around: A stale root plus a server taking ~6s before rejecting it costs
   the floored first call, the failure, and then the recovery - and a tester
   measured 15.6-16.1s, five of five over the Stop hook's limit, at the DEFAULT
   budget. This case named only the hung-API shape, which is cheaper. Drive a

@@ -526,6 +526,7 @@ lock_done() {
 MAP_ROOT=""
 map_root() {
   MAP_ROOT=""
+  # A `-` value is the DEAD-ROOT SENTINEL - see where it is read below.
   [ -n "$key" ] || return 0
   # GUARD THE FILE, do not rely on the redirect's `2>/dev/null`. Redirections are
   # applied left to right, so `done < "$THREADS" 2>/dev/null` reports a missing
@@ -535,7 +536,30 @@ map_root() {
   [ -r "$THREADS" ] || return 0
   local _k _v
   while read -r _k _v || [ -n "$_k" ]; do
-    [ "$_k" = "$key" ] && MAP_ROOT="$_v"
+    if [ "$_k" = "$key" ]; then
+      if [ "$_v" = "-" ]; then
+        # THE DEAD-ROOT SENTINEL: "this id is gone, do not send to it again."
+        #
+        # It does NOT mean "never thread this session". Reporting no root lets the
+        # ORDINARY path create a fresh one on the next run - with a whole budget in
+        # hand, no deadline pressure, and no second call in the same run. That is
+        # the difference from the recovery this replaced: re-rooting is fine, and
+        # re-rooting INSIDE the run that just spent a call discovering the problem
+        # is what could not fit in a 15s hook.
+        #
+        # Cost of a deleted root, measured: ONE extra call, ONCE. Six messages in a
+        # session whose root had been deleted took SEVEN calls and delivered 6/6,
+        # with threading resumed from the second message.
+        #
+        # Measured before this was wired: later runs read `-` as a post id and
+        # posted with `root_id=-`, so five of six messages went to a thread that
+        # does not exist. A sentinel the reader does not know about is worse than
+        # no sentinel at all.
+        MAP_ROOT=""
+      else
+        MAP_ROOT="$_v"
+      fi
+    fi
   done < "$THREADS" 2>/dev/null
   return 0
 }
@@ -783,130 +807,31 @@ fi
 # The thread now exists, or the post failed and there is nothing to publish.
 # Either way the next run may proceed.
 [ -n "$_make_root" ] && lock_release
-
-# 6) A root that no longer exists (post deleted, channel purged) must not wedge the session
-#    into silence for the rest of its life. Drop the stale mapping and retry as a new thread,
-#    once. Anything still failing after that is Mattermost's problem, not this turn's.
-# A send that never happened for want of time is not evidence that the root is
-# dead, and recovering from it costs calls we already know we cannot afford.
+# 6) A ROOT THAT NO LONGER EXISTS: POST FLAT, AND STOP THREADING THIS SESSION.
 #
-# THIS USED TO TEST A FLAG SET INSIDE `post`, AND THAT FLAG NEVER ARRIVED. `post`
-# is always called as `$(post ...)` - a command substitution is a SUBSHELL, so its
-# assignments die with it and the guard was dead code from the moment it was
-# written. A tester proved it by instrumenting the caller. The budget is readable
-# here directly, in this shell, which needs no flag at all: if there is not enough
-# left to have made the call, the empty result says nothing about the root.
-# Only `!deadroot` recovers. An empty `out` now means the send did not land for
-# some other reason, and re-rooting on that is how a transient blip cost a thread.
-# THE WALL DECIDES WHETHER A CALL CAN HAPPEN, NOT THE HTTP BUDGET. This asked
-# `remaining` - the budget clock - and at a marginal budget that clock is spent by
-# the time the dead root has been discovered, so the recovery was skipped and the
-# message was never sent AT ALL. Measured by an attempt-18 tester crossing two axes
-# no case crossed: dead root + a 6s API + MM_DEADLINE_SECS 8 or 9 delivered 1/15
-# and 8/15 where the pre-item notifier `6829474` delivers 15/15. A GUARANTEED LOSS,
-# against the code this replaces, which is the one line this item is not allowed to
-# cross.
+# THE RECOVERY IS GONE - it re-rooted, and re-rooting is where every measured loss
+# in this item lived. It cost a SECOND API call, and a threaded sender needing two
+# round-trips where the notifier it replaces needs one cannot match it inside a 15s
+# hook: 11-15 of 15 against the parent's 15/15 at the default budget with a 6s API,
+# plus the wedged-session bug, the `!deadroot`-into-the-map bug, and the lock
+# interaction around the retry. Four rounds of defects for one behaviour.
 #
-# `remaining` is soft accounting for how much HTTP work has been done; `wall_left`
-# is the hard fact about whether the hook can still afford a call. Asking the
-# former produced "no time left" while there were seconds of wall in hand, and the
-# floor + wall clamp in `post` already sizes the call correctly once it is allowed
-# to happen. Same principle as the rest of this round: one wall, and every decision
-# about whether there is time asks IT.
-# NO PRE-CHECK ON TIME AT ALL, and that is the fix rather than a third clock.
+# AND THE BEHAVIOUR WAS NOT WORTH IT. Threading already exists for sessions driven
+# from Mattermost - the bridge posts under a root and always has. This script only
+# groups the HOOK pings from an IDE session, so the whole feature is tidier
+# grouping, and trading delivery for tidier grouping is backwards in a change whose
+# entire origin was two months of missed messages.
 #
-# This asked `remaining` (attempt 18), then `wall_left` (attempt 19). Both are
-# WRONG, and measurably in opposite directions: `remaining` carries the lock
-# credit, so at the default budget it is the MORE generous of the two, and
-# swapping to the wall made the recovery skip itself where it used to fire -
-# 11/15 against 15/15 at budget 10, a regression I introduced while fixing the
-# budgets below it, and one a ten-round sample had already hidden from me once.
-#
-# `post` ALREADY decides this, with the real arithmetic: budget =
-# min(max(remaining, floor), wall_left), refused under 2. A gate here is a second
-# opinion computed from one of the two inputs, and a second opinion that disagrees
-# with the decision it precedes is not a safety check, it is a bug with a comment.
-# If there is no time, `post` refuses and nothing is lost that could have been
-# sent; if there is, the call happens.
-#
-# ONE DECISION POINT. The same lesson as the wall itself: when two places compute
-# whether there is time, they will disagree, and the disagreement is the defect.
+# So: send the message flat, once, and write a sentinel so LATER runs of this
+# session do not pay the discovery again. One local append, no API call. The
+# session stops being threaded; it never stops being delivered.
 if [ "$out" = '!deadroot' ] && [ -n "$root" ]; then
-  if [ -n "$key" ] && [ -f "$THREADS" ]; then
-    # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
-    # exits 1, the && short-circuits, the mv never runs and the stale entry
-    # survives - so the append below produced a DUPLICATE and the dead root was
-    # still found first. Found in test, attempt 1.
-    # NOTHING TO DO. The stale line is simply superseded by the one appended
-    # below, because the lookup takes the LAST match. No rewrite, no temp file,
-    # no race, and no `.tmp` orphans to gitignore.
-    :
-  fi
-  # Same read-then-act as step 4, so the same lock. Without it two concurrent
-  # recoveries of one session re-announce twice, which is the T15 defect wearing
-  # a different hat.
-  lock_take "$_dead_root" || :
-  map_root; root="$MAP_ROOT"
-  # A ROOT WE FOUND IS A ROOT WE USE, whether or not we hold the lock. This tested
-  # `-z "$LOCK"` FIRST, and `lock_take` deliberately returns WITHOUT the lock when
-  # it finds a published root - so the caller threw away a perfectly good root it
-  # had just been handed and posted flat. A tester measured 6 of 6 concurrent
-  # recoveries doing that, and the branch written for exactly this case fired 0 of
-  # 18 rounds: it was reachable only in the window between the map read and the
-  # mkdir.
-  #
-  # Ordering IS the logic here. The lock decides who may CREATE a thread; it has
-  # never had anything to do with who may USE one.
-  if [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
-    # Someone else recovered this session while we waited. Use their root.
-    lock_release
-    post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
-    _recovered=1
-  elif [ -z "$LOCK" ]; then
-    # Post FLAT and stop. This used to send here and then fall through to the
-    # unconditional send below, so every recovery that could not take the lock
-    # delivered the operator the SAME message twice - measured 3 of 3 runs by a
-    # tester, and invisible to every case in the plan because they all counted
-    # "at least N" rather than "exactly N".
-    root=""
-    # FLOORED, and the reasoning here used to say the opposite. "A call has
-    # already been spent" is true of the CLOCK and false of the MESSAGE: the
-    # first call came back `!deadroot`, which is the server REJECTING the root,
-    # not serving the message. This is the message's first real attempt, and
-    # starving it is why parity broke exactly here - a tester measured tip 9/10
-    # against parent 10/10 with a dead root and a 5s server, the one shape where
-    # the tip must make two calls and the unthreaded parent makes one.
-    #
-    # What made flooring unaffordable before was that the floor could overrun the
-    # hook. It is clamped by the wall now, so the guarantee costs what is there
-    # and never more.
-    post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
-    _recovered=1
-  elif [ -n "$LOCK" ] && [ -n "$root" ] && [ "$root" != "$_dead_root" ]; then
-    # Unreachable in practice now that the case above runs first; kept because a
-    # future edit could reorder them, and a redundant branch is cheaper than a
-    # second round of this bug.
-    lock_release
-  else
-    # Same rule as the first notification: the retry itself becomes the new root.
-    # No header, so a recovery costs ONE call, which is what makes it affordable
-    # at the moment we have already spent a call discovering the root was dead.
-    root=""
-    _retry=$(post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR")
-    # `!deadroot` MUST NEVER REACH THE MAP. The step-5 write tests for it; this
-    # one did not, and the two writes are the same write. A rootless create
-    # returning a root_id error is not something real Mattermost does, so this was
-    # latent rather than live - but a tester forced it and the NEXT run posted
-    # with `root_id=!deadroot`, which is the wedged-session failure this whole
-    # item exists to remove, reached through the recovery meant to prevent it.
-    # Two writes with one rule between them is one write too many to trust.
-    if [ -n "$_retry" ] && [ "$_retry" != '!deadroot' ] && [ -n "$key" ]; then
-      { printf '%s %s\n' "$key" "$_retry" >> "$THREADS"; } 2>/dev/null
-    fi
-    _recovered=1
-    lock_release
-  fi
-  [ -z "$_recovered" ] && post "${MENTION:+$MENTION }$MSG" "$root" >/dev/null 2>&1
+  post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
+  # The LAST line wins, so this supersedes the dead mapping without rewriting the
+  # file - the same append-only rule that removed the read-modify-write race. The
+  # next run reads "no root" and opens a fresh thread through the ordinary path,
+  # on a full budget.
+  [ -n "$key" ] && { printf '%s -\n' "$key" >> "$THREADS"; } 2>/dev/null
 fi
 
 exit 0

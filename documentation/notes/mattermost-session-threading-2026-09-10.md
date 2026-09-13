@@ -698,6 +698,50 @@ still held the dead ids.
 That is a degradation of THREADING, which is the direction this item is allowed to
 fail in. It is not a loss of the message.
 
+## THE DEAD-ROOT RECOVERY IS GONE, AND WITH IT EVERY MEASURED LOSS
+
+A root that no longer exists used to trigger a RECOVERY: a second API call, in the
+same run, to open a replacement thread. That one behaviour produced four rounds of
+defects - a wedged session that could never re-thread, `!deadroot` written into the
+map, a lock interaction on the retry path, a time check written three different
+ways and deleted - and a parity hole that could not be tuned away, because a sender
+needing two round-trips cannot match a one-round-trip sender inside a 15s hook.
+
+**IT WAS ALSO NOT WORTH IT.** Threading already exists for sessions driven from
+Mattermost: the bridge posts under a root and always has. This script threads the
+HOOK pings from an IDE session, so the whole feature is tidier grouping of
+notifications - and trading delivery for tidier grouping is backwards in a change
+whose origin was two months of missed messages. The operator made that call; the
+measurement only says what it costs.
+
+What replaces it: the run that discovers the dead root posts FLAT, and appends a
+`-` sentinel for that session. The next run reads "no root" and opens a fresh
+thread through the ORDINARY path - on a whole budget, with no deadline pressure and
+no second call in the same run. Re-rooting was never the problem; re-rooting INSIDE
+the run that had just spent a call discovering the problem was.
+
+Measured, six messages per session, 6s API, default budget unless stated:
+
+| shape | delivered | calls |
+|---|---|---|
+| clean map, fast API | 6/6 | 6 |
+| clean map, 6s API | 6/6 | 6 |
+| DEAD ROOT, 6s API | **6/6** | **7** |
+| DEAD ROOT, 6s API, budget 8 | **6/6** | **6** |
+| pre-item `6829474`, 6s API | 6/6 | 6 |
+| pre-item `6829474`, dead root | 6/6 | 6 |
+
+**A DELETED ROOT NOW COSTS ONE EXTRA CALL, ONCE** - not one per message, and not a
+message. Delivery is at parity with the notifier being replaced in every shape
+measured, and below `MM_THREAD_MIN_BUDGET` the map is not read at all so the run is
+byte-for-byte the parent's behaviour.
+
+**AND THE WORST CASE'S WORST SHAPE IS NO LONGER OVER THE HOOK LIMIT.** T7 names "a
+first call that is SLOW AND THEN FAILS" as deterministically over 15s - a tester
+measured 15.6-16.1s, five of five. That shape was the recovery's second call. It
+now reads max 12.09s, 0 of 12 over 15s. The hung-server case is max 12.17s, 0 of
+20.
+
 ## THE "IS THERE TIME?" CHECK HAS NOW BEEN WRITTEN THREE WAYS AND DELETED
 
   attempt 18  asked `remaining`  - skipped the call at low budgets (0-1 of 15)
