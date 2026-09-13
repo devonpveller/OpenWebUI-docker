@@ -498,11 +498,26 @@ means the recovery ran ONCE and nine runs sent nothing at all.
 Run it: a stale map entry, a server answering in 6s, and `MM_DEADLINE_SECS` at 8,
 9 and 10, at least 15 passes each, counting messages the SERVER received.
 
-PASS: parity with `6829474` at EVERY budget from 8 up, and two calls per run
-(the dead-root discovery plus the recovery). The shortfall this case was written
-to record is now fixed, so a shortfall is a REGRESSION rather than a known limit.
-FAIL: any loss at any budget, or a run making only one call when its root is
-dead - that is the recovery skipping itself, which is the defect.
+**THIS CASE WAS WRITTEN FOR A RECOVERY THAT NO LONGER EXISTS**, and an attempt-20
+tester failed the item for doing what was intended - the SECOND time this plan has
+done that after the arithmetic changed under it. It demanded TWO calls per run and
+called a single call "the recovery skipping itself"; below
+`MM_THREAD_MIN_BUDGET` one call is CORRECT, because the map is not read at all.
+
+**AND SWEEP PAST THE SEND BUDGET.** Every latency sweep here stopped at 6s, and
+the defect this case now exists for only appears when the API is SLOWER THAN THE
+CALL'S OWN TIMEOUT - there the rejection never arrives, `post` returns empty
+rather than `!deadroot`, and a response keyed on the reason does nothing at all.
+Go to 8s, 9s and 10s.
+
+PASS: parity with `6829474` at every budget and latency EXCEPT the single message
+that discovers a deleted root at an API slower than the send budget; the sentinel
+written in every non-confirming case, so the loss is one message and not the
+session; and ZERO duplicates anywhere, including a LIVE root at a latency above the
+budget.
+FAIL: any duplicate; any loss beyond that one message; a map left holding a dead id
+after a non-confirming rooted send; or a run below `MM_THREAD_MIN_BUDGET` that
+reads the map at all.
 
 **A CASE THAT VARIES ONE VARIABLE AT A TIME CANNOT SEE A TWO-VARIABLE DEFECT**,
 and every case in this plan varied one. The hole sat on the diagonal that neither

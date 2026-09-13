@@ -698,6 +698,70 @@ still held the dead ids.
 That is a degradation of THREADING, which is the direction this item is allowed to
 fail in. It is not a loss of the message.
 
+## THE SENTINEL KEYS ON "DID NOT CONFIRM", NOT ON THE REASON - AND THE RETRY DOES NOT
+
+Removing the recovery left one defect behind, and an attempt-20 tester found it by
+sweeping a latency the plan never reached: an API SLOWER THAN THE SEND BUDGET.
+
+`!deadroot` is the server saying it rejected the root. But when the API is slower
+than the call's own timeout the 400 never arrives, so `post` returns EMPTY - and
+the old condition tested the sentinel alone, so neither the flat retry nor the map
+write happened. The map kept the dead id and every later message repeated it: at a
+9s API, **15 of 15 messages lost and 10 of 15 maps never repaired**, against a
+parent that loses none.
+
+Keying the response on the REASON made it depend on being told, and a slow server
+does not tell you.
+
+**The sentinel now fires on any non-confirmation. The RETRY still fires only on an
+explicit rejection**, and that split is the whole of the safety:
+
+  * `!deadroot` - the server states it did NOT create the post, so a flat retry
+    cannot duplicate.
+  * empty - the call did not confirm, and a call that did not confirm MAY have been
+    accepted with curl giving up on the response. Retrying that is how one message
+    becomes two, and T20 requires exactly one.
+
+Measured at a 9s API against an 8s budget, no duplicate appeared even while the
+retry fired on empty - **because by then there is no wall left to retry with. That
+is luck, not a design**: at a latency just above the budget the time would be
+there, and so would the second copy. The sentinel costs an extra thread; the retry
+would cost a duplicate message, and only one of those is the direction this item
+may fail in.
+
+Six messages a session, fresh dead root, default budget:
+
+| API answers in | delivered | calls | duplicates | parent |
+|---|---|---|---|---|
+| 6s | 6/6 | 7 | 0 | 6/6 |
+| 8s | 6/6 | 7 | 0 | 6/6 |
+| 9s | **5/6** | 6 | 0 | 6/6 |
+| 10s | **5/6** | 6 | 0 | 6/6 |
+| 9s, LIVE root | 6/6 | 6 | 0 | 6/6 |
+| 6s, LIVE root | 6/6 | 6 | 0 | 6/6 |
+
+**THE RESIDUAL, STATED: at an API slower than the send budget, the ONE message that
+discovers a deleted root is lost.** Not every message - the sentinel is written, so
+the next run opens a fresh thread and the rest deliver. The parent never loses it
+because it never uses a root. Closing that would mean not using a root at all when
+the API has been slow, which needs latency state this script does not keep, and it
+costs a single ping in the case where Mattermost is answering in nine seconds AND
+the session's root has been deleted.
+
+## THREE FIGURES OF MINE THAT DID NOT REPRODUCE ON ANOTHER HOST
+
+An attempt-20 tester re-measured and got, against my numbers:
+
+  hung server + held lock, 20 passes   max 13.26s   (I measured 12.17s)
+  slow-then-rejects, 20 passes         max 12.74s   (I measured 12.09s)
+  N=2 threading at 3s, 30 rounds       18/30        (I measured 14/30)
+
+None changes a verdict - both worst cases stay 0 of 20 over 15s, and 18/30 is the
+same coin flip 14/30 described. **Take the HIGHER of the two worst-case figures as
+the one to design against**: the margin to the Stop hook is 1.74s, not 2.8s, and
+a figure measured on one machine under one load is a lower bound on what another
+will see.
+
 ## THE DEAD-ROOT RECOVERY IS GONE, AND WITH IT EVERY MEASURED LOSS
 
 A root that no longer exists used to trigger a RECOVERY: a second API call, in the

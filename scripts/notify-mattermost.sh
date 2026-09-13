@@ -825,13 +825,43 @@ fi
 # So: send the message flat, once, and write a sentinel so LATER runs of this
 # session do not pay the discovery again. One local append, no API call. The
 # session stops being threaded; it never stops being delivered.
-if [ "$out" = '!deadroot' ] && [ -n "$root" ]; then
-  post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
+# A ROOTED SEND THAT DID NOT CONFIRM IS A ROOT WE CANNOT KEEP USING - whatever the
+# reason. This tested `!deadroot` alone, and an attempt-20 tester showed that is the
+# WRONG KEY: when the API is slower than the send budget the 400 does not arrive
+# inside the call's own timeout, so `post` returns "" instead of the sentinel, and
+# NEITHER the flat retry NOR the map write happened. The map kept the dead root and
+# every later message repeated it - at a 9s API, 15 of 15 messages lost and 10 of 15
+# maps never repaired, against a parent that loses none.
+#
+# `!deadroot` says "the server rejected this root". An empty result says "this
+# message did not land, and I do not know why". Both mean the same thing about the
+# ROOT: do not keep sending to it. Keying the response on the reason made the
+# recovery depend on being told, and a slow server does not tell you.
+#
+# Writing the sentinel on a merely TRANSIENT failure costs an extra thread - the
+# next run opens a fresh root - and never costs a message. That is the degradation
+# this item is allowed to make, and it is the one the whole design already chooses
+# everywhere else.
+if [ -z "$out" ] || { [ "$out" = '!deadroot' ] && [ -n "$root" ]; }; then
+  # RETRY ONLY ON AN EXPLICIT REJECTION, AND WRITE THE SENTINEL ON EITHER.
+  #
+  # `!deadroot` is the server saying it did NOT create the post, so a flat retry
+  # cannot duplicate. An EMPTY result means the call did not confirm - and a call
+  # that did not confirm may still have been ACCEPTED, with curl giving up on the
+  # response. Retrying that is how one message becomes two, and T20 requires
+  # exactly one.
+  #
+  # Measured at a 9s API against an 8s budget: no duplicate appeared, because by
+  # then there is no wall left to retry with either. That is luck, not a design -
+  # at a latency just above the budget the time WOULD be there, and so would the
+  # second copy. The sentinel costs an extra thread; the retry would cost a
+  # duplicate message. Only one of those is the direction this item may fail in.
+  [ "$out" = '!deadroot' ] && post "${MENTION:+$MENTION }$MSG" "" "$POST_FLOOR" >/dev/null 2>&1
   # The LAST line wins, so this supersedes the dead mapping without rewriting the
   # file - the same append-only rule that removed the read-modify-write race. The
   # next run reads "no root" and opens a fresh thread through the ordinary path,
   # on a full budget.
-  [ -n "$key" ] && { printf '%s -\n' "$key" >> "$THREADS"; } 2>/dev/null
+  [ -n "$root" ] && [ -n "$key" ] && { printf '%s -\n' "$key" >> "$THREADS"; } 2>/dev/null
 fi
 
 exit 0
