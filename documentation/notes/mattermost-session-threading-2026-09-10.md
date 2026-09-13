@@ -660,25 +660,61 @@ one rule between them is one write too many to trust. Guarded.
 
 Dead root AND a 6s API AND `MM_DEADLINE_SECS` at 8 or 9 lost messages the pre-item
 notifier `6829474` delivers. An attempt-18 tester found it by crossing two axes no
-case crossed. FIXED, and the call counts say exactly what was happening:
+case crossed, and an attempt-19 tester showed my first fix for it was worth less
+than I claimed and broke the default budget. Where it now stands, all at 15 rounds
+a cell, 6s API:
 
-| MM_DEADLINE_SECS | this tip | tip WITHOUT the gate fix | pre-item `6829474` |
+| MM_DEADLINE_SECS | this tip | tip with the old gate | `6829474` |
 |---|---|---|---|
-| 8 | **10/10** (20 calls) | **1/10** (11 calls) | 10/10 (10 calls) |
-| 9 | **10/10** (20 calls) | **4/10** (14 calls) | 10/10 (10 calls) |
-| 10 | 10/10 (20 calls) | 10/10 (20 calls) | 10/10 (10 calls) |
+| 8 | **15/15 (15 calls)** | 0/15 (15 calls) | 15/15 (15 calls) |
+| 9 | **15/15 (15 calls)** | 11/15 (26 calls) | 15/15 (15 calls) |
+| 10 | 13/15 (28 calls) | 15/15 (30 calls) | 15/15 (15 calls) |
 
-**ELEVEN CALLS FOR TEN RUNS.** Ten of them were the dead-root discovery; the
-recovery ran ONCE. The other nine runs made no second call at all, so the message
-was never sent - a guaranteed loss, not a timeout. With the fix every run makes
-two calls and parity is restored at every budget.
+**BELOW THE DEFAULT BUDGET THIS IS NOW PARITY BY CONSTRUCTION, NOT BY TUNING.**
+Fifteen calls for fifteen runs: the map is not read at all below
+`MM_THREAD_MIN_BUDGET`, so no root is used, no recovery can be needed, and the run
+makes exactly the one floored call the parent makes. The gate that already existed
+("below 8 we do not thread") governed only CREATING a thread; USING a dead one is
+what commits a run to a second call, and that decision was ungated. Two halves of
+one rule, one of them missing.
 
-THE GATE WAS ASKING THE WRONG CLOCK. `remaining` is the HTTP budget, spent by the
-time a 6s call has discovered the root is dead; `wall_left` is the hard fact about
-whether the hook can still afford a call. The recovery asked the former and
-skipped itself while seconds of wall were still in hand. The floor and the wall
-clamp inside `post` already size the call correctly once it is allowed to happen -
-one wall, and every decision about whether there is time asks IT.
+**AT THE DEFAULT BUDGET A RESIDUAL REMAINS AND IS NOT TUNABLE AWAY.** With a dead
+root the threaded sender needs TWO calls where the parent needs one, and at 6s a
+call two do not fit inside what a 15s hook affords. Across every measurement of
+that cell this session the threaded build ran 11-15 of 15 against the parent's
+15/15 - a spread I twice read as a result. Sequentially it is worse-looking than
+it is: one session, six consecutive messages, dead root, 6s API delivered **6/6,
+three sessions out of three**, because only the first message of a session pays
+the discovery. Under concurrency with a fresh dead root per round it is 11-15/15.
+
+**THE MAP IS NEVER REPAIRED ABOVE ABOUT 4s A CALL, AND THAT IS THE REAL COST.**
+Measured: re-threading appends a new root 12/12 at 3s, 11/12 at 4s, 0/12 at 5s and
+0/12 at 6s. Above 4s the recovery's own send is sized by the wall to about `-m 3`,
+the 201 never returns, `_retry` is empty, and the mapping stays dead - so every
+later message pays two calls and posts flat. Proven by reading the MAP after the
+run, not inferred: after eighteen messages across three dead-root sessions the map
+still held the dead ids.
+
+That is a degradation of THREADING, which is the direction this item is allowed to
+fail in. It is not a loss of the message.
+
+## THE "IS THERE TIME?" CHECK HAS NOW BEEN WRITTEN THREE WAYS AND DELETED
+
+  attempt 18  asked `remaining`  - skipped the call at low budgets (0-1 of 15)
+  attempt 19  asked `wall_left`  - fixed those, BROKE the default (11/15 vs 15/15)
+  attempt 20  asks nothing
+
+`remaining` carries the lock credit, so at the default budget it is the MORE
+generous of the two clocks and swapping to the wall made the recovery skip itself
+where it used to fire. I shipped that swap as a fix having measured it at TEN
+rounds, where it read 10/10.
+
+`post` already computes the real arithmetic - `min(max(remaining, floor),
+wall_left)`, refused under 2 - so a gate in front of it was a second opinion
+derived from one of its own inputs. **A second opinion that disagrees with the
+decision it precedes is not a safety check; it is a bug with a comment.** Deleted.
+One decision point, which is the same lesson as the wall itself, applied one screen
+away from where it was written.
 
 **No case in the plan crossed a dead root with a marginal budget.** T6a sweeps
 latency at the default budget; T19 sweeps budget with a live root. The hole sits

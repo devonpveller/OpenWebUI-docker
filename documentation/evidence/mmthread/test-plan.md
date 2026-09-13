@@ -71,6 +71,12 @@ Read the channel back through the API and print `root_id` for each post.
 
 PASS: session A has ONE root and TWO replies carrying that root's id; session B has
 its OWN root and one reply; B's reply is not under A's root.
+
+**COUNT THE FIRST MESSAGE AS THE ROOT, NOT AS A REPLY UNDER AN ANNOUNCE POST.**
+There is no announce post any more - T15 says so and the code agrees - so three
+messages from one session are ONE root plus TWO replies, which is what the line
+above means. Read with the old announce in mind it reads as four posts, and an
+attempt-19 tester flagged the arithmetic as contradicting T15.
 FAIL: any message is a top-level post, or the two sessions share a root.
 
 ## T2 — it is genuinely RED on the current code
@@ -173,10 +179,22 @@ What to check now:
 - the FIRST send always goes out, with `-m` at least the floor (8), even at
   `MM_DEADLINE_SECS=3`. A budget too small to send is not a reason not to send;
   the pre-item sender has no budget at all and always uses `-m 8`.
-- LATER calls - the recovery retry - draw on what is left and ARE skipped when
-  there is nothing left. Verify by instrumenting `-m` per call, not by timing:
-  at `MM_DEADLINE_SECS=20` a dead-root retry shows `-m 19` then `-m 16`; at 3 the
-  retry does not happen at all.
+- LATER calls are FLOORED TOO, and clamped by the wall like every other call.
+  Verify by instrumenting `-m` per call, not by timing.
+
+  **THREE ASSERTIONS THAT STOOD HERE DESCRIBED A BUILD THAT NO LONGER EXISTS**,
+  and an attempt-19 tester failed the item for doing what was intended - which is
+  the plan's fault, not theirs. They said a dead-root retry at
+  `MM_DEADLINE_SECS=20` shows `-m 19` then `-m 16` (measured: `-m 10` then
+  `-m 9` - MM_WALL_SECS clamps both, and the budget stopped being the only
+  bound); that at budget 3 "the retry does not happen at all" (it does, `-m 8`
+  then `-m 8`); and the FAIL clause below forbade "a later call that is floored"
+  while this round deliberately floors it, because a `!deadroot` response is the
+  server REJECTING the root rather than serving the message.
+
+  WHEN THE ARITHMETIC CHANGES, EVERY PREDICTION DERIVED FROM IT IS STALE. The
+  wall landed two attempts ago and these three were left describing the budget
+  that preceded it.
 - the budget is clamped at BOTH ends (1 and 60) and a non-integer falls back to
   the default, all with zero stderr.
 - **THE SHAPE THAT IS DETERMINISTICALLY OVER 15s: a first call that is SLOW AND
@@ -187,7 +205,16 @@ What to check now:
   server that is slow AND rejects, not one that merely hangs.
 
 FAIL: any non-zero exit, any stderr reaching the caller, a first send that does
-not happen, a later call that is floored, or a run that could exceed 15s.
+not happen, or a run that could exceed 15s. (A floored LATER call is correct now
+and is no longer a failure - see above.)
+
+**DEFINE "DELIVERED" BEFORE COUNTING IT.** Server receipt and a client-confirmed
+201 diverge on EVERY run at budgets 8-10 against a slow API: curl can abandon a
+request the server has already accepted and recorded. Count server receipt for
+DELIVERY - that is what reaches the operator - and client confirmation for
+anything that depends on the RESPONSE, which the map repair does, because it needs
+the new root id out of the 201. An attempt-19 tester had to pick a definition the
+plan never gave, and the two answers differ.
 
 ## T8 — the allowlist still works
 

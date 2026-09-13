@@ -108,6 +108,23 @@ _started=$(now_s)
 # this replaces. Worst case is startup + this + the lock wait, which stays inside
 # the Stop hook's 15 seconds at the default budget.
 POST_FLOOR=8
+# THE BUDGET BELOW WHICH THIS DOES NOT THREAD AT ALL - not create a thread, and
+# not USE one either. The two are separate decisions and only the first was gated,
+# which is the whole of the parity loss an attempt-19 tester measured.
+#
+# A dead root costs TWO calls: one to learn it is dead, one to send. The pre-item
+# notifier `6829474` always costs ONE. At 6s a call the second does not fit inside
+# what the hook can afford, so the message is lost where the code being replaced
+# delivers it - 14/15 and 13/15 against 15/15 at budgets 8 and 9, measured over 15
+# rounds in two independent sweeps. (I published 10/10 there off TEN rounds. A
+# ten-round sample has about one chance in three of missing a 10% failure rate,
+# and this is the third figure in this item I have published off too few rounds.)
+#
+# So below this budget the map is not read, no root is used, no recovery can be
+# needed, and the run makes exactly the one floored call the parent makes. PARITY
+# BY CONSTRUCTION rather than by tuning - threading is what degrades, never
+# delivery, which is the one direction this item is allowed to fail in.
+MM_THREAD_MIN_BUDGET=10
 # THE HOOK'S LIMIT IS NOT THE HTTP BUDGET, AND ADDING UP SEPARATELY-TUNED TERMS
 # IS NOT A BOUND. Three terms decided the worst case - startup, the lock wait, and
 # the floored first send - each bounded on its own and then SUMMED, each retuned
@@ -583,7 +600,7 @@ lock_take() {
   # thread AT ALL and the run behaves exactly like the sender it replaces - which
   # is better than threading badly, and honest in a way that tuning the gate one
   # more notch would not have been.
-  [ "$MM_DEADLINE_SECS" -lt 8 ] && return 1
+  [ "$MM_DEADLINE_SECS" -lt "$MM_THREAD_MIN_BUDGET" ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
   _lock_t0=$(now_s)
   # BOUNDED BY TIME, NOT BY TURNS. The turn count was sized from a measured cost
@@ -681,8 +698,13 @@ lock_take() {
 lock_take || :
 
 # 3) Find this session's thread root, if it has one.
+#
+# ...BUT NOT WHEN THE BUDGET CANNOT AFFORD THE RECOVERY A DEAD ONE WOULD NEED.
+# Reading the map here is what commits the run to a possible second call. Below
+# MM_THREAD_MIN_BUDGET it does not read it, so this run is indistinguishable from
+# the pre-item sender: one floored call, no root, no recovery, no map write.
 root=""
-if [ -n "$key" ] && [ -f "$THREADS" ]; then
+if [ "$MM_DEADLINE_SECS" -ge "$MM_THREAD_MIN_BUDGET" ] && [ -n "$key" ] && [ -f "$THREADS" ]; then
   # Field-exact, not a substring: `xbeef0011` cannot answer for `beef0011`.
   # LAST match wins, not first. The map is append-only, so a recovery appends a
   # new root and the newest line is the live one. That removes the read-modify-
@@ -791,7 +813,25 @@ fi
 # floor + wall clamp in `post` already sizes the call correctly once it is allowed
 # to happen. Same principle as the rest of this round: one wall, and every decision
 # about whether there is time asks IT.
-if [ "$out" = '!deadroot' ] && [ -n "$root" ] && [ "$(wall_left)" -ge 2 ]; then
+# NO PRE-CHECK ON TIME AT ALL, and that is the fix rather than a third clock.
+#
+# This asked `remaining` (attempt 18), then `wall_left` (attempt 19). Both are
+# WRONG, and measurably in opposite directions: `remaining` carries the lock
+# credit, so at the default budget it is the MORE generous of the two, and
+# swapping to the wall made the recovery skip itself where it used to fire -
+# 11/15 against 15/15 at budget 10, a regression I introduced while fixing the
+# budgets below it, and one a ten-round sample had already hidden from me once.
+#
+# `post` ALREADY decides this, with the real arithmetic: budget =
+# min(max(remaining, floor), wall_left), refused under 2. A gate here is a second
+# opinion computed from one of the two inputs, and a second opinion that disagrees
+# with the decision it precedes is not a safety check, it is a bug with a comment.
+# If there is no time, `post` refuses and nothing is lost that could have been
+# sent; if there is, the call happens.
+#
+# ONE DECISION POINT. The same lesson as the wall itself: when two places compute
+# whether there is time, they will disagree, and the disagreement is the defect.
+if [ "$out" = '!deadroot' ] && [ -n "$root" ]; then
   if [ -n "$key" ] && [ -f "$THREADS" ]; then
     # awk, not `grep -v && mv`: when the map holds ONLY this session's line grep
     # exits 1, the && short-circuits, the mv never runs and the stale entry
