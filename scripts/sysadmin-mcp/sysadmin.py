@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
@@ -370,6 +371,43 @@ def container_logs(name: str, tail: int = 200) -> dict:
     return {"container": name, "tail": tail, "logs": text}
 
 
+def _volume_last_write() -> dict:
+    """Newest mtime (epoch seconds) under each volume's _data, in ONE wsl call.
+
+    Docker records no "last used" for a volume: `docker volume ls -f dangling=true` will call a
+    15-month-cold directory dangling without saying how cold, which is why volume_report could
+    stamp DO NOT PRUNE on data nothing had touched since 2025-05. maxdepth 3 from the volumes root
+    reaches <name>/, <name>/_data/ and its immediate children — enough to date a webui.db or a
+    postgres dir without walking 88 GB of files. Returns {} on any failure; callers must treat a
+    missing age as UNKNOWN and fall back to the conservative (protected) classification.
+    """
+    mount = load_config()["docker_desktop_mount"]
+    root = f"{mount}/data/docker/volumes"
+    r = _wsl_dd(["find", root, "-maxdepth", "3", "-exec", "stat", "-c", "%Y %n", "{}", "+"],
+                timeout=120)
+    if r["rc"] != 0:
+        return {}
+    newest: dict = {}
+    prefix = root + "/"
+    for line in r["out"].splitlines():
+        line = line.strip()
+        if not line or " " not in line:
+            continue
+        ts, _, path = line.partition(" ")
+        if not path.startswith(prefix):
+            continue
+        name = path[len(prefix):].split("/", 1)[0]
+        if not name:
+            continue
+        try:
+            t = int(ts)
+        except ValueError:
+            continue
+        if t > newest.get(name, 0):
+            newest[name] = t
+    return newest
+
+
 def volume_report() -> dict:
     """List volumes + dangling set. REPORT ONLY — flags protected data volumes; never prunes."""
     cfg = load_config()
@@ -389,11 +427,37 @@ def volume_report() -> dict:
     dangling_protected = sorted(v for v in dangling if is_protected(v))
     dangling_anon = sorted(v for v in dangling if not is_protected(v) and len(v) == 64)
     dangling_other = sorted(v for v in dangling if not is_protected(v) and len(v) != 64)
+
+    # A protected SUBSTRING says a volume's name looks like live data. It cannot say the volume IS
+    # live: after the 2026-08-21 per-plane split, `ai-stack_openwebui-data` and the live
+    # `frontend_openwebui-data` both match "openwebui", and the dead one was reported DO NOT PRUNE
+    # while nothing had written to it since the day before the split. Dangling already means no
+    # container references it; age is the second signal that separates the two.
+    cold_days = float(cfg["thresholds"].get("volume_orphan_cold_days", 30))
+    ages = _volume_last_write()
+    now = time.time()
+    cold, live_named = [], []
+    for v in dangling_protected:
+        ts = ages.get(v)
+        if ts is None:
+            live_named.append({"volume": v, "age_days": None})  # unknown age -> stay conservative
+            continue
+        age = round((now - ts) / 86400.0, 1)
+        (cold if age >= cold_days else live_named).append({"volume": v, "age_days": age})
+
     return {
         "total": len(all_vols),
         "dangling_total": len(dangling),
-        "dangling_protected_DO_NOT_PRUNE": dangling_protected,
+        "dangling_protected_DO_NOT_PRUNE": [e["volume"] for e in live_named],
+        "dangling_protected_cold": cold,
+        "cold_after_days": cold_days,
         "dangling_anonymous": dangling_anon,
         "dangling_named_other": dangling_other,
-        "note": "REPORT ONLY. Never `docker volume prune`; named data volumes above hold live state.",
+        "note": (
+            "REPORT ONLY. Never `docker volume prune`. DO_NOT_PRUNE holds protected names that are "
+            "recently written or of unknown age. `dangling_protected_cold` holds protected names "
+            "that no container references AND nothing has written for "
+            f"{cold_days:g}+ days — orphan CANDIDATES, not orphans: verify contents against the "
+            "live volume and back up before removing either."
+        ),
     }
