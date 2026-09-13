@@ -54,7 +54,11 @@ Anything a fake cannot answer - that Mattermost really threads on `root_id`, tha
 the channel renders it - is a DEPLOY-time check, not a test-time one. Say so in
 the evidence rather than reaching for the real server.
 
-## T1 — the shape, against the real API
+## T1 — the shape, against a LOCAL FAKE
+
+**NOT "against the real API".** That heading survived the round that added the
+local-fake recipe, and three testers in a row were told by the title to do what
+the brief forbids. A heading is the first thing read and the last thing updated.
 
 Run three notifications: two from one fake session id, one from another.
 
@@ -187,8 +191,9 @@ What to check now:
   the plan's fault, not theirs. They said a dead-root retry at
   `MM_DEADLINE_SECS=20` shows `-m 19` then `-m 16` (measured: `-m 10` then
   `-m 9` - MM_WALL_SECS clamps both, and the budget stopped being the only
-  bound); that at budget 3 "the retry does not happen at all" (it does, `-m 8`
-  then `-m 8`); and the FAIL clause below forbade "a later call that is floored"
+  bound); that at budget 3 "the retry does not happen at all" - which contradicted
+  T23 in this same file, since budget 3 is below `MM_THREAD_MIN_BUDGET` and ONE
+  call is the correct behaviour there, not a missing retry; and the FAIL clause below forbade "a later call that is floored"
   while this round deliberately floors it, because a `!deadroot` response is the
   server REJECTING the root rather than serving the message.
 
@@ -404,11 +409,15 @@ message sent**, **no lock directory left behind**, and **zero bytes on stderr**.
 
 Run 1-5 at the default `MM_DEADLINE_SECS=10` and again at 8.
 
-**BELOW `MM_DEADLINE_SECS=8` THE SCRIPT DOES NOT THREAD AT ALL** - no lock is
+**BELOW `MM_THREAD_MIN_BUDGET` (10) THE SCRIPT DOES NOT THREAD AT ALL** - no lock is
 taken, no map line is written, and it behaves exactly like the pre-item sender.
 That floor exists because threading costs two syscalls that are not free on this
 platform, and at 5s per call a budget of 5 delivered 4 of 6 where the pre-item
-sender delivered 6, while 8 and 10 were at parity. So at a budget below 8 the
+sender delivered 6, while 8 and 10 were at parity. **That 8 became 10 when the
+map-read gate landed, and this paragraph kept saying 8** - an attempt-21 tester
+measured that budgets 8 and 9 do not thread either, so a lock exemption hung on
+"below 8" exempts nothing at 8 or 9. Name the CONSTANT, not its value. So at a
+budget below `MM_THREAD_MIN_BUDGET` the
 "no lock directory left behind" clause does NOT apply: a run that never touches
 the locking cannot tidy it either, and a stale lock is cleared by the next run at
 a normal budget. Every other clause still applies at every budget - exit 0, a
@@ -444,7 +453,15 @@ separate times, and each time it looked like a result about the code:
 If a measurement surprises you, suspect the harness first, and say in your report
 how you ruled it out. A number you cannot defend is worse than no number.
 
-## T6a — a dead root must be recoverable MORE THAN ONCE, and the map must show it
+**WHY THESE ARE T21/T22/T23 AND NOT T6a/T15a/T20a.** `queue.ps1` parses a case as
+`^##\s+(T\d+|Case\s+\d+)\b`, so a lettered heading is INVISIBLE to it: its verdict
+cannot be recorded, and `-Pass` - which demands every PARSED case read PASS - never
+sees it. An attempt-21 tester had to fold three cases under their parents to report
+them at all. The same defect was found and fixed in `drilllabel` (a `## T9a` renamed
+to `## T10`) and then written again here. **A case the harness cannot parse is a
+case that cannot fail.**
+
+## T21 — a dead root must be recoverable MORE THAN ONCE, and the map must show it
 
 **RUN IT AGAINST A SLOW API, NOT ONLY AN INSTANT ONE — SWEEP THE LATENCY.** For
 every attempt up to 17 this case was run against an instant-reject shim, and so
@@ -477,9 +494,9 @@ dead root. **Read the map file. Do not infer it from the posts** - "a message wa
 delivered" is true in both the working and the broken case, which is exactly why
 this needed its own case.
 
-## T20a - A DEAD ROOT *AND* A MARGINAL BUDGET, which no case crossed
+## T23 - A DEAD ROOT *AND* A MARGINAL BUDGET, which no case crossed
 
-Every case here varies ONE axis. T6a sweeps latency at the default budget; T19
+Every case here varies ONE axis. T21 sweeps latency at the default budget; T19
 sweeps budget with a live root. An attempt-18 tester crossed them and found the
 only real loss of parity in the item:
 
@@ -488,9 +505,17 @@ fix and against the pre-item notifier:
 
 | MM_DEADLINE_SECS | this tip | tip WITHOUT the gate fix | pre-item `6829474` |
 |---|---|---|---|
-| 8 | **10/10** (20 calls) | **1/10** (11 calls) | 10/10 (10 calls) |
-| 9 | **10/10** (20 calls) | **4/10** (14 calls) | 10/10 (10 calls) |
-| 10 | 10/10 (20 calls) | 10/10 (20 calls) | 10/10 (10 calls) |
+| 8 | 15/15, **ONE call per run** | 0-3/15 | 15/15 (one call) |
+| 9 | 15/15, **ONE call per run** | 11-14/15 | 15/15 (one call) |
+| 10 | see the residual below | - | 15/15 (one call) |
+
+**THIS TABLE ONCE PREDICTED "20 calls" AT BUDGETS 8 AND 9 AND THAT IS NOW WRONG BY
+DESIGN.** Those budgets are below `MM_THREAD_MIN_BUDGET`, so the map is not read,
+no root is used, and ONE call per run is CORRECT - it is the parity the row is
+there to prove. An attempt-21 tester was failed by the old prediction for observing
+the intended behaviour. **Every figure derived from a constant must be re-derived
+when the constant moves**, and this is the third time in this plan that it was
+not.
 
 The call counts are the evidence, not the delivery rate: 11 calls for 10 runs
 means the recovery ran ONCE and nine runs sent nothing at all.
@@ -556,7 +581,7 @@ parent and announce LESS, because it declines to spend the message's budget on a
 thread header. If it announces just as often and delivers less, the budget rule
 is not working.
 
-## T15a — how far the threading guarantee is claimed to hold
+## T22 — how far the threading guarantee is claimed to hold
 
 **THE CLAIM IS NOW N=2 ONLY, and the previous round's wider claim was refuted by
 measurement rather than argument.** A tester ran 30 rounds and found N=3 splitting
@@ -571,7 +596,7 @@ your sample can and cannot exclude.
 
 **AND N=2 MUST BE RUN ACROSS THE LATENCY AXIS, not only at an instant API.**
 This is the gap that let a real defect ship: T15 listed latency only at N=3 and
-N=10, and T15a said "N=2 is 30 of 30" naming no latency at all - so a tester
+N=10, and T22 said "N=2 is 30 of 30" naming no latency at all - so a tester
 following it literally runs an instant API, gets 30 of 30, and ships. The plan
 supplies the missing reasoning itself in T19 ("the latency axis is where three
 successive designs failed") and confined it to delivery. An attempt-15 tester
@@ -640,9 +665,11 @@ it.** "Narrowed the test to fit the code" and "scoped a claim to what was
 measured" look identical in a diff, and differ only in whether the reasoning
 survives someone trying to break it.
 
-FAIL: N=2 showing more than one root in any of 30 rounds; N=3 materially worse
+FAIL: N=2 showing more than one root in any of 30 rounds **AT OR BELOW THE 2s
+CEILING T22 states** - above it, splitting is the documented behaviour and failing
+on it contradicts T22 in the same file; N=3 materially worse
 than 1 in 30; or any N **in scope** losing a message the pre-item notifier
-delivers. **N=10 IS NOT IN SCOPE** - T15a declares it so, and this clause used to
+delivers. **N=10 IS NOT IN SCOPE** - T22 declares it so, and this clause used to
 demand `delivered == N` at N=10 anyway, which fails the item on a residual it has
 already scoped out. Measured, for honesty rather than as a criterion: N=10 loses 1
 of 12 rounds instant and 3 of 12 at 1s, where the parent loses none.

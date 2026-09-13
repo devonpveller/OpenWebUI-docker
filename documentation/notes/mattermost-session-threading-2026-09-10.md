@@ -740,27 +740,52 @@ Six messages a session, fresh dead root, default budget:
 | 9s, LIVE root | 6/6 | 6 | 0 | 6/6 |
 | 6s, LIVE root | 6/6 | 6 | 0 | 6/6 |
 
-**THE RESIDUAL, STATED: at an API slower than the send budget, the ONE message that
-discovers a deleted root is lost.** Not every message - the sentinel is written, so
-the next run opens a fresh thread and the rest deliver. The parent never loses it
-because it never uses a root. Closing that would mean not using a root at all when
-the API has been slow, which needs latency state this script does not keep, and it
-costs a single ping in the case where Mattermost is answering in nine seconds AND
-the session's root has been deleted.
+**THE RESIDUAL, AND THE BOUNDARY I GOT WRONG.** I wrote "at an API SLOWER THAN THE
+SEND BUDGET, the one message that discovers a deleted root is lost". The first half
+holds and the second does not: there is no threshold. An attempt-21 tester measured
+the deciding message at 8s - where the API is NOT slower than the budget - and got
+9 of 15 delivered; re-measured here, 12 of 15. It is a COIN FLIP whose odds worsen
+with latency, not a cliff at a number, because what decides it is whether >=2s of
+the wall survives the first call - which depends on latency AND startup AND any
+time spent on the lock.
+
+**"At an API slower than X" was a tidy sentence, and tidy is what made it wrong.**
+The honest statement: when a session's root has been deleted, the ONE message that
+discovers it may be lost, with probability rising from zero at a fast API to
+certainty past about 9s. Every later message is fine, because the sentinel is
+written - verified in EVERY cell measured, 15 of 15 at 8s, including when `post`
+returns before making any call at all.
+
+**AND "THE SENTINEL COSTS AN EXTRA THREAD" IS UNDERSTATED BY FIVE TIMES.** For a
+transient failure at normal latency it is exactly one extra thread and the session
+re-threads immediately. But for a HEALTHY root at a latency near or above the send
+budget, the replacement root's own post never confirms either, so the map is never
+written and EVERY PING OPENS ITS OWN THREAD. Measured: at 6s, one thread and four
+replies for five messages; **at 11s, FIVE THREADS FOR FIVE MESSAGES**. Delivery is
+untouched - 5/5, parent 5/5 - so this is the direction the item may fail in, but
+the feature does not degrade to "an extra thread", it degrades to OFF.
+
+Which is worth saying plainly, because it is the whole feature's ceiling: above
+roughly the send budget, grouping stops working and the operator sees exactly what
+they see today - flat pings. Nothing is lost; nothing is gained either.
 
 ## THREE FIGURES OF MINE THAT DID NOT REPRODUCE ON ANOTHER HOST
 
 An attempt-20 tester re-measured and got, against my numbers:
 
-  hung server + held lock, 20 passes   max 13.26s   (I measured 12.17s)
-  slow-then-rejects, 20 passes         max 12.74s   (I measured 12.09s)
-  N=2 threading at 3s, 30 rounds       18/30        (I measured 14/30)
+  hung server + held lock, 20 passes   attempt 20: 13.26s   attempt 21: 12.41s   me: 12.17s
+  slow-then-rejects, 20 passes         attempt 20: 12.74s   attempt 21: 13.05s   me: 12.09s
+  N=2 threading at 3s, 30 rounds       attempt 20: 18/30    attempt 21: 14/30    me: 14/30
 
-None changes a verdict - both worst cases stay 0 of 20 over 15s, and 18/30 is the
-same coin flip 14/30 described. **Take the HIGHER of the two worst-case figures as
-the one to design against**: the margin to the Stop hook is 1.74s, not 2.8s, and
-a figure measured on one machine under one load is a lower bound on what another
-will see.
+Three measurements of the same thing on the same host, spread by a second. None
+changes a verdict - every worst case is 0 of 20 over 15s - but the spread IS the
+finding. **Design against the highest figure anyone has seen: 13.26s, a margin of
+1.74s to the Stop hook**, not the 2.8s my own number implied.
+
+The threading rate settled at 14/30, which is what I measured and what attempt 21
+measured; attempt 20's 18/30 is the outlier. Three samples of a coin flip disagree,
+which is what a coin flip does - and is why this plan now demands 30 rounds for a
+rate and 20 passes for a timing.
 
 ## THE DEAD-ROOT RECOVERY IS GONE, AND WITH IT EVERY MEASURED LOSS
 

@@ -168,7 +168,8 @@ _lock_spent=0
 # curl timeout out of that worst case; this takes another second, and both are
 # needed because the budget is wall-clock and the hook's limit is not negotiable.
 LOCK_SPEND_CAP=2
-_recovered=""         # set when the recovery path has already sent the message
+# `_recovered` lived here and is GONE with the recovery that set it. A variable
+# declared and never read is a reader being told a path exists that does not.
 
 # ANNOUNCE_MIN_BUDGET IS GONE, and so is the threshold it named. It gated a
 # second API call on 5 seconds of remaining budget, a figure measured against
@@ -620,10 +621,16 @@ lock_take() {
   # costs a lock directory and a map line - two syscalls that are not free on this
   # platform - and below a certain budget those cost the message instead. Measured
   # at 5s per call: MM_DEADLINE_SECS=5 delivered 4 of 6 where the pre-item sender
-  # delivered 6, while 8 and 10 were at full parity. So under 8 this does not
+  # delivered 6, while 8 and 10 were at full parity. So below
+  # MM_THREAD_MIN_BUDGET this does not
   # thread AT ALL and the run behaves exactly like the sender it replaces - which
   # is better than threading badly, and honest in a way that tuning the gate one
   # more notch would not have been.
+  # THIS COMMENT SAID "under 8" WHILE THE CONSTANT SAYS 10, and an attempt-21
+  # tester measured that budgets 8 and 9 do not thread either. A prose figure
+  # beside the constant it describes is the defect this very file names a few
+  # dozen lines up - a count that a command beside it derives should not also be
+  # typed out. The constant is the number; the comment no longer repeats it.
   [ "$MM_DEADLINE_SECS" -lt "$MM_THREAD_MIN_BUDGET" ] && return 1
   local _d="$THREADS.lock.$key" _at _age _i=0
   _lock_t0=$(now_s)
