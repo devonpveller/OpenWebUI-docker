@@ -231,14 +231,40 @@ spelling, or a second session opens and 1219 returns.
 
 The failure alert goes to the portal-alerter **and** to Mattermost **and** to
 Telegram, and the log records which channels answered. This is deliberate: the
-alerter's Gmail OAuth refresh token died on 2026-08-21, after which it returned
-500 to every `/alert` while its `/health` still answered `ready: true` with HTTP
-200 — its healthcheck only proves the listener is up, not that mail can be sent.
-Both 2026-09 backup failures alerted correctly into that void.
+alerter's Gmail refresh token is dead, so it returns 500 to every `/alert` while
+its `/health` still answers `ready: true` with HTTP 200 — the healthcheck only
+proves the listener is up, not that mail can be sent. Both 2026-09 backup
+failures alerted correctly into that void.
 
-If `docker logs portal-alerter` shows `Token refresh failed: Bad Request`, the
-OAuth grant needs re-consenting in Google Cloud (publish the app out of Testing
-mode — a Testing-mode refresh token expires after 7 days).
+**`portal-alerter` and the daily digest are different services with different
+OAuth clients.** `openbrain-digest` has been sending fine throughout. A working
+digest is *not* evidence that the alerter works, and re-consenting one does
+nothing for the other.
+
+To check the alerter specifically:
+
+```powershell
+docker logs --timestamps portal-alerter | Select-String "Token refresh failed" | Select-Object -Last 3
+```
+
+If present, its refresh token returns `invalid_grant` and must be re-minted:
+
+```powershell
+deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
+docker compose -f portal/docker-compose.yml up -d --force-recreate portal-alerter
+```
+
+**Do not date the outage from the container log.** The log begins when the
+container was created, not when the token broke. The honest last-known-good is
+`expiry_date` inside `secrets/google/portal-alerter/token.json` — `alerter.ts`
+rewrites that file on every successful refresh, so its timestamp is the last time
+mail actually worked. On 2026-09-13 the log implied 23 days and the token file
+said 14 weeks.
+
+Likewise ignore the 0-byte `config/alerter/token.json` / `credentials.json`:
+those are Docker's bind-mount placeholders, created because the compose file
+mounts `../config/alerter:/app` and then layers the real files from `secrets/`
+over it. They are not the credentials and never were.
 
 ---
 

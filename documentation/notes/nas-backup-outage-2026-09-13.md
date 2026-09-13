@@ -15,7 +15,7 @@ Four independent things had to line up, and they did:
 
 | # | Defect | First seen | Evidence |
 |---|---|---|---|
-| 1 | portal-alerter's Gmail OAuth refresh token died → every `/alert` 500s | **2026-08-21** | `docker logs --timestamps portal-alerter` → 56 × `Token refresh failed: Bad Request` |
+| 1 | portal-alerter's Gmail OAuth refresh token is dead → every `/alert` 500s | **no later than 2026-06-05**, see below | `docker logs --timestamps portal-alerter` → 56 × `Token refresh failed: Bad Request`; live refresh returns `invalid_grant` |
 | 2 | Its `/health` still answers `ready:true` + HTTP 200 | — | [alerter.ts:662](../../config/alerter/alerter.ts#L662); healthcheck is `wget -q -O /dev/null …/health`, which discards the body that *does* carry `last_error` |
 | 3 | NAS `backup-user` password expired | between 08-30 and 09-06 | `logs/nas-sync-2026-09-06.log`: `The password of this user has expired. System error 2242` |
 | 4 | `check_backups.py` never looked at the off-site layer | since it was written | `grep -i "nas\|slot-" scripts/sysadmin-mcp/check_backups.py` → no matches |
@@ -78,11 +78,47 @@ Verified live: `net use \\192.168.1.247\backups /user:backup-user` returned exit
 
 ## What this change does NOT fix
 
-- **The portal-alerter is still dead.** Its OAuth grant needs re-consenting in
-  Google Cloud (publish out of Testing mode; a Testing-mode refresh token expires
-  after 7 days — the same failure as `daily-digest-oauth-7day-expiry`). Operator
-  action. This work makes the alerter's death non-fatal by fanning out to
-  Mattermost and Telegram, rather than repairing it.
+- **The portal-alerter is still dead.** Its refresh token returns `invalid_grant`.
+  Re-consent with
+  `deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts`,
+  then recreate the container. Operator action (browser consent). This work makes
+  the alerter's death non-fatal by fanning out to Mattermost and Telegram, rather
+  than repairing it.
+
+  ### Correction: when it died, and what it is NOT (2026-09-13)
+
+  An earlier revision of this note said the token "died 2026-08-21" and blamed the
+  same 7-day Testing-mode expiry as `daily-digest-oauth-7day-expiry`. Both claims
+  were wrong as stated, and the operator was right to push back — the daily digest
+  has been working fine throughout.
+
+  - **They are different services with different OAuth clients.** `openbrain-digest`
+    has its own credentials and shows **zero** token errors; `portal-alerter` uses
+    `secrets/google/portal-alerter/`, its own `client_id`. Fixing one does nothing
+    for the other, and the digest working never implied the alerter was.
+  - **2026-08-21 is when the CONTAINER was created**, not when the token broke:
+    `docker inspect portal-alerter` → `Created: 2026-08-21T10:11:23Z`, eighteen
+    seconds before the first logged failure at `10:11:41Z`. That is commit
+    `9a0a737`, the Part K portal split. The log starts there because the container
+    does; it says nothing about earlier.
+  - **The real last-known-good is 2026-06-05.** `alerter.ts` writes the refreshed
+    token back to `token.json` on every successful refresh
+    ([alerter.ts:103](../../config/alerter/alerter.ts#L103)), and that file still
+    carries `expiry_date: 2026-06-05T07:59:56Z` with an mtime to match. No
+    successful refresh has happened since. The outage is potentially **14 weeks**,
+    not 23 days.
+  - Testing-mode expiry is now *plausible again* on those dates (Jun 5 + 7 days
+    ≈ Jun 12) but is **not established**: `invalid_grant` covers revocation, a
+    password change, and the per-client token cap equally. Check the app's
+    publishing status in Google Cloud before assuming.
+  - The 0-byte `config/alerter/token.json` and `credentials.json` dated Aug 21
+    06:11 are **Docker's own bind-mount placeholders**, not a truncated token —
+    `portal/docker-compose.yml` mounts `../config/alerter:/app` and then layers
+    the two real files from `secrets/` on top, and Docker creates a missing mount
+    target. Their timestamp matching the first failure to the minute is the
+    container's creation, and it is a coincidence worth not chasing twice. Same
+    trap as `observability-audit`: a bind-mount of a missing file is silently
+    created.
 - **`/health` still lies.** It returns `ready:true` regardless. Deliberately left
   alone: [alerter.ts:14](../../config/alerter/alerter.ts#L14) says the killswitch
   and `portal-status.ps1` consume it, so returning 503 when *mail* breaks could
