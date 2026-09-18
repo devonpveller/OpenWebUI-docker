@@ -352,6 +352,28 @@ PASS, per round: exactly **one announce**, and **delivered == N**.
 FAIL: more than one announce in any round; any message not delivered that the
 PARENT delivers under the same conditions; or a parent that is not red.
 
+**EXCEPT AT A PER-CALL COST ABOVE `LOCK_WAIT_SECS`, WHERE DELIVERY WINS AND MORE
+THAN ONE ROOT IS THE ACCEPTED OUTCOME** (operator decision, 2026-09-18). At the
+`N=3 with ~5s per call` setting the one-root rule above cannot hold and must not
+be asserted:
+
+- `LOCK_WAIT_SECS` is 4, and line 618 caps the wait at it *regardless of budget*
+  (`[ "$_wait" -gt "$LOCK_WAIT_SECS" ] && _wait="$LOCK_WAIT_SECS"`). A call that
+  costs 5s therefore cannot publish its map line inside any other run's wait.
+- So the losers stop waiting and post UNTHREADED. That is not a defect; it is
+  T18 case 5 being obeyed - *"the run stops waiting and posts ANYWAY -
+  unthreaded is acceptable, silent is not."* The two rules contradicted each
+  other at this setting, and the operator resolved it in favour of delivery.
+- Measured 2026-09-18 (attempt 22): 3 roots in 12 of 12 rounds with
+  **delivered=3/3 in every round** - nothing lost. Raising the constant was the
+  alternative and was declined: T7's worst case already measures max 12.10s
+  against the Stop hook's 15s, and buying threading here would spend that margin.
+
+**So at `N=3 with ~5s per call` the assertion is `delivered == N` ONLY.** Record
+the root count as an observation, not a verdict. FAIL that setting only if a
+message is LOST - which is the outage this item exists to end. Every other
+setting keeps the one-root rule unchanged.
+
 **THE CLASSIFICATION CHANGED WITH THE DESIGN. There is no announce post any
 more** - the first message IS the thread root, so nothing is a header and the old
 three-way split no longer applies. For N concurrent runs of ONE session:
