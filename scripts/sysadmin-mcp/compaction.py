@@ -49,7 +49,16 @@ def task_registered() -> bool:
 
 
 def _min_trapped_gb() -> float:
-    return float(sa.load_config()["thresholds"].get("vhdx_trapped_warn_gb", 60))
+    """The ACT threshold: below this, compaction is not worth the downtime.
+
+    Deliberately NOT `vhdx_trapped_warn_gb`. That one is the WARN threshold — when disk_report
+    should mention compaction to the operator — and reusing it here made one number do two
+    unrelated jobs. On 2026-09-13 that left 47.8 GB trapped and un-compactable: the disk_report
+    verdict said HEALTHY *and* compact_execute hard-refused, because 47.8 < the single 60 GB
+    number. Falls back to the old behaviour only if the act threshold is absent.
+    """
+    th = sa.load_config()["thresholds"]
+    return float(th.get("vhdx_compact_min_gb", th.get("vhdx_trapped_warn_gb", 60)))
 
 
 def _plan_token(warranted: bool, registered: bool) -> str:
