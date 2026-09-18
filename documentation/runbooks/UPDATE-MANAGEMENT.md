@@ -12,7 +12,7 @@ retirement (CLEANUP-PLAN v3, decision D-2).
 
 Upgrades are planned, executed, and verified per release with a written plan —
 the pattern to copy is
-[`implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md`](../implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md)
+[`update-owui-to-0-11-0/UPGRADE-PLAN.md` in the plan store](../../../documentation-plans-ai-stack/implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md)
 (executed 2026-08-20). Non-negotiables learned there:
 
 - `WEBUI_SECRET_KEY` is pinned in `.env` — never let a recreate regenerate it
@@ -28,7 +28,7 @@ the pattern to copy is
 ## Inference plane (llama.cpp / llama-swap / LiteLLM)
 
 - Model swaps follow the written-plan pattern:
-  `implementation-guide/qwen3.8-model-swap/` is the reference execution.
+  `qwen3.8-model-swap/` in the plan store is the reference execution.
 - `scripts/recovery/update-stack.bat` drives image updates for the llama-cpp upstreams.
 - LiteLLM (`llm-gateway`) and `llm-queue` are pinned images / local builds —
   bump deliberately, one PR each, and re-run

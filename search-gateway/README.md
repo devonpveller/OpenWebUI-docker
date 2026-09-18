@@ -6,7 +6,7 @@ exposes native REST + a Tavily-compatible shim + a SearXNG-compatible endpoint
 interface for future paid-provider rotation.
 
 > Build spec: [`../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md`](../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md)
-> Integration decisions: [`../../documentation-plans-ai-stack/implementation-guide/web-search/integration-plan-private-search-gateway.md`](../../documentation-plans-ai-stack/implementation-guide/web-search/integration-plan-private-search-gateway.md)
+> Integration decisions: [`documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md`](../documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md)
 
 ## Quickstart
 

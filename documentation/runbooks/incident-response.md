@@ -7,8 +7,8 @@
 - Compromises of services NOT in the portal slice (OpenWebUI native, llama-cpp, OB1, mnemory, etc.) — those have their own concerns; this doc focuses on the gateway.
 
 **Companion docs:**
-- Plan: [implementation-guide/open-source authentication front ends for ai stack/plan-internet-exposed-front-end.md](implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/plan-internet-exposed-front-end.md)
-- Audit: [implementation-guide/open-source authentication front ends for ai stack/audit-plan-internet-exposed-front-end.md](implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-plan-internet-exposed-front-end.md)
+- Plan: [archive: auth-front-end/plan-internet-exposed-front-end.md](../archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
+- Audit: [archive: auth-front-end/audit-plan-internet-exposed-front-end.md](../archive/implementation-guide/auth-front-end/audit-plan-internet-exposed-front-end.md)
 
 ---
 

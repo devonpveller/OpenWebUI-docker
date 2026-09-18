@@ -222,7 +222,7 @@ services:
   # stands up ALONGSIDE the running llama-cpp / llama-cpp-embed with NO aliases
   # yet — nothing routes through it until the cut-in (flip) renames the real
   # servers to *-upstream and gives the gateway the llama-cpp / llama-cpp-embed
-  # aliases. See ../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md.
+  # aliases. See documentation/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md.
   # PERMISSIVE (no master_key) — attribution by the key string each caller sends
   # (proven by the T0 spike, 2026-06-12). Forwards by model name to llama-cpp.
   # =====================================================================
