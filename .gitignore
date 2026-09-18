@@ -63,6 +63,7 @@ config/alerter/token.json
 
 # Claude Code Mattermost notifier — per-session allowlist (machine-specific runtime state)
 scripts/.mm-notify-sessions
+scripts/.mm-notify-sessions.*
 .claude/settings.local.json
 
 # Claude-Sessions bridge runtime state (session map, audit logs, per-turn MCP configs)
@@ -98,3 +99,5 @@ documentation/issue-plans/
 # on is COMMITTED - see documentation/evidence/README.md - and only the working state below
 # is ignored. If a row cites it, it does not belong here.
 .quadrant/
+scripts/.mm-session-threads
+scripts/.mm-session-threads.*
