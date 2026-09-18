@@ -11,7 +11,17 @@
   Exit: 0 all passed, 1 one or more failed.
 #>
 [CmdletBinding()]
-param([string]$Lib = (Join-Path $PSScriptRoot 'compact-lib.ps1'))
+# The default is resolved in the BODY, not in the param() block. Under
+# [CmdletBinding()] on Windows PowerShell 5.1, $PSScriptRoot is EMPTY while
+# param() defaults are being evaluated, so `Join-Path $PSScriptRoot ...` threw
+# "Cannot bind argument to parameter 'Path' because it is an empty string" and
+# this script exited 1 with ZERO tests run -- including via the exact command its
+# own header prescribes. Measured 2026-09-18: param-only and comment-help+param
+# both resolve it; adding [CmdletBinding()] is what empties it. It is populated
+# normally in the body, so resolve it there.
+param([string]$Lib = '')
+
+if (-not $Lib) { $Lib = Join-Path $PSScriptRoot 'compact-lib.ps1' }
 
 . $Lib
 
