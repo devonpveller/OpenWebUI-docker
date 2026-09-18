@@ -137,6 +137,12 @@ def render_volume_report(d: dict) -> str:
     if d["dangling_protected_DO_NOT_PRUNE"]:
         out.append("\n**Dangling but PROTECTED (live data — never prune):**")
         out += [f"  - {v}" for v in d["dangling_protected_DO_NOT_PRUNE"]]
+    if d.get("dangling_protected_cold"):
+        out.append(f"\n**Protected NAME but COLD (no container references it, and nothing has "
+                   f"written to it for {d.get('cold_after_days', 30):g}+ days — orphan CANDIDATES, "
+                   f"verify + back up before removing):**")
+        out += [f"  - {e['volume']}  (last write {e['age_days']:g} days ago)"
+                for e in sorted(d["dangling_protected_cold"], key=lambda e: -(e["age_days"] or 0))]
     if d["dangling_named_other"]:
         out.append("\n**Dangling named (review before any action):**")
         out += [f"  - {v}" for v in d["dangling_named_other"]]
@@ -218,9 +224,16 @@ def render_compact_status(d: dict) -> str:
     if st in ("idle", "running") and "reclaimed_gb" not in d:
         return f"compaction: {st} — {d.get('note', '')}"
     lines = [f"# compaction: {st}",
-             f"- vhdx: {d.get('vhdx_before_gb')} -> {d.get('vhdx_after_gb')} GB (reclaimed {d.get('reclaimed_gb')})",
-             f"- C: free: {d.get('c_free_before_gb')} -> {d.get('c_free_after_gb')} GB",
-             f"- stack returned: {d.get('stack_returned')} ({d.get('post_running')}/{d.get('pre_running')} running)"]
+             f"- vhdx: {d.get('vhdx_before_gb')} -> {d.get('vhdx_after_gb')} GB (reclaimed {d.get('reclaimed_gb')})"]
+    # Reclaimed ALONE reads like a win; against the target it measured, it may be a failure.
+    if d.get("trapped_before_gb") is not None:
+        lines.append(f"- vs target: {d.get('reclaimed_gb')} reclaimed of {d.get('trapped_before_gb')} GB "
+                     f"trapped (shortfall {d.get('shortfall_gb')} GB)")
+    if d.get("fstrim_ok") is not None:
+        lines.append(f"- fstrim: {d.get('fstrim_ok')}"
+                     + (f" — {d.get('fstrim_note')}" if not d.get("fstrim_ok") else ""))
+    lines += [f"- C: free: {d.get('c_free_before_gb')} -> {d.get('c_free_after_gb')} GB",
+              f"- stack returned: {d.get('stack_returned')} ({d.get('post_running')}/{d.get('pre_running')} running)"]
     if d.get("error"):
         lines.append(f"- error: {d['error']}")
     for n in (d.get("notes") or [])[-6:]:

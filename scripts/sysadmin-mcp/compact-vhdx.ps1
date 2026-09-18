@@ -18,6 +18,9 @@ param(
   [string]$Watchdog = 'StackWatchdog',
   [string]$ResultFile = '',
   [double]$MinTrappedGb = 1.0,
+  [double]$MinReclaimFraction = 0.5,
+  [double]$ShortfallGraceGb = 5.0,
+  [switch]$SkipFstrim,
   [int]$DaemonWaitSec = 180,
   [int]$StackWaitSec = 300
 )
@@ -29,11 +32,16 @@ $scriptDir = if ($PSScriptRoot) { $PSScriptRoot }
              elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath }
              else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if ([string]::IsNullOrWhiteSpace($ResultFile)) { $ResultFile = Join-Path $scriptDir 'state\compact-result.json' }
+# Pure decision helpers (Get-ReclaimVerdict). Kept in a sibling file so they are testable without
+# elevation, Docker, or the 15 minutes of downtime a real compaction costs.
+. (Join-Path $scriptDir 'compact-lib.ps1')
 $GB = 1000000000
 New-Item -ItemType Directory -Force -Path (Split-Path $ResultFile) | Out-Null
 $result = [ordered]@{
   ok = $false; started = (Get-Date).ToString('o'); finished = $null
   vhdx_before_gb = $null; vhdx_after_gb = $null; reclaimed_gb = $null
+  trapped_before_gb = $null; shortfall_gb = $null
+  fstrim_ok = $null; fstrim_note = $null
   pre_running = $null; post_running = $null; stack_returned = $false
   c_free_before_gb = $null; c_free_after_gb = $null; error = $null; notes = @()
 }
@@ -60,9 +68,42 @@ try {
   $usedKb = ($df | Select-Object -Last 1).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)[2]
   $usedGb = [math]::Round(([double]$usedKb * 1024) / $GB, 1)
   $trapped = [math]::Round($result.vhdx_before_gb - $usedGb, 1)
+  $result.trapped_before_gb = $trapped
   Note "trapped ~= $trapped GB (vhdx $($result.vhdx_before_gb) - used $usedGb)"
   if ($trapped -lt $MinTrappedGb) { $result.error = "trapped $trapped GB < MinTrappedGb $MinTrappedGb; refusing no-op compaction"; Note 'REFUSED tiny trapped'; exit 2 }
 } catch { Note "trapped check skipped: $($_.Exception.Message)" }
+
+# TRIM BEFORE COMPACTING. Optimize-VHD cannot read ext4 -- it reclaims only blocks the GUEST has
+# already discarded. /mnt/docker-desktop-disk is mounted 'rw,relatime' with NO 'discard' option, so
+# the guest never issues online TRIM; only Docker Desktop's own periodic trim marks anything, on its
+# own cadence. On 2026-09-13 that cost 44.5 GB: the run measured 54.4 GB trapped and Optimize-VHD
+# returned 9.9, because only that much happened to be discarded. fstrim makes the free extent
+# eligible. It must run while the distro is UP and the disk mounted -- the df above just proved both
+# -- and therefore BEFORE the engine stop and `wsl --shutdown` further down.
+if ($SkipFstrim) {
+  $result.fstrim_ok = $false
+  $result.fstrim_note = 'skipped by -SkipFstrim'
+  Note 'fstrim SKIPPED by switch -- expect Optimize-VHD to reclaim only what was already discarded'
+} else {
+  try {
+    Note 'fstrim (discarding free blocks so Optimize-VHD can reclaim them; minutes)'
+    $ft = (wsl -d docker-desktop -e /sbin/fstrim -v /mnt/docker-desktop-disk) 2>&1
+    $ftText = ($ft | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) {
+      $result.fstrim_ok = $true
+      $result.fstrim_note = $ftText
+      Note "fstrim ok: $ftText"
+    } else {
+      $result.fstrim_ok = $false
+      $result.fstrim_note = "exit $LASTEXITCODE : $ftText"
+      Note "WARN fstrim FAILED (exit $LASTEXITCODE): $ftText -- compaction will under-reclaim"
+    }
+  } catch {
+    $result.fstrim_ok = $false
+    $result.fstrim_note = $_.Exception.Message
+    Note "WARN fstrim threw: $($_.Exception.Message) -- compaction will under-reclaim"
+  }
+}
 
 $docker = (Get-Command docker -ErrorAction SilentlyContinue).Source
 if (-not $docker) { $docker = 'C:\Program Files\Docker\Docker\resources\bin\docker.exe' }
@@ -131,6 +172,21 @@ try {
   $result.vhdx_after_gb = [math]::Round((Get-Item $VhdxPath).Length / $GB, 1)
   $result.reclaimed_gb = [math]::Round($result.vhdx_before_gb - $result.vhdx_after_gb, 1)
   Note "vhdx $($result.vhdx_before_gb) -> $($result.vhdx_after_gb) GB (reclaimed $($result.reclaimed_gb))"
+
+  # SHORTFALL CHECK. Downtime was spent against a measured target; compare the two and say so.
+  # Without this the 2026-09-13 03:15 run wrote ok=true after returning 9.9 of the 54.4 GB it had
+  # just measured -- a check that passed while checking nothing. The judgement lives in
+  # compact-lib.ps1 so it can be tested without elevation or downtime (test-compact-lib.ps1).
+  $verdict = Get-ReclaimVerdict -TrappedGb $result.trapped_before_gb -ReclaimedGb $result.reclaimed_gb `
+                                -MinReclaimFraction $MinReclaimFraction -ShortfallGraceGb $ShortfallGraceGb `
+                                -FstrimOk $result.fstrim_ok
+  $result.shortfall_gb = $verdict.shortfall_gb
+  if (-not $verdict.ok) {
+    $result.error = $verdict.reason
+    Note "SHORTFALL $($verdict.reason)"
+  } else {
+    Note $verdict.reason
+  }
 }
 finally {
   # Restart the engine GRACEFULLY, with retries. `docker desktop start` cleans up and starts dockerd;
@@ -171,14 +227,18 @@ finally {
 
   $cAfter = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
   $result.c_free_after_gb = [math]::Round($cAfter.FreeSpace / $GB, 1)
-  $result.ok = ($null -ne $result.reclaimed_gb) -and ($up) -and ($result.stack_returned -or -not $result.pre_running)
+  # A run that returned almost none of the space it measured is NOT ok, however cleanly the stack
+  # came back -- the shortfall branch above has already put the reason in $result.error.
+  $result.ok = ($null -ne $result.reclaimed_gb) -and ($up) -and `
+               ($result.stack_returned -or -not $result.pre_running) -and `
+               ([string]::IsNullOrEmpty($result.error))
   Note "DONE ok=$($result.ok) C: $($result.c_free_before_gb) -> $($result.c_free_after_gb) GB"
 
   # Notify. On success the engine (and Mattermost) is back -> post a #sysadmin summary. On FAILURE the
   # engine is down so Mattermost (a container) is unreachable -> fire a Windows msg popup so the
   # incident is LOUD, not silent (a compaction must never strand Docker quietly again).
   if ($result.ok) {
-    $sum = "[sysadmin] compaction OK: reclaimed $($result.reclaimed_gb) GB, C: $($result.c_free_before_gb)->$($result.c_free_after_gb) GB, stack $($result.post_running)/$($result.pre_running) running."
+    $sum = "[sysadmin] compaction OK: reclaimed $($result.reclaimed_gb) of $($result.trapped_before_gb) GB trapped (fstrim_ok=$($result.fstrim_ok)), C: $($result.c_free_before_gb)->$($result.c_free_after_gb) GB, stack $($result.post_running)/$($result.pre_running) running."
     if ($py -and (Test-Path $mmpost)) { try { & $py $mmpost $sum 2>$null | Out-Null } catch {} }
     # Out-of-band confirmation (works whether or not you're at the machine).
     if ($py -and (Test-Path $tgnotify)) { try { & $py $tgnotify $sum 2>$null | Out-Null } catch {} }

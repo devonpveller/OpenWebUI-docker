@@ -146,6 +146,80 @@ def test_stdio() -> None:
             proc.kill()
 
 
+def test_volume_age() -> None:
+    """A protected NAME is not proof a volume is live.
+
+    After the 2026-08-21 per-plane split both `ai-stack_openwebui-data` (dead) and the live
+    `frontend_openwebui-data` matched the "openwebui" substring, so the report stamped
+    DO NOT PRUNE on 10 GB nothing had written to since the day before the split. Dangling already
+    means no container references it; age is the second signal. Only the wsl/docker boundary is
+    stubbed here -- the parsing and the classification under test are the real ones.
+    """
+    print("VOLUME AGE - protected-and-live vs protected-but-cold")
+    import time as _t
+    now = int(_t.time())
+    root = "/mnt/docker-desktop-disk/data/docker/volumes"
+    vols = ["ai-stack_openwebui-data", "ai-stack_mnemory-data", "deadbeef" * 8, "some_other_vol"]
+
+    def fake_wsl(args, timeout=30):
+        cold = now - 24 * 86400          # the real Aug-20 orphan: 24 days at time of writing
+        warm = now - 1 * 86400
+        lines = [
+            f"{cold} {root}/ai-stack_openwebui-data",
+            f"{cold} {root}/ai-stack_openwebui-data/_data",
+            f"{cold} {root}/ai-stack_openwebui-data/_data/webui.db",
+            f"{warm} {root}/ai-stack_mnemory-data/_data/state.db",
+            f"{now} {root}",                      # the root itself must not become a volume
+            "garbage-with-no-space",              # malformed lines must be skipped, not crash
+            f"notanumber {root}/some_other_vol/_data",
+        ]
+        return {"rc": 0, "out": "\n".join(lines), "err": ""}
+
+    def fake_docker(args, timeout=30):
+        if "dangling=true" in args:
+            return {"rc": 0, "out": "\n".join(vols), "err": ""}
+        return {"rc": 0, "out": "\n".join(vols + ["frontend_openwebui-data"]), "err": ""}
+
+    real_wsl, real_docker, real_cfg = sa._wsl_dd, sa._docker, sa.load_config
+    try:
+        sa._wsl_dd, sa._docker = fake_wsl, fake_docker
+        cfg = dict(real_cfg())
+        cfg["thresholds"] = dict(cfg["thresholds"], volume_orphan_cold_days=14)
+        sa.load_config = lambda: cfg
+
+        ages = sa._volume_last_write()
+        check("newest mtime wins per volume", ages["ai-stack_openwebui-data"] == now - 24 * 86400,
+              str(ages.get("ai-stack_openwebui-data")))
+        check("volumes root is not itself a volume", "" not in ages and root not in ages, str(list(ages)))
+        check("malformed lines skipped", "some_other_vol" not in ages, str(list(ages)))
+
+        vr = sa.volume_report()
+        cold_names = [e["volume"] for e in vr["dangling_protected_cold"]]
+        check("Aug-20 orphan lands in COLD", "ai-stack_openwebui-data" in cold_names, str(cold_names))
+        check("  ... and NOT in DO_NOT_PRUNE",
+              "ai-stack_openwebui-data" not in vr["dangling_protected_DO_NOT_PRUNE"],
+              str(vr["dangling_protected_DO_NOT_PRUNE"]))
+        check("recently-written protected volume stays DO_NOT_PRUNE",
+              "ai-stack_mnemory-data" in vr["dangling_protected_DO_NOT_PRUNE"],
+              str(vr["dangling_protected_DO_NOT_PRUNE"]))
+        check("unknown age stays DO_NOT_PRUNE (conservative)",
+              "some_other_vol" not in cold_names, str(cold_names))
+        check("age is reported, not just the verdict",
+              any(e["volume"] == "ai-stack_openwebui-data" and 23 <= e["age_days"] <= 25
+                  for e in vr["dangling_protected_cold"]), str(vr["dangling_protected_cold"]))
+
+        # A wsl failure must not silently reclassify every protected volume as cold.
+        sa._wsl_dd = lambda args, timeout=30: {"rc": 1, "out": "", "err": "wsl down"}
+        vr2 = sa.volume_report()
+        check("wsl failure -> nothing is called cold", vr2["dangling_protected_cold"] == [],
+              str(vr2["dangling_protected_cold"]))
+        check("  ... and the protected set is intact",
+              "ai-stack_openwebui-data" in vr2["dangling_protected_DO_NOT_PRUNE"],
+              str(vr2["dangling_protected_DO_NOT_PRUNE"]))
+    finally:
+        sa._wsl_dd, sa._docker, sa.load_config = real_wsl, real_docker, real_cfg
+
+
 if __name__ == "__main__":
     try:  # console may be cp1252 on Windows; never let a stray non-ASCII char crash the harness
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -153,6 +227,7 @@ if __name__ == "__main__":
         pass
     only_unit = "--unit" in sys.argv
     test_unit()
+    test_volume_age()
     if not only_unit:
         test_live()
         test_stdio()

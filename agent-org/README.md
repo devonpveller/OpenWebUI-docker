@@ -3,13 +3,13 @@
 A self-hosted, mobile-accessible **Microsoft-Teams-style chat platform that doubles as the
 coordination fabric for a governed fleet of coding agents** (Human Operator → PO → PM →
 `little-coder` workers). It implements the design corpus in
-[`documentation/implementation-guide/teams-chat-agent-orchestration/`](../documentation/implementation-guide/teams-chat-agent-orchestration/),
+[`../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/`](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/),
 grounded in *"AI Organizations are More Effective but Less Aligned than Individual Agents"*
 (arXiv:2604.10290). **Safety leads:** the escalation gate + bus-only comms + charters are the
 spine; capability rides on top.
 
 > **Precedence:** the governance spec wins. See
-> [`SAFETY-AND-WORKFLOW-governance-model.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/SAFETY-AND-WORKFLOW-governance-model.md).
+> [`SAFETY-AND-WORKFLOW-governance-model.md`](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/SAFETY-AND-WORKFLOW-governance-model.md).
 > This directory is the *build*; [`IMPLEMENTATION-NOTES.md`](IMPLEMENTATION-NOTES.md) is the
 > authoritative "what's built / what's operator-gated" record.
 

@@ -119,21 +119,32 @@ function Get-ObInitdbLogTail {
 # path.) Claiming to poll a health state that does not exist would be the vacuous-check
 # pattern this drill exists to catch.
 function Start-ObInitdbDetailed {
+    # -Owner marks the container for `scripts/agent-harness/reap.ps1`, so a caller killed
+    # before its teardown leaves a database container somebody can collect by name rather
+    # than an anonymous one nobody dares delete. Optional, and empty means "no label" - the
+    # callers that do not pass it behave exactly as before. See lib\harness-owner.ps1 for
+    # why the mark is made at creation instead of trusted to a `finally`.
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$InitDir,
         [string[]]$DockerArgs = @(),
-        [int]$TimeoutSec = 0
+        [int]$TimeoutSec = 0,
+        [string]$Owner = ""
     )
     if ($TimeoutSec -le 0) { $TimeoutSec = Get-ObInitdbTimeoutSec }
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $result = @{ Ready = $false; Outcome = 'timeout'; ElapsedSec = 0.0; BudgetSec = $TimeoutSec; Detail = '' }
 
     & docker rm -f $Name 2>&1 | Out-Null
+    $ownerArgs = @()
+    if ($Owner) {
+        . (Join-Path $PSScriptRoot "harness-owner.ps1")
+        $ownerArgs = @(Get-HarnessOwnerLabel $Owner)
+    }
     $run = @("run", "-d", "--name", $Name,
              "-e", "POSTGRES_DB=openbrain", "-e", "POSTGRES_USER=postgres",
              "-e", "POSTGRES_PASSWORD=test",
-             "-v", "${InitDir}:/docker-entrypoint-initdb.d:ro") + $DockerArgs +
+             "-v", "${InitDir}:/docker-entrypoint-initdb.d:ro") + $ownerArgs + $DockerArgs +
              @("pgvector/pgvector:pg16")
     $runOut = (& docker @run 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
@@ -185,9 +196,10 @@ function Start-ObInitdb {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$InitDir,
         [string[]]$DockerArgs = @(),
-        [int]$TimeoutSec = 0
+        [int]$TimeoutSec = 0,
+        [string]$Owner = ""
     )
-    return (Start-ObInitdbDetailed -Name $Name -InitDir $InitDir -DockerArgs $DockerArgs -TimeoutSec $TimeoutSec).Ready
+    return (Start-ObInitdbDetailed -Name $Name -InitDir $InitDir -DockerArgs $DockerArgs -TimeoutSec $TimeoutSec -Owner $Owner).Ready
 }
 
 # initdb errors that are NOT errors: the entrypoint's own DROP ... IF EXISTS chatter.

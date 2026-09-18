@@ -185,7 +185,7 @@ unrelated work; one item is partially delivered as a side effect:
 10. **v2's D-5 (LM Studio) was already decided on the operator's own record —
     and the "dead" path has a live runtime cost.** The 0.11.0 upgrade removed
     both LM Studio connections from OWUI
-    (`documentation/implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md:691-693`);
+    (`../documentation-plans-ai-stack/implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md:691-693`);
     no LM Studio inference endpoint survives. Meanwhile the live `.env`
     overrides the sane compose default with the dead link-local host
     (`.env:122-126`: `LMSTUDIO_HOST=169.254.83.107`, `LMSTUDIO_PORT=5506`,

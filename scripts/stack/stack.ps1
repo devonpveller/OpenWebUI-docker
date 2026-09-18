@@ -173,6 +173,22 @@ switch ($Action) {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8060/health).StatusCode -eq 200 }
         Probe "search: gateway http://127.0.0.1:8085/healthz" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8085/healthz).StatusCode -eq 200 }
+        # /healthz said 200 through the whole 2026-09-11 outage: bing answered
+        # every query with ten results for its first word, HTTP 200, no error.
+        # /health reports which engines actually put results in recent payloads.
+        # 'unknown' (nothing searched since the gateway started) is NOT a failure
+        # here - only a measured DEGRADED is, and this probe prints the number.
+        $searchEngines = 'REFUSED'
+        try {
+            $sh = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8085/health).Content | ConvertFrom-Json
+            $n = 0
+            foreach ($p in $sh.providers.PSObject.Properties) {
+                if ($p.Value.engines_answering_now -gt $n) { $n = [int]$p.Value.engines_answering_now }
+            }
+            $searchEngines = "$($sh.search) - $n engine(s) answering"
+        } catch { }
+        Probe "search: $searchEngines" {
+            $searchEngines -ne 'REFUSED' -and $searchEngines -notmatch '^DEGRADED' }
         Probe "coder: little-coder daemon :8090/health" {
             docker exec little-coder curl -fsS --max-time 8 http://localhost:8090/health 2>$null | Out-Null
             $LASTEXITCODE -eq 0 }

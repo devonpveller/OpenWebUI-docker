@@ -98,7 +98,7 @@ $script:Contract = [ordered]@{
             1 = "FAILURE - a drill check failed, or a dispositioned gap stopped being measured (a rotted ledger)"
             2 = "an UNDISPOSITIONED gap fired. Either the tree regressed or a new property went unmet; name it in GAP_DISPOSITIONS before this run can be read as expected"
         }
-        Doc     = "documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md, 'The drill's exit code, and what CI reads (C.9 H4)'"
+        Doc     = "../documentation-plans-ai-stack/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md, 'The drill's exit code, and what CI reads (C.9 H4)'"
     }
 
     # THE CONTRACT'S OWN SELF-TEST, pinned like everything else so that this file being

@@ -669,6 +669,15 @@ if ($RunId -notmatch '^[a-z0-9][a-z0-9-]{0,15}$') {
 }
 
 # --- per-run resource names. NOTHING below is a shared constant. -------------------------
+# Marks every persistent resource this run creates so a KILLED run - the one case the
+# finally below cannot cover - leaves leftovers `reap.ps1 -Owner pp-drill-<runid>` can
+# collect. This drill is the one that left eight containers and a network on the daemon
+# on 2026-09-07, with its teardown code present and correct.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$OWNER     = "pp-drill-$RunId"
+# Printed HERE, before any of the long setup, so the id is on the screen even for a run that
+# dies before it reaches its first check. An owner nobody can read is an owner nobody can reap.
+Write-Host (Format-HarnessOwnerBanner $OWNER)
 $NET       = "pp-drill-net-$RunId"
 $DB        = "pp-drill-$RunId-db"
 $STUB      = "pp-drill-$RunId-embed"
@@ -1020,7 +1029,7 @@ function Get-GatewayEnv {
 
 function Start-Gateway {
     param([string]$Name, [int]$Port, [hashtable]$GwEnv, [string]$Upstream)
-    $a = @("run", "-d", "--name", $Name, "--network", $NET, "-p", "127.0.0.1:${Port}:8061",
+    $a = @("run", "-d", "--name", $Name, (Get-HarnessOwnerLabel $OWNER), "--network", $NET, "-p", "127.0.0.1:${Port}:8061",
            "-e", "OPENBRAIN_URL=$Upstream", "-e", "OPENBRAIN_KEY=$KEY",
            "-e", "GATEWAY_KEY=$OPSKEY")
     foreach ($k in $GwEnv.Keys) { $a += @("-e", "$k=$($GwEnv[$k])") }
@@ -1066,7 +1075,7 @@ function Start-McpServer {
     #                                  live connections are postgres). The red is not a
     #                                  hypothetical; it is the deployed configuration.
     param([string]$Name, [int]$Port, [string]$Img, [string]$DbUser = $APPUSER)
-    $a = @("run", "-d", "--name", $Name, "--network", $NET, "-p", "127.0.0.1:${Port}:8000",
+    $a = @("run", "-d", "--name", $Name, (Get-HarnessOwnerLabel $OWNER), "--network", $NET, "-p", "127.0.0.1:${Port}:8000",
            "-e", "DB_HOST=$DB", "-e", "DB_PORT=5432", "-e", "DB_NAME=openbrain",
            "-e", "DB_USER=$DbUser", "-e", "DB_PASSWORD=test", "-e", "MCP_ACCESS_KEY=$KEY",
            "-e", "PORT=8000", "-e", "EMBEDDING_API_BASE=http://${STUB}:8080",
@@ -1078,13 +1087,13 @@ try {
     # --- 1. the throwaway plane ---------------------------------------------------------
     Section "an isolated plane - no live container, no real memory, ever (run $RunId)"
     Note "workspace=$WS  ports srv=$ServerPort ops=$OpsPort cloud=$CloudPort red=$RedSrvPort/$RedOpsPort/$RedMemPort"
-    Invoke-DockerOrThrow -DockerArgs @("network", "create", $NET) -What "create network $NET" | Out-Null
+    Invoke-DockerOrThrow -DockerArgs @("network", "create", (Get-HarnessOwnerLabel $OWNER), $NET) -What "create network $NET" | Out-Null
     $chain = Get-ObInitChain -ComposePath (Join-Path $OB1 "docker\docker-compose.yml")
     if ($chain.Count -lt 1) { Fail "could not parse the initdb chain from compose"; throw "no chain" }
     $staged = Copy-ObInitChain -Chain $chain -SourceDir (Join-Path $OB1 "docker") -TargetDir $INITDIR
     if ($staged -ne $chain.Count) { Fail "staged $staged of $($chain.Count) migrations - a mount names a missing file" }
     else { Pass "staged the full initdb chain ($staged migrations)" }
-    if (Start-ObInitdb -Name $DB -InitDir $INITDIR -DockerArgs @("--network", $NET)) {
+    if (Start-ObInitdb -Name $DB -InitDir $INITDIR -DockerArgs @("--network", $NET) -Owner $OWNER) {
         Pass "throwaway database is up on the real schema"
     } else { Fail "initdb did not complete - nothing below is trustworthy"; throw "db not ready" }
     $initErrs = Get-ObInitdbErrors -Name $DB
@@ -1203,7 +1212,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     )
     Set-Content -Path $STUBPATH -Value $stubLines -Encoding ASCII
     $stubFwd = ($STUBPATH -replace '\\', '/')
-    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $STUB, "--network", $NET,
+    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $STUB, (Get-HarnessOwnerLabel $OWNER), "--network", $NET,
         "-v", "${stubFwd}:/stub.ts:ro", "denoland/deno:2.3.3", "run", "--allow-net", "/stub.ts") `
         -What "start stub embedder $STUB" | Out-Null
     $stubUp = $false
@@ -1897,7 +1906,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     docker build -t $EXTIMAGE $EXTSRC 2>&1 | Select-Object -Last 1 | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "docker build failed for $EXTIMAGE"; throw "ext build failed" }
     $contactId = Db "INSERT INTO professional_contacts (user_id, name, notes) VALUES ('$EXTUSER', 'drill contact $MARKER', 'baseline notes') RETURNING id"
-    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $EXT, "--network", $NET,
+    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $EXT, (Get-HarnessOwnerLabel $OWNER), "--network", $NET,
         "-p", "127.0.0.1:${ExtPort}:8000", "-e", "DB_HOST=$DB", "-e", "DB_PORT=5432",
         "-e", "DB_NAME=openbrain", "-e", "DB_USER=$APPUSER", "-e", "DB_PASSWORD=test",
         "-e", "DEFAULT_USER_ID=$EXTUSER", "-e", "MCP_ACCESS_KEY=$KEY", "-e", "PORT=8000",
@@ -1942,7 +1951,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
     }
 
     # (b) the SAME image, connected the way production connects it
-    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $REDEXT, "--network", $NET,
+    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $REDEXT, (Get-HarnessOwnerLabel $OWNER), "--network", $NET,
         "-p", "127.0.0.1:${RedExtPort}:8000", "-e", "DB_HOST=$DB", "-e", "DB_PORT=5432",
         "-e", "DB_NAME=openbrain", "-e", "DB_USER=postgres", "-e", "DB_PASSWORD=test",
         "-e", "DEFAULT_USER_ID=$EXTUSER", "-e", "MCP_ACCESS_KEY=$KEY", "-e", "PORT=8000",
@@ -2146,7 +2155,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
     # 14a. the PostgREST door, exactly as compose configures it (anon role = service_role),
     # behind the repo's own path-stripping Caddyfile. Both from the exported gitlink tree.
-    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $PGRST, "--network", $NET,
+    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $PGRST, (Get-HarnessOwnerLabel $OWNER), "--network", $NET,
         "--network-alias", "openbrain-postgrest",
         "-e", "PGRST_DB_URI=postgres://postgres:test@${DB}:5432/openbrain",
         "-e", "PGRST_DB_SCHEMAS=public",
@@ -2154,7 +2163,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         "-e", "PGRST_SERVER_PORT=3000",
         "postgrest/postgrest:v12.2.3") -What "start PostgREST $PGRST" | Out-Null
     $caddyFwd = (($OB1 -replace '\\', '/') + "/docker/Caddyfile")
-    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $RESTPROXY, "--network", $NET,
+    Invoke-DockerOrThrow -DockerArgs @("run", "-d", "--name", $RESTPROXY, (Get-HarnessOwnerLabel $OWNER), "--network", $NET,
         "-v", "${caddyFwd}:/etc/caddy/Caddyfile:ro", "caddy:2-alpine") `
         -What "start the /rest/v1 proxy $RESTPROXY" | Out-Null
     Start-Sleep 6
@@ -2900,7 +2909,7 @@ if ($ledgerExit -eq 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps gap(s), ALL DISPOSITIONED ($passes checks passed, 0 failed)" -ForegroundColor Green
     Write-Host "  Exit 0 under -AcceptDispositionedGaps. This is NOT 'U5's recording half is met' - it is" -ForegroundColor Yellow
     Write-Host "  'nothing changed since the operator dispositioned these', which is what CI can assert." -ForegroundColor Yellow
-    Write-Host "  See documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
+    Write-Host "  See ../documentation-plans-ai-stack/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
     exit $ledgerExit
 }
 Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps NAMED GAP(S) OPEN ($passes checks passed, 0 failed)" -ForegroundColor Yellow

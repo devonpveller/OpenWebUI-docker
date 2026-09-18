@@ -18,7 +18,7 @@ Drive it with the workspace script:
 |---|---|
 | **How do I run, stop, wire or debug the four containers?** networks, ports, volumes, dependency order | **this file** |
 | What the gateway *application* is: HTTP endpoints, auth model, provider interface, privacy invariants, Python dev + tests | [`../search-gateway/README.md`](../search-gateway/README.md) |
-| Why the plane is built this way | [`guide-Private-Search-Gateway.md`](../documentation/implementation-guide/web-search/guide-Private-Search-Gateway.md) |
+| Why the plane is built this way | [`guide-Private-Search-Gateway.md`](../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md) |
 | Where this plane sits among all the other planes | [stack-map](../.claude/skills/stack-map/references/workspace-stacks.md) |
 | Adding, removing or moving a container here | [`SERVICE-LIFECYCLE.md`](../documentation/runbooks/SERVICE-LIFECYCLE.md) |
 

@@ -1,7 +1,7 @@
 # wiki-latency-probe.ps1 - baseline/verification probe for the wiki viewer pipeline.
 #
 # Measures the four numbers the wiki-dynamic-index plan moves
-# (documentation/implementation-guide/wiki-dynamic-index/PLAN.md):
+# (../documentation-plans-ai-stack/implementation-guide/wiki-dynamic-index/PLAN.md):
 #   1. rebuild   - Quartz builder wall time per rebuild (viewer log)
 #   2. indexes   - published static index sizes (contentIndex / graphIndex)
 #   3. eager     - bytes a cold page load pulls before any panel is opened

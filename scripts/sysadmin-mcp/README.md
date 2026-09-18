@@ -3,7 +3,7 @@
 A dependency-free (stdlib-only) MCP server + gated executors that let an AI **systems-administrator
 persona** operate this stack through semantic, safety-gated tools. Capability #1 is disk-prune
 (motivated by the 2026-07-26 near-full-C: incident). Design:
-[../../documentation/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md](../../documentation/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md).
+[../../../documentation-plans-ai-stack/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md](../../../documentation-plans-ai-stack/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md).
 
 ## Files
 | File | Role |
@@ -13,12 +13,14 @@ persona** operate this stack through semantic, safety-gated tools. Capability #1
 | `executor.py` | gated safe reclaim (`reclaim_plan`/`reclaim_execute`) — idle+recency guarded, no volume ops |
 | `compaction.py` | gated vhdx compaction (`compact_plan`/`compact_execute`/`compact_status`) |
 | `compact-vhdx.ps1` | the elevated compaction body (runs as a RunLevel-Highest task) |
+| `compact-lib.ps1` | pure decision helpers for the above (`Get-ReclaimVerdict`) — no elevation, no Docker, so the judgement is testable without 15 min of downtime |
+| `test-compact-lib.ps1` | 17 checks on that verdict; case 1 is the real 2026-09-13 under-reclaim |
 | `check_disk.py` | weekly detector → posts a `#sysadmin` alert when a threshold trips |
 | `register-sysadmin-tasks.ps1` | ONE-TIME (elevated): registers the compaction task + weekly detector |
 | `charter.md` | the @sysadmin persona charter (appended to the bridge's system prompt) |
 | `sysadmin-bridge-launch.ps1` / `register-sysadmin-bridge.ps1` | run/register the persona (2nd bridge instance) |
 | `config.json` | thresholds + machine facts + channel/operators |
-| `test_*.py` | 71 tests (unit parsers + live probes + stdio round-trip + fail-closed gates + source guards) |
+| `test_*.py` | 102 tests (unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards) — 36 + 42 + 24, run each file directly |
 
 ## Tools (surface)
 Read-only: `disk_report`, `container_status`, `stack_health`, `container_logs`, `volume_report`,
@@ -53,8 +55,28 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
 3. Run elevated: `powershell -File scripts/sysadmin-mcp/register-sysadmin-bridge.ps1`, then
    `schtasks /run /tn sysadmin-bridge`.
 
+## Compaction: trim first, then judge the result (2026-09-13)
+- **`fstrim` runs BEFORE the engine stop**, while the docker-desktop distro is up and the disk
+  mounted. `Optimize-VHD` cannot read ext4 — it reclaims only blocks the guest has already
+  discarded, and `/mnt/docker-desktop-disk` is mounted `rw,relatime` with no `discard`. Without
+  the trim, a run returns whatever Docker Desktop's own periodic trim happened to mark: on
+  2026-09-13 that was **9.9 GB of a measured 54.4 GB**, reported as success.
+- **The result is judged against its own target.** `trapped_before_gb`, `fstrim_ok` and
+  `shortfall_gb` are result fields, and `Get-ReclaimVerdict` sets `ok=false` with a named reason
+  when the return misses proportionally (`-MinReclaimFraction`, default 0.5) *and* by more than
+  `-ShortfallGraceGb` (default 5). Both conditions are required so a small target missed by a
+  small amount is not an incident.
+- **WARN and ACT are different numbers.** `vhdx_trapped_warn_gb` (60) decides when `disk_report`
+  mentions compaction; `vhdx_compact_min_gb` (20) decides when `compact_execute` will run. They
+  were the same key until 47.8 GB trapped left the stack simultaneously "HEALTHY" and refused.
+
 ## Safety notes
 - Never `docker volume prune`; `volume_report` is report-only and flags protected data volumes.
+- **A protected name is not proof of life.** `volume_report` splits `DO_NOT_PRUNE` (protected and
+  recently written, or of unknown age) from `dangling_protected_cold` (protected name, no
+  container references it, nothing written for `volume_orphan_cold_days`+). Cold entries are
+  orphan *candidates*: verify contents against the live volume and back up before removing. If
+  the age probe fails, nothing is classified cold — the conservative side.
 - Reclaim clears only IDLE ao-worker `/tmp/lc-*.jsonl` (busy workers skipped); logs are truncated,
   not deleted; images/build-cache prune is dangling-only.
 - Compaction takes the whole stack down ~10–15 min; it pauses/re-arms the health watchdog and

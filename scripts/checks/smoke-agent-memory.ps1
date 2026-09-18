@@ -41,6 +41,13 @@ function Pass($t) { Write-Host "  PASS  $t" -ForegroundColor Green }
 function Fail($t) { Write-Host "  FAIL  $t" -ForegroundColor Red; $script:fails++ }
 
 $NET   = "am-smoke-net"
+
+# Marks every persistent resource this run creates so a KILLED run - the one case the
+# finally below cannot cover - leaves leftovers `reap.ps1 -Owner am-smoke` can collect.
+. (Join-Path $PSScriptRoot "lib\harness-owner.ps1")
+$OWNER = "am-smoke"
+# Printed before the long setup, so the id is on the screen even for a run that dies early.
+Write-Host (Format-HarnessOwnerBanner $OWNER)
 $DB    = "am-smoke-db"
 $STUB  = "am-smoke-embed"
 $SRV   = "am-smoke-mcp"
@@ -56,14 +63,14 @@ Remove-SmokeStack
 try {
     # --- 1. the database, on the chain compose actually mounts ---------------------------
     Section "throwaway database (real initdb chain)"
-    docker network create $NET 2>$null | Out-Null
+    docker network create (Get-HarnessOwnerLabel $OWNER) $NET 2>$null | Out-Null
     $chain = Get-ObInitChain -ComposePath (Join-Path $root "OB1\docker\docker-compose.yml")
     if ($chain.Count -lt 1) { Fail "could not parse the initdb chain from compose"; throw "no chain" }
     $tmp = Join-Path $env:TEMP "am-smoke-initdb"
     $staged = Copy-ObInitChain -Chain $chain -SourceDir (Join-Path $root "OB1\docker") -TargetDir $tmp
     if ($staged -ne $chain.Count) { Fail "staged $staged of $($chain.Count) migrations - a mount names a missing file" }
     else { Pass "staged the full chain ($staged migrations)" }
-    if (Start-ObInitdb -Name $DB -InitDir $tmp -DockerArgs @("--network", $NET)) {
+    if (Start-ObInitdb -Name $DB -InitDir $tmp -DockerArgs @("--network", $NET) -Owner $OWNER) {
         Pass "initdb finished (entrypoint reported init process complete)"
     } else { Fail "initdb did not complete - nothing below is trustworthy"; throw "db not ready" }
     $initErrs = Get-ObInitdbErrors -Name $DB
@@ -86,7 +93,7 @@ try {
     $stubPath = Join-Path $env:TEMP "am-smoke-embed.ts"
     Set-Content -Path $stubPath -Value $stubLines -Encoding ASCII
     $stubFwd = ($stubPath -replace '\\', '/')
-    docker run -d --name $STUB --network $NET -v "${stubFwd}:/stub.ts:ro" `
+    docker run -d --name $STUB (Get-HarnessOwnerLabel $OWNER) --network $NET -v "${stubFwd}:/stub.ts:ro" `
         denoland/deno:2.3.3 run --allow-net /stub.ts | Out-Null
     $stubUp = $false
     for ($i = 0; $i -lt 30; $i++) {
@@ -103,7 +110,7 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "docker build failed for $IMAGE"; throw "build failed" }
     Pass "image built as $IMAGE (never :local - that is the production tag)"
 
-    docker run -d --name $SRV --network $NET -p "${HostPort}:8000" `
+    docker run -d --name $SRV (Get-HarnessOwnerLabel $OWNER) --network $NET -p "${HostPort}:8000" `
         -e DB_HOST=$DB -e DB_PORT=5432 -e DB_NAME=openbrain -e DB_USER=postgres `
         -e DB_PASSWORD=test -e MCP_ACCESS_KEY=$KEY -e PORT=8000 `
         -e "EMBEDDING_API_BASE=http://${STUB}:8080" -e EMBEDDING_API_KEY=stub `

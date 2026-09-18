@@ -25,7 +25,7 @@ model_list:
   # they share one upstream slot, so a stray *-upstream api_base on `:nothink`
   # would bypass the queue (design §3.1). Revert = point both back at
   # llama-cpp-upstream + set llama-swap concurrencyLimit back to 32.
-  # See documentation/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md.
+  # See ../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md.
   - model_name: qwen36-27b
     litellm_params:
       model: openai/qwen36-27b

@@ -1,7 +1,7 @@
 """
 title: Deep Research (thin client)
 author: ai-stack / Open Brain
-version: 1.2.0
+version: 1.5.5
 description: >
   Thin OWUI client for the shared Open Brain research engine (Research Engine
   P5). Submits the query to openbrain-research `POST /research`. ALL the harness logic
@@ -34,6 +34,7 @@ description: >
 
 import asyncio
 import json
+import re
 from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
@@ -258,14 +259,42 @@ def _handoff_notice(job_id: str) -> str:
         f"No findings exist yet; this tool returned nothing to summarise.\n\n"
         f"The grounded report will be appended to this very message when the engine "
         f"finishes (minutes to hours). The user does not need to stay on this page.\n\n"
-        f"YOUR ONLY VALID RESPONSE NOW: one short line telling the user research is "
-        f"running and will appear here when done. Then stop.\n"
+        f"YOUR ONLY VALID RESPONSE NOW: reply with EXACTLY this line and nothing "
+        f"else, then stop:\n"
+        f"_Researching — this message will be replaced by the grounded report when "
+        f"the engine finishes._\n"
+        f"(The engine REPLACES that exact line with the report, so any other wording "
+        f"stays above the findings forever.)\n"
         f"- Do NOT answer the question from your own knowledge - that is the exact "
         f"fabrication this engine exists to prevent, and it will be archived above "
         f"the real answer.\n"
         f"- Do NOT reach for web search, fetch, or any other tool to fill the wait.\n"
         f"- Do NOT call deep_research again for this question - the engine runs jobs "
         f"one at a time, so a duplicate only queues behind this one and doubles the wait."
+    )
+
+
+def _incomplete_directive(result: dict[str, Any]) -> str:
+    """
+    The one machine-addressed line an incomplete run emits.
+
+    BYTE-IDENTICAL to lib.ts `incompleteDirective` - the plan's parity case
+    compares the two renderers' whole output, and this line is the only part of
+    it that is written for the model rather than the reader. An HTML comment:
+    invisible in the chat, in context on the next turn, impossible to mistake
+    for part of the report.
+    """
+    ns = result.get("needs_status")
+    if isinstance(ns, list):
+        open_n = sum(1 for n in ns if not (isinstance(n, dict) and n.get("status") == "answered"))
+    else:
+        open_n = len(result.get("gaps") or [])
+    backstop = result.get("backstop")
+    why = backstop if backstop and backstop != "complete" else "gaps_open"
+    return (
+        f"<!-- engine: incomplete ({why}); {open_n} need(s) not fully answered; "
+        f"do not fill them from your own knowledge - call deep_research with a query "
+        f"targeting the open question -->"
     )
 
 
@@ -298,36 +327,145 @@ def _render(result: dict[str, Any]) -> str:
     backstop = result.get("backstop")
     incomplete = bool(gaps) or (backstop and backstop != "complete")
 
-    if gaps:
-        parts.append(
-            "\n\n**Open gaps** (NOT grounded — recorded for a future run):\n"
-            + "\n".join(f"- {g}" for g in gaps)
-        )
+    # The "Open gaps (NOT grounded)" block and the INCOMPLETE banner that used to
+    # sit here are GONE, in step with lib.ts renderResult. The block printed the
+    # report's own limitations a second time and labelled them "not grounded"
+    # even for needs the report had answered in part; the banner was a paragraph
+    # addressed to a model, printed where a person reads. The directive they
+    # carried is now one machine-addressed line at the very end - see
+    # _incomplete_directive, which is byte-identical to the TypeScript renderer.
 
-    # Directive to the calling model — keeps it from "finishing" with fabricated
-    # content. The engine is the only grounded path; gaps are pursued by calling
-    # it again, never filled from the model's own knowledge or other tools.
-    if incomplete:
-        reason = (
-            f"stopped early ({backstop})"
-            if backstop and backstop != "complete"
-            else "left gaps open"
-        )
-        parts.append(
-            f"\n\n> ⚠ This research is grounded but INCOMPLETE — it {reason}. The open "
-            f"gaps above are not answered by any source. Do NOT fill them from your own "
-            f"knowledge or other web/fetch tools (that fabricates). To pursue a gap, call "
-            f"deep_research again with a query targeting it; otherwise present the gaps as "
-            f"open unknowns."
-        )
-
-    reuse_ratio = result.get("reuse_ratio")
+    # Footer parity with lib.ts renderResult (research-trust 2026-09-11).
+    # `coverage NN%` is GONE from both renderers: it was 1 - gap_ratio over
+    # synthesis LINES, printed where a reader looks for how much of the QUESTION
+    # was answered. Job ce398d06 printed "coverage 22%" having answered 0 of 6
+    # needs. A job recorded before this change carries no needs_status and now
+    # gets no coverage number at all, rather than the old misleading one.
     foot = []
-    if reuse_ratio is not None:
-        foot.append(f"coverage {round(float(reuse_ratio) * 100)}%")
+    needs_status = result.get("needs_status")
+    if isinstance(needs_status, list) and needs_status:
+        answered = sum(
+            1 for n in needs_status
+            if isinstance(n, dict) and n.get("status") == "answered"
+        )
+        # Parity with report.ts coverageFooter(). `partial` exists because dry
+        # run 1f2ff740 printed "needs answered 0 of 6" beside a report stating
+        # findings from 11 cited sources: the judge marks a need open, the
+        # synthesis grounds lines about it, and both can be true. The footer
+        # must say the second number or it contradicts its own body.
+        partial = sum(
+            1 for n in needs_status
+            if isinstance(n, dict) and n.get("status") == "partial"
+        )
+        foot.append(
+            f"needs answered {answered} of {len(needs_status)}"
+            + (f" ({partial} partly)" if partial else "")
+        )
+        # Parity with report.ts coverageFooter(): the gap-closing pass states
+        # what it cost and what it bought, including when it bought nothing.
+        gp = result.get("gap_pass")
+        if isinstance(gp, dict):
+            foot.append(
+                f"gap-closing pass: +{gp.get('added', 0)} sources, needs answered "
+                f"{gp.get('answeredBefore', 0)} of {gp.get('total', 0)} -> "
+                f"{gp.get('answeredAfter', 0)} of {gp.get('total', 0)}"
+            )
+        rec = result.get("search_record")
+        if isinstance(rec, dict) and isinstance(rec.get("fetched"), int):
+            # PARITY with report.ts coverageFooter()/searchHealthLabel(). Both
+            # renderers must say the same thing in the same words: this file is
+            # re-pasted into Open WebUI by hand, so a divergence here is a
+            # divergence the operator cannot see. `offtopic` was added to the
+            # TypeScript side and not to this one, which left the two disagreeing
+            # in both wording ("collapsed" vs "junk") and content (no DEGRADED
+            # line at all) — tester, X4.
+            junk = int(rec.get("collapsed") or 0) + int(rec.get("offtopic") or 0)
+            hit_bits = [f"{rec.get('hits', 0)} hits"]
+            if junk:
+                hit_bits.append(f"{junk} junk")
+            foot.append(
+                f"sources {rec.get('relevant', 0)} relevant of {rec['fetched']} "
+                f"fetched ({', '.join(hit_bits)})"
+            )
+            ok_calls = int(rec.get("ok") or 0)
+            empty_calls = int(rec.get("empty") or 0)
+            degraded = (junk > 0 and junk >= ok_calls) or (
+                ok_calls == 0 and (junk > 0 or empty_calls > 0)
+            )
+            if degraded:
+                foot.append(
+                    f"search: DEGRADED ({junk} of {junk + ok_calls + empty_calls} "
+                    f"searches returned junk)"
+                )
+            # Parity with report.ts coverageFooter(): say when the entity gate
+            # could not be applied. A reader who sees "search: ok" is entitled
+            # to know it was decided by the weaker overlap rule.
+            missing = int(rec.get("entity_missing") or 0)
+            rejected = int(rec.get("entity_rejected") or 0)
+            no_gate = missing + rejected
+            if no_gate:
+                why = (
+                    f"{rejected} rejected the run's subject"
+                    if rejected
+                    else f"{missing} had no subject to check"
+                )
+                foot.append(
+                    f"entity gate: {no_gate} search(es) judged without it ({why})"
+                )
+            # Not part of no_gate: these searches were refused BY the gate
+            # rather than judged without it. Parity with report.ts.
+            unfloored = int(rec.get("unfloored") or 0)
+            if unfloored:
+                foot.append(
+                    f"entity gate refused {unfloored} search(es): "
+                    f"the query had fewer than two content words"
+                )
+    # Parity with report.ts coverageFooter(): the rendered report was checked
+    # sentence by sentence against the lines it cites, and this says how much of
+    # it had to be corrected. The reader this document is written for never sees
+    # a job row - a tester found a hedge turned into an absolute by READING the
+    # report, and this line is what tells the next reader the machine looked.
+    rf = result.get("render_fidelity")
+    if isinstance(rf, dict):
+        checked = int(rf.get("checked") or 0)
+        # Parity with report.ts coverageFooter(): the line prints whenever the
+        # check RAN, not only when something survived it.
+        if checked > 0 or int(rf.get("units") or 0) > 0:
+            corrected = int(rf.get("rewritten") or 0) + int(rf.get("replaced") or 0)
+            # N OF M, and the units nothing looked at: a coverage number with no
+            # denominator is one a reader cannot reproduce from the document.
+            units = int(rf.get("units") or checked)
+            unchecked = int(rf.get("unchecked") or 0)
+            foot.append(
+                f"render checked: {checked} of {units}, {corrected} corrected, "
+                f"{unchecked} unchecked"
+            )
+            # Parity with report.ts coverageFooter(): names the evidence never
+            # used, removed before the reader saw them. Only when there were any.
+            # Parity with report.ts coverageFooter(): sentences the check
+            # declined to touch because a correction would have inverted them.
+            held = int(rf.get("polarity_skipped") or 0)
+            dup = int(rf.get("duplicate_skipped") or 0)
+            none_ = int(rf.get("no_candidate") or 0)
+            if held + dup + none_ > 0:
+                foot.append(
+                    f"left as written: {held + dup + none_} "
+                    f"({held} would invert, {dup} already said, {none_} nothing to cite)"
+                )
+            blocked = rf.get("names_blocked") or []
+            if isinstance(blocked, list) and blocked:
+                foot.append(f"names: {len(blocked)} blocked")
+        elif rf.get("error"):
+            foot.append("render check: not run")
     if backstop and backstop != "complete":
         foot.append(f"stopped early: {backstop}")
+    # The harness stamps this footer onto `prose`; do not print it twice.
+    if foot and re.search(r"needs answered \d+ of \d+", "\n".join(parts)):
+        foot = []
     if foot:
         parts.append(f"\n\n_— {' · '.join(foot)}_")
+
+    if incomplete:
+        parts.append("\n\n" + _incomplete_directive(result))
 
     return "\n".join(parts)

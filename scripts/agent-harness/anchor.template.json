@@ -4,7 +4,8 @@
     "  queue.ps1 -Propose -Id <id> -Anchor <this file> -Developer <your id>",
     "The operator confirms it (queue.ps1 -ConfirmAnchor), and only then does work begin.",
     "Write it in the OPERATOR's terms, not yours. If you had to guess at what they meant,",
-    "the anchor is where you say so - that is the cheapest moment to be corrected."
+    "the anchor is where you say so - that is the cheapest moment to be corrected.",
+    "Keep this file beside its plan in the plan store: ../documentation-plans-ai-stack/implementation-guide/<feature>/anchors/<id>.json (not in the code repo). -Propose copies it into the queue, so that path is fine."
   ],
 
   "goal": "One sentence. The outcome, in the operator's words, not a description of the steps.",

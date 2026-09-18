@@ -7,6 +7,15 @@ Docker container**, when Docker is down every Mattermost-based path (the `#sysad
 bridge, `notify-mattermost.sh`) is dead too. The fix is a **Docker-independent Telegram
 channel** plus an autonomous **engine-restart watchdog**.
 
+> **Scope widened 2026-09-16.** Telegram was originally scoped to a full
+> Docker-down *only*. That left the opposite failure silent: on 2026-09-16 the
+> tailscale node logged out (expired node key) and every tailnet route -
+> OpenWebUI, Mattermost `:8446`, the wiki, the LiteLLM UI - was gone for 94
+> minutes while Docker stayed perfectly healthy. The watchdog detected it 8
+> times and alerted nowhere. Telegram now also carries the **catastrophe tier**
+> (Layer 4). Full account:
+> [`notes/tailnet-outage-alert-silence-2026-09-16.md`](notes/tailnet-outage-alert-silence-2026-09-16.md).
+
 Related: [`backup-restore-runbook.md`](backup-restore-runbook.md) (data recovery),
 `scripts/recovery/emergency-recovery.ps1` (ordered restart), and the `litellm-proxy-status` /
 disk-bloat memories.
@@ -30,7 +39,7 @@ stranded, provided alerts reach them and a recovery lever exists. That's what th
 
 ---
 
-## The three layers
+## The four layers
 
 ### Layer 1 — out-of-band alerts (`scripts/sysadmin-mcp/telegram_notify.py`)
 Reads `SYSADMIN_TELEGRAM_BOT_TOKEN` + `SYSADMIN_TELEGRAM_CHAT_ID` from the repo-root `.env`
@@ -72,6 +81,43 @@ Telegram and runs a **strict whitelist** for the operator's `chat_id` only:
 only (message text is never `exec`'d); destructive actions need a typed confirm; single-instance
 lock prevents duplicate pollers; every command is audit-logged to
 `scripts/sysadmin-mcp/telegram-state/audit.jsonl`.
+
+### Layer 4 - catastrophe alerts for IN-STACK faults (added 2026-09-16)
+`Send-CatastropheAlert` / `Resolve-Catastrophe` in `scripts/checks/stack-watchdog.ps1`.
+Layers 1-2 answer *"Docker is gone"*; this one answers *"Docker is fine and the
+thing you need is still unreachable."*
+
+**Tier (operator decision 2026-09-16) - total loss of remote access, of the
+comms channel itself, or of inference** - and only **after** an automatic repair
+has already FAILED, so a self-healed blip stays quiet:
+
+| Key | Fires when |
+|---|---|
+| `tailscale-container` | the tailscale container will not become healthy |
+| `tailscale-logout` | the node is logged out (every `serve` route gone) |
+| `tailscale-daemon` | tailscaled stops answering |
+| `tailnet-connectivity` | no egress from inside the tailscale netns |
+| `mattermost` | Mattermost unreachable - an alert about it *cannot* go through it |
+| `inference` / `llm-gateway` | llama-cpp unreachable, or the gateway/queue front door is down |
+
+Behaviour: Telegram first (Docker-independent), Mattermost mirrored best-effort;
+re-alerts hourly while the fault persists; sends a RESOLVED ping and re-arms once
+it clears. **Not** catastrophe tier, deliberately: stale backups, search gateway,
+Open Notebook, little-coder - those stay in the log and Mattermost.
+
+Two structural fixes shipped with it, both of which had been masking faults:
+- **No more fatal early returns.** A failed repair used to `return $false` and
+  abort the whole cycle, so one outage blinded the watchdog to inference, backups
+  and the bridges. Failures now record into `$script:HealthIssues` and the cycle
+  continues; the summary reports `WITH ISSUES: <list>` instead of the old
+  unconditional "All health checks passed".
+- **Preventive node-key expiry warning.** `Test-TailscaleNodeState` warns once a
+  day when the tailscale node key is <14 days from expiring - the root cause of
+  the 2026-09-16 outage, which had no detection at all.
+
+> The durable fix for that root cause is **disabling key expiry for this node**
+> (or moving to an OAuth client). The 2026-09-16 re-auth reset the clock to ~180
+> days, so without it this recurs around 2027-03-15.
 
 ---
 

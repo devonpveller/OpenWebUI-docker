@@ -172,6 +172,47 @@ named in the anchor's out-of-scope list. Doing so is a small, well-defined follo
 their leftovers become reapable without touching the existing `finally` at all. Until then
 their droppings are ORPHANS, which `reap.ps1 -Report` lists but never auto-deletes.
 
+> **CORRECTED 2026-09-07 by item `drilllabel`, then corrected again 2026-09-08 by its
+> tester.** The heading above ("that is still the leak") reads as if these scripts clean up
+> badly. Mostly they do not - but "all six" and "every drill here" were both wrong, and the
+> second version of this block asserted them.
+>
+> **NINE scripts in `scripts/checks/` create a persistent docker resource, not six.**
+> Enumerated 2026-09-08 over `docker run -d` / `docker create` / `docker network create` /
+> `Start-ObInitdb*`:
+>
+> | script | teardown construct |
+> |---|---|
+> | `drill-personal-plane-exclusion.ps1` | `finally` |
+> | `prove-agent-memory-rls.ps1` | `finally` |
+> | `smoke-agent-memory.ps1` | `finally` |
+> | `drill-mcp-door-not-superuser.ps1` | `trap` + `Cleanup` on all ten abort paths |
+> | `redprove-census-cannot-measure.ps1` | `trap` |
+> | `redprove-fixture-cleanup.ps1` | `trap` |
+> | `drill-app-role-not-superuser.ps1` | `trap` |
+> | `drill-rls-boot-assertion.ps1` | `finally` (at column 0, after a `catch` - see the note below) |
+> | `test-quartz4-offline.ps1` | **neither** - it force-deletes at the end of the happy path only |
+>
+> So the split among the six THIS ITEM EDITED is 3/3, and across all nine it is **4 `trap`,
+> 4 `finally`, and exactly ONE with neither**: `test-quartz4-offline.ps1`, which force-deletes
+> at line 429 on the happy path only.
+>
+> **The row above was wrong once more, and the way it was wrong is the point.** It said
+> `drill-rls-boot-assertion.ps1` had "neither `trap` nor a `} finally {`" - which was a true
+> statement about a GREP PATTERN and a false one about the script. Its `try` is at line 161,
+> its `catch` at 728 and its `finally` at 736, with the braces at column 0, so the literal
+> `} finally {` does not appear. That `finally` removes every container the run registered
+> (`$containers += ...` before each creation) and sweeps both compose projects by run id. A
+> tester caught it on attempt 2 by reading the file instead of the grep. A search is not
+> evidence about code until someone has looked at what it missed.
+>
+> The structural point still stands and is the reason for the whole item: **no in-process
+> construct survives the process being KILLED** - not `finally`, not `trap`, not a `Cleanup`
+> you remembered to call everywhere. That is what happened. But "these scripts are all
+> careful" was an overstatement: ONE script, outside this item's six, is still unlabelled and
+> leaks on an exception as well as on a kill. It is the obvious next candidate for the
+> retrofit.
+
 ---
 
 ## 6. ~5 GB of test images remain, by decision
@@ -244,6 +285,49 @@ Networks (both with zero attached containers):
 
 Nothing else was touched. The IMAGES those containers referenced were NOT removed - the
 `:drill-5e705d0f` and `:graphsel` tags remain, per finding 6.
+
+---
+
+## 9. Why the drills use the single-token `--label=k=v` form
+
+> **This finding originally claimed a third PowerShell array behaviour: that an array
+> written INLINE in a native call is space-joined into one argument. That is FALSE, and
+> finding 2 above carries the correction.** Measured on the work line:
+> `& docker create --name x @("--label","k=v") alpine true` exits 0 and applies the label.
+> PowerShell expands a plain inline array into separate arguments for a native command.
+>
+> What actually failed, and produced the wrong diagnosis, was a NESTED array of my own
+> making: a helper returning `,@("--label","k=v")` - the comma-wrap that stops an empty
+> array vanishing - called as `@(Get-Args ...)`, which yields an array CONTAINING an array.
+> A native call flattens that inner array into one space-joined argument,
+> `--label ai-stack.harness.owner=x`, which docker rejects as an unknown flag. One level of
+> self-inflicted nesting, mistaken for a language rule.
+
+So the single-token form is a CHOICE, not a necessity. `lib/harness-owner.ps1` returns
+`--label=k=v` as one argument because it splices inline anywhere without caring how the
+surrounding call is built - the six drills assemble their `docker run` lines very
+differently, several across backtick continuations, and a two-token flag would have meant
+touching each of those constructions. `docker run`, `docker create` and
+`docker network create` all accept it (verified).
+
+The alternative - rewriting each multi-line `docker run -d ... -e ... -e ...` into an args
+array so it could be splatted from a variable - is a large, risky diff to add one label, and
+`docker @args` splatting into an executable is the form that does work (finding 2, row 2 of
+the native cases). Either would have been correct; this one is smaller.
+
+---
+
+## 10. `docker run --rm` does not need a label, and labelling it would be noise
+
+`--rm` sets `AutoRemove` on the container; the DAEMON removes it when it exits, so it
+survives its client being killed and needs no help from a reaper. That is why
+`lib/harness-owner.ps1` states the rule as "persistent creation sites are labelled,
+`--rm` sites are not" rather than labelling everything.
+
+The residual case, stated so nobody reads more into the rule than it carries: a `--rm`
+container whose client is killed while the container is still RUNNING keeps running, and is
+only auto-removed when it eventually exits. For the sites here that is a `curl` finishing in
+seconds. A long-lived `--rm` container would deserve a label after all.
 
 ---
 
@@ -337,3 +421,207 @@ and reports a failure if the resource is still there.
 Note the interaction with finding 1: the error text goes to STDERR, so a caller that
 captured only stdout would see neither the message nor a non-zero exit. Two independent
 signals, both absent.
+
+---
+
+## 15. A compose label on a CONTAINER may have come from its IMAGE
+
+Docker labels are inherited. Several `:local` images in this stack were built BY compose, so
+they carry compose's labels and stamp them on every container run from them:
+
+```
+docker image inspect openbrain-mcp-server:local --format '{{json .Config.Labels}}'
+  {"com.docker.compose.project":"open-brain",
+   "com.docker.compose.service":"openbrain-mcp",
+   "com.docker.compose.version":"5.3.0"}
+```
+
+So `reap.ps1`'s original key-presence guard - protect anything carrying
+`com.docker.compose.project` - refused `drill-mcp-door-not-superuser.ps1`'s own throwaway
+container, and the network it occupied survived with it. Found 2026-09-08 by the first real
+consumer of the labelling convention, on the very drill the `drilllabel` anchor names as its
+demonstration case.
+
+**No edit at the creation site can fix it.** `--label com.docker.compose.project=` produces
+`{"com.docker.compose.project":""}` and `docker ps -aq --filter label=com.docker.compose.project`
+still matches it - the filter tests the KEY, not the value.
+
+**The discriminator, measured 2026-09-08 across all 81 production containers on this host:**
+every one carries `com.docker.compose.config-hash`, `com.docker.compose.container-number`
+AND `com.docker.compose.oneoff`. Zero exceptions. A compose-built IMAGE carries none of the
+three - only `{project, service, version}`. Compose writes the runtime keys when it CREATES
+a container: `docker compose create`, never started, already carries all three (measured).
+
+**They are not inherited from a compose-BUILT image, because such an image carries none of
+them - but an image CAN be made to carry one by hand**, and `LABEL
+com.docker.compose.oneoff=False` in a Dockerfile is inherited by every container built from
+it, and hits docker's key-presence filter. Measured.
+
+**That paragraph used to end "That is why rule 3 exists," and that was false.** Rule 3
+(`Test-ComposeInherited`) sits LAST in a short-circuiting `-and` behind rule 2, so in the
+case just described it is never evaluated: a tester built two containers from images
+differing by one `LABEL` line and found rules 1 and 3 satisfied on BOTH, with rule 2 the
+only rule that refuses. And no charitable reading survives the direction of the effect - an
+image-supplied key can only ADD a key, so it can only push toward PROTECTED, and a conjunct
+can only make the test stricter. A conjunct is not how you fix a rule that is already
+refusing.
+
+Rule 3 exists for the case rule 3 itself names: a `com.docker.compose.project` set BY HAND
+on a container compose never created.
+
+This went into the block written to retract the LAST false attribution in this same guard -
+the same guard whose own line about a correction that leaves its source standing appears
+elsewhere in this note. **Measuring
+the fact is not measuring the reason**, and the surrounding paragraph being a correction of
+exactly that error bought no protection whatsoever.
+
+Two things this paragraph asserted and should not have. It said "two lines above it" and
+"three paragraphs under", and both were wrong in this layout - rule 3 is below, not above,
+and the line about corrections is a long way further down. Both figures were lifted verbatim
+from the tester's report that found the error, where they described THEIR excerpt. **A
+figure inherited from a report is an invented figure in a different layout**, and it went in
+under a doctrine this very item ships: no distance ships from these files.
+
+And it said "the move is identical both times". It is not. The first, at
+`564abad:scripts/agent-harness/reap.ps1`, reads `writes those when it STARTS a container,
+and no image can supply them;` - a bare unmeasured assertion, with no measured premise and
+no "that is why" anywhere near it. The second hangs a confident attribution off a fact that
+HAD just been measured. What the two actually share is the only thing that needed saying:
+both are false claims about WHY this guard is safe, shipped inside a safety contract. Adding
+"identical" bought the sentence rhetoric and cost it its truth.
+
+This paragraph said "when it starts a container; they cannot be inherited from an image
+because no image has them" - both halves wrong, both erring safe. **`reap.ps1` names this
+finding BY PATH as the measurement**, in a sentence added because a reader had followed a
+citation to the wrong model. So the corrected header sent its reader here, to the same
+wrong model, in the same document that says further down that a correction leaving its own
+source standing has been moved rather than made.
+
+(That sentence said "two paragraphs above". The line it points at is BELOW this one, and a
+long way below - the direction was backwards and the distance invented. **The attempt-7
+tester reported BOTH of them, by line number, with measurements** - I fixed one and left
+this one standing, then wrote that I had found the survivor myself. An attempt-8 tester read
+the evidence file and caught the credit as well as the omission. Fixing one of two reported
+instances and claiming the second as a discovery is a worse failure than missing it.)
+
+Found by the first outing of T12, the case written after the previous attempt found the
+identical error in the header itself. The phrase-grep in T10 could not reach it: the header
+said "no image can supply them" and this said "cannot be inherited from an image because no
+image has them" - the same MODEL in different WORDS.
+
+`reap.ps1`'s exception is therefore narrow and FAILS CLOSED. All three must hold:
+
+1. the resource carries THIS harness's owner label;
+2. it carries NONE of the compose runtime keys;
+3. its IMAGE carries the same `project` value, proving the label was inherited.
+
+Miss any one and it stays protected.
+
+**TWO SENTENCES THAT STOOD HERE ARE RETRACTED, and the second was inverted.** They said
+rule 1 was "the load-bearing gate" because "a production container never does" carry the
+owner label, and that "if compose ever stops writing the runtime keys, rule 1 still holds
+the line".
+
+The whole reason this guard exists is the container that DOES carry the label - a stray
+`labels:` block in a plane's compose file, which is the scenario `reap.ps1`'s header names.
+For that container rule 1 is SATISFIED, so it protects nothing, and if rule 2 also stopped
+working the outcome would rest on rule 3 alone. **Measured on this host: 17 of 81 live
+containers already satisfy rule 3** - their image carries the same project value - so the
+promised fallback covers seventeen real containers in the wrong direction. (Counted with
+`docker inspect` over every container carrying `com.docker.compose.project`, comparing the
+container's project value against its image's: 17 match, 14 mismatch, 50 have no image
+label.)
+
+The load-bearing gate is the CONJUNCTION - **as a FALLBACK argument.** No rule is safe to
+lean on once the others are gone, which is why `reap.ps1` states all three and says "miss
+any one".
+
+Stated flatly as "no single rule holds the line" this would be its own unqualified claim,
+and an attempt-2 tester said so: measured today, 0 of 81 production containers carry the
+ownership label and 81 of 81 carry all three runtime keys, so rules 1 and 2 EACH hold the
+line alone right now. That is the point of `reap.ps1`'s own emphasis that rule 2 is the
+mechanism. What fails is the FALLBACK reasoning - "if rule 2 goes, rule 1 still has us" -
+because the container this guard exists for is the one where rule 1 is satisfied.
+
+A paragraph retracting an unqualified claim is a poor place to make one.
+
+This correction exists because an attempt-1 tester followed the corrected header's own
+citation and arrived here, at the model the correction was written to retract. **A
+correction that leaves its own source standing has not been made** - it has been moved. `verify-reap.ps1` CASE 7g covers both directions, and BOTH halves are
+seeded red: restoring the key-presence guard fails "the INHERITED-label container is
+reaped", and removing the runtime-key check fails "the RUNTIME-KEYED container is REFUSED".
+
+**The second seed is why the case is trustworthy.** Its first version built the
+runtime-keyed fixture from plain `alpine`, whose image carries no compose label - so rule 3
+refused it on its own and the runtime-key check was never what kept it alive. Seeding that
+check out left the verifier GREEN. The fixture is now built from the same compose-labelled
+image, so only the runtime keys stand between it and deletion.
+
+---
+
+## 16. `lib/harness-owner.ps1` reads the config by a second route (latent, not yet divergent)
+
+`scripts/checks/lib/harness-owner.ps1` resolves the ownership label by raw-reading
+`scripts/agent-harness/harness.config.json` at a fixed relative path. `reap.ps1` resolves it
+through `Get-HarnessSetting`, which layers **built-in defaults < harness.config.json <
+harness.local.json < environment** (`config.ps1`).
+
+So the library ignores `harness.local.json` and `AI_STACK_HARNESS_CONFIG`. Set either and
+the drills would label with one key while the reaper swept for another.
+
+**There is no divergence today**, verified 2026-09-08: no `harness.local.json` exists, and
+`config.ps1`, `config.py`, `harness.config.json` and the library's own fallback literal all
+say `ai-stack.harness.owner`.
+
+It is still a second spelling by another route - the exact failure the library's own comment
+says it exists to prevent ("does not fail loudly, it just makes every sweep quietly find
+nothing"). Found by the `drilllabel` reviewer 2026-09-08 and left for its own item, because
+fixing it changes behaviour: the library would have to dot-source `config.ps1`, which pulls
+the whole harness module into `scripts/checks/`, or reimplement the layering. Neither is a
+documentation change, and the item that surfaced it was a documentation fix.
+
+---
+
+## `grep -iF` ABORTS ON THIS HOST, PRINTS NOTHING, AND SAYS NOTHING ON STDERR
+
+GNU grep 3.0 under this Git-for-Windows bash:
+
+    grep -iF "compose" scripts/agent-harness/reap.ps1   -> rc=134, NO OUTPUT, stderr EMPTY
+    grep -iE "compose" scripts/agent-harness/reap.ps1   -> rc=0,   matches
+    grep -F  "compose" scripts/agent-harness/reap.ps1   -> rc=0,   matches
+
+(The middle and last lines carried match COUNTS - 66 and 57 - which were right when
+written and 65 and 56 two commits later, because every round adds comment lines to
+`reap.ps1`. A count this note asserts about a DIFFERENT file in the same diff ages
+exactly like a count it asserts about itself; the doctrine did not have a special
+case for it and does not need one. The counts are gone: nothing in the finding
+turns on them, only on rc=134 against rc=0.)
+
+`-i` and `-F` together abort (SIGABRT); either alone is fine. The "Aborted" line is printed
+by BASH'S JOB CONTROL, not by grep - so inside a pipeline, a command substitution or a
+script it never appears at all, and `grep -iF ... | head` shows `rc=0` because the exit code
+read is `head`'s.
+
+**This is the worst possible shape for a search-based check.** A paraphrase hunt is a
+search whose PASS condition is "no matches", and this returns no matches while examining
+nothing - silently, with a clean-looking pipeline. A tester hit it mid-run and only caught
+it because the sweep felt too fast.
+
+The general rule, which is this note's subject in a different costume: **a search that finds
+nothing has to prove it can find something.** Run every hunt pattern against a line you know
+exists before trusting a clean result. That control costs one command and converts "I found
+nothing" from a claim about the repo into a claim about the repo AND the tool.
+
+## `verify-reap.ps1` CASE 4 READS OTHER SESSIONS' CONTAINERS
+
+CASE 4 is not hermetic: it inspects live containers, so an unrelated fixture left running by
+another agent changes its result. A tester's first run read 65/1 from their own leftovers
+rather than from the code under test. Quiesce, or read the failure before believing it.
+
+## THE HARNESS PROVISIONS TESTERS ON THE WORK-LINE TIP, NOT THE ITEM'S SHA
+
+An `mmthread` tester found their worktree created at the work line's tip rather than at the
+attempt's recorded commit, and detached it by hand. A tester who does NOT notice tests
+something other than the attempt, and would report it under the attempt's number. Not this
+item's code - recorded here because the queue is the common dependency and the failure is
+silent on both sides.

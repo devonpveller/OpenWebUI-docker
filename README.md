@@ -149,7 +149,7 @@ health probes, and the sysadmin plane truthful.
 | `OB1/` | Open Brain — pinned git submodule since 2026-08-21 (bump via PR; incl. the Open Notebook trio since K.5b) |
 | `backup/` + `backups/` | Sidecar scripts/Dockerfiles + produced artifacts |
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates…) |
-| `documentation/implementation-guide/` | Per-feature plans — see its README index for shipped/draft status |
+| `documentation/implementation-guide/` | The per-feature status INDEX (spans both repos) + the two plan sets that must stay here: `multi-agent-concurrency/` (MERGE-PROTOCOL travels with every worktree) and `dark-factory-unification/` (read by `dfu-done.ps1` in CI). Plans themselves live in the `documentation-plans-ai-stack` private repo. |
 | `documentation/archive/` | Retired docs, kept for history |
 | `CLEANUP-PLAN.md` | The living restructure/cleanup plan (v3) |
 
