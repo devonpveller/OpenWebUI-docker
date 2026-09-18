@@ -368,8 +368,25 @@ print(json.dumps(d))' 2>/dev/null)
   # it was also, silently, licensed to overrun the Stop hook, and at a hung server
   # that is exactly what it did. The message's guarantee is "a real attempt", not
   # "eight seconds regardless of whether anyone is still listening".
+  # THE WALL MAY BOUND OPTIONAL WORK. IT MAY NOT BOUND THE MESSAGE.
+  # This clamp ran unconditionally, AFTER the floor above, and silently undid it:
+  # a run reaching here with the wall spent had its floored budget cut to 0 or 1,
+  # was then refused outright by the guard below, and issued NO curl at all --
+  # exiting 0 with empty stderr. Two comments in this file assert that cannot
+  # happen ("the FIRST send ... is never skipped"; "a call that has been given the
+  # floor above is never refused here"). They stated the intent; this line
+  # contradicted it.
+  #
+  # Measured 2026-09-18 at the SHIPPED DEFAULT (MM_WALL_SECS=11): 9s of pre-send
+  # overhead -> zero HTTP calls, exit 0, message gone. NO CONCURRENCY NEEDED -- a
+  # loaded machine is enough. Under ten-way concurrency it cost 5 of 9 rounds, one
+  # of them 0 of 10 delivered, where the pre-item sender delivered 10 of 10.
+  # Isolated to this line: at MM_WALL_SECS=60, nothing else changed, 0 of 8 rounds
+  # lost anything.
+  #
+  # The floor now survives the wall; the wall still bounds every OPTIONAL call.
   _wl=$(wall_left)
-  [ "$_budget" -gt "$_wl" ] && _budget="$_wl"
+  [ "$_floor" -le 0 ] && [ "$_budget" -gt "$_wl" ] && _budget="$_wl"
   # OUT OF BUDGET IS NOT A DEAD ROOT. Both used to return an empty string, so the
   # caller could not tell "the server rejected this root" from "there was no time
   # left to ask" - and the recovery path fired on the second, spending the little
@@ -380,7 +397,8 @@ print(json.dumps(d))' 2>/dev/null)
   # `$(post ...)` at the sites that read its result, and a command substitution is
   # a subshell, so an assignment would die with it. The caller reads `remaining`
   # itself.)
-  [ "$_budget" -lt 2 ] && return 1
+  # A FLOORED CALL IS NEVER REFUSED. Only an optional later call can be.
+  [ "$_floor" -le 0 ] && [ "$_budget" -lt 2 ] && return 1
   _resp=$(curl -s -m "$_budget" -w '\n%{http_code}' \
     -H "Authorization: Bearer $tok" -H "Content-Type: application/json" \
     -X POST "$API" -d "$_payload" 2>/dev/null)
