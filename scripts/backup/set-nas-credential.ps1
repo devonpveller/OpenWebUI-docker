@@ -23,7 +23,14 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $false)]
-  [string]$NasVaultPath
+  [string]$NasVaultPath,
+
+  # Take the credentials from .env (NAS_BACKUP_USER / NAS_BACKUP_PASSWORD)
+  # instead of prompting. Get-Credential CANNOT run from a scheduled task, a
+  # remote session, or any non-interactive repair path -- which is exactly when
+  # a rotation is most likely to be needed. Added 2026-09-13, after an expired
+  # Synology password took the weekly off-site backup down for two runs.
+  [switch]$FromEnv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,13 +51,46 @@ Write-Host ""
 
 # Get-Credential gives a SecureString password by design. We pull plaintext
 # from it just long enough to build the byte array, then null it immediately.
-$cred = Get-Credential -Message "NAS dedicated backup user credentials (for SMB)"
-if (-not $cred) {
-  Write-Host "Cancelled. No credential saved." -ForegroundColor Yellow
-  exit 1
+if ($FromEnv) {
+  $dotEnv = Join-Path $projectRoot '.env'
+  if (-not (Test-Path $dotEnv)) {
+    Write-Host "ERROR: -FromEnv but no .env at $dotEnv" -ForegroundColor Red
+    exit 1
+  }
+  function Get-DotEnvValue {
+    param([string]$Path, [string]$Key)
+    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
+      $t = $line.Trim()
+      if ($t.StartsWith('#') -or -not $t.Contains('=')) { continue }
+      $eq = $t.IndexOf('=')
+      if ($t.Substring(0, $eq).Trim() -ne $Key) { continue }
+      $v = $t.Substring($eq + 1).Trim()
+      if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
+        $v = $v.Substring(1, $v.Length - 2)
+      }
+      return $v
+    }
+    return $null
+  }
+  $nasUser = Get-DotEnvValue -Path $dotEnv -Key 'NAS_BACKUP_USER'
+  $nasPassPlain = Get-DotEnvValue -Path $dotEnv -Key 'NAS_BACKUP_PASSWORD'
+  if ([string]::IsNullOrEmpty($nasUser) -or [string]::IsNullOrEmpty($nasPassPlain)) {
+    Write-Host "ERROR: NAS_BACKUP_USER / NAS_BACKUP_PASSWORD missing or empty in $dotEnv" -ForegroundColor Red
+    exit 1
+  }
+  # Length only -- never the value. This script's whole job is to stop the
+  # password existing in plaintext anywhere it is not already.
+  Write-Host "Read from .env: user '$nasUser', password <$($nasPassPlain.Length) chars>" -ForegroundColor DarkGray
 }
-$nasUser = $cred.UserName
-$nasPassPlain = $cred.GetNetworkCredential().Password
+else {
+  $cred = Get-Credential -Message "NAS dedicated backup user credentials (for SMB)"
+  if (-not $cred) {
+    Write-Host "Cancelled. No credential saved." -ForegroundColor Yellow
+    exit 1
+  }
+  $nasUser = $cred.UserName
+  $nasPassPlain = $cred.GetNetworkCredential().Password
+}
 if ([string]::IsNullOrEmpty($nasUser) -or [string]::IsNullOrEmpty($nasPassPlain)) {
   Write-Host "ERROR: empty username or password not allowed." -ForegroundColor Red
   exit 1
