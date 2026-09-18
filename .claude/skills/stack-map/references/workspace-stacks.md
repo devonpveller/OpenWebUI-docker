@@ -291,7 +291,7 @@ binaries never enter the vault git history).
 File: `agent-org/docker/docker-compose.yml`. Run with:
 `docker compose -f agent-org/docker/docker-compose.yml ...`. `.env` lives next to the file at
 `agent-org/docker/.env` (template: `.env.example`). Design corpus:
-`documentation/implementation-guide/teams-chat-agent-orchestration/`.
+`../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/`.
 
 > **Why separate:** like OB1, `agent-org` is its own compose project (`name: agent-org`). It
 > attaches to the main stack's `ai-stack_llm-net` as an **external** network for LOCAL

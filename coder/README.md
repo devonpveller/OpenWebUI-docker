@@ -13,7 +13,7 @@ published port, what you may rebuild - falls out of that.
 | Question | Read |
 |---|---|
 | **How do I run, stop, wire or debug these four containers?** | **this file** |
-| What the agent *is*: inner loop, journals, cohorts, skill library, chapters | [`Self-improving-little-coder-design.md`](../documentation/implementation-guide/little-coder/Self-improving-little-coder-design.md) |
+| What the agent *is*: inner loop, journals, cohorts, skill library, chapters | [`Self-improving-little-coder-design.md`](../../documentation-plans-ai-stack/implementation-guide/little-coder/Self-improving-little-coder-design.md) |
 | The agent source, its operator CLI and tests | [`../little-coder/README.md`](../little-coder/README.md) |
 | Where this plane sits among all the others | [stack-map reference](../.claude/skills/stack-map/references/workspace-stacks.md) |
 | Adding, removing or moving a container here | [`SERVICE-LIFECYCLE.md`](../documentation/runbooks/SERVICE-LIFECYCLE.md) |

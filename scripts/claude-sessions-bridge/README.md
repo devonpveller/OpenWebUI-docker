@@ -1,7 +1,7 @@
 # Claude-Sessions bridge — Mattermost threads ⟷ Claude Code sessions
 
 The inbound half of
-[claude-code-mattermost-bridge/DESIGN.md](../../documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md)
+[claude-code-mattermost-bridge/DESIGN.md](../../../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md)
 (P-CCB.1 "thread = session" + the P-CCB.3 mid-turn approval relay), built 2026-07-13.
 
 ## What it does

@@ -7,6 +7,7 @@
 # Checks, in order of how cheap they are:
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
 #   2. line endings      - repo convention
+#   2b. doc placement    - new plans belong in the documentation-plans repo
 #   3. gateway routing   - inference must go through the LiteLLM alias
 #   3b. corpus exposure  - a direct corpus INSERT must state its plane
 #   4. project configs   - compose renders + ps1 tokenize
@@ -30,6 +31,23 @@ fi
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/validate-lineendings.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (line endings)!"
+    exit 1
+fi
+
+# --- 2b. documentation placement (staged-aware) ----------------------------
+# Fail if this commit ADDS planning material to the code repo. Plans, build logs,
+# task lists and numbered plan sets belong in the private plan store,
+# documentation-plans-ai-stack; this repo carries the one-row status entry in
+# documentation/implementation-guide/README.md and nothing else of a plan.
+#
+# It is a PARTIAL guard and the script header says so plainly: the drift it is
+# named after (a 24-file plan set written into documentation/implementation-guide/
+# on 2026-09-18) was never staged, so this hook would not have seen it. It closes
+# the path where the drift gets committed here permanently. Run the script with
+# -All to see the untracked half, which no commit-time check can reach.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-doc-placement.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (planning material staged into the code repo)!"
     exit 1
 fi
 

@@ -2909,7 +2909,7 @@ if ($ledgerExit -eq 0) {
     Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps gap(s), ALL DISPOSITIONED ($passes checks passed, 0 failed)" -ForegroundColor Green
     Write-Host "  Exit 0 under -AcceptDispositionedGaps. This is NOT 'U5's recording half is met' - it is" -ForegroundColor Yellow
     Write-Host "  'nothing changed since the operator dispositioned these', which is what CI can assert." -ForegroundColor Yellow
-    Write-Host "  See documentation/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
+    Write-Host "  See ../documentation-plans-ai-stack/implementation-guide/agent-memory-plane/PROMOTION-RUNBOOK.md." -ForegroundColor Yellow
     exit $ledgerExit
 }
 Write-Host "PERSONAL-PLANE EXCLUSION DRILL: CONTAINMENT GREEN, $gaps NAMED GAP(S) OPEN ($passes checks passed, 0 failed)" -ForegroundColor Yellow

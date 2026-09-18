@@ -1,7 +1,7 @@
 # agent-org — Implementation Notes (what's built / what's operator-gated)
 
 **Date:** 2026-07-01. This is the authoritative record of the v1 build of the
-[teams-chat-agent-orchestration](../documentation/implementation-guide/teams-chat-agent-orchestration/)
+[teams-chat-agent-orchestration](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/)
 design corpus. It maps every TASKS item to its landing site and status.
 
 **Status legend:** ✅ built + tested here **AND wired into the live path** · 🟡 module built +
@@ -59,7 +59,7 @@ hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreve
   `little-coder:local`**. `test_projects.py` (owner convention + explicit override + threading).
 - **The rest of the delivery pipeline** (PR → autonomous test series incl. AI-browser for web →
   human-gated merge → deploy → human testing) is designed in
-  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
+  [`DELIVERY-PIPELINE.md`](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)
   (DP.1–DP.6, not yet built; the AI-browser lane is the largest new build + a decision-gate).
 
 ## Progress visibility + effort-list hygiene + fork onboarding (2026-07-03)
@@ -86,7 +86,7 @@ with finished test efforts; and a *fork* workflow couldn't be set up). **126 →
   live).** The MonoGame worker fought the git-proxy because a fork needs a second remote (`upstream`)
   and the proxy **blocks `git remote add`** + only fetches from **operator-configured** remotes.
   Built D0.f (see the dedicated section below +
-  [`DELIVERY-PIPELINE.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)):
+  [`DELIVERY-PIPELINE.md`](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/DELIVERY-PIPELINE.md)):
   `/project add … --upstream <url>` (+ NL onboarding); the bridge bakes `upstream` at setup **via the
   real git binary** (the same operator path as clone, §12.3) so the worker can `fetch`/`merge --no-ff`
   upstream but push only to `origin`. Substrate-native; the API-level alternative is the GitHub MCP
@@ -616,7 +616,7 @@ per-effort**"), but the per-project selection was never built. Now it is (**119 
 
 ### Comms model (CM.1–CM.6) — BUILT + tested (2026-07-02)
 
-Implemented [`COMMS-MODEL-deterministic-routing.md`](../documentation/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
+Implemented [`COMMS-MODEL-deterministic-routing.md`](../../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/COMMS-MODEL-deterministic-routing.md)
 in full — the deterministic *audience × intent → destination* model that replaces the
 channel-per-effort sprawl. Bridge-internal (no 3-place change); only the `agent-bridge` image is
 rebuilt. **81 tests green** (65 → 73 comms model → 80 P4.0 → 81 intake clarify-loop). What landed, per phase:

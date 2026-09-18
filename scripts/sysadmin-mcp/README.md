@@ -3,7 +3,7 @@
 A dependency-free (stdlib-only) MCP server + gated executors that let an AI **systems-administrator
 persona** operate this stack through semantic, safety-gated tools. Capability #1 is disk-prune
 (motivated by the 2026-07-26 near-full-C: incident). Design:
-[../../documentation/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md](../../documentation/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md).
+[../../../documentation-plans-ai-stack/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md](../../../documentation-plans-ai-stack/implementation-guide/disk-prune-watcher/DESIGN-systems-administrator.md).
 
 ## Files
 | File | Role |

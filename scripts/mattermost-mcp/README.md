@@ -3,7 +3,7 @@
 A **permanent, dependency-free** bridge so a Claude Code session can READ operator messages and
 POST updates to the self-hosted Mattermost with native tools — replacing ad-hoc
 `docker exec … curl` one-liners. This is the durable version of the two-way loop sketched in
-[`documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md`](../../documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md).
+[`../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md`](../../../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md).
 
 ## What it is
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude-Sessions bridge — Mattermost threads ⟷ headless Claude Code sessions.
 
-The inbound half of documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md
+The inbound half of ../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md
 (P-CCB.1 with the P-CCB.3 mid-turn approval relay built in):
 
   #claude-sessions channel

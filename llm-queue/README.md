@@ -11,7 +11,7 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
                                                              (this service)  (concurrencyLimit: 0)
 ```
 
-**Design:** [`../documentation/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`](../documentation/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md)
+**Design:** [`../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`](../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md)
 
 ## What it does
 

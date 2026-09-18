@@ -102,7 +102,7 @@ services:
       # call hangs forever and the chat model stays stuck waiting. The fix
       # is still absent on OWUI main as of 2026-05-09. Re-enable only after
       # standing up the Jupyter engine — see
-      # documentation/implementation-guide/Jupyter/.
+      # ../documentation-plans-ai-stack/implementation-guide/Jupyter/.
       - ENABLE_CODE_INTERPRETER=${ENABLE_CODE_INTERPRETER:-False}
       - ENABLE_CODE_EXECUTION=${ENABLE_CODE_EXECUTION:-False}
     deploy:
