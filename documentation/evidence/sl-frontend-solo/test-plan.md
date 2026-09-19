@@ -723,35 +723,65 @@ judgement the gate should see. A green `pytest scripts/stack` is NOT sufficient
 evidence here: 38 tests passed against the un-updated manifest, so the suite
 does not cover this.
 
-## T13 - the manifest's `frontend/docker-compose.yml:<line>` citations resolve
+## T13 - EVERY `frontend/docker-compose.yml:<line>` citation in the tree resolves
 
-The manifest header asserts "EVERY edge below is evidenced in a compose file;
-the evidence is cited in the comment above it as `<file>:<line>`". This branch
-inserts ~130 lines near the top of that file, so every citation was re-derived.
+The manifest header (`stack.manifest.toml:38-39`) asserts "EVERY edge below is
+evidenced in a compose file; the evidence is cited in the comment above it as
+`<file>:<line>` (verified 2026-09-19)". This branch has rewritten that file's
+header three times, and **attempt 4 failed here**: one commit replaced 16 header
+lines with 18, and 25 of the manifest's 26 citations went stale by exactly +2
+while the header still claimed they were verified. The 26th was accidentally
+right, which is the trap - a spot check can pass while the set is broken.
+
+**Scope is the whole tree, not the manifest.** The sweep:
 
 ```bash
-grep -n "frontend/docker-compose.yml:" stack.manifest.toml
-for n in 113 151 156 163 239 250 256 283 284 295 304 306 307 310 311 312 313 314 316 325 326 328 329 466 474 479; do
+git grep -n "frontend/docker-compose.yml:"
+```
+
+**Method: re-derive by CONSTRUCT, then compare to the cited number.** For each
+hit, read what the citation claims is there, `grep -n` for that construct, and
+check the number matches:
+
+```bash
+grep -n "^    build:\|image: openwebui:local\|SEARXNG_QUERY_URL=\|^    deploy:\|driver: nvidia\|capabilities: \[ gpu\|network_mode: service:openwebui\|NO env_file HERE\|TAILSCALE_AUTH_KEY=\|LLAMA_CPP_HOST=\|LLAMA_CPP_ENABLED=\|LLAMA_CPP_EMBED_HOST=\|OPEN_NOTEBOOK_HOST=\|OPEN_NOTEBOOK_PORT=\|OPEN_NOTEBOOK_ENABLED=\|OPEN_NOTEBOOK_TS_PORT=\|OPEN_NOTEBOOK_API_PORT=\|QUARTZ_HOST=\|QUARTZ_ENABLED=\|OPENWEBUI_BACKUP_INTERVAL\|# OB1 Quartz wiki\|^  default:\|name: ai-stack_app-net\|^  owui-net:\|FRESH CLONE (profile: stock)" frontend/docker-compose.yml
+```
+
+then print each cited line and read it:
+
+```bash
+for n in <every number cited anywhere in the sweep>; do
   printf "%4s: %s
 " "$n" "$(sed -n "${n}p" frontend/docker-compose.yml)"
 done
 ```
 
-**PASS** when every citation in `[planes.frontend]` — the `requires anchor`
-networks, the entrypoint override span, the inference / search / ob1 / portal /
-agent-org edges, the two `host` entries and all three profile descriptions —
-points at the construct the comment beside it names. Check the RANGES too, not
-only their first line.
+**Do NOT verify by adding a delta.** Two of this item's three citation defects
+were off-by-a-constant, and arithmetic reproduces a constant offset perfectly —
+it would have "confirmed" every wrong number. Locate the construct.
 
-**FAIL** on any that does not. For reference, the pre-fix state: `:290-298`
-(cited as the three `external: true` networks) was `LLAMA_CPP_EMBED_ENABLED` and
-a caddy comment; `:111-114` (the CUDA image + device reservation) was `ports:` /
-`- owui-net`; `:135` (`network_mode`) was a blank line.
+**PASS** when every hit in the sweep points at the construct its comment names,
+RANGES included (check both ends, not just the first line). The hits at the time
+of writing: `stack.manifest.toml`'s `[planes.frontend]` block (the `requires
+anchor` networks, the entrypoint-override span, the inference / search / ob1 /
+portal / agent-org edges, both `host` entries and all three profile
+descriptions) and `.env.example`'s `OPENWEBUI_BACKUP_INTERVAL` pointer.
 
-**While you are there:** the `host = [...]` entries used to read as a forward
-reference ("sl-frontend-solo makes the stock image the default"). They now
-describe the present tense and split the requirement by profile — the CUDA image
-and NVIDIA runtime are needed under `gpu` only, and the auth key under
-`tailscale` only. **FAIL** if a `host` entry still states a requirement the
-DEFAULT deployment does not have: that is the line a newcomer reads to decide
-whether their machine can run this.
+**FAIL** on any that does not resolve — including one that is right by accident
+while its neighbours are wrong. Also **FAIL** if the manifest's `:38-39`
+"verified" claim is still present while any citation under it is stale: the
+header is itself a claim under test.
+
+**Out of scope, and expected to appear in the sweep:** two other items' findings
+notes cite pre-profile line numbers
+(`stack-layers-sl-closeout-findings.md:70`, `cleanup-branch-closeout-audit-2026-09-19.md:104`).
+They are true of the commits they were written against, and this item lists them
+for sl-readmes' sweep in its own findings note rather than rewriting another
+item's evidence. **FAIL** if they are silently edited; **FAIL** too if they are
+not listed anywhere.
+
+**While you are there:** the `host = [...]` entries should describe the present
+tense and split the requirement by profile — the CUDA image and NVIDIA runtime
+under `gpu` only, the auth key under `tailscale` only. **FAIL** if a `host`
+entry states a requirement the DEFAULT deployment does not have: that is the
+line a newcomer reads to decide whether their machine can run this.

@@ -144,6 +144,40 @@ caller-list is a snapshot of a moment, and the commit that changes the moment
 owns every copy of the list. There were three copies (compose header, stack-map,
 here); the fix updated one.
 
+**Attempt 4 then failed on the same rule applied to LINE NUMBERS**, which is the
+stricter case: the fix above replaced 16 header lines with 18, and 25 of the 26
+`frontend/docker-compose.yml:<line>` citations in `stack.manifest.toml` went
+stale by exactly +2 while the manifest's own header (`:38-39`) kept claiming
+every one was verified. Nothing in the diff of that commit touched the manifest,
+which is exactly why it was missed: **a citation is invalidated by an edit to
+the file it points INTO, not by an edit to the file it lives in.**
+
+### The checklist this item earned
+
+Anything editing `frontend/docker-compose.yml`, before the commit:
+
+1. Make every other edit first - prose, code, the note, the plan.
+2. **Then, as the LAST step, re-derive every citation of that file** by
+   `git grep -n "frontend/docker-compose.yml:"` across the whole tree (not just
+   the manifest, and not just the files you touched), and for each hit locate the
+   cited CONSTRUCT with a grep and compare the real line to the cited number.
+   **Never re-derive by adding the delta** - two of the three defects this item
+   hit were off-by-a-constant in a way that arithmetic reproduces perfectly.
+3. Re-run the renders, `ruff`, `pytest scripts/stack` and
+   `check-project-configs.ps1` after that, because step 2 can itself edit files.
+
+Citations OUTSIDE this item's own scope, found by the tree-wide sweep and
+**deliberately not edited** - they are other items' notes and rewriting another
+item's evidence is not this item's business. **For sl-readmes' closeout sweep:**
+
+| File:line | Cites | Correct as of d7fdc35 |
+|---|---|---|
+| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `frontend/docker-compose.yml:210`, for `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` | that construct is at **`:368`**; `:210` is now an AIOHTTP timeout comment |
+| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | `frontend/docker-compose.yml:108-114` (the NVIDIA reservation) | the reservation is at `:252-258` |
+
+Both describe the pre-profile file and are true of the commit they were written
+against; they are stale only relative to this branch.
+
 **CORRECTION, and how it was got wrong** (attempt 1, caught by the tester).
 This entry previously claimed the opposite — that explicit naming survives, so
 the per-service repairs were fine. The measurement behind that claim was real

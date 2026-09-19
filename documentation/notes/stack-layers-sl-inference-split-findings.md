@@ -58,6 +58,13 @@ models registered), and wrote the warning into
 
 ## F3 — OPERATOR ACTION REQUIRED BEFORE THE NEXT `up` OF THE INFERENCE PLANE
 
+> **2026-09-19, superseded in part by D15/D17 (sl-frontend-solo):**
+> `COMPOSE_PROFILES` is ONE global variable shared by every plane, so the
+> canonical value for this host is **`local,gpu,tailscale`**, not `local`
+> alone - setting `local` by itself now drops the frontend's `gpu` and
+> `tailscale`. The single authoritative section listing every plane's profiles
+> is at the top of `.env.example`. The rest of this entry stands as written.
+
 After this merges, `.env` needs
 
 ```

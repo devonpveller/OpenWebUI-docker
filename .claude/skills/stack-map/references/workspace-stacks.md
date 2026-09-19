@@ -134,8 +134,9 @@ does not help, because the reference resolves at project load. `openwebui` is
 the one exception (`restart openwebui`, `build --no-cache openwebui` work) —
 the gpu definition names nothing outside its own profile. So the value is
 required for the watchdog's seven tailscale repairs (plus two advice strings),
-for `emergency-recovery.ps1`, and for `scripts/recovery/quick-fixes.bat`'s four
-tailscale calls. TWO callers are independent of it because they pass the
+for `emergency-recovery.ps1`, for `scripts/recovery/quick-fixes.bat`'s four
+tailscale calls, and for the `stop tailscale openwebui` recipe documented in
+`backup/openwebui-restore.sh:9`. TWO callers are independent of it because they pass the
 profiles themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend
 and tailscale entries, as the portal and agent-org entries there already did)
 and the frontend recipe in `documentation/runbooks/restore-from-snapshot.md`,
