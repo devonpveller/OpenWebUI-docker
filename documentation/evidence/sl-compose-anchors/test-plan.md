@@ -269,7 +269,7 @@ checkout, and never in the developer's worktree.
 ```sh
 git -c core.longpaths=true clone -b work/sl-compose-anchors "$WT" "$SC/cfg"   # short path!
 cd "$SC/cfg"
-cp "$WT/.env" .env 2>/dev/null || true      # only if present; the check uses .env.example
+cp "$WT/.env" .env                          # REQUIRED - see the note below
 git reset --soft development
 git add -- . ':!OB1'
 git diff --cached --name-only            # expect the 11 compose files + manifest + .env.example
@@ -286,6 +286,19 @@ echo "exit=$?"
 `nothing staged - skip` line (you staged nothing — the case did not run), or on a
 `docker compose unavailable` line (that is a plan inadequacy on your host, not a
 pass: report `-PlanInadequate`).
+
+**The `.env` copy is not optional, and this was measured.** `.env` is gitignored,
+so a fresh clone has none — and without it the inventory verifier in the second
+half of this check emits a SPURIOUS failure that has nothing to do with this
+item: eight `[ -- ] NOT VERIFIED - <plane>: .env is absent` lines, then
+`[FAIL] projects.ai-stack: committed {"file": null, "env_file": null, ...} !=
+generated {"file": "docker-compose.yml", "env_file": ".env", ...}` and
+`INVENTORY DRIFT`. The generator marks the anchor unstartable only when it can
+see the env file. Copy `.env` in and the same clone prints
+`[OK] scripts/lib/stack-services.json matches ...`. Do not report that drift as
+an item failure; if you cannot obtain `.env`, say so and score T4 against the
+`all 8 compose projects render clean` line alone, noting the rest was not
+verifiable in your environment.
 
 ---
 
