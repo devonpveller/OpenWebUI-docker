@@ -1,7 +1,102 @@
 # frontend/docker-compose.yml — the FRONTEND compose project (K.5, 2026-08-21).
 # openwebui + its tailscale netns companion + their backup sidecars, moved out
-# of the root ai-stack project (CLEANUP-PLAN Part K). Definitions unchanged;
-# only paths (../), image pinning, and network/volume ownership.
+# of the root ai-stack project (CLEANUP-PLAN Part K).
+#
+# PROFILES (stack-layers §2.5 / DECISIONS D8, 2026-09-19). Three, and at least
+# one openwebui-providing profile must be active or the project renders with
+# nothing but the backup sidecar:
+#
+#   stock      openwebui-stock — the pinned upstream image, no GPU, no build,
+#              no other plane. This is the FRESH-CLONE deployment: `cp
+#              .env.example .env` then `docker compose -f
+#              frontend/docker-compose.yml --env-file .env up -d` and Open WebUI
+#              is on http://127.0.0.1:3000 with only Docker installed. It needs
+#              none of the anchor's ai-stack_* networks (see `owui-net` below).
+#   gpu        openwebui — THIS HOST's deployment: the CUDA local build, the
+#              nvidia device reservation, the USE_CUDA/NVIDIA_* env, the llm-net
+#              and app-net seams and the status-pipe code mount.
+#   tailscale  tailscale + tailscale-backup — the tailnet node that welds itself
+#              to openwebui's network namespace. Requires the `gpu` profile,
+#              because `network_mode: service:openwebui` names that service.
+#
+# THIS PLANE'S PROFILES ARE `gpu,tailscale`, AND THEY ARE NOT THE DEFAULT.
+# They go in COMPOSE_PROFILES in .env — but that variable is GLOBAL: every
+# plane driven with `--env-file .env` reads the same value, so it is set in ONE
+# authoritative section at the top of .env.example (stack-layers D15) and this
+# file does not own it. **This host's FULL value is
+# `COMPOSE_PROFILES=local,gpu,tailscale`** — `local` is the inference plane's
+# GPU backends, and setting `gpu,tailscale` alone would silently take them
+# down. Compose reads the variable from the `--env-file` (verified against
+# compose v5.3, 2026-09-19), a duplicate key in that file is last-wins and
+# silent, and a `--profile` flag on the command line REPLACES the value rather
+# than adding to it — which is what lets `--profile gpu --profile tailscale`
+# render this host's frontend from a .env.example that says `stock`.
+#
+# WHY `stock` IS A PROFILE AND NOT THE UN-PROFILED DEFAULT. It would be nicer
+# if the stock service simply had no `profiles:` key and `--profile gpu` swapped
+# it out. Compose cannot do that: `--profile` only ADDS to the active set, never
+# subtracts, so an un-profiled `openwebui-stock` stays active alongside
+# `openwebui` — and because both declare `container_name: openwebui`, the
+# project then fails to render at all (`container name "openwebui" is already
+# in use by service ...`, exit 1). The reviewer built that alternative and it
+# fails exactly there. Hence three profiles, with `stock` named explicitly.
+#
+# WITHOUT THIS PLANE'S PROFILES IN THAT VALUE, every lifecycle and repair path
+# here is broken — measured against this file, 2026-09-19:
+#   `up -d`            starts openwebui-backup and NOTHING ELSE;
+#   `down`             removes openwebui-backup and LEAVES openwebui and
+#                      tailscale running (compose only tears down services
+#                      whose profile is active), so a "clean" teardown is not;
+#   `... tailscale`    ANY verb naming tailscale — `up -d tailscale`,
+#                      `stop`/`start`/`restart`/`rm`/`ps`/`config`, and
+#                      `up -d --force-recreate --no-deps tailscale` — exits 1
+#                      with `no such service: openwebui`. Naming a service
+#                      activates ONLY that service's own profile, so
+#                      `network_mode: service:openwebui` and
+#                      `depends_on: openwebui` point at a service the project
+#                      does not contain, and compose refuses to LOAD it.
+#                      `--no-deps` does not help: the reference is resolved at
+#                      project load, before deps are considered.
+#   `... openwebui`    survives, alone among them, because the gpu definition
+#                      names nothing outside its own profile — so
+#                      `restart openwebui` and `build --no-cache openwebui`
+#                      still work.
+# That means `scripts/checks/stack-watchdog.ps1`'s seven tailscale repair calls
+# (and the two advice strings that print the same commands),
+# `scripts/recovery/emergency-recovery.ps1` (both its whole-project verbs and
+# its `restart tailscale`), `scripts/recovery/quick-fixes.bat`'s four
+# (`restart tailscale`, `build --no-cache tailscale`, and two `up -d
+# tailscale`) and `backup/openwebui-restore.sh`'s documented
+# `stop tailscale openwebui` all exit 1 until the value is right — silently, in
+# the watchdog's case, since it pipes them to Out-Null. The repo's own
+# `scripts/checks/check-watchdog-repair-targets.ps1` reports exactly this
+# (`tailscale` / `tailscale-backup` NOT DECLARED) and is the check to run after
+# editing .env.
+# TWO callers do NOT depend on the value, because they pass the profiles
+# themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend and
+# tailscale entries, as the portal and agent-org entries there already did) and
+# the frontend recipe in `documentation/runbooks/restore-from-snapshot.md`.
+# Both were given `--profile gpu --profile tailscale` here, and both exit 0
+# against a profile-less env (measured).
+#
+# WHY TWO openwebui SERVICE DEFINITIONS, AND NOT ONE WITH ENV-DRIVEN GPU BITS.
+# Compose can gate a SERVICE on a profile; it cannot gate a FIELD. Interpolation
+# reaches scalars only, so neither the `build:` block nor
+# `deploy.resources.reservations.devices` can be made to vanish when a variable
+# is unset — and those two are exactly what stops a fresh clone (an unwanted
+# CUDA build, then `could not select device driver "nvidia"`). Both render
+# criteria run the SAME env file and differ only in the `--profile` flags, so
+# service activation is the only lever there is: hence one service per shape.
+# They share `container_name: openwebui`, the `openwebui-data` volume and the
+# :3000 port, so exactly one may be active — turning on `stock` and `gpu`
+# together is refused by `docker compose config` ("container name ... is already
+# in use"), loudly, before anything starts.
+#
+# The GPU definition keeps the service key `openwebui` deliberately: the
+# recovery, backup and restore scripts address it by that key
+# (emergency-recovery.ps1, restore-from-snapshot.ps1, backup/openwebui-restore.sh),
+# and renaming it would have made every one of them profile-dependent. The
+# fresh-clone variant is the one that carries the new key.
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
 #   docker compose -f frontend/docker-compose.yml --env-file .env up -d
@@ -17,7 +112,49 @@
 name: frontend
 
 services:
+  # --- FRESH CLONE (profile: stock) ------------------------------------------
+  # Stock upstream image, no build, no GPU, no anchor network, no other plane.
+  # Same container_name / port / data volume as the gpu definition, so a host
+  # can move between the two without touching webui.db. Everything the gpu
+  # service carries that needs another plane (the llm-net aliases, the
+  # status-pipe code mount, the search-gateway wiring, OWUI's LiteLLM virtual
+  # key) is deliberately absent here: none of it resolves on a clone with
+  # nothing else running, and OWUI's own defaults are correct without it.
+  openwebui-stock:
+    profiles: [ stock ]
+    # Pinned, and the same base the CUDA image is built FROM
+    # (Dockerfile.openwebui-gpu line 1) — so `stock` and `gpu` are the same
+    # Open WebUI release, differing only in the torch wheels.
+    image: ${OWUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0}
+    container_name: openwebui
+    ports:
+      - "127.0.0.1:3000:8080" # Bind to localhost only
+    networks:
+      - owui-net
+    volumes:
+      - openwebui-data:/app/backend/data
+      - ../config:/app/config:ro # Read-only config
+    environment:
+      - TZ=America/New_York
+      # Same fail-loud guard as the gpu definition: a recreate WITHOUT this key
+      # rotates it and breaks every encrypted-at-rest value in webui.db.
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set via --env-file .env (copy .env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: false # OpenWebUI needs write access for temp files
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
+      interval: 15s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+  # --- THIS HOST (profile: gpu) ----------------------------------------------
   openwebui:
+    profiles: [ gpu ]
     build:
       context: ..
       dockerfile: Dockerfile.openwebui-gpu
@@ -33,6 +170,13 @@ services:
       - default
       - llm-net
       - app-net               # plan §7.4 — portal Caddy reaches openwebui:8080 here
+      # Project-local net, added 2026-09-19 with the profiles: it is the ONE
+      # network openwebui-backup can share with BOTH openwebui definitions
+      # (its script probes `nc -z openwebui 8080`, and its entrypoint `apk add`s
+      # pigz, so it needs name resolution plus egress - nothing an anchor
+      # network provides that a project bridge does not). The three external
+      # seams above are untouched.
+      - owui-net
     volumes:
       - openwebui-data:/app/backend/data
       - ../config:/app/config:ro # Read-only config
@@ -126,12 +270,18 @@ services:
       start_period: 60s
 
   tailscale:
+    profiles: [ tailscale ]
     build:
       context: ..
       dockerfile: dockerfile.tailscale
     # Pinned like openwebui (retagged from ai-stack-tailscale at K.5).
     image: tailscale:local
     container_name: tailscale
+    # This names the `gpu` definition, so the tailscale profile is usable only
+    # together with gpu; `--profile tailscale` alone is refused by compose
+    # ("depends on undefined service openwebui"), which is the correct answer —
+    # there would be no netns to join. entrypoint.sh is unchanged by the
+    # profile split.
     network_mode: service:openwebui
     # NO env_file HERE, deliberately (2026-08-28) - see coder/docker-compose.yml for the
     # full account. Of everything `env_file: ../.env` used to inject, this service reads
@@ -203,7 +353,15 @@ services:
       - ../backups/openwebui:/backups
       - ../backup/openwebui-backup.sh:/scripts/backup.sh:ro
     networks:
-      - default
+      # owui-net, not the anchor's ai-stack_default: this sidecar carries no
+      # profile (it backs up the data volume in EVERY deployment), so the only
+      # network it may name is the one both openwebui definitions are on. The
+      # backup SCRIPT's one network call is `nc -z openwebui 8080`
+      # (backup/openwebui-backup.sh:78), which owui-net answers by container
+      # name under either profile; the compose `command` below also does an
+      # `apk add pigz`, which needs plain egress - a project-owned bridge gives
+      # it that exactly as ai-stack_default did.
+      - owui-net
     environment:
       - BACKUP_DIR=/backups
       - DATA_DIR=/data
@@ -235,14 +393,25 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # One entry per openwebui definition, both `required: false`: exactly one of
+    # them is ever active, and WITHOUT `required: false` compose refuses the
+    # whole project ("depends on undefined service") whenever the other is off.
+    # `required: false` does not weaken the wait — when the named service IS
+    # active the service_healthy condition is still enforced (verified against
+    # compose v5.3, 2026-09-19).
     depends_on:
       openwebui:
         condition: service_healthy
+        required: false
+      openwebui-stock:
+        condition: service_healthy
+        required: false
 
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   tailscale-backup:
+    profiles: [ tailscale ]
     image: alpine:3.21
     container_name: tailscale-backup
     volumes:
@@ -254,10 +423,14 @@ services:
       - BACKUP_DIR=/backups
       - PREFIX=tailscale
       - RETAIN_COUNT=${TAILSCALE_BACKUP_RETAIN_COUNT:-2}
-      # tailscale-backup has no network attachment (the bind mount is the
-      # only source). HEALTH_TCP intentionally empty -- dir-nonempty is the
-      # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
-      # onto a shared network later.
+      # tailscale-backup needs no network: the bind mount is its only source.
+      # It still GETS one — declaring no `networks:` key means compose attaches
+      # it to the project default, which here is the external ai-stack_default
+      # (true of development's render as well; the comment used to claim "no
+      # network attachment", which the render has never agreed with).
+      # HEALTH_TCP intentionally empty -- dir-nonempty is the only precheck.
+      # Set HEALTH_TCP=tailscale:41641 etc if you wire it onto a shared
+      # network later.
       - HEALTH_TCP=
       # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
       - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily
@@ -281,12 +454,17 @@ services:
 
 volumes:
   # Migrated from ai-stack_openwebui-data 2026-08-21 (data copied; ~10 GB).
+  # Shared by BOTH openwebui definitions on purpose: a host that moves between
+  # the stock and gpu profiles keeps its webui.db.
   openwebui-data:
 
 networks:
-  # All three are anchor-owned seams — attached externally so every DNS name
-  # (openwebui for portal caddy; gateway/vpn from here; llama-cpp aliases)
-  # keeps resolving unchanged.
+  # The three ai-stack_* seams are anchor-owned and attached externally so every
+  # DNS name (openwebui for portal caddy; gateway/vpn from here; llama-cpp
+  # aliases) keeps resolving unchanged. They are declared here but only the
+  # `gpu` definition uses them, and compose does not require an UNUSED external
+  # network to exist (verified against compose v5.3, 2026-09-19) — which is what
+  # lets the `stock` profile come up on a host that has never run the anchor.
   default:
     external: true
     name: ai-stack_default
@@ -296,3 +474,6 @@ networks:
   app-net:
     external: true
     name: ai-stack_app-net
+  # PROJECT-OWNED (renders as frontend_owui-net). The only network shared by
+  # both openwebui definitions and the always-on backup sidecar.
+  owui-net:

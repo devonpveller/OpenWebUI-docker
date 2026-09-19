@@ -162,6 +162,48 @@ function Test-DockerCompose {
     }
 }
 
+function Confirm-FrontendProfiles {
+    # The frontend plane is PROFILE-GATED since 2026-09-19 (stack-layers 2.5 /
+    # D8): which services exist at all comes from COMPOSE_PROFILES in .env. If
+    # that line is missing, every frontend path in THIS script still reports
+    # success while doing nothing - `up -d` / `down` / `stop` address
+    # openwebui-backup alone, and `restart tailscale` exits 1 with `no such
+    # service: openwebui` (naming a service activates only ITS profile, and
+    # tailscale's network_mode/depends_on name the gpu-profiled openwebui).
+    # A GPU reset that tears down a sidecar, rebuilds the image and never
+    # recreates openwebui is the worst version of that. This is the loud line.
+    #
+    # It deliberately does NOT pass the profiles itself. A fixed
+    # `--profile gpu --profile tailscale` here would be WRONG on a `stock`
+    # host: it would start the CUDA build and reserve an NVIDIA device, the
+    # exact failure the profile split exists to remove. The profile set is a
+    # property of the HOST and belongs in that host's .env; this only checks
+    # that it is there. (scripts\backup\restore-from-snapshot.ps1 DOES pass
+    # them, because its catalog entries describe one host's deployment by
+    # design, as the portal and agent-org entries there already did.)
+    #
+    # Non-fatal by design - recovery must still run, loudly degraded rather
+    # than refused. cmd /c so compose's stderr cannot become a PS 5.1
+    # NativeCommandError.
+    try {
+        $svc = (cmd /c "docker compose -f $($Script:FrontendCompose) --env-file .env config --services 2>nul") -join "`n"
+        if (-not $svc) {
+            Write-Log "WARN" "Could not render the frontend plane to check its profiles - continuing"
+            return $true
+        }
+        if ($svc -notmatch '(?m)^openwebui(-stock)?\s*$') {
+            $list = (($svc -split "`n") | Where-Object { $_ }) -join ', '
+            Write-Log "ERROR" "FRONTEND PROFILES MISSING: the frontend plane renders no Open WebUI service (got: $list). Every frontend up/down/stop below will address openwebui-backup ONLY, and any command naming tailscale will exit 1 with 'no such service: openwebui'. FIX: put the frontend's profiles into COMPOSE_PROFILES in .env - this host's FULL value is local,gpu,tailscale, and `gpu,tailscale` alone would drop the inference backends (one authoritative section at the top of .env.example lists every plane's profiles). Then re-run; verify with scripts\checks\check-watchdog-repair-targets.ps1."
+            return $false
+        }
+    }
+    catch {
+        Write-Log "WARN" "Frontend profile check failed ($($_.Exception.Message)) - continuing"
+    }
+    return $true
+}
+
+
 function Test-OB1Available {
     # OB1 is an optional, separately-deployed stack. Recovery only drives it
     # when its compose file is present in the workspace.
@@ -562,6 +604,10 @@ function Invoke-MinimalRecovery {
     Write-Log "INFO" "MINIMAL RECOVERY - GENTLE RESTART"
     Write-Log "INFO" "========================================="
 
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # or everything below quietly addresses openwebui-backup and nothing else.
+    Confirm-FrontendProfiles | Out-Null
+
     Write-Log "INFO" "Attempting gentle service restart..."
 
     # Just restart services without destroying containers.
@@ -715,6 +761,10 @@ function Invoke-EmergencyRecovery {
     if (-not (Test-DockerCompose)) {
         throw "Docker Compose is not available"
     }
+
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # or everything below quietly addresses openwebui-backup and nothing else.
+    Confirm-FrontendProfiles | Out-Null
 
     # Check current status
     Write-Log "INFO" "Current container status:"
@@ -898,6 +948,10 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "NUCLEAR RECOVERY - FULL STACK RESTART"
     Write-Log "WARN" "========================================="
 
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # or everything below quietly addresses openwebui-backup and nothing else.
+    Confirm-FrontendProfiles | Out-Null
+
     # CRITICAL: Last-chance diagnostic check
     Write-Log "INFO" "Performing final diagnostic before nuclear option..."
     if (Test-BasicConnectivity) {
@@ -1003,6 +1057,10 @@ function Invoke-GPUReset {
     Write-Log "INFO" "========================================="
     Write-Log "INFO" "GPU RECOVERY - REBUILDING GPU SERVICES"
     Write-Log "INFO" "========================================="
+
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # or everything below quietly addresses openwebui-backup and nothing else.
+    Confirm-FrontendProfiles | Out-Null
 
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
     try { docker compose -f $Script:InferenceCompose --env-file .env down }

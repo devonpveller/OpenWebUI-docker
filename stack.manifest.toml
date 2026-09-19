@@ -116,15 +116,24 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 "8081" = "llama-cpp-upstream (loopback; probes only - never route inference here)"
 "8082" = "llama-cpp-embed-upstream (loopback; probes only)"
 
+# NOT `pending`: sl-inference-split landed it. `profiles: [local]` is live in
+# inference/compose/upstreams.yml:41,:130, queue.yml:39 and backups.yml:48, and
+# the render proves it (4 services without the profile, 8 with). Flipped here by
+# sl-frontend-solo, which is making this file's profile rows truthful as a set -
+# it is inference's row, corrected in the same pass as the frontend's.
+# Not `default = true`, for the same reason as the frontend's: a CLI --profile
+# REPLACES COMPOSE_PROFILES rather than adding to it, so a default would
+# override the host's own value.
 [planes.inference.profiles.local]
-description = "llama.cpp upstreams + llm-queue, i.e. local inference (needs the GPU and the GGUFs)"
-pending     = true   # sl-inference-split adds it
+description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
 
 # --------------------------------------------------------------------------
 [planes.frontend]
 # Open WebUI + the tailscale netns companion. NEVER restart openwebui alone.
-# requires anchor: frontend/docker-compose.yml:290-298 (ai-stack_default,
-# ai-stack_llm-net, ai-stack_app-net, all external: true).
+# requires anchor: frontend/docker-compose.yml:468-476 (ai-stack_default,
+# ai-stack_llm-net, ai-stack_app-net, all external: true). NOTE it is the `gpu`
+# profile that attaches to them; under `stock` the plane uses only its own
+# frontend_owui-net (:479) and needs no anchor network at all.
 compose  = "frontend/docker-compose.yml"
 env_file = ".env"
 lease    = "frontend"
@@ -135,24 +144,24 @@ requires = ["anchor"]
 # OTHER planes, and every one of the toggles defaults TRUE, so a default boot
 # reaches into four planes besides this one. The route table is
 # entrypoint.sh:93-105; the variables are entrypoint.sh:54-77, overridden for
-# the two that differ by frontend/docker-compose.yml:156-181.
-# inference: frontend/docker-compose.yml:156,159 (LLAMA_CPP_HOST /
+# the two that differ by frontend/docker-compose.yml:306-331.
+# inference: frontend/docker-compose.yml:306,309 (LLAMA_CPP_HOST /
 #   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
-#   LLAMA_CPP_ENABLED toggle at :158 - OWUI serves without it. Also
+#   LLAMA_CPP_ENABLED toggle at :308 - OWUI serves without it. Also
 #   entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
 #   true) -> the serve route at entrypoint.sh:103.
-# search: frontend/docker-compose.yml:97 (SEARXNG_QUERY_URL defaults to
+# search: frontend/docker-compose.yml:241 (SEARXNG_QUERY_URL defaults to
 #   http://gateway:8080/search) - web search is off without it, chat is not.
-# ob1: frontend/docker-compose.yml:162 (OPEN_NOTEBOOK_HOST defaults to
-#   open_notebook, an ob1-plane service) with :164 OPEN_NOTEBOOK_ENABLED
-#   defaulting TRUE; ports at :163,:166. Consumed by entrypoint.sh:97 and :99
+# ob1: frontend/docker-compose.yml:312 (OPEN_NOTEBOOK_HOST defaults to
+#   open_notebook, an ob1-plane service) with :314 OPEN_NOTEBOOK_ENABLED
+#   defaulting TRUE; ports at :313,:315-316. Consumed by entrypoint.sh:97 and :99
 #   (the open-notebook and open-notebook-api serve routes). The image's own
 #   fallback for the wiki route also points at ob1 (entrypoint.sh:66,
 #   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
 #   overrides it - see the portal edge below.
-# portal: frontend/docker-compose.yml:178 (QUARTZ_HOST defaults to `caddy`, a
-#   PORTAL-plane service) with :180 QUARTZ_ENABLED defaulting TRUE; the comment
-#   at :168-177 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
+# portal: frontend/docker-compose.yml:328 (QUARTZ_HOST defaults to `caddy`, a
+#   PORTAL-plane service) with :330 QUARTZ_ENABLED defaulting TRUE; the comment
+#   at :318-327 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
 #   which resolves because caddy and openwebui share ai-stack_app-net).
 #   Consumed by entrypoint.sh:101. Note this is the reverse of portal's HARD
 #   requires on frontend: the portal needs openwebui to serve its main vhost,
@@ -162,25 +171,36 @@ requires = ["anchor"]
 #   whose own comment says "agent-org compose project on llm-net, starts after
 #   us". Declared in the IMAGE (entrypoint.sh, baked into tailscale:local), not
 #   in frontend/docker-compose.yml - the compose file passes this service
-#   exactly one variable (:136-147). A reader of the compose file alone does
+#   exactly one variable (:286-297). A reader of the compose file alone does
 #   not see this edge.
 optional = ["inference", "search", "ob1", "portal", "agent-org"]
 host = [
-  "Image openwebui:local - a LOCAL CUDA build (frontend/docker-compose.yml:20-23, Dockerfile.openwebui-gpu); sl-frontend-solo makes the stock image the default",
-  "A Tailscale auth key (TAILSCALE_AUTH_KEY) for the tailnet companion; the pair is hard-wired today (frontend/docker-compose.yml:135, network_mode: service:openwebui)",
+  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:158-165, Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :252-258. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
+  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:285, network_mode: service:openwebui names the gpu definition)",
 ]
 keys = ["WEBUI_SECRET_KEY"]
 
 [planes.frontend.ports]
 "3000" = "openwebui (loopback)"
 
+# Three profiles, live in the compose file since sl-frontend-solo. At least one
+# openwebui-providing profile must be active or the plane renders nothing but
+# openwebui-backup.
+#
+# NONE is `default = true`, deliberately. A `default` profile makes the driver
+# pass `--profile ...` on every invocation, and a CLI --profile REPLACES
+# COMPOSE_PROFILES rather than adding to it - so the host's own value (set in
+# ONE authoritative section of .env.example) would be silently overridden, and
+# a `stock` host would be handed `gpu`. This is parity with stack.ps1, which
+# passes no frontend profile either and lets .env decide.
+[planes.frontend.profiles.stock]
+description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:115-153). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
+
 [planes.frontend.profiles.gpu]
-description = "CUDA image + the NVIDIA device reservation (frontend/docker-compose.yml:111-114)"
-pending     = true   # sl-frontend-solo adds it
+description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:158-165, 252-258), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
-description = "the tailscale netns companion and its state backup"
-pending     = true   # sl-frontend-solo adds it
+description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:285)"
 
 # --------------------------------------------------------------------------
 [planes.memory]
