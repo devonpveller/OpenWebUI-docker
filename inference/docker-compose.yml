@@ -35,17 +35,17 @@
 # a front door that can serve CLOUD models from a machine with no GPU. On, it is
 # the full local inference plane.
 #   * THE OPERATOR'S DEPLOYMENT RUNS WITH THE PROFILE ON. Put `local` into
-#     COMPOSE_PROFILES in .env rather than passing `--profile local` on the
+#     COMPOSE_PROFILES in inference/.env rather than `--profile local` on the
 #     command line - llm-gateway reads COMPOSE_PROFILES to decide which model
 #     groups to register, so the flag alone would start the local backends
 #     without listing their models.
-#     COMPOSE_PROFILES is ONE GLOBAL VARIABLE shared by every plane driven with
-#     `--env-file .env`, and a duplicate key in that file is last-wins and
-#     silent - so add `local` to the value, never a second assignment. The
-#     canonical values, and the single authoritative section listing every
-#     plane's profiles, are at the top of .env.example. On this host:
-#         COMPOSE_PROFILES=local,gpu,tailscale
-#     (`local` alone would silently drop the frontend's gpu + tailscale.)
+#     COMPOSE_PROFILES is per-PLANE since sl-env-split (D17): compose loads
+#     inference/.env natively from this project directory, so this plane's
+#     value carries `local` and NOTHING ELSE. A duplicate key in one env file
+#     is last-wins and silent, so there is exactly one assignment. On this
+#     host:
+#         COMPOSE_PROFILES=local
+#     (the frontend's gpu + tailscale live in frontend/.env, separately.)
 #   * What the gateway REGISTERS is assembled at container start from
 #     inference/config/litellm.config.yaml +
 #     inference/config/litellm/model_list/*.yaml: a local
@@ -53,8 +53,8 @@
 #     key is set. The rule is "never register a model whose backend is absent".
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
-#   docker compose -f inference/docker-compose.yml --env-file .env up -d
-# The ${LITELLM_DB_PASSWORD:?} guard makes a bare `up` without the env file
+#   docker compose -f inference/docker-compose.yml up -d
+# The ${LITELLM_DB_PASSWORD:?} guard makes a bare `up` without inference/.env
 # fail loud instead of starting with empty credentials.
 #
 # Seam: llm-net is OWNED by the root ai-stack anchor project (callers live

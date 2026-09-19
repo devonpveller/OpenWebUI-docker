@@ -77,7 +77,7 @@ $Driver = Join-Path $PSScriptRoot 'stack.py'
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Write-Host "stack.ps1 is a shim over $Driver and python is not on PATH." -ForegroundColor Red
     Write-Host "Install Python >= 3.11 (the driver is standard-library only), or run the compose" -ForegroundColor Red
-    Write-Host "project directly: docker compose -f <plane>/docker-compose.yml --env-file .env <verb>" -ForegroundColor Red
+    Write-Host "project directly: docker compose -f <plane>/docker-compose.yml <verb>" -ForegroundColor Red
     exit 1
 }
 

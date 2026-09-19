@@ -47,7 +47,9 @@
     "",
     "  file     - compose file, repo-root-relative. null means the project owns NO",
     "             services and nothing can be started in it (only 'ai-stack').",
-    "  env_file - extra --env-file, or null when the project needs none.",
+    "  env_file - extra --env-file, or null when the project needs none. NULL FOR",
+    "             EVERY PROJECT since sl-env-split (2026-09-19): each compose project",
+    "             directory holds its own .env and compose loads it natively.",
     "  compose  - the same thing spelled as a human-runnable command line."
   ],
   "_sidecar": [
@@ -97,7 +99,7 @@
     },
     "open-brain": {
       "plane": "ob1",
-      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values. PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
+      "note": "env_file is null, as it now is for every project: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env (since sl-env-split every plane works this way). PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
       "profiles": [
         "research",
         "wiki",
@@ -107,7 +109,7 @@
     },
     "agent-org": {
       "plane": "agent-org",
-      "note": "env_file is deliberately null, same as open-brain: compose's project directory is agent-org/docker, so it auto-loads agent-org/docker/.env. Passing the ROOT .env would override it with the wrong values. The workers/cloud slices are PROFILE-GATED: a bare `config` or `up` renders only the six always-on services, so any tool reading this file must pass --profile workers --profile cloud to see the rest.",
+      "note": "env_file is null, as it now is for every project: compose's project directory is agent-org/docker, so it auto-loads agent-org/docker/.env. The workers/cloud slices are PROFILE-GATED: a bare `config` or `up` renders only the six always-on services, so any tool reading this file must pass --profile workers --profile cloud to see the rest.",
       "profiles": [
         "workers",
         "cloud"
@@ -121,7 +123,7 @@
         "project": "frontend",
         "critical": true,
         "host_health": "http://127.0.0.1:3000/health",
-        "note": "PROFILE-GATED since 2026-09-19 (stack-layers 2.5 / D8): this ONE container is produced by service `openwebui` under the `gpu` profile (this host) or `openwebui-stock` under the `stock` profile (a fresh clone). No 'service' field, because the right key depends on which profile the deployment runs; the implied key `openwebui` is correct wherever COMPOSE_PROFILES includes gpu, which is every host that runs the watchdog. Any tool rendering this plane must pass --profile gpu --profile tailscale (or have COMPOSE_PROFILES in .env) or it sees only openwebui-stock + openwebui-backup."
+        "note": "PROFILE-GATED since 2026-09-19 (stack-layers 2.5 / D8): this ONE container is produced by service `openwebui` under the `gpu` profile (this host) or `openwebui-stock` under the `stock` profile (a fresh clone). No 'service' field, because the right key depends on which profile the deployment runs; the implied key `openwebui` is correct wherever COMPOSE_PROFILES includes gpu, which is every host that runs the watchdog. Any tool rendering this plane must pass --profile gpu --profile tailscale (or have COMPOSE_PROFILES in frontend/.env) or it sees only openwebui-stock + openwebui-backup."
       },
       {
         "container": "tailscale",

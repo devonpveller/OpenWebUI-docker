@@ -321,7 +321,7 @@ gitignored; no `.example` exists.
    long-random-string entropy rule).
 5. **D-1 rescoped:** history now carries more than this key — the
    `.env.bak-pre-mtp` and `.env.bak-pre-qwen38` commits each held ~25 live
-   credentials (caught only by GitHub push protection; `.gitignore:4-12` rules
+   credentials (caught only by GitHub push protection; `.gitignore:11-19` rules
    added after). If a history scrub is ever done, those commits are the
    driver, not just A.1.
 
@@ -358,11 +358,11 @@ Watchtower for the explicit update runbook — the case is now stronger).
 | `.claude/settings.local.json` tracked + ignored (`.gitignore:61`) | still open | `git rm --cached` |
 | `open-notebook-backup` hardcoded root/root | still open, now `docker-compose.yml:1387-1388` | switch to `${SURREAL_USER}`/`${SURREAL_PASSWORD}` |
 | `.env.example` drift | **grew: 58 vars missing**, incl. the 8 v2 named **and secret `WEBUI_SECRET_KEY`** (compose:23 — a fresh clone silently breaks encrypted-at-rest values), `LLM_QUEUE_*` ×10, `LLAMA_*`, backup knobs; line 1 still `OLLAMA_HOST` | regenerate the file from compose `${VAR}` refs; drop the ollama line |
-| `backup/` allowlist rot | **partially fixed** (`generic-tar-backup.sh`, `pg-backup.sh` committed in `eca57da`); **6 live files still untracked**: `open-notebook-backup.sh`, `openbrain-db-backup.sh`, `openbrain-wiki-backup.sh`, `Dockerfile`, `Dockerfile.postgres`, `Dockerfile.surreal` — a fresh clone still cannot build/run those sidecars | extend `.gitignore:47-48` re-includes; commit all 6 |
+| `backup/` allowlist rot | **partially fixed** (`generic-tar-backup.sh`, `pg-backup.sh` committed in `eca57da`); **6 live files still untracked**: `open-notebook-backup.sh`, `openbrain-db-backup.sh`, `openbrain-wiki-backup.sh`, `Dockerfile`, `Dockerfile.postgres`, `Dockerfile.surreal` — a fresh clone still cannot build/run those sidecars | extend `.gitignore:54-55` re-includes; commit all 6 |
 | `config/alerter` cred duplication | still open; compose mounts the `secrets/` copies (:1646-1647) but `:1645` still bind-mounts the dup dir RW into `/app` | keep `secrets/` as home; remove `config/alerter/{credentials,token}.json`; keep the code files |
 | SECURITY.md scope gap | untouched since 2026-05-31; covers none of A.1–A.3; `:22` "no docker.sock in the portal slice" is technically-true-and-misleading | update after A.1–A.3 land |
 | **NEW: stale `.git/hooks/pre-commit`** | live hook is `.githooks/` (via `core.hooksPath`), but the old 2-check copy in `.git/hooks/` remains — and a fresh clone that doesn't set `core.hooksPath` gets **no secret guard at all** | delete the stale copy; add a bootstrap note/script (`git config core.hooksPath .githooks`) to README + CLAUDE.md |
-| **NEW: `.mcp.json` literal token on disk** | gitignored (`.gitignore:27`) but holds the live `gw-` key in plaintext; same for `OB1/docker/mcpo*.config.json` (`MCP_ACCESS_KEY`) | after rotation, prefer env indirection where the client supports it; at minimum document these as secret-bearing files in SECURITY.md |
+| **NEW: `.mcp.json` literal token on disk** | gitignored (`.gitignore:34`) but holds the live `gw-` key in plaintext; same for `OB1/docker/mcpo*.config.json` (`MCP_ACCESS_KEY`) | after rotation, prefer env indirection where the client supports it; at minimum document these as secret-bearing files in SECURITY.md |
 
 ---
 

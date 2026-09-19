@@ -95,20 +95,22 @@ Preferred — the plane driver, which knows the ordering:
 .\scripts\stack\stack.ps1 health          # probes http://127.0.0.1:8060/health
 ```
 
-Manual, **from the repo root** (compose resolves `--env-file` against your cwd
-but every `context:` and bind path against the *compose file*, so the root is
-the only cwd where both are correct):
+Manual, **from the repo root** (every `context:` and bind path resolves against
+the *compose file*, and the `-f memory/docker-compose.yml` path below is written
+relative to the root; `memory/.env` is found wherever you stand, because compose
+loads it from the PROJECT DIRECTORY, not from your cwd):
 
 ```powershell
-docker compose -f memory/docker-compose.yml --env-file .env up -d
-docker compose -f memory/docker-compose.yml --env-file .env ps
-docker compose -f memory/docker-compose.yml --env-file .env down
+docker compose -f memory/docker-compose.yml up -d
+docker compose -f memory/docker-compose.yml ps
+docker compose -f memory/docker-compose.yml down
 ```
 
-A bare `up` without `--env-file` fails loudly on the `${MCP_API_KEY:?}` guard —
-by design. Note the asymmetry: `MNEMORY_GATEWAY_KEY`, `MCP_API_KEYS` and
-`MNEMORY_CLOUD_USER` have **no** `:?` guard, so a partially-populated `.env`
-gives you a gateway with an empty key instead of a hard failure.
+A bare `up` without `memory/.env` (copy `memory/.env.example`) fails loudly on
+the `${MCP_API_KEY:?}` guard — by design. Note the asymmetry:
+`MNEMORY_GATEWAY_KEY`, `MCP_API_KEYS` and `MNEMORY_CLOUD_USER` have **no** `:?`
+guard, so a partially-populated file gives you a gateway with an empty key
+instead of a hard failure.
 
 After a crash or a netns break, use the ordered driver instead:
 `.\scripts\recovery\emergency-recovery.ps1 recover` — it starts this plane as a

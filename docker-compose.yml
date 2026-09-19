@@ -6,9 +6,17 @@
 # cold host (scripts/stack/stack.ps1 does this for you).
 #
 # The service trees are self-contained compose projects, each driven with
-# `docker compose -f <dir>/docker-compose.yml --env-file .env ...` from this
-# directory (single root .env; every plane file carries a ${VAR:?} fail-loud
-# guard against running without it):
+# `docker compose -f <dir>/docker-compose.yml ...` from this directory. Since
+# sl-env-split (2026-09-19) EACH OWNS ITS ENV: compose loads `<dir>/.env`
+# natively from the project directory, and EVERY plane below REFUSES to render
+# when its own file is absent - by three different mechanisms (all measured
+# 2026-09-19, reading the process exit code and not a pipeline's):
+#   the six in-repo planes  a ${VAR:?} guard. The portal's is new with this
+#                           change - it had none, and for one revision it
+#                           rendered clean with every secret blank.
+#   agent-org/docker/       a service-level `env_file: .env` on agent-bridge
+#                           (:109-110), which compose stats and refuses.
+#   OB1/docker/             its own ${OPS_GATEWAY_KEY:?} guard (:252).
 #
 #   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)

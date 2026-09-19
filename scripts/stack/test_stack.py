@@ -181,8 +181,8 @@ def test_no_state_file_up_dry_run_is_anchor_then_frontend_and_runs_nothing(root)
     code, out, recorder = run(root, "up", "--dry-run")
     assert code == 0
     assert docker_lines(out) == [
-        "docker compose -f docker-compose.yml --env-file .env up -d",
-        "docker compose -f frontend/docker-compose.yml --env-file .env up -d",
+        "docker compose -f docker-compose.yml up -d",
+        "docker compose -f frontend/docker-compose.yml up -d",
     ]
     assert recorder.commands == []  # a dry-run that starts a container FAILS
 
@@ -191,11 +191,11 @@ def test_up_without_dry_run_goes_through_the_runner(root):
     code, out, recorder = run(root, "up")
     assert code == 0
     assert recorder.lines == docker_lines(out)
-    assert recorder.lines[0].endswith("docker-compose.yml --env-file .env up -d")
+    assert recorder.lines[0].endswith("docker-compose.yml up -d")
 
 
 def test_up_stops_at_the_first_failing_plane(root):
-    failing = ("docker", "compose", "-f", "docker-compose.yml", "--env-file", ".env", "up", "-d")
+    failing = ("docker", "compose", "-f", "docker-compose.yml", "up", "-d")
     recorder = Recorder({failing: 17})
     code, out, recorder = run(root, "up", runner=recorder)
     assert code == stack.EXIT_REFUSED
@@ -278,7 +278,7 @@ def test_enable_search_with_a_blank_key_refuses_and_names_the_key(root):
     assert "blank" in out
     # and, like the requires-refusal, it names a remedy: the file to edit and a
     # command that lists every such key.
-    assert "Set them in .env" in out
+    assert "Set them in search/.env" in out
     assert "stack.py doctor" in out
 
 
@@ -315,7 +315,7 @@ def test_restart_one_plane_restarts_only_that_plane(root):
     code, out, _ = run(root, "restart", "frontend", "--dry-run")
     assert code == 0
     assert docker_lines(out) == [
-        "docker compose -f frontend/docker-compose.yml --env-file .env restart"
+        "docker compose -f frontend/docker-compose.yml restart"
     ]
 
 
@@ -400,7 +400,7 @@ def test_the_anchor_is_implicit_never_written_to_state_but_always_started(root):
     run(root, "enable", "research")
     assert "anchor" not in state_of(root)["planes"]
     _, out, _ = run(root, "up", "--dry-run")
-    assert docker_lines(out)[0] == "docker compose -f docker-compose.yml --env-file .env up -d"
+    assert docker_lines(out)[0] == "docker compose -f docker-compose.yml up -d"
 
 
 def test_disable_says_so_when_a_name_is_ambiguous_too(root):
@@ -441,13 +441,18 @@ def test_enable_a_product_refuses_on_any_member_planes_blank_key(root):
 # --------------------------------------------------------------------------
 
 
-def test_ob1_and_agent_org_pass_no_env_file_and_read_their_own(root):
+def test_no_plane_passes_an_env_file_and_each_reads_its_own(root):
     manifest = stack.Manifest.load(REAL_MANIFEST)
     assert manifest.env_file("ob1") is None
     assert manifest.env_path(REPO_ROOT, "ob1") == REPO_ROOT / "OB1" / "docker" / ".env"
     assert manifest.env_file("agent-org") is None
     assert manifest.env_path(REPO_ROOT, "agent-org") == REPO_ROOT / "agent-org" / "docker" / ".env"
-    assert manifest.env_file("frontend") == ".env"
+    assert manifest.env_file("frontend") is None
+    assert manifest.env_path(REPO_ROOT, "frontend") == REPO_ROOT / "frontend" / ".env"
+    # sl-env-split: the anchor is the ONLY plane whose env file is the repo root
+    # one, and it gets there the same way - its project directory IS the root.
+    assert all(manifest.env_file(p) is None for p in manifest.order)
+    assert manifest.env_path(REPO_ROOT, "anchor") == REPO_ROOT / ".env"
 
 
 def test_a_bare_ob1_plane_passes_its_default_profile_and_what_that_needs(root):
@@ -630,8 +635,8 @@ def test_status_only_ever_runs_ps(root):
     code, out, recorder = run(root, "status")
     assert code == 0
     assert recorder.lines == [
-        "docker compose -f inference/docker-compose.yml --env-file .env ps",
-        "docker compose -f frontend/docker-compose.yml --env-file .env ps",
+        "docker compose -f inference/docker-compose.yml ps",
+        "docker compose -f frontend/docker-compose.yml ps",
     ]
     assert all(cmd[-1] == "ps" for cmd in recorder.commands)
 
@@ -944,7 +949,7 @@ def test_up_all_never_starts_the_manual_plane(root):
 def test_up_one_plane_starts_only_that_plane_and_names_what_it_assumes(root):
     code, out, _r = run(root, "up", "coder", "--dry-run")
     assert code == 0
-    assert docker_lines(out) == ["docker compose -f coder/docker-compose.yml --env-file .env up -d"]
+    assert docker_lines(out) == ["docker compose -f coder/docker-compose.yml up -d"]
     assert "# note: coder requires anchor, inference; this starts only coder" in out
 
 
@@ -957,7 +962,7 @@ def test_a_plane_and_all_together_is_refused(root):
 def test_status_reports_the_enabled_planes_and_does_not_pull_in_the_anchor(root):
     run(root, "init", "--planes", "memory")
     _code, _out, recorder = run(root, "status")
-    assert recorder.lines == ["docker compose -f memory/docker-compose.yml --env-file .env ps"]
+    assert recorder.lines == ["docker compose -f memory/docker-compose.yml ps"]
 
 
 # --------------------------------------------------------------------------
@@ -978,24 +983,21 @@ def test_status_reports_the_enabled_planes_and_does_not_pull_in_the_anchor(root)
 MINI_MANIFEST = """
 [planes.anchor]
 compose  = "docker-compose.yml"
-env_file = ".env"
 implicit = true
 requires = []
 [planes.anchor.ports]
 
 [planes.inference]
 compose  = "inference/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 [planes.inference.ports]
 "8081" = "llama-cpp-upstream"
 [planes.inference.profiles.local]
-description = "the llama.cpp upstreams; COMPOSE_PROFILES in the root .env turns it on"
+description = "the llama.cpp upstreams; COMPOSE_PROFILES in inference/.env turns it on"
 opt_in      = true
 
 [planes.frontend]
 compose  = "frontend/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 [planes.frontend.ports]
 "3000" = "openwebui"
@@ -1005,21 +1007,18 @@ pending     = true
 
 [planes.memory]
 compose  = "memory/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 [planes.memory.ports]
 "8060" = "mnemory-cloud-gateway"
 
 [planes.search]
 compose  = "search/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 [planes.search.ports]
 "8085" = "gateway"
 
 [planes.coder]
 compose  = "coder/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 [planes.coder.ports]
 "9091" = "little-coder metrics"
@@ -1047,7 +1046,6 @@ opt_in      = true
 
 [planes.portal]
 compose  = "portal/docker-compose.yml"
-env_file = ".env"
 requires = ["anchor"]
 manual   = "scripts/portal/portal-on.ps1"
 [planes.portal.ports]
@@ -1207,10 +1205,11 @@ def test_inventory_write_builds_the_file_from_the_manifest_the_sidecar_and_the_r
         "compose": "docker compose", "file": None, "env_file": None, "note": "pure network anchor",
     }
     assert data["projects"]["inference"] == {
-        "compose": "docker compose -f inference/docker-compose.yml --env-file .env",
-        "file": "inference/docker-compose.yml", "env_file": ".env",
+        "compose": "docker compose -f inference/docker-compose.yml",
+        "file": "inference/docker-compose.yml", "env_file": None,
     }
-    # ob1 and agent-org carry no --env-file: compose loads their own.
+    # NO plane carries an --env-file since sl-env-split: every compose project
+    # loads the .env in its own project directory.
     assert data["projects"]["open-brain"]["env_file"] is None
     assert data["projects"]["agent-org"]["compose"] == \
         "docker compose -f agent-org/docker/docker-compose.yml"
@@ -1438,12 +1437,15 @@ def test_the_profile_flags_each_plane_gets_are_pinned(root):
 def test_a_planes_compose_profiles_are_unioned_into_any_flags_the_driver_passes(root):
     """`docker compose --profile X` REPLACES COMPOSE_PROFILES, it does not add.
 
-    Measured on compose v5.3.0: the inference plane renders 8 services with the
-    root .env alone (COMPOSE_PROFILES=local,...) and 4 with that same env plus
+    Measured on compose v5.3.0: the inference plane renders 8 services with its
+    own env file alone (COMPOSE_PROFILES=local) and 4 with that same env plus
     one unrelated --profile flag. So whenever the driver passes any flag, it has
     to pass the env's profiles too, or it silently starts a subset.
+
+    The env file is the PLANE's own since sl-env-split (D17), which is what
+    stops the frontend's `gpu` from ever reaching the inference render.
     """
-    env = root / ".env"
+    env = root / "inference" / ".env"
     env.write_text(env.read_text(encoding="utf-8") + "\nCOMPOSE_PROFILES=local,gpu\n", encoding="utf-8")
     manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
     state = stack.State.default()
@@ -1639,7 +1641,7 @@ def test_the_same_mismatch_in_a_NON_submodule_plane_is_still_drift(mini_root):
     manifest_path = mini_root / stack.MANIFEST_NAME
     manifest_path.write_text(
         manifest_path.read_text(encoding="utf-8").replace(
-            'description = "the llama.cpp upstreams; COMPOSE_PROFILES in the root .env turns it on"',
+            'description = "the llama.cpp upstreams; COMPOSE_PROFILES in inference/.env turns it on"',
             'description = "a profile the compose file does not have"',
         ),
         encoding="utf-8",
@@ -1714,7 +1716,8 @@ def test_the_skip_decision_reads_the_RENDER_not_the_env_file(root):
     renders = [c for c in host.calls if c[:3] == ["docker", "compose", "-f"]]
     assert renders and renders[0][3] == "frontend/docker-compose.yml"
     assert renders[0][-2:] == ["config", "--services"]
-    assert "--env-file" in renders[0]   # compose applies COMPOSE_PROFILES itself
+    assert "--env-file" not in renders[0]   # frontend/.env loads natively; compose
+                                           # applies COMPOSE_PROFILES from it itself
 
 
 def test_an_unreadable_frontend_render_probes_anyway_and_says_why(root):

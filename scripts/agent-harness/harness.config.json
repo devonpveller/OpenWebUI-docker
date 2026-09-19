@@ -416,11 +416,22 @@
       "fail only in worktrees. An ARRAY of lines, like _comment above: a JSON string",
       "cannot contain a raw newline, and the first version of this note did. PowerShell",
       "ConvertFrom-Json accepted it; Python json.loads did not - and this file has BOTH",
-      "readers (config.ps1 and config.py), so it would have broken the bridge alone."
+      "readers (config.ps1 and config.py), so it would have broken the bridge alone.",
+      "SIX PLANE FILES ADDED 2026-09-19 (sl-env-split): each compose project now loads",
+      "`<plane>/.env` natively from its own project directory, so a worktree without",
+      "them renders NOTHING for that plane - the same failure the OB1 recipe files",
+      "caused, once per plane. Narrowing this list is still the supported way to keep",
+      "a plane's secrets out of an agent tree; that agent then cannot render it."
     ],
     "env_files": [
       ".env",
       ".env.test",
+      "frontend/.env",
+      "inference/.env",
+      "memory/.env",
+      "search/.env",
+      "coder/.env",
+      "portal/.env",
       "OB1/docker/.env",
       "OB1/recipes/daily-digest/.env",
       "OB1/recipes/email-history-import/.env",

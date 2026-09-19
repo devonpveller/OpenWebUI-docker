@@ -23,7 +23,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "common.ps1")
-$EnvFiles = @(".env", ".env.test", "OB1/docker/.env")
+# The LIST is configuration, exactly as in new-worktree.ps1 - which is where it
+# already lived while this script carried a hardcoded copy of it. The two had
+# ALREADY drifted before sl-env-split touched either (this list was missing the
+# two OB1 recipe files and agent-org/docker/.env, so a sync silently refreshed
+# three of six files and reported success), and the six plane files added on
+# 2026-09-19 would have made that four of twelve. Read the setting instead.
+$EnvFiles = @(Get-HarnessSetting "worktree.env_files" @(".env"))
 
 function Say([string]$Text, [string]$Color = "Gray") {
     if (-not $Quiet) { Write-Host $Text -ForegroundColor $Color }

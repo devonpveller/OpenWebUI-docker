@@ -428,7 +428,7 @@ function Get-PsRegions($lines) {
     # so a script whose git calls sit at file scope - `& git.exe push origin HEAD | Out-Null`
     # with no function anywhere - reported "ok: every git-calling function can report a
     # failure" (reproduced 2026-08-30), and a live in-glob instance,
-    # scripts/checks/check-project-configs.ps1:18, went unflagged.
+    # scripts/checks/check-project-configs.ps1:19, went unflagged.
     #
     # DISCLOSED LIMITS: a function declared at column 0 opens a region; an INDENTED (nested)
     # function stays inside its enclosing region and is attributed to it - which is not

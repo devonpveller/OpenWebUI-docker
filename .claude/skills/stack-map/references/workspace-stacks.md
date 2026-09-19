@@ -123,14 +123,15 @@ Run with: `docker compose ...` from the workspace root.
 
 **PROFILE-GATED since 2026-09-19 (stack-layers §2.5 / D8).** This plane renders
 differently depending on `COMPOSE_PROFILES`, and **the operator's deployment is
-not the default**. That variable is GLOBAL — every plane driven with
-`--env-file .env` reads the same value, so it is set in ONE authoritative
-section at the top of `.env.example` (D15) and **this host's full value is
-`COMPOSE_PROFILES=local,gpu,tailscale`**: `local` is the inference plane's GPU
-backends, and setting `gpu,tailscale` alone would silently take them down. A
-duplicate assignment in an env file is last-wins and silent, which is why there
-is only one. Without the frontend's two profiles in that value,
-`docker compose -f frontend/docker-compose.yml --env-file .env up -d` starts
+not the default**. Since `sl-env-split` (2026-09-19, D17) the variable is
+PER PLANE: compose loads `frontend/.env` natively from this project directory,
+so **this plane's full value is `COMPOSE_PROFILES=gpu,tailscale`** and the
+inference plane's `local` lives in `inference/.env`. (It used to be one global
+assignment in the root `.env` reading `local,gpu,tailscale`, back when every
+plane was driven with the same `--env-file`.) A duplicate assignment in one env
+file is last-wins and silent, which is why there is only one per file. Without
+the frontend's two profiles in that value,
+`docker compose -f frontend/docker-compose.yml up -d` starts
 `openwebui-backup` and nothing else; `... down` leaves `openwebui` and
 `tailscale` running (compose only tears down services whose profile is active);
 and **every verb that names `tailscale` — `up -d`, `stop`, `start`, `restart`,
@@ -193,7 +194,7 @@ this project owns.
 
 > `inference/docker-compose.yml` — the LLM host is its own service tree. Drive it
 > with `scripts/stack/stack.ps1` or `docker compose -f inference/docker-compose.yml
-> --env-file .env ...` from the repo root (fail-loud without the env file).
+> ...` from the repo root (fail-loud without `inference/.env`).
 > **Split by service group 2026-09-19** (stack-layers `sl-inference-split`): the
 > spine file holds `name`, the networks and the volumes and `include:`s
 > `inference/compose/{upstreams,queue,gateway,backups}.yml`. ONE project still —
@@ -515,7 +516,7 @@ Bottom-up (start in this order; stop in reverse):
 
 1. `openwebui` (provides the network namespace for `tailscale`)
 2. **the `inference` project** (`docker compose -f inference/docker-compose.yml
-    --env-file .env up -d`) — its internal depends_on runs upstreams →
+    up -d`) — its internal depends_on runs upstreams →
     `llm-queue` → `llm-gateway-db` → `llm-gateway` (+ ui/backups); one command,
     ordered + health-gated. Needs the anchor networks (any root `up` creates
     them), and every caller in every other project needs IT

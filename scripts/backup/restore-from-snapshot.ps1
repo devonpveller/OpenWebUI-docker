@@ -73,8 +73,9 @@ function Write-Log {
 # To add a new service to the disaster-recovery flow, add an entry here.
 
 # Part K (2026-08-21): every service lives in its own compose project now, so
-# each entry names its Compose file (+ ComposeArgs where the project needs
-# --env-file or a profile). Volume targets carry the new project prefixes
+# each entry names its Compose file (+ ComposeArgs where the project needs a
+# PROFILE - no entry needs an --env-file since sl-env-split, 2026-09-19: each
+# project directory holds its own .env). Volume targets carry the project prefixes
 # (frontend_/memory_/coder_/portal_) - the old ai-stack_* volumes are the
 # superseded pre-split copies, NOT the live data.
 $catalog = [ordered]@{
@@ -101,21 +102,20 @@ $catalog = [ordered]@{
     Compose = 'frontend\docker-compose.yml'
     # The frontend plane is PROFILE-GATED (2026-09-19). Passing the profiles
     # here, as the portal ('internet') and agent-org ('workers') entries do,
-    # makes a restore independent of whether .env carries COMPOSE_PROFILES:
+    # makes a restore independent of whether frontend/.env has COMPOSE_PROFILES:
     # without them `stop tailscale` / `start tailscale` exit 1 with `no such
     # service: openwebui` - naming tailscale activates only ITS profile, and
     # its network_mode/depends_on name the gpu-profiled openwebui - so the
     # restore would log progress while restoring nothing. This catalog
     # describes THIS host's deployment; a `stock` host would carry
     # `--profile stock` and name `openwebui-stock` here.
-    ComposeArgs = @('--env-file','.env','--profile','gpu','--profile','tailscale')
+    ComposeArgs = @('--profile','gpu','--profile','tailscale')
   }
   'mnemory' = @{
     Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'memory_mnemory-data'; Type = 'volume-tar' })
     Stop    = @('mnemory','mnemory-cloud-gateway')
     Start   = @('mnemory','mnemory-cloud-gateway')
     Compose = 'memory\docker-compose.yml'
-    ComposeArgs = @('--env-file','.env')
   }
   # little-coder writes ONE archive holding all five volumes as top-level directories
   # (backup/little-coder-backup.sh: `tar czf ... -C /data .` over /data/{journals,skill,
@@ -136,7 +136,6 @@ $catalog = [ordered]@{
     Stop    = @('little-coder','open-terminal','lc-egress')
     Start   = @('lc-egress','open-terminal','little-coder')
     Compose = 'coder\docker-compose.yml'
-    ComposeArgs = @('--env-file','.env')
   }
   # (smolcrawl removed 2026-08-21: pipelines + backup retired; old archives
   #  remain on the NAS for history but there is nothing to restore INTO.)
@@ -148,7 +147,7 @@ $catalog = [ordered]@{
     # Profiles for the same reason as the 'openwebui' entry above: any verb
     # naming `tailscale` needs the gpu profile active too, or compose refuses
     # to load the project at all.
-    ComposeArgs = @('--env-file','.env','--profile','gpu','--profile','tailscale')
+    ComposeArgs = @('--profile','gpu','--profile','tailscale')
   }
   'openbrain-wiki' = @{
     Archives = @(@{ Pattern = "openbrain-wiki-*.tar.gz"; Target = 'open-brain_openbrain-wiki-data'; Type = 'volume-tar' })
@@ -185,7 +184,12 @@ $catalog = [ordered]@{
     Stop    = @('llama-cpp-upstream','llama-cpp-embed-upstream')
     Start   = @('llama-cpp-upstream','llama-cpp-embed-upstream')
     Compose = 'inference\docker-compose.yml'
-    ComposeArgs = @('--env-file','.env')
+    # `local` for the same reason the frontend entries pass gpu/tailscale: the
+    # two upstreams are PROFILE-GATED, so naming them without it exits 1 and the
+    # restore would log progress having stopped nothing. Passing the flag makes
+    # this independent of whether inference/.env carries COMPOSE_PROFILES - which
+    # matters more since sl-env-split, because that value moved files.
+    ComposeArgs = @('--profile','local')
   }
   # agent-org worker task journals (memory-plane Phase 0.3). Two volumes, two archives,
   # 1:1 - the workers are stopped together because both mounts are recreated in one pass.

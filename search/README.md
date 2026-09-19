@@ -76,12 +76,12 @@ One host port is published, and the omissions are deliberate:
 
 ## Bring it up and down
 
-Every command needs the root `.env`: the plane interpolates from it, and
-`MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard that aborts the `up` if it
-is missing. `stack.ps1` sets its own working directory and adds
-`--env-file .env` for every plane project, this one included, so it can be run
-from anywhere; **by hand, run from the repo root** so the relative
-`--env-file .env` resolves.
+Every command needs `search/.env` (copy `search/.env.example`): the plane
+interpolates from it, and `MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard
+that aborts the `up` if it is missing. Compose finds that file itself - it is
+the PROJECT DIRECTORY's `.env`, so no `--env-file` is needed and your cwd does
+not matter to it. **Still run by hand from the repo root**, because the
+`-f search/docker-compose.yml` path below is written relative to it.
 
 ```powershell
 .\scripts\stack\stack.ps1 up search        # this plane only - see the anchor note above
@@ -92,7 +92,7 @@ from anywhere; **by hand, run from the repo root** so the relative
 ```
 
 Each of those is a thin wrapper: `up search` runs
-`docker compose -f search\docker-compose.yml --env-file .env up -d` and nothing
+`docker compose -f search\docker-compose.yml up -d` and nothing
 else. `restart` maps to `docker compose restart`, which restarts the existing
 containers **without recreating them** - a changed `.env` value or compose
 setting needs an `up -d`, not a restart. `health` takes no plane argument, runs
@@ -101,9 +101,9 @@ every probe in the workspace, and exits with the number of failures.
 By hand:
 
 ```powershell
-docker compose -f search/docker-compose.yml --env-file .env up -d
-docker compose -f search/docker-compose.yml --env-file .env down
-docker compose -f search/docker-compose.yml --env-file .env config   # render/validate
+docker compose -f search/docker-compose.yml up -d
+docker compose -f search/docker-compose.yml down
+docker compose -f search/docker-compose.yml config   # render/validate
 ```
 
 `gateway` is the only image built here (`private-search-gateway:local`); the
@@ -111,8 +111,8 @@ other three are pulled. **`up -d` alone does not pick up source changes** under
 `./gateway` - build it explicitly:
 
 ```powershell
-docker compose -f search/docker-compose.yml --env-file .env build gateway
-docker compose -f search/docker-compose.yml --env-file .env up -d gateway
+docker compose -f search/docker-compose.yml build gateway
+docker compose -f search/docker-compose.yml up -d gateway
 ```
 
 Retagging `private-search-gateway:local` is a deploy, not a test. Under the
@@ -178,7 +178,7 @@ whole render.
   config is served straight out of your git working tree, and the mount is
   **`rw`**, so the container can write into your checkout: unexplained
   `git status` noise under `search/searxng/` is the container, not you.
-- Consequently `docker compose -f search/docker-compose.yml --env-file .env
+- Consequently `docker compose -f search/docker-compose.yml
   down -v` destroys nothing that matters here. Do not carry that habit over to
   `memory` or `open-brain`, where the same command is destructive.
 
@@ -236,7 +236,7 @@ under another name.
 
 | Symptom | Where to look |
 |---|---|
-| `up` aborts complaining about `MULLVAD_WG_PRIVATE_KEY` | The guard doing its job: you ran without `--env-file .env`, or the key is unset. |
+| `up` aborts complaining about `MULLVAD_WG_PRIVATE_KEY` | The guard doing its job: `search/.env` is absent, or the key is unset. |
 | `/healthz` green but `/readyz` 503 | The chain behind the gateway. Either the tunnel is still building (give SearXNG its 90 s), or redis or SearXNG is unhappy. The watchdog only restarts on `/healthz`, so a plane that is up but not working will not self-heal - somebody has to look. |
 | Searches return fewer engines than usual, without errors | Everything leaves through one exit IP, so a heavy fan-out can get the whole plane captcha'd at once. SearXNG keeps its state, engine suspensions included, in redis `db0` (`SEARXNG_REDIS_URL`); clear it with `docker exec search-redis redis-cli -n 0 FLUSHDB`. |
 | One engine in particular returns nothing | Engine enable/disable policy lives in [`searxng/settings.yml`](searxng/settings.yml), tuned for what actually answers a VPN exit IP. |

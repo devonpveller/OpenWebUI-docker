@@ -16,7 +16,7 @@ by default.
 | Project | Driven with | Contents |
 |---------|-------------|----------|
 | **Anchor** (`ai-stack`, root `docker-compose.yml`) | `docker compose up -d` (or `stack.ps1 up anchor`) | **0 services** — owns the shared `ai-stack_llm-net` / `app-net` / `default` networks every project attaches to externally |
-| **Frontend** (`frontend/`) | `stack.ps1` or `docker compose -f frontend/docker-compose.yml --env-file .env …` | `openwebui` + `tailscale` (netns pair) + their backups |
+| **Frontend** (`frontend/`) | `stack.ps1` or `docker compose -f frontend/docker-compose.yml …` | `openwebui` + `tailscale` (netns pair) + their backups |
 | **Inference** (`inference/`) | same pattern | `llm-gateway` + db/ui (LiteLLM front door, holds the aliases), `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`, 2 backups — owns `llm-backend-net` |
 | **Memory** (`memory/`) | same pattern | `mnemory`, `mnemory-cloud-gateway` (host :8060), `mnemory-backup` |
 | **Search** (`search/`) | same pattern | `vpn` (Mullvad — all egress), `redis`, `searxng`, `gateway` (host :8085) — owns `search-net` |
@@ -43,7 +43,10 @@ Enforced at commit time by `scripts/checks/check-llm-gateway-routing.ps1`.
 
 ```powershell
 git config core.hooksPath .githooks   # pre-commit: 10 checks (.githooks/pre-commit)
-Copy-Item .env.example .env           # then fill in values — WEBUI_SECRET_KEY is REQUIRED
+Copy-Item .env.example .env           # the anchor's own (NAS + T2 keys); nearly empty
+foreach ($p in 'frontend','inference','memory','search','coder','portal') {
+  Copy-Item "$p/.env.example" "$p/.env"   # EACH PLANE OWNS ITS ENV (stack-layers D10)
+}                                     # then fill in — frontend WEBUI_SECRET_KEY is REQUIRED
 .\scripts\stack\stack.ps1 up          # every project, dependency order (anchor networks first)
 .\scripts\stack\stack.ps1 status      # per-project container states
 ```
@@ -53,8 +56,14 @@ around a network anchor**: the root `docker-compose.yml` owns only the shared
 `ai-stack_*` networks (0 services), and each service tree is its own project
 (`frontend/`, `inference/`, `memory/`, `search/`, `coder/`, `portal/`,
 `OB1/docker/`, `agent-org/docker/`). Drive one plane manually with
-`docker compose -f <plane>/docker-compose.yml --env-file .env ...` from this
-directory — the `--env-file` is required (plane files fail loud without it).
+`docker compose -f <plane>/docker-compose.yml ...` from this
+directory. Each plane owns its environment: compose loads `<plane>/.env`
+natively from the project directory (copy `<plane>/.env.example`). No
+`--env-file` flag, from any cwd. **Every one of the eight REFUSES to render
+when its own file is absent** rather than silently blanking - the six in-repo
+planes on a `${VAR:?}` guard, `agent-org/docker/` on a service-level
+`env_file: .env`, `OB1/docker/` on its own `${OPS_GATEWAY_KEY:?}`
+(all measured 2026-09-19).
 
 `WEBUI_SECRET_KEY` encrypts values at rest in `webui.db` — pin it once and
 never rotate casually. All published ports bind to `127.0.0.1`; external
@@ -77,7 +86,7 @@ Manual recovery, escalating:
 
 ```powershell
 # One service misbehaving — restart just its plane:
-docker compose -f <plane>/docker-compose.yml --env-file .env restart <service>
+docker compose -f <plane>/docker-compose.yml restart <service>
 
 # Netns rule: NEVER restart openwebui alone — tailscale shares its network
 # namespace. Order: restart openwebui, wait healthy, then restart tailscale
@@ -113,9 +122,9 @@ scheduler idioms:
 **sleep-loop** for interval tars (runs once at container start, then every
 `BACKUP_INTERVAL` seconds) and **supercronic** for cron-timed DB dumps.
 
-**Changing a backup interval**: set the variable in the root `.env` and
+**Changing a backup interval**: set the variable in that plane's `.env` and
 recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml
---env-file .env up -d <sidecar>`). All intervals are seconds; defaults live
+up -d <sidecar>`). All intervals are seconds; defaults live
 in the compose files:
 
 | Variable | Sidecar (project) | Default |

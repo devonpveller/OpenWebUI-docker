@@ -46,9 +46,10 @@ try {
 
   # Both compose files referenced so the local-test override is also
   # known (idempotent — fine to include even in production teardown).
+  # No --env-file since sl-env-split: portal/ is the project directory, so
+  # compose loads portal/.env natively.
   $stopArgs = @('-p', 'portal',
                 '-f', (Join-Path $projectRoot 'portal\docker-compose.yml'),
-                '--env-file', (Join-Path $projectRoot '.env'),
                 '--profile', 'internet', 'stop') + $portalServices
   if ($PSCmdlet.ShouldProcess(($portalServices -join ', '), "docker compose $($stopArgs -join ' ')")) {
     docker compose @stopArgs

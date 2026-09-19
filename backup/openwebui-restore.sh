@@ -6,11 +6,11 @@ set -eu
 # (frontend_openwebui-data since Part K 2026-08-21).
 #
 # Usage (from the repo root; NETNS RULE - tailscale stops first, starts last):
-#   docker compose -f frontend/docker-compose.yml --env-file .env stop tailscale openwebui
+#   docker compose -f frontend/docker-compose.yml stop tailscale openwebui
 #   docker run --rm -v frontend_openwebui-data:/data -v ./backups/openwebui:/backups:ro \
 #     alpine sh -c "sh /backups/../../backup/openwebui-restore.sh /backups/openwebui-backup-....tar.gz"
-#   docker compose -f frontend/docker-compose.yml --env-file .env start openwebui
-#   docker compose -f frontend/docker-compose.yml --env-file .env start tailscale
+#   docker compose -f frontend/docker-compose.yml start openwebui
+#   docker compose -f frontend/docker-compose.yml start tailscale
 
 BACKUP_FILE="${1:-}"
 DATA_DIR="${DATA_DIR:-/data}"

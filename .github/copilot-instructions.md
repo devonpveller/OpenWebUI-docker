@@ -14,12 +14,12 @@ project into per-plane projects; root `ai-stack` = the network anchor):
   `llm-net`/`app-net`/`default`) + the transitional aux trio. The planes are
   their own projects since Part K (2026-08-21): `frontend/` (OWUI +
   tailscale netns pair), `inference/`, `memory/`, `search/`, `coder/` —
-  each `<plane>/docker-compose.yml`, driven with `--env-file .env`. The portal is its OWN compose project since 2026-08-21
+  each `<plane>/docker-compose.yml`; compose loads `<plane>/.env` natively (no `--env-file` since sl-env-split). The portal is its OWN compose project since 2026-08-21
   (`portal/docker-compose.yml`), driven only by `scripts/portal/portal-on.ps1`.
 - **Inference** (`inference/docker-compose.yml`, own project since K.1):
   `llm-gateway` = LiteLLM front door → `llm-queue` →
   `llama-cpp-upstream`/`llama-cpp-embed-upstream`, + gateway db/ui and the
-  llm-gateway/lm-models backups. Drive with `--env-file .env` from the root.
+  llm-gateway/lm-models backups. Drive from the root; it reads `inference/.env`.
 - **Open Brain** (`OB1/docker/docker-compose.yml`): a separate project of
   ~26 `openbrain-*` containers (incl. its own db/wiki backup sidecars),
   attaching to `ai-stack_llm-net` externally.

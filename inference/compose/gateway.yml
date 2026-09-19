@@ -89,7 +89,7 @@ services:
       # list cannot drift from what is actually running. Setting the profile with
       # the `--profile local` CLI flag instead does NOT set it here: the gateway
       # then registers no local models - the safe direction (a listed model always
-      # has a backend), but the reason to keep COMPOSE_PROFILES in .env.
+      # has a backend), but the reason to keep COMPOSE_PROFILES in inference/.env.
       - COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
       # Blank by default => no cloud model is registered and nothing changes.
       # Read inference/config/litellm/model_list/cloud.openrouter.yaml BEFORE
@@ -135,7 +135,7 @@ services:
     environment:
       - POSTGRES_DB=litellm
       - POSTGRES_USER=litellm
-      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD:?set via --env-file .env from the repo root, or scripts/stack/stack.ps1}
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD:?set in inference/.env (copy inference/.env.example), or use scripts/stack/stack.ps1}
     volumes:
       - llm-gateway-db-data:/var/lib/postgresql/data
     restart: unless-stopped

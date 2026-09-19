@@ -32,8 +32,8 @@ executor; see the Coder section.)
 
 ### Inference plane (the LiteLLM front door) — own compose project `inference` since 2026-08-21 (Part K.1)
 
-> `inference/docker-compose.yml`, driven with `--env-file .env` from the repo
-> root (or `scripts/stack/stack.ps1`). Owns `llm-backend-net` + the
+> `inference/docker-compose.yml`, driven from the repo root (or
+> `scripts/stack/stack.ps1`); compose loads `inference/.env` itself. Owns `llm-backend-net` + the
 > `inference_*` data volumes; attaches to the anchor's `ai-stack_llm-net`
 > externally, where `llm-gateway` carries the aliases. The two inference
 > backup sidecars (`llm-gateway-backup`, `lm-models-backup`) moved with it.

@@ -5,8 +5,8 @@
 # (../) and network ownership changed.
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
-#   docker compose -f search/docker-compose.yml --env-file .env up -d
-# The ${MULLVAD_WG_PRIVATE_KEY:?} guard makes a bare `up` fail loud.
+#   docker compose -f search/docker-compose.yml up -d
+# The ${MULLVAD_WG_PRIVATE_KEY:?} guard makes a bare `up` without search/.env fail.
 #
 # Seams: `vpn` (:8888 proxy) and `gateway` (:8080) are DNS names that OB1
 # (openbrain-research/podcast, FETCH_PROXY) and OWUI resolve on the anchor’s
@@ -32,7 +32,7 @@ services:
     environment:
       - VPN_SERVICE_PROVIDER=mullvad
       - VPN_TYPE=wireguard
-      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
+      - WIREGUARD_PRIVATE_KEY=${MULLVAD_WG_PRIVATE_KEY:?set in search/.env (copy search/.env.example), or stack.ps1}
       - WIREGUARD_ADDRESSES=${MULLVAD_WG_ADDRESSES}
       - SERVER_COUNTRIES=${MULLVAD_COUNTRIES:-Netherlands}
       # HTTP forward-proxy for SearXNG. HTTPS targets use CONNECT, so DNS is

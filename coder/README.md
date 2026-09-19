@@ -127,23 +127,25 @@ Preferred - the workspace driver knows the plane order and passes the root
 By hand, **from the repository root**:
 
 ```powershell
-docker compose -f coder/docker-compose.yml --env-file .env up -d
-docker compose -f coder/docker-compose.yml --env-file .env down
+docker compose -f coder/docker-compose.yml up -d
+docker compose -f coder/docker-compose.yml down
 ```
 
-**`--env-file .env` is not optional, and its path resolves against your current
-directory** - which is why you run these from the repo root. Two mechanisms are in play
-and only the first cares where you are standing: `--env-file` feeds the compose CLI's
-`${VAR}` interpolation, including the `${OPEN_TERMINAL_API_KEY:?...}` guard that makes a
-bare `up` fail loudly rather than start a keyless executor, while `env_file: ../.env` in
-the service definitions injects the root `.env` into the containers and resolves relative
-to the compose file, so it finds that same file whatever your cwd.
+**`coder/.env` is not optional** - copy `coder/.env.example`. Compose loads it from
+the PROJECT DIRECTORY, so it is found whatever your cwd; you run these from the repo
+root only because the `-f coder/docker-compose.yml` path is written relative to it.
+That file feeds the compose CLI's `${VAR}` interpolation, including the
+`${OPEN_TERMINAL_API_KEY:?...}` guard that makes a bare `up` fail loudly rather than
+start a keyless executor. There is no `env_file:` in any service here - that
+wholesale grant of the root `.env` was removed on 2026-08-28; a service names the
+variables it needs, and `scripts/checks/check-env-file-scope.ps1` keeps it that way.
 
-Two things to know before editing `.env` for this plane:
+Two things to know before editing `coder/.env`:
 
-- **`OPEN_TERMINAL_API_KEY` is defined twice** and compose takes the last one, so
-  rotating only the first occurrence yields a 401 that looks like a code bug. Run
-  `grep -n "^OPEN_TERMINAL_API_KEY=" .env` before you touch it.
+- **A duplicate key is last-wins, silently.** The root `.env` used to define
+  `OPEN_TERMINAL_API_KEY` twice, so rotating only the first occurrence yielded a 401
+  that looked like a code bug. `coder/.env.example` defines it once; run
+  `grep -n "^OPEN_TERMINAL_API_KEY=" coder/.env` before you touch it.
 - **Keep `LC_LLAMA_API_KEY` set.** It is passed through bare as `LLAMACPP_API_KEY` while
   the sibling variable defaults to `llama`, so unsetting it boots the agent with an empty
   bearer for the gateway - a 401 - while the other still reads fine.
@@ -186,7 +188,7 @@ docker exec open-terminal curl -fsS http://localhost:8000/health
   `llm-net` DNS, the gateway or the virtual key is broken; `stack.ps1 health` is the
   functional probe.
 - **Restart one service with the full `-f` form**, from the repo root:
-  `docker compose -f coder/docker-compose.yml --env-file .env up -d open-terminal`.
+  `docker compose -f coder/docker-compose.yml up -d open-terminal`.
   A bare `docker compose up -d <service>` at the repo root silently does nothing - the
   root project is a network anchor with zero services.
 - **Read the rendered config as YAML, not `--format json`.** PowerShell 5.1's

@@ -38,7 +38,7 @@ services:
   # lm-models-backup -- weekly tar of the host GGUF model store (llama.cpp
   # models; the .lmstudio path is historical). Sleep-loop; HEALTH_TCP probes
   # llama-cpp-upstream (probe-only backend-net member, no inference client).
-  # Set LM_MODELS_BACKUP_INTERVAL= (empty) in .env to disable.
+  # Set LM_MODELS_BACKUP_INTERVAL= (empty) in inference/.env to disable.
   lm-models-backup:
     image: alpine:3.21
     container_name: lm-models-backup

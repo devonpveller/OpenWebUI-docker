@@ -969,8 +969,17 @@ def cmd_t2(n: int, plane: str, service: str, probe: str,
     gen_file = STATE / f"t2-issue-{n}.yml"
     gen_file.write_text(yaml.safe_dump(gen, sort_keys=False), encoding="utf-8")
     proj = f"test-issue-{n}"
-    envfiles = ["--env-file", str(ROOT / ".env")]
+    # THE PLANE'S OWN env file since sl-env-split (2026-09-19), not the root one:
+    # the twin is a copy of a service from `plane`, so it needs that plane's
+    # variables, which the root .env no longer carries. The generated compose file
+    # lives under .stack/, so compose's own project-directory load would find
+    # nothing - this is the one place that still has to name the file.
+    plane_env = ROOT / Path(PLANES[plane][0]).parent / ".env"
+    envfiles = ["--env-file", str(plane_env)]
     if (ROOT / ".env.test").is_file():
+        # .env.test stays at the ROOT: TEST_VALIDATION_LLM_KEY is the gateway lane
+        # for twins of ANY plane, so it is not plane-scoped. Passed SECOND, so it
+        # wins on any key the plane file also sets.
         envfiles += ["--env-file", str(ROOT / ".env.test")]
     base = ["docker", "compose", "-p", proj, "-f", str(gen_file), *envfiles]
     print(f"T2 issue #{n}: {plane}/{service} → twin '{twin_name}' (project {proj})")

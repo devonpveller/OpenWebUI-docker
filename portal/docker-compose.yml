@@ -3,6 +3,31 @@
 # decision #5): the portal may front more than ai-stack in the future, and a
 # separate project is the expandability seam. Driven by
 # scripts/portal/portal-on.ps1 / portal-off.ps1 - never part of an ai-stack up.
+#
+# ENV: compose loads portal/.env NATIVELY from this project directory
+# (sl-env-split 2026-09-19); copy portal/.env.example. The
+# ${AUTHELIA_JWT_SECRET:?} guard below makes a bare `up` without that file
+# fail loud - WHICH IS NEW HERE, and the reason it had to be: until
+# sl-env-split all three drivers passed `--env-file <repo root>/.env`, and
+# compose hard-refuses a NAMED env file that is absent (exit 1). Dropping the
+# flag dropped that refusal, and this plane had no `:?` guard of its own - so
+# for one revision `config` exited 0 with PUBLIC_DOMAIN, the three Authelia
+# secrets, CLOUDFLARE_TUNNEL_TOKEN and WORKBENCH_KEY all blanked, on the
+# internet-exposed plane. Caught by sl-env-split's tester (attempt 1, X1).
+#
+# ONE guard is enough for the case that regressed - an ABSENT file - and it is
+# what every other plane carries. A file that EXISTS but is half-filled is a
+# different question, and the answer is not six more guards: it is
+# stack.manifest.toml's [planes.portal] `keys` list, which portal-on.ps1 now
+# pre-flights before it starts anything (this plane is `manual`, so it is not
+# in the driver's enabled set and `stack.py doctor` does not reach it).
+# AUTHELIA_JWT_SECRET is the guarded one because among those keys it is the
+# one whose blankness is an AUTH-CORRECTNESS event rather than an outage: a
+# blank CLOUDFLARE_TUNNEL_TOKEN fails safe (nothing gets exposed), while a
+# signing secret that is silently empty is the opposite of safe.
+#
+# NOTE the `internet` profile is passed on the COMMAND LINE by portal-on.ps1
+# and is deliberately absent from portal/.env - see portal/.env.example.
 # Cross-project seam: caddy attaches to ai-stack_app-net (external) to reach
 # openwebui + open_notebook.
 # Paths: the portal's own config tree lives HERE (portal/config/, moved from the
@@ -140,7 +165,7 @@ services:
       # in Authelia 5.0). The .env key stays as AUTHELIA_JWT_SECRET so the
       # operator doesn't need to rotate; only the env-var name Authelia sees
       # inside the container changes.
-      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET=${AUTHELIA_JWT_SECRET}
+      - AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET=${AUTHELIA_JWT_SECRET:?set in portal/.env (copy portal/.env.example) - a blank identity-signing secret on an internet-exposed auth gate is worse than a refusal}
       - AUTHELIA_SESSION_SECRET=${AUTHELIA_SESSION_SECRET}
       - AUTHELIA_STORAGE_ENCRYPTION_KEY=${AUTHELIA_STORAGE_ENCRYPTION_KEY}
     user: "10001:10001"      # plan §2 hardening floor — non-root UID
@@ -187,7 +212,7 @@ services:
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
       # Server-side secret Caddy injects as X-Brain-Key when proxying
-      # /workbench/* to openbrain-workbench (G7). Set this in the main .env to
+      # /workbench/* to openbrain-workbench (G7). Set this in portal/.env to
       # the SAME value as OB1's MCP_ACCESS_KEY. Empty = the workbench rejects
       # every /workbench call (fail closed).
       - WORKBENCH_KEY=${WORKBENCH_KEY}
