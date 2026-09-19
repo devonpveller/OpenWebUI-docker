@@ -92,16 +92,20 @@ mean a secret or artifact got committed).
 
 ```bash
 cd "<WT>"
-git show development:portal/docker-compose.yml 2>&1 | head -1      # expect: fatal / does not exist
-git ls-tree development -- config/authelia/                         # the OLD tree listing
-git ls-tree work/sl-colo-portal -- portal/config/authelia/          # the NEW tree listing
+git ls-tree development -- config/authelia/                  # the OLD tree listing
+git ls-tree work/sl-colo-portal -- portal/config/authelia/   # the NEW tree listing
+git ls-tree work/sl-colo-portal -- config/                   # what is LEFT at the old root
 ```
 
 **PASS:** `development`'s `config/authelia/` lists `.gitignore`, `.healthcheck.env`,
 `configuration.yml`, `users_database.yml.template` and **not** `users_database.yml`; the new
-listing has the identical four names under `portal/config/authelia/`. The file was never
-tracked, so the move cannot have lost it.
-**FAIL:** the old tree contained `users_database.yml` and the new one does not.
+listing has the identical four names — and the identical blob SHAs — under
+`portal/config/authelia/`. The file was never tracked, so the move cannot have lost it. The
+third command shows what is LEFT at the old root: only `litellm/`, `litellm.config.yaml`,
+`litellm.ui.config.yaml`, `llama-swap.config.yaml`, `chat-template.jinja` — inference-owned
+and out of scope per the anchor (`sl-colo-inference` moves them later).
+**FAIL:** the old tree contained `users_database.yml` and the new one does not; a blob SHA
+differs between the two listings; or anything portal-owned is still under `config/`.
 
 ---
 
@@ -149,28 +153,55 @@ git grep -n -E "config/(alerter|auth-notification-bridge|authelia|caddy|portal-c
 # (b) OLD-path hits only — excludes the "portal/config/" and "./config/" prefixes:
 git grep -n -E "(^|[^./a-zA-Z_-])config/(alerter|auth-notification-bridge|authelia|caddy|portal-cron|tripwire|tunnel-watcher|watcher)" | cut -d: -f1 | sort | uniq -c
 
-# (c) the backslash spelling:
-git grep -n -E "config\\\\(alerter|auth-notification-bridge|authelia|caddy|portal-cron|tripwire|tunnel-watcher|watcher)"
+# (c) the backslash spelling. Use a BRACKET CLASS, not an escaped backslash: the
+#     obvious spelling mangles differently in every shell and can degrade to an escaped
+#     literal paren, which turns the alternation into top-level alternatives and floods
+#     with false hits. VERIFY the pattern on a control first:
+git grep -n -E 'config[\]' | head -3     # CONTROL: must find the known archive little-coder\config\ lines
+git grep -n -E 'config[\](alerter|auth-notification-bridge|authelia|caddy|portal-cron|tripwire|tunnel-watcher|watcher)'
 
 # (d) prove (b)'s exclusion is not hiding a real miss — every "./config/<tree>" outside portal/:
 git grep -n -E "\./config/(alerter|auth-notification-bridge|authelia|caddy|portal-cron|tripwire|tunnel-watcher|watcher)" -- . ':!portal' ':!documentation/archive' ':!scripts/archive'
 ```
 
-**PASS:**
-- (b) hits only `CLEANUP-PLAN.md` (3), `documentation/archive/**` (5 files, 41 lines) and
-  `documentation/notes/nas-backup-outage-2026-09-13.md` (2) — all four in the leave-alone set.
-  Expected totals as written: CLEANUP-PLAN.md 3, audit-plan… 3, integration-task-document.md 19,
-  plan-internet-exposed-front-end.md 17, MERGE-PREP-quartz-4.md 1, TASKS-quartz-4-expansion.md 1,
-  nas-backup-outage 2.
-- (c) prints nothing.
-- (d) prints only `documentation/notes/nas-backup-outage-2026-09-13.md` (leave-alone) and
-  `documentation/runbooks/backup-restore-runbook.md:266`, which is *quoting* the compose
-  line and so must read `./config/alerter:/app`.
-- (a)'s extra hits over (b) are exactly `portal/docker-compose.yml` (19), `.gitignore` (4),
-  `SECURITY.md` (3), the four runbooks, and files inside `portal/config/` — all new-path spellings.
+**PASS:** (b) hits **nine** files and no others — the six leave-alone files plus the three
+this commit writes. Every one of them is prose or a deliberate old-path quote, never a
+functional pointer. Expected, exactly:
 
-**FAIL:** any hit in (b) or (c) outside `archive/`, `notes/`, `CLEANUP-PLAN.md`; or (d)
-shows a root-level script or doc still reaching `./config/<portal tree>`.
+| File | (b) lines | Why it is allowed |
+|---|---|---|
+| `CLEANUP-PLAN.md` | 3 | leave-alone per the anchor; `sl-closeout` owns this file |
+| `documentation/archive/…/audit-plan-internet-exposed-front-end.md` | 3 | archive |
+| `documentation/archive/…/integration-task-document.md` | 19 | archive |
+| `documentation/archive/…/plan-internet-exposed-front-end.md` | 17 | archive |
+| `documentation/archive/…/MERGE-PREP-quartz-4.md` | 1 | archive |
+| `documentation/archive/…/TASKS-quartz-4-expansion.md` | 1 | archive |
+| `documentation/notes/nas-backup-outage-2026-09-13.md` | 2 (`:14`, `:121`) | notes; `:121` describes the 0-byte file that was on disk on 2026-09-13, and `:14` is the dated "Path note" this item added saying so. (`:123` quotes the old compose mount and is caught by (d), not (b).) Its three dangling markdown links AND its live re-consent command WERE repointed — verify: `grep -c 'portal/config/alerter' documentation/notes/nas-backup-outage-2026-09-13.md` returns **4** |
+| `documentation/evidence/stack-layers/sl-colo-portal-test-plan.md` | this file | it quotes the old paths to describe the move |
+| `documentation/notes/stack-layers-sl-colo-portal-findings.md` | the findings note | same, plus F1's migration commands, which MUST name the old path |
+
+The last two are the files the commit itself adds; a literal reading of "hits only archive/,
+notes/ or CLEANUP-PLAN.md" would wrongly fail on them. **Do not take their count on trust —
+read every hit line in both and confirm none is a functional pointer** (a mount, a build
+context, a script argument, a resolvable markdown link). If one is, that is a FAIL.
+
+- (c) prints **no script, compose file or runbook** — only this item's own two docs: the four
+  PowerShell lines of the F1 migration block in the findings note (which MUST name the old
+  backslash path — that is the point of the block) and the
+  `portal\config\authelia\users_database.yml` row in T1b's table above, which is already
+  the NEW path. The CONTROL line proves the pattern really does match backslash paths: it finds
+  `little-coder\config\…` lines under `documentation/archive/`. If the CONTROL prints
+  nothing, your shell mangled the pattern — fix that before believing the main line's silence.
+- (d) prints only `documentation/notes/nas-backup-outage-2026-09-13.md`, this item's own two
+  docs, and `documentation/runbooks/backup-restore-runbook.md:266`, which is *quoting*
+  the compose line and so must read `./config/alerter:/app`. ((d) also covers the `../config/`
+  spelling, since `./config/` is a substring of it.)
+- (a)'s extra hits over (b) are `portal/docker-compose.yml` (19), `.gitignore` (4),
+  `SECURITY.md` (3), the four runbooks and files inside `portal/config/` — all new-path
+  spellings.
+
+**FAIL:** any hit in (b) or (c) that is a live pointer, anywhere; a hit in a file not in the
+nine above; or (d) showing a root-level script or doc still reaching `./config/<portal tree>`.
 
 **Also spot-read three repointed pointers and confirm the target exists:**
 
@@ -298,14 +329,17 @@ foreach ($f in 'scripts\portal\portal-on.ps1','scripts\portal\portal-off.ps1',
   $errs=$null; $null=[System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw $f),[ref]$errs)
   if ($errs.Count -eq 0) { "PARSE OK   $f" } else { "PARSE FAIL $f"; $errs | % { "   $($_.Message)" } }
 }
-powershell -NoProfile -ExecutionPolicy Bypass -File 'scripts\checks\check-project-configs.ps1'; "EXIT=$LASTEXITCODE"
-ruff check .   # see below
+ruff check . --no-cache
 ```
+
+**`check-project-configs.ps1` is NOT run here — it is STAGED-AWARE.** Run standalone in a
+clean worktree it prints `[configs] nothing staged - skip` and exits 0, i.e. it checks
+nothing, and recording that as a pass would be recording a pass on an inert check. Its real
+result is obtained in **T7**, where the change set is staged; see T7's PASS list for the
+output you must see. Do not run it here and do not treat a `skip` as evidence of anything.
 
 **PASS:**
 - all six parse clean;
-- `check-project-configs.ps1` exits 0 and prints "all 7 compose projects render clean" +
-  "stack-services.json inventory matches the compose configs";
 - `portal-on.ps1` / `portal-off.ps1` contain **no** `config/` path at all — verify with
   `git grep -n "config" -- scripts/portal/`, which should return only
   `portal-off.ps1:32` ("Volumes and configuration are preserved."). They pass
@@ -313,10 +347,11 @@ ruff check .   # see below
   paths against `portal/`, which is exactly why the new `./config/...` spelling is correct
   and why these two scripts needed no edit. **If you think they should have been edited,
   say so — that is the developer's reasoning, test it, don't accept it.**
-- `ruff check .` reports exactly **one** error, `E501` in
+- `ruff check . --no-cache` reports exactly **one** error, `E501` in
   `llm-queue/src/llm_queue/__init__.py:9` — **pre-existing on `development`** and not in this
-  diff. Confirm that by running `ruff check .` in a `development` worktree too. If ruff
-  reports anything else, FAIL.
+  diff. You do not need a second worktree to prove that: `git diff --name-only development
+  work/sl-colo-portal | grep '\.py$'` returns nothing, so this branch touches no Python at
+  all. If ruff reports anything else, FAIL.
 
 ---
 
@@ -324,22 +359,41 @@ ruff check .   # see below
 
 *Anchor criterion 5, second half.*
 
+**This case is where `check-project-configs.ps1` actually runs** (T6 explains why it cannot
+run there): the hook invokes it with the change set STAGED, which is the only state in which
+it inspects anything.
+
+Do this in **your own throwaway worktree**, never the developer's and never the main
+checkout. If your session refuses `git reset --soft` / `git update-ref`, reach the same
+staged state this way instead:
+
 ```bash
-cd "<WT>"
-git log -1 --format='%H %s' work/sl-colo-portal
-git config core.hooksPath                    # expect .githooks
-# replay the hook against the committed tree without creating a commit:
-git checkout -b verify/sl-colo-portal work/sl-colo-portal
-git reset --soft HEAD~1                      # re-stage the same change set
-.githooks/pre-commit ; echo "hook exit=$?"
-git reset --hard work/sl-colo-portal ; git checkout - ; git branch -D verify/sl-colo-portal
+cd "<YOUR OWN SCRATCH WORKTREE>"
+git config core.hooksPath                     # expect .githooks
+git switch --detach b28cbc5
+git cherry-pick -n <the branch's commits>     # -n = stage, do not commit
+git diff --cached --name-status --find-renames | wc -l      # must equal the commits' path count
+git status --short | grep -v '^[ADMR]' || echo "no unstaged remainder"
+sh .githooks/pre-commit ; echo "hook exit=$?"
 ```
 
-**PASS:** hook exit 0 — secret guard, LF check, gateway-routing check and the compose/ps1
-structural check all pass. The developer committed WITH hooks enabled and never used
-`--no-verify`; verify that too: `git log -1 --format=%H` and confirm the commit exists with
-the moves as renames (T2).
-**FAIL:** a non-zero hook exit, or evidence of `--no-verify`.
+**PASS:** hook exit 0 with `Pre-commit validations passed!`, and on the way there it must
+print — this is the substantive half of T6 —
+```
+  [configs] all 7 compose projects render clean
+  [configs] stack-services.json inventory matches the compose configs
+  [configs] N staged .ps1 file(s) parse clean
+```
+plus a clean secret guard, LF check, doc-placement check (it must NOT object to
+`documentation/evidence/stack-layers/…` or `documentation/notes/…`), gateway-routing check
+and `env_file scope: no new shared-.env grants staged`. The OB1 gitlink checks skip (no
+gitlink staged).
+
+Also confirm the developer committed WITH hooks: `git log --format='%H %s' b28cbc5..work/sl-colo-portal`
+lists the commits, and T2 shows the moves recorded as renames, which is consistent with a
+hook-enabled commit and inconsistent with nothing here.
+**FAIL:** a non-zero hook exit; `[configs] nothing staged - skip` (you did not reach a staged
+state — fix that, don't record it as a pass); or any check objecting.
 
 ---
 
@@ -391,6 +445,80 @@ states that networks and volumes are defined at the bottom of that file and that
 explains which mounts are `./` (the plane's own config) and which stay `../` (`secrets/`,
 `backup/`, `backups/`, `reports/`).
 **FAIL:** the false claim survives, or the new claim is itself wrong.
+
+---
+
+## T10 — No moved file carries a path that depends on its own DEPTH in the tree
+
+*Not an anchor criterion — it is the class of defect that failed attempt 1 (findings F9/F10),
+and the one class a colocation move can introduce that every other case here is blind to. A
+grep for `config/<tree>` cannot see it; the compose render never reads these files; PSParser
+covers `.ps1` and ruff covers `.py`, and the offender was TypeScript.*
+
+A moved file is depth-safe if every path it names is one of: **absolute inside the container**
+(`/data`, `/watch`, `/srv/site`), **sibling-relative** ("next to me"), or **build-context
+relative** (and the context moved with it). It is NOT safe if it walks `../` out of its own
+tree, because that literal encodes how deep the file sits.
+
+```bash
+cd "<WT>"
+git grep -n -E 'import\.meta\.url|__dirname|\$PSScriptRoot|\$\(dirname|dirname |readlink|realpath|BASH_SOURCE|\$0|\.\./' -- portal/config
+```
+
+**PASS:** exactly **four** lines, and each one is justified:
+
+| Line | What it is | Verdict |
+|---|---|---|
+| `alerter/setup-token.ts:44` | `new URL("../../../secrets/google/portal-alerter/", import.meta.url)` | escapes the tree — **must be `../../../`**, three levels from `portal/config/alerter/` to the repo root |
+| `alerter/setup-token.ts:36` | `new URL("./credentials.json", import.meta.url)` | sibling, depth-independent |
+| `alerter/setup-token.ts:42` | a comment that quotes the old `"../../"` while explaining the fix | comment, not a path |
+| `alerter/alerter.ts:42` | `new URL(".", import.meta.url)` → `${SCRIPT_DIR}credentials.json`/`token.json` | sibling, and it runs INSIDE the container where that dir is `/app` |
+
+**Do not accept the table — measure line 44 yourself.** Resolve it the way the runtime does
+(against the file's own URL, not the cwd):
+
+```bash
+cd "<WT>"
+node -e "
+const {pathToFileURL}=require('url'), path=require('path'), fs=require('fs');
+const self=pathToFileURL(path.resolve('portal/config/alerter/setup-token.ts')).href;
+const lit=fs.readFileSync('portal/config/alerter/setup-token.ts','utf8')
+            .match(/new URL\(\"([^\"]*secrets[^\"]*)\", import\.meta\.url\)/)[1];
+const got=new URL(lit,self).href;
+const want=pathToFileURL(path.resolve('secrets/google/portal-alerter')).href+'/';
+console.log('literal :',lit); console.log('resolves:',got); console.log('want    :',want);
+console.log('MATCH   :', got===want);
+"
+```
+
+**PASS:** `literal` is `../../../secrets/google/portal-alerter/`, and `MATCH: true` — it
+resolves to the **repo-root** `secrets/google/portal-alerter/`, the same directory
+`portal/docker-compose.yml` mounts as `../secrets/google/portal-alerter/token.json`. (That
+directory does not exist in a worktree — it is gitignored — which is fine: the test is that
+the two agree on WHERE, not that it is present.)
+**FAIL:** `MATCH: false`; or the literal is `../../` (the attempt-1 bug: it resolves to
+`<root>/portal/secrets/…`, `Deno.mkdir(recursive)` at `:144` would create that wrong
+directory, `:146` would print `Wrote …` as if it worked, and the alerter would go on reading
+the old token — a silent failure on a documented break-glass procedure).
+
+Also confirm the docstring is no longer false:
+
+```bash
+git show work/sl-colo-portal:portal/config/alerter/setup-token.ts | sed -n '3,14p;33,45p'
+```
+
+**PASS:** step 4 of the docstring names the **repo-root** `secrets/google/portal-alerter/token.json`
+and says "three levels up from this file"; the `DEPTH-COUPLED` comment above the constant
+warns the next mover. **FAIL:** the docstring still names a bare relative path with no anchor.
+
+Finally, satisfy yourself the grep above is not the only thing standing between this and the
+next silent breakage — **open the other moved files and check the classification claim**:
+the four Dockerfiles (only `portal-cron/Dockerfile:27` has a `COPY`, and it is
+context-relative), the four shell scripts (`/watch`, `/state`, `/data`, `/tmp` only),
+`authelia/configuration.yml` (`/config`, `/data`), the Caddyfile (`root * /srv/site`, and
+every `import` is a snippet defined in the same file at `:27,38,58,70,100,123` — not a file
+path), and `caddy/site/*.html` (absolute URL paths like `/hub.css`). If any of those names a
+host path or a `../`, that is a FAIL the grep missed.
 
 ---
 

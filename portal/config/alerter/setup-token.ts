@@ -7,7 +7,8 @@
  *   1. open the Google consent screen in your default browser
  *   2. capture the redirect on http://127.0.0.1:8765
  *   3. exchange the code for tokens with the gmail.send scope
- *   4. write secrets/google/portal-alerter/token.json
+ *   4. write the REPO-ROOT secrets/google/portal-alerter/token.json
+ *      (three levels up from this file - see TOKEN_OUT_URL below)
  *
  * After this completes once, the portal-alerter container can run
  * unattended — it only needs to refresh the access token (the refresh
@@ -33,7 +34,14 @@
 // URL objects work across Windows + Linux without URL-encoding bugs.
 // Deno.readTextFile / writeTextFile / mkdir all accept URL directly.
 const CREDENTIALS_URL = new URL("./credentials.json", import.meta.url);
-const TOKEN_OUT_URL = new URL("../../secrets/google/portal-alerter/", import.meta.url);
+// DEPTH-COUPLED: resolved against THIS FILE's location, not the cwd. The file
+// lives at portal/config/alerter/, so the repo root is three levels up. If this
+// script is ever moved again this literal must move with it - a wrong depth does
+// NOT error: Deno.mkdir(recursive) below would create the wrong directory and the
+// script would print "Wrote ..." while the alerter kept reading the old token.
+// (Was "../../" and one level short after the 2026-09-19 config/ -> portal/config/
+// move; caught in test, fixed here.)
+const TOKEN_OUT_URL = new URL("../../../secrets/google/portal-alerter/", import.meta.url);
 const TOKEN_URL = new URL("token.json", TOKEN_OUT_URL);
 const SCOPES = ["https://www.googleapis.com/auth/gmail.send"];
 const REDIRECT_PORT = 8765;
