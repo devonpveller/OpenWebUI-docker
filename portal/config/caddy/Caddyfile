@@ -90,7 +90,7 @@
 #   2. Add a vhost below: http://<app>.{$PUBLIC_DOMAIN} with the three
 #      standard imports + `import authelia_gate` + a reverse_proxy to
 #      <container>:<port> (copy the litellm vhost as the template).
-#   3. Add a card to config/caddy/site/index.html (the hub page).
+#   3. Add a card to portal/config/caddy/site/index.html (the hub page).
 #   4. Cloudflare dashboard (operator): add the public hostname
 #      <app>.devinveller.ai -> this tunnel -> http://caddy:80.
 #   5. docker exec caddy caddy validate --config /etc/caddy/Caddyfile

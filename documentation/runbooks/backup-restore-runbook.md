@@ -250,7 +250,7 @@ docker logs --timestamps portal-alerter | Select-String "Token refresh failed" |
 If present, its refresh token returns `invalid_grant` and must be re-minted:
 
 ```powershell
-deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
+deno run --allow-net --allow-read --allow-write --allow-env portal/config/alerter/setup-token.ts
 docker compose -f portal/docker-compose.yml up -d --force-recreate portal-alerter
 ```
 
@@ -261,9 +261,9 @@ rewrites that file on every successful refresh, so its timestamp is the last tim
 mail actually worked. On 2026-09-13 the log implied 23 days and the token file
 said 14 weeks.
 
-Likewise ignore the 0-byte `config/alerter/token.json` / `credentials.json`:
+Likewise ignore the 0-byte `portal/config/alerter/token.json` / `credentials.json`:
 those are Docker's bind-mount placeholders, created because the compose file
-mounts `../config/alerter:/app` and then layers the real files from `secrets/`
+mounts `./config/alerter:/app` and then layers the real files from `secrets/`
 over it. They are not the credentials and never were.
 
 ---

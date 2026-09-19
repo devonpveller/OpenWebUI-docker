@@ -73,7 +73,7 @@ function Invoke-Unit {
 
   Section "Caddy validate (portal route)"
   docker run --rm -e PUBLIC_DOMAIN=example.com -e ACME_EMAIL=a@b.c -e WORKBENCH_KEY=k `
-    -v "${rootFwd}/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine `
+    -v "${rootFwd}/portal/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.8.4-alpine `
     caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
   if ($LASTEXITCODE -eq 0) { Pass "caddy validate" } else { Fail "caddy validate" }
 

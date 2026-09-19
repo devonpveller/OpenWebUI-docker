@@ -1,5 +1,5 @@
 #!/bin/sh
-# config/auth-notification-bridge/bridge.sh
+# portal/config/auth-notification-bridge/bridge.sh
 #
 # Tails Authelia's filesystem notifier output and forwards each completed
 # record to portal-alerter as an /alert. This closes the gap left by

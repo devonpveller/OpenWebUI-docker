@@ -48,7 +48,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - ✅ `.env.example` checked in as the schema
 - ✅ `users_database.yml` (Authelia) gitignored; only the `.template` is tracked
 - ✅ `secrets/google/portal-alerter/credentials.json` and `token.json` gitignored
-- ✅ `config/authelia/.healthcheck.env` is a runtime-populated bind mount (also fine to track since Authelia overwrites at startup)
+- ✅ `portal/config/authelia/.healthcheck.env` is a runtime-populated bind mount (also fine to track since Authelia overwrites at startup)
 - ⚠️ Tailscale auth key rotation cadence: check expiry in Tailscale admin; rotate proactively
 
 ### Container Security (portal slice)
@@ -137,7 +137,7 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 ### Access monitoring (single source of truth)
 - Full reference: [documentation/runbooks/monitoring-access.md](documentation/runbooks/monitoring-access.md)
 - Operator tool: [scripts/portal/access-query.ps1](scripts/portal/access-query.ps1) for interactive review of recent activity (filters: Hours, Subdomain, Status, IP, UniqueIPs)
-- `config/watcher/known-ips.txt` is the "trusted source IP" list. Auto-populated by `authelia-watcher` after the first new-IP alert; edit by hand to remove stale entries
+- `portal/config/watcher/known-ips.txt` is the "trusted source IP" list. Auto-populated by `authelia-watcher` after the first new-IP alert; edit by hand to remove stale entries
 - `tunnel-watcher` polls `cloudflared:2000/ready` every 30s and alerts HIGH after 3 consecutive failures (~90s default); INFO on recovery; hourly heartbeat to docker logs
 
 ### Real-time alerting (Gmail via portal-alerter)
@@ -228,4 +228,4 @@ In approximate priority order:
 - Backup conventions (new services): [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md)
 - Restore workflow: [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md) + [scripts/backup/restore-from-snapshot.ps1](scripts/backup/restore-from-snapshot.ps1)
 - Active compose: [docker-compose.yml](docker-compose.yml)
-- Live Caddyfile: [config/caddy/Caddyfile](config/caddy/Caddyfile)
+- Live Caddyfile: [portal/config/caddy/Caddyfile](portal/config/caddy/Caddyfile)

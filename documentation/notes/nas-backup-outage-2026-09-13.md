@@ -7,6 +7,13 @@ measured and what was changed.
 Anchor: `nasbackup`. Artifact: the `scripts/backup/` + `check_backups.py` patches
 this note accompanies.
 
+> **Path note, 2026-09-19 (stack-layers `sl-colo-portal`):** the portal's config
+> trees moved from the repo-root `config/` to `portal/config/`. The links and the
+> re-consent command in this note were repointed so they still resolve; the prose
+> below deliberately keeps the OLD paths where it is describing what was on disk
+> on 2026-09-13 (e.g. the 0-byte `config/alerter/token.json` and the compose line
+> it quotes). Read those as history, not as where to look today.
+
 ---
 
 ## What actually happened
@@ -16,7 +23,7 @@ Four independent things had to line up, and they did:
 | # | Defect | First seen | Evidence |
 |---|---|---|---|
 | 1 | portal-alerter's Gmail OAuth refresh token is dead → every `/alert` 500s | **no later than 2026-06-05**, see below | `docker logs --timestamps portal-alerter` → 56 × `Token refresh failed: Bad Request`; live refresh returns `invalid_grant` |
-| 2 | Its `/health` still answers `ready:true` + HTTP 200 | — | [alerter.ts:662](../../config/alerter/alerter.ts#L662); healthcheck is `wget -q -O /dev/null …/health`, which discards the body that *does* carry `last_error` |
+| 2 | Its `/health` still answers `ready:true` + HTTP 200 | — | [alerter.ts:662](../../portal/config/alerter/alerter.ts#L662); healthcheck is `wget -q -O /dev/null …/health`, which discards the body that *does* carry `last_error` |
 | 3 | NAS `backup-user` password expired | between 08-30 and 09-06 | `logs/nas-sync-2026-09-06.log`: `The password of this user has expired. System error 2242` |
 | 4 | `check_backups.py` never looked at the off-site layer | since it was written | `grep -i "nas\|slot-" scripts/sysadmin-mcp/check_backups.py` → no matches |
 
@@ -80,7 +87,7 @@ Verified live: `net use \\192.168.1.247\backups /user:backup-user` returned exit
 
 - **The portal-alerter is still dead.** Its refresh token returns `invalid_grant`.
   Re-consent with
-  `deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts`,
+  `deno run --allow-net --allow-read --allow-write --allow-env portal/config/alerter/setup-token.ts`,
   then recreate the container. Operator action (browser consent). This work makes
   the alerter's death non-fatal by fanning out to Mattermost and Telegram, rather
   than repairing it.
@@ -103,7 +110,7 @@ Verified live: `net use \\192.168.1.247\backups /user:backup-user` returned exit
     does; it says nothing about earlier.
   - **The real last-known-good is 2026-06-05.** `alerter.ts` writes the refreshed
     token back to `token.json` on every successful refresh
-    ([alerter.ts:103](../../config/alerter/alerter.ts#L103)), and that file still
+    ([alerter.ts:103](../../portal/config/alerter/alerter.ts#L103)), and that file still
     carries `expiry_date: 2026-06-05T07:59:56Z` with an mtime to match. No
     successful refresh has happened since. The outage is potentially **14 weeks**,
     not 23 days.
@@ -120,7 +127,7 @@ Verified live: `net use \\192.168.1.247\backups /user:backup-user` returned exit
     trap as `observability-audit`: a bind-mount of a missing file is silently
     created.
 - **`/health` still lies.** It returns `ready:true` regardless. Deliberately left
-  alone: [alerter.ts:14](../../config/alerter/alerter.ts#L14) says the killswitch
+  alone: [alerter.ts:14](../../portal/config/alerter/alerter.ts#L14) says the killswitch
   and `portal-status.ps1` consume it, so returning 503 when *mail* breaks could
   take the portal down because email broke. The honest fix is a separate,
   carefully-scoped change — it needs those two consumers audited first.

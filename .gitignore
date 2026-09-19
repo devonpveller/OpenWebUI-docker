@@ -53,13 +53,13 @@ secrets/
 !backup/Dockerfile
 
 # --- Portal-specific paths from plan §7.2 ---
-config/authelia/users_database.yml
-config/tripwire/baseline.sha256
-config/alerter/credentials.json
+portal/config/authelia/users_database.yml
+portal/config/tripwire/baseline.sha256
+portal/config/alerter/credentials.json
 # Incident-response snapshot directories produced by breach-killswitch.ps1
 /incident/
 /reports
-config/alerter/token.json
+portal/config/alerter/token.json
 
 # Claude Code Mattermost notifier — per-session allowlist (machine-specific runtime state)
 scripts/.mm-notify-sessions
