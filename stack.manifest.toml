@@ -1,0 +1,439 @@
+# stack.manifest.toml - the ai-stack plane and product manifest.
+#
+# ONE checked-in file declaring, per PLANE (a compose project that starts and
+# stops together): its compose file, what it needs to RUN, what makes it
+# USABLE, its compose profiles, what the host must provide, and which keys must
+# be non-blank before it may be enabled.
+#
+# Read by scripts/stack/stack.py (standard library only, Python >= 3.11).
+# The driver NEVER writes this file; per-host enablement lives in the
+# gitignored .stack/state.json. Schema: scripts/stack/README.md.
+#
+# TWO GRAPHS, deliberately not merged (stack-layers PLAN section 1):
+#   requires - what a plane needs to RUN. Hard: `up` orders by it and
+#              `enable` REFUSES when a required plane is off.
+#   optional - a soft edge. The plane runs without it, degraded. Informational
+#              only: it never orders `up` and never causes a refusal.
+#   surfaces - what a PERSON needs to reach an engine. Declared per product.
+#
+# WHERE THE LINE IS, for the very common `HOST=${VAR:-<other plane's service>}`
+# plus `..._ENABLED=${VAR:-<bool>}` shape: THE TOGGLE'S DEFAULT DECIDES.
+#   default TRUE  -> an `optional` edge: a default boot reaches for the other
+#                    plane and degrades (a dead route, a 502) when it is off.
+#   default FALSE -> NOT an edge: a default boot never touches it. Such
+#                    references are recorded in the plane's comment as
+#                    "considered, not an edge" with their line numbers, so a
+#                    reader can tell "seen and rejected" from "not seen".
+# This rule is stated because the first cut of this manifest missed two
+# default-true cases sitting four and sixteen lines below one it did cite
+# (frontend -> ob1, frontend -> portal), and an unstated rule is how that
+# happens twice.
+#
+# ORDER MATTERS. `up` is a topological sort of `requires`; ties are broken by
+# the order planes are declared BELOW, and that order is what reproduces
+# scripts/stack/stack.ps1's sequence:
+#   anchor, inference, frontend, memory, search, coder, ob1, agent-org
+# Re-ordering these tables re-orders `up`. Do it deliberately.
+#
+# EVERY edge below is evidenced in a compose file; the evidence is cited in the
+# comment above it as <file>:<line> (verified 2026-09-19).
+#
+# Plane keys:
+#   compose   - compose file, repo-root-relative (forward slashes).
+#   env_file  - extra --env-file for the compose CLI. Absent/empty means the
+#               project directory's own .env is loaded natively by compose.
+#               Today every plane except ob1 and agent-org uses the single root
+#               .env; sl-env-split changes that later.
+#   lease     - scripts/agent-harness/lease-names.conf name. Absent = none.
+#   requires  - hard edges (above).
+#   optional  - soft edges (above).
+#   implicit  - the plane is started whenever anything runs and never has to be
+#               enabled; no requires-refusal ever names it.
+#   manual    - present when the driver must NOT start/stop this plane; the
+#               value names what does. `up`/`down`/`restart` skip or refuse it.
+#   host      - what the machine itself must provide, in prose.
+#   keys      - variable names that must be present and non-blank in the plane's
+#               env file. A blank one makes `enable` refuse and name the key.
+#   ports     - published HOST ports -> what answers on them.
+#   profiles  - compose profiles. Each is a sub-table:
+#                 description - what the profile turns on
+#                 default     - passed on every invocation (parity with stack.ps1)
+#                 pending     - DECLARED here, not yet in the compose file; a
+#                               later stack-layers item adds it. Enabling one is
+#                               a no-op until then, and the driver says so.
+
+# --------------------------------------------------------------------------
+[planes.anchor]
+# The root docker-compose.yml owns the shared ai-stack_* networks and ZERO
+# services (Part K.5b). Every other plane attaches to those networks
+# externally, which is why every plane requires the anchor. It is IMPLICIT:
+# `up` starts it whenever any plane runs, and no plane's `enable` refuses on
+# account of it.
+compose  = "docker-compose.yml"
+env_file = ".env"
+implicit = true
+requires = []
+optional = []
+host     = ["Docker Engine (Docker Desktop on this host); creates the networks, starts no container"]
+keys     = []
+
+[planes.anchor.ports]
+
+# --------------------------------------------------------------------------
+[planes.inference]
+# The LLM front door. llm-gateway (LiteLLM) carries the `llama-cpp` /
+# `llama-cpp-embed` aliases on ai-stack_llm-net; the real servers sit on the
+# project's native llm-backend-net so callers cannot route around it.
+# requires anchor: inference/docker-compose.yml:448-450, 453-455 (ai-stack_llm-net
+# and ai-stack_app-net, both external: true).
+compose  = "inference/docker-compose.yml"
+env_file = ".env"
+lease    = "inference"
+requires = ["anchor"]
+optional = []
+host = [
+  "NVIDIA GPU + NVIDIA Container Toolkit (inference/docker-compose.yml:83-86, 129-132)",
+  "Chat GGUFs at the HOST path hardcoded in inference/docker-compose.yml:34 - sl-inference-split replaces it with LM_MODELS_DIR",
+  "Embedding GGUF at data/models/embeddings/bge-m3-f16.gguf (inference/docker-compose.yml:111,119)",
+]
+# LITELLM_MASTER_KEY is required since J.1 (per-caller virtual keys); without it
+# every consumer's bearer is rejected.
+keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
+
+[planes.inference.ports]
+"8081" = "llama-cpp-upstream (loopback; probes only - never route inference here)"
+"8082" = "llama-cpp-embed-upstream (loopback; probes only)"
+
+[planes.inference.profiles.local]
+description = "llama.cpp upstreams + llm-queue, i.e. local inference (needs the GPU and the GGUFs)"
+pending     = true   # sl-inference-split adds it
+
+# --------------------------------------------------------------------------
+[planes.frontend]
+# Open WebUI + the tailscale netns companion. NEVER restart openwebui alone.
+# requires anchor: frontend/docker-compose.yml:290-298 (ai-stack_default,
+# ai-stack_llm-net, ai-stack_app-net, all external: true).
+compose  = "frontend/docker-compose.yml"
+env_file = ".env"
+lease    = "frontend"
+requires = ["anchor"]
+# The frontend is the stack's tailnet front door: `tailscale` shares openwebui's
+# netns and entrypoint.sh publishes a serve route per backend, each a
+# HOST=${VAR:-<service>} + ..._ENABLED pair. Five of those backends live in
+# OTHER planes, and every one of the toggles defaults TRUE, so a default boot
+# reaches into four planes besides this one. The route table is
+# entrypoint.sh:93-105; the variables are entrypoint.sh:54-77, overridden for
+# the two that differ by frontend/docker-compose.yml:156-181.
+# inference: frontend/docker-compose.yml:156,159 (LLAMA_CPP_HOST /
+#   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
+#   LLAMA_CPP_ENABLED toggle at :158 - OWUI serves without it. Also
+#   entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
+#   true) -> the serve route at entrypoint.sh:103.
+# search: frontend/docker-compose.yml:97 (SEARXNG_QUERY_URL defaults to
+#   http://gateway:8080/search) - web search is off without it, chat is not.
+# ob1: frontend/docker-compose.yml:162 (OPEN_NOTEBOOK_HOST defaults to
+#   open_notebook, an ob1-plane service) with :164 OPEN_NOTEBOOK_ENABLED
+#   defaulting TRUE; ports at :163,:166. Consumed by entrypoint.sh:97 and :99
+#   (the open-notebook and open-notebook-api serve routes). The image's own
+#   fallback for the wiki route also points at ob1 (entrypoint.sh:66,
+#   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
+#   overrides it - see the portal edge below.
+# portal: frontend/docker-compose.yml:178 (QUARTZ_HOST defaults to `caddy`, a
+#   PORTAL-plane service) with :180 QUARTZ_ENABLED defaulting TRUE; the comment
+#   at :168-177 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
+#   which resolves because caddy and openwebui share ai-stack_app-net).
+#   Consumed by entrypoint.sh:101. Note this is the reverse of portal's HARD
+#   requires on frontend: the portal needs openwebui to serve its main vhost,
+#   and the frontend's tailnet wiki route needs the portal's caddy.
+# agent-org: entrypoint.sh:74,76 (MATTERMOST_HOST defaults to `mattermost`,
+#   MATTERMOST_ENABLED defaults TRUE) -> the serve route at entrypoint.sh:105,
+#   whose own comment says "agent-org compose project on llm-net, starts after
+#   us". Declared in the IMAGE (entrypoint.sh, baked into tailscale:local), not
+#   in frontend/docker-compose.yml - the compose file passes this service
+#   exactly one variable (:136-147). A reader of the compose file alone does
+#   not see this edge.
+optional = ["inference", "search", "ob1", "portal", "agent-org"]
+host = [
+  "Image openwebui:local - a LOCAL CUDA build (frontend/docker-compose.yml:20-23, Dockerfile.openwebui-gpu); sl-frontend-solo makes the stock image the default",
+  "A Tailscale auth key (TAILSCALE_AUTH_KEY) for the tailnet companion; the pair is hard-wired today (frontend/docker-compose.yml:135, network_mode: service:openwebui)",
+]
+keys = ["WEBUI_SECRET_KEY"]
+
+[planes.frontend.ports]
+"3000" = "openwebui (loopback)"
+
+[planes.frontend.profiles.gpu]
+description = "CUDA image + the NVIDIA device reservation (frontend/docker-compose.yml:111-114)"
+pending     = true   # sl-frontend-solo adds it
+
+[planes.frontend.profiles.tailscale]
+description = "the tailscale netns companion and its state backup"
+pending     = true   # sl-frontend-solo adds it
+
+# --------------------------------------------------------------------------
+[planes.memory]
+# mnemory (the unified memory layer) + the ONLY cloud door.
+# requires anchor: memory/docker-compose.yml:138-140 (ai-stack_llm-net).
+# requires inference: memory/docker-compose.yml:36 (LLM_BASE_URL =
+#   http://llama-cpp:8080/v1) and :38 (EMBED_BASE_URL =
+#   http://llama-cpp-embed:8080/v1). Both are unconditional - mnemory cannot
+#   embed or summarise without them.
+compose  = "memory/docker-compose.yml"
+env_file = ".env"
+lease    = "memory"
+requires = ["anchor", "inference"]
+optional = []
+host     = []
+keys     = ["MCP_API_KEY"]
+
+[planes.memory.ports]
+"8060" = "mnemory-cloud-gateway (loopback; the only cloud door)"
+
+# --------------------------------------------------------------------------
+[planes.search]
+# Private Search Gateway: Mullvad VPN (all egress) + redis + SearXNG + gateway.
+# requires anchor: search/docker-compose.yml:173-175 (ai-stack_default, which
+#   is where OB1 and the frontend resolve `vpn` and `gateway` by name).
+compose  = "search/docker-compose.yml"
+env_file = ".env"
+lease    = "search"
+requires = ["anchor"]
+optional = []
+host = [
+  "/dev/net/tun and NET_ADMIN for the WireGuard kill-switch (search/docker-compose.yml:25-28)",
+  "A Mullvad WireGuard account (key + addresses)",
+]
+keys = ["MULLVAD_WG_PRIVATE_KEY", "MULLVAD_WG_ADDRESSES"]
+
+[planes.search.ports]
+"8085" = "gateway (loopback REST / Tavily shim)"
+
+# --------------------------------------------------------------------------
+[planes.coder]
+# little-coder control plane: open-terminal (executor) + little-coder (daemon)
+# + lc-egress.
+# requires anchor: coder/docker-compose.yml:212-214 (ai-stack_llm-net).
+# requires inference: coder/docker-compose.yml:28 and :76 join llm-net FOR
+#   llama-cpp, :47-48 exempt `llama-cpp` from the egress proxy, and the agent's
+#   base_url is http://llama-cpp:8080/v1 (little-coder/config/little-coder.config.yaml:11,
+#   little-coder/config/models.json:6). The daemon has no other model backend.
+compose  = "coder/docker-compose.yml"
+env_file = ".env"
+lease    = "coder"
+requires = ["anchor", "inference"]
+optional = []
+host     = []
+keys     = ["OPEN_TERMINAL_API_KEY"]
+
+[planes.coder.ports]
+"9091" = "little-coder Prometheus metrics (loopback)"
+
+# --------------------------------------------------------------------------
+[planes.ob1]
+# Open Brain - the openbrain-* fleet, the wiki, the scheduled slice
+# (docker-compose.scheduled.yml, pulled in by include: at
+# OB1/docker/docker-compose.yml:15-16) and the Open Notebook trio.
+# env_file is DELIBERATELY absent: compose's project directory is OB1/docker,
+# so it loads OB1/docker/.env natively. Passing the root .env would override it.
+# requires anchor: OB1/docker/docker-compose.yml:1268-1286 (ai-stack_llm-net,
+#   ai-stack_app-net, ai-stack_default - the last aliased `search-gw-net`).
+# requires inference: OB1/docker/docker-compose.yml:116,120 (openbrain-mcp),
+#   406,410, 444, 493,497, 568,571, 675,681, 846, 941, 977, 1173 - CHAT_API_BASE
+#   and EMBEDDING_API_BASE across the fleet; scheduled.yml:186,258.
+# requires search: OB1/docker/docker-compose.yml:567 (openbrain-research
+#   SEARCH_API_BASE -> http://gateway:8080), :637 (FETCH_PROXY_URL ->
+#   http://vpn:8888), :982 (grounding-backfiller, same proxy) and
+#   scheduled.yml:190 (the digest chain's fetches). Defaults, not toggles: with
+#   the search plane down these resolve to nothing and research/backfill fail.
+# optional frontend: OB1/docker/docker-compose.yml:562 (openbrain-research
+#   OWUI_BASE_URL -> http://openwebui:8080) - research pushes results into OWUI;
+#   the rest of the fleet does not care.
+# optional agent-org: OB1/docker/docker-compose.scheduled.yml:253
+#   (openbrain-idea-refinery MATTERMOST_URL defaults to
+#   http://host.docker.internal:8065) under the `idea-refinery` profile, which
+#   is `default = true` below. THE ONLY EDGE IN THIS MANIFEST THAT DOES NOT
+#   CROSS A DOCKER NETWORK: it goes out to the host and back in through the
+#   loopback port this manifest declares at [planes.agent-org.ports] "8065",
+#   via `extra_hosts: host.docker.internal:host-gateway`. Gated in practice by
+#   IDEA_REFINERY_MM_TOKEN (scheduled.yml:254, blank by default); it is set on
+#   this host. The cluster transition has to treat this one specially - a host
+#   hop does not follow a plane to another node.
+compose  = "OB1/docker/docker-compose.yml"
+lease    = "open-brain"
+requires = ["anchor", "inference", "search"]
+optional = ["frontend", "agent-org"]
+host = [
+  "Google OAuth client + tokens under OB1/secrets/google/ for the scheduled digest chain (OB1/docker/docker-compose.scheduled.yml:69-74,103-104,134-135)",
+  "The OB1 submodule checked out (git submodule update --init)",
+  "A speech-to-text server on the HOST at :8000 for openbrain-extract's audio/video path (OB1/docker/docker-compose.yml:894 STT_API_BASE defaults to http://host.docker.internal:8000, reached via extra_hosts at :897-898) - a host service, not a plane",
+]
+keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GATEWAY_KEY"]
+
+[planes.ob1.ports]
+"3001" = "openbrain-rest (PostgREST)"
+"5055" = "open_notebook API"
+"8003" = "surrealdb"
+"8061" = "openbrain-gateway (cloud door)"
+"8062" = "openbrain-ops-gateway (ops door)"
+"8503" = "open_notebook UI"
+"8810" = "openbrain-entity-worker"
+"8811" = "openbrain-wiki (compiler)"
+"8812" = "openbrain-wiki-viewer (Quartz)"
+"8813" = "openbrain-suggestion-worker"
+"8814" = "openbrain-workbench"
+"8815" = "openbrain-extract (debug)"
+"8816" = "openbrain-curator"
+"8817" = "openbrain-chunk-worker"
+"8818" = "openbrain-research"
+"8819" = "openbrain-grounding-backfiller"
+
+[planes.ob1.profiles.idea-refinery]
+description = "the idea-refinery services; scripts/stack/stack.ps1 passes this on every OB1 invocation"
+default     = true
+
+[planes.ob1.profiles.research]
+description = "openbrain-research + the grounding backfiller"
+pending     = true   # sl-ob1-profiles adds it
+
+[planes.ob1.profiles.wiki]
+description = "the wiki compiler and the Quartz viewer (a SURFACE)"
+pending     = true   # sl-ob1-profiles adds it
+
+[planes.ob1.profiles.notebook]
+description = "the Open Notebook trio: surrealdb + open_notebook + its backup (a SURFACE)"
+pending     = true   # sl-ob1-profiles adds it
+
+# --------------------------------------------------------------------------
+[planes.agent-org]
+# Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
+# env_file DELIBERATELY absent - project directory agent-org/docker loads its
+# own .env, same reasoning as ob1.
+# requires anchor: agent-org/docker/docker-compose.yml:748-750 (ai-stack_llm-net).
+# requires inference: agent-org/docker/docker-compose.yml:127
+#   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :257 (agent-bridge joins
+#   llm-net for the alias); :372-373,457-458 exempt llama-cpp from the workers'
+#   egress proxy.
+# NOT an edge: the worker slices RUN images the coder plane BUILDS
+#   (little-coder:local at :294,:392; little-coder-open-terminal:local at
+#   :351,:438). That is a build-time dependency on the IMAGES, not on the coder
+#   plane being up - agent-org talks to no coder container.
+# CONSIDERED, NOT AN EDGE - agent-org -> ob1: agent-org/docker/docker-compose.yml:142
+#   (AO_OPENBRAIN_URL -> http://openbrain-mcp:8000) and :152 (AO_RESEARCH_URL ->
+#   http://openbrain-research:8000) do name ob1-plane services, but both sit
+#   behind toggles that default OFF - :141 AO_OPENBRAIN_MIRROR_ENABLED false,
+#   :151 AO_GROUNDING_ENABLED false - so a default boot never reaches for ob1
+#   and nothing degrades when ob1 is down. By the toggle rule in this file's
+#   header that makes it a latent integration, not an edge. If either default
+#   flips to true, it becomes an `optional` edge and belongs in the list below.
+compose  = "agent-org/docker/docker-compose.yml"
+lease    = "agent-org"
+requires = ["anchor", "inference"]
+optional = []
+host = [
+  "Images little-coder:local and little-coder-open-terminal:local must exist for the `workers` profile (built by the coder plane)",
+  "An OpenRouter key for the `cloud` profile (OPENROUTER_API_KEY in agent-org/docker/.env)",
+]
+keys = ["MM_DB_PASSWORD", "AO_DB_PASSWORD"]
+
+[planes.agent-org.ports]
+"8065" = "mattermost (loopback; the org's own surface)"
+"8830" = "agent-bridge control/debug (loopback)"
+
+[planes.agent-org.profiles.workers]
+description = "the ao-worker / ao-ot / ao-git-egress slices"
+
+[planes.agent-org.profiles.cloud]
+description = "the cloud lane (the only component with internet egress); needs OPENROUTER_API_KEY"
+
+# --------------------------------------------------------------------------
+[planes.portal]
+# The internet-exposed auth front-end. MANUAL on purpose: exposing the stack
+# stays a human action, exactly as scripts/stack/stack.ps1's header says.
+# requires anchor: portal/docker-compose.yml:603-605 (app-net, external: true,
+#   name: ai-stack_app-net).
+# requires frontend: portal/docker-compose.yml:601-602 - caddy joins
+#   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
+#   config/caddy/Caddyfile:197 proxies openwebui:8080. Without the frontend the
+#   portal's primary vhost 502s.
+# optional ob1: config/caddy/Caddyfile:143 (openbrain-wiki-viewer:8080), :136
+#   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
+#   while the rest of the portal serves.
+# optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
+#   which joins ai-stack_app-net for exactly that (inference/docker-compose.yml:320-327).
+compose  = "portal/docker-compose.yml"
+env_file = ".env"
+lease    = "portal"
+requires = ["anchor", "frontend"]
+optional = ["ob1", "inference"]
+manual   = "scripts/portal/portal-on.ps1 / scripts/portal/portal-off.ps1"
+host = [
+  "A Cloudflare tunnel (token) and a public domain; the portal publishes NO host ports - all ingress arrives through cloudflared",
+]
+keys = [
+  "CLOUDFLARE_TUNNEL_TOKEN",
+  "AUTHELIA_JWT_SECRET",
+  "AUTHELIA_SESSION_SECRET",
+  "AUTHELIA_STORAGE_ENCRYPTION_KEY",
+  "PUBLIC_DOMAIN",
+]
+
+[planes.portal.ports]
+
+[planes.portal.profiles.internet]
+description = "cloudflared + the tunnel watcher; without it the portal runs local-test only"
+
+
+# ==========================================================================
+# PRODUCTS - vertical slices. `enable <product>` enables every plane listed
+# (plus everything those planes require), every profile under [profiles], and
+# every profile under [surfaces] unless --headless is passed. A plane named
+# ONLY in [surfaces] is itself dropped by --headless.
+# ==========================================================================
+
+[products.chat]
+description = "Open WebUI on its own - what a fresh clone gets"
+planes      = ["frontend"]
+
+[products.inference]
+description = "the LLM front door and the local llama.cpp backends"
+planes      = ["inference"]
+profiles    = { inference = ["local"] }
+
+[products.memory]
+description = "mnemory, the unified memory layer, and its cloud door"
+planes      = ["memory"]
+
+[products.search]
+description = "the private search gateway (SearXNG behind Mullvad)"
+planes      = ["search"]
+
+[products.open-brain]
+description = "the Open Brain knowledge core"
+planes      = ["ob1"]
+surfaces    = { ob1 = ["wiki"] }
+
+[products.research]
+description = "the research engine: OB1 + inference + search, read through OWUI, the wiki and Open Notebook"
+planes      = ["inference", "search", "ob1", "frontend"]
+profiles    = { ob1 = ["research"] }
+surfaces    = { ob1 = ["wiki", "notebook"] }
+
+[products.coding-agent]
+description = "little-coder; its surface is Open WebUI (PLAN section 1)"
+planes      = ["coder"]
+surfaces    = { frontend = [] }
+
+[products.agent-org]
+description = "the governed multi-agent org; Mattermost is its INTERNAL surface, so --headless drops nothing"
+planes      = ["agent-org"]
+profiles    = { agent-org = ["workers"] }
+
+[products.digest]
+description = "the scheduled digest chain inside OB1 (gmail pull -> research -> podcast -> digest)"
+planes      = ["inference", "search", "ob1"]
+profiles    = { ob1 = ["research"] }
+
+[products.portal]
+description = "the internet front-end (started by hand: portal-on.ps1)"
+planes      = ["portal", "frontend"]
+profiles    = { portal = ["internet"] }

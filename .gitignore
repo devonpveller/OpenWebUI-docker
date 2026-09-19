@@ -99,5 +99,12 @@ documentation/issue-plans/
 # on is COMMITTED - see documentation/evidence/README.md - and only the working state below
 # is ignored. If a row cites it, it does not belong here.
 .quadrant/
+
+# Per-host stack state written by scripts/stack/stack.py: which planes and profiles
+# THIS machine enables and which docker context each runs on. The manifest
+# (stack.manifest.toml) is the shared, committed declaration; this is the local
+# answer to it, and committing one machine's answer would hand every other machine
+# the wrong default. Recreate it with `python scripts/stack/stack.py init`.
+.stack/
 scripts/.mm-session-threads
 scripts/.mm-session-threads.*
