@@ -1,7 +1,9 @@
 # sl-compose-anchors — test plan
 
 Item `sl-compose-anchors`, branch `work/sl-compose-anchors`, developer worktree
-`wt-sl-compose-anchors`, base `development` @ 4934529.
+`wt-sl-compose-anchors`, base `development` @ **f291cb3** (the sl-env-split
+merge). Rebased onto it 2026-09-19; every case below was re-run against that
+base before this revision was submitted.
 
 **What changed.** The hardening / scheduler / healthcheck-timing boilerplate that
 the nine plane compose files wrote out longhand is now declared once per file as
@@ -32,16 +34,26 @@ either work inside a worktree/clone of `work/sl-compose-anchors` or use
 ## Setup — the scratch harness every render case uses
 
 Do this once. `$SC` is any scratch directory of yours, on a SHORT path
-(`C:\tmp\sl` and not somewhere under the worktree — the clone below is deep).
+(`C:\tmp\sl` and not somewhere under the worktree — the clones below are deep).
 
-**Attempt 1 failed here, and the fix is in this section.** The first version of
-this plan rendered the two trees from two differently-rooted directories and
-compared raw JSON. `docker compose config` RESOLVES `build.context` and every
-bind-mount `source` to an ABSOLUTE path, so two trees at different roots differ
-in every one of those strings before a single compose file is read. The
-normalizer below rewrites the tree root — and its PARENT, because
-`memory/docker-compose.yml`'s build context is `../../mnemory`, a sibling of the
-repo — to fixed tokens. T1c proves that rewrite hides nothing.
+**Two things in this section were learned the hard way; both are fixes, not
+preferences.**
+
+*First,* `docker compose config` RESOLVES `build.context` and every bind-mount
+`source` to an ABSOLUTE path, so two trees at different roots differ in every one
+of those strings before a compose file is read. Attempt 1 of this plan compared
+raw JSON across two roots and could not pass. The normalizer rewrites the tree
+root — and its PARENT, because `memory/docker-compose.yml`'s build context is
+`../../mnemory`, a sibling of the repo — to fixed tokens. T1c proves that
+rewrite hides nothing.
+
+*Second,* since **sl-env-split** (merged as `f291cb3`, the base of this branch)
+**nothing passes `--env-file`**: every plane loads `<plane>/.env` NATIVELY from
+its project directory, and `COMPOSE_PROFILES` is per-plane too. So each tree
+needs its plane `.env` files seeded, both trees from the SAME source
+(`<plane>/.env.example`, which is tracked and carries no secret), and the
+renderer passes `--profile` flags with `COMPOSE_PROFILES=` cleared in the
+environment so "no profile" is expressible.
 
 ```sh
 # 1. normalizer: sorted-key JSON; `nox` drops top-level x- keys; TOKEN=PATH
@@ -84,7 +96,9 @@ if mode == "nox":
 print(json.dumps(walk(d), sort_keys=True, indent=1))
 EOF
 
-# 2. renderer: writes <outdir>/<name>.json for all 15 plane x profile combos
+# 2. renderer: writes <outdir>/<name>.json for all 15 plane x profile combos.
+#    NO --env-file: each plane loads its own .env. COMPOSE_PROFILES is cleared
+#    in the environment so an empty profile list means exactly that.
 cat > "$SC/render.sh" <<'EOF'
 #!/bin/sh
 # render.sh <tree> <outdir> <mode> <scratch>
@@ -94,13 +108,12 @@ mkdir -p "$OUT"; cd "$ROOT"
 ABS=$(pwd -W 2>/dev/null || pwd); PAR=$(dirname "$ABS")
 render() {
   nm="$1"; f="$2"; shift 2
-  if [ -z "$1" ]; then env="$SC/env.noprofiles"; set --; else env=".env.example"; fi
-  args=""; for p in "$@"; do args="$args --profile $p"; done
-  if docker compose -f "$f" --env-file "$env" $args config --format json > "$OUT/$nm.raw" 2>"$OUT/$nm.err"; then
+  args=""; for p in "$@"; do [ -n "$p" ] && args="$args --profile $p"; done
+  if COMPOSE_PROFILES= docker compose -f "$f" $args config --format json > "$OUT/$nm.raw" 2>"$OUT/$nm.err"; then
     python "$SC/normalize.py" "$MODE" "ROOT=$ABS" "ROOT=$ROOT" "SIBLING=$PAR" < "$OUT/$nm.raw" > "$OUT/$nm.json"
     rm -f "$OUT/$nm.raw"; echo "OK   $nm"
   else
-    echo "FAIL $nm : $(grep -v 'level=warning' "$OUT/$nm.err" | head -c 250)"
+    echo "FAIL $nm : $(grep -v 'level=warning' "$OUT/$nm.err" | head -c 220)"
   fi
 }
 render frontend-bare     frontend/docker-compose.yml ""
@@ -121,33 +134,34 @@ render agentorg-wc       agent-org/docker/docker-compose.yml workers cloud
 EOF
 ```
 
-**Two clones, each seeded from `.env.example` — not the operator's `.env`.**
-Clone rather than `git worktree add`: a worktree mutates the shared repo's
-worktree list, and the operator's checkout is not yours to add to.
+**Two clones, each seeded from the tracked `.env.example` files.** Clone rather
+than `git worktree add`: a worktree mutates the shared repo's worktree list, and
+the operator's checkout is not yours to add to.
 
 ```sh
-WT=<a checkout of work/sl-compose-anchors>        # only used as the clone SOURCE
-for pair in base:development head:work/sl-compose-anchors; do
-  d=${pair%%:*}; b=${pair##*:}
-  git -c core.longpaths=true clone -q -b "$b" "$WT" "$SC/$d"
-  cp "$SC/$d/.env.example" "$SC/$d/.env"                       # REQUIRED - see below
-  cp "$SC/$d/.env.example" "$SC/$d/agent-org/docker/.env"      # REQUIRED - see below
+WT=<a checkout of work/sl-compose-anchors>        # only the clone SOURCE
+for pair in base:f291cb3 head:work/sl-compose-anchors; do
+  d=${pair%%:*}; r=${pair##*:}
+  git -c core.longpaths=true clone -q "$WT" "$SC/$d"
+  git -C "$SC/$d" checkout -q "$r"
+  for e in .env frontend/.env inference/.env memory/.env search/.env \
+           coder/.env portal/.env agent-org/docker/.env; do
+    cp "$SC/$d/${e%.env}.env.example" "$SC/$d/$e"
+  done
 done
-sed 's/^COMPOSE_PROFILES=.*/COMPOSE_PROFILES=/' "$SC/base/.env.example" > "$SC/env.noprofiles"
 sh "$SC/render.sh" "$SC/base" "$SC/before" nox "$SC"
 sh "$SC/render.sh" "$SC/head" "$SC/after"  nox "$SC"
 ```
 
-**Why the two `cp` lines are not optional.** `agent-org/docker/docker-compose.yml`
-carries `env_file: ../../.env` on two services, and compose resolves an
-`env_file` from disk regardless of `--env-file`. A fresh clone has neither file
-(both gitignored), so all four agent-org combinations die with
-`env file <root>\.env not found` — measured. And they must be seeded from the
-SAME source in both trees, because `config` INLINES an `env_file`'s contents
-into the service environment: seeding one tree from `.env.example` and the other
-from the operator's real `.env` would make every agent-org combination differ on
-values this item never touched. `.env.example` is tracked, identical in both
-trees except for five citation line numbers (T5), and contains no secret.
+**Why the seeding is not optional.** `.env` and every `<plane>/.env` are
+gitignored, so a fresh clone has none. `agent-org/docker/docker-compose.yml`
+also carries `env_file: ../../.env` on two services, which compose resolves from
+disk no matter what else is on the command line — without the root `.env` all
+four agent-org combinations die with `env file <root>\.env not found`
+(measured). And both trees must be seeded from the SAME source, because `config`
+INLINES an `env_file`'s contents into the service environment: seeding one tree
+from `.env.example` and the other from a real `.env` would make agent-org differ
+on values this item never touched.
 
 Every `render.sh` line must print `OK`, in both trees, **30 lines total**. A
 `FAIL` is a case failure in itself, whichever tree it came from.
@@ -389,7 +403,7 @@ checkout, and never in the developer's worktree.
 
 ```sh
 cd "$SC/head"
-git reset --soft 4934529                 # the base; `development` is not a ref in a -b clone
+git reset --soft f291cb3                 # the base sha; a -b clone has no `development` ref
 git add -- . ':!OB1'
 git diff --cached --name-only            # expect the 11 compose files + stack.manifest.toml
                                          #   + .env.example + CLEANUP-PLAN.md + the 2 new docs
@@ -398,7 +412,7 @@ echo "exit=$?"
 ```
 
 **Passes** on `exit=0` **and** an output line reading
-`[configs] all 8 compose projects render clean` **and**
+`[configs] all 9 compose projects render clean` **and**
 `[OK] scripts/lib/stack-services.json matches the manifest, the sidecar and the
 compose renders`. Paste the whole output.
 
@@ -419,9 +433,7 @@ finding.
    `[FAIL] projects.ai-stack: committed {"file": null, "env_file": null, ...} !=
    generated {"file": "docker-compose.yml", "env_file": ".env", ...}`, then
    `INVENTORY DRIFT`. The generator marks the anchor unstartable only when it can
-   see an env file. The Setup's `cp .env.example .env` is what prevents this —
-   and note the copy only needs to EXIST for this half; the compose renders here
-   use `.env.example` explicitly.
+   see an env file. The Setup's seeding loop is what prevents this.
 2. **Empty `OB1/` ⇒ `open-brain` is NOT VERIFIED, not failed.** A clone does not
    populate the submodule, so you will see
    `[configs] NOT VERIFIED: project 'open-brain' has 30 inventory row(s) and no
@@ -452,52 +464,62 @@ moved. Check **both spellings**: the path form (`frontend/docker-compose.yml:408
 and the bare continuation form a paragraph uses after naming the file once
 (`… and :313 (agent-bridge joins …)`).
 
-**The counting unit, because the first version of this plan gave a number with
+**The counting unit, because an earlier revision of this plan gave a number with
 no unit.** It said "97 citation points", which matches nothing a tester can
-reproduce — it was the raw hit count of the developer's scratch scanner,
-including its own false positives (bare ports like `:8445`, continuations that
-belong to `frontend/entrypoint.sh` rather than the compose file named earlier on
-the line, and `OB1/` paths this item does not touch). Retract it. The
-reproducible figures, all measured against this branch:
+reproduce — it was the raw hit count of a scratch scanner, its own false
+positives included (bare ports like `:8445`, continuations belonging to
+`frontend/entrypoint.sh` rather than to the compose file named earlier on the
+line, and `OB1/` paths this item does not touch). Retract it. Measured against
+this branch, after the rebase onto `f291cb3`:
 
 | unit | count |
 |---|---|
-| files carrying citations into the eleven changed compose files | **3** (`stack.manifest.toml`, `.env.example`, `CLEANUP-PLAN.md`) |
-| LINES in those files that name at least one such line number | **35** |
-| individual line NUMBERS those lines name | **66** |
-| of those, numbers this branch CHANGED | **65** |
+| files carrying citations into the eleven changed compose files | **8** |
+| LINES in them naming at least one such line number | **40** |
+| individual line NUMBERS those lines name | **75** |
+| of those, numbers this branch changed relative to `f291cb3` | **71** |
 
-The one number that did not change is `inference/compose/upstreams.yml:24`, which
-sits above the inserted `x-` block. Nothing else in this repo cites into those
-eleven files: `documentation/archive/**` cites the 2,249-line pre-split root
-compose, which is a different file, and earlier items' evidence records are
-deliberately out of scope (see the end of this case).
+The eight files are `stack.manifest.toml` (29 lines / 55 numbers),
+`CLEANUP-PLAN.md` (1/2), `coder/.env.example` (2/2), `frontend/.env.example`
+(1/2), `inference/.env.example` (4/9), `memory/.env.example` (1/1),
+`search/.env.example` (1/2) and `documentation/runbooks/env-split-migration.md`
+(1/2). Five of those are NEW to this sweep: sl-env-split moved the root
+`.env.example`'s citations out into the per-plane files, so a sweep written
+against the old base would have missed them entirely.
+
+The four numbers that did not change are all in `stack.manifest.toml`:
+`upstreams.yml:24`, which sits above the inserted `x-` block, and three
+agent-org numbers that were briefly WRONG at those values — findings §C4 says
+how, and it is the reason this case is worth executing rather than skimming.
+Nothing else in this repo cites into the eleven files: `documentation/archive/**`
+cites the 2,249-line pre-split ROOT compose, a different file, and earlier items'
+evidence records are deliberately out of scope (end of this case).
 
 **Run** — list every citation, then resolve each one:
 
 ```sh
 cd "$SC/head"
 MSYS_NO_PATHCONV=1 grep -nE \
-  "(([A-Za-z0-9_./-]*/)?(docker-compose|upstreams|queue|gateway|backups)\.yml):[0-9]+" \
-  stack.manifest.toml .env.example CLEANUP-PLAN.md
+  "(docker-compose|upstreams|queue|gateway|backups)[.]yml:[0-9]+" \
+  stack.manifest.toml CLEANUP-PLAN.md documentation/runbooks/env-split-migration.md \
+  coder/.env.example frontend/.env.example inference/.env.example \
+  memory/.env.example search/.env.example
 ```
 
 then, for each hit, `sed -n '<N>p' <target>` and compare with the sentence —
 including the bare `:NNN` and `, NNN` continuations, which the grep pattern above
 does NOT show. That is the point of the table below: it names them.
 
-**Passes** when each of the citations below reads as its sentence claims. These
-are the ones this item moved; check every one, and check the bare `:NNN`
-continuations named in the right-hand column:
+**Passes** when each of these reads as its sentence claims.
 
 | file:line | cites | must be |
 |---|---|---|
 | `stack.manifest.toml:118` | `inference/docker-compose.yml:94-96, 99-101` | `llm-net:` … `name: ai-stack_llm-net`; `app-net:` … `name: ai-stack_app-net` |
-| `:129` | `upstreams.yml:122-128 and :173-179` | both `deploy:` … `capabilities: [gpu]` blocks |
-| `:130` | `upstreams.yml:24, :76` | the MODEL STORE comment; the `${LM_MODELS_DIR…}:/models:ro` bind |
-| `:131` | `upstreams.yml:166` | `- LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf` |
-| `:142` | `upstreams.yml:63,:151, queue.yml:64, backups.yml:71` | four `profiles: [local]` lines |
-| `:162`, `:165` | `frontend:502-510`, `(:513)` | `default:` … `name: ai-stack_app-net`; `owui-net:` |
+| `:130` | `upstreams.yml:122-128 and :173-179` | both `deploy:` … `capabilities: [gpu]` blocks |
+| `:131` | `upstreams.yml:24, :76` | the MODEL STORE comment; the `/models:ro` bind |
+| `:132` | `upstreams.yml:166` | `- LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf` |
+| `:143` | `upstreams.yml:63,:151, queue.yml:64, backups.yml:71` | four `profiles: [local]` lines |
+| `:163`, `:166` | `frontend:502-510`, `(:513)` | `default:` … `name: ai-stack_app-net`; `owui-net:` |
 | `:176`, `:177`, `:179` | `frontend:344-369`, `:344,347`, `:346` | the tailscale env run; the two `LLAMA_CPP_*_HOST` lines; `LLAMA_CPP_ENABLED` |
 | `:182`, `:184`, `:185`, `:186` | `frontend:286`, `:350`, `:352`, `:351,:353-354` | `SEARXNG_QUERY_URL`; `OPEN_NOTEBOOK_HOST`; `_ENABLED`; `_PORT` / `_TS_PORT` / `_API_PORT` |
 | `:191`, `:192`, `:193` | `frontend:366`, `:368`, `:356-365` | `QUARTZ_HOST`; `QUARTZ_ENABLED`; the Quartz routing comment |
@@ -505,24 +527,36 @@ continuations named in the right-hand column:
 | `:207`, `:232`, `:236` | `frontend:198-205`/`297-303`, `:162-193`, `:198-205, 297-303` | `build:`…`image: openwebui:local`; `deploy:`…`capabilities: [ gpu ]`; the whole `openwebui-stock` block |
 | `:208`, `:241`, `:250` | `frontend:323` ×3 | `network_mode: service:openwebui` |
 | `:255`, `:256`, `:257` | `memory:153-155`, `:54`, `:56` | `llm-net:`…`name:`; `LLM_BASE_URL`; `EMBED_BASE_URL` |
-| `:274`, `:282` | `search:187-189`, `:43-46` | `default:`…`name: ai-stack_default`; `cap_add:`…`/dev/net/tun` |
-| `:294`, `:295`, `:296` | `coder:226-228`, `:46 and :93`, `:65-66` | the llm-net seam; two `- llm-net` joins; `NO_PROXY`/`no_proxy` |
-| `:443`–`:456` | `agent-org:764-766, 183, 313, 420-421, 499-500, 345, 437, 399, 480, 198, 208, 197, 207` | see the sentences; each names its construct |
-| `:490`, `:492` | `portal:593-595`, `:591-592` | `app-net:`/`external: true`/`name: ai-stack_app-net`; the two-line `# The ai-stack seam` comment |
+| `:273`, `:280` | `search:187-189`, `:43-46` | `default:`…`name: ai-stack_default`; `cap_add:`…`/dev/net/tun` |
+| `:292`, `:293`, `:294` | `coder:226-228`, `:46 and :93`, `:65-66` | the llm-net seam; two `- llm-net` joins; `NO_PROXY`/`no_proxy` |
+| `:440`–`:456` | `agent-org:764-766, 183, 313, 420-421, 499-500, 345, 437, 399, 480, 198, 208, 197, 207` | see the sentences; each names its construct |
+| `:487`, `:492` | `portal:618-620`, `:616-617` | `app-net:`/`external: true`/`name: ai-stack_app-net`; the two-line `# The ai-stack seam` comment |
 | `:500`, `:501` | `gateway.yml:173`, `:182-184` | `llm-gateway-ui:`; its `networks:` / `- llm-net` / `- app-net` |
-| `.env.example:158,162,229` | `memory:127`, `frontend:408`, `coder:197` | the three `BACKUP_INTERVAL=` lines |
-| `.env.example:333,346` | `backups.yml:64, 98, 105-107`, `:37,55` | the disable comment / `LM_MODELS_BACKUP_INTERVAL` / the `if [ -z … ]` guard; `llm-gateway-backup:` and its entrypoint |
-| `CLEANUP-PLAN.md:755` | `agent-org:520,590` | the two egress `build:` keys |
+| `CLEANUP-PLAN.md:755` | `agent-org:520,590` | the two egress `build:` keys (`ao-git-egress`, `ao-egress`) |
+| `coder/.env.example:32`, `:64` | `frontend:281`, `coder:197` | the commented-out `TERMINAL_SERVER_CONNECTIONS`; `LITTLE_CODER_BACKUP_INTERVAL` |
+| `frontend/.env.example:144` | `frontend:408 and :472` | the openwebui-backup and tailscale-backup `BACKUP_INTERVAL` lines |
+| `inference/.env.example:35`, `:104` | `gateway.yml:115`, `queue.yml:75-76` | the `COMPOSE_PROFILES` passthrough; the admission-sizing comment pair |
+| `inference/.env.example:156`, `:163` | `backups.yml:37,55`, `:64, 98, 105-107` | `llm-gateway-backup:` and its entrypoint; the disable comment, `LM_MODELS_BACKUP_INTERVAL`, the `if [ -z … ]` guard |
+| `memory/.env.example:47` | `memory:127` | `MNEMORY_BACKUP_INTERVAL` |
+| `search/.env.example:65` | `search:154-161` | the `gateway` service's `environment:` … `REDIS_URL` |
+| `env-split-migration.md:190` | `agent-org:351` and `:443` | `ao-worker-1`'s and `ao-worker-2`'s `env_file:` |
 
 **Fails** if any citation lands on an unrelated construct or past the end of its
-file.
+file. Three ambiguity traps, each with a wrong answer that still looks right:
+`agent-org:520,590` are the SECOND and THIRD `build:` in that file (the first,
+`:153`, is `agent-bridge`); `search:154` is the THIRD `environment:` (vpn and
+searxng come first); `agent-org:351,443` are the SECOND and THIRD `env_file:`
+(`:165` is `agent-bridge`). Resolve by owning service, not by first match.
 
-**Two of these were ALREADY broken on `development`** and were repaired by
-construct rather than by offset — findings §C. `stack.manifest.toml`'s two portal
-citations were off by exactly 4 lines (they named `notify-net`, not `app-net`),
-and `CLEANUP-PLAN.md:755` was off by 41 (it named a `profiles:` line and an env
-var, not the two egress builds). Verify BOTH the old breakage (in `$SC/base`) and
-the new correctness; a repair you cannot show was needed is not verified.
+**Two of these were ALREADY broken at 4934529** and were repaired by construct
+rather than by offset — findings §C. `stack.manifest.toml`'s two portal
+citations were off by exactly four lines (they named `notify-net`, not
+`app-net`); sl-env-split found the same defect independently and landed first,
+so the repair you see is theirs, shifted by this item's −14 lines in that file.
+`CLEANUP-PLAN.md:755` was off by 41 — it named a `profiles:` line and an env
+var, not the two egress builds — and that repair is this item's. Verify BOTH the
+old breakage (`git show 4934529:<file>`) and the new correctness; a repair you
+cannot show was needed is not verified.
 
 **Out of scope, deliberately:** dated evidence records from earlier items
 (`documentation/notes/*-findings.md`, `documentation/evidence/*/test-plan.md`)
@@ -691,7 +725,8 @@ Findings: `documentation/notes/stack-layers-sl-compose-anchors-findings.md`.
 
 * §A1/§A2 — the two experiments are T6. If T6 passes, §A is verified.
 * §B — the before-counts; T3's second command.
-* §C1/§C2 — read `git show development:portal/docker-compose.yml` lines 601-609 and `git show development:agent-org/docker/docker-compose.yml` lines 440, 481, 516, 557.
+* §C1/§C2 — read `git show 4934529:portal/docker-compose.yml` lines 601-609 and `git show 4934529:agent-org/docker/docker-compose.yml` lines 440, 481, 516, 557. Both defects are described against 4934529, the base this item was WRITTEN on; sl-env-split merged first and repaired the portal pair independently (§C1 says so).
+* §C4 — the rebase finding: `git show f291cb3:agent-org/docker/docker-compose.yml | wc -l` is 752 and the branch's is 768, so the manifest's agent-org citations HAD to move; check they read 764-766 / 183 / 313 / 420-421,499-500 now.
 * §D1 — read `portal/docker-compose.yml`: `portal-init` has no `read_only` and `user: "0:0"`; `portal-cron` has no `user:` key between its own service key and `cloudflared:`. Then read `SECURITY.md:55` and `:163`.
 * §D3 — `grep -cE '^ *- "com\.centurylinklabs\.watchtower\.enable=false"'` over the nine plane files must total **47** with the per-file split the note gives.
 * §D6 — `grep -rn '^ *logging:' ` over the nine plane files must return nothing.
@@ -733,8 +768,8 @@ done
 #    expanded. The second command spells the two characters with chr(92) on
 #    purpose: a grep pattern for a literal backslash-n is itself easy to mangle
 #    when this plan is copied, which is exactly how the defect got in.
-git diff 4934529 -- '*.yml' | grep '^+#' | awk 'length($0) > 101 { print length($0)-1": "$0 }'
-git diff 4934529 -- '*.yml' | python -c "import sys; bs=chr(92); [sys.stdout.write(l) for l in sys.stdin if l[:1]=='+' and bs+'n' in l]"
+git diff f291cb3 -- '*.yml' | grep '^+#' | awk 'length($0) > 101 { print length($0)-1": "$0 }'
+git diff f291cb3 -- '*.yml' | python -c "import sys; bs=chr(92); [sys.stdout.write(l) for l in sys.stdin if l[:1]=='+' and bs+'n' in l]"
 ```
 
 **Passes** when all of:

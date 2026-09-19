@@ -437,10 +437,10 @@ opt_in      = true
 # Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
 # No env_file key - project directory agent-org/docker loads its own .env,
 # the same way every plane does since sl-env-split.
-# requires anchor: agent-org/docker/docker-compose.yml:748-750 (ai-stack_llm-net).
-# requires inference: agent-org/docker/docker-compose.yml:127
-#   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :257 (agent-bridge joins
-#   llm-net for the alias); :372-373,457-458 exempt llama-cpp from the workers'
+# requires anchor: agent-org/docker/docker-compose.yml:764-766 (ai-stack_llm-net).
+# requires inference: agent-org/docker/docker-compose.yml:183
+#   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :313 (agent-bridge joins
+#   llm-net for the alias); :420-421,499-500 exempt llama-cpp from the workers'
 #   egress proxy.
 # NOT an edge: the worker slices RUN images the coder plane BUILDS
 #   (little-coder:local at :345,:437; little-coder-open-terminal:local at
@@ -484,12 +484,14 @@ opt_in      = true
 [planes.portal]
 # The internet-exposed auth front-end. MANUAL on purpose: exposing the stack
 # stays a human action, exactly as scripts/stack/stack.ps1's header says.
-# requires anchor: portal/docker-compose.yml:632-634 (app-net, external: true,
+# requires anchor: portal/docker-compose.yml:618-620 (app-net, external: true,
 #   name: ai-stack_app-net). RE-DERIVED 2026-09-19 (sl-env-split): these two
 #   read :603-605 and :601-602, which were ALREADY four lines short of the
 #   blocks they name at base 4934529 - :603 was `notify-net:`. Corrected to the
-#   real lines, then shifted by the +25 this item added to that file's header.
-# requires frontend: portal/docker-compose.yml:630-631 - caddy joins
+#   real lines, then shifted by the +25 sl-env-split added to that file's
+#   header - and again by the -14 sl-compose-anchors then took out of it,
+#   which is the pair of numbers standing here now.
+# requires frontend: portal/docker-compose.yml:616-617 - caddy joins
 #   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
 #   config/caddy/Caddyfile:197 proxies openwebui:8080. Without the frontend the
 #   portal's primary vhost 502s.

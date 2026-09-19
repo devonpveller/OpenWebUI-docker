@@ -83,12 +83,13 @@ re-reading the criterion.
 
 ---
 
-## C. Citations already broken on `development`, found by this item's sweep
+## C. Citations: what the sweep counted, what was already broken, what broke
 
 The sweep re-derives every `path:line` into the eleven files whose line counts
 changed. C0 states what "every" counts. C1 and C2 were already wrong before
-this branch existed; C3 is a defect this branch introduced and fixed, kept here
-because the way it evaded every gate is the transferable part.
+this branch existed. C3 is a defect this branch introduced and fixed, and C4 is
+one the REBASE introduced and the sweep caught — both kept because the way each
+evaded every gate is the transferable part.
 
 ### C0. What the sweep counted, since the first report gave a number with no unit
 
@@ -100,16 +101,29 @@ paths this item does not touch). It is retracted. The reproducible figures:
 
 | unit | count |
 |---|---|
-| files citing into the eleven changed compose files | 3 |
-| LINES in them naming at least one such line number | 35 |
-| individual line NUMBERS those lines name | 66 |
-| of those, numbers this branch changed | 65 |
+| files citing into the eleven changed compose files | 8 |
+| LINES in them naming at least one such line number | 40 |
+| individual line NUMBERS those lines name | 75 |
+| of those, numbers this branch changed relative to `f291cb3` | 71 |
 
-The one that did not move is `inference/compose/upstreams.yml:24`, which sits
-above the inserted `x-` block. The three files are `stack.manifest.toml`,
-`.env.example` and `CLEANUP-PLAN.md`; `documentation/archive/**` cites the
-2,249-line pre-split ROOT compose, a different file, and earlier items' evidence
-records are out of scope by the precedent in `a2e4e3e`.
+Per file: `stack.manifest.toml` 29 lines / 55 numbers, `CLEANUP-PLAN.md` 1/2,
+`coder/.env.example` 2/2, `frontend/.env.example` 1/2, `inference/.env.example`
+4/9, `memory/.env.example` 1/1, `search/.env.example` 1/2 and
+`documentation/runbooks/env-split-migration.md` 1/2.
+
+**Five of those eight are new to the sweep, and the first version of this entry
+listed three.** That was true of the base this item was written on and false of
+the base it landed on: sl-env-split gutted the root `.env.example` and moved its
+citations out into the per-plane files. A sweep scoped by a file LIST rather
+than by a grep over the tree would have missed all five. The scope is now
+derived, not remembered.
+
+The four numbers that did not change are all in `stack.manifest.toml`:
+`inference/compose/upstreams.yml:24`, which sits above the inserted `x-` block,
+and three agent-org numbers that were briefly WRONG at those values — C4.
+`documentation/archive/**` cites the 2,249-line pre-split ROOT compose, a
+different file, and earlier items' evidence records are out of scope by the
+precedent in `a2e4e3e`.
 
 ### C1. `stack.manifest.toml` — both portal citations off by exactly 4 lines
 *read from source, `git show development:portal/docker-compose.yml`.*
@@ -117,8 +131,14 @@ records are out of scope by the precedent in `a2e4e3e`.
 * `# requires anchor: portal/docker-compose.yml:603-605 (app-net, external: true, name: ai-stack_app-net)` — on `development` :603 is `notify-net:` and :605 is a comment. The `app-net:` / `external: true` / `name: ai-stack_app-net` run is **607-609**.
 * `# requires frontend: portal/docker-compose.yml:601-602 - caddy joins ai-stack_app-net "to reach openwebui:8080 and open_notebook"` — the quoted comment is at **605-606**; :601-602 are the `notify-net` comment pair.
 
-Both now point at the constructs they describe (`:593-595` and `:591-592` on this
-branch). A reader following the old numbers landed on the wrong network.
+**sl-env-split found the same defect independently and landed first** (its merge
+`f291cb3` is this branch's base), correcting the pair to `:632-634` / `:630-631`
+and recording the four-line offset in the manifest comment itself. So the repair
+in the tree is theirs; this item's contribution is the −14 lines its portal
+header took out of that file, which moves the pair again to `:618-620` and
+`:616-617`. Two items finding one broken citation on the same day is the
+argument for re-deriving by construct rather than trusting the number: neither
+sweep was looking for it.
 
 ### C2. `CLEANUP-PLAN.md:755` — neither cited line was a build
 *read from source.* The text is "agent-org egress builds at
@@ -153,6 +173,54 @@ citations INTO it moved a second time: `.env.example`'s `:35,53` -> `:37,55` and
 `backups.yml:69` -> `:71`. `search/docker-compose.yml` is unchanged in length
 (two lines became two), so its citations did not move.
 
+### C4. Resolving a rebase conflict to the OTHER item's side reinstates their stale line numbers
+
+*read from source; measured during this item's rebase onto `f291cb3`,
+2026-09-19.* The most transferable thing this item found, and it was found by
+the sweep rather than by the rebase.
+
+**First, the fact that makes the trap survivable at all.** sl-env-split touched
+every plane compose header, so the obvious expectation is that every citation
+moved. Measured, it did not: env-split was **line-count-neutral in ten of the
+eleven** files, and only `portal/docker-compose.yml` changed length (616 → 641,
++25). Line counts at the four points that matter:
+
+| file | 4934529 | f291cb3 | this branch pre-rebase | this branch now |
+|---|---|---|---|---|
+| `frontend/docker-compose.yml` | 484 | 484 | 513 | 513 |
+| `inference/docker-compose.yml` | 96 | 96 | 107 | 107 |
+| `inference/compose/{upstreams,queue,gateway,backups}.yml` | 169/90/190/97 | 169/90/190/97 | 189/114/209/119 | 189/114/209/119 |
+| `memory` / `search` / `coder` | 144/175/221 | 144/175/221 | 159/189/235 | 159/189/235 |
+| **`portal/docker-compose.yml`** | **616** | **641** | **602** | **627** |
+| `agent-org/docker/docker-compose.yml` | 752 | 752 | 768 | 768 |
+
+So of this item's own citations, only the portal pair had to move.
+
+**The trap.** The rebase conflicted in exactly one file, `stack.manifest.toml`,
+in two hunks — the `[planes.agent-org]` block and the `[planes.portal]` block.
+Both were conflicts of PROSE: env-split had reworded the `env_file` sentence and
+rewritten the portal citation note. Resolving them to env-split's side is the
+right call for the prose, and it is what the merge protocol's "the later merger
+adapts" asks for. But their side also carried **their line numbers**, which were
+correct for `f291cb3` and stale the moment this branch's commits replayed on top:
+`agent-org/docker/docker-compose.yml:748-750`, `:127`, `:257` and
+`:372-373,457-458` all silently reverted to pre-anchor values, in a file that had
+grown by sixteen lines. Nothing flagged it. The rebase was clean, the render
+equality was 15/15, every repo gate was green, and four citations were wrong.
+
+The post-rebase sweep caught it only because it re-derives numbers **by
+construct** rather than re-checking them: `agent-org:748` reads `llm-net:` in
+`f291cb3` and reads something else in the rebased tree, so the lookup moved it to
+`:764`. A sweep that had asked "does :748 still look plausible?" would have
+passed it.
+
+**The rule, stated so the next rebase does not repeat it.** After resolving any
+conflict hunk to the other side, re-derive every line number inside the hunk you
+accepted. Their numbers were derived against a tree that does not exist any more
+— the one without your commits. "Take theirs" is a decision about PROSE; it is
+never a decision about NUMBERS, because the numbers were never theirs to be
+right about once your changes are underneath them.
+
 ---
 
 ## D. True, out of scope, and not acted on
@@ -165,7 +233,7 @@ citations INTO it moved a second time: `.env.example`'s `:35,53` -> `:37,55` and
 the twelve services. The exceptions:
 
 * **`portal-init`** has no `read_only` key, no `tmpfs`, and `user: "0:0"` — by design: it exists to `chown` the volumes, and its own comment says `root — required to chown volumes`.
-* **`portal-cron`** carries no `user:` key at all (the service block runs from `portal-cron:` to `cloudflared:` with none).
+* **`portal-cron`** carries no `user:` key at all (its block runs 401-430, `portal-cron:` to `cloudflared:`, with none).
 
 Nothing changed here: `portal-init`'s exception is now *visible* rather than
 implicit, because it is the one service that merges `*hardening` instead of
@@ -183,7 +251,7 @@ Left alone deliberately: the anchor's artifact is the compose files and their
 headers, and the runbook is a lifecycle surface with its own item.
 
 ### D3. CLEANUP-PLAN D.1's anchor list is now three-quarters delivered
-*read from source, `CLEANUP-PLAN.md:549-551`.* D.1 names four anchors to
+*read from source, `CLEANUP-PLAN.md:549-552`.* D.1 names four anchors to
 introduce: `x-hardening`, `x-watchtower-disable`, `x-healthcheck-http`,
 `x-backup-sidecar`. Three now exist per plane file. **`x-watchtower-disable` is
 not done**: `- "com.centurylinklabs.watchtower.enable=false"` is still written
