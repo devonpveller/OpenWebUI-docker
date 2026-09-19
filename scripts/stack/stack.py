@@ -13,8 +13,13 @@ nothing but Python and Docker. That rule is enforced by a test in
 scripts/stack/test_stack.py and by the item's anchor.
 
 Verbs:  status  up  down  restart <plane>  enable  disable  list  doctor  init
+        health  stats  inventory --write|--check
+        status/up/down take an optional plane, or --all for every declared
+        plane (the `manual` ones excepted); with neither they act on the set
+        this machine ENABLES.
         `--dry-run` on up/down/restart prints the exact docker command lines and
-        runs nothing.
+        runs nothing. `status`, `health` and `inventory --check` are READ-ONLY:
+        no lease, nothing started, stopped or recreated.
 
 Everything - refusals included - is written to STDOUT, never stderr, and the
 exit code carries the failure. PowerShell 5.1 turns a native command's stderr
@@ -23,6 +28,8 @@ into a terminating NativeCommandError under `$ErrorActionPreference = 'Stop'`
 driver is meant to be callable from a .ps1 without that dance.
 
 Exit codes: 0 fine, 1 refused / a docker command failed, 2 usage error.
+`health` is the exception and says so out loud: its exit code is the NUMBER
+OF FAILED PROBES, exactly as scripts/stack/stack.ps1 health has always been.
 
 Design and every verb's refusal cases: scripts/stack/README.md.
 """
@@ -31,11 +38,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
 import tomllib
+import urllib.error
+import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 MANIFEST_NAME = "stack.manifest.toml"
 STATE_REL = Path(".stack") / "state.json"
@@ -47,6 +58,11 @@ DEFAULT_ENABLED = ("frontend",)
 EXIT_OK = 0
 EXIT_REFUSED = 1
 EXIT_USAGE = 2
+
+# A module constant, not a call site: `stats` delegates to a .ps1 and a test has
+# to be able to ask "what would this do on a Linux node?" without monkeypatching
+# the os module out from under pathlib.
+WINDOWS = os.name == "nt"
 
 
 class Refusal(Exception):
@@ -177,6 +193,27 @@ class Manifest:
 
     def pending_profiles(self, name: str) -> list[str]:
         return [p for p, spec in self.profiles(name).items() if _spec(spec).get("pending")]
+
+    def opt_in_profiles(self, name: str) -> list[str]:
+        """Profiles nothing turns on automatically - the operator or an env does."""
+        return [p for p, spec in self.profiles(name).items() if _spec(spec).get("opt_in")]
+
+    def unaccounted_profiles(self, name: str) -> list[str]:
+        """Declared profiles that say nothing about whether they are deployed.
+
+        Every profile must carry exactly one of `default` (passed on every
+        invocation), `opt_in` (something outside the driver turns it on:
+        COMPOSE_PROFILES in the plane env, portal-on.ps1, the operator) or
+        `pending` (not in the compose file yet). A profile with none of the
+        three is a silent reduction waiting to happen: the driver will not pass
+        it, and nobody declared that it should not.
+        """
+        out = []
+        for profile, spec in self.profiles(name).items():
+            flags = _spec(spec)
+            if not (flags.get("default") or flags.get("opt_in") or flags.get("pending")):
+                out.append(profile)
+        return out
 
     def keys(self, name: str) -> list[str]:
         return list(self.plane(name).get("keys", []))
@@ -429,6 +466,38 @@ def run_profiles(manifest: Manifest, state: State, plane: str) -> list[str]:
     return manifest.profile_order(plane, manifest.profile_closure(plane, wanted))
 
 
+def compose_profiles_env(manifest: Manifest, root: Path, plane: str) -> list[str]:
+    """COMPOSE_PROFILES as the plane's own env file sets it."""
+    value = read_env_file(manifest.env_path(root, plane)).get("COMPOSE_PROFILES", "")
+    return [p.strip() for p in value.split(",") if p.strip()]
+
+
+def effective_profiles(manifest: Manifest, state: State, root: Path, plane: str) -> list[str]:
+    """The --profile flags to pass, which must never START FEWER CONTAINERS.
+
+    `docker compose --profile X` REPLACES COMPOSE_PROFILES; it does not union
+    with it. Measured 2026-09-19 on compose v5.3.0, inference plane, root .env
+    carrying COMPOSE_PROFILES=local,gpu,tailscale:
+
+        docker compose -f inference/... --env-file .env config --services
+            -> 8 services (the `local` half is on)
+        ... --env-file .env --profile idea-refinery config --services
+            -> 4 services. `local` was silently dropped.
+
+    So the moment ANY flag is passed to a plane, every profile that plane's env
+    already enabled has to be passed too, or the driver quietly starts a subset
+    of what a bare invocation would have started - four llama.cpp containers, in
+    that example, with no error anywhere. Passing no flag at all is safe:
+    compose then reads COMPOSE_PROFILES itself, which is today's behaviour for
+    every plane except ob1.
+    """
+    wanted = set(run_profiles(manifest, state, plane))
+    if not wanted:
+        return []
+    wanted |= set(compose_profiles_env(manifest, root, plane))
+    return manifest.profile_order(plane, wanted)
+
+
 def subprocess_runner(cmd, cwd) -> int:
     return subprocess.call(cmd, cwd=str(cwd))
 
@@ -516,7 +585,7 @@ def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, l
             plane,
             verb_args,
             context=state.context_of(plane),
-            profiles=run_profiles(manifest, state, plane),
+            profiles=effective_profiles(manifest, state, root, plane),
         )
         console.line(" ".join(cmd))
         if dry_run:
@@ -528,31 +597,74 @@ def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, l
     return EXIT_OK
 
 
-def cmd_up(manifest, state, root, console, runner, dry_run: bool) -> int:
+def select_planes(manifest, state, plane, every: bool, verb: str, closure: bool = True):
+    """(planes, mode) - which planes a verb acts on, and how they were chosen.
+
+    Three selections, because scripts/stack/stack.ps1 had two and the state file
+    adds a third:
+
+      <plane>   exactly that plane. `stack.ps1 up coder` meant this and the
+                runbooks still say it, so the shim keeps working.
+      --all     every plane the manifest declares except the `manual` ones,
+                dependency-ordered. This is what a bare `stack.ps1 up` did.
+      neither   the planes THIS MACHINE enables, plus their requires closure -
+                the state-driven selection stack.py was built for.
+
+    The distinction matters. A bare `stack.py up` on a fresh clone starts the
+    frontend and nothing else; if the shim quietly mapped `stack.ps1 up` onto
+    that, a post-reboot bring-up would come back with one plane and no error.
+    It maps onto --all instead.
+    """
+    if plane and every:
+        raise Refusal(f"refused: `{verb}` takes a plane name or --all, not both")
+    if plane:
+        manifest.plane(plane)
+        return [plane], "one"
+    if every:
+        return order_planes(manifest, [p for p in manifest.order if not manifest.manual(p)]), "all"
     enabled = [p for p in manifest.order if state.is_enabled(p)]
     if not enabled:
-        console.line("# nothing enabled (`stack.py enable <plane|product>` or `stack.py init`)")
+        return [], "enabled"
+    # `closure=False` for status: reporting on a plane nobody enabled - the
+    # anchor, pulled in by `requires` - is noise, and the anchor owns no
+    # services, so its `ps` is an empty table with a header.
+    wanted = dependency_closure(manifest, enabled) if closure else enabled
+    return order_planes(manifest, wanted), "enabled"
+
+
+def _manual_notes(manifest, console, planes, what: str) -> None:
+    for plane in planes:
+        console.line(f"# {plane} is not driven by stack.py - {what} it with {manifest.manual(plane)}")
+
+
+def _requires_note(manifest, console, plane: str, driven) -> None:
+    """`up coder` starts coder alone - say what it assumes is already running."""
+    unmet = [dep for dep in manifest.requires(plane) if dep not in driven]
+    if unmet:
+        console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
+
+
+def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool) -> int:
+    ordered, mode = select_planes(manifest, state, plane, every, "up")
+    if not ordered:
+        console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
         return EXIT_OK
-    ordered = order_planes(manifest, dependency_closure(manifest, enabled))
     driven = [p for p in ordered if not manifest.manual(p)]
-    skipped = [p for p in ordered if manifest.manual(p)]
+    if mode == "one":
+        _requires_note(manifest, console, plane, driven)
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up")
-    for plane in skipped:
-        console.line(f"# {plane} is not driven by stack.py - start it with {manifest.manual(plane)}")
+    _manual_notes(manifest, console, [p for p in ordered if manifest.manual(p)], "start")
     return code
 
 
-def cmd_down(manifest, state, root, console, runner, dry_run: bool) -> int:
-    enabled = [p for p in manifest.order if state.is_enabled(p)]
-    if not enabled:
-        console.line("# nothing enabled")
+def cmd_down(manifest, state, root, console, runner, plane, every: bool, dry_run: bool) -> int:
+    ordered, _mode = select_planes(manifest, state, plane, every, "down")
+    if not ordered:
+        console.line("# nothing enabled (`stack.py down --all` stops every declared plane)")
         return EXIT_OK
-    ordered = order_planes(manifest, dependency_closure(manifest, enabled))
     driven = [p for p in reversed(ordered) if not manifest.manual(p)]
-    skipped = [p for p in ordered if manifest.manual(p)]
     code = _drive(manifest, state, root, console, runner, ["down"], driven, dry_run, "down")
-    for plane in skipped:
-        console.line(f"# {plane} is not driven by stack.py - stop it with {manifest.manual(plane)}")
+    _manual_notes(manifest, console, [p for p in ordered if manifest.manual(p)], "stop")
     return code
 
 
@@ -571,16 +683,16 @@ def cmd_restart(manifest, state, root, console, runner, plane: str, dry_run: boo
     return _drive(manifest, state, root, console, runner, ["restart"], [plane], dry_run, "restart")
 
 
-def cmd_status(manifest, state, root, console, runner) -> int:
-    enabled = [p for p in manifest.order if state.is_enabled(p)]
-    if not enabled:
-        console.line("# nothing enabled")
+def cmd_status(manifest, state, root, console, runner, plane=None, every: bool = False) -> int:
+    ordered, _mode = select_planes(manifest, state, plane, every, "status", closure=False)
+    if not ordered:
+        console.line("# nothing enabled (`stack.py status --all` reports every declared plane)")
         return EXIT_OK
     failures = 0
-    for plane in order_planes(manifest, enabled):
+    for plane in ordered:
         cmd = compose_command(
             manifest, plane, ["ps"], context=state.context_of(plane),
-            profiles=run_profiles(manifest, state, plane),
+            profiles=effective_profiles(manifest, state, root, plane),
         )
         console.line(f"== {plane}")
         console.line(" ".join(cmd))
@@ -854,6 +966,774 @@ def cmd_init(manifest, state, root, console, args) -> int:
 
 
 # --------------------------------------------------------------------------
+# health probes
+# --------------------------------------------------------------------------
+#
+# These fifteen probes are scripts/stack/stack.ps1's `health` sweep, one for
+# one, with the same pass condition, the same [OK]/[FAIL] line shape and the
+# same exit code (the number of FAILED probes). The .ps1 is now a shim over
+# this code, so the comments that were paid for in outages live HERE:
+#
+#   * a failing probe never stops the sweep. A stopped openwebui costs one
+#     FAILED line, not the eight probes after it (see the owui-drift note).
+#   * the owui-drift check REFUSES (exit 2, a sentence on stderr) rather than
+#     reporting a clean bill, and REFUSED must read as FAIL. In PowerShell that
+#     needed an $ErrorActionPreference dance; here it is just "the answer is
+#     not a number".
+#   * `search` gets TWO probes on purpose. /healthz said 200 through the whole
+#     2026-09-11 outage - bing answered every query with ten results for its
+#     first word, HTTP 200, no error. /health reports which engines actually
+#     put results into recent payloads.
+
+
+class CommandResult(NamedTuple):
+    code: int
+    stdout: str
+    stderr: str
+
+
+class HttpResult(NamedTuple):
+    status: int
+    body: str
+
+
+def subprocess_capture(cmd, cwd) -> CommandResult:
+    """Run a command and CAPTURE it. The runner seam streams; this one reads."""
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, errors="replace",
+        )
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+def urllib_get(url: str, timeout: int = 8) -> HttpResult:
+    """GET a URL. Any failure is a status 0 with the reason as the body.
+
+    Invoke-WebRequest throws on a non-2xx and the .ps1 probes let that be the
+    FAIL; urllib raises HTTPError for the same cases, so both land on FAIL.
+    """
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return HttpResult(getattr(response, "status", response.getcode()), body)
+    except urllib.error.HTTPError as exc:  # a real answer, just not a 2xx
+        return HttpResult(exc.code, "")
+    except Exception as exc:  # noqa: BLE001 - URLError, timeout, ssl, OSError all mean "no answer"
+        return HttpResult(0, str(exc))
+
+
+class HealthSweep:
+    """Runs the probes, prints them, counts the failures."""
+
+    def __init__(self, console: Console, root: Path, capture, http):
+        self.console = console
+        self.root = root
+        self.capture = capture
+        self.http = http
+        self.failed = 0
+        self.results: list[tuple[str, bool]] = []
+
+    def probe(self, name: str, ok) -> None:
+        try:
+            passed = bool(ok() if callable(ok) else ok)
+        except Exception:  # noqa: BLE001 - a probe that throws is a probe that failed
+            passed = False
+        self.console.line(("  [OK]   " if passed else "  [FAIL] ") + name)
+        self.results.append((name, passed))
+        if not passed:
+            self.failed += 1
+
+    # -- the shapes a probe can take ---------------------------------------
+
+    def docker(self, *args) -> CommandResult:
+        return self.capture(["docker", *args], self.root)
+
+    def http_ok(self, url: str) -> bool:
+        return self.http(url, 8).status == 200
+
+    # -- the sweep ---------------------------------------------------------
+
+    def run(self) -> int:
+        self.console.line("== container health (all projects)")
+        unhealthy = [
+            line.strip()
+            for line in self.docker(
+                "ps", "--filter", "health=unhealthy", "--format", "{{.Names}}"
+            ).stdout.splitlines()
+            if line.strip()
+        ]
+        self.probe(f"0 unhealthy containers (found: {', '.join(unhealthy)})", len(unhealthy) == 0)
+
+        self.console.line("== functional gates")
+        self.probe(
+            "anchor: ai-stack_llm-net exists",
+            lambda: self.docker(
+                "network", "inspect", "ai-stack_llm-net", "--format", "{{.Name}}"
+            ).stdout.strip() == "ai-stack_llm-net",
+        )
+        self.probe(
+            "inference: llm-gateway liveliness",
+            # /health/liveliness, never /health: a GET of LiteLLM's /health
+            # through the alias makes it load every model it advertises.
+            lambda: self.docker(
+                "exec", "llm-gateway", "python", "-c",
+                "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
+                "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
+            ).code == 0,
+        )
+        self.probe(
+            "frontend: OWUI http://127.0.0.1:3000/health",
+            lambda: self.http_ok("http://127.0.0.1:3000/health"),
+        )
+        # The frontend plane is profile-gated since sl-frontend-solo: a deployment
+        # without the `tailscale` profile has no tailscale container, and telling
+        # its operator that eight serve routes are missing is a FAIL line about a
+        # container that is not meant to exist. This guard and its two fail-open
+        # paths came across from that item's stack.ps1 when this sweep replaced it.
+        deployed, note = self.tailscale_deployed()
+        if deployed:
+            if note:
+                self.console.line("  [warn] " + note)
+            self.probe(
+                "frontend: 8 tailnet serve routes",
+                lambda: int(
+                    self.docker(
+                        "exec", "tailscale", "sh", "-c",
+                        "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null "
+                        "| grep -c 'proxy http'",
+                    ).stdout.strip()
+                ) >= 8,
+            )
+        else:
+            self.console.line(
+                "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)"
+            )
+        drift = self.owui_drift()
+        self.probe(f"frontend: owui/ manifest rows drifted from live webui.db: {drift}", drift == "0")
+        self.probe(
+            "memory: cloud door http://127.0.0.1:8060/health",
+            lambda: self.http_ok("http://127.0.0.1:8060/health"),
+        )
+        self.probe(
+            "search: gateway http://127.0.0.1:8085/healthz",
+            lambda: self.http_ok("http://127.0.0.1:8085/healthz"),
+        )
+        engines = self.search_engines()
+        self.probe(f"search: {engines}", engines != "REFUSED" and not engines.startswith("DEGRADED"))
+        self.probe(
+            "coder: little-coder daemon :8090/health",
+            lambda: self.docker(
+                "exec", "little-coder", "curl", "-fsS", "--max-time", "8",
+                "http://localhost:8090/health",
+            ).code == 0,
+        )
+        self.probe(
+            "OB1: open_notebook API :5055/api/config",
+            lambda: self.http_ok("http://127.0.0.1:5055/api/config"),
+        )
+        self.probe("OB1: ops door :8062/health", lambda: self.http_ok("http://127.0.0.1:8062/health"))
+        # The curator answers 503 with {"ok":false,"db":false} when its DB is gone
+        # and nothing at all while crash-looping (2026-09-05: "Module not found
+        # pool.ts", noticed 14 h late from a disk check). Either reads as FAIL.
+        self.probe(
+            "OB1: research-curator http://127.0.0.1:8816/health",
+            lambda: self.http_ok("http://127.0.0.1:8816/health"),
+        )
+        self.probe(
+            "OB1: openbrain-db accepting connections",
+            lambda: self.docker(
+                "exec", "openbrain-db", "pg_isready", "-U", "postgres", "-d", "openbrain", "-t", "5"
+            ).code == 0,
+        )
+        self.probe(
+            "agent-org: mattermost ping",
+            lambda: self.docker(
+                "exec", "agent-bridge", "python", "-c",
+                "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
+                "'http://mattermost:8065/api/v4/system/ping', timeout=8).status==200 else 1)",
+            ).code == 0,
+        )
+
+        self.console.line("")
+        if self.failed == 0:
+            self.console.line("ALL HEALTH PROBES PASSED")
+        else:
+            self.console.line(f"{self.failed} probe(s) FAILED")
+        return self.failed
+
+    # -- the two probes whose LABEL carries the measurement ----------------
+
+    def tailscale_deployed(self):
+        """(is it part of THIS deployment?, a note to print first).
+
+        WHICH SOURCE: the RENDERED project, not a parse of `.env`. That is
+        compose's own answer after applying COMPOSE_PROFILES from the env file,
+        from the environment, and its own precedence rules; reimplementing that
+        here would drift the moment any of them changes.
+
+        AND IT FAILS OPEN, twice over, because a checker that goes quiet on its
+        own error is the failure mode this stack keeps paying for:
+          * the render produced nothing (docker down, or an .env so incomplete
+            that the compose file's fail-loud WEBUI_SECRET_KEY guard rejects it)
+            -> probe anyway and say why;
+          * the render says no tailscale while a container NAMED tailscale is
+            running -> that is a host whose .env lost the frontend profiles from
+            COMPOSE_PROFILES. Probe anyway, and say that too.
+        """
+        rendered = self.capture(
+            ["docker", "compose", "-f", "frontend/docker-compose.yml", "--env-file", ".env",
+             "config", "--services"],
+            self.root,
+        )
+        services = [line.strip() for line in rendered.stdout.splitlines() if line.strip()]
+        if rendered.code != 0 or not services:
+            return True, ("the frontend plane rendered NOTHING (docker down, or .env "
+                          "missing/incomplete) - cannot tell whether tailscale is deployed, so "
+                          "probing it anyway")
+        if "tailscale" in services:
+            return True, ""
+        # Exact match, never a substring: `--filter name=tailscale` also matches
+        # stt-tts-tailscale, and the `^...$` anchors do not survive a shell.
+        running = [
+            line.strip()
+            for line in self.docker("ps", "--filter", "name=tailscale",
+                                    "--format", "{{.Names}}").stdout.splitlines()
+            if line.strip() == "tailscale"
+        ]
+        if running:
+            return True, ("tailscale is RUNNING but absent from the frontend render - .env is "
+                          "probably missing the frontend profiles from COMPOSE_PROFILES "
+                          "(this host: local,gpu,tailscale)")
+        return False, ""
+
+    def owui_drift(self) -> str:
+        """'0', a drifted count, or 'REFUSED - <why>'. Never raises.
+
+        owui/ plugins deploy BY PASTE: nothing links the repo file to the live
+        webui.db row, so a committed fix can sit unpasted for weeks (the
+        deep_research banner, 2026-09-04..06). check-owui-drift.ps1 -CountOnly
+        prints the count on stdout, or the word REFUSED with the sentence on
+        stderr and exit 2. Anything that is not a number is a FAIL.
+        """
+        script = self.root / "scripts" / "checks" / "check-owui-drift.ps1"
+        result = self.capture(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-CountOnly"],
+            self.root,
+        )
+        values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        answer = values[-1] if values else "REFUSED"
+        if not answer.isdigit():
+            why = "the check produced no answer"
+            errors = [line.strip() for line in result.stderr.splitlines() if line.strip()]
+            if errors:
+                why = errors[0]
+                if why.startswith("REFUSED:"):
+                    why = why[len("REFUSED:"):].strip()
+            return f"REFUSED - {why}"
+        return answer
+
+    def search_engines(self) -> str:
+        """'<verdict> - <n> engine(s) answering', or 'REFUSED'. Never raises.
+
+        'unknown' (nothing searched since the gateway started) is NOT a failure
+        here - only a measured DEGRADED is - and the probe prints the number.
+        """
+        response = self.http("http://127.0.0.1:8085/health", 8)
+        if response.status != 200:
+            return "REFUSED"
+        try:
+            payload = json.loads(response.body)
+            best = 0
+            for provider in (payload.get("providers") or {}).values():
+                count = int((provider or {}).get("engines_answering_now") or 0)
+                best = max(best, count)
+            return f"{payload.get('search')} - {best} engine(s) answering"
+        except (ValueError, AttributeError, TypeError):
+            return "REFUSED"
+
+
+def cmd_health(root, console, capture, http) -> int:
+    """Exit code is the NUMBER OF FAILED PROBES, exactly as stack.ps1 health."""
+    return HealthSweep(console, root, capture, http).run()
+
+
+# --------------------------------------------------------------------------
+# stats
+# --------------------------------------------------------------------------
+
+
+def cmd_stats(root: Path, console: Console, runner) -> int:
+    """Delegate to scripts/stack/stack-stats.ps1.
+
+    That script reads the llm-queue /observe board and the LiteLLM spend ledger
+    through `docker exec ... psql`, and it is PowerShell-only today. Rather than
+    reimplement a hundred lines of report formatting for a host that cannot be
+    the one asking, this verb REFUSES off Windows and says what to run instead.
+    A verb that silently prints nothing and exits 0 is the failure class this
+    repo hunts; `stats` is not going to join it.
+    """
+    script = root / "scripts" / "stack" / "stack-stats.ps1"
+    if not script.is_file():
+        raise Refusal(f"refused: {rel(root, script)} is missing, so there is nothing to report")
+    if not WINDOWS:
+        raise Refusal(
+            "refused: `stats` reads the LiteLLM ledger through scripts/stack/stack-stats.ps1, which is "
+            "PowerShell 5.1 only and is not ported. Run it on the Windows host (powershell -NoProfile "
+            "-ExecutionPolicy Bypass -File scripts/stack/stack-stats.ps1), or read the queue board "
+            "directly at llm-queue's /observe/queue."
+        )
+    return runner(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], root)
+
+
+# --------------------------------------------------------------------------
+# inventory - scripts/lib/stack-services.json, GENERATED
+# --------------------------------------------------------------------------
+#
+# WHAT IS DERIVED AND WHAT IS CURATED, because the split is the whole design:
+#
+#   derived from stack.manifest.toml   the `projects` block - which compose file,
+#                                      which --env-file, the runnable command
+#                                      line - and which planes belong here at
+#                                      all: a `manual` plane (the portal) does
+#                                      not, because the watchdog must not
+#                                      auto-repair a plane whose whole point is
+#                                      that a human starts it.
+#   derived from the compose RENDER    which containers exist, their compose
+#                                      SERVICE key, their profiles, and whether a
+#                                      project owns any services at all.
+#   curated, in the sidecar            the plane GROUPING and the row order, and
+#                                      the hand-owned judgement: critical,
+#                                      host_health, stale_pool_guard, note.
+#
+# The render is also the VERIFIER. A container in a render and not in the sidecar
+# is drift (`--write` refuses - only a human can say which group it joins); a
+# sidecar row whose project disagrees with the render is drift; a manifest
+# `ports` entry no service publishes is drift, and so is a published port the
+# manifest does not declare. That is what the manifest's [planes.*.ports] tables
+# are FOR - they had no consumer at all until this verb.
+#
+# A project whose compose file is not on disk (OB1 is a submodule; CI does not
+# check it out) is carried from the sidecar and reported UNVERIFIED by name -
+# not silently. A check that cannot run must never look like one that passed.
+
+INVENTORY_REL = Path("scripts") / "lib" / "stack-services.json"
+CURATED_REL = Path("scripts") / "lib" / "stack-services.curated.json"
+
+# Row key order in the generated file: derived fact first, then the curated
+# judgement, then the prose, so a diff reads top-down.
+ROW_KEY_ORDER = ["container", "service", "profile", "profiles", "project",
+                 "critical", "host_health", "stale_pool_guard", "note"]
+
+
+class Render(NamedTuple):
+    """One compose project as the CLI renders it."""
+
+    services: dict   # service key -> {container, profiles, ports}
+    profiles: list   # every profile the compose file declares
+    available: bool  # False when the compose file is not on disk
+    why: str         # why not, when unavailable
+
+
+def render_env_path(manifest: Manifest, root: Path, plane: str) -> Path:
+    """The env file a RENDER uses: the .example when there is one.
+
+    Deterministic on purpose. `.env.example` is kept complete (CLEANUP-PLAN v3
+    A.4) so compose interpolation resolves with no real secret, which is how the
+    same inventory comes out of a laptop, this host and a CI runner.
+    """
+    real = manifest.env_path(root, plane)
+    example = real.with_name(real.name + ".example")
+    return example if example.is_file() else real
+
+
+def render_project(manifest: Manifest, root: Path, plane: str, capture) -> Render:
+    compose_rel = manifest.plane(plane)["compose"]
+    compose_path = root / Path(compose_rel)
+    if not compose_path.is_file():
+        return Render(
+            {}, [], False,
+            f"{compose_rel} is not on disk (OB1 is a submodule - `git submodule update --init`)",
+        )
+
+    base = ["docker", "compose", "-f", compose_rel,
+            "--env-file", rel(root, render_env_path(manifest, root, plane))]
+    listed = capture(base + ["config", "--profiles"], root)
+    if listed.code != 0:
+        raise Refusal(
+            f"refused: `docker compose -f {compose_rel} config --profiles` exited {listed.code}\n"
+            + (listed.stderr.strip() or listed.stdout.strip())
+        )
+    profiles = sorted({line.strip() for line in listed.stdout.splitlines() if line.strip()})
+
+    # Every declared profile is switched ON for the render: the inventory must
+    # list the profile-gated containers too (the watchdog repairs them), and a
+    # bare `config` hides them. That is exactly why the old pre-commit verifier
+    # never saw openbrain-idea-refinery - it rendered without profiles.
+    cmd = list(base)
+    for profile in profiles:
+        cmd += ["--profile", profile]
+    rendered = capture(cmd + ["config", "--format", "json"], root)
+    if rendered.code != 0:
+        raise Refusal(
+            f"refused: `docker compose -f {compose_rel} config --format json` exited {rendered.code}\n"
+            + (rendered.stderr.strip() or rendered.stdout.strip())
+        )
+    try:
+        data = json.loads(rendered.stdout)
+    except ValueError as exc:
+        raise Refusal(f"refused: the render of {compose_rel} is not JSON ({exc})") from None
+
+    services = {}
+    for key, spec in (data.get("services") or {}).items():
+        spec = spec or {}
+        services[key] = {
+            "container": spec.get("container_name") or key,
+            "profiles": list(spec.get("profiles") or []),
+            "ports": sorted(
+                {str(port.get("published")) for port in (spec.get("ports") or []) if port.get("published")}
+            ),
+        }
+    return Render(services, profiles, True, "")
+
+
+class Inventory:
+    """Builds scripts/lib/stack-services.json and says where it disagrees."""
+
+    def __init__(self, manifest: Manifest, root: Path, capture):
+        self.manifest = manifest
+        self.root = root
+        self.capture = capture
+        self.curated = self._load_curated()
+        self.drift: list[str] = []
+        self.skipped: list[str] = []
+
+    def _load_curated(self) -> dict:
+        path = self.root / CURATED_REL
+        if not path.is_file():
+            raise Refusal(
+                f"refused: no curated sidecar at {rel(self.root, path)}. It holds the plane grouping and "
+                "the hand-owned fields (critical / host_health / notes); the generator cannot invent them."
+            )
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise Refusal(f"refused: {rel(self.root, path)} is not valid JSON ({exc})") from None
+
+    # -- generation --------------------------------------------------------
+
+    def build(self) -> dict:
+        projects = self.curated.get("projects") or {}
+        self._check_plane_coverage(projects)
+
+        renders = {}
+        for project, spec in projects.items():
+            renders[project] = render_project(self.manifest, self.root, spec["plane"], self.capture)
+            if not renders[project].available:
+                self.skipped.append(f"{project}: {renders[project].why}")
+
+        self._check_profile_accounting()
+        return {
+            "_comment": list(self.curated.get("_comment") or []),
+            "projects": self._projects(projects, renders),
+            "planes": self._planes(renders),
+        }
+
+    def _check_plane_coverage(self, projects: dict) -> None:
+        """Every non-manual plane is claimed by exactly one project.
+
+        ADDING A PLANE must force a decision here rather than letting it vanish
+        from the inventory the watchdog routes repairs through.
+        """
+        claimed = {}
+        for project, spec in projects.items():
+            plane = spec.get("plane")
+            if not plane:
+                raise Refusal(f"refused: project '{project}' in {CURATED_REL.as_posix()} names no plane")
+            self.manifest.plane(plane)
+            if plane in claimed:
+                raise Refusal(
+                    f"refused: plane '{plane}' is claimed by two projects in {CURATED_REL.as_posix()} "
+                    f"({claimed[plane]} and {project})"
+                )
+            claimed[plane] = project
+        for plane in self.manifest.order:
+            if self.manifest.manual(plane):
+                if plane in claimed:
+                    raise Refusal(
+                        f"refused: plane '{plane}' is `manual` in {MANIFEST_NAME} "
+                        f"({self.manifest.manual(plane)}) but claimed by project '{claimed[plane]}' in "
+                        f"{CURATED_REL.as_posix()}. The inventory drives AUTOMATED repair; a plane a human "
+                        "starts by hand must not be in it."
+                    )
+                continue
+            if plane not in claimed:
+                raise Refusal(
+                    f"refused: plane '{plane}' has no project in {CURATED_REL.as_posix()}. Add a "
+                    f'"<compose project name>": {{ "plane": "{plane}" }} entry - the project name is not '
+                    "always the plane name (ob1 -> open-brain, anchor -> ai-stack)."
+                )
+
+    def _projects(self, curated: dict, renders: dict) -> dict:
+        out = {}
+        for project, spec in curated.items():
+            plane = spec["plane"]
+            render = renders[project]
+            entry = {}
+            if render.available and not render.services:
+                # A project that owns NO services can never start anything.
+                # file=null is what marks it unstartable for the watchdog, which
+                # then skips the row instead of issuing `up -d` into the void -
+                # the Part K anchor defect, in one field.
+                entry["compose"] = "docker compose"
+                entry["file"] = None
+                entry["env_file"] = None
+            else:
+                compose_rel = self.manifest.plane(plane)["compose"]
+                env_file = self.manifest.env_file(plane)
+                entry["compose"] = ("docker compose -f " + compose_rel
+                                    + (f" --env-file {env_file}" if env_file else ""))
+                entry["file"] = compose_rel
+                entry["env_file"] = env_file
+            if spec.get("note"):
+                entry["note"] = spec["note"]
+            if spec.get("profiles"):
+                entry["profiles"] = list(spec["profiles"])
+            out[project] = entry
+            if render.available:
+                self._check_ports(plane, render)
+                self._check_profiles(plane, render)
+        return out
+
+    def _planes(self, renders: dict) -> dict:
+        # container -> (project, service key, profiles), from every render.
+        seen = {}
+        for project, render in renders.items():
+            for service, spec in render.services.items():
+                seen[spec["container"]] = (project, service, spec["profiles"])
+
+        out = {}
+        listed = set()
+        for group, rows in (self.curated.get("planes") or {}).items():
+            out[group] = [self._row(group, row, renders, seen) for row in rows]
+            listed.update(row["container"] for row in rows)
+
+        for container in sorted(seen):
+            if container not in listed:
+                self.drift.append(
+                    f"MISSING from {CURATED_REL.as_posix()}: {container} (project {seen[container][0]}) - "
+                    "add it to a plane group with its `critical` flag; the generator cannot choose the "
+                    "group for you"
+                )
+        return out
+
+    def _row(self, group: str, curated_row: dict, renders: dict, seen: dict) -> dict:
+        container = curated_row["container"]
+        project = curated_row.get("project")
+        row = {"container": container, "project": project}
+
+        if container in seen:
+            # The render is authoritative here, AND it audits what the sidecar
+            # recorded: a stale `service` or `profile` in the sidecar would
+            # otherwise pass unnoticed on a machine that can render the project
+            # and then produce a different file on one that cannot.
+            rendered_project, service, profiles = seen[container]
+            if rendered_project != project:
+                self.drift.append(
+                    f"WRONG project for {container}: the sidecar says '{project}', the render says "
+                    f"'{rendered_project}'"
+                )
+                row["project"] = rendered_project
+            derived = {}
+            if service != container:
+                derived["service"] = service
+            if len(profiles) == 1:
+                derived["profile"] = profiles[0]
+            elif profiles:
+                derived["profiles"] = sorted(profiles)
+            for key in ("service", "profile", "profiles"):
+                if curated_row.get(key) != derived.get(key):
+                    self.drift.append(
+                        f"STALE `{key}` for {container} in {CURATED_REL.as_posix()}: it records "
+                        f"{json.dumps(curated_row.get(key))}, the render says {json.dumps(derived.get(key))}"
+                    )
+            row.update(derived)
+        else:
+            render = renders.get(project)
+            if render is None:
+                self.drift.append(
+                    f"UNKNOWN project '{project}' for {container} (group {group}) - it is not in "
+                    f"{CURATED_REL.as_posix()}'s projects map"
+                )
+            elif render.available:
+                self.drift.append(
+                    f"NOT IN THE RENDER: {container} sits in the {group} group owned by project "
+                    f"'{project}', which renders {len(render.services)} service(s) and none is that container"
+                )
+            # An unrenderable project carries its recorded facts, unverified.
+            for key in ("service", "profile", "profiles"):
+                if curated_row.get(key):
+                    row[key] = curated_row[key]
+
+        for key in ("critical", "host_health", "stale_pool_guard", "note"):
+            if key in curated_row:
+                row[key] = curated_row[key]
+        if "critical" not in row:
+            self.drift.append(f"NO `critical` flag for {container} in {CURATED_REL.as_posix()}")
+        return {key: row[key] for key in ROW_KEY_ORDER if key in row}
+
+    # -- the manifest's own declarations, now with a consumer --------------
+
+    def _check_ports(self, plane: str, render: Render) -> None:
+        declared = {str(port) for port in (self.manifest.plane(plane).get("ports") or {})}
+        published = {port for spec in render.services.values() for port in spec["ports"]}
+        for port in sorted(declared - published, key=int):
+            self.drift.append(
+                f"PORT {port} is declared under [planes.{plane}.ports] in {MANIFEST_NAME} but no service "
+                "in that plane publishes it"
+            )
+        for port in sorted(published - declared, key=int):
+            owner = next((spec["container"] for spec in render.services.values() if port in spec["ports"]), "?")
+            self.drift.append(
+                f"PORT {port} is published by {owner} but is NOT declared under [planes.{plane}.ports] "
+                f"in {MANIFEST_NAME}"
+            )
+
+    def _check_profile_accounting(self) -> None:
+        """Every declared profile says whether a default `up` starts it.
+
+        This is the gate that stops a new profile from silently shrinking the
+        running set. When a compose file gains a profile around services that
+        run TODAY, the plane's manifest table must say `default = true` (the
+        driver passes it) or `opt_in = true` (something else turns it on, and
+        the description says what). Saying nothing is what a reduction looks
+        like, and it is exactly the shape the ob1 research/wiki/notebook
+        profiles arrive in.
+
+        Manifest-only on purpose: COMPOSE_PROFILES lives in a gitignored env
+        file, so it cannot be the thing CI checks. Every plane is checked,
+        including the `manual` one the inventory itself skips.
+        """
+        for plane in self.manifest.order:
+            for profile in self.manifest.unaccounted_profiles(plane):
+                self.drift.append(
+                    f"PROFILE '{profile}' under [planes.{plane}.profiles] in {MANIFEST_NAME} declares "
+                    "neither `default = true` (the driver passes it on every invocation), `opt_in = true` "
+                    "(COMPOSE_PROFILES, an operator or another script turns it on - say which in the "
+                    "description) nor `pending = true` (not in the compose file yet). Until it does, a "
+                    "bare `up` will not start what it gates and nothing says that was intended."
+                )
+
+    def _check_profiles(self, plane: str, render: Render) -> None:
+        pending = set(self.manifest.pending_profiles(plane))
+        declared = set(self.manifest.profiles(plane)) - pending
+        found = set(render.profiles)
+        compose_rel = self.manifest.plane(plane)["compose"]
+        for profile in sorted(declared - found):
+            self.drift.append(
+                f"PROFILE '{profile}' is declared under [planes.{plane}.profiles] in {MANIFEST_NAME} but "
+                f"{compose_rel} declares no such profile (mark it `pending = true` if the item that adds "
+                "it has not landed)"
+            )
+        for profile in sorted(found - declared):
+            why = " (the manifest still marks it `pending = true`)" if profile in pending else ""
+            self.drift.append(
+                f"PROFILE '{profile}' exists in {compose_rel} but is not a live declaration under "
+                f"[planes.{plane}.profiles] in {MANIFEST_NAME}{why}"
+            )
+
+
+def _inventory_text(data: dict) -> str:
+    return json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+
+
+def _inventory_diff(current: dict, wanted: dict) -> list[str]:
+    """The rows that differ, named. A whole-file diff is not an answer."""
+    lines = []
+    if list(current.get("_comment") or []) != list(wanted.get("_comment") or []):
+        lines.append(f"_comment: the header differs from {CURATED_REL.as_posix()}'s")
+
+    have, want = current.get("projects") or {}, wanted.get("projects") or {}
+    for project in sorted(set(have) | set(want)):
+        if have.get(project) != want.get(project):
+            lines.append(f"projects.{project}: committed {json.dumps(have.get(project))} != "
+                         f"generated {json.dumps(want.get(project))}")
+
+    have, want = current.get("planes") or {}, wanted.get("planes") or {}
+    for group in sorted(set(have) | set(want)):
+        rows_have = {row.get("container"): row for row in (have.get(group) or [])}
+        rows_want = {row.get("container"): row for row in (want.get(group) or [])}
+        for container in sorted(set(rows_have) | set(rows_want)):
+            if rows_have.get(container) != rows_want.get(container):
+                lines.append(f"planes.{group}[{container}]: committed {json.dumps(rows_have.get(container))} "
+                             f"!= generated {json.dumps(rows_want.get(container))}")
+        if ([row.get("container") for row in (have.get(group) or [])]
+                != [row.get("container") for row in (want.get(group) or [])]):
+            lines.append(f"planes.{group}: the row ORDER differs from the sidecar's")
+    return lines or ["the files differ in a way the row diff does not describe"]
+
+
+def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) -> int:
+    if write == check:
+        raise Refusal(
+            "refused: `inventory` needs exactly one of --write (regenerate "
+            f"{INVENTORY_REL.as_posix()}) or --check (fail on drift, change nothing)"
+        )
+    inventory = Inventory(manifest, root, capture)
+    data = inventory.build()
+    path = root / INVENTORY_REL
+
+    for note in inventory.skipped:
+        console.line(f"  [ -- ] NOT VERIFIED - {note}")
+
+    if inventory.drift:
+        for line in inventory.drift:
+            console.line(f"  [FAIL] {line}")
+        console.line("")
+        console.line(
+            f"{len(inventory.drift)} problem(s). Fix {CURATED_REL.as_posix()} (or {MANIFEST_NAME}) and "
+            "re-run; nothing is written while the inputs disagree with the compose files."
+        )
+        return EXIT_REFUSED
+
+    wanted = _inventory_text(data)
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+
+    if check:
+        if current is None:
+            console.line(f"  [FAIL] {rel(root, path)} does not exist (run `inventory --write`)")
+            return EXIT_REFUSED
+        try:
+            same = json.loads(current) == data
+        except ValueError as exc:
+            console.line(f"  [FAIL] {rel(root, path)} is not valid JSON ({exc})")
+            return EXIT_REFUSED
+        if not same:
+            for line in _inventory_diff(json.loads(current), data):
+                console.line(f"  [FAIL] {line}")
+            console.line("")
+            console.line(f"{rel(root, path)} is not what {MANIFEST_NAME}, "
+                         f"{CURATED_REL.as_posix()} and the compose renders say. "
+                         "Re-run with --write and commit the result.")
+            return EXIT_REFUSED
+        console.line(f"  [OK]   {rel(root, path)} matches the manifest, the sidecar and the compose renders")
+        return EXIT_OK
+
+    if current == wanted:
+        console.line(f"  [OK]   {rel(root, path)} already up to date")
+        return EXIT_OK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # LF on purpose: .gitattributes gives *.json eol=lf, so writing the Windows
+    # default would rewrite every line and show the whole file as changed.
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(wanted)
+    console.line(f"wrote {rel(root, path)}")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
 
@@ -870,12 +1750,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="verb")
 
     sub.add_parser("list", help="planes, their state, and the products that group them")
-    sub.add_parser("status", help="docker compose ps per enabled plane (read-only)")
 
-    for verb, helptext in (("up", "start enabled planes in dependency order"),
+    for verb, helptext in (("status", "docker compose ps per plane (read-only)"),
+                           ("up", "start planes in dependency order"),
                            ("down", "stop them in reverse order")):
         p = sub.add_parser(verb, help=helptext)
-        p.add_argument("--dry-run", action="store_true", help="print the docker commands, run nothing")
+        p.add_argument("plane", nargs="?", default=None, help="act on exactly this plane")
+        p.add_argument("--all", dest="every", action="store_true",
+                       help="every declared plane except the `manual` ones, instead of the enabled set")
+        if verb != "status":
+            p.add_argument("--dry-run", action="store_true", help="print the docker commands, run nothing")
 
     p = sub.add_parser("restart", help="restart one plane in place")
     p.add_argument("plane")
@@ -895,6 +1779,14 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(kind="auto")
 
     sub.add_parser("doctor", help="docker, compose, env files and blank keys")
+    sub.add_parser("health", help="the functional probe sweep (read-only; exit code = failed probes)")
+    sub.add_parser("stats", help="inference demand + queue statistics (delegates to stack-stats.ps1)")
+
+    p = sub.add_parser("inventory", help="generate or verify scripts/lib/stack-services.json")
+    p.add_argument("--write", action="store_true",
+                   help="regenerate the inventory from the manifest, the sidecar and the compose renders")
+    p.add_argument("--check", action="store_true",
+                   help="fail on any drift and name the rows; writes nothing")
 
     p = sub.add_parser("init", help="write a state file for this machine")
     p.add_argument("--planes", default=None, help="comma-separated plane names")
@@ -906,11 +1798,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv=None, runner=None, stdout=None) -> int:
+def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
+    """Four seams, so every test is hermetic.
+
+    `runner(cmd, cwd) -> int` STREAMS a command (docker compose up, the stats
+    script); `capture(cmd, cwd) -> CommandResult` reads one back (the health
+    probes, the compose renders); `http(url, timeout) -> HttpResult` is the
+    only network call; `stdout` is the single output stream.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     console = Console(stdout)
     runner = runner or subprocess_runner
+    capture = capture or subprocess_capture
+    http = http or urllib_get
 
     if not args.verb:
         parser.print_help(console.stream)
@@ -928,11 +1829,11 @@ def main(argv=None, runner=None, stdout=None) -> int:
         if args.verb == "list":
             return cmd_list(manifest, state, root, console)
         if args.verb == "status":
-            return cmd_status(manifest, state, root, console, runner)
+            return cmd_status(manifest, state, root, console, runner, args.plane, args.every)
         if args.verb == "up":
-            return cmd_up(manifest, state, root, console, runner, args.dry_run)
+            return cmd_up(manifest, state, root, console, runner, args.plane, args.every, args.dry_run)
         if args.verb == "down":
-            return cmd_down(manifest, state, root, console, runner, args.dry_run)
+            return cmd_down(manifest, state, root, console, runner, args.plane, args.every, args.dry_run)
         if args.verb == "restart":
             return cmd_restart(manifest, state, root, console, runner, args.plane, args.dry_run)
         if args.verb == "enable":
@@ -943,6 +1844,12 @@ def main(argv=None, runner=None, stdout=None) -> int:
             return cmd_doctor(manifest, state, root, console, runner)
         if args.verb == "init":
             return cmd_init(manifest, state, root, console, args)
+        if args.verb == "health":
+            return cmd_health(root, console, capture, http)
+        if args.verb == "stats":
+            return cmd_stats(root, console, runner)
+        if args.verb == "inventory":
+            return cmd_inventory(manifest, root, console, capture, args.write, args.check)
     except Refusal as refusal:
         console.line(str(refusal))
         return EXIT_REFUSED

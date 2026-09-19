@@ -670,3 +670,766 @@ def test_a_corrupt_state_file_is_refused_not_ignored(root):
     code, out, _ = run(root, "list")
     assert code == stack.EXIT_REFUSED
     assert "unreadable" in out
+
+
+# --------------------------------------------------------------------------
+# health - the fifteen probes stack.ps1 ran, one for one
+# --------------------------------------------------------------------------
+#
+# The point of pinning the NAMES is parity. A probe dropped, merged into a
+# neighbour or renamed shows up here as a list mismatch, which is exactly the
+# anchor criterion ("a probe dropped, merged or weakened FAILS").
+
+PS1_PROBES = [
+    "0 unhealthy containers (found: )",
+    "anchor: ai-stack_llm-net exists",
+    "inference: llm-gateway liveliness",
+    "frontend: OWUI http://127.0.0.1:3000/health",
+    "frontend: 8 tailnet serve routes",
+    "frontend: owui/ manifest rows drifted from live webui.db: 0",
+    "memory: cloud door http://127.0.0.1:8060/health",
+    "search: gateway http://127.0.0.1:8085/healthz",
+    "search: ok - 4 engine(s) answering",
+    "coder: little-coder daemon :8090/health",
+    "OB1: open_notebook API :5055/api/config",
+    "OB1: ops door :8062/health",
+    "OB1: research-curator http://127.0.0.1:8816/health",
+    "OB1: openbrain-db accepting connections",
+    "agent-org: mattermost ping",
+]
+
+HEALTHY_SEARCH = json.dumps(
+    {"status": "ok", "search": "ok",
+     "providers": {"searxng": {"engines_answering_now": 4, "verdict": "ok"}}}
+)
+
+
+class FakeHost:
+    """A stand-in stack: every docker call and every HTTP GET is scripted.
+
+    Defaults are the all-green case; a test breaks exactly the one thing it is
+    about. Nothing here touches a daemon or a socket.
+    """
+
+    def __init__(self, **broken):
+        self.unhealthy = broken.get("unhealthy", [])
+        self.network = broken.get("network", "ai-stack_llm-net")
+        self.exec_codes = broken.get("exec_codes", {})
+        self.serve_routes = broken.get("serve_routes", "8")
+        self.drift_stdout = broken.get("drift_stdout", "0")
+        self.drift_stderr = broken.get("drift_stderr", "")
+        self.http_status = broken.get("http_status", {})
+        self.search_body = broken.get("search_body", HEALTHY_SEARCH)
+        self.calls: list[list[str]] = []
+
+    def capture(self, cmd, cwd):
+        self.calls.append(list(cmd))
+        if cmd[0] == "powershell":
+            return stack.CommandResult(0, self.drift_stdout, self.drift_stderr)
+        if cmd[:2] == ["docker", "ps"]:
+            return stack.CommandResult(0, "\n".join(self.unhealthy), "")
+        if cmd[:2] == ["docker", "network"]:
+            return stack.CommandResult(0, self.network, "")
+        if cmd[:2] == ["docker", "exec"]:
+            container = cmd[2]
+            if container == "tailscale":
+                return stack.CommandResult(0, self.serve_routes, "")
+            return stack.CommandResult(self.exec_codes.get(container, 0), "", "")
+        raise AssertionError(f"unscripted docker call: {cmd}")
+
+    def http(self, url, timeout=8):
+        status = self.http_status.get(url, 200)
+        body = self.search_body if url.endswith("8085/health") else "{}"
+        return stack.HttpResult(status, body)
+
+
+def sweep(host: FakeHost, root: Path):
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), "health"], stdout=out, capture=host.capture, http=host.http)
+    return code, out.getvalue()
+
+
+def probe_lines(text: str) -> list[tuple[str, str]]:
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("  [OK]   "):
+            rows.append(("OK", line[len("  [OK]   "):]))
+        elif line.startswith("  [FAIL] "):
+            rows.append(("FAIL", line[len("  [FAIL] "):]))
+    return rows
+
+
+def test_health_runs_exactly_the_probes_stack_ps1_ran_in_the_same_order(root):
+    code, out = sweep(FakeHost(), root)
+    assert [name for _state, name in probe_lines(out)] == PS1_PROBES
+    assert code == 0
+    assert "ALL HEALTH PROBES PASSED" in out
+
+
+def test_health_exit_code_is_the_number_of_failed_probes(root):
+    host = FakeHost(
+        unhealthy=["openbrain-curator"],
+        exec_codes={"openbrain-db": 1},
+        http_status={"http://127.0.0.1:8062/health": 503},
+    )
+    code, out = sweep(host, root)
+    assert code == 3
+    assert "3 probe(s) FAILED" in out
+    assert [name for state, name in probe_lines(out) if state == "FAIL"] == [
+        "0 unhealthy containers (found: openbrain-curator)",
+        "OB1: ops door :8062/health",
+        "OB1: openbrain-db accepting connections",
+    ]
+
+
+def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root):
+    """The regression this sweep was rebuilt around.
+
+    stack.ps1's first owui-drift probe assigned OUTSIDE a Probe block, so a
+    stopped openwebui turned the check's stderr into a terminating
+    NativeCommandError: five probe lines, no summary, and the eight later probes
+    (memory, search, coder, OB1 x4, agent-org) never ran at all.
+    """
+    host = FakeHost(
+        drift_stdout="REFUSED",
+        drift_stderr="REFUSED: the container 'openwebui' is not running.",
+        http_status={"http://127.0.0.1:3000/health": 0},
+        serve_routes="",
+    )
+    code, out = sweep(host, root)
+    rows = probe_lines(out)
+    assert len(rows) == 15
+    assert [name for state, name in rows if state == "FAIL"] == [
+        "frontend: OWUI http://127.0.0.1:3000/health",
+        "frontend: 8 tailnet serve routes",
+        "frontend: owui/ manifest rows drifted from live webui.db: "
+        "REFUSED - the container 'openwebui' is not running.",
+    ]
+    assert code == 3
+    # The eight probes AFTER the frontend block still ran and still passed.
+    assert [state for state, _name in rows][-9:] == ["OK"] * 9
+
+
+def test_a_drift_count_above_zero_fails_and_the_number_is_in_the_label(root):
+    code, out = sweep(FakeHost(drift_stdout="7"), root)
+    assert code == 1
+    assert ("FAIL", "frontend: owui/ manifest rows drifted from live webui.db: 7") in probe_lines(out)
+
+
+def test_healthz_alone_cannot_pass_search(root):
+    """/healthz said 200 through the whole 2026-09-11 outage. Hence two probes."""
+    degraded = json.dumps(
+        {"search": "DEGRADED", "providers": {"searxng": {"engines_answering_now": 0}}}
+    )
+    code, out = sweep(FakeHost(search_body=degraded), root)
+    rows = probe_lines(out)
+    assert ("OK", "search: gateway http://127.0.0.1:8085/healthz") in rows
+    assert ("FAIL", "search: DEGRADED - 0 engine(s) answering") in rows
+    assert code == 1
+
+
+def test_search_unknown_is_not_a_failure_only_a_measured_degraded_is(root):
+    body = json.dumps({"search": "unknown", "providers": {"searxng": {"engines_answering_now": 0}}})
+    code, out = sweep(FakeHost(search_body=body), root)
+    assert ("OK", "search: unknown - 0 engine(s) answering") in probe_lines(out)
+    assert code == 0
+
+
+def test_a_probe_that_throws_is_one_failed_probe_not_a_crash(root):
+    """`[int]$r` on an empty string threw in PowerShell; int('') raises here."""
+    code, out = sweep(FakeHost(serve_routes="not a number"), root)
+    assert ("FAIL", "frontend: 8 tailnet serve routes") in probe_lines(out)
+    assert code == 1
+
+
+def test_the_liveliness_probe_never_gets_litellms_bare_health(root):
+    """A GET of LiteLLM /health through the alias makes it load every model."""
+    host = FakeHost()
+    sweep(host, root)
+    gateway = [c for c in host.calls if c[:3] == ["docker", "exec", "llm-gateway"]]
+    assert gateway and all("/health/liveliness" in " ".join(c) for c in gateway)
+    assert not any("localhost:8080/health'" in " ".join(c) for c in gateway)
+
+
+# --------------------------------------------------------------------------
+# stats
+# --------------------------------------------------------------------------
+
+
+def test_stats_hands_off_to_the_powershell_report(root):
+    script = root / "scripts" / "stack" / "stack-stats.ps1"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    code, out, recorder = run(root, "stats")
+    assert code == 0
+    assert len(recorder.commands) == 1
+    assert recorder.commands[0][:1] == ["powershell"]
+    assert recorder.commands[0][-1].endswith("stack-stats.ps1")
+
+
+def test_stats_refuses_off_windows_rather_than_printing_nothing(root, monkeypatch):
+    """A verb that silently does nothing is the failure class this repo hunts."""
+    script = root / "scripts" / "stack" / "stack-stats.ps1"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    code, out, recorder = run(root, "stats")
+    assert code == stack.EXIT_REFUSED
+    assert out.startswith("refused:")
+    assert "stack-stats.ps1" in out
+    assert recorder.commands == []
+
+
+# --------------------------------------------------------------------------
+# plane selection: one plane, --all, or whatever this machine enables
+# --------------------------------------------------------------------------
+
+
+def test_up_all_is_the_order_stack_ps1_used_whatever_the_state_says(root):
+    code, out, _recorder = run(root, "up", "--all", "--dry-run")
+    assert code == 0
+    assert [ln.split(" -f ")[1].split()[0] for ln in docker_lines(out)] == [
+        "docker-compose.yml", "inference/docker-compose.yml", "frontend/docker-compose.yml",
+        "memory/docker-compose.yml", "search/docker-compose.yml", "coder/docker-compose.yml",
+        "OB1/docker/docker-compose.yml", "agent-org/docker/docker-compose.yml",
+    ]
+
+
+def test_down_all_is_the_exact_reverse(root):
+    _code, up_out, _r = run(root, "up", "--all", "--dry-run")
+    _code, down_out, _r = run(root, "down", "--all", "--dry-run")
+    ups = [ln.split(" -f ")[1].split()[0] for ln in docker_lines(up_out)]
+    downs = [ln.split(" -f ")[1].split()[0] for ln in docker_lines(down_out)]
+    assert downs == list(reversed(ups))
+
+
+def test_up_all_never_starts_the_manual_plane(root):
+    _code, out, _r = run(root, "up", "--all", "--dry-run")
+    assert "portal/docker-compose.yml" not in out
+
+
+def test_up_one_plane_starts_only_that_plane_and_names_what_it_assumes(root):
+    code, out, _r = run(root, "up", "coder", "--dry-run")
+    assert code == 0
+    assert docker_lines(out) == ["docker compose -f coder/docker-compose.yml --env-file .env up -d"]
+    assert "# note: coder requires anchor, inference; this starts only coder" in out
+
+
+def test_a_plane_and_all_together_is_refused(root):
+    code, out, _r = run(root, "up", "coder", "--all", "--dry-run")
+    assert code == stack.EXIT_REFUSED
+    assert "not both" in out
+
+
+def test_status_reports_the_enabled_planes_and_does_not_pull_in_the_anchor(root):
+    run(root, "init", "--planes", "memory")
+    _code, _out, recorder = run(root, "status")
+    assert recorder.lines == ["docker compose -f memory/docker-compose.yml --env-file .env ps"]
+
+
+# --------------------------------------------------------------------------
+# inventory
+# --------------------------------------------------------------------------
+#
+# Hermetic here means the compose RENDER is scripted too: `docker compose config`
+# is answered from a fixture, so these tests pin the generator's behaviour
+# without a daemon. The real tree is covered by `inventory --check` itself,
+# which CI and the pre-commit hook both run.
+
+# The inventory generator is unit-tested against a SMALL manifest of its own,
+# not the shipping one: these tests are about the generator, and pinning them to
+# every port and profile the real stack happens to publish would make an
+# unrelated plane change fail them. The real tree is covered three ways - the
+# `shipped` tests at the end of this file, the pre-commit check, and the
+# `stack-driver` CI job, all of which run `inventory --check` for real.
+MINI_MANIFEST = """
+[planes.anchor]
+compose  = "docker-compose.yml"
+env_file = ".env"
+implicit = true
+requires = []
+[planes.anchor.ports]
+
+[planes.inference]
+compose  = "inference/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+[planes.inference.ports]
+"8081" = "llama-cpp-upstream"
+[planes.inference.profiles.local]
+description = "the llama.cpp upstreams; COMPOSE_PROFILES in the root .env turns it on"
+opt_in      = true
+
+[planes.frontend]
+compose  = "frontend/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+[planes.frontend.ports]
+"3000" = "openwebui"
+[planes.frontend.profiles.gpu]
+description = "the CUDA image and the device reservation"
+pending     = true
+
+[planes.memory]
+compose  = "memory/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+[planes.memory.ports]
+"8060" = "mnemory-cloud-gateway"
+
+[planes.search]
+compose  = "search/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+[planes.search.ports]
+"8085" = "gateway"
+
+[planes.coder]
+compose  = "coder/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+[planes.coder.ports]
+"9091" = "little-coder metrics"
+
+[planes.ob1]
+compose  = "OB1/docker/docker-compose.yml"
+requires = ["anchor"]
+[planes.ob1.ports]
+[planes.ob1.profiles.idea-refinery]
+description = "the idea-refinery services"
+default     = true
+
+[planes.agent-org]
+compose  = "agent-org/docker/docker-compose.yml"
+requires = ["anchor"]
+[planes.agent-org.ports]
+"8065" = "mattermost"
+"8830" = "agent-bridge"
+[planes.agent-org.profiles.workers]
+description = "the worker pool; the operator starts it"
+opt_in      = true
+[planes.agent-org.profiles.cloud]
+description = "the cloud lane; the operator starts it"
+opt_in      = true
+
+[planes.portal]
+compose  = "portal/docker-compose.yml"
+env_file = ".env"
+requires = ["anchor"]
+manual   = "scripts/portal/portal-on.ps1"
+[planes.portal.ports]
+[planes.portal.profiles.internet]
+description = "cloudflared; portal-on.ps1 passes it"
+opt_in      = true
+"""
+
+
+@pytest.fixture
+def mini_root(tmp_path: Path) -> Path:
+    """A throwaway root built on MINI_MANIFEST, with placeholder compose files."""
+    (tmp_path / stack.MANIFEST_NAME).write_text(MINI_MANIFEST, encoding="utf-8")
+    manifest = stack.Manifest.load(tmp_path / stack.MANIFEST_NAME)
+    for name in manifest.order:
+        compose = tmp_path / Path(manifest.plane(name)["compose"])
+        compose.parent.mkdir(parents=True, exist_ok=True)
+        compose.write_text("# placeholder - the render is scripted\n", encoding="utf-8")
+        env = manifest.env_path(tmp_path, name)
+        env.parent.mkdir(parents=True, exist_ok=True)
+        env.write_text("", encoding="utf-8")
+    return tmp_path
+
+
+FIXTURE_RENDER = {
+    "docker-compose.yml": {"profiles": [], "services": {}},
+    "inference/docker-compose.yml": {
+        "profiles": ["local"],
+        "services": {
+            "llm-gateway": {"container_name": "llm-gateway"},
+            "llama-cpp-upstream": {
+                "container_name": "llama-cpp-upstream",
+                "profiles": ["local"],
+                "ports": [{"published": "8081"}],
+            },
+        },
+    },
+    "frontend/docker-compose.yml": {
+        "profiles": [],
+        "services": {"openwebui": {"container_name": "openwebui", "ports": [{"published": "3000"}]}},
+    },
+    "memory/docker-compose.yml": {
+        "profiles": [],
+        "services": {"mnemory-cloud-gateway": {"container_name": "mnemory-cloud-gateway",
+                                               "ports": [{"published": "8060"}]}},
+    },
+    "search/docker-compose.yml": {
+        "profiles": [],
+        # The case the `service` field exists for: the key is not the name.
+        "services": {"gateway": {"container_name": "search-gateway", "ports": [{"published": "8085"}]}},
+    },
+    "coder/docker-compose.yml": {
+        "profiles": [],
+        "services": {"little-coder": {"container_name": "little-coder", "ports": [{"published": "9091"}]}},
+    },
+    "OB1/docker/docker-compose.yml": {
+        "profiles": ["idea-refinery"],
+        "services": {
+            "openbrain-db": {"container_name": "openbrain-db"},
+            "openbrain-idea-refinery": {"container_name": "openbrain-idea-refinery",
+                                        "profiles": ["idea-refinery"]},
+        },
+    },
+    "agent-org/docker/docker-compose.yml": {
+        "profiles": ["cloud", "workers"],
+        "services": {
+            "mattermost": {"container_name": "mattermost", "ports": [{"published": "8065"}]},
+            "agent-bridge": {"container_name": "agent-bridge", "ports": [{"published": "8830"}]},
+            "ao-worker-1": {"container_name": "ao-worker-1", "profiles": ["workers"]},
+        },
+    },
+}
+
+CURATED_PROJECTS = {
+    "ai-stack": {"plane": "anchor", "note": "pure network anchor"},
+    "inference": {"plane": "inference"},
+    "frontend": {"plane": "frontend"},
+    "memory": {"plane": "memory"},
+    "search": {"plane": "search"},
+    "coder": {"plane": "coder"},
+    "open-brain": {"plane": "ob1"},
+    "agent-org": {"plane": "agent-org", "profiles": ["workers", "cloud"]},
+}
+
+CURATED_ROWS = {
+    "core": [
+        {"container": "openwebui", "project": "frontend", "critical": True,
+         "host_health": "http://127.0.0.1:3000/health"},
+        {"container": "llm-gateway", "project": "inference", "critical": True},
+        {"container": "llama-cpp-upstream", "profile": "local", "project": "inference", "critical": True},
+    ],
+    "search": [{"container": "search-gateway", "service": "gateway", "project": "search", "critical": False}],
+    "memory": [{"container": "mnemory-cloud-gateway", "project": "memory", "critical": False}],
+    "coder": [{"container": "little-coder", "project": "coder", "critical": False}],
+    "openbrain": [
+        {"container": "openbrain-db", "project": "open-brain", "critical": True},
+        {"container": "openbrain-idea-refinery", "profile": "idea-refinery",
+         "project": "open-brain", "critical": False},
+    ],
+    "agent-org": [
+        {"container": "mattermost", "project": "agent-org", "critical": True},
+        {"container": "agent-bridge", "project": "agent-org", "critical": True},
+        {"container": "ao-worker-1", "profile": "workers", "project": "agent-org", "critical": False},
+    ],
+}
+
+
+class FakeCompose:
+    """Answers `config --profiles` and `config --format json` from a fixture."""
+
+    def __init__(self, render=None, missing=()):
+        self.render = json.loads(json.dumps(render if render is not None else FIXTURE_RENDER))
+        self.missing = set(missing)
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, cwd):
+        self.calls.append(list(cmd))
+        compose = cmd[cmd.index("-f") + 1]
+        spec = self.render[compose]
+        if "--profiles" in cmd:
+            return stack.CommandResult(0, "\n".join(spec["profiles"]), "")
+        services = {k: dict(v) for k, v in spec["services"].items()}
+        return stack.CommandResult(0, json.dumps({"name": "x", "services": services}), "")
+
+
+def curated_file(root: Path, projects=None, rows=None, comment=("generated",)) -> Path:
+    path = root / stack.CURATED_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "_comment": list(comment),
+        "projects": json.loads(json.dumps(projects if projects is not None else CURATED_PROJECTS)),
+        "planes": json.loads(json.dumps(rows if rows is not None else CURATED_ROWS)),
+    }, indent=2), encoding="utf-8")
+    return path
+
+
+def inventory(root: Path, *args, compose=None):
+    out = io.StringIO()
+    compose = compose or FakeCompose()
+    code = stack.main(["--root", str(root), "inventory", *args], stdout=out, capture=compose)
+    return code, out.getvalue(), compose
+
+
+def generated(root: Path) -> dict:
+    return json.loads((root / stack.INVENTORY_REL).read_text(encoding="utf-8"))
+
+
+def test_inventory_write_builds_the_file_from_the_manifest_the_sidecar_and_the_render(mini_root):
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code == 0, out
+    data = generated(mini_root)
+
+    # projects: the compose invocation comes from the manifest, and the anchor's
+    # file is null because its render declares no services.
+    assert data["projects"]["ai-stack"] == {
+        "compose": "docker compose", "file": None, "env_file": None, "note": "pure network anchor",
+    }
+    assert data["projects"]["inference"] == {
+        "compose": "docker compose -f inference/docker-compose.yml --env-file .env",
+        "file": "inference/docker-compose.yml", "env_file": ".env",
+    }
+    # ob1 and agent-org carry no --env-file: compose loads their own.
+    assert data["projects"]["open-brain"]["env_file"] is None
+    assert data["projects"]["agent-org"]["compose"] == \
+        "docker compose -f agent-org/docker/docker-compose.yml"
+    assert data["projects"]["agent-org"]["profiles"] == ["workers", "cloud"]
+    # the MANUAL plane is deliberately not an inventory project
+    assert "portal" not in data["projects"]
+
+    # rows: service only where it differs, profile from the render, curated kept
+    rows = {r["container"]: r for group in data["planes"].values() for r in group}
+    assert rows["search-gateway"]["service"] == "gateway"
+    assert "service" not in rows["openwebui"]
+    assert rows["llama-cpp-upstream"]["profile"] == "local"
+    assert rows["openwebui"]["host_health"] == "http://127.0.0.1:3000/health"
+    assert list(rows["openwebui"]) == ["container", "project", "critical", "host_health"]
+
+
+def test_inventory_check_passes_on_what_write_just_wrote(mini_root):
+    curated_file(mini_root)
+    inventory(mini_root, "--write")
+    code, out, _c = inventory(mini_root, "--check")
+    assert code == 0
+    assert "[OK]" in out
+
+
+def test_inventory_check_is_red_when_one_row_is_edited_by_hand(mini_root):
+    curated_file(mini_root)
+    inventory(mini_root, "--write")
+    path = mini_root / stack.INVENTORY_REL
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["planes"]["core"][1]["project"] = "memory"
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    code, out, _c = inventory(mini_root, "--check")
+    assert code != 0
+    assert "planes.core[llm-gateway]" in out
+    assert "memory" in out and "inference" in out
+
+
+def test_inventory_check_is_red_when_a_row_is_deleted(mini_root):
+    curated_file(mini_root)
+    inventory(mini_root, "--write")
+    path = mini_root / stack.INVENTORY_REL
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["planes"]["agent-org"] = [r for r in data["planes"]["agent-org"] if r["container"] != "ao-worker-1"]
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    code, out, _c = inventory(mini_root, "--check")
+    assert code != 0
+    assert "ao-worker-1" in out
+
+
+def test_a_container_the_sidecar_does_not_list_refuses_rather_than_being_invented(mini_root):
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["openbrain"] = [r for r in rows["openbrain"] if r["container"] != "openbrain-idea-refinery"]
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "MISSING from scripts/lib/stack-services.curated.json: openbrain-idea-refinery" in out
+    assert not (mini_root / stack.INVENTORY_REL).exists()
+
+
+def test_a_sidecar_row_no_render_produces_is_drift(mini_root):
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["coder"].append({"container": "open-terminal", "project": "coder", "critical": False})
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "NOT IN THE RENDER: open-terminal" in out
+
+
+def test_a_stale_service_key_in_the_sidecar_is_drift_not_a_silent_win(mini_root):
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["search"][0]["service"] = "searxng"
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "STALE `service` for search-gateway" in out
+
+
+def test_a_published_port_the_manifest_does_not_declare_is_drift(mini_root):
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["memory/docker-compose.yml"]["services"]["mnemory-cloud-gateway"]["ports"].append(
+        {"published": "9999"}
+    )
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "PORT 9999 is published by mnemory-cloud-gateway" in out
+    assert "[planes.memory.ports]" in out
+
+
+def test_a_declared_port_nothing_publishes_is_drift(mini_root):
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["frontend/docker-compose.yml"]["services"]["openwebui"]["ports"] = []
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "PORT 3000 is declared under [planes.frontend.ports]" in out
+
+
+def test_a_profile_the_manifest_still_calls_pending_is_drift(mini_root):
+    """The stale flag this item found: inference's `local` shipped, the manifest
+    still said `pending = true`, and nothing compared the two."""
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["frontend/docker-compose.yml"]["profiles"] = ["gpu"]
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "PROFILE 'gpu'" in out and "pending = true" in out
+
+
+def test_an_unrenderable_project_is_named_not_quietly_passed(mini_root):
+    """CI has no OB1 submodule. A check that cannot run must say so."""
+    (mini_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code == 0
+    assert "NOT VERIFIED - open-brain:" in out
+    rows = {r["container"]: r for group in generated(mini_root)["planes"].values() for r in group}
+    # the recorded facts are carried through so the file is the same either way
+    assert rows["openbrain-idea-refinery"]["profile"] == "idea-refinery"
+    assert rows["openbrain-db"]["project"] == "open-brain"
+
+
+def test_a_plane_with_no_project_refuses_so_a_new_plane_cannot_vanish(mini_root):
+    projects = {k: v for k, v in CURATED_PROJECTS.items() if k != "coder"}
+    curated_file(mini_root, projects=projects)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "plane 'coder' has no project" in out
+
+
+def test_the_manual_plane_may_not_be_given_a_project(mini_root):
+    projects = dict(CURATED_PROJECTS, portal={"plane": "portal"})
+    curated_file(mini_root, projects=projects)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "is `manual`" in out and "AUTOMATED repair" in out
+
+
+def test_inventory_needs_exactly_one_of_write_and_check(mini_root):
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root)
+    assert code == stack.EXIT_REFUSED
+    assert "--write" in out and "--check" in out
+
+
+def test_the_header_comment_comes_from_the_sidecar(mini_root):
+    curated_file(mini_root, comment=["GENERATED - regenerate with inventory --write"])
+    inventory(mini_root, "--write")
+    assert generated(mini_root)["_comment"] == ["GENERATED - regenerate with inventory --write"]
+
+
+# --------------------------------------------------------------------------
+# the real tree: the inventory that actually ships
+# --------------------------------------------------------------------------
+
+
+def test_the_shipped_sidecar_covers_every_non_manual_plane_and_only_those():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    curated = json.loads((REPO_ROOT / stack.CURATED_REL).read_text(encoding="utf-8"))
+    claimed = {spec["plane"] for spec in curated["projects"].values()}
+    assert claimed == {p for p in manifest.order if not manifest.manual(p)}
+    assert "portal" not in claimed
+
+
+def test_every_shipped_row_carries_a_critical_flag_and_a_known_project():
+    curated = json.loads((REPO_ROOT / stack.CURATED_REL).read_text(encoding="utf-8"))
+    projects = set(curated["projects"])
+    for group, rows in curated["planes"].items():
+        for row in rows:
+            assert "critical" in row, f"{group}/{row['container']} has no critical flag"
+            assert row["project"] in projects, f"{group}/{row['container']} names an unknown project"
+
+
+def test_the_shipped_inventory_is_the_shape_its_consumers_read():
+    """status_check.py and stack-watchdog.ps1 read exactly these keys."""
+    data = json.loads((REPO_ROOT / stack.INVENTORY_REL).read_text(encoding="utf-8"))
+    assert set(data) == {"_comment", "projects", "planes"}
+    for name, project in data["projects"].items():
+        assert set(project) <= {"compose", "file", "env_file", "note", "profiles"}
+        assert "file" in project and "env_file" in project and "compose" in project
+        if project["file"] is None:
+            assert name == "ai-stack", "only an anchor owns no services"
+    for rows in data["planes"].values():
+        for row in rows:
+            assert set(row) <= set(stack.ROW_KEY_ORDER)
+            assert isinstance(row["critical"], bool)
+
+
+# --------------------------------------------------------------------------
+# profiles: the driver must never start FEWER containers than a bare compose
+# --------------------------------------------------------------------------
+
+
+def test_the_profile_flags_each_plane_gets_are_pinned(root):
+    """Today's set, from the REAL manifest. Changing it is a deliberate edit.
+
+    ob1 is the one that matters: `--profile idea-refinery` is what stack.ps1
+    passed on every invocation and what starts all thirty OB1 containers on the
+    base this was written against. If a later item puts more OB1 services behind
+    more profiles, this test is where "the shim now starts fewer containers"
+    surfaces.
+    """
+    _code, out, _r = run(root, "up", "--all", "--dry-run")
+    flags = {}
+    for line in docker_lines(out):
+        parts = line.split()
+        plane = parts[parts.index("-f") + 1]
+        flags[plane] = [parts[i + 1] for i, tok in enumerate(parts) if tok == "--profile"]
+    assert flags["OB1/docker/docker-compose.yml"] == ["idea-refinery"]
+    assert all(not v for k, v in flags.items() if k != "OB1/docker/docker-compose.yml")
+
+
+def test_a_planes_compose_profiles_are_unioned_into_any_flags_the_driver_passes(root):
+    """`docker compose --profile X` REPLACES COMPOSE_PROFILES, it does not add.
+
+    Measured on compose v5.3.0: the inference plane renders 8 services with the
+    root .env alone (COMPOSE_PROFILES=local,...) and 4 with that same env plus
+    one unrelated --profile flag. So whenever the driver passes any flag, it has
+    to pass the env's profiles too, or it silently starts a subset.
+    """
+    env = root / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "\nCOMPOSE_PROFILES=local,gpu\n", encoding="utf-8")
+    manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
+    state = stack.State.default()
+
+    # ob1 gets a flag (idea-refinery is `default`), but reads its OWN env file,
+    # which has no COMPOSE_PROFILES - so nothing is unioned in.
+    assert stack.effective_profiles(manifest, state, root, "ob1") == ["idea-refinery"]
+    # inference gets NO flag today, so compose reads COMPOSE_PROFILES itself.
+    assert stack.effective_profiles(manifest, state, root, "inference") == []
+    # ...but the moment anything enables a profile there, the env's come too.
+    state.enable("inference", ["local"])
+    assert set(stack.effective_profiles(manifest, state, root, "inference")) == {"local", "gpu"}
+
+
+def test_a_profile_that_says_nothing_about_deployment_is_refused(mini_root):
+    """The guard for the next item that puts running services behind a profile."""
+    curated_file(mini_root)
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8")
+        + '\n[planes.ob1.profiles.newslice]\ndescription = "services that run today"\n',
+        encoding="utf-8",
+    )
+    code, out, _c = inventory(mini_root, "--check")
+    assert code != 0
+    assert "PROFILE 'newslice'" in out
+    assert "`default = true`" in out and "`opt_in = true`" in out
+
+
+def test_every_profile_the_real_manifest_declares_is_accounted_for():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    unaccounted = {p: manifest.unaccounted_profiles(p) for p in manifest.order}
+    assert not any(unaccounted.values()), unaccounted

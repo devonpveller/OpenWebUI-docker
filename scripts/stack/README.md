@@ -15,22 +15,41 @@ but Python and Docker. `scripts/stack/test_stack.py` enforces that rule with an
 AST check, and the whole suite is hermetic - the docker call is injected, so no
 test ever reaches a daemon.
 
-`stack.ps1` is untouched by this item and remains the driver in use; `stack.py`
-reproduces its ordering exactly (see *Ordering* below) so the two agree while
-`sl-driver-parity` moves health, stats and the inventory generator across.
+`stack.ps1` **is a shim over this driver** since 2026-09-19 (`sl-driver-parity`).
+It forwards its arguments and exits with the driver's code; it holds no plane
+registry, no probe and no ordering of its own, so there is nothing in it left to
+drift. It survives because runbooks, plane READMEs and compose comments say
+`.\scripts\stack\stack.ps1 up <plane>` in about forty places. Retiring it is a
+later item.
+
+Two things the shim has to translate, and both are in its own header:
+
+- `stack.ps1 up` (its `$Plane` default is `all`) means **every declared plane**,
+  which the driver spells `up --all`. A bare `stack.py up` means the narrower
+  "whatever this machine enables" - on a fresh clone, the frontend alone.
+- `stack.ps1 restart` with no plane is forwarded as `restart all`, so the
+  refusal is the driver's rather than a second copy of it.
 
 ---
 
 ## Quick start
 
 ```text
-python scripts/stack/stack.py list             # what exists, what is on
-python scripts/stack/stack.py init             # write a state file (default: frontend)
-python scripts/stack/stack.py enable research  # turn a product on
-python scripts/stack/stack.py up --dry-run     # the exact docker lines, run nothing
-python scripts/stack/stack.py up               # start them, in dependency order
-python scripts/stack/stack.py doctor           # docker, env files, blank keys
+python scripts/stack/stack.py list                # what exists, what is on
+python scripts/stack/stack.py init                # write a state file (default: frontend)
+python scripts/stack/stack.py enable research     # turn a product on
+python scripts/stack/stack.py up --dry-run        # the exact docker lines, run nothing
+python scripts/stack/stack.py up                  # start them, in dependency order
+python scripts/stack/stack.py up --all            # every declared plane (what stack.ps1 up did)
+python scripts/stack/stack.py up coder            # exactly one plane
+python scripts/stack/stack.py doctor              # docker, env files, blank keys
+python scripts/stack/stack.py health              # the 15-probe sweep (read-only)
+python scripts/stack/stack.py stats               # inference demand + queue board
+python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 ```
+
+`status`, `health`, `doctor` and `inventory --check` are **read-only**: they
+start, stop and recreate nothing, so they need no plane lease.
 
 With **no state file at all** the machine runs `frontend` and nothing else -
 that is what a fresh clone gets.
@@ -48,6 +67,10 @@ meant to be called from a `.ps1` must not write there.
 | 0 | fine |
 | 1 | refused, or a docker command exited non-zero |
 | 2 | usage error (no verb) |
+
+`health` is the deliberate exception and says so in the module docstring: its
+exit code is **the number of failed probes**, which is what `stack.ps1 health`
+has always returned and what remote uptime watching reads.
 
 ---
 
@@ -87,7 +110,40 @@ seen*.
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. |
 | `ports` | published **host** ports -> what answers on them. |
-| `profiles` | compose profiles, each a sub-table: `description`, optional `default = true` (passed on every invocation - `ob1`'s `idea-refinery`, for parity with `stack.ps1`), optional `pending = true` (declared here, **not yet in the compose file**; a later `stack-layers` item adds it, and the driver says so when you enable one). |
+| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
+
+#### Every profile says whether a default `up` starts it
+
+| Flag | Means | Today |
+|---|---|---|
+| `default = true` | the driver passes `--profile <name>` on every invocation | `ob1`'s `idea-refinery` - parity with what `stack.ps1` always passed |
+| `opt_in = true` | something **other than the driver** turns it on, and the description says what | `inference`'s `local` (`COMPOSE_PROFILES` in the root `.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
+| `pending = true` | declared here, **not yet in the compose file**; a later item adds it. Enabling one is a no-op and the driver says so | `frontend`'s `gpu`/`tailscale` |
+
+Declaring none of the three is **refused** by `inventory --check`. That gate
+exists because the dangerous change is a compose file gaining a profile around
+services that are *already running*: the driver would then stop passing what
+starts them, `up` would quietly bring up a smaller stack, and nothing would say
+so. Forcing the declaration turns that into a decision someone made on purpose.
+
+#### `--profile` REPLACES `COMPOSE_PROFILES`; it does not add to it
+
+Measured 2026-09-19, compose v5.3.0, root `.env` carrying
+`COMPOSE_PROFILES=local,gpu,tailscale`:
+
+```text
+docker compose -f inference/docker-compose.yml --env-file .env config --services
+  -> 8 services            (the `local` half is on)
+... --env-file .env --profile idea-refinery config --services
+  -> 4 services            (`local` silently dropped)
+```
+
+So the moment the driver passes **any** flag to a plane, it must also pass every
+profile that plane's env file already enabled, or it starts a subset of what a
+bare invocation would have started - with no error anywhere. `effective_profiles()`
+does exactly that union, and passing no flag at all stays safe because compose
+then reads `COMPOSE_PROFILES` itself. That is today's path for every plane except
+`ob1`.
 
 ### Product keys
 
@@ -157,16 +213,28 @@ would start the wrong set.
 Planes with `enabled` / `disabled`, the profiles and context of the enabled
 ones, the `up would start:` line, and the products. Read-only, no docker.
 
+### `status` / `up` / `down` - which planes?
+
+All three take the same selection:
+
+| Form | Acts on |
+|---|---|
+| *(nothing)* | the planes this machine **enables**. `up`/`down` add their `requires` closure; `status` does not - reporting on a plane nobody enabled is noise |
+| `<plane>` | exactly that plane. `up <plane>` prints a `#` note naming any requirement it is **not** starting |
+| `--all` | every plane the manifest declares except the `manual` ones - what a bare `stack.ps1 up` meant |
+
+A plane name together with `--all` is refused.
+
 ### `status`
 
-`docker compose ... ps` for each enabled plane, in dependency order. Read-only:
+`docker compose ... ps` per selected plane, in dependency order. Read-only:
 no lease needed, nothing is started, stopped or recreated. Exits 1 if any `ps`
 exits non-zero.
 
 ### `up` / `down` [`--dry-run`]
 
-`up` starts every enabled plane and everything they require, in dependency
-order; `down` stops them in reverse. `--dry-run` prints the exact
+`up` starts the selected planes in dependency order; `down` stops them in
+reverse. `--dry-run` prints the exact
 `docker [--context X] compose -f <file> [--env-file ...] [--profile p]... <verb>`
 lines and runs **nothing**.
 
@@ -228,6 +296,70 @@ manifest and state paths, and then per enabled plane: the compose file exists,
 the env file exists (and how it is loaded), every blank or missing key, and the
 plane's `host` requirements. Exits 1 if anything is `[FAIL]`. Read-only.
 
+### `health`
+
+The fifteen functional probes `stack.ps1 health` ran, one for one, with the same
+pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code:
+**the number of failed probes**. Read-only - `docker ps`, `docker network
+inspect`, four read-only `docker exec`s and six HTTP GETs.
+
+Rules the probes encode, each bought with an outage:
+
+- **A failing probe never stops the sweep.** The first version of the
+  owui-drift probe assigned outside a `Probe` block, so a stopped `openwebui`
+  turned the check's stderr into a terminating `NativeCommandError`: five probe
+  lines, no summary, and the eight later probes never ran. A stopped plane costs
+  its own probe lines and nothing else.
+- **`REFUSED` reads as FAIL.** `check-owui-drift.ps1 -CountOnly` prints a count,
+  or the word `REFUSED` with a sentence on stderr. Anything that is not a number
+  fails, and the reason goes in the probe's label.
+- **`search` gets two probes.** `/healthz` answered 200 throughout the
+  2026-09-11 outage - bing returned ten results for each query's first word,
+  HTTP 200, no error. `/health` reports which engines actually put results into
+  recent payloads; `unknown` (nothing searched yet) is not a failure, a measured
+  `DEGRADED` is.
+- **Never GET LiteLLM's bare `/health` through the alias** - it makes the
+  gateway load every model it advertises. `/health/liveliness` only.
+
+The probe NAMES are pinned in `test_stack.py` (`PS1_PROBES`), so a probe that is
+dropped, merged into a neighbour or renamed fails the suite.
+
+### `stats`
+
+Hands off to `scripts/stack/stack-stats.ps1` (the llm-queue `/observe` board and
+the LiteLLM spend ledger, read-only). That script is PowerShell 5.1 only, so off
+Windows this verb **refuses** and names what to run instead - a verb that prints
+nothing and exits 0 is the failure class this repo hunts.
+
+### `inventory --write` | `--check`
+
+Generates `scripts/lib/stack-services.json`, the inventory
+`scripts/recovery/status_check.py` and `scripts/checks/stack-watchdog.ps1` read.
+Exactly one of the two flags is required.
+
+| Part of the file | Comes from |
+|---|---|
+| `projects.*` (compose file, `--env-file`, the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
+| `container`, `service`, `profile` | the compose **render**, with every declared profile switched on |
+| the plane GROUPING and row order; `critical`, `host_health`, `stale_pool_guard`, `note` | `scripts/lib/stack-services.curated.json`, hand-owned. Edit **that** file, then `--write` |
+
+The render is also the verifier. `--check` fails, naming the row, on: a
+container in a render that the sidecar does not list (`--write` refuses outright
+- only a person can say which group it joins); a row whose project the render
+contradicts; a stale `service` or `profile` recorded in the sidecar; a plane with
+no project; a `manual` plane given one; a published host port the manifest's
+`[planes.*.ports]` does not declare, or a declared port nothing publishes; and
+the profile rules above.
+
+**Rendering with every profile is the point.** The check this replaced rendered
+without any, so it could not see a profile-gated container at all - which is how
+`openbrain-idea-refinery`, running on this host, stayed absent from the inventory
+and un-repairable by the watchdog for as long as that check existed.
+
+A project whose compose file is not on disk - CI does not check out the OB1
+submodule - is carried from the sidecar and printed as `NOT VERIFIED` by name.
+A check that cannot run must never look like one that passed.
+
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 
 Writes `.stack/state.json`. Non-interactive by design - it has to behave
@@ -268,11 +400,25 @@ started a container leaves a command in a list instead. The suite pins the
 `stack.ps1` ordering, the requires/optional edge sets, every refusal, the
 product expansions, `--headless`, the context prefix, and the stdlib-only rule.
 
+`health` runs against a scripted host (`FakeHost`) - every `docker` call and
+every HTTP GET is answered from a fixture, so the probe set, the exit code and
+the "one dead plane does not end the sweep" rule are all testable with no
+daemon. The **inventory generator** is tested against a small manifest of its
+own (`MINI_MANIFEST`) with a scripted `docker compose config`, so an unrelated
+plane change cannot fail it; the shipping tree is covered by three `shipped`
+tests plus `inventory --check` itself, which the pre-commit hook and the
+`stack-driver` CI job both run for real.
+
+`.github/workflows/ci.yml` runs `python -m pytest scripts/stack -q` and
+`python scripts/stack/stack.py inventory --check` on Python 3.12.
+
 ## Not in this item
 
-Health probes, `stats`, and the generated services inventory
-(`sl-driver-parity`). Adding compose profiles to any plane - the manifest only
-*declares* the pending ones (`sl-frontend-solo`, `sl-inference-split`,
-`sl-ob1-profiles`). Per-plane `.env` files (`sl-env-split`): this item encodes
-today's single root `.env`. The cross-node forwarder and any remote deploy logic
-(`cluster-transition`).
+Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python; both still
+carry their own ordering and their own probes. Executing against remote docker
+contexts - the `--context` prefix is passed through and nothing more
+(`cluster-transition`). Archiving `stack.ps1`: it stays as the shim until every
+caller has moved. Adding compose profiles to a plane - the manifest still only
+*declares* `frontend`'s pending `gpu`/`tailscale` (`sl-frontend-solo`) and
+`ob1`'s pending `research`/`wiki`/`notebook` (`sl-ob1-profiles`). Per-plane
+`.env` files (`sl-env-split`): this item still encodes the single root `.env`.

@@ -55,12 +55,34 @@
 #   keys      - variable names that must be present and non-blank in the plane's
 #               env file. A blank one makes `enable` refuse and name the key.
 #   ports     - published HOST ports -> what answers on them.
-#   profiles  - compose profiles. Each is a sub-table:
+#   profiles  - compose profiles. Each is a sub-table with a `description`, an
+#               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
+#               flags below, which say whether a default `up` starts what the
+#               profile gates. Declaring none of the three is refused by
+#               `stack.py inventory --check`: a profile that appears around
+#               services which run TODAY and says nothing about itself is a
+#               silent shrink of the running set.
 #                 description - what the profile turns on
 #                 default     - passed on EVERY invocation, and it survives
 #                               --headless. For something a plane is not usable
 #                               without; never for a SURFACE, or --headless
 #                               becomes a no-op for that plane.
+#                 opt_in      - something OTHER than the driver turns it on:
+#                               COMPOSE_PROFILES in the plane env file, a
+#                               product (`enable research`), an operator, or a
+#                               dedicated script. The description must say
+#                               which. NOTE that `docker compose --profile X`
+#                               REPLACES COMPOSE_PROFILES instead of adding to
+#                               it, so the driver unions the env's list into any
+#                               flags it passes - see effective_profiles().
+#                 pending     - DECLARED here, not yet in the compose file; a
+#                               later stack-layers item adds it. Enabling one is
+#                               a no-op until then, and the driver says so.
+#                               NOT the same as a profile whose compose file is
+#                               a PINNED SUBMODULE that has not caught up - see
+#                               the ob1 tables, and `inventory --check`, which
+#                               reports those as `[declared, not rendered]`
+#                               rather than as drift.
 #                 requires    - other profiles ON THE SAME PLANE that this one
 #                               cannot work without. The driver closes over these
 #                               transitively (stack.py `profile_closure`), so
@@ -70,9 +92,6 @@
 #                               beside it. Use it where a profiled service's only
 #                               engine lives in another profile - otherwise the
 #                               plane comes up healthy and silently does nothing.
-#                 pending     - DECLARED here, not yet in the compose file; a
-#                               later stack-layers item adds it. Enabling one is
-#                               a no-op until then, and the driver says so.
 
 # --------------------------------------------------------------------------
 [planes.anchor]
@@ -125,6 +144,13 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 # REPLACES COMPOSE_PROFILES rather than adding to it, so a default would
 # override the host's own value.
 [planes.inference.profiles.local]
+# OPT-IN, not default: this host turns it on with COMPOSE_PROFILES=local in the
+# ROOT .env, which compose reads for itself. The driver deliberately passes no
+# --profile flag here, because a flag would REPLACE that env setting rather than
+# add to it (see effective_profiles() in scripts/stack/stack.py for the measured
+# proof). sl-frontend-solo reached the same conclusion for its three frontend
+# profiles and left all of them without a `default` for exactly this reason.
+opt_in      = true
 description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
 
 # --------------------------------------------------------------------------
@@ -404,11 +430,17 @@ keys = ["MM_DB_PASSWORD", "AO_DB_PASSWORD"]
 "8065" = "mattermost (loopback; the org's own surface)"
 "8830" = "agent-bridge control/debug (loopback)"
 
+# Both slices are OPERATOR-DRIVEN and always have been: scripts/stack/stack.ps1's
+# header said so in as many words ("NOT managed here (deliberate): ... the
+# agent-org workers/cloud profiles"), and the driver keeps that promise. They run
+# on this host because the operator started them, not because `up` did.
 [planes.agent-org.profiles.workers]
-description = "the ao-worker / ao-ot / ao-git-egress slices"
+description = "the ao-worker / ao-ot / ao-git-egress slices; started by the operator, never by `up`"
+opt_in      = true
 
 [planes.agent-org.profiles.cloud]
 description = "the cloud lane (the only component with internet egress); needs OPENROUTER_API_KEY"
+opt_in      = true
 
 # --------------------------------------------------------------------------
 [planes.portal]
@@ -445,7 +477,8 @@ keys = [
 [planes.portal.ports]
 
 [planes.portal.profiles.internet]
-description = "cloudflared + the tunnel watcher; without it the portal runs local-test only"
+description = "cloudflared + the tunnel watcher; passed by scripts/portal/portal-on.ps1, never by the driver (this plane is `manual`)"
+opt_in      = true
 
 
 # ==========================================================================

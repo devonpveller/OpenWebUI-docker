@@ -67,6 +67,7 @@ Everyday driving (all from the repo root):
 ```powershell
 .\scripts\stack\stack.ps1 status            # per-project container states
 .\scripts\stack\stack.ps1 health            # 15 functional probes across every plane
+#   (stack.ps1 is a shim; `python scripts\stack\stack.py <verb>` is the driver)
 .\scripts\stack\stack.ps1 up|down [plane]   # dependency-ordered start/stop (planes: anchor,
                                             #   inference, frontend, memory, search, coder, ob1, agent-org)
 .\scripts\stack\stack.ps1 restart <plane>   # one plane in place

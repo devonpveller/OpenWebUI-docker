@@ -1,0 +1,523 @@
+{
+  "_comment": [
+    "GENERATED FILE - do not hand-edit. Regenerate with:",
+    "    python scripts/stack/stack.py inventory --write",
+    "and verify with `inventory --check`, which the pre-commit check",
+    "scripts/checks/check-project-configs.ps1 and the ci.yml `stack-driver` job both run.",
+    "",
+    "Canonical service inventory for the ai-stack health checkers - the single",
+    "source of truth for WHAT to check, to stop the checkers from drifting.",
+    "Consumed by scripts/recovery/status_check.py (data-driven liveness loop) and by",
+    "scripts/checks/stack-watchdog.ps1, which routes EVERY container repair through the",
+    "`projects` map below, so a plane split cannot leave remediation pointing at a",
+    "project that no longer owns the container - which is exactly what Part K did,",
+    "silently, for 22 self-heal paths between 2026-08-21 and 2026-08-28.",
+    "",
+    "WHERE EACH FIELD COMES FROM (sl-driver-parity, 2026-09-19):",
+    "  projects.*            stack.manifest.toml - the compose file, the --env-file and",
+    "                        the runnable command line. A plane the manifest marks",
+    "                        `manual` (the portal) is deliberately absent: the watchdog",
+    "                        must not auto-repair a plane a human starts by hand.",
+    "  container / service   the compose RENDER, with every declared profile switched on",
+    "  profile               so profile-gated containers appear too. Rendering WITHOUT",
+    "                        profiles is why the old verifier never saw",
+    "                        openbrain-idea-refinery.",
+    "  critical, host_health scripts/lib/stack-services.curated.json - hand-owned",
+    "  stale_pool_guard,     judgement, plus the plane GROUPING and the row order,",
+    "  note                  which no machine can derive. Edit the SIDECAR, then",
+    "                        re-run `inventory --write`.",
+    "",
+    "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
+    "Some compose SERVICE keys differ from the container name (search: redis ->",
+    "search-redis, gateway -> search-gateway, vpn -> search-vpn); the 'service' field",
+    "is present exactly where they differ, and `docker compose` wants that key.",
+    "Open Brain is a SEPARATE compose project (open-brain) and a submodule; a checkout",
+    "without it renders nothing here and `inventory --check` says so by name rather",
+    "than passing quietly.",
+    "",
+    "  file     - compose file, repo-root-relative. null means the project owns NO",
+    "             services and nothing can be started in it (only 'ai-stack').",
+    "  env_file - extra --env-file, or null when the project needs none.",
+    "  compose  - the same thing spelled as a human-runnable command line."
+  ],
+  "_sidecar": [
+    "CURATED SIDECAR for scripts/lib/stack-services.json - the half of that file no",
+    "machine can derive. EDIT THIS FILE, then run:",
+    "    python scripts/stack/stack.py inventory --write",
+    "",
+    "What lives here and nowhere else:",
+    "  _comment   the header text copied verbatim into the generated file",
+    "  projects   which compose PROJECT name belongs to which manifest PLANE (they are",
+    "             not always the same word: anchor -> ai-stack, ob1 -> open-brain), plus",
+    "             each project's hand-written note and the profiles a tool must pass to",
+    "             see all of its services. Everything else about a project - the compose",
+    "             file, the --env-file, the command line - comes from stack.manifest.toml.",
+    "  planes     the GROUPING and the ROW ORDER, and the judgement fields: `critical`,",
+    "             `host_health`, `stale_pool_guard`, `note`. A generator cannot decide",
+    "             whether a container is critical, so it refuses to guess.",
+    "",
+    "`service` / `profile` are recorded here only where they are non-default, and the",
+    "compose render AUDITS them: a stale value is reported as drift rather than quietly",
+    "winning on a machine that cannot render the project (CI has no OB1 submodule).",
+    "",
+    "Adding a container: add its row here in the right group, then `inventory --write`.",
+    "`--write` REFUSES to invent a row for a container it finds in a render and not here,",
+    "because only a person can say which group it joins and whether it is critical.",
+    "See documentation/runbooks/SERVICE-LIFECYCLE.md step 8."
+  ],
+  "projects": {
+    "ai-stack": {
+      "plane": "anchor",
+      "note": "PURE NETWORK ANCHOR since Part K.5b (2026-08-21): owns the shared llm-net / app-net / default networks and ZERO services. `docker compose up -d <anything>` here exits 1 with 'no such service'. file=null marks it unstartable; no container row points at it."
+    },
+    "frontend": {
+      "plane": "frontend"
+    },
+    "inference": {
+      "plane": "inference"
+    },
+    "memory": {
+      "plane": "memory"
+    },
+    "search": {
+      "plane": "search"
+    },
+    "coder": {
+      "plane": "coder"
+    },
+    "open-brain": {
+      "plane": "ob1",
+      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values."
+    },
+    "agent-org": {
+      "plane": "agent-org",
+      "note": "env_file is deliberately null, same as open-brain: compose's project directory is agent-org/docker, so it auto-loads agent-org/docker/.env. Passing the ROOT .env would override it with the wrong values. The workers/cloud slices are PROFILE-GATED: a bare `config` or `up` renders only the six always-on services, so any tool reading this file must pass --profile workers --profile cloud to see the rest.",
+      "profiles": [
+        "workers",
+        "cloud"
+      ]
+    }
+  },
+  "planes": {
+    "core": [
+      {
+        "container": "openwebui",
+        "project": "frontend",
+        "critical": true,
+        "host_health": "http://127.0.0.1:3000/health"
+      },
+      {
+        "container": "tailscale",
+        "project": "frontend",
+        "critical": true
+      },
+      {
+        "container": "llm-gateway",
+        "project": "inference",
+        "critical": true,
+        "note": "LiteLLM front door (holds the llama-cpp / llama-cpp-embed aliases). No host_health: llm-net is internal so host :4000 is inert; liveliness is in-network (http://llm-gateway:8080/health/liveliness)."
+      },
+      {
+        "container": "llm-gateway-db",
+        "project": "inference",
+        "critical": true,
+        "note": "Postgres spend-log ledger backing llm-gateway."
+      },
+      {
+        "container": "llama-cpp-upstream",
+        "profile": "local",
+        "project": "inference",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8081/health"
+      },
+      {
+        "container": "llama-cpp-embed-upstream",
+        "profile": "local",
+        "project": "inference",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8082/health"
+      },
+      {
+        "container": "llm-queue",
+        "profile": "local",
+        "project": "inference",
+        "critical": true,
+        "note": "B2 admission controller between LiteLLM and the upstreams (llm-backend-net only; liveness via docker exec /healthz)"
+      },
+      {
+        "container": "llm-gateway-ui",
+        "project": "inference",
+        "critical": false,
+        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.devinveller.ai); serves no inference"
+      }
+    ],
+    "memory": [
+      {
+        "container": "mnemory",
+        "project": "memory",
+        "critical": false
+      },
+      {
+        "container": "mnemory-cloud-gateway",
+        "project": "memory",
+        "critical": false
+      }
+    ],
+    "search": [
+      {
+        "container": "search-redis",
+        "service": "redis",
+        "project": "search",
+        "critical": false
+      },
+      {
+        "container": "searxng",
+        "project": "search",
+        "critical": false
+      },
+      {
+        "container": "search-gateway",
+        "service": "gateway",
+        "project": "search",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8085/healthz"
+      },
+      {
+        "container": "search-vpn",
+        "service": "vpn",
+        "project": "search",
+        "critical": true,
+        "note": "Mullvad egress + kill-switch; ALL search-plane traffic"
+      }
+    ],
+    "coder": [
+      {
+        "container": "open-terminal",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "little-coder",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "lc-egress",
+        "project": "coder",
+        "critical": false
+      }
+    ],
+    "notebook": [
+      {
+        "container": "open_notebook",
+        "project": "open-brain",
+        "critical": false,
+        "note": "being retired (Quartz workbench); still live for podcasts"
+      },
+      {
+        "container": "surrealdb",
+        "project": "open-brain",
+        "critical": false,
+        "note": "open-notebook DB; WS-only, no HTTP health"
+      }
+    ],
+    "openbrain": [
+      {
+        "container": "openbrain-db",
+        "project": "open-brain",
+        "critical": true,
+        "note": "stale-pool dependency: if this restarts after openbrain-mcp, mcp must be restarted"
+      },
+      {
+        "container": "openbrain-mcp",
+        "project": "open-brain",
+        "critical": true,
+        "stale_pool_guard": "openbrain-db",
+        "note": "holds a long-lived DB connection that does NOT auto-reconnect; OWUI tool 500s / 'Broken pipe' when stale"
+      },
+      {
+        "container": "openbrain-mcpo",
+        "project": "open-brain",
+        "critical": true,
+        "note": "MCP->OpenAPI bridge Open WebUI tools call"
+      },
+      {
+        "container": "openbrain-mcpo-ext",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-gateway",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8061/health"
+      },
+      {
+        "container": "openbrain-ops-gateway",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8062/health",
+        "note": "Ops door (PLAN §1.4): a second openbrain-gateway instance with its own OPS_GATEWAY_KEY, allowlisting the agent_memory_* tools for HOST processes that cannot reach openbrain-mcp (it publishes no host port). Stateless - no backup sidecar. Not critical: without it host callers lose the agent-memory lane; nothing else degrades."
+      },
+      {
+        "container": "openbrain-rest",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:3001/"
+      },
+      {
+        "container": "openbrain-postgrest",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki-viewer",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-entity-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-ext",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-research",
+        "project": "open-brain",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8818/health"
+      },
+      {
+        "container": "openbrain-curator",
+        "project": "open-brain",
+        "critical": false,
+        "host_health": "http://127.0.0.1:8816/health"
+      },
+      {
+        "container": "openbrain-chunk-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-suggestion-worker",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-grounding-backfiller",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-workbench",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-extract",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-cron",
+        "project": "open-brain",
+        "critical": true,
+        "note": "the clock for the whole scheduled chain"
+      },
+      {
+        "container": "openbrain-gmail-pull",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-gmail-prune",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-digest",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-podcast",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-idea-refinery",
+        "profile": "idea-refinery",
+        "project": "open-brain",
+        "critical": false,
+        "note": "Idea Refinery, behind the `idea-refinery` profile the manifest marks `default = true` (so every stack.py / stack.ps1 invocation passes it). Absent from this inventory until 2026-09-19 because the pre-commit verifier rendered WITHOUT profiles and could not see it; the watchdog therefore refused to route a repair for it."
+      }
+    ],
+    "backups": [
+      {
+        "container": "llm-gateway-backup",
+        "project": "inference",
+        "critical": false
+      },
+      {
+        "container": "lm-models-backup",
+        "profile": "local",
+        "project": "inference",
+        "critical": false,
+        "note": "weekly GGUF-store tar; empty LM_MODELS_BACKUP_INTERVAL disables"
+      },
+      {
+        "container": "openwebui-backup",
+        "project": "frontend",
+        "critical": false
+      },
+      {
+        "container": "tailscale-backup",
+        "project": "frontend",
+        "critical": false
+      },
+      {
+        "container": "mnemory-backup",
+        "project": "memory",
+        "critical": false
+      },
+      {
+        "container": "little-coder-backup",
+        "project": "coder",
+        "critical": false
+      },
+      {
+        "container": "openbrain-db-backup",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "openbrain-wiki-backup",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "open-notebook-backup",
+        "project": "open-brain",
+        "critical": false
+      },
+      {
+        "container": "mattermost-db-backup",
+        "project": "agent-org",
+        "critical": false,
+        "note": "pg_dump sidecar for mattermost-db."
+      },
+      {
+        "container": "agent-bridge-db-backup",
+        "project": "agent-org",
+        "critical": false,
+        "note": "pg_dump sidecar for agent-bridge-db."
+      },
+      {
+        "container": "ao-worker-1-journals-backup",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
+      },
+      {
+        "container": "ao-worker-2-journals-backup",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
+      }
+    ],
+    "agent-org": [
+      {
+        "container": "mattermost",
+        "project": "agent-org",
+        "critical": true,
+        "host_health": "http://127.0.0.1:8065/api/v4/system/ping",
+        "note": "The org's whole operator surface. Its healthcheck uses mmctl, not curl - a curl-based one reported healthy while the server was unusable (see memory: mattermost-mobile-thread-bug)."
+      },
+      {
+        "container": "mattermost-db",
+        "project": "agent-org",
+        "critical": true,
+        "note": "Postgres behind Mattermost."
+      },
+      {
+        "container": "agent-bridge",
+        "project": "agent-org",
+        "critical": true,
+        "note": "The governed org bus - orchestrator, gates, workers. Holds a long-lived DB connection; see stale_pool_guard on openbrain-mcp for the same class of failure."
+      },
+      {
+        "container": "agent-bridge-db",
+        "project": "agent-org",
+        "critical": true,
+        "note": "Postgres behind agent-bridge: efforts, gates, constraints, audit."
+      },
+      {
+        "container": "ao-worker-1",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Worker pool slot 1. Stateless BY DESIGN - the flail guard forks a fresh session; what persists is curated memory, not context."
+      },
+      {
+        "container": "ao-worker-2",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Worker pool slot 2."
+      },
+      {
+        "container": "ao-ot-1",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "open-terminal executor for worker 1. GIT_DISCOVERY_ACROSS_FILESYSTEM=1 lives here."
+      },
+      {
+        "container": "ao-ot-2",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "open-terminal executor for worker 2."
+      },
+      {
+        "container": "ao-git-egress",
+        "profile": "workers",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Git proxy for the worker pool. Hard-denies pushes to main/master (production-branch guard)."
+      },
+      {
+        "container": "ao-egress",
+        "profile": "cloud",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Egress proxy for the cloud slice."
+      },
+      {
+        "container": "llm-gateway-cloud",
+        "profile": "cloud",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Cloud LiteLLM slice; profile-gated and normally down."
+      },
+      {
+        "container": "llm-gateway-cloud-db",
+        "profile": "cloud",
+        "project": "agent-org",
+        "critical": false,
+        "note": "Spend ledger for the cloud slice."
+      }
+    ]
+  }
+}

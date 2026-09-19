@@ -206,6 +206,73 @@ if ($ymlStaged.Count -gt 0) {
                 Write-Host ("  [configs] stack-services.json inventory matches the compose configs " +
                             "[rows verified/expected: $($coverage -join ' ')]")
             }
+
+        # The coverage guard above and the generator check below are BOTH kept,
+        # deliberately (sl-driver-parity + sl-ob1-profiles, merged 2026-09-19).
+        # They do not answer the same question:
+        #   coverage  - did THIS render reach every inventory row for the project?
+        #               It is what caught open-brain silently verifying 26 of 30.
+        #   generator - is the whole file reproducible from stack.manifest.toml
+        #               plus scripts\lib\stack-services.curated.json?
+        # A file can be perfectly reproducible from inputs that were themselves
+        # derived from a render that narrowed, so neither subsumes the other.
+        }
+    }
+}
+
+
+# --- 1b. the service inventory, via the driver ------------------------------
+#
+# WAS an inline row diff here (D-12, 2026-08-22): render five projects, regex
+# every container_name out of the JSON, compare (container -> project) against
+# scripts\lib\stack-services.json. It has been replaced by
+# `python scripts\stack\stack.py inventory --check`, which does strictly more:
+#
+#   * it renders WITH every declared profile, so profile-gated containers are
+#     visible. The inline version rendered without them and therefore could not
+#     see openbrain-idea-refinery - a container the watchdog consequently
+#     refused to repair, for as long as the check had existed;
+#   * it checks the reverse direction too (a row in the JSON that no render
+#     produces), and the compose SERVICE key, and the published host ports and
+#     the profiles against stack.manifest.toml;
+#   * the whole file is GENERATED from the manifest plus
+#     scripts\lib\stack-services.curated.json, so "matches" means byte-for-byte
+#     reproducible, not "the two columns I happened to compare agree".
+#
+# Trigger: any staged compose file (as before) OR any staged inventory input -
+# the manifest, the generated file, or the curated sidecar. The old placement,
+# inside the *.yml gate, meant an edit to stack-services.json alone was never
+# verified against anything.
+$invInputs = @($staged | Where-Object {
+        $_ -match '\.(yml|yaml)$' -or
+        $_ -eq 'stack.manifest.toml' -or
+        $_ -match '^scripts/lib/stack-services(\.curated)?\.json$'
+    })
+if ($invInputs.Count -gt 0) {
+    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    $dockerOk = $true
+    try { docker compose version | Out-Null } catch { $dockerOk = $false }
+    if (-not $py) {
+        Write-Host "  [configs] python not found - service inventory NOT verified (this is a gap, not a pass)" -ForegroundColor Yellow
+    }
+    elseif (-not $dockerOk -or $LASTEXITCODE -ne 0) {
+        Write-Host "  [configs] docker compose unavailable - service inventory NOT verified (this is a gap, not a pass)" -ForegroundColor Yellow
+    }
+    else {
+        # EAP is dropped to Continue around the call for the usual PS 5.1 reason:
+        # a native command's stderr becomes a terminating NativeCommandError
+        # under 'Stop'. The driver writes nothing to stderr by design, but a
+        # docker warning underneath it can.
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $invOut = & python 'scripts/stack/stack.py' inventory --check 2>&1
+        $invCode = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        foreach ($line in $invOut) { Write-Host ("  [configs] " + ("$line").TrimEnd()) }
+        if ($invCode -ne 0) {
+            Write-Host "  [configs] INVENTORY DRIFT - regenerate with: python scripts\stack\stack.py inventory --write" -ForegroundColor Red
+            Write-Host "  [configs] (curated fields live in scripts\lib\stack-services.curated.json; edit those THERE)" -ForegroundColor Yellow
+            $failed++
         }
     }
 }
