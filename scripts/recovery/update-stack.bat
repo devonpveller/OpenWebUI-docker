@@ -171,7 +171,7 @@ if not defined FULL_UPDATE (
 REM Step 3: Update Dockerfile
 echo.
 echo [STEP 3/8] Updating frontend\Dockerfile.openwebui-gpu...
-powershell -Command "(Get-Content '%SCRIPT_DIR%\..\..\frontend\Dockerfile.openwebui-gpu') -replace 'FROM ghcr.io/open-webui/open-webui:v[0-9.]+', 'FROM ghcr.io/open-webui/open-webui:%VERSION%' | Set-Content '%SCRIPT_DIR%\..\..\frontend\Dockerfile.openwebui-gpu'"
+powershell -Command "(Get-Content '..\frontend\Dockerfile.openwebui-gpu') -replace 'FROM ghcr.io/open-webui/open-webui:v[0-9.]+', 'FROM ghcr.io/open-webui/open-webui:%VERSION%' | Set-Content '..\frontend\Dockerfile.openwebui-gpu'"
 echo [SUCCESS] Dockerfile updated to %VERSION%
 
 REM Step 4: Rebuild custom GPU image (CRITICAL - must use custom Dockerfile)

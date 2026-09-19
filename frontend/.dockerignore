@@ -9,9 +9,11 @@
 # Exclude everything, then re-include only the file tailscale copies — so an
 # .env or a cache dropped in this directory is out by default rather than by
 # someone remembering to add it.
-# NOTE: every other service builds from a subdirectory context (./little-coder,
-# ./backup, ./config/*, ../mnemory, ...), which this .dockerignore does NOT
-# affect. Nothing builds from the repo root any more, so there is nothing left
-# there for a root .dockerignore to guard.
+# NOTE: every other service builds from a context inside its own plane - coder
+# spells it ../little-coder, portal ./config/watcher, search ./gateway, memory
+# ../../mnemory, each RELATIVE TO ITS OWN compose file and not to this one -
+# and this .dockerignore does NOT affect any of them. Nothing builds from the
+# repo root any more, so there is nothing left there for a root .dockerignore
+# to guard.
 *
 !entrypoint.sh

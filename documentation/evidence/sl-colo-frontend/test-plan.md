@@ -1,7 +1,9 @@
 # Test plan — sl-colo-frontend
 
 **Item:** `sl-colo-frontend` (stack-layers PLAN §2.7, Part L.1; DECISIONS D16/D17/D18)
-**Branch:** `work/sl-colo-frontend` **Base:** `development` @ `3a373e2`
+**Branch:** `work/sl-colo-frontend` **Base:** `development` @ `2f5c451`
+(attempt 1 was based on `3a373e2`; rebased onto `2f5c451` after sl-driver-parity
+merged, per stack-layers D18)
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-colo-frontend.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-colo-frontend-findings.md`
 
@@ -27,7 +29,25 @@ for T9 only — a short-path scratch clone of their own. **No image is built and
 no container is touched by any case in this plan.** If a case cannot be run in
 the tester's environment, that is `-PlanInadequate`, not a scoped pass.
 
-Shorthand used below: `$W` = the worktree root, `$B` = `3a373e2` (the base).
+Shorthand used below: `$W` = the worktree root, `$B` = `2f5c451` (the base).
+
+**Revision 2 (2026-09-19).** Attempt 1 scored **14/15**: the move itself passed
+every case, and **T14 failed** — two findings entries stated false mechanisms
+and one reported a fix that was not delivered. The artifact fix is in
+`scripts/recovery/update-stack.bat` (`:174` reverted to a name-only repoint) and
+in the findings note (F4/F5 rewritten, F13/F14 added). Three cases in this plan
+were themselves defective and are rewritten: **T9** gave a recipe that could not
+reach the state it named and passed vacuously, **T10(a)**'s second grep would
+have failed a correct branch, and **T14** told the tester to check a variable
+definition at a line that only *uses* the variable. **T8**'s `:38` citation was
+off by one (`:39`). Each is marked where it appears.
+
+T9 also picked up something the rebase introduced rather than attempt 1: since
+`$B`, `check-project-configs.ps1` compares a GENERATED service inventory against
+the committed one, and in a clone with no `.env` that comparison fails
+**identically on `$B`**. The case now names that signature, gives a recipe that
+reaches exit 0, and gives a differential fallback for a tester who would rather
+not copy a secrets file — both measured.
 
 ---
 
@@ -41,7 +61,7 @@ Shorthand used below: `$W` = the worktree root, `$B` = `3a373e2` (the base).
     git -C $W show --name-status --format='%h %s' <the move commit> | grep -E '^R'
 
 **PASS:** each `--follow` count is **greater than 1** — history walks through
-the rename (the developer measured 18 / 8 / 4 / 3). The whole-branch
+the rename (the developer measured 18 / 8 / 4 / 4). The whole-branch
 `--name-status` shows `R100 Dockerfile.openwebui-gpu →
 frontend/Dockerfile.openwebui-gpu`, `R100 dockerfile.tailscale →
 frontend/dockerfile.tailscale` and `R099 entrypoint.sh →
@@ -52,11 +72,13 @@ lost), or any of those three shows as a `D`+`A` pair rather than an `R` at git's
 default 50% similarity.
 
 **Expected, and not a failure:** `.dockerignore` shows as `D` + `A` in the
-**whole-branch** diff, because that diff squashes two commits: the move (R100)
-and the comment rewrite. The file's only non-comment content is `*` and
-`!entrypoint.sh`, so rewriting the comment drops similarity to ~42% and the
-squashed view cannot see the rename. `git log --follow -- frontend/.dockerignore`
-walks through it anyway (count 3), which is the property that matters, and
+**whole-branch** diff, because that diff squashes the move (R100) with two
+later comment rewrites. The file's only non-comment content is `*` and
+`!entrypoint.sh`, so rewriting the comment drops similarity to **24%**
+(`git diff $B...work/sl-colo-frontend -M10% --name-status` prints the figure)
+and the squashed view cannot see the rename.
+`git log --follow -- frontend/.dockerignore` walks through it anyway (count 4),
+which is the property that matters, and
 `git show <the move commit> --name-status` shows the `R100` directly. Check both
 rather than scoring the squashed view. The anchor names only the other three
 files for this criterion.
@@ -201,15 +223,26 @@ inside a moved file that is relative to the FILE's old location (`../`,
 
 Then read all four files in full — the grep is a prompt, not the check.
 
-**PASS:** the only location-relative expression in any of the four is the
-`entrypoint.sh` comment at `:38`, and this branch changed it from
-`./data/tailscale` to `<repo>/data/tailscale` — which is what the compose bind
-`../data/tailscale` (now relative to `frontend/`) actually resolves to.
-Everything else in `entrypoint.sh` is container-absolute (`/tmp/...`,
-`/var/lib/tailscale`, `/usr/local/bin/tailscaled`) or an env-driven hostname.
+**PASS:** two classes of hit and nothing else.
+1. The `entrypoint.sh` comment at **`:39`** (grep the construct — `grep -n
+   "STATE_DIR maps to" frontend/entrypoint.sh` — rather than trusting this
+   number; `:38` is the first line of the same comment block, which is what
+   attempt 1 of this plan wrongly cited). This branch changed it from
+   `./data/tailscale` to `<repo>/data/tailscale` — which is what the compose
+   bind `../data/tailscale` (now relative to `frontend/`) actually resolves to.
+   Everything else in `entrypoint.sh` is container-absolute (`/tmp/...`,
+   `/var/lib/tailscale`, `/usr/local/bin/tailscaled`) or an env-driven hostname.
+2. `frontend/.dockerignore:13-14`, which names OTHER planes' context spellings
+   (`../little-coder`, `./config/watcher`, `./gateway`, `../../mnemory`). These
+   are narrative about other compose files, not paths this file resolves, and
+   the sentence says so in as many words ("each RELATIVE TO ITS OWN compose file
+   and not to this one"). Attempt 1 carried the root-era spelling here without
+   that qualification; check the qualification is present, because a bare list
+   of `./`-prefixed paths in a moved file is exactly the defect this case hunts.
 
 **FAIL:** any surviving `./` or `../` path in a moved file that was relative to
-the repo root, or a changed line in `entrypoint.sh` other than `:38` (compare
+the repo root and is not labelled as belonging to another file, or a changed
+line in `entrypoint.sh` other than the `:39` comment (compare
 `git diff $B...work/sl-colo-frontend -M -- entrypoint.sh frontend/entrypoint.sh`
 — it must be exactly **1 insertion, 1 deletion**, that comment).
 
@@ -221,18 +254,65 @@ against a partially staged tree can pass on a state that will never exist. Do it
 in a short-path scratch clone of your own — not in `$W`, whose path is long
 enough to trip Windows path limits:
 
-    git -c core.longpaths=true clone --branch work/sl-colo-frontend $W C:/t/scf
+**The staging step is the whole case, and the obvious recipe does not work.** In
+a fresh clone every file is already COMMITTED, so `git add -- .` stages nothing
+and the check prints `[configs] nothing staged - skip` and exits **0** — a
+vacuous pass. Attempt 1 of this plan shipped exactly that recipe and the tester
+had to defeat it. Put the branch's whole delta back into the index first:
+
+    git -c core.longpaths=true clone --no-local --branch work/sl-colo-frontend $W C:/t/scf
     cd C:/t/scf
-    git add -- . ':!OB1'
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1
+    git reset --soft $B                 # the branch delta becomes STAGED, worktree untouched
+    git add -A -- . ':!OB1'             # picks up the .dockerignore delete/add pair too
+    git diff --cached --name-only | wc -l
+    cp $W/.env C:/t/scf/.env            # see "the .env problem" below
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1 ; echo "EXIT=$?"
+    rm -f C:/t/scf/.env                 # do not leave a copy of the secrets lying around
 
-**PASS:** exit 0. Every project renders and the per-project container coverage
-assertion holds — including `frontend`, whose render target passes
-`--profile gpu --profile tailscale`.
+**The `.env` problem, measured on `$B` as well as here.** `.env` is gitignored,
+so a clone has none, and since sl-driver-parity (`$B`) this check also compares
+the GENERATED service inventory against the committed
+`scripts/lib/stack-services.json`. Without `.env` the anchor project renders as
+`file: null` instead of `docker-compose.yml`, the generated inventory differs,
+and the check prints `[FAIL] projects.ai-stack: committed … != generated …` plus
+`INVENTORY DRIFT` and exits **1** — on a clone of `$B` exactly as on a clone of
+this branch. Two ways to handle it; **say in the evidence which you used**:
+- **(a) preferred** — copy `.env` into the clone as above, run, then delete it.
+  Measured: `EXIT=0`, no drift, no FAIL line.
+- **(b) if you will not copy a secrets file** — run the check on a clone of
+  `$B` staged the same way and `diff` the two outputs. Measured: the only
+  difference is one informational line (`2 staged .json file(s) are
+  strict-valid`, which `$B`'s own delta produces and this branch's does not).
+  Identical `INVENTORY DRIFT` on both = environmental, not branch-caused.
 
-**FAIL:** non-zero exit; in particular a frontend render error naming a missing
-build context or Dockerfile, or a coverage mismatch. Also FAIL if you ran it in
-`$W` instead of your own clone — that is not the state being tested.
+**PASS:** all four of these, not just the exit code.
+1. The staged count equals `git -C $W diff --name-only $B..work/sl-colo-frontend | wc -l`
+   (**18** at the time of writing — re-derive it, do not trust the number). A
+   count of 0 means the state was never reached and nothing below is evidence.
+2. The output contains `[configs] all 8 compose projects render clean` — an
+   explicit **project count**, not merely a silent success.
+3. It contains `[configs] stack-services.json inventory matches the compose
+   configs` with `frontend:4/4` in the rows line (the frontend render target
+   passes `--profile gpu --profile tailscale`).
+4. Route (a): `EXIT=0`. Route (b): the branch output and the `$B` output differ
+   in nothing but that one informational line.
+
+**FAIL:** any of the following.
+- The output contains **`nothing staged`** or **`skip`** for the configs gate.
+  That is the vacuous path: exit 0 while rendering no compose project at all,
+  and it is scored as a FAIL of this case, not a pass. (Attempt 1's recipe
+  produced exactly this.)
+- Fewer than 8 projects render clean, or `frontend` is not `4/4`.
+- A frontend render error naming a missing build context or Dockerfile, or a
+  coverage mismatch.
+- On route (b), any output difference beyond that one line — in particular an
+  inventory FAIL naming a project on the branch but not on `$B`.
+- You ran it in `$W` instead of your own clone — that is not the state being
+  tested, and `$W`'s path is long enough to trip Windows path limits anyway.
+
+`NOT VERIFIED` lines for `agent-org` (no render target) and for `open-brain`
+(needs `OB1/docker/.env`, absent in a clone with an empty submodule) are
+expected and are not failures — they appear identically on a clone of `$B`.
 
 ## T10 - Tree-wide citation sweep, BY CONSTRUCT, both path forms
 
@@ -263,7 +343,7 @@ These are the lines `stack.manifest.toml:142-179` cites.
 **PASS for (a):** every remaining hit falls in exactly one of three classes, and
 the tester should classify each rather than counting:
 1. **inside `frontend/`** — a sibling reference that is correct at the new depth
-   (`frontend/.dockerignore:4,5,17`, `frontend/docker-compose.yml:126,160,281,288,293,301,306,332`,
+   (`frontend/.dockerignore:4,5,19`, `frontend/docker-compose.yml:126,160,281,288,293,301,306,332`,
    `frontend/dockerfile.tailscale:7,10,13,16`, `frontend/entrypoint.sh:2`);
 2. **a repointed path** naming `frontend/...` or `frontend\...`;
 3. **narrative or log text naming the file, not a path** — `workspace-stacks.md:23`
@@ -272,11 +352,22 @@ the tester should classify each rather than counting:
    `scripts/recovery/emergency-recovery.ps1:632`, `scripts/stack/test_stack.py:135`,
    and `.gitattributes:5`, which is an **unanchored git pattern**, not a path
    (T11 proves it still matches).
-The second grep (backslash/dotdot forms) must return **nothing** outside
-`frontend/`.
+**The second grep is scored by CLASSIFICATION, not by emptiness.** Attempt 1 of
+this plan required it to "return nothing outside `frontend/`", which is wrong:
+the regex's `[\\/]` alternative matches the **repointed** form
+`frontend/entrypoint.sh` itself, so a correct branch produces ~35 hits and a
+tester scoring the wording literally would fail a sound artifact. Classify every
+hit instead. It passes when each one is (i) the repointed `frontend/` or
+`frontend\` form, (ii) inside `frontend/`, or (iii) another file entirely —
+`portal/config/portal-cron/{Dockerfile,crontab}` (the portal's OWN
+`entrypoint.sh`, in the portal's own context) and
+`inference/compose/gateway.yml` (`docker/prod_entrypoint.sh`, a different file
+inside the LiteLLM image). Its job is to catch a `..\Dockerfile.openwebui-gpu`
+or `../entrypoint.sh` still pointing at the root, and there must be none.
 
-**FAIL for (a):** any hit outside those three classes — a runbook command, a
-script path, a markdown link or a manifest citation still naming a root path.
+**FAIL for (a):** any hit, in either grep, outside those classes — a runbook
+command, a script path, a markdown link or a manifest citation still naming a
+root path.
 
 **PASS for (b):** every cited line holds the construct the citing text claims
 (`:54` is `LLAMA_CPP_HOST=`, `:93` is the `llama-cpp|` route row, `:105` the
@@ -363,19 +454,56 @@ Read `documentation/notes/stack-layers-sl-colo-frontend-findings.md` and check
 each entry against the file it describes — comments are not evidence, and a
 right answer for a wrong reason fails.
 
+**This case FAILED on attempt 1 and is the reason there is a second.** F4 and F5
+both rested on "`%SCRIPT_DIR%` is `scripts/recovery/`", and the plan told the
+tester to "check `:93` sets it" — `:93` is a **use** of the variable, not a
+definition. `SCRIPT_DIR` is assigned nowhere in that file. Off the back of that
+false premise, F4 asserted a fix that was not delivered. The general rule this
+bought, and the first thing to do in this case:
+
+> **Locate the DEFINITION of every variable a finding's reasoning depends on
+> before scoring that finding, and say where it is.** A line that *reads*
+> `%VAR%` / `$VAR` is not a line that sets it. Grep for the assignment form
+> (`set "VAR=`, `VAR=`, `$VAR =`, `%~dp0`) and, if there is none, say so —
+> an undefined variable in a shell or batch script expands to **nothing**
+> silently, so every claim built on its value is wrong in a way that reading
+> the surrounding prose will never reveal.
+
 **PASS:** every entry carries one of the three provenance labels; every
 `file:line` in it resolves to the construct claimed; every claim about what a
-script DOES is verified by reading the whole function body, not its comment.
-Specifically worth re-deriving: **F4** (that `update-stack.bat`'s cwd at `:174`
-is `%SCRIPT_DIR%` — check `:93` sets it and the next `cd` is `:182`), **F5**
-(that the root compose project has zero services, so those `docker compose`
-calls fail), **F6** (read `rebuild_tailscale.py`'s `find_project_root` and
-`main` to their ends), and **F2** (that no `eol=lf` rule is path-anchored).
+script DOES is verified by reading the whole function body, not its comment;
+and every variable a claim depends on has a definition the tester located.
+Specifically worth re-deriving, each by running the command rather than reading
+the note:
+- **F13** — `grep -c "SCRIPT_DIR"` = 27 with **zero** assignments and no
+  `%~dp0`, on this branch AND on `$B`; then, in `cmd` with `@echo off` +
+  `setlocal enabledelayedexpansion`, that `%SCRIPT_DIR%` is empty, that
+  `cd /d "%SCRIPT_DIR%\..\.."` lands on `D:\`, and that `cd /d "%SCRIPT_DIR%"`
+  errors with errorlevel 1 and leaves the cwd alone. Also check F13's *repair*
+  claim (`set "SCRIPT_DIR=%~dp0"` after `:6` makes both spellings work) —
+  it is `[measured]`, so measure it.
+- **F4** — that `:174` is a **name-only** repoint and claims no fix:
+  `git diff $B..work/sl-colo-frontend -- scripts/recovery/update-stack.bat`
+  must show `'..\Dockerfile.openwebui-gpu'` → `'..\frontend\Dockerfile.openwebui-gpu'`
+  and no other change of *shape* anywhere in the file. A reintroduced
+  `%SCRIPT_DIR%\..\..\` form is a FAIL.
+- **F5** — that the root compose project has zero services
+  (`grep -c "^services:" docker-compose.yml` = 0) **and** that the calls fail
+  earlier than that, at `D:\`, with `no configuration file provided`
+  (`cd /d D:\ && docker compose ps`). The entry claims both; check both.
+- **F6** — read `rebuild_tailscale.py`'s `find_project_root` and `main` to their
+  ends, and confirm `grep -iE "dockerfile|entrypoint"` over the file is empty
+  (that is why it needed no edit).
+- **F2** — that no `eol=lf` rule is path-anchored, by `check-attr` at BOTH the
+  old and the new path.
+- **F14** — that `README.md` and `documentation/runbooks/UPDATE-MANAGEMENT.md`
+  really contain no reference to any moved file, on `$B` as well as here.
 
 **FAIL:** an entry stated more confidently than its label supports, an entry
-whose stated *reason* is wrong even though its headline is right, or a
-`file:line` that does not resolve. A false claim in the sink is worse than one
-in the deliverable — the next item reads this.
+whose stated *reason* is wrong even though its headline is right, an entry that
+reports a change as delivered when it is not, or a `file:line` that does not
+resolve. A false claim in the sink is worse than one in the deliverable — the
+next item reads this.
 
 ## T15 - Lint and hooks, on the branch as committed
 
