@@ -111,6 +111,29 @@ jobs:
       - run: python -m pip install -e "./search/gateway[dev]"
       - run: python -m pytest search/gateway/tests -q
 
+  stack-driver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # Same .env stub as compose-validate, for the same reason: the plane files
+      # declare `env_file: .env` for CONTAINER env and `config` stats that file,
+      # which exists on the host and not on a runner. The inventory generator
+      # RENDERS with the .example files (that is deliberate and deterministic -
+      # see render_env_path in stack.py), but compose still needs .env present.
+      - run: cp .env.example .env
+      - run: cp agent-org/docker/.env.example agent-org/docker/.env
+      # Hermetic: no daemon is touched, the docker call is injected.
+      - run: python -m pytest scripts/stack -q
+        # ubuntu-latest ships docker + compose v2, which is all `config` needs.
+        #
+        # OB1 is a SUBMODULE and is not checked out here, so the open-brain
+        # project cannot be rendered. `inventory --check` says so by name and
+        # carries that project's recorded rows through UNVERIFIED rather than
+        # passing quietly - the remaining seven projects are verified for real.
+      - run: python scripts/stack/stack.py inventory --check
+
   bridge-stdlib-tests:
     runs-on: ubuntu-latest
     steps:

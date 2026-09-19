@@ -55,12 +55,34 @@
 #   keys      - variable names that must be present and non-blank in the plane's
 #               env file. A blank one makes `enable` refuse and name the key.
 #   ports     - published HOST ports -> what answers on them.
-#   profiles  - compose profiles. Each is a sub-table:
+#   profiles  - compose profiles. Each is a sub-table with a `description`, an
+#               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
+#               flags below, which say whether a default `up` starts what the
+#               profile gates. Declaring none of the three is refused by
+#               `stack.py inventory --check`: a profile that appears around
+#               services which run TODAY and says nothing about itself is a
+#               silent shrink of the running set.
 #                 description - what the profile turns on
 #                 default     - passed on EVERY invocation, and it survives
 #                               --headless. For something a plane is not usable
 #                               without; never for a SURFACE, or --headless
 #                               becomes a no-op for that plane.
+#                 opt_in      - something OTHER than the driver turns it on:
+#                               COMPOSE_PROFILES in the plane env file, a
+#                               product (`enable research`), an operator, or a
+#                               dedicated script. The description must say
+#                               which. NOTE that `docker compose --profile X`
+#                               REPLACES COMPOSE_PROFILES instead of adding to
+#                               it, so the driver unions the env's list into any
+#                               flags it passes - see effective_profiles().
+#                 pending     - DECLARED here, not yet in the compose file; a
+#                               later stack-layers item adds it. Enabling one is
+#                               a no-op until then, and the driver says so.
+#                               NOT the same as a profile whose compose file is
+#                               a PINNED SUBMODULE that has not caught up - see
+#                               the ob1 tables, and `inventory --check`, which
+#                               reports those as `[declared, not rendered]`
+#                               rather than as drift.
 #                 requires    - other profiles ON THE SAME PLANE that this one
 #                               cannot work without. The driver closes over these
 #                               transitively (stack.py `profile_closure`), so
@@ -70,9 +92,6 @@
 #                               beside it. Use it where a profiled service's only
 #                               engine lives in another profile - otherwise the
 #                               plane comes up healthy and silently does nothing.
-#                 pending     - DECLARED here, not yet in the compose file; a
-#                               later stack-layers item adds it. Enabling one is
-#                               a no-op until then, and the driver says so.
 
 # --------------------------------------------------------------------------
 [planes.anchor]
@@ -96,17 +115,20 @@ keys     = []
 # The LLM front door. llm-gateway (LiteLLM) carries the `llama-cpp` /
 # `llama-cpp-embed` aliases on ai-stack_llm-net; the real servers sit on the
 # project's native llm-backend-net so callers cannot route around it.
-# requires anchor: inference/docker-compose.yml:448-450, 453-455 (ai-stack_llm-net
-# and ai-stack_app-net, both external: true).
+# requires anchor: inference/docker-compose.yml:83-85, 88-90 (ai-stack_llm-net
+# and ai-stack_app-net, both external: true). Re-derived 2026-09-19: these read
+# :448-450, 453-455 until sl-driver-parity's citation sweep - sl-inference-split
+# moved the services into inference/compose/*.yml and left that file 91 lines
+# long, so the old numbers pointed past its end.
 compose  = "inference/docker-compose.yml"
 env_file = ".env"
 lease    = "inference"
 requires = ["anchor"]
 optional = []
 host = [
-  "NVIDIA GPU + NVIDIA Container Toolkit (inference/docker-compose.yml:83-86, 129-132)",
-  "Chat GGUFs at the HOST path hardcoded in inference/docker-compose.yml:34 - sl-inference-split replaces it with LM_MODELS_DIR",
-  "Embedding GGUF at data/models/embeddings/bge-m3-f16.gguf (inference/docker-compose.yml:111,119)",
+  "NVIDIA GPU + NVIDIA Container Toolkit (inference/compose/upstreams.yml:100-106 and :152-158) - the `local` profile only",
+  "Chat GGUFs under ${LM_MODELS_DIR} (inference/compose/upstreams.yml:24, :54); sl-inference-split replaced the literal per-user path this line used to cite",
+  "Embedding GGUF bge-m3-f16.gguf in that same store (inference/compose/upstreams.yml:145)",
 ]
 # LITELLM_MASTER_KEY is required since J.1 (per-caller virtual keys); without it
 # every consumer's bearer is rejected.
@@ -125,6 +147,13 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 # REPLACES COMPOSE_PROFILES rather than adding to it, so a default would
 # override the host's own value.
 [planes.inference.profiles.local]
+# OPT-IN, not default: this host turns it on with COMPOSE_PROFILES=local in the
+# ROOT .env, which compose reads for itself. The driver deliberately passes no
+# --profile flag here, because a flag would REPLACE that env setting rather than
+# add to it (see effective_profiles() in scripts/stack/stack.py for the measured
+# proof). sl-frontend-solo reached the same conclusion for its three frontend
+# profiles and left all of them without a `default` for exactly this reason.
+opt_in      = true
 description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
 
 # --------------------------------------------------------------------------
@@ -194,12 +223,30 @@ keys = ["WEBUI_SECRET_KEY"]
 # a `stock` host would be handed `gpu`. This is parity with stack.ps1, which
 # passes no frontend profile either and lets .env decide.
 [planes.frontend.profiles.stock]
+# All three are `opt_in`, never `default`, and the block comment above says why
+# in sl-frontend-solo's own words: a CLI --profile REPLACES COMPOSE_PROFILES, so
+# a default here would hand a `stock` host `gpu`. `opt_in` is the flag for
+# exactly that - something other than the driver's defaults turns it on, and
+# here it is the COMPOSE_PROFILES line in .env.
+opt_in      = true
 description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:115-153). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
+opt_in      = true
 description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:158-165, 257-263), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
+# `requires gpu` is the MACHINE-READABLE form of what this description already
+# says twice: the companion's network_mode names the `gpu` definition of
+# openwebui (frontend/docker-compose.yml:290), so `--profile tailscale` alone is
+# not a deployment - compose refuses it outright with
+#   service "tailscale" depends on undefined service "openwebui"
+# Added by sl-driver-parity using the `requires` key sl-ob1-profiles introduced,
+# because the inventory generator needs to know which profiles can be rendered
+# TOGETHER and prose cannot tell it. Changes nothing operationally: no frontend
+# profile is `default`, so nothing passes these flags today.
+requires    = ["gpu"]
+opt_in      = true
 description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:290)"
 
 # --------------------------------------------------------------------------
@@ -271,11 +318,11 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 #   ai-stack_app-net, ai-stack_default - the last aliased `search-gw-net`).
 # requires inference: OB1/docker/docker-compose.yml:116,120 (openbrain-mcp),
 #   406,410, 444, 493,497, 568,571, 675,681, 846, 941, 977, 1173 - CHAT_API_BASE
-#   and EMBEDDING_API_BASE across the fleet; scheduled.yml:186,258.
+#   and EMBEDDING_API_BASE across the fleet; OB1/docker/docker-compose.scheduled.yml:186,258.
 # requires search: OB1/docker/docker-compose.yml:567 (openbrain-research
 #   SEARCH_API_BASE -> http://gateway:8080), :637 (FETCH_PROXY_URL ->
 #   http://vpn:8888), :982 (grounding-backfiller, same proxy) and
-#   scheduled.yml:190 (the digest chain's fetches). Defaults, not toggles: with
+#   OB1/docker/docker-compose.scheduled.yml:190 (the digest chain's fetches). Defaults, not toggles: with
 #   the search plane down these resolve to nothing and research/backfill fail.
 # optional frontend: OB1/docker/docker-compose.yml:562 (openbrain-research
 #   OWUI_BASE_URL -> http://openwebui:8080) - research pushes results into OWUI;
@@ -287,7 +334,7 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 #   CROSS A DOCKER NETWORK: it goes out to the host and back in through the
 #   loopback port this manifest declares at [planes.agent-org.ports] "8065",
 #   via `extra_hosts: host.docker.internal:host-gateway`. Gated in practice by
-#   IDEA_REFINERY_MM_TOKEN (scheduled.yml:254, blank by default); it is set on
+#   IDEA_REFINERY_MM_TOKEN (OB1/docker/docker-compose.scheduled.yml:254, blank by default); it is set on
 #   this host. The cluster transition has to treat this one specially - a host
 #   hop does not follow a plane to another node.
 compose  = "OB1/docker/docker-compose.yml"
@@ -321,8 +368,9 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 
 [planes.ob1.profiles.idea-refinery]
 # requires research: openbrain-idea-refinery's ONLY engine is openbrain-research
-# (OB1/docker/docker-compose.scheduled.yml RESEARCH_URL; integrations/
-# openbrain-idea-refinery/index.ts:268 submits the job, :295 polls it). Found by
+# (OB1/docker/docker-compose.scheduled.yml RESEARCH_URL;
+# OB1/integrations/openbrain-idea-refinery/index.ts:268 submits the job, :295
+# polls it - the path needs its OB1/ prefix or nothing resolves it). Found by
 # this item's TESTER, not by its developer, who grepped the compose files and so
 # never saw it. Without this line the plane's one `default = true` profile starts
 # a drain with no engine - `stack.py enable ob1` and `enable open-brain --headless`
@@ -347,11 +395,27 @@ default     = true
 requires    = ["research"]
 
 # The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles). They are
-# NOT `default`, on purpose: `default` means "passed on every invocation", and
-# the whole point of the research product's surfaces split is that --headless
-# can drop wiki and notebook. scripts/stack/stack.ps1 DOES pass all three (see
-# its ob1 row) because it is the pre-manifest driver and must keep starting the
-# set that is running today; sl-driver-parity reconciles the two.
+# `opt_in`, never `default`: `default` means "passed on every invocation" AND it
+# survives --headless, and the whole point of the research product's surfaces
+# split is that --headless can drop wiki and notebook. `opt_in` is the flag for
+# "something other than the driver's defaults turns this on" - here, a PRODUCT
+# (`enable research`, `enable open-brain`, `enable digest`) or the `requires`
+# edge from idea-refinery.
+#
+# HOW sl-ob1-profiles' stack.ps1 ROW WAS RECONCILED (sl-driver-parity): that
+# script is now a shim with no plane registry, so its four-profile line has no
+# landing place and is not carried forward. The equivalent is the DRIVER'S
+# STATE. Today's host has no .stack/state.json, so `stack.ps1 up` -> `stack.py
+# up --all` passes idea-refinery plus research (the `requires` closure) and
+# nothing else - which starts exactly the same 30 containers, because the PINNED
+# OB1 gitlink (5005197) does not carry these three profiles at all and compose
+# ignores a profile it does not know. AFTER THE GITLINK BUMPS that stops being
+# true: wiki and notebook would then gate seven running containers that a bare
+# `up` no longer starts. The operator runs `stack.py init --product research`
+# (or `enable research`) once, at that bump, and the state file carries them
+# from then on. That is the wave-4 step; it is recorded in
+# documentation/notes/stack-layers-sl-driver-parity-findings.md and in
+# `inventory --check`'s own `[declared, not rendered]` output.
 
 [planes.ob1.profiles.research]
 # OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which
@@ -360,13 +424,16 @@ requires    = ["research"]
 # `ungrounded_claims` for every inlet, not just research (its own comment at
 # OB1/docker/docker-compose.yml, "general brain-health"), so it renders with no
 # profile at all.
-description = "the research engine: openbrain-research + openbrain-curator"
+description = "the research engine: openbrain-research + openbrain-curator; the `research` and `digest` products enable it, and `idea-refinery` requires it"
+opt_in      = true
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE)"
+description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
+opt_in      = true
 
 [planes.ob1.profiles.notebook]
-description = "the Open Notebook trio: surrealdb + open_notebook + its backup (a SURFACE)"
+description = "the Open Notebook trio: surrealdb + open_notebook + its backup; a SURFACE of the `research` product, and an engine PROFILE of `digest` (openbrain-podcast renders through it)"
+opt_in      = true
 
 # --------------------------------------------------------------------------
 [planes.agent-org]
@@ -404,11 +471,17 @@ keys = ["MM_DB_PASSWORD", "AO_DB_PASSWORD"]
 "8065" = "mattermost (loopback; the org's own surface)"
 "8830" = "agent-bridge control/debug (loopback)"
 
+# Both slices are OPERATOR-DRIVEN and always have been: scripts/stack/stack.ps1's
+# header said so in as many words ("NOT managed here (deliberate): ... the
+# agent-org workers/cloud profiles"), and the driver keeps that promise. They run
+# on this host because the operator started them, not because `up` did.
 [planes.agent-org.profiles.workers]
-description = "the ao-worker / ao-ot / ao-git-egress slices"
+description = "the ao-worker / ao-ot / ao-git-egress slices; started by the operator, never by `up`"
+opt_in      = true
 
 [planes.agent-org.profiles.cloud]
 description = "the cloud lane (the only component with internet egress); needs OPENROUTER_API_KEY"
+opt_in      = true
 
 # --------------------------------------------------------------------------
 [planes.portal]
@@ -424,7 +497,8 @@ description = "the cloud lane (the only component with internet egress); needs O
 #   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
 #   while the rest of the portal serves.
 # optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
-#   which joins ai-stack_app-net for exactly that (inference/docker-compose.yml:320-327).
+#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:153,
+#   networks at :162-164).
 compose  = "portal/docker-compose.yml"
 env_file = ".env"
 lease    = "portal"
@@ -445,7 +519,8 @@ keys = [
 [planes.portal.ports]
 
 [planes.portal.profiles.internet]
-description = "cloudflared + the tunnel watcher; without it the portal runs local-test only"
+description = "cloudflared + the tunnel watcher; passed by scripts/portal/portal-on.ps1, never by the driver (this plane is `manual`)"
+opt_in      = true
 
 
 # ==========================================================================

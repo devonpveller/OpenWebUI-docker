@@ -123,7 +123,8 @@ long as the gateway is unreachable.
 ## Where this plane sits in the stack order
 
 Anchor (networks) → **inference** → frontend → **memory** → search → coder →
-open-brain → agent-org (`scripts/stack/stack.ps1` `$Projects`;
+open-brain → agent-org (declared by the order of the `[planes.*]` tables in
+`stack.manifest.toml`, which `scripts/stack/stack.py` topologically sorts;
 `emergency-recovery.ps1` uses the same relative position).
 
 Upward: memory needs the anchor's `ai-stack_llm-net` to exist, and the inference
@@ -180,10 +181,19 @@ checklist is `documentation/runbooks/SERVICE-LIFECYCLE.md`; the surfaces this
 plane actually appears on today are:
 
 - `memory/docker-compose.yml` (here)
-- `scripts/stack/stack.ps1` — the `$Projects` row and the `health` probe
+- `stack.manifest.toml` — the `[planes.memory]` table (compose file, `env_file`,
+  `requires`, `ports`, `keys`)
+- `scripts/stack/stack.py` — the plane's probe in `HealthSweep.run()`, and its
+  label in `PS1_PROBES` (`scripts/stack/test_stack.py`), which pins the probe set.
+  `scripts/stack/stack.ps1` is a shim over that driver since 2026-09-19 and holds
+  no plane list and no probe of its own
 - `scripts/recovery/emergency-recovery.ps1` — `$Script:MemoryServices`, `Start-PlaneStack "memory"`
 - `scripts/checks/stack-watchdog.ps1` — auxiliary restarts + `$ExpectedBackupRecency`
-- `scripts/lib/stack-services.json` — the `memory` section and the backup row
+- `scripts/lib/stack-services.curated.json` — the `memory` section and the backup
+  row. Edit the CURATED sidecar, then run
+  `python scripts/stack/stack.py inventory --write`:
+  `scripts/lib/stack-services.json` is generated and `inventory --check` (in the
+  pre-commit hook and in CI) refuses a hand edit
 - `.claude/skills/stack-map/references/workspace-stacks.md` §1c, and the plane table in `CLAUDE.md`
 - `documentation/CONTAINER-REGISTRY.md`,
   `documentation/runbooks/restore-from-snapshot.md`,

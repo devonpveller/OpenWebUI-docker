@@ -50,42 +50,53 @@
     "  env_file - extra --env-file, or null when the project needs none.",
     "  compose  - the same thing spelled as a human-runnable command line."
   ],
+  "_sidecar": [
+    "CURATED SIDECAR for scripts/lib/stack-services.json - the half of that file no",
+    "machine can derive. EDIT THIS FILE, then run:",
+    "    python scripts/stack/stack.py inventory --write",
+    "",
+    "What lives here and nowhere else:",
+    "  _comment   the header text copied verbatim into the generated file",
+    "  projects   which compose PROJECT name belongs to which manifest PLANE (they are",
+    "             not always the same word: anchor -> ai-stack, ob1 -> open-brain), plus",
+    "             each project's hand-written note and the profiles a tool must pass to",
+    "             see all of its services. Everything else about a project - the compose",
+    "             file, the --env-file, the command line - comes from stack.manifest.toml.",
+    "  planes     the GROUPING and the ROW ORDER, and the judgement fields: `critical`,",
+    "             `host_health`, `stale_pool_guard`, `note`. A generator cannot decide",
+    "             whether a container is critical, so it refuses to guess.",
+    "",
+    "`service` / `profile` are recorded here only where they are non-default, and the",
+    "compose render AUDITS them: a stale value is reported as drift rather than quietly",
+    "winning on a machine that cannot render the project (CI has no OB1 submodule).",
+    "",
+    "Adding a container: add its row here in the right group, then `inventory --write`.",
+    "`--write` REFUSES to invent a row for a container it finds in a render and not here,",
+    "because only a person can say which group it joins and whether it is critical.",
+    "See documentation/runbooks/SERVICE-LIFECYCLE.md step 8."
+  ],
   "projects": {
     "ai-stack": {
-      "compose": "docker compose",
-      "file": null,
-      "env_file": null,
+      "plane": "anchor",
       "note": "PURE NETWORK ANCHOR since Part K.5b (2026-08-21): owns the shared llm-net / app-net / default networks and ZERO services. `docker compose up -d <anything>` here exits 1 with 'no such service'. file=null marks it unstartable; no container row points at it."
     },
     "frontend": {
-      "compose": "docker compose -f frontend/docker-compose.yml --env-file .env",
-      "file": "frontend/docker-compose.yml",
-      "env_file": ".env"
+      "plane": "frontend"
     },
     "inference": {
-      "compose": "docker compose -f inference/docker-compose.yml --env-file .env",
-      "file": "inference/docker-compose.yml",
-      "env_file": ".env"
+      "plane": "inference"
     },
     "memory": {
-      "compose": "docker compose -f memory/docker-compose.yml --env-file .env",
-      "file": "memory/docker-compose.yml",
-      "env_file": ".env"
+      "plane": "memory"
     },
     "search": {
-      "compose": "docker compose -f search/docker-compose.yml --env-file .env",
-      "file": "search/docker-compose.yml",
-      "env_file": ".env"
+      "plane": "search"
     },
     "coder": {
-      "compose": "docker compose -f coder/docker-compose.yml --env-file .env",
-      "file": "coder/docker-compose.yml",
-      "env_file": ".env"
+      "plane": "coder"
     },
     "open-brain": {
-      "compose": "docker compose -f OB1/docker/docker-compose.yml",
-      "file": "OB1/docker/docker-compose.yml",
-      "env_file": null,
+      "plane": "ob1",
       "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values. PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
       "profiles": [
         "research",
@@ -95,9 +106,7 @@
       ]
     },
     "agent-org": {
-      "compose": "docker compose -f agent-org/docker/docker-compose.yml",
-      "file": "agent-org/docker/docker-compose.yml",
-      "env_file": null,
+      "plane": "agent-org",
       "note": "env_file is deliberately null, same as open-brain: compose's project directory is agent-org/docker, so it auto-loads agent-org/docker/.env. Passing the ROOT .env would override it with the wrong values. The workers/cloud slices are PROFILE-GATED: a bare `config` or `up` renders only the six always-on services, so any tool reading this file must pass --profile workers --profile cloud to see the rest.",
       "profiles": [
         "workers",
@@ -116,10 +125,10 @@
       },
       {
         "container": "tailscale",
-        "profile": "tailscale",
         "project": "frontend",
         "critical": true,
-        "note": "PROFILE-GATED (`tailscale` profile, which requires `gpu`). Absent from the frontend render on a deployment that does not run it; stack.ps1 health and stack-watchdog.ps1 skip their tailnet checks in that case (Test-TailscaleDeployed)."
+        "note": "PROFILE-GATED (`tailscale` profile, which requires `gpu`). Absent from the frontend render on a deployment that does not run it; stack.ps1 health and stack-watchdog.ps1 skip their tailnet checks in that case (Test-TailscaleDeployed).",
+        "profile": "tailscale"
       },
       {
         "container": "llm-gateway",
@@ -220,17 +229,17 @@
     "notebook": [
       {
         "container": "open_notebook",
-        "profile": "notebook",
         "project": "open-brain",
         "critical": false,
-        "note": "being retired (Quartz workbench); still live for podcasts"
+        "note": "being retired (Quartz workbench); still live for podcasts",
+        "profile": "notebook"
       },
       {
         "container": "surrealdb",
-        "profile": "notebook",
         "project": "open-brain",
         "critical": false,
-        "note": "open-notebook DB; WS-only, no HTTP health"
+        "note": "open-notebook DB; WS-only, no HTTP health",
+        "profile": "notebook"
       }
     ],
     "openbrain": [
@@ -284,15 +293,15 @@
       },
       {
         "container": "openbrain-wiki",
-        "profile": "wiki",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-wiki-viewer",
-        "profile": "wiki",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-entity-worker",
@@ -306,17 +315,17 @@
       },
       {
         "container": "openbrain-research",
-        "profile": "research",
         "project": "open-brain",
         "critical": true,
-        "host_health": "http://127.0.0.1:8818/health"
+        "host_health": "http://127.0.0.1:8818/health",
+        "profile": "research"
       },
       {
         "container": "openbrain-curator",
-        "profile": "research",
         "project": "open-brain",
         "critical": false,
-        "host_health": "http://127.0.0.1:8816/health"
+        "host_health": "http://127.0.0.1:8816/health",
+        "profile": "research"
       },
       {
         "container": "openbrain-chunk-worker",
@@ -335,9 +344,9 @@
       },
       {
         "container": "openbrain-workbench",
-        "profile": "wiki",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-extract",
@@ -399,9 +408,9 @@
       },
       {
         "container": "tailscale-backup",
-        "profile": "tailscale",
         "project": "frontend",
-        "critical": false
+        "critical": false,
+        "profile": "tailscale"
       },
       {
         "container": "mnemory-backup",
@@ -420,15 +429,15 @@
       },
       {
         "container": "openbrain-wiki-backup",
-        "profile": "wiki",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "open-notebook-backup",
-        "profile": "notebook",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "notebook"
       },
       {
         "container": "mattermost-db-backup",
