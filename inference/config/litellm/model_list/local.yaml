@@ -1,16 +1,17 @@
 # LOCAL model group — the llama.cpp models served by this host.
 #
-# Moved here from config/litellm.config.yaml (stack-layers sl-inference-split,
-# 2026-09-19) so the gateway can run CLOUD-ONLY. The entries below are
-# byte-identical to the model_list that lived in that file; only their home
-# changed.
+# Moved here from litellm.config.yaml beside it (stack-layers
+# sl-inference-split, 2026-09-19; the whole tree then moved from config/ into
+# inference/config/ at sl-colo-inference, same day) so the gateway can run
+# CLOUD-ONLY. The entries below are byte-identical to the model_list that lived
+# in that file; only their home changed.
 #
-# `x-requires-profile: local` is read by config/litellm/assemble-config.py and
-# stripped before LiteLLM sees the config: these models are registered only when
-# `local` is in COMPOSE_PROFILES — the same variable that decides whether
-# llm-queue and the *-upstream servers start at all. With the profile off there
-# is no llm-queue to forward to, so listing them would advertise a backend that
-# is not running.
+# `x-requires-profile: local` is read by the assemble-config.py one directory
+# up (inference/config/litellm/) and stripped before LiteLLM sees the config:
+# these models are registered only when `local` is in COMPOSE_PROFILES — the
+# same variable that decides whether llm-queue and the *-upstream servers start
+# at all. With the profile off there is no llm-queue to forward to, so listing
+# them would advertise a backend that is not running.
 model_list:
   # ─── Chat — Qwen 3.6 27B (both variants share one upstream slot) ───
   # B2 (2026-06-14): api_base points at the llm-queue ADMISSION CONTROLLER, NOT

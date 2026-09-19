@@ -5,7 +5,8 @@
 # supervision cap — governance §3). It is the ONLY agent-org component with an egress, and
 # only through ao-egress -> openrouter.ai (no-log/ZDR providers, prefer open-weight).
 #
-# ⚠️ The LOCAL llm-gateway is a DIFFERENT, air-gapped instance (config/litellm.config.yaml).
+# ⚠️ The LOCAL llm-gateway is a DIFFERENT, air-gapped instance
+# (inference/config/litellm.config.yaml).
 # Do NOT add OpenRouter to it; do NOT add these models to it. Two lanes, two gateways
 # (PLAN §3.4 / OD-6). "Never route around LiteLLM" holds for cloud too (this IS the front
 # door for cloud), and the local air-gap stays intact.

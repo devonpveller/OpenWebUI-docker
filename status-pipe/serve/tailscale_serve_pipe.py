@@ -46,8 +46,8 @@ DOCKER_PS_TIMEOUT = 10
 # controller. NEVER GET /health on the gateway: with background_health_checks
 # off, LiteLLM's /health fires a LIVE health-check completion at every
 # registered model, which forces a llama-swap model load (swap thrash — see
-# config/litellm.config.yaml). No host publish (llm-net is internal), so host
-# runs report the panel as unreachable; that is expected.
+# inference/config/litellm.config.yaml). No host publish (llm-net is internal),
+# so host runs report the panel as unreachable; that is expected.
 LLM_GATEWAY_URL = os.environ.get("LLM_GATEWAY_URL", "http://llm-gateway:8080").rstrip("/")
 
 
@@ -1068,7 +1068,7 @@ _LLM_KEY_NAMES: Dict[str, str] = {
     # LiteLLM's openai-client path re-keys upstream requests as `dummy` (its
     # litellm_params.api_key) — the caller's real key is NOT forwarded to
     # llm-queue unless the caller sets the OpenAI `user` body field (see
-    # config/litellm.config.yaml, B2/P2 attribution note).
+    # inference/config/litellm.config.yaml, B2/P2 attribution note).
     "dummy": "via-gateway (unattributed)",
 }
 

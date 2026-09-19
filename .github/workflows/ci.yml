@@ -99,8 +99,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e "./llm-queue[dev]"
-      - run: pytest -q llm-queue/tests
+      - run: pip install -e "./inference/llm-queue[dev]"
+      - run: pytest -q inference/llm-queue/tests
 
   pytest-search-gateway:
     runs-on: ubuntu-latest

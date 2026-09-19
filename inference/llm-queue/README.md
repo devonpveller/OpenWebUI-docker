@@ -11,7 +11,7 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
                                                              (this service)  (concurrencyLimit: 0)
 ```
 
-**Design:** [`../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`](../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md)
+**Design:** [`../../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`](../../../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md)
 
 ## What it does
 
@@ -46,7 +46,7 @@ callers → llama-cpp:8080 (alias) → llm-gateway (LiteLLM) → llm-queue → l
 Keep these in sync — see `config.py`:
 
 ```
-llama-swap --parallel  ==  LLM_QUEUE_SLOTS (P)         # config/llama-swap.config.yaml = .env LLAMA_SWAP_QWEN36_27B_N_PARALLEL
+llama-swap --parallel  ==  LLM_QUEUE_SLOTS (P)         # inference/config/llama-swap.config.yaml = .env LLAMA_SWAP_QWEN36_27B_N_PARALLEL
 LLM_QUEUE_MAX_IN_FLIGHT (N)  <=  P + 1                 # headroom discipline
 llama-swap concurrencyLimit  ==  0                     # the queue is the sole gate
 ```
@@ -55,24 +55,30 @@ llama-swap concurrencyLimit  ==  0                     # the queue is the sole g
 
 ```pwsh
 # tests (pure logic + ASGI burst sims, no Docker needed)
-cd llm-queue; python -m venv .venv; ./.venv/Scripts/python -m pip install -e ".[dev]"
+cd inference/llm-queue; python -m venv .venv; ./.venv/Scripts/python -m pip install -e ".[dev]"
 ./.venv/Scripts/python -m pytest -q
 ./.venv/Scripts/python -m ruff check src tests
 
-# rebuild + redeploy the container (no source mount — code is baked)
-docker compose build llm-queue && docker compose up -d llm-queue
+# rebuild + redeploy the container (no source mount — code is baked).
+# ALWAYS name the plane file: since K.1 the root project is the network anchor
+# and owns no services, so a bare `docker compose` from the repo root does
+# nothing here. Run from the REPO ROOT:
+docker compose -f inference/docker-compose.yml --env-file .env build llm-queue
+docker compose -f inference/docker-compose.yml --env-file .env up -d llm-queue
 
 # burst verifier (run inside a container that can reach the target)
-docker exec -i llm-queue   python - http://localhost:8080 24 < llm-queue/scripts/burst.py   # direct
-docker exec -i llm-queue   python - http://llm-gateway:8080 48 < llm-queue/scripts/burst.py  # via LiteLLM
+docker exec -i llm-queue   python - http://localhost:8080 24 < inference/llm-queue/scripts/burst.py   # direct
+docker exec -i llm-queue   python - http://llm-gateway:8080 48 < inference/llm-queue/scripts/burst.py  # via LiteLLM
 ```
 
 ## Revert (one config line each)
 
-1. `config/litellm.config.yaml`: both `qwen36-27b` `api_base` → `http://llama-cpp-upstream:8080/v1`
-2. `config/llama-swap.config.yaml`: `concurrencyLimit: 0` → `32`
+1. `inference/config/litellm/model_list/local.yaml`: both `qwen36-27b` `api_base` → `http://llama-cpp-upstream:8080/v1`
+   (the model_list left `litellm.config.yaml` at sl-inference-split, 2026-09-19 — that file is now the BASE config only)
+2. `inference/config/llama-swap.config.yaml`: `concurrencyLimit: 0` → `32`
 
-…then `docker compose restart llm-gateway llama-cpp-upstream`.
+…then, from the repo root,
+`docker compose -f inference/docker-compose.yml --env-file .env restart llm-gateway llama-cpp-upstream`.
 
 ## Operational notes
 
