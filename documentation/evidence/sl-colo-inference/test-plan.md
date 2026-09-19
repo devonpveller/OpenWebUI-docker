@@ -64,11 +64,14 @@ history is severed.
 Also confirm git itself saw renames:
 
 ```bash
-git -C "$W" show --stat -M HEAD | grep -c ' => '
+git -C "$W" show --name-status -M work/sl-colo-inference | grep -c '^R'
+git -C "$W" show --name-status -M work/sl-colo-inference | grep '^R' | awk '{print $2}' | sed 's|/.*||' | sort | uniq -c
 ```
 
-**PASS:** 40 rename entries (32 `llm-queue/*`, 8 `config/*`).
-**FAIL:** fewer — some file was copied rather than moved.
+**PASS:** `40`, split `8 config` / `32 llm-queue`.
+**FAIL:** fewer — some file was recorded as an add+delete, not a rename.
+(Use `--name-status`, not `--stat`: `--stat` elides long paths with `...` and
+under-counts.)
 
 ## T2 — `config/` is gone and its contents are all accounted for
 
