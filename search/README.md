@@ -32,8 +32,8 @@ here.
 |---|---|---|
 | `vpn` | `search-vpn` | gluetun (`${VPN_IMAGE:-qmcgaw/gluetun:latest}`) holding a Mullvad **WireGuard** tunnel with a kill-switch, and exposing an **HTTP forward proxy on `:8888`**. This is the plane's only route to the internet, and it carries both engine queries (SearXNG) and page fetches (OB1). Needs `NET_ADMIN` and `/dev/net/tun`. |
 | `redis` | `search-redis` | Cache for SearXNG (`db0`, including its engine suspensions) and for the gateway (`db1` - response cache and circuit-breaker state). Runs with `--save "" --appendonly no`: nothing it holds survives a restart, by design. |
-| `searxng` | `searxng` | The metasearch engine. Its config comes from the repo tree, not the image default: [`gateway/searxng`](gateway/searxng) is bind-mounted at `/etc/searxng`, and that `settings.yml` is what points every engine request at `http://vpn:8888`. |
-| `gateway` | `search-gateway` | The plane's front door: the Python app in `./gateway/gateway`, built here as `private-search-gateway:local`. Normalises engines behind one API and adds auth, caching and a circuit breaker. |
+| `searxng` | `searxng` | The metasearch engine. Its config comes from the repo tree, not the image default: [`searxng/`](searxng) is bind-mounted at `/etc/searxng`, and that `settings.yml` is what points every engine request at `http://vpn:8888`. |
+| `gateway` | `search-gateway` | The plane's front door: the Python app in `./gateway`, built here as `private-search-gateway:local`. Normalises engines behind one API and adds auth, caching and a circuit breaker. |
 
 The compose file also carries comment tombstones for two services that no
 longer exist - `tor` (retired 2026-08-21, superseded by the Mullvad tunnel) and
@@ -108,7 +108,7 @@ docker compose -f search/docker-compose.yml --env-file .env config   # render/va
 
 `gateway` is the only image built here (`private-search-gateway:local`); the
 other three are pulled. **`up -d` alone does not pick up source changes** under
-`./gateway/gateway` - build it explicitly:
+`./gateway` - build it explicitly:
 
 ```powershell
 docker compose -f search/docker-compose.yml --env-file .env build gateway
@@ -119,8 +119,8 @@ Retagging `private-search-gateway:local` is a deploy, not a test. Under the
 [merge protocol](../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md)
 that is a gated step: test builds tag `:wt-<id>` and leave `:local` alone.
 
-Relative paths inside the compose file (`../.env`, `./gateway/gateway`,
-`./gateway/searxng`) resolve against the **file**, not your shell's
+Relative paths inside the compose file (`../.env`, `./gateway`,
+`./searxng`) resolve against the **file**, not your shell's
 working directory - so `-f search/docker-compose.yml` works from anywhere in the
 repo, but a copy of the file somewhere else will not.
 
@@ -174,10 +174,10 @@ whole render.
 
 - Everything in `redis` is cache plus circuit-breaker and suspension
   bookkeeping. Losing it on restart is the intended behaviour.
-- The one bind mount is `./gateway/searxng:/etc/searxng:rw`. SearXNG
+- The one bind mount is `./searxng:/etc/searxng:rw`. SearXNG
   config is served straight out of your git working tree, and the mount is
   **`rw`**, so the container can write into your checkout: unexplained
-  `git status` noise under `search/gateway/searxng/` is the container, not you.
+  `git status` noise under `search/searxng/` is the container, not you.
 - Consequently `docker compose -f search/docker-compose.yml --env-file .env
   down -v` destroys nothing that matters here. Do not carry that habit over to
   `memory` or `open-brain`, where the same command is destructive.
@@ -239,7 +239,7 @@ under another name.
 | `up` aborts complaining about `MULLVAD_WG_PRIVATE_KEY` | The guard doing its job: you ran without `--env-file .env`, or the key is unset. |
 | `/healthz` green but `/readyz` 503 | The chain behind the gateway. Either the tunnel is still building (give SearXNG its 90 s), or redis or SearXNG is unhappy. The watchdog only restarts on `/healthz`, so a plane that is up but not working will not self-heal - somebody has to look. |
 | Searches return fewer engines than usual, without errors | Everything leaves through one exit IP, so a heavy fan-out can get the whole plane captcha'd at once. SearXNG keeps its state, engine suspensions included, in redis `db0` (`SEARXNG_REDIS_URL`); clear it with `docker exec search-redis redis-cli -n 0 FLUSHDB`. |
-| One engine in particular returns nothing | Engine enable/disable policy lives in [`gateway/searxng/settings.yml`](gateway/searxng/settings.yml), tuned for what actually answers a VPN exit IP. |
+| One engine in particular returns nothing | Engine enable/disable policy lives in [`searxng/settings.yml`](searxng/settings.yml), tuned for what actually answers a VPN exit IP. |
 | Bursts are not being throttled | SearXNG's own limiter is off on purpose (`server.limiter: false`): it is public-instance bot protection and would throttle our own research fan-out. Burst control lives in the gateway's cache and circuit breaker. |
 | Something outside the plane cannot reach `vpn:8888` | The kill-switch firewall. `SEARCH_NET_SUBNET` is the knob for clients on other networks; in-plane services never need it. |
 | The whole plane needs bringing back after a crash | `scripts/recovery/emergency-recovery.ps1` restarts it in order along with the rest of the workspace. |

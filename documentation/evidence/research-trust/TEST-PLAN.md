@@ -812,7 +812,7 @@ These steps change live systems and are **not part of the test pass**.
 7. Release the lease.
 
 **Rollback:** restore `SEARXNG_IMAGE=searxng/searxng:latest` in `.env` and
-`git checkout` the previous `search/gateway/searxng/settings.yml`, then `up -d searxng`.
+`git checkout` the previous `search/searxng/settings.yml`, then `up -d searxng`.
 
 ### D.2 Open Brain plane — lease `open-brain`
 
