@@ -5,13 +5,23 @@ Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
 Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../documentation/CONTAINER-REGISTRY.md).
 
-**Last reconciled against live compose: 2026-08-21** — Part K restructure
+**Last reconciled against live compose: 2026-09-19** (stack-layers
+`sl-readmes`; every profile cell, service count and driver name below was
+re-read from the file it describes). Since the 2026-08-21 reconcile: each plane
+gained its own `.env` and its own README, the plane sources moved into the plane
+directories, and **`stack.manifest.toml` became the declaration of record**,
+driven by `python scripts/stack/stack.py` (`scripts/stack/stack.ps1` is now a
+shim). What that manifest declares - requires, optional, profiles, ports, keys,
+host needs, products - is the machine-readable half of this document; this file
+is the rendered topology.
+
+**Prior reconcile, 2026-08-21** — Part K restructure
 COMPLETE: the root `ai-stack` project is a **pure network anchor (0
 services)**; each plane is its own compose project — `frontend` (K.5, incl.
 the openwebui+tailscale netns pair), `inference` (K.1, owns
 `llm-backend-net`), `memory` (K.2), `search` (K.3, owns `search-net`),
 `coder` (K.4, owns `lc-net`, adopted open-terminal); the Open Notebook trio
-joined OB1 (K.5b). Driver: `scripts/stack/stack.ps1`. Earlier that day the
+joined OB1 (K.5b). Earlier that day the
 openbrain-db/wiki backups moved into OB1 and `smolcrawl-pipelines`/`-backup`
 retired. 2026-08-20 CLEANUP-PLAN v3 execution day: the root compose became a
 thin include of `compose/<plane>.yml` files (rendered model proven identical);
@@ -20,8 +30,8 @@ own compose project `portal`** on 2026-08-21 (12 services,
 `portal/docker-compose.yml`, data migrated to `portal_*` volumes, joins
 `ai-stack_app-net` externally); the status-pipe
 subsystem consolidated to `status-pipe/` and OWUI's whole-repo mount replaced
-by three narrow ro mounts; entrypoint.sh rewritten to a 318-line route table
-(ollama/LM Studio blocks gone). Prior reconcile (2026-07-01) — added the **`agent-org`** project
+by three narrow ro mounts; `frontend/entrypoint.sh` rewritten around a
+data-driven route table (ollama/LM Studio blocks gone). Prior reconcile (2026-07-01) — added the **`agent-org`** project
 (teams-chat agent orchestration: `mattermost` + `mattermost-db` + `agent-bridge` +
 `agent-bridge-db`, plus the profile-gated `workers`/`cloud` planes — see §3). Prior
 (2026-06-14): added **`llm-queue`** (B2 front-ended inference admission controller between the
@@ -33,9 +43,16 @@ portal/auth slice (Authelia/Caddy/Cloudflared + watchers/tripwire), the unified-
 and the portal networks (`edge/auth/app/notify-net`).
 
 Source files:
-- `docker-compose.yml` — the **main** (anchor) project (the watchtower-era
+- `stack.manifest.toml` — **the declaration of record**: every plane's compose
+  file, requires/optional edges, profiles, ports, keys and host needs, plus the
+  products that group them. Read by `scripts/stack/stack.py`
+- `docker-compose.yml` — the **main** (anchor) project: a `networks:` block and
+  nothing else, no `include:` and no root `compose/` directory (the watchtower-era
   `docker-compose.override.yml` was archived at K.5 — its settings live in
   `frontend/docker-compose.yml` now)
+- `<plane>/README.md` — the per-plane detail (what starts, requires, surfaces,
+  host needs, first run, live state) for frontend, inference, memory, search,
+  coder and portal
 - `portal/local-test.override.yml` — portal test mode, no Cloudflare (own project since 2026-08-21)
 - `OB1/docker/docker-compose.yml` (+ `docker-compose.scheduled.yml`) — the **open-brain** project (separate)
 - `agent-org/docker/docker-compose.yml` — the **agent-org** project (separate; teams-chat orchestration)
@@ -44,24 +61,43 @@ Source files:
 
 ## 1. Root anchor — compose project `ai-stack` (0 services since K.5b)
 
-Files: `docker-compose.yml` (thin include of `compose/<plane>.yml`; the network ANCHOR — owns `llm-net`/`app-net`/`default`); plane projects at `frontend|inference|memory|search|coder/docker-compose.yml`; portal = `portal/docker-compose.yml` (own project).
-Run with: `docker compose ...` from the workspace root.
+Files: `docker-compose.yml` — **networks only, no `include:`, no services**; the
+plane projects are `frontend|inference|memory|search|coder|portal/docker-compose.yml`,
+each its own project with its own `.env`.
+Run with: `docker compose up -d` from the workspace root (it creates the three
+networks and starts nothing), or `python scripts/stack/stack.py up anchor`.
 
-> **Profiles:** the **Portal** plane below is gated behind `profiles: [internet]`
-> (or `[internet, local-test]`) and does **NOT** start with a plain `docker compose up -d` —
-> it's driven by `scripts/portal/portal-on.ps1` / `portal-off.ps1`. Everything else starts by default.
+> **Profiles: FIVE planes are profile-gated, not one.** `frontend`
+> (`stock` | `gpu` | `tailscale`), `inference` (`local`), `portal` (`internet`),
+> `agent-org` (`workers`, `cloud`) and `ob1` (`idea-refinery`, plus
+> `research`/`wiki`/`notebook` declared in the manifest and not yet in the pinned
+> gitlink). Each plane's set comes from **its own `<plane>/.env`**, and a
+> `--profile` flag on the command line REPLACES that value rather than adding to
+> it. **There is no `local-test` compose profile** anywhere in
+> `portal/docker-compose.yml`, despite several comments naming one: portal test
+> mode is the overlay file `portal/local-test.override.yml`, and
+> `portal-on.ps1 -Test` passes no profile at all.
+> The **Portal** plane is `manual` in the manifest: the driver never starts or
+> stops it, `scripts/portal/portal-on.ps1` / `portal-off.ps1` do.
 
 ### Networks
-| Network      | Type            | Purpose |
+
+Only the first three are the ANCHOR's. The rest are listed here because they are
+the workspace's whole network surface, but each is **native to the plane project
+named in its row** and is created and destroyed with that project.
+
+| Network      | Type / owner    | Purpose |
 |--------------|-----------------|---------|
-| `llm-net`    | internal (no internet) | **caller plane / shared seam**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM, in the **inference** project — it attaches externally). The `*-upstream` real servers are NOT here (isolated on the inference project's native `llm-backend-net`) so callers cannot route around LiteLLM |
-| `search-net` | internal (no internet) | search gateway isolation — only `vpn` (Mullvad; engine queries AND page fetches since tor retired 2026-08-21) bridges out |
-| `lc-net`     | internal (no internet) | little-coder control plane isolation |
-| `auth-net`   | bridge, **internal** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
-| `app-net`    | bridge          | caddy ↔ openwebui / open_notebook (backends reached only via caddy) |
-| `edge-net`   | bridge          | portal ingress: cloudflared ↔ caddy |
-| `notify-net` | bridge          | portal egress chokepoint (portal-alerter → Gmail; portal-cron) |
-| `default`    | bridge          | host-reachable / internet egress |
+| `llm-net`    | internal; **anchor** | **caller plane / shared seam**: every inference consumer sits here and reaches inference ONLY via the `llama-cpp` / `llama-cpp-embed` aliases on **`llm-gateway`** (LiteLLM, in the **inference** project — it attaches externally). The `*-upstream` real servers are NOT here (isolated on the inference project's native `llm-backend-net`) so callers cannot route around LiteLLM |
+| `search-net` | internal; **search project** | search gateway isolation — only `vpn` (Mullvad; engine queries AND page fetches since tor retired 2026-08-21) bridges out |
+| `lc-net`     | internal; **coder project** | little-coder control plane isolation |
+| `llm-backend-net` | internal; **inference project** | the real `*-upstream` servers + `llm-queue`, reachable only by `llm-gateway`. This is what makes routing around LiteLLM physically impossible |
+| `owui-net`   | bridge; **frontend project** | the one network both `openwebui` definitions and the always-on backup sidecar share; it is also all the `stock` profile needs |
+| `auth-net`   | bridge, internal; **portal project** | portal: caddy ↔ authelia ↔ portal-alerter ↔ watchers (no internet) |
+| `app-net`    | bridge; **anchor** | caddy ↔ openwebui / open_notebook / llm-gateway-ui (backends reached only via caddy) |
+| `edge-net`   | bridge; **portal project** | portal ingress: cloudflared ↔ caddy |
+| `notify-net` | bridge; **portal project** | portal egress chokepoint (portal-alerter → Gmail; portal-cron) - the plane's ONLY internet egress |
+| `default`    | bridge; **anchor** (`ai-stack_default`) | host-reachable / internet egress; the cross-project DNS seam for search's `vpn` + `gateway` |
 | `obnet`      | external (`open-brain_obnet`) | so `open_notebook` (IKS) can reach OB1's Postgres |
 
 ### Planes & containers
@@ -70,35 +106,60 @@ Run with: `docker compose ...` from the workspace root.
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
-| `openbrain-wiki-backup` **[profile `wiki`]** | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
+| `openbrain-wiki-backup` **[profile `wiki`]** | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | `wiki` (open-brain) — declared in the manifest and the curated inventory; the PINNED gitlink does not carry it yet, so today it renders unprofiled |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
 | `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
-| `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
-| `authelia-backup` | authelia-data | default, auth-net | internet, local-test |
+| `caddy-backup` | caddy-data (supercronic, `CADDY_BACKUP_CRON`, default `0 3 * * *`) | default, edge-net | **none** — it carries no `profiles:` key, so a bare portal `up` starts it |
+| `authelia-backup` | authelia-data (supercronic, `AUTHELIA_BACKUP_CRON`, default `0 3 * * *`) | default, auth-net | **none** — same |
 
-**Portal (internet-exposed front-end — profile-gated; NOT in a default `up`)**
+**Portal (internet-exposed front-end — its own project; `manual`, so NOT in any driver `up`)**
+
+Re-read from `portal/docker-compose.yml` 2026-09-19: **only two of the twelve
+carry a `profiles:` key.** A bare `docker compose -f portal/docker-compose.yml
+up -d` starts ten of them with no tunnel - which is why the documented path is
+`portal-on.ps1`, not a bare `up`. (Render: 10 services without a profile, 12
+with `--profile internet`.)
+
 | Container | Role | Networks | Profile |
 |-----------|------|----------|---------|
-| `portal-init` | one-shot: chown portal volumes, exits | none (`network_mode: none`) | internet, local-test |
-| `caddy` | reverse proxy + `forward_auth`; sole ingress (no host port) | edge-net, auth-net, app-net | internet, local-test |
-| `authelia` | SSO / 2FA auth gateway (:9091 internal) | auth-net | internet, local-test |
-| `cloudflared` | Cloudflare Tunnel — the only internet ingress | edge-net | internet |
-| `portal-alerter` | Deno alert/digest → Gmail (:8080) | auth-net, notify-net | internet, local-test |
-| `authelia-watcher` | tails auth/access logs → alerts (new-IP, etc.) | auth-net | internet, local-test |
-| `authelia-notif-bridge` | forwards Authelia OTP/notifications → alerter | auth-net | internet, local-test |
-| `integrity-tripwire` | hashes Caddyfile/Authelia configs; alerts on drift | auth-net | internet, local-test |
-| `portal-cron` | supercronic → triggers the daily portal digest | notify-net | internet, local-test |
-| `tunnel-watcher` | probes `cloudflared:/ready`; alerts on tunnel down | edge-net, auth-net | internet |
+| `portal-init` | one-shot: chown the four volumes to the service UIDs, then exits | none (`network_mode: none`) | none |
+| `caddy` | reverse proxy + `forward_auth`; sole ingress (no host port) | edge-net, auth-net, app-net | none |
+| `authelia` | SSO / 2FA auth gateway (:9091 internal) | auth-net | none |
+| `cloudflared` | Cloudflare Tunnel — the only internet ingress | edge-net | **`internet`** |
+| `portal-alerter` | Deno alert/digest → Gmail (:8080); the plane's only internet egress | auth-net, notify-net | none |
+| `authelia-watcher` | tails auth/access logs → alerts (new-IP, etc.) | auth-net | none |
+| `authelia-notif-bridge` | forwards Authelia OTP/notifications → alerter | auth-net | none |
+| `integrity-tripwire` | hashes Caddyfile/Authelia configs; alerts on drift (`TRIPWIRE_CRON`, default `0 4 * * *`) | auth-net | none |
+| `portal-cron` | supercronic → triggers the daily portal digest (`PORTAL_DIGEST_CRON`, default `0 7 * * *`) | notify-net | none |
+| `tunnel-watcher` | probes `cloudflared:2000/ready`; alerts on tunnel down | edge-net, auth-net | **`internet`** |
+
+> **`portal-off.ps1` names ten services explicitly and misses two.**
+> `tunnel-watcher` and `authelia-notif-bridge` are not in its list, so they keep
+> running after a portal-off. Check with
+> `docker compose -p portal -f portal/docker-compose.yml ps`.
 
 ### Volumes
-`openwebui-data`, `mnemory-data`, `smolcrawl-data`,
-`little-coder-journals`, `little-coder-skill`, `little-coder-cohorts`,
-`little-coder-polyglot`, `little-coder-sessions`, `little-coder-workspace`,
-`caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data`.
-(`llm-gateway-db-data` + `llm-queue-data` migrated to the inference project
-2026-08-21 — now `inference_*` volumes.)
-**External** (owned by the open-brain project): `openbrain-wiki-data`
-(= `open-brain_openbrain-wiki-data`), `wiki-assets` (= `open-brain_wiki-assets`).
+
+**The anchor project declares NONE.** Its `volumes:` section was removed on
+2026-09-19; the last entry was the orphan crawl-index volume left behind when
+`smolcrawl-pipelines` retired. Every volume belongs to a plane project and
+carries that project's prefix:
+
+| Project | Volumes |
+|---|---|
+| `frontend` | `openwebui-data` |
+| `inference` | `llm-gateway-db-data`, `llm-queue-data` |
+| `memory` | `mnemory-data` |
+| `search` | none, deliberately (redis is in-memory) |
+| `coder` | `little-coder-journals`, `-skill`, `-cohorts`, `-polyglot`, `-sessions`, `-workspace` |
+| `portal` | `caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data` |
+| `open-brain` | `openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets` |
+
+The pre-split `ai-stack_*` copies still exist on the daemon (data was copied,
+not moved, at the 2026-08-21 cutover) and deleting them is the operator's call.
+**Restoring into the wrong one looks like a successful restore and changes
+nothing** - confirm with
+`docker inspect <container> --format "{{range .Mounts}}{{.Name}} {{end}}"`.
 
 ---
 
@@ -206,14 +267,15 @@ this project owns.
 > `lm-models-backup`). Off, the project renders as `llm-gateway` +
 > `llm-gateway-db` + `llm-gateway-ui` + `llm-gateway-backup`: a LiteLLM front
 > door that can serve CLOUD models on a machine with no GPU. **The operator's
-> deployment runs with it ON**, through `COMPOSE_PROFILES` in `.env` and NOT
-> through `--profile local` — `llm-gateway` reads `COMPOSE_PROFILES` to decide which
+> deployment runs with it ON**, through `COMPOSE_PROFILES` in **`inference/.env`**
+> (which `inference/.env.example` ships COMMENTED OUT, so a straight copy of the
+> example is the cloud-only four) and NOT through `--profile local` — `llm-gateway` reads `COMPOSE_PROFILES` to decide which
 > model groups to register (`inference/config/litellm/assemble-config.py` merges
 > `inference/config/litellm.config.yaml` with
 > `inference/config/litellm/model_list/*.yaml`, keeping a
 > local group only under the profile and a cloud provider only when its API key
-> is set). The GGUF store is `${LM_MODELS_DIR}` (`.env`), no longer a literal
-> per-user path.
+> is set). The GGUF store is `${LM_MODELS_DIR}` (`inference/.env`), no longer a
+> literal per-user path. Per-plane detail: [`inference/README.md`](../../../../inference/README.md).
 > It ATTACHES to the anchor's `ai-stack_llm-net` (external; llm-gateway carries the
 > `llama-cpp`/`llama-cpp-embed` aliases there) and OWNS the internal `llm-backend-net`
 > plus the `inference_llm-gateway-db-data` / `inference_llm-queue-data` volumes
@@ -296,10 +358,17 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > servers must be healthy first) is up; tear it down *before* the main stack so
 > `docker compose down` can drop `llm-net`.
 
-> **Profiles (since 2026-09-19, `sl-ob1-profiles`):** a bare `docker compose up`
-> here starts **20 of the 30** containers — the knowledge core plus the always-on
-> scheduled slice. Three groups are profile-gated and marked **[profile `x`]** in
-> the tables below:
+> **Profiles (since 2026-09-19, `sl-ob1-profiles`):** four profiles are declared
+> for this plane in `stack.manifest.toml`, and the tables below mark each gated
+> container **[profile `x`]**. **Against the PINNED gitlink (`5005197`) only
+> `idea-refinery` exists in the compose file**, so today a bare
+> `docker compose -f OB1/docker/docker-compose.yml config --services` renders
+> **29 of the 30** and all four profiles render 30 (measured 2026-09-19).
+> `python scripts/stack/stack.py inventory --check` reports `research`, `wiki`
+> and `notebook` as `[declared, not rendered]` and says so on every run until the
+> gitlink bumps - at which point they start gating real services and the operator
+> runs `stack.py init --product research --force` once. The rows below describe
+> the post-bump shape:
 >
 > | Profile | Turns on | Why not core |
 > |---------|----------|--------------|
@@ -308,9 +377,13 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > | `notebook` | `surrealdb`, `open_notebook`, `open-notebook-backup` | a second SURFACE onto the store (openbrain-db is canonical since IKS) |
 > | `idea-refinery` | `openbrain-idea-refinery` | pre-existing profile, and **running on this host** — both drivers pass it on every invocation. It is gated because it needs a Mattermost bot token to deliver dossiers, not because it is waiting for one. `requires` the `research` profile (its only engine) — see below |
 >
-> The full live set needs all four:
+> The full set is all four:
 > `docker compose -f OB1/docker/docker-compose.yml --profile research --profile wiki --profile notebook --profile idea-refinery up -d`
-> — which is exactly what `scripts/stack/stack.ps1`'s `ob1` row passes.
+> — and `python scripts/stack/stack.py up ob1` passes `idea-refinery` (the
+> plane's one `default = true` profile) plus `research` (its `requires` closure)
+> unless the state file enables more; `stack.ps1` is a shim with no profile list
+> of its own. Against the pinned gitlink two profiles and four render the same
+> 30 services, because compose ignores a profile it does not know.
 >
 > **Invariant:** no core service may `depends_on` a profiled one. None does.
 > But `depends_on` is not the only way one service reaches another: **six**
@@ -491,13 +564,16 @@ update, or network-namespace break.
 | File | Role |
 |------|------|
 | `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
-| `scripts/recovery/emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)` | Legacy linear equivalent (PowerShell version preferred) |
+| `scripts/recovery/quick-fixes.bat`, `scripts/recovery/update-stack.bat` | Present, but NOT a recovery path any more: both issue bare `docker compose` commands at the repo root, which since Part K is the zero-service anchor. Use the `.ps1` above. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
-The recovery scripts hold a service inventory (`MainStackServices` — now incl. the
-backup sidecars, `OB1Services`, `AgentOrgServices`) plus a `$MainBackups`
-helper group (the openbrain-db/wiki backups live in the OB1 project since
-2026-08-21 and start with it). agent-org is driven as a
+The recovery script holds a PER-PLANE service inventory - `$Script:InferenceServices`,
+`$Script:FrontendServices`, `$Script:MemoryServices`, `$Script:SearchServices`,
+`$Script:CoderServices`, `$Script:OB1Services`, `$Script:AgentOrgServices` -
+each beside that plane's `$Script:<Plane>Compose` path. `$Script:MainStackServices`
+is now the EMPTY array, because the root project owns no services; there is no
+`$MainBackups` group left either, since every backup sidecar starts and stops
+with its own plane. agent-org is driven as a
 separate project (`Start-/Stop-/Reset-AgentOrgStack`, `$AgentOrgCompose`), stopped first and
 started last (downstream of OB1). **When you add a container to any of the three compose
 files, add it to that inventory and to the shutdown/startup sequences** so the recovery stack
@@ -512,31 +588,44 @@ A nuclear `docker compose down` stops a running portal; recovery detects this an
 
 ## Cross-stack dependency order
 
-Bottom-up (start in this order; stop in reverse):
+**The order is DATA, not prose**: it is a topological sort of the `requires`
+edges in `stack.manifest.toml`, with ties broken by the order the `[planes.*]`
+tables are declared. `python scripts/stack/stack.py up --all --dry-run` prints
+the exact `docker compose` line for each plane, in order, and runs nothing -
+prefer that over reading this list. `emergency-recovery.ps1` uses the same
+relative order.
 
-1. `openwebui` (provides the network namespace for `tailscale`)
-2. **the `inference` project** (`docker compose -f inference/docker-compose.yml
-    up -d`) — its internal depends_on runs upstreams →
-    `llm-queue` → `llm-gateway-db` → `llm-gateway` (+ ui/backups); one command,
-    ordered + health-gated. Needs the anchor networks (any root `up` creates
-    them), and every caller in every other project needs IT
-3. `tailscale`
-4. `mnemory` → `mnemory-cloud-gateway` → `mnemory-backup`
-5. `openwebui-backup`
-6. `surrealdb` → `open_notebook`
-7. Search: `vpn` → `redis` → `searxng` → `gateway`
-8. Coder: `open-terminal` → `little-coder` → `lc-egress`
-9. **Backup sidecars** — each starts after its target is healthy; idle cron otherwise
-    (`mnemory-backup`, `openwebui-backup`, `little-coder-backup`,
-    `tailscale-backup`, `lm-models-backup`, `llm-gateway-backup`,
-    `open-notebook-backup`; the openbrain-db/wiki backups belong to the OB1
-    project and come up with it).
-11. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after `llm-gateway`.
-11.5. **agent-org** (`docker compose -f agent-org/docker/docker-compose.yml up -d`) — after OB1
+Plane by plane (start in this order; `down` reverses it):
+
+1. **anchor** (`docker compose up -d` at the root) — creates
+    `ai-stack_llm-net` / `app-net` / `default` and starts nothing. Every other
+    plane declares those `external: true`, so without this they fail to render.
+2. **inference** (`docker compose -f inference/docker-compose.yml up -d`) — its
+    internal `depends_on` runs the upstreams → `llm-queue` → `llm-gateway-db`
+    → `llm-gateway` (+ ui/backups); one command, ordered and health-gated. Every
+    caller in every other project needs IT.
+3. **frontend** — `openwebui` (which provides the network namespace) →
+    `tailscale`; `openwebui-backup` waits on whichever openwebui definition is
+    active. **Never restart `openwebui` alone.**
+4. **memory** — `mnemory` → `mnemory-cloud-gateway`, with `mnemory-backup` also
+    waiting on `mnemory`.
+5. **search** — `vpn` and `redis` in parallel → `searxng` → `gateway`.
+6. **coder** — `open-terminal` → `little-coder`; `lc-egress` waits on nothing.
+7. **Backup sidecars** generally — each starts after its target is healthy and
+    idles otherwise (`mnemory-backup`, `openwebui-backup`, `tailscale-backup`,
+    `little-coder-backup`, `lm-models-backup`, `llm-gateway-backup`; the
+    openbrain-db / wiki / open-notebook backups belong to the OB1 project and
+    come up with it).
+8. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after
+    `llm-gateway` is healthy. It also `requires` search: `openbrain-research`
+    and the grounding backfiller reach `gateway` and `vpn` by name.
+9. **agent-org** (`docker compose -f agent-org/docker/docker-compose.yml up -d`) — after OB1
     (downstream of it: attaches to `ai-stack_llm-net`, optionally mirrors audit to OB1's
     gateway). Default plane only; `workers`/`cloud` profiles are operator-driven. Stop it
     first (before OB1) on the way down.
-12. **Portal** (profile-gated, **separate lifecycle**): `scripts/portal/portal-on.ps1` →
-    `portal-init` → `authelia` → `caddy` → `cloudflared`, plus `portal-alerter` and the
-    watchers/tripwire/cron + `caddy-backup`/`authelia-backup`. Not part of the default `up`;
-    tear down with `portal-off.ps1`.
+10. **Portal** (`manual`, **separate lifecycle**): `scripts/portal/portal-on.ps1`
+    brings it up in five ordered groups - `portal-alerter`, `authelia`, `caddy`,
+    the four watchers, the two backups - plus a sixth (`cloudflared` +
+    `tunnel-watcher`) in production mode; `portal-init` is pulled in by
+    `depends_on`. Never part of a driver `up`; tear down with `portal-off.ps1`,
+    which names ten of the twelve (see the portal note in section 1).

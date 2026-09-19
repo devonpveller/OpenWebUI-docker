@@ -6,16 +6,19 @@ re-reading every compose file.
 
 ## What it does
 
-The workspace is **two separate Docker Compose projects** plus a recovery
-layer:
+The workspace is **nine separate Docker Compose projects**, one per plane,
+plus a driver and a recovery layer:
 
-- **`ai-stack`** — `docker-compose.yml`: core, memory, search, coder, and aux
-  planes (~22 containers).
-- **`open-brain`** — `OB1/docker/docker-compose.yml`: the Open Brain memory
-  system (~10 containers), a separate project that attaches to the main
-  stack's network.
-- **Recovery stack** — `scripts/recovery/emergency-recovery.{ps1,bat}`: orchestrated
-  restart/repair for both projects.
+- **`ai-stack`** — `docker-compose.yml`: the network ANCHOR, **zero services**.
+- **`frontend`, `inference`, `memory`, `search`, `coder`, `portal`** —
+  `<plane>/docker-compose.yml`, each with its own `.env` and `README.md`.
+- **`open-brain`** — `OB1/docker/docker-compose.yml` (a pinned submodule; 30
+  containers with every profile).
+- **`agent-org`** — `agent-org/docker/docker-compose.yml`.
+- **Driver** — `python scripts/stack/stack.py`, reading `stack.manifest.toml`
+  (`scripts/stack/stack.ps1` is a shim over it).
+- **Recovery stack** — `scripts/recovery/emergency-recovery.ps1`: orchestrated
+  restart/repair across every project.
 
 The skill reads the live compose files, groups containers by plane, and
 reports a current inventory — networks, ports, and dependency order included.
@@ -27,8 +30,8 @@ curated reference.
 - "What stacks / containers are in this workspace?"
 - "Where does `mnemory` run? What network is it on?"
 - "Show me the topology."
-- Before editing `docker-compose.yml`, `OB1/docker/docker-compose.yml`, or the
-  `emergency-recovery` scripts.
+- Before editing any `<plane>/docker-compose.yml`, `stack.manifest.toml`, or
+  `emergency-recovery.ps1`.
 
 ## Files
 
@@ -40,10 +43,14 @@ curated reference.
 
 ## Keeping it accurate
 
-The compose files are the source of truth. When a container is added or
-removed, update three places together: the compose file, the recovery scripts'
-service inventory, and `references/workspace-stacks.md`. The skill checks for
-this drift each time it runs.
+The compose files are the source of truth for what EXISTS;
+`stack.manifest.toml` is the declaration of what each plane needs, surfaces and
+gates. When a container is added or removed, the compose file, the manifest,
+`emergency-recovery.ps1`'s per-plane inventory,
+`scripts/lib/stack-services.curated.json` (then `stack.py inventory --write`),
+`references/workspace-stacks.md` and the plane's own README change together.
+The skill checks for that drift each time it runs; the full lifecycle
+checklist is `documentation/runbooks/SERVICE-LIFECYCLE.md`.
 
 ## Invoke
 
