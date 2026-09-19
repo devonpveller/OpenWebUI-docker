@@ -236,7 +236,7 @@ git show work/sl-frontend-solo:frontend/docker-compose.yml | sed -n '1,95p'
 | H27 | `entrypoint.sh` is unchanged by the profile split | `git diff development...work/sl-frontend-solo -- entrypoint.sh dockerfile.tailscale Dockerfile.openwebui-gpu` → empty |
 | H28 | `stock` is a PROFILE and not the un-profiled default because `--profile` only ADDS, never subtracts: an un-profiled stock service stays active alongside `openwebui`, and their shared `container_name` then fails the whole render | build it: two services, one un-profiled, one `profiles: [gpu]`, same `container_name`; `--profile gpu config -q` → exit 1, `container name ... is already in use` |
 | H29 | A duplicate `COMPOSE_PROFILES` key in an env file is last-wins and silent | T11 |
-| H30 | The affected callers include `quick-fixes.bat`'s four tailscale calls and the recipe in `restore-from-snapshot.md` | `grep -n tailscale scripts/recovery/quick-fixes.bat` (expect `:87`, `:121`, `:122`, `:514` naming the frontend file) and read the runbook row |
+| H30 | The AFFECTED callers include `quick-fixes.bat`'s four tailscale calls; the EXEMPT ones are `restore-from-snapshot.ps1` AND the frontend recipe in `restore-from-snapshot.md`, both of which pass the profiles themselves | `grep -n tailscale scripts/recovery/quick-fixes.bat` (expect `:87`, `:121`, `:122`, `:514` naming the frontend file); then read `documentation/runbooks/restore-from-snapshot.md:206` and RUN its exact shape against a profile-less env - `docker compose -f frontend/docker-compose.yml --env-file /tmp/env.without --profile gpu --profile tailscale config tailscale` → exit 0. **A caller on the wrong side of that split is a FAIL** - attempt 3 failed here, because the commit that gave the runbook its flags left three copies of the caller-list still calling it profile-less |
 
 **PASS** only when every row holds AND you found no unlisted header claim that
 is false. **FAIL** on any false claim, and say which row.
@@ -558,8 +558,23 @@ statement matches T5B's measured exit codes. **FAIL** on any sentence that
 contradicts the matrix — including any survivor of attempt 1's "naming a
 service explicitly still works past an inactive profile".
 
-Also check they agree on WHO is exempt: `restore-from-snapshot.ps1` passes its
-own profiles (T5F); `emergency-recovery.ps1` checks rather than passes (T5G).
+**Check the caller lists as LISTS, not as prose.** Each of the four documents
+names who is affected and who is exempt. Build the union of both columns across
+all four and test every entry against T5B's matrix:
+
+- exempt, because they pass `--profile gpu --profile tailscale` themselves:
+  `scripts/backup/restore-from-snapshot.ps1` (T5F) and the frontend recipe in
+  `documentation/runbooks/restore-from-snapshot.md:206`;
+- affected: the watchdog's seven repairs + two advice strings,
+  `emergency-recovery.ps1`'s whole-project verbs and its `restart tailscale`,
+  `quick-fixes.bat`'s four, `backup/openwebui-restore.sh:9`;
+- neither: `emergency-recovery.ps1` CHECKS rather than passes (T5G).
+
+**FAIL if any entry is on the wrong side in any of the four documents**, even
+one. This is the attempt-3 failure: a commit added the flags to the runbook
+recipe AND left three copies of the caller-list describing it as profile-less.
+A caller-list is a snapshot of a moment, and the commit that changes the moment
+owns every copy.
 
 ## T9 - The findings note, in full - no enumeration to hide behind
 
@@ -654,9 +669,27 @@ set a value that omits another plane's required profile:
 grep -rn "COMPOSE_PROFILES=gpu,tailscale" --include=*.md --include=*.yml --include=*.ps1 --include=*.bat . | grep -v documentation/evidence
 ```
 
-**FAIL** when: two assignments exist (commented or not); or any document names a
-value that drops `local`. And **FAIL** if the duplicate-key measurement does not
-reproduce as last-wins-silently-exit-0 — that is the fact the whole decision
+**Sweep it unbounded, and classify every hit.** A one-directional grep finds
+only the mistake you already know about; attempt 3's tester found the mirror
+image (five sentences instructing `COMPOSE_PROFILES=local` ALONE) by looking at
+all of them:
+
+```bash
+git grep -n "COMPOSE_PROFILES"
+```
+
+For each hit say which it is: (a) the single assignment in `.env.example`;
+(b) prose naming one of the two canonical values, or pointing at the section;
+(c) code reading the variable (`config/litellm/assemble-config.py`,
+`inference/compose/gateway.yml`); (d) a measurement or a quotation in a findings
+note; or (e) **prose instructing a value that is neither canonical** — which is
+the failure.
+
+**FAIL** when: more than one assignment exists (commented or not); or any hit
+falls in class (e) — a document telling the operator to set a value that is not
+`stock` or `local,gpu,tailscale`, in either direction (dropping `local`, or
+dropping `gpu,tailscale`). And **FAIL** if the duplicate-key measurement does
+not reproduce as last-wins-silently-exit-0 — that is the fact the whole decision
 rests on.
 
 ## T12 - `stack.manifest.toml` no longer calls these profiles `pending`

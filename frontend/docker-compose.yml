@@ -66,16 +66,18 @@
 # `scripts/recovery/emergency-recovery.ps1` (both its whole-project verbs and
 # its `restart tailscale`), `scripts/recovery/quick-fixes.bat`'s four
 # (`restart tailscale`, `build --no-cache tailscale`, and two `up -d
-# tailscale`), the profile-less recipe in
-# `documentation/runbooks/restore-from-snapshot.md`, and
-# `backup/openwebui-restore.sh`'s documented `stop tailscale openwebui` all
-# exit 1 until the value is right — silently, since the watchdog pipes them to
-# Out-Null. The repo's own `scripts/checks/check-watchdog-repair-targets.ps1`
-# reports exactly this (`tailscale` / `tailscale-backup` NOT DECLARED) and is
-# the check to run after editing .env. `scripts/backup/restore-from-snapshot.ps1`
-# is the one caller that does NOT depend on the value: its frontend and
-# tailscale entries pass `--profile gpu --profile tailscale` themselves, as the
-# portal and agent-org entries there already did.
+# tailscale`) and `backup/openwebui-restore.sh`'s documented
+# `stop tailscale openwebui` all exit 1 until the value is right — silently, in
+# the watchdog's case, since it pipes them to Out-Null. The repo's own
+# `scripts/checks/check-watchdog-repair-targets.ps1` reports exactly this
+# (`tailscale` / `tailscale-backup` NOT DECLARED) and is the check to run after
+# editing .env.
+# TWO callers do NOT depend on the value, because they pass the profiles
+# themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend and
+# tailscale entries, as the portal and agent-org entries there already did) and
+# the frontend recipe in `documentation/runbooks/restore-from-snapshot.md`.
+# Both were given `--profile gpu --profile tailscale` here, and both exit 0
+# against a profile-less env (measured).
 #
 # WHY TWO openwebui SERVICE DEFINITIONS, AND NOT ONE WITH ENV-DRIVEN GPU BITS.
 # Compose can gate a SERVICE on a profile; it cannot gate a FIELD. Interpolation

@@ -30,11 +30,18 @@
 # LiteLLM gateway + its ledger DB + the Admin-UI sidecar + the ledger backup:
 # a front door that can serve CLOUD models from a machine with no GPU. On, it is
 # the full local inference plane.
-#   * THE OPERATOR'S DEPLOYMENT RUNS WITH THE PROFILE ON. Set it in .env:
-#         COMPOSE_PROFILES=local
-#     rather than with `--profile local` on the command line - llm-gateway reads
-#     COMPOSE_PROFILES to decide which model groups to register, so the flag
-#     alone would start the local backends without listing their models.
+#   * THE OPERATOR'S DEPLOYMENT RUNS WITH THE PROFILE ON. Put `local` into
+#     COMPOSE_PROFILES in .env rather than passing `--profile local` on the
+#     command line - llm-gateway reads COMPOSE_PROFILES to decide which model
+#     groups to register, so the flag alone would start the local backends
+#     without listing their models.
+#     COMPOSE_PROFILES is ONE GLOBAL VARIABLE shared by every plane driven with
+#     `--env-file .env`, and a duplicate key in that file is last-wins and
+#     silent - so add `local` to the value, never a second assignment. The
+#     canonical values, and the single authoritative section listing every
+#     plane's profiles, are at the top of .env.example. On this host:
+#         COMPOSE_PROFILES=local,gpu,tailscale
+#     (`local` alone would silently drop the frontend's gpu + tailscale.)
 #   * What the gateway REGISTERS is assembled at container start from
 #     config/litellm.config.yaml + config/litellm/model_list/*.yaml: a local
 #     group only under the `local` profile, a cloud provider only when its API

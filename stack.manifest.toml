@@ -116,9 +116,16 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 "8081" = "llama-cpp-upstream (loopback; probes only - never route inference here)"
 "8082" = "llama-cpp-embed-upstream (loopback; probes only)"
 
+# NOT `pending`: sl-inference-split landed it. `profiles: [local]` is live in
+# inference/compose/upstreams.yml:41,:130, queue.yml:39 and backups.yml:48, and
+# the render proves it (4 services without the profile, 8 with). Flipped here by
+# sl-frontend-solo, which is making this file's profile rows truthful as a set -
+# it is inference's row, corrected in the same pass as the frontend's.
+# Not `default = true`, for the same reason as the frontend's: a CLI --profile
+# REPLACES COMPOSE_PROFILES rather than adding to it, so a default would
+# override the host's own value.
 [planes.inference.profiles.local]
-description = "llama.cpp upstreams + llm-queue, i.e. local inference (needs the GPU and the GGUFs)"
-pending     = true   # sl-inference-split adds it
+description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. local inference (needs the GPU and the GGUFs). Off, the plane is a LiteLLM gateway + ledger + Admin UI that serves cloud models only"
 
 # --------------------------------------------------------------------------
 [planes.frontend]

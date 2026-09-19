@@ -127,13 +127,22 @@ and `:607` (`stop`/`rm -f`/`up -d` in the same function's harder path), `:1776`
 plus two operator-advice strings at `:481` and `:1848` that print the same
 commands; `scripts/recovery/emergency-recovery.ps1:633` (`restart tailscale`);
 `scripts/recovery/quick-fixes.bat`'s four - `:87` (`restart tailscale`), `:121`
-(`build --no-cache tailscale`), `:122` and `:514` (`up -d tailscale`); the
-profile-less recipe in `documentation/runbooks/restore-from-snapshot.md:206`;
+(`build --no-cache tailscale`), `:122` and `:514` (`up -d tailscale`);
 and the `stop tailscale openwebui` recipe documented in
 `backup/openwebui-restore.sh:9`. The watchdog pipes every one of its repairs to
 `Out-Null`, so they fail **silently**. (quick-fixes.bat and the runbook were
-raised by the attempt-1 tester; the runbook's recipe now carries the flags, the
-.bat is left to its owner - see 12.)
+both raised by the attempt-1 tester. The runbook's recipe is NOT in the list
+above: it was given `--profile gpu --profile tailscale` by this item, so it is
+exempt alongside `scripts/backup/restore-from-snapshot.ps1` - measured, exit 0
+against a profile-less env. The .bat is left to its owner - see 12.)
+
+**Attempt 3 failed on exactly that distinction**, and the lesson is worth more
+than the sentence: the runbook's flags and the sentence calling it
+"profile-less" landed in the SAME commit. **When a fix and a claim about that
+fix land together, the row describing the claim has to move with it** - a
+caller-list is a snapshot of a moment, and the commit that changes the moment
+owns every copy of the list. There were three copies (compose header, stack-map,
+here); the fix updated one.
 
 **CORRECTION, and how it was got wrong** (attempt 1, caught by the tester).
 This entry previously claimed the opposite — that explicit naming survives, so

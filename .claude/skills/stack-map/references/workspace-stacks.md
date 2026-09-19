@@ -134,12 +134,12 @@ does not help, because the reference resolves at project load. `openwebui` is
 the one exception (`restart openwebui`, `build --no-cache openwebui` work) —
 the gpu definition names nothing outside its own profile. So the value is
 required for the watchdog's seven tailscale repairs (plus two advice strings),
-for `emergency-recovery.ps1`, for `scripts/recovery/quick-fixes.bat`'s four
-tailscale calls, and for the recipe in
-`documentation/runbooks/restore-from-snapshot.md`;
-`scripts/backup/restore-from-snapshot.ps1` is independent of it, because its
-frontend and tailscale entries pass `--profile gpu --profile tailscale`
-themselves, as the portal and agent-org entries there already did.
+for `emergency-recovery.ps1`, and for `scripts/recovery/quick-fixes.bat`'s four
+tailscale calls. TWO callers are independent of it because they pass the
+profiles themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend
+and tailscale entries, as the portal and agent-org entries there already did)
+and the frontend recipe in `documentation/runbooks/restore-from-snapshot.md`,
+both given `--profile gpu --profile tailscale` by this item.
 `emergency-recovery.ps1` does NOT pass them — it CHECKS
 (`Confirm-FrontendProfiles`) and logs an ERROR naming the fix, because a fixed
 `gpu,tailscale` in a generic driver would start the CUDA build and reserve a
@@ -196,8 +196,8 @@ this project owns.
 > `lm-models-backup`). Off, the project renders as `llm-gateway` +
 > `llm-gateway-db` + `llm-gateway-ui` + `llm-gateway-backup`: a LiteLLM front
 > door that can serve CLOUD models on a machine with no GPU. **The operator's
-> deployment runs with it ON**, set as `COMPOSE_PROFILES=local` in `.env` and NOT
-> as `--profile local` — `llm-gateway` reads `COMPOSE_PROFILES` to decide which
+> deployment runs with it ON**, through `COMPOSE_PROFILES` in `.env` and NOT
+> through `--profile local` — `llm-gateway` reads `COMPOSE_PROFILES` to decide which
 > model groups to register (`config/litellm/assemble-config.py` merges
 > `config/litellm.config.yaml` with `config/litellm/model_list/*.yaml`, keeping a
 > local group only under the profile and a cloud provider only when its API key
