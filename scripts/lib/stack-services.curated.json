@@ -120,12 +120,15 @@
         "container": "openwebui",
         "project": "frontend",
         "critical": true,
-        "host_health": "http://127.0.0.1:3000/health"
+        "host_health": "http://127.0.0.1:3000/health",
+        "note": "PROFILE-GATED since 2026-09-19 (stack-layers 2.5 / D8): this ONE container is produced by service `openwebui` under the `gpu` profile (this host) or `openwebui-stock` under the `stock` profile (a fresh clone). No 'service' field, because the right key depends on which profile the deployment runs; the implied key `openwebui` is correct wherever COMPOSE_PROFILES includes gpu, which is every host that runs the watchdog. Any tool rendering this plane must pass --profile gpu --profile tailscale (or have COMPOSE_PROFILES in .env) or it sees only openwebui-stock + openwebui-backup."
       },
       {
         "container": "tailscale",
         "project": "frontend",
-        "critical": true
+        "critical": true,
+        "note": "PROFILE-GATED (`tailscale` profile, which requires `gpu`). Absent from the frontend render on a deployment that does not run it; stack.ps1 health and stack-watchdog.ps1 skip their tailnet checks in that case (Test-TailscaleDeployed).",
+        "profile": "tailscale"
       },
       {
         "container": "llm-gateway",
@@ -406,7 +409,8 @@
       {
         "container": "tailscale-backup",
         "project": "frontend",
-        "critical": false
+        "critical": false,
+        "profile": "tailscale"
       },
       {
         "container": "mnemory-backup",

@@ -720,13 +720,26 @@ class FakeHost:
         self.drift_stderr = broken.get("drift_stderr", "")
         self.http_status = broken.get("http_status", {})
         self.search_body = broken.get("search_body", HEALTHY_SEARCH)
+        # sl-frontend-solo made the tailnet probe deployment-aware: it renders the
+        # frontend project and skips itself when that render has no `tailscale`
+        # service. The default here is THIS host - the profile is deployed.
+        self.frontend_services = broken.get(
+            "frontend_services",
+            ["openwebui", "openwebui-backup", "tailscale", "tailscale-backup"],
+        )
+        self.running = broken.get("running", [])
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
         self.calls.append(list(cmd))
         if cmd[0] == "powershell":
             return stack.CommandResult(0, self.drift_stdout, self.drift_stderr)
+        if cmd[:3] == ["docker", "compose", "-f"]:
+            return stack.CommandResult(0 if self.frontend_services else 1,
+                                       "\n".join(self.frontend_services), "")
         if cmd[:2] == ["docker", "ps"]:
+            if "name=tailscale" in cmd:
+                return stack.CommandResult(0, "\n".join(self.running), "")
             return stack.CommandResult(0, "\n".join(self.unhealthy), "")
         if cmd[:2] == ["docker", "network"]:
             return stack.CommandResult(0, self.network, "")
@@ -1672,3 +1685,206 @@ def test_the_shipped_manifest_accounts_for_the_three_ob1_profiles_as_opt_in():
     # and the requires edge sl-ob1-profiles added is still enforced
     assert manifest.profile_requires("ob1", "idea-refinery") == ["research"]
     assert manifest.profile_closure("ob1", {"idea-refinery"}) == {"idea-refinery", "research"}
+
+
+# --------------------------------------------------------------------------
+# the frontend plane is profile-gated (sl-frontend-solo)
+# --------------------------------------------------------------------------
+
+
+def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
+    """A FAIL line about a container that is not meant to exist is noise.
+
+    Carried across from sl-frontend-solo's stack.ps1 when this sweep replaced it.
+    The skip is NOT a failure and NOT a silent drop: it prints its own line and
+    the sweep still exits 0.
+    """
+    code, out = sweep(FakeHost(frontend_services=["openwebui-stock", "openwebui-backup"]), root)
+    assert code == 0
+    assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
+    names = [name for _s, name in probe_lines(out)]
+    assert "frontend: 8 tailnet serve routes" not in names
+    assert len(names) == 14          # the other fourteen all still ran
+    assert "ALL HEALTH PROBES PASSED" in out
+
+
+def test_the_skip_decision_reads_the_RENDER_not_the_env_file(root):
+    host = FakeHost(frontend_services=["openwebui-stock", "openwebui-backup"])
+    sweep(host, root)
+    renders = [c for c in host.calls if c[:3] == ["docker", "compose", "-f"]]
+    assert renders and renders[0][3] == "frontend/docker-compose.yml"
+    assert renders[0][-2:] == ["config", "--services"]
+    assert "--env-file" in renders[0]   # compose applies COMPOSE_PROFILES itself
+
+
+def test_an_unreadable_frontend_render_probes_anyway_and_says_why(root):
+    """Fail open. A checker that goes quiet on its own error is the failure mode."""
+    code, out = sweep(FakeHost(frontend_services=[]), root)
+    assert "[warn] the frontend plane rendered NOTHING" in out
+    assert ("OK", "frontend: 8 tailnet serve routes") in probe_lines(out)
+    assert code == 0
+
+
+def test_a_running_tailscale_absent_from_the_render_probes_anyway_and_says_why(root):
+    """The operator whose .env lost the frontend profiles from COMPOSE_PROFILES."""
+    code, out = sweep(FakeHost(frontend_services=["openwebui-stock"], running=["tailscale"]), root)
+    assert "[warn] tailscale is RUNNING but absent from the frontend render" in out
+    assert ("OK", "frontend: 8 tailnet serve routes") in probe_lines(out)
+    assert code == 0
+
+
+def test_the_running_check_is_an_exact_name_match_not_a_substring(root):
+    """`--filter name=tailscale` also matches stt-tts-tailscale."""
+    code, out = sweep(
+        FakeHost(frontend_services=["openwebui-stock"], running=["stt-tts-tailscale"]), root)
+    assert "[skip] frontend: 8 tailnet serve routes" in out
+    assert code == 0
+
+
+def test_the_shipped_frontend_profiles_are_opt_in_and_tailscale_requires_gpu():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.default_profiles("frontend") == []
+    assert sorted(manifest.opt_in_profiles("frontend")) == ["gpu", "stock", "tailscale"]
+    assert manifest.unaccounted_profiles("frontend") == []
+    # prose in two descriptions, and a compose error if you ignore it
+    assert manifest.profile_requires("frontend", "tailscale") == ["gpu"]
+    assert manifest.profile_closure("frontend", {"tailscale"}) == {"tailscale", "gpu"}
+
+
+# --------------------------------------------------------------------------
+# mutually exclusive profiles: one container, two definitions
+# --------------------------------------------------------------------------
+
+EXCLUSIVE_RENDER = {
+    # keyed by the frozenset of profiles the render was asked for
+    frozenset(): {"openwebui-backup": {"container_name": "openwebui-backup"}},
+    frozenset({"stock"}): {
+        "openwebui-backup": {"container_name": "openwebui-backup"},
+        "openwebui-stock": {"container_name": "openwebui", "profiles": ["stock"]},
+    },
+    frozenset({"gpu"}): {
+        "openwebui-backup": {"container_name": "openwebui-backup"},
+        "openwebui": {"container_name": "openwebui", "profiles": ["gpu"],
+                      "ports": [{"published": "3000"}]},
+    },
+    frozenset({"tailscale", "gpu"}): {
+        "openwebui-backup": {"container_name": "openwebui-backup"},
+        "openwebui": {"container_name": "openwebui", "profiles": ["gpu"],
+                      "ports": [{"published": "3000"}]},
+        "tailscale": {"container_name": "tailscale", "profiles": ["tailscale"]},
+    },
+}
+
+
+class ExclusiveCompose(FakeCompose):
+    """frontend renders per profile-set; every other project as usual."""
+
+    def __call__(self, cmd, cwd):
+        compose = cmd[cmd.index("-f") + 1]
+        if compose != "frontend/docker-compose.yml":
+            return super().__call__(cmd, cwd)
+        self.calls.append(list(cmd))
+        asked = frozenset(cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--profile")
+        if "--profiles" in cmd:
+            return stack.CommandResult(0, "gpu\nstock\ntailscale", "")
+        if asked not in EXCLUSIVE_RENDER:
+            # what compose actually says when two definitions share a name
+            return stack.CommandResult(
+                1, "", 'services.openwebui: container name "openwebui" is already in use')
+        return stack.CommandResult(
+            0, json.dumps({"name": "frontend", "services": EXCLUSIVE_RENDER[asked]}), "")
+
+
+def exclusive_mini(mini_root: Path) -> Path:
+    path = mini_root / stack.MANIFEST_NAME
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            '[planes.frontend.profiles.gpu]\ndescription = "the CUDA image and the device reservation"\n'
+            'pending     = true',
+            '[planes.frontend.profiles.stock]\ndescription = "the stock image"\nopt_in      = true\n\n'
+            '[planes.frontend.profiles.gpu]\ndescription = "the CUDA image"\nopt_in      = true\n\n'
+            '[planes.frontend.profiles.tailscale]\ndescription = "the netns companion"\n'
+            'requires    = ["gpu"]\nopt_in      = true',
+        ),
+        encoding="utf-8",
+    )
+    return mini_root
+
+
+def test_mutually_exclusive_profiles_fall_back_to_a_render_per_closure(mini_root):
+    exclusive_mini(mini_root)
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["core"] = [r for r in rows["core"] if r["container"] != "openwebui"] + [
+        {"container": "openwebui", "project": "frontend", "critical": True},
+        {"container": "openwebui-backup", "project": "frontend", "critical": False},
+        {"container": "tailscale", "profile": "tailscale", "project": "frontend", "critical": True},
+    ]
+    curated_file(mini_root, rows=rows)
+    compose = ExclusiveCompose()
+    code, out, _c = inventory(mini_root, "--write", compose=compose)
+    assert code == 0, out
+
+    # `tailscale` was never rendered ALONE - its `requires` closure came too,
+    # because `--profile tailscale` on its own is not a deployment.
+    asked = [frozenset(c[i + 1] for i, t in enumerate(c) if t == "--profile")
+             for c in compose.calls if "--format" in c]
+    assert frozenset({"tailscale", "gpu"}) in asked
+    assert frozenset({"tailscale"}) not in asked
+
+    written = {r["container"]: r for g in generated(mini_root)["planes"].values() for r in g}
+    # one container, two definitions -> neither key is derivable, and it says so
+    assert "service" not in written["openwebui"] and "profile" not in written["openwebui"]
+    assert "mutually exclusive - openwebui: produced by 2" in out
+    # ...while an unambiguous profiled row still gets its profile derived
+    assert written["tailscale"]["profile"] == "tailscale"
+
+
+def test_a_render_that_fails_for_any_other_reason_still_refuses(mini_root):
+    """The fallback is for exclusivity, not a blanket retry."""
+    exclusive_mini(mini_root)
+    curated_file(mini_root)
+
+    class Broken(ExclusiveCompose):
+        def __call__(self, cmd, cwd):
+            if cmd[cmd.index("-f") + 1] == "frontend/docker-compose.yml" and "--format" in cmd:
+                return stack.CommandResult(1, "", "yaml: line 3: mapping values are not allowed")
+            return super().__call__(cmd, cwd)
+
+    code, out, _c = inventory(mini_root, "--write", compose=Broken())
+    assert code != 0
+    assert "mapping values are not allowed" in out
+
+
+def test_a_bogus_service_on_a_declared_not_rendered_row_is_still_stale(mini_root):
+    """The F-T14 regression: the gitlink bucket must exempt ONE key, not three.
+
+    A row whose `profile` is accepted as a declaration had its `service` and
+    `profiles` skipped as well, so a bogus `service` was green on a host with the
+    submodule and red in CI without it. A check whose answer depends on which
+    machine runs it is not a check.
+    """
+    submodule_root(mini_root)
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            'description = "the idea-refinery services"\ndefault     = true',
+            'description = "the idea-refinery services"\ndefault     = true\n\n'
+            '[planes.ob1.profiles.wiki]\ndescription = "the wiki surface"\nopt_in      = true',
+        ),
+        encoding="utf-8",
+    )
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["openbrain"].append({"container": "openbrain-wiki", "profile": "wiki",
+                              "service": "not-the-service-key",
+                              "project": "open-brain", "critical": False})
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["OB1/docker/docker-compose.yml"]["services"]["openbrain-wiki"] = {
+        "container_name": "openbrain-wiki"
+    }
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "STALE `service` for openbrain-wiki" in out
+    # ...and the profile is still accepted as a declaration, not called stale
+    assert "STALE `profile` for openbrain-wiki" not in out
+    assert "declared, not rendered" in out

@@ -1338,7 +1338,8 @@ class Render(NamedTuple):
     profiles: list   # every profile the compose file declares
     available: bool  # False when the compose file is not on disk
     why: str         # why not, when unavailable
-    pinned: bool = False  # the compose file comes from a pinned submodule
+    pinned: bool = False   # the compose file comes from a pinned submodule
+    exclusive: bool = False  # its profiles cannot all be rendered together
 
 
 def submodule_paths(root: Path) -> list[str]:
@@ -1405,35 +1406,63 @@ def render_project(manifest: Manifest, root: Path, plane: str, capture) -> Rende
         )
     profiles = sorted({line.strip() for line in listed.stdout.splitlines() if line.strip()})
 
+    def render_with(active):
+        cmd = list(base)
+        for profile in active:
+            cmd += ["--profile", profile]
+        return capture(cmd + ["config", "--format", "json"], root)
+
+    def collect(payload, into):
+        try:
+            data = json.loads(payload)
+        except ValueError as exc:
+            raise Refusal(f"refused: the render of {compose_rel} is not JSON ({exc})") from None
+        for key, spec in (data.get("services") or {}).items():
+            spec = spec or {}
+            into[key] = {
+                "container": spec.get("container_name") or key,
+                "profiles": list(spec.get("profiles") or []),
+                "ports": sorted({str(port.get("published"))
+                                 for port in (spec.get("ports") or []) if port.get("published")}),
+            }
+
     # Every declared profile is switched ON for the render: the inventory must
     # list the profile-gated containers too (the watchdog repairs them), and a
     # bare `config` hides them. That is exactly why the old pre-commit verifier
     # never saw openbrain-idea-refinery - it rendered without profiles.
-    cmd = list(base)
-    for profile in profiles:
-        cmd += ["--profile", profile]
-    rendered = capture(cmd + ["config", "--format", "json"], root)
-    if rendered.code != 0:
-        raise Refusal(
-            f"refused: `docker compose -f {compose_rel} config --format json` exited {rendered.code}\n"
-            + (rendered.stderr.strip() or rendered.stdout.strip())
-        )
-    try:
-        data = json.loads(rendered.stdout)
-    except ValueError as exc:
-        raise Refusal(f"refused: the render of {compose_rel} is not JSON ({exc})") from None
-
-    services = {}
-    for key, spec in (data.get("services") or {}).items():
-        spec = spec or {}
-        services[key] = {
-            "container": spec.get("container_name") or key,
-            "profiles": list(spec.get("profiles") or []),
-            "ports": sorted(
-                {str(port.get("published")) for port in (spec.get("ports") or []) if port.get("published")}
-            ),
-        }
-    return Render(services, profiles, True, "", is_pinned_submodule(root, compose_rel))
+    services: dict = {}
+    exclusive = False
+    rendered = render_with(profiles)
+    if rendered.code == 0:
+        collect(rendered.stdout, services)
+    else:
+        # SOME PROFILES CANNOT COEXIST. sl-frontend-solo gave the frontend plane
+        # `stock` and `gpu`, two definitions of the SAME container_name for two
+        # different deployments, so compose refuses to render them together:
+        #   services.openwebui: container name "openwebui" is already in use
+        # That is not an error in the compose file and not drift - it is what
+        # mutually exclusive means. Render the base and each profile on its own
+        # and take the union, so every container is still seen exactly once.
+        # Anything else that makes a render fail still raises: the fallback only
+        # holds if EVERY individual render succeeds.
+        # Each profile is rendered with its `requires` CLOSURE, not alone: the
+        # frontend's `tailscale` names the `gpu` definition of openwebui in its
+        # network_mode, so `--profile tailscale` by itself is not a deployment
+        # and compose says so ("depends on undefined service openwebui"). The
+        # manifest already declares that edge; this is the driver using it.
+        attempts = [render_with([])] + [
+            render_with(manifest.profile_order(plane, manifest.profile_closure(plane, {profile})))
+            for profile in profiles
+        ]
+        if any(a.code != 0 for a in attempts):
+            raise Refusal(
+                f"refused: `docker compose -f {compose_rel} config --format json` exited "
+                f"{rendered.code}\n" + (rendered.stderr.strip() or rendered.stdout.strip())
+            )
+        exclusive = True
+        for attempt in attempts:
+            collect(attempt.stdout, services)
+    return Render(services, profiles, True, "", is_pinned_submodule(root, compose_rel), exclusive)
 
 
 class Inventory:
@@ -1445,6 +1474,11 @@ class Inventory:
         self.capture = capture
         self.curated = self._load_curated()
         self._plane_of: dict = {}
+        self._ambiguous: dict = {}
+        # A THIRD kind of "not drift and not silence": one container, two
+        # definitions, one per deployment. Kept apart from the gitlink bucket so
+        # the advice that follows that one is not attached to this one.
+        self.mutually_exclusive: list[str] = []
         self.drift: list[str] = []
         self.skipped: list[str] = []
         # Not drift and not silence: a third bucket, printed by name.
@@ -1550,10 +1584,25 @@ class Inventory:
 
     def _planes(self, renders: dict) -> dict:
         # container -> (project, service key, profiles), from every render.
+        # A container produced by MORE THAN ONE service key is ambiguous: the
+        # frontend's `openwebui` is service `openwebui` under `gpu` and
+        # `openwebui-stock` under `stock`, and which key is right depends on the
+        # deployment. Neither `service` nor `profile` can be derived for such a
+        # row, so neither is emitted - which is the same conclusion
+        # sl-frontend-solo reached by hand and wrote into that row's note.
         seen = {}
+        produced_by = {}
         for project, render in renders.items():
             for service, spec in render.services.items():
+                produced_by.setdefault(spec["container"], []).append(service)
                 seen[spec["container"]] = (project, service, spec["profiles"])
+        self._ambiguous = {c: sorted(keys) for c, keys in produced_by.items() if len(keys) > 1}
+        for container, keys in sorted(self._ambiguous.items()):
+            self.mutually_exclusive.append(
+                f"{container}: produced by {len(keys)} mutually exclusive services "
+                f"({', '.join(keys)}), so `service` and `profile` cannot be derived and are "
+                "deliberately absent from its row"
+            )
 
         out = {}
         listed = set()
@@ -1604,12 +1653,15 @@ class Inventory:
                     f"'{rendered_project}'"
                 )
             derived = {}
-            if service != container:
-                derived["service"] = service
-            if len(profiles) == 1:
-                derived["profile"] = profiles[0]
-            elif profiles:
-                derived["profiles"] = sorted(profiles)
+            if container in self._ambiguous:
+                pass          # neither key is derivable - see _planes()
+            else:
+                if service != container:
+                    derived["service"] = service
+                if len(profiles) == 1:
+                    derived["profile"] = profiles[0]
+                elif profiles:
+                    derived["profiles"] = sorted(profiles)
 
             # A container row's `profile` is DERIVED where the render carries one
             # and DECLARED where the plane's compose is a pinned submodule that
@@ -1622,20 +1674,33 @@ class Inventory:
             unpinned = self.unpinned_profiles(rendered_project and self._plane_of.get(rendered_project),
                                               renders[rendered_project]) if rendered_project in renders else set()
             declared_profile = curated_row.get("profile")
-            if declared_profile and not derived.get("profile") and declared_profile in unpinned:
+            accepted_profile = (
+                bool(declared_profile) and not derived.get("profile") and declared_profile in unpinned
+            )
+            if accepted_profile:
                 self.declared_not_rendered.append(
                     f"{container}: `profile: {declared_profile}` is declared in "
                     f"{CURATED_REL.as_posix()} and the pinned compose carries no profile for it"
                 )
                 derived["profile"] = declared_profile
-            else:
-                for key in ("service", "profile", "profiles"):
-                    if curated_row.get(key) != derived.get(key):
-                        self.drift.append(
-                            f"STALE `{key}` for {container} in {CURATED_REL.as_posix()}: it records "
-                            f"{json.dumps(curated_row.get(key))}, the render says "
-                            f"{json.dumps(derived.get(key))}"
-                        )
+
+            # The STALE loop runs REGARDLESS, and exempts only the one key the
+            # pinned-submodule rule is about. It used to sit in an `else`, so a
+            # row in that bucket had its `service` and `profiles` unchecked too:
+            # a bogus `service` on openbrain-wiki passed here and failed in CI,
+            # where the submodule is absent and the bucket does not apply. A
+            # check whose answer depends on which machine runs it is not a check.
+            for key in ("service", "profile", "profiles"):
+                if key == "profile" and accepted_profile:
+                    continue
+                if key == "profile" and container in self._ambiguous and not curated_row.get(key):
+                    continue
+                if curated_row.get(key) != derived.get(key):
+                    self.drift.append(
+                        f"STALE `{key}` for {container} in {CURATED_REL.as_posix()}: it records "
+                        f"{json.dumps(curated_row.get(key))}, the render says "
+                        f"{json.dumps(derived.get(key))}"
+                    )
             row.update(derived)
         else:
             render = renders.get(project)
@@ -1793,6 +1858,8 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
 
     for note in inventory.skipped:
         console.line(f"  [ -- ] NOT VERIFIED - {note}")
+    for note in inventory.mutually_exclusive:
+        console.line(f"  [ ~~ ] mutually exclusive - {note}")
     for note in inventory.declared_not_rendered:
         console.line(f"  [ ~~ ] declared, not rendered - {note}")
     if inventory.declared_not_rendered:

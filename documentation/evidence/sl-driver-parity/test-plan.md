@@ -1,12 +1,13 @@
 # sl-driver-parity — test plan
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
-**Branch:** `work/sl-driver-parity`, base `development` @ `f2bb38f`
-**Attempt:** 4. Attempt 3 PASSED 10/10 and was withdrawn by its developer, not
-failed: `development` moved to `f2bb38f` (`sl-ob1-profiles`) and the two items
-share six files. Per D18 a rebase that rewrites commits needs a re-test at the
-new tip. **Re-run every case** — the merge changed the driver, the manifest and
-the inventory — and run the new **T11**, which covers the merged behaviours.
+**Branch:** `work/sl-driver-parity`, base `development` @ `b9fff95`
+**Attempt:** 5. Attempt 4 PASSED 11/11 and was withdrawn by its developer, not
+failed: `development` moved again, to `b9fff95` (`sl-frontend-solo`). Per D18 a
+rebase that rewrites commits needs a re-test at the new tip. **Re-run every
+case**; **T11** covers the `sl-ob1-profiles` seam and the new **T12** covers the
+`sl-frontend-solo` one. Two tester findings from attempt 4 are fixed and have
+cases of their own: F-T14 in T12d, F-T15 in T9.
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-driver-parity`
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-driver-parity.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-driver-parity-findings.md`
@@ -623,7 +624,21 @@ Check each claim against the file, not against its neighbours:
 | `README.md:69` | now says **15** probes and points at the driver (it said 12) |
 | `CLAUDE.md` | the new **Driver** row names the verbs the driver actually has; the container rule now names `stack-services.curated.json` + `inventory --write` |
 | `documentation/runbooks/SERVICE-LIFECYCLE.md` rows 5 and 8 | row 5 sends you to `HealthSweep.run()` **and** `PS1_PROBES`; row 8 sends you to the sidecar, then `--write`. Follow row 8 literally for an imaginary service and confirm the instructions are sufficient |
-| `documentation/notes/stack-layers-sl-driver-parity-findings.md` | **every** claim: open each cited file at the cited line; re-run each `[measured]` command. A false claim here is worse than one in the artifact (MERGE-PROTOCOL §2). F4 now records a claim that was true at `9f64b84` and is not at `be00d53`; F11-F14 are new |
+| `documentation/notes/stack-layers-sl-driver-parity-findings.md` | **every** claim: open each cited file at the cited line; re-run each `[measured]` command. A false claim here is worse than one in the artifact (MERGE-PROTOCOL §2). F4 records a claim true at `9f64b84` and false at `be00d53`; F11–F14 came from attempt 1, F18–F21 from the ob1-profiles rebase, F22–F25 from this one |
+
+**Every citation names the construct it points at, and the blob when that is not
+HEAD** (attempt 4's F-T15: F2 and F7 cited `check-project-configs.ps1:67-96` and
+`:67-77` "(pre-change)", which is not a revision — the file has been rewritten
+twice since). Check each with `git show <blob>:<path> | sed -n '<n>p'`:
+
+| citation | blob | must be |
+|---|---|---|
+| `check-project-configs.ps1:67` / `:77` / `:96` | `9f64b84` | `$renderTargets = @(` / the `}` closing the conditional `open-brain` / the `}` closing the name loop |
+| `stack-watchdog.ps1:107` / `:145` / `:162` / `:170` | HEAD | `Get-RepairTargetMap` / the `service`-else-container fallback / `function Invoke-PlaneCompose` / the "Cannot repair" log |
+| `check-watchdog-repair-targets.ps1:214` | HEAD | `$svc = if ($row.service)`. **`:196` also appears in F16's text as the OLD value, quoted deliberately** |
+| `test_stack.py:716` | `5133de9` | `assert sweep(FakeHost(serve_routes="9"), root)[0] == 0` |
+| `memory/README.md:126` / `:183` / `:186` | `be00d53` | the three `$Projects` / `stack-services.json` lines this branch repointed |
+| `llm-queue/src/llm_queue/__init__.py:9` | `9f64b84` | the 103-character docstring line (68 at `be00d53`) |
 
 **The four claims attempt 1 failed on — check these first, they are the case:**
 
@@ -818,7 +833,9 @@ deliberately does not take.*
 The guard only runs when a `*.yml` is staged, so do this in `$COPY`:
 
 ```bash
-git init -q . ; git add -A >/dev/null
+git init -q . ; git add -- . ':!OB1' >/dev/null   # NOT `git add -A`: OB1 is a plain
+                                                 # directory in this copy, not a
+                                                 # submodule, so -A stages all of it
 echo "" >> memory/docker-compose.yml
 git add memory/docker-compose.yml scripts/lib/stack-services.json
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1
@@ -846,6 +863,119 @@ closure plus the unknown-profile refusal.
 
 ---
 
+---
+
+## T12 — the sl-frontend-solo merge: a plane whose profiles exclude each other
+
+*New for attempt 5. Read-only.*
+
+### T12a — the tailnet probe knows whether it applies
+
+`sl-frontend-solo` made `stack.ps1 health`'s tailnet probe deployment-aware. The
+shim replaced that script, so the logic had to come across or it would have been
+silently dropped — the whole failure class this item exists for.
+
+```bash
+python -m pytest scripts/stack -q -k "tailnet or skip_decision or unreadable or running_tailscale or exact_name"
+python scripts/stack/stack.py health
+```
+
+**Pass:** those cases green, and on THIS host (which runs the `tailscale`
+profile) the probe RUNS — fifteen `[OK]` lines, no `[skip]`. Read
+`HealthSweep.tailscale_deployed()` and check all three branches against
+`git show f2bb38f:scripts/stack/stack.ps1`'s version: it reads the RENDER (not
+`.env`), it probes anyway when the render is unreadable, and it probes anyway
+when a container named exactly `tailscale` is running while absent from the
+render. Both fail-open paths print a `[warn]` naming the situation.
+**Fail:** the probe silently dropped on a deployment that has tailscale; a
+`[skip]` counted as a failure; the decision made by parsing `.env` instead of
+rendering; a name check that would accept `stt-tts-tailscale`.
+
+### T12b — the frontend's three profiles cannot all be rendered together
+
+```bash
+docker compose -f frontend/docker-compose.yml --env-file .env.example --profile stock --profile gpu --profile tailscale config -q
+docker compose -f frontend/docker-compose.yml --env-file .env.example --profile tailscale config -q
+python scripts/stack/stack.py inventory --check ; echo "exit=$?"
+```
+
+**Pass:** the first says
+`services.openwebui: container name "openwebui" is already in use` (`stock` and
+`gpu` are two definitions of one container); the second says
+`service "tailscale" depends on undefined service "openwebui"` (it needs `gpu`);
+and `inventory --check` still exits **0** — the generator falls back to one
+render per profile *closure* and unions them. Confirm from `render_project` that
+the fallback triggers only on failure and re-raises if any individual render
+fails.
+**Fail:** a non-zero exit; a crash; a fallback that swallows a genuinely broken
+compose file (T12c).
+
+### T12c — the fallback is for exclusivity, not a blanket retry
+
+```bash
+python -m pytest scripts/stack -q -k "fall_back_to_a_render_per_closure or any_other_reason"
+```
+
+**Pass:** both green. The second injects a YAML syntax error and asserts the
+generator still REFUSES.
+
+### T12d — one container, two definitions; and the F-T14 fix
+
+```bash
+python scripts/stack/stack.py inventory --check | grep "mutually exclusive"
+python -m pytest scripts/stack -q -k "bogus_service_on_a_declared"
+```
+
+**Pass:** a `[ ~~ ] mutually exclusive - openwebui: produced by 2 mutually
+exclusive services (openwebui, openwebui-stock)` line, and the `openwebui` row in
+`scripts/lib/stack-services.json` carries **neither** `service` nor `profile` —
+which key is right depends on the deployment, which is what `sl-frontend-solo`'s
+own note on that row says.
+
+For F-T14, prove the fix bites. In `$COPY`, put the STALE loop back under the
+`else` it used to sit in (`for key in ([] if accepted_profile else (...)):`) and
+re-run that case: it must go RED. Restore it. **The defect: a row whose `profile`
+was accepted as a gitlink declaration had its `service` and `profiles` unchecked
+too, so a bogus `service` on `openbrain-wiki` passed on this host and failed in
+CI — a check whose answer depends on which machine runs it.**
+**Fail:** the mutually-exclusive line missing; a `service` or `profile` on the
+`openwebui` row; the STALE case staying green under that mutation.
+
+### T12e — the inventory still equals `b9fff95`'s, minus the declared differences
+
+```bash
+python - <<'EOF'
+import json, subprocess
+from pathlib import Path
+theirs = json.loads(subprocess.run(["git","show","b9fff95:scripts/lib/stack-services.json"],
+                                   capture_output=True).stdout.decode("utf-8"))
+mine = json.loads(Path("scripts/lib/stack-services.json").read_text(encoding="utf-8"))
+tr = {r["container"]: r for g in theirs["planes"].values() for r in g}
+mr = {r["container"]: r for g in mine["planes"].values() for r in g}
+print("rows:", len(tr), len(mr), "| same set:", set(tr)==set(mr),
+      "| projects identical:", theirs["projects"]==mine["projects"])
+for c in sorted(set(tr)&set(mr)):
+    if tr[c]!=mr[c]: print("  DIFF", c)
+EOF
+```
+
+**Pass:** 69 rows both sides, same container set, `projects identical: True`, and
+exactly **four** `DIFF` lines, each declared: `openbrain-idea-refinery` (note
+carries both items' provenance), `searxng` (redundant `service` dropped —
+finding F5), `tailscale` and `tailscale-backup` (which gain the
+`profile: tailscale` the generator derives and the hand-kept file omitted).
+**Fail:** any fifth difference; a changed `critical`, `host_health` or
+`stale_pool_guard`; a row gained or lost.
+
+### T12f — the coverage line includes the frontend
+
+Run T11d's staged-scratch recipe. **Pass:** the coverage list carries
+`frontend:4/4` alongside `inference:8/8 … open-brain:30/30`, because
+`sl-frontend-solo` added a frontend render target with its two profiles.
+**Fail:** `frontend` missing from the list, or a count below 4/4.
+
+---
+
 ## Out of scope for this item (do not fail it for these)
 
 - Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python — both keep
@@ -854,6 +984,11 @@ closure plus the unknown-profile refusal.
 - Archiving `stack.ps1` — it stays as the shim until every caller has moved.
 - The probe set's known gaps, `open-terminal` above all: this item reproduced the
   fifteen probes one for one **including** what they do not cover. See finding F9.
+- Adding `requires = ["gpu"]` to the frontend's `tailscale` profile IS this
+  item's change and is in scope: the generator needs a machine-readable answer to
+  "which profiles render together", and `sl-frontend-solo`'s description already
+  said it twice in prose. It changes nothing operationally — no frontend profile
+  is `default`. Finding F23.
 - The OB1 **gitlink bump** and the one-time `stack.py init --product research`
   that follows it (finding F18). This item deploys nothing.
 - `ruff check .` from the repo root is now **clean** — the pre-existing `llm-queue`

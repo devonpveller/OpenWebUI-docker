@@ -47,7 +47,9 @@ ever gains one, it inherits this trap.
 
 ## F2 — `openbrain-idea-refinery` was missing from `scripts/lib/stack-services.json`, and the check that was supposed to catch that could not see it
 
-**[source]** `scripts/checks/check-project-configs.ps1:67-96` (pre-change) rendered
+**[source]** `9f64b84:scripts/checks/check-project-configs.ps1:67-96` — pinned to that
+blob, per F16's own rule: the file has been rewritten twice since (this item, then
+sl-ob1-profiles' coverage guard), so a HEAD-relative citation would be false. It rendered
 five projects with `docker compose ... config --format json` and **no** `--profile`
 flags, then regex-extracted `container_name`. Compose omits profile-gated services
 from a bare `config`, so no profile-gated container was ever in the set being
@@ -142,8 +144,9 @@ declares neither — see the `opt_in` row in the manifest header and
 
 ## F7 — `agent-org` was never in the pre-commit inventory verifier's render set
 
-**[source]** `check-project-configs.ps1:67-77` (pre-change) listed five render
-targets plus a conditional `open-brain`. `agent-org` appeared in neither, so its
+**[source]** `9f64b84:scripts/checks/check-project-configs.ps1:67-77` (pinned to the
+blob for the same reason as F2) listed five render targets plus a conditional
+`open-brain`. `agent-org` appeared in neither, so its
 twelve inventory rows were never verified against anything. This matches the
 standing note `documentation/notes/memory-plane-phase0-findings.md` §F2, written
 when agent-org had **no** rows at all. Fixed here: the generator renders all eight
@@ -436,3 +439,101 @@ fine — `git show ... | python -c "sys.stdin.buffer.read().decode('utf-8')"`
 round-trips it exactly. Recorded because for several minutes it looked like the
 generator was double-encoding notes, and the next person to compare blobs this way
 will see the same ghost.
+
+---
+
+## Added at the rebase onto `b9fff95` (sl-frontend-solo merged)
+
+## F22 — two profiles on one plane can be mutually exclusive, and "render with every profile on" then stops working
+
+`sl-frontend-solo` gave the frontend plane `stock` and `gpu`: two definitions of
+the SAME `container_name: openwebui`, one per deployment. This item's generator
+renders each project with every declared profile switched on — which is how it
+sees profile-gated containers at all — and that render now fails **[measured]**:
+
+```text
+$ docker compose -f frontend/docker-compose.yml --env-file .env.example \
+    --profile stock --profile gpu --profile tailscale config -q
+services.openwebui: container name "openwebui" is already in use by service {}"
+```
+
+Rendering each profile *alone* is not the fix either, because a profile can
+depend on another **[measured]**:
+
+```text
+$ docker compose -f frontend/docker-compose.yml --env-file .env.example \
+    --profile tailscale config -q
+service "tailscale" depends on undefined service "openwebui": invalid compose project
+```
+
+So the generator falls back to **one render per profile CLOSURE**, plus the
+bare render, and unions the results — `stock` alone, `gpu` alone,
+`tailscale`+`gpu` together. The fallback fires only when the all-profiles render
+fails, and it re-raises if any individual render fails, so a genuinely broken
+compose file is still a refusal (tested both ways).
+
+## F23 — `requires = ["gpu"]` added to the frontend's `tailscale` profile
+
+The closure above needs a machine-readable answer to *which profiles can be
+rendered together*, and the manifest already had the key: `requires`, introduced
+by `sl-ob1-profiles`. `sl-frontend-solo`'s own description states the constraint
+twice in prose — "usable ONLY with `gpu`, whose service its network_mode names
+(frontend/docker-compose.yml:285)" — and compose enforces it by refusing the
+render. This item writes it down.
+
+**It changes nothing operationally:** no frontend profile is `default`, so the
+driver passes no frontend flag at all and `.env`'s `COMPOSE_PROFILES` decides,
+exactly as `sl-frontend-solo` intended. The edge only affects what the generator
+renders and what `enable` would close over.
+
+All three frontend profiles are also marked `opt_in` here, which is the flag this
+item's accounting gate demands. That is not a change of intent: the block comment
+`sl-frontend-solo` wrote above those tables already says none may be `default`,
+and gives this item's own F1 (a CLI `--profile` REPLACES `COMPOSE_PROFILES`) as
+the reason. `opt_in` is the name for what that comment describes.
+
+## F24 — one container, two definitions: `service` and `profile` cannot be derived
+
+The `openwebui` row is produced by service `openwebui` (profile `gpu`) and by
+`openwebui-stock` (profile `stock`). Which key is correct depends on the
+deployment, so the generator emits **neither** field and prints
+`[ ~~ ] mutually exclusive - openwebui: produced by 2 mutually exclusive
+services (openwebui, openwebui-stock)`.
+
+That is the same conclusion `sl-frontend-solo` reached by hand and wrote into the
+row's note — "No 'service' field, because the right key depends on which profile
+the deployment runs" — now derived rather than remembered. The generator has
+three non-drift buckets as a result, printed separately so the advice attached to
+one is not attached to another: `NOT VERIFIED` (could not render), `declared, not
+rendered` (a pinned submodule behind the manifest), and `mutually exclusive`.
+
+## F25 — `tailscale` and `tailscale-backup` gain a `profile` field
+
+`sl-frontend-solo`'s hand-kept rows for both carry no `profile`, though both
+services sit behind the `tailscale` profile in the render **[measured]**. The
+generator derives it, so the rows gain `"profile": "tailscale"`.
+
+It is an improvement rather than a cosmetic diff: that item's own coverage guard
+reads `$rowProfile[$_]` to tell an operator which `--profile` a narrowed render is
+missing, and a row with no `profile` produces no hint. Declared as one of the four
+differences between this branch's inventory and `b9fff95`'s.
+
+## F26 — `stack.ps1`'s tailnet guard was a probe-set change, and a shim would have dropped it
+
+`sl-frontend-solo` did not only edit the plane; it changed `stack.ps1 health`,
+making the tailnet probe skip itself where the `tailscale` profile is not
+deployed, with two fail-open paths. Replacing that script with a shim would have
+silently discarded all of it — the exact failure this item's pinned `PS1_PROBES`
+list exists to prevent, arriving through a file the list does not cover.
+
+Ported into `HealthSweep.tailscale_deployed()` with its reasoning intact: the
+decision reads the RENDER rather than parsing `.env` (compose's own answer after
+it has applied `COMPOSE_PROFILES` from every source), an unreadable render probes
+anyway, and a container named exactly `tailscale` running while absent from the
+render probes anyway and says why. Five tests cover it, including the
+exact-versus-substring name match that `stt-tts-tailscale` would otherwise defeat.
+
+**The general point for the next shim:** a pinned list of probe NAMES catches a
+probe that is dropped from the file it pins. It does not catch a probe changed in
+the file being REPLACED. When a driver absorbs another, diff the absorbed file
+across the range, do not just count what you kept.

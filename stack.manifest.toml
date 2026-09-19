@@ -220,12 +220,30 @@ keys = ["WEBUI_SECRET_KEY"]
 # a `stock` host would be handed `gpu`. This is parity with stack.ps1, which
 # passes no frontend profile either and lets .env decide.
 [planes.frontend.profiles.stock]
+# All three are `opt_in`, never `default`, and the block comment above says why
+# in sl-frontend-solo's own words: a CLI --profile REPLACES COMPOSE_PROFILES, so
+# a default here would hand a `stock` host `gpu`. `opt_in` is the flag for
+# exactly that - something other than the driver's defaults turns it on, and
+# here it is the COMPOSE_PROFILES line in .env.
+opt_in      = true
 description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:115-153). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
+opt_in      = true
 description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:158-165, 257-263), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
+# `requires gpu` is the MACHINE-READABLE form of what this description already
+# says twice: the companion's network_mode names the `gpu` definition of
+# openwebui (frontend/docker-compose.yml:290), so `--profile tailscale` alone is
+# not a deployment - compose refuses it outright with
+#   service "tailscale" depends on undefined service "openwebui"
+# Added by sl-driver-parity using the `requires` key sl-ob1-profiles introduced,
+# because the inventory generator needs to know which profiles can be rendered
+# TOGETHER and prose cannot tell it. Changes nothing operationally: no frontend
+# profile is `default`, so nothing passes these flags today.
+requires    = ["gpu"]
+opt_in      = true
 description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:290)"
 
 # --------------------------------------------------------------------------

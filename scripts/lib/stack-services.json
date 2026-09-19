@@ -116,6 +116,7 @@
       },
       {
         "container": "tailscale",
+        "profile": "tailscale",
         "project": "frontend",
         "critical": true,
         "note": "PROFILE-GATED (`tailscale` profile, which requires `gpu`). Absent from the frontend render on a deployment that does not run it; stack.ps1 health and stack-watchdog.ps1 skip their tailnet checks in that case (Test-TailscaleDeployed)."
@@ -398,6 +399,7 @@
       },
       {
         "container": "tailscale-backup",
+        "profile": "tailscale",
         "project": "frontend",
         "critical": false
       },
