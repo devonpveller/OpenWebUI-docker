@@ -14,7 +14,7 @@ internal `auth-net` Docker network.
 | Source | Condition | Severity |
 |---|---|---|
 | **authelia-watcher** | 5+ failed Authelia logins from same IP in 5 min | HIGH |
-| | First successful login from an IP not in `config/watcher/known-ips.txt` *(IP is then auto-recorded; subsequent logins from the same source won't re-alert)* | HIGH |
+| | First successful login from an IP not in `portal/config/watcher/known-ips.txt` *(IP is then auto-recorded; subsequent logins from the same source won't re-alert)* | HIGH |
 | | Authelia regulation ban applied | MEDIUM |
 | | WebAuthn / TOTP credential added or removed | HIGH |
 | | Authelia config reload | MEDIUM |
@@ -32,7 +32,7 @@ seconds.
 
 ## known-ips.txt — how to read and edit
 
-[`config/watcher/known-ips.txt`](../config/watcher/known-ips.txt) is the
+[`portal/config/watcher/known-ips.txt`](../../portal/config/watcher/known-ips.txt) is the
 list of IPs that *don't* fire the new-IP alert. Format: one full IP per
 line (`#` comments). It's mounted **read-write** into authelia-watcher;
 the watcher auto-appends an IP after firing the first new-IP alert from
@@ -117,7 +117,7 @@ access events.
 
 ## Cloudflare tunnel health
 
-[`tunnel-watcher`](../config/tunnel-watcher/tunnel-watch.sh) polls
+[`tunnel-watcher`](../../portal/config/tunnel-watcher/tunnel-watch.sh) polls
 `http://cloudflared:2000/ready` every 30 seconds (configurable via
 `TUNNEL_WATCHER_POLL_SEC`). After 3 consecutive failures
 (`TUNNEL_WATCHER_FAILURES_BEFORE_ALERT`, default 3 = ~90s), it fires
@@ -142,6 +142,6 @@ non-2xx as "down".
 | Portal-alerter digest reports | `/reports/` (now persisted) | `./reports/portal-digest/` |
 
 Rotation: Caddy rolls its log at 100 MB / 7 backups / 30 days
-(`access_log` snippet in [Caddyfile](../config/caddy/Caddyfile)).
+(`access_log` snippet in [Caddyfile](../../portal/config/caddy/Caddyfile)).
 Authelia's log doesn't self-rotate; size monitoring is an open
 follow-up.

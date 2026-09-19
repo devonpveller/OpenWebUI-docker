@@ -19,7 +19,7 @@
  * then copy it here:
  *   Copy-Item `
  *     secrets/google/portal-alerter/credentials.json `
- *     config/alerter/credentials.json
+ *     portal/config/alerter/credentials.json
  *
  * The OAuth consent screen for that client must include the gmail.send scope.
  * If you provision the client in OB1's existing GCP project (recommended),
@@ -27,7 +27,7 @@
  * uses it — no scope changes needed.
  *
  * Usage (PowerShell, from the workspace root):
- *   deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
+ *   deno run --allow-net --allow-read --allow-write --allow-env portal/config/alerter/setup-token.ts
  */
 
 // URL objects work across Windows + Linux without URL-encoding bugs.
@@ -52,7 +52,7 @@ async function main() {
     console.error(
       `\nNo credentials.json at ${CREDENTIALS_URL}.\n` +
         `Copy your DEDICATED portal-alerter OAuth client secret here, then re-run:\n` +
-        `  Copy-Item secrets/google/portal-alerter/credentials.json config/alerter/credentials.json\n`,
+        `  Copy-Item secrets/google/portal-alerter/credentials.json portal/config/alerter/credentials.json\n`,
     );
     Deno.exit(1);
   }

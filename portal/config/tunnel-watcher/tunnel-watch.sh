@@ -1,5 +1,5 @@
 #!/bin/sh
-# config/tunnel-watcher/tunnel-watch.sh
+# portal/config/tunnel-watcher/tunnel-watch.sh
 #
 # Polls cloudflared's /ready endpoint on a fixed interval. If the tunnel
 # is down for >= FAILURES_BEFORE_ALERT consecutive checks (default 3 =

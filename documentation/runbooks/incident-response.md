@@ -23,7 +23,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 | Event | Severity | Source | Means |
 |---|---|---|---|
 | `authentication.failed.burst` | high | `authelia-watcher` (Authelia log, >=5 fails / 5min, same IP) | Active credential-stuffing probe. Confirm: read the included log line; check whether the username tried exists. |
-| `authentication.success.new_ip` | high | `authelia-watcher` (Authelia log, success from IP not in `known-ips.txt`) | Either you logged in from a new place, OR a stolen session/credential. Confirm: did you log in from that IP just now? If yes, append it to `config/watcher/known-ips.txt`. If no, **killswitch immediately**. |
+| `authentication.success.new_ip` | high | `authelia-watcher` (Authelia log, success from IP not in `known-ips.txt`) | Either you logged in from a new place, OR a stolen session/credential. Confirm: did you log in from that IP just now? If yes, append it to `portal/config/watcher/known-ips.txt`. If no, **killswitch immediately**. |
 | `regulation.ban` | medium | `authelia-watcher` (Authelia log, regulation event) | An account locked itself out (>=3 fails). Usually benign (typo) but watch for repeats from same source IP. |
 | `credential.webauthn.change` | high | `authelia-watcher` (Authelia log, WebAuthn event) | A WebAuthn credential was added/removed. Confirm: did you do that just now? If no, **killswitch immediately**. |
 | `credential.totp.change` | high | `authelia-watcher` (Authelia log, TOTP event) | Same as above for TOTP. |
@@ -98,7 +98,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 5. **Audit the portal-alerter's OAuth token.** If you suspect the alerter container itself was compromised:
    - Revoke at https://myaccount.google.com/permissions (revokes the refresh token for the `open-brain-email` OAuth client)
    - Delete `secrets/google/portal-alerter/token.json`
-   - Re-run `config/alerter/setup-token.ts` on the host to mint a fresh token
+   - Re-run `portal/config/alerter/setup-token.ts` on the host to mint a fresh token
    - **Coupling caveat (plan §6.9):** revoking the OAuth *client* (vs the token) ALSO breaks OB1's daily digest. Revoking just the token (delete the file, re-bootstrap) leaves the client intact and OB1 unaffected. Prefer the token-only path when possible.
 
 6. **If the host is compromised, not just a container** — different playbook entirely. The portal scripts only address container-level compromise; a host compromise requires offline rebuild from images of known-good state. Out of scope for v1.
@@ -169,7 +169,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
    ```
    Confirms which 2FA methods existed at the time of the snapshot.
 
-6. **Hash check of the user database file:** compare `incident/<ts>/users_database.yml` (if captured) against `git show HEAD:config/authelia/users_database.yml.template` (the template) to see what differs. The deltas show added users or hash changes.
+6. **Hash check of the user database file:** compare `incident/<ts>/users_database.yml` (if captured) against `git show HEAD:portal/config/authelia/users_database.yml.template` (the template) to see what differs. The deltas show added users or hash changes.
 
 ---
 

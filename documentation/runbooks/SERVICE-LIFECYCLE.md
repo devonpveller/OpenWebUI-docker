@@ -32,7 +32,7 @@ skipped.
 ## When you EXPOSE a service (portal or tailnet)
 
 - **Portal (internet)**: the whole recipe lives at the top of
-  `config/caddy/Caddyfile` next to the `(authelia_gate)` snippet — app-net
+  `portal/config/caddy/Caddyfile` next to the `(authelia_gate)` snippet — app-net
   attach → vhost (copy the litellm one) → hub card → Cloudflare hostname
   (operator, dashboard) → validate + reload. Then re-accept the tripwire
   baseline (`docker exec integrity-tripwire sh /scripts/tripwire.sh accept`)
