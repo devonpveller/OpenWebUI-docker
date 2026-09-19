@@ -24,10 +24,12 @@
 # Container rule still applies: adding/removing/moving a service = the plane
 # compose file + recovery scripts + the stack-map doc together.
 
-volumes:
-  # Orphan from smolcrawl-pipelines (retired 2026-08-21) — old crawl indexes.
-  # Delete when confident nothing wants them back.
-  smolcrawl-data:
+# No `volumes:` section since 2026-09-19: the anchor declares none. The last
+# entry was the orphan crawl-index volume left behind when smolcrawl-pipelines
+# was retired (2026-08-21) — nothing has mounted it since. Only the DECLARATION
+# was removed; the volume itself is untouched on the daemon, and deleting it
+# (with the other pre-split volumes) stays the operator's call — CLEANUP-PLAN v3
+# K.6 / stack-layers D7.
 
 networks:
   # Internal-only CALLER plane: no internet access. Every inference consumer

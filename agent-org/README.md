@@ -31,7 +31,7 @@ agent-org/
     charters/                   # role charters = the profiles' system_prompt_refs (§4)
     floor/                      # hard-rules.md (immutable floor) + stop-gate-enforcement.md
     hooks/pretooluse_floor.py   # the deterministic floor hook (hard-rule #4, P3.3)
-    tests/                      # 55 deterministic tests (no infra needed)
+    tests/                      # 866 `def test_` functions, no infra needed
 ```
 
 Charters are also delivered to workers as Agent Skills under
@@ -118,12 +118,12 @@ The chat bus is the primary surface; the bridge also exposes an HTTP control pla
 ## Tests
 
 ```bash
-cd agent-org/agent-bridge && pip install -e .[test] && pytest -q   # 55 tests, no infra
+cd agent-org/agent-bridge && pip install -e .[test] && pytest -q   # 866 `def test_`, no infra
 ```
 
 ## Conventions honored
 - **G1** — never commit/push or merge to `main` without an explicit ask.
-- **3-place change** — every container is in compose **+** `scripts/recovery/emergency-recovery.ps1`/`.bat`
+- **3-place change** — every container is in compose **+** `scripts/recovery/emergency-recovery.ps1`
   **+** `.claude/skills/stack-map/references/workspace-stacks.md` (run `/stack-map`).
 - **No secrets in files** — bot tokens / DB passwords / model keys via env only.
 - **Reuse, don't reinvent** — little-coder for workers, its floor (git-proxy/lc-egress) for

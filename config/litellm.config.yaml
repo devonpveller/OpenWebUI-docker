@@ -1,9 +1,11 @@
 # LiteLLM gateway config — transparent interposition (guide §1A).
 #
-# PERMISSIVE during the lazy-key period: no master_key (general_settings) so the
-# gateway accepts the junk/empty keys callers send today and logs each request
-# under the key string presented (proven by the T0 spike, 2026-06-12 — distinct
-# keys => distinct LiteLLM_SpendLogs rows, plaintext key).
+# ENFORCING since the J.1 flip (2026-08-21): `master_key` under
+# general_settings below is set from ${LITELLM_MASTER_KEY}, so every caller must
+# present its own sk- virtual key or get a 401. Issue caller keys via
+# llm-gateway-ui /key/generate. Before the flip this gateway ran PERMISSIVE and
+# attributed spend by whatever key string a caller sent (T0 spike, 2026-06-12);
+# that period is over, and commenting that line out is the only way back to it.
 #
 # AS-FLIPPED (cut-in applied 2026-06-12, guide §1A.7 / §8.3-revised): api_base
 # below points at the renamed real servers (llama-cpp-upstream /
@@ -14,7 +16,7 @@
 # loop onto itself.
 #
 # DATABASE_URL is injected via compose env (expands ${LITELLM_DB_PASSWORD}); the
-# spend ledger + store_model_in_db use it. master_key intentionally absent.
+# spend ledger + store_model_in_db use it, and the same DB holds the virtual keys.
 
 # MODEL LIST — NOT IN THIS FILE any more (stack-layers sl-inference-split,
 # 2026-09-19). This file is now the gateway's BASE config: general_settings and
