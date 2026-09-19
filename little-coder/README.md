@@ -51,9 +51,12 @@ Python, mirroring the repo's `search-mcpo` / `memory/mnemory-gateway` pattern. T
 Before deploying with self-improvement chapters, the operator must:
 
 1. Create the **private** self-improvement git remote (design §10.6) and set
-   `LC_SELF_REMOTE_URL` in `.env`.
+   `LC_SELF_REMOTE_URL` in **`coder/.env`** (per-plane since sl-env-split,
+   2026-09-19 - the root `.env` no longer carries it).
 2. Provision a fine-grained PAT scoped to `contents:write` on that remote only
-   and set `LC_SELF_REMOTE_PAT` in `.env`.
+   and set `LC_SELF_REMOTE_PAT` in **`coder/.env`**.
 
-Unused until Chapter 4+, but the credential chain is wired now so later
-chapters do not retrofit it.
+Unused until Chapter 4+, and to be exact: **nothing reads either name anywhere
+in the repo today** (swept 2026-09-19). They are declared in
+`coder/.env.example`, labelled `NO READER TODAY`, so the credential chain is
+documented in the plane that will consume it rather than retrofitted later.

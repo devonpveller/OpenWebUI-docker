@@ -8,7 +8,11 @@
 # The service trees are self-contained compose projects, each driven with
 # `docker compose -f <dir>/docker-compose.yml ...` from this directory. Since
 # sl-env-split (2026-09-19) EACH OWNS ITS ENV: compose loads `<dir>/.env`
-# natively from the project directory, and each carries a ${VAR:?} guard:
+# natively from the project directory. Each of the SIX below carries a
+# ${VAR:?} guard, so an absent file is refused rather than blanked (portal's
+# is new with that change - it had none, and for one revision rendered clean
+# with every secret blank). OB1 and agent-org own their env files too, but
+# carry NO such guard: both render exit 0 with blanks, measured 2026-09-19.
 #
 #   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)

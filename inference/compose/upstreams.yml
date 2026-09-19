@@ -34,10 +34,10 @@ services:
     container_name: llama-cpp-upstream
     # `local` profile (stack-layers, 2026-09-19): a GPU-bound llama.cpp
     # server. Profile off => the gateway runs cloud-only. The operator's
-    # deployment runs WITH it: `local` is one name in the GLOBAL
-    # COMPOSE_PROFILES value in .env, which on this host is
-    # `local,gpu,tailscale` (see the authoritative section in .env.example -
-    # naming `local` alone there would drop the frontend's profiles).
+    # deployment runs WITH it: COMPOSE_PROFILES is PER-PLANE since sl-env-split
+    # (D17), so `local` on its own is the whole correct value in inference/.env
+    # - the frontend's `gpu,tailscale` lives in frontend/.env and naming it here
+    # would do nothing. See inference/.env.example.
     profiles: [local]
     # Isolated behind the gateway (2026-06-13): only llm-gateway (+ the
     # lm-models-backup liveness probe) can reach this real inference server.
@@ -124,9 +124,9 @@ services:
     container_name: llama-cpp-embed-upstream
     # `local` profile (stack-layers, 2026-09-19): a GPU-bound llama.cpp
     # server. Profile off => the gateway runs cloud-only. The operator's
-    # deployment runs WITH it: `local` is one name in the GLOBAL
-    # COMPOSE_PROFILES value in .env, which on this host is
-    # `local,gpu,tailscale` (see the authoritative section in .env.example).
+    # deployment runs WITH it: COMPOSE_PROFILES is PER-PLANE since sl-env-split
+    # (D17), so `local` on its own is the whole correct value in inference/.env.
+    # See inference/.env.example.
     profiles: [local]
     # Isolated behind the gateway (2026-06-13) — see llama-cpp-upstream.
     networks:

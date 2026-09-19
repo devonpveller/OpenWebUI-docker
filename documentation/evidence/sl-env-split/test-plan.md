@@ -10,6 +10,33 @@ D16, D17).
 
 ---
 
+## Attempt 2 (2026-09-19) - what changed after the FAIL
+
+Attempt 1 (`e777d11`) failed **Case 12**: `portal/docker-compose.yml` had no
+`${VAR:?}` guard, so removing `--env-file` removed the only thing that refused
+an absent env file on the internet-exposed plane - and four sentences the item
+authored said otherwise. The plan was also marked inadequate. What is different
+in this revision, and where to look hardest:
+
+* **Case 1b is rewritten** - its old snippet was a PS 5.1 no-op that passed
+  while checking nothing; `portal` is now a sixth case, and both halves of the
+  portal fix (compose guard + `portal-on.ps1` pre-flight) are exercised.
+* **Case 12 enumerates seven guard lines across six planes** with the reason
+  for each guarded variable, and invites you to disagree with the portal's
+  single-guard design.
+* **Case 7** now says what an unmigrated host looks like and why that is still
+  a PASS.
+* **Case 2** no longer claims there are no prose hits for `LC_SELF_REMOTE_*`.
+* **Case 5** gains the pre-flight (row 3b) and two `sysadmin-mcp` negatives.
+* **Case 11** gains the anchoring rule and the portal line-count exception.
+
+Findings sections 12-20 record the fix, the measurements, and three things the
+tester was right about that are recorded rather than changed. Section 14 is a
+defect **I** found while fixing theirs - an agent-org wildcard that reaches
+into the root `.env` - which now has a blocking step 4b in the runbook.
+
+---
+
 ## Rebase onto `4934529` (2026-09-19)
 
 This item was first queued at `df3e603` on base `2f5c451`. `development` then
@@ -128,20 +155,86 @@ A render must fail when the plane's OWN file is gone, **even though the root
 is what "a plane that still needs the root file to render FAILS" means in
 reverse.
 
+**DO NOT use `Rename-Item <path> <path>` here.** On PS 5.1 `-NewName` takes a
+LEAF, not a path: `Rename-Item memory\.env memory\.env.hidden` THROWS (`Cannot
+rename the specified target...`), the file never moves, the render then reads
+the still-present `.env`, and the case reports exit 0 for every plane - passing
+while checking nothing. That is exactly what attempt 1's plan told the tester to
+run; they caught it. Left here as the warning it earned.
+
+Use `Move-Item`, which takes a path, and stash the files OUTSIDE the repo:
+
 ```powershell
-Rename-Item memory\.env memory\.env.hidden
-docker compose -f memory\docker-compose.yml config -q    # expect NON-ZERO
-$LASTEXITCODE
-Rename-Item memory\.env.hidden memory\.env
+$stash = Join-Path $env:TEMP "envsplit-1b-$(Get-Random)"
+New-Item -ItemType Directory -Path $stash | Out-Null
+$cases = @(
+  @{ p='memory';    v='MCP_API_KEY';            a=@() }
+  @{ p='search';    v='MULLVAD_WG_PRIVATE_KEY'; a=@() }
+  @{ p='coder';     v='OPEN_TERMINAL_API_KEY';  a=@() }
+  @{ p='frontend';  v='WEBUI_SECRET_KEY';       a=@() }
+  @{ p='inference'; v='LITELLM_DB_PASSWORD';    a=@() }
+  @{ p='portal';    v='AUTHELIA_JWT_SECRET';    a=@('--profile','internet') }
+)
+foreach ($c in $cases) {
+  $src = "$($c.p)\.env"; $dst = Join-Path $stash "$($c.p).env"
+  Move-Item $src $dst                          # throws loudly if it cannot
+  $err  = & docker compose -f "$($c.p)\docker-compose.yml" @($c.a) config 2>&1 1>$null
+  $code = $LASTEXITCODE
+  Move-Item $dst $src                          # restore BEFORE reporting
+  $s = ($err | Out-String)
+  $named = ($s -match [regex]::Escape($c.v)) -and ($s -match [regex]::Escape("$($c.p)/.env"))
+  "{0,-10} exit={1} names-var-and-file={2}" -f $c.p, $code, $named
+}
+Remove-Item $stash -Recurse -Force
 ```
 
-**PASS:** non-zero, with a message naming `MCP_API_KEY` and `memory/.env`.
-A render that still succeeds means something outside the plane is supplying the
-value — that is a FAIL, and worth finding.
+**PASS:** all SIX report `exit=1 names-var-and-file=True`. The root `.env` stays
+present throughout, so a refusal proves nothing outside the plane supplies the
+value. If `Move-Item` errors for a plane, that plane's result is meaningless -
+read the error, do not read past it.
 
-Repeat for `search` (`MULLVAD_WG_PRIVATE_KEY`), `coder`
-(`OPEN_TERMINAL_API_KEY`), `frontend` (`WEBUI_SECRET_KEY`) and `inference`
-(`LITELLM_DB_PASSWORD`).
+**`portal` is in that list, and it is the one to look at hardest.** Its guard is
+NEW in this item. Before it, every portal command passed
+`--env-file <repo root>/.env`, and compose hard-refuses a NAMED env file that is
+absent - so dropping the flag dropped the refusal, and attempt 1 shipped a
+revision where `docker compose -f portal/docker-compose.yml --profile internet
+config` exited **0** with `PUBLIC_DOMAIN`, all three Authelia secrets,
+`CLOUDFLARE_TUNNEL_TOKEN` and `WORKBENCH_KEY` blanked, on the internet-exposed
+plane.
+
+The compose guard covers ONE variable (`AUTHELIA_JWT_SECRET`); the plane's other
+required keys are covered by a pre-flight in `portal-on.ps1`, because a `manual`
+plane is not in the driver's enabled set and `stack.py doctor` never reaches it.
+**Check both halves:**
+
+```powershell
+Move-Item portal\.env "$env:TEMP\portal.env.bak"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $null = & '.\scripts\portal\portal-on.ps1' 2>&1; exit $LASTEXITCODE }"
+"absent-file refusal exit=$LASTEXITCODE"
+Move-Item "$env:TEMP\portal.env.bak" portal\.env
+# the shipped example leaves three required keys blank on purpose, so the
+# restored file is already the "exists but incomplete" case:
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& { $null = & '.\scripts\portal\portal-on.ps1' 2>&1; exit $LASTEXITCODE }"
+"blank-key refusal exit=$LASTEXITCODE"
+```
+
+**PASS:** both exit **1** - the first saying `portal/.env not found`, the second
+naming the blank keys - and **neither reaches a `docker` call**. Confirm that
+last part: no compose output appears, and `docker ps -q | Measure-Object` returns
+the same count either side. If `portal-on.ps1` ever gets as far as `up -d` here,
+STOP and fail the case: that is the regression the pre-flight exists to prevent.
+Read the pre-flight to the end too - it reads the key list OUT of
+`stack.manifest.toml`'s `[planes.portal] keys` and degrades to a built-in list
+with a yellow line if it cannot, rather than silently checking nothing.
+
+**Scope of "every plane refuses" - check the claim, do not assume it.** The six
+in-repo planes refuse. `agent-org` and `OB1` own their env files too and do
+**not**: with their file moved away, `docker compose -f <their compose> config`
+exits **0** with blank-variable warnings (measured 2026-09-19 - neither carries a
+`:?` guard on a variable its own file supplies). Confirm that yourself, then
+confirm the item's prose says "the six" rather than "every plane" everywhere.
+`docker-compose.yml:11`, `README.md`'s plane paragraph, and the runbook's step 2
+and Rollback sections are the four that were wrong in attempt 1.
 
 ---
 
@@ -220,7 +313,7 @@ portal     refs= 21 assigns= 21
 | `anchor` 3 orphans | the root file's whole purpose: variables no plane reads. `NAS_BACKUP_*` → `scripts/backup/backup-to-nas.ps1`, `set-nas-credential.ps1`; `TEST_VALIDATION_LLM_KEY` → `scripts/issue-ops/issue_ops.py` | `git grep -n NAS_BACKUP_USER -- scripts` and read the call site |
 | `frontend` MISSING `OWUI_IMAGE` | shipped **commented out** (`#OWUI_IMAGE=…`), exactly as the pre-split root file had it; compose has a `:-` default | `grep -n OWUI_IMAGE frontend/.env.example` and `frontend/docker-compose.yml:128` |
 | `frontend` / `inference` `COMPOSE_PROFILES` | compose reads it as a **CLI variable**, not via `${…}`, so a reference/assignment asymmetry is inherent. `frontend` assigns it (`=stock`); `inference` ships it commented AND also interpolates it at `inference/compose/gateway.yml:93` | read both files' `COMPOSE_PROFILES` sections to the end |
-| `coder` 2 orphans | `LC_SELF_REMOTE_URL` / `_PAT` have **no reader anywhere in the repo**; kept deliberately and labelled `NO READER TODAY` in the file | `git grep -n LC_SELF_REMOTE_URL -- . ':!documentation'` → expect **no hits outside `coder/.env.example`** |
+| `coder` 2 orphans | `LC_SELF_REMOTE_URL` / `_PAT` have **no CODE reader anywhere in the repo**; kept deliberately and labelled `NO READER TODAY` in the file | `git grep -n LC_SELF_REMOTE_URL -- . ':!documentation'` → expect exactly **three PROSE hits and no code**: `coder/.env.example`, the root `.env.example`'s where-it-went pointer, and `little-coder/README.md:53-57` (which this revision repointed from "`.env`" to `coder/.env` and which now states the no-reader fact too). Anything that *executes* is a FAIL |
 
 **Also check:** `DUPLICATE KEYS` must be empty for every plane. The pre-split
 root file assigned `GPU_AISTACK_DEVICE_ID`, `GPU_LLAMA_CPP_DEVICE_ID`,
@@ -316,6 +409,7 @@ whole function or block**, not the matched line.
 | 1 | `scripts/portal/breach-killswitch.ps1` `:101-118` | rotated `AUTHELIA_JWT_SECRET` / `AUTHELIA_SESSION_SECRET` in the **root** `.env`, backing it up as `.env.killswitch-<ts>.bak` | rotate in **`portal/.env`**. Read the whole Step 4 block: the backup path, the two regex replacements, and the warning when the file is absent must all name `portal/.env`. **A killswitch that rotates the wrong file reports success and rotates nothing** — that is the defect this case exists for. |
 | 2 | `scripts/portal/breach-killswitch.ps1` `:77` | `--env-file <root>/.env` on the compose `stop` | no flag; `portal/` is the project directory |
 | 3 | `scripts/portal/portal-on.ps1` `:45-51` | `--env-file <root>/.env` in `$portalBase` | no flag. Confirm `--profile internet` is still passed on the **command line** for the production branch, and that `portal/.env.example` carries **no** `COMPOSE_PROFILES` line |
+| 3b | `scripts/portal/portal-on.ps1`, the new PRE-FLIGHT block | nothing - there was no check; the `--env-file` was the only gate | refuses before ANY docker call when `portal/.env` is absent, or when a key in `stack.manifest.toml`'s `[planes.portal] keys` is blank. Read it to the end: the key list is PARSED OUT of the manifest, and if that parse fails it prints a yellow line and falls back to a built-in list rather than checking nothing. Exercised in Case 1b |
 | 4 | `scripts/portal/portal-off.ps1` `:49-53` | same flag in `$stopArgs` | no flag |
 | 5 | `scripts/recovery/emergency-recovery.ps1` | 25 `--env-file .env` invocations across `Start-PlaneStack`, `Stop-PlaneStack`, the GPU/netns repairs, `nuclear`, `status` | none. Read `Start-PlaneStack` and `Stop-PlaneStack` in full — they take `$ComposePath` for **any** plane, so one missed flag breaks every plane |
 | 6 | `scripts/checks/stack-watchdog.ps1` | 12 `--env-file .env` invocations (the frontend render, the tailscale self-heal, the two upstream restarts, the alert text) | none. Read the tailscale self-heal block (`:1770-1790`) and `:1848`'s alert message: the message must tell the operator to put the key in **`frontend/.env`** |
@@ -333,6 +427,12 @@ whole function or block**, not the matched line.
 `scripts/mattermost-mcp/server.py`, `scripts/notify-mattermost.sh`,
 `scripts/claude-sessions-bridge/bridge.py` (root `.env` as a fallback for
 `CLAUDE_MM_BOT_TOKEN`, which is host tooling, not a plane);
+`scripts/sysadmin-mcp/register-sysadmin-telegram.ps1:34` and
+`scripts/sysadmin-mcp/telegram_notify.py:31` (root `.env` for
+`SYSADMIN_TELEGRAM_BOT_TOKEN` / `_CHAT_ID` — host tooling again, and never in
+`.env.example`, so no runbook row is owed; **these two were missing from
+attempt 1's version of this list**, which is why it is something to CHECK
+rather than read);
 `scripts/checks/queue-eta-notify.ps1`, `scripts/issue-ops/github_app_auth.py`
 (`agent-org/docker/.env`, out of scope); `scripts/checks/check-backup-coverage.ps1`
 (uses `docker volume ls`, renders nothing).
@@ -405,8 +505,29 @@ foreach ($p in 'frontend','inference','memory','search','coder','portal') {
 }
 ```
 
-**PASS:** all six files present and non-empty; all six renders exit 0. **Do not
-print any file's contents** — `Length` is the evidence you need.
+**WHAT YOU SEE DEPENDS ON WHETHER THE HOST HAS MIGRATED, and BOTH outcomes can
+be a PASS.** This item ships files and a runbook; the operator performs the
+migration afterwards. So decide which host you are on first:
+
+* **Host NOT yet migrated** (the expected state while this is in review - the
+  six `<plane>/.env` do not exist in the main checkout): the six files are
+  ABSENT in the new worktree too, and five of the six renders exit **1** on
+  their `:?` guard (portal exits 1 as well, since its guard is now in). That is
+  a **PASS for this case** provided two things hold: `new-worktree.ps1` said so
+  out loud - it warns in yellow, naming each file it could not copy, because
+  `worktree.env_files` lists a source that is not there - and each refusal
+  names the plane's own file. A SILENT provisioning here is the FAIL.
+  Record it as `PASS (host not migrated - N files absent, warned, renders
+  refuse)`, and say so plainly rather than reporting six green renders you did
+  not see.
+* **Host already migrated**: all six files present and non-empty, all six
+  renders exit 0.
+
+Either way: **do not print any file's contents** - `Length` is the evidence you
+need, and these are the operator's real credentials.
+
+To tell the two apart before you start:
+`Test-Path "D:\Open WebUIi-stackrontend\.env"`.
 
 Then remove it: `scripts\agent-harness\remove-worktree.ps1 -Id envsplitchk` (or
 `git worktree remove`), and confirm it is gone.
@@ -604,22 +725,41 @@ for f in subprocess.run(["git","ls-files"],capture_output=True,text=True).stdout
   produced exactly one (`owui/README.md:63` matching `README.md:63`). If you
   find another the item acted on, that is a FAIL.
 
-**Separately, confirm the compose files did NOT move any line.** `stack.manifest.toml`
-cites them at 99 anchors:
+**Anchor the pattern.** The root file's path, `docker-compose.yml`, is a SUFFIX
+of every plane path, so an unanchored sweep reports
+`memory/docker-compose.yml:36` as a citation into the ANCHOR file - four of six
+manifest hits were that in attempt 2's first pass. Use a `(?<![\w/.-])`
+look-behind. Same class as attempt 1's `owui/README.md:63` matching
+`README.md:63`. **A basename sweep is a list to READ, not a list to apply.**
+
+**`portal/docker-compose.yml` gains 25 lines in this item** (the header block
+explaining the new guard), so every citation into it must be re-derived - the
+manifest has two. Attempt 2 found both were ALREADY four lines wrong at base,
+so check them against the CONSTRUCTS they name (`app-net:` / `external: true` /
+`name: ai-stack_app-net`, and the caddy seam comment) rather than by adding 25.
+
+**Separately, confirm the OTHER compose files did NOT move any line** -
+`stack.manifest.toml` cites them at ~66 anchors:
 
 ```powershell
 foreach ($f in 'docker-compose.yml','frontend\docker-compose.yml','inference\docker-compose.yml',
                'inference\compose\upstreams.yml','inference\compose\queue.yml','inference\compose\gateway.yml',
                'inference\compose\backups.yml','memory\docker-compose.yml','search\docker-compose.yml',
-               'coder\docker-compose.yml','portal\docker-compose.yml') {
+               'coder\docker-compose.yml') {
   $o = (git show "<base>:$($f -replace '\\','/')" | Measure-Object -Line).Lines
   $n = (Get-Content $f | Measure-Object -Line).Lines
   "{0,-38} old={1,-5} new={2,-5} {3}" -f $f, $o, $n, $(if ($o -eq $n) {'OK'} else {'CHANGED - re-derive its citations'})
 }
+# portal is DELIBERATELY absent from that list - it gains 25 lines (see above).
+"portal old={0} new={1} (expect +25)" -f `
+  (git show "<base>:portal/docker-compose.yml" | Measure-Object -Line).Lines, `
+  (Get-Content portal\docker-compose.yml | Measure-Object -Line).Lines
 ```
 
-**PASS:** every line `OK`. A `CHANGED` means every `stack.manifest.toml`
-citation into that file needs re-deriving, and the item did not do it.
+**PASS:** every line in the loop `OK`, and portal `+25`. A `CHANGED` in the loop
+means every `stack.manifest.toml` citation into that file needs re-deriving and
+the item did not do it. For portal, the two manifest citations must land on the
+CONSTRUCTS they name - check them, do not assume the arithmetic.
 
 ---
 
@@ -631,9 +771,40 @@ Every `${VAR:?...}` guard must name the **plane file**, not `--env-file`:
 git grep -n ':?set' -- '*.yml'
 ```
 
-**PASS:** five guards — `frontend` (**two**, the `stock` and `gpu` definitions;
-both must name `frontend/.env`), `inference/compose/gateway.yml`, `memory`,
-`search`, `coder`. None may say `--env-file`, `../.env`, or `.env` unqualified.
+**PASS: SEVEN guard lines across SIX planes** - one plane, one guarded
+variable, except the frontend, which has two definitions of the same service
+and therefore two copies of the same guard. Check the variable as well as the
+file, because WHICH variable is guarded is a design decision each file should
+be able to defend:
+
+| plane | guarded variable | why that one |
+|---|---|---|
+| frontend (`:141` **and** `:201`) | `WEBUI_SECRET_KEY` | a recreate without it ROTATES it, breaking every encrypted value in `webui.db` and all sessions. Two lines because `stock` and `gpu` are two service definitions |
+| inference (`compose/gateway.yml`) | `LITELLM_DB_PASSWORD` | the gateway's ledger DB; blank means the whole front door comes up on empty credentials |
+| memory | `MCP_API_KEY` | the memory layer's only authentication |
+| search | `MULLVAD_WG_PRIVATE_KEY` | blank = no tunnel = the privacy plane's egress leaks |
+| coder | `OPEN_TERMINAL_API_KEY` | blank = a keyless command executor |
+| portal | `AUTHELIA_JWT_SECRET` | **NEW in this item** - see below |
+
+None may say `--env-file`, `../.env`, or `.env` unqualified; each must name
+`<plane>/.env`.
+
+**The portal one is the case this item failed on in attempt 1, so judge it, do
+not just count it.** Read `portal/docker-compose.yml`'s header block and the
+guard's message, and decide whether the argument holds: ONE guard restores the
+refusal that removing `--env-file` destroyed (an ABSENT file), and
+`AUTHELIA_JWT_SECRET` is chosen over the other five required keys because a
+blank `CLOUDFLARE_TUNNEL_TOKEN` fails SAFE (nothing gets exposed) while a blank
+identity-signing secret does not. A half-filled file is a different failure and
+is answered by `portal-on.ps1`'s pre-flight, not by more guards. **If you think
+a second compose guard was owed, say so** - that is a legitimate review finding
+and the item should not have the last word on it.
+
+Also check the two planes NOT in that table: `agent-org` and `OB1` own their env
+files and carry no such guard, and both render exit 0 with blanks when their
+file is absent. Every sentence in the item about planes failing loud must be
+scoped to the six - Case 1b's last paragraph names the four that were wrong in
+attempt 1.
 
 Then read each plane compose file's **header block** and confirm its
 "Drive it with …" line no longer shows `--env-file`, and that its

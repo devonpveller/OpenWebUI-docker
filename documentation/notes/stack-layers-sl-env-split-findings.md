@@ -106,22 +106,39 @@ item's six new plane files would have made it four of twelve.
 
 Fixed: `sync-worktree-env.ps1` now reads the same setting.
 
-## 5. `scripts/recovery/update-stack.bat` and `dev-helper.ps1` address the anchor project — broken since Part K, unrelated to this item
+## 5. Two `.bat` files address the anchor project - broken since Part K, unrelated to this item
 
-**[read]** `scripts/recovery/update-stack.bat` runs 28 **bare** `docker compose`
-commands (`docker compose up -d openwebui` at :237, `build --no-cache openwebui`
-at :183, `ps llama-cpp-upstream …` at :80) with no `-f`. From the repo root that
-addresses the **anchor** project, which has owned **zero services** since K.5b
-(2026-08-21). Every one of those lines fails with `no such service`.
-`scripts/checks/dev-helper.ps1:63` (`docker compose config`) and `:102`
-(`docker compose build --no-cache tailscale`) have the same shape.
+**CORRECTED 2026-09-19 after the tester (F4) showed the first version attached
+one file's numbers to another.** The original text said "`update-stack.bat`
+runs 28 bare commands … this item removed the `--env-file .env` from that
+`.bat`'s 25 flag-carrying lines", which cannot be true of one file: 28 bare
+lines and 25 flag-carrying ones are two different files. Re-measured, per file:
 
-**[pre-existing]**, caused by Part K and not by the env split. This item removed
-the `--env-file .env` from that `.bat`'s 25 flag-carrying lines for consistency
-with everything else, but did **not** fix the missing `-f`: that is a service-
-lifecycle repair with its own blast radius, and guessing which plane each of 28
-lines meant is exactly the kind of change that should not ride along in a
-different item. Worth its own item.
+| file | compose invocations | of those BARE (no `-f`) | `--env-file` at base `4934529` | touched by this item |
+|---|---:|---:|---:|---|
+| `scripts/recovery/update-stack.bat` | 18 | **18** | **0** | **no** - not in the diff at all |
+| `scripts/recovery/quick-fixes.bat` | 39 | **11** | **25** | yes - the 25 removals were here |
+
+(counted as lines matching `^\s*@?docker compose `, so `echo`d advice does not
+inflate them.)
+
+**[read]** A bare `docker compose` from the repo root addresses the **anchor**
+project, which has owned **zero services** since K.5b (2026-08-21), so every
+one of those 29 lines fails with `no such service` - `update-stack.bat:237`
+(`up -d openwebui`), `:183` (`build --no-cache openwebui`), `:80` (`ps
+llama-cpp-upstream …`); in `quick-fixes.bat` the eleven are `down`, `up -d`,
+`ps`, and `start` for tailscale / mnemory / surrealdb / open_notebook / the two
+upstreams. `scripts/checks/dev-helper.ps1:63` (`docker compose config`) and
+`:102` (`build --no-cache tailscale`) have the same shape.
+
+**[pre-existing]**, caused by Part K, not by the env split. The deferral stands
+- guessing which plane each of 29 lines meant is a service-lifecycle repair
+with its own blast radius and does not belong in a different item. What was NOT
+honest in the first version, and is recorded now: this item edited
+`quick-fixes.bat` twenty-five times and left eleven known-broken calls in it
+unmentioned. Editing a file that often without saying what is still wrong with
+it is how a defect gets a fresh commit date and no owner. Worth its own item,
+and the numbers above are what it should start from.
 
 ## 6. The `WORKBENCH_KEY` placeholder in the watchdog is a precedence hazard the split did not create
 
@@ -329,3 +346,279 @@ blanking `MCP_API_KEY` in `memory/.env.example` alone turned it RED with
 set in memory/.env (copy memory/.env.example)` — which also demonstrates that
 the check renders each plane against **that plane's own example** and that the
 reworded guard text is what a failure now tells you.
+
+---
+
+# Attempt 2 (2026-09-19) — what the tester found, and what changed
+
+Attempt 1 was tested at `e777d11` by `wt-tester-env` and FAILED Case 12 (11/12
+pass), with the plan marked inadequate. Their evidence is the authority; this
+section records what I did about it and what I measured myself.
+
+## 12. THE REGRESSION: the portal plane did not fail loud, and four sentences said it did
+
+**This is the one that mattered, and I missed it because I checked that the
+planes I had guarded still refused, instead of checking that every plane
+refused.** The `:?` guards were pre-existing on five planes; the portal never had
+one, because it never needed one: all three of its drivers passed
+`--env-file <repo root>/.env`, and **compose hard-refuses a NAMED env file that
+is absent** (`couldn't find env file: …`, exit 1). Removing the flag removed that
+refusal, and I put nothing in its place — on the internet-exposed plane.
+
+**[measured] The regression, in the shape the tester found it:** with
+`portal/.env` absent,
+`docker compose -f portal/docker-compose.yml --profile internet config` exited
+**0**, blanking `PUBLIC_DOMAIN`, `ACME_EMAIL`, all three Authelia secrets,
+`CLOUDFLARE_TUNNEL_TOKEN`, `WORKBENCH_KEY` and the digest addresses. Nine
+unguarded, defaultless `${VAR}` consumers; `portal-on.ps1` would then have
+started caddy, authelia and cloudflared on those blanks.
+
+### What went in
+
+**A `${AUTHELIA_JWT_SECRET:?}` guard** on the authelia service, naming
+`portal/.env`. One guard, matching what every other plane carries, because the
+thing that regressed is the ABSENT FILE and one guard restores exactly that.
+Among the portal's five required keys it is the one whose blankness is an
+auth-correctness event rather than an outage: a blank `CLOUDFLARE_TUNNEL_TOKEN`
+fails **safe** (nothing reaches the internet at all), a blank identity-signing
+secret does not. The argument is written into the compose header so the next
+person can disagree with it on the merits.
+
+**A pre-flight in `portal-on.ps1`**, because a guard answers "no file" and not
+"file with a blank line in it", and the portal is the plane where the difference
+is a security event. It refuses before any docker call if `portal/.env` is
+missing, or if any key in `stack.manifest.toml`'s `[planes.portal] keys` is
+blank. The key list is **parsed out of the manifest** rather than copied, so
+adding a key there arms it here; if that parse fails it says so in yellow and
+falls back to a built-in list, because a check that silently checks nothing is
+this repo's recurring defect and I am not adding another. It is deliberately not
+routed through `stack.py doctor`: the portal is a `manual` plane, absent from
+the driver's enabled set, so `doctor` never reaches it — which is precisely why
+the operator's own entrypoint is where this belongs.
+
+**[measured] Refuse / pass proof, all six directions:**
+
+| case | result |
+|---|---|
+| `portal/.env` absent, `config` (no profile) | exit **1** |
+| `portal/.env` absent, `config --profile internet` | exit **1**, `required variable AUTHELIA_JWT_SECRET is missing a value: set in portal/.env (copy portal/.env.example) …` |
+| `--env-file portal/.env.example --profile internet config -q` | exit **0**, stderr EMPTY |
+| `portal/.env` present (copied from the example), native load | exit **0** |
+| `portal-on.ps1`, file absent | exit **1**, `REFUSED: portal/.env not found`, no docker call reached |
+| `portal-on.ps1`, file present with three keys blank | exit **1**, `REFUSED: portal/.env is missing a value for: CLOUDFLARE_TUNNEL_TOKEN, AUTHELIA_SESSION_SECRET, AUTHELIA_STORAGE_ENCRYPTION_KEY` |
+
+81 containers running before and after.
+
+`portal/.env.example` gives `AUTHELIA_JWT_SECRET` a non-empty PLACEHOLDER for the
+same reason `frontend`'s `WEBUI_SECRET_KEY` and `search`'s
+`MULLVAD_WG_PRIVATE_KEY` have one: the committed example is what the pre-commit
+compose check and CI render against, and an empty value trips the guard. The
+file says so, and says why the other two Authelia secrets stay blank.
+
+### The four sentences, corrected
+
+Each was true of five planes and stated of all of them.
+
+| where | was | now |
+|---|---|---|
+| `docker-compose.yml:11` | "each carries a `${VAR:?}` guard" | names the **six**, says the portal's is new and why, and states that OB1 and agent-org carry none |
+| `README.md` plane paragraph | "the plane files fail loud without it" | "each of those **six** carries a `${VAR:?}` guard … `OB1/docker/` and `agent-org/docker/` … have no such guard and render with blanks" |
+| `env-split-migration.md` step 2 | "a file you forget to fill fails loud on its `:?` guard" | names the six guarded variables, one per plane, then states the asymmetry plainly: forget one of those six and the plane refuses; forget any other and you get a blank string and a stderr warning — which is why step 3 demands an EMPTY stderr and not just exit 0 |
+| `env-split-migration.md` Rollback | "There is no partial state in which a plane silently runs on the wrong value" | deleting the six is safe **because** all six now refuse — with the portal's history stated — and the case that is genuinely NOT covered (a file that exists and is incomplete) is named, with the two mechanisms that do cover it |
+
+## 13. "Every plane refuses" is false for agent-org and OB1 — scoped, with the measurement
+
+**[measured]** With its own env file moved aside, `docker compose -f
+agent-org/docker/docker-compose.yml config -q` exits **0** (warnings for
+`AO_DB_PASSWORD`, `MM_DB_PASSWORD`); `docker compose -f
+OB1/docker/docker-compose.yml config -q` exits **0** (warnings for
+`POSTGRES_PASSWORD`, `SURREAL_USER`, `SURREAL_PASSWORD`). Neither carries a `:?`
+guard on a variable its own file supplies.
+
+This matters beyond wording: `scripts/stack/stack.py`'s `render_project` carries
+a comment asserting that agent-org's service-level `env_file:` makes the render
+**exit 1** when that file is absent. On compose v5.3 today it does not. The
+driver's behaviour is unaffected — it checks the path itself, before compose —
+so nothing is broken, but the comment's stated reason is stale. Left alone
+deliberately: it is a claim about another plane's compose, it belongs to whoever
+next touches that code path, and rewriting a comment to match a measurement made
+in passing is how a second wrong claim gets written. Recorded here instead.
+
+Both planes are out of scope by the anchor. The prose is now scoped to the six.
+
+## 14. The agent-org wildcard that reaches into the root `.env` — a cross-plane consequence I had missed
+
+Found by my own sweep while checking §13, not by the tester.
+
+**[measured]** `agent-org/docker/docker-compose.yml:300` and `:398` give
+`ao-worker-1` / `ao-worker-2` **`env_file: ../../.env`** — the whole ROOT file.
+Of the names the pre-split root `.env.example` carried, **151 reach those
+containers that way and are not overridden by the services' own `environment:`
+block**. The one that matters operationally is **`LC_DEPLOY_TOKEN`**: it is not
+in their `environment:` block, the wildcard is its only route, and the runbook's
+step 5 deletes it from the root file.
+
+Nothing breaks immediately — a running container keeps the environment it
+started with — but on the workers' next recreate they clone with no deploy
+token: public repos fine, private repos fail. That is the same silent class as
+the 2026-08 `ao-worker stale deploy token` incident, arriving from the other
+direction, and it would have been mine.
+
+**Handled in the runbook, not in agent-org's compose:** a new blocking step
+**4b**, before the trim, naming the two services, the measurement, the variable,
+and the recreate. Editing another plane's compose to name its variables is the
+real fix and is out of scope here — it is precisely what
+`scripts/checks/check-env-file-scope.ps1` exists to prevent, and those two grants
+are grandfathered past it.
+
+**OPEN, follow-up in agent-org:** replace `env_file: ../../.env` on
+`ao-worker-1`/`-2` with the named variables they actually need, so the check can
+stop grandfathering them.
+
+## 15. F1 — five live operator messages still quoted the retired global value
+
+All five were in files this item edited, which is the uncomfortable part: I
+reworded six sentences in `stack-watchdog.ps1` and missed a seventh in the same
+file.
+
+| site | was | now |
+|---|---|---|
+| `scripts/recovery/emergency-recovery.ps1:196` | "put the frontend's profiles into COMPOSE_PROFILES in .env - this host's FULL value is `local,gpu,tailscale` … (one authoritative section at the top of .env.example)" | "put `COMPOSE_PROFILES=gpu,tailscale` in `frontend\.env` — PER-PLANE since sl-env-split, so that is now the WHOLE correct value there … editing the ROOT .env changes nothing for this plane", plus a line for the not-yet-migrated case pointing at the runbook |
+| `scripts/checks/stack-watchdog.ps1:306` | the same sentence, in the WARN | the same per-plane rewrite |
+| `scripts/stack/stack.py:1228` | fail-open reason ending "(this host: local,gpu,tailscale)", naming no file | names `frontend/.env`, gives the per-plane value, and points at the runbook if the file is absent |
+| `inference/compose/upstreams.yml:39` | "`local` is one name in the GLOBAL COMPOSE_PROFILES value in .env … naming `local` alone there would drop the frontend's profiles" | "`local` on its own is the whole correct value in `inference/.env`" — the old advice is now exactly backwards |
+| `inference/compose/upstreams.yml:129` | same | same |
+
+`:196` was the worst of them: it is the recovery path's guidance, it fires only
+when the frontend is already broken, and after the split it actively misdirected.
+
+**[measured]** `git grep "local,gpu,tailscale"` outside archive/evidence/notes
+now returns five hits, all in the runbook and the stack-map reference, all
+describing the OLD value the operator is splitting — the one context where
+naming it is correct.
+
+## 16. F2 — the merge-to-migration window is now stated, loudly
+
+Between this landing on `development` (the live-hosted line) and the operator
+running steps 1-2, `<plane>/.env` does not exist. The runbook now opens with a
+blockquote table: `new-worktree.ps1` provisions worktrees that render 5 of 6
+planes as errors (warning in yellow, naming each), `restore-from-snapshot.ps1`
+cannot stop or start a frontend/inference/memory/coder service,
+`emergency-recovery.ps1` cannot start a plane, and `portal-on.ps1` refuses. All
+loud, no data loss, and **every one of them is a tool you would reach for during
+an incident** — which is the argument for doing steps 1-4 at merge time rather
+than "soon". Step 7's "the restart can wait" is true of the running containers
+and was being read as true of the tooling; it now says which.
+
+## 17. F3-F7 — the small ones
+
+* **F3** `scripts/sysadmin-mcp/register-sysadmin-telegram.ps1:34` and
+  `telegram_notify.py:31` read the root `.env` for
+  `SYSADMIN_TELEGRAM_BOT_TOKEN` / `_CHAT_ID`. Host tooling, never templated in
+  `.env.example`, so no behaviour change and no runbook row — but they were
+  missing from the sweep's "NOT affected" list, which was presented as
+  exhaustive. Added to it, in the plan, with that provenance.
+* **F5** `little-coder/README.md:53-57` told the operator to set
+  `LC_SELF_REMOTE_URL` / `_PAT` "in `.env`". Repointed to `coder/.env`, and it
+  now also states the fact only `coder/.env.example` carried: **nothing reads
+  either name anywhere in the repo today**.
+* **F6** `search/.env.example` said the seven NOT-WIRED tunables were "shipped
+  COMMENTED OUT" and told the reader to "uncomment" one — of lines that are
+  prose, not `#NAME=value`. Substance was right, three sentences described a
+  shape the file does not have. Reworded to say they are prose **deliberately**,
+  because a commented-out assignment invites an uncomment that would change
+  nothing while looking like it had; the seven runbook table rows now say "prose
+  only" rather than "commented out".
+* **F7** `breach-killswitch.ps1` writes `portal/.env` with
+  `Set-Content -Encoding utf8`, which emits a BOM on PS 5.1, and compose now
+  parses that file natively on every portal command. **[pre-existing]** — the
+  same code wrote the root `.env` before this item — but the blast radius
+  changed, because a BOM on the first line can make the first variable parse as
+  a name with a leading zero-width character. Not fixed here: it is a one-line
+  encoding change inside an incident-response script and deserves a test proving
+  the rotated file still parses, not a drive-by. **OPEN.**
+
+## 18. What the tester was right about that I have NOT changed
+
+`--profile` REPLACES `COMPOSE_PROFILES` rather than unioning with it, so the
+`--profile local` added to the `lm-models` restore entry (§10) narrows that one
+invocation's render to `local` alone. Harmless for the two services that entry
+names, and the entry is strictly better off with the flag — but the tester is
+right that "can only make the restore work in more cases" is a statement about
+**that entry**, not about the mechanism. §10 is left as written with this
+correction recorded beside it rather than softened in place: its job was to flag
+the change for judgement, and the judgement has now been made.
+
+## 19. Plan repairs (the `-PlanInadequate` half)
+
+* **Case 1b's snippet was a no-op on PS 5.1.** `Rename-Item <path> <path>`
+  throws (`-NewName` takes a leaf), so the file never moved, the render read the
+  still-present `.env`, and the case reported exit 0 for every plane — it passed
+  while checking nothing, which is this repo's signature defect and I wrote one
+  into a test plan. Rewritten with `Move-Item`, a stash outside the repo,
+  restore-before-report, **portal added as a sixth case**, and an assertion that
+  the message names both the variable and the plane file. The warning is left in
+  the plan rather than quietly fixed.
+* **Case 1b now also covers the two halves of the portal fix** (compose guard,
+  `portal-on.ps1` pre-flight) and tells the tester to confirm no docker call is
+  reached, plus the agent-org / OB1 scoping measurement.
+* **Case 12** now enumerates **seven guard lines across six planes** in a table —
+  plane, guarded variable, and WHY that variable — instead of asserting "five
+  guards", and invites the tester to disagree with the portal's single-guard
+  design on the merits.
+* **Case 7** now states what a tester sees on a host that has **not** migrated
+  (the expected state while this is in review): five or six renders refusing is
+  a PASS provided `new-worktree.ps1` warned by name, and a silent provisioning
+  is the FAIL. It says to record which host state was seen rather than reporting
+  green renders nobody saw.
+* **Case 2's** coder expectation said "no hits outside `coder/.env.example`",
+  which is false: there are three prose hits. Corrected to name all three and to
+  say the FAIL condition is anything that *executes*.
+* **Case 5** gains the `portal-on.ps1` pre-flight as row 3b, and the two
+  `sysadmin-mcp` readers in the "swept and NOT affected" list.
+
+## 20. Citation sweep, attempt 2 — and a basename false-positive class worth naming
+
+Re-derived by construct against `development` (4934529) after every other edit,
+both the full-path and the bare-basename form, across every tracked file outside
+`OB1/`. `portal/docker-compose.yml` gained 25 lines and `scripts/portal/portal-on.ps1`
+gained 66, so this pass had real work to do.
+
+**[measured] Two LIVE citations repointed, and both were ALREADY WRONG at base:**
+
+| citing | was | base reality | now |
+|---|---|---|---|
+| `stack.manifest.toml:485` | `portal/docker-compose.yml:603-605` for "app-net, external: true, name: ai-stack_app-net" | at base, `:603` is `notify-net:` — the app-net block was `:607-609`, four lines further down | `:632-634` (verified by reading the block) |
+| `stack.manifest.toml:490` | `portal/docker-compose.yml:601-602` for the caddy/app-net comment | at base, that comment was `:605-606` | `:630-631` |
+
+Both were off by four BEFORE this item touched the file, so shifting them by +25
+would have produced a number that was newly wrong in a different way. They were
+re-derived from the constructs they name, not from arithmetic, and the manifest
+now says so in place.
+
+**A false-positive class this sweep must guard against, named because it bit the
+first pass of it:** the root file's path, `docker-compose.yml`, is a SUFFIX of
+every plane's path, so an unanchored pattern reports
+`memory/docker-compose.yml:36`, `search/docker-compose.yml:25-28`,
+`coder/docker-compose.yml:28` and `OB1/docker/docker-compose.yml:15-16` as
+citations into the ANCHOR file. Four of the six manifest hits in the first run
+were that. The fix is a `(?<![\w/.-])` look-behind; with it the live set drops
+from 58 hits to 19. The same class produced attempt 1's one false positive
+(`owui/README.md:63` matching `README.md:63`). **A basename sweep is a list to
+read, not a list to apply** — which is also why the plan's Case 11 says so.
+
+**[measured] Everything else: 15 flagged, all judged, none needing action.**
+Five are this item's own repoints (three from attempt 1 — `andon.ps1:431`,
+`drill-dark-factory.ps1:365`, `queue.ps1:939` — plus the two manifest ones
+above); three are attempt 1's `.gitignore` repoints, re-verified against the
+current file (`:11` the backup-rules comment, `:54` `!backup/generic-tar-backup.sh`,
+`:34` `.mcp.json`); and seven were already stale before this item and stay
+recorded rather than silently renumbered — `CLEANUP-PLAN.md:266`, `:330`
+(claims an `openwebui` bind mount the anchor compose has not had since Part K),
+`:358`, `:438`, `:893`, `DECISIONS.md:1705` (`prove-clone-recursive` is in no
+version of `ci.yml`), `WALKTHROUGH.md:384`.
+
+**Compose line-count neutrality still holds everywhere except `portal/`**, which
+is where the fix had to go. Verified per file against `development`; the 66
+`stack.manifest.toml` citations into the other ten compose files are byte-identical
+at their cited lines.

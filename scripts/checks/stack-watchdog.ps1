@@ -303,7 +303,7 @@ function Test-TailscaleDeployed {
             # matches too - verified 2026-09-19).
             $live = @(@(cmd /c "docker ps --filter name=tailscale --format {{.Names}} 2>nul") | Where-Object { $_ -eq 'tailscale' })
             if ($live.Count -gt 0) {
-                Write-LogEntry "tailscale is RUNNING but absent from the frontend render - .env is probably missing the frontend profiles from COMPOSE_PROFILES (this host's full value is local,gpu,tailscale - see the section at the top of .env.example); keeping the tailnet checks ON" "WARN"
+                Write-LogEntry "tailscale is RUNNING but absent from the frontend render - frontend\.env is probably missing the frontend profiles from COMPOSE_PROFILES (per-plane since sl-env-split; the whole correct value there is gpu,tailscale, and inference\.env carries local separately). If frontend\.env is absent, this host has not been migrated: documentationunbooks\env-split-migration.md. Keeping the tailnet checks ON" "WARN"
             } else {
                 $deployed = $false
             }

@@ -10,6 +10,24 @@ Performing the migration is an operator step, and this runbook is it.
 **Audience:** the operator, on the deploy host, at a moment when a short
 inference/frontend outage is acceptable. Step 0 is what makes this reversible.
 
+> ## DO STEPS 1-4 AT MERGE TIME, NOT "SOON"
+>
+> `development` is the LIVE-HOSTED line. Between this landing there and steps
+> 1-2 being done, `<plane>/.env` does not exist, and **the tooling degrades
+> even though the running containers do not**:
+>
+> | what breaks in the window | how it looks |
+> |---|---|
+> | `scripts/agent-harness/new-worktree.ps1` | provisions worktrees that render 5 of 6 planes as errors; it warns in yellow, naming each missing file |
+> | `scripts/backup/restore-from-snapshot.ps1` | cannot stop or start any frontend/inference/memory/coder service - the `:?` guard refuses the render |
+> | `scripts/recovery/emergency-recovery.ps1` | cannot start a plane, for the same reason; its FRONTEND PROFILES MISSING message now says so |
+> | `scripts/portal/portal-on.ps1` | REFUSES with `portal/.env not found` - deliberate, and new with this change |
+>
+> All of it is loud and none of it is data loss. The running stack keeps the
+> environment it started with, so **there is no rush to restart anything** -
+> step 7 says so. But do not leave the window open across an incident: every
+> tool in that table is one you would reach for during one.
+
 ---
 
 ## What changed, in one paragraph
@@ -75,9 +93,21 @@ foreach ($p in 'frontend','inference','memory','search','coder','portal') {
 ### 2. Copy this host's REAL values into them
 
 For every variable in the table at the end of this runbook, take the value from
-the root `.env` and put it in the destination file. The examples ship
-placeholders, so a file you forget to fill fails loud on its `:?` guard rather
-than starting with an empty credential - except where the table says otherwise.
+the root `.env` and put it in the destination file.
+
+Each of the six plane files has exactly ONE variable carrying a `${...:?}`
+guard, and each of those ships a non-empty PLACEHOLDER so the committed example
+still renders: `WEBUI_SECRET_KEY` (frontend), `LITELLM_DB_PASSWORD` (inference),
+`MCP_API_KEY` (memory), `MULLVAD_WG_PRIVATE_KEY` (search),
+`OPEN_TERMINAL_API_KEY` (coder), `AUTHELIA_JWT_SECRET` (portal). **Forget one
+of those six and the plane refuses to render at all** - loud, and the message
+names the file. **Forget any OTHER variable and nothing refuses**: compose
+substitutes a blank string with a warning on stderr, which a script that
+redirects stderr will not show you. That asymmetry is why step 3 insists on an
+EMPTY stderr and not merely on exit 0, and why the portal - where a blank is a
+security event rather than an outage - additionally gets a pre-flight in
+`portal-on.ps1` that checks every key in `stack.manifest.toml`'s
+`[planes.portal] keys` before it starts anything.
 
 Do not retype secrets by hand. A safe mechanical pass, per plane:
 
@@ -155,9 +185,48 @@ python scripts\stack\stack.py up --dry-run      # prints commands; starts nothin
 
 No printed line may contain `--env-file`.
 
+### 4b. BEFORE you trim: the one wildcard that still reaches across
+
+`agent-org/docker/docker-compose.yml:300` and `:398` give `ao-worker-1` and
+`ao-worker-2` **`env_file: ../../.env`** - a wildcard grant of the WHOLE root
+file into those two containers. agent-org is out of scope for this change and
+its own `.env` was not touched, but step 5 empties the file those two services
+are reading, so the consequence lands on them.
+
+**Measured (2026-09-19):** of the names the pre-split root `.env.example`
+carried, 151 reach those workers through that wildcard and are NOT overridden
+by the services' own `environment:` block. The one that matters operationally
+is **`LC_DEPLOY_TOKEN`** - the per-repo token little-coder clones private work
+repos with. It is not in their `environment:` block; the wildcard is its only
+route. After step 5 it is gone from the root file, so on the workers' **next
+recreate** they clone with no token: public repos still work, private ones
+fail. That is the same silent class as the 2026-08 `ao-worker stale deploy
+token` incident, arriving from the other direction.
+
+So, before step 5:
+
+```powershell
+# Is LC_DEPLOY_TOKEN already in agent-org's own file? (It may well be.)
+Select-String -Path agent-org\docker\.env -Pattern '^LC_DEPLOY_TOKEN='
+```
+
+If it is absent, copy the value there from the root `.env`, and recreate the
+pool the next time you touch it (`docker compose -f
+agent-org/docker/docker-compose.yml --profile workers up -d --force-recreate
+ao-worker-1 ao-worker-2`). A running worker keeps the environment it started
+with, so nothing breaks until that recreate - which is exactly why this is easy
+to miss.
+
+**The real fix is not in this runbook:** `scripts/checks/check-env-file-scope.ps1`
+exists to stop exactly this wildcard, and those two grants are grandfathered.
+Naming the variables those services actually need, and deleting
+`env_file: ../../.env`, is a follow-up item in agent-org - recorded in
+`documentation/notes/stack-layers-sl-env-split-findings.md`.
+
 ### 5. Trim the root `.env`
 
-Only now. Delete from the root `.env` every variable the table marks as moved,
+Only now, and only after 4b. Delete from the root `.env` every variable the
+table marks as moved,
 leaving `NAS_BACKUP_USER`, `NAS_BACKUP_PASSWORD` and `TEST_VALIDATION_LLM_KEY`.
 **The file must still EXIST**: the anchor project's directory is the repo root,
 so compose and `stack.py doctor` both look for it there.
@@ -295,13 +364,13 @@ assignments). Your real `.env` does not share those line numbers; match by NAME.
 | `GPU_LLAMA_CPP_EMBED_DEVICE_ID` | 167 | `inference/.env` |
 | `GATEWAY_API_KEY` | 174 | `search/.env` |
 | `SEARXNG_SECRET_KEY` | 175 | `search/.env` |
-| `PROVIDER_PRIORITY` | 178 | `search/.env` - **commented out**, nothing injects it |
-| `CACHE_TTL_SECONDS` | 179 | `search/.env` - **commented out**, nothing injects it |
-| `REQUEST_TIMEOUT_SECONDS` | 180 | `search/.env` - **commented out**, nothing injects it |
-| `CIRCUIT_FAILURE_THRESHOLD` | 181 | `search/.env` - **commented out**, nothing injects it |
-| `CIRCUIT_COOLDOWN_SECONDS` | 182 | `search/.env` - **commented out**, nothing injects it |
-| `LOG_LEVEL` | 183 | `search/.env` - **commented out**, nothing injects it |
-| `LOG_QUERIES` | 184 | `search/.env` - **commented out**, nothing injects it |
+| `PROVIDER_PRIORITY` | 178 | `search/.env` - **prose only**, nothing injects it |
+| `CACHE_TTL_SECONDS` | 179 | `search/.env` - **prose only**, nothing injects it |
+| `REQUEST_TIMEOUT_SECONDS` | 180 | `search/.env` - **prose only**, nothing injects it |
+| `CIRCUIT_FAILURE_THRESHOLD` | 181 | `search/.env` - **prose only**, nothing injects it |
+| `CIRCUIT_COOLDOWN_SECONDS` | 182 | `search/.env` - **prose only**, nothing injects it |
+| `LOG_LEVEL` | 183 | `search/.env` - **prose only**, nothing injects it |
+| `LOG_QUERIES` | 184 | `search/.env` - **prose only**, nothing injects it |
 | `SEARXNG_IMAGE` | 191 | `search/.env` |
 | `SEARCH_REDIS_IMAGE` | 192 | `search/.env` |
 | `ENABLE_WEB_SEARCH` | 195 | `frontend/.env` |

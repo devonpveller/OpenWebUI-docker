@@ -1223,9 +1223,12 @@ class HealthSweep:
             if line.strip() == "tailscale"
         ]
         if running:
-            return True, ("tailscale is RUNNING but absent from the frontend render - .env is "
-                          "probably missing the frontend profiles from COMPOSE_PROFILES "
-                          "(this host: local,gpu,tailscale)")
+            return True, ("tailscale is RUNNING but absent from the frontend render - "
+                          "frontend/.env is probably missing the frontend profiles from "
+                          "COMPOSE_PROFILES (per-plane since sl-env-split: the whole value "
+                          "there is gpu,tailscale, and inference/.env carries local "
+                          "separately). If frontend/.env is absent this host has not been "
+                          "migrated - documentation/runbooks/env-split-migration.md")
         return False, ""
 
     def owui_drift(self) -> str:
