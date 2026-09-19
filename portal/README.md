@@ -49,9 +49,26 @@ path.
 | `cloudflared` | `internet` | `cloudflare/cloudflared:2024.10.0`. The tunnel - **the only internet ingress**. Metrics on `:2000` inside `edge-net`, no host port. |
 | `tunnel-watcher` | `internet` | Probes `cloudflared:2000/ready` every `TUNNEL_WATCHER_POLL_SEC` (30) and alerts HIGH after `TUNNEL_WATCHER_FAILURES_BEFORE_ALERT` (3) consecutive misses. |
 
-Every service runs non-root with `cap_drop: ALL`, `no-new-privileges` and (bar
-`portal-init` and `portal-alerter`) a read-only root filesystem, with explicit
-CPU / memory / pids limits.
+**The hardening floor, read out of the render rather than the file** (`config
+--format json`, all twelve services, 2026-09-19):
+
+| Property | Who has it |
+|---|---|
+| `cap_drop: ALL` + `security_opt: no-new-privileges` | **all twelve**, `portal-init` included |
+| `read_only: true` | **eleven** - every service except `portal-init`, which exists to chown the volumes and so needs a writable root FS |
+| a non-root `user:` | ten. `portal-init` is deliberately `0:0` (it chowns), and `portal-cron` sets no `user:` at all |
+| `cpus` + `memory` + `pids` limits | ten. `caddy-backup` and `authelia-backup` carry `pids` only; `portal-init` has no `deploy` block |
+
+Since `sl-compose-anchors` (2026-09-19) that floor is declared **once** at the
+top of the file as YAML extension fields and merged into each service with
+`<<: *name` - `x-hardening` (the two keys all twelve carry), `x-hardening-ro`
+(that plus `read_only`), and `x-healthcheck-http` (the interval/timeout/retries
+the three probed services share; `test:` and `start_period` stay per-service).
+No rendered service definition changed. **The trap when you edit: a merge key
+merges MAPS, and a LIST written on a service REPLACES the anchored list rather
+than appending to it** - a service needing one more `security_opt` or `cap_drop`
+entry must spell out the whole list. That is why `portal-init`'s and `caddy`'s
+extra capabilities use `cap_add`, a different key, and survive the merge.
 
 ## Requires
 
@@ -231,7 +248,9 @@ full checklist is
 the surfaces this plane appears on today are:
 
 - [`docker-compose.yml`](docker-compose.yml) and the plane-internal
-  [`config/`](config) tree
+  [`config/`](config) tree. A new service joins the `x-hardening` /
+  `x-hardening-ro` floor by MERGING it, never by re-typing it - and if it needs
+  one more list entry it spells the whole list out, per the trap above
 - [`../stack.manifest.toml`](../stack.manifest.toml) - the `[planes.portal]`
   table (including `manual` and the `keys` list `portal-on.ps1` reads), its
   `internet` profile, and the `portal` product

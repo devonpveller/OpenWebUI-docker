@@ -6,10 +6,15 @@ are the source of truth; this doc is the curated summary.
 Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../../documentation/CONTAINER-REGISTRY.md).
 
 **Last reconciled against live compose: 2026-09-19** (stack-layers
-`sl-readmes`; every profile cell, service count and driver name below was
-re-read from the file it describes). Since the 2026-08-21 reconcile: each plane
-gained its own `.env` and its own README, the plane sources moved into the plane
-directories, and **`stack.manifest.toml` became the declaration of record**,
+`sl-readmes`, re-derived against `sl-compose-anchors` at 55ea48b; every profile
+cell, service count and driver name below was re-read from the file it
+describes). Since the 2026-08-21 reconcile: each plane gained its own `.env`
+and its own README, the plane sources moved into the plane directories, the
+repeated hardening / sidecar / healthcheck-timing blocks became per-file YAML
+extension fields merged in with `<<: *name` (`sl-compose-anchors`; ten compose
+files carry an `x-` anchor today - `git grep -l '^x-[a-z-]*: &' -- '*.yml'` -
+and **no rendered service definition changed**, which is why every count below
+still holds), and **`stack.manifest.toml` became the declaration of record**,
 driven by `python scripts/stack/stack.py` (`scripts/stack/stack.ps1` is now a
 shim). What that manifest declares - requires, optional, profiles, ports, keys,
 host needs, products - is the machine-readable half of this document; this file

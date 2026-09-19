@@ -170,21 +170,25 @@ Citations OUTSIDE this item's own scope, found by the tree-wide sweep and
 **deliberately not edited** - they are other items' notes and rewriting another
 item's evidence is not this item's business. **For sl-readmes' closeout sweep:**
 
-| File:line | Cites | Where the CONSTRUCT is |
+| File:line | Cites | Where the CONSTRUCT is, on `sl-compose-anchors` (55ea48b) |
 |---|---|---|
-| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` | **`frontend/docker-compose.yml:373`** |
-| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | the NVIDIA device reservation (`driver: nvidia` at `:261`) | **`frontend/docker-compose.yml:257-263`** |
+| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` | **`frontend/docker-compose.yml:406`** |
+| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | the NVIDIA device reservation (`driver: nvidia` at `:301`) | **`frontend/docker-compose.yml:297-303`** |
 
 Both originally cited the pre-profile file (`:210` and `:108-114`), which is
 true of the commit they were written against and stale relative to this branch.
 
-**CLOSED by `sl-readmes`, 2026-09-19.** Both notes were re-derived BY CONSTRUCT
-rather than by line, and **both already carry the correct numbers above** - they
-were fixed in the same pass that landed them, so nothing needed editing there.
-What was stale was this table itself: it said `:368` and `:252-258`, the numbers
-that were right when this note was written, and the frontend compose file has
-grown by five lines since. That is the failure mode this note exists to warn
-about, reproduced inside the warning. Re-derive with, and not by counting:
+**CLOSED by `sl-readmes`, 2026-09-19 - and it took two passes, which is the
+point.** On the first pass the two notes above already carried the then-correct
+`:373` and `:257-263`, and the stale numbers were the ones in THIS TABLE
+(`:368`, `:252-258`) - the failure mode this note exists to warn about,
+reproduced inside the warning. Then `sl-compose-anchors` landed, the frontend
+compose file grew by its extension-field block, and **all six numbers moved
+again**. Both notes were edited to the values above, and this table with them.
+
+The lesson is not "re-derive once before you commit". It is **re-derive after
+every rebase, because a rebase with no conflicts still moves every line below
+the other item's insertion point.** Re-derive with these, never by counting:
 
 ```bash
 grep -n 'RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT' frontend/docker-compose.yml

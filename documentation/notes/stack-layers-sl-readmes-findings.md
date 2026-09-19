@@ -1,8 +1,9 @@
 # stack-layers `sl-readmes` - findings
 
 **Item:** `sl-readmes` (stack-layers wave 4). **Developer:** `wt-sl-readmes`,
-branch `work/sl-readmes`, based on `development` at `f291cb3`.
-**Written:** 2026-09-19.
+branch `work/sl-readmes`, rebased onto `development` at **`55ea48b`**
+(`sl-compose-anchors`); first written against `f291cb3`.
+**Written:** 2026-09-19, re-derived after the rebase the same day.
 
 This item is DOCUMENTATION ONLY. Its anchor puts "any compose, script, check or
 manifest edit" out of scope, so everything true-but-out-of-scope that the
@@ -378,6 +379,93 @@ standing state.
 Worth noting the failure is LOUD (a throw, not a silent skip), so it has never
 produced a false green. *Fix:* resolve the store from the common git dir rather
 than from `$Root`. *Why not here:* check edit, out of scope.
+
+## 5c. Re-derivation after the `sl-compose-anchors` rebase (55ea48b)
+
+`sl-compose-anchors` touched eleven compose files, `stack.manifest.toml`, the
+six `<plane>/.env.example` files, `CLEANUP-PLAN.md` and the env-split runbook.
+**The rebase produced no conflict** - this item is markdown outside those paths
+- and that is exactly the case the coordinator flagged as dangerous: a clean
+rebase still moves every line below another item's insertion point.
+
+### What did NOT change, measured rather than assumed
+
+**[measured]** after the rebase, `config --services` per plane: frontend 1 (no
+profile, via a stripped env file) / 2 `stock` / 2 `gpu` / 4 `gpu,tailscale`;
+inference 4 / 8 `local`; portal 10 / 12 `internet`; search 4; memory 3; coder 4.
+**Every count in every README is unchanged**, which is the anchors item's own
+claim ("no rendered service definition changed") holding. Re-derived from the
+RENDER, not the file: the two digest-pinned LiteLLM images still match each
+other; `llm-gateway-backup`'s `sleep 86400` is still hard-coded in its
+`entrypoint`; `lm-models-backup` still carries 604800 / 43200 /
+`llama-cpp-upstream:8080`; `openwebui-backup` still has the 1 GiB memory limit
+and `tailscale-backup` still lands on the external `ai-stack_default`.
+`#COMPOSE_PROFILES=local` is still commented out in `inference/.env.example`
+and `COMPOSE_PROFILES=stock` still live in `frontend/.env.example`; only
+`cloudflared` and `tunnel-watcher` still carry a `profiles:` key in the portal.
+
+### What the re-derivation DID catch - a claim of mine that was wrong from the start
+
+**[measured]** `portal/README.md` said "Every service runs non-root with
+`cap_drop: ALL`, `no-new-privileges` and (bar `portal-init` and
+`portal-alerter`) a read-only root filesystem, with explicit CPU / memory /
+pids limits." Rendering all twelve services and reading the four keys back:
+
+| Property | Reality |
+|---|---|
+| `cap_drop: ALL` + `no-new-privileges` | all twelve - correct |
+| `read_only: true` | **eleven**. Only `portal-init` lacks it. `portal-alerter` HAS it, and my sentence said it did not |
+| non-root `user:` | **ten**. `portal-init` is `0:0` by design; `portal-cron` sets no `user:` at all. "Every service runs non-root" was false twice |
+| `cpus`+`memory`+`pids` | **ten**. The two backup sidecars carry `pids` only; `portal-init` has no `deploy` block |
+
+Written from an excerpt rather than from the render - the "read to the end"
+failure, in the file whose own README warns about it. Corrected to a table read
+out of `config --format json`. **This was wrong before the rebase too**; the
+rebase is only what made me look again.
+
+### `path:line` citations: what was re-derived, and what moved
+
+This item's own artifacts still carry **no** `path:line` citation into any
+compose file, the manifest or an `.env.example` - everything is cited by
+construct. What needed re-deriving was the citations in the NOTES, and the
+frontend compose file moved a long way:
+
+| Citation, by construct | Before 55ea48b | After |
+|---|---|---|
+| `RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT` | `frontend/docker-compose.yml:373` | **`:406`** |
+| the NVIDIA reservation block / `driver: nvidia` | `:257-263` / `:261` | **`:297-303`** / **`:301`** |
+| `MNEMORY_BACKUP_INTERVAL` | `memory/docker-compose.yml:111` | **`:127`** |
+
+Fixed in the three places the anchor's artifact names:
+`documentation/notes/stack-layers-sl-closeout-findings.md`,
+`documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md`, and the
+table in `documentation/notes/stack-layers-sl-frontend-solo-findings.md`.
+
+**Verified as ALREADY correct** (`sl-compose-anchors` updated them itself):
+every `frontend/docker-compose.yml:<n>` citation in `stack.manifest.toml`
+(`:344` `LLAMA_CPP_HOST`, `:347` `LLAMA_CPP_EMBED_HOST`, `:286`
+`SEARXNG_QUERY_URL`, `:350` `OPEN_NOTEBOOK_HOST`, `:323` `network_mode`,
+`:502` the `default` network) and the two in `frontend/.env.example` (`:408`,
+`:472`, both `BACKUP_INTERVAL`).
+
+### Still stale, in other items' notes - NOT fixed here
+
+**[measured]** These are outside the anchor's artifact (it names
+`sl-frontend-solo-findings.md` and "the closeout notes", and rewriting another
+item's evidence is not this item's business). Re-derived so the next sweep does
+not have to:
+
+| Note | Cites | Construct | Correct now |
+|---|---|---|---|
+| `stack-layers-sl-colo-frontend-findings.md:32` | `frontend/docker-compose.yml:159` and `:280` | `context: ..` (since changed to `context: .`) | `:199` and `:313` |
+| `stack-layers-sl-colo-inference-findings.md:145` | `:136` | the `openwebui-stock` "NO /app/config MOUNT" pointer comment | `:183` |
+| `stack-layers-sl-colo-inference-findings.md:250,259` | `:182` | `- openwebui-data:/app/backend/data` (the stock one) | `:182` - unchanged by luck, the insertion is below it |
+| `stack-layers-sl-driver-parity-findings.md:494` | `:285` | `network_mode: service:openwebui` | `:323` |
+| `stack-layers-sl-env-split-findings.md:29` | `:373` | `RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT` | `:406` |
+| `stack-layers-sl-env-split-findings.md:45` | `:241` | the commented-out `TERMINAL_SERVER_CONNECTIONS` line | `:281` |
+
+None of them is acted on by a reader following an instruction; each is an
+evidence line in a closed item's note.
 
 ## 6. Left alone on purpose
 

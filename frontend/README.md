@@ -50,6 +50,23 @@ so `--profile tailscale` alone is refused outright by compose with
 encodes that as `requires = ["gpu"]` under
 `[planes.frontend.profiles.tailscale]`.
 
+**Four blocks these five services used to repeat are declared once** at the top
+of the compose file as YAML extension fields and merged in with `<<: *name`
+(`sl-compose-anchors`, 2026-09-19): `x-hardening` (the `security_opt` the four
+services that carry it share - `tailscale` never did and does not gain it),
+`x-hardening-owui` (that plus `read_only: false` and the `/tmp` tmpfs both
+openwebui definitions share, because they are one application under two
+profiles), `x-healthcheck-http` (the probe TIMINGS; `test:` stays per-service),
+and `x-backup-sidecar` (the `alpine:3.21` sleep-loop shape both backup sidecars
+share, so bumping the alpine tag moves both). `docker compose config` echoes
+the `x-` keys back at the top level - they are declarations, not services, and
+no rendered definition changed. **The trap when you edit: a merge key merges
+MAPS, and a LIST written on a service REPLACES the anchored list rather than
+appending to it**, so a service needing one more `security_opt` or `tmpfs`
+entry must spell out the whole list. Extra hardening under a DIFFERENT key
+(`tailscale`'s `cap_add`, `tailscale-backup`'s `cap_drop`) is just that key and
+merges cleanly.
+
 ## Requires
 
 | Needs | What makes it so |

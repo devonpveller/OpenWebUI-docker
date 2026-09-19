@@ -46,6 +46,18 @@ container name are identical for all eight.
 | `llm-queue` | `local` | The B2 admission controller, built from [`llm-queue/`](llm-queue) as `llm-queue:local`. Sits BETWEEN LiteLLM and the upstreams, on `llm-backend-net` only, holding and dispatching instead of letting llama-swap drop the overflow with a flat 429. Keeps its own SQLite event store on `inference_llm-queue-data`. | `compose/queue.yml` |
 | `lm-models-backup` | `local` | `alpine:3.21` sleep-loop, weekly by default (`LM_MODELS_BACKUP_INTERVAL`, 604800), tarring `${LM_MODELS_DIR}` into `backups/lm-models`; it skips the very large tar when an artifact younger than `MIN_AGE_SECS` (43200) already exists. Its `HEALTH_TCP` probes `llama-cpp-upstream:8080` **by upstream name**, never the alias - the alias now resolves to the gateway and would report "reachable" with the model server down. | `compose/backups.yml` |
 
+**Each of the four group files declares its own `x-hardening` anchor**
+(`sl-compose-anchors`, 2026-09-19): `security_opt: [ no-new-privileges:true ]`,
+the one key every service in this plane shares, written once per file and merged
+in with `<<: *hardening`. It is per FILE and not per plane because a YAML anchor
+does not cross an `include:` boundary - four files, four identical declarations,
+and that is the correct shape rather than duplication to remove. **The trap when
+you edit: a merge key merges MAPS, and a LIST written on a service REPLACES the
+anchored list rather than appending to it**, so a service wanting a second
+`security_opt` entry must spell out the whole list. Hardening under a DIFFERENT
+key is just that key and merges cleanly - which is what `lm-models-backup`'s
+`cap_drop: [ALL]` is. No rendered service definition changed.
+
 **The `local` profile is the whole GPU half of the plane.** With it off the
 project is a LiteLLM gateway + ledger + Admin UI + ledger backup: a front door
 that can serve CLOUD models from a machine with no GPU (stack-layers D11).

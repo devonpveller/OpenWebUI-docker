@@ -1,7 +1,8 @@
 # Test plan - `sl-readmes`
 
 **Item:** `sl-readmes` (stack-layers wave 4). **Branch:** `work/sl-readmes`,
-based on `development` at `f291cb3`. **Developer:** `wt-sl-readmes`.
+rebased onto `development` at **`55ea48b`** (`sl-compose-anchors`); first
+written against `f291cb3`. **Developer:** `wt-sl-readmes`.
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-readmes.json`.
 **Findings sink:** `documentation/notes/stack-layers-sl-readmes-findings.md`.
 
@@ -176,6 +177,31 @@ that settles it:
 | `$Script:<Plane>Services` variables exist and `$MainStackServices` is empty | stack-map section 4 | `grep -n '^\$Script:.*Services' scripts/recovery/emergency-recovery.ps1` |
 | the portal has no rows in the generated inventory | `portal/README.md`, findings 1.2 | a `python -c` over `scripts/lib/stack-services.json` filtering `project == "portal"` |
 | `restore-from-snapshot.ps1` has `caddy` and `authelia` catalog entries | `portal/README.md` | `grep -n "^  'caddy'\|^  'authelia'" scripts/backup/restore-from-snapshot.ps1` |
+| the portal hardening table: 12 / 11 / 10 / 10 for cap_drop+no-new-privileges, read_only, non-root user, cpus+memory+pids | `portal/README.md` | render and read the keys back, **do not read the file** - see the note below the table |
+| the `x-` extension fields each plane README describes | `frontend/`, `inference/`, `portal/README.md` | `git grep -l '^x-[a-z-]*: &' -- '*.yml'` (expect 10 files) and `sed -n '/^x-/,/^services:/p' <file>` for the contents |
+
+**The portal hardening table must be read from the RENDER, not the file.**
+`sl-compose-anchors` moved that floor into `x-hardening` / `x-hardening-ro`
+merge keys, so grepping `portal/docker-compose.yml` for `read_only` finds one
+occurrence covering eleven services. This is the command:
+
+```bash
+python -c "
+import json,subprocess
+a=['docker','compose','-f','portal/docker-compose.yml','--env-file','portal/.env.example','--profile','internet','config','--format','json']
+d=json.loads(subprocess.run(a,capture_output=True,text=True).stdout)
+for n,s in sorted(d['services'].items()):
+    lim=s.get('deploy',{}).get('resources',{}).get('limits',{})
+    print(n, s.get('user','-'), s.get('read_only','-'), s.get('cap_drop','-'), sorted(lim) or '-')
+"
+```
+
+**Expect** `portal-init` as the only one with no `read_only` and with
+`user=0:0`; `portal-cron` with no `user` at all; `caddy-backup` and
+`authelia-backup` with `pids` only; all twelve with `cap_drop: ['ALL']`.
+The README's table says exactly that - **the developer's first version of this
+sentence got it wrong in three ways**, written from an excerpt instead of the
+render, so check it rather than reading it.
 
 **The frontend "no profile" row needs a stripped env file, and this is the trap
 the developer fell into first.** `frontend/.env.example` ships
@@ -627,8 +653,13 @@ own.
         documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md \
         documentation/notes/stack-layers-sl-frontend-solo-findings.md
    ```
-   **Expect** the constructs at `:373` and inside `:257-263`, and every citation
-   printed by the third command to match. FAILS on any mismatch.
+   **Expect**, on `55ea48b`, `RETAIN_COUNT` at **`:406`** and `driver: nvidia`
+   at **`:301`** inside the reservation block **`:297-303`** - and every
+   citation printed by the third command to match those. **Do not take the
+   numbers in this sentence on trust**: derive them with the two greps and
+   compare. They moved once already (they were `:373` and `:257-263` before
+   `sl-compose-anchors` landed), which is the whole point of the case.
+   FAILS on any mismatch.
 
 3. **The stack-map Backups row's profile cell.** `openbrain-wiki-backup` is
    `[profile wiki]`, and the Backups table used to give its profile cell as
