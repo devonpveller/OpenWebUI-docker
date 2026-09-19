@@ -9,11 +9,18 @@ profiles; teach the ai-stack manifest, drivers, inventory and docs about them.
 Destination, for the operator: `feature/integrated-knowledge-system` on the OB1 remote.
 **Findings:** `documentation/notes/stack-layers-sl-ob1-profiles-findings.md`
 
-> **ATTEMPT 2.** Attempt 1 FAILED on **T14**: it claimed two cross-group runtime
+> **ATTEMPT 3.** Attempt 2 FAILED on **T31 criterion 4** only: `profile_closure`
+> ran on `cmd_enable`'s product branch and at drive time, but not on the plane
+> branch or in `cmd_init`, so `enable ob1` PRINTED two profiles and WROTE one.
+> Every state-file writer now goes through one helper, `enable_plane_profiles`,
+> and T31 criterion 4 covers all five paths. T21 gains a fourth break (absent
+> `OB1/docker/.env` — the CI shape — used to be a silent skip). **No OB1 change
+> in this attempt: the OB1 commit is untouched at `fe3e045`.**
+>
+> *Attempt 2 fixed attempt 1's T14 FAIL: it claimed two cross-group runtime
 > references and there are six — the two it missed arrive via `env_file:` and are
-> invisible to the grep it used. T14 is rewritten around the render-based method;
-> T30 and T31 are new; T11, T16, T19, T21 and T24 changed. The OB1 commit was
-> AMENDED, so its SHA differs from attempt 1's.
+> invisible to a grep. T14 is built around the render-based method; T30 and T31
+> are new; T11, T16, T19, T21 and T24 changed then.*
 
 > **The tester did not write this.** Read the findings note first — cases T1,
 > T13, T14, T20, T21, T25, T30 and T31 exist because of what is in it, and §9
@@ -265,8 +272,9 @@ writing if it restates.
 
 ## T16 - [C1] the stack unit tests pass
 
-`python -m pytest scripts/stack -q` → **44 passed** (41 in attempt 1 plus the three
-profile-`requires` tests judged at T31). Then read the diff of
+`python -m pytest scripts/stack -q` → **47 passed** (41 in attempt 1; +3 for
+profile-`requires` in attempt 2; +3 in attempt 3 for the state-file writers, judged
+at T31 criterion 4). Then read the diff of
 `scripts/stack/test_stack.py` and judge each edit as a correction or an
 accommodation:
 
@@ -354,9 +362,34 @@ Verify the MECHANISM, not the assertion:
    corrupt the manifest yourself (`requires = ["reserch"]`) and confirm
    `Manifest.load` raises a `Refusal` naming `ob1.idea-refinery` — a mechanism
    that cannot be made to fail is not a mechanism.
-4. The state file written by `enable` must already contain `research`, not have
-   it added only at drive time. A state file that omits a prerequisite the
-   driver silently supplies is a state file that lies.
+4. **The state file must contain `research`, from EVERY writer — this criterion
+   failed attempt 2.** A state file that omits a prerequisite the driver silently
+   supplies is a state file that lies. Attempt 2 applied the closure only on
+   `cmd_enable`'s *product* branch, so `enable ob1` printed
+   `profiles: idea-refinery, research` and wrote `["idea-refinery"]`; drive time
+   was right either way, which is precisely why the suite stayed green.
+
+   Check the **file**, not the printed line, for all five writer paths:
+
+   | Invocation | state `planes.ob1.profiles` must be |
+   |---|---|
+   | `enable ob1` (plane branch, after enabling its required planes) | `["idea-refinery","research"]` |
+   | `init --planes inference,search,ob1` | `["idea-refinery","research"]` |
+   | `init --planes … --context ob1=<ctx>` | same, plus `context` set |
+   | `enable open-brain --headless` (product branch) | `["idea-refinery","research"]` |
+   | `init --product research` | all four |
+
+   Then check the SHAPE of the fix, not just its effect: there is one helper,
+   `enable_plane_profiles`, and `State.enable` is called from nowhere else in the
+   module (`grep -n "\.enable(" scripts/stack/stack.py` → exactly one hit, inside
+   that helper). Three tests pin this —
+   `test_enabling_the_PLANE_writes_the_closure_not_just_the_defaults`,
+   `test_init_with_planes_writes_the_closure_too`,
+   `test_every_state_writer_goes_through_the_one_helper`. **Make them fail**:
+   revert the plane branch to `state.enable(target, manifest.default_profiles(target))`
+   in a scratch copy and confirm the first and third go red; revert the `cmd_init`
+   line and confirm the second and third do. Three writers each resolving profiles
+   their own way is the bug; a test that only covers one path is how it shipped.
 
 Then judge the DECISION, which is stated at the manifest line and in findings
 §5a. Two alternatives were rejected: marking `research` itself `default` (would
@@ -434,8 +467,22 @@ and read `$?`, which reports grep's status:
    **1** with `RENDER PRODUCED NOTHING for open-brain … 30 inventory row(s) went
    unverified`. Previously the code did `if (-not $raw) { continue }` and went
    green.
+4. **Rename `OB1/docker/.env` out of the way** — the CI shape, since that file is
+   gitignored. New in attempt 3. The `Test-Path` guard then drops the open-brain
+   render target entirely, and before this fix the check printed its green line
+   having verified 30 fewer rows with nothing said. Must now print
+   `NOT VERIFIED: project 'open-brain' has 30 inventory row(s) and no render
+   target (OB1\docker\.env absent …)` and the coverage list must lose its
+   `open-brain:30/30` entry. **Exit stays 0** — deliberately: CI legitimately
+   cannot render OB1, so a red here would cry wolf on every run. Judge that call;
+   if you think it should be red, say so.
 
-Revert all three, then delete the clone.
+   The same pass prints `NOT VERIFIED: project 'agent-org' has 16 inventory
+   row(s) and no render target` on EVERY run, including the green one. That is a
+   real pre-existing gap (agent-org has never had a render target) which attempt
+   1's tester could only find by instrumenting the script. Confirm it appears.
+
+Revert all four, then delete the clone.
 
 ## T22 - [C7] the inventory rows carry the right profiles
 

@@ -237,7 +237,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > | `research` | `openbrain-curator`, `openbrain-research` | the research ENGINE; the store captures, embeds, chunks and serves without it |
 > | `wiki` | `openbrain-wiki`, `-wiki-viewer`, `-workbench`, `-wiki-backup` | a reading/writing SURFACE onto the store |
 > | `notebook` | `surrealdb`, `open_notebook`, `open-notebook-backup` | a second SURFACE onto the store (openbrain-db is canonical since IKS) |
-> | `idea-refinery` | `openbrain-idea-refinery` | pre-existing; off until a Mattermost bot token is set |
+> | `idea-refinery` | `openbrain-idea-refinery` | pre-existing profile, and **running on this host** — both drivers pass it on every invocation. It is gated because it needs a Mattermost bot token to deliver dossiers, not because it is waiting for one. `requires` the `research` profile (its only engine) — see below |
 >
 > The full live set needs all four:
 > `docker compose -f OB1/docker/docker-compose.yml --profile research --profile wiki --profile notebook --profile idea-refinery up -d`

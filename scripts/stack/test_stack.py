@@ -485,6 +485,60 @@ def test_the_idea_refinery_profile_pulls_the_research_engine_it_calls(root):
     assert set(state_of(root)["planes"]["ob1"]["profiles"]) == {"idea-refinery", "research"}
 
 
+def test_enabling_the_PLANE_writes_the_closure_not_just_the_defaults(root):
+    """`enable <plane>` must WRITE what it PRINTS.
+
+    Attempt 2 shipped the closure on cmd_enable's product branch only, so
+    `stack.py enable ob1` printed "profiles: idea-refinery, research" and wrote
+    ["idea-refinery"]. Drive time was right either way - `run_profiles` closes -
+    which is exactly why 44 tests passed with the defect present: no CLI surface
+    misled, the artifact on disk just lied. Assert the FILE, not the line.
+    """
+    run(root, "init", "--planes", "inference,search")
+    code, out, _ = run(root, "enable", "ob1")
+    assert code == 0
+    assert "profiles: idea-refinery, research" in out
+    assert state_of(root)["planes"]["ob1"]["profiles"] == ["idea-refinery", "research"]
+
+
+def test_init_with_planes_writes_the_closure_too(root):
+    """The third state-file writer. Same defect, same fix, its own test."""
+    run(root, "init", "--planes", "inference,search,ob1")
+    assert state_of(root)["planes"]["ob1"]["profiles"] == ["idea-refinery", "research"]
+    # ...and the --context writer, which is a separate call site.
+    run(root, "init", "--force", "--planes", "inference,search,ob1", "--context", "ob1=remote")
+    entry = state_of(root)["planes"]["ob1"]
+    assert entry["profiles"] == ["idea-refinery", "research"] and entry["context"] == "remote"
+
+
+def test_every_state_writer_goes_through_the_one_helper(root):
+    """No call site may write profiles into state except `enable_plane_profiles`.
+
+    The defect above existed because three writers each resolved profiles their own
+    way. This pins the shape of the fix: `State.enable` is called exactly once in the
+    module, from the helper. A new command that writes state and skips it reintroduces
+    the same class of bug, silently.
+    """
+    tree = ast.parse(Path(stack.__file__).read_text(encoding="utf-8"))
+    callers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            # `<something>.enable(...)` where the receiver is a plain name - i.e.
+            # `state.enable(...)` / `fresh.enable(...)`, the State method. Method
+            # DEFINITIONS are not Calls, so State.enable's own def is not matched.
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "enable"
+                    and isinstance(inner.func.value, ast.Name)):
+                callers.append(node.name)
+    assert sorted(set(callers)) == ["enable_plane_profiles"], (
+        f"State.enable is called from {sorted(set(callers))}; it must only be called by "
+        "enable_plane_profiles, which closes the profile set over `requires`."
+    )
+
+
 def test_profile_requires_is_transitive_and_order_is_the_manifests(root):
     manifest = stack.Manifest.load(REAL_MANIFEST)
     manifest.planes["ob1"]["profiles"]["wiki"] = {"description": "x", "requires": ["notebook"]}

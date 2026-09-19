@@ -275,6 +275,76 @@ because the profile the driver always passes needs it. That is the honest
 resolution of a contradiction that already existed; removing `default` is what
 removes the research engine, not removing `requires`.
 
+## 5c. Three writers, one right: the `requires` closure reached half its call sites
+
+Attempt 2 FAILED T31 criterion 4. I added `profile_closure` to `cmd_enable`'s
+**product** branch and to `run_profiles`, and wrote a comment there claiming the
+state file is closed "not only at drive time". That was true of products and
+false of planes: `cmd_enable`'s plane branch and both `cmd_init` writers still
+called `state.enable(...)` with the bare `default_profiles(...)`. So:
+
+```
+$ stack.py enable ob1
+  ob1  profiles: idea-refinery, research      <- printed
+$ cat state.json
+  {"profiles": ["idea-refinery"]}             <- written
+```
+
+`stack.py enable ob1` is the exact invocation the manifest comment names as the
+motivating bug, and it was the one path that still had it.
+
+**Why it survived 44 tests.** Drive time was correct — `run_profiles` closes, so
+`up`, `up --dry-run` and `list` all showed both profiles. Nothing deployed
+wrong; no CLI surface misled. The only wrong artifact was JSON on disk that no
+test read. The three tests touching state all exercised the product path, which
+worked.
+
+Fixed by making one function the only writer: **`enable_plane_profiles`**, which
+resolves exactly as `run_profiles` does and is now the sole caller of
+`State.enable` in the module (`grep -n "\.enable(" scripts/stack/stack.py` →
+one hit). Three tests added, each proven to go red against the reintroduced bug:
+`test_enabling_the_PLANE_writes_the_closure_not_just_the_defaults`,
+`test_init_with_planes_writes_the_closure_too`, and
+`test_every_state_writer_goes_through_the_one_helper` — the last is an AST
+assertion, so a *new* command that writes state and skips the helper fails
+rather than silently reintroducing the class.
+
+**The pattern worth keeping** (this is the third instance in one item, after
+§5b's self-policing guard and §5's grep-based audit): *a correct mechanism
+applied to some of its call sites is indistinguishable from a correct
+implementation right up until someone reads the artifact.* The generalisable
+defence is not more tests of behaviour, it is collapsing the call sites to one
+and asserting structurally that there is only one.
+
+## 5d. `check-project-configs.ps1` skipped an entire project in silence
+
+`if (Test-Path 'OB1\docker\.env')` gated whether the open-brain render target
+was added at all. `OB1/docker/.env` is gitignored, so **in CI that file is
+absent**, the target is never added, and the check printed its green line having
+verified 30 fewer rows with nothing said — the same silent narrowing as §5b, by
+a different route, and one my own `expected`-count guard could not catch because
+a target that does not exist has nothing to compare.
+
+Now every project that has inventory rows but no render target prints an
+unmissable line:
+
+```
+[configs] NOT VERIFIED: project 'open-brain' has 30 inventory row(s) and no render target
+          (OB1\docker\.env absent - gitignored, so this is expected off the deploy host)
+```
+
+**Deliberately not a failure.** CI legitimately cannot render OB1, so exiting 1
+would cry wolf on every run and train people to ignore the check — which is the
+disease, not the cure. An always-printed line is the honest middle.
+
+It immediately surfaced a second one on **every** run, green included:
+`NOT VERIFIED: project 'agent-org' has 16 inventory row(s) and no render
+target`. agent-org has never had a render target, so its `workers`/`cloud` rows
+have never been machine-verified in either direction. Attempt 1's tester found
+this by instrumenting the script; it is now simply printed. Still not fixed —
+adding that target is another item's surface — but it can no longer be
+discovered only by someone who goes looking.
+
 ## 5b. The first version of my own coverage guard was worthless
 
 Worth recording because it is a failure mode I have now produced twice in one
@@ -373,4 +443,33 @@ Recorded so they are not lost when the evidence file is cleaned up.
 - **The handoff destination was not in the commit message.** Attempt 1's message
   named the OB1 branch and SHA but not the branch to push it onto, so an
   operator reading only the commit knew what to push and not where. Fixed: the
-  destination is in this attempt's ai-stack commit message and in plan T27.
+  destination is in attempt 2's ai-stack commit message and in plan T27.
+- **`agent-org` has no render target in `check-project-configs.ps1`**, so its 16
+  rows have never been verified in either direction. Now PRINTED on every run
+  (§5d) rather than requiring instrumentation to find, but not fixed — adding
+  that target is another item's surface.
+
+## 13. Merge-order note for whoever lands second
+
+Flagged by the coordinator, recorded here because it outlives the queue entry.
+Two sibling items touch the same three files:
+
+- **`sl-driver-parity`** (in its own fix cycle, same base 9f64b84, will rebase)
+  adds a profile-declaration gate and an `inventory --check` generator. Both
+  overlap this item's surface directly: the gate covers the same "declare a
+  profile in every place" rule as `SERVICE-LIFECYCLE.md` row 8a, and the
+  generator covers the same inventory↔compose agreement as the coverage
+  assertion in §5b/§5d. **If that generator lands, the hand-maintained
+  `$renderTargets` list here should probably become its input rather than a
+  second source of truth** — two mechanisms asserting the same property is how
+  one of them quietly stops being true.
+- **`sl-frontend-solo`** (in test) flips the `frontend` profiles from `pending`
+  and adds `stock`. That touches `stack.manifest.toml`'s profile tables and will
+  add `frontend` rows with a `profile` field — which means the frontend render
+  target in `check-project-configs.ps1` must gain those profiles, or §5b's
+  assertion fails it (frontend is currently 4/4 and would become 4/N). **That
+  failure is the guard working, not a conflict** — fix it by passing the
+  profiles, never by shrinking the expectation.
+
+Whoever merges second adapts. The textual conflicts are small; the semantic one
+to watch is duplicate enforcement of the same invariant.

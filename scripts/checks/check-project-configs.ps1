@@ -93,6 +93,28 @@ if ($ymlStaged.Count -gt 0) {
                                      A = @('--profile', 'research', '--profile', 'wiki',
                                            '--profile', 'notebook', '--profile', 'idea-refinery') }
             }
+
+            # A project with inventory rows but NO render target is unverified, and until
+            # now that was invisible: the `if` above silently dropped open-brain wherever
+            # OB1\docker\.env is absent - which is the CI shape - so the check printed its
+            # green line having verified 30 fewer rows than it appeared to. Same silent
+            # narrowing as a dropped --profile, by a different route. Name it. NOT a
+            # failure: OB1's env is gitignored and CI legitimately cannot render it, so a
+            # red here would mean crying wolf on every CI run. An unmissable line is the
+            # honest answer; the assertions below still cover every project that IS
+            # rendered. (agent-org has never had a render target either - same treatment.)
+            $rendered = @($renderTargets | ForEach-Object { $_.P })
+            $projectsWithRows = @($known.Values | Sort-Object -Unique)
+            foreach ($proj in $projectsWithRows) {
+                if ($rendered -notcontains $proj) {
+                    $n = @($known.Keys | Where-Object { $known[$_] -eq $proj }).Count
+                    $why = if ($proj -eq 'open-brain') {
+                        " (OB1\docker\.env absent - gitignored, so this is expected off the deploy host)"
+                    } else { "" }
+                    Write-Host ("  [configs] NOT VERIFIED: project '$proj' has $n inventory row(s) " +
+                                "and no render target$why") -ForegroundColor Yellow
+                }
+            }
             $drift = @()
             $coverage = @()
             foreach ($rt in $renderTargets) {
