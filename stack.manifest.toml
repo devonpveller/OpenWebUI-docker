@@ -168,43 +168,43 @@ env_file = ".env"
 lease    = "frontend"
 requires = ["anchor"]
 # The frontend is the stack's tailnet front door: `tailscale` shares openwebui's
-# netns and entrypoint.sh publishes a serve route per backend, each a
+# netns and frontend/entrypoint.sh publishes a serve route per backend, each a
 # HOST=${VAR:-<service>} + ..._ENABLED pair. Five of those backends live in
 # OTHER planes, and every one of the toggles defaults TRUE, so a default boot
 # reaches into four planes besides this one. The route table is
-# entrypoint.sh:93-105; the variables are entrypoint.sh:54-77, overridden for
+# frontend/entrypoint.sh:93-105; the variables are :54-77, overridden for
 # the two that differ by frontend/docker-compose.yml:311-336.
 # inference: frontend/docker-compose.yml:311,314 (LLAMA_CPP_HOST /
 #   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
 #   LLAMA_CPP_ENABLED toggle at :313 - OWUI serves without it. Also
-#   entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
-#   true) -> the serve route at entrypoint.sh:103.
+#   frontend/entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
+#   true) -> the serve route at frontend/entrypoint.sh:103.
 # search: frontend/docker-compose.yml:246 (SEARXNG_QUERY_URL defaults to
 #   http://gateway:8080/search) - web search is off without it, chat is not.
 # ob1: frontend/docker-compose.yml:317 (OPEN_NOTEBOOK_HOST defaults to
 #   open_notebook, an ob1-plane service) with :319 OPEN_NOTEBOOK_ENABLED
-#   defaulting TRUE; ports at :318,:320-321. Consumed by entrypoint.sh:97 and :99
+#   defaulting TRUE; ports at :318,:320-321. Consumed by frontend/entrypoint.sh:97 and :99
 #   (the open-notebook and open-notebook-api serve routes). The image's own
-#   fallback for the wiki route also points at ob1 (entrypoint.sh:66,
+#   fallback for the wiki route also points at ob1 (frontend/entrypoint.sh:66,
 #   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
 #   overrides it - see the portal edge below.
 # portal: frontend/docker-compose.yml:333 (QUARTZ_HOST defaults to `caddy`, a
 #   PORTAL-plane service) with :335 QUARTZ_ENABLED defaulting TRUE; the comment
 #   at :323-332 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
 #   which resolves because caddy and openwebui share ai-stack_app-net).
-#   Consumed by entrypoint.sh:101. Note this is the reverse of portal's HARD
+#   Consumed by frontend/entrypoint.sh:101. Note this is the reverse of portal's HARD
 #   requires on frontend: the portal needs openwebui to serve its main vhost,
 #   and the frontend's tailnet wiki route needs the portal's caddy.
-# agent-org: entrypoint.sh:74,76 (MATTERMOST_HOST defaults to `mattermost`,
-#   MATTERMOST_ENABLED defaults TRUE) -> the serve route at entrypoint.sh:105,
+# agent-org: frontend/entrypoint.sh:74,76 (MATTERMOST_HOST defaults to `mattermost`,
+#   MATTERMOST_ENABLED defaults TRUE) -> the serve route at frontend/entrypoint.sh:105,
 #   whose own comment says "agent-org compose project on llm-net, starts after
-#   us". Declared in the IMAGE (entrypoint.sh, baked into tailscale:local), not
+#   us". Declared in the IMAGE (frontend/entrypoint.sh, baked into tailscale:local), not
 #   in frontend/docker-compose.yml - the compose file passes this service
 #   exactly one variable (:291-302). A reader of the compose file alone does
 #   not see this edge.
 optional = ["inference", "search", "ob1", "portal", "agent-org"]
 host = [
-  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:158-165, Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :257-263. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
+  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:158-165, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :257-263. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
   "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:290, network_mode: service:openwebui names the gpu definition)",
 ]
 keys = ["WEBUI_SECRET_KEY"]

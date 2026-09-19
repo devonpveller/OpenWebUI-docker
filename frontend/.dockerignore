@@ -1,0 +1,19 @@
+# This plane's build context (context: . = frontend/, since the 2026-09-19
+# colocation; this file was the ROOT .dockerignore, guarding the old
+# `context: ..`). The context is consumed by only two images:
+#   - openwebui (Dockerfile.openwebui-gpu): no COPY, needs nothing from context
+#   - tailscale (dockerfile.tailscale): COPY entrypoint.sh only
+# Without this, `docker compose build` shipped the ENTIRE workspace
+# (backups/, data/, models/, OB1/ — tens of GB) to the daemon as build context;
+# from here it would ship the compose file, this file and the two Dockerfiles.
+# Exclude everything, then re-include only the file tailscale copies — so an
+# .env or a cache dropped in this directory is out by default rather than by
+# someone remembering to add it.
+# NOTE: every other service builds from a context inside its own plane - coder
+# spells it ../little-coder, portal ./config/watcher, search ./gateway, memory
+# ../../mnemory, each RELATIVE TO ITS OWN compose file and not to this one -
+# and this .dockerignore does NOT affect any of them. Nothing builds from the
+# repo root any more, so there is nothing left there for a root .dockerignore
+# to guard.
+*
+!entrypoint.sh

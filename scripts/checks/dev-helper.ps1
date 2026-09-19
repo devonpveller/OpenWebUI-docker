@@ -75,9 +75,9 @@ function Test-DockerCompose {
 }
 
 function Test-EntrypointShebang {
-    Write-ColorOutput "🔍 Checking entrypoint.sh shebang..." "Cyan"
+    Write-ColorOutput "🔍 Checking frontend\entrypoint.sh shebang..." "Cyan"
     
-    $EntrypointPath = Join-Path $PROJECT_DIR "entrypoint.sh"
+    $EntrypointPath = Join-Path $PROJECT_DIR "frontend\entrypoint.sh"
     if (Test-Path $EntrypointPath) {
         $FirstLine = Get-Content $EntrypointPath -First 1
         if ($FirstLine -eq "#!/bin/sh") {
@@ -89,7 +89,7 @@ function Test-EntrypointShebang {
             return $false
         }
     } else {
-        Write-ColorOutput "❌ entrypoint.sh not found" "Red"
+        Write-ColorOutput "❌ frontend\entrypoint.sh not found" "Red"
         return $false
     }
 }

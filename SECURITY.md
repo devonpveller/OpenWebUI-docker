@@ -86,12 +86,12 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 
 ## 3. Tailnet trust posture (plan §6.6 — Option C, accepted)
 
-**Open Notebook has no native authentication.** The existing tailnet path at `tailscale serve --https=8443 -> open_notebook:8502` (configured in [entrypoint.sh](entrypoint.sh)) means **anyone on the tailnet can reach Open Notebook unauthenticated.**
+**Open Notebook has no native authentication.** The existing tailnet path at `tailscale serve --https=8443 -> open_notebook:8502` (configured in [frontend/entrypoint.sh](frontend/entrypoint.sh)) means **anyone on the tailnet can reach Open Notebook unauthenticated.**
 
 **Decision (2026-05-28):** accept as-is. The implicit posture is that tailnet members are trusted equivalently to a single household user. Internet users still face full Authelia + Cloudflare Access gating; tailnet is the trusted-side bypass for the operator's own access.
 
 If this trust model changes (e.g., adding tailnet users you don't fully trust), revisit:
-- Option A: remove the Open Notebook tailnet serve from `entrypoint.sh`
+- Option A: remove the Open Notebook tailnet serve from `frontend/entrypoint.sh`
 - Option B: Tailscale ACL rule restricting which identities can hit port 8443
 
 ---

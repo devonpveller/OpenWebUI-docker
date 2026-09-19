@@ -39,7 +39,7 @@ skipped.
   (operator, dashboard) → validate + reload. Then re-accept the tripwire
   baseline (`docker exec integrity-tripwire sh /scripts/tripwire.sh accept`)
   or the next integrity check alerts on your own change.
-- **Tailnet**: add a row to the data-driven route table in `entrypoint.sh`
+- **Tailnet**: add a row to the data-driven route table in `frontend/entrypoint.sh`
   (name|enabled|host|port|ts_port|path|local_port|probe|attempts|verify) and
   rebuild/restart the tailscale container. Probe LiteLLM-fronted targets
   with `/health/liveliness`, never `/health` (thrash + 401).
