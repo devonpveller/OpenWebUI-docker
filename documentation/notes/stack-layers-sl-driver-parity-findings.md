@@ -308,7 +308,15 @@ The mechanical lesson, which is the reason this is in the sink and not just in a
 commit message: **a line citation is invalidated by editing the file it points
 into, including by your own change in the same branch.** Re-derive every citation
 in the note and the plan after any edit, rather than re-reading the ones that look
-suspicious. Doing that here also turned up a second defect the eye had passed over
+suspicious.
+
+**And re-run the sweep over the REPAIRS.** A fix is an edit like any other, so it
+invalidates citations exactly the way the original edit did - including the ones
+it just wrote. Attempt 6 swept before the repairs and after the new prose, never
+over the repaired lines themselves, and shipped a path that does not exist
+(F-T18). Bulk replacements across a path must also be ANCHORED: every citation
+ends with the same few characters, so an unanchored suffix match will prefix a
+line that was already correct. Doing that here also turned up a second defect the eye had passed over
 twice - the plan excused a `$Projects` hit in `coder-plane-findings.md:164` that
 does not exist (that file contains the string nowhere; line 164 says "the project
 registry's `Note` string" in prose), while two real hits went unlisted. Right
@@ -561,13 +569,18 @@ column resolves.
 | `inference/docker-compose.yml:34` (chat GGUF path) | same - and the line itself said that path was being replaced by `LM_MODELS_DIR` | `inference/compose/upstreams.yml:24, :54` |
 | `inference/docker-compose.yml:111,119` (embedding GGUF) | same | `inference/compose/upstreams.yml:145` |
 | `inference/docker-compose.yml:320-327` (llm-gateway-ui on app-net) | same | `inference/compose/gateway.yml:152, :161-163` |
-| `scheduled.yml:186` / `:190` / `:253` / `:254` / `:258` | **names no file** - it is `docker-compose.scheduled.yml`. A bare basename that does not exist resolves for a human reading the paragraph above it, and for nothing else | full paths |
+| `scheduled.yml:186` / `:258` / `:190` / `:254` - **four refs on three lines** (`274`, `278`, `290` at `ae915c3`) | **names no file** - it is `docker-compose.scheduled.yml`. A bare basename that does not exist resolves for a human reading the paragraph above it, and for nothing else | full paths |
 | `integrations/openbrain-idea-refinery/index.ts:268` | a path relative to the OB1 submodule root with no `OB1/` prefix; 26 files in this tree are named `index.ts` | `OB1/integrations/...` |
 
 Each replacement was verified by READING the line, not by counting: `:78-80` is
 `llm-net` / `external: true` / `name: ai-stack_llm-net`; `upstreams.yml:145` is
 `LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf`; `gateway.yml:152` is
 `llm-gateway-ui:`; `index.ts:268` is the `fetch(${RESEARCH_URL}/research)` call.
+
+**This table said FIVE bare `scheduled.yml` refs in its first version and there
+were four** - `:253` (line 283 at `ae915c3`) was already fully qualified. The
+invented fifth is not a harmless miscount: it is the entry whose repair then
+damaged a correct line. See F-T18.
 
 **The rule this makes concrete, and the second half is the one that keeps being
 missed:** a citation is invalidated by any edit to the file it points into -
@@ -595,3 +608,34 @@ their `memory/README.md` repoints at `:33`/`:151` and my three at
 `:126`/`:183`/`:186` (now `:127`/`:184`/`:192`). Recorded because "no conflict" is
 the easiest thing there is to mistake for "nothing to check", and this four-file
 overlap was flagged in advance precisely because it was real.
+
+## F-T18 - the fix for F27 broke a line F27 had no business touching
+
+`stack.manifest.toml:330` shipped in attempt 6 as
+
+```text
+# optional agent-org: OB1/docker/docker-compose.OB1/docker/docker-compose.scheduled.yml:253
+```
+
+a path that does not exist. The repair for F27 was a bulk suffix replacement -
+`s.replace("scheduled.yml:253", "OB1/docker/docker-compose.scheduled.yml:253")` -
+and `scheduled.yml:253` is a SUFFIX of the already-qualified
+`OB1/docker/docker-compose.scheduled.yml:253`, so the rewrite prefixed a line
+that was already correct. The enumeration that drove it claimed five bare refs
+where there were four, and the phantom fifth was exactly that line.
+
+Two rules, and the second is the one that would have caught it:
+
+1. **A bulk replacement across a path must be ANCHORED.** Match the whole
+   citation - a word boundary or a preceding non-path character - not a tail of
+   it. Every path citation ends with the same few characters by construction, so
+   an unanchored suffix match is a loaded gun in any file that mixes qualified
+   and unqualified forms. Which this one did, deliberately, which is why it was
+   being repaired.
+2. **A repair is an edit like any other, so re-run the check on its own output.**
+   The sweep ran before the fixes and reported 7 problems; it ran after and
+   reported the 8 labelled quotations. It never ran over the REPAIRED lines
+   asking whether they resolved - and it would have caught this instantly,
+   because that path does not exist. F16's rule now says so explicitly.
+
+The other six repairs were re-derived independently by the tester and stand.

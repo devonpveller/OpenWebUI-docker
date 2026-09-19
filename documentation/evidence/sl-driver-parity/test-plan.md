@@ -2,12 +2,18 @@
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
 **Branch:** `work/sl-driver-parity`, base `development` @ `ae915c3`
-**Attempt:** 6. Attempt 5 PASSED 12/12 and was released for review; a reviewer
-requeued it under D18 because `development` moved again, to `ae915c3`
-(`sl-colo-gateways`), before anyone claimed it. **Re-run every case.** The rebase
-itself was clean - see *Attempt 6* below for the four shared files and the
-expected values that moved. **T11** covers the `sl-ob1-profiles` seam, **T12**
-the `sl-frontend-solo` one; F-T14 is T12d and F-T15 is T9.
+**Attempt:** 7. Attempt 6 failed **T9 only** (11/12): the repair for finding F27
+shipped `stack.manifest.toml:330` as a path that does not exist, because an
+unanchored suffix replacement prefixed a line that was already correct. That is
+the FIRST thing to check in T9, and F-T18 records the rule. Everything else in
+attempt 6 passed, and the six other citation repairs were re-derived by the
+tester and stand.
+
+Attempt 6 itself was a rebase onto `ae915c3` (`sl-colo-gateways`) after a
+reviewer requeued attempt 5 (which passed 12/12) under D18. **Re-run every
+case.** *Attempt 6* below lists the four shared files and the expected values
+that moved. **T11** covers the `sl-ob1-profiles` seam, **T12** the
+`sl-frontend-solo` one; F-T14 is T12d, F-T15 and F-T18 are T9.
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-driver-parity`
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-driver-parity.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-driver-parity-findings.md`
@@ -631,20 +637,57 @@ HEAD** (attempt 4's F-T15: F2 and F7 cited `check-project-configs.ps1:67-96` and
 `:67-77` "(pre-change)", which is not a revision — the file has been rewritten
 twice since). Check each with `git show <blob>:<path> | sed -n '<n>p'`:
 
-| citation | blob | must be |
-|---|---|---|
-| `check-project-configs.ps1:67` / `:77` / `:96` | `9f64b84` | `$renderTargets = @(` / the `}` closing the conditional `open-brain` / the `}` closing the name loop |
-| `stack-watchdog.ps1:107` / `:145` / `:162` / `:170` | HEAD | `Get-RepairTargetMap` / the `service`-else-container fallback / `function Invoke-PlaneCompose` / the "Cannot repair" log |
-| `check-watchdog-repair-targets.ps1:214` | HEAD | `$svc = if ($row.service)`. **`:196` also appears in F16's text as the OLD value, quoted deliberately** |
+Each row gives the construct to **grep for**, so the check is "does this line
+still contain the thing the text says it does", not "does the file have that many
+lines". Run each as `git show <blob>:<path> | sed -n '<n>p'` and match the string.
 
-**Two places quote broken citations on purpose and label themselves as doing so:**
-F16 (`...:196`) and F27's left-hand column (the five `inference/docker-compose.yml`
-line numbers, `scheduled.yml:NNN`, and the unprefixed `index.ts:268`). A sweep
-will report those; they are quotations of what was wrong, not claims. Every other
-citation in this branch must resolve - 86 did on the developer's run.
+| citation | blob | grep for |
+|---|---|---|
+| `check-project-configs.ps1:67` / `:77` / `:96` | `9f64b84` | `$renderTargets = @(` / `}` closing the conditional `open-brain` / `}` closing the name loop |
+| `stack-watchdog.ps1:107` / `:145` / `:162` / `:170` | HEAD | `function Get-RepairTargetMap` / `$Service = if ($Row.service)` / `function Invoke-PlaneCompose` / `no compose project owns it` |
+| `check-watchdog-repair-targets.ps1:214` | HEAD | `$svc = if ($row.service)`. **`:196` also appears in F16's text as the OLD value, quoted deliberately** |
+| `inference/docker-compose.yml:78-80` / `:83-85` | HEAD | `name: ai-stack_llm-net` / `name: ai-stack_app-net` |
+| `inference/compose/upstreams.yml:24` / `:54` / `:100-106` / `:145` / `:152-158` | HEAD | `MODEL STORE: ${LM_MODELS_DIR}` / `${LM_MODELS_DIR:-../../data/models/gguf}:/models:ro` / `driver: nvidia` / `LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf` / the second `driver: nvidia` |
+| `inference/compose/gateway.yml:152` / `:161-163` | HEAD | `llm-gateway-ui:` / `- app-net` |
+| `OB1/docker/docker-compose.scheduled.yml:186` / `:190` / `:253` / `:254` / `:258` | HEAD | `CHAT_API_BASE:` / `FETCH_PROXY_URL:` / `MATTERMOST_URL:` / `MATTERMOST_TOKEN:` / `CHAT_API_BASE:` again (the scheduled slice sets it on two services; **neither of these two lines is `EMBEDDING_API_BASE`**, which the manifest's prose at `[planes.ob1]` names alongside it - that variable lives in `OB1/docker/docker-compose.yml`, not the scheduled file) |
+| `OB1/integrations/openbrain-idea-refinery/index.ts:268` / `:295` | HEAD | `fetch(\`${RESEARCH_URL}/research\`` / `/research/jobs/${jobId}` |
+
+**Three places quote broken citations on purpose and label themselves as doing so:**
+F16 (`...:196`); F27's left-hand column (the five `inference/docker-compose.yml`
+line numbers, the bare `scheduled.yml:NNN`, and the unprefixed `index.ts:268`);
+and F-T18, which quotes the `s.replace("scheduled.yml:253", ...)` call that broke
+a correct line. This plan quotes the same two in T9 and in *Attempt 6*. A sweep
+reports all of them; they are quotations of what was wrong, not claims.
+**Every other citation must resolve.** On the developer's final run: 122 matches,
+109 resolving, 13 inside those labelled quotations (the count grows whenever the
+prose ABOUT the quotations is edited, which is why it is stated as "every live
+citation resolves" and not as a target number to hit).
 | `test_stack.py:716` | `5133de9` | `assert sweep(FakeHost(serve_routes="9"), root)[0] == 0` |
 | `memory/README.md:126` / `:183` / `:186` | `be00d53` | the three `$Projects` / `stack-services.json` lines this branch repointed |
 | `llm-queue/src/llm_queue/__init__.py:9` | `9f64b84` | the 103-character docstring line (68 at `be00d53`) |
+
+**Attempt 6 shipped a path that does not exist.** Check this first:
+
+```bash
+sed -n '330p' stack.manifest.toml
+grep -rn 'docker-compose\.OB1/' . --exclude-dir=.git
+```
+
+**Pass:** line 330 reads
+`# optional agent-org: OB1/docker/docker-compose.scheduled.yml:253` — ONE prefix —
+and the grep finds nothing anywhere in the tree. `:253` must be
+`MATTERMOST_URL: ${IDEA_REFINERY_MM_URL:-…}`.
+**Fail:** a doubled prefix; any other path built by concatenating a prefix onto a
+path that already had one.
+
+That line was **correct at `ae915c3`** and was broken by the repair for F27: an
+unanchored `s.replace("scheduled.yml:253", "OB1/docker/…scheduled.yml:253")`
+matched the tail of the already-qualified path. F27's table had also claimed five
+bare `scheduled.yml` refs where there were four (`:253` was never bare), and the
+phantom fifth is exactly the line the repair damaged. Confirm the table now says
+four, on three lines (`274`, `278`, `290` at `ae915c3`), and that **F-T18** and
+F16 both carry the rule: a bulk replacement across a path must be anchored, and a
+repair is an edit like any other — re-run the sweep over its own output.
 
 **The four claims attempt 1 failed on — check these first, they are the case:**
 
@@ -1026,10 +1069,12 @@ each kept both intents:
 **And an inherited-citation sweep.** Every `path:line` in every file this branch
 touches was re-derived by CONSTRUCT, in the path form and the bare-basename form
 (`scheduled.yml:186` resolves to no file at all - the name is
-`docker-compose.scheduled.yml`). After the fixes, **every live citation in the
-branch resolves**: the sweep reports 104 matches, 98 resolving and 8 that are the
-labelled quotations above (F16's `:196` and F27's left-hand column). Before those
-fixes the count was 86 found / 79 resolving. Seven were broken
+`docker-compose.scheduled.yml`). **Every live citation in the branch resolves**:
+the final sweep reports 122 matches, 109 resolving and 13 inside the labelled
+quotations above. It was run THREE times - before the repairs (86 found, 79
+resolving, 7 broken), after them, and again after the attempt-7 fix, because the
+repairs are edits too and attempt 6 shipped a broken path by not doing the third
+run (F-T18). Seven were broken
 before this pass, every one inherited in `stack.manifest.toml`: five
 `inference/docker-compose.yml` citations pointing past the end of a file
 `sl-inference-split` left 91 lines long, and two unresolvable basenames. Spot-check

@@ -327,7 +327,7 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 # optional frontend: OB1/docker/docker-compose.yml:562 (openbrain-research
 #   OWUI_BASE_URL -> http://openwebui:8080) - research pushes results into OWUI;
 #   the rest of the fleet does not care.
-# optional agent-org: OB1/docker/docker-compose.OB1/docker/docker-compose.scheduled.yml:253
+# optional agent-org: OB1/docker/docker-compose.scheduled.yml:253
 #   (openbrain-idea-refinery MATTERMOST_URL defaults to
 #   http://host.docker.internal:8065) under the `idea-refinery` profile, which
 #   is `default = true` below. THE ONLY EDGE IN THIS MANIFEST THAT DOES NOT
