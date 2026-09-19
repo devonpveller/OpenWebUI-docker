@@ -1407,6 +1407,31 @@ def render_project(manifest: Manifest, root: Path, plane: str, capture) -> Rende
             is_pinned_submodule(root, compose_rel),
         )
 
+    # A plane whose GITIGNORED env file is absent cannot be rendered here, and
+    # that is not drift. agent-org's compose carries service-level `env_file:`
+    # entries, which `config` STATS - so on any machine without
+    # agent-org/docker/.env the render exits 1, the generator used to refuse, and
+    # the pre-commit hook then printed "INVENTORY DRIFT - regenerate with
+    # --write". Wrong twice over: nothing had drifted, and `--write` refuses the
+    # same way, so the remedy it named could not work.
+    #
+    # Degrade the way the coverage guard and the missing-python path already do -
+    # name the project and the file, skip its rows, print the gap, exit 0. A
+    # compose file that EXISTS and fails to render for any other reason is still
+    # a hard refusal: this exemption is one named, checkable condition.
+    # The REAL env path, not render_env_path's `.example`. The two differ on
+    # purpose (F28) and it is the real one that matters here: a service-level
+    # `env_file:` inside the compose names `.env` literally, and compose stats it
+    # whatever `--env-file` the CLI was given.
+    env_path = manifest.env_path(root, plane)
+    if not env_path.is_file():
+        return Render(
+            {}, [], False,
+            f"{rel(root, env_path)} is absent - gitignored, so this is expected off the deploy "
+            f"host, and {compose_rel} cannot be rendered without it",
+            is_pinned_submodule(root, compose_rel),
+        )
+
     base = ["docker", "compose", "-f", compose_rel,
             "--env-file", rel(root, render_env_path(manifest, root, plane))]
     listed = capture(base + ["config", "--profiles"], root)

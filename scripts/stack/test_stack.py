@@ -1888,3 +1888,56 @@ def test_a_bogus_service_on_a_declared_not_rendered_row_is_still_stale(mini_root
     # ...and the profile is still accepted as a declaration, not called stale
     assert "STALE `profile` for openbrain-wiki" not in out
     assert "declared, not rendered" in out
+
+
+# --------------------------------------------------------------------------
+# a gitignored env file that is absent is a GAP, not drift
+# --------------------------------------------------------------------------
+
+
+def test_a_missing_gitignored_env_is_a_printed_gap_not_a_refusal(mini_root):
+    """agent-org's compose carries service-level `env_file:` entries, which
+    `docker compose config` STATS whatever --env-file the CLI was given. On any
+    machine without agent-org/docker/.env the render exits 1; the generator used
+    to refuse, and the pre-commit hook then printed
+    "INVENTORY DRIFT - regenerate with --write" - wrong twice, because nothing
+    had drifted and `--write` refuses the same way, so the remedy it named could
+    not work. Degrade like the coverage guard: name the project and the file,
+    skip its rows, exit 0.
+    """
+    (mini_root / "agent-org" / "docker" / ".env").unlink()
+    curated_file(mini_root)
+    code, out, compose = inventory(mini_root, "--write")
+    assert code == 0, out
+    assert "NOT VERIFIED - agent-org: agent-org/docker/.env is absent" in out
+    assert "gitignored, so this is expected off the deploy host" in out
+    # and it never reached for docker at all on that project
+    assert not any("agent-org" in " ".join(c) for c in compose.calls)
+
+
+def test_the_rows_of_a_skipped_project_are_still_written_from_the_sidecar(mini_root):
+    """Skipping the RENDER must not drop the rows - the watchdog reads them."""
+    (mini_root / "agent-org" / "docker" / ".env").unlink()
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code == 0, out
+    written = {r["container"]: r for g in generated(mini_root)["planes"].values() for r in g}
+    assert written["mattermost"]["project"] == "agent-org"
+    assert written["ao-worker-1"]["profile"] == "workers"     # carried, unverified
+
+
+def test_a_compose_file_that_exists_and_will_not_render_is_still_a_refusal(mini_root):
+    """The exemption is ONE named condition, not a blanket retry."""
+    curated_file(mini_root)
+
+    class Broken(FakeCompose):
+        def __call__(self, cmd, cwd):
+            if cmd[cmd.index("-f") + 1] == "memory/docker-compose.yml":
+                return stack.CommandResult(
+                    1, "", "yaml: while parsing a flow node at line 146: did not find expected node content")
+            return super().__call__(cmd, cwd)
+
+    code, out, _c = inventory(mini_root, "--check", compose=Broken())
+    assert code != 0
+    assert "did not find expected node content" in out
+    assert "NOT VERIFIED" not in out

@@ -98,7 +98,12 @@ E501 Line too long (103 > 100)
 
 That citation is into the `9f64b84` blob, and only there
 (`git show 9f64b84:llm-queue/src/llm_queue/__init__.py | awk 'NR==9{print length($0)}'`
--> 103; the same line at `be00d53` is 68 characters).
+-> 103; the same line at `be00d53` is 68 characters). **The PATH is also only
+that blob's**: `sl-colo-inference` moved the package to
+`inference/llm-queue/src/llm_queue/__init__.py` on `3a373e2`, so resolving this
+citation against the working tree finds sixteen files named `__init__.py` and
+none of them the right one. A blob-pinned citation pins the path as well as the
+line.
 
 A docstring line carrying the `../documentation-plans-ai-stack/...` path the
 2026-09-18 plan-store move rewrote — the rewrite pushed it past `llm-queue`'s own
@@ -639,3 +644,65 @@ Two rules, and the second is the one that would have caught it:
    because that path does not exist. F16's rule now says so explicitly.
 
 The other six repairs were re-derived independently by the tester and stand.
+
+---
+
+## Added at the rebase onto `3a373e2` (sl-colo-inference merged)
+
+## F30 — `inventory --check` refused where it should have reported a gap, and the hook then named a remedy that could not work
+
+`agent-org/docker/docker-compose.yml` carries **service-level `env_file:`**
+entries, and `docker compose config` STATS those whatever `--env-file` the CLI
+was given. So on any machine without `agent-org/docker/.env` — which is
+gitignored, so every machine but the deploy host — the render exits 1, the
+generator raised a Refusal, and `check-project-configs.ps1` printed:
+
+```text
+[configs] INVENTORY DRIFT - regenerate with: python scripts\stack\stack.py inventory --write
+```
+
+**Wrong twice.** Nothing had drifted: the inventory was correct and unreadable,
+which is a different thing. And the remedy it named could not work — `--write`
+refuses by the same path, so the operator following that line gets the same
+error and no way forward.
+
+Fixed by degrading the way the two neighbouring checks already do: the coverage
+guard's `NOT VERIFIED: project '<p>' ... (<file> absent - gitignored, so this is
+expected off the deploy host)` and F13's missing-python line. The generator now
+names the project and the file, carries that project's rows through from the
+sidecar unverified, prints the gap and exits 0.
+
+**The exemption is ONE named, checkable condition** — the plane's real env file
+is absent — and nothing else. A compose file that exists and fails to render for
+any other reason is still a hard refusal, tested both ways. The guard reads
+`manifest.env_path()`, the REAL path, not `render_env_path()`'s `.example`: the
+two differ on purpose (F28) and it is the literal `.env` that a service-level
+`env_file:` names.
+
+The general shape is worth keeping, because this is the third time it has come
+up in this item: **"I cannot check this here" and "this is wrong" must not print
+the same way.** F13 said it for a missing tool, F19 for a pinned submodule, and
+this is the same distinction for a gitignored file. Only one of the three ever
+exits non-zero.
+
+## F31 — the inference citations moved again, and `git show` pins a PATH as well as a line
+
+`sl-colo-inference` added five lines to `inference/docker-compose.yml` (91 -> 96)
+and shifted `inference/compose/gateway.yml`, so the citations F27 repaired needed
+re-deriving a second time **[measured]**:
+
+| citation | was | now | construct |
+|---|---|---|---|
+| anchor networks | `:78-80, 83-85` | `:83-85, 88-90` | `name: ai-stack_llm-net` / `name: ai-stack_app-net` |
+| llm-gateway-ui | `gateway.yml:152` | `:153` | `llm-gateway-ui:` |
+| its networks | `:161-163` | `:162-164` | `networks:` / `- llm-net` / `- app-net` |
+
+`upstreams.yml:24, :54, :100-106, :145, :152-158` were untouched, and were
+re-derived anyway rather than assumed.
+
+That item also moved `llm-queue/` into the plane, which breaks F4's citation in a
+way worth naming: `llm-queue/src/llm_queue/__init__.py:9` is pinned to `9f64b84`
+and is correct **there**, but resolving it against today's tree finds sixteen
+files named `__init__.py` and not that one. **A blob-pinned citation pins the
+path as well as the line** — read it with `git show <blob>:<path>`, never by
+opening the working tree. Said now in F4 and in the plan's citation table.

@@ -1,8 +1,13 @@
 # sl-driver-parity — test plan
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
-**Branch:** `work/sl-driver-parity`, base `development` @ `ae915c3`
-**Attempt:** 7. Attempt 6 failed **T9 only** (11/12): the repair for finding F27
+**Branch:** `work/sl-driver-parity`, base `development` @ `3a373e2`
+**Attempt:** 8. Attempt 7 PASSED and the reviewer's verdict was FITS; it was
+requeued under D18 because `development` moved to `3a373e2`
+(`sl-colo-inference`). **Re-run every case** - see *Attempt 8* below for what
+moved and for the one class-2 defect fixed in this pass (T13).
+
+Attempt 7 in turn fixed **T9 only** (11/12 at attempt 6): the repair for finding F27
 shipped `stack.manifest.toml:330` as a path that does not exist, because an
 unanchored suffix replacement prefixed a line that was already correct. That is
 the FIRST thing to check in T9, and F-T18 records the rule. Everything else in
@@ -646,25 +651,30 @@ lines". Run each as `git show <blob>:<path> | sed -n '<n>p'` and match the strin
 | `check-project-configs.ps1:67` / `:77` / `:96` | `9f64b84` | `$renderTargets = @(` / `}` closing the conditional `open-brain` / `}` closing the name loop |
 | `stack-watchdog.ps1:107` / `:145` / `:162` / `:170` | HEAD | `function Get-RepairTargetMap` / `$Service = if ($Row.service)` / `function Invoke-PlaneCompose` / `no compose project owns it` |
 | `check-watchdog-repair-targets.ps1:214` | HEAD | `$svc = if ($row.service)`. **`:196` also appears in F16's text as the OLD value, quoted deliberately** |
-| `inference/docker-compose.yml:78-80` / `:83-85` | HEAD | `name: ai-stack_llm-net` / `name: ai-stack_app-net` |
+| `inference/docker-compose.yml:83-85` / `:88-90` | HEAD | `name: ai-stack_llm-net` / `name: ai-stack_app-net` |
 | `inference/compose/upstreams.yml:24` / `:54` / `:100-106` / `:145` / `:152-158` | HEAD | `MODEL STORE: ${LM_MODELS_DIR}` / `${LM_MODELS_DIR:-../../data/models/gguf}:/models:ro` / `driver: nvidia` / `LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf` / the second `driver: nvidia` |
-| `inference/compose/gateway.yml:152` / `:161-163` | HEAD | `llm-gateway-ui:` / `- app-net` |
+| `inference/compose/gateway.yml:153` / `:162-164` | HEAD | `llm-gateway-ui:` / the `networks:` key then `- llm-net`, `- app-net` |
 | `OB1/docker/docker-compose.scheduled.yml:186` / `:190` / `:253` / `:254` / `:258` | HEAD | `CHAT_API_BASE:` / `FETCH_PROXY_URL:` / `MATTERMOST_URL:` / `MATTERMOST_TOKEN:` / `CHAT_API_BASE:` again (the scheduled slice sets it on two services; **neither of these two lines is `EMBEDDING_API_BASE`**, which the manifest's prose at `[planes.ob1]` names alongside it - that variable lives in `OB1/docker/docker-compose.yml`, not the scheduled file) |
 | `OB1/integrations/openbrain-idea-refinery/index.ts:268` / `:295` | HEAD | `fetch(\`${RESEARCH_URL}/research\`` / `/research/jobs/${jobId}` |
 
-**Three places quote broken citations on purpose and label themselves as doing so:**
-F16 (`...:196`); F27's left-hand column (the five `inference/docker-compose.yml`
-line numbers, the bare `scheduled.yml:NNN`, and the unprefixed `index.ts:268`);
-and F-T18, which quotes the `s.replace("scheduled.yml:253", ...)` call that broke
-a correct line. This plan quotes the same two in T9 and in *Attempt 6*. A sweep
-reports all of them; they are quotations of what was wrong, not claims.
-**Every other citation must resolve.** On the developer's final run: 122 matches,
-109 resolving, 13 inside those labelled quotations (the count grows whenever the
-prose ABOUT the quotations is edited, which is why it is stated as "every live
-citation resolves" and not as a target number to hit).
+**A sweep over this branch reports some citations that do not resolve, and every
+one of them is deliberate.** Two kinds, both labelled where they appear:
+
+* **quotations of what was wrong** - F16's old `:196`, F27's left-hand column,
+  and F-T18's quoted `s.replace(...)` call that broke a correct line. This plan
+  quotes the last two again, in T9 and in *Attempt 6*.
+* **blob-pinned citations whose PATH also belongs to that blob** - F4's
+  `llm-queue` line, whose package `sl-colo-inference` moved into the inference
+  plane on `3a373e2`. Read those with `git show <blob>:<path>`; opening the
+  working tree finds the wrong file or none.
+
+**Every other citation must resolve.** On the developer's final run: 123
+matches, 109 resolving, 14 in those two categories. The count moves whenever the
+prose ABOUT them is edited, which is why the criterion is "every live citation
+resolves" and not a number to hit.
 | `test_stack.py:716` | `5133de9` | `assert sweep(FakeHost(serve_routes="9"), root)[0] == 0` |
 | `memory/README.md:126` / `:183` / `:186` | `be00d53` | the three `$Projects` / `stack-services.json` lines this branch repointed |
-| `llm-queue/src/llm_queue/__init__.py:9` | `9f64b84` | the 103-character docstring line (68 at `be00d53`) |
+| `llm-queue/src/llm_queue/__init__.py:9` | `9f64b84` | the 103-character docstring line (68 at `be00d53`). **The path is the one that existed at those blobs**; `sl-colo-inference` moved it to `inference/llm-queue/...` on `3a373e2`, so resolve it with `git show`, not against the working tree |
 
 **Attempt 6 shipped a path that does not exist.** Check this first:
 
@@ -1070,8 +1080,8 @@ each kept both intents:
 touches was re-derived by CONSTRUCT, in the path form and the bare-basename form
 (`scheduled.yml:186` resolves to no file at all - the name is
 `docker-compose.scheduled.yml`). **Every live citation in the branch resolves**:
-the final sweep reports 122 matches, 109 resolving and 13 inside the labelled
-quotations above. It was run THREE times - before the repairs (86 found, 79
+the final sweep reports 123 matches, 109 resolving and 14 inside the labelled
+categories above. It was run THREE times - before the repairs (86 found, 79
 resolving, 7 broken), after them, and again after the attempt-7 fix, because the
 repairs are edits too and attempt 6 shipped a broken path by not doing the third
 run (F-T18). Seven were broken
@@ -1082,6 +1092,90 @@ the re-derived ones - `inference/docker-compose.yml:78-80` is
 `name: ai-stack_llm-net`, `inference/compose/upstreams.yml:145` is
 `LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf`, `inference/compose/gateway.yml:152` is
 `llm-gateway-ui:` - and treat any citation that does not resolve as a defect.
+
+---
+
+---
+
+## Attempt 8 - what the `3a373e2` rebase touched
+
+`sl-colo-inference` moved the inference plane's own source and config inside it:
+`llm-queue/` -> `inference/llm-queue/`, `config/*` -> `inference/config/*`, and
+`config/` is gone. One conflict, in `stack.manifest.toml`'s frontend profile
+tables; everything else merged cleanly and was checked by hand.
+
+| file | theirs | mine | result |
+|---|---|---|---|
+| `stack.manifest.toml` | frontend citations renumbered for a 484-line file (`:257-263`, `:290`, ...) | the `opt_in` flags and `tailscale requires = ["gpu"]` | **CONFLICT**, resolved: their renumbered descriptions verbatim, my flags and the `requires` edge, and the edge's own comment repointed to their `:290` |
+| `.github/workflows/ci.yml` | `pytest-llm-queue` -> `./inference/llm-queue[dev]` and `inference/llm-queue/tests` | the `stack-driver` job | all THREE jobs present; T7 runs all three |
+| `README.md` | the repo-map row drops `llm-queue/` | the shim pointer at `:69-70` | both present |
+| `.env.example`, `workspace-stacks.md` | inference repoints | untouched by this branch | theirs, unchanged |
+
+**Expected values that moved:**
+
+* **T7** - `ci.yml` now has three recently-changed jobs. Run all three locally:
+  `pytest-llm-queue` at its NEW path (`./inference/llm-queue[dev]`),
+  `pytest-search-gateway`, and `stack-driver`.
+* **T9** - the inference citations this branch repaired moved a second time,
+  because that item added five lines to `inference/docker-compose.yml` (91 ->
+  96) and shifted `inference/compose/gateway.yml`. The citation table has the new
+  values; re-derive them by construct, do not trust the table. Finding F31.
+* **T3/T12e** - the inventory is unchanged by the move (the generator derives
+  from container names, and none changed), but `inventory --check` must still be
+  green and the `llm-queue` build context is now `../llm-queue` relative to
+  `inference/compose/queue.yml`.
+
+---
+
+## T13 - "I cannot check this here" must not print like "this is wrong"
+
+*New for attempt 8. Read-only.*
+
+`agent-org/docker/docker-compose.yml` carries service-level `env_file:` entries,
+which `docker compose config` STATS whatever `--env-file` the CLI passes. So on
+any machine without `agent-org/docker/.env` - gitignored, so every machine but
+the deploy host - the render exits 1. `inventory --check` used to raise, and the
+pre-commit hook then printed
+`INVENTORY DRIFT - regenerate with: ... inventory --write`: wrong twice, because
+nothing had drifted and `--write` refuses by the same path, so the remedy it
+named could not work.
+
+Reproduce the old shape and confirm the new one, in a scratch copy:
+
+```bash
+COPY="$SL/noenv"; rm -rf "$COPY"; mkdir -p "$COPY"
+git ls-files -z | xargs -0 -n 200 cp --parents -t "$COPY"
+cp "$COPY/.env.example" "$COPY/.env"          # root .env only - NOT agent-org's
+cd "$COPY" && python scripts/stack/stack.py inventory --check ; echo "exit=$?"
+```
+
+**Pass:** exit **0**, with a line naming the project AND the file -
+`[ -- ] NOT VERIFIED - agent-org: agent-org/docker/.env is absent - gitignored,
+so this is expected off the deploy host` - and the `[OK]` line after it. Confirm
+with `python -c "import json; ..."` that agent-org's sixteen rows are still in
+the generated file: skipping the RENDER must not drop the ROWS, because the
+watchdog routes repairs through them.
+**Fail:** a non-zero exit; a bare refusal with no project named; agent-org's rows
+missing from the output.
+
+Then confirm the exemption is one condition and not a blanket retry:
+
+```bash
+printf '\n  bogus: {{{\n' >> "$COPY/memory/docker-compose.yml"
+cd "$COPY" && python scripts/stack/stack.py inventory --check ; echo "exit=$?"
+```
+
+**Pass:** exit **non-zero**, naming the YAML error. A compose file that EXISTS
+and will not render is still a hard refusal.
+**Fail:** exit 0; a `NOT VERIFIED` line for `memory`.
+
+```bash
+python -m pytest scripts/stack -q -k "gitignored_env or skipped_project or exists_and_will_not_render"
+```
+
+**Pass:** three green. Finding F30 has the reasoning; the shape it belongs to -
+F13 (missing tool), F19 (pinned submodule), F30 (gitignored file) - is that only
+one of the three kinds of "cannot check" ever exits non-zero.
 
 ---
 

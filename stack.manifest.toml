@@ -115,7 +115,7 @@ keys     = []
 # The LLM front door. llm-gateway (LiteLLM) carries the `llama-cpp` /
 # `llama-cpp-embed` aliases on ai-stack_llm-net; the real servers sit on the
 # project's native llm-backend-net so callers cannot route around it.
-# requires anchor: inference/docker-compose.yml:78-80, 83-85 (ai-stack_llm-net
+# requires anchor: inference/docker-compose.yml:83-85, 88-90 (ai-stack_llm-net
 # and ai-stack_app-net, both external: true). Re-derived 2026-09-19: these read
 # :448-450, 453-455 until sl-driver-parity's citation sweep - sl-inference-split
 # moved the services into inference/compose/*.yml and left that file 91 lines
@@ -497,8 +497,8 @@ opt_in      = true
 #   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
 #   while the rest of the portal serves.
 # optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
-#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:152,
-#   networks at :161-163).
+#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:153,
+#   networks at :162-164).
 compose  = "portal/docker-compose.yml"
 env_file = ".env"
 lease    = "portal"
