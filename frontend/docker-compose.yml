@@ -27,15 +27,38 @@
 # verified) — which is what lets `--profile gpu --profile tailscale` render this
 # host's deployment from a .env.example that says `stock`.
 #
-# WITHOUT THAT LINE IN .env, TWO THINGS GO QUIET (both verified 2026-09-19):
-#   `up -d`  starts openwebui-backup and NOTHING ELSE;
-#   `down`   removes openwebui-backup and LEAVES openwebui and tailscale
-#            running — compose only tears down services whose profile is
-#            active, so a "clean" teardown is not one.
-# Naming a service explicitly still works past an inactive profile
-# (`... up -d tailscale`, `... build openwebui`), which is why the watchdog's
-# per-service repair paths survive a missing line; the whole-project verbs do
-# not.
+# THAT LINE IS REQUIRED, NOT ADVISORY. Without it, every lifecycle and repair
+# path for this plane is broken — measured against this file, 2026-09-19:
+#   `up -d`            starts openwebui-backup and NOTHING ELSE;
+#   `down`             removes openwebui-backup and LEAVES openwebui and
+#                      tailscale running (compose only tears down services
+#                      whose profile is active), so a "clean" teardown is not;
+#   `... tailscale`    ANY verb naming tailscale — `up -d tailscale`,
+#                      `stop`/`start`/`restart`/`rm`/`ps`/`config`, and
+#                      `up -d --force-recreate --no-deps tailscale` — exits 1
+#                      with `no such service: openwebui`. Naming a service
+#                      activates ONLY that service's own profile, so
+#                      `network_mode: service:openwebui` and
+#                      `depends_on: openwebui` point at a service the project
+#                      does not contain, and compose refuses to LOAD it.
+#                      `--no-deps` does not help: the reference is resolved at
+#                      project load, before deps are considered.
+#   `... openwebui`    survives, alone among them, because the gpu definition
+#                      names nothing outside its own profile — so
+#                      `restart openwebui` and `build --no-cache openwebui`
+#                      still work.
+# That means `scripts/checks/stack-watchdog.ps1`'s seven tailscale repair calls
+# (and the two advice strings that print the same commands),
+# `scripts/recovery/emergency-recovery.ps1` (both its whole-project verbs and
+# its `restart tailscale`) and `backup/openwebui-restore.sh`'s
+# documented `stop tailscale openwebui` all exit 1 until the line is in .env —
+# silently, since the watchdog pipes them to Out-Null. The repo's own
+# `scripts/checks/check-watchdog-repair-targets.ps1` reports exactly this
+# (`tailscale` / `tailscale-backup` NOT DECLARED) and is the check to run after
+# editing .env. `scripts/backup/restore-from-snapshot.ps1` is the one caller
+# that does NOT depend on the line: its frontend and tailscale entries pass
+# `--profile gpu --profile tailscale` themselves, as the portal and agent-org
+# entries there already did.
 #
 # WHY TWO openwebui SERVICE DEFINITIONS, AND NOT ONE WITH ENV-DRIVEN GPU BITS.
 # Compose can gate a SERVICE on a profile; it cannot gate a FIELD. Interpolation
@@ -376,10 +399,14 @@ services:
       - BACKUP_DIR=/backups
       - PREFIX=tailscale
       - RETAIN_COUNT=${TAILSCALE_BACKUP_RETAIN_COUNT:-2}
-      # tailscale-backup has no network attachment (the bind mount is the
-      # only source). HEALTH_TCP intentionally empty -- dir-nonempty is the
-      # only precheck. Set HEALTH_TCP=tailscale:41641 etc if you wire it
-      # onto a shared network later.
+      # tailscale-backup needs no network: the bind mount is its only source.
+      # It still GETS one — declaring no `networks:` key means compose attaches
+      # it to the project default, which here is the external ai-stack_default
+      # (true of development's render as well; the comment used to claim "no
+      # network attachment", which the render has never agreed with).
+      # HEALTH_TCP intentionally empty -- dir-nonempty is the only precheck.
+      # Set HEALTH_TCP=tailscale:41641 etc if you wire it onto a shared
+      # network later.
       - HEALTH_TCP=
       # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
       - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily

@@ -286,7 +286,14 @@ function Test-TailscaleDeployed {
         # cmd /c so compose's stderr warnings cannot become PS 5.1
         # NativeCommandErrors under this script's EAP=Stop.
         $svc = (cmd /c "docker compose -f frontend\docker-compose.yml --env-file .env config --services 2>nul") -join "`n"
-        if ($svc -and ($svc -notmatch '(?m)^tailscale\s*$')) {
+        if (-not $svc) {
+            # A render ERROR is not an answer, and must never pass for one. The
+            # trigger is real: the compose file carries a fail-loud
+            # WEBUI_SECRET_KEY guard, so a .env that is missing or lacks that
+            # key renders NOTHING. Say so, and check as usual.
+            Write-LogEntry "The frontend plane rendered NOTHING (docker down, or .env missing/incomplete - the compose file's WEBUI_SECRET_KEY guard hard-fails the render) - cannot tell whether tailscale is deployed, so treating it as DEPLOYED and keeping the tailnet checks ON" "WARN"
+        }
+        elseif ($svc -notmatch '(?m)^tailscale\s*$') {
             # Substring filter + an exact-match pass: `--filter name=^tailscale$`
             # cannot survive cmd /c (cmd eats the `^`, so stt-tts-tailscale
             # matches too - verified 2026-09-19).

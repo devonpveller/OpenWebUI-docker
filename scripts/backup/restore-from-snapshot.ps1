@@ -99,7 +99,16 @@ $catalog = [ordered]@{
     Stop    = @('tailscale','openwebui')
     Start   = @('openwebui','tailscale')
     Compose = 'frontend\docker-compose.yml'
-    ComposeArgs = @('--env-file','.env')
+    # The frontend plane is PROFILE-GATED (2026-09-19). Passing the profiles
+    # here, as the portal ('internet') and agent-org ('workers') entries do,
+    # makes a restore independent of whether .env carries COMPOSE_PROFILES:
+    # without them `stop tailscale` / `start tailscale` exit 1 with `no such
+    # service: openwebui` - naming tailscale activates only ITS profile, and
+    # its network_mode/depends_on name the gpu-profiled openwebui - so the
+    # restore would log progress while restoring nothing. This catalog
+    # describes THIS host's deployment; a `stock` host would carry
+    # `--profile stock` and name `openwebui-stock` here.
+    ComposeArgs = @('--env-file','.env','--profile','gpu','--profile','tailscale')
   }
   'mnemory' = @{
     Archives = @(@{ Pattern = "mnemory-*.tar.gz"; Target = 'memory_mnemory-data'; Type = 'volume-tar' })
@@ -136,7 +145,10 @@ $catalog = [ordered]@{
     Stop    = @('tailscale')
     Start   = @('tailscale')
     Compose = 'frontend\docker-compose.yml'
-    ComposeArgs = @('--env-file','.env')
+    # Profiles for the same reason as the 'openwebui' entry above: any verb
+    # naming `tailscale` needs the gpu profile active too, or compose refuses
+    # to load the project at all.
+    ComposeArgs = @('--env-file','.env','--profile','gpu','--profile','tailscale')
   }
   'openbrain-wiki' = @{
     Archives = @(@{ Pattern = "openbrain-wiki-*.tar.gz"; Target = 'open-brain_openbrain-wiki-data'; Type = 'volume-tar' })

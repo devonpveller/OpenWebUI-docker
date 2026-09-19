@@ -170,7 +170,13 @@ switch ($Action) {
             # cmd /c so compose's stderr warnings cannot become PS 5.1
             # NativeCommandErrors under this script's EAP=Stop.
             $feSvc = (cmd /c "docker compose -f frontend\docker-compose.yml --env-file .env config --services 2>nul") -join "`n"
-            if ($feSvc -and ($feSvc -notmatch '(?m)^tailscale\s*$')) {
+            if (-not $feSvc) {
+                # A render ERROR is not an answer. The compose file's fail-loud
+                # WEBUI_SECRET_KEY guard makes an incomplete .env render
+                # NOTHING, so this is a real trigger, not a theoretical one.
+                $tsNote = 'the frontend plane rendered NOTHING (docker down, or .env missing/incomplete) - cannot tell whether tailscale is deployed, so probing it anyway'
+            }
+            elseif ($feSvc -notmatch '(?m)^tailscale\s*$') {
                 # Substring filter + an exact-match pass: `--filter name=^tailscale$`
                 # cannot survive cmd /c (cmd eats the `^`, so the anchor is lost
                 # and stt-tts-tailscale matches too - verified 2026-09-19).

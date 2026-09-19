@@ -117,13 +117,23 @@ Run with: `docker compose ...` from the workspace root.
 differently depending on `COMPOSE_PROFILES`, and **the operator's deployment is
 not the default** — `.env` must carry `COMPOSE_PROFILES=gpu,tailscale` or
 `docker compose -f frontend/docker-compose.yml --env-file .env up -d` starts
-`openwebui-backup` and nothing else — **and `... down` leaves `openwebui` and
-`tailscale` running**, because compose only tears down services whose profile
-is active. Naming a service explicitly (`up -d tailscale`, `build openwebui`)
-still works past an inactive profile, which is why the watchdog's per-service
-repairs survive a missing line and the whole-project verbs do not. A
-`--profile` flag on the command line REPLACES `COMPOSE_PROFILES` rather than
-adding to it.
+`openwebui-backup` and nothing else; `... down` leaves `openwebui` and
+`tailscale` running (compose only tears down services whose profile is active);
+and **every verb that names `tailscale` — `up -d`, `stop`, `start`, `restart`,
+`rm`, `ps`, `config`, and `up -d --force-recreate --no-deps tailscale` — exits
+1 with `no such service: openwebui`.** Naming a service activates only that
+service's own profile, so `network_mode: service:openwebui` and `depends_on:
+openwebui` point outside the project and compose refuses to load it; `--no-deps`
+does not help, because the reference resolves at project load. `openwebui` is
+the one exception (`restart openwebui`, `build --no-cache openwebui` work) —
+the gpu definition names nothing outside its own profile. So the line is
+required for the watchdog's nine tailscale repairs and for
+`emergency-recovery.ps1`; `scripts/backup/restore-from-snapshot.ps1` is
+independent of it, because its frontend and tailscale entries pass
+`--profile gpu --profile tailscale` themselves.
+`scripts/checks/check-watchdog-repair-targets.ps1` is the check that tells you
+whether this host's `.env` is right. A `--profile` flag on the command line
+REPLACES `COMPOSE_PROFILES` rather than adding to it.
 
 | Profile | Services | For |
 |---------|----------|-----|

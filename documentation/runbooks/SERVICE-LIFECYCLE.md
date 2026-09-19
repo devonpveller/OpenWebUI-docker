@@ -88,6 +88,26 @@ nothing. So, in the same commit:
   renders with the project's own `env_file`, so it only resolves gated services
   on a host whose `.env` sets them — which is the right answer there: if the
   watchdog cannot start a container it claims to repair, that IS a failure.
+  **Run it after editing a host's `.env`; it is the check that says whether the
+  profile set is right.**
+- **Naming a service on the command line does NOT reliably get you past an
+  inactive profile.** It activates only THAT service's own profile. If the
+  service you name references another one — `depends_on`, `network_mode:
+  service:x`, `volumes_from`, `links` — and that one is behind a different
+  profile, compose refuses to load the project at all and every verb exits 1
+  with `no such service: x`. `--no-deps` does not help: the reference resolves
+  at project load, before dependencies are considered. Measured on
+  `frontend` 2026-09-19: `config|ps|up|stop|start|restart|rm tailscale` all
+  exit 1 without `COMPOSE_PROFILES`, while the same verbs on `openwebui`
+  succeed, because the gpu definition names nothing outside its own profile.
+  So **a repair path that names a cross-referencing service needs the profile
+  set present**, either in the host's `.env` or passed by the caller —
+  `scripts/backup/restore-from-snapshot.ps1` does the latter for every profiled
+  plane it drives (`internet`, `workers`, and now `gpu`+`tailscale`), because
+  its catalog describes one host's deployment by design. A generic driver
+  should NOT hard-code profiles — on `frontend` that would start a CUDA build
+  and reserve a GPU on a `stock` host — it should CHECK and say so;
+  `emergency-recovery.ps1`'s `Confirm-FrontendProfiles` is that shape.
 - **Every OBSERVER needs a guard, and it must fail OPEN.** A probe or repair
   aimed at a service the deployment does not have must SKIP and say so, never
   FAIL and never repair. Decide from the rendered project
