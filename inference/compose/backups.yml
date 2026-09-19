@@ -25,7 +25,9 @@
 # readability trap, not an error. Keep them identical.
 # THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
 # REPLACES the anchored list, it does NOT append to it - a service needing a
-# second `security_opt` entry spells out the WHOLE list in its own key. Hardening under a\n# DIFFERENT key (lm-models-backup's cap_drop) is just that key, after the merge.
+# second `security_opt` entry spells out the WHOLE list in its own key.
+# Hardening under a DIFFERENT key (lm-models-backup's cap_drop) is just that
+# key, written after the merge.
 
 x-hardening: &hardening
   security_opt:

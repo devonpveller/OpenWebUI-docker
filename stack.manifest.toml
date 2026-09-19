@@ -140,7 +140,7 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 "8082" = "llama-cpp-embed-upstream (loopback; probes only)"
 
 # NOT `pending`: sl-inference-split landed it. `profiles: [local]` is live in
-# inference/compose/upstreams.yml:63,:151, queue.yml:64 and backups.yml:69, and
+# inference/compose/upstreams.yml:63,:151, queue.yml:64 and backups.yml:71, and
 # the render proves it (4 services without the profile, 8 with). Flipped here by
 # sl-frontend-solo, which is making this file's profile rows truthful as a set -
 # it is inference's row, corrected in the same pass as the frontend's.

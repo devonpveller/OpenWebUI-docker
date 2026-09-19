@@ -24,8 +24,8 @@
 # REPLACES the anchored list, it does NOT append to it - so a service needing an
 # extra `security_opt` entry must spell out the WHOLE list (the anchor's entry
 # included) in its own key. Extra hardening under a DIFFERENT key (cap_drop,
-# cap_add, read_only, tmpfs) is just that key (vpn's cap_add, searxng's cap_drop/cap_add). No service in this file
-# overrides an anchored key.
+# cap_add, read_only, tmpfs) is just that key - vpn's cap_add, and searxng's
+# cap_drop plus cap_add. No service in this file overrides an anchored key.
 name: search
 
 x-hardening: &hardening
