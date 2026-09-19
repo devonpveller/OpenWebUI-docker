@@ -6,6 +6,9 @@ shared `config/` inference files into `inference/`, delete `config/`.
 (branch `work/sl-colo-inference`). **Revised 2026-09-19 after test attempt 1 passed**
 (tester `wt-tester-colo-inf`, 12/12, plan judged inadequate): rebased from base `9f64b84`
 onto `be00d53`, F2 corrected, F11/F12 updated for the rebase, **F13 and F14 added**.
+**Revised again after attempt 2 FAILED** on T9 and T13c, both caught by this item's own
+cases: **F14's classification of repair paths was wrong** (corrected in place, see the
+admonition inside it) and **F15 added** for the stale pointer the rebase carried in.
 
 > ### Read F14 first if you are about to merge this.
 > Every other entry here is context for a later reader. **F14 is an action with a
@@ -374,48 +377,100 @@ running container's `HostConfig`** — those six binds stay recorded on the exis
 container objects, now pointing at absent sources. So what happens next depends entirely on
 *how* the container is next brought up:
 
-- **DANGEROUS — anything that starts the EXISTING container object.** A bare
-  `docker restart llm-gateway` or `docker start`, and — the one nobody schedules — the
-  automatic `restart: unless-stopped` after a Docker Desktop restart or a host reboot.
-  These reuse the recorded bind spec. [not verifiable here] Docker's documented behaviour
-  for a bind whose source does not exist is to **create an empty directory** at it; that
-  would hand LiteLLM and llama-swap a *directory* where each expects a config **file**, and
-  the failure surfaces as a config-parse error rather than as a missing mount. I did not
-  reproduce this, because reproducing it means starting a container, which this item must
-  not do. What IS certain from `docker inspect` is the first half: the source vanishes and
-  the recorded spec is not updated.
+- **DANGEROUS — anything that starts the EXISTING container object**, because it reuses the
+  recorded bind spec. That is a bare `docker restart` / `docker start`, **`docker compose
+  restart`** (which restarts the existing container and does NOT re-render the compose
+  file), and — the one nobody schedules — the automatic `restart: unless-stopped` after a
+  Docker Desktop restart or a host reboot.
+  [not verifiable here] Docker's documented behaviour for a bind whose source does not
+  exist is to **create an empty directory** at it. For the five FILE binds that hands
+  LiteLLM and llama-swap a *directory* where each expects a config file, and the failure
+  surfaces as a config-parse error rather than as a missing mount. I did not reproduce it,
+  because reproducing it means starting a container, which this item must not do. What IS
+  certain from `docker inspect` is the first half: the source vanishes and the recorded
+  spec is not updated. **`openwebui` is the exception** — its bind is the whole `config/`
+  *directory*, so an empty directory is exactly what it would get, and nothing reads
+  `/app/config` anyway (F2). Of the six binds, five are hazardous and one is inert.
 - **SAFE — compose `up -d`, because it re-renders the *new* file and RECREATES the
-  container with corrected sources.** Both automatic repair paths use exactly that, so
-  they self-heal rather than break: [source] `scripts/checks/stack-watchdog.ps1:640`
+  container with corrected sources.** [source] `scripts/checks/stack-watchdog.ps1:640`
   repairs any unhealthy container via `Invoke-PlaneCompose -Container $Container -Action
   @('up','-d')`, which builds `docker compose <plane args> up -d <service>`
-  (`stack-watchdog.ps1:174,179`); `scripts/recovery/emergency-recovery.ps1:600` runs
-  `docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway`,
+  (`stack-watchdog.ps1:174,179`); `emergency-recovery.ps1:600` runs
+  `docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway`;
   and `Start-InferenceStack` (`:221-228`, called at `:802`, `:960`, `:1023`) runs the same
   command for the whole plane.
-- **NOT a repair — compose `restart`.** `docker compose restart` restarts the EXISTING
-  container without re-rendering it, so it is in the dangerous group, not the safe one.
-  `stack-watchdog.ps1:747` uses it — but only for `llama-cpp-embed-upstream`, which
-  [observed] binds **nothing** under `config/`, so that call site is harmless here. The
-  distinction matters more than the call site: "it goes through compose" is not the
-  property that saves you; "it recreates the container" is.
 
-**So the realistic failure is a reboot, or a hand `docker restart`, in the window between
-the merge and the first compose recreate** — bounded, self-healing a watchdog cycle later,
-and entirely avoidable.
+> ### The recovery script's FIRST move is in the dangerous group. Corrected 2026-09-19.
+>
+> An earlier version of this entry put `compose restart` in the dangerous group but named
+> `stack-watchdog.ps1:747` as its only call site and called that harmless (it targets only
+> `llama-cpp-embed-upstream`, which [observed] binds nothing under `config/` — still true).
+> **It missed the call sites that matter**, found by the tester running this item's own
+> T13c as written. In `scripts/recovery/emergency-recovery.ps1`, `Invoke-MinimalRecovery`
+> (`:560`) does:
+>
+> ```
+> :578   docker compose -f $InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
+> :580   docker compose -f $FrontendCompose  --env-file .env restart openwebui
+> :587   docker compose -f $FrontendCompose  --env-file .env restart tailscale
+> ```
+>
+> `llama-cpp-upstream` and `openwebui` are both in the table above. And this is not a
+> peripheral branch: `Invoke-MinimalRecovery` is **the first thing both recovery modes
+> try** — `recover` at `:727` and `nuclear` at `:905`, each gated only on
+> `Test-BasicConnectivity`. The healing `up -d` at `:600` is 22 lines later in the same
+> function and covers **only `llm-queue` and `llm-gateway`** — never `llama-cpp-upstream`.
+> So in the window between the merge and the first recreate, `emergency-recovery.ps1
+> recover` is itself a way to break the inference plane.
+>
+> **Read to the end of the function before deciding how bad that is.**
+> `Invoke-MinimalRecovery` finishes by calling `Test-BasicConnectivity` again (`:620`),
+> which at `:519` execs a real health probe into `llama-cpp-upstream`
+> (`docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health`). A broken
+> upstream therefore makes minimal recovery return `$false`, the caller falls through to
+> full (or nuclear) recovery, and *that* path's `Start-InferenceStack` does `up -d` for the
+> whole plane and repairs it. **So the script does not leave the plane wedged and does not
+> report a false success** — but it breaks the upstream first, drags `openwebui` and its
+> netns companion `tailscale` through a restart cycle, waits 60 s, and then escalates the
+> operator into a full teardown they did not need. `tailscale` itself is unaffected by this
+> item (it binds `data/tailscale`, not `config/`).
+>
+> The general rule, which is what the earlier version got wrong: **"it goes through
+> compose" is not the property that saves you — "it recreates the container" is.**
+
+**So the realistic failure is a reboot, a hand `docker restart`, or an
+`emergency-recovery.ps1 recover`, in the window between the merge and the first compose
+recreate** — recoverable, but not something to leave lying around.
 
 **The landing step this item therefore requires**, as part of the merge and not as a
-follow-up:
+follow-up. **Do it BEFORE anyone runs `emergency-recovery.ps1 recover` or `nuclear`** —
+until the plane is recreated, those are a way to break it, not a way to fix it:
 
 1. Take the `inference` lease (`lease.ps1 -Acquire -Name inference`).
-2. From the repo root:
-   `docker compose -f inference/docker-compose.yml --env-file .env up -d`
-   — recreates `llm-gateway`, `llm-gateway-ui` and `llama-cpp-upstream` against the new
-   sources.
+2. From the repo root, with the operator's `COMPOSE_PROFILES` in `.env` (the real
+   deployment runs `COMPOSE_PROFILES=local`; without it this brings up the gateway trio
+   only and leaves `llama-cpp-upstream` on its stale spec):
+   ```
+   docker compose -f inference/docker-compose.yml --env-file .env up -d
+   ```
+   Compose recreates exactly the containers whose spec changed, so this covers
+   `llm-gateway`, `llm-gateway-ui` and `llama-cpp-upstream`. Verify rather than assume:
+   ```
+   docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' \
+     llm-gateway llm-gateway-ui llama-cpp-upstream
+   ```
+   — every source must now read `…\ai-stack\inference\config\…`, and `llm-gateway` must
+   have gained `/app/conf.d` and `/app/assemble-config.py` (see the closing paragraph).
 3. The frontend's `openwebui` at its **next deliberate recreate** under the frontend's own
    rules — never `openwebui` alone; order openwebui → tailscale. Its mount is being
-   *removed*, not repointed, so it carries no config-parse hazard; it is the one of the six
-   that can wait.
+   *removed*, not repointed, and nothing reads `/app/config` (F2), so it is the one of the
+   six that can wait.
+4. **Do not "fix" the `docker compose … restart` in `inference/llm-queue/README.md`'s
+   Revert section on the strength of this entry.** That one is correct as written: it
+   reverts by EDITING THE CONTENTS of two config files that stay where they are, so the
+   binds resolve and a restart is the right, cheap verb. The hazard here is a bind whose
+   SOURCE PATH no longer exists, which is a different thing entirely and applies only in
+   the pre-recreate window.
 
 **And the recreate deploys two items, not one.** [observed 2026-09-19] The running
 `llm-gateway` mounts only `/app/config.yaml` and `/app/custom_callbacks.py` — it has no
@@ -424,3 +479,43 @@ therefore **predates `sl-inference-split`** (merged at `9f64b84`, the same day).
 this item's doing, but whoever performs the recreate above will bring the gateway's
 config-assembly mechanism live at the same time, and should expect the assembler's startup
 log (`docker logs llm-gateway | grep assemble-config`) to be new output, not a regression.
+
+## F15 — a rebase can carry a stale pointer INTO a branch without it appearing in the diff
+
+[observed 2026-09-19] `.env.example:281` reached test attempt 2 reading
+`# general_settings in config/litellm.config.yaml` — a live pointer, in the operator-facing
+template, at a file this item had deleted. It was not a miss in the original sweep:
+
+```
+git grep -n 'config/litellm' 9f64b84   -- .env.example   ->  :265   (one hit)
+git grep -n 'config/litellm' development -- .env.example ->  :271, :281   (two)
+```
+
+`sl-closeout` added the J.1 master_key NOTE paragraph and merged to `development` first.
+When this branch rebased from `9f64b84` onto `be00d53`, that paragraph arrived **as
+context** — `git diff -M development..work/sl-colo-inference -- .env.example` shows only
+the OpenRouter hunk, because the J.1 paragraph is identical on both sides. So every
+diff-shaped check passed, and the line was stale the whole time.
+
+**The general shape, which is not specific to this item:** a colocation item's correctness
+condition is *"no pointer in the TREE names the old path"*, but the natural thing to review
+is the DIFF. Those are the same thing only while the base holds still. Any long-lived
+branch that rebases — and under this repo's worktree-per-session policy most of them do —
+can inherit a pointer at something it has itself moved, from work that landed in between.
+
+**What actually catches it:** re-running the unbounded grep **against the tree** after every
+rebase. Nothing else here does. `scripts/checks/check-llm-gateway-routing.ps1` does not look
+for moved paths; `check-project-configs.ps1` renders compose and would not have noticed a
+comment; `check-doc-placement.ps1` is about where plans live. The item's own test plan (T9)
+is the only gate, which is why it is now the first line of that case and why the case names
+`.env.example:271` and `:281` explicitly rather than trusting a sweep to surface them.
+
+[source] Scope, re-checked independently by me after the tester reported it: sweeping both
+the forward-slash and backslash forms of `config/litellm`, `config/llama-swap`,
+`config/chat-template` and `llm-queue/` over the whole tree outside the exempt set returns
+**nothing** once `:281` is repointed. `.env.example:281` was the only one.
+
+**Not proposed here:** a check. A guard that re-greps for "paths this branch moved" would
+need to know what the branch moved, which is a per-item fact, not a repo-wide one. The
+honest fix is the discipline: **after a rebase, re-run the item's own tree-level sweep**,
+and say in the evidence that you did.

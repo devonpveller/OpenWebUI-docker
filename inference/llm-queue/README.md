@@ -80,6 +80,11 @@ docker exec -i llm-queue   python - http://llm-gateway:8080 48 < inference/llm-q
 …then, from the repo root,
 `docker compose -f inference/docker-compose.yml --env-file .env restart llm-gateway llama-cpp-upstream`.
 
+`restart` is deliberate and correct here: both steps EDIT THE CONTENTS of files that stay
+where they are, so the existing binds still resolve and there is nothing to re-render.
+(Do not "upgrade" it to `up -d` after reading `documentation/notes/stack-layers-sl-colo-inference-findings.md`
+F14 — that hazard is about a bind whose SOURCE PATH has moved, which is a different case.)
+
 ## Operational notes
 
 - **Fail-closed** (design §8a): if the queue crashes it returns a hard error and

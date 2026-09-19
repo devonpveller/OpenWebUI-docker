@@ -196,8 +196,8 @@ services:
       #   4. webui.db, where OWUI's tools / functions / pipes actually live -
       #      read-only scan of all 44 tables: ZERO rows in `function`, `tool`,
       #      `model`, `prompt` or `config`. The only hits are chat transcripts
-      #      and one uploaded file: a compose example inside a saved
-      #      conversation, not a loaded code path.
+      #      (34 rows) and 5 `file` rows across 3 uploads - saved conversations
+      #      and doc dumps quoting a compose example, not a loaded code path.
       # This repo DOES contain other `/app/config` references and none of them
       # is OWUI's: little-coder's own /app/config/little-coder.config.yaml in
       # the coder/ and agent-org worker containers (a different mount, from a

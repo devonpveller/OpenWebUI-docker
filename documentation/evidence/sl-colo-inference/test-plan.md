@@ -3,7 +3,13 @@
 **Item:** `sl-colo-inference` (stack-layers PLAN 2.7, Part L.1, wave 2).
 **Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`be00d53`** (which
 contains `sl-inference-split` AND `sl-closeout`).
-**Revision 2:** attempt 1 passed 12/12 (tester `wt-tester-colo-inf`) with the plan judged
+**Revision 3:** attempt 2 FAILED 11/13 — **T9** (`.env.example:281`, a pointer the rebase
+carried in already stale) and **T13c** (F14 named one `compose restart` call site and missed
+the two that matter, inside the recovery script's first branch). Both were found by these
+cases run exactly as written, which is the plan working; both are fixed in the commit this
+revision accompanies. T9 gains a backslash-form sweep and a named `.env.example` bar; T13c
+now demands an enumeration of every repair verb rather than a check of the note's list, and
+T13e is new. **Revision 2:** attempt 1 passed 12/12 with the plan judged
 **inadequate**. This revision rebases the branch from `9f64b84` onto `be00d53` and fixes
 what that judgement named: **T8a** stated as its PASS condition the output of a command
 that cannot succeed on this host (F13); **T11** ran `validate-lineendings.ps1` in an export
@@ -485,6 +491,21 @@ is a gated deploy, not part of this test.
 cd "$SCRATCH/head"
 grep -rn 'llm-queue/\|config/litellm\|config/llama-swap\|config/chat-template' . \
   --exclude-dir=OB1 --exclude-dir=.git
+# and the BACKSLASH forms, which a forward-slash grep cannot see (ps1/json/toml write these):
+grep -rnF -e 'config\litellm' -e 'config\llama-swap' -e 'config\chat-template' -e '\llm-queue\' . \
+  --exclude-dir=OB1 --exclude-dir=.git
+```
+
+**REBASE HAZARD — this case failed attempt 2, so run the sweep against the TREE, never
+against `git diff`.** The branch was rebased mid-flight and `sl-closeout` had meanwhile
+added a paragraph to `.env.example` naming `config/litellm.config.yaml`. The developer's
+diff repointed only the pointers that existed on the OLD base, so `.env.example:281`
+arrived **already stale from the base** and no case had ever looked at it. A stale pointer
+can enter this branch without appearing in its diff. Worth listing what the rebase brought
+in, so the sweep has a shortlist to be careful about:
+
+```bash
+git -C "$W" diff --name-only 9f64b84..development | sort
 ```
 
 **PASS:** every hit is in one of these, and nothing else:
@@ -495,8 +516,23 @@ grep -rn 'llm-queue/\|config/litellm\|config/llama-swap\|config/chat-template' .
 | `documentation/notes/...` | findings files; the anchor allows `notes/` |
 | `CLEANUP-PLAN.md` | the anchor allows it (`:1190` is this move's own plan row) |
 | `documentation/archive/`, `scripts/archive/` | the anchor allows `archive/` |
-| `documentation/evidence/stack-layers/sl-*-test-plan.md` | **declared, see below** |
+| `documentation/evidence/...` | this item's own plan + merged items' records; **declared, see below** |
 | `agent-org/config/litellm-cloud.config.yaml`, `agent-org/README.md:22,89`, `agent-org/IMPLEMENTATION-NOTES.md:331`, `agent-org/docker/docker-compose.yml:522` | **substring collision, see below** |
+
+**`.env.example` is NOT in that list and never will be** — it is the operator-facing
+template, the anchor's artifact line names "`.env.example` comments" explicitly, and its
+criterion says a live pointer to an old path FAILS. Both of its `config/litellm` lines must
+read `inference/...`: **`:271`** (the OpenRouter fragment, which existed on the old base)
+and **`:281`** (the J.1 master_key NOTE, which arrived with the rebase). Check them by
+name rather than trusting the sweep:
+
+```bash
+grep -n 'config/litellm' "$SCRATCH/head/.env.example"
+```
+
+**PASS:** exactly two hits, both `inference/config/litellm...`.
+**FAIL:** either one still bare — `ls config/litellm.config.yaml` in the tree then confirms
+the file it sends the operator to does not exist.
 
 > **DECLARED — two places the criterion's wording does not fit.**
 >
@@ -648,26 +684,74 @@ frontend's `openwebui` at its next deliberate recreate under the netns rule.
 **FAIL:** any of those missing. This is the case whose absence the first plan was failed
 for; do not accept a note that gestures at "recreate later".
 
-**T13c — the self-healing claim, checked against the code and not against the note.**
+**T13c — the classification of repair paths, checked against the code and not against the
+note.** This is the case that failed attempt 2, and it failed because it was run as
+written: F14 had the right rule and the wrong inventory. **Enumerate every call site; do
+not accept the note's list.**
 
 ```bash
-grep -n "Invoke-PlaneCompose" "$SCRATCH/head/scripts/checks/stack-watchdog.ps1"
-sed -n '162,185p'  "$SCRATCH/head/scripts/checks/stack-watchdog.ps1"
-sed -n '221,230p'  "$SCRATCH/head/scripts/recovery/emergency-recovery.ps1"
-grep -n 'InferenceCompose --env-file .env up -d' "$SCRATCH/head/scripts/recovery/emergency-recovery.ps1"
+cd "$SCRATCH/head"
+# every compose verb issued by the two scripts that repair things
+grep -n "Invoke-PlaneCompose" scripts/checks/stack-watchdog.ps1
+sed -n '162,185p'             scripts/checks/stack-watchdog.ps1
+grep -nE 'docker compose .*(up -d|restart|start)' scripts/recovery/emergency-recovery.ps1
+grep -n 'Invoke-MinimalRecovery\|Start-InferenceStack' scripts/recovery/emergency-recovery.ps1
 ```
 
-**PASS:** `stack-watchdog.ps1:640` repairs an unhealthy container with
-`-Action @('up','-d')`, and `Invoke-PlaneCompose` (`:162`, building `$Argv` at `:174` and
+**PASS — the classification in F14 must match what those four commands print, in both
+directions:**
+
+*Recreating (safe).* `stack-watchdog.ps1:640` repairs an unhealthy container with
+`-Action @('up','-d')`, and `Invoke-PlaneCompose` (`:162`, building `$Argv` at `:174`,
 running it at `:179`) turns that into `docker compose <plane args> up -d <service>`;
-`emergency-recovery.ps1:600` and `Start-InferenceStack` (`:221-228`, called at `:802`,
-`:960`, `:1023`) both run `… up -d`. **And read to the end of the file:**
-`stack-watchdog.ps1:747` uses `-Action @('restart')`, which does **not** recreate — confirm
-F14 says so and confirm that call site targets only `llama-cpp-embed-upstream`, which binds
-nothing under `config/`.
-**FAIL:** a repair path that reuses the existing container (`restart`, `start`) for a
-container in T13a's table, and F14 not saying so. "It goes through compose" is not the
-property that makes a path safe; "it recreates the container" is.
+`emergency-recovery.ps1:600` runs `up -d llm-queue llm-gateway`; `Start-InferenceStack`
+(`:221-228`, called at `:802`, `:960`, `:1023`) runs `up -d` for the whole plane.
+
+*Reusing the existing container (dangerous).* `stack-watchdog.ps1:747` uses
+`-Action @('restart')` — harmless, it targets only `llama-cpp-embed-upstream`, which binds
+nothing under `config/`. **And, the ones the first version of F14 missed:**
+`emergency-recovery.ps1:578` (`compose restart llama-cpp-upstream llama-cpp-embed-upstream`)
+and `:580` (`compose restart openwebui`) inside `Invoke-MinimalRecovery` (`:560`) — both
+containers ARE in T13a's table. F14 must name them, must say that `Invoke-MinimalRecovery`
+is the **first** branch of both `recover` (`:727`) and `nuclear` (`:905`), and must say that
+the healing `up -d` at `:600` is 22 lines later in the same function and covers only
+`llm-queue` and `llm-gateway` — never `llama-cpp-upstream`.
+
+*And read to the end of the function before accepting how bad it is.*
+`Invoke-MinimalRecovery` closes with `Test-BasicConnectivity` (`:620`), which at `:519`
+execs `docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health`. A broken
+upstream therefore returns `$false`, the caller falls through to full/nuclear recovery, and
+`Start-InferenceStack`'s `up -d` repairs it. F14 must say this too: the script does **not**
+leave the plane wedged and does **not** report a false success — it breaks the upstream
+first, cycles `openwebui` and its netns companion, waits 60 s, and escalates the operator
+into a teardown they did not need. An F14 that claims a permanent wedge is as wrong as one
+that claims safety.
+
+**FAIL:** any compose/docker verb that reuses an existing container, issued against a
+container in T13a's table, that F14 does not name — or an F14 whose severity does not match
+what the function actually does end to end. "It goes through compose" is not the property
+that makes a path safe; "it recreates the container" is.
+
+**T13e — the landing step is stated as a precondition, not a suggestion.**
+
+```bash
+NOTE="$SCRATCH/head/documentation/notes/stack-layers-sl-colo-inference-findings.md"
+grep -n 'BEFORE anyone runs\|COMPOSE_PROFILES\|lease.ps1\|docker inspect' "$NOTE"
+grep -n -A6 '^## Revert' "$SCRATCH/head/inference/llm-queue/README.md"
+```
+
+**PASS:** F14's landing step says to recreate **before** anyone runs
+`emergency-recovery.ps1 recover`/`nuclear`; names the `inference` lease; gives
+`docker compose -f inference/docker-compose.yml --env-file .env up -d` **with the
+operator's `COMPOSE_PROFILES` in `.env`** (without `local`, `llama-cpp-upstream` is not in
+the rendered set and keeps its stale spec — the one way to run the prescribed command and
+still miss the container that matters); offers a `docker inspect` verification of the new
+sources; and carries the carve-out for `inference/llm-queue/README.md`'s Revert section,
+whose `compose restart` is correct because that revert edits file CONTENTS at unchanged
+paths. The README says so at its own call site too, so a reader who arrives there without
+F14 does not "fix" it.
+**FAIL:** the landing step reads as optional or omits the profile caveat; or the README's
+`restart` is left unexplained, so the next reader of F14 changes a correct instruction.
 
 **T13d — the plane is already a merge behind, so the recreate deploys two items.**
 
@@ -695,7 +779,7 @@ paragraph is stale and should be dropped rather than left to mislead).
 | unbounded grep hits only archive/notes/CLEANUP-PLAN; `config/` gone | T9, T2 |
 | routing check still scans the moved files (plant → red) | T6 |
 | names/tags/aliases/networks unchanged; live plane untouched | T5c, T5d, T12 |
-| *(no anchor criterion)* — the post-merge live hazard the findings note must carry | **T13** |
+| *(no anchor criterion)* — the post-merge live hazard the findings note must carry | **T13a-e** |
 
 ## Open declarations for the gate
 
@@ -716,5 +800,12 @@ paragraph is stale and should be dropped rather than left to mislead).
    and the branch carries no wrap of its own. T11's note is revised accordingly.
 7. **T13 / F14** — this item cannot be merged and left alone: six bind sources on four
    running containers point into the deleted `config/`. The landing step is a compose
-   recreate of the inference plane under its lease. That is an operational action for the
-   merger, outside every anchor criterion, and the gate should confirm someone owns it.
+   recreate of the inference plane under its lease, **before anyone runs
+   `emergency-recovery.ps1 recover` or `nuclear`** — attempt 2 established that the
+   recovery script's first branch `compose restart`s `llama-cpp-upstream`, so until the
+   recreate happens the repair tool is itself a way to break the plane. That is an
+   operational action for the merger, outside every anchor criterion, and the gate should
+   confirm someone owns it.
+8. **F15 (findings)** — a rebase can carry a stale pointer INTO a branch without it ever
+   appearing in the branch's diff. `.env.example:281` did exactly that. Nothing in this
+   repo's checks catches it; only a sweep of the tree does, which is now T9's opening line.
