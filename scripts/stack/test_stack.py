@@ -340,7 +340,33 @@ def test_enable_research_pulls_its_planes_and_ob1_profiles(root):
     planes = state_of(root)["planes"]
     assert set(planes) == {"inference", "search", "ob1", "frontend"}
     assert set(planes["ob1"]["profiles"]) == {"idea-refinery", "research", "wiki", "notebook"}
-    assert "PENDING" in out  # the driver says the profiles do not exist yet
+    # Was `assert "PENDING" in out`. sl-ob1-profiles (2026-09-19) put all three
+    # into OB1/docker/docker-compose.yml, so the driver must no longer warn that
+    # enabling them changes nothing - a stale "pending" notice is a lie about
+    # what `up` will start.
+    assert "PENDING" not in out
+
+
+def test_the_ob1_profiles_are_no_longer_pending(root):
+    """The three OB1 profiles exist in the compose file, so nothing may mark them pending."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook"}
+    assert manifest.pending_profiles("ob1") == []
+    # Only idea-refinery is `default`: `default` means "passed on every
+    # invocation", and --headless has to be able to drop wiki and notebook.
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+
+
+def test_digest_needs_the_notebook_profile_not_just_research(root):
+    """openbrain-podcast renders its audio through open_notebook, so --headless must not drop it."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.product("digest")["profiles"]["ob1"] == ["research", "notebook"]
+    assert "surfaces" not in manifest.product("digest")
+    code, _, _ = run(root, "enable", "digest", "--headless")
+    assert code == 0
+    assert set(state_of(root)["planes"]["ob1"]["profiles"]) == {
+        "idea-refinery", "research", "notebook"
+    }
 
 
 def test_enable_research_headless_omits_the_wiki_and_notebook_profiles(root):
@@ -424,12 +450,130 @@ def test_ob1_and_agent_org_pass_no_env_file_and_read_their_own(root):
     assert manifest.env_file("frontend") == ".env"
 
 
-def test_ob1_keeps_the_idea_refinery_profile_stack_ps1_always_passes(root):
+def test_a_bare_ob1_plane_passes_its_default_profile_and_what_that_needs(root):
+    """Enabling the PLANE gets `default` profiles, closed over `requires`.
+
+    `idea-refinery` is ob1's only default; it `requires` research because
+    openbrain-idea-refinery's only engine is openbrain-research. So a bare plane
+    enable passes BOTH - it used to pass idea-refinery alone, which started a drain
+    that could never drain. `wiki` and `notebook` are surfaces and stay out; they
+    are reached by enabling a PRODUCT.
+
+    NOTE the deliberate divergence from scripts/stack/stack.ps1, which passes all
+    four on every OB1 invocation because it is the pre-manifest driver and must keep
+    starting the 30 containers running on this host; the comment on its `ob1` row
+    says so. sl-driver-parity reconciles the two.
+    """
     run(root, "init", "--planes", "inference,search,ob1")
     _, out, _ = run(root, "up", "--dry-run")
     ob1 = [line for line in docker_lines(out) if "OB1/docker" in line]
     assert ob1 == [
-        "docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d"
+        "docker compose -f OB1/docker/docker-compose.yml "
+        "--profile idea-refinery --profile research up -d"
+    ]
+
+
+def test_the_idea_refinery_profile_pulls_the_research_engine_it_calls(root):
+    """A profile whose only engine is another profile must pull it in."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.profile_requires("ob1", "idea-refinery") == ["research"]
+    # ...and it is the plane's only default, so this closure runs on every invocation.
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+    # Even the most headless path a person can ask for carries the engine.
+    code, _, _ = run(root, "enable", "open-brain", "--headless")
+    assert code == 0
+    assert set(state_of(root)["planes"]["ob1"]["profiles"]) == {"idea-refinery", "research"}
+
+
+def test_enabling_the_PLANE_writes_the_closure_not_just_the_defaults(root):
+    """`enable <plane>` must WRITE what it PRINTS.
+
+    Attempt 2 shipped the closure on cmd_enable's product branch only, so
+    `stack.py enable ob1` printed "profiles: idea-refinery, research" and wrote
+    ["idea-refinery"]. Drive time was right either way - `run_profiles` closes -
+    which is exactly why 44 tests passed with the defect present: no CLI surface
+    misled, the artifact on disk just lied. Assert the FILE, not the line.
+    """
+    run(root, "init", "--planes", "inference,search")
+    code, out, _ = run(root, "enable", "ob1")
+    assert code == 0
+    assert "profiles: idea-refinery, research" in out
+    assert state_of(root)["planes"]["ob1"]["profiles"] == ["idea-refinery", "research"]
+
+
+def test_init_with_planes_writes_the_closure_too(root):
+    """The third state-file writer. Same defect, same fix, its own test."""
+    run(root, "init", "--planes", "inference,search,ob1")
+    assert state_of(root)["planes"]["ob1"]["profiles"] == ["idea-refinery", "research"]
+    # ...and the --context writer, which is a separate call site.
+    run(root, "init", "--force", "--planes", "inference,search,ob1", "--context", "ob1=remote")
+    entry = state_of(root)["planes"]["ob1"]
+    assert entry["profiles"] == ["idea-refinery", "research"] and entry["context"] == "remote"
+
+
+def test_every_state_writer_goes_through_the_one_helper(root):
+    """No call site may write profiles into state except `enable_plane_profiles`.
+
+    The defect above existed because three writers each resolved profiles their own
+    way. This pins the shape of the fix: `State.enable` is called exactly once in the
+    module, from the helper. A new command that writes state and skips it reintroduces
+    the same class of bug, silently.
+    """
+    tree = ast.parse(Path(stack.__file__).read_text(encoding="utf-8"))
+    callers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for inner in ast.walk(node):
+            # `<something>.enable(...)` where the receiver is a plain name - i.e.
+            # `state.enable(...)` / `fresh.enable(...)`, the State method. Method
+            # DEFINITIONS are not Calls, so State.enable's own def is not matched.
+            if (isinstance(inner, ast.Call)
+                    and isinstance(inner.func, ast.Attribute)
+                    and inner.func.attr == "enable"
+                    and isinstance(inner.func.value, ast.Name)):
+                callers.append(node.name)
+    assert sorted(set(callers)) == ["enable_plane_profiles"], (
+        f"State.enable is called from {sorted(set(callers))}; it must only be called by "
+        "enable_plane_profiles, which closes the profile set over `requires`."
+    )
+
+
+def test_profile_requires_is_transitive_and_order_is_the_manifests(root):
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    manifest.planes["ob1"]["profiles"]["wiki"] = {"description": "x", "requires": ["notebook"]}
+    manifest.planes["ob1"]["profiles"]["research"] = {"description": "y", "requires": ["wiki"]}
+    assert manifest.profile_closure("ob1", {"idea-refinery"}) == {
+        "idea-refinery", "research", "wiki", "notebook"
+    }
+    # The ORDER handed to compose stays the manifest's declaration order, not
+    # discovery order - `--profile` flags are order-insensitive, but a command line
+    # that reshuffles between runs makes diffing two dry-runs pointlessly hard.
+    assert manifest.profile_order("ob1", manifest.profile_closure("ob1", {"idea-refinery"})) == [
+        "idea-refinery", "research", "wiki", "notebook"
+    ]
+
+
+def test_a_profile_requiring_an_unknown_profile_is_refused(root):
+    """The typo has to fail loudly here, not silently pass an unknown flag to compose."""
+    text = (REAL_MANIFEST).read_text(encoding="utf-8").replace(
+        'requires    = ["research"]', 'requires    = ["reserch"]'
+    )
+    path = root / "typo.manifest.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(stack.Refusal) as exc:
+        stack.Manifest.load(path)
+    assert "ob1.idea-refinery" in str(exc.value) and "reserch" in str(exc.value)
+
+
+def test_enabling_research_drives_ob1_with_every_profile_the_live_set_needs(root):
+    """The `research` product's dry-run must name the profiles that render the live 30."""
+    run(root, "init", "--product", "research")
+    _, out, _ = run(root, "up", "--dry-run")
+    ob1 = [line for line in docker_lines(out) if "OB1/docker" in line]
+    assert ob1 == [
+        "docker compose -f OB1/docker/docker-compose.yml "
+        "--profile idea-refinery --profile research --profile wiki --profile notebook up -d"
     ]
 
 

@@ -45,7 +45,16 @@ $Projects = @(
     @{ Name = "memory";    Compose = "memory\docker-compose.yml";          Note = "mnemory + cloud gateway" }
     @{ Name = "search";    Compose = "search\docker-compose.yml";          Note = "Mullvad vpn + searxng + gateway" }
     @{ Name = "coder";     Compose = "coder\docker-compose.yml";           Note = "open-terminal + little-coder + lc-egress" }
-    @{ Name = "ob1";       Compose = "OB1\docker\docker-compose.yml";      Note = "Open Brain + Open Notebook trio"; Profiles = @("idea-refinery"); OwnEnv = $true }
+    # OB1 gained research / wiki / notebook profiles on 2026-09-19
+    # (sl-ob1-profiles). This script passes ALL FOUR deliberately: it is the
+    # pre-manifest driver and its job is to start what is running on this host
+    # today - 30 containers. Dropping the three here would silently stop the
+    # wiki, the research engine and Open Notebook from coming up, which is a
+    # deployment change, and this item deploys nothing. stack.py expresses the
+    # same set through the `research` product instead (only idea-refinery is
+    # `default` in stack.manifest.toml, so --headless can drop the surfaces);
+    # sl-driver-parity reconciles the two drivers.
+    @{ Name = "ob1";       Compose = "OB1\docker\docker-compose.yml";      Note = "Open Brain + Open Notebook trio"; Profiles = @("idea-refinery", "research", "wiki", "notebook"); OwnEnv = $true }
     @{ Name = "agent-org"; Compose = "agent-org\docker\docker-compose.yml"; Note = "Mattermost + agent-bridge (default plane)"; OwnEnv = $true }
 )
 

@@ -66,7 +66,13 @@
       "compose": "docker compose -f OB1/docker/docker-compose.yml",
       "file": "OB1/docker/docker-compose.yml",
       "env_file": null,
-      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values."
+      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values. PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
+      "profiles": [
+        "research",
+        "wiki",
+        "notebook",
+        "idea-refinery"
+      ]
     },
     "agent-org": {
       "compose": "docker compose -f agent-org/docker/docker-compose.yml",
@@ -192,12 +198,14 @@
     "notebook": [
       {
         "container": "open_notebook",
+        "profile": "notebook",
         "project": "open-brain",
         "critical": false,
         "note": "being retired (Quartz workbench); still live for podcasts"
       },
       {
         "container": "surrealdb",
+        "profile": "notebook",
         "project": "open-brain",
         "critical": false,
         "note": "open-notebook DB; WS-only, no HTTP health"
@@ -254,11 +262,13 @@
       },
       {
         "container": "openbrain-wiki",
+        "profile": "wiki",
         "project": "open-brain",
         "critical": false
       },
       {
         "container": "openbrain-wiki-viewer",
+        "profile": "wiki",
         "project": "open-brain",
         "critical": false
       },
@@ -274,12 +284,14 @@
       },
       {
         "container": "openbrain-research",
+        "profile": "research",
         "project": "open-brain",
         "critical": true,
         "host_health": "http://127.0.0.1:8818/health"
       },
       {
         "container": "openbrain-curator",
+        "profile": "research",
         "project": "open-brain",
         "critical": false,
         "host_health": "http://127.0.0.1:8816/health"
@@ -301,6 +313,7 @@
       },
       {
         "container": "openbrain-workbench",
+        "profile": "wiki",
         "project": "open-brain",
         "critical": false
       },
@@ -333,7 +346,15 @@
       {
         "container": "openbrain-podcast",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "note": "chain tail. Its enrichment and audio steps reach PROFILED services (RESEARCH_URL -> openbrain-research, ON_BASE -> open_notebook), so a digest chain run without --profile research --profile notebook produces no episode."
+      },
+      {
+        "container": "openbrain-idea-refinery",
+        "profile": "idea-refinery",
+        "project": "open-brain",
+        "critical": false,
+        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (documentation/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure."
       }
     ],
     "backups": [
@@ -376,11 +397,13 @@
       },
       {
         "container": "openbrain-wiki-backup",
+        "profile": "wiki",
         "project": "open-brain",
         "critical": false
       },
       {
         "container": "open-notebook-backup",
+        "profile": "notebook",
         "project": "open-brain",
         "critical": false
       },

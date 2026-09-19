@@ -57,7 +57,19 @@
 #   ports     - published HOST ports -> what answers on them.
 #   profiles  - compose profiles. Each is a sub-table:
 #                 description - what the profile turns on
-#                 default     - passed on every invocation (parity with stack.ps1)
+#                 default     - passed on EVERY invocation, and it survives
+#                               --headless. For something a plane is not usable
+#                               without; never for a SURFACE, or --headless
+#                               becomes a no-op for that plane.
+#                 requires    - other profiles ON THE SAME PLANE that this one
+#                               cannot work without. The driver closes over these
+#                               transitively (stack.py `profile_closure`), so
+#                               enabling one pulls its prerequisites in. COMPOSE
+#                               HAS NO SUCH MECHANISM: a hand-run
+#                               `--profile x` still needs `--profile y` typed
+#                               beside it. Use it where a profiled service's only
+#                               engine lives in another profile - otherwise the
+#                               plane comes up healthy and silently does nothing.
 #                 pending     - DECLARED here, not yet in the compose file; a
 #                               later stack-layers item adds it. Enabling one is
 #                               a no-op until then, and the driver says so.
@@ -288,20 +300,53 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 "8819" = "openbrain-grounding-backfiller"
 
 [planes.ob1.profiles.idea-refinery]
-description = "the idea-refinery services; scripts/stack/stack.ps1 passes this on every OB1 invocation"
+# requires research: openbrain-idea-refinery's ONLY engine is openbrain-research
+# (OB1/docker/docker-compose.scheduled.yml RESEARCH_URL; integrations/
+# openbrain-idea-refinery/index.ts:268 submits the job, :295 polls it). Found by
+# this item's TESTER, not by its developer, who grepped the compose files and so
+# never saw it. Without this line the plane's one `default = true` profile starts
+# a drain with no engine - `stack.py enable ob1` and `enable open-brain --headless`
+# both did - and it comes up healthy and produces nothing. Not a fetch that
+# crashes; a queue that never empties.
+#
+# WHY NOT THE OTHER TWO FIXES. Marking `research` itself `default = true` would
+# make --headless a no-op for this plane (default profiles survive it), which is
+# the entire point of the surfaces split. Dropping `default` from idea-refinery is
+# the better long-term answer - its own compose comment says it should be off
+# until deliberately enabled, and it is on here only because stack.ps1 has always
+# passed it - but that STOPS a container that has been up for days, and this item
+# deploys nothing. Left for the operator / sl-driver-parity.
+#
+# CONSEQUENCE, stated rather than discovered later: `enable open-brain --headless`
+# now yields `idea-refinery, research` instead of `idea-refinery` alone. A headless
+# knowledge core pulls the research engine in, because the profile the driver
+# always passes needs it. That is the honest resolution of a contradiction that
+# was already there; removing `default` is what removes the research engine.
+description = "the idea-refinery drain; scripts/stack/stack.ps1 passes this on every OB1 invocation"
 default     = true
+requires    = ["research"]
+
+# The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles). They are
+# NOT `default`, on purpose: `default` means "passed on every invocation", and
+# the whole point of the research product's surfaces split is that --headless
+# can drop wiki and notebook. scripts/stack/stack.ps1 DOES pass all three (see
+# its ob1 row) because it is the pre-manifest driver and must keep starting the
+# set that is running today; sl-driver-parity reconciles the two.
 
 [planes.ob1.profiles.research]
-description = "openbrain-research + the grounding backfiller"
-pending     = true   # sl-ob1-profiles adds it
+# OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which
+# exists only to place research output. NOT the grounding backfiller - this
+# description used to claim it, and the backfiller is core: it drains
+# `ungrounded_claims` for every inlet, not just research (its own comment at
+# OB1/docker/docker-compose.yml, "general brain-health"), so it renders with no
+# profile at all.
+description = "the research engine: openbrain-research + openbrain-curator"
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler and the Quartz viewer (a SURFACE)"
-pending     = true   # sl-ob1-profiles adds it
+description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE)"
 
 [planes.ob1.profiles.notebook]
 description = "the Open Notebook trio: surrealdb + open_notebook + its backup (a SURFACE)"
-pending     = true   # sl-ob1-profiles adds it
 
 # --------------------------------------------------------------------------
 [planes.agent-org]
@@ -408,6 +453,9 @@ description = "the private search gateway (SearXNG behind Mullvad)"
 planes      = ["search"]
 
 [products.open-brain]
+# The knowledge core IS the ob1 plane's unprofiled render (store, doors,
+# coherence workers, backup) since sl-ob1-profiles - no profile needed for it.
+# The wiki is its reading surface, so --headless drops it and leaves the core.
 description = "the Open Brain knowledge core"
 planes      = ["ob1"]
 surfaces    = { ob1 = ["wiki"] }
@@ -429,9 +477,16 @@ planes      = ["agent-org"]
 profiles    = { agent-org = ["workers"] }
 
 [products.digest]
+# `notebook` is a PROFILE here, not a surface: openbrain-podcast - the chain's
+# tail, and always-on core in OB1's scheduled slice - renders its audio through
+# Open Notebook (ON_BASE -> http://open_notebook:5055,
+# OB1/docker/docker-compose.scheduled.yml) and gets its enrichment from
+# openbrain-research (RESEARCH_URL, same file). Both are engine dependencies of
+# the chain, so --headless must NOT drop them; a headless digest with no
+# notebook is a chain that silently produces no episode.
 description = "the scheduled digest chain inside OB1 (gmail pull -> research -> podcast -> digest)"
 planes      = ["inference", "search", "ob1"]
-profiles    = { ob1 = ["research"] }
+profiles    = { ob1 = ["research", "notebook"] }
 
 [products.portal]
 description = "the internet front-end (started by hand: portal-on.ps1)"
