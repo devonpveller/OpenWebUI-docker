@@ -66,6 +66,50 @@ stack); keep old backup archives on the NAS even when the target is gone.
   `ai-stack_*` network — OB1/portal/agent-org attach by literal name
   (`docker network inspect <net>` shows who is holding it).
 
+## When you PROFILE-GATE a service
+
+Four planes are profile-gated today: `frontend` (`stock` | `gpu` | `tailscale`,
+2026-09-19), `portal` (`internet`), `agent-org` (`workers`, `cloud`) and OB1
+(`idea-refinery`). A profiled service is INVISIBLE to anything that renders the
+plane without its profile, and that is exactly how a checker starts checking
+nothing. So, in the same commit:
+
+- **Decide where the profile set comes from and say it out loud.** compose
+  reads `COMPOSE_PROFILES` from the `--env-file`, and a `--profile` flag on the
+  command line REPLACES that value rather than adding to it. `.env.example`
+  carries the fresh-clone set; the operator's `.env` carries this host's. **A
+  plane whose default profile set is not the operator's deployment needs a line
+  in `.env` before the next `up`** — without it `up -d` starts whatever has no
+  profile, quietly.
+- **Every renderer needs the profiles.** `check-project-configs.ps1` renders the
+  plane twice (default and profiled) and diffs the PROFILED render against
+  `scripts/lib/stack-services.json`, because the default render is a subset and
+  would stop covering the gated rows. `check-watchdog-repair-targets.ps1`
+  renders with the project's own `env_file`, so it only resolves gated services
+  on a host whose `.env` sets them — which is the right answer there: if the
+  watchdog cannot start a container it claims to repair, that IS a failure.
+- **Every OBSERVER needs a guard, and it must fail OPEN.** A probe or repair
+  aimed at a service the deployment does not have must SKIP and say so, never
+  FAIL and never repair. Decide from the rendered project
+  (`docker compose -f <plane> --env-file .env config --services`) rather than
+  parsing `.env` — that is compose's own answer after it has applied every
+  source and precedence rule. If the render cannot be read, or the container is
+  running while the render denies it, keep checking and log why: a checker that
+  goes silent on its own uncertainty is worse than one that cries wolf. Live
+  example: `Test-TailscaleDeployed` in `scripts/checks/stack-watchdog.ps1` and
+  the matching skip in `scripts/stack/stack.ps1`'s `health` action.
+- **Two definitions of one container is a legitimate shape, and compose polices
+  it.** `frontend` has `openwebui` (gpu) and `openwebui-stock` (stock) sharing
+  one `container_name` and one data volume, because compose can gate a SERVICE
+  on a profile but cannot gate a FIELD — `build:` and
+  `deploy.resources.reservations.devices` cannot be blanked by an unset
+  variable. Activating both profiles is refused by `docker compose config`
+  ("container name ... is already in use"), so the mistake is loud. A sidecar
+  that must run in BOTH deployments (`openwebui-backup`) names both in
+  `depends_on` with `required: false` — without it compose rejects the whole
+  project whenever the other definition is off, and `required: false` does not
+  weaken the wait on the one that IS active.
+
 ## The one-command checks
 
 ```powershell

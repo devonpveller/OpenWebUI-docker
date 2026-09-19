@@ -34,7 +34,15 @@ if ($ymlStaged.Count -gt 0) {
         $projects = @(
             @{ N = 'anchor';    F = 'docker-compose.yml';           A = @('--env-file', '.env.example') }
             @{ N = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example') }
+            # The frontend plane is profile-gated (stack-layers 2.5 / D8), so it
+            # is rendered TWICE: once as .env.example leaves it (COMPOSE_PROFILES
+            # =stock - the fresh-clone deployment) and once with the operator's
+            # profiles. One render can be valid while the other is broken -
+            # `openwebui-backup` depends on both openwebui definitions, and a
+            # dropped `required: false` only shows up in the render where the
+            # named service is off.
             @{ N = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example') }
+            @{ N = 'frontend (gpu,tailscale)'; F = 'frontend\docker-compose.yml'; A = @('--env-file', '.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
             @{ N = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
             @{ N = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
             @{ N = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }
@@ -75,8 +83,13 @@ if ($ymlStaged.Count -gt 0) {
             # had never been verified, silently - the same defect the OB1 profiles would
             # have introduced, already present and unnoticed.
             $renderTargets = @(
+                # PROFILED renders for BOTH gated planes: a default render is a
+                # SUBSET, so checking it would silently stop verifying the rows
+                # behind a profile. The profiled render is the superset - every
+                # container name the plane can produce. (`--profile local` from
+                # sl-inference-split; the frontend's pair from sl-frontend-solo.)
                 @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example', '--profile', 'local') }
-                @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example') }
+                @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
                 @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
                 @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
                 @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }

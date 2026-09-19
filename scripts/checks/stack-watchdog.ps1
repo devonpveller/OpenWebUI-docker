@@ -256,6 +256,55 @@ function Test-TailscaleConnection {
     }
 }
 
+function Test-TailscaleDeployed {
+    [CmdletBinding()]
+    param()
+    # Is the `tailscale` profile part of THIS deployment? The frontend plane is
+    # profile-gated since 2026-09-19 (stack-layers 2.5 / D8): `stock` is Open
+    # WebUI alone, `gpu,tailscale` is this host. A deployment without the
+    # tailscale profile has no tailscale container, and repairing a container
+    # that is not meant to exist is its own kind of outage.
+    #
+    # WHICH SOURCE: the RENDERED project (`config --services`), not a parse of
+    # .env. That is compose's own answer after it has applied COMPOSE_PROFILES
+    # from --env-file, from the process environment, and its own precedence
+    # rules; reimplementing that here would drift the moment any of them moves.
+    #
+    # IT FAILS OPEN in BOTH unclear cases, deliberately:
+    #   - the render cannot be read (docker down, bad env file) -> assume
+    #     deployed, because a checker that goes quiet on its own error is the
+    #     failure mode this stack keeps paying for;
+    #   - the render says no tailscale while a container NAMED tailscale is
+    #     RUNNING -> that is this host with COMPOSE_PROFILES missing from .env.
+    #     Keep checking and log why, rather than silently dropping the tailnet
+    #     checks that exist because a 94-minute outage went unnoticed.
+    # Cached for the life of the process: the answer cannot change inside a
+    # cycle, and daemon mode runs a cycle every IntervalSeconds.
+    if ($null -ne $script:TailscaleDeployedCache) { return $script:TailscaleDeployedCache }
+    $deployed = $true
+    try {
+        # cmd /c so compose's stderr warnings cannot become PS 5.1
+        # NativeCommandErrors under this script's EAP=Stop.
+        $svc = (cmd /c "docker compose -f frontend\docker-compose.yml --env-file .env config --services 2>nul") -join "`n"
+        if ($svc -and ($svc -notmatch '(?m)^tailscale\s*$')) {
+            # Substring filter + an exact-match pass: `--filter name=^tailscale$`
+            # cannot survive cmd /c (cmd eats the `^`, so stt-tts-tailscale
+            # matches too - verified 2026-09-19).
+            $live = @(@(cmd /c "docker ps --filter name=tailscale --format {{.Names}} 2>nul") | Where-Object { $_ -eq 'tailscale' })
+            if ($live.Count -gt 0) {
+                Write-LogEntry "tailscale is RUNNING but absent from the frontend render - .env is probably missing COMPOSE_PROFILES=gpu,tailscale; keeping the tailnet checks ON" "WARN"
+            } else {
+                $deployed = $false
+            }
+        }
+    }
+    catch {
+        Write-LogEntry "Could not read the frontend render to decide whether tailscale is deployed ($($_.Exception.Message)) - assuming it IS, and checking as usual" "WARN"
+    }
+    $script:TailscaleDeployedCache = $deployed
+    return $deployed
+}
+
 # Inventory of expected `tailscale serve` mappings inside the tailscale
 # container. Each entry is what entrypoint.sh's setup_*_serve functions
 # put in place at container startup. The health check verifies all of
@@ -1667,130 +1716,145 @@ function Invoke-HealthCheck {
         Resolve-Catastrophe -Key 'openwebui' -Message "OpenWebUI is healthy again."
     }
     
-    # Tailscale container. Test-ServiceHealth is $false for BOTH "not running"
-    # and "running but unhealthy", so the old code announced "not running" about
-    # a container that was up the whole time, then "fixed" it with `compose up
-    # -d` - a NO-OP on an already-running container with unchanged config. That
-    # is exactly how the 2026-09-16 outage retried a no-op 8 times across 94
-    # minutes and never recovered. Split the two cases: RECREATE when it is up
-    # but unhealthy, so a changed .env (a fresh TAILSCALE_AUTH_KEY, say) is
-    # actually picked up. --no-deps leaves openwebui - which OWNS the netns
-    # tailscale joins - untouched.
-    if (-not (Test-ServiceHealth "tailscale")) {
-        $tsState = Get-ContainerState "tailscale"
-        if ($tsState.Running) {
-            # Recreate is DESTRUCTIVE (it flaps all 8 serve routes), so cap it at
-            # once an hour. The container healthcheck also probes 127.0.0.1:8080,
-            # which is OPENWEBUI's port over the shared netns - so an OWUI outage
-            # marks tailscale unhealthy, and an uncapped recreate would rebuild
-            # tailscale every 10 minutes over a fault that is not its own
-            # (found in review 2026-09-16).
-            $rcCooldown = Join-Path $PROJECT_DIR 'logs\.ts-recreate-cooldown'
-            $mayRecreate = $true
-            try {
-                if (Test-Path $rcCooldown) {
-                    if (((Get-Date) - (Get-Item $rcCooldown).LastWriteTime).TotalHours -lt 1) { $mayRecreate = $false }
+    # HOST tailscale node (operator remote access) - a SEPARATE tailnet node
+    # from the container one, and deliberately OUTSIDE the profile guard
+    # below: it is the Windows Tailscale app, not a container this compose
+    # project owns, so a frontend deployment without the tailscale profile
+    # says nothing about it. (The function returns early when tailscale.exe
+    # is not installed, so it is a no-op on a host that has no host node.)
+    Test-HostTailscaleBackend | Out-Null
+
+    # --- CONTAINER tailscale: only when this deployment HAS one -----------
+    # The frontend plane is profile-gated since 2026-09-19 (stack-layers 2.5
+    # / D8). Without the `tailscale` profile there is no tailscale container,
+    # and everything from here to the serve-route repair would be checking -
+    # and trying to repair - a container that is not meant to exist. See
+    # Test-TailscaleDeployed for which source answers the question and why it
+    # fails OPEN in both unclear cases.
+    if (Test-TailscaleDeployed) {
+        # Tailscale container. Test-ServiceHealth is $false for BOTH "not running"
+        # and "running but unhealthy", so the old code announced "not running" about
+        # a container that was up the whole time, then "fixed" it with `compose up
+        # -d` - a NO-OP on an already-running container with unchanged config. That
+        # is exactly how the 2026-09-16 outage retried a no-op 8 times across 94
+        # minutes and never recovered. Split the two cases: RECREATE when it is up
+        # but unhealthy, so a changed .env (a fresh TAILSCALE_AUTH_KEY, say) is
+        # actually picked up. --no-deps leaves openwebui - which OWNS the netns
+        # tailscale joins - untouched.
+        if (-not (Test-ServiceHealth "tailscale")) {
+            $tsState = Get-ContainerState "tailscale"
+            if ($tsState.Running) {
+                # Recreate is DESTRUCTIVE (it flaps all 8 serve routes), so cap it at
+                # once an hour. The container healthcheck also probes 127.0.0.1:8080,
+                # which is OPENWEBUI's port over the shared netns - so an OWUI outage
+                # marks tailscale unhealthy, and an uncapped recreate would rebuild
+                # tailscale every 10 minutes over a fault that is not its own
+                # (found in review 2026-09-16).
+                $rcCooldown = Join-Path $PROJECT_DIR 'logs\.ts-recreate-cooldown'
+                $mayRecreate = $true
+                try {
+                    if (Test-Path $rcCooldown) {
+                        if (((Get-Date) - (Get-Item $rcCooldown).LastWriteTime).TotalHours -lt 1) { $mayRecreate = $false }
+                    }
+                } catch { }
+                if ($mayRecreate) {
+                    Write-LogEntry "Tailscale container is RUNNING but health=$($tsState.Health) - recreating (up -d would be a no-op)..." "WARN"
+                    docker compose -f frontend\docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale | Out-Null
+                    try { (Get-Date -Format o) | Out-File $rcCooldown -Encoding ascii -Force } catch { }
+                } else {
+                    Write-LogEntry "Tailscale container still health=$($tsState.Health) but a recreate ran within the hour - not recreating again (check whether OpenWebUI, whose :8080 the healthcheck probes, is the real fault)" "WARN"
                 }
-            } catch { }
-            if ($mayRecreate) {
-                Write-LogEntry "Tailscale container is RUNNING but health=$($tsState.Health) - recreating (up -d would be a no-op)..." "WARN"
-                docker compose -f frontend\docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale | Out-Null
-                try { (Get-Date -Format o) | Out-File $rcCooldown -Encoding ascii -Force } catch { }
             } else {
-                Write-LogEntry "Tailscale container still health=$($tsState.Health) but a recreate ran within the hour - not recreating again (check whether OpenWebUI, whose :8080 the healthcheck probes, is the real fault)" "WARN"
+                Write-LogEntry "Tailscale container not running (state=$($tsState.State)), starting..." "WARN"
+                docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
+            }
+
+            # Wait for the container plus its netns reattachment.
+            Start-Sleep 45
+
+            if (-not (Test-ServiceHealth "tailscale")) {
+                # CATASTROPHE: a tailscale container that will not come healthy means
+                # EVERY tailnet route is gone - OpenWebUI, Mattermost :8446, the wiki,
+                # the LiteLLM UI. Alert out-of-band and CARRY ON with the cycle.
+                Send-CatastropheAlert -Key 'tailscale-container' -Message "the TAILNET is down - the tailscale container will not become healthy and auto-repair failed. Remote access to OpenWebUI, Mattermost (:8446), the wiki and the LiteLLM UI is GONE. Reply 'status', or check 'docker logs tailscale'."
+                $script:HealthIssues += 'tailscale-container'
+            } else {
+                Write-LogEntry "Tailscale container recovered" "SUCCESS"
+                Resolve-Catastrophe -Key 'tailscale-container' -Message "the tailscale container is healthy again."
             }
         } else {
-            Write-LogEntry "Tailscale container not running (state=$($tsState.State)), starting..." "WARN"
-            docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
-        }
-
-        # Wait for the container plus its netns reattachment.
-        Start-Sleep 45
-
-        if (-not (Test-ServiceHealth "tailscale")) {
-            # CATASTROPHE: a tailscale container that will not come healthy means
-            # EVERY tailnet route is gone - OpenWebUI, Mattermost :8446, the wiki,
-            # the LiteLLM UI. Alert out-of-band and CARRY ON with the cycle.
-            Send-CatastropheAlert -Key 'tailscale-container' -Message "the TAILNET is down - the tailscale container will not become healthy and auto-repair failed. Remote access to OpenWebUI, Mattermost (:8446), the wiki and the LiteLLM UI is GONE. Reply 'status', or check 'docker logs tailscale'."
-            $script:HealthIssues += 'tailscale-container'
-        } else {
-            Write-LogEntry "Tailscale container recovered" "SUCCESS"
             Resolve-Catastrophe -Key 'tailscale-container' -Message "the tailscale container is healthy again."
         }
-    } else {
-        Resolve-Catastrophe -Key 'tailscale-container' -Message "the tailscale container is healthy again."
-    }
 
-    # Test network connectivity. CATASTROPHE + continue: egress being dead
-    # inside the tailscale netns breaks every tailnet route, but it tells us
-    # nothing about inference or the bridges - which the old early return
-    # stopped us from checking at all.
-    if (-not (Test-NetworkConnectivity)) {
-        Write-LogEntry "Network connectivity failed, attempting recovery..." "WARN"
-        if (-not (Repair-TailscaleService)) {
-            Write-LogEntry "Failed to restore network connectivity" "ERROR"
-            Send-CatastropheAlert -Key 'tailnet-connectivity' -Message "no network egress from the tailscale container and auto-repair failed - every tailnet route (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI) is unreachable. Reply 'status' or 'recover'."
-            $script:HealthIssues += 'tailnet-connectivity'
+        # Test network connectivity. CATASTROPHE + continue: egress being dead
+        # inside the tailscale netns breaks every tailnet route, but it tells us
+        # nothing about inference or the bridges - which the old early return
+        # stopped us from checking at all.
+        if (-not (Test-NetworkConnectivity)) {
+            Write-LogEntry "Network connectivity failed, attempting recovery..." "WARN"
+            if (-not (Repair-TailscaleService)) {
+                Write-LogEntry "Failed to restore network connectivity" "ERROR"
+                Send-CatastropheAlert -Key 'tailnet-connectivity' -Message "no network egress from the tailscale container and auto-repair failed - every tailnet route (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI) is unreachable. Reply 'status' or 'recover'."
+                $script:HealthIssues += 'tailnet-connectivity'
+            } else {
+                Resolve-Catastrophe -Key 'tailnet-connectivity' -Message "tailnet connectivity is restored."
+            }
         } else {
             Resolve-Catastrophe -Key 'tailnet-connectivity' -Message "tailnet connectivity is restored."
         }
-    } else {
-        Resolve-Catastrophe -Key 'tailnet-connectivity' -Message "tailnet connectivity is restored."
-    }
     
-    # Test the tailscale daemon itself. CATASTROPHE + continue, as above.
-    if (-not (Test-TailscaleConnection)) {
-        Write-LogEntry "Tailscale connection failed, attempting recovery..." "WARN"
-        if (-not (Repair-TailscaleService)) {
-            Write-LogEntry "Failed to restore Tailscale connection" "ERROR"
-            Send-CatastropheAlert -Key 'tailscale-daemon' -Message "the tailscale daemon is not answering and auto-repair failed - the tailnet is down (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Reply 'status', or check 'docker logs tailscale'."
-            $script:HealthIssues += 'tailscale-daemon'
+        # Test the tailscale daemon itself. CATASTROPHE + continue, as above.
+        if (-not (Test-TailscaleConnection)) {
+            Write-LogEntry "Tailscale connection failed, attempting recovery..." "WARN"
+            if (-not (Repair-TailscaleService)) {
+                Write-LogEntry "Failed to restore Tailscale connection" "ERROR"
+                Send-CatastropheAlert -Key 'tailscale-daemon' -Message "the tailscale daemon is not answering and auto-repair failed - the tailnet is down (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Reply 'status', or check 'docker logs tailscale'."
+                $script:HealthIssues += 'tailscale-daemon'
+            } else {
+                Resolve-Catastrophe -Key 'tailscale-daemon' -Message "the tailscale daemon is answering again."
+            }
         } else {
             Resolve-Catastrophe -Key 'tailscale-daemon' -Message "the tailscale daemon is answering again."
         }
-    } else {
-        Resolve-Catastrophe -Key 'tailscale-daemon' -Message "the tailscale daemon is answering again."
-    }
     
-    # HOST tailscale node (operator remote access) — independent of the
-    # container node checked above; non-fatal but repairs + logs loudly.
-    Test-HostTailscaleBackend | Out-Null
-
-    # Test serve configuration. Additive repair: re-add only missing
-    # mappings (never `serve reset`, which would wipe working ones --
-    # including the per-service mappings the old code didn't know about).
-    # Tailnet NODE login state + key expiry. A logged-out node keeps the
-    # container running and tailscaled alive while EVERY serve route silently
-    # fails with "Logged out." - the 2026-09-16 failure mode, which nothing
-    # here looked for. The expiry warning is the preventive half: node keys
-    # expire on a schedule, so this gives notice instead of an outage.
-    # Only DEFINITIVE logged-out states page. BackendState is one of NoState /
-    # NeedsMachineAuth / NeedsLogin / Stopped / Starting / Running, and treating
-    # "anything but Running" as logged out would page on every restart, since the
-    # container has a 60s start_period (found in review 2026-09-16).
-    $tsNode = Test-TailscaleNodeState
-    if ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsLogin')) {
-        Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node is LOGGED OUT (NeedsLogin) - every serve route is gone (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Fix: put a fresh TAILSCALE_AUTH_KEY in .env, then 'docker compose -f frontend/docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale'."
-        $script:HealthIssues += 'tailscale-logout'
-    } elseif ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsMachineAuth')) {
-        Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node needs DEVICE APPROVAL (NeedsMachineAuth) - every serve route is down until it is approved. Approve this machine in the Tailscale admin console; a new auth key will NOT fix this one."
-        $script:HealthIssues += 'tailscale-machineauth'
-    } elseif ($tsNode.Reachable -and -not $tsNode.LoggedIn) {
-        # Starting / NoState / Stopped: transient or mid-restart. Record, do not page.
-        Write-LogEntry "Tailscale node is not Running yet (BackendState=$($tsNode.State)) - not paging; the container-health check covers a persistent failure" "WARN"
-    } elseif ($tsNode.LoggedIn) {
-        Resolve-Catastrophe -Key 'tailscale-logout' -Message "the tailscale node is logged in again."
-        if (($null -ne $tsNode.ExpiresInDays) -and ($tsNode.ExpiresInDays -lt 14)) {
-            Write-LogEntry "Tailscale node key expires in $($tsNode.ExpiresInDays) days" "WARN"
-            Send-TelegramAlert "WARNING ai-stack: the tailscale NODE KEY expires in $($tsNode.ExpiresInDays) days. When it does, every tailnet route - Mattermost included - goes down. Disable key expiry for this node, or re-auth it now." -ThrottleKey 'tailscale-key-expiry' -ThrottleHours 24
+        # Test serve configuration. Additive repair: re-add only missing
+        # mappings (never `serve reset`, which would wipe working ones --
+        # including the per-service mappings the old code didn't know about).
+        # Tailnet NODE login state + key expiry. A logged-out node keeps the
+        # container running and tailscaled alive while EVERY serve route silently
+        # fails with "Logged out." - the 2026-09-16 failure mode, which nothing
+        # here looked for. The expiry warning is the preventive half: node keys
+        # expire on a schedule, so this gives notice instead of an outage.
+        # Only DEFINITIVE logged-out states page. BackendState is one of NoState /
+        # NeedsMachineAuth / NeedsLogin / Stopped / Starting / Running, and treating
+        # "anything but Running" as logged out would page on every restart, since the
+        # container has a 60s start_period (found in review 2026-09-16).
+        $tsNode = Test-TailscaleNodeState
+        if ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsLogin')) {
+            Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node is LOGGED OUT (NeedsLogin) - every serve route is gone (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Fix: put a fresh TAILSCALE_AUTH_KEY in .env, then 'docker compose -f frontend/docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale'."
+            $script:HealthIssues += 'tailscale-logout'
+        } elseif ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsMachineAuth')) {
+            Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node needs DEVICE APPROVAL (NeedsMachineAuth) - every serve route is down until it is approved. Approve this machine in the Tailscale admin console; a new auth key will NOT fix this one."
+            $script:HealthIssues += 'tailscale-machineauth'
+        } elseif ($tsNode.Reachable -and -not $tsNode.LoggedIn) {
+            # Starting / NoState / Stopped: transient or mid-restart. Record, do not page.
+            Write-LogEntry "Tailscale node is not Running yet (BackendState=$($tsNode.State)) - not paging; the container-health check covers a persistent failure" "WARN"
+        } elseif ($tsNode.LoggedIn) {
+            Resolve-Catastrophe -Key 'tailscale-logout' -Message "the tailscale node is logged in again."
+            if (($null -ne $tsNode.ExpiresInDays) -and ($tsNode.ExpiresInDays -lt 14)) {
+                Write-LogEntry "Tailscale node key expires in $($tsNode.ExpiresInDays) days" "WARN"
+                Send-TelegramAlert "WARNING ai-stack: the tailscale NODE KEY expires in $($tsNode.ExpiresInDays) days. When it does, every tailnet route - Mattermost included - goes down. Disable key expiry for this node, or re-auth it now." -ThrottleKey 'tailscale-key-expiry' -ThrottleHours 24
+            }
         }
-    }
 
-    if (-not (Repair-TailscaleServes)) {
-        Write-LogEntry "Some tailscale serve mappings could not be restored (see prior WARN/ERROR lines)" "WARN"
-        # Non-fatal: openwebui main path may still work even if open_notebook
-        # serves are missing; downstream checks (LlamaCpp, OpenTerminal) will
-        # exercise their own paths.
+        if (-not (Repair-TailscaleServes)) {
+            Write-LogEntry "Some tailscale serve mappings could not be restored (see prior WARN/ERROR lines)" "WARN"
+            # Non-fatal: openwebui main path may still work even if open_notebook
+            # serves are missing; downstream checks (LlamaCpp, OpenTerminal) will
+            # exercise their own paths.
+        }
+    } else {
+        Write-LogEntry "tailscale is not part of this deployment (no 'tailscale' service in the frontend render and no container by that name) - skipping the tailscale container, connectivity, node-state and serve-route checks" "INFO"
     }
     
     # Test llama-cpp connectivity

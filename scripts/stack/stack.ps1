@@ -41,7 +41,7 @@ Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 $Projects = @(
     @{ Name = "anchor";    Compose = "docker-compose.yml";                 Note = "shared ai-stack_* networks only (0 services)" }
     @{ Name = "inference"; Compose = "inference\docker-compose.yml";       Note = "llama.cpp upstreams -> llm-queue -> LiteLLM gateway" }
-    @{ Name = "frontend";  Compose = "frontend\docker-compose.yml";        Note = "openwebui + tailscale netns pair" }
+    @{ Name = "frontend";  Compose = "frontend\docker-compose.yml";        Note = "openwebui + tailscale netns pair (PROFILE-GATED: COMPOSE_PROFILES in .env picks stock | gpu,tailscale)" }
     @{ Name = "memory";    Compose = "memory\docker-compose.yml";          Note = "mnemory + cloud gateway" }
     @{ Name = "search";    Compose = "search\docker-compose.yml";          Note = "Mullvad vpn + searxng + gateway" }
     @{ Name = "coder";     Compose = "coder\docker-compose.yml";           Note = "open-terminal + little-coder + lc-egress" }
@@ -145,9 +145,51 @@ switch ($Action) {
             $LASTEXITCODE -eq 0 }
         Probe "frontend: OWUI http://127.0.0.1:3000/health" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:3000/health).StatusCode -eq 200 }
-        Probe "frontend: 8 tailnet serve routes" {
-            $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
-            [int]$r -ge 8 }
+        # --- is the tailscale profile part of THIS deployment? ---------------
+        # The frontend plane is profile-gated since 2026-09-19 (stack-layers
+        # 2.5 / D8): a deployment without the `tailscale` profile has no
+        # tailscale container, and telling its operator that eight serve routes
+        # are missing is a FAIL line about a container that is not meant to
+        # exist.
+        #
+        # WHICH SOURCE: the RENDERED project (`config --services`), not a parse
+        # of .env. That is compose's own answer after it has applied
+        # COMPOSE_PROFILES from --env-file, from the host environment, and its
+        # own precedence rules; reimplementing that here would drift the moment
+        # any of them changes.
+        #
+        # AND IT FAILS OPEN, twice over. If the render cannot be read at all
+        # (docker down, bad env file) the probe still runs - a checker that
+        # goes quiet on its own error is the failure mode this stack keeps
+        # paying for. And if the render says "no tailscale" while a container
+        # NAMED tailscale is running, that is the operator's deployment with
+        # COMPOSE_PROFILES missing from .env: keep probing, and say so.
+        $tsDeployed = $true
+        $tsNote = ''
+        try {
+            # cmd /c so compose's stderr warnings cannot become PS 5.1
+            # NativeCommandErrors under this script's EAP=Stop.
+            $feSvc = (cmd /c "docker compose -f frontend\docker-compose.yml --env-file .env config --services 2>nul") -join "`n"
+            if ($feSvc -and ($feSvc -notmatch '(?m)^tailscale\s*$')) {
+                # Substring filter + an exact-match pass: `--filter name=^tailscale$`
+                # cannot survive cmd /c (cmd eats the `^`, so the anchor is lost
+                # and stt-tts-tailscale matches too - verified 2026-09-19).
+                $tsLive = @(@(cmd /c "docker ps --filter name=tailscale --format {{.Names}} 2>nul") | Where-Object { $_ -eq 'tailscale' })
+                if ($tsLive.Count -gt 0) {
+                    $tsNote = 'tailscale is RUNNING but absent from the frontend render - .env is probably missing COMPOSE_PROFILES=gpu,tailscale'
+                } else {
+                    $tsDeployed = $false
+                }
+            }
+        } catch { }
+        if ($tsDeployed) {
+            if ($tsNote) { Write-Host ("  [warn] " + $tsNote) -ForegroundColor Yellow }
+            Probe "frontend: 8 tailnet serve routes" {
+                $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
+                [int]$r -ge 8 }
+        } else {
+            Write-Host "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" -ForegroundColor DarkGray
+        }
         # owui/ plugins deploy BY PASTE: nothing links the repo file to the live
         # webui.db row, so a committed fix can sit unpasted for weeks (the
         # deep_research banner, 2026-09-04..06). Count only - the names are in

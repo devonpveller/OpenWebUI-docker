@@ -113,12 +113,47 @@ Run with: `docker compose ...` from the workspace root.
 > Images pinned (`openwebui:local` / `tailscale:local`) — rebuilds are
 > deliberate, per the UPDATE-MANAGEMENT runbook, never an `up` side effect.
 
+**PROFILE-GATED since 2026-09-19 (stack-layers §2.5 / D8).** This plane renders
+differently depending on `COMPOSE_PROFILES`, and **the operator's deployment is
+not the default** — `.env` must carry `COMPOSE_PROFILES=gpu,tailscale` or
+`docker compose -f frontend/docker-compose.yml --env-file .env up -d` starts
+`openwebui-backup` and nothing else — **and `... down` leaves `openwebui` and
+`tailscale` running**, because compose only tears down services whose profile
+is active. Naming a service explicitly (`up -d tailscale`, `build openwebui`)
+still works past an inactive profile, which is why the watchdog's per-service
+repairs survive a missing line and the whole-project verbs do not. A
+`--profile` flag on the command line REPLACES `COMPOSE_PROFILES` rather than
+adding to it.
+
+| Profile | Services | For |
+|---------|----------|-----|
+| *(none)* | `openwebui-backup` only | nothing useful — a misconfigured `.env` looks like this |
+| `stock` | `openwebui-stock` (+ backup) | a fresh clone: pinned upstream image, no GPU, no local build, no anchor network, no other plane |
+| `gpu` | `openwebui` (+ backup) | this host: the CUDA local build, the nvidia device reservation, the `llm-net`/`app-net` seams, the status-pipe mount |
+| `tailscale` | `tailscale`, `tailscale-backup` | the tailnet node. Requires `gpu` — `network_mode: service:openwebui` names that service |
+
+`openwebui-stock` and `openwebui` both declare `container_name: openwebui` and
+share `frontend_openwebui-data`, so exactly one may be active: turning on both
+is refused by `docker compose config` before anything starts. The container
+table below is the `gpu,tailscale` deployment.
+
 | Container | Role | Host port | Networks | GPU |
 |-----------|------|-----------|----------|-----|
-| `openwebui` | Open WebUI chat surface | 127.0.0.1:3000 | default, llm-net, app-net (all external) | yes |
+| `openwebui` | Open WebUI chat surface (service `openwebui` under `gpu`; service `openwebui-stock` under `stock`) | 127.0.0.1:3000 | default, llm-net, app-net (external) + owui-net (project-local) | yes (`gpu` only) |
 | `tailscale` | Tailnet VPN; shares openwebui netns; 8 serve routes (OWUI, llama-cpp aliases — probe = `/health/liveliness` since J.1, ON :8443/:5055, wiki :8444 via caddy:8446, LiteLLM UI :8445, Mattermost :8446) | — (`network_mode: service:openwebui`) | — | no |
-| `openwebui-backup` | openwebui-data (mem-capped 1g; output still `./backups/openwebui`) | — | default (external) |  |
-| `tailscale-backup` | tailscale state dir (bind mount) | — | — |  |
+| `openwebui-backup` | openwebui-data (mem-capped 1g; output still `./backups/openwebui`). No profile — it runs in every deployment, which is why it sits on `owui-net` (the one net both openwebui definitions share) rather than `ai-stack_default` | — | owui-net (project-local) |  |
+| `tailscale-backup` | tailscale state dir (bind mount). Gets the project's `default` net implicitly (= `ai-stack_default`) — its compose comment saying "no network attachment" describes the mounts, not the render | — | default (external) |  |
+
+**Observers know about the profiles.** `stack.ps1 health` prints
+`[skip] frontend: 8 tailnet serve routes` instead of a FAIL, and
+`stack-watchdog.ps1` skips the whole container-tailscale section
+(health/recreate, egress, daemon, node state, serve-route repair) when the
+profile is absent — both via the same rule: read the RENDERED project, and fail
+OPEN if the render is unreadable *or* if a container named `tailscale` is
+running while the render says otherwise (that is this host with
+`COMPOSE_PROFILES` missing, and it gets a loud line, not silence). The HOST
+Tailscale app check is deliberately outside that guard — it is not a container
+this project owns.
 
 ---
 
