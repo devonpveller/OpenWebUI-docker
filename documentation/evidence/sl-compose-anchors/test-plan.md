@@ -250,7 +250,11 @@ BEFORE counts as "frontend 3, inference 8, memory 3, search 4, coder 4, portal
 a fourth service carrying the block) and `agent-org` — named in the anchor's
 `artifact` but absent from the count list — is **16**. Verify the before-counts
 yourself with the same command in `$SC/base`; the expected values are
-4 / 2,1,3,2 / 3 / 4 / 4 / 12 / 16 = **48 declarations across ten files, now 10**.
+4 / 2,1,3,2 / 3 / 4 / 4 / 12 / 16 = **51 declarations across ten files, now 10**.
+(Commit `d50fdec`'s message says "forty-eight". That number is WRONG - it is the
+sum with agent-org's 16 replaced by the 13 watchtower labels, a transcription
+slip found while writing the report. The per-file numbers in that commit and in
+findings §B are right; only the total was not. Count it yourself.)
 Findings §B records the discrepancy. Judge the criterion's intent (one
 declaration per file), and flag the wording.
 

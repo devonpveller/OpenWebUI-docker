@@ -71,6 +71,10 @@ declaration counts on the base commit:
 | `portal/docker-compose.yml` | 12 | 12 |
 | `agent-org/docker/docker-compose.yml` | *not listed* | **16** |
 
+The ten files carried **51** declarations between them before this change and
+carry **10** after. (Commit `d50fdec`'s message says "forty-eight"; that total
+is wrong - the per-file numbers in it and in the table above are not.)
+
 The frontend miscount predates the `stock` profile (sl-frontend-solo added a
 fourth service carrying the block). agent-org is named in the anchor's
 `artifact` field but omitted from the count list. The criterion was tested at
