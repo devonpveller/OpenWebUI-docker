@@ -23,20 +23,36 @@ not to the note's eight.** The header comment at `.githooks/pre-commit:7-16` is
 still one check short (no 5d) — not corrected here, it is not one of the 17.
 [source: .githooks/pre-commit]
 
-## 2. `scripts/checks/plan-store.ps1` cannot run from a git worktree
+## 2. `scripts/checks/plan-store.ps1` resolves both the store AND the index from CWD
 
-It derives the plan store as `<repo root>/../documentation-plans-ai-stack`
-(`plan-store.ps1:59`). Inside a harness worktree the repo root is
-`.../.claude/worktrees/wt-<id>`, so it looks for the store under
-`.claude/worktrees/` and throws at :60. It exits 0 when given
-`-Store "D:\Open WebUI\documentation-plans-ai-stack"` explicitly. Every agent
-run by the harness works in a worktree, and CLAUDE.md tells every planning
-session to run this script at start and end — so the default path is wrong for
-the population that is told to use it. A one-line fix (`git rev-parse
---git-common-dir` to find the main checkout) would close it; that is a change to
-a check script and is out of scope for a docs item.
-[source: scripts/checks/plan-store.ps1:57-60] [live: both invocations run
-2026-09-19 from `wt-sl-closeout`]
+**Corrected 2026-09-19 after the tester refuted the first version of this entry.**
+It is not "needs `-Store` from a worktree" — the determinant is the CURRENT
+DIRECTORY, and `-Store` fixes only half of what that breaks.
+
+`plan-store.ps1:56` sets `$Root = git rev-parse --show-toplevel`, which answers
+for the CWD, not for `$PSScriptRoot`. Two things hang off `$Root`:
+
+- the plan store, derived as `<$Root>/../documentation-plans-ai-stack` (:59),
+  with a hard `throw` if that has no `.git` (:60). From a worktree `$Root` is
+  `.../.claude/worktrees/wt-<id>`, so it looks under `.claude/worktrees/` and
+  throws. `-Store <abs path>` gets past this.
+- `$IndexPath = Join-Path $Root 'documentation/implementation-guide/README.md'`
+  (:62), the index the seam check reads. `-Store` does NOT redirect this.
+  Invoked by absolute path with the CWD in the operator's main checkout, it
+  audits the MAIN checkout's index — so a branch that adds a status row is
+  scored against an index that does not have it yet, and the run exits 1 with
+  `plan store feature '<name>' has NO status row in the index` (:89).
+
+So the working combination is **CWD inside the worktree AND `-Store` pointing at
+the real store**. Every agent the harness runs works in a worktree, and CLAUDE.md
+tells every planning session to run this script at start and end, so the default
+is wrong for the population told to use it. Resolving `$Root` from
+`git rev-parse --git-common-dir` (or from `$PSScriptRoot`) would close both
+halves; that is a change to a check script and out of scope for a docs item.
+[source: scripts/checks/plan-store.ps1:56-62, :89] [live: exit 0 from
+`wt-sl-closeout` with CWD in the worktree,
+2026-09-19; the exit-1-from-the-wrong-CWD half was observed by the tester
+(wt-tester-closeout) on the same day, not re-run here]
 
 ## 3. Three more `.env.example` variables that nothing reads
 
@@ -68,16 +84,47 @@ four bare directories. `frontend/` and `inference/` are the two that really do
 hold one file each, which is also why they are the two planes with no README.
 [source: `ls` of each plane directory, 2026-09-19]
 
-## 5. `agent-org/README.md`: 866 is a count of `def test_`, not of collected tests
+## 5. `agent-org/README.md`: 865 test functions, counted with the AST — and why grep said 866
 
-The README's two "55 tests" claims were corrected to 866, which is the number of
-`def test_` definitions under `agent-org/agent-bridge/tests/` (the directory
-`pyproject.toml:25` sets as `testpaths`). Two further `def test_` live outside
-that directory and are not collected. What `pytest -q` actually reports may be
-HIGHER, because parametrized tests collect once per case; the suite was not run
-here (it needs `pip install -e .[test]`).
-[source: agent-org/agent-bridge/pyproject.toml:23-25; grep count]
-[unverifiable here: the collected count]
+**Corrected 2026-09-19: the first fix shipped 866, which is wrong, and it was
+wrong for the reason this whole item exists.** The number came from the audit
+note's `[agent]` line and was reproduced with `grep -c "def test_"` instead of
+being counted from the code. Grep counts TEXT, so it counts prose: the 866th hit
+is a sentence inside `tests/test_p18_observation.py:392` ("...branch has a stable
+44 `def test_`, and the honest 44 next round read as a regression..."), which is
+documentation, not a definition.
+
+The count in the README is now **865**, obtained by parsing every file under
+`agent-org/agent-bridge/tests/` and counting `ast.FunctionDef` /
+`ast.AsyncFunctionDef` nodes whose name starts with `test_`:
+
+    98 files · 109 sync + 756 async = 865 · all module-level · 865 unique names
+
+The README states the method ("AST count, 2026-09-19") rather than a bare number,
+so the next reader can reproduce it and knows what it is not. `tests/` is the
+right scope because `pyproject.toml:23-25` sets `testpaths = ["tests"]`.
+
+Two further corrections to what this entry said before:
+
+- It claimed "two further `def test_` live outside that directory". They are not
+  definitions either — both are COMMENT lines in
+  `agent-org/agent-bridge/app/orchestrator.py:1403,1432`, found by the same grep
+  and misread the same way.
+- What `pytest -q` reports is still expected to be HIGHER than 865, because a
+  parametrized function collects once per case. The suite was NOT run (it needs
+  `pip install -e .[test]`), so the README does not claim to state pytest's
+  number.
+
+**The lesson, which is the reusable part:** a test count taken with `grep` is a
+count of a string, and any test suite that writes about testing will contain that
+string in prose. Use the AST. The same applies to counting services, probes or
+volumes from text — T2's pre-commit recount survived only because the thing being
+counted (`powershell.exe -NoProfile`) does not appear in the file's prose.
+[source: AST parse of agent-org/agent-bridge/tests/*.py, 2026-09-19;
+agent-org/agent-bridge/pyproject.toml:23-25;
+agent-org/agent-bridge/tests/test_p18_observation.py:392;
+agent-org/agent-bridge/app/orchestrator.py:1403,1432]
+[unverifiable here: the collected count pytest would report]
 
 ## 6. OB1's "~29 containers" is 24 services (left uncorrected, deliberately)
 

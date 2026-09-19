@@ -138,14 +138,29 @@ PASS = all six corrected, every number independently recounted.
     `notify-net` and four volumes itself, and takes only `ai-stack_app-net`
     externally. **FAIL** if the new header names a network or volume the file
     does not declare.
-13. **agent-bridge test count.** `git show work/sl-closeout:agent-org/README.md`
-    — both mentions must match the number of `def test_` definitions under
-    `agent-org/agent-bridge/tests/` on this branch (count them from a checkout).
-    `pyproject.toml` sets `testpaths = ["tests"]`, so `def test_` outside that
-    directory does not count. **FAIL** if the README says 55, or if it states a
-    number as what `pytest -q` reports — the suite was NOT run (it needs
-    `pip install -e .[test]`), and the developer phrased it as a `def test_`
-    count on purpose; see the findings note §5.
+13. **agent-bridge test count — COUNT IT WITH THE AST, NOT WITH GREP.**
+    `grep -c "def test_"` OVER-COUNTS: this suite writes *about* testing, so the
+    string appears in prose too (`tests/test_p18_observation.py:392` is one such
+    line, and `app/orchestrator.py:1403,1432` are two more, in comments). Attempt
+    1 of this item failed exactly there — a grep count of 866 shipped into the
+    README when there are 865 definitions. Count definitions:
+
+    ```bash
+    python -c "import ast,pathlib; print(sum(1 for p in pathlib.Path('agent-org/agent-bridge/tests').rglob('*.py') for n in ast.walk(ast.parse(p.read_text(encoding='utf-8'))) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith('test_')))"
+    ```
+
+    (Python prints two `SyntaxWarning` lines while parsing the suite; they are
+    harmless and the count is the last line — it is 865 on this branch.)
+
+    Both mentions in `git show work/sl-closeout:agent-org/README.md` must equal
+    that number AND must name the method they used, so the next reader can
+    reproduce it. `pyproject.toml:23-25` sets `testpaths = ["tests"]`, so
+    definitions outside that directory are out of scope.
+    **FAIL** if the README says 55; **FAIL** if it says 866 (the grep artefact);
+    **FAIL** if it states a bare number with no method, or presents a number as
+    what `pytest -q` reports — the suite was NOT run (it needs
+    `pip install -e .[test]`) and parametrization makes pytest's count higher.
+    See the findings note §5.
 14. **Watchdog project count.** `scripts/README.md` must match the `projects`
     keys in `git show work/sl-closeout:scripts/lib/stack-services.json`.
     **FAIL** if it says three, or if it lists `portal` among them — the portal
@@ -246,24 +261,36 @@ claim that does not hold.
 1. `git show work/sl-closeout:documentation/implementation-guide/README.md | grep -n "stack-layers"`
    — exactly one status row, marked **@ plan store**, stating PLAN 2026-09-19
    and wave 1 in progress.
-2. Run the check from your worktree:
+2. Run the check **with your current directory inside your worktree** — `cd`
+   there first; passing the script by absolute path is not enough:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "<your worktree>\scripts\checks\plan-store.ps1" -Store "D:\Open WebUI\documentation-plans-ai-stack"
+cd "<your worktree>"
+powershell -NoProfile -ExecutionPolicy Bypass -File ".\scripts\checks\plan-store.ps1" -Store "D:\Open WebUI\documentation-plans-ai-stack"
 ```
 
 Expect exit 0 and `plan store: clean (versioned, pushed, indexed)`.
-**`-Store` is required from a worktree**, and that is a defect in the script,
-not in this item: it resolves the store as
-`<repo root>/../documentation-plans-ai-stack` (`plan-store.ps1:59`), which
-inside a worktree points at `.claude/worktrees/`. It is written up in the
-findings note §2. Running it without `-Store` throws; that is expected and is
-NOT a fail for this item. **FAIL** if it exits non-zero WITH `-Store`, or if the
-seam check reports the stack-layers feature as having no status row.
 
-Note: the check also audits the operator's MAIN checkout for untracked plan
-material. Untracked notes sitting there belong to the operator, not to this
-item; report them, do not fail on them.
+**Both the CWD and `-Store` matter, and that is a defect in the script rather
+than in this item** (findings note §2). `plan-store.ps1:56` takes `$Root` from
+`git rev-parse --show-toplevel`, i.e. from the CURRENT DIRECTORY. `-Store` fixes
+only the store lookup (:59-60, which otherwise throws because a worktree's
+parent is `.claude/worktrees/`); the seam check reads
+`$IndexPath = <$Root>/documentation/implementation-guide/README.md` (:62), so
+running it with the CWD in the operator's MAIN checkout scores this branch's row
+against the main checkout's index — which will not carry the row until the
+branch merges — and exits 1 with `plan store feature 'stack-layers' has NO
+status row in the index` (:89). That exit-1 is the wrong CWD, not a fail of this
+item; re-run from the worktree. Likewise, running without `-Store` throws, which
+is expected.
+
+**FAIL** only if it exits non-zero when run with the CWD in your worktree AND
+`-Store` given, or if the seam check then reports stack-layers as having no row.
+
+Note on its first section: the embedded `check-doc-placement.ps1 -All` audits
+whatever `$Root` resolved to, so from your worktree it audits YOUR tree, not the
+operator's. If you do run it from the main checkout and it lists untracked notes
+there, those are the operator's and are not this item's to fix.
 
 ## T9 - criterion 6, the scope of the diff, ruff, and the hooks
 

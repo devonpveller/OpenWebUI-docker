@@ -31,7 +31,7 @@ agent-org/
     charters/                   # role charters = the profiles' system_prompt_refs (§4)
     floor/                      # hard-rules.md (immutable floor) + stop-gate-enforcement.md
     hooks/pretooluse_floor.py   # the deterministic floor hook (hard-rule #4, P3.3)
-    tests/                      # 866 `def test_` functions, no infra needed
+    tests/                      # 865 test functions (AST count, 2026-09-19)
 ```
 
 Charters are also delivered to workers as Agent Skills under
@@ -118,7 +118,7 @@ The chat bus is the primary surface; the bridge also exposes an HTTP control pla
 ## Tests
 
 ```bash
-cd agent-org/agent-bridge && pip install -e .[test] && pytest -q   # 866 `def test_`, no infra
+cd agent-org/agent-bridge && pip install -e .[test] && pytest -q   # 865 test fns (AST, 2026-09-19)
 ```
 
 ## Conventions honored
