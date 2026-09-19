@@ -19,6 +19,11 @@ product menu below, pick one more thing, and turn it on.
 You need **Docker** and **Python 3.11 or newer** (the driver is standard-library
 only, so a fresh host needs nothing else).
 
+**The commands here are PowerShell**, because this stack is developed on
+Windows + Docker Desktop and every script in `scripts/` is a `.ps1`. Only the
+two `Copy-Item` lines below are shell-specific - `cp` does the same job - and
+`stack.py` is plain Python that runs anywhere Docker and Python do.
+
 ```powershell
 git config core.hooksPath .githooks       # pre-commit checks (.githooks/pre-commit)
 Copy-Item .env.example .env               # the anchor's own; nearly empty
@@ -73,7 +78,16 @@ record - the table below is derived from it, and
 | **digest** | anchor, inference, search, ob1 | `ob1: research`, `ob1: notebook` | - | open-brain's | open-brain's |
 | **portal** | anchor, frontend, portal | `portal: internet` | - | `WEBUI_SECRET_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, `AUTHELIA_JWT_SECRET`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY`, `PUBLIC_DOMAIN` | a Cloudflare tunnel token and a public domain. **The portal is `manual`: the driver never starts it** - `scripts/portal/portal-on.ps1` does |
 
-Two things that table is saying quietly and are worth saying out loud:
+**Reading the keys column.** A product's real key set is the union of the
+`keys` of every plane in its "Starts" cell - so it is always cumulative, and
+`+ X` is shorthand for "everything an earlier row already introduced for the
+planes this one shares, plus X". `memory` is `LITELLM_DB_PASSWORD`,
+`LITELLM_MASTER_KEY`, `MCP_API_KEY`; `coding-agent` is those first two plus
+`WEBUI_SECRET_KEY` plus `OPEN_TERMINAL_API_KEY`. You never have to work it out:
+`stack.py enable <product>` refuses with the whole list, each key beside the
+file it belongs in.
+
+Two more things that table is saying quietly and are worth saying out loud:
 
 - **A product pulls what its planes REQUIRE**, which is why `memory` starts
   inference and `open-brain` starts search. It does **not** pull their optional

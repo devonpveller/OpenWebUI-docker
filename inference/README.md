@@ -202,7 +202,10 @@ After a crash or a wedged GPU, use the ordered path instead:
 Restore: `documentation/runbooks/restore-from-snapshot.md`, or the orchestrated
 `scripts/backup/restore-from-snapshot.ps1 -SnapshotRoot .\backups -Date
 <yyyy-MM-dd> [-Services <name|all>] [-Apply]`. `-SnapshotRoot` and `-Date` are
-MANDATORY, and without `-Apply` the script only plans.
+MANDATORY, and without `-Apply` the script only plans. **The catalog is keyed by
+what you restore, not by the plane:** this plane's one key is `lm-models` (the
+GGUF store). The LiteLLM ledger has no orchestrated entry - restore it from the
+`pg_dump` in `backups/llm-gateway` by hand.
 
 ## Gotchas
 

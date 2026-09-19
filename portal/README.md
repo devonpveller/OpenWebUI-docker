@@ -50,14 +50,16 @@ path.
 | `tunnel-watcher` | `internet` | Probes `cloudflared:2000/ready` every `TUNNEL_WATCHER_POLL_SEC` (30) and alerts HIGH after `TUNNEL_WATCHER_FAILURES_BEFORE_ALERT` (3) consecutive misses. |
 
 **The hardening floor, read out of the render rather than the file** (`config
---format json`, all twelve services, 2026-09-19):
+--format json`, all twelve services, 2026-09-19). **Each row's count plus its
+exceptions must come to twelve** - that arithmetic is the cheapest check on
+this table, and it is what caught the first version of the last row:
 
 | Property | Who has it |
 |---|---|
 | `cap_drop: ALL` + `security_opt: no-new-privileges` | **all twelve**, `portal-init` included |
 | `read_only: true` | **eleven** - every service except `portal-init`, which exists to chown the volumes and so needs a writable root FS |
-| a non-root `user:` | ten. `portal-init` is deliberately `0:0` (it chowns), and `portal-cron` sets no `user:` at all |
-| `cpus` + `memory` + `pids` limits | ten. `caddy-backup` and `authelia-backup` carry `pids` only; `portal-init` has no `deploy` block |
+| a non-root `user:` | **ten**. `portal-init` is deliberately `0:0` (it chowns), and `portal-cron` sets no `user:` at all |
+| `cpus` + `memory` + `pids` limits | **nine**. `caddy-backup` and `authelia-backup` carry `pids` only, and `portal-init` has no `deploy` block at all - 9 + 2 + 1 = 12 |
 
 Since `sl-compose-anchors` (2026-09-19) that floor is declared **once** at the
 top of the file as YAML extension fields and merged into each service with

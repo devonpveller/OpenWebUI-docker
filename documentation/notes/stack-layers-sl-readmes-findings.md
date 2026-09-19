@@ -250,11 +250,13 @@ docker compose -f docker-compose.yml up -d
 docker compose -f frontend/docker-compose.yml up -d
 ```
 
-The first has no `-p`, and `docker-compose.yml` declares no `name:`, so the
-project name is the clone DIRECTORY's name. Cloning into a directory called
-`ai-stack` and running that line would address the live anchor project and its
-`ai-stack_*` networks. **On a host already running the stack, do not run the
-anchor line of the quickstart.** It is not needed for the proof either: the
+The first has no `-p`, and the root `docker-compose.yml` declares no `name:`
+either, so the project name is **the clone DIRECTORY's name** - `qs_*` networks
+from a clone called `qs`, and the LIVE `ai-stack_*` ones from a clone called
+`ai-stack`. The hazard is therefore conditional, and that is the reason to
+state it rather than to discount it: the safety rests on a directory name
+nobody declared as load-bearing. **On a host already running the stack, do not
+run the anchor line of the quickstart.** It is not needed for the proof either: the
 `stock` profile uses only the project-local `owui-net` and needs no anchor
 network (compose does not require an UNUSED external network to exist). The
 test plan says this in the case itself rather than in a preamble.
@@ -306,10 +308,15 @@ Nothing was started for any of those; `enable` only writes the state file.
 ## 5. Ledger: what was removed from README.md / CLAUDE.md, and why
 
 The anchor requires that no claim be silently dropped. Every statement that
-left one of the two rewritten files is here.
+left one of the two rewritten files is here. **Two rows were missing from the
+first version of this table and were added after the tester found them** - which
+is worth stating rather than quietly fixing: a ledger whose value is its
+completeness has to be audited for completeness, not read.
 
 | Removed from | Claim | Disposition |
 |---|---|---|
+| README.md | "Self-hosted AI stack **on Windows + Docker Desktop**" in the opening sentence | **Moved** - it survives in `CLAUDE.md`'s "Shell" convention ("Windows + PowerShell 5.1 ... recovery scripts assume Docker Desktop"). But see the note below this table: dropping it from the README was a mistake of a different kind. |
+| README.md | "All published ports bind to `127.0.0.1`; external access is Tailscale serve or the portal only" | **Moved and distributed**: every plane README now states its own publishes and their loopback binding, and the product table's surfaces column carries it per product. Still true as a whole - all eight published ports across the six in-repo planes are `127.0.0.1` binds. |
 | README.md | The ten-row "Topology - compose projects around a network anchor" table | **Moved**, shortened, to the "The layout" section, one row per plane, each linking that plane's README. The per-plane detail it used to carry lives in those READMEs now. |
 | README.md | Quickstart loop copying all six `<plane>/.env.example` files | **Moved** to "Add one thing": a fresh clone needs two env files, and `enable` names the rest when you ask for them. The env-split rule itself is kept verbatim in "The layout". |
 | README.md | "pre-commit: 10 checks" | **Removed as unreliable** - see 3.3. |
@@ -323,6 +330,15 @@ left one of the two rewritten files is here.
 | stack-map reference | Portal/Backups "internet, local-test" profile cells | **Corrected to what the compose file says** - ten of twelve portal services carry no profile at all. |
 | stack-map reference | "Legacy linear equivalent (PowerShell version preferred)" row | **Replaced** by a row naming the two surviving `.bat` files and why they are not a recovery path. |
 | stack-map SKILL.md | Quick map listing `watchtower`, `tor`, `mcpo`, `smolcrawl-pipelines`, `llama-cpp`, `llama-cpp-embed` as containers | **Replaced** by the nine projects, with an explicit "retired, do not re-add" line naming each - the two llama-cpp names because they are network ALIASES on `llm-gateway` now, not containers. |
+
+**The "Windows + Docker Desktop" row needed more than a disposition, and got
+it.** The sentence moved, but the AUDIENCE did not: the quickstart a newcomer
+is told to run is `Copy-Item` and `.\scripts\...`, PowerShell-only, while the
+product table says `chat` needs "nothing beyond Docker". "Moved to CLAUDE.md"
+is a true disposition and a useless one, because `CLAUDE.md` is not the file
+that reader was sent to. **Fixed in the artifact** rather than left here: the
+quickstart now names the shell its commands are written in. A dropped claim can
+be correctly ledgered and still be a defect.
 
 ---
 
@@ -409,19 +425,33 @@ and `COMPOSE_PROFILES=stock` still live in `frontend/.env.example`; only
 **[measured]** `portal/README.md` said "Every service runs non-root with
 `cap_drop: ALL`, `no-new-privileges` and (bar `portal-init` and
 `portal-alerter`) a read-only root filesystem, with explicit CPU / memory /
-pids limits." Rendering all twelve services and reading the four keys back:
+pids limits." Measured by rendering the plane and counting the key on each
+service - `config --format json --profile internet`, then for each of the
+twelve read `user`, `read_only`, `cap_drop`, `security_opt` and
+`deploy.resources.limits`:
 
-| Property | Reality |
-|---|---|
-| `cap_drop: ALL` + `no-new-privileges` | all twelve - correct |
-| `read_only: true` | **eleven**. Only `portal-init` lacks it. `portal-alerter` HAS it, and my sentence said it did not |
-| non-root `user:` | **ten**. `portal-init` is `0:0` by design; `portal-cron` sets no `user:` at all. "Every service runs non-root" was false twice |
-| `cpus`+`memory`+`pids` | **ten**. The two backup sidecars carry `pids` only; `portal-init` has no `deploy` block |
+| Property | Reality | Exceptions, and they must add to 12 |
+|---|---|---|
+| `cap_drop: ALL` + `no-new-privileges` | **12** | none |
+| `read_only: true` | **11** | `portal-init` only. `portal-alerter` HAS it, and my sentence said it did not |
+| non-root `user:` | **10** | `portal-init` is `0:0` by design; `portal-cron` sets no `user:` at all. "Every service runs non-root" was false twice |
+| `cpus`+`memory`+`pids` | **9** | `caddy-backup` + `authelia-backup` carry `pids` only (2), `portal-init` has no `deploy` block (1). 9 + 2 + 1 = 12 |
 
 Written from an excerpt rather than from the render - the "read to the end"
-failure, in the file whose own README warns about it. Corrected to a table read
-out of `config --format json`. **This was wrong before the rebase too**; the
-rebase is only what made me look again.
+failure, in the file whose own README warns about it. **This was wrong before
+the rebase too**; the rebase is only what made me look again.
+
+**And the first correction repeated the defect (attempt 1, caught by the
+tester).** The table above said **ten** in its last row - the same false number
+the paragraph above it exists to correct, one row down, under a `[measured]`
+label, in the findings file that the NEXT item reads. Its first three rows were
+right, so the fourth borrowed their credibility. The arithmetic refutes it
+without any tooling: ten with all three, plus two with `pids` only, plus one
+with no `deploy` block, is thirteen services in a twelve-service plane.
+**A count of a subset is only checked when its exceptions are counted too**, and
+that is why the "must add to 12" column is now part of the table rather than
+prose beside it. The render's answer, both here and in `portal/README.md`, is
+9 / 2 / 1.
 
 ### `path:line` citations: what was re-derived, and what moved
 

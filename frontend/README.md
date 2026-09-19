@@ -251,8 +251,11 @@ the surfaces this plane appears on today are:
   `Confirm-FrontendProfiles`
 - `scripts/checks/stack-watchdog.ps1` (tailnet serve repair) and
   `scripts/checks/check-watchdog-repair-targets.ps1`
-- `scripts/backup/restore-from-snapshot.ps1` - the `frontend` and `tailscale`
-  catalog entries, which pass the profiles themselves
+- `scripts/backup/restore-from-snapshot.ps1` - the **`openwebui`** and
+  `tailscale` catalog entries, which pass
+  `--profile gpu --profile tailscale` themselves. The catalog is keyed by what
+  you restore, not by the plane: there is no `frontend` key, and
+  `-Services openwebui` is what restores `frontend_openwebui-data`
 - `scripts/lib/stack-services.curated.json` - edit the CURATED sidecar, then run
   `python scripts/stack/stack.py inventory --write`
 - `.claude/skills/stack-map/references/workspace-stacks.md` section 1a, and the

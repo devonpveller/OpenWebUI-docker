@@ -177,7 +177,7 @@ that settles it:
 | `$Script:<Plane>Services` variables exist and `$MainStackServices` is empty | stack-map section 4 | `grep -n '^\$Script:.*Services' scripts/recovery/emergency-recovery.ps1` |
 | the portal has no rows in the generated inventory | `portal/README.md`, findings 1.2 | a `python -c` over `scripts/lib/stack-services.json` filtering `project == "portal"` |
 | `restore-from-snapshot.ps1` has `caddy` and `authelia` catalog entries | `portal/README.md` | `grep -n "^  'caddy'\|^  'authelia'" scripts/backup/restore-from-snapshot.ps1` |
-| the portal hardening table: 12 / 11 / 10 / 10 for cap_drop+no-new-privileges, read_only, non-root user, cpus+memory+pids | `portal/README.md` | render and read the keys back, **do not read the file** - see the note below the table |
+| the portal hardening table: **12 / 11 / 10 / 9** for cap_drop+no-new-privileges, read_only, non-root user, cpus+memory+pids | `portal/README.md` | render and read the keys back, **do not read the file** - see the note below the table. Check each row's exceptions sum to 12 |
 | the `x-` extension fields each plane README describes | `frontend/`, `inference/`, `portal/README.md` | `git grep -l '^x-[a-z-]*: &' -- '*.yml'` (expect 10 files) and `sed -n '/^x-/,/^services:/p' <file>` for the contents |
 
 **The portal hardening table must be read from the RENDER, not the file.**
@@ -198,10 +198,16 @@ for n,s in sorted(d['services'].items()):
 
 **Expect** `portal-init` as the only one with no `read_only` and with
 `user=0:0`; `portal-cron` with no `user` at all; `caddy-backup` and
-`authelia-backup` with `pids` only; all twelve with `cap_drop: ['ALL']`.
-The README's table says exactly that - **the developer's first version of this
-sentence got it wrong in three ways**, written from an excerpt instead of the
-render, so check it rather than reading it.
+`authelia-backup` with `pids` only; all twelve with `cap_drop: ['ALL']`; and
+**nine** services carrying all three of `cpus`, `memory`, `pids`.
+
+**Count the exceptions and make them sum to 12.** That one habit settles this
+row without any tooling, and it is what the plan's own first version failed:
+attempt 1 wrote `10` here AND in the README AND in the findings note, and
+10 + 2 (pids-only) + 1 (no `deploy`) is thirteen services in a twelve-service
+plane. **Treat no number in this plan as an oracle** - the plan and the
+artifact were written by the same person, so a plan expectation that agrees
+with the artifact is one measurement, not two. Derive, then compare.
 
 **The frontend "no profile" row needs a stripped env file, and this is the trap
 the developer fell into first.** `frontend/.env.example` ships
@@ -346,9 +352,15 @@ Compare, row by row, against the product table in `README.md`:
 - the "Starts (planes, in order)" cell must equal the `up` line;
 - the "Profiles it turns on" cell must equal the `profiles` line;
 - the "Surfaces" cell must equal the `surfaces` line;
-- the "Keys it will ask for" cell must be the `keys` line (the README writes
-  `+ X` where a row inherits the row above's keys - expand that before
-  comparing);
+- the "Keys it will ask for" cell must be the `keys` line. **The README's `+`
+  is NOT "the row above's keys"** - that reading is wrong and produces two
+  false FAILs (`open-brain`, whose row above is `search`, and `coding-agent`,
+  whose row above is `research`). The real convention, which the README now
+  states under the table, is that a product's key set is **the union of the
+  `keys` of every plane in its own "Starts" cell**, and `+ X` names only what
+  this product adds beyond what an earlier row already introduced for the
+  planes it shares. Expand it that way - from the planes, never from the
+  adjacent row - before comparing. It is then exact for all ten rows;
 - the "host" cell must be the union of `planes[p]['host']` over the `up` set.
 
 Cross-check the same names against the driver's own output:
@@ -398,11 +410,17 @@ python scripts/stack/stack.py up --dry-run
 ```
 
 **Expect exactly two lines**, the anchor's and the frontend's.
-**Do not run the first one** (findings 4.3): it has no `-p`, so its project
-name is this directory's, and it would address the live `ai-stack_*` networks.
-The proof does not need it - the `stock` profile uses only the project-local
-`owui-net`, and compose does not require an unused external network to exist,
-which this case then demonstrates.
+**Do not run the first one** (findings 4.3). The mechanism, stated fully
+because a half-stated one invites someone to decide it does not apply: the
+anchor line carries no `-p`, and the root `docker-compose.yml` declares no
+`name:` either, so its project name is **the clone's DIRECTORY name**. Clone
+into `qs` and it would create harmless `qs_*` networks; clone into a directory
+called `ai-stack` and it addresses the LIVE anchor project and its
+`ai-stack_*` networks. Cloning to `qs` as instructed above is what makes the
+difference, which is precisely why the line stays unrun rather than relying on
+the directory name being right. The proof does not need it: the `stock` profile
+uses only the project-local `owui-net`, and compose does not require an unused
+external network to exist - which this case then demonstrates.
 
 Write the test overlay (non-prod names, non-prod port, owner label - compose
 v5.3.0 has no `--label` flag, findings 4.1):
@@ -552,11 +570,23 @@ ruff check .
 ```
 
 **Expect** `check-doc-placement` to pass (this item added no plan file or
-feature directory to this repo); `inventory --check` to end with
+feature directory to this repo); `ruff` clean (this item changed no Python);
+and `inventory --check` to exit 0 ending with
 `scripts/lib/stack-services.json matches the manifest, the sidecar and the
-compose renders` at exit 0, with the `[ ~~ ] declared, not rendered` lines for
-the three OB1 profiles present and **not** counted as drift; and `ruff` clean
-(this item changed no Python).
+compose renders`.
+
+**`inventory --check`'s OB1 lines depend on the machine, and both shapes are a
+pass.** `OB1/docker/.env` is gitignored, so:
+
+- **on a host that has it** (the deploy host, and a harness worktree that was
+  provisioned with it) the three OB1 profiles print as
+  `[ ~~ ] declared, not rendered`, because the check can render the plane and
+  see that the pinned gitlink does not carry them;
+- **in a clone without it** the same rows print `[ -- ] NOT VERIFIED` - the
+  check cannot render OB1 at all and says so rather than going quiet.
+
+Exit 0 and the final OK line hold either way. **What FAILS is a non-zero exit,
+or either of those rows appearing as drift.** Say which shape you saw.
 
 **The `/stack-map` drift check.** Run the skill (or follow
 `.claude/skills/stack-map/SKILL.md`'s Process section by hand) against the
