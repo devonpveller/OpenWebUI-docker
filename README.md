@@ -155,7 +155,7 @@ health probes, and the sysadmin plane truthful.
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates…) |
 | `documentation/implementation-guide/` | The per-feature status INDEX (spans both repos) + the two plan sets that must stay here: `multi-agent-concurrency/` (MERGE-PROTOCOL travels with every worktree) and `dark-factory-unification/` (read by `dfu-done.ps1` in CI). Plans themselves live in the `documentation-plans-ai-stack` private repo. |
 | `documentation/archive/` | Retired docs, kept for history |
-| `CLEANUP-PLAN.md` | The living restructure/cleanup plan (v3) |
+| `CLEANUP-PLAN.md` | The 2026-08 restructure (v3), **CLOSED 2026-09-19** — history, not a worklist. Its "v3 CLOSED" section says what closed and where each open item went; the successor is `stack-layers/` in the plan store |
 
 ## Conventions
 

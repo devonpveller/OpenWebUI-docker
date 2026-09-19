@@ -1,5 +1,12 @@
 # refactor/ai-stack-cleanup close-out audit (2026-09-19)
 
+> **Two of the `[agent]` figures below were DISPROVED when `sl-closeout` acted on
+> them: the pre-commit hook runs 10 checks, not 8 (finding 7), and the
+> agent-bridge suite has 865 test functions, not 866 (finding 13) — see
+> `documentation/notes/stack-layers-sl-closeout-findings.md` §1 and §5 for how
+> each was recounted. The note is kept as the dated record of what the audit
+> said; the sink is what is true.**
+
 Scope: what must be true before `refactor/ai-stack-cleanup` merges into
 `development`, and what the branch leaves open against `CLEANUP-PLAN.md`.
 Method: two refute-briefed subagents (docs vs repo; plan ledger vs repo) plus

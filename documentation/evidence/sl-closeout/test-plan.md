@@ -1,8 +1,14 @@
-# sl-closeout — test plan
+# sl-closeout2 — test plan
 
-**Item:** `sl-closeout` (stack-layers wave 1) · **Branch:** `work/sl-closeout`
+**Item:** `sl-closeout2` (stack-layers wave 1; the REOPEN of `sl-closeout`,
+rejected `-Misfits` at review 2026-09-19) · **Branch:** `work/sl-closeout`
 · **Base:** `development` @ b28cbc5 · **Anchor:**
-`../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-closeout.json`
+`../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-closeout2.json`
+
+The branch name and the evidence directory keep the ORIGINAL id: the three
+commits the first tester passed still stand, and one fix commit closes the
+eighteenth error. T1-T10 are unchanged from the attempt that passed them; T11
+and T12 are the two new criteria.
 
 ## How to run this
 
@@ -44,7 +50,7 @@ something softer:
    only in the operator's checkout.
 3. `documentation/notes/stack-layers-sl-closeout-findings.md` — the
    `findings_sink` the anchor itself names.
-4. `documentation/evidence/stack-layers/sl-closeout-test-plan.md` — this file.
+4. `documentation/evidence/sl-closeout/test-plan.md` — this file.
 
 T9 tests the criterion as: nothing outside the artifact list **plus these four**.
 
@@ -305,7 +311,12 @@ The file list must be exactly the artifact list plus the four declared above
 `portal/docker-compose.yml`, `coder/docker-compose.yml`,
 `documentation/implementation-guide/README.md`, `CLEANUP-PLAN.md`,
 `docker-compose.yml`, `llm-queue/src/llm_queue/__init__.py`, and the three files
-under `documentation/notes/` and `documentation/evidence/`.
+under `documentation/notes/` and `documentation/evidence/`. The last of those is
+a RENAME: `git diff --name-status development...work/sl-closeout` must show
+`R... documentation/evidence/stack-layers/sl-closeout-test-plan.md ->
+documentation/evidence/sl-closeout/test-plan.md`, and
+`git ls-tree -r --name-only work/sl-closeout documentation/evidence/stack-layers/`
+must print nothing.
 
 `ruff check .` must print `All checks passed!`.
 
@@ -341,3 +352,97 @@ telling the reader what to set instead; the old
 `# NOTE: the gateway runs PERMISSIVE ...` block must have been REPLACED, not
 merely dropped; and nothing may have been removed from `CLEANUP-PLAN.md` except
 the `IN EXECUTION` status sentence, which the new header replaces.
+
+## T11 - the new criterion: no root document still presents CLEANUP-PLAN.md as live
+
+This is the eighteenth error and the reason the item was reopened: attempt 1
+marked `CLEANUP-PLAN.md` CLOSED while two root documents still pointed at it as
+the living plan. Closing a plan is two edits, not one.
+
+1. The anchor's own check, run unbounded from a checkout of the branch:
+
+```bash
+git grep -n -i "living" -- README.md CLAUDE.md
+```
+
+   **No line about CLEANUP-PLAN may appear.** On this branch the command returns
+   exactly one line, `README.md:107` — "one backup sidecar living **in its own
+   plane project**" — which is about backup sidecars and has nothing to do with
+   the plan. Any hit that names `CLEANUP-PLAN` is a **FAIL**.
+
+2. Read the two rewritten pointers and check they describe the file the new
+   header actually describes:
+
+```bash
+git show work/sl-closeout:CLAUDE.md | sed -n '212,218p'
+git show work/sl-closeout:README.md | sed -n '158p'
+git show work/sl-closeout:CLEANUP-PLAN.md | sed -n '9,16p'
+```
+
+   Both must say the file is the CLOSED v3 record rather than a worklist, and
+   both must name the successor (`stack-layers`, in the plan store). **FAIL** if
+   either still implies live work, if either points at a successor path that
+   does not exist (check
+   `../documentation-plans-ai-stack/implementation-guide/stack-layers/`), or if
+   a pointer describes the file differently from the file's own `**Status:**`
+   line.
+
+3. Sweep for the same SHAPE, not just the same word — a pointer that routes a
+   reader to the closed plan for a decision that has moved:
+
+```bash
+git grep -n "CLEANUP-PLAN" -- README.md CLAUDE.md scripts/README.md agent-org/README.md documentation/implementation-guide/README.md SECURITY.md
+```
+
+   Expect: `CLAUDE.md:27` and `SECURITY.md:7` (historical attributions of work
+   done on a date — correct as they stand), `SECURITY.md:24` (a live deferred
+   item, D-1, still routed through the closed plan — **out of this item's
+   artifact list**, recorded in the findings note §9, do NOT fail on it),
+   `scripts/README.md:15` (rewritten here: the D-12 generator moved to
+   `stack-layers`, and the line must no longer read "wire-or-demote ="),
+   `documentation/implementation-guide/README.md:58` (the stack-layers row,
+   which names what it supersedes — correct). **FAIL** if any line in an
+   artifact-list file still presents a CLEANUP-PLAN item as the live place for
+   an open decision.
+
+PASS = the grep returns nothing about CLEANUP-PLAN, both pointers describe the
+closed record and name the successor, and no artifact-list file routes a live
+decision through it.
+
+## T12 - the house path and the audit-note header
+
+1. **Path.** The plan must be at `documentation/evidence/sl-closeout/test-plan.md`
+   — the pattern `documentation/evidence/README.md` states and that
+   `gate5d/`, `mmthread/`, `passplan/` and a dozen others already follow
+   (stack-layers `DECISIONS.md` D16).
+
+```bash
+git ls-tree -r --name-only work/sl-closeout documentation/evidence/ | grep -i sl-closeout
+```
+
+   Expect exactly `documentation/evidence/sl-closeout/test-plan.md` and nothing
+   under `documentation/evidence/stack-layers/`. Then check the file has no
+   stale self-reference:
+   `git show work/sl-closeout:documentation/evidence/sl-closeout/test-plan.md | grep -n "stack-layers/sl-closeout-test-plan"`
+   must return nothing. **FAIL** on a plan still at the feature-directory path,
+   on both copies existing, or on a self-reference to the old path.
+
+2. **Audit-note header.** `git show work/sl-closeout:documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md | head -10`
+   must carry a header pointing readers at the findings sink for the two
+   `[agent]` figures the branch disproved, naming BOTH corrections: 8 checks ->
+   10, and 866 -> 865. Verify each against the source rather than against the
+   header:
+
+```bash
+git show work/sl-closeout:.githooks/pre-commit | grep -c "powershell.exe -NoProfile"
+python -c "import ast,pathlib; print(sum(1 for p in pathlib.Path('agent-org/agent-bridge/tests').rglob('*.py') for n in ast.walk(ast.parse(p.read_text(encoding='utf-8'))) if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name.startswith('test_')))"
+```
+
+   10 and 865. **FAIL** if the header is absent, if it names only one of the two
+   figures, if it states a number that does not match the recount, or if it
+   edits the audit note's FINDINGS themselves — the note is the dated record of
+   what the audit said and its body must still say 8 and 866, with the header
+   and the sink carrying the correction.
+
+PASS = the plan is at the house path with no stale copy or self-reference, and
+the audit note carries a header naming both disproved figures correctly.

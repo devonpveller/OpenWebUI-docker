@@ -211,7 +211,10 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `documentation/implementation-guide/README.md`
 - Plans, build logs, plan sets → the private plan store
   `../documentation-plans-ai-stack` (never write a new one into this repo)
-- The living cleanup/restructure plan → `CLEANUP-PLAN.md` (v3)
+- The 2026-08 restructure, CLOSED 2026-09-19 (history + its own file:line
+  evidence, not a worklist) → `CLEANUP-PLAN.md` (v3). What is still open and
+  where it went is the "v3 CLOSED" section near the top; the successor plan is
+  `../documentation-plans-ai-stack/implementation-guide/stack-layers/`
 - little-coder design + workflow → `../documentation-plans-ai-stack/implementation-guide/little-coder/`
 - Private search gateway → `search-gateway/README.md`
 

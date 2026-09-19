@@ -12,7 +12,7 @@
 | `claude-sessions-bridge/` | Mattermost ⟷ headless Claude Code sessions (+ approval relay MCP, session tools, self-restart) | Scheduled Task `claude-sessions-bridge` (logon, lock :48291) |
 | `sysadmin-mcp/` | Sysadmin MCP server (disk/compaction/reclaim), Telegram out-of-band channel, scheduled disk/tmp/backup checks | `.mcp.json` stdio + 6 Scheduled Tasks (see its README) |
 | `mattermost-mcp/` | Dependency-free Mattermost MCP server + `mm.py` CLI | `.mcp.json` stdio |
-| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; wire-or-demote = CLEANUP-PLAN D-12) | imported |
+| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; hand-maintained, drift-verified by `check-project-configs.ps1`. The generator CLEANUP-PLAN D-12 asked for moved to the `stack-layers` plan in the plan store) | imported |
 | `archive/` | Retired code with provenance table — see `archive/README.md` | never |
 
 ## `recovery/`

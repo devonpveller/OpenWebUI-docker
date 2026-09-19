@@ -159,3 +159,40 @@ crawl-index volume left behind when smolcrawl-pipelines was retired") without
 naming it. Worth knowing for the next anchor that pairs a `grep -q` check with a
 removal.
 [source: anchors/sl-closeout.json acceptance[2]; docker-compose.yml:26-32]
+
+## 9. `SECURITY.md` still routes a live deferred item through the closed plan
+
+Swept after the reviewer rejected attempt 1 for exactly this shape: marking
+`CLEANUP-PLAN.md` CLOSED without fixing the documents that point AT it as live.
+Two pointers were inside the artifact list and are fixed on this branch
+(`CLAUDE.md`'s Pointers entry, `README.md`'s repo-map row), and one more in the
+same class was fixed because it named a decision that has moved
+(`scripts/README.md:15`, `stack-services.json` "wire-or-demote = CLEANUP-PLAN
+D-12" — D-12's generator half is now `sl-driver-parity`).
+
+One remains and is NOT fixed here, because `SECURITY.md` is not in this item's
+artifact list:
+
+    SECURITY.md:24  "...scrub = CLEANUP-PLAN D-1, deferred"
+
+D-1 (the git-history credential scrub) really is still deferred, so the sentence
+is true — but it sends the reader to a file whose new header says it is no
+longer a worklist, and the "v3 CLOSED" ledger covers D-1 only implicitly, inside
+the Part A row about the declined rotation. Either `SECURITY.md` should name the
+posture itself as the live record (it already is: §0 and §24-33), or the ledger
+should name D-1 explicitly. A one-line edit for whoever owns `SECURITY.md` next;
+`stack-layers` DECISIONS D2 is the decision it hangs off.
+
+`SECURITY.md:7` ("2026-08-20 posture changes (CLEANUP-PLAN v3 execution day)")
+and `CLAUDE.md:27` ("Retired 2026-08-20 (CLEANUP-PLAN v3)") are historical
+attributions, not live pointers, and are correct as they stand.
+
+**The generalisable part:** closing a plan is two edits, not one — the plan's own
+status, and every pointer that describes it. The first without the second
+produces a document that calls itself closed and a repo that still routes
+newcomers to it, which is worse than leaving it open. `git grep -n -i "living"`
+over the root docs is the cheap version of the sweep; `git grep -n CLEANUP-PLAN`
+is the thorough one.
+[source: git grep -n CLEANUP-PLAN over README.md, CLAUDE.md, SECURITY.md,
+scripts/README.md, agent-org/README.md and documentation/implementation-guide/README.md,
+2026-09-19]
