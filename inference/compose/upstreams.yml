@@ -12,11 +12,8 @@
 # models on a machine with no GPU (stack-layers D11).
 #
 # RELATIVE PATHS ARE RESOLVED AGAINST THIS FILE'S DIRECTORY, not the parent
-# compose file's - so ../ is inference/ and ../../ is the repo root. Since
-# sl-colo-inference (2026-09-19) the LiteLLM/llama-swap config lives INSIDE the
-# plane, so the config binds read ../config/... while the binds that still reach
-# repo-root trees (data/, backup/, backups/) keep ../../. Verified in the render:
-# `docker compose -f
+# compose file's - so ../ is inference/ (the LiteLLM/llama-swap config lives
+# there now) and ../../ is the repo root. Verified in the render: `docker compose -f
 # inference/docker-compose.yml --env-file .env.example --profile local config`
 # prints absolute sources under the repo root, byte-identical to the pre-split
 # render. Top-level `networks:` / `volumes:` are NOT redeclared here; they live

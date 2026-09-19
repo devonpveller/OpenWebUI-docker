@@ -101,7 +101,7 @@ Open after merge:
 
 ## Standalone-OWUI blockers [verified]
 
-- `frontend/docker-compose.yml:108-114` reserves an NVIDIA device — compose
+- `frontend/docker-compose.yml:113-119` reserves an NVIDIA device — compose
   refuses to start openwebui on a host without the nvidia runtime.
 - `openwebui:local` / `tailscale:local` are built from root Dockerfiles with
   context `..`; nothing pulls a stock image.

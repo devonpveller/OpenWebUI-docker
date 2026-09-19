@@ -1,9 +1,20 @@
-# Test plan — `sl-colo-inference`
+# Test plan — `sl-colo-inference2`
 
-**Item:** `sl-colo-inference` (stack-layers PLAN 2.7, Part L.1, wave 2).
-**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`be00d53`** (which
-contains `sl-inference-split` AND `sl-closeout`).
-**Revision 3:** attempt 2 FAILED 11/13 — **T9** (`.env.example:281`, a pointer the rebase
+**Item:** `sl-colo-inference2` — the reopen of `sl-colo-inference` (stack-layers PLAN 2.7,
+Part L.1, wave 2). Same branch, same worktree.
+**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`f2bb38f`** (which
+contains `sl-inference-split`, `sl-closeout` and `sl-ob1-profiles`).
+**Revision 4 (item reopened as `sl-colo-inference2`):** attempt 3 passed test and was
+then **REJECTED at review (`-Misfits`)**. The 30-line evidence comment this item put into
+`frontend/docker-compose.yml` shifted the file by +30 and broke nine live line citations in
+`stack.manifest.toml` and `.env.example` that were correct on the work line; a +1 header
+line in `inference/compose/backups.yml` broke two more; and findings F7 was headed "drift
+this item did not create" while the item had created eight. The comment is now **six
+lines** (T15), every citation into a file this branch changes is re-derived by construct
+(T14), the backups.yml edit was made line-neutral so two of the eleven needed no
+renumbering at all, and F7 is split into what the item BROKE (F7a) and what it only FOUND
+(F7b). Branch base is now `development` @ `f2bb38f` (reviewer-rebased; tip `936c2e8` before
+this fix commit). **Revision 3:** attempt 2 FAILED 11/13 — **T9** (`.env.example:281`, a pointer the rebase
 carried in already stale) and **T13c** (F14 named one `compose restart` call site and missed
 the two that matter, inside the recovery script's first branch). Both were found by these
 cases run exactly as written, which is the plan working; both are fixed in the commit this
@@ -154,7 +165,8 @@ into the source tree. Both are gitignored (`.gitignore:77`, `:25`) so they canno
 committed, but `PKG-INFO` copies the `pyproject.toml` description verbatim and will show up
 as a fifth hit in this sweep. A `git archive` export has neither.
 
-**T3b — the one link that actually resolves.** `README.md:14` is a markdown link, so it is
+**T3b — the one link that actually resolves.** `inference/llm-queue/README.md:14` is a
+markdown link, so it is
 file-relative, and the move changed its depth by one.
 
 ```bash
@@ -418,7 +430,7 @@ MSYS_NO_PATHCONV=1 git grep -n '/app/config' -- . ':!OB1' | wc -l
 |---|---|---|
 | (a) the OWUI-side trees | **exactly zero — no output** | none of the repo's `/app/config` references is OWUI's. This is the claim the anchor's criterion actually needs |
 | (b) code, excluding docs and the comment block | **27**, across twelve files | a stable figure: it does not move when documentation is edited. A change here means a real consumer appeared or vanished |
-| (c) whole repo minus `OB1/` | **NON-ZERO** (100 as written; it was 68 before this revision, because the note and the compose comment now quote the string themselves) | do not use the number as a bar — use it only to prove the search ran. **Zero here means the `MSYS_NO_PATHCONV=1` prefix did not take effect and you have measured nothing** |
+| (c) whole repo minus `OB1/` | **NON-ZERO** (≈100 as written; it was 68 before the note and the plan started quoting the string themselves, and it moves every time they are edited) | do not use the number as a bar — use it only to prove the search ran. **Zero here means the `MSYS_NO_PATHCONV=1` prefix did not take effect and you have measured nothing** |
 
 Then **classify** the hits rather than counting them. Every one must fall in one of:
 `little-coder`'s own `/app/config/little-coder.config.yaml`
@@ -564,7 +576,7 @@ it names and confirm the claim, do not just confirm the path exists:
 | `inference/llm-queue/README.md` "Development & iteration" | the rebuild command now names `-f inference/docker-compose.yml`. Confirm the bare `docker compose build llm-queue` it replaced really would have failed: the root `docker-compose.yml` is the network anchor and declares **zero** services (finding F5). |
 | `documentation/runbooks/queue-eta-notifications.md:105,108` | the two `inference/llm-queue/src/...` files exist and contain `get_queue` / `snapshot()` |
 | `.claude/skills/stack-map/references/workspace-stacks.md:143-145,157,158` | the three config paths and `inference/llm-queue/` resolve |
-| `SECURITY.md:35`, `.env.example:265`, `README.md:147`, `status-pipe/serve/tailscale_serve_pipe.py:49,1071`, `agent-org/config/litellm-cloud.config.yaml:8` | each named path resolves |
+| `SECURITY.md:35`, `.env.example:271`, `README.md:151`, `status-pipe/serve/tailscale_serve_pipe.py:49,1071`, `agent-org/config/litellm-cloud.config.yaml:8-9` | each named path resolves |
 
 ## T10 — what was REMOVED, not only what is present
 
@@ -766,6 +778,155 @@ whoever performs the recreate brings the config-assembly mechanism live at the s
 **FAIL:** F14 omits it, or the gateway already carries `/app/conf.d` (then F14's closing
 paragraph is stale and should be dropped rather than left to mislead).
 
+## T14 — every line citation INTO a file this branch changes, re-derived by construct
+
+**This case exists because the item was REJECTED at review for exactly what it checks.** A
+30-line evidence comment inserted at `frontend/docker-compose.yml:38` shifted that file by
++30 and silently invalidated nine live `file:line` citations elsewhere in the tree; a +1
+header line in `inference/compose/backups.yml` broke two more. Every hunk of that diff was
+correct. The broken files were ones the diff never touched, so nothing in the diff, and no
+case in the previous plan, could see it.
+
+**Do not check arithmetic. Open the target.** A citation is correct only if the line it
+names says what the citing sentence claims it says.
+
+**T14a — enumerate the citations.** First list the files this branch changes, then find
+every citation into any of them:
+
+```bash
+cd "$SCRATCH/head"
+git -C "$W" diff --name-only development..work/sl-colo-inference | sort          # the changed set
+git -C "$W" diff --numstat development..work/sl-colo-inference                   # and their line deltas
+
+MSYS_NO_PATHCONV=1 git grep -n -E \
+  '(frontend/docker-compose\.yml|inference/docker-compose\.yml|inference/compose/[a-z]+\.yml|inference/config/[A-Za-z0-9._/-]+|inference/llm-queue/[A-Za-z0-9._/-]+|check-llm-gateway-routing\.ps1|workspace-stacks\.md|litellm-cloud\.config\.yaml|\.env\.example|README\.md|SECURITY\.md):[0-9]+' \
+  -- . ':!OB1' ':!documentation/archive' ':!scripts/archive'
+```
+
+**T14b — resolve each one.** For every hit, open the cited file at the cited line and read
+it. A small script beats doing it by hand, and it is what the developer used:
+
+```bash
+python - <<'EOF'
+import io, os, re, sys
+CITE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:yml|yaml|py|ps1|sh|md|toml|json|jinja|example)|\.env\.example):(\d+)")
+for src in sys.argv[1:] or ["stack.manifest.toml", ".env.example",
+                            "documentation/notes/stack-layers-sl-colo-inference-findings.md",
+                            "documentation/evidence/sl-colo-inference/test-plan.md"]:
+    for i, line in enumerate(io.open(src, encoding="utf-8", errors="replace"), 1):
+        for m in CITE.finditer(line):
+            path, n = m.group(1), int(m.group(2))
+            if not os.path.exists(path):
+                continue
+            L = io.open(path, encoding="utf-8", errors="replace").read().split("\n")
+            tgt = L[n-1].strip()[:88] if 0 < n <= len(L) else "<PAST EOF (%d lines)>" % len(L)
+            print(f"{src}:{i} -> {path}:{n}\n      {tgt}")
+EOF
+```
+
+**PASS — the eleven the branch touched, each landing on what its sentence claims:**
+
+| citing | cites | must be |
+|---|---|---|
+| `stack.manifest.toml:126` | `frontend/docker-compose.yml:295-303` | `default:` … `name: ai-stack_app-net` (the three `external: true` networks) |
+| `stack.manifest.toml:138` | `:161-186` | `LLAMA_CPP_HOST=…` … `QUARTZ_TS_PORT=…` |
+| `stack.manifest.toml:139` | `:161`, `:164` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST` |
+| `stack.manifest.toml:141` | `:163` | `LLAMA_CPP_ENABLED` |
+| `stack.manifest.toml:144` | `:102` | `SEARXNG_QUERY_URL` |
+| `stack.manifest.toml:146` | `:167`, `:169`, `:168`, `:171` | the four `OPEN_NOTEBOOK_*` vars |
+| `stack.manifest.toml:153` | `:183`, `:185`, `:173-182` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
+| `stack.manifest.toml:165` | `:141-152` | `# NO env_file HERE…` … `TAILSCALE_AUTH_KEY=…` |
+| `stack.manifest.toml:170` | `:140` | `network_mode: service:openwebui` |
+| `stack.manifest.toml:178` | `:116-119` | `devices:` … `capabilities: [ gpu ]` |
+| `.env.example:84` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+
+**Also PASS, and check it rather than assuming:** `stack.manifest.toml:169` still cites
+`frontend/docker-compose.yml:20-23` **unchanged** — it points above the insertion point.
+A case that "fixed" it too would be wrong.
+
+**PASS — five more, in other items' records, shifted by the same insert:**
+`documentation/evidence/sl-closeout/test-plan.md:221` (`:212`→`:217`),
+`documentation/notes/stack-layers-sl-closeout-findings.md:70` (`:210`→`:215`),
+`documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` (`:108-114`→`:113-119`),
+and `documentation/evidence/stack-layers/sl-manifest-test-plan.md:112,119,131,132,133,134`
+(all +5). **Read F7a's admonition on these and judge it**: two are merged items' EXECUTION
+RECORDS, which T9 declares are not rewritten, and the developer updated their line numbers
+anyway on the reasoning that a number there is navigation, not a claim about what was run.
+Either verdict is defensible; the case fails only if the note does not DECLARE the
+judgement, or if a record's substantive claim (what was checked, and the result) was
+altered. Diff them and confirm only digits moved:
+`git -C "$W" diff development..work/sl-colo-inference -- documentation/evidence/stack-layers/sl-manifest-test-plan.md`.
+
+**Also PASS — the four that were SAVED rather than renumbered, which is the better
+outcome.** `.env.example:255` cites `inference/compose/backups.yml:41,75,82-84`, `:268`
+cites `:13,31`, `documentation/notes/stack-layers-sl-closeout-findings.md:282` cites both
+sets, and `documentation/notes/stack-layers-sl-inference-split-findings.md:194` +
+`documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428` cite
+`inference/compose/upstreams.yml:66,75`. Both of those compose headers were re-wrapped to
+be **line-neutral**, so all four citations stay correct untouched:
+
+```bash
+git -C "$W" diff --numstat development..work/sl-colo-inference -- inference/compose/backups.yml inference/compose/upstreams.yml
+#   expect   1  1   and   4  4   (equal insertions and deletions = no shift)
+```
+
+Confirm the targets by construct: `backups.yml:13,31,41,75,82-84` are
+`llm-gateway-backup:`, the `sleep 86400` entrypoint, the disable comment, the
+`BACKUP_INTERVAL` default and the `DISABLED … exit 0` block; `upstreams.yml:66,75` are the
+two `/models/lmstudio-community/…gguf` model paths.
+**FAIL:** either numstat shows a net shift, or any of those six/two lines is not what the
+citing sentence says — the neutrality was the whole point of that edit.
+
+**FAIL:** any citation that lands on something other than what its sentence claims, **where
+the citing file and the cited line were consistent on `development`**. That is a stale
+citation this branch caused, and it is this case's whole point.
+
+**NOT a fail, and do not let it hide the real ones:** citations that were ALREADY wrong on
+`development`. Findings **F7b** lists the three known ones — `stack.manifest.toml:121`
+(a `pending = true` for an item that landed), `:107-109` (host requirements pointing into
+the inference spine, some past its end) and `:401,403,406` (`config/caddy/Caddyfile`, moved
+to `portal/` by sl-colo-portal). Check F7b's numbers resolve to what it says; check the
+targets are genuinely wrong on `development` too:
+
+```bash
+git -C "$W" show development:stack.manifest.toml | sed -n '121p;107,109p;401p;403p;406p'
+```
+
+**FAIL:** F7b claims something is pre-existing that this branch actually broke, or F7a
+omits a citation the branch broke. **Also FAIL: any sentence in the findings note claiming
+the item created no drift** — the rejected version was headed "drift this item did not
+create and did not fix" while the item had created eight. Read F7's heading and its
+F7a/F7b split; if the note reports only other people's debt, the case fails regardless of
+whether the citations themselves are now right.
+
+**Known and unavoidable:** `sl-frontend-solo` is unmerged and changes
+`frontend/docker-compose.yml` by roughly +130 lines, re-deriving the same manifest
+citations for its own change. Whichever lands second re-derives again. Do not treat that as
+a defect in either branch; check only that THIS branch's tree is self-consistent.
+
+## T15 — the evidence comment in the deliverable is at most six lines
+
+CLAUDE.md: *findings go to `documentation/notes/`, not into the deliverable.* The rejected
+version put a 30-line debugging narrative — the MSYS story, the webui.db row counts, the
+little-coder inventory — into a compose file, which is both the policy breach and the
+mechanism of T14's breakage.
+
+```bash
+cd "$SCRATCH/head"
+awk '/# NO \/app\/config MOUNT/,/^      - \.\.\/status-pipe/' frontend/docker-compose.yml
+```
+
+**PASS:** the block from `# NO /app/config MOUNT` up to (not including) the pre-existing
+`# Narrow code mounts (v3 A.2/G.1)` comment is **six lines or fewer**, and carries exactly:
+the claim (no OWUI code path reads it), the four checks **by name** (image-code grep,
+container env, `DATA_DIR` in `open_webui/env.py`, the 44-table `webui.db` scan), and a
+pointer to findings **F2/F13**. The `# Narrow code mounts` paragraph below it is
+pre-existing and is not part of the count.
+**FAIL:** seven or more lines; or the block narrates the MSYS trap, quotes row counts, or
+lists the non-OWUI `/app/config` consumers — all of which belong in F2/F13 and are there.
+**Also FAIL:** the block drops one of the four checks or the findings pointer, which would
+make the deliverable un-actionable rather than merely shorter.
+
 ---
 
 ## Case-to-criterion map
@@ -780,6 +941,7 @@ paragraph is stale and should be dropped rather than left to mislead).
 | routing check still scans the moved files (plant → red) | T6 |
 | names/tags/aliases/networks unchanged; live plane untouched | T5c, T5d, T12 |
 | *(no anchor criterion)* — the post-merge live hazard the findings note must carry | **T13a-e** |
+| the comment is <= six lines; every citation into a changed file re-derived by construct; no findings sentence claiming the item created no drift | **T14, T15** |
 
 ## Open declarations for the gate
 
@@ -806,6 +968,15 @@ paragraph is stale and should be dropped rather than left to mislead).
    recreate happens the repair tool is itself a way to break the plane. That is an
    operational action for the merger, outside every anchor criterion, and the gate should
    confirm someone owns it.
-8. **F15 (findings)** — a rebase can carry a stale pointer INTO a branch without it ever
+8. **F7a / T14 (findings + plan)** — this item BROKE eleven live line citations by
+   inserting comment lines, and fixed them; the mechanism (an insert is an edit to every
+   citation below it, in files the diff never touches) is not caught by any check in this
+   repo, only by T14's enumeration. Two more were avoided by making the `backups.yml` edit
+   line-neutral. `sl-frontend-solo` will re-derive the same manifest citations for its own
+   +130-line frontend change; whichever lands second re-derives again, unavoidably.
+9. **F7b (findings)** — three pre-existing stale citations in `stack.manifest.toml` were
+   deliberately NOT renumbered: they point into files that were restructured, so a new line
+   number would not repair them, and silently rewriting another item's debt hides it.
+10. **F15 (findings)** — a rebase can carry a stale pointer INTO a branch without it ever
    appearing in the branch's diff. `.env.example:281` did exactly that. Nothing in this
    repo's checks catches it; only a sweep of the tree does, which is now T9's opening line.

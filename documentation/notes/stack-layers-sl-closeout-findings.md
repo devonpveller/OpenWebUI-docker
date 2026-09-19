@@ -67,7 +67,7 @@ audit, so they were left alone:
 are the **container-side** names. Every sidecar sets them itself in its own `environment:` block from a prefixed
 host variable — e.g. `- BACKUP_INTERVAL=${MNEMORY_BACKUP_INTERVAL:-86400}`
 (`memory/docker-compose.yml:111`), `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}`
-(`frontend/docker-compose.yml:210`) — and `backup/generic-tar-backup.sh:25,27`
+(`frontend/docker-compose.yml:215`) — and `backup/generic-tar-backup.sh:25,27`
 reads them from inside the container. No compose file interpolates the bare
 names from the root `.env`, so setting them there changes nothing. They belong
 in the `sl-env-split` sweep.

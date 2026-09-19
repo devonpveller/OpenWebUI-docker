@@ -52,7 +52,7 @@ workers` the one litellm bind resolves to
 
 So the criterion is met vacuously: nothing to repoint. **One line in agent-org WAS
 changed** and it is a comment, not a mount:
-`agent-org/config/litellm-cloud.config.yaml:8` pointed at the moved file
+`agent-org/config/litellm-cloud.config.yaml:8-9` pointed at the moved file
 (`config/litellm.config.yaml`) when warning that the local gateway is a different,
 air-gapped instance; it now reads `inference/config/litellm.config.yaml`.
 
@@ -138,7 +138,7 @@ one entry in this file a reader must act on before the merge lands.**
 
 ## F3 — the gateway-routing check is VACUOUS when run from a worktree
 
-`scripts/checks/check-llm-gateway-routing.ps1:73` carries `'*\.claude\*'` in
+`scripts/checks/check-llm-gateway-routing.ps1:77` carries `'*\.claude\*'` in
 `$allowPathLike`. [source] Agent worktrees live at
 `<repo>\.claude\worktrees\wt-<id>\`, so **every file in a worktree matches that glob and
 is allow-listed**, and `Test-Allowed` returns true for all of them before a single line is
@@ -215,28 +215,138 @@ environment with **container-absolute** defaults (`/app/config.base.yaml`, `/app
 cannot reach it; what had to stay correct is the compose **targets**, and those are
 unchanged — only the bind **sources** moved (verified in the render diff).
 
-## F7 — `stack.manifest.toml` carries drift this item did not create and did not fix
+## F7 — line citations: the eight this item BROKE and fixed, and the drift it only found
 
-Three, all [source]:
+> **REWRITTEN 2026-09-19 after review rejection (`-Misfits`).** The previous version of
+> this entry was headed "drift this item did not create and did not fix" — and the item had
+> just created eight stale citations of its own, by inserting a 30-line evidence comment
+> into `frontend/docker-compose.yml` and a line into `inference/compose/backups.yml`. That
+> heading is the notes-lied failure class this repo keeps paying for: a findings file that
+> reports someone else's debt while hiding the author's. Both halves are below, separated,
+> and every line number in them was re-derived by opening the target.
 
-1. `stack.manifest.toml:109` — `[planes.inference.profiles.local]` still has
-   `pending = true   # sl-inference-split adds it`. That item **has landed** (it is in
-   this item's base, `9f64b84`), so the flag is stale. It is not cosmetic:
-   `scripts/stack/stack.py:648-657` reads `pending_profiles()` and prints "note: PENDING
-   profiles enabled (...) - the compose files do not carry them yet, so enabling them
-   changes nothing until the item that adds them lands" — which is now a false statement
-   printed to the operator at the moment they enable the profile that does work.
-2. `stack.manifest.toml:96-98` — the `host` requirements cite
-   `inference/docker-compose.yml:83-86, 129-132`, `:34` and `:111,119`. Those services
-   moved into `inference/compose/upstreams.yml` at sl-inference-split, so the line anchors
-   point into the spine file, which is now comments and `include:`. Line 97 also says
+### F7a — drift this item CREATED, and has fixed
+
+Inserting lines into a file silently invalidates every `file:line` citation below the
+insertion point, anywhere in the tree. This item inserted at
+`frontend/docker-compose.yml:38`, `inference/compose/backups.yml:4` and
+`inference/compose/upstreams.yml:15`, and **sixteen
+live citations went stale** — all of them correct on the work line before the item touched
+it. The reviewer caught them; they were not in any test case, because no case looked.
+
+Fixed here [source, each re-derived by opening the target file at the new line]:
+
+| citing | was | now | what is actually there |
+|---|---|---|---|
+| `stack.manifest.toml:126` | `frontend/docker-compose.yml:290-298` | `:295-303` | the three `external: true` network declarations |
+| `stack.manifest.toml:138` | `:156-181` | `:161-186` | the env-override block, `LLAMA_CPP_HOST` → `QUARTZ_TS_PORT` |
+| `stack.manifest.toml:139` | `:156,159` | `:161,164` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST` |
+| `stack.manifest.toml:141` | `:158` | `:163` | `LLAMA_CPP_ENABLED` |
+| `stack.manifest.toml:144` | `:97` | `:102` | `SEARXNG_QUERY_URL` |
+| `stack.manifest.toml:146` | `:162`, `:164`, `:163`, `:166` | `:167`, `:169`, `:168`, `:171` | the four `OPEN_NOTEBOOK_*` vars |
+| `stack.manifest.toml:153` | `:178`, `:180`, `:168-177` | `:183`, `:185`, `:173-182` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
+| `stack.manifest.toml:165` | `:136-147` | `:141-152` | the tailscale service's one-variable block |
+| `stack.manifest.toml:170` | `:135` | `:140` | `network_mode: service:openwebui` |
+| `stack.manifest.toml:178` | `:111-114` | `:116-119` | the NVIDIA device reservation |
+| `.env.example:84` | `:212` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+
+`stack.manifest.toml:169` (`frontend/docker-compose.yml:20-23`) needed **no** change: it
+cites above the insertion point. That is the check working, not an omission.
+
+Five more, in other items' records, shifted by the same insert and re-derived the same way
+[source]:
+
+| citing | was | now | what is actually there |
+|---|---|---|---|
+| `documentation/evidence/sl-closeout/test-plan.md:221` | `:212` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `:210` | `:215` | `RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` |
+| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | `:108-114` | `:113-119` | `deploy:` … `capabilities: [ gpu ]` |
+| `documentation/evidence/stack-layers/sl-manifest-test-plan.md:112,119,131,132,133,134` | `:162`, `:290-298`, `:156/:158/:159`, `:97`, `:162/:164/:163/:166`, `:178/:180/:168-177` | `:167`, `:295-303`, `:161/:163/:164`, `:102`, `:167/:169/:168/:171`, `:183/:185/:173-182` | the same lines, five lines lower |
+
+> **A judgement call the gate is entitled to overrule.** Two of those five are
+> `documentation/evidence/` **execution records of merged items** — what a tester actually
+> ran against the tree as it then stood — and this item's own T9 declares that such records
+> are not rewritten, because doing so makes them claim something that was never run. I
+> updated the line NUMBERS anyway, on the reasoning that a number in those sentences is
+> *navigation*, not a claim: the sentence still asserts exactly what it asserted, about
+> exactly the same line of code, and leaving it dangling helps nobody. Changing what the
+> record says was CHECKED would be falsification; changing where to look for it is not. If
+> the gate disagrees, the revert is mechanical and the numbers are all in the table above.
+
+**Four citations were SAVED rather than renumbered — the better outcome.** Two of the
+item's edits were comment rewraps that had grown their file by a line or three for no
+reason at all:
+
+- `inference/compose/backups.yml` (+1) is cited by `.env.example:255` (`:41,75,82-84`),
+  `.env.example:268` (`:13,31`) and
+  `documentation/notes/stack-layers-sl-closeout-findings.md:282` (both sets).
+- `inference/compose/upstreams.yml` (+3) is cited by
+  `documentation/notes/stack-layers-sl-inference-split-findings.md:194` and
+  `documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428`, both at
+  `:66,75` (the `/models/lmstudio-community/…` paths).
+
+Both headers were re-wrapped to be **line-neutral** (`git diff --numstat development --`
+prints `1 1` and `4 4`), so all four citations stay correct untouched and two files that
+would otherwise have been edited were not. **Where a shift buys nothing, not shifting beats
+renumbering** — it is fewer files touched, fewer conflicts for the branches landing beside
+this one, and nothing to get wrong.
+
+**The remaining shifted files carry no incoming citations at all**, checked rather than
+assumed: `scripts/checks/check-llm-gateway-routing.ps1` (+4),
+`.claude/skills/stack-map/references/workspace-stacks.md` (+1),
+`agent-org/config/litellm-cloud.config.yaml` (+1), `inference/compose/gateway.yml` (+1) and
+`inference/compose/queue.yml` (+1) are cited by nothing outside this item's own note and
+plan, and those two were re-derived (`check-llm-gateway-routing.ps1:73 -> :77`,
+`litellm-cloud.config.yaml:8 -> :8-9`). `inference/docker-compose.yml` (+5) is the one
+exception and it is F7b's, not F7a's: all five documents citing it point into the
+**pre-split 461-line** file, and that file is **84 lines on `development`** — so `:86` and
+everything above it was already past EOF before this branch existed.
+
+**What this costs the next item, unavoidably:** `sl-frontend-solo` is unmerged and changes
+`frontend/docker-compose.yml` by about +130 lines, re-deriving the same manifest citations
+for its own change. Whichever of the two lands second re-derives again. There is no way to
+avoid that; there is only the discipline of doing it against the tree as it stands on your
+own branch, as the last step before committing.
+
+### F7b — drift this item only FOUND (pre-existing; not touched)
+
+[source] These were stale **before** this item, and are stale for a different reason — the
+files they point into were restructured by other items, so renumbering would not fix them;
+they need re-targeting by whoever closes those items out. Verified by opening each target:
+
+1. `stack.manifest.toml:121` — `[planes.inference.profiles.local]` still carries
+   `pending = true   # sl-inference-split adds it`. **That item has landed** (it is in this
+   item's base), so the flag is false. It is not cosmetic: `scripts/stack/stack.py:709-719`
+   reads `pending_profiles()` (`:713`) and prints "note: PENDING profiles enabled (...) -
+   the compose files do not carry them yet, so enabling them changes nothing until the item
+   that adds them lands" (`:717-718`) — a false statement printed to the operator at the
+   moment they enable the profile that does work.
+2. `stack.manifest.toml:107-109` — the `host` requirements cite
+   `inference/docker-compose.yml:83-86, 129-132`, `:34` and `:111,119`. Those services moved
+   into `inference/compose/upstreams.yml` at sl-inference-split, and the spine file is now
+   about 85 lines of comments and `include:` — so `:111`, `:119` and `:129-132` are **past
+   its end** and `:83-86` and `:34` land on unrelated comments. Line `:108` also says
    "sl-inference-split replaces it with LM_MODELS_DIR" in the future tense; it did.
-3. `stack.manifest.toml:356,358,361` — three comments cite `config/caddy/Caddyfile:197`,
+3. `stack.manifest.toml:401,403,406` — three comments cite `config/caddy/Caddyfile:197`,
    `:143`, `:136`, `:295`. `sl-colo-portal` moved that tree to `portal/config/caddy/`
    (confirmed present at `portal/config/caddy/Caddyfile`); there is no `config/caddy/`.
 
-None of these is in this item's artifact and none was touched. They belong to whoever
-closes out sl-inference-split / sl-manifest / sl-colo-portal.
+None of the three is in this item's artifact and none was touched. They belong to whoever
+closes out sl-inference-split / sl-manifest / sl-colo-portal. **This item deliberately did
+not renumber them**, because a citation pointing at the wrong FILE is not repaired by
+moving its line number, and because silently rewriting another item's open debt hides it.
+
+### F7c — the general lesson, which is why the test plan now has a case for it
+
+A colocation item's diff is reviewed hunk by hunk, and every hunk can be correct while the
+commit as a whole breaks a citation nobody's eye passes over: the broken file is one the
+diff does not touch. **Inserting N lines into a file is an edit to every citation into that
+file below the insertion point**, and the only way to see it is to enumerate them from the
+tree. The plan's T14 does that by construct and fails on any stale citation this branch
+caused. The same reasoning produced the six-line cap on the compose comment: evidence
+belongs in this file, not in the deliverable (CLAUDE.md, "findings go to
+`documentation/notes/`"), and a 30-line comment was both a policy breach and the mechanism
+of the breakage.
 
 ## F8 — there is no `stack-layers` status row in the implementation-guide index
 
