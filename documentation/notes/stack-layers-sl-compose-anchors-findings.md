@@ -86,7 +86,30 @@ re-reading the criterion.
 ## C. Citations already broken on `development`, found by this item's sweep
 
 The sweep re-derives every `path:line` into the eleven files whose line counts
-changed. Two were already wrong before this branch existed.
+changed. C0 states what "every" counts. C1 and C2 were already wrong before
+this branch existed; C3 is a defect this branch introduced and fixed, kept here
+because the way it evaded every gate is the transferable part.
+
+### C0. What the sweep counted, since the first report gave a number with no unit
+
+*measured against this branch, 2026-09-19.* The earlier figure "97 citation
+points" was the raw hit count of a scratch scanner, false positives included
+(bare ports such as `:8445`, continuations belonging to `frontend/entrypoint.sh`
+rather than to the compose file named earlier on the same line, and `OB1/`
+paths this item does not touch). It is retracted. The reproducible figures:
+
+| unit | count |
+|---|---|
+| files citing into the eleven changed compose files | 3 |
+| LINES in them naming at least one such line number | 35 |
+| individual line NUMBERS those lines name | 66 |
+| of those, numbers this branch changed | 65 |
+
+The one that did not move is `inference/compose/upstreams.yml:24`, which sits
+above the inserted `x-` block. The three files are `stack.manifest.toml`,
+`.env.example` and `CLEANUP-PLAN.md`; `documentation/archive/**` cites the
+2,249-line pre-split ROOT compose, a different file, and earlier items' evidence
+records are out of scope by the precedent in `a2e4e3e`.
 
 ### C1. `stack.manifest.toml` — both portal citations off by exactly 4 lines
 *read from source, `git show development:portal/docker-compose.yml`.*
@@ -105,6 +128,30 @@ branch). A reader following the old numbers landed on the wrong network.
 egress `build:` keys were at **481** (`ao-git-egress`) and **557** (`ao-egress`)
 — an offset of 41, i.e. written against a revision of the file that predates
 ~41 lines of insertions. Now `:520,590`.
+
+### C3. Two header lines this branch wrote were never wrapped (F1, fixed)
+
+*read from source; the defect and the fix are both on this branch.*
+`inference/compose/backups.yml` carried a 171-character comment line containing
+the four characters `\n#` as literal text, mid-sentence, where a line break was
+intended; `search/docker-compose.yml` carried a 114-character one. Both headers'
+sibling lines wrap between 54 and 88.
+
+The mechanism is worth more than the fix. These headers were produced by a
+generator invoked once per file, and the per-file tail was passed to it as a
+shell argument that contained a `\n` escape inside single quotes — so nothing
+ever turned it into a newline, and Python then inserted the two characters
+verbatim. It survived every gate the item had: the YAML is valid (it is a
+comment), the render is byte-identical, `check-project-configs` is green, and
+the test plan had ten cases and not one of them read the prose. The anchor names
+"the compose headers noting the extension fields" as part of the artifact, and
+half the artifact was going untested. T11 exists because of this.
+
+The fix moved `inference/compose/backups.yml` from 117 to 119 lines, so the
+citations INTO it moved a second time: `.env.example`'s `:35,53` -> `:37,55` and
+`:62,96,103-105` -> `:64,98,105-107`, and `stack.manifest.toml`'s
+`backups.yml:69` -> `:71`. `search/docker-compose.yml` is unchanged in length
+(two lines became two), so its citations did not move.
 
 ---
 
