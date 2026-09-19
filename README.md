@@ -24,7 +24,7 @@ by default.
 | **Portal** (`portal/`) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` | `caddy`, `authelia`, `cloudflared` + watcher/alerter/tripwire/cron sidecars. Internet-exposed auth front-end |
 | **Open Brain** (`OB1/docker/`) | `docker compose -f OB1/docker/docker-compose.yml …` | ~29 containers: the `openbrain-*` fleet + its backups + the Open Notebook trio (`surrealdb`, `open_notebook`, backup) |
 | **agent-org** (`agent-org/docker/`) | `docker compose -f agent-org/docker/docker-compose.yml …` | Mattermost + `agent-bridge` (the governed org bus) + profile-gated worker/cloud slices |
-| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (or `.bat`) | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset` |
+| **Recovery** | `scripts/recovery/emergency-recovery.ps1` (the `.bat` twin was archived 2026-08-21) | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset` |
 
 Start order: anchor → inference → the caller planes → OB1 → agent-org
 (`scripts/stack/stack.ps1 up` runs exactly that). Bring OB1 up **after**
@@ -42,7 +42,7 @@ Enforced at commit time by `scripts/checks/check-llm-gateway-routing.ps1`.
 ## Quickstart (fresh clone)
 
 ```powershell
-git config core.hooksPath .githooks   # pre-commit: secret guard + line endings + routing check
+git config core.hooksPath .githooks   # pre-commit: 10 checks (.githooks/pre-commit)
 Copy-Item .env.example .env           # then fill in values — WEBUI_SECRET_KEY is REQUIRED
 .\scripts\stack\stack.ps1 up          # every project, dependency order (anchor networks first)
 .\scripts\stack\stack.ps1 status      # per-project container states
@@ -66,7 +66,7 @@ Everyday driving (all from the repo root):
 
 ```powershell
 .\scripts\stack\stack.ps1 status            # per-project container states
-.\scripts\stack\stack.ps1 health            # 12 functional probes across every plane
+.\scripts\stack\stack.ps1 health            # 15 functional probes across every plane
 .\scripts\stack\stack.ps1 up|down [plane]   # dependency-ordered start/stop (planes: anchor,
                                             #   inference, frontend, memory, search, coder, ob1, agent-org)
 .\scripts\stack\stack.ps1 restart <plane>   # one plane in place
@@ -92,7 +92,9 @@ scripts\recovery\quick-fixes.bat                      # interactive single-fix m
 .\scripts\portal\portal-on.ps1   /   portal-off.ps1
 
 # Restore from backups (see documentation/runbooks/restore-from-snapshot.md):
-.\scripts\backup\restore-from-snapshot.ps1 -Services <name|all> [-Apply]
+.\scripts\backup\restore-from-snapshot.ps1 -SnapshotRoot .\backups `
+  -Date <yyyy-MM-dd> [-Services <name|all>] [-Apply]
+# -SnapshotRoot and -Date are MANDATORY; without -Apply it only plans.
 ```
 
 Watching the watchers: `scripts/checks/stack-watchdog.ps1` runs every 60 s as
@@ -104,7 +106,9 @@ Mattermost `#sysadmin`.
 
 Every stateful store has exactly one backup sidecar living **in its own
 plane project**, writing verified artifacts (+ sha256 sentinels) to
-`./backups/<service>/`, mirrored nightly to the NAS. Two scheduler idioms:
+`./backups/<service>/`, mirrored WEEKLY to the NAS (the scheduled task runs
+Sundays at 04:00 - `scripts/backup/install-nas-backup-task.ps1:89`). Two
+scheduler idioms:
 **sleep-loop** for interval tars (runs once at container start, then every
 `BACKUP_INTERVAL` seconds) and **supercronic** for cron-timed DB dumps.
 
@@ -144,14 +148,14 @@ health probes, and the sysadmin plane truthful.
 | `frontend/` `inference/` `memory/` `search/` `coder/` | The plane compose projects (one service tree each) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/` (Part M issue pipeline), `archive/` |
-| `llm-queue/`, `search-gateway/`, `mnemory-cloud-gateway/`, `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
+| `llm-queue/`, `search-gateway/`, `mnemory-gateway/` (builds the `mnemory-cloud-gateway` container), `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
 | `agent-org/` | Governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain — pinned git submodule since 2026-08-21 (bump via PR; incl. the Open Notebook trio since K.5b) |
 | `backup/` + `backups/` | Sidecar scripts/Dockerfiles + produced artifacts |
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates…) |
 | `documentation/implementation-guide/` | The per-feature status INDEX (spans both repos) + the two plan sets that must stay here: `multi-agent-concurrency/` (MERGE-PROTOCOL travels with every worktree) and `dark-factory-unification/` (read by `dfu-done.ps1` in CI). Plans themselves live in the `documentation-plans-ai-stack` private repo. |
 | `documentation/archive/` | Retired docs, kept for history |
-| `CLEANUP-PLAN.md` | The living restructure/cleanup plan (v3) |
+| `CLEANUP-PLAN.md` | The 2026-08 restructure (v3), **CLOSED 2026-09-19** — history, not a worklist. Its "v3 CLOSED" section says what closed and where each open item went; the successor is `stack-layers/` in the plan store |
 
 ## Conventions
 

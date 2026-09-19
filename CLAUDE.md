@@ -13,11 +13,11 @@ for the full inventory — networks, ports, dependency order.
 
 | Stack | Driven with | Contents |
 |-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose ...` (root file includes `compose/<plane>.yml` since 2026-08-20) | Part K (2026-08-21, in progress) is dissolving this into per-plane projects; root becomes the **network anchor** (owns `llm-net`/`app-net`/`default`). **PURE NETWORK ANCHOR since K.5b — 0 services.** Owns `llm-net` / `app-net` / `default` (the `ai-stack_*` names every project attaches to externally); `docker compose up -d` here just creates networks. |
+| **Main** (`ai-stack`) | `docker compose -f docker-compose.yml ...` (the root file declares networks only — no `include:`, and no root-level `compose/` directory; `inference/compose/` belongs to that plane's project) | Part K (2026-08-21) dissolved this into per-plane projects; root is the **network anchor**. **PURE NETWORK ANCHOR since K.5b — 0 services.** Owns `llm-net` / `app-net` / `default` (the `ai-stack_*` names every project attaches to externally); `docker compose up -d` here just creates networks. |
 | **Inference** (`inference`, own project since 2026-08-21 K.1) | `docker compose -f inference/docker-compose.yml --env-file .env ...` (or `scripts/stack/stack.ps1`) | The LLM host: `llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases on the anchor's `llm-net` (external); `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference on its **native** `llm-backend-net`; `llm-gateway-backup`, `lm-models-backup`. **8 services**, of which 4 (both upstreams, `llm-queue`, `lm-models-backup`) sit behind the `local` profile since 2026-09-19 — set `COMPOSE_PROFILES=local` in `.env` or a bare `up` brings the gateway up with no backends. Four included files under `inference/compose/`; one project still. |
 | **Memory** (`memory`, own project since 2026-08-21 K.2) | `docker compose -f memory/docker-compose.yml --env-file .env ...` | `mnemory` (unified memory layer, llm-net only), `mnemory-cloud-gateway` (the ONLY cloud door, host :8060), `mnemory-backup`. **3 services.** |
 | **Search** (`search`, own project since 2026-08-21 K.3) | `docker compose -f search/docker-compose.yml --env-file .env ...` | Private Search Gateway: `vpn` (Mullvad — ALL egress; HTTP proxy :8888), `redis`, `searxng`, `gateway` (host :8085). Owns `search-net`; `vpn`+`gateway` stay on `ai-stack_default` externally so OB1/OWUI DNS holds. **4 services.** |
-| **Coder** (`coder`, own project since 2026-08-21 K.4) | `docker compose -f coder/docker-compose.yml --env-file .env ...` | little-coder control plane: `open-terminal` (executor — moved in from core), `little-coder` (daemon :8090; metrics host :9091), `lc-egress`, `little-coder-backup`. Owns `lc-net` + the 7 coder volumes. **4 services.** |
+| **Coder** (`coder`, own project since 2026-08-21 K.4) | `docker compose -f coder/docker-compose.yml --env-file .env ...` | little-coder control plane: `open-terminal` (executor — moved in from core), `little-coder` (daemon :8090; metrics host :9091), `lc-egress`, `little-coder-backup`. Owns `lc-net` + the 6 coder volumes. **4 services.** |
 | **Frontend** (`frontend`, own project since 2026-08-21 K.5) | `docker compose -f frontend/docker-compose.yml --env-file .env ...` | `openwebui` (host :3000) + `tailscale` (netns companion — never restart openwebui alone; the project's depends_on encodes the order) + both backups. Images pinned `openwebui:local`/`tailscale:local` — rebuild deliberately only. **4 services.** |
 | **Portal** (`portal`, own compose project since 2026-08-21) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | 12 services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end; attaches to `ai-stack_app-net` externally to reach openwebui/open_notebook — positioned to front more apps later. |
 | **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | ~29 containers: the `openbrain-*` fleet + its two backup sidecars + the **Open Notebook trio** (`surrealdb`, `open_notebook`, `open-notebook-backup` — moved in K.5b 2026-08-21; ON stays live until the wiki workbench matures). Attaches to `ai-stack_llm-net`/`app-net` externally. Bring up **after** `llm-gateway` is healthy; tear down before the planes it depends on. |
@@ -211,7 +211,10 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `documentation/implementation-guide/README.md`
 - Plans, build logs, plan sets → the private plan store
   `../documentation-plans-ai-stack` (never write a new one into this repo)
-- The living cleanup/restructure plan → `CLEANUP-PLAN.md` (v3)
+- The 2026-08 restructure, CLOSED 2026-09-19 (history + its own file:line
+  evidence, not a worklist) → `CLEANUP-PLAN.md` (v3). What is still open and
+  where it went is the "v3 CLOSED" section near the top; the successor plan is
+  `../documentation-plans-ai-stack/implementation-guide/stack-layers/`
 - little-coder design + workflow → `../documentation-plans-ai-stack/implementation-guide/little-coder/`
 - Private search gateway → `search-gateway/README.md`
 
@@ -231,6 +234,7 @@ parent records exactly which OB1 commit is deployed.
   `git add OB1` + commit the new pointer with a message saying what moved.
   Never bump the gitlink to a commit that isn't on the OB1 remote.
 - **openbrain-gateway** source lives HERE (`openbrain-gateway/`, beside its
-  twin `mnemory-cloud-gateway`); OB1 consumes the prebuilt
+  twin `mnemory-gateway/` — the directory that builds the
+  `mnemory-cloud-gateway` container); OB1 consumes the prebuilt
   `openbrain-gateway:local` image. Rebuild it from this repo:
   `docker build -t openbrain-gateway:local ./openbrain-gateway`.

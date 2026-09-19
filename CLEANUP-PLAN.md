@@ -6,9 +6,14 @@ part lettering, so v2 references stay meaningful). v2 was itself audited on
 code, a 280-file documentation triage, deploy plane, monoliths/duplication,
 scripts inventory, agent-communication fabric). All file:line references are
 from that 2026-08-20 snapshot.
-**Status:** IN EXECUTION — the 2026-08-20 execution day (operator-authorized,
-branch `refactor/ai-stack-cleanup`) landed the bulk of Parts A–E, G.1, D.1/D.2,
-I and the J prep. Ledger below; unchecked items carry their blockers.
+**Status:** CLOSED 2026-09-19 — see "v3 CLOSED" below, which says per Part what
+landed, what superseded the rest, and where each still-open item now lives. The
+file is kept for its history and its file:line evidence; it is no longer a live
+worklist. Successor plan:
+`../documentation-plans-ai-stack/implementation-guide/stack-layers/PLAN.md`.
+The 2026-08-20 execution day (operator-authorized, branch
+`refactor/ai-stack-cleanup`) landed the bulk of Parts A–E, G.1, D.1/D.2, I and
+the J prep; the two ledgers below are that history.
 
 ## Execution ledger — 2026-08-20 (~30 commits)
 
@@ -107,6 +112,93 @@ Discipline for every phase (unchanged from v1/v2, plus one addition):
   restructure.
 - **NEW — check the working tree first.** In-flight uncommitted work exists
   (see "In-flight work" below); nothing in this plan may clobber or commit it.
+
+---
+
+## v3 CLOSED — 2026-09-19
+
+`refactor/ai-stack-cleanup` merged into `development` (706 commits ahead, 14
+behind at the merge). This section closes v3: every Part is either DONE, was
+SUPERSEDED by work that overtook it, or has MOVED to a named successor. Nothing
+below is a worklist item for this file any more. Source of the per-Part
+verdicts: `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md`
+(two refute-briefed audit passes plus hand verification).
+
+**Successor plan:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/PLAN.md`
+(+ `DECISIONS.md`, `TASKS.md`). Status row lives in
+`documentation/implementation-guide/README.md`.
+
+### Closed — the work was done
+
+| Part | Verdict |
+|---|---|
+| **A** security remediation | DONE except the key ROTATION, which the operator DECLINED 2026-08-20; the accepted-risk posture and its conditions live in `SECURITY.md`, not here. |
+| **B** cruft, junk, drift | DONE (B.1-B.5). |
+| **C** documentation truth pass | DONE; C.7 (implementation-guide hygiene) was overtaken — see "Superseded by the plan store". |
+| **D.1** compose modularization | DONE, then SUPERSEDED by Part K — see below. |
+| **D.4** Windows host-path portability | DONE for the paths it listed. A literal `C:\Users\yamao\.lmstudio\models` bind survives in `inference/docker-compose.yml` (the D.4 sweep grepped only `D:/`); it is now the `LM_MODELS_DIR` item in `sl-inference-split`. |
+| **G.1 / G.2** status-pipe consolidation, `scripts/` taxonomy | DONE. |
+| **H.1** OB1 as a pinned submodule | DONE 2026-08-21. |
+| **I.2 / I.3** ruff gate + CI | DONE. |
+| **J.1 / J.2 / J.3** virtual keys, one chat-client lib, MCP edge pruned | DONE. J.1 flipped `master_key` ON 2026-08-21. |
+| **K.1-K.6** project-per-plane restructure | DONE. The root `docker-compose.yml` is a pure network anchor (0 services); the eight plane projects are listed in `scripts/lib/stack-services.json`. K.6's volume tail is the operator's D7, below. |
+| **M.1-M.7** issue pipeline, Mattermost surface, interlocks, roles | DONE. M.8's tail is open — below. |
+
+### Superseded
+
+- **Part K superseded D.1.** D.1 split the 2,2xx-line root compose into
+  `compose/<plane>.yml` includes; Part K then dissolved the root project
+  ENTIRELY into eight independent compose projects around a network anchor.
+  There is no `compose/` directory and no `include:` in the root file today, so
+  D.1 as written can no longer be executed against this tree.
+- **The plan store superseded C.7 and Part C's doc-routing rules.** C.7's
+  implementation-guide hygiene (tag `shipped/` vs `proposed/`, archive
+  superseded plan sets in place) was overtaken by the 2026-08-29 decision that
+  plans do not live in this repo at all. Phase 2 ran 2026-09-18:
+  `documentation/implementation-guide/` is now the status index plus exactly two
+  directories kept for mechanical reasons (`multi-agent-concurrency/`,
+  `dark-factory-unification/`). Enforced by
+  `scripts/checks/check-doc-placement.ps1` (pre-commit 2b), audited by
+  `scripts/checks/plan-store.ps1`.
+
+### Moved to the `stack-layers` plan
+
+Read these in `../documentation-plans-ai-stack/implementation-guide/stack-layers/PLAN.md`;
+they are NOT tracked by this file any more.
+
+| v3 item | Where it went |
+|---|---|
+| **Part L.1** source-tree colocation | `sl-colo-gateways`, `sl-colo-portal`, `sl-colo-inference`, `sl-colo-frontend` — one plane per item (PLAN §3). `little-coder/` deliberately does not move (DECISIONS D5). |
+| **Part L.2** per-plane `.env` split | `sl-env-split` (PLAN §2.7, DECISIONS D10). |
+| **D.1 x-anchors** (the deferred polish) | `sl-compose-anchors`, as a render-identical refactor once every plane file is being touched anyway (PLAN §2.6). There are zero `x-` anchors in any of the seven compose files today. |
+| **D-12** services-inventory generator | `sl-driver-parity`: `stack.py inventory --write` generates `scripts/lib/stack-services.json` from the manifest plus the rendered compose files, and the pre-commit check becomes `inventory --check` (PLAN §2.4). D-12 landed as wire-as-VERIFIED (a drift diff inside `check-project-configs.ps1`); the generator half is what moved. |
+| **I.4 / J.6** conventions page + port registry | The manifest IS the port registry (PLAN §2.1/§2.4). Neither document exists today. |
+
+### Still open, tracked elsewhere
+
+- **E.1 twin privacy gateways** — `openbrain-gateway/app.py` and
+  `mnemory-gateway/app.py` are still two implementations of one idea (272 and
+  267 lines). Queued 2026-08-22, never started; explicitly OUT of scope for
+  stack-layers (PLAN §6). No successor owner.
+- **H.2 little-coder submodule** — not done, and deliberately parked:
+  stack-layers DECISIONS D5 keeps `little-coder/` a tracked root directory until
+  the other planes are self-contained and the pattern is proven.
+- **F.1 / F.2 monoliths** — they grew:
+  `agent-org/agent-bridge/app/orchestrator.py` is 13,801 lines and
+  `scripts/claude-sessions-bridge/bridge.py` 2,397. Out of scope for
+  stack-layers (PLAN §6); no successor plan.
+- **M.8 live-validation tiers** — T2 proved out; the five remaining items are
+  listed at the end of §M.8 in this file. **That list is the one part of this
+  file that is still live work**: everything else here is history, and a reader
+  who needs a worklist should be in the `stack-layers` plan instead.
+- **D7 stale volumes (the K.6 tail)** — roughly fourteen pre-split volumes plus
+  two unprefixed `openwebui_*` remain on the daemon. Deleting them is
+  destructive and stays the operator's call; the per-plane copies have held the
+  data since 2026-08-21 and every store has a backup sidecar. The 2026-09-19
+  close-out removed only the orphan volume DECLARATION from the root compose
+  file — no volume was deleted.
+- **CI gap** — the agent-bridge and little-coder suites are not in
+  `.github/workflows/ci.yml`, and the gateway-routing check is pre-commit only.
 
 ---
 

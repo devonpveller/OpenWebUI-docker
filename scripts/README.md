@@ -12,7 +12,7 @@
 | `claude-sessions-bridge/` | Mattermost ⟷ headless Claude Code sessions (+ approval relay MCP, session tools, self-restart) | Scheduled Task `claude-sessions-bridge` (logon, lock :48291) |
 | `sysadmin-mcp/` | Sysadmin MCP server (disk/compaction/reclaim), Telegram out-of-band channel, scheduled disk/tmp/backup checks | `.mcp.json` stdio + 6 Scheduled Tasks (see its README) |
 | `mattermost-mcp/` | Dependency-free Mattermost MCP server + `mm.py` CLI | `.mcp.json` stdio |
-| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; wire-or-demote = CLEANUP-PLAN D-12) | imported |
+| `lib/` | Shared code: `mm_lib.py` (.env credential mechanics — the once-6×-copied line-walk), `portal-alerter-client.ps1`, `stack-services.json` (inventory; hand-maintained, drift-verified by `check-project-configs.ps1`. The generator CLEANUP-PLAN D-12 asked for moved to the `stack-layers` plan in the plan store) | imported |
 | `archive/` | Retired code with provenance table — see `archive/README.md` | never |
 
 ## `recovery/`
@@ -28,14 +28,21 @@ docker-compose.yml) and `update-stack.bat`.
 
 - `stack-watchdog.ps1` — the 60 s watchdog (Scheduled Task `StackWatchdog`;
   renamed from check-tailscale-health 2026-08-21). Covers: tailnet serves,
-  all three compose projects, Docker-engine restart, backup recency,
+  all eight compose projects in `scripts/lib/stack-services.json` (ai-stack,
+  frontend, inference, memory, search, coder, open-brain, agent-org — the
+  portal is driven separately), Docker-engine restart, backup recency,
   claude-bridge health, Telegram alerting. Log stays at
   `logs/tailscale-health.log` for continuity.
 - `check-openbrain-health.ps1`, `check-agent-org-health.ps1` — per-project
   probes (fanned out from the watchdog).
 - `check-backup-coverage.ps1` — every stateful path has a sidecar (manual).
-- Pre-commit (via `.githooks/`): `check-staged-secrets.ps1`,
-  `validate-lineendings.ps1`, `check-llm-gateway-routing.ps1`.
+- Pre-commit (via `.githooks/`), ten checks in this order:
+  `check-staged-secrets.ps1`, `validate-lineendings.ps1`,
+  `check-doc-placement.ps1`, `check-llm-gateway-routing.ps1`,
+  `check-corpus-exposure-producers.ps1`, `check-project-configs.ps1`,
+  `check-env-file-scope.ps1`, `check-ob1-recipe-tests.ps1`,
+  `check-ob1-deno-recipes.ps1`, `check-ob1-integration-images.ps1` — then the
+  hook appends an attestation line. `.githooks/pre-commit` is the authority.
 - `test-quartz4-offline.ps1`, `dev-helper.ps1` — manual dev aids.
 
 ## `portal/`

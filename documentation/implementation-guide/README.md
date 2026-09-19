@@ -9,8 +9,12 @@
 > lives. NEW plans, build logs and plan sets are written in the private plan store
 > `documentation-plans-ai-stack` (`implementation-guide/<feature>/`), committed and
 > pushed there, and get a row here naming that location - see CLAUDE.md, "Plans live
-> in the plan store". The folders listed below without such a note are legacy: they
-> predate the plan store and stay until its Phase 2 migration is decided.
+> in the plan store". **Phase 2 ran 2026-09-18**: the feature directories that
+> were still here moved to the store, so every row below is marked **@ plan store**
+> except the two that stay here for a MECHANICAL reason - `multi-agent-concurrency/`
+> (MERGE-PROTOCOL.md must travel with every worktree) and `dark-factory-unification/`
+> (`scripts/checks/dfu-done.ps1` reads its PLAN/DECISIONS/WALKTHROUGH in CI). A third
+> directory appearing here is drift.
 > `scripts/checks/check-doc-placement.ps1` blocks a new plan staged into this repo
 > and, with `-All`, audits what is sitting here untracked.
 
@@ -51,6 +55,7 @@
 | `portable-research-service/` **@ plan store** | 📦 evergreen | Deliberately workspace-agnostic extractions. |
 | `multi-agent-concurrency/` **stays here** | BUILT + LIVE 2026-08-28 | Worktree tooling, plane leases, the develop/test/review pipeline, the anchor gate. Kept in this repo because `MERGE-PROTOCOL.md` must travel with every worktree an agent provisions. |
 | `dark-factory-unification/` **stays here** | PLANNED 2026-08-29, partly executed | One org, pluggable substrates, one memory plane. Kept here because `scripts/checks/dfu-done.ps1` and `verify-dfu-done.ps1` READ its `PLAN.md`/`DECISIONS.md`/`WALKTHROUGH.md` and CI runs them against a checkout of this repo alone. `DECISIONS.md` is also the `source_of_record` in `scripts/checks/defect-classes.json`. |
+| `stack-layers/` **@ plan store** | PLAN 2026-09-19, wave 1 in progress | The stack as three layers (foundations / engines / surfaces) behind one `stack.manifest.toml` and one stdlib `stack.py` driver, so a fresh clone starts Open WebUI alone and `enable <product>` turns the rest on. Supersedes CLEANUP-PLAN v3 Part L (colocation, per-plane `.env`), D.1 x-anchors, D-12 (inventory generator) and I.4/J.6 (conventions page + port registry). Evidence: `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md`. |
 | `cluster-transition/` **@ plan store** | PLAN 2026-09-17, not built | ai-stack onto three OptiPlex nodes; inference stays on the GPU box. Supersedes the placement half of the portal plan. |
 | `portal-authentik-traefik/` **@ plan store** | PLAN 2026-09-16, not built | Portal refactor Authelia+Caddy to Authentik+Traefik; as of 2026-09-17 it lands on cluster node 1, so only its Phase 3 and tailnet lane change. |
 | `validated-work-memory/` **@ plan store** | PLANNED 2026-09-11, nothing implemented | Receipt to lesson to skill, with re-validation. |

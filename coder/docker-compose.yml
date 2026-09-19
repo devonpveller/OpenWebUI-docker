@@ -198,8 +198,9 @@ services:
       - "com.centurylinklabs.watchtower.enable=false"
 
 volumes:
-  # The five expertise volumes + per-chat sessions + the shared workspace —
-  # migrated from the ai-stack_* volumes 2026-08-21 (data copied).
+  # Six volumes: the four expertise stores (journals, skill, cohorts, polyglot)
+  # + per-chat sessions + the shared workspace — migrated from the ai-stack_*
+  # volumes 2026-08-21 (data copied).
   little-coder-journals:
   little-coder-skill:
   little-coder-cohorts:
