@@ -291,17 +291,27 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 description = "the idea-refinery services; scripts/stack/stack.ps1 passes this on every OB1 invocation"
 default     = true
 
+# The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles). They are
+# NOT `default`, on purpose: `default` means "passed on every invocation", and
+# the whole point of the research product's surfaces split is that --headless
+# can drop wiki and notebook. scripts/stack/stack.ps1 DOES pass all three (see
+# its ob1 row) because it is the pre-manifest driver and must keep starting the
+# set that is running today; sl-driver-parity reconciles the two.
+
 [planes.ob1.profiles.research]
-description = "openbrain-research + the grounding backfiller"
-pending     = true   # sl-ob1-profiles adds it
+# OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which
+# exists only to place research output. NOT the grounding backfiller - this
+# description used to claim it, and the backfiller is core: it drains
+# `ungrounded_claims` for every inlet, not just research (its own comment at
+# OB1/docker/docker-compose.yml, "general brain-health"), so it renders with no
+# profile at all.
+description = "the research engine: openbrain-research + openbrain-curator"
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler and the Quartz viewer (a SURFACE)"
-pending     = true   # sl-ob1-profiles adds it
+description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE)"
 
 [planes.ob1.profiles.notebook]
 description = "the Open Notebook trio: surrealdb + open_notebook + its backup (a SURFACE)"
-pending     = true   # sl-ob1-profiles adds it
 
 # --------------------------------------------------------------------------
 [planes.agent-org]
@@ -408,6 +418,9 @@ description = "the private search gateway (SearXNG behind Mullvad)"
 planes      = ["search"]
 
 [products.open-brain]
+# The knowledge core IS the ob1 plane's unprofiled render (store, doors,
+# coherence workers, backup) since sl-ob1-profiles - no profile needed for it.
+# The wiki is its reading surface, so --headless drops it and leaves the core.
 description = "the Open Brain knowledge core"
 planes      = ["ob1"]
 surfaces    = { ob1 = ["wiki"] }
@@ -429,9 +442,16 @@ planes      = ["agent-org"]
 profiles    = { agent-org = ["workers"] }
 
 [products.digest]
+# `notebook` is a PROFILE here, not a surface: openbrain-podcast - the chain's
+# tail, and always-on core in OB1's scheduled slice - renders its audio through
+# Open Notebook (ON_BASE -> http://open_notebook:5055,
+# OB1/docker/docker-compose.scheduled.yml) and gets its enrichment from
+# openbrain-research (RESEARCH_URL, same file). Both are engine dependencies of
+# the chain, so --headless must NOT drop them; a headless digest with no
+# notebook is a chain that silently produces no episode.
 description = "the scheduled digest chain inside OB1 (gmail pull -> research -> podcast -> digest)"
 planes      = ["inference", "search", "ob1"]
-profiles    = { ob1 = ["research"] }
+profiles    = { ob1 = ["research", "notebook"] }
 
 [products.portal]
 description = "the internet front-end (started by hand: portal-on.ps1)"

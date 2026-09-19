@@ -340,7 +340,33 @@ def test_enable_research_pulls_its_planes_and_ob1_profiles(root):
     planes = state_of(root)["planes"]
     assert set(planes) == {"inference", "search", "ob1", "frontend"}
     assert set(planes["ob1"]["profiles"]) == {"idea-refinery", "research", "wiki", "notebook"}
-    assert "PENDING" in out  # the driver says the profiles do not exist yet
+    # Was `assert "PENDING" in out`. sl-ob1-profiles (2026-09-19) put all three
+    # into OB1/docker/docker-compose.yml, so the driver must no longer warn that
+    # enabling them changes nothing - a stale "pending" notice is a lie about
+    # what `up` will start.
+    assert "PENDING" not in out
+
+
+def test_the_ob1_profiles_are_no_longer_pending(root):
+    """The three OB1 profiles exist in the compose file, so nothing may mark them pending."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert set(manifest.profiles("ob1")) == {"idea-refinery", "research", "wiki", "notebook"}
+    assert manifest.pending_profiles("ob1") == []
+    # Only idea-refinery is `default`: `default` means "passed on every
+    # invocation", and --headless has to be able to drop wiki and notebook.
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+
+
+def test_digest_needs_the_notebook_profile_not_just_research(root):
+    """openbrain-podcast renders its audio through open_notebook, so --headless must not drop it."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.product("digest")["profiles"]["ob1"] == ["research", "notebook"]
+    assert "surfaces" not in manifest.product("digest")
+    code, _, _ = run(root, "enable", "digest", "--headless")
+    assert code == 0
+    assert set(state_of(root)["planes"]["ob1"]["profiles"]) == {
+        "idea-refinery", "research", "notebook"
+    }
 
 
 def test_enable_research_headless_omits_the_wiki_and_notebook_profiles(root):
@@ -424,12 +450,32 @@ def test_ob1_and_agent_org_pass_no_env_file_and_read_their_own(root):
     assert manifest.env_file("frontend") == ".env"
 
 
-def test_ob1_keeps_the_idea_refinery_profile_stack_ps1_always_passes(root):
+def test_a_bare_ob1_plane_passes_only_the_default_profile(root):
+    """Enabling the PLANE gets `default` profiles only - the core fleet plus idea-refinery.
+
+    The three sl-ob1-profiles groups are reached by enabling a PRODUCT (see
+    test_enable_research_pulls_its_planes_and_ob1_profiles), never by naming the
+    plane. NOTE the deliberate divergence from scripts/stack/stack.ps1, which
+    passes all four on every OB1 invocation because it is the pre-manifest driver
+    and must keep starting the 30 containers running on this host; the comment on
+    its `ob1` row says so. sl-driver-parity reconciles the two.
+    """
     run(root, "init", "--planes", "inference,search,ob1")
     _, out, _ = run(root, "up", "--dry-run")
     ob1 = [line for line in docker_lines(out) if "OB1/docker" in line]
     assert ob1 == [
         "docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d"
+    ]
+
+
+def test_enabling_research_drives_ob1_with_every_profile_the_live_set_needs(root):
+    """The `research` product's dry-run must name the profiles that render the live 30."""
+    run(root, "init", "--product", "research")
+    _, out, _ = run(root, "up", "--dry-run")
+    ob1 = [line for line in docker_lines(out) if "OB1/docker" in line]
+    assert ob1 == [
+        "docker compose -f OB1/docker/docker-compose.yml "
+        "--profile idea-refinery --profile research --profile wiki --profile notebook up -d"
     ]
 
 

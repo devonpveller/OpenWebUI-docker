@@ -31,7 +31,7 @@ which is exactly why this is a note and not a commit.
 |---|---|
 | `stt-tts-server`, `stt-tts-tailscale` | A speech project outside every declared compose file. |
 | `task-management-api-1`, `task-management-db-1` | Docker-Compose default naming (`-1` suffix), so an unnamed project — possibly not this workspace's at all. |
-| `openbrain-idea-refinery` | IS in the OB1 compose under the `idea-refinery` profile; the plane rows do not carry a `profile` key for it the way the new agent-org rows now do. |
+| ~~`openbrain-idea-refinery`~~ | **RESOLVED 2026-09-19 (sl-ob1-profiles).** Row added to the `openbrain` plane with `"profile": "idea-refinery"`, the shape this line asked for. It was forced rather than chosen: the same item gave OB1 `research`/`wiki`/`notebook` profiles and pointed `check-project-configs.ps1`'s row diff at a fully-profiled render, which would have reported this container as MISSING and blocked the commit. Nine other OB1 rows gained `profile` fields at the same time. |
 
 ## Why this matters beyond tidiness
 

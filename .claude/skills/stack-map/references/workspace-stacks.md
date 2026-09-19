@@ -70,7 +70,7 @@ Run with: `docker compose ...` from the workspace root.
 | Container | Backs up | Networks | Profile |
 |-----------|----------|----------|---------|
 | `openbrain-db-backup` | `pg_dump` of OB1 Postgres (**open-brain** project since 2026-08-21; output still `./backups/openbrain-db`) | obnet (native) | default (open-brain) |
-| `openbrain-wiki-backup` | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
+| `openbrain-wiki-backup` **[profile `wiki`]** | openbrain-wiki-data + wiki-assets (**open-brain** project since 2026-08-21; output still `./backups/openbrain-wiki`) | — | default (open-brain) |
 | `agent-bridge-db-backup` | `pg_dump` of `agent-bridge-db` (**agent-org** project; governance/effort/project state) | ao-net | default (agent-org) |
 | `mattermost-db-backup` | `pg_dump` of `mattermost-db` (**agent-org** project; conversation content) | ao-net | default (agent-org) |
 | `caddy-backup` | caddy-data | default, edge-net | internet, local-test |
@@ -227,6 +227,26 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > servers must be healthy first) is up; tear it down *before* the main stack so
 > `docker compose down` can drop `llm-net`.
 
+> **Profiles (since 2026-09-19, `sl-ob1-profiles`):** a bare `docker compose up`
+> here starts **20 of the 30** containers — the knowledge core plus the always-on
+> scheduled slice. Three groups are profile-gated and marked **[profile `x`]** in
+> the tables below:
+>
+> | Profile | Turns on | Why not core |
+> |---------|----------|--------------|
+> | `research` | `openbrain-curator`, `openbrain-research` | the research ENGINE; the store captures, embeds, chunks and serves without it |
+> | `wiki` | `openbrain-wiki`, `-wiki-viewer`, `-workbench`, `-wiki-backup` | a reading/writing SURFACE onto the store |
+> | `notebook` | `surrealdb`, `open_notebook`, `open-notebook-backup` | a second SURFACE onto the store (openbrain-db is canonical since IKS) |
+> | `idea-refinery` | `openbrain-idea-refinery` | pre-existing; off until a Mattermost bot token is set |
+>
+> The full live set needs all four:
+> `docker compose -f OB1/docker/docker-compose.yml --profile research --profile wiki --profile notebook --profile idea-refinery up -d`
+> — which is exactly what `scripts/stack/stack.ps1`'s `ob1` row passes.
+> **Invariant:** no core service may `depends_on` a profiled one. None does; the
+> per-service reasons and the two surviving core→profiled RUNTIME references
+> (`openbrain-ext`'s `WIKI_RECOMPILE_URL`, `openbrain-podcast`'s `RESEARCH_URL` +
+> `ON_BASE`) are in `OB1/docker/README.md`, "Compose profiles".
+
 ### Networks
 | Network   | Type                         | Purpose |
 |-----------|------------------------------|---------|
@@ -249,13 +269,13 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-rest` | Caddy `/rest/v1` path-stripping proxy | 127.0.0.1:3001 | obnet |
 | `openbrain-entity-worker` | Entity-extraction worker | 127.0.0.1:8810 | obnet, llm-net |
 | `openbrain-suggestion-worker` | Cross-thread suggestion worker (Integrated Knowledge System; `POST /suggest`) | 127.0.0.1:8813 | obnet, llm-net |
-| `openbrain-curator` | Research-package ingestion inlet (`POST /ingest/research-package`); resolves deep-research onto the best existing thread (pgvector shortlist + LLM decision), delegates the write to openbrain-mcp `/research/persist`, writes grounded claim→source edges (Research Engine P2); deno-postgres + llama-cpp + llama-cpp-embed | 127.0.0.1:8816 | obnet, llm-net |
-| `openbrain-research` | Shared research harness (Research Engine P3/P4; `POST /research` → job_id, `GET /research/jobs/:id[/stream]`); reuses grounded claims → gap analysis → stages gaps (SearXNG + per-page fetch) → synthesizes verbatim with `[Source N]` citations → enforces grounding (honest `[GAP]`s, never fabricates) → delegates placement+claims to openbrain-curator; deno-postgres + llama-cpp + llama-cpp-embed + SearXNG gateway | 127.0.0.1:8818 | obnet, llm-net, search-gw-net (=ai-stack_default, to reach the private `gateway`) |
+| `openbrain-curator` **[profile `research`]** | Research-package ingestion inlet (`POST /ingest/research-package`); resolves deep-research onto the best existing thread (pgvector shortlist + LLM decision), delegates the write to openbrain-mcp `/research/persist`, writes grounded claim→source edges (Research Engine P2); deno-postgres + llama-cpp + llama-cpp-embed | 127.0.0.1:8816 | obnet, llm-net |
+| `openbrain-research` **[profile `research`]** | Shared research harness (Research Engine P3/P4; `POST /research` → job_id, `GET /research/jobs/:id[/stream]`); reuses grounded claims → gap analysis → stages gaps (SearXNG + per-page fetch) → synthesizes verbatim with `[Source N]` citations → enforces grounding (honest `[GAP]`s, never fabricates) → delegates placement+claims to openbrain-curator; deno-postgres + llama-cpp + llama-cpp-embed + SearXNG gateway | 127.0.0.1:8818 | obnet, llm-net, search-gw-net (=ai-stack_default, to reach the private `gateway`) |
 | `openbrain-chunk-worker` | Writer-agnostic chunk-embedding worker (Integrated Knowledge System); chunks any OB1 source into `source_chunks` (1200/150 + bge-m3) so passage-level vector retrieval works for every frontend, incl. Open Notebook "ask your knowledge base"; periodic scan + `POST /chunks`; deno-postgres + llama-cpp-embed | 127.0.0.1:8817 | obnet, llm-net |
 | `openbrain-grounding-backfiller` | S2 brain-health worker. (1) Drains `ungrounded_claims` — per claim extracts its entity (local `:nothink` LLM) → fetches the Wikipedia page (Tor) → `find_or_create_source` + `link_claim_to_source 'corroborates'` so confidence recomputes and the claim leaves the view; `POST /backfill?limit=N {thread_ids?}`. (2) Heals thin/failed web **sources** whose ingestion truncated them (~150-char stubs) — `POST /refetch?limit=N` re-fetches (Tor-first, direct fallback), updates content (chunk-worker re-embeds), 3-attempt cap then `refetch_failed`. Cron: backfill 07:00 UTC, refetch 07:30 UTC. deno-postgres | 127.0.0.1:8819 | obnet, llm-net, search-gw-net (Tor) |
-| `openbrain-wiki` | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
-| `openbrain-wiki-viewer` | Quartz 4 read-only wiki viewer (also tailnet HTTPS `:8444` + Caddy `wiki.${PUBLIC_DOMAIN}`) | 127.0.0.1:8812 | obnet, app-net |
-| `openbrain-workbench` | Deno+Hono read/write API behind the viewer (`/workbench/*` via portal Caddy `handle`, X-Brain-Key injected); deno-postgres writes + PostgREST reads | 127.0.0.1:8814 (debug only) | obnet, llm-net, app-net |
+| `openbrain-wiki` **[profile `wiki`]** | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
+| `openbrain-wiki-viewer` **[profile `wiki`]** | Quartz 4 read-only wiki viewer (also tailnet HTTPS `:8444` + Caddy `wiki.${PUBLIC_DOMAIN}`) | 127.0.0.1:8812 | obnet, app-net |
+| `openbrain-workbench` **[profile `wiki`]** | Deno+Hono read/write API behind the viewer (`/workbench/*` via portal Caddy `handle`, X-Brain-Key injected); deno-postgres writes + PostgREST reads | 127.0.0.1:8814 (debug only) | obnet, llm-net, app-net |
 | `openbrain-extract` | FastAPI content-extraction sidecar (`POST /extract`: PDF/DOCX/PPTX/image-OCR/audio-STT registry); sandboxed (non-root, cap_drop, read-only FS); reaches host STT via `host.docker.internal` | 127.0.0.1:8815 (debug only) | obnet |
 | `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
 | `openbrain-gmail-pull` | HTTP-triggered Gmail ingest; chains to prune on success | — (internal only) | obnet, llm-net |
@@ -299,9 +319,9 @@ binaries never enter the vault git history).
 
 | Container | Purpose | Host port | Networks |
 |-----------|---------|-----------|----------|
-| `surrealdb` | Open Notebook local store (SurrealDB v2, digest-pinned) | 127.0.0.1:8003 | default (open-brain) |
-| `open_notebook` | Open Notebook UI + API (IKS fork — openbrain-db is the canonical store) | 127.0.0.1:8503 / :5055 | default, obnet, ai-stack_llm-net + app-net (external) |
-| `open-notebook-backup` | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) | — | default (open-brain) |
+| `surrealdb` **[profile `notebook`]** | Open Notebook local store (SurrealDB v2, digest-pinned) | 127.0.0.1:8003 | default (open-brain) |
+| `open_notebook` **[profile `notebook`]** | Open Notebook UI + API (IKS fork — openbrain-db is the canonical store) | 127.0.0.1:8503 / :5055 | default, obnet, ai-stack_llm-net + app-net (external) |
+| `open-notebook-backup` **[profile `notebook`]** | SurrealDB logical export + notebook_data tar (output still `ai-stack/backups/open-notebook`) | — | default (open-brain) |
 
 
 ## 3. agent-org — compose project `agent-org` (SEPARATE)

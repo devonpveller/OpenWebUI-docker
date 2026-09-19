@@ -72,8 +72,16 @@ if ($ymlStaged.Count -gt 0) {
                 @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }
             )
             # OB1 renders only where its gitignored env exists (not in CI).
+            # ALL FOUR PROFILES, deliberately: OB1 gained research/wiki/notebook
+            # profiles on 2026-09-19 (sl-ob1-profiles), so a bare render now
+            # emits 20 of its 30 container_names. This check only walks
+            # compose -> json, so the 10 profiled rows would not have FAILED -
+            # they would simply have stopped being verified, which is worse than
+            # a red check. Passing the profiles keeps all 30 rows covered.
             if (Test-Path 'OB1\docker\.env') {
-                $renderTargets += @{ P = 'open-brain'; F = 'OB1\docker\docker-compose.yml'; A = @() }
+                $renderTargets += @{ P = 'open-brain'; F = 'OB1\docker\docker-compose.yml';
+                                     A = @('--profile', 'research', '--profile', 'wiki',
+                                           '--profile', 'notebook', '--profile', 'idea-refinery') }
             }
             $drift = @()
             foreach ($rt in $renderTargets) {
