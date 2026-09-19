@@ -798,7 +798,7 @@ These steps change live systems and are **not part of the test pass**.
    you are about to run. Setting `SEARXNG_IMAGE` to the `searxng/searxng@sha256:...` form
    instead of the tag removes the question permanently and is the better choice if the
    operator wants it.
-3. Per `search-gateway/README.md`'s own rule for an image bump: diff the new image's
+3. Per `search/gateway/README.md`'s own rule for an image bump: diff the new image's
    `settings.template.yml` against ours and re-verify `routes/searxng_compat.py` still
    matches the new payload shape. This is a **4-month** jump on privacy infrastructure and
    is the only real risk in this deploy.
@@ -812,7 +812,7 @@ These steps change live systems and are **not part of the test pass**.
 7. Release the lease.
 
 **Rollback:** restore `SEARXNG_IMAGE=searxng/searxng:latest` in `.env` and
-`git checkout` the previous `search-gateway/searxng/settings.yml`, then `up -d searxng`.
+`git checkout` the previous `search/searxng/settings.yml`, then `up -d searxng`.
 
 ### D.2 Open Brain plane — lease `open-brain`
 

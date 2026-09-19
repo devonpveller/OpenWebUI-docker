@@ -43,7 +43,7 @@ little-coder/
 
 Upstream little-coder is a **Node.js** CLI built on the `pi` agent framework —
 not Python. The agent container is Node-based; this control-plane wrapper is
-Python, mirroring the repo's `search-mcpo` / `mnemory-gateway` pattern. The
+Python, mirroring the repo's `search-mcpo` / `memory/mnemory-gateway` pattern. The
 `agent.py` filename in design §6 is a Chapter-5 illustration only.
 
 ## Operator action items (cannot be automated)

@@ -389,7 +389,7 @@ host ports — cloud services (Claude Code, ChatGPT) must enter through
 `openbrain-gateway` at `127.0.0.1:8061`. Gateway forces
 `metadata.share=cloud` on reads and stamps `metadata.origin=cloud,
 share=cloud` on writes; the 39 extension tools are blocked entirely.
-Mirrors the mnemory-cloud-gateway pattern (`mnemory-gateway/app.py`). Local
+Mirrors the mnemory-cloud-gateway pattern (`memory/mnemory-gateway/app.py`). Local
 trusted clients (OWUI via the mcpo bridges, recipes on obnet, the
 entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
 `openbrain-ext` directly on internal networks and are unaffected.

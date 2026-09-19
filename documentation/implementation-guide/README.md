@@ -28,7 +28,7 @@
 | `podcast-on-demand-audio/` **@ plan store** | ✅ shipped 2026-08-02 | |
 | `disk-prune-watcher/` **@ plan store** | ✅ shipped | Realized as `scripts/sysadmin-mcp/`. |
 | `claude-code-mattermost-bridge/` **@ plan store** | ✅ shipped | Code: `scripts/mattermost-mcp/` + `scripts/claude-sessions-bridge/`. |
-| `web-search/` **@ plan store** | ✅ shipped | `search-gateway/README.md` is the living doc. |
+| `web-search/` **@ plan store** | ✅ shipped | `search/gateway/README.md` is the living doc. |
 | `open-source authentication front ends for ai stack/` **@ plan store** | ✅ shipped | Portal live; posture + post-audit kept, plan/tasks archived. |
 | `expand-quartz-4/` **@ plan store** | ✅ shipped | Plan + outcomes + promotion runbook kept. |
 | `open-notebook-integration-openbrain/` **@ plan store** | ✅ shipped (IKS) | Ledger + sync/pending plans kept. its `iks-dev` overlay was torn down + archived 2026-08-20 (idle since 08-01; volumes kept; tree at `scripts/archive/iks-dev/`). |

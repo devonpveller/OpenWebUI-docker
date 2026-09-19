@@ -5,8 +5,8 @@ exposes native REST + a Tavily-compatible shim + a SearXNG-compatible endpoint
 + an MCP/OpenAPI surface, and is built around a pluggable `SearchProvider`
 interface for future paid-provider rotation.
 
-> Build spec: [`../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md`](../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md)
-> Integration decisions: [`documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md`](../documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md)
+> Build spec: [`../../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md`](../../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md)
+> Integration decisions: [`documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md`](../../documentation/archive/implementation-guide/web-search/integration-plan-private-search-gateway.md)
 
 ## Quickstart
 
@@ -63,7 +63,7 @@ model the stack already uses for `mnemory`.
 | No query logging unless `LOG_QUERIES=true` (hash only) | structlog config logs a 16-char sha256 *fingerprint* only when explicitly enabled; default false. |
 | Result URLs not logged at INFO | URLs never logged; only counts/provider/latency. |
 | No telemetry | SearXNG `enable_metrics: false`; no metrics endpoint. |
-| Default-deny Tor-hostile engines | `searxng/settings.yml` disables Google/Bing/Yandex. |
+| Default-deny Tor-hostile engines | `../searxng/settings.yml` disables Google/Bing/Yandex. |
 | Privacy infra not silently swapped | All search services `watchtower.enable=false`; images pinnable via `.env`. |
 
 **Scope caveat:** the gateway privatises the **search query** step. `smolcrawl`
@@ -93,10 +93,10 @@ end-to-end private browsing.
 
 ```bash
 python -m venv .venv && .venv/Scripts/activate    # (Windows)
-pip install -e "gateway[dev]"
+pip install -e ".[dev]"
 pytest                       # 27 unit tests; integration deselected
 pytest -m integration        # requires the stack up (GATEWAY_E2E_URL/API_KEY)
-ruff check gateway/src gateway/tests
+ruff check src tests
 ```
 
 ## Roadmap (documented, not built)

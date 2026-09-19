@@ -67,7 +67,7 @@ services:
 
   mnemory-cloud-gateway:
     build:
-      context: ../mnemory-gateway
+      context: ./mnemory-gateway
       dockerfile: Dockerfile
     container_name: mnemory-cloud-gateway
     networks:

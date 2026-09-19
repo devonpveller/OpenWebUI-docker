@@ -30,7 +30,7 @@ containers; where a doc elsewhere disagrees, the compose file wins.
 | Service | Container | What it is / what it is for |
 |---|---|---|
 | `mnemory` | `mnemory` | The memory layer itself. Serves the MCP/REST API on **8050** and a management/health endpoint on **8051** (`MGMT_PORT`). Stores to SQLite + embedded Qdrant under `/data`. Calls the LLM plane for synthesis (`qwen36-27b:nothink`) and embeddings (`qllama/bge-m3:latest`, 1024 dims) through the `llama-cpp` / `llama-cpp-embed` **aliases on LiteLLM** — never a direct upstream. Auth by `MCP_API_KEY` (+ additional `MCP_API_KEYS`). |
-| `mnemory-cloud-gateway` | `mnemory-cloud-gateway` | Privacy-enforcing reverse proxy in front of mnemory's MCP endpoint, **for cloud clients only** (Claude Code and friends). Source lives in this repo: [`../mnemory-gateway/`](../mnemory-gateway). Default-deny: reads are force-filtered to `labels.share == "cloud"`, writes are stamped `origin=cloud, share=cloud` with the `personal` category stripped, `user_id`/`agent_id` arguments are stripped, and everything outside a small allow-list (notably `ask_memories`, `get_core_memories`, `get_recent_memories`, and all update/delete/artifact tools) is blocked — including from `tools/list`, so the model never even sees them. Cloud clients hold `MNEMORY_GATEWAY_KEY` and **never** the real mnemory key; the gateway injects the real key plus a fixed `X-User-Id` (`BOUND_USER_ID`) upstream. |
+| `mnemory-cloud-gateway` | `mnemory-cloud-gateway` | Privacy-enforcing reverse proxy in front of mnemory's MCP endpoint, **for cloud clients only** (Claude Code and friends). Source lives in this repo: [`memory/mnemory-gateway/`](mnemory-gateway). Default-deny: reads are force-filtered to `labels.share == "cloud"`, writes are stamped `origin=cloud, share=cloud` with the `personal` category stripped, `user_id`/`agent_id` arguments are stripped, and everything outside a small allow-list (notably `ask_memories`, `get_core_memories`, `get_recent_memories`, and all update/delete/artifact tools) is blocked — including from `tools/list`, so the model never even sees them. Cloud clients hold `MNEMORY_GATEWAY_KEY` and **never** the real mnemory key; the gateway injects the real key plus a fixed `X-User-Id` (`BOUND_USER_ID`) upstream. |
 | `mnemory-backup` | `mnemory-backup` | `alpine:3.21` sleep-loop (default 24 h) running [`../backup/mnemory-backup.sh`](../backup/mnemory-backup.sh): tars `/data` (mounted `:ro`) to `../backups/mnemory/mnemory-backup-<ts>.tar.gz` + `.sha256`, count-based retention (default keep 2). Not crond — crond misses fire-windows on Docker Desktop VM clock jumps. |
 
 ## Network and port posture
@@ -148,7 +148,7 @@ care about clean logs.
   ../../mnemory` resolves to the *sibling* `mnemory` checkout next to
   `ai-stack/`, not to anything inside this repo. A clean clone of ai-stack alone
   cannot build `mnemory:local`; it can only run a pre-built image. (The gateway
-  is different — `context: ../mnemory-gateway` is in-repo.)
+  is different — `context: ./mnemory-gateway` is in-repo.)
 - **The compose healthcheck overrides the image's own.** The mnemory Dockerfile
   `HEALTHCHECK` hits `:8050/health`; compose replaces it with `:8051/health`
   (`MGMT_PORT`). Change `MGMT_PORT` and you must change the healthcheck with it,

@@ -5,7 +5,7 @@ MCP endpoint (openbrain-mcp) for CLOUD services (Claude Code, ChatGPT, etc).
 Local/trusted clients on obnet/llm-net keep talking to openbrain-mcp
 directly and are unaffected.
 
-Modelled on ../mnemory-gateway/app.py — see that file for the prior art.
+Modelled on ../memory/mnemory-gateway/app.py — see that file for the prior art.
 The mechanic is identical, swapping mnemory's `labels` for Open Brain's
 `metadata` JSONB:
 
