@@ -109,7 +109,54 @@
 # Seams (all external): ai-stack_default (reach search `gateway`, host UX),
 # llm-net (llama-cpp aliases), app-net (portal caddy → openwebui; the QUARTZ
 # tailnet serve route reaches caddy:8446 through it).
+#
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). The blocks the
+# five services below used to repeat verbatim are declared ONCE as YAML
+# extension fields and merged in with `<<: *name`, at the point in each service
+# where the block they replace used to sit. `docker compose config` echoes the
+# `x-` keys back at the top level; they are declarations, not services, and no
+# rendered service definition changed.
+#   x-hardening        security_opt: [ no-new-privileges:true ]  - all four
+#                      services that carry it (tailscale, the netns companion,
+#                      never did and does not gain it here).
+#   x-hardening-owui   x-hardening + read_only:false + the /tmp tmpfs. The two
+#                      openwebui definitions are the same application under two
+#                      profiles, so their runtime posture is one fact.
+#   x-healthcheck-http the probe TIMINGS both openwebui definitions share;
+#                      `test:` stays explicit on the service, because that is
+#                      the part that is about the service and not the policy.
+#   x-backup-sidecar   x-hardening + the alpine sleep-loop shape both backup
+#                      sidecars share (image, entrypoint, restart). Bumping the
+#                      alpine tag now moves both, which is the intent.
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - so a service that needs
+# an extra `security_opt` or `tmpfs` entry must spell out the WHOLE list (the
+# anchor's entries included) in its own key. Extra hardening under a DIFFERENT
+# key (tailscale's cap_add, tailscale-backup's cap_drop) is just that key. No
+# service in this file overrides an anchored key today.
 name: frontend
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+x-hardening-owui: &hardening-owui
+  <<: *hardening
+  read_only: false # OpenWebUI needs write access for temp files
+  tmpfs:
+    - /tmp:noexec,nosuid,size=100m
+
+x-healthcheck-http: &healthcheck-http
+  interval: 15s
+  timeout: 15s
+  retries: 3
+  start_period: 60s
+
+x-backup-sidecar: &backup-sidecar
+  <<: *hardening
+  image: alpine:3.21
+  entrypoint: /bin/sh
+  restart: unless-stopped
 
 services:
   # --- FRESH CLONE (profile: stock) ------------------------------------------
@@ -140,17 +187,10 @@ services:
       # rotates it and breaks every encrypted-at-rest value in webui.db.
       - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set in frontend/.env (copy frontend/.env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    read_only: false # OpenWebUI needs write access for temp files
-    tmpfs:
-      - /tmp:noexec,nosuid,size=100m
+    <<: *hardening-owui
     healthcheck:
+      <<: *healthcheck-http
       test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
-      interval: 15s
-      timeout: 15s
-      retries: 3
-      start_period: 60s
 
   # --- THIS HOST (profile: gpu) ----------------------------------------------
   openwebui:
@@ -262,17 +302,10 @@ services:
               device_ids: ["${GPU_AISTACK_DEVICE_ID:-1}"]
               capabilities: [ gpu ]
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    read_only: false # OpenWebUI needs write access for temp files
-    tmpfs:
-      - /tmp:noexec,nosuid,size=100m
+    <<: *hardening-owui
     healthcheck:
+      <<: *healthcheck-http
       test: [ "CMD", "curl", "-f", "--max-time", "10", "http://localhost:8080/health" ]
-      interval: 15s
-      timeout: 15s
-      retries: 3
-      start_period: 60s
 
   tailscale:
     profiles: [ tailscale ]
@@ -351,7 +384,7 @@ services:
       start_period: 60s
 
   openwebui-backup:
-    image: alpine:3.21
+    <<: *backup-sidecar
     container_name: openwebui-backup
     volumes:
       - openwebui-data:/data:ro
@@ -373,7 +406,8 @@ services:
       - RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}
       - HEALTH_TCP=openwebui:8080
       - BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}   # daily (sleep-loop; unified 2026-08-21)
-    entrypoint: /bin/sh
+    # image / entrypoint (/bin/sh) / restart / security_opt come from
+    # *backup-sidecar at the top of this file; this is that shell's -c script.
     command:
       - -c
       - |
@@ -395,9 +429,6 @@ services:
       resources:
         limits:
           memory: 1g
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     # One entry per openwebui definition, both `required: false`: exactly one of
     # them is ever active, and WITHOUT `required: false` compose refuses the
     # whole project ("depends on undefined service") whenever the other is off.
@@ -417,7 +448,7 @@ services:
 
   tailscale-backup:
     profiles: [ tailscale ]
-    image: alpine:3.21
+    <<: *backup-sidecar
     container_name: tailscale-backup
     volumes:
       - ../data/tailscale:/data:ro
@@ -440,7 +471,8 @@ services:
       # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
       - BACKUP_INTERVAL=${TAILSCALE_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
-    entrypoint: /bin/sh
+    # image / entrypoint (/bin/sh) / restart / security_opt come from
+    # *backup-sidecar at the top of this file; this is that shell's -c script.
     command:
       - -c
       - |
@@ -449,9 +481,6 @@ services:
           sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] tailscale backup.sh exited $$?"
           sleep "$${BACKUP_INTERVAL}"
         done
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     cap_drop:
       - ALL
     labels:

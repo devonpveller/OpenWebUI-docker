@@ -14,7 +14,25 @@
 # little_coder pipe and agent-org reach the daemon over it). lc-net is
 # plane-internal and native. lc-egress gets internet via a project-local
 # default bridge (no cross-project consumer of its DNS name).
+#
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). The hardening
+# boilerplate every service here carried verbatim is declared ONCE below as a
+# YAML extension field and merged in with `<<: *hardening`, at the point in each
+# service where the block it replaces used to sit. `docker compose config`
+# echoes the `x-` blocks back at the top level; they are declarations, not
+# services, and no rendered service definition changed.
+#   x-hardening   security_opt: [ no-new-privileges:true ]
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - so a service needing an
+# extra `security_opt` entry must spell out the WHOLE list (the anchor's entry
+# included) in its own key. Extra hardening under a DIFFERENT key (cap_drop,
+# cap_add, read_only, tmpfs) is just that key. No service in this file
+# overrides an anchored key.
 name: coder
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
 
 services:
   open-terminal:
@@ -49,8 +67,7 @@ services:
     volumes:
       - little-coder-workspace:/workspace
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
     #  project; startup order is enforced by stack.ps1 / recovery, and the
     #  service retries until the gateway answers -- same posture as OB1.)
@@ -120,8 +137,7 @@ services:
     ports:
       - "127.0.0.1:9091:9090"   # Prometheus metrics (loopback only)
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
     #  project; startup order is enforced by stack.ps1 / recovery, and the
     #  service retries until the gateway answers -- same posture as OB1.)
@@ -156,8 +172,7 @@ services:
       - lc-net      # reachable by open-terminal
       - default     # the only little-coder-side service with internet
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -192,8 +207,7 @@ services:
           sleep "$${BACKUP_INTERVAL}"
         done
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 

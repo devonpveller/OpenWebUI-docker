@@ -20,7 +20,68 @@
 # (http://llama-cpp:8080). The cloud lane is the ONLY component with internet egress, and
 # only through ao-egress (OpenRouter allowlist). The local gateway air-gap is untouched.
 
+#
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). All sixteen
+# services below repeated the same hardening line, the four backup sidecars
+# repeated their whole scheduler shape twice over, and seven healthchecks
+# repeated two timing policies. Each is declared ONCE below as a YAML extension
+# field and merged in with `<<: *name`, at the point in each service where the
+# block it replaces used to sit. `docker compose config` echoes the `x-` keys
+# back at the top level; they are declarations, not services, and no rendered
+# service definition changed.
+#   x-hardening          security_opt no-new-privileges - all sixteen services.
+#   x-backup-sidecar     x-hardening + the ALPINE sleep-loop shape (image,
+#                        entrypoint /bin/sh, restart, cap_drop ALL) shared by
+#                        the two worker-journal sidecars.
+#   x-pg-backup-sidecar  x-hardening + the POSTGRES dump-loop shape (image,
+#                        the one-line while/sleep entrypoint, restart) shared
+#                        by agent-bridge-db-backup and mattermost-db-backup.
+#                        Its `image:` is NOT the same fact as the three live
+#                        postgres services' - those keep their own tag.
+#   x-healthcheck-pg     the pg_isready timings the three postgres services
+#                        share (10s/5s/10/20s). `test:` stays explicit: each
+#                        probes its own user and database.
+#   x-healthcheck-lc     the little-coder timings the two ao-workers and two
+#                        ao-ots share (30s interval, 10s timeout, 3 retries).
+#                        `start_period` is NOT in it - workers wait 40s and
+#                        open-terminals 30s - and neither is `test`.
+#                        mattermost's probe is deliberately outside it: same
+#                        interval and timeout, but 5 retries and 60s.
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - so a service needing an
+# extra `security_opt` or `cap_drop` entry must spell out the WHOLE list (the
+# anchor's entries included) in its own key. No service in this file overrides
+# an anchored key today.
 name: agent-org
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+x-backup-sidecar: &backup-sidecar
+  <<: *hardening
+  image: alpine:3.21
+  entrypoint: /bin/sh
+  restart: unless-stopped
+  cap_drop:
+    - ALL
+
+x-pg-backup-sidecar: &pg-backup-sidecar
+  <<: *hardening
+  image: postgres:15-alpine
+  entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
+  restart: unless-stopped
+
+x-healthcheck-pg: &healthcheck-pg
+  interval: 10s
+  timeout: 5s
+  retries: 10
+  start_period: 20s
+
+x-healthcheck-lc: &healthcheck-lc
+  interval: 30s
+  timeout: 10s
+  retries: 3
 
 services:
   # ── Chat platform (Mattermost Team Edition) — chat + mobile (TOOLING §3.1) ──
@@ -36,14 +97,10 @@ services:
     networks:
       - ao-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mmuser -d mattermost"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      <<: *healthcheck-pg
 
   mattermost:
     image: mattermost/mattermost-team-edition:${MATTERMOST_VERSION:-11.7}
@@ -77,8 +134,7 @@ services:
     ports:
       - "127.0.0.1:8065:8065"
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       # mmctl over the local socket — the image's own probe. The prior curl-based
       # check broke on the v10.11+ distroless images (no curl/shell in-image),
@@ -258,8 +314,7 @@ services:
     ports:
       - "127.0.0.1:8830:8000"   # loopback control/debug surface + floor-hook endpoint
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -275,14 +330,10 @@ services:
     networks:
       - ao-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U bridge -d agent_bridge"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      <<: *healthcheck-pg
 
   # ── Worker pool (profile: workers) — P5, the real architectural lift ────────
   # Each worker = a (little-coder + open-terminal) pair with its own network-isolated
@@ -334,13 +385,10 @@ services:
       - ao-worker-net
       - llm-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      <<: *healthcheck-lc
       start_period: 40s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -377,13 +425,10 @@ services:
       - ao-worker-net
       - llm-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      <<: *healthcheck-lc
       start_period: 30s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -423,13 +468,10 @@ services:
       - ao-worker-net
       - llm-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8090/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      <<: *healthcheck-lc
       start_period: 40s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -462,13 +504,10 @@ services:
       - ao-worker-net
       - llm-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      <<: *healthcheck-lc
       start_period: 30s
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
@@ -493,8 +532,7 @@ services:
       - ao-worker-net
       - default
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -524,8 +562,7 @@ services:
       - ao-net
       - ao-cloud-egress-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -542,14 +579,10 @@ services:
     networks:
       - ao-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      <<: *healthcheck-pg
 
   # Allowlist egress proxy pinned to openrouter.ai (mirrors lc-egress). The ONLY internet
   # path in agent-org. no-log/ZDR providers are pinned in the cloud LiteLLM config.
@@ -568,8 +601,7 @@ services:
       - ao-cloud-egress-net
       - default
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -580,7 +612,7 @@ services:
   # (shared with the NAS sync + scripts/checks/check-backup-coverage.ps1). Paths are
   # ../../ because compose resolves them relative to THIS file (agent-org/docker/).
   agent-bridge-db-backup:
-    image: postgres:15-alpine
+    <<: *pg-backup-sidecar
     container_name: agent-bridge-db-backup
     depends_on:
       agent-bridge-db:
@@ -598,10 +630,6 @@ services:
     volumes:
       - ../../backups/agent-bridge-db:/backups
       - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
-    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -618,7 +646,7 @@ services:
   # archive would have no mechanical restore path, which is how you end up with backups
   # that exist and cannot be used. Two archives, two targets, no new restore machinery.
   ao-worker-1-journals-backup:
-    image: alpine:3.21
+    <<: *backup-sidecar
     container_name: ao-worker-1-journals-backup
     # Same profile as the worker it backs up. Ungated, this would run with no worker ever
     # having written a journal — and check_backups.py treats a RUNNING sidecar with no
@@ -639,7 +667,8 @@ services:
       - HEALTH_TCP=
       - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
-    entrypoint: /bin/sh
+    # image / entrypoint (/bin/sh) / restart / security_opt / cap_drop come
+    # from *backup-sidecar at the top of this file; this is that shell's -c script.
     command:
       - -c
       - |
@@ -648,16 +677,11 @@ services:
           sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-1-journals backup.sh exited $$?"
           sleep "$${BACKUP_INTERVAL}"
         done
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   ao-worker-2-journals-backup:
-    image: alpine:3.21
+    <<: *backup-sidecar
     container_name: ao-worker-2-journals-backup
     profiles: ["workers"]      # see ao-worker-1-journals-backup
     volumes:
@@ -672,7 +696,8 @@ services:
       - HEALTH_TCP=
       - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
       - TZ=UTC
-    entrypoint: /bin/sh
+    # image / entrypoint (/bin/sh) / restart / security_opt / cap_drop come
+    # from *backup-sidecar at the top of this file; this is that shell's -c script.
     command:
       - -c
       - |
@@ -681,16 +706,11 @@ services:
           sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-2-journals backup.sh exited $$?"
           sleep "$${BACKUP_INTERVAL}"
         done
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
   mattermost-db-backup:
-    image: postgres:15-alpine
+    <<: *pg-backup-sidecar
     container_name: mattermost-db-backup
     depends_on:
       mattermost-db:
@@ -708,10 +728,6 @@ services:
     volumes:
       - ../../backups/mattermost-db:/backups
       - ../../backup/pg-backup.sh:/scripts/backup.sh:ro
-    entrypoint: ["/bin/sh", "-c", "while true; do sh /scripts/backup.sh || true; sleep 86400; done"]
-    restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 

@@ -12,7 +12,25 @@
 # (openbrain-research/podcast, FETCH_PROXY) and OWUI resolve on the anchor’s
 # ai-stack_default bridge — both attach to it EXTERNALLY here, which is also
 # their internet egress. search-net is plane-internal and native.
+#
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). The hardening
+# boilerplate every service here carried verbatim is declared ONCE below as a
+# YAML extension field and merged in with `<<: *hardening`, at the point in each
+# service where the block it replaces used to sit. `docker compose config`
+# echoes the `x-` blocks back at the top level; they are declarations, not
+# services, and no rendered service definition changed.
+#   x-hardening   security_opt: [ no-new-privileges:true ]
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - so a service needing an
+# extra `security_opt` entry must spell out the WHOLE list (the anchor's entry
+# included) in its own key. Extra hardening under a DIFFERENT key (cap_drop,
+# cap_add, read_only, tmpfs) is just that key (vpn's cap_add, searxng's cap_drop/cap_add). No service in this file
+# overrides an anchored key.
 name: search
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
 
 services:
   # tor RETIRED 2026-08-21 (operator, after dependency validation): its
@@ -47,8 +65,7 @@ services:
       # via DoT through the tunnel (no DNS leak). NOTE: WIREGUARD_ADDRESSES must
       # be IPv4-only unless the Docker host has IPv6 (gluetun rejects v6 addrs).
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 30s
@@ -65,8 +82,7 @@ services:
     networks:
       - search-net
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 15s
@@ -101,8 +117,7 @@ services:
     restart: unless-stopped
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/ || exit 1"]
       interval: 30s
@@ -147,8 +162,7 @@ services:
     ports:
       - "127.0.0.1:8085:8080"   # native REST / Tavily shim for host tools
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
       interval: 30s
