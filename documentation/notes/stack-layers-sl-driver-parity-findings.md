@@ -94,6 +94,10 @@ E501 Line too long (103 > 100)
   --> llm-queue\src\llm_queue\__init__.py:9:101
 ```
 
+That citation is into the `9f64b84` blob, and only there
+(`git show 9f64b84:llm-queue/src/llm_queue/__init__.py | awk 'NR==9{print length($0)}'`
+-> 103; the same line at `be00d53` is 68 characters).
+
 A docstring line carrying the `../documentation-plans-ai-stack/...` path the
 2026-09-18 plan-store move rewrote — the rewrite pushed it past `llm-queue`'s own
 100-column limit (the root `ruff.toml` allows 120, the subproject's does not).
@@ -111,7 +115,7 @@ and both are content changes to `scripts/lib/stack-services.json`:
 
 - `searxng` carried `"service": "searxng"` **[source]** — identical to its
   container name. Harmless to both consumers (`stack-watchdog.ps1:145` and
-  `check-watchdog-repair-targets.ps1:196` both do "service if present, else
+  `check-watchdog-repair-targets.ps1:214` both do "service if present, else
   container"), but redundant data is what drifts. Dropped; `service` is now emitted
   only where the compose SERVICE key actually differs (`redis`/`gateway`/`vpn` in
   the search plane).
@@ -254,3 +258,81 @@ Worth stating plainly because this item's own headline is probe parity: a pinned
 list of probe NAMES proves none was dropped, and proves nothing at all about
 whether one was weakened. Those are two different guarantees and they need two
 different tests.
+
+**Challenged in attempt 2 and re-checked:** the reading was that the test asserts
+only `3`, `7` and `8`, so "8 and 9 PASS" claimed more than the test contained.
+It does contain the fourth case **[measured]**:
+
+```text
+$ git show 5133de9:scripts/stack/test_stack.py | grep -n 'serve_routes="9"'
+716:    assert sweep(FakeHost(serve_routes="9"), root)[0] == 0
+```
+
+The claim stands as written. What was true is that the body put that case on its
+fourth line where a reader could stop early - the same "read to the end" failure
+MERGE-PROTOCOL 2 names - so the four cases are now one table, one line each, and
+each asserts the probe's VERDICT as well as the exit code. The wording did not
+need fixing; the shape that invited the misreading did.
+
+---
+
+## F15 — the branch edits one file outside the anchor's artifact list, deliberately
+
+`scripts/checks/check-watchdog-repair-targets.ps1` is **not** in the anchor's
+`artifact` line. It is changed here anyway (F12), and this is the declaration
+rather than something a reviewer should have to discover:
+
+* the anchor's fourth acceptance criterion is *about that file* - "the tester runs
+  check-watchdog-repair-targets.ps1 and a shape error FAILS";
+* this item made the inventory able to carry profile-gated rows, and that script
+  was the last consumer that could not see one. Leaving it would have shipped a
+  criterion that passes today and breaks the first time a profiled container joins
+  the watchdog's managed set;
+* the change is eighteen lines inside one function, adds no new behaviour to the
+  driver, and the script's exit code and output are unchanged today
+  (`REPAIR TARGETS OK: 24 container(s)`).
+
+If the reviewer judges it out of scope, the revert is that one function and the
+finding stays as a record for whoever picks it up.
+
+## F16 — a `[source]` citation this branch's OWN fix invalidated
+
+F5 cited `check-watchdog-repair-targets.ps1:196` for the "service if present, else
+container" fallback. True when written; the F12 fix added eighteen lines to that
+same file and moved it to **`:214`**. Corrected.
+
+The mechanical lesson, which is the reason this is in the sink and not just in a
+commit message: **a line citation is invalidated by editing the file it points
+into, including by your own change in the same branch.** Re-derive every citation
+in the note and the plan after any edit, rather than re-reading the ones that look
+suspicious. Doing that here also turned up a second defect the eye had passed over
+twice - the plan excused a `$Projects` hit in `coder-plane-findings.md:164` that
+does not exist (that file contains the string nowhere; line 164 says "the project
+registry's `Note` string" in prose), while two real hits went unlisted. Right
+verdict, wrong reason.
+
+## F17 — `memory/README.md` carried three claims this item made false — FIXED
+
+The `$Projects` sweep the plan asks for returns exactly one live plane README, and
+all three of its hits were instructions a reader would act on **[source]**.
+
+**The line numbers below are in `be00d53:memory/README.md`, before this change**
+(`git show be00d53:memory/README.md | sed -n '126p;183p;186p'`) - this branch edits
+that file, so citing its current lines would go stale the moment anyone edits it
+again, which is the mistake F16 is about:
+
+| line (at `be00d53`) | said | now says |
+|---|---|---|
+| `:126` | the stack order comes from "`scripts/stack/stack.ps1` `$Projects`" | the order of the `[planes.*]` tables in `stack.manifest.toml`, topologically sorted by the driver |
+| `:183` | "`scripts/stack/stack.ps1` — the `$Projects` row and the `health` probe" | the `[planes.memory]` table, plus the probe in `HealthSweep.run()` and its label in `PS1_PROBES` |
+| `:186` | "`scripts/lib/stack-services.json` — the `memory` section and the backup row" | the CURATED sidecar, then `inventory --write` — the json is generated and a hand edit is refused |
+
+Checked and NOT changed: `coder/README.md` and `search/README.md` mention
+`stack.ps1 health` as a command, which still works through the shim;
+`documentation/evidence/stack-layers/sl-manifest-test-plan.md:496` cites the old
+`$Projects` array but is a dated evidence artifact of a completed run, and those
+record what was true at the time rather than being kept current.
+
+This is a file outside the artifact list, like F15. It is fixed rather than only
+recorded because the three lines are instructions THIS branch falsified, and a
+plane README is exactly where the next person changing that plane starts.

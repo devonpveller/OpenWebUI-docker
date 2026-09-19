@@ -851,13 +851,15 @@ def test_a_serve_route_count_below_the_threshold_fails(root):
     tailnet's full serve table; seven means one backend stopped being published,
     which is precisely the silent failure the probe exists for.
     """
-    code, out = sweep(FakeHost(serve_routes="3"), root)
-    assert ("FAIL", "frontend: 8 tailnet serve routes") in probe_lines(out)
-    assert code == 1
-    # ...and the boundary itself holds in both directions.
-    assert sweep(FakeHost(serve_routes="7"), root)[0] == 1
-    assert sweep(FakeHost(serve_routes="8"), root)[0] == 0
-    assert sweep(FakeHost(serve_routes="9"), root)[0] == 0
+    # One table rather than four asserts: the cases below the threshold and the
+    # cases above it have to be visible in a single glance, or a reader stops
+    # early and reports the last one missing (a tester did, on this exact body).
+    for routes, expect_fail in (("3", True), ("7", True), ("8", False), ("9", False)):
+        code, out = sweep(FakeHost(serve_routes=routes), root)
+        verdict = "FAIL" if expect_fail else "OK"
+        assert (verdict, "frontend: 8 tailnet serve routes") in probe_lines(out), \
+            f"{routes} routes should be {verdict}"
+        assert code == (1 if expect_fail else 0), f"{routes} routes -> exit {code}"
 
 
 def test_the_liveliness_probe_never_gets_litellms_bare_health(root):

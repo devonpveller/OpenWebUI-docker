@@ -153,8 +153,12 @@ anything but FAIL); the exit code no longer being the failed count.
    the tester proved it: weakening probe 5 from `>= 8` to `>= 0` left the suite
    green. Repeat that mutation now — change `) >= 8,` to `) >= 0,` in
    `HealthSweep.run()` — and
-   `test_a_serve_route_count_below_the_threshold_fails` must go RED (it pins 3 and
-   7 FAIL, 8 and 9 PASS). A green suite under that mutation FAILS the item.
+   `test_a_serve_route_count_below_the_threshold_fails` must go RED. That test
+   walks one table - `3` and `7` FAIL, `8` and `9` PASS - asserting the probe's
+   VERDICT and the exit code for each. (Attempt 2 was read as containing only
+   three of the four cases; it contained all four, and the body is now a single
+   table so the count is readable in one glance rather than four consecutive
+   asserts.) A green suite under that mutation FAILS the item.
 
 ---
 
@@ -636,10 +640,19 @@ Check each claim against the file, not against its neighbours:
    project cannot be rendered here).
 2. **`SERVICE-LIFECYCLE.md` row 4** must no longer send a new-plane author to
    `stack.ps1`'s `$Projects` registry — this item deleted it. It should name a
-   `[planes.<name>]` table in `stack.manifest.toml`. Sweep the tree for any other
-   live doc still pointing at `$Projects`
-   (`coder-plane-findings.md:164` is a dated findings note about the pre-change
-   file and is fine).
+   `[planes.<name>]` table in `stack.manifest.toml`. Then sweep the tree:
+   `grep -rn '\$Projects' --include=*.md .` The hits that are FINE, and why: this
+   plan itself (it quotes the old registry deliberately); `SERVICE-LIFECYCLE.md:23`
+   (it now says the registry no longer exists); and
+   `documentation/evidence/stack-layers/sl-manifest-test-plan.md:496`, a dated
+   evidence artifact of a completed run, which records what was true then and is
+   not rewritten. Any OTHER live doc is a defect - attempt 2 left two, both in
+   `memory/README.md`, now fixed.
+   *(Attempt 2's plan excused `coder-plane-findings.md:164` here. That file
+   contains no `$Projects` at all - it says "the project registry's `Note` string"
+   in prose - so the excuse named a hit that does not exist while the two real ones
+   went unlisted. Right verdict, wrong reason, which MERGE-PROTOCOL 2 warns about
+   by name.)*
 3. **`scripts/stack/README.md`'s `health` section counts.** Count them yourself in
    `HealthSweep`: `docker exec` calls and HTTP GETs. The README must say **five**
    and **seven** (attempt 1 said four and six; the missing GET was the second
@@ -691,6 +704,25 @@ on them empty, mtimes unchanged).
 | `check-watchdog-repair-targets.ps1` renders with every declared profile | finding F-T3: it was the last inventory consumer that could not see a profiled row |
 | Plan: mutating cases moved to a scratch copy; T8's snippet takes a `Path`; T6b no longer claims "exactly two lines"; T2 states it is green-path only | plan defects P1-P4 |
 | Rebased onto `be00d53` (`sl-closeout`), keeping both intents in `README.md` and `CLAUDE.md` | the work line moved |
+
+## Attempt 3 — what changed since the second failed run
+
+| Change | Why |
+|---|---|
+| `check-watchdog-repair-targets.ps1:196` -> `:214` in finding F5 | T9(a): this branch's own F12 fix added 18 lines to that file and moved the line it cited. Every citation in the note and this plan was re-derived against the current tree, not just that one |
+| the boundary test is one table (`3`/`7` FAIL, `8`/`9` PASS), asserting the verdict as well as the exit code | T9(b): the claim was TRUE - `serve_routes="9"` is asserted at `5133de9:test_stack.py:716` - but four consecutive asserts invited stopping at the third. The shape changed, not the claim; F14 records the check |
+| `memory/README.md:126`, `:183`, `:186` repointed at the manifest, `HealthSweep.run()`/`PS1_PROBES`, and the curated sidecar + `inventory --write` | T9(c): the only live plane README this item falsified. Recorded as F17 |
+| this plan's `$Projects` sweep now gives the grep and lists every excused hit with its reason | T9(c): attempt 2 excused a hit that does not exist and missed two that do |
+| F15 declares `check-watchdog-repair-targets.ps1` as an out-of-artifact-list change, with the reason | reviewer note F-T8 - a reviewer should meet it as a decision, not discover it |
+
+**Merge order** (reviewer note F-T9): `sl-ob1-profiles` is in review on base
+`9f64b84`. It flips OB1's `research`/`wiki`/`notebook` from `pending = true` and
+adds a `requires` key to profile tables. This item's gate tolerates unknown keys
+(`test_an_unknown_key_in_a_profile_table_is_tolerated`), so `requires` is free;
+what binds is that a profile declared `pending` while it exists in the compose
+file is refused, by design. **Whichever item lands second rebases and flips all
+three in the same commit.** If this one lands second, that is a three-line
+manifest edit plus `inventory --write`, and the tester should re-run T3a and T8.
 
 80 tests now (was 76).
 
