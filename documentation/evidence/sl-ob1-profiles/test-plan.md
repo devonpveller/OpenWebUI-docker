@@ -5,11 +5,11 @@ profiles; teach the ai-stack manifest, drivers, inventory and docs about them.
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-ob1-profiles.json`
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-ob1-profiles`
 **ai-stack branch:** `work/sl-ob1-profiles`, commit **`6fa94a4`** (base `development` @ 9f64b84)
-**OB1 branch:** `work/sl-ob1-profiles`, commit **`17cb1572a7f9350df11283ba9172b9ee7e47a6a0`** — **UNPUSHED ON PURPOSE** (case R1)
+**OB1 branch:** `work/sl-ob1-profiles`, commit **`17cb1572a7f9350df11283ba9172b9ee7e47a6a0`** — **UNPUSHED ON PURPOSE** (case T25)
 **Findings:** `documentation/notes/stack-layers-sl-ob1-profiles-findings.md`
 
-> **The tester did not write this.** Read the findings note first — cases A1,
-> B1, C5, C6 and R1 exist because of what is in it, and §9 explains why the
+> **The tester did not write this.** Read the findings note first — cases T1,
+> T13, T20, T21 and T25 exist because of what is in it, and §9 explains why the
 > no-profile render is 20 services and not the 15 the anchor's criterion lists.
 
 **Ground rules.** All commands run from the worktree unless stated; OB1 compose
@@ -29,7 +29,7 @@ unresolved variable — is a FAIL for that case, not a warning.
 
 ---
 
-## A1 - no-profile render is core only (the anchor's first criterion)
+## T1 - [A1] no-profile render is core only (the anchor's first criterion)
 
 No profiles. Expect **20** services: the 15 core (`openbrain-db`, `-mcp`,
 `-ext`, `-gateway`, `-ops-gateway`, `-mcpo`, `-mcpo-ext`, `-postgrest`, `-rest`,
@@ -43,48 +43,48 @@ FAIL if ANY of these appear: `openbrain-curator`, `openbrain-research`,
 `openbrain-wiki-backup`, `surrealdb`, `open_notebook`, `open-notebook-backup`,
 `openbrain-idea-refinery`.
 
-## A2 - `--profile research` renders 22
+## T2 - [A2] `--profile research` renders 22
 
-A1's set plus exactly `openbrain-curator` and `openbrain-research`.
+T1's set plus exactly `openbrain-curator` and `openbrain-research`.
 
-## A3 - `--profile wiki` renders 24
+## T3 - [A3] `--profile wiki` renders 24
 
-A1's set plus exactly `openbrain-wiki`, `-wiki-viewer`, `-workbench`,
+T1's set plus exactly `openbrain-wiki`, `-wiki-viewer`, `-workbench`,
 `-wiki-backup`.
 
-## A4 - `--profile notebook` renders 23
+## T4 - [A4] `--profile notebook` renders 23
 
-A1's set plus exactly `surrealdb`, `open_notebook`, `open-notebook-backup`.
+T1's set plus exactly `surrealdb`, `open_notebook`, `open-notebook-backup`.
 
-## A5 - `--profile idea-refinery` renders 21
+## T5 - [A5] `--profile idea-refinery` renders 21
 
-A1's set plus `openbrain-idea-refinery`. This profile PRE-DATES the item
+T1's set plus `openbrain-idea-refinery`. This profile PRE-DATES the item
 (`docker-compose.scheduled.yml`); the case exists because the task brief
 asserted OB1 had no profiles, which was wrong — findings §1.
 
-## A6 - `research` + `wiki` renders 26
+## T6 - [A6] `research` + `wiki` renders 26
 
-Must equal A2 ∪ A3 exactly — no service appears that neither single profile
+Must equal T2 ∪ T3 exactly — no service appears that neither single profile
 produced.
 
-## A7 - `research` + `notebook` renders 25
+## T7 - [A7] `research` + `notebook` renders 25
 
-Must equal A2 ∪ A4 exactly.
+Must equal T2 ∪ T4 exactly.
 
-## A8 - `wiki` + `notebook` renders 27
+## T8 - [A8] `wiki` + `notebook` renders 27
 
-Must equal A3 ∪ A4 exactly.
+Must equal T3 ∪ T4 exactly.
 
-## A9 - all three new profiles render 29
+## T9 - [A9] all three new profiles render 29
 
 `--profile research --profile wiki --profile notebook`. This is the anchor's
 "all 24 main-file services" criterion, plus the 5 scheduled ones.
 
-## A10 - all four profiles render the full 30-container fleet
+## T10 - [A10] all four profiles render the full 30-container fleet
 
 `--profile research --profile wiki --profile notebook --profile idea-refinery`.
 
-## A11 - definitions are unchanged apart from nine `profiles:` keys
+## T11 - [A11] definitions are unchanged apart from nine `profiles:` keys
 
 Prove the change adds nothing else:
 
@@ -101,14 +101,14 @@ block, and nothing else. Developer observed 1407 → 1425 lines, nine blocks, no
 other hunk. Use `stash` / `stash pop`, **not** `git -C OB1 checkout` — per the
 OB1-gitlink memory, a submodule checkout IS a deploy.
 
-## A12 - the scheduled compose file still renders
+## T12 - [A12] the scheduled compose file still renders
 
-Out of scope but merged into the project by `include:`, so A1–A10 already
+Out of scope but merged into the project by `include:`, so T1–T10 already
 exercise it. Confirm explicitly that
 `docker compose -f docker-compose.scheduled.yml --env-file .env config -q`
 exits 0.
 
-## B1 - no CORE service depends_on a profiled one
+## T13 - [B1] no CORE service depends_on a profiled one
 
 The invariant the whole change rests on. **Enumerate it yourself; do not copy
 the table below.**
@@ -151,7 +151,7 @@ No `depends_on` at all: `openbrain-db`, `openbrain-extract`,
 nothing to fix.** If your enumeration finds an edge this table missed, that is a
 FAIL and the table is what was wrong.
 
-## B2 - the surviving core→profiled RUNTIME references are declared
+## T14 - [B2] the surviving core→profiled RUNTIME references are declared
 
 Core→profiled references survive as environment URLs. For each, confirm it is
 (a) present, (b) commented at its line or in `OB1/docker/README.md`, (c) **not**
@@ -163,7 +163,7 @@ a `depends_on`:
 
 An undocumented third one = FAIL.
 
-## B3 - every profiled service has a stated reason
+## T15 - [B3] every profiled service has a stated reason
 
 `OB1/docker/README.md` §"Compose profiles" must name **all nine** profiled
 services with a group and a one-line reason. A service assigned with no reason
@@ -171,14 +171,14 @@ FAILS per the anchor. Read the reasons adversarially: does each actually
 distinguish the service from core, or merely restate the assignment? Say so in
 writing if it restates.
 
-## C1 - the stack unit tests pass
+## T16 - [C1] the stack unit tests pass
 
 `python -m pytest scripts/stack -q` → **41 passed**. Then read the diff of
 `scripts/stack/test_stack.py` and judge each edit as a correction or an
 accommodation:
 
 - `test_enable_research_pulls_its_planes_and_ob1_profiles`: `assert "PENDING" in out`
-  became `not in`. Correct only because the profiles now exist — confirm via C2.
+  became `not in`. Correct only because the profiles now exist — confirm via T17.
 - `test_the_ob1_profiles_are_no_longer_pending` (new)
 - `test_digest_needs_the_notebook_profile_not_just_research` (new)
 - `test_a_bare_ob1_plane_passes_only_the_default_profile` (renamed from
@@ -187,13 +187,13 @@ accommodation:
   unchanged)
 - `test_enabling_research_drives_ob1_with_every_profile_the_live_set_needs` (new)
 
-## C2 - the manifest no longer marks the OB1 profiles pending
+## T17 - [C2] the manifest no longer marks the OB1 profiles pending
 
 `grep -n "pending" stack.manifest.toml` must return **no** `[planes.ob1.*]`
 line. `inference.local`, `frontend.gpu` and `frontend.tailscale` must STILL be
 pending — those belong to other items and flipping them would be out of scope.
 
-## C3 - the dry-run flags reproduce the live container set
+## T18 - [C3] the dry-run flags reproduce the live container set
 
 ```bash
 python scripts/stack/stack.py --state <scratch>/s.json enable research
@@ -217,7 +217,7 @@ diff live.txt render.txt
 
 PASS = empty diff, 30 lines each.
 
-## C4 - the other product paths resolve to the right profile sets
+## T19 - [C4] the other product paths resolve to the right profile sets
 
 Same scratch-state method, one fresh state per row:
 
@@ -232,7 +232,7 @@ Same scratch-state method, one fresh state per row:
 If `digest --headless` drops `notebook`, that is a FAIL — findings §6 explains
 why a headless digest without Open Notebook silently produces no episode.
 
-## C5 - stack.ps1 does not regress the deployment
+## T20 - [C5] stack.ps1 does not regress the deployment
 
 `scripts/stack/stack.ps1`'s `ob1` row must pass **all four** profiles. Confirm
 the file parses
@@ -244,7 +244,7 @@ in findings §7. Decide for yourself whether the reasoning holds and say so
 either way. The tempting wrong fix is marking the three `default = true` so the
 drivers match — that makes `--headless` a no-op for this plane.
 
-## C6 - check-project-configs passes, and can still be made to FAIL
+## T21 - [C6] check-project-configs passes, and can still be made to FAIL
 
 Stage the branch's files, then run:
 
@@ -270,7 +270,7 @@ evidence:
 
 Revert both.
 
-## C7 - the inventory rows carry the right profiles
+## T22 - [C7] the inventory rows carry the right profiles
 
 `scripts/lib/stack-services.json` must parse; must carry `"profile"` on exactly
 the nine profiled containers plus the new `openbrain-idea-refinery` row; and
@@ -278,7 +278,7 @@ the nine profiled containers plus the new `openbrain-idea-refinery` row; and
 every `profile` value against the `profiles:` key on that service in the compose
 file — any mismatch is a FAIL.
 
-## C8 - ruff's one error is pre-existing, not this branch's
+## T23 - [C8] ruff's one error is pre-existing, not this branch's
 
 `ruff check .` reports exactly one error:
 `E501 llm-queue/src/llm_queue/__init__.py:9`. Confirm the attribution yourself
@@ -286,7 +286,7 @@ file — any mismatch is a FAIL.
 plan-store move, which is on the base). If the error is in a file this branch
 touched, that is a FAIL. Background: findings §8.
 
-## C9 - the docs match the code
+## T24 - [C9] the docs match the code
 
 `.claude/skills/stack-map/references/workspace-stacks.md` OB1 section carries
 the profile block and the nine ``**[profile `x`]**`` row markers, in the same
@@ -294,7 +294,7 @@ style the inference plane already uses for `local`.
 `documentation/runbooks/SERVICE-LIFECYCLE.md` gains row 8a naming the three
 places a profile must be declared. Run `/stack-map` if you want the drift view.
 
-## R1 - the OB1 commit exists locally and is NOT on any remote
+## T25 - [R1] the OB1 commit exists locally and is NOT on any remote
 
 The anchor requires the SHA to be reachable on the OB1 remote BEFORE the gitlink
 moves. **Per DECISIONS D4 the push is a human action, so this item neither
@@ -311,7 +311,7 @@ git -C <worktree>/OB1 branch -r --contains 5005197
 #   -> origin/feature/integrated-knowledge-system  (the parent, still the pin)
 ```
 
-## R2 - the ai-stack gitlink is still 5005197
+## T26 - [R2] the ai-stack gitlink is still 5005197
 
 ```bash
 git -C <worktree> ls-tree HEAD OB1
@@ -325,7 +325,7 @@ worktree HEAD moved to the new branch. That is expected and correct — the
 gitlink in the index and tree is unchanged. A commit on this branch touching
 `OB1` is a FAIL.
 
-## R3 - the operator handoff is stated and not performed
+## T27 - [R3] the operator handoff is stated and not performed
 
 The plan must tell the operator exactly what to push, and the tester must NOT
 push it. Confirm this item's report and this plan both name: OB1 branch
@@ -335,14 +335,14 @@ pushed onto `feature/integrated-knowledge-system`. Only after
 `origin/feature/integrated-knowledge-system` may a FOLLOW-UP commit run
 `git add OB1` in ai-stack. **Do not do any of that while testing.**
 
-## D1 - the live open-brain containers are unchanged
+## T28 - [D1] the live open-brain containers are unchanged
 
 `docker ps --filter "label=com.docker.compose.project=open-brain" --format "{{.Names}}" | sort`
-must return the same 30 names as case C3's `render.txt`. Check uptimes too: a
+must return the same 30 names as case T18's `render.txt`. Check uptimes too: a
 container whose uptime reset during testing means something in this plan
 restarted it, which is a FAIL of the plan as much as of the item.
 
-## D2 - no state file was left inside the worktree
+## T29 - [D2] no state file was left inside the worktree
 
 `ls <worktree>/.stack` → absent. It is gitignored, but its presence would mean a
 case ran `stack.py` without `--state` pointing outside the repo.
