@@ -133,7 +133,7 @@ services:
       - owui-net
     volumes:
       - openwebui-data:/app/backend/data
-      - ../config:/app/config:ro # Read-only config
+      # NO /app/config MOUNT (removed from BOTH openwebui definitions 2026-09-19) - the claim, the four checks and F2/F13 are on the gpu one below.
     environment:
       - TZ=America/New_York
       # Same fail-loud guard as the gpu definition: a recreate WITHOUT this key
@@ -179,7 +179,12 @@ services:
       - owui-net
     volumes:
       - openwebui-data:/app/backend/data
-      - ../config:/app/config:ro # Read-only config
+      # NO /app/config MOUNT (removed 2026-09-19, sl-colo-inference): it bound the
+      # whole shared config dir into the internet-facing frontend and NO OWUI CODE
+      # PATH READS IT - verified on the DEPLOYED image by four checks: image-code
+      # grep, container env, DATA_DIR (open_webui/env.py), a read-only scan of all
+      # 44 webui.db tables. Evidence + the Git-Bash grep trap that made this
+      # comment's first version false: F2/F13, notes/stack-layers-sl-colo-inference-findings.md
       # Narrow code mounts (v3 A.2/G.1) — the old `.:/host_project:ro` mount
       # shipped every on-disk secret into the internet-facing frontend. Only
       # the status-pipe subsystem, the system prompts the githelper pipe

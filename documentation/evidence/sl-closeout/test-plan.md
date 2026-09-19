@@ -218,7 +218,7 @@ done
 
 PASS requires: the three INTERVAL lines present with values matching the compose
 defaults (`coder/docker-compose.yml:182`, `memory/docker-compose.yml:111`,
-`frontend/docker-compose.yml:212` — all `:-86400`); and none of the four cron
+`frontend/docker-compose.yml:375` — all `:-86400`); and none of the four cron
 names assigned a value. Where a cron name survives as prose, the comment must
 name the REAL mechanism, and you must check that mechanism exists —
 `llm-gateway-backup` has no interval variable at all, so confirm its entrypoint

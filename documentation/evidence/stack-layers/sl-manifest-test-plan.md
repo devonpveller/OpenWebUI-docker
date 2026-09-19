@@ -109,14 +109,14 @@ is neither listed nor dismissed in writing.
 the character immediately before the hostname is the `-` of `:-`. A word-boundary
 regex whose lookbehind excludes `-` silently skips every edge of this shape -
 that is exactly how attempt 1 missed two. Seed your sweep with a known hit
-(`frontend/docker-compose.yml:162`) and confirm it is found before trusting a
+(`frontend/docker-compose.yml:317`) and confirm it is found before trusting a
 clean result.
 
 ### requires (hard - `up` orders by these; `enable` refuses on them)
 
 | Edge | Evidence (open and read) | What it says |
 |---|---|---|
-| every plane -> `anchor` | `inference/docker-compose.yml:448-450,453-455`, `frontend/docker-compose.yml:290-298`, `memory/docker-compose.yml:138-140`, `search/docker-compose.yml:173-175`, `coder/docker-compose.yml:212-214`, `OB1/docker/docker-compose.yml:1268-1270,1276-1278,1284-1286`, `agent-org/docker/docker-compose.yml:748-750`, `portal/docker-compose.yml:603-605` | each declares `external: true` + `name: ai-stack_*`, the networks the root `docker-compose.yml` owns |
+| every plane -> `anchor` | `inference/docker-compose.yml:448-450,453-455`, `frontend/docker-compose.yml:473-481`, `memory/docker-compose.yml:138-140`, `search/docker-compose.yml:173-175`, `coder/docker-compose.yml:212-214`, `OB1/docker/docker-compose.yml:1268-1270,1276-1278,1284-1286`, `agent-org/docker/docker-compose.yml:748-750`, `portal/docker-compose.yml:603-605` | each declares `external: true` + `name: ai-stack_*`, the networks the root `docker-compose.yml` owns |
 | `memory` -> `inference` | `memory/docker-compose.yml:36`, `:38` | `LLM_BASE_URL=http://llama-cpp:8080/v1`, `EMBED_BASE_URL=http://llama-cpp-embed:8080/v1` - unconditional |
 | `coder` -> `inference` | `coder/docker-compose.yml:28`, `:47-48`, `:76`; plus `little-coder/config/little-coder.config.yaml:11` and `little-coder/config/models.json:6` | joins `llm-net` "for llama-cpp inference", exempts `llama-cpp` from the egress proxy; the base URL itself is in the mounted config (see finding F5) |
 | `ob1` -> `inference` | `OB1/docker/docker-compose.yml:116`, `:120`, `:406`, `:410`, `:444`, `:493`, `:497`, `:568`, `:571`, `:675`, `:681`, `:846`, `:941`, `:977`, `:1173`; `OB1/docker/docker-compose.scheduled.yml:186`, `:258` | `CHAT_API_BASE` / `EMBEDDING_API_BASE` on the whole fleet |
@@ -128,10 +128,10 @@ clean result.
 
 | Edge | Evidence | Why soft |
 |---|---|---|
-| `frontend` -> `inference` | `frontend/docker-compose.yml:156`, `:158`, `:159`; also `entrypoint.sh:70`, `:72` (`LITELLM_UI_HOST` -> `llm-gateway-ui`, enabled true) consumed at `entrypoint.sh:103` | `LLAMA_CPP_HOST` defaults to the alias but sits behind `LLAMA_CPP_ENABLED` (`:158`); OWUI serves without it |
-| `frontend` -> `search` | `frontend/docker-compose.yml:97` | `SEARXNG_QUERY_URL` default `http://gateway:8080/search`; web search off, chat unaffected |
-| **`frontend` -> `ob1`** *(added attempt 2)* | `frontend/docker-compose.yml:162` (`OPEN_NOTEBOOK_HOST=${...:-open_notebook}`), `:164` (`OPEN_NOTEBOOK_ENABLED` default **true**), ports `:163`, `:166`; consumed by `entrypoint.sh:97`, `:99`. Also `entrypoint.sh:66` - the image's own `QUARTZ_HOST` fallback is `openbrain-wiki-viewer` | `open_notebook` is an ob1-plane service (`OB1/docker/docker-compose.yml:1112`); with ob1 down the two tailnet serve routes are dead, OWUI itself is not |
-| **`frontend` -> `portal`** *(added attempt 2)* | `frontend/docker-compose.yml:178` (`QUARTZ_HOST=${...:-caddy}`), `:180` (`QUARTZ_ENABLED` default **true**), comment `:168-177`; consumed by `entrypoint.sh:101` | `caddy` is a portal-plane service (`portal/docker-compose.yml:169`). Note this is the reverse of `portal -> frontend` above: the portal hard-needs openwebui for its main vhost, the frontend's tailnet wiki route softly needs caddy |
+| `frontend` -> `inference` | `frontend/docker-compose.yml:311`, `:313`, `:314`; also `entrypoint.sh:70`, `:72` (`LITELLM_UI_HOST` -> `llm-gateway-ui`, enabled true) consumed at `entrypoint.sh:103` | `LLAMA_CPP_HOST` defaults to the alias but sits behind `LLAMA_CPP_ENABLED` (`:313`); OWUI serves without it |
+| `frontend` -> `search` | `frontend/docker-compose.yml:246` | `SEARXNG_QUERY_URL` default `http://gateway:8080/search`; web search off, chat unaffected |
+| **`frontend` -> `ob1`** *(added attempt 2)* | `frontend/docker-compose.yml:317` (`OPEN_NOTEBOOK_HOST=${...:-open_notebook}`), `:319` (`OPEN_NOTEBOOK_ENABLED` default **true**), ports `:318`, `:321`; consumed by `entrypoint.sh:97`, `:99`. Also `entrypoint.sh:66` - the image's own `QUARTZ_HOST` fallback is `openbrain-wiki-viewer` | `open_notebook` is an ob1-plane service (`OB1/docker/docker-compose.yml:1112`); with ob1 down the two tailnet serve routes are dead, OWUI itself is not |
+| **`frontend` -> `portal`** *(added attempt 2)* | `frontend/docker-compose.yml:333` (`QUARTZ_HOST=${...:-caddy}`), `:335` (`QUARTZ_ENABLED` default **true**), comment `:323-332`; consumed by `entrypoint.sh:101` | `caddy` is a portal-plane service (`portal/docker-compose.yml:169`). Note this is the reverse of `portal -> frontend` above: the portal hard-needs openwebui for its main vhost, the frontend's tailnet wiki route softly needs caddy |
 | **`frontend` -> `agent-org`** *(added attempt 2)* | `entrypoint.sh:74` (`MATTERMOST_HOST=${...:-mattermost}`), `:76` (`MATTERMOST_ENABLED` default **true**), route row `:105` | Declared in the **image** (`tailscale:local`), not in `frontend/docker-compose.yml` - that file passes this service one variable (`:136-147`). Same class as coder -> inference (F5) |
 | `ob1` -> `frontend` | `OB1/docker/docker-compose.yml:562` | `OWUI_BASE_URL` default `http://openwebui:8080` on openbrain-research only |
 | **`ob1` -> `agent-org`** *(added attempt 2)* | `OB1/docker/docker-compose.scheduled.yml:253` (`MATTERMOST_URL` -> `http://host.docker.internal:8065`), profile `idea-refinery` (`:236`, `default = true` in the manifest), `extra_hosts` on that service, token at `:254` | **The only edge that does not cross a docker network** - out to the host and back through agent-org's published `8065`, which the manifest declares under `[planes.agent-org.ports]`. Gated by `IDEA_REFINERY_MM_TOKEN`, which is set in `OB1/docker/.env` on this host |

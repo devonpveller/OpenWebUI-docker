@@ -19,7 +19,8 @@
 #
 # No model_list here on purpose: the Models page may show DB-stored models only
 # (empty if none) — analytics is the goal, and omitting the list avoids drift
-# with config/litellm.config.yaml (the single source of truth for inference).
+# with inference/config/litellm.config.yaml (the single source of truth for
+# inference).
 
 general_settings:
   store_model_in_db: true

@@ -17,8 +17,12 @@
 # the volumes and the rendered service definitions are unchanged - only the file
 # a definition lives in moved. Two things `include:` changes that are worth
 # knowing before editing a group file:
-#   - RELATIVE PATHS resolve against the INCLUDED file's directory, so binds and
-#     build contexts inside compose/ read ../../ where they used to read ../.
+#   - RELATIVE PATHS resolve against the INCLUDED file's directory, so from
+#     compose/ the plane's own tree is ../ and the repo root is ../../. Since
+#     sl-colo-inference (2026-09-19) the LiteLLM/llama-swap config and the
+#     llm-queue source live INSIDE inference/, so those binds and that build
+#     context read ../config/... and ../llm-queue; the binds that still reach
+#     repo-root trees (data/, backup/, backups/) read ../../.
 #   - TOP-LEVEL `networks:` / `volumes:` stay HERE, declared once. The group
 #     files only reference them; compose merges the included models before it
 #     validates, so a reference with no local declaration renders clean
@@ -43,7 +47,8 @@
 #         COMPOSE_PROFILES=local,gpu,tailscale
 #     (`local` alone would silently drop the frontend's gpu + tailscale.)
 #   * What the gateway REGISTERS is assembled at container start from
-#     config/litellm.config.yaml + config/litellm/model_list/*.yaml: a local
+#     inference/config/litellm.config.yaml +
+#     inference/config/litellm/model_list/*.yaml: a local
 #     group only under the `local` profile, a cloud provider only when its API
 #     key is set. The rule is "never register a model whose backend is absent".
 #

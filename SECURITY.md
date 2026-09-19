@@ -32,8 +32,8 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - **LiteLLM master_key FLIPPED ON 2026-08-21 (J.1 executed):** per-caller
   `sk-` virtual keys enforced at the gateway; caller identity reaches
   llm-queue via the `x-ai-stack-caller` header injected by the pre-call hook
-  (`config/litellm/custom_callbacks.py`). Verified: junk key → 401, virtual
-  key → 200 with correct lane attribution. Runbook:
+  (`inference/config/litellm/custom_callbacks.py`). Verified: junk key → 401,
+  virtual key → 200 with correct lane attribution. Runbook:
   `../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`.
 - SurrealDB image pinned by digest; its datastore still accepts the
   persisted first-boot root login (network isolation is the boundary) — a

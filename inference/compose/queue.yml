@@ -2,12 +2,12 @@
 #
 # Included by inference/docker-compose.yml; see upstreams.yml's header for what
 # `include:` does to relative paths (they resolve against THIS directory, hence
-# ../../ for the build context).
+# ../llm-queue for the build context - the source moved into the plane 2026-09-19).
 #
 # PROFILE `local`: the queue exists to schedule the local GPU. With no local
 # upstreams there is nothing to admit, and the gateway's api_base has nothing to
 # forward to - which is why the local model group is gated on the same profile
-# (config/litellm/model_list/local.yaml).
+# (inference/config/litellm/model_list/local.yaml).
 
 services:
   # =====================================================================
@@ -29,7 +29,7 @@ services:
 
   llm-queue:
     build:
-      context: ../../llm-queue
+      context: ../llm-queue
       dockerfile: Dockerfile
     image: llm-queue:local
     container_name: llm-queue

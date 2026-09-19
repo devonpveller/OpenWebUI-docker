@@ -10,7 +10,7 @@
   gateway `llm-gateway`, reached via its network aliases `llama-cpp:8080` /
   `llama-cpp-embed:8080`. The renamed real servers `llama-cpp-upstream:8080` /
   `llama-cpp-embed-upstream:8080` may ONLY be referenced by:
-    - the gateway's own config (config/litellm.config.yaml api_base),
+    - the gateway's own config (inference/config/litellm.config.yaml api_base),
     - health / GPU / recovery probes and the upstream service definitions.
 
   This guard flags the dangerous pattern: an inference/serve HOST or BASE-URL
@@ -60,7 +60,11 @@ $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 # Legit direct-upstream references (NOT bypasses): the gateway's own forwarding
 # config, recovery/health probe scripts, host monitor modules, docs, this guard.
 $allowPathLike = @(
-    '*\config\litellm.config.yaml'
+    # (path refreshed 2026-09-19: sl-colo-inference moved the gateway config
+    #  into the plane, config\ -> inference\config\. Only the BASE config is
+    #  allowed; the model_list fragments under inference\config\litellm\ are
+    #  deliberately NOT listed, so a bypass planted in a fragment still flags.)
+    '*\inference\config\litellm.config.yaml'
     # (paths refreshed 2026-08-21: G.2 moved these under scripts\recovery\
     #  and scripts\checks\; the .bat twin was archived at K.8)
     '*\scripts\recovery\emergency-recovery.ps1'

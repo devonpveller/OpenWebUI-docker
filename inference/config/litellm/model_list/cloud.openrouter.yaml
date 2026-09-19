@@ -3,9 +3,9 @@
 # There is no `x-requires-profile` here on purpose: a cloud model needs no local
 # service, so the only thing that can make it real is its credential. Every
 # entry below references `os.environ/OPENROUTER_API_KEY`, and
-# config/litellm/assemble-config.py drops any model whose os.environ refs are
-# unset or empty. Blank key (the shipped default, .env.example) => these models
-# do not exist as far as /v1/models is concerned.
+# inference/config/litellm/assemble-config.py drops any model whose os.environ
+# refs are unset or empty. Blank key (the shipped default, .env.example) =>
+# these models do not exist as far as /v1/models is concerned.
 #
 # ── TWO THINGS THE KEY ALONE DOES NOT GIVE YOU (read before setting it) ──
 #

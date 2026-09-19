@@ -2,7 +2,7 @@
 # Admin-UI sidecar.
 #
 # Included by inference/docker-compose.yml; see upstreams.yml's header for the
-# relative-path rule (../../ = the repo root).
+# relative-path rule (../ = inference/, ../../ = the repo root).
 #
 # NOT PROFILED - deliberately. These three are what an inference node always
 # runs; the `local` profile toggles the BACKENDS behind them. That is why
@@ -11,7 +11,8 @@
 # profile is off ("depends on undefined service").
 #
 # WHICH MODELS THE GATEWAY REGISTERS is decided at container start by
-# config/litellm/assemble-config.py - see the entrypoint comment on llm-gateway.
+# inference/config/litellm/assemble-config.py - see the entrypoint comment on
+# llm-gateway.
 
 services:
   # =====================================================================
@@ -58,13 +59,13 @@ services:
     volumes:
       # BASE config only (general_settings + litellm_settings). It no longer
       # carries a model_list - see the entrypoint below.
-      - ../../config/litellm.config.yaml:/app/config.base.yaml:ro
+      - ../config/litellm.config.yaml:/app/config.base.yaml:ro
       # One file per model group; the assembler decides which ones apply.
-      - ../../config/litellm/model_list:/app/conf.d:ro
-      - ../../config/litellm/assemble-config.py:/app/assemble-config.py:ro
+      - ../config/litellm/model_list:/app/conf.d:ro
+      - ../config/litellm/assemble-config.py:/app/assemble-config.py:ro
       # J.1 (2026-08-21): pre-call hook injecting x-ai-stack-caller from the
       # virtual key's metadata - the identity signal llm-queue lanes key on.
-      - ../../config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
+      - ../config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
     # NEVER REGISTER A MODEL WHOSE BACKEND IS ABSENT (stack-layers D11).
     # LiteLLM YAML has no conditionals, so the config is assembled at start:
     # assemble-config.py merges the base file with the fragments in /app/conf.d,
@@ -91,8 +92,8 @@ services:
       # has a backend), but the reason to keep COMPOSE_PROFILES in .env.
       - COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
       # Blank by default => no cloud model is registered and nothing changes.
-      # Read config/litellm/model_list/cloud.openrouter.yaml BEFORE setting it:
-      # this gateway has no egress (both its networks are internal:true).
+      # Read inference/config/litellm/model_list/cloud.openrouter.yaml BEFORE
+      # setting it: this gateway has no egress (both networks are internal:true).
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     depends_on:
       # required:false on all three (compose >= 2.20): they live in the `local`
@@ -162,7 +163,7 @@ services:
       - llm-net
       - app-net
     volumes:
-      - ../../config/litellm.ui.config.yaml:/app/config.yaml:ro
+      - ../config/litellm.ui.config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "8080"]
     environment:
       - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm

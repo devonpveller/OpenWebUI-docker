@@ -1,7 +1,7 @@
 # inference/compose/backups.yml - the plane's two backup sidecars.
 #
 # Included by inference/docker-compose.yml; see upstreams.yml's header for the
-# relative-path rule (../../ = the repo root).
+# relative-path rule (../ = inference/, ../../ = repo root; all binds here ../../).
 #
 # llm-gateway-backup is NOT profiled: it dumps the spend ledger, which exists
 # whatever the gateway is serving. lm-models-backup IS in the `local` profile:

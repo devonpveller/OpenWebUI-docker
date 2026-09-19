@@ -102,10 +102,10 @@ Pick the narrowest one that fits:
 ## Fixtures
 
 Both fixtures mirror the REAL `GET /observe/queue` payload (see
-`llm-queue/src/llm_queue/routes/control.py`, `get_queue`): top-level keys
+`inference/llm-queue/src/llm_queue/routes/control.py`, `get_queue`): top-level keys
 are exactly `models` / `held_total` / `max_total_connections`, and `models`
 is a map keyed by model name whose values carry the per-model `snapshot()`
-shape (see `llm-queue/src/llm_queue/scheduler.py`, `snapshot()`).
+shape (see `inference/llm-queue/src/llm_queue/scheduler.py`, `snapshot()`).
 
 - `scripts/checks/fixtures/queue-eta-busy.json` — 2 models (`qwen36-27b`
   and `bge-m3`); `qwen36-27b` has 2 running + 3 waiting rows and `bge-m3`

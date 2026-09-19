@@ -21,8 +21,8 @@
 # MODEL LIST — NOT IN THIS FILE any more (stack-layers sl-inference-split,
 # 2026-09-19). This file is now the gateway's BASE config: general_settings and
 # litellm_settings, which apply whatever models are served. The model_list is
-# assembled at container start by config/litellm/assemble-config.py from the
-# fragments in config/litellm/model_list/:
+# assembled at container start by inference/config/litellm/assemble-config.py
+# from the fragments in inference/config/litellm/model_list/:
 #
 #   local.yaml               the llama.cpp models — the exact entries that used
 #                            to sit here (the `AS-FLIPPED` note above describes
