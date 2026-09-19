@@ -182,17 +182,34 @@ services:
       # NO /app/config MOUNT (removed 2026-09-19, stack-layers sl-colo-inference).
       # `../config:/app/config:ro` mounted the ENTIRE shared config directory -
       # the LiteLLM gateway config, its model_list fragments and the llama-swap
-      # config - into the internet-facing frontend, and NOTHING read it. Evidence
-      # taken before removal: zero references to `/app/config` anywhere in this
-      # repo; zero in the running image's code (`grep -rI "/app/config"
-      # /app/backend/open_webui /app/build` in the live container: no hits); no
-      # env var in the container names it; OWUI resolves its own config from
-      # DATA_DIR (`open_webui/env.py:222`, `/app/backend/data`, the
-      # openwebui-data volume above). The only occurrences of the string on that
-      # container are inside UPLOADED CHAT CONTENT (chat_message/chat/file rows
-      # in webui.db), where it is a 2025 Ollama-era compose snippet a user
-      # pasted - not a code path. The mount is the same over-broad-mount class
-      # as the `.:/host_project:ro` one removed in v3 A.2/G.1 below.
+      # config - into the internet-facing frontend, and NO OWUI CODE PATH READS
+      # IT. Four checks against the DEPLOYED image and its database, before
+      # removal (2026-09-19):
+      #   1. image code - `grep -rI "/app/config" /app/backend/open_webui
+      #      /app/build` in the live container: no hits. The only files under
+      #      /app holding the string were the MOUNTED FILES THEMSELVES.
+      #   2. env - `env | grep -i config` in the live container: no hits, so no
+      #      variable pointed OWUI at it.
+      #   3. OWUI resolves its own config from DATA_DIR, not from here:
+      #      open_webui/env.py:222 -> /app/backend/data, i.e. the openwebui-data
+      #      volume mounted above.
+      #   4. webui.db, where OWUI's tools / functions / pipes actually live -
+      #      read-only scan of all 44 tables: ZERO rows in `function`, `tool`,
+      #      `model`, `prompt` or `config`. The only hits are chat transcripts
+      #      and one uploaded file: a compose example inside a saved
+      #      conversation, not a loaded code path.
+      # This repo DOES contain other `/app/config` references and none of them
+      # is OWUI's: little-coder's own /app/config/little-coder.config.yaml in
+      # the coder/ and agent-org worker containers (a different mount, from a
+      # different source), the unrelated /app/config.yaml of the LiteLLM
+      # gateways, archived tutorials, and this item's own docs. An earlier
+      # version of this comment claimed "zero references anywhere in this repo"
+      # and that was FALSE - it came from a `git grep '/app/config'` run in Git
+      # Bash, where MSYS rewrites the pattern to C:/Program Files/Git/app/config
+      # and the search returns nothing whatever the tree holds. Prefix
+      # MSYS_NO_PATHCONV=1 to search for a path-shaped string there.
+      # The mount was the same over-broad-mount class as the
+      # `.:/host_project:ro` one removed in v3 A.2/G.1 below.
       # Narrow code mounts (v3 A.2/G.1) — the old `.:/host_project:ro` mount
       # shipped every on-disk secret into the internet-facing frontend. Only
       # the status-pipe subsystem, the system prompts the githelper pipe

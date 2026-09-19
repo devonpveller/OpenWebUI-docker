@@ -1,8 +1,15 @@
 # Test plan — `sl-colo-inference`
 
 **Item:** `sl-colo-inference` (stack-layers PLAN 2.7, Part L.1, wave 2).
-**Branch:** `work/sl-colo-inference` · **Base:** `development` @ `9f64b84` (which already
-contains `sl-inference-split`).
+**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`be00d53`** (which
+contains `sl-inference-split` AND `sl-closeout`).
+**Revision 2:** attempt 1 passed 12/12 (tester `wt-tester-colo-inf`) with the plan judged
+**inadequate**. This revision rebases the branch from `9f64b84` onto `be00d53` and fixes
+what that judgement named: **T8a** stated as its PASS condition the output of a command
+that cannot succeed on this host (F13); **T11** ran `validate-lineendings.ps1` in an export
+where it checks nothing; **T5b** had no bar for the frontend, the one plane whose mounts
+this item changes; and there was no case at all for the post-merge live hazard, now **T13**.
+Every bar below that mentions the base means `be00d53`.
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-colo-inference.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-colo-inference-findings.md`
 **Kind of evidence this item owes:** this is a MOVE, not a behaviour change. There is no
@@ -36,7 +43,7 @@ W="D:/Open WebUI/ai-stack/.claude/worktrees/wt-sl-colo-inference"   # source of 
 
 rm -rf "$SCRATCH"; mkdir -p "$SCRATCH/head" "$SCRATCH/base"
 git -C "$W" archive work/sl-colo-inference | tar -x -C "$SCRATCH/head"
-git -C "$W" archive 9f64b84                | tar -x -C "$SCRATCH/base"
+git -C "$W" archive development             | tar -x -C "$SCRATCH/base"   # = be00d53
 # renders need an env file; .env.example is tracked, so both exports already have it
 cp "$W/agent-org/docker/.env" "$SCRATCH/head/agent-org/docker/.env"
 cp "$W/agent-org/docker/.env" "$SCRATCH/base/agent-org/docker/.env"
@@ -64,14 +71,19 @@ history is severed.
 Also confirm git itself saw renames:
 
 ```bash
-git -C "$W" show --name-status -M work/sl-colo-inference | grep -c '^R'
-git -C "$W" show --name-status -M work/sl-colo-inference | grep '^R' | awk '{print $2}' | sed 's|/.*||' | sort | uniq -c
+git -C "$W" diff --name-status -M development..work/sl-colo-inference | grep -c '^R'
+git -C "$W" diff --name-status -M development..work/sl-colo-inference | grep '^R' | awk '{print $2}' | sed 's|/.*||' | sort | uniq -c
 ```
 
 **PASS:** `40`, split `8 config` / `32 llm-queue`.
 **FAIL:** fewer — some file was recorded as an add+delete, not a rename.
-(Use `--name-status`, not `--stat`: `--stat` elides long paths with `...` and
-under-counts.)
+
+Two traps in that one line, both paid for:
+- **Use `--name-status`, not `--stat`.** `--stat` elides long paths with `...`, which eats
+  the `{old => new}` marker and under-counts (it returned 5 against 40).
+- **Diff the RANGE, not `show` a commit.** The branch now carries more than one commit, so
+  `git show <branch>` shows only the tip — which is a documentation commit with no renames
+  in it at all.
 
 ## T2 — `config/` is gone and its contents are all accounted for
 
@@ -241,10 +253,14 @@ identical set is non-existent on the base:
 |---|---|---|
 | inference (`local`) | `data/models/embeddings`, `backups/llm-gateway`, `backups/lm-models` | yes (verified in `D:\Open WebUI\ai-stack` 2026-09-19) |
 | inference (no profile) | `backups/llm-gateway` | yes |
+| **frontend** | `data/tailscale` (×3 — openwebui `/host_project/data/tailscale`, tailscale `/var/lib/tailscale`, tailscale-backup `/data`), `backups/openwebui`, `backups/tailscale`, and `/dev/net/tun` | the three repo-relative ones: yes (verified 2026-09-19). `/dev/net/tun` is a **Linux device inside the Docker VM** and never exists on the Windows host — absent on base and head alike, and nothing to do with this item |
 | agent-org | `agent-org/agent-bridge/secrets`, `backups/agent-bridge-db`, `backups/mattermost-db` | (unchanged by this item) |
 
 **FAIL:** any path under `inference/config/`, `inference/llm-queue/` or `agent-org/config/`
 does not exist; or a runtime directory is missing on the head that existed on the base.
+The frontend row exists because this is the one plane whose mounts the item CHANGES: base
+and head are identical there (six absent, the same six), and without a stated bar a tester
+would have had nothing to compare the changed plane against.
 Note `LM_MODELS_DIR` in `.env.example` is an absolute host path
 (`C:\Users\yamao\.lmstudio\models`) and is not affected by this item either way.
 
@@ -368,10 +384,51 @@ deselected. A green count with the wrong rootdir is a different suite than CI ru
 The anchor says removing it without evidence FAILS. **Try to refute the evidence rather
 than confirm it.** Findings F2 lists what was checked; each line below re-checks one.
 
-```bash
-# 8a - nothing in this repo names the path
-cd "$SCRATCH/head" && git -C "$W" grep -n '/app/config' -- . ':!OB1'     # expect: no output
+**8a — the repo-side claim, and the trap that made the first version of this case
+worthless.** THE PATTERN MUST BE PASSED WITH `MSYS_NO_PATHCONV=1`. In Git Bash an argument
+that looks like an absolute POSIX path is rewritten before the program sees it, so a bare
+`git grep '/app/config'` searches for `C:/Program Files/Git/app/config` and **cannot return
+a hit in this repository whatever the tree holds**. The first version of this case listed
+`expect: no output` as its PASS condition — i.e. it asked you to confirm the output of a
+broken command, and a false "zero references" sentence reached the deliverable on the
+strength of it (findings F13). Prove the trap to yourself first, then run the real search:
 
+```bash
+python -c "import sys; print(sys.argv[1:])" /app/config
+#   -> ['C:/Program Files/Git/app/config']   <- the rewrite, demonstrated
+
+cd "$SCRATCH/head"
+# (a) the load-bearing bar: the OWUI-side trees
+MSYS_NO_PATHCONV=1 git grep -n '/app/config' -- status-pipe owui entrypoint.sh                                                 Dockerfile.openwebui-gpu dockerfile.tailscale
+# (b) code outside documentation and this item's own comment block
+MSYS_NO_PATHCONV=1 git grep -n '/app/config' -- . ':!OB1' ':!documentation' ':!frontend/docker-compose.yml' | wc -l
+# (c) everything, only to prove the grep is not broken
+MSYS_NO_PATHCONV=1 git grep -n '/app/config' -- . ':!OB1' | wc -l
+```
+
+**PASS — three bars; only (a) is load-bearing:**
+
+| bar | expected | meaning |
+|---|---|---|
+| (a) the OWUI-side trees | **exactly zero — no output** | none of the repo's `/app/config` references is OWUI's. This is the claim the anchor's criterion actually needs |
+| (b) code, excluding docs and the comment block | **27**, across twelve files | a stable figure: it does not move when documentation is edited. A change here means a real consumer appeared or vanished |
+| (c) whole repo minus `OB1/` | **NON-ZERO** (100 as written; it was 68 before this revision, because the note and the compose comment now quote the string themselves) | do not use the number as a bar — use it only to prove the search ran. **Zero here means the `MSYS_NO_PATHCONV=1` prefix did not take effect and you have measured nothing** |
+
+Then **classify** the hits rather than counting them. Every one must fall in one of:
+`little-coder`'s own `/app/config/little-coder.config.yaml`
+(`little-coder/src/littlecoder/config.py:27`, `daemon.py:1086`,
+`docker/Dockerfile.agent:46`, `docker/entrypoint-agent.sh:24`), mounted into **different
+containers from a different source** by `coder/docker-compose.yml:113` and
+`agent-org/docker/docker-compose.yml:325,417`; the unrelated `/app/config.yaml` of the
+LiteLLM gateways; `documentation/archive/` tutorials; or this item's own docs and the
+`frontend/docker-compose.yml` comment block.
+
+**FAIL:** a hit in bar (a) — `status-pipe/`, `owui/`, `entrypoint.sh` or any OWUI pipe —
+that would be a consumer the developer missed, and the mount must then be narrowed rather
+than removed. **Also FAIL:** a zero in bar (c), which means the prefix did not take effect
+on your shell and the case has measured nothing.
+
+```bash
 # 8b - nothing in the DEPLOYED image's code names it (read-only exec, no restart)
 MSYS_NO_PATHCONV=1 docker exec openwebui sh -c 'grep -rIn "/app/config" /app/backend/open_webui /app/build'   # expect: no output
 
@@ -408,7 +465,7 @@ If you find one, the item fails this criterion and the mount must be narrowed in
 **8f — the compose change is the removal and nothing else:**
 
 ```bash
-git -C "$W" diff -M 9f64b84..work/sl-colo-inference -- frontend/docker-compose.yml
+git -C "$W" diff -M development..work/sl-colo-inference -- frontend/docker-compose.yml
 ```
 **PASS:** the only removed line is `- ../config:/app/config:ro`, replaced by a comment
 block recording the evidence; `openwebui-data:/app/backend/data`, the three narrow
@@ -476,8 +533,8 @@ it names and confirm the claim, do not just confirm the path exists:
 ## T10 — what was REMOVED, not only what is present
 
 ```bash
-git -C "$W" diff -M --stat 9f64b84..work/sl-colo-inference
-git -C "$W" diff -M       9f64b84..work/sl-colo-inference -- ':!documentation/notes' ':!documentation/evidence' | grep '^-' | grep -v '^---'
+git -C "$W" diff -M --stat development..work/sl-colo-inference
+git -C "$W" diff -M       development..work/sl-colo-inference -- ':!documentation/notes' ':!documentation/evidence' | grep '^-' | grep -v '^---'
 ```
 
 Read every removed line. **PASS:** every one is either (a) the old half of a path that was
@@ -494,24 +551,50 @@ comment in the routing check (it should still sit above the recovery/checks entr
 
 ## T11 — repo-wide checks stay green
 
+**T11a — the two that work in an export:**
+
 ```bash
 cd "$SCRATCH/head"
 python -m ruff check .
 powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/checks/check-project-configs.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/checks/validate-lineendings.ps1
 ```
 
 **PASS:** `ruff` → `All checks passed!`; project-configs → `all 7 compose projects render
-clean` **and** `stack-services.json inventory matches the compose configs`; line endings →
-`SUCCESS`.
+clean` **and** `stack-services.json inventory matches the compose configs`.
 
-**Note on ruff, so the green is not over-read (finding F11):** `ruff check .` was **RED on
-the base commit** — `llm-queue/src/llm_queue/__init__.py:9` was 103 chars against the
-subproject's `line-length = 100`, and the fix for it lives on the unmerged `sl-closeout`
-branch. This item re-wrapped that docstring line because the file became this item's.
-So green here is partly attributable to that wrap, not to the move. Confirm the wrap is
-docstring-only (`git diff -M 9f64b84..work/sl-colo-inference -- inference/llm-queue/src/llm_queue/__init__.py`)
-and touches no code.
+**T11b — line endings, WHICH MUST NOT BE RUN IN A `git archive` EXPORT.**
+`validate-lineendings.ps1` enumerates its inputs with `git ls-files`. An export has no
+`.git`, so the list is empty and the script prints a SUCCESS having checked nothing — the
+same vacuous-green class as F3's routing check, and the plan sent the first tester into it.
+Run it where git can answer: a real worktree (your own detached one, or read-only in the
+developer's).
+
+```bash
+cd <a real worktree of the commit under test>
+powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/checks/validate-lineendings.ps1
+```
+
+**PASS:** `SUCCESS: All tracked shell scripts have Unix line endings` — the message naming
+*tracked shell scripts*.
+**FAIL, and read the message, do not just read the exit code:**
+`SUCCESS: No tracked shell scripts to check` is the vacuous form. Exit 0 either way.
+
+**Note on ruff (finding F11), REVISED for the rebased base:** on the item's original base
+`9f64b84`, `ruff check .` was RED — `llm_queue/__init__.py:9` was 103 chars against the
+subproject's `line-length = 100` — and the developer re-wrapped it. `sl-closeout` fixed the
+same line differently and reached `development` first, so the rebase onto `be00d53`
+conflicted there and was resolved in **`development`'s favour**. The branch therefore
+carries **none** of the developer's wrap, and ruff's green is now attributable to the base.
+Confirm it:
+
+```bash
+git -C "$W" diff -M --stat development..work/sl-colo-inference -- '*llm_queue/__init__.py'
+```
+
+**PASS:** `0` insertions, `0` deletions — a pure rename. (Without `-M` git prints it as a
+new file: the rename's other half is filtered out by the pathspec, which is not a content
+change.)
+**FAIL:** any content delta — the conflict was resolved the other way and F11 is stale.
 
 ## T12 — the live plane was not touched
 
@@ -526,6 +609,79 @@ pinned LiteLLM digest, `openwebui:local`). No `:wt-*` tagged image exists
 **FAIL:** any restart, recreate or new tag. Nothing in this plan should have produced one;
 if you see one, find out which case did and report it before anything else.
 
+## T13 — the live hazard: is the findings note's merge warning TRUE, and complete?
+
+This item deletes a directory that four **running** containers bind out of. Findings **F14**
+states the hazard and prescribes the landing step. This case checks F14 against the live
+system, because a warning that is wrong is worse than none.
+
+**Read-only throughout. Do NOT start, stop, restart or recreate anything.**
+
+**T13a — the six binds are real, and F14's table is exact.**
+
+```bash
+for c in llm-gateway llm-gateway-ui llama-cpp-upstream llama-cpp-embed-upstream llm-queue openwebui; do
+  echo "=== $c"
+  MSYS_NO_PATHCONV=1 docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}{{end}}' "$c"
+done
+```
+
+**PASS:** exactly the six rows F14 lists, with those destinations, and **nothing** under
+`config/` on `llama-cpp-embed-upstream`, `llm-queue` or `llm-gateway-db`.
+**FAIL:** a seventh container or a seventh bind under `config/` that F14 does not name —
+the note is then incomplete and the landing step under-scoped. A bind F14 lists that is NOT
+present is also a fail: the note would be warning about something that is not there.
+
+**T13b — the note actually says it.** Grep the findings note for the landing step:
+
+```bash
+grep -n 'F14\|lease\|recreate\|up -d' "$SCRATCH/head/documentation/notes/stack-layers-sl-colo-inference-findings.md"
+```
+
+**PASS:** F14 exists, is flagged in the note's header, names all four containers, states
+that a compose-file edit does not rewrite a running container's `HostConfig`, distinguishes
+the **recreating** path (`compose up -d`) from the **non-recreating** ones (bare
+`docker restart` / `docker start`, `compose restart`, and the automatic
+`restart: unless-stopped` after a host or Docker reboot), and prescribes an `inference`
+lease + `docker compose -f inference/docker-compose.yml --env-file .env up -d`, with the
+frontend's `openwebui` at its next deliberate recreate under the netns rule.
+**FAIL:** any of those missing. This is the case whose absence the first plan was failed
+for; do not accept a note that gestures at "recreate later".
+
+**T13c — the self-healing claim, checked against the code and not against the note.**
+
+```bash
+grep -n "Invoke-PlaneCompose" "$SCRATCH/head/scripts/checks/stack-watchdog.ps1"
+sed -n '162,185p'  "$SCRATCH/head/scripts/checks/stack-watchdog.ps1"
+sed -n '221,230p'  "$SCRATCH/head/scripts/recovery/emergency-recovery.ps1"
+grep -n 'InferenceCompose --env-file .env up -d' "$SCRATCH/head/scripts/recovery/emergency-recovery.ps1"
+```
+
+**PASS:** `stack-watchdog.ps1:640` repairs an unhealthy container with
+`-Action @('up','-d')`, and `Invoke-PlaneCompose` (`:162`, building `$Argv` at `:174` and
+running it at `:179`) turns that into `docker compose <plane args> up -d <service>`;
+`emergency-recovery.ps1:600` and `Start-InferenceStack` (`:221-228`, called at `:802`,
+`:960`, `:1023`) both run `… up -d`. **And read to the end of the file:**
+`stack-watchdog.ps1:747` uses `-Action @('restart')`, which does **not** recreate — confirm
+F14 says so and confirm that call site targets only `llama-cpp-embed-upstream`, which binds
+nothing under `config/`.
+**FAIL:** a repair path that reuses the existing container (`restart`, `start`) for a
+container in T13a's table, and F14 not saying so. "It goes through compose" is not the
+property that makes a path safe; "it recreates the container" is.
+
+**T13d — the plane is already a merge behind, so the recreate deploys two items.**
+
+```bash
+MSYS_NO_PATHCONV=1 docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' llm-gateway
+```
+
+**PASS:** the running `llm-gateway` shows `/app/config.yaml` and `/app/custom_callbacks.py`
+and has **no** `/app/conf.d`, no `/app/assemble-config.py` and no `/app/config.base.yaml` —
+i.e. it predates `sl-inference-split`, and F14 says so. Not this item's doing; it means
+whoever performs the recreate brings the config-assembly mechanism live at the same time.
+**FAIL:** F14 omits it, or the gateway already carries `/app/conf.d` (then F14's closing
+paragraph is stale and should be dropped rather than left to mislead).
+
 ---
 
 ## Case-to-criterion map
@@ -539,6 +695,7 @@ if you see one, find out which case did and report it before anything else.
 | unbounded grep hits only archive/notes/CLEANUP-PLAN; `config/` gone | T9, T2 |
 | routing check still scans the moved files (plant → red) | T6 |
 | names/tags/aliases/networks unchanged; live plane untouched | T5c, T5d, T12 |
+| *(no anchor criterion)* — the post-merge live hazard the findings note must carry | **T13** |
 
 ## Open declarations for the gate
 
@@ -553,5 +710,11 @@ if you see one, find out which case did and report it before anything else.
    criterion is met vacuously and the agent-org render is byte-identical.
 5. **F3 (findings)** — `check-llm-gateway-routing.ps1` is vacuous from any worktree under
    `.claude/`. This affects every item, not just this one; it is not fixed here.
-6. **F11 (findings)** — `ruff check .` was red on the base; this item's green is partly a
-   pre-existing E501 fix in a file it moved.
+6. **F11 (findings)** — `ruff check .` was red on the item's ORIGINAL base `9f64b84`. After
+   the rebase onto `be00d53` the E501 fix comes from `development` (`sl-closeout` fixed the
+   same line first and won the conflict), so ruff's green is now attributable to the base
+   and the branch carries no wrap of its own. T11's note is revised accordingly.
+7. **T13 / F14** — this item cannot be merged and left alone: six bind sources on four
+   running containers point into the deleted `config/`. The landing step is a compose
+   recreate of the inference plane under its lease. That is an operational action for the
+   merger, outside every anchor criterion, and the gate should confirm someone owns it.
