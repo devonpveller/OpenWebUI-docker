@@ -2,9 +2,17 @@
 
 **Item:** `sl-colo-inference2` — the reopen of `sl-colo-inference` (stack-layers PLAN 2.7,
 Part L.1, wave 2). Same branch, same worktree.
-**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`f2bb38f`** (which
-contains `sl-inference-split`, `sl-closeout` and `sl-ob1-profiles`).
-**Revision 4 (item reopened as `sl-colo-inference2`):** attempt 3 passed test and was
+**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`b9fff95`** (which
+contains `sl-inference-split`, `sl-closeout`, `sl-ob1-profiles` and `sl-frontend-solo`).
+**Revision 5:** attempt 1 of the reopened item PASSED 15/15 — T14's independent
+155-citation index found none broken. `development` then moved to **`b9fff95`**
+(`sl-frontend-solo`), which REPLACED `frontend/docker-compose.yml` with a 479-line profiled
+file and re-derived every citation into it for itself. Per D18 the branch rebased before
+review: three conflicts (`workspace-stacks.md`, `.env.example`, `stack.manifest.toml`), and
+the merged compose file is **484** lines with this item's comment back at **`:182`** — so
+every citation at `:183`+ gained +5 **again**, including the ones `sl-frontend-solo` had
+just fixed. T14's table below is the SECOND re-derivation. Nothing about the artifact
+changed; only numbers. **Revision 4 (item reopened as `sl-colo-inference2`):** attempt 3 passed test and was
 then **REJECTED at review (`-Misfits`)**. The 30-line evidence comment this item put into
 `frontend/docker-compose.yml` shifted the file by +30 and broke nine live line citations in
 `stack.manifest.toml` and `.env.example` that were correct on the work line; a +1 header
@@ -252,13 +260,15 @@ docker compose -f agent-org/docker/docker-compose.yml --env-file agent-org/docke
 
 **PASS:** all four `rc=0`.
 
-> **DECLARED CONFLICT WITH THE ANCHOR.** The anchor's acceptance criterion renders the
-> frontend as `--profile gpu --profile tailscale`. **`frontend/docker-compose.yml`
-> declares no profiles at all** (`grep -n profiles frontend/docker-compose.yml` returns
-> nothing, on the base and on the head). Those flags are accepted by compose and select
-> nothing, so passing them renders the same thing as passing neither. The case above
-> renders without them, deliberately. Flag this to the gate rather than treating the
-> criterion's wording as met or unmet by accident.
+> **A DECLARED CONFLICT THAT HAS SINCE RESOLVED ITSELF — run the flags now.** Through
+> revision 4 this plan rendered the frontend WITHOUT `--profile gpu --profile tailscale`,
+> because `frontend/docker-compose.yml` declared no profiles at all and the anchor's flags
+> selected nothing. **`sl-frontend-solo` (in the base since `b9fff95`) added them**:
+> `grep -n 'profiles:' frontend/docker-compose.yml` now returns `stock` (`:124`), `gpu`
+> (`:157`) and `tailscale` (`:278`, `:419`). The criterion is therefore literally
+> satisfiable and the command above passes the flags as the anchor writes them. Confirm
+> the profiles exist before trusting the render — if that grep comes back empty you are on
+> an older base than this plan assumes.
 
 **T5b — every rendered bind source and build context exists on disk.** For each of the
 four renders above, re-run with `--format json` and check each `services.*.volumes[].source`
@@ -705,7 +715,7 @@ not accept the note's list.**
 cd "$SCRATCH/head"
 # every compose verb issued by the two scripts that repair things
 grep -n "Invoke-PlaneCompose" scripts/checks/stack-watchdog.ps1
-sed -n '162,185p'             scripts/checks/stack-watchdog.ps1
+sed -n '162,185p'             scripts/checks/stack-watchdog.ps1   # Invoke-PlaneCompose
 grep -nE 'docker compose .*(up -d|restart|start)' scripts/recovery/emergency-recovery.ps1
 grep -n 'Invoke-MinimalRecovery\|Start-InferenceStack' scripts/recovery/emergency-recovery.ps1
 ```
@@ -713,24 +723,24 @@ grep -n 'Invoke-MinimalRecovery\|Start-InferenceStack' scripts/recovery/emergenc
 **PASS — the classification in F14 must match what those four commands print, in both
 directions:**
 
-*Recreating (safe).* `stack-watchdog.ps1:640` repairs an unhealthy container with
+*Recreating (safe).* `stack-watchdog.ps1:700` repairs an unhealthy container with
 `-Action @('up','-d')`, and `Invoke-PlaneCompose` (`:162`, building `$Argv` at `:174`,
 running it at `:179`) turns that into `docker compose <plane args> up -d <service>`;
-`emergency-recovery.ps1:600` runs `up -d llm-queue llm-gateway`; `Start-InferenceStack`
-(`:221-228`, called at `:802`, `:960`, `:1023`) runs `up -d` for the whole plane.
+`emergency-recovery.ps1:646` runs `up -d llm-queue llm-gateway`; `Start-InferenceStack`
+(`:263-270`, called at `:852`, `:1014`, `:1081`) runs `up -d` for the whole plane.
 
-*Reusing the existing container (dangerous).* `stack-watchdog.ps1:747` uses
+*Reusing the existing container (dangerous).* `stack-watchdog.ps1:807` uses
 `-Action @('restart')` — harmless, it targets only `llama-cpp-embed-upstream`, which binds
 nothing under `config/`. **And, the ones the first version of F14 missed:**
-`emergency-recovery.ps1:578` (`compose restart llama-cpp-upstream llama-cpp-embed-upstream`)
-and `:580` (`compose restart openwebui`) inside `Invoke-MinimalRecovery` (`:560`) — both
+`emergency-recovery.ps1:624` (`compose restart llama-cpp-upstream llama-cpp-embed-upstream`)
+and `:626` (`compose restart openwebui`) inside `Invoke-MinimalRecovery` (`:602`) — both
 containers ARE in T13a's table. F14 must name them, must say that `Invoke-MinimalRecovery`
-is the **first** branch of both `recover` (`:727`) and `nuclear` (`:905`), and must say that
-the healing `up -d` at `:600` is 22 lines later in the same function and covers only
+is the **first** branch of both `recover` (`:777`) and `nuclear` (`:959`), and must say that
+the healing `up -d` at `:646` is 22 lines later in the same function and covers only
 `llm-queue` and `llm-gateway` — never `llama-cpp-upstream`.
 
 *And read to the end of the function before accepting how bad it is.*
-`Invoke-MinimalRecovery` closes with `Test-BasicConnectivity` (`:620`), which at `:519`
+`Invoke-MinimalRecovery` closes with `Test-BasicConnectivity` (`:666`), which at `:562`
 execs `docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health`. A broken
 upstream therefore returns `$false`, the caller falls through to full/nuclear recovery, and
 `Start-InferenceStack`'s `up -d` repairs it. F14 must say this too: the script does **not**
@@ -824,37 +834,44 @@ for src in sys.argv[1:] or ["stack.manifest.toml", ".env.example",
 EOF
 ```
 
-**PASS — the eleven the branch touched, each landing on what its sentence claims:**
+**PASS — the twelve the branch touched, each landing on what its sentence claims.** The
+branch's only insert into a cited file is the six-line evidence comment at
+**`frontend/docker-compose.yml:182`**, making that file **484** lines (it is 479 on
+`development`). Everything at `:183` and beyond gains **+5**:
 
 | citing | cites | must be |
 |---|---|---|
-| `stack.manifest.toml:126` | `frontend/docker-compose.yml:295-303` | `default:` … `name: ai-stack_app-net` (the three `external: true` networks) |
-| `stack.manifest.toml:138` | `:161-186` | `LLAMA_CPP_HOST=…` … `QUARTZ_TS_PORT=…` |
-| `stack.manifest.toml:139` | `:161`, `:164` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST` |
-| `stack.manifest.toml:141` | `:163` | `LLAMA_CPP_ENABLED` |
-| `stack.manifest.toml:144` | `:102` | `SEARXNG_QUERY_URL` |
-| `stack.manifest.toml:146` | `:167`, `:169`, `:168`, `:171` | the four `OPEN_NOTEBOOK_*` vars |
-| `stack.manifest.toml:153` | `:183`, `:185`, `:173-182` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
-| `stack.manifest.toml:165` | `:141-152` | `# NO env_file HERE…` … `TAILSCALE_AUTH_KEY=…` |
-| `stack.manifest.toml:170` | `:140` | `network_mode: service:openwebui` |
-| `stack.manifest.toml:178` | `:116-119` | `devices:` … `capabilities: [ gpu ]` |
-| `.env.example:84` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+| `stack.manifest.toml:133` | `frontend/docker-compose.yml:473-481`, and `frontend_owui-net (:484)` | `default:` … `name: ai-stack_app-net`; the project-owned net |
+| `stack.manifest.toml:147` | `:311-336` | `LLAMA_CPP_HOST=…` … `QUARTZ_TS_PORT=…` |
+| `stack.manifest.toml:148`, `:150` | `:311`, `:314`, `:313` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST`, `LLAMA_CPP_ENABLED` |
+| `stack.manifest.toml:153` | `:246` | `SEARXNG_QUERY_URL` |
+| `stack.manifest.toml:155` | `:317`, `:319`, `:318`, `:320-321` | the five `OPEN_NOTEBOOK_*` vars |
+| `stack.manifest.toml:162` | `:333`, `:335`, `:323-332` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
+| `stack.manifest.toml:169` | `:291-302` | `# NO env_file HERE…` … `TAILSCALE_AUTH_KEY=…` |
+| `stack.manifest.toml:178` | `:158-165` **unchanged**, `:257-263` | the `gpu` build block; the NVIDIA reservation |
+| `stack.manifest.toml:179`, `:203` | `:290` | `network_mode: service:openwebui` |
+| `stack.manifest.toml:197` | `:115-153` **unchanged** | the whole `stock` service |
+| `stack.manifest.toml:200` | `:158-165` **unchanged**, `:257-263` | as `:178` |
+| `.env.example:162` | `:375` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
 
-**Also PASS, and check it rather than assuming:** `stack.manifest.toml:169` still cites
-`frontend/docker-compose.yml:20-23` **unchanged** — it points above the insertion point.
-A case that "fixed" it too would be wrong.
+**Also PASS, and this is the half a careless sweep gets wrong:** `:115-153` and the two
+`:158-165` citations are **unchanged**, because they point ABOVE the insert at `:182`. A
+sweep that adds 5 to everything is wrong in four places. Confirm each of those three still
+lands on the `stock` service and the `gpu` build block.
 
-**PASS — five more, in other items' records, shifted by the same insert:**
-`documentation/evidence/sl-closeout/test-plan.md:221` (`:212`→`:217`),
-`documentation/notes/stack-layers-sl-closeout-findings.md:70` (`:210`→`:215`),
-`documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` (`:108-114`→`:113-119`),
+**PASS — four more, in other items' records, shifted by the same insert:**
+`documentation/evidence/sl-closeout/test-plan.md:221` → `:375`,
+`documentation/notes/stack-layers-sl-closeout-findings.md:70` → `:373`,
+`documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` → `:257-263`,
 and `documentation/evidence/stack-layers/sl-manifest-test-plan.md:112,119,131,132,133,134`
-(all +5). **Read F7a's admonition on these and judge it**: two are merged items' EXECUTION
+→ `:317`, `:473-481`, `:311/:313/:314`, `:246`, `:317/:319/:318/:321`, `:333/:335/:323-332`. **Read F7a's admonition on these and judge it**: two are merged items' EXECUTION
 RECORDS, which T9 declares are not rewritten, and the developer updated their line numbers
 anyway on the reasoning that a number there is navigation, not a claim about what was run.
-Either verdict is defensible; the case fails only if the note does not DECLARE the
-judgement, or if a record's substantive claim (what was checked, and the result) was
-altered. Diff them and confirm only digits moved:
+**`sl-frontend-solo` made the OPPOSITE call** on the same two files (its findings note
+`:170-177`: "deliberately not edited"), so its table listing them for a later
+`sl-readmes` sweep is now obsolete — F7a says so. Either verdict is defensible; the case
+fails only if the note does not DECLARE the judgement and that clash, or if a record's
+substantive claim (what was checked, and the result) was altered. Diff them and confirm only digits moved:
 `git -C "$W" diff development..work/sl-colo-inference -- documentation/evidence/stack-layers/sl-manifest-test-plan.md`.
 
 **Also PASS — the four that were SAVED rather than renumbered, which is the better
@@ -945,8 +962,12 @@ make the deliverable un-actionable rather than merely shorter.
 
 ## Open declarations for the gate
 
-1. **T5a** — the anchor's `--profile gpu --profile tailscale` for the frontend names
-   profiles that **do not exist** in `frontend/docker-compose.yml` (base or head).
+1. **T5a — WITHDRAWN, the base fixed it.** Through revision 4 this declared that the
+   anchor's `--profile gpu --profile tailscale` named profiles that did not exist.
+   `sl-frontend-solo` added them (`stock`/`gpu`/`tailscale`), so the criterion is now met
+   as written and the plan renders with the flags. Recorded rather than deleted: a
+   declaration that quietly vanishes leaves the gate unable to tell whether it was
+   resolved or dropped.
 2. **T9** — the grep exemption list does not cover `documentation/evidence/`, which holds
    merged items' execution records that must not be rewritten.
 3. **T9** — `agent-org/config/litellm-cloud.config.yaml` is a substring collision with

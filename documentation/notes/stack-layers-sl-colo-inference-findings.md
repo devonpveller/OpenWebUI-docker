@@ -9,6 +9,12 @@ onto `be00d53`, F2 corrected, F11/F12 updated for the rebase, **F13 and F14 adde
 **Revised again after attempt 2 FAILED** on T9 and T13c, both caught by this item's own
 cases: **F14's classification of repair paths was wrong** (corrected in place, see the
 admonition inside it) and **F15 added** for the stale pointer the rebase carried in.
+**Revised a third time 2026-09-19** after a review rejection (F7 rewritten as F7a/F7b) and
+a fourth after rebasing onto **`b9fff95`** (`sl-frontend-solo`), which replaced
+`frontend/docker-compose.yml` wholesale: **every line number in F7a and in F14's citations
+of the recovery scripts was re-derived a second time** against the 484-line merged file and
+the grown `emergency-recovery.ps1` / `stack-watchdog.ps1`. F7b lost an entry because
+someone fixed it; the note says so rather than dropping it silently.
 
 > ### Read F14 first if you are about to merge this.
 > Every other entry here is context for a later reader. **F14 is an action with a
@@ -227,114 +233,133 @@ unchanged — only the bind **sources** moved (verified in the render diff).
 
 ### F7a — drift this item CREATED, and has fixed
 
+> **RE-DERIVED A SECOND TIME, 2026-09-19.** The table below was first built against a
+> 295-line `frontend/docker-compose.yml`. `sl-frontend-solo` then merged to `development`
+> (`b9fff95`), replacing that file with a 479-line profiled one and re-deriving every
+> citation into it for ITSELF. Rebasing onto that base put this item's six-line comment
+> back in at **`frontend/docker-compose.yml:182`**, making the merged file **484** lines —
+> so every citation at `:183` or below-in-file gained **+5** again, including the ones
+> `sl-frontend-solo` had just fixed. The numbers here are the SECOND re-derivation, taken
+> by opening the 484-line file. None of the first round's numbers survives; they are gone
+> rather than corrected, because a superseded mapping in a findings note is a trap.
+
 Inserting lines into a file silently invalidates every `file:line` citation below the
-insertion point, anywhere in the tree. This item inserted at
-`frontend/docker-compose.yml:38`, `inference/compose/backups.yml:4` and
-`inference/compose/upstreams.yml:15`, and **sixteen
-live citations went stale** — all of them correct on the work line before the item touched
-it. The reviewer caught them; they were not in any test case, because no case looked.
+insertion point, anywhere in the tree — and it does so again every time the base moves.
+This item's only insert into a cited file is the six-line evidence comment at
+`frontend/docker-compose.yml:182` (+5). Everything at `:183` and beyond shifts.
 
-Fixed here [source, each re-derived by opening the target file at the new line]:
+Re-derived here [source, each by opening the target at the new line]:
 
-| citing | was | now | what is actually there |
-|---|---|---|---|
-| `stack.manifest.toml:126` | `frontend/docker-compose.yml:290-298` | `:295-303` | the three `external: true` network declarations |
-| `stack.manifest.toml:138` | `:156-181` | `:161-186` | the env-override block, `LLAMA_CPP_HOST` → `QUARTZ_TS_PORT` |
-| `stack.manifest.toml:139` | `:156,159` | `:161,164` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST` |
-| `stack.manifest.toml:141` | `:158` | `:163` | `LLAMA_CPP_ENABLED` |
-| `stack.manifest.toml:144` | `:97` | `:102` | `SEARXNG_QUERY_URL` |
-| `stack.manifest.toml:146` | `:162`, `:164`, `:163`, `:166` | `:167`, `:169`, `:168`, `:171` | the four `OPEN_NOTEBOOK_*` vars |
-| `stack.manifest.toml:153` | `:178`, `:180`, `:168-177` | `:183`, `:185`, `:173-182` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
-| `stack.manifest.toml:165` | `:136-147` | `:141-152` | the tailscale service's one-variable block |
-| `stack.manifest.toml:170` | `:135` | `:140` | `network_mode: service:openwebui` |
-| `stack.manifest.toml:178` | `:111-114` | `:116-119` | the NVIDIA device reservation |
-| `.env.example:84` | `:212` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+| citing | cites | resolves to |
+|---|---|---|
+| `stack.manifest.toml:133` | `:473-481`, and `frontend_owui-net (:484)` | `default:` … `name: ai-stack_app-net`; the project-owned net |
+| `stack.manifest.toml:147` | `:311-336` | the env-override block, `LLAMA_CPP_HOST` → `QUARTZ_TS_PORT` |
+| `stack.manifest.toml:148,150` | `:311`, `:314`, `:313` | `LLAMA_CPP_HOST`, `LLAMA_CPP_EMBED_HOST`, `LLAMA_CPP_ENABLED` |
+| `stack.manifest.toml:153` | `:246` | `SEARXNG_QUERY_URL` |
+| `stack.manifest.toml:155` | `:317`, `:319`, `:318`, `:320-321` | the five `OPEN_NOTEBOOK_*` vars |
+| `stack.manifest.toml:162` | `:333`, `:335`, `:323-332` | `QUARTZ_HOST`, `QUARTZ_ENABLED`, the wiki-route comment |
+| `stack.manifest.toml:169` | `:291-302` | the tailscale service's one-variable block |
+| `stack.manifest.toml:178` | `:158-165` **unchanged**, `:257-263` | the `gpu` build block (above the insert); the NVIDIA reservation |
+| `stack.manifest.toml:179`, `:203` | `:290` | `network_mode: service:openwebui` |
+| `stack.manifest.toml:197` | `:115-153` **unchanged** | the whole `stock` service (above the insert) |
+| `stack.manifest.toml:200` | `:158-165` **unchanged**, `:257-263` | as `:178` |
+| `.env.example:162` | `:375` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
 
-`stack.manifest.toml:169` (`frontend/docker-compose.yml:20-23`) needed **no** change: it
-cites above the insertion point. That is the check working, not an omission.
+Four citations needed **no** change because they point ABOVE the insertion point
+(`:115-153`, `:158-165` twice). Checking that and leaving them alone is as much part of the
+method as renumbering the rest — a sweep that adds 5 to everything is wrong in four places.
 
-Five more, in other items' records, shifted by the same insert and re-derived the same way
+Four more, in other items' records, shifted by the same insert and re-derived the same way
 [source]:
 
-| citing | was | now | what is actually there |
-|---|---|---|---|
-| `documentation/evidence/sl-closeout/test-plan.md:221` | `:212` | `:217` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
-| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `:210` | `:215` | `RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` |
-| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | `:108-114` | `:113-119` | `deploy:` … `capabilities: [ gpu ]` |
-| `documentation/evidence/stack-layers/sl-manifest-test-plan.md:112,119,131,132,133,134` | `:162`, `:290-298`, `:156/:158/:159`, `:97`, `:162/:164/:163/:166`, `:178/:180/:168-177` | `:167`, `:295-303`, `:161/:163/:164`, `:102`, `:167/:169/:168/:171`, `:183/:185/:173-182` | the same lines, five lines lower |
+| citing | cites | resolves to |
+|---|---|---|
+| `documentation/evidence/sl-closeout/test-plan.md:221` | `:375` | `BACKUP_INTERVAL=${OPENWEBUI_BACKUP_INTERVAL:-86400}` |
+| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `:373` | `RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` |
+| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | `:257-263` | `deploy:` … `capabilities: [ gpu ]` |
+| `documentation/evidence/stack-layers/sl-manifest-test-plan.md:112,119,131,132,133,134` | `:317`, `:473-481`, `:311/:313/:314`, `:246`, `:317/:319/:318/:321`, `:333/:335/:323-332` | the same anchors |
 
-> **A judgement call the gate is entitled to overrule.** Two of those five are
-> `documentation/evidence/` **execution records of merged items** — what a tester actually
-> ran against the tree as it then stood — and this item's own T9 declares that such records
-> are not rewritten, because doing so makes them claim something that was never run. I
-> updated the line NUMBERS anyway, on the reasoning that a number in those sentences is
-> *navigation*, not a claim: the sentence still asserts exactly what it asserted, about
-> exactly the same line of code, and leaving it dangling helps nobody. Changing what the
-> record says was CHECKED would be falsification; changing where to look for it is not. If
-> the gate disagrees, the revert is mechanical and the numbers are all in the table above.
+> **A judgement call, and `sl-frontend-solo` made the OPPOSITE one — the gate should settle
+> it.** Two of those four are `documentation/evidence/` **execution records of merged
+> items**, and this item's own T9 declares such records are not rewritten. I update their
+> line NUMBERS anyway, reasoning that a number there is *navigation*, not a claim: the
+> sentence still asserts exactly what it asserted, about the same line of code. Changing
+> what a record says was CHECKED would be falsification; changing where to look is not.
+> `sl-frontend-solo` reached the other conclusion — its findings note (`:170-177`) says
+> those files are "**deliberately not edited** - they are other items' notes and rewriting
+> another item's evidence is not this item's business", and lists them for a later
+> `sl-readmes` sweep. **Consequence, and it is the reason to declare this rather than
+> quietly proceed:** that note's table is now obsolete — the two files it lists carry
+> re-derived numbers, not the pre-profile ones it records. Whoever runs that sweep should
+> re-derive rather than apply the table. I did not edit their note to say so, which would
+> have been the same over-reach in the other direction.
 
-**Four citations were SAVED rather than renumbered — the better outcome.** Two of the
-item's edits were comment rewraps that had grown their file by a line or three for no
-reason at all:
+**Four citations were SAVED rather than renumbered — the better outcome.** Two of this
+item's edits were comment rewraps that had grown their file for no reason:
 
-- `inference/compose/backups.yml` (+1) is cited by `.env.example:255` (`:41,75,82-84`),
-  `.env.example:268` (`:13,31`) and
+- `inference/compose/backups.yml` is cited by `.env.example:333` (`:41,75,82-84`),
+  `.env.example:346` (`:13,31`) and
   `documentation/notes/stack-layers-sl-closeout-findings.md:282` (both sets).
-- `inference/compose/upstreams.yml` (+3) is cited by
+- `inference/compose/upstreams.yml` is cited by
   `documentation/notes/stack-layers-sl-inference-split-findings.md:194` and
   `documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428`, both at
-  `:66,75` (the `/models/lmstudio-community/…` paths).
+  `:66,75` (the `/models/lmstudio-community/…` model paths).
 
 Both headers were re-wrapped to be **line-neutral** (`git diff --numstat development --`
-prints `1 1` and `4 4`), so all four citations stay correct untouched and two files that
-would otherwise have been edited were not. **Where a shift buys nothing, not shifting beats
-renumbering** — it is fewer files touched, fewer conflicts for the branches landing beside
-this one, and nothing to get wrong.
+prints `1 1` and `4 4`), so all four stay correct untouched and two files that would
+otherwise have been edited were not. **Where a shift buys nothing, not shifting beats
+renumbering** — fewer files touched, fewer conflicts for the branches landing beside this
+one, and nothing to get wrong. It is also the only class of fix a base change cannot make
+stale: these four survived the `sl-frontend-solo` rebase without a second look.
 
-**The remaining shifted files carry no incoming citations at all**, checked rather than
-assumed: `scripts/checks/check-llm-gateway-routing.ps1` (+4),
+**The remaining shifted files carry no incoming citations**, checked rather than assumed:
+`scripts/checks/check-llm-gateway-routing.ps1` (+4),
 `.claude/skills/stack-map/references/workspace-stacks.md` (+1),
 `agent-org/config/litellm-cloud.config.yaml` (+1), `inference/compose/gateway.yml` (+1) and
 `inference/compose/queue.yml` (+1) are cited by nothing outside this item's own note and
-plan, and those two were re-derived (`check-llm-gateway-routing.ps1:73 -> :77`,
-`litellm-cloud.config.yaml:8 -> :8-9`). `inference/docker-compose.yml` (+5) is the one
-exception and it is F7b's, not F7a's: all five documents citing it point into the
-**pre-split 461-line** file, and that file is **84 lines on `development`** — so `:86` and
-everything above it was already past EOF before this branch existed.
-
-**What this costs the next item, unavoidably:** `sl-frontend-solo` is unmerged and changes
-`frontend/docker-compose.yml` by about +130 lines, re-deriving the same manifest citations
-for its own change. Whichever of the two lands second re-derives again. There is no way to
-avoid that; there is only the discipline of doing it against the tree as it stands on your
-own branch, as the last step before committing.
+plan, and those two are re-derived (`check-llm-gateway-routing.ps1:77`,
+`litellm-cloud.config.yaml:8-9`). `inference/docker-compose.yml` (+5) is the exception and
+it is F7b's, not F7a's.
 
 ### F7b — drift this item only FOUND (pre-existing; not touched)
 
-[source] These were stale **before** this item, and are stale for a different reason — the
-files they point into were restructured by other items, so renumbering would not fix them;
-they need re-targeting by whoever closes those items out. Verified by opening each target:
+[source, re-derived on `b9fff95`] Stale **before** this item, and stale for a different
+reason — the files they point into were restructured, so renumbering would not fix them:
 
-1. `stack.manifest.toml:121` — `[planes.inference.profiles.local]` still carries
-   `pending = true   # sl-inference-split adds it`. **That item has landed** (it is in this
-   item's base), so the flag is false. It is not cosmetic: `scripts/stack/stack.py:709-719`
-   reads `pending_profiles()` (`:713`) and prints "note: PENDING profiles enabled (...) -
-   the compose files do not carry them yet, so enabling them changes nothing until the item
-   that adds them lands" (`:717-718`) — a false statement printed to the operator at the
-   moment they enable the profile that does work.
-2. `stack.manifest.toml:107-109` — the `host` requirements cite
-   `inference/docker-compose.yml:83-86, 129-132`, `:34` and `:111,119`. Those services moved
-   into `inference/compose/upstreams.yml` at sl-inference-split, and the spine file is now
-   about 85 lines of comments and `include:` — so `:111`, `:119` and `:129-132` are **past
-   its end** and `:83-86` and `:34` land on unrelated comments. Line `:108` also says
-   "sl-inference-split replaces it with LM_MODELS_DIR" in the future tense; it did.
-3. `stack.manifest.toml:401,403,406` — three comments cite `config/caddy/Caddyfile:197`,
+1. `stack.manifest.toml:107-109` — the inference `host` requirements cite
+   `inference/docker-compose.yml:83-86, 129-132`, `:34` and `:111,119`. Those services
+   moved into `inference/compose/upstreams.yml` at sl-inference-split, and the spine file
+   is now ~90 lines of comments and `include:` — so `:111`, `:119` and `:129-132` are
+   **past its end** (it is **84 lines on `development`**, i.e. they were already past the
+   end before this branch existed) and `:83-86`, `:34` land on unrelated comments. Line
+   `:108` also says "sl-inference-split replaces it with LM_MODELS_DIR" in the future
+   tense; it did.
+2. `stack.manifest.toml:421,423,426` — three comments cite `config/caddy/Caddyfile:197`,
    `:143`, `:136`, `:295`. `sl-colo-portal` moved that tree to `portal/config/caddy/`
    (confirmed present at `portal/config/caddy/Caddyfile`); there is no `config/caddy/`.
 
-None of the three is in this item's artifact and none was touched. They belong to whoever
-closes out sl-inference-split / sl-manifest / sl-colo-portal. **This item deliberately did
-not renumber them**, because a citation pointing at the wrong FILE is not repaired by
-moving its line number, and because silently rewriting another item's open debt hides it.
+**One entry has been REMOVED from this list because someone fixed it.** The first version
+of F7b reported that `[planes.inference.profiles.local]` still carried
+`pending = true   # sl-inference-split adds it`, making `scripts/stack/stack.py:709-719`
+print a false "PENDING profiles enabled" note (`:713`, `:717-718`) to the operator. On
+`b9fff95` that line reads `# NOT `pending`: sl-inference-split landed it. `profiles:
+[local]` is live in …` (`stack.manifest.toml:119`) — corrected by one of the items that
+landed in between. Recording the fix rather than silently dropping the entry is the point:
+a findings note that quietly loses an item leaves the next reader unable to tell whether it
+was fixed or forgotten.
+
+**The scale, measured after the second re-derivation** [observed 2026-09-19]: the tree
+holds **569** resolvable `path:line` citations, **141** of them into files this branch
+changes. Nine resolve past their target's end, and **none is this branch's**: eight cite
+`inference/docker-compose.yml` at `:111`, `:316`, `:320`, `:383`, `:448` — beyond its
+**91 lines on `development`**, so already dead before this branch — and the ninth
+(`documentation/notes/u6dark-findings.md:1074` → `README.md:184`) is into a file whose
+length this branch does not change (168 lines on both sides).
+
+Neither remaining entry is in this item's artifact and neither was touched. **This item
+deliberately did not renumber them**, because a citation pointing at the wrong FILE is not
+repaired by moving its line number, and silently rewriting another item's open debt hides
+it.
 
 ### F7c — the general lesson, which is why the test plan now has a case for it
 
@@ -502,40 +527,40 @@ container objects, now pointing at absent sources. So what happens next depends 
   *directory*, so an empty directory is exactly what it would get, and nothing reads
   `/app/config` anyway (F2). Of the six binds, five are hazardous and one is inert.
 - **SAFE — compose `up -d`, because it re-renders the *new* file and RECREATES the
-  container with corrected sources.** [source] `scripts/checks/stack-watchdog.ps1:640`
+  container with corrected sources.** [source] `scripts/checks/stack-watchdog.ps1:700`
   repairs any unhealthy container via `Invoke-PlaneCompose -Container $Container -Action
   @('up','-d')`, which builds `docker compose <plane args> up -d <service>`
-  (`stack-watchdog.ps1:174,179`); `emergency-recovery.ps1:600` runs
+  (`stack-watchdog.ps1:162,174,179`); `emergency-recovery.ps1:646` runs
   `docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway`;
-  and `Start-InferenceStack` (`:221-228`, called at `:802`, `:960`, `:1023`) runs the same
+  and `Start-InferenceStack` (`:263-270`, called at `:852`, `:1014`, `:1081`) runs the same
   command for the whole plane.
 
 > ### The recovery script's FIRST move is in the dangerous group. Corrected 2026-09-19.
 >
 > An earlier version of this entry put `compose restart` in the dangerous group but named
-> `stack-watchdog.ps1:747` as its only call site and called that harmless (it targets only
+> `stack-watchdog.ps1:807` as its only call site and called that harmless (it targets only
 > `llama-cpp-embed-upstream`, which [observed] binds nothing under `config/` — still true).
 > **It missed the call sites that matter**, found by the tester running this item's own
 > T13c as written. In `scripts/recovery/emergency-recovery.ps1`, `Invoke-MinimalRecovery`
-> (`:560`) does:
+> (`:602`) does:
 >
 > ```
-> :578   docker compose -f $InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
-> :580   docker compose -f $FrontendCompose  --env-file .env restart openwebui
-> :587   docker compose -f $FrontendCompose  --env-file .env restart tailscale
+> :624   docker compose -f $InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
+> :626   docker compose -f $FrontendCompose  --env-file .env restart openwebui
+> :633   docker compose -f $FrontendCompose  --env-file .env restart tailscale
 > ```
 >
 > `llama-cpp-upstream` and `openwebui` are both in the table above. And this is not a
 > peripheral branch: `Invoke-MinimalRecovery` is **the first thing both recovery modes
-> try** — `recover` at `:727` and `nuclear` at `:905`, each gated only on
-> `Test-BasicConnectivity`. The healing `up -d` at `:600` is 22 lines later in the same
+> try** — `recover` at `:777` and `nuclear` at `:959`, each gated only on
+> `Test-BasicConnectivity`. The healing `up -d` at `:646` is 22 lines later in the same
 > function and covers **only `llm-queue` and `llm-gateway`** — never `llama-cpp-upstream`.
 > So in the window between the merge and the first recreate, `emergency-recovery.ps1
 > recover` is itself a way to break the inference plane.
 >
 > **Read to the end of the function before deciding how bad that is.**
-> `Invoke-MinimalRecovery` finishes by calling `Test-BasicConnectivity` again (`:620`),
-> which at `:519` execs a real health probe into `llama-cpp-upstream`
+> `Invoke-MinimalRecovery` finishes by calling `Test-BasicConnectivity` again (`:666`),
+> which at `:562` execs a real health probe into `llama-cpp-upstream`
 > (`docker exec llama-cpp-upstream curl -f -s http://localhost:8080/health`). A broken
 > upstream therefore makes minimal recovery return `$false`, the caller falls through to
 > full (or nuclear) recovery, and *that* path's `Start-InferenceStack` does `up -d` for the
