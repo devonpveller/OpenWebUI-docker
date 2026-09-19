@@ -188,7 +188,9 @@ they are NOT tracked by this file any more.
   `scripts/claude-sessions-bridge/bridge.py` 2,397. Out of scope for
   stack-layers (PLAN §6); no successor plan.
 - **M.8 live-validation tiers** — T2 proved out; the five remaining items are
-  listed at the end of M.8 in this file and are still the live list.
+  listed at the end of §M.8 in this file. **That list is the one part of this
+  file that is still live work**: everything else here is history, and a reader
+  who needs a worklist should be in the `stack-layers` plan instead.
 - **D7 stale volumes (the K.6 tail)** — roughly fourteen pre-split volumes plus
   two unprefixed `openwebui_*` remain on the daemon. Deleting them is
   destructive and stays the operator's call; the per-plane copies have held the

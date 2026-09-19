@@ -59,12 +59,12 @@ halves; that is a change to a check script and out of scope for a docs item.
 Same class as the four cron variables this item removed, but not named in the
 audit, so they were left alone:
 
-    .env.example:337  BACKUP_INTERVAL=86400
-    .env.example:338  RETAIN_COUNT=2
-    .env.example:339  MIN_AGE_SECS=82800
+    .env.example:370  BACKUP_INTERVAL=86400
+    .env.example:371  RETAIN_COUNT=2
+    .env.example:372  MIN_AGE_SECS=82800
 
-(line numbers after this item's edits.) These are the **container-side** names.
-Every sidecar sets them itself in its own `environment:` block from a prefixed
+(line numbers on this branch after the 2026-09-19 rebase onto 9f64b84.) These
+are the **container-side** names. Every sidecar sets them itself in its own `environment:` block from a prefixed
 host variable — e.g. `- BACKUP_INTERVAL=${MNEMORY_BACKUP_INTERVAL:-86400}`
 (`memory/docker-compose.yml:111`), `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}`
 (`frontend/docker-compose.yml:210`) — and `backup/generic-tar-backup.sh:25,27`
@@ -80,9 +80,15 @@ The note says the plane dirs "contain only a compose file — [verified]".
 `memory/`, `search/` and `coder/` each also hold a `README.md`, and `portal/`
 holds `local-test.override.yml`. The substance of L.1 is unaffected — no plane
 directory contains its service SOURCE — but the next reader should not expect
-four bare directories. `frontend/` and `inference/` are the two that really do
-hold one file each, which is also why they are the two planes with no README.
-[source: `ls` of each plane directory, 2026-09-19]
+four bare directories.
+
+**Overtaken while this item was in review (2026-09-19):** `sl-colo-portal`
+(adfd9f2) moved the portal's eight config trees into `portal/config/`, and
+`sl-inference-split` (9f64b84) added `inference/compose/` with four included
+service-group files. So the listing keeps moving, which is L.1 happening rather
+than an objection to it — do not cite a plane-directory listing as a stable fact.
+[source: `ls` of each plane directory, 2026-09-19, re-run after the rebase onto
+9f64b84]
 
 ## 5. `agent-org/README.md`: 865 test functions, counted with the AST — and why grep said 866
 
@@ -137,16 +143,22 @@ OB1/docker/docker-compose.yml]
 
 ## 7. Two standalone-OWUI blockers this item could not fix
 
-Both are named in the audit's last section and both are `stack-layers` wave-1
-work, not doc fixes:
+Both were named in the audit's last section as `stack-layers` wave-1 work, and
+one of the two landed while this item was in review:
 
-- `inference/docker-compose.yml` binds `C:\Users\yamao\.lmstudio\models`
-  literally; CLEANUP-PLAN D.4 missed it because that sweep grepped only for
-  `D:/`. It becomes `LM_MODELS_DIR` in `sl-inference-split`.
-- `config/` mixes portal config with inference config in one directory, which is
-  what `sl-colo-portal` and `sl-colo-inference` separate.
+- The literal `C:\Users\yamao\.lmstudio\models` bind that CLEANUP-PLAN D.4
+  missed (its sweep grepped only for `D:/`) — `sl-inference-split` owns the
+  `LM_MODELS_DIR` change. Re-check it against `inference/compose/upstreams.yml`
+  and `inference/compose/backups.yml` now that the plane is split, not against
+  the old single file.
+- `config/` no longer mixes the two planes: `sl-colo-portal` (adfd9f2) moved the
+  portal's trees into `portal/config/`, so what remains at the repo root is the
+  inference set (`litellm.config.yaml`, `litellm.ui.config.yaml`,
+  `llama-swap.config.yaml`, `chat-template.jinja`, `litellm/`).
+  `sl-colo-inference` is the item that moves those.
 
-[source: inference/docker-compose.yml:34,394; `ls config/`]
+[source: `ls config/` and `ls inference/compose/`, 2026-09-19, after the rebase
+onto 9f64b84]
 
 ## 8. The acceptance check constrains the wording of the removal comment
 
@@ -196,3 +208,78 @@ is the thorough one.
 [source: git grep -n CLEANUP-PLAN over README.md, CLAUDE.md, SECURITY.md,
 scripts/README.md, agent-org/README.md and documentation/implementation-guide/README.md,
 2026-09-19]
+
+## 10. `UPDATE-MANAGEMENT.md` still names Watchtower as the stack's auto-updater
+
+The nineteenth survivor of the same shape, found by the reviewer of attempt 2.
+
+    documentation/runbooks/UPDATE-MANAGEMENT.md:7-9
+    "Everything is **manual and verified** - the only auto-updater is
+     Watchtower, scoped to the `openwebui` image and pending retirement
+     (CLEANUP-PLAN v3, decision D-2)."
+
+Watchtower was RETIRED on 2026-08-20, not pending retirement. There is no
+`watchtower` service, image or `container_name` in any compose file in this
+workspace; what survives is the opt-out LABEL
+`com.centurylinklabs.watchtower.enable=false` on many services (harmless, and
+documentation of the decision), one OB1 comment explaining a deliberate absence
+of that label, and an archived override under `scripts/archive/`. `CLAUDE.md:27`
+records the retirement correctly, so the runbook contradicts the file every
+agent reads first.
+
+Not fixed here: `documentation/runbooks/UPDATE-MANAGEMENT.md` is outside this
+item's artifact list. The fix is one sentence - say the stack has no
+auto-updater, that Watchtower was retired 2026-08-20, and that the surviving
+labels are inert.
+[source: grep for `watchtower` across every `*.yml` in the workspace,
+2026-09-19; documentation/runbooks/UPDATE-MANAGEMENT.md:7-9; CLAUDE.md:27]
+
+## 11. `config/litellm.ui.config.yaml` still calls the main gateway PERMISSIVE
+
+Audit finding 1's class, in a file the finding did not name and the artifact
+list does not cover:
+
+    config/litellm.ui.config.yaml:10
+    "Setting a master_key on the PERMISSIVE main gateway would enforce auth on
+     every ... no-key path"
+
+The main gateway has not been permissive since the J.1 flip on 2026-08-21;
+`config/litellm.config.yaml` sets `master_key` under `general_settings`. The
+sidecar's REASON for existing is still sound (LiteLLM 1.88.1 hard-requires a
+master key for the admin UI), so only the parenthetical about the main gateway
+is stale - but it is the same false statement this item corrected in two other
+files, and someone reading it will draw the same wrong conclusion.
+
+Not fixed here: outside the artifact list. It belongs with `sl-colo-inference`,
+which moves that file into `inference/config/` anyway.
+[source: config/litellm.ui.config.yaml:8-17; config/litellm.config.yaml
+general_settings, 2026-09-19 after the rebase onto 9f64b84]
+
+## 12. The rebase dropped this branch's portal header hunk on purpose
+
+Recorded because a reader diffing this branch will find audit finding 12
+corrected by a commit that is not ours.
+
+`development` and this branch fixed the same false header
+(`portal/docker-compose.yml`, "Networks/volumes are defined in the root file")
+in different words, and the rebase onto 9f64b84 conflicted there. This branch's
+hunk was DROPPED and `development`'s kept, on the reviewer's recommendation,
+because `sl-colo-portal` (adfd9f2) rewrote the surrounding paragraph anyway to
+describe the new `portal/config/` tree - keeping our wording would have
+reintroduced a header that no longer matched the file's mounts. The finding is
+closed either way; only the authorship moved.
+
+`git diff development -- portal/docker-compose.yml` is therefore EMPTY on this
+branch, and `portal/docker-compose.yml` stays in the anchor's artifact list
+while not appearing in the diff.
+
+Two citations moved with that rebase and were corrected here rather than in the
+audit note, whose body is the dated record of what the audit said:
+`portal/docker-compose.yml`'s header is now at :13-14 (the audit cites :10), its
+`networks:` at :592 and `volumes:` at :611 (the test plan cited a 585-615
+window). The `.env.example` comments that cited
+`inference/docker-compose.yml:383,413,420-421` and "service llm-gateway-backup"
+now cite `inference/compose/backups.yml:41,75,82-84` and `:13,31`, because
+`sl-inference-split` moved both sidecars into the included file.
+[source: the rebase conflict itself; portal/docker-compose.yml and
+inference/compose/backups.yml as of 2026-09-19]

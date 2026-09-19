@@ -137,13 +137,19 @@ PASS = all six corrected, every number independently recounted.
     comment must both agree with that count, and the comment's breakdown must
     add up (expertise stores + sessions + workspace). **FAIL** if the comment
     still says "five expertise volumes" while four are declared.
-12. **Portal header.**
-    `git show work/sl-closeout:portal/docker-compose.yml | sed -n '1,14p'` must
-    no longer say networks/volumes live in the root file. Verify against the
-    same file's tail (`sed -n '585,615p'`): it declares `edge-net`, `auth-net`,
-    `notify-net` and four volumes itself, and takes only `ai-stack_app-net`
-    externally. **FAIL** if the new header names a network or volume the file
-    does not declare.
+12. **Portal header.** `git show work/sl-closeout:portal/docker-compose.yml |
+    sed -n '1,15p'` — lines 13-14 must no longer say networks/volumes live in
+    the root file. **That wording is `development`'s, not this branch's:** both
+    branches corrected audit finding 12 in different words, and this rebase
+    dropped this branch's hunk in favour of `development`'s, which also covers
+    the `portal/config/` move (`sl-colo-portal`, merged as adfd9f2). See the
+    findings note §12. `git diff development -- portal/docker-compose.yml` must
+    therefore be EMPTY. The finding is still verified the same way: read the
+    file's tail (`sed -n '590,616p'`) and confirm it declares `edge-net`,
+    `auth-net`, `notify-net` (networks: at :592) and four volumes (volumes: at
+    :611) itself, taking only `ai-stack_app-net` externally. **FAIL** if the
+    header names a network or volume the file does not declare, or if this
+    branch re-introduces a competing header.
 13. **agent-bridge test count — COUNT IT WITH THE AST, NOT WITH GREP.**
     `grep -c "def test_"` OVER-COUNTS: this suite writes *about* testing, so the
     string appears in prose too (`tests/test_p18_observation.py:392` is one such
@@ -306,17 +312,28 @@ ruff check .        # from a checkout of the branch
 ```
 
 The file list must be exactly the artifact list plus the four declared above
-(see "Declared conflict"): `README.md`, `CLAUDE.md`, `.env.example`,
+(see "Declared conflict"), and after the 2026-09-19 rebase onto 9f64b84 it is
+**fourteen** paths: `README.md`, `CLAUDE.md`, `.env.example`,
 `config/litellm.config.yaml`, `scripts/README.md`, `agent-org/README.md`,
-`portal/docker-compose.yml`, `coder/docker-compose.yml`,
-`documentation/implementation-guide/README.md`, `CLEANUP-PLAN.md`,
-`docker-compose.yml`, `llm-queue/src/llm_queue/__init__.py`, and the three files
-under `documentation/notes/` and `documentation/evidence/`. The last of those is
-a RENAME: `git diff --name-status development...work/sl-closeout` must show
-`R... documentation/evidence/stack-layers/sl-closeout-test-plan.md ->
-documentation/evidence/sl-closeout/test-plan.md`, and
+`coder/docker-compose.yml`, `documentation/implementation-guide/README.md`,
+`CLEANUP-PLAN.md`, `docker-compose.yml`,
+`llm-queue/src/llm_queue/__init__.py`, and the three files under
+`documentation/notes/` and `documentation/evidence/`.
+
+`portal/docker-compose.yml` is in the ARTIFACT list but must NOT be in the diff:
+the rebase dropped this branch's header hunk in favour of `development`'s (T3
+case 12, findings note §12), so `git diff development -- portal/docker-compose.yml`
+is empty. An artifact-list file the branch does not need to touch is not a
+failure; a file outside the list is.
+
+The plan file shows as an ADD, not a rename, in this three-dot diff — the old
+path never existed on `development`, so the rename is visible only in the
+branch's own commits. What must hold on the branch tip is that
 `git ls-tree -r --name-only work/sl-closeout documentation/evidence/stack-layers/`
-must print nothing.
+lists the OTHER items' plans (`sl-colo-portal`, `sl-inference-split`,
+`sl-manifest`) and **nothing of this item's** — the rebase's rename detection
+tried to drag all three into `sl-closeout/` and was refused. **FAIL** if any of
+those three moved.
 
 `ruff check .` must print `All checks passed!`.
 
