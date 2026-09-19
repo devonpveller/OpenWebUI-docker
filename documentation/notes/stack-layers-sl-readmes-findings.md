@@ -325,6 +325,60 @@ left one of the two rewritten files is here.
 
 ---
 
+## 5a. Found by the closing citation sweep - all pre-existing
+
+The house rule is to re-derive every `path:line` citation by construct as the
+LAST step, and to sweep the tree for citations of every file touched. Both were
+done. **This item's own artifacts contain no `path:line` citations at all** -
+everything is cited by construct (a grep that finds it), because the previous
+item's findings note was itself falsified by a five-line shift.
+
+The sweep of the tree for citations OF the files this item touched found hits
+only in `documentation/evidence/*/test-plan.md`, `documentation/archive/` and
+`CLEANUP-PLAN.md` - historical records that must keep saying what was checked -
+plus two in live documents, and **both were already stale on `development`**:
+
+| Citation | Cited as | What is actually there | Proof it is not mine |
+|---|---|---|---|
+| `documentation/implementation-guide/dark-factory-unification/DECISIONS.md` cites `MERGE-PROTOCOL.md:135-137` | "says PRs are ..." | the `reap.ps1` label / orphan-container bullet | `git show development:...MERGE-PROTOCOL.md \| sed -n '133,140p'` prints the same |
+| `documentation/notes/agent-harness-queue-defects-2026-09-04.md` cites `MERGE-PROTOCOL.md:305` | "documents `-Requeue` as the reviewer's stale-pass move only" | the unterminated-code-fence warning | `git show development:...MERGE-PROTOCOL.md \| sed -n '303,308p'` prints the same |
+
+**[measured]** This item's MERGE-PROTOCOL edit inserts inside step 4, well past
+line 305, so it shifts nothing at or before either citation. They are other
+items' evidence and rewriting another item's evidence is not this item's
+business - recorded here so the next sweep does not re-discover them.
+
+## 5b. `plan-store.ps1` resolves the store relative to the WORKTREE, not the checkout
+
+**[measured]** Run from `.claude/worktrees/wt-sl-readmes`, the check dies:
+
+```
+plan store not found at D:\Open WebUI\ai-stack\.claude\worktrees\documentation-plans-ai-stack
+  (clone devonpveller/documentation-plans-ai-stack beside the code repo)
+```
+
+`$Store` defaults to `Join-Path (Split-Path $Root -Parent) 'documentation-plans-ai-stack'`
+**[source]**, and `$Root` in a worktree is the worktree directory - so the
+sibling it looks for is `.claude/worktrees/documentation-plans-ai-stack`.
+**Every harness worktree hits this**, and the item's own acceptance criterion
+asks a tester to run it. It takes an explicit `-Store`, so the workaround is
+one flag:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\checks\plan-store.ps1 `
+  -Store "D:\Open WebUI\documentation-plans-ai-stack"
+```
+
+**[measured]** With that flag, from this worktree, on this branch: exit 0,
+`plan store: clean (versioned, pushed, indexed)`, "No untracked paths under
+implementation-guide", "Tracked feature directories here (plan store Phase-2
+backlog): 3" - the two kept directories plus the index, which is the expected
+standing state.
+
+Worth noting the failure is LOUD (a throw, not a silent skip), so it has never
+produced a false green. *Fix:* resolve the store from the common git dir rather
+than from `$Root`. *Why not here:* check edit, out of scope.
+
 ## 6. Left alone on purpose
 
 - **`CLEANUP-PLAN.md`** still contains live-reading `--env-file` sentences

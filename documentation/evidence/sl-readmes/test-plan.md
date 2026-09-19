@@ -442,12 +442,23 @@ neither in the new documents nor in the sink.
 ## T7 - criterion 7, the repo's own gates pass
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\checks\plan-store.ps1; echo "rc=$LASTEXITCODE"
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\checks\plan-store.ps1 `
+  -Store "D:\Open WebUI\documentation-plans-ai-stack"
+echo "rc=$LASTEXITCODE"
 ```
 
-**Expect** exit 0. (It checks both repos for untracked plan files, unpushed
-store commits and store features with no status row. If it reports something
-that predates this branch, say so - this item wrote nothing plan-shaped.)
+**`-Store` is required from a worktree and this is not a workaround for a
+failing check** - see finding 5b. The default is
+`Join-Path (Split-Path $Root -Parent) 'documentation-plans-ai-stack'`, and
+`$Root` in a worktree is the worktree, so the bare form looks for the store
+under `.claude/worktrees/` and throws. The failure is loud, never a false
+green. Run the bare form first if you want to see it, then the flagged one.
+
+**Expect** exit 0 and `plan store: clean (versioned, pushed, indexed)`, with
+"Tracked feature directories here (plan store Phase-2 backlog): 3" (the two
+kept directories plus the index - the expected standing state) and "No
+untracked paths under implementation-guide". This item wrote nothing
+plan-shaped; if it reports something that predates this branch, say so.
 
 Pre-commit hooks ran on every commit in this branch; re-run the staged-aware
 ones against the whole diff:
