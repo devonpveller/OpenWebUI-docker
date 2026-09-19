@@ -373,11 +373,27 @@ default     = true
 requires    = ["research"]
 
 # The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles). They are
-# NOT `default`, on purpose: `default` means "passed on every invocation", and
-# the whole point of the research product's surfaces split is that --headless
-# can drop wiki and notebook. scripts/stack/stack.ps1 DOES pass all three (see
-# its ob1 row) because it is the pre-manifest driver and must keep starting the
-# set that is running today; sl-driver-parity reconciles the two.
+# `opt_in`, never `default`: `default` means "passed on every invocation" AND it
+# survives --headless, and the whole point of the research product's surfaces
+# split is that --headless can drop wiki and notebook. `opt_in` is the flag for
+# "something other than the driver's defaults turns this on" - here, a PRODUCT
+# (`enable research`, `enable open-brain`, `enable digest`) or the `requires`
+# edge from idea-refinery.
+#
+# HOW sl-ob1-profiles' stack.ps1 ROW WAS RECONCILED (sl-driver-parity): that
+# script is now a shim with no plane registry, so its four-profile line has no
+# landing place and is not carried forward. The equivalent is the DRIVER'S
+# STATE. Today's host has no .stack/state.json, so `stack.ps1 up` -> `stack.py
+# up --all` passes idea-refinery plus research (the `requires` closure) and
+# nothing else - which starts exactly the same 30 containers, because the PINNED
+# OB1 gitlink (5005197) does not carry these three profiles at all and compose
+# ignores a profile it does not know. AFTER THE GITLINK BUMPS that stops being
+# true: wiki and notebook would then gate seven running containers that a bare
+# `up` no longer starts. The operator runs `stack.py init --product research`
+# (or `enable research`) once, at that bump, and the state file carries them
+# from then on. That is the wave-4 step; it is recorded in
+# documentation/notes/stack-layers-sl-driver-parity-findings.md and in
+# `inventory --check`'s own `[declared, not rendered]` output.
 
 [planes.ob1.profiles.research]
 # OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which
@@ -386,13 +402,16 @@ requires    = ["research"]
 # `ungrounded_claims` for every inlet, not just research (its own comment at
 # OB1/docker/docker-compose.yml, "general brain-health"), so it renders with no
 # profile at all.
-description = "the research engine: openbrain-research + openbrain-curator"
+description = "the research engine: openbrain-research + openbrain-curator; the `research` and `digest` products enable it, and `idea-refinery` requires it"
+opt_in      = true
 
 [planes.ob1.profiles.wiki]
-description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE)"
+description = "the wiki compiler, the Quartz viewer, the workbench and the wiki backup (a SURFACE); the `open-brain` and `research` products enable it, and --headless drops it"
+opt_in      = true
 
 [planes.ob1.profiles.notebook]
-description = "the Open Notebook trio: surrealdb + open_notebook + its backup (a SURFACE)"
+description = "the Open Notebook trio: surrealdb + open_notebook + its backup; a SURFACE of the `research` product, and an engine PROFILE of `digest` (openbrain-podcast renders through it)"
+opt_in      = true
 
 # --------------------------------------------------------------------------
 [planes.agent-org]

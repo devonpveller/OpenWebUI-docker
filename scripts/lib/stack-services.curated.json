@@ -27,6 +27,16 @@
     "  note                  which no machine can derive. Edit the SIDECAR, then",
     "                        re-run `inventory --write`.",
     "",
+    "PROFILE FIELDS, and the one case where a row's `profile` is NOT derived:",
+    "  A row's `profile` normally comes from the compose render. For a plane whose",
+    "  compose file is a PINNED SUBMODULE, the manifest may name profiles the pinned",
+    "  commit does not carry yet - OB1's research / wiki / notebook are exactly that",
+    "  today (gitlink 5005197 declares only idea-refinery). There the `profile` in",
+    "  the curated sidecar is a DECLARATION: `inventory --check` prints it as",
+    "  `[declared, not rendered]` instead of calling it stale, and starts verifying",
+    "  it against the render the moment the gitlink bumps. For every plane whose",
+    "  compose lives in this repo the two must agree, and a mismatch is drift.",
+    "",
     "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
     "Some compose SERVICE keys differ from the container name (search: redis ->",
     "search-redis, gateway -> search-gateway, vpn -> search-vpn); the 'service' field",
@@ -87,7 +97,13 @@
     },
     "open-brain": {
       "plane": "ob1",
-      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values."
+      "note": "env_file is deliberately null: compose's project directory here is OB1/docker, so it auto-loads OB1/docker/.env. Passing the ROOT .env would override it with the wrong values. PROFILE-GATED since 2026-09-19 (sl-ob1-profiles): a bare `config` or `up` renders only the 20 core + always-on-scheduled services, so any tool reading this file must pass --profile research --profile wiki --profile notebook --profile idea-refinery to see all 30. The rows below carry a `profile` field wherever that applies.",
+      "profiles": [
+        "research",
+        "wiki",
+        "notebook",
+        "idea-refinery"
+      ]
     },
     "agent-org": {
       "plane": "agent-org",
@@ -212,13 +228,15 @@
         "container": "open_notebook",
         "project": "open-brain",
         "critical": false,
-        "note": "being retired (Quartz workbench); still live for podcasts"
+        "note": "being retired (Quartz workbench); still live for podcasts",
+        "profile": "notebook"
       },
       {
         "container": "surrealdb",
         "project": "open-brain",
         "critical": false,
-        "note": "open-notebook DB; WS-only, no HTTP health"
+        "note": "open-notebook DB; WS-only, no HTTP health",
+        "profile": "notebook"
       }
     ],
     "openbrain": [
@@ -273,12 +291,14 @@
       {
         "container": "openbrain-wiki",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-wiki-viewer",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-entity-worker",
@@ -294,13 +314,15 @@
         "container": "openbrain-research",
         "project": "open-brain",
         "critical": true,
-        "host_health": "http://127.0.0.1:8818/health"
+        "host_health": "http://127.0.0.1:8818/health",
+        "profile": "research"
       },
       {
         "container": "openbrain-curator",
         "project": "open-brain",
         "critical": false,
-        "host_health": "http://127.0.0.1:8816/health"
+        "host_health": "http://127.0.0.1:8816/health",
+        "profile": "research"
       },
       {
         "container": "openbrain-chunk-worker",
@@ -320,7 +342,8 @@
       {
         "container": "openbrain-workbench",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "openbrain-extract",
@@ -351,14 +374,15 @@
       {
         "container": "openbrain-podcast",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "note": "chain tail. Its enrichment and audio steps reach PROFILED services (RESEARCH_URL -> openbrain-research, ON_BASE -> open_notebook), so a digest chain run without --profile research --profile notebook produces no episode."
       },
       {
         "container": "openbrain-idea-refinery",
         "profile": "idea-refinery",
         "project": "open-brain",
         "critical": false,
-        "note": "Idea Refinery, behind the `idea-refinery` profile the manifest marks `default = true` (so every stack.py / stack.ps1 invocation passes it). Absent from this inventory until 2026-09-19 because the pre-commit verifier rendered WITHOUT profiles and could not see it; the watchdog therefore refused to route a repair for it."
+        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (documentation/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure. sl-driver-parity reached the same row from the other side and the reason is worth keeping: the pre-commit verifier rendered WITHOUT profiles, so this container was invisible to it and the watchdog refused to route a repair for a container that had been up for days."
       }
     ],
     "backups": [
@@ -402,12 +426,14 @@
       {
         "container": "openbrain-wiki-backup",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "wiki"
       },
       {
         "container": "open-notebook-backup",
         "project": "open-brain",
-        "critical": false
+        "critical": false,
+        "profile": "notebook"
       },
       {
         "container": "mattermost-db-backup",

@@ -1395,11 +1395,22 @@ def test_the_shipped_inventory_is_the_shape_its_consumers_read():
 def test_the_profile_flags_each_plane_gets_are_pinned(root):
     """Today's set, from the REAL manifest. Changing it is a deliberate edit.
 
-    ob1 is the one that matters: `--profile idea-refinery` is what stack.ps1
-    passed on every invocation and what starts all thirty OB1 containers on the
-    base this was written against. If a later item puts more OB1 services behind
-    more profiles, this test is where "the shim now starts fewer containers"
-    surfaces.
+    ob1 is the one that matters, and this expectation MOVED when sl-ob1-profiles
+    merged: from `[idea-refinery]` to `[idea-refinery, research]`. Not a
+    regression - that item declared `idea-refinery requires research` (the drain's
+    only engine is openbrain-research, so the profile the driver always passes
+    starts a queue that can never empty without it) and `run_profiles` closes over
+    `requires`.
+
+    It changes NOTHING about what starts today: the pinned OB1 gitlink (5005197)
+    declares only `idea-refinery`, so compose ignores `--profile research`, and
+    `up --all` still brings up the same thirty containers. After the gitlink bumps
+    it does matter - see `inventory --check`'s `[declared, not rendered]` block and
+    finding F18 for the one-time `stack.py init --product research` the operator
+    runs at that point.
+
+    If a later item puts more OB1 services behind more profiles, this test is
+    where "the shim now starts fewer containers" surfaces.
     """
     _code, out, _r = run(root, "up", "--all", "--dry-run")
     flags = {}
@@ -1407,7 +1418,7 @@ def test_the_profile_flags_each_plane_gets_are_pinned(root):
         parts = line.split()
         plane = parts[parts.index("-f") + 1]
         flags[plane] = [parts[i + 1] for i, tok in enumerate(parts) if tok == "--profile"]
-    assert flags["OB1/docker/docker-compose.yml"] == ["idea-refinery"]
+    assert flags["OB1/docker/docker-compose.yml"] == ["idea-refinery", "research"]
     assert all(not v for k, v in flags.items() if k != "OB1/docker/docker-compose.yml")
 
 
@@ -1424,9 +1435,10 @@ def test_a_planes_compose_profiles_are_unioned_into_any_flags_the_driver_passes(
     manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
     state = stack.State.default()
 
-    # ob1 gets a flag (idea-refinery is `default`), but reads its OWN env file,
-    # which has no COMPOSE_PROFILES - so nothing is unioned in.
-    assert stack.effective_profiles(manifest, state, root, "ob1") == ["idea-refinery"]
+    # ob1 gets its flags (idea-refinery is `default`, research comes in through
+    # that profile's `requires`), but reads its OWN env file, which has no
+    # COMPOSE_PROFILES - so nothing is unioned in.
+    assert stack.effective_profiles(manifest, state, root, "ob1") == ["idea-refinery", "research"]
     # inference gets NO flag today, so compose reads COMPOSE_PROFILES itself.
     assert stack.effective_profiles(manifest, state, root, "inference") == []
     # ...but the moment anything enables a profile there, the env's come too.
@@ -1456,19 +1468,21 @@ def test_every_profile_the_real_manifest_declares_is_accounted_for():
 
 
 def test_an_unknown_key_in_a_profile_table_is_tolerated(mini_root):
-    """A profile table may grow keys this item does not know about.
+    """A profile table may grow keys the deployment gate does not know about.
 
-    `sl-ob1-profiles` adds `requires` to profile tables (a profile that pulls in
-    another). Whichever of the two lands second has enough to adapt without the
-    accounting gate ALSO refusing the new key, so the gate reads the three
-    deployment flags and ignores everything else.
+    Written when `requires` was the unknown key - `sl-ob1-profiles` was in flight
+    and had to be able to add it without this item's accounting gate refusing it.
+    `requires` is real and validated now (that item merged), so the case moves to
+    a key that IS unknown. The rule it pins is unchanged and is the reason the two
+    items merged without touching each other here: the gate reads the three
+    deployment flags and ignores every other key.
     """
     curated_file(mini_root)
     manifest_path = mini_root / stack.MANIFEST_NAME
     manifest_path.write_text(
         manifest_path.read_text(encoding="utf-8").replace(
             'description = "the idea-refinery services"',
-            'description = "the idea-refinery services"\nrequires    = ["research"]',
+            'description = "the idea-refinery services"\nowner       = "the digest chain"',
         ),
         encoding="utf-8",
     )
@@ -1477,6 +1491,39 @@ def test_an_unknown_key_in_a_profile_table_is_tolerated(mini_root):
     assert manifest.unaccounted_profiles("ob1") == []
     code, out, _c = inventory(mini_root, "--write")
     assert code == 0, out
+
+
+def test_a_profile_requires_edge_is_closed_over_and_validated(mini_root):
+    """`requires`, the key sl-ob1-profiles added, through THIS item's paths.
+
+    Two halves: the closure reaches drive time (so `up` passes the prerequisite),
+    and an edge naming a profile that does not exist is refused at load.
+    """
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    base = manifest_path.read_text(encoding="utf-8")
+    manifest_path.write_text(
+        base.replace(
+            'description = "the idea-refinery services"\ndefault     = true',
+            'description = "the idea-refinery services"\ndefault     = true\n'
+            'requires    = ["research"]\n\n[planes.ob1.profiles.research]\n'
+            'description = "the research engine"\nopt_in      = true',
+        ),
+        encoding="utf-8",
+    )
+    manifest = stack.Manifest.load(manifest_path)
+    state = stack.State.default()
+    assert stack.effective_profiles(manifest, state, mini_root, "ob1") == ["idea-refinery", "research"]
+
+    manifest_path.write_text(
+        base.replace(
+            'description = "the idea-refinery services"',
+            'description = "the idea-refinery services"\nrequires    = ["nonesuch"]',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(stack.Refusal) as caught:
+        stack.Manifest.load(manifest_path)
+    assert "requires unknown profile 'nonesuch'" in str(caught.value)
 
 
 def test_a_sidecar_row_may_omit_project_and_the_render_fills_it_in(mini_root):
@@ -1510,3 +1557,118 @@ def test_a_row_in_no_render_at_all_must_name_its_project(mini_root):
     assert code != 0
     assert "NO `project` for typo-svc" in out
     assert "not declared in any plane's compose file" in out
+
+
+# --------------------------------------------------------------------------
+# a PINNED SUBMODULE may declare profiles its pinned commit does not carry
+# --------------------------------------------------------------------------
+#
+# The sl-ob1-profiles / sl-driver-parity seam. That item made OB1's research,
+# wiki and notebook profiles real on the OB1 BRANCH and declared them in the
+# manifest; the gitlink still pins 5005197, whose compose declares only
+# `idea-refinery`. Calling that drift would be the check lying, and dropping the
+# declaration would lose something the watchdog and the coverage guard read.
+
+
+def submodule_root(mini_root: Path) -> Path:
+    """The mini tree, with ob1's compose declared as a submodule path."""
+    (mini_root / ".gitmodules").write_text(
+        '[submodule "OB1"]\n\tpath = OB1\n\turl = https://example.invalid/OB1.git\n',
+        encoding="utf-8",
+    )
+    return mini_root
+
+
+def test_only_a_pinned_submodule_gets_the_declared_not_rendered_treatment(mini_root):
+    manifest = stack.Manifest.load(mini_root / stack.MANIFEST_NAME)
+    assert stack.is_pinned_submodule(submodule_root(mini_root), "OB1/docker/docker-compose.yml")
+    # ...and nothing else. A plane whose compose lives in this repo must agree
+    # with the manifest, because both land in the same commit.
+    for plane in ("inference", "frontend", "memory", "search", "coder", "agent-org"):
+        assert not stack.is_pinned_submodule(mini_root, manifest.plane(plane)["compose"])
+
+
+def test_a_profile_the_pinned_submodule_lacks_is_reported_not_failed(mini_root):
+    submodule_root(mini_root)
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            'description = "the idea-refinery services"\ndefault     = true',
+            'description = "the idea-refinery services"\ndefault     = true\n\n'
+            '[planes.ob1.profiles.wiki]\ndescription = "the wiki surface"\nopt_in      = true',
+        ),
+        encoding="utf-8",
+    )
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    # the row DECLARES a profile the pinned render does not carry
+    rows["openbrain"].append({"container": "openbrain-wiki", "profile": "wiki",
+                              "project": "open-brain", "critical": False})
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["OB1/docker/docker-compose.yml"]["services"]["openbrain-wiki"] = {
+        "container_name": "openbrain-wiki"          # no `profiles` - the pinned commit
+    }
+    curated_file(mini_root, rows=rows)
+
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code == 0, out
+    assert "declared, not rendered" in out
+    assert "PROFILE 'wiki'" in out
+    assert "openbrain-wiki: `profile: wiki` is declared" in out
+    # the operator's one-time step at the gitlink bump is named, not implied
+    assert "init --product research" in out
+    # and the declaration survives into the generated file
+    written = {r["container"]: r for g in generated(mini_root)["planes"].values() for r in g}
+    assert written["openbrain-wiki"]["profile"] == "wiki"
+
+
+def test_the_same_mismatch_in_a_NON_submodule_plane_is_still_drift(mini_root):
+    """The rule must not become a blanket excuse."""
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            'description = "the llama.cpp upstreams; COMPOSE_PROFILES in the root .env turns it on"',
+            'description = "a profile the compose file does not have"',
+        ),
+        encoding="utf-8",
+    )
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["inference/docker-compose.yml"]["profiles"] = []
+    render["inference/docker-compose.yml"]["services"]["llama-cpp-upstream"].pop("profiles")
+    curated_file(mini_root)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "PROFILE 'local' is declared" in out
+    assert "declared, not rendered" not in out
+
+
+def test_a_curated_profile_the_manifest_never_declared_is_still_drift(mini_root):
+    """`[declared, not rendered]` covers a real declaration, not a typo."""
+    submodule_root(mini_root)
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["openbrain"].append({"container": "openbrain-wiki", "profile": "wikki",
+                              "project": "open-brain", "critical": False})
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["OB1/docker/docker-compose.yml"]["services"]["openbrain-wiki"] = {
+        "container_name": "openbrain-wiki"
+    }
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code != 0
+    assert "STALE `profile` for openbrain-wiki" in out
+
+
+def test_the_shipped_manifest_accounts_for_the_three_ob1_profiles_as_opt_in():
+    """They are surfaces and engines a PRODUCT enables - never `default`.
+
+    `default` survives --headless, so marking wiki or notebook default would make
+    `enable open-brain --headless` a no-op for this plane, which is the entire
+    point of the research product's surfaces split.
+    """
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+    assert sorted(manifest.opt_in_profiles("ob1")) == ["notebook", "research", "wiki"]
+    assert manifest.pending_profiles("ob1") == []
+    assert manifest.unaccounted_profiles("ob1") == []
+    # and the requires edge sl-ob1-profiles added is still enforced
+    assert manifest.profile_requires("ob1", "idea-refinery") == ["research"]
+    assert manifest.profile_closure("ob1", {"idea-refinery"}) == {"idea-refinery", "research"}

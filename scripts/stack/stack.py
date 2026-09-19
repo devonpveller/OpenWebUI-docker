@@ -1338,6 +1338,39 @@ class Render(NamedTuple):
     profiles: list   # every profile the compose file declares
     available: bool  # False when the compose file is not on disk
     why: str         # why not, when unavailable
+    pinned: bool = False  # the compose file comes from a pinned submodule
+
+
+def submodule_paths(root: Path) -> list[str]:
+    """Repo-relative paths declared in .gitmodules, forward slashes, no trailing /.
+
+    Read rather than assumed: `git submodule` is not available to a driver that
+    has to run with nothing but Python and Docker, and .gitmodules is committed.
+    """
+    path = root / ".gitmodules"
+    if not path.is_file():
+        return []
+    out = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        key, sep, value = raw.partition("=")
+        if sep and key.strip() == "path":
+            out.append(value.strip().replace("\\", "/").rstrip("/"))
+    return out
+
+
+def is_pinned_submodule(root: Path, compose_rel: str) -> bool:
+    """Does this plane's compose file come from a submodule pinned to a commit?
+
+    It decides whether a manifest-declared profile that the RENDER does not carry
+    is drift or simply not-yet-pinned. For a plane whose compose file sits in this
+    repo the two files land in the same commit and MUST agree - a mismatch is an
+    error. OB1 is a submodule pinned by gitlink, so the manifest can legitimately
+    describe the branch the gitlink will move to, and the difference resolves when
+    someone bumps it. Calling that "drift" would be false, and suppressing it
+    everywhere would blind the check for the seven planes where it is real.
+    """
+    first = compose_rel.replace("\\", "/").split("/")[0]
+    return first in submodule_paths(root)
 
 
 def render_env_path(manifest: Manifest, root: Path, plane: str) -> Path:
@@ -1359,6 +1392,7 @@ def render_project(manifest: Manifest, root: Path, plane: str, capture) -> Rende
         return Render(
             {}, [], False,
             f"{compose_rel} is not on disk (OB1 is a submodule - `git submodule update --init`)",
+            is_pinned_submodule(root, compose_rel),
         )
 
     base = ["docker", "compose", "-f", compose_rel,
@@ -1399,7 +1433,7 @@ def render_project(manifest: Manifest, root: Path, plane: str, capture) -> Rende
                 {str(port.get("published")) for port in (spec.get("ports") or []) if port.get("published")}
             ),
         }
-    return Render(services, profiles, True, "")
+    return Render(services, profiles, True, "", is_pinned_submodule(root, compose_rel))
 
 
 class Inventory:
@@ -1410,8 +1444,11 @@ class Inventory:
         self.root = root
         self.capture = capture
         self.curated = self._load_curated()
+        self._plane_of: dict = {}
         self.drift: list[str] = []
         self.skipped: list[str] = []
+        # Not drift and not silence: a third bucket, printed by name.
+        self.declared_not_rendered: list[str] = []
 
     def _load_curated(self) -> dict:
         path = self.root / CURATED_REL
@@ -1430,6 +1467,7 @@ class Inventory:
     def build(self) -> dict:
         projects = self.curated.get("projects") or {}
         self._check_plane_coverage(projects)
+        self._plane_of = {name: spec["plane"] for name, spec in projects.items()}
 
         renders = {}
         for project, spec in projects.items():
@@ -1572,12 +1610,32 @@ class Inventory:
                 derived["profile"] = profiles[0]
             elif profiles:
                 derived["profiles"] = sorted(profiles)
-            for key in ("service", "profile", "profiles"):
-                if curated_row.get(key) != derived.get(key):
-                    self.drift.append(
-                        f"STALE `{key}` for {container} in {CURATED_REL.as_posix()}: it records "
-                        f"{json.dumps(curated_row.get(key))}, the render says {json.dumps(derived.get(key))}"
-                    )
+
+            # A container row's `profile` is DERIVED where the render carries one
+            # and DECLARED where the plane's compose is a pinned submodule that
+            # does not carry it yet. Nine OB1 rows are in the second state today:
+            # openbrain-wiki and friends sit behind `wiki` on the OB1 branch, and
+            # the gitlink still points at a commit with no such profile, so the
+            # render reports none. Calling the curated value STALE there would be
+            # the check lying; dropping it would lose a true declaration that the
+            # watchdog and the coverage guard both read.
+            unpinned = self.unpinned_profiles(rendered_project and self._plane_of.get(rendered_project),
+                                              renders[rendered_project]) if rendered_project in renders else set()
+            declared_profile = curated_row.get("profile")
+            if declared_profile and not derived.get("profile") and declared_profile in unpinned:
+                self.declared_not_rendered.append(
+                    f"{container}: `profile: {declared_profile}` is declared in "
+                    f"{CURATED_REL.as_posix()} and the pinned compose carries no profile for it"
+                )
+                derived["profile"] = declared_profile
+            else:
+                for key in ("service", "profile", "profiles"):
+                    if curated_row.get(key) != derived.get(key):
+                        self.drift.append(
+                            f"STALE `{key}` for {container} in {CURATED_REL.as_posix()}: it records "
+                            f"{json.dumps(curated_row.get(key))}, the render says "
+                            f"{json.dumps(derived.get(key))}"
+                        )
             row.update(derived)
         else:
             render = renders.get(project)
@@ -1653,12 +1711,33 @@ class Inventory:
                     "bare `up` will not start what it gates and nothing says that was intended."
                 )
 
+    def unpinned_profiles(self, plane: str, render: Render) -> set:
+        """Profiles the manifest declares that the PINNED compose does not carry.
+
+        Empty for every plane whose compose file lives in this repo - there the
+        two must agree. For ob1 it is how `research` / `wiki` / `notebook` are
+        described today: real on the OB1 branch, absent from the commit the
+        gitlink pins (5005197), and verified automatically the moment it bumps.
+        """
+        if not (render.available and render.pinned):
+            return set()
+        pending = set(self.manifest.pending_profiles(plane))
+        return (set(self.manifest.profiles(plane)) - pending) - set(render.profiles)
+
     def _check_profiles(self, plane: str, render: Render) -> None:
         pending = set(self.manifest.pending_profiles(plane))
         declared = set(self.manifest.profiles(plane)) - pending
         found = set(render.profiles)
         compose_rel = self.manifest.plane(plane)["compose"]
-        for profile in sorted(declared - found):
+        unpinned = self.unpinned_profiles(plane, render)
+        for profile in sorted(unpinned):
+            self.declared_not_rendered.append(
+                f"PROFILE '{profile}' ([planes.{plane}.profiles] in {MANIFEST_NAME}) is not in the PINNED "
+                f"{compose_rel}. Declared, not rendered - it is real on the submodule's branch and the "
+                "gitlink has not moved. Verified automatically once it does; until then a bare `up` neither "
+                "passes nor needs it"
+            )
+        for profile in sorted(declared - found - unpinned):
             self.drift.append(
                 f"PROFILE '{profile}' is declared under [planes.{plane}.profiles] in {MANIFEST_NAME} but "
                 f"{compose_rel} declares no such profile (mark it `pending = true` if the item that adds "
@@ -1714,6 +1793,15 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
 
     for note in inventory.skipped:
         console.line(f"  [ -- ] NOT VERIFIED - {note}")
+    for note in inventory.declared_not_rendered:
+        console.line(f"  [ ~~ ] declared, not rendered - {note}")
+    if inventory.declared_not_rendered:
+        console.line(
+            "  [ ~~ ] ^ those resolve themselves when the submodule gitlink bumps. AT THAT BUMP the "
+            "profiles start gating real services, so run `python scripts/stack/stack.py init --product "
+            "research --force` (or `enable research`) once, or a bare `up` will start fewer containers "
+            "than it does today."
+        )
 
     if inventory.drift:
         for line in inventory.drift:

@@ -1,34 +1,54 @@
 {
   "_comment": [
-    "Canonical service inventory for the ai-stack health checkers \u2014 the single",
-    "source of truth for WHAT to check, to stop the three checkers from drifting.",
-    "Consumed directly by status_check.py (data-driven liveness loop). The",
-    "PowerShell monitor (stack-watchdog.ps1) and quick-fixes.bat keep their",
-    "bespoke probe/recovery logic but should be reconciled against this list when",
-    "containers are added/removed (alongside compose + recovery scripts + stack-map,",
-    "per CLAUDE.md's three-place convention).",
+    "GENERATED FILE - do not hand-edit. Regenerate with:",
+    "    python scripts/stack/stack.py inventory --write",
+    "and verify with `inventory --check`, which the pre-commit check",
+    "scripts/checks/check-project-configs.ps1 and the ci.yml `stack-driver` job both run.",
+    "",
+    "Canonical service inventory for the ai-stack health checkers - the single",
+    "source of truth for WHAT to check, to stop the checkers from drifting.",
+    "Consumed by scripts/recovery/status_check.py (data-driven liveness loop) and by",
+    "scripts/checks/stack-watchdog.ps1, which routes EVERY container repair through the",
+    "`projects` map below, so a plane split cannot leave remediation pointing at a",
+    "project that no longer owns the container - which is exactly what Part K did,",
+    "silently, for 22 self-heal paths between 2026-08-21 and 2026-08-28.",
+    "",
+    "WHERE EACH FIELD COMES FROM (sl-driver-parity, 2026-09-19):",
+    "  projects.*            stack.manifest.toml - the compose file, the --env-file and",
+    "                        the runnable command line. A plane the manifest marks",
+    "                        `manual` (the portal) is deliberately absent: the watchdog",
+    "                        must not auto-repair a plane a human starts by hand.",
+    "  container / service   the compose RENDER, with every declared profile switched on",
+    "  profile               so profile-gated containers appear too. Rendering WITHOUT",
+    "                        profiles is why the old verifier never saw",
+    "                        openbrain-idea-refinery.",
+    "  critical, host_health scripts/lib/stack-services.curated.json - hand-owned",
+    "  stale_pool_guard,     judgement, plus the plane GROUPING and the row order,",
+    "  note                  which no machine can derive. Edit the SIDECAR, then",
+    "                        re-run `inventory --write`.",
+    "",
+    "PROFILE FIELDS, and the one case where a row's `profile` is NOT derived:",
+    "  A row's `profile` normally comes from the compose render. For a plane whose",
+    "  compose file is a PINNED SUBMODULE, the manifest may name profiles the pinned",
+    "  commit does not carry yet - OB1's research / wiki / notebook are exactly that",
+    "  today (gitlink 5005197 declares only idea-refinery). There the `profile` in",
+    "  the curated sidecar is a DECLARATION: `inventory --check` prints it as",
+    "  `[declared, not rendered]` instead of calling it stale, and starts verifying",
+    "  it against the render the moment the gitlink bumps. For every plane whose",
+    "  compose lives in this repo the two must agree, and a mismatch is drift.",
     "",
     "IMPORTANT: 'container' is the docker container NAME (use with `docker inspect`).",
-    "For the ai-stack project some compose SERVICE keys differ from container names",
-    "(service redis->search-redis, gateway->search-gateway,",
-    "\u2014 see the 'service' field where it differs.",
-    "Open Brain is a SEPARATE compose project (open-brain); a plain `docker compose`",
-    "from the ai-stack dir cannot see it \u2014 probe its containers by name.",
+    "Some compose SERVICE keys differ from the container name (search: redis ->",
+    "search-redis, gateway -> search-gateway, vpn -> search-vpn); the 'service' field",
+    "is present exactly where they differ, and `docker compose` wants that key.",
+    "Open Brain is a SEPARATE compose project (open-brain) and a submodule; a checkout",
+    "without it renders nothing here and `inventory --check` says so by name rather",
+    "than passing quietly.",
     "",
-    "MACHINE-VERIFIED since 2026-08-22 (D-12): the pre-commit check",
-    "(check-project-configs.ps1) diffs every (container -> project) row against",
-    "the rendered compose configs - the inventory can no longer drift silently.",
-    "Curated fields (critical / host_health / notes) remain hand-owned.",
-    "",
-    "'projects' CARRIES THE COMPOSE INVOCATION (2026-08-28). Each entry has:",
-    "  file     - compose file, repo-root-relative. null means the project owns",
-    "             NO services and nothing can be started in it (only 'ai-stack').",
+    "  file     - compose file, repo-root-relative. null means the project owns NO",
+    "             services and nothing can be started in it (only 'ai-stack').",
     "  env_file - extra --env-file, or null when the project needs none.",
-    "  compose  - the same thing spelled as a human-runnable command line.",
-    "stack-watchdog.ps1 resolves every container repair through this map, so a",
-    "plane split cannot leave remediation pointing at a project that no longer",
-    "owns the container - which is exactly what Part K did, silently, for 22",
-    "self-heal paths between 2026-08-21 and 2026-08-28."
+    "  compose  - the same thing spelled as a human-runnable command line."
   ],
   "projects": {
     "ai-stack": {
@@ -155,28 +175,27 @@
     "search": [
       {
         "container": "search-redis",
-        "project": "search",
         "service": "redis",
+        "project": "search",
         "critical": false
       },
       {
         "container": "searxng",
         "project": "search",
-        "service": "searxng",
         "critical": false
       },
       {
         "container": "search-gateway",
-        "project": "search",
         "service": "gateway",
+        "project": "search",
         "critical": false,
         "host_health": "http://127.0.0.1:8085/healthz"
       },
       {
         "container": "search-vpn",
+        "service": "vpn",
         "project": "search",
         "critical": true,
-        "service": "vpn",
         "note": "Mullvad egress + kill-switch; ALL search-plane traffic"
       }
     ],
@@ -249,7 +268,7 @@
         "project": "open-brain",
         "critical": false,
         "host_health": "http://127.0.0.1:8062/health",
-        "note": "Ops door (PLAN \u00a71.4): a second openbrain-gateway instance with its own OPS_GATEWAY_KEY, allowlisting the agent_memory_* tools for HOST processes that cannot reach openbrain-mcp (it publishes no host port). Stateless - no backup sidecar. Not critical: without it host callers lose the agent-memory lane; nothing else degrades."
+        "note": "Ops door (PLAN §1.4): a second openbrain-gateway instance with its own OPS_GATEWAY_KEY, allowlisting the agent_memory_* tools for HOST processes that cannot reach openbrain-mcp (it publishes no host port). Stateless - no backup sidecar. Not critical: without it host callers lose the agent-memory lane; nothing else degrades."
       },
       {
         "container": "openbrain-rest",
@@ -356,7 +375,7 @@
         "profile": "idea-refinery",
         "project": "open-brain",
         "critical": false,
-        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (documentation/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure."
+        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (documentation/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure. sl-driver-parity reached the same row from the other side and the reason is worth keeping: the pre-commit verifier rendered WITHOUT profiles, so this container was invisible to it and the watchdog refused to route a repair for a container that had been up for days."
       }
     ],
     "backups": [
@@ -423,16 +442,16 @@
       },
       {
         "container": "ao-worker-1-journals-backup",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
       },
       {
         "container": "ao-worker-2-journals-backup",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "Worker journal tarball sidecar (profile-gated with the pool it serves)."
       }
     ],
@@ -464,58 +483,58 @@
       },
       {
         "container": "ao-worker-1",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "Worker pool slot 1. Stateless BY DESIGN - the flail guard forks a fresh session; what persists is curated memory, not context."
       },
       {
         "container": "ao-worker-2",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "Worker pool slot 2."
       },
       {
         "container": "ao-ot-1",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "open-terminal executor for worker 1. GIT_DISCOVERY_ACROSS_FILESYSTEM=1 lives here."
       },
       {
         "container": "ao-ot-2",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "open-terminal executor for worker 2."
       },
       {
         "container": "ao-git-egress",
+        "profile": "workers",
         "project": "agent-org",
         "critical": false,
-        "profile": "workers",
         "note": "Git proxy for the worker pool. Hard-denies pushes to main/master (production-branch guard)."
       },
       {
         "container": "ao-egress",
+        "profile": "cloud",
         "project": "agent-org",
         "critical": false,
-        "profile": "cloud",
         "note": "Egress proxy for the cloud slice."
       },
       {
         "container": "llm-gateway-cloud",
+        "profile": "cloud",
         "project": "agent-org",
         "critical": false,
-        "profile": "cloud",
         "note": "Cloud LiteLLM slice; profile-gated and normally down."
       },
       {
         "container": "llm-gateway-cloud-db",
+        "profile": "cloud",
         "project": "agent-org",
         "critical": false,
-        "profile": "cloud",
         "note": "Spend ledger for the cloud slice."
       }
     ]

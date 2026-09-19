@@ -16,6 +16,11 @@ AST check, and the whole suite is hermetic - the docker call is injected, so no
 test ever reaches a daemon.
 
 `stack.ps1` **is a shim over this driver** since 2026-09-19 (`sl-driver-parity`).
+`sl-ob1-profiles` had given that script's plane registry four OB1 profiles to keep
+the thirty running containers starting; the registry is gone, and the same set is
+expressed here instead - `idea-refinery` is `default` and `requires` `research`,
+so `up` passes both, which against the pinned gitlink renders exactly the same
+thirty services.
 It forwards its arguments and exits with the driver's code; it holds no plane
 registry, no probe and no ordering of its own, so there is nothing in it left to
 drift. It survives because runbooks, plane READMEs and compose comments say
@@ -346,6 +351,7 @@ Exactly one of the two flags is required.
 |---|---|
 | `projects.*` (compose file, `--env-file`, the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
 | `container`, `service`, `profile` | the compose **render**, with every declared profile switched on |
+| `profile` | the render, EXCEPT where the plane's compose file is a pinned submodule that does not carry the profile yet - there the sidecar's value is a DECLARATION (see below) |
 | `project` | the render too - a sidecar row may omit it. Record it only where the render cannot answer: a project whose compose file may be absent (`open-brain` - CI has no submodule). Where recorded, it is audited against the render |
 | the plane GROUPING and row order; `critical`, `host_health`, `stale_pool_guard`, `note` | `scripts/lib/stack-services.curated.json`, hand-owned. Edit **that** file, then `--write` |
 
@@ -364,6 +370,31 @@ contradicts; a stale `service` or `profile` recorded in the sidecar; a plane wit
 no project; a `manual` plane given one; a published host port the manifest's
 `[planes.*.ports]` does not declare, or a declared port nothing publishes; and
 the profile rules above.
+
+#### `[declared, not rendered]` - a pinned submodule that has not caught up
+
+A plane whose compose file lives in **this** repo must agree with the manifest:
+both land in the same commit, so a manifest-declared profile the render does not
+carry is drift, and a curated `profile` on a row the render gives no profile for
+is stale. `ob1` is different - `OB1/docker/docker-compose.yml` comes from a
+submodule pinned by gitlink, so the manifest can legitimately describe the branch
+the gitlink will move to.
+
+Today `stack.manifest.toml` declares `research`, `wiki` and `notebook` on that
+plane (sl-ob1-profiles) while the pinned commit `5005197` declares only
+`idea-refinery`. `inventory --check` prints those, and the nine container rows
+that name them, as `[ ~~ ] declared, not rendered` and **passes**; the moment the
+gitlink bumps, the render carries them and every one is verified for real. The
+submodule set is read from `.gitmodules`, so this is not an `ob1` special case in
+the code - and a curated `profile` the MANIFEST never declared is still drift,
+so the exemption cannot launder a typo.
+
+**One thing the operator owes at that bump**, which `--check` says out loud every
+time until it happens: run `python scripts/stack/stack.py init --product research
+--force` (or `enable research`) once. Until the bump, `wiki` and `notebook` gate
+nothing - compose ignores a profile it does not know, and `up --all` starts the
+same thirty OB1 containers it does today (measured). After it, they gate seven
+running containers that a bare `up` would no longer start.
 
 **Rendering with every profile is the point.** The check this replaced rendered
 without any, so it could not see a profile-gated container at all - which is how
@@ -434,5 +465,7 @@ contexts - the `--context` prefix is passed through and nothing more
 (`cluster-transition`). Archiving `stack.ps1`: it stays as the shim until every
 caller has moved. Adding compose profiles to a plane - the manifest still only
 *declares* `frontend`'s pending `gpu`/`tailscale` (`sl-frontend-solo`) and
-`ob1`'s pending `research`/`wiki`/`notebook` (`sl-ob1-profiles`). Per-plane
+`ob1`'s `research`/`wiki`/`notebook` are real in the manifest since
+`sl-ob1-profiles`, and not yet in the pinned submodule - see
+*[declared, not rendered]* above. Per-plane
 `.env` files (`sl-env-split`): this item still encodes the single root `.env`.

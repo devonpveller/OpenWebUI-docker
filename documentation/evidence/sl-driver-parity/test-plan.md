@@ -1,11 +1,12 @@
 # sl-driver-parity — test plan
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
-**Branch:** `work/sl-driver-parity`, base `development` @ `be00d53`
-**Attempt:** 2 — attempt 1 failed T9 only (three false doc claims and a runbook
-row that could not be followed). What changed is listed under *Attempt 2* below;
-T1-T8 and T10 passed and are unchanged, but **re-run them** — the branch was
-rebased onto `be00d53` and the driver changed.
+**Branch:** `work/sl-driver-parity`, base `development` @ `f2bb38f`
+**Attempt:** 4. Attempt 3 PASSED 10/10 and was withdrawn by its developer, not
+failed: `development` moved to `f2bb38f` (`sl-ob1-profiles`) and the two items
+share six files. Per D18 a rebase that rewrites commits needs a re-test at the
+new tip. **Re-run every case** — the merge changed the driver, the manifest and
+the inventory — and run the new **T11**, which covers the merged behaviours.
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-driver-parity`
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-driver-parity.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-driver-parity-findings.md`
@@ -20,7 +21,8 @@ Artifacts under test:
 | `scripts/lib/stack-services.curated.json` | **new** — the hand-owned half of the inventory |
 | `scripts/lib/stack-services.json` | now GENERATED from the manifest + the sidecar + the compose renders |
 | `scripts/checks/check-project-configs.ps1` | its inline row diff replaced by `stack.py inventory --check` |
-| `stack.manifest.toml` | `opt_in` profile flag; `inference.local` no longer `pending` |
+| `stack.manifest.toml` | `opt_in` profile flag; `inference.local` no longer `pending`; the three OB1 profiles `sl-ob1-profiles` made real are now `opt_in` |
+| `scripts/checks/check-watchdog-repair-targets.ps1` | renders with profiles (declared out-of-artifact-list change — finding F15) |
 | `.github/workflows/ci.yml` | new `stack-driver` job |
 | `scripts/stack/README.md`, `README.md`, `CLAUDE.md`, `documentation/runbooks/SERVICE-LIFECYCLE.md` | docs |
 
@@ -728,6 +730,122 @@ manifest edit plus `inventory --write`, and the tester should re-run T3a and T8.
 
 ---
 
+---
+
+## T11 — the sl-ob1-profiles merge: both items' behaviours survive
+
+*New for attempt 4. Everything here is read-only.*
+
+### T11a — every OB1 profile is accounted for, and none is `default`
+
+```bash
+python -c "
+import sys, pathlib; sys.path.insert(0,'scripts/stack'); import stack
+m = stack.Manifest.load(pathlib.Path('stack.manifest.toml'))
+for p in m.order:
+    print(p, 'default=', m.default_profiles(p), 'opt_in=', m.opt_in_profiles(p),
+          'pending=', m.pending_profiles(p), 'UNACCOUNTED=', m.unaccounted_profiles(p))
+print('closure:', m.profile_closure('ob1', {'idea-refinery'}))
+"
+```
+
+**Pass:** every plane's `UNACCOUNTED` is empty — in particular `ob1`, which was
+the collision (`sl-ob1-profiles` made the three real and this item's gate demands
+a deployment flag). `ob1` shows `default=['idea-refinery']`,
+`opt_in=['research','wiki','notebook']`, `pending=[]`, and the closure is
+`{'idea-refinery','research'}`.
+**Fail:** any `UNACCOUNTED` entry; `wiki` or `notebook` marked `default` (that
+would make `enable open-brain --headless` a no-op for the plane, defeating the
+surfaces split); the `requires` closure not reaching `research`.
+
+### T11b — `[declared, not rendered]`, and that it is bounded
+
+```bash
+git ls-tree development OB1                                     # expect 5005197...
+docker compose -f OB1/docker/docker-compose.yml config --profiles   # expect: idea-refinery only
+python scripts/stack/stack.py inventory --check ; echo "exit=$?"
+```
+
+**Pass:** exit **0**, with three `[ ~~ ] declared, not rendered` lines naming
+`research`, `wiki` and `notebook`, nine more naming the container rows that
+declare them, and the closing line telling the operator to run
+`init --product research --force` at the gitlink bump. The `[OK]` line follows.
+**Fail:** a non-zero exit (the pinned submodule is not drift); OR silence — a
+pass with no `declared, not rendered` output would mean the rule became a blanket
+exemption. Also confirm the bound by reading `is_pinned_submodule`: the submodule
+set comes from `.gitmodules`, not from a hard-coded `ob1`.
+
+Then prove it cannot launder a mistake, in `$COPY`:
+
+```bash
+python -c "
+import json,pathlib
+p=pathlib.Path('scripts/lib/stack-services.curated.json'); d=json.loads(p.read_text(encoding='utf-8'))
+for r in d['planes']['openbrain']:
+    if r['container']=='openbrain-wiki': r['profile']='wikki'
+p.write_text(json.dumps(d,indent=2,ensure_ascii=False)+'
+',encoding='utf-8')"
+python scripts/stack/stack.py inventory --check ; echo "exit=$?"
+```
+
+**Pass:** exit non-zero with ``STALE `profile` for openbrain-wiki`` — a profile
+the MANIFEST never declared is drift even on a pinned-submodule plane.
+
+### T11c — the shim still starts today's thirty OB1 containers
+
+```bash
+python scripts/stack/stack.py up --all --dry-run | grep OB1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stack/stack.ps1 up --dry-run | grep OB1
+docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery --profile research config --services | wc -l
+docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery --profile research --profile wiki --profile notebook config --services | wc -l
+docker ps --format '{{.Names}}' | grep -cE 'openbrain|open_notebook|surrealdb|open-notebook'
+```
+
+**Pass:** both drivers print
+`docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery --profile research up -d`;
+both renders give **30**; **30** containers are running. `sl-ob1-profiles`'
+four-profile registry row has no landing place in a shim, and this is the proof
+that dropping it starts the same set — not an argument that it should.
+**Fail:** the two renders disagreeing; either differing from the running count;
+the OB1 line missing `research` (the `requires` closure is what puts it there).
+
+*Read the reasoning at `scripts/stack/stack.ps1`'s header and finding F18 — and
+note what F18 says about the gitlink bump. That is a deployment step this item
+deliberately does not take.*
+
+### T11d — sl-ob1-profiles' coverage guard is still there and still counts to 30
+
+The guard only runs when a `*.yml` is staged, so do this in `$COPY`:
+
+```bash
+git init -q . ; git add -A >/dev/null
+echo "" >> memory/docker-compose.yml
+git add memory/docker-compose.yml scripts/lib/stack-services.json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1
+```
+
+**Pass:** BOTH checks run — the coverage line
+`[rows verified/expected: inference:8/8 frontend:4/4 memory:3/3 search:4/4 coder:4/4 open-brain:30/30]`,
+the `NOT VERIFIED: project 'agent-org' ... no render target` line, AND this item's
+`[OK] scripts/lib/stack-services.json matches ...`.
+**Fail:** either missing. They answer different questions (finding F20) and
+deleting one was the tempting wrong move.
+
+### T11e — both suites, green together
+
+```bash
+python -m pytest scripts/stack -q      # expect 95 passed
+```
+
+**Pass:** 95. Four expectations moved deliberately in the merge and each says why
+in its own docstring: the pinned per-plane profile flags (`ob1` now gets two), the
+`effective_profiles` assertion, the unknown-key test (`requires` stopped being
+unknown, so it moved to a key that is), and a new `requires` test exercising
+closure plus the unknown-profile refusal.
+**Fail:** any failure; any expectation changed without a stated reason.
+
+---
+
 ## Out of scope for this item (do not fail it for these)
 
 - Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python — both keep
@@ -736,6 +854,8 @@ manifest edit plus `inventory --write`, and the tester should re-run T3a and T8.
 - Archiving `stack.ps1` — it stays as the shim until every caller has moved.
 - The probe set's known gaps, `open-terminal` above all: this item reproduced the
   fifteen probes one for one **including** what they do not cover. See finding F9.
+- The OB1 **gitlink bump** and the one-time `stack.py init --product research`
+  that follows it (finding F18). This item deploys nothing.
 - `ruff check .` from the repo root is now **clean** — the pre-existing `llm-queue`
   E501 that attempt 1's plan told you to expect was fixed by `sl-closeout`, which
   is in this branch's new base. Finding F4 records both states. Any violation is

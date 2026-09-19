@@ -30,6 +30,20 @@
 #   .\scripts\stack\stack.ps1 health           # functional probes across every plane
 #   .\scripts\stack\stack.ps1 stats            # inference demand + queue statistics
 #
+# WHERE sl-ob1-profiles' FOUR-PROFILE OB1 ROW WENT. That item (merged 2026-09-19)
+# changed this script's `$Projects` registry to pass
+# `--profile idea-refinery --profile research --profile wiki --profile notebook`
+# for OB1, so the pre-manifest driver kept starting the thirty containers running
+# on this host. The registry does not exist any more, so there is nowhere in this
+# file for that line to live; the SAME SET is expressed in the driver instead:
+# `idea-refinery` is `default = true` in stack.manifest.toml and `requires`
+# `research`, so `up` passes both. Measured 2026-09-19 against the PINNED OB1
+# gitlink (5005197, which declares only `idea-refinery`): two profiles and four
+# profiles render the same 30 services, and 30 are running. `wiki` and `notebook`
+# gate nothing until the gitlink bumps - at which point the operator runs
+# `stack.py init --product research` ONCE, which `inventory --check` says out loud
+# every time it runs until then.
+#
 # `restart` with no plane still refuses - the refusal is the DRIVER's
 # (stack.py cmd_restart), reached by forwarding "all" rather than reimplemented
 # here. The portal is still not managed (portal-on.ps1 / portal-off.ps1): the

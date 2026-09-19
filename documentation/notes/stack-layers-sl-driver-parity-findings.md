@@ -336,3 +336,103 @@ record what was true at the time rather than being kept current.
 This is a file outside the artifact list, like F15. It is fixed rather than only
 recorded because the three lines are instructions THIS branch falsified, and a
 plane README is exactly where the next person changing that plane starts.
+
+---
+
+## Added at the rebase onto `f2bb38f` (sl-ob1-profiles merged)
+
+## F18 — after the OB1 gitlink bumps, a bare `up` starts seven fewer containers unless the operator runs `init` once
+
+The seam between the two items, stated where the next person will look for it.
+
+`sl-ob1-profiles` declared `research` / `wiki` / `notebook` on the ob1 plane and
+gave `stack.ps1`'s registry all four profiles so the pre-manifest driver kept
+starting today's thirty containers. That registry no longer exists — this item's
+shim has no plane list — so the set is expressed through the driver instead:
+`idea-refinery` is `default = true` and `requires = ["research"]`, so `up` passes
+both.
+
+**Today that is exactly equivalent, and it is measured, not assumed [measured]:**
+
+```text
+$ git ls-tree development OB1
+160000 commit 5005197dd3ae85a2a4aba8bf142084cac2824759  OB1
+$ docker compose -f OB1/docker/docker-compose.yml config --profiles
+idea-refinery
+$ docker compose -f OB1/docker/docker-compose.yml \
+    --profile idea-refinery --profile research config --services | wc -l
+30
+$ docker compose -f OB1/docker/docker-compose.yml \
+    --profile idea-refinery --profile research --profile wiki --profile notebook \
+    config --services | wc -l
+30
+$ docker ps --format '{{.Names}}' | grep -cE 'openbrain|open_notebook|surrealdb|open-notebook'
+30
+```
+
+The pinned OB1 commit declares only `idea-refinery`; compose ignores a profile it
+does not know, so two flags and four flags render the same thirty, and thirty are
+running. `stack.ps1 up` and `stack.py up --all` both emit
+`--profile idea-refinery --profile research`.
+
+**After the gitlink bumps this stops being true.** `wiki` and `notebook` will then
+gate seven containers that ARE running today — `openbrain-wiki`,
+`openbrain-wiki-viewer`, `openbrain-workbench`, `openbrain-wiki-backup`,
+`open_notebook`, `surrealdb`, `open-notebook-backup` — and a bare `up` will not
+start them, because neither profile is `default` and neither should be (`default`
+survives `--headless`, which would make the research product's surfaces split
+meaningless).
+
+**The one-time step:** `python scripts/stack/stack.py init --product research
+--force` (or `enable research`), which writes them into `.stack/state.json` — a
+file this host does not have at all today. `inventory --check` prints that
+instruction on every run until the bump, next to the `[declared, not rendered]`
+lines, so it cannot be met cold. This is the wave-4 step; it is a deployment
+change and neither item makes it.
+
+## F19 — a pinned submodule can legitimately disagree with the manifest, and only it can
+
+The rule this item added rather than suppressing the noise or failing on it.
+
+A plane whose compose file lives in THIS repo must agree with `stack.manifest.toml`
+— both land in the same commit — so a declared profile the render lacks is drift.
+`ob1`'s compose comes from a gitlink-pinned submodule, so the manifest may describe
+the branch the gitlink will move to. `inventory --check` therefore has three
+buckets, not two: drift (fails), `NOT VERIFIED` (could not render at all), and
+`[declared, not rendered]` (a pinned submodule that has not caught up — passes,
+and starts being verified for real the moment the gitlink moves).
+
+Bounded deliberately, and tested in both directions: the submodule set is read from
+`.gitmodules` (`is_pinned_submodule`), so it is not an `ob1` special case; the same
+mismatch on any other plane is still drift; and a curated `profile` the MANIFEST
+never declared is still `STALE`, so the exemption cannot launder a typo.
+
+## F20 — the coverage guard and the generator check answer different questions, and both are kept
+
+`check-project-configs.ps1` now runs both, which looks like duplication and is not:
+
+* **`sl-ob1-profiles`' coverage guard** asks *did this render reach every inventory
+  row for the project?* It derives the expectation from the inventory, which the
+  render target cannot move, and it is what caught open-brain silently verifying
+  26 of 30 rows. It also prints `NOT VERIFIED` for a project with rows and no
+  render target — `agent-org`, which has never had one **[measured]**: the guard's
+  own output is `rows verified/expected: inference:8/8 frontend:4/4 memory:3/3
+  search:4/4 coder:4/4 open-brain:30/30` plus
+  `NOT VERIFIED: project 'agent-org' has 16 inventory row(s) and no render target`.
+* **This item's `inventory --check`** asks *is the whole file reproducible from the
+  manifest and the curated sidecar?* It renders all eight projects, `agent-org`
+  included.
+
+Neither subsumes the other: a file can be perfectly reproducible from inputs that
+were themselves derived from a render that quietly narrowed. Deleting either was
+available and would have been wrong.
+
+## F21 — a verification artifact, not a defect: `git show | python(text=True)` mojibakes UTF-8 on Windows
+
+While diffing the two inventories I read a committed blob with
+`subprocess.run(..., text=True)` and saw `PLAN Â§1.4` where the file has `§`.
+`text=True` decodes with the LOCALE codec (cp1252 here), not UTF-8. The file is
+fine — `git show ... | python -c "sys.stdin.buffer.read().decode('utf-8')"`
+round-trips it exactly. Recorded because for several minutes it looked like the
+generator was double-encoding notes, and the next person to compare blobs this way
+will see the same ghost.
