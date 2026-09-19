@@ -170,13 +170,26 @@ Citations OUTSIDE this item's own scope, found by the tree-wide sweep and
 **deliberately not edited** - they are other items' notes and rewriting another
 item's evidence is not this item's business. **For sl-readmes' closeout sweep:**
 
-| File:line | Cites | Correct as of d7fdc35 |
+| File:line | Cites | Where the CONSTRUCT is |
 |---|---|---|
-| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `frontend/docker-compose.yml:210`, for `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` | that construct is at **`:368`**; `:210` is now an AIOHTTP timeout comment |
-| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | `frontend/docker-compose.yml:108-114` (the NVIDIA reservation) | the reservation is at `:252-258` |
+| `documentation/notes/stack-layers-sl-closeout-findings.md:70` | `- RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT:-2}` | **`frontend/docker-compose.yml:373`** |
+| `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md:104` | the NVIDIA device reservation (`driver: nvidia` at `:261`) | **`frontend/docker-compose.yml:257-263`** |
 
-Both describe the pre-profile file and are true of the commit they were written
-against; they are stale only relative to this branch.
+Both originally cited the pre-profile file (`:210` and `:108-114`), which is
+true of the commit they were written against and stale relative to this branch.
+
+**CLOSED by `sl-readmes`, 2026-09-19.** Both notes were re-derived BY CONSTRUCT
+rather than by line, and **both already carry the correct numbers above** - they
+were fixed in the same pass that landed them, so nothing needed editing there.
+What was stale was this table itself: it said `:368` and `:252-258`, the numbers
+that were right when this note was written, and the frontend compose file has
+grown by five lines since. That is the failure mode this note exists to warn
+about, reproduced inside the warning. Re-derive with, and not by counting:
+
+```bash
+grep -n 'RETAIN_COUNT=${OPENWEBUI_BACKUP_RETAIN_COUNT' frontend/docker-compose.yml
+grep -n 'driver: nvidia' frontend/docker-compose.yml
+```
 
 **CORRECTION, and how it was got wrong** (attempt 1, caught by the tester).
 This entry previously claimed the opposite — that explicit naming survives, so

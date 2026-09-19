@@ -10,6 +10,26 @@ anchor. "A service" always lives in exactly one project
 (`frontend/ inference/ memory/ search/ coder/ portal/ OB1/docker/
 agent-org/docker/`).
 
+> ## The inventory of record is `stack.manifest.toml`
+>
+> One committed file declares every PLANE - its compose file, what it
+> `requires` to run, its `optional` edges, its `profiles`, its published
+> `ports`, the `keys` that must be non-blank and what the `host` must provide -
+> and every PRODUCT that groups planes into a vertical slice. `python
+> scripts/stack/stack.py` reads it; `scripts/stack/stack.ps1` is a shim with no
+> registry of its own. Per-host enablement lives in the gitignored
+> `.stack/state.json`, and **the driver never writes the manifest**.
+>
+> So a service-level change starts here: if the plane, port, profile, key or
+> host requirement you are adding is not in that file, nothing downstream can
+> know about it. The GENERATED companion is
+> `scripts/lib/stack-services.json` (row 8 below) - written by `stack.py
+> inventory --write` from the manifest, the curated sidecar and the compose
+> renders, and refused by `inventory --check` if hand-edited.
+>
+> Each plane also carries its own `README.md` with a "Changing this plane"
+> section naming the surfaces that plane actually appears on. Update it too.
+
 ## When you ADD a service (or move one between projects)
 
 Work top to bottom; every row is a file or system that will silently lie if
@@ -68,11 +88,13 @@ stack); keep old backup archives on the NAS even when the target is gone.
 
 ## When you PROFILE-GATE a service
 
-Four planes are profile-gated today: `frontend` (`stock` | `gpu` | `tailscale`,
-2026-09-19), `portal` (`internet`), `agent-org` (`workers`, `cloud`) and OB1
-(`idea-refinery`). A profiled service is INVISIBLE to anything that renders the
-plane without its profile, and that is exactly how a checker starts checking
-nothing. So, in the same commit:
+**Five** planes are profile-gated today, and row 8a above lists the same five:
+`frontend` (`stock` | `gpu` | `tailscale`, 2026-09-19), `inference` (`local`),
+`portal` (`internet`), `agent-org` (`workers`, `cloud`) and OB1
+(`idea-refinery` today, plus `research` / `wiki` / `notebook` declared in the
+manifest and not yet carried by the pinned gitlink). A profiled service is
+INVISIBLE to anything that renders the plane without its profile, and that is
+exactly how a checker starts checking nothing. So, in the same commit:
 
 - **Decide where the profile set comes from and say it out loud.** compose
   reads `COMPOSE_PROFILES` from **that plane's own `<plane>/.env`** (per-plane
@@ -118,7 +140,8 @@ nothing. So, in the same commit:
   running while the render denies it, keep checking and log why: a checker that
   goes silent on its own uncertainty is worse than one that cries wolf. Live
   example: `Test-TailscaleDeployed` in `scripts/checks/stack-watchdog.ps1` and
-  the matching skip in `scripts/stack/stack.ps1`'s `health` action.
+  the matching `tailscale_deployed()` skip in `HealthSweep.run()`
+  (`scripts/stack/stack.py`), which `stack.ps1 health` now forwards to.
 - **Two definitions of one container is a legitimate shape, and compose polices
   it.** `frontend` has `openwebui` (gpu) and `openwebui-stock` (stock) sharing
   one `container_name` and one data volume, because compose can gate a SERVICE
@@ -134,8 +157,13 @@ nothing. So, in the same commit:
 ## The one-command checks
 
 ```powershell
-.\scripts\stack\stack.ps1 health        # functional probes, all planes
+python scripts\stack\stack.py health           # 15 functional probes, all planes; exit code = failures
+python scripts\stack\stack.py doctor           # docker, compose, env files, blank keys, host requirements
+python scripts\stack\stack.py inventory --check  # manifest vs sidecar vs compose renders; writes nothing
 powershell scripts\stack\ob1-deploy.ps1 -Service <svc> -WhatIfOnly   # what a build: deploy WOULD do
 powershell scripts\checks\check-backup-coverage.ps1   # every byte has a sidecar
-# pre-commit runs: secrets, line endings, gateway routing, compose+ps1 parse
+# pre-commit (.githooks/pre-commit) runs, in this order: staged secrets, line
+# endings, doc placement, gateway-only LLM routing, the corpus write contract,
+# project configs (compose renders + inventory coverage), env_file scope, three
+# OB1 checks that fire only on a gitlink bump, and the attestation gate.
 ```
