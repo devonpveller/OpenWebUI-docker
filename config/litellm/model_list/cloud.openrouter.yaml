@@ -1,0 +1,49 @@
+# CLOUD model group — OpenRouter. OFF unless OPENROUTER_API_KEY is set.
+#
+# There is no `x-requires-profile` here on purpose: a cloud model needs no local
+# service, so the only thing that can make it real is its credential. Every
+# entry below references `os.environ/OPENROUTER_API_KEY`, and
+# config/litellm/assemble-config.py drops any model whose os.environ refs are
+# unset or empty. Blank key (the shipped default, .env.example) => these models
+# do not exist as far as /v1/models is concerned.
+#
+# ── TWO THINGS THE KEY ALONE DOES NOT GIVE YOU (read before setting it) ──
+#
+# 1. EGRESS. llm-gateway sits on `llm-net` and `llm-backend-net`, BOTH
+#    `internal: true`. It has no route to the internet, by design (supply-chain
+#    posture, LiteLLM-Proxy guide §19: the gateway makes no outbound calls).
+#    Setting OPENROUTER_API_KEY therefore makes these models LISTED but not
+#    REACHABLE until the operator also gives the gateway an egress path — which
+#    is a deliberate change to that posture, not a side effect of this file.
+#    Verified 2026-09-19 against inference/docker-compose.yml's network block.
+#
+# 2. THE TWO-GATEWAY DECISION. agent-org/config/litellm-cloud.config.yaml
+#    (Pc.1, governance OD-6 / agent-org PLAN §3.4) states the opposite policy in
+#    as many words: "The LOCAL llm-gateway is a DIFFERENT, air-gapped instance
+#    ... Do NOT add OpenRouter to it". agent-org's cloud lane runs its OWN
+#    LiteLLM behind ao-egress with its own master key and per-role budgets.
+#    This file is the MECHANISM asked for by stack-layers D11 (the gateway must
+#    be able to run cloud-only, e.g. on a node with no GPU); whether the local
+#    gateway is ever the thing that carries a cloud lane is an operator
+#    decision that has not been taken. Shipped blank so nothing changes today.
+#    See documentation/notes/stack-layers-sl-inference-split-findings.md.
+#
+# The model ids are PLACEHOLDERS (same pair agent-org picked at Pc.1) — replace
+# them with whatever the operator actually buys. `data_collection: deny` keeps
+# routing on no-log / zero-data-retention providers.
+
+model_list:
+  - model_name: cloud-large
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-72b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          data_collection: "deny"
+  - model_name: cloud-small
+    litellm_params:
+      model: openrouter/qwen/qwen-2.5-7b-instruct
+      api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          data_collection: "deny"
