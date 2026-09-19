@@ -187,7 +187,7 @@ services:
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
       - ACME_EMAIL=${ACME_EMAIL}
       # Server-side secret Caddy injects as X-Brain-Key when proxying
-      # /workbench/* to openbrain-workbench (G7). Set this in the main .env to
+      # /workbench/* to openbrain-workbench (G7). Set this in portal/.env to
       # the SAME value as OB1's MCP_ACCESS_KEY. Empty = the workbench rejects
       # every /workbench call (fail closed).
       - WORKBENCH_KEY=${WORKBENCH_KEY}

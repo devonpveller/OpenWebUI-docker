@@ -936,7 +936,7 @@ function Invoke-OracleOnStall([string]$i) {
     #
     # ADVISORY: a stall check that could not run must never block a tester from recording a
     # verdict. But it says SKIPPED and why - a check that quietly does nothing is the exact
-    # failure class this plan's sec 0 A6 is about (CLAUDE.md:131 records eight found in a day).
+    # failure class this plan's sec 0 A6 is about (CLAUDE.md:200 records eight found in a day).
     $mod = Join-Path $PSScriptRoot "oracle_on_stall.py"
     if (-not (Test-Path $mod)) {
         Write-Host "  stall check SKIPPED: oracle_on_stall.py is not beside queue.ps1." -ForegroundColor Yellow

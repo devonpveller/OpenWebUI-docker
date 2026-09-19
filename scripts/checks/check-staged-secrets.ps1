@@ -16,6 +16,14 @@
 # SCOPE: only STAGED content is scanned (git diff --cached), so it stays fast -
 # no walking the working tree or vendored/data dirs.
 #
+# PER-PLANE ENV FILES (sl-env-split, 2026-09-19): rule 1 below matches on the
+# file's LEAF, not its path, so `frontend/.env`, `portal/.env` and every other
+# `<plane>/.env` are blocked by the existing `$leaf -eq '.env'` arm with no
+# change - and `<plane>/.env.example` is allowed by the same allowlist that
+# allows the root one. Verified by staging a scratch `portal/.env`. Do NOT
+# anchor these tests to a path: that is exactly how the six new files would
+# have become committable in silence.
+#
 # EXIT: 0 = clean, 1 = blocked.
 
 $ErrorActionPreference = 'Stop'

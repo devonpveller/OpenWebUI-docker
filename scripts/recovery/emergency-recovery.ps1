@@ -66,8 +66,8 @@ $Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
 # The INFERENCE plane is a separate compose project since 2026-08-21 (Part K.1,
 # project name "inference"). It owns llm-backend-net; llm-gateway carries the
 # llama-cpp/llama-cpp-embed aliases on the anchor's ai-stack_llm-net (external).
-# It must start BEFORE the callers and stop AFTER them. --env-file is REQUIRED
-# (single root .env; the compose file fails loud without it).
+# It must start BEFORE the callers and stop AFTER them. NO --env-file since
+# sl-env-split: compose loads inference/.env natively (it fails loud without it).
 $Script:InferenceCompose = "inference\docker-compose.yml"
 $Script:InferenceServices = @(
     "llama-cpp-upstream", "llama-cpp-embed-upstream", "llm-queue",
@@ -164,7 +164,7 @@ function Test-DockerCompose {
 
 function Confirm-FrontendProfiles {
     # The frontend plane is PROFILE-GATED since 2026-09-19 (stack-layers 2.5 /
-    # D8): which services exist at all comes from COMPOSE_PROFILES in .env. If
+    # D8): which services exist at all comes from COMPOSE_PROFILES in frontend/.env.
     # that line is missing, every frontend path in THIS script still reports
     # success while doing nothing - `up -d` / `down` / `stop` address
     # openwebui-backup alone, and `restart tailscale` exits 1 with `no such
@@ -177,7 +177,7 @@ function Confirm-FrontendProfiles {
     # `--profile gpu --profile tailscale` here would be WRONG on a `stock`
     # host: it would start the CUDA build and reserve an NVIDIA device, the
     # exact failure the profile split exists to remove. The profile set is a
-    # property of the HOST and belongs in that host's .env; this only checks
+    # property of the HOST and belongs in that host's frontend/.env; this checks
     # that it is there. (scripts\backup\restore-from-snapshot.ps1 DOES pass
     # them, because its catalog entries describe one host's deployment by
     # design, as the portal and agent-org entries there already did.)
@@ -186,7 +186,7 @@ function Confirm-FrontendProfiles {
     # than refused. cmd /c so compose's stderr cannot become a PS 5.1
     # NativeCommandError.
     try {
-        $svc = (cmd /c "docker compose -f $($Script:FrontendCompose) --env-file .env config --services 2>nul") -join "`n"
+        $svc = (cmd /c "docker compose -f $($Script:FrontendCompose) config --services 2>nul") -join "`n"
         if (-not $svc) {
             Write-Log "WARN" "Could not render the frontend plane to check its profiles - continuing"
             return $true
@@ -267,7 +267,7 @@ function Start-InferenceStack {
     # (any root-project `up` creates them).
     Write-Log "INFO" "Starting inference project (upstreams -> llm-queue -> LiteLLM gateway)..."
     try {
-        docker compose -f $Script:InferenceCompose --env-file .env up -d
+        docker compose -f $Script:InferenceCompose up -d
         if (-not (Wait-ForHealthy "llm-gateway" 240)) {
             Write-Log "WARN" "llm-gateway health check failed, but continuing..."
         }
@@ -285,7 +285,7 @@ function Stop-InferenceStack {
     # llm-queue (graceful drain) -> upstreams. Callers must stop first.
     Write-Log "INFO" "Stopping inference project..."
     try {
-        docker compose -f $Script:InferenceCompose --env-file .env stop --timeout 30
+        docker compose -f $Script:InferenceCompose stop --timeout 30
     }
     catch {
         Write-Log "WARN" "Inference stop had issues, continuing: $_"
@@ -299,7 +299,7 @@ function Start-PlaneStack {
     param([string]$Label, [string]$ComposePath, [string]$GateContainer = "", [int]$GateTimeout = 90)
     Write-Log "INFO" "Starting $Label project..."
     try {
-        docker compose -f $ComposePath --env-file .env up -d
+        docker compose -f $ComposePath up -d
         if ($GateContainer -and -not (Wait-ForHealthy $GateContainer $GateTimeout)) {
             Write-Log "WARN" "$Label health gate ($GateContainer) failed, but continuing..."
         }
@@ -313,7 +313,7 @@ function Stop-PlaneStack {
     param([string]$Label, [string]$ComposePath, [int]$Timeout = 30)
     Write-Log "INFO" "Stopping $Label project..."
     try {
-        docker compose -f $ComposePath --env-file .env stop --timeout $Timeout
+        docker compose -f $ComposePath stop --timeout $Timeout
     }
     catch {
         Write-Log "WARN" "$Label stop had issues, continuing: $_"
@@ -604,7 +604,7 @@ function Invoke-MinimalRecovery {
     Write-Log "INFO" "MINIMAL RECOVERY - GENTLE RESTART"
     Write-Log "INFO" "========================================="
 
-    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if frontend/.env has none,
     # or everything below quietly addresses openwebui-backup and nothing else.
     Confirm-FrontendProfiles | Out-Null
 
@@ -621,16 +621,16 @@ function Invoke-MinimalRecovery {
         # from under it. The order MUST be: inference (netns-independent) → restart
         # openwebui → WAIT until it is healthy → only THEN restart tailscale so it
         # re-attaches to the new, stable namespace.
-        docker compose -f $Script:InferenceCompose --env-file .env restart llama-cpp-upstream llama-cpp-embed-upstream
+        docker compose -f $Script:InferenceCompose restart llama-cpp-upstream llama-cpp-embed-upstream
 
-        docker compose -f $Script:FrontendCompose --env-file .env restart openwebui
+        docker compose -f $Script:FrontendCompose restart openwebui
         if (-not (Wait-ForHealthy "openwebui" 240)) {
             Write-Log "WARN" "OpenWebUI not healthy after restart; restarting tailscale anyway so it is not left orphaned..."
         }
 
         # Tailscale LAST — re-attaches to openwebui's (now stable) netns and
         # re-applies its serve config via entrypoint.sh.
-        docker compose -f $Script:FrontendCompose --env-file .env restart tailscale
+        docker compose -f $Script:FrontendCompose restart tailscale
         Wait-ForHealthy "tailscale" 90 | Out-Null
 
         # Ensure every auxiliary container is running (cheap no-op if already
@@ -643,12 +643,12 @@ function Invoke-MinimalRecovery {
         # and LiteLLM; both must be up before callers — design B2). A
         # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
         # nudge them so a cold dependent comes back.
-        docker compose -f $Script:InferenceCompose --env-file .env up -d llm-queue llm-gateway
+        docker compose -f $Script:InferenceCompose up -d llm-queue llm-gateway
 
-        docker compose -f $Script:MemoryCompose --env-file .env up -d
+        docker compose -f $Script:MemoryCompose up -d
 
-        docker compose -f $Script:SearchCompose --env-file .env up -d
-        docker compose -f $Script:CoderCompose --env-file .env up -d
+        docker compose -f $Script:SearchCompose up -d
+        docker compose -f $Script:CoderCompose up -d
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
 
@@ -762,7 +762,7 @@ function Invoke-EmergencyRecovery {
         throw "Docker Compose is not available"
     }
 
-    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if frontend/.env has none,
     # or everything below quietly addresses openwebui-backup and nothing else.
     Confirm-FrontendProfiles | Out-Null
 
@@ -825,7 +825,7 @@ function Invoke-EmergencyRecovery {
     # own depends_on. The netns rule is encoded inside the project.
     Write-Log "INFO" "Starting frontend project (openwebui + tailscale)..."
     try {
-        docker compose -f $Script:FrontendCompose --env-file .env up -d
+        docker compose -f $Script:FrontendCompose up -d
         if (-not (Wait-ForHealthy "openwebui" 240)) {
             throw "OpenWebUI failed to become healthy"
         }
@@ -920,14 +920,14 @@ function Invoke-EmergencyRecovery {
         docker ps --filter "name=surrealdb" --format "table {{.Names}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Memory + coder plane status:"
-        docker compose -f $Script:MemoryCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
-        docker compose -f $Script:CoderCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:MemoryCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:CoderCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Backup scheduler status:"
-        docker compose -f $Script:FrontendCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:FrontendCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         Write-Log "INFO" "Inference project status:"
-        docker compose -f $Script:InferenceCompose --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+        docker compose -f $Script:InferenceCompose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
@@ -948,7 +948,7 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "NUCLEAR RECOVERY - FULL STACK RESTART"
     Write-Log "WARN" "========================================="
 
-    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if frontend/.env has none,
     # or everything below quietly addresses openwebui-backup and nothing else.
     Confirm-FrontendProfiles | Out-Null
 
@@ -995,7 +995,7 @@ function Invoke-NuclearRecovery {
             @{ N = "memory";    C = $Script:MemoryCompose },
             @{ N = "inference"; C = $Script:InferenceCompose })) {
         Write-Log "INFO" "Tearing down $($plane.N) project..."
-        try { docker compose -f $plane.C --env-file .env down }
+        try { docker compose -f $plane.C down }
         catch { Write-Log "WARN" "$($plane.N) teardown had issues: $_" }
     }
 
@@ -1058,23 +1058,23 @@ function Invoke-GPUReset {
     Write-Log "INFO" "GPU RECOVERY - REBUILDING GPU SERVICES"
     Write-Log "INFO" "========================================="
 
-    # Frontend plane profiles (2026-09-19): say so LOUDLY if .env has none,
+    # Frontend plane profiles (2026-09-19): say so LOUDLY if frontend/.env has none,
     # or everything below quietly addresses openwebui-backup and nothing else.
     Confirm-FrontendProfiles | Out-Null
 
     Write-Log "INFO" "Stopping GPU-dependent services for reset..."
-    try { docker compose -f $Script:InferenceCompose --env-file .env down }
+    try { docker compose -f $Script:InferenceCompose down }
     catch { Write-Log "WARN" "Inference teardown had issues: $_" }
-    try { docker compose -f $Script:MemoryCompose --env-file .env down }
+    try { docker compose -f $Script:MemoryCompose down }
     catch { Write-Log "WARN" "Memory teardown had issues: $_" }
-    try { docker compose -f $Script:FrontendCompose --env-file .env down }
+    try { docker compose -f $Script:FrontendCompose down }
     catch { Write-Log "WARN" "Frontend teardown had issues: $_" }
 
     Write-Log "INFO" "Rebuilding OpenWebUI with fresh GPU configuration..."
-    docker compose -f $Script:FrontendCompose --env-file .env build --no-cache openwebui
+    docker compose -f $Script:FrontendCompose build --no-cache openwebui
 
     Write-Log "INFO" "Starting the frontend project with GPU support..."
-    docker compose -f $Script:FrontendCompose --env-file .env up -d
+    docker compose -f $Script:FrontendCompose up -d
 
     if (Wait-ForHealthy "openwebui" 240) {
         Write-Log "INFO" "Starting the inference project with GPU support..."
@@ -1091,10 +1091,10 @@ function Invoke-GPUReset {
 
                     # Restart the planes that consume llama-cpp-upstream inference:
                     # the memory layer, the little-coder plane, and OB1.
-                    docker compose -f $Script:MemoryCompose --env-file .env up -d
+                    docker compose -f $Script:MemoryCompose up -d
                     Write-Log "INFO" "Mnemory layer started"
 
-                    docker compose -f $Script:CoderCompose --env-file .env up -d
+                    docker compose -f $Script:CoderCompose up -d
                     Write-Log "INFO" "little-coder control plane started"
 
                     Start-OB1Stack

@@ -222,7 +222,13 @@ class Manifest:
         return list(self.plane(name).get("keys", []))
 
     def env_file(self, name: str) -> str | None:
-        """The --env-file the compose CLI is given, or None when compose loads its own."""
+        """The --env-file the compose CLI is given, or None when compose loads its own.
+
+        None for every plane since sl-env-split (2026-09-19): each project directory
+        holds its own `.env` and compose loads it natively, so the driver passes no
+        flag at all. The key is still honoured so a plane whose env genuinely lives
+        somewhere else could declare one.
+        """
         value = self.plane(name).get("env_file")
         return value or None
 
@@ -230,8 +236,8 @@ class Manifest:
         """The env file the plane actually READS - which is what a key check must read.
 
         With an explicit env_file that is the file; without one, compose loads the
-        .env sitting in the compose file's own directory (that is exactly why ob1
-        and agent-org pass no --env-file).
+        .env sitting in the compose file's own directory - which is every plane
+        since sl-env-split (frontend/.env, inference/.env, ... OB1/docker/.env).
         """
         explicit = self.env_file(name)
         if explicit:
@@ -479,12 +485,12 @@ def effective_profiles(manifest: Manifest, state: State, root: Path, plane: str)
     """The --profile flags to pass, which must never START FEWER CONTAINERS.
 
     `docker compose --profile X` REPLACES COMPOSE_PROFILES; it does not union
-    with it. Measured 2026-09-19 on compose v5.3.0, inference plane, root .env
-    carrying COMPOSE_PROFILES=local,gpu,tailscale:
+    with it. Measured 2026-09-19 on compose v5.3.0, inference plane, with its own
+    env file carrying COMPOSE_PROFILES=local:
 
-        docker compose -f inference/... --env-file .env config --services
+        docker compose -f inference/... config --services
             -> 8 services (the `local` half is on)
-        ... --env-file .env --profile idea-refinery config --services
+        ... --profile idea-refinery config --services
             -> 4 services. `local` was silently dropped.
 
     So the moment ANY flag is passed to a plane, every profile that plane's env
@@ -492,7 +498,9 @@ def effective_profiles(manifest: Manifest, state: State, root: Path, plane: str)
     of what a bare invocation would have started - four llama.cpp containers, in
     that example, with no error anywhere. Passing no flag at all is safe:
     compose then reads COMPOSE_PROFILES itself, which is today's behaviour for
-    every plane except ob1.
+    every plane except ob1. Since sl-env-split that value is PER PLANE (D17):
+    compose_profiles_env reads the plane's OWN file, so the frontend's
+    `gpu,tailscale` can no longer leak into the inference render.
     """
     wanted = set(run_profiles(manifest, state, plane))
     if not wanted:
@@ -906,7 +914,8 @@ def cmd_doctor(manifest, state, root, console, runner) -> int:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
         env_path = manifest.env_path(root, plane)
-        loaded = "--env-file" if manifest.env_file(plane) else "compose loads it from the project dir"
+        loaded = (f"--env-file {manifest.env_file(plane)}" if manifest.env_file(plane)
+                  else "compose loads it from the project dir")
         if env_path.is_file():
             console.line(f"    [OK]   env {rel(root, env_path)} ({loaded})")
         else:
@@ -1186,13 +1195,15 @@ class HealthSweep:
             running -> that is a host whose .env lost the frontend profiles from
             COMPOSE_PROFILES. Probe anyway, and say that too.
         """
-        # `.env`, NOT `.env.example`, and the asymmetry with the inventory
-        # generator is deliberate. This asks what THIS HOST DEPLOYS, so it has to
-        # read this host's COMPOSE_PROFILES; render_env_path() asks what the
-        # compose file DECLARES and uses the .example so the answer is identical
-        # on a laptop, this host and a CI runner. Same command, two questions.
+        # frontend/.env, NOT frontend/.env.example, and the asymmetry with the
+        # inventory generator is deliberate. This asks what THIS HOST DEPLOYS, so
+        # it has to read this host's COMPOSE_PROFILES; render_env_path() asks what
+        # the compose file DECLARES and uses the .example so the answer is the
+        # same on a laptop, this host and a CI runner. Same command, two
+        # questions. NO --env-file: compose loads frontend/.env natively from the
+        # project directory, which is where this host's profiles live (D17).
         rendered = self.capture(
-            ["docker", "compose", "-f", "frontend/docker-compose.yml", "--env-file", ".env",
+            ["docker", "compose", "-f", "frontend/docker-compose.yml",
              "config", "--services"],
             self.root,
         )
@@ -1303,7 +1314,8 @@ def cmd_stats(root: Path, console: Console, runner) -> int:
 # WHAT IS DERIVED AND WHAT IS CURATED, because the split is the whole design:
 #
 #   derived from stack.manifest.toml   the `projects` block - which compose file,
-#                                      which --env-file, the runnable command
+#                                      which env_file (null everywhere since
+#                                      sl-env-split), the runnable command
 #                                      line - and which planes belong here at
 #                                      all: a `manual` plane (the portal) does
 #                                      not, because the watchdog must not
@@ -1382,9 +1394,11 @@ def is_pinned_submodule(root: Path, compose_rel: str) -> bool:
 def render_env_path(manifest: Manifest, root: Path, plane: str) -> Path:
     """The env file a RENDER uses: the .example when there is one.
 
-    Deterministic on purpose. `.env.example` is kept complete (CLEANUP-PLAN v3
-    A.4) so compose interpolation resolves with no real secret, which is how the
-    same inventory comes out of a laptop, this host and a CI runner.
+    Deterministic on purpose. Each plane's `.env.example` is kept COMPLETE for
+    that plane (CLEANUP-PLAN v3 A.4; per-plane since sl-env-split), so compose
+    interpolation resolves with no real secret - which is how the same inventory
+    comes out of a laptop, this host and a CI runner. Since the plane env is
+    `<project dir>/.env`, this returns `<project dir>/.env.example`.
 
     CONTRAST with HealthSweep.tailscale_deployed(), which renders the frontend
     plane with the REAL `.env`. That one asks what THIS HOST DEPLOYS and so must

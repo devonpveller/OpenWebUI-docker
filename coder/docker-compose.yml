@@ -7,8 +7,8 @@
 # network/volume ownership.
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
-#   docker compose -f coder/docker-compose.yml --env-file .env up -d
-# The ${OPEN_TERMINAL_API_KEY:?} guard makes a bare `up` fail loud.
+#   docker compose -f coder/docker-compose.yml up -d
+# The ${OPEN_TERMINAL_API_KEY:?} guard fails a bare `up` without coder/.env.
 #
 # Seams: llm-net external (inference via the llama-cpp alias; OWUI's
 # little_coder pipe and agent-org reach the daemon over it). lc-net is
@@ -37,7 +37,7 @@ services:
     # THE RULE: a service names the variables it needs. Enforced by
     # scripts/checks/check-env-file-scope.ps1.
     environment:
-      - API_KEY=${OPEN_TERMINAL_API_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
+      - API_KEY=${OPEN_TERMINAL_API_KEY:?set in coder/.env (copy coder/.env.example), or stack.ps1}
       # All internet traffic goes through lc-egress, which permits only the
       # operator-configured git host (design §3.4). Internal peers bypass it.
       - HTTP_PROXY=http://lc-egress:8888

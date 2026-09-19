@@ -203,11 +203,11 @@ Part K (2026-08-21)** — the live volumes are:
 
 | Service | Volume(s) | Stop/start via |
 |---|---|---|
-| openwebui | `frontend_openwebui-data` | `docker compose -f frontend/docker-compose.yml --env-file .env --profile gpu --profile tailscale stop tailscale openwebui` (netns rule: tailscale first; start openwebui then tailscale). **The profile flags are not optional**: the frontend plane is profile-gated, and naming `tailscale` without `gpu` active exits 1 with `no such service: openwebui`. `scripts/backup/restore-from-snapshot.ps1` passes them for you. |
-| mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml --env-file .env stop mnemory mnemory-cloud-gateway` |
-| little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml --env-file .env stop little-coder open-terminal lc-egress` |
+| openwebui | `frontend_openwebui-data` | `docker compose -f frontend/docker-compose.yml --profile gpu --profile tailscale stop tailscale openwebui` (netns rule: tailscale first; start openwebui then tailscale). **The profile flags are not optional**: the frontend plane is profile-gated, and naming `tailscale` without `gpu` active exits 1 with `no such service: openwebui`. `scripts/backup/restore-from-snapshot.ps1` passes them for you. |
+| mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway` |
+| little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
-| lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml --env-file .env stop llama-cpp-upstream llama-cpp-embed-upstream` |
+| lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
 | ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
 
 **little-coder** is the one service whose backup is a SINGLE archive covering

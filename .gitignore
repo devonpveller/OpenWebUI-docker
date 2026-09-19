@@ -1,4 +1,11 @@
 # .gitignore
+# NO LEADING SLASH, deliberately: a pattern without one matches at EVERY level,
+# so this single line covers the root .env AND every per-plane one - frontend/.env,
+# inference/.env, memory/.env, search/.env, coder/.env, portal/.env (sl-env-split,
+# 2026-09-19; verified with `git check-ignore -v frontend/.env`). Anchoring it to
+# `/.env` would leave six live secret files committable. The same holds for every
+# backup pattern below, and `.env.example` at any level stays tracked because no
+# rule matches it.
 .env
 .env.killswitch-*.bak
 # Any .env backup, however named. 2026-08-20: .env.bak-pre-mtp and

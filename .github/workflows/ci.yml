@@ -57,22 +57,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # .env.example is kept complete on purpose (v3 A.4) — it makes compose
+      # Each plane's .env.example is kept complete FOR THAT PLANE (v3 A.4;
+      # per-plane since sl-env-split 2026-09-19) — it makes compose
       # interpolation resolvable in CI without any real secret. Since Part K
       # (2026-08-21) the workspace is one anchor + per-plane compose projects;
       # validate every one of them. (OB1 is a submodule with its own gitignored
       # env — not checked out here; agent-org likewise carries its own env.)
-      # Plane files also declare env_file: .env for CONTAINER env — `config`
-      # stats that file, which exists on the host but not on a runner. Stub it
-      # from the example (found 2026-08-23 by PR #28, the first PR through CI).
+      # `.env` STUBS: compose stats a service-level `env_file:` against whatever
+      # file the CLI was given, and those exist on the host but not on a runner
+      # (found 2026-08-23 by PR #28, the first PR through CI). One per PROJECT
+      # DIRECTORY now, because that is where compose looks.
       - run: cp .env.example .env
+      - run: |
+          for p in frontend inference memory search coder portal; do
+            cp "$p/.env.example" "$p/.env"
+          done
+      # --env-file is passed EXPLICITLY here even though compose would load
+      # <plane>/.env natively: the committed example is the deterministic input,
+      # and naming it also suppresses the native load of the stub above.
       - run: docker compose --env-file .env.example config -q
-      - run: docker compose -f inference/docker-compose.yml --env-file .env.example config -q
-      - run: docker compose -f frontend/docker-compose.yml --env-file .env.example config -q
-      - run: docker compose -f memory/docker-compose.yml --env-file .env.example config -q
-      - run: docker compose -f search/docker-compose.yml --env-file .env.example config -q
-      - run: docker compose -f coder/docker-compose.yml --env-file .env.example config -q
-      - run: docker compose -f portal/docker-compose.yml --env-file .env.example --profile internet config -q
+      - run: docker compose -f inference/docker-compose.yml --env-file inference/.env.example config -q
+      - run: docker compose -f inference/docker-compose.yml --env-file inference/.env.example --profile local config -q
+      - run: docker compose -f frontend/docker-compose.yml --env-file frontend/.env.example config -q
+      - run: docker compose -f frontend/docker-compose.yml --env-file frontend/.env.example --profile gpu --profile tailscale config -q
+      - run: docker compose -f memory/docker-compose.yml --env-file memory/.env.example config -q
+      - run: docker compose -f search/docker-compose.yml --env-file search/.env.example config -q
+      - run: docker compose -f coder/docker-compose.yml --env-file coder/.env.example config -q
+      - run: docker compose -f portal/docker-compose.yml --env-file portal/.env.example --profile internet config -q
 
   powershell-parse:
     runs-on: ubuntu-latest
@@ -117,12 +128,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      # Same .env stub as compose-validate, for the same reason: the plane files
-      # declare `env_file: .env` for CONTAINER env and `config` stats that file,
-      # which exists on the host and not on a runner. The inventory generator
-      # RENDERS with the .example files (that is deliberate and deterministic -
-      # see render_env_path in stack.py), but compose still needs .env present.
+      # Same .env stubs as compose-validate, for the same reason: `config` stats
+      # a service-level `env_file:` against the CLI's file, and the driver's
+      # render_project() refuses a plane whose real env file is absent. The
+      # inventory generator RENDERS with the .example files (deliberate and
+      # deterministic - see render_env_path in stack.py), but compose still needs
+      # `<project dir>/.env` to EXIST. One per project directory since
+      # sl-env-split (2026-09-19).
       - run: cp .env.example .env
+      - run: |
+          for p in frontend inference memory search coder portal; do
+            cp "$p/.env.example" "$p/.env"
+          done
       - run: cp agent-org/docker/.env.example agent-org/docker/.env
       # Hermetic: no daemon is touched, the docker call is injected.
       - run: python -m pytest scripts/stack -q

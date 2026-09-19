@@ -6,7 +6,7 @@
 #      final record before the alerter goes down).
 #   2. Stops the internet-exposed services (preserves tailnet path).
 #   3. Snapshots Caddy + Authelia logs to ./incident/<UTC-timestamp>/.
-#   4. Rotates AUTHELIA_JWT_SECRET + AUTHELIA_SESSION_SECRET in .env (preserves
+#   4. Rotates AUTHELIA_JWT_SECRET + AUTHELIA_SESSION_SECRET in portal/.env (preserves
 #      old values commented out for the IR record).
 #   5. Prints recovery steps and EXITS -- does NOT auto-restart anything.
 #
@@ -74,7 +74,8 @@ try {
   if ($DryRun) {
     Write-Host "    [DRY RUN] would: docker compose -p portal --profile internet stop $($services -join ' ')"
   } else {
-    docker compose -p portal -f (Join-Path $projectRoot 'portal\docker-compose.yml') --env-file (Join-Path $projectRoot '.env') --profile internet stop @services
+    # No --env-file since sl-env-split: portal/ is the project directory.
+    docker compose -p portal -f (Join-Path $projectRoot 'portal\docker-compose.yml') --profile internet stop @services
     if ($LASTEXITCODE -ne 0) { Write-Warning "compose stop returned $LASTEXITCODE -- review state" }
   }
 
@@ -97,18 +98,22 @@ try {
     Get-ChildItem $incidentDir | Select-Object Name, Length | Format-Table | Out-String | Write-Host
   }
 
-  # --- Step 4: Rotate Authelia secrets in .env. ---
-  Write-Host "==> Step 4: rotate Authelia secrets in .env" -ForegroundColor Cyan
-  $envPath = Join-Path $projectRoot '.env'
+  # --- Step 4: Rotate Authelia secrets in portal/.env. ---
+  # portal/.env, NOT the root one, since sl-env-split (2026-09-19): the portal
+  # plane owns AUTHELIA_* and the root file no longer carries them at all, so
+  # rotating there would have written two dead lines and left the live secrets
+  # in place - a killswitch that reports success and rotates nothing.
+  Write-Host "==> Step 4: rotate Authelia secrets in portal/.env" -ForegroundColor Cyan
+  $envPath = Join-Path $projectRoot 'portal\.env'
   if (-not (Test-Path $envPath)) {
-    Write-Warning "    .env not found at $envPath -- skipping rotation. Rotate manually."
+    Write-Warning "    portal/.env not found at $envPath -- skipping rotation. Rotate manually."
   } else {
     if ($DryRun) {
-      Write-Host "    [DRY RUN] would generate new JWT + SESSION secrets via 'docker run --rm authelia/authelia:4.39 authelia crypto rand --length 64' and patch .env (commenting old values for IR record)"
+      Write-Host "    [DRY RUN] would generate new JWT + SESSION secrets via 'docker run --rm authelia/authelia:4.39 authelia crypto rand --length 64' and patch portal/.env (commenting old values for IR record)"
     } else {
       $backupEnv = "$envPath.killswitch-$ts.bak"
       Copy-Item $envPath $backupEnv
-      Write-Host "    Backed up .env to $backupEnv" -ForegroundColor DarkGray
+      Write-Host "    Backed up portal/.env to $backupEnv" -ForegroundColor DarkGray
 
       $newJwt     = (docker run --rm authelia/authelia:4.39 authelia crypto rand --length 64 2>$null).Trim()
       $newSession = (docker run --rm authelia/authelia:4.39 authelia crypto rand --length 64 2>$null).Trim()

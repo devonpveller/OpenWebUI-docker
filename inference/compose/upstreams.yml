@@ -14,7 +14,7 @@
 # RELATIVE PATHS ARE RESOLVED AGAINST THIS FILE'S DIRECTORY, not the parent
 # compose file's - so ../ is inference/ (the LiteLLM/llama-swap config lives
 # there now) and ../../ is the repo root. Verified in the render: `docker compose -f
-# inference/docker-compose.yml --env-file .env.example --profile local config`
+# inference/docker-compose.yml --env-file inference/.env.example --profile local`
 # prints absolute sources under the repo root, byte-identical to the pre-split
 # render. Top-level `networks:` / `volumes:` are NOT redeclared here; they live
 # once in inference/docker-compose.yml and compose merges the included models

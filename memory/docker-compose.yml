@@ -5,8 +5,8 @@
 # only paths (../) and network/volume ownership changed.
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
-#   docker compose -f memory/docker-compose.yml --env-file .env up -d
-# The ${MCP_API_KEY:?} guard makes a bare `up` without the env file fail loud.
+#   docker compose -f memory/docker-compose.yml up -d
+# The ${MCP_API_KEY:?} guard makes a bare `up` without memory/.env fail loud.
 #
 # Doors rule (unchanged): local callers on llm-net talk to mnemory directly;
 # cloud clients get ONLY the host-published mnemory-cloud-gateway (:8060).
@@ -38,7 +38,7 @@ services:
       - EMBED_BASE_URL=http://llama-cpp-embed:8080/v1
       - EMBED_MODEL=qllama/bge-m3:latest
       - EMBED_DIMS=1024
-      - MCP_API_KEY=${MCP_API_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1}
+      - MCP_API_KEY=${MCP_API_KEY:?set in memory/.env (copy memory/.env.example), or use stack.ps1}
       - MCP_API_KEYS=${MCP_API_KEYS}
       - FIND_MEMORIES_QUERIES=3
       - LLM_CONTEXT_SIZE=${MNEMORY_LLM_CONTEXT_SIZE:-131072}

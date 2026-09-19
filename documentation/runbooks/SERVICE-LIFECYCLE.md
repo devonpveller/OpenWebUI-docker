@@ -75,11 +75,12 @@ plane without its profile, and that is exactly how a checker starts checking
 nothing. So, in the same commit:
 
 - **Decide where the profile set comes from and say it out loud.** compose
-  reads `COMPOSE_PROFILES` from the `--env-file`, and a `--profile` flag on the
-  command line REPLACES that value rather than adding to it. `.env.example`
-  carries the fresh-clone set; the operator's `.env` carries this host's. **A
+  reads `COMPOSE_PROFILES` from **that plane's own `<plane>/.env`** (per-plane
+  since `sl-env-split`, D17), and a `--profile` flag on the command line
+  REPLACES that value rather than adding to it. `<plane>/.env.example` carries
+  the fresh-clone set; the operator's `<plane>/.env` carries this host's. **A
   plane whose default profile set is not the operator's deployment needs a line
-  in `.env` before the next `up`** — without it `up -d` starts whatever has no
+  in its own `.env` before the next `up`** — without it `up -d` starts whatever has no
   profile, quietly.
 - **Every renderer needs the profiles.** `check-project-configs.ps1` renders the
   plane twice (default and profiled) and diffs the PROFILED render against
@@ -111,8 +112,8 @@ nothing. So, in the same commit:
 - **Every OBSERVER needs a guard, and it must fail OPEN.** A probe or repair
   aimed at a service the deployment does not have must SKIP and say so, never
   FAIL and never repair. Decide from the rendered project
-  (`docker compose -f <plane> --env-file .env config --services`) rather than
-  parsing `.env` — that is compose's own answer after it has applied every
+  (`docker compose -f <plane> config --services`) rather than
+  parsing the env file — that is compose's own answer after it has applied every
   source and precedence rule. If the render cannot be read, or the container is
   running while the render denies it, keep checking and log why: a checker that
   goes silent on its own uncertainty is worse than one that cries wolf. Live

@@ -8,8 +8,8 @@
 #
 #   stock      openwebui-stock — the pinned upstream image, no GPU, no build,
 #              no other plane. This is the FRESH-CLONE deployment: `cp
-#              .env.example .env` then `docker compose -f
-#              frontend/docker-compose.yml --env-file .env up -d` and Open WebUI
+#              frontend/.env.example frontend/.env` then `docker compose -f
+#              frontend/docker-compose.yml up -d` and Open WebUI
 #              is on http://127.0.0.1:3000 with only Docker installed. It needs
 #              none of the anchor's ai-stack_* networks (see `owui-net` below).
 #   gpu        openwebui — THIS HOST's deployment: the CUDA local build, the
@@ -20,17 +20,17 @@
 #              because `network_mode: service:openwebui` names that service.
 #
 # THIS PLANE'S PROFILES ARE `gpu,tailscale`, AND THEY ARE NOT THE DEFAULT.
-# They go in COMPOSE_PROFILES in .env — but that variable is GLOBAL: every
-# plane driven with `--env-file .env` reads the same value, so it is set in ONE
-# authoritative section at the top of .env.example (stack-layers D15) and this
-# file does not own it. **This host's FULL value is
-# `COMPOSE_PROFILES=local,gpu,tailscale`** — `local` is the inference plane's
-# GPU backends, and setting `gpu,tailscale` alone would silently take them
-# down. Compose reads the variable from the `--env-file` (verified against
-# compose v5.3, 2026-09-19), a duplicate key in that file is last-wins and
-# silent, and a `--profile` flag on the command line REPLACES the value rather
-# than adding to it — which is what lets `--profile gpu --profile tailscale`
-# render this host's frontend from a .env.example that says `stock`.
+# They go in COMPOSE_PROFILES in `frontend/.env`, which compose loads NATIVELY
+# from this project directory (stack-layers D17, sl-env-split 2026-09-19). The
+# variable used to be ONE global assignment in the root .env because every
+# plane was driven with `--env-file .env`; now each plane owns its own, so
+# **this plane's FULL value is `COMPOSE_PROFILES=gpu,tailscale`** and the
+# inference plane's `local` lives in `inference/.env` where it belongs.
+# Compose reads the variable from that file (verified against compose v5.3,
+# 2026-09-19), a duplicate key in it is last-wins and silent, and a `--profile`
+# flag on the command line REPLACES the value rather than adding to it — which
+# is what lets `--profile gpu --profile tailscale` render this host's frontend
+# from a frontend/.env.example that says `stock`.
 #
 # WHY `stock` IS A PROFILE AND NOT THE UN-PROFILED DEFAULT. It would be nicer
 # if the stock service simply had no `profiles:` key and `--profile gpu` swapped
@@ -99,7 +99,7 @@
 # fresh-clone variant is the one that carries the new key.
 #
 # Drive it with scripts/stack/stack.ps1, or manually FROM THE REPO ROOT:
-#   docker compose -f frontend/docker-compose.yml --env-file .env up -d
+#   docker compose -f frontend/docker-compose.yml up -d
 # The ${WEBUI_SECRET_KEY:?} guard makes a bare `up` fail loud — REQUIRED,
 # because a recreate without that key would rotate it and break webui.db.
 #
@@ -138,7 +138,7 @@ services:
       - TZ=America/New_York
       # Same fail-loud guard as the gpu definition: a recreate WITHOUT this key
       # rotates it and breaks every encrypted-at-rest value in webui.db.
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set via --env-file .env (copy .env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set in frontend/.env (copy frontend/.env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -198,7 +198,7 @@ services:
       # key was previously auto-generated into the container's EPHEMERAL layer
       # (/app/backend/.webui_secret_key, outside the data volume), so a recreate would
       # rotate it and break every encrypted-at-rest value in webui.db + all sessions.
-      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set via --env-file ../.env or scripts/stack/stack.ps1 - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:?set in frontend/.env (copy frontend/.env.example) - a recreate WITHOUT this key rotates it and breaks webui.db encrypted values + all sessions}
       # OWUI's own LOW-PRIVILEGE virtual key (the same one its chat connection
       # holds in webui.db) — the status-pipe llm-traffic module uses it for the
       # gateway's read-only /observe/* queue board, which 401s unauthenticated

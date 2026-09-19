@@ -362,7 +362,7 @@ Check "GREEN: the word 'git' in a COMMENT or STRING does not fire it" ((Get-Cond
 
 # CODE OUTSIDE ANY FUNCTION. The scan used to walk function bodies only, so a script whose
 # git calls sit at file scope was reported clean - and a live in-glob instance,
-# check-project-configs.ps1:18, went unflagged for it.
+# check-project-configs.ps1:19, went unflagged for it.
 Remove-Item (Join-Path $fixDir "commented.ps1") -Force
 Set-Content -Path (Join-Path $fixDir "toplevel.ps1") -Encoding ascii -Value @(
     '# there is no function anywhere in this file',

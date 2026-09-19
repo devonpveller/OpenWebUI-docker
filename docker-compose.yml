@@ -6,9 +6,9 @@
 # cold host (scripts/stack/stack.ps1 does this for you).
 #
 # The service trees are self-contained compose projects, each driven with
-# `docker compose -f <dir>/docker-compose.yml --env-file .env ...` from this
-# directory (single root .env; every plane file carries a ${VAR:?} fail-loud
-# guard against running without it):
+# `docker compose -f <dir>/docker-compose.yml ...` from this directory. Since
+# sl-env-split (2026-09-19) EACH OWNS ITS ENV: compose loads `<dir>/.env`
+# natively from the project directory, and each carries a ${VAR:?} guard:
 #
 #   frontend/   openwebui + tailscale (netns pair) + their backups   (K.5)
 #   inference/  llama.cpp upstreams + llm-queue + LiteLLM gateway    (K.1)

@@ -2,8 +2,9 @@
 #
 # Two cheap gates, each run ONLY when the staged changes make them relevant:
 #   1. compose validation - any staged *.yml/*.yaml => render every project's
-#      compose file with `docker compose config -q` against .env.example
-#      (kept complete on purpose, v3 A.4). Catches exactly the drift class
+#      compose file with `docker compose config -q` against ITS OWN
+#      `<plane>/.env.example` (each kept complete for that plane, v3 A.4 +
+#      sl-env-split D10). Catches exactly the drift class
 #      the Part K restructure kept finding by hand: broken includes, dead
 #      depends_on, missing env guards, bad network refs.
 #   2. PowerShell parse - staged *.ps1 files are tokenized with PSParser so a
@@ -31,22 +32,35 @@ if ($ymlStaged.Count -gt 0) {
     else {
         # (OB1 + agent-org validate against their own gitignored env files and
         # are covered by their own workflows; the portal needs its profile.)
+        # EACH PROJECT AGAINST ITS OWN EXAMPLE (sl-env-split, 2026-09-19). The
+        # example is passed explicitly rather than left to compose's native
+        # project-directory load, for the reason render_env_path() gives in
+        # stack.py: `<plane>/.env` is the DEPLOY host's file and may not exist
+        # here at all, while `<plane>/.env.example` is committed - so the render
+        # is the same on a laptop, this host and a CI runner. Passing --env-file
+        # also SUPPRESSES the native load, so a stray local .env cannot colour
+        # the answer.
         $projects = @(
             @{ N = 'anchor';    F = 'docker-compose.yml';           A = @('--env-file', '.env.example') }
-            @{ N = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example') }
+            @{ N = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example') }
             # The frontend plane is profile-gated (stack-layers 2.5 / D8), so it
-            # is rendered TWICE: once as .env.example leaves it (COMPOSE_PROFILES
-            # =stock - the fresh-clone deployment) and once with the operator's
-            # profiles. One render can be valid while the other is broken -
+            # is rendered TWICE: once as frontend\.env.example leaves it
+            # (COMPOSE_PROFILES=stock - the fresh clone) and once with the
+            # operator's. One render can be valid while the other is broken -
             # `openwebui-backup` depends on both openwebui definitions, and a
             # dropped `required: false` only shows up in the render where the
-            # named service is off.
-            @{ N = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example') }
-            @{ N = 'frontend (gpu,tailscale)'; F = 'frontend\docker-compose.yml'; A = @('--env-file', '.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
-            @{ N = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
-            @{ N = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
-            @{ N = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }
-            @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', '.env.example', '--profile', 'internet') }
+            # named service is off. The inference plane gets the same treatment
+            # since sl-env-split: its own example ships `local` COMMENTED OUT (the
+            # cloud-only shape), so the `local` half needs its own render here or
+            # four services would stop being validated - which is what the root
+            # .env.example's single global COMPOSE_PROFILES used to hide.
+            @{ N = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', 'frontend\.env.example') }
+            @{ N = 'frontend (gpu,tailscale)'; F = 'frontend\docker-compose.yml'; A = @('--env-file', 'frontend\.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
+            @{ N = 'inference (local)'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example', '--profile', 'local') }
+            @{ N = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', 'memory\.env.example') }
+            @{ N = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', 'search\.env.example') }
+            @{ N = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', 'coder\.env.example') }
+            @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', 'portal\.env.example', '--profile', 'internet') }
         )
         foreach ($p in $projects) {
             # cmd /c so compose's stderr WARNINGS (e.g. an unset optional var)
@@ -88,11 +102,11 @@ if ($ymlStaged.Count -gt 0) {
                 # behind a profile. The profiled render is the superset - every
                 # container name the plane can produce. (`--profile local` from
                 # sl-inference-split; the frontend's pair from sl-frontend-solo.)
-                @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example', '--profile', 'local') }
-                @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
-                @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
-                @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
-                @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', '.env.example') }
+                @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', 'inference\.env.example', '--profile', 'local') }
+                @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', 'frontend\.env.example', '--profile', 'gpu', '--profile', 'tailscale') }
+                @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', 'memory\.env.example') }
+                @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', 'search\.env.example') }
+                @{ P = 'coder';     F = 'coder\docker-compose.yml';     A = @('--env-file', 'coder\.env.example') }
             )
             # OB1 renders only where its gitignored env exists (not in CI).
             # ALL FOUR PROFILES, deliberately: OB1 gained research/wiki/notebook

@@ -83,8 +83,8 @@ if %ERRORLEVEL% NEQ 0 (
     goto :interactive_menu
 )
 echo [DEBUG] Now in: %CD%
-echo [DEBUG] Running docker compose -f frontend\docker-compose.yml --env-file .env restart tailscale...
-docker compose -f frontend\docker-compose.yml --env-file .env restart tailscale
+echo [DEBUG] Running docker compose -f frontend\docker-compose.yml restart tailscale...
+docker compose -f frontend\docker-compose.yml restart tailscale
 echo [DEBUG] Docker compose exit code: %ERRORLEVEL%
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for Tailscale to reconnect...
@@ -118,8 +118,8 @@ echo.
 echo [INFO] Rebuilding Tailscale container...
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose down tailscale
-docker compose -f frontend\docker-compose.yml --env-file .env build --no-cache tailscale
-docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
+docker compose -f frontend\docker-compose.yml build --no-cache tailscale
+docker compose -f frontend\docker-compose.yml up -d tailscale
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for rebuild completion...
 timeout /t 45 /nobreak >nul
@@ -224,7 +224,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo [WARN] GPU check failed, restarting GPU services...
 cd /d "%SCRIPT_DIR%\..\.."
     docker restart llama-cpp-upstream llama-cpp-embed-upstream
-docker compose -f frontend\docker-compose.yml --env-file .env restart openwebui
+docker compose -f frontend\docker-compose.yml restart openwebui
     cd /d "%SCRIPT_DIR%"
     echo [INFO] Waiting for GPU services to restart...
     timeout /t 60 /nobreak >nul
@@ -397,7 +397,7 @@ cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Open Terminal health: OK
 ) else (
-    echo [ERROR] Open Terminal health: FAILED - run: docker compose -f coder\docker-compose.yml --env-file .env up -d open-terminal
+    echo [ERROR] Open Terminal health: FAILED - run: docker compose -f coder\docker-compose.yml up -d open-terminal
 )
 echo.
 echo [INFO] Mnemory Health:
@@ -407,7 +407,7 @@ cd /d "%SCRIPT_DIR%"
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] Mnemory health: OK
 ) else (
-    echo [ERROR] Mnemory health: FAILED - run: docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
+    echo [ERROR] Mnemory health: FAILED - run: docker compose -f memory\docker-compose.yml up -d mnemory
 )
 echo.
 echo.
@@ -431,14 +431,14 @@ curl -s -f -m 5 http://127.0.0.1:8085/healthz >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     echo [SUCCESS] search-gateway healthz: OK
 ) else (
-    echo [ERROR] search-gateway healthz: FAILED - run: docker compose -f search\docker-compose.yml --env-file .env up -d
+    echo [ERROR] search-gateway healthz: FAILED - run: docker compose -f search\docker-compose.yml up -d
 )
 echo.
 echo [INFO] Extended planes running state (search / little-coder / mnemory-cloud-gateway):
 echo        ^(compose service keys: gateway=search-gateway, vpn=search-vpn^)
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f search\docker-compose.yml --env-file .env ps --format "table {{.Service}}\t{{.Status}}" 2>nul
-docker compose -f coder\docker-compose.yml --env-file .env ps little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f search\docker-compose.yml ps --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f coder\docker-compose.yml ps little-coder lc-egress --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 echo.
 echo [INFO] Open Brain stack (mcp/mcpo/db/gateway/wiki - SEPARATE compose project):
@@ -446,8 +446,8 @@ powershell -ExecutionPolicy Bypass -NoProfile -File "%SCRIPT_DIR%check-openbrain
 echo.
 echo [INFO] Backup schedulers (no health endpoints - running state only):
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f frontend\docker-compose.yml --env-file .env ps openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
-docker compose -f memory\docker-compose.yml --env-file .env ps mnemory-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f frontend\docker-compose.yml ps openwebui-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
+docker compose -f memory\docker-compose.yml ps mnemory-backup --format "table {{.Service}}\t{{.Status}}" 2>nul
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
@@ -467,13 +467,13 @@ echo [WARN] This will restart OpenWebUI, llama-cpp, llama-cpp-embed, and Tailsca
 echo.
 echo [INFO] Stopping dependent containers first...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f inference\docker-compose.yml --env-file .env stop --timeout 30
-docker compose -f memory\docker-compose.yml --env-file .env stop --timeout 30
-docker compose -f frontend\docker-compose.yml --env-file .env stop --timeout 45-backup open_notebook surrealdb
+docker compose -f inference\docker-compose.yml stop --timeout 30
+docker compose -f memory\docker-compose.yml stop --timeout 30
+docker compose -f frontend\docker-compose.yml stop --timeout 45-backup open_notebook surrealdb
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Restarting OpenWebUI...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f frontend\docker-compose.yml --env-file .env restart openwebui
+docker compose -f frontend\docker-compose.yml restart openwebui
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for OpenWebUI to be healthy...
 :wait_openwebui_restart
@@ -492,7 +492,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start llama-cpp-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp start failed, trying up -d...
-    docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-upstream
+    docker compose -f inference\docker-compose.yml up -d llama-cpp-upstream
 )
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Starting llama-cpp-embed...
@@ -500,7 +500,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start llama-cpp-embed-upstream
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] llama-cpp-embed start failed, trying up -d...
-    docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-embed-upstream
+    docker compose -f inference\docker-compose.yml up -d llama-cpp-embed-upstream
 )
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for llama-cpp to initialize...
@@ -511,7 +511,7 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start tailscale
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Tailscale start failed, trying up -d...
-    docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale
+    docker compose -f frontend\docker-compose.yml up -d tailscale
 )
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Waiting for Tailscale to connect...
@@ -522,10 +522,10 @@ cd /d "%SCRIPT_DIR%\..\.."
 docker compose start mnemory
 if %ERRORLEVEL% NEQ 0 (
     echo [WARN] Mnemory start failed, trying up -d...
-    docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory
+    docker compose -f memory\docker-compose.yml up -d mnemory
 )
-docker compose -f memory\docker-compose.yml --env-file .env up -d mnemory-backup
-docker compose -f frontend\docker-compose.yml --env-file .env up -d openwebui-backup
+docker compose -f memory\docker-compose.yml up -d mnemory-backup
+docker compose -f frontend\docker-compose.yml up -d openwebui-backup
 cd /d "%SCRIPT_DIR%"
 cd /d "%SCRIPT_DIR%"
 echo [INFO] Starting surrealdb (open-notebook DB)...
@@ -566,7 +566,7 @@ echo ========================================
 echo.
 echo [INFO] Checking Mnemory service status...
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f memory\docker-compose.yml --env-file .env ps mnemory --format "table {{.Service}}\t{{.Status}}"
+docker compose -f memory\docker-compose.yml ps mnemory --format "table {{.Service}}\t{{.Status}}"
 echo.
 echo [INFO] Testing Mnemory health endpoint...
 docker exec mnemory python -c "import urllib.request; urllib.request.urlopen('http://localhost:8051/health')" >nul 2>&1
@@ -594,7 +594,7 @@ if %RESULT% EQU 0 (
 echo.
 echo [INFO] Mnemory backup service status:
 cd /d "%SCRIPT_DIR%\..\.."
-docker compose -f memory\docker-compose.yml --env-file .env ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
+docker compose -f memory\docker-compose.yml ps mnemory-backup --format "table {{.Service}}\t{{.Status}}"
 cd /d "%SCRIPT_DIR%"
 if "%1"=="" (
     echo.
@@ -675,7 +675,7 @@ if %RESULT% EQU 0 (
     echo [SUCCESS] llm-gateway is healthy ^(front door is up^)
 ) else (
     echo [WARN] llm-gateway liveliness failed, restarting db then gateway...
-    docker compose -f inference\docker-compose.yml --env-file .env up -d llm-gateway-db
+    docker compose -f inference\docker-compose.yml up -d llm-gateway-db
     timeout /t 5 /nobreak >nul
     docker restart llm-gateway
     echo [INFO] Waiting for gateway ^(first boot runs prisma migrations, ~60-90s^)...

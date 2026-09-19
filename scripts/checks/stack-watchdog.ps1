@@ -266,7 +266,7 @@ function Test-TailscaleDeployed {
     # that is not meant to exist is its own kind of outage.
     #
     # WHICH SOURCE: the RENDERED project (`config --services`), not a parse of
-    # .env. That is compose's own answer after it has applied COMPOSE_PROFILES
+    # frontend/.env. That is compose's own answer after applying COMPOSE_PROFILES
     # from --env-file, from the process environment, and its own precedence
     # rules; reimplementing that here would drift the moment any of them moves.
     #
@@ -275,12 +275,12 @@ function Test-TailscaleDeployed {
     #     deployed, because a checker that goes quiet on its own error is the
     #     failure mode this stack keeps paying for;
     #   - the render says no tailscale while a container NAMED tailscale is
-    #     RUNNING -> that is this host with COMPOSE_PROFILES missing from .env.
+    #     RUNNING -> that is this host with COMPOSE_PROFILES missing from frontend/.env.
     #     Keep checking and log why, rather than silently dropping the tailnet
     #     checks that exist because a 94-minute outage went unnoticed.
     # Cached PER CYCLE, not for the life of the process: the answer cannot
     # change inside one cycle, but it certainly can between them - the operator
-    # edits .env precisely to fix this - and daemon mode runs for weeks. The
+    # edits frontend/.env precisely to fix this - and daemon mode runs weeks. The
     # cache is cleared at the top of Invoke-HealthCheck; re-probing costs one
     # `compose config` (~550 ms measured), cheap once a minute and silly
     # several times inside one cycle.
@@ -289,13 +289,13 @@ function Test-TailscaleDeployed {
     try {
         # cmd /c so compose's stderr warnings cannot become PS 5.1
         # NativeCommandErrors under this script's EAP=Stop.
-        $svc = (cmd /c "docker compose -f frontend\docker-compose.yml --env-file .env config --services 2>nul") -join "`n"
+        $svc = (cmd /c "docker compose -f frontend\docker-compose.yml config --services 2>nul") -join "`n"
         if (-not $svc) {
             # A render ERROR is not an answer, and must never pass for one. The
             # trigger is real: the compose file carries a fail-loud
-            # WEBUI_SECRET_KEY guard, so a .env that is missing or lacks that
+            # WEBUI_SECRET_KEY guard, so a frontend/.env missing or lacking that
             # key renders NOTHING. Say so, and check as usual.
-            Write-LogEntry "The frontend plane rendered NOTHING (docker down, or .env missing/incomplete - the compose file's WEBUI_SECRET_KEY guard hard-fails the render) - cannot tell whether tailscale is deployed, so treating it as DEPLOYED and keeping the tailnet checks ON" "WARN"
+            Write-LogEntry "The frontend plane rendered NOTHING (docker down, or frontend/.env missing/incomplete - the compose file's WEBUI_SECRET_KEY guard hard-fails the render) - cannot tell whether tailscale is deployed, so treating it as DEPLOYED and keeping the tailnet checks ON" "WARN"
         }
         elseif ($svc -notmatch '(?m)^tailscale\s*$') {
             # Substring filter + an exact-match pass: `--filter name=^tailscale$`
@@ -478,7 +478,7 @@ function Test-EntrypointHealth {
             $Logs = cmd /c "docker logs tailscale --tail 5 2>&1" | Out-String
             if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
                 Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
-                Write-LogEntry "Run: docker compose -f frontend\docker-compose.yml --env-file .env build --no-cache tailscale" "INFO"
+                Write-LogEntry "Run: docker compose -f frontend\docker-compose.yml build --no-cache tailscale" "INFO"
                 # (the plane file is REQUIRED: tailscale lives in the frontend
                 #  project, and a bare `docker compose build` would hit the root
                 #  anchor, which declares no services - the operator would be
@@ -507,7 +507,7 @@ function Repair-LlamaCppConnectivity {
         # Check if llama-cpp-upstream container is running
         if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
             Write-LogEntry "llama-cpp-upstream container not running, starting..." "WARN"
-            docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-upstream | Out-Null
+            docker compose -f inference\docker-compose.yml up -d llama-cpp-upstream | Out-Null
             Start-Sleep 30
 
             if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
@@ -519,7 +519,7 @@ function Repair-LlamaCppConnectivity {
         # Also check llama-cpp-embed-upstream
         if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
             Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
-            docker compose -f inference\docker-compose.yml --env-file .env up -d llama-cpp-embed-upstream | Out-Null
+            docker compose -f inference\docker-compose.yml up -d llama-cpp-embed-upstream | Out-Null
             Start-Sleep 15
         }
         
@@ -573,7 +573,7 @@ function Repair-TailscaleService {
     try {
         # First try gentle restart (preserves network namespace)
         Write-LogEntry "Attempting gentle restart (preserving GPU container)..."
-        docker compose -f frontend\docker-compose.yml --env-file .env stop tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml stop tailscale | Out-Null
         Start-Sleep 5
         
         # Ensure OpenWebUI is still healthy before restarting Tailscale
@@ -582,7 +582,7 @@ function Repair-TailscaleService {
             return $false
         }
         
-        docker compose -f frontend\docker-compose.yml --env-file .env start tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml start tailscale | Out-Null
         Start-Sleep 45  # Increased wait time for GPU container dependencies
         
         # Verify gentle restart worked
@@ -601,10 +601,10 @@ function Repair-TailscaleService {
         }
         
         # Use the proper network namespace recovery method
-        docker compose -f frontend\docker-compose.yml --env-file .env stop tailscale | Out-Null
-        docker compose -f frontend\docker-compose.yml --env-file .env rm -f tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml stop tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml rm -f tailscale | Out-Null
         Start-Sleep 5  # Give OpenWebUI time to stabilize
-        docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
+        docker compose -f frontend\docker-compose.yml up -d tailscale | Out-Null
         Start-Sleep 60  # Increased wait for GPU container + network namespace reattachment
         
         # Final verification
@@ -1662,7 +1662,7 @@ function Invoke-HealthCheck {
     # bridges went unchecked for as long as the fault lasted.
     $script:HealthIssues = @()
     # Per-cycle, not per-process: a daemon started before the operator fixed
-    # .env must notice the fix on the NEXT cycle, not on the next restart.
+    # frontend/.env must notice the fix on the NEXT cycle, not the next restart.
     $script:TailscaleDeployedCache = $null
 
     # Change to project directory
@@ -1752,7 +1752,7 @@ function Invoke-HealthCheck {
         # -d` - a NO-OP on an already-running container with unchanged config. That
         # is exactly how the 2026-09-16 outage retried a no-op 8 times across 94
         # minutes and never recovered. Split the two cases: RECREATE when it is up
-        # but unhealthy, so a changed .env (a fresh TAILSCALE_AUTH_KEY, say) is
+        # but unhealthy, so a changed frontend/.env (a fresh TAILSCALE_AUTH_KEY) is
         # actually picked up. --no-deps leaves openwebui - which OWNS the netns
         # tailscale joins - untouched.
         if (-not (Test-ServiceHealth "tailscale")) {
@@ -1773,14 +1773,14 @@ function Invoke-HealthCheck {
                 } catch { }
                 if ($mayRecreate) {
                     Write-LogEntry "Tailscale container is RUNNING but health=$($tsState.Health) - recreating (up -d would be a no-op)..." "WARN"
-                    docker compose -f frontend\docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale | Out-Null
+                    docker compose -f frontend\docker-compose.yml up -d --force-recreate --no-deps tailscale | Out-Null
                     try { (Get-Date -Format o) | Out-File $rcCooldown -Encoding ascii -Force } catch { }
                 } else {
                     Write-LogEntry "Tailscale container still health=$($tsState.Health) but a recreate ran within the hour - not recreating again (check whether OpenWebUI, whose :8080 the healthcheck probes, is the real fault)" "WARN"
                 }
             } else {
                 Write-LogEntry "Tailscale container not running (state=$($tsState.State)), starting..." "WARN"
-                docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
+                docker compose -f frontend\docker-compose.yml up -d tailscale | Out-Null
             }
 
             # Wait for the container plus its netns reattachment.
@@ -1845,7 +1845,7 @@ function Invoke-HealthCheck {
         # container has a 60s start_period (found in review 2026-09-16).
         $tsNode = Test-TailscaleNodeState
         if ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsLogin')) {
-            Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node is LOGGED OUT (NeedsLogin) - every serve route is gone (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Fix: put a fresh TAILSCALE_AUTH_KEY in .env, then 'docker compose -f frontend/docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale'."
+            Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node is LOGGED OUT (NeedsLogin) - every serve route is gone (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Fix: put a fresh TAILSCALE_AUTH_KEY in frontend/.env, then 'docker compose -f frontend/docker-compose.yml up -d --force-recreate --no-deps tailscale'."
             $script:HealthIssues += 'tailscale-logout'
         } elseif ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsMachineAuth')) {
             Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node needs DEVICE APPROVAL (NeedsMachineAuth) - every serve route is down until it is approved. Approve this machine in the Tailscale admin console; a new auth key will NOT fix this one."

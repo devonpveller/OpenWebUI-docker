@@ -40,10 +40,10 @@
 #
 # Plane keys:
 #   compose   - compose file, repo-root-relative (forward slashes).
-#   env_file  - extra --env-file for the compose CLI. Absent/empty means the
-#               project directory's own .env is loaded natively by compose.
-#               Today every plane except ob1 and agent-org uses the single root
-#               .env; sl-env-split changes that later.
+#   env_file  - extra --env-file for the compose CLI. RETIRED by sl-env-split
+#               (2026-09-19): NO plane declares one, so compose loads
+#               `<project dir>/.env` natively for all eight. The key is still
+#               READ (Manifest.env_file) so a future plane could declare one.
 #   lease     - scripts/agent-harness/lease-names.conf name. Absent = none.
 #   requires  - hard edges (above).
 #   optional  - soft edges (above).
@@ -53,7 +53,8 @@
 #               value names what does. `up`/`down`/`restart` skip or refuse it.
 #   host      - what the machine itself must provide, in prose.
 #   keys      - variable names that must be present and non-blank in the plane's
-#               env file. A blank one makes `enable` refuse and name the key.
+#               OWN env file (`<project dir>/.env`). A blank one makes `enable`
+#               refuse, naming the key and the file.
 #   ports     - published HOST ports -> what answers on them.
 #   profiles  - compose profiles. Each is a sub-table with a `description`, an
 #               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
@@ -101,7 +102,6 @@
 # `up` starts it whenever any plane runs, and no plane's `enable` refuses on
 # account of it.
 compose  = "docker-compose.yml"
-env_file = ".env"
 implicit = true
 requires = []
 optional = []
@@ -121,7 +121,6 @@ keys     = []
 # moved the services into inference/compose/*.yml and left that file 91 lines
 # long, so the old numbers pointed past its end.
 compose  = "inference/docker-compose.yml"
-env_file = ".env"
 lease    = "inference"
 requires = ["anchor"]
 optional = []
@@ -164,7 +163,6 @@ description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. lo
 # profile that attaches to them; under `stock` the plane uses only its own
 # frontend_owui-net (:484) and needs no anchor network at all.
 compose  = "frontend/docker-compose.yml"
-env_file = ".env"
 lease    = "frontend"
 requires = ["anchor"]
 # The frontend is the stack's tailnet front door: `tailscale` shares openwebui's
@@ -258,7 +256,6 @@ description = "the tailscale netns companion and its state backup; usable ONLY w
 #   http://llama-cpp-embed:8080/v1). Both are unconditional - mnemory cannot
 #   embed or summarise without them.
 compose  = "memory/docker-compose.yml"
-env_file = ".env"
 lease    = "memory"
 requires = ["anchor", "inference"]
 optional = []
@@ -274,7 +271,6 @@ keys     = ["MCP_API_KEY"]
 # requires anchor: search/docker-compose.yml:173-175 (ai-stack_default, which
 #   is where OB1 and the frontend resolve `vpn` and `gateway` by name).
 compose  = "search/docker-compose.yml"
-env_file = ".env"
 lease    = "search"
 requires = ["anchor"]
 optional = []
@@ -297,7 +293,6 @@ keys = ["MULLVAD_WG_PRIVATE_KEY", "MULLVAD_WG_ADDRESSES"]
 #   base_url is http://llama-cpp:8080/v1 (little-coder/config/little-coder.config.yaml:11,
 #   little-coder/config/models.json:6). The daemon has no other model backend.
 compose  = "coder/docker-compose.yml"
-env_file = ".env"
 lease    = "coder"
 requires = ["anchor", "inference"]
 optional = []
@@ -312,8 +307,8 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 # Open Brain - the openbrain-* fleet, the wiki, the scheduled slice
 # (docker-compose.scheduled.yml, pulled in by include: at
 # OB1/docker/docker-compose.yml:15-16) and the Open Notebook trio.
-# env_file is DELIBERATELY absent: compose's project directory is OB1/docker,
-# so it loads OB1/docker/.env natively. Passing the root .env would override it.
+# No env_file key: compose's project directory is OB1/docker, so it loads
+# OB1/docker/.env natively - which is how every plane works since sl-env-split.
 # requires anchor: OB1/docker/docker-compose.yml:1268-1286 (ai-stack_llm-net,
 #   ai-stack_app-net, ai-stack_default - the last aliased `search-gw-net`).
 # requires inference: OB1/docker/docker-compose.yml:116,120 (openbrain-mcp),
@@ -438,8 +433,8 @@ opt_in      = true
 # --------------------------------------------------------------------------
 [planes.agent-org]
 # Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
-# env_file DELIBERATELY absent - project directory agent-org/docker loads its
-# own .env, same reasoning as ob1.
+# No env_file key - project directory agent-org/docker loads its own .env,
+# the same way every plane does since sl-env-split.
 # requires anchor: agent-org/docker/docker-compose.yml:748-750 (ai-stack_llm-net).
 # requires inference: agent-org/docker/docker-compose.yml:127
 #   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :257 (agent-bridge joins
@@ -500,7 +495,6 @@ opt_in      = true
 #   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:153,
 #   networks at :162-164).
 compose  = "portal/docker-compose.yml"
-env_file = ".env"
 lease    = "portal"
 requires = ["anchor", "frontend"]
 optional = ["ob1", "inference"]

@@ -107,7 +107,7 @@ seen*.
 | Key | Meaning |
 |---|---|
 | `compose` | compose file, repo-root-relative, forward slashes. Printed verbatim into the docker command. |
-| `env_file` | the `--env-file` argument. **Absent means absent**: compose then loads the `.env` sitting in the compose file's own directory. That is why `ob1` and `agent-org` pass none - their project directories are `OB1/docker` and `agent-org/docker`, and passing the root `.env` would override the right values with the wrong ones. |
+| `env_file` | the `--env-file` argument. **Absent means absent**: compose then loads the `.env` sitting in the compose file's own directory. Since `sl-env-split` (2026-09-19) NO plane declares one - every project directory holds its own `.env` (`frontend/.env`, `inference/.env`, ... `OB1/docker/.env`), so the driver passes no flag at all. The key is still read, so a plane whose env genuinely lives elsewhere could declare one. |
 | `lease` | the `scripts/agent-harness/lease-names.conf` name for the plane. Absent = no canonical lease name (the anchor). |
 | `requires` / `optional` | see above. |
 | `implicit` | the plane is started whenever anything runs and never has to be enabled. Only the anchor. No refusal ever names it, and `enable` never writes it into the state file. |
@@ -133,13 +133,13 @@ so. Forcing the declaration turns that into a decision someone made on purpose.
 
 #### `--profile` REPLACES `COMPOSE_PROFILES`; it does not add to it
 
-Measured 2026-09-19, compose v5.3.0, root `.env` carrying
-`COMPOSE_PROFILES=local,gpu,tailscale`:
+Measured 2026-09-19, compose v5.3.0, with the inference plane's own env file
+carrying `COMPOSE_PROFILES=local`:
 
 ```text
-docker compose -f inference/docker-compose.yml --env-file .env config --services
+docker compose -f inference/docker-compose.yml config --services
   -> 8 services            (the `local` half is on)
-... --env-file .env --profile idea-refinery config --services
+... --profile idea-refinery config --services
   -> 4 services            (`local` silently dropped)
 ```
 
@@ -240,7 +240,7 @@ exits non-zero.
 
 `up` starts the selected planes in dependency order; `down` stops them in
 reverse. `--dry-run` prints the exact
-`docker [--context X] compose -f <file> [--env-file ...] [--profile p]... <verb>`
+`docker [--context X] compose -f <file> [--profile p]... <verb>`
 lines and runs **nothing**.
 
 A `manual` plane (the portal) is never started or stopped; a `#` comment line
@@ -310,8 +310,8 @@ pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code:
 * `docker ps` - twice, once for unhealthy containers and once, with
   `--filter name=tailscale`, by the deployment guard below;
 * `docker network inspect ai-stack_llm-net`;
-* **one `docker compose -f frontend/docker-compose.yml --env-file .env config
-  --services`** - the tailnet guard asking whether the `tailscale` profile is
+* **one `docker compose -f frontend/docker-compose.yml config --services`** -
+  the tailnet guard asking whether the `tailscale` profile is
   part of this deployment (added with `sl-frontend-solo`; it was missing from
   this list until a tester counted);
 * **five** read-only `docker exec`s - `llm-gateway`, `tailscale`,
@@ -364,7 +364,7 @@ Exactly one of the two flags is required.
 
 | Part of the file | Comes from |
 |---|---|
-| `projects.*` (compose file, `--env-file`, the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
+| `projects.*` (compose file, `env_file` - `null` for every plane since `sl-env-split` - and the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
 | `container`, `service`, `profile` | the compose **render**, with every declared profile switched on |
 | `profile` | the render, EXCEPT where the plane's compose file is a pinned submodule that does not carry the profile yet - there the sidecar's value is a DECLARATION (see below) |
 | `project` | the render too - a sidecar row may omit it. Record it only where the render cannot answer: a project whose compose file may be absent (`open-brain` - CI has no submodule). Where recorded, it is audited against the render |

@@ -42,11 +42,13 @@ $ErrorActionPreference = 'Continue'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
-  # Own compose project since 2026-08-21 (CLEANUP-PLAN v3 #5). The root .env
-  # is passed explicitly - interpolation no longer finds it from portal/.
+  # Own compose project since 2026-08-21 (CLEANUP-PLAN v3 #5). NO --env-file
+  # since sl-env-split (2026-09-19): `-f portal\docker-compose.yml` makes
+  # portal/ the project directory, so compose loads portal/.env itself. The
+  # `internet` profile stays a COMMAND-LINE flag and is deliberately absent
+  # from portal/.env - exposing the stack must never be a standing setting.
   $portalBase = @('-p', 'portal',
-                  '-f', (Join-Path $projectRoot 'portal\docker-compose.yml'),
-                  '--env-file', (Join-Path $projectRoot '.env'))
+                  '-f', (Join-Path $projectRoot 'portal\docker-compose.yml'))
   if ($Test) {
     $composeArgs = $portalBase + @('-f', (Join-Path $projectRoot 'portal\local-test.override.yml'))
     Write-Host "==> Bringing portal up in TEST mode (no tunnel)" -ForegroundColor Cyan

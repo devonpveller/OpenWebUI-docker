@@ -63,8 +63,8 @@ cd inference/llm-queue; python -m venv .venv; ./.venv/Scripts/python -m pip inst
 # ALWAYS name the plane file: since K.1 the root project is the network anchor
 # and owns no services, so a bare `docker compose` from the repo root does
 # nothing here. Run from the REPO ROOT:
-docker compose -f inference/docker-compose.yml --env-file .env build llm-queue
-docker compose -f inference/docker-compose.yml --env-file .env up -d llm-queue
+docker compose -f inference/docker-compose.yml build llm-queue
+docker compose -f inference/docker-compose.yml up -d llm-queue
 
 # burst verifier (run inside a container that can reach the target)
 docker exec -i llm-queue   python - http://localhost:8080 24 < inference/llm-queue/scripts/burst.py   # direct
@@ -78,7 +78,7 @@ docker exec -i llm-queue   python - http://llm-gateway:8080 48 < inference/llm-q
 2. `inference/config/llama-swap.config.yaml`: `concurrencyLimit: 0` → `32`
 
 …then, from the repo root,
-`docker compose -f inference/docker-compose.yml --env-file .env restart llm-gateway llama-cpp-upstream`.
+`docker compose -f inference/docker-compose.yml restart llm-gateway llama-cpp-upstream`.
 
 `restart` is deliberate and correct here: both steps EDIT THE CONTENTS of files that stay
 where they are, so the existing binds still resolve and there is nothing to re-render.

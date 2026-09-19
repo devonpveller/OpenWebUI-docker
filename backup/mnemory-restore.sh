@@ -12,9 +12,9 @@ set -eu
 #
 # IMPORTANT: Stop the memory plane before restoring! (own compose project
 # since Part K 2026-08-21; run from the repo root)
-#   docker compose -f memory/docker-compose.yml --env-file .env stop mnemory mnemory-cloud-gateway
+#   docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway
 #   <run restore>
-#   docker compose -f memory/docker-compose.yml --env-file .env start mnemory mnemory-cloud-gateway
+#   docker compose -f memory/docker-compose.yml start mnemory mnemory-cloud-gateway
 
 BACKUP_FILE="${1:-}"
 DATA_DIR="${DATA_DIR:-/data}"
