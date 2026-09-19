@@ -1,10 +1,19 @@
-# Test plan — `sl-colo-inference2`
+# Test plan — `sl-colo-inference3`
 
-**Item:** `sl-colo-inference2` — the reopen of `sl-colo-inference` (stack-layers PLAN 2.7,
-Part L.1, wave 2). Same branch, same worktree.
+**Item:** `sl-colo-inference3` — the second reopen of `sl-colo-inference` (stack-layers
+PLAN 2.7, Part L.1, wave 2). Same branch, same worktree.
 **Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`ae915c3`** (which
 contains `sl-inference-split`, `sl-closeout`, `sl-ob1-profiles`, `sl-frontend-solo` and
 `sl-colo-gateways`).
+**Revision 7:** attempt 3 passed test and was **REJECTED at review** — every prior finding
+had landed, but `frontend/docker-compose.yml:136` (`openwebui-stock`, the service
+`sl-frontend-solo` added and the rebase brought in) still carried
+`- ../config:/app/config:ro`, the exact line this item removed from the `gpu` definition.
+`--profile stock` rendered a bind to the `config/` this item deletes, so a **fresh clone**
+would have recreated the removed directory. Nobody had ever rendered `stock`: the anchor
+named `gpu`+`tailscale`, and `openwebui-stock` had zero hits in the note or this plan. The
+mount is now a **one-line pointer** (line-neutral, so no citation moved), and **T16** below
+renders EVERY profile combination of every touched plane. Base unchanged at `ae915c3`.
 **Revision 6:** attempt 2 FAILED on **T14 only** (14/15). `stack.manifest.toml:119-120`
 cites `profiles: [local]` at `upstreams.yml:41,:130, queue.yml:39 and backups.yml:48` — the
 second and later as **bare basenames** — and this branch's +1 in `queue.yml` had pushed
@@ -987,6 +996,111 @@ make the deliverable un-actionable rather than merely shorter.
 
 ---
 
+## T16 — EVERY profile combination of EVERY touched plane, and none names `config/`
+
+**This case exists because the item was rejected a second time for what it does not cover.**
+`sl-frontend-solo` split the frontend's one openwebui service into `openwebui`
+(`profiles: [gpu]`) and `openwebui-stock` (`profiles: [stock]`, the fresh-clone deployment).
+The rebase that brought that split in carried `- ../config:/app/config:ro` onto the NEW
+service, and this item had removed it only from the old one. Nobody noticed for three
+attempts because **every render anyone ran named the profiles the ANCHOR named** —
+`--profile local`, `--profile gpu --profile tailscale`. `openwebui-stock` was in neither, so
+it never appeared in a rendered service list. The consequence was not cosmetic: `--profile
+stock` resolved a bind to the `config/` this item deletes, so a fresh clone would have
+**recreated the directory the goal says is removed** (Docker materialises a missing bind
+source as an empty directory — the F14 mechanism, arriving from the other end).
+
+**A profile you never render is a service you never check.** Enumerate the profiles from the
+files, do not take them from the anchor:
+
+```bash
+cd "$SCRATCH/head"
+grep -n 'profiles:' frontend/docker-compose.yml inference/compose/*.yml inference/docker-compose.yml agent-org/docker/docker-compose.yml
+```
+
+Then render each combination and assert that no bind source and no build context resolves
+inside the removed `config/`:
+
+```bash
+check () {   # check <compose-file> <env-file> [profile ...]
+  f=$1; e=$2; shift 2; args=""; for p in "$@"; do args="$args --profile $p"; done
+  docker compose -f "$f" --env-file "$e" $args config --format json \
+    | python -c "
+import json,os,sys
+d=json.load(sys.stdin); removed=os.path.abspath('config'); bad=[]
+for n,s in d.get('services',{}).items():
+    for v in s.get('volumes') or []:
+        if v.get('type')=='bind':
+            p=os.path.abspath(str(v['source']))
+            if p==removed or p.startswith(removed+os.sep): bad.append((n,'bind',p))
+    b=s.get('build')
+    if b and b.get('context'):
+        p=os.path.abspath(str(b['context']))
+        if p==removed or p.startswith(removed+os.sep): bad.append((n,'build',p))
+print(len(d.get('services',{})),'services;','FAIL' if bad else 'OK', bad)"
+}
+check frontend/docker-compose.yml .env.example stock
+check frontend/docker-compose.yml .env.example gpu tailscale
+check frontend/docker-compose.yml .env.example                      # no profile
+check inference/docker-compose.yml .env.example local
+check inference/docker-compose.yml .env.example                     # no profile
+check agent-org/docker/docker-compose.yml agent-org/docker/.env
+check agent-org/docker/docker-compose.yml agent-org/docker/.env cloud workers
+```
+
+**PASS — every row `OK`, with the service counts as a second signal that the profile
+actually selected something:**
+
+| render | services | must be |
+|---|---|---|
+| frontend `--profile stock` | 2 (`openwebui-stock`, `openwebui-backup`) | OK. This is the row the rejection was about — if it FAILs, `openwebui-stock` still carries the mount |
+| frontend `--profile gpu --profile tailscale` | 4 | OK |
+| frontend, no profile | 2 | OK |
+| inference `--profile local` | 8 | OK |
+| inference, no profile | 4 | OK |
+| agent-org, no profile | 6 | OK |
+| agent-org `--profile cloud --profile workers` | 16 | OK |
+
+**FAIL:** any row printing `FAIL`, i.e. any bind or build context inside `config/`. A render
+that merely *succeeds* is not the bar — read the `OK`/`FAIL` verdict, because the mount
+rendered perfectly well for three attempts while being wrong.
+
+**ONE COMBINATION MUST REFUSE TO RENDER, and the refusal is the correct result:**
+
+```bash
+docker compose -f frontend/docker-compose.yml --env-file .env.example --profile stock --profile gpu config -q
+```
+
+**PASS:** it fails with `container name "openwebui" is already in use`. The two definitions
+deliberately share `container_name` — `sl-frontend-solo` designed them mutually exclusive
+and `stack.manifest.toml:197` says so in as many words. Confirm this is that item's design
+and not this branch's breakage by running the identical command against a `development`
+export; it refuses there too.
+**FAIL:** it renders. That would mean the mutual exclusion was lost, which is
+`sl-frontend-solo`'s invariant and not this item's to change.
+
+**Check the removal from the SOURCE side too**, so a passing render is not the only
+evidence:
+
+```bash
+MSYS_NO_PATHCONV=1 git grep -n '/app/config' -- frontend/docker-compose.yml
+```
+
+**PASS:** the only hits are the six-line evidence comment on the `gpu` definition (T15) and
+the **one-line pointer** to it on `openwebui-stock` at `:136`. Neither is a `volumes:` entry.
+**FAIL:** any `- ...:/app/config` mount line survives on either definition.
+
+**Why the pointer is one line.** Replacing the mount with a single comment line keeps
+`frontend/docker-compose.yml` at **484** lines, so not one of T14's 30 frontend citations
+moved and none needed re-deriving — F7c's principle applied to a removal rather than a
+rewrap. Confirm it: `git -C "$W" diff -U0 development..work/sl-colo-inference -- frontend/docker-compose.yml`
+prints exactly `@@ -136 +136 @@` (1-for-1) and `@@ -182 +182,6 @@` (the six-line comment).
+**FAIL:** a `@@ -136 +136,0 @@`-shaped hunk, i.e. the line was deleted rather than replaced —
+then every citation below `:136` shifted by -1 and T14 must be re-derived before this case
+can pass.
+
+---
+
 ## Case-to-criterion map
 
 | anchor acceptance criterion | cases |
@@ -1000,6 +1114,7 @@ make the deliverable un-actionable rather than merely shorter.
 | names/tags/aliases/networks unchanged; live plane untouched | T5c, T5d, T12 |
 | *(no anchor criterion)* — the post-merge live hazard the findings note must carry | **T13a-e** |
 | the comment is <= six lines; every citation into a changed file re-derived by construct; no findings sentence claiming the item created no drift | **T14, T15** |
+| every profile combination of every touched plane renders, and no render names the removed `config/` | **T16** |
 
 ## Open declarations for the gate
 

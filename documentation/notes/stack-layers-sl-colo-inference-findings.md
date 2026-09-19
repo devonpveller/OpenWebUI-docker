@@ -135,6 +135,16 @@ The anchor requires the mount removed **with evidence** that no OWUI code path r
 reads `/app/config`, and that no OWUI feature reads it through a path this repo cannot
 see. Both were bounded by checking the image actually deployed.
 
+**The mount was removed from BOTH openwebui definitions** (corrected 2026-09-19, third
+review). `sl-frontend-solo` split the service in two — `openwebui` under `profiles:
+[gpu]` and `openwebui-stock` under `profiles: [stock]`, the fresh-clone deployment — and
+the rebase that brought that split in carried `- ../config:/app/config:ro` into the NEW
+service while this item had removed it only from the old one. The four checks above are
+about the OWUI image and its database, so they apply identically to both definitions:
+same image release, same `openwebui-data` volume, same `webui.db`. `openwebui-stock`
+now carries a one-line pointer at `frontend/docker-compose.yml:136` back to the six-line
+comment on the `gpu` definition, rather than a second copy of it.
+
 **What removal does not do:** the change is to `frontend/docker-compose.yml` only. The
 **running** `openwebui` container still has the directory mounted — it was created before
 this change — and will keep it until the next deliberate recreate of the frontend plane.
@@ -706,3 +716,43 @@ the forward-slash and backslash forms of `config/litellm`, `config/llama-swap`,
 need to know what the branch moved, which is a per-item fact, not a repo-wide one. The
 honest fix is the discipline: **after a rebase, re-run the item's own tree-level sweep**,
 and say in the evidence that you did.
+
+## F15b — a rebase can add a SERVICE to a file you already edited, and your removal is
+not re-applied to it
+
+[observed 2026-09-19] The same base-moves-under-you shape as F15, one level up. This item
+removed `- ../config:/app/config:ro` from `frontend/docker-compose.yml`. Two rebases
+later, `sl-frontend-solo` had split that file's one openwebui service into **two** —
+`openwebui` (`profiles: [gpu]`) and `openwebui-stock` (`profiles: [stock]`, the
+fresh-clone deployment) — and the new service was written with the mount still on it.
+The rebase replayed my deletion onto the service it was written against and left the new
+one alone. Both sides behaved correctly; the result was a branch that deletes `config/`
+and still binds it.
+
+**Why nothing caught it for three attempts.** Every render this item ever ran named the
+profiles the ANCHOR named — `--profile local` for inference, `--profile gpu --profile
+tailscale` for the frontend. `openwebui-stock` is in neither, so it never appeared in a
+rendered service list, and `openwebui-stock` has zero hits in this note or the test plan.
+The citation sweep could not see it either: this is not a stale line NUMBER, it is a live
+mount of a deleted directory.
+
+**And it was not merely untidy.** `docker compose -f frontend/docker-compose.yml
+--env-file .env.example --profile stock config` resolved the bind source to the repo's
+`config/`. On a fresh clone — which is exactly who the `stock` profile is for — Docker
+materialises a missing bind source as an empty directory, so the fresh-clone deployment
+would have **recreated the directory this item's goal says is removed**. The same
+empty-directory mechanism as F14, arriving from the opposite direction.
+
+**The rule, and it is now an anchor criterion:** after every rebase, re-run the item's own
+REMOVAL sweep against **every profile combination of every plane it touches**, not just
+the combinations the anchor happened to name. A profile you never render is a service you
+never check. The plan's T16 does this by construct and fails on any render naming
+`config/`; it is cheap (one `docker compose config` per combination) and it is the only
+thing that would have caught this.
+
+**One combination legitimately refuses to render, and that refusal is the correct
+result:** `--profile stock --profile gpu` together fails with `container name "openwebui"
+is already in use`, because the two definitions deliberately share `container_name` —
+`sl-frontend-solo` designed them mutually exclusive and `stack.manifest.toml:197` says so.
+[source] Verified identical on `development`, so it is that item's design, not this
+branch's breakage. A plan case must expect the refusal rather than score it a failure.

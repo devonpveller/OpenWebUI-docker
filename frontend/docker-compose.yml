@@ -133,7 +133,7 @@ services:
       - owui-net
     volumes:
       - openwebui-data:/app/backend/data
-      - ../config:/app/config:ro # Read-only config
+      # NO /app/config MOUNT (removed from BOTH openwebui definitions 2026-09-19) - the claim, the four checks and F2/F13 are on the gpu one below.
     environment:
       - TZ=America/New_York
       # Same fail-loud guard as the gpu definition: a recreate WITHOUT this key
