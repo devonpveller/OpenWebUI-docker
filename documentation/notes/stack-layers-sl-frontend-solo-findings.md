@@ -77,7 +77,8 @@ docker compose -f t11.yml down
   (wtslfs-t11-gated-1 still running)       <- the profiled one, untouched
 ```
 
-So on a host whose `.env` has not been given `COMPOSE_PROFILES=gpu,tailscale`:
+So on a host whose `.env` value omits the frontend's profiles (this host's FULL
+value is `COMPOSE_PROFILES=local,gpu,tailscale` - see 12):
 
 - `docker compose -f frontend/docker-compose.yml --env-file .env up -d` starts
   `openwebui-backup` and nothing else;
@@ -91,8 +92,8 @@ The whole-project verbs in the recovery surface are therefore exposed
 (`up -d`), `:1015` via `Start-PlaneStack` → `:302` (`up -d`), and `:810` via
 `Stop-PlaneStack` → `:316` (`stop --timeout`). Each would operate on
 `openwebui-backup` alone. `Confirm-FrontendProfiles` (added at `:165`, called
-from all four recovery entry points - `:609`, `:767`, `:953`, `:1063`) now logs an ERROR naming the fix before
-any of them runs - see the end of this entry.
+from all four recovery entry points - `:609`, `:767`, `:953`, `:1063`) now logs
+an ERROR naming the fix before any of them runs - see the end of this entry.
 
 **The per-service verbs do NOT survive either — except for `openwebui`.**
 *Observed live, 2026-09-19, against this file with this host's `.env` (which
@@ -120,14 +121,19 @@ That makes the exposed set much wider than the whole-project verbs. Line
 numbers are of THIS branch's files as committed in attempt 2 (they shifted from
 the tester's attempt-1 report, which read `18b4901`):
 `scripts/checks/stack-watchdog.ps1`'s seven tailscale repair calls -
-`:572` and `:581` (`stop`/`start` in `Repair-TailscaleService`), `:600`, `:601`
-and `:603` (`stop`/`rm -f`/`up -d` in the same function's harder path), `:1769`
-(`up -d --force-recreate --no-deps tailscale`) and `:1776` (`up -d tailscale`),
-plus two operator-advice strings at `:477` and `:1841` that print the same
-commands - and `scripts/recovery/emergency-recovery.ps1:633`
-(`restart tailscale`), and the `stop tailscale openwebui` recipe documented in
+`:576` and `:585` (`stop`/`start` in `Repair-TailscaleService`), `:604`, `:605`
+and `:607` (`stop`/`rm -f`/`up -d` in the same function's harder path), `:1776`
+(`up -d --force-recreate --no-deps tailscale`) and `:1783` (`up -d tailscale`),
+plus two operator-advice strings at `:481` and `:1848` that print the same
+commands; `scripts/recovery/emergency-recovery.ps1:633` (`restart tailscale`);
+`scripts/recovery/quick-fixes.bat`'s four - `:87` (`restart tailscale`), `:121`
+(`build --no-cache tailscale`), `:122` and `:514` (`up -d tailscale`); the
+profile-less recipe in `documentation/runbooks/restore-from-snapshot.md:206`;
+and the `stop tailscale openwebui` recipe documented in
 `backup/openwebui-restore.sh:9`. The watchdog pipes every one of its repairs to
-`Out-Null`, so they fail **silently**.
+`Out-Null`, so they fail **silently**. (quick-fixes.bat and the runbook were
+raised by the attempt-1 tester; the runbook's recipe now carries the flags, the
+.bat is left to its owner - see 12.)
 
 **CORRECTION, and how it was got wrong** (attempt 1, caught by the tester).
 This entry previously claimed the opposite — that explicit naming survives, so
@@ -301,3 +307,57 @@ stack.ps1 health
 Both now emit that WARN and still run the checks. Raised by the attempt-1
 tester as C2-2 (correctly classed as not class-1, since the direction was
 already safe).
+
+## 12. `COMPOSE_PROFILES` is GLOBAL, and the rebase put two blocks in charge of it.
+
+*Observed live, 2026-09-19 (attempt 3), after rebasing onto `development`
+be00d53.* `sl-inference-split` landed an `.env.example` block that also told the
+reader to set `COMPOSE_PROFILES` (`#COMPOSE_PROFILES=local`, "uncomment the line
+below in your .env") while this branch's frontend block set it to `stock`. Two
+blocks, one variable.
+
+The variable is a **single global compose setting**: every plane driven with
+`--env-file .env` reads the same value, and each project ignores profile names
+it does not declare. A duplicate key in an env file is **last-wins, silently,
+exit 0** - measured:
+
+```
+printf 'COMPOSE_PROFILES=stock
+COMPOSE_PROFILES=local
+' > dup.env
+docker compose -f dup.yml --env-file dup.env config --services
+  s_local                     <- only the LAST assignment survives, exit 0
+```
+
+And the live value is one no document stated: `.env:334` is
+`COMPOSE_PROFILES=local,gpu,tailscale`. An operator obeying attempt 2's "put
+`COMPOSE_PROFILES=gpu,tailscale` in .env" **exactly** would have dropped
+`local` and taken `llama-cpp-upstream`, `llama-cpp-embed-upstream`, `llm-queue`
+and llm-gateway's local model-group registration down with it. That is the
+attempt-1 failure class again: an instruction about `.env` stated more
+confidently than the environment supports.
+
+**Fixed per orchestrator decision D15:** `.env.example` now carries ONE
+authoritative `COMPOSE_PROFILES` section at the top that owns the variable for
+all planes - it says the variable is global, lists every profile by plane,
+names which planes are NOT part of it (portal passes `internet` on the command
+line; agent-org and OB1 load their own env files, so `sl-ob1-profiles` adds
+research/wiki/notebook THERE, not here), gives the two canonical values
+(`stock` for a fresh clone, `local,gpu,tailscale` for this host), and ships
+`stock` active. The inference block keeps its prose and points at that section
+instead of assigning the variable again. Every sentence in this branch that
+said `gpu,tailscale` alone - compose header, stack-map, the watchdog and
+stack.ps1 warnings, the recovery ERROR - now names the full value or points at
+the section.
+
+**Left alone, deliberately:** `scripts/recovery/quick-fixes.bat`'s four
+tailscale calls (`:87`, `:121`, `:122`, `:514`) have the same profile problem
+as the watchdog's. They are not fixed here because fixing them means either
+hardcoding this host's profiles into a generic .bat - the thing 10 explains is
+wrong for a generic driver - or porting the preflight to batch. The header and
+this note name them so the next reader is not surprised. *Also noticed while
+reading it (read from source, unrelated to profiles): `quick-fixes.bat:120`
+(`docker compose down tailscale`) and `:511` (`docker compose start tailscale`)
+carry no `-f`, so they hit the ROOT anchor project, which has had zero services
+since Part K.5b. Those two have been broken since 2026-08-21, independently of
+anything here.*

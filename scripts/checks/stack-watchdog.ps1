@@ -278,8 +278,12 @@ function Test-TailscaleDeployed {
     #     RUNNING -> that is this host with COMPOSE_PROFILES missing from .env.
     #     Keep checking and log why, rather than silently dropping the tailnet
     #     checks that exist because a 94-minute outage went unnoticed.
-    # Cached for the life of the process: the answer cannot change inside a
-    # cycle, and daemon mode runs a cycle every IntervalSeconds.
+    # Cached PER CYCLE, not for the life of the process: the answer cannot
+    # change inside one cycle, but it certainly can between them - the operator
+    # edits .env precisely to fix this - and daemon mode runs for weeks. The
+    # cache is cleared at the top of Invoke-HealthCheck; re-probing costs one
+    # `compose config` (~550 ms measured), cheap once a minute and silly
+    # several times inside one cycle.
     if ($null -ne $script:TailscaleDeployedCache) { return $script:TailscaleDeployedCache }
     $deployed = $true
     try {
@@ -299,7 +303,7 @@ function Test-TailscaleDeployed {
             # matches too - verified 2026-09-19).
             $live = @(@(cmd /c "docker ps --filter name=tailscale --format {{.Names}} 2>nul") | Where-Object { $_ -eq 'tailscale' })
             if ($live.Count -gt 0) {
-                Write-LogEntry "tailscale is RUNNING but absent from the frontend render - .env is probably missing COMPOSE_PROFILES=gpu,tailscale; keeping the tailnet checks ON" "WARN"
+                Write-LogEntry "tailscale is RUNNING but absent from the frontend render - .env is probably missing the frontend profiles from COMPOSE_PROFILES (this host's full value is local,gpu,tailscale - see the section at the top of .env.example); keeping the tailnet checks ON" "WARN"
             } else {
                 $deployed = $false
             }
@@ -1657,6 +1661,9 @@ function Invoke-HealthCheck {
     # tailscale) aborted the whole cycle, so inference, backups and the
     # bridges went unchecked for as long as the fault lasted.
     $script:HealthIssues = @()
+    # Per-cycle, not per-process: a daemon started before the operator fixed
+    # .env must notice the fix on the NEXT cycle, not on the next restart.
+    $script:TailscaleDeployedCache = $null
 
     # Change to project directory
     Set-Location $PROJECT_DIR

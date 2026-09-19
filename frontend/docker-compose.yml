@@ -19,16 +19,30 @@
 #              to openwebui's network namespace. Requires the `gpu` profile,
 #              because `network_mode: service:openwebui` names that service.
 #
-# THE OPERATOR'S DEPLOYMENT IS `gpu,tailscale`, AND IT IS NOT THE DEFAULT.
-# Put COMPOSE_PROFILES=gpu,tailscale in .env (see .env.example) — every driver
-# here passes `--env-file .env`, and compose reads COMPOSE_PROFILES from that
-# file (verified against compose v5.3, 2026-09-19). A `--profile` flag on the
-# command line REPLACES COMPOSE_PROFILES rather than adding to it (also
-# verified) — which is what lets `--profile gpu --profile tailscale` render this
-# host's deployment from a .env.example that says `stock`.
+# THIS PLANE'S PROFILES ARE `gpu,tailscale`, AND THEY ARE NOT THE DEFAULT.
+# They go in COMPOSE_PROFILES in .env — but that variable is GLOBAL: every
+# plane driven with `--env-file .env` reads the same value, so it is set in ONE
+# authoritative section at the top of .env.example (stack-layers D15) and this
+# file does not own it. **This host's FULL value is
+# `COMPOSE_PROFILES=local,gpu,tailscale`** — `local` is the inference plane's
+# GPU backends, and setting `gpu,tailscale` alone would silently take them
+# down. Compose reads the variable from the `--env-file` (verified against
+# compose v5.3, 2026-09-19), a duplicate key in that file is last-wins and
+# silent, and a `--profile` flag on the command line REPLACES the value rather
+# than adding to it — which is what lets `--profile gpu --profile tailscale`
+# render this host's frontend from a .env.example that says `stock`.
 #
-# THAT LINE IS REQUIRED, NOT ADVISORY. Without it, every lifecycle and repair
-# path for this plane is broken — measured against this file, 2026-09-19:
+# WHY `stock` IS A PROFILE AND NOT THE UN-PROFILED DEFAULT. It would be nicer
+# if the stock service simply had no `profiles:` key and `--profile gpu` swapped
+# it out. Compose cannot do that: `--profile` only ADDS to the active set, never
+# subtracts, so an un-profiled `openwebui-stock` stays active alongside
+# `openwebui` — and because both declare `container_name: openwebui`, the
+# project then fails to render at all (`container name "openwebui" is already
+# in use by service ...`, exit 1). The reviewer built that alternative and it
+# fails exactly there. Hence three profiles, with `stock` named explicitly.
+#
+# WITHOUT THIS PLANE'S PROFILES IN THAT VALUE, every lifecycle and repair path
+# here is broken — measured against this file, 2026-09-19:
 #   `up -d`            starts openwebui-backup and NOTHING ELSE;
 #   `down`             removes openwebui-backup and LEAVES openwebui and
 #                      tailscale running (compose only tears down services
@@ -50,15 +64,18 @@
 # That means `scripts/checks/stack-watchdog.ps1`'s seven tailscale repair calls
 # (and the two advice strings that print the same commands),
 # `scripts/recovery/emergency-recovery.ps1` (both its whole-project verbs and
-# its `restart tailscale`) and `backup/openwebui-restore.sh`'s
-# documented `stop tailscale openwebui` all exit 1 until the line is in .env —
-# silently, since the watchdog pipes them to Out-Null. The repo's own
-# `scripts/checks/check-watchdog-repair-targets.ps1` reports exactly this
-# (`tailscale` / `tailscale-backup` NOT DECLARED) and is the check to run after
-# editing .env. `scripts/backup/restore-from-snapshot.ps1` is the one caller
-# that does NOT depend on the line: its frontend and tailscale entries pass
-# `--profile gpu --profile tailscale` themselves, as the portal and agent-org
-# entries there already did.
+# its `restart tailscale`), `scripts/recovery/quick-fixes.bat`'s four
+# (`restart tailscale`, `build --no-cache tailscale`, and two `up -d
+# tailscale`), the profile-less recipe in
+# `documentation/runbooks/restore-from-snapshot.md`, and
+# `backup/openwebui-restore.sh`'s documented `stop tailscale openwebui` all
+# exit 1 until the value is right — silently, since the watchdog pipes them to
+# Out-Null. The repo's own `scripts/checks/check-watchdog-repair-targets.ps1`
+# reports exactly this (`tailscale` / `tailscale-backup` NOT DECLARED) and is
+# the check to run after editing .env. `scripts/backup/restore-from-snapshot.ps1`
+# is the one caller that does NOT depend on the value: its frontend and
+# tailscale entries pass `--profile gpu --profile tailscale` themselves, as the
+# portal and agent-org entries there already did.
 #
 # WHY TWO openwebui SERVICE DEFINITIONS, AND NOT ONE WITH ENV-DRIVEN GPU BITS.
 # Compose can gate a SERVICE on a profile; it cannot gate a FIELD. Interpolation
@@ -152,9 +169,11 @@ services:
       - llm-net
       - app-net               # plan §7.4 — portal Caddy reaches openwebui:8080 here
       # Project-local net, added 2026-09-19 with the profiles: it is the ONE
-      # network openwebui-backup can share with BOTH openwebui definitions, and
-      # the backup's only use of a network is `nc -z openwebui 8080`. The three
-      # external seams above are untouched.
+      # network openwebui-backup can share with BOTH openwebui definitions
+      # (its script probes `nc -z openwebui 8080`, and its entrypoint `apk add`s
+      # pigz, so it needs name resolution plus egress - nothing an anchor
+      # network provides that a project bridge does not). The three external
+      # seams above are untouched.
       - owui-net
     volumes:
       - openwebui-data:/app/backend/data
@@ -334,9 +353,12 @@ services:
     networks:
       # owui-net, not the anchor's ai-stack_default: this sidecar carries no
       # profile (it backs up the data volume in EVERY deployment), so the only
-      # network it may name is the one both openwebui definitions are on. Its
-      # sole use of a network is `nc -z openwebui 8080`
-      # (backup/openwebui-backup.sh:78), which owui-net answers.
+      # network it may name is the one both openwebui definitions are on. The
+      # backup SCRIPT's one network call is `nc -z openwebui 8080`
+      # (backup/openwebui-backup.sh:78), which owui-net answers by container
+      # name under either profile; the compose `command` below also does an
+      # `apk add pigz`, which needs plain egress - a project-owned bridge gives
+      # it that exactly as ai-stack_default did.
       - owui-net
     environment:
       - BACKUP_DIR=/backups

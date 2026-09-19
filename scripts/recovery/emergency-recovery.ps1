@@ -193,7 +193,7 @@ function Confirm-FrontendProfiles {
         }
         if ($svc -notmatch '(?m)^openwebui(-stock)?\s*$') {
             $list = (($svc -split "`n") | Where-Object { $_ }) -join ', '
-            Write-Log "ERROR" "FRONTEND PROFILES MISSING: the frontend plane renders no Open WebUI service (got: $list). Every frontend up/down/stop below will address openwebui-backup ONLY, and any command naming tailscale will exit 1 with 'no such service: openwebui'. FIX: add COMPOSE_PROFILES=gpu,tailscale to .env and re-run; verify with scripts\checks\check-watchdog-repair-targets.ps1."
+            Write-Log "ERROR" "FRONTEND PROFILES MISSING: the frontend plane renders no Open WebUI service (got: $list). Every frontend up/down/stop below will address openwebui-backup ONLY, and any command naming tailscale will exit 1 with 'no such service: openwebui'. FIX: put the frontend's profiles into COMPOSE_PROFILES in .env - this host's FULL value is local,gpu,tailscale, and `gpu,tailscale` alone would drop the inference backends (one authoritative section at the top of .env.example lists every plane's profiles). Then re-run; verify with scripts\checks\check-watchdog-repair-targets.ps1."
             return $false
         }
     }

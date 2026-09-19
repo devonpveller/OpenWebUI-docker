@@ -115,7 +115,13 @@ Run with: `docker compose ...` from the workspace root.
 
 **PROFILE-GATED since 2026-09-19 (stack-layers §2.5 / D8).** This plane renders
 differently depending on `COMPOSE_PROFILES`, and **the operator's deployment is
-not the default** — `.env` must carry `COMPOSE_PROFILES=gpu,tailscale` or
+not the default**. That variable is GLOBAL — every plane driven with
+`--env-file .env` reads the same value, so it is set in ONE authoritative
+section at the top of `.env.example` (D15) and **this host's full value is
+`COMPOSE_PROFILES=local,gpu,tailscale`**: `local` is the inference plane's GPU
+backends, and setting `gpu,tailscale` alone would silently take them down. A
+duplicate assignment in an env file is last-wins and silent, which is why there
+is only one. Without the frontend's two profiles in that value,
 `docker compose -f frontend/docker-compose.yml --env-file .env up -d` starts
 `openwebui-backup` and nothing else; `... down` leaves `openwebui` and
 `tailscale` running (compose only tears down services whose profile is active);
@@ -126,11 +132,18 @@ service's own profile, so `network_mode: service:openwebui` and `depends_on:
 openwebui` point outside the project and compose refuses to load it; `--no-deps`
 does not help, because the reference resolves at project load. `openwebui` is
 the one exception (`restart openwebui`, `build --no-cache openwebui` work) —
-the gpu definition names nothing outside its own profile. So the line is
-required for the watchdog's nine tailscale repairs and for
-`emergency-recovery.ps1`; `scripts/backup/restore-from-snapshot.ps1` is
-independent of it, because its frontend and tailscale entries pass
-`--profile gpu --profile tailscale` themselves.
+the gpu definition names nothing outside its own profile. So the value is
+required for the watchdog's seven tailscale repairs (plus two advice strings),
+for `emergency-recovery.ps1`, for `scripts/recovery/quick-fixes.bat`'s four
+tailscale calls, and for the recipe in
+`documentation/runbooks/restore-from-snapshot.md`;
+`scripts/backup/restore-from-snapshot.ps1` is independent of it, because its
+frontend and tailscale entries pass `--profile gpu --profile tailscale`
+themselves, as the portal and agent-org entries there already did.
+`emergency-recovery.ps1` does NOT pass them — it CHECKS
+(`Confirm-FrontendProfiles`) and logs an ERROR naming the fix, because a fixed
+`gpu,tailscale` in a generic driver would start the CUDA build and reserve a
+GPU on a `stock` host.
 `scripts/checks/check-watchdog-repair-targets.ps1` is the check that tells you
 whether this host's `.env` is right. A `--profile` flag on the command line
 REPLACES `COMPOSE_PROFILES` rather than adding to it.

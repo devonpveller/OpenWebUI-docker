@@ -182,7 +182,7 @@ switch ($Action) {
                 # and stt-tts-tailscale matches too - verified 2026-09-19).
                 $tsLive = @(@(cmd /c "docker ps --filter name=tailscale --format {{.Names}} 2>nul") | Where-Object { $_ -eq 'tailscale' })
                 if ($tsLive.Count -gt 0) {
-                    $tsNote = 'tailscale is RUNNING but absent from the frontend render - .env is probably missing COMPOSE_PROFILES=gpu,tailscale'
+                    $tsNote = 'tailscale is RUNNING but absent from the frontend render - .env is probably missing the frontend profiles from COMPOSE_PROFILES (this host: local,gpu,tailscale)'
                 } else {
                     $tsDeployed = $false
                 }

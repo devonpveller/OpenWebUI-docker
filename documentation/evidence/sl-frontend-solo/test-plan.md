@@ -1,4 +1,4 @@
-# Test plan — `sl-frontend-solo` (frontend compose profiles), attempt 2
+# Test plan — `sl-frontend-solo` (frontend compose profiles), attempt 3
 
 **Branch** `work/sl-frontend-solo` · **base** `development` b28cbc5 ·
 **developer worktree** `wt-sl-frontend-solo`
@@ -6,6 +6,13 @@
 criterion 1 now names `openwebui-stock`, and criterion 5 now covers the repair
 paths BEHIND the guard, not only the guard.
 **Findings sink** `documentation/notes/stack-layers-sl-frontend-solo-findings.md`
+**Attempt 2** passed every case at `1ceb070` and was then REQUEUED by the
+reviewer: the rebase onto `development` be00d53 brought this branch into contact
+with two things that did not exist at its base - `sl-inference-split`'s own
+`COMPOSE_PROFILES` block in `.env.example`, and `stack.manifest.toml`. **T11,
+T12 and T13 at the end of this plan cover exactly that contact and were written
+by the reviewer, not by me**; T1-T10 are unchanged and still apply.
+
 **Attempt 1** FAILED (`-PlanInadequate`) at `18b4901`. Read
 `.git/agent-worktrees/queue/sl-frontend-solo.attempt1.evidence.md` first: it is
 a better map of this change than this plan is, and the reason attempt 1 failed
@@ -204,7 +211,7 @@ git show work/sl-frontend-solo:frontend/docker-compose.yml | sed -n '1,95p'
 | H2 | `stock` = fresh clone; `cp .env.example .env` + `up -d` gives OWUI on 127.0.0.1:3000 with only Docker; needs none of the `ai-stack_*` networks | T1 + T3 |
 | H3 | `gpu` = this host: CUDA build, device reservation, `USE_CUDA`/`NVIDIA_*`, `llm-net` + `app-net`, status-pipe mount | T2's render of `openwebui` |
 | H4 | `tailscale` requires `gpu`, because `network_mode: service:openwebui` names that service | `--profile tailscale` alone → exit 1, `depends on undefined service "openwebui"` |
-| H5 | The operator's deployment is `gpu,tailscale`, is NOT the default, and compose reads `COMPOSE_PROFILES` from `--env-file` | S2 files; `--env-file /tmp/env.with config --services` → four services |
+| H5 | This plane's profiles are `gpu,tailscale`, are NOT the default, and go in a GLOBAL `COMPOSE_PROFILES` owned by ONE section of `.env.example`; **this host's full value is `local,gpu,tailscale`** and `gpu,tailscale` alone would drop the inference backends | T11; S2 files; `--env-file /tmp/env.with config --services` → four services |
 | H6 | A CLI `--profile` REPLACES `COMPOSE_PROFILES` rather than adding | `--env-file .env.example --profile gpu config --services` → `openwebui` + backup, NOT `openwebui-stock` |
 | H7 | Without the line, `up -d` starts `openwebui-backup` and nothing else | `--env-file /tmp/env.without config --services` → one service |
 | H8 | Without the line, `down` leaves `openwebui` and `tailscale` running | T5C (throwaway project) |
@@ -227,6 +234,9 @@ git show work/sl-frontend-solo:frontend/docker-compose.yml | sed -n '1,95p'
 | H25 | `tailscale-backup` needs no network but still GETS the project default | T2's render: `tailscale-backup.networks == {default: null}` in BOTH renders |
 | H26 | The stock image is the same base the CUDA image is built FROM | `git show work/sl-frontend-solo:Dockerfile.openwebui-gpu | head -1` |
 | H27 | `entrypoint.sh` is unchanged by the profile split | `git diff development...work/sl-frontend-solo -- entrypoint.sh dockerfile.tailscale Dockerfile.openwebui-gpu` → empty |
+| H28 | `stock` is a PROFILE and not the un-profiled default because `--profile` only ADDS, never subtracts: an un-profiled stock service stays active alongside `openwebui`, and their shared `container_name` then fails the whole render | build it: two services, one un-profiled, one `profiles: [gpu]`, same `container_name`; `--profile gpu config -q` → exit 1, `container name ... is already in use` |
+| H29 | A duplicate `COMPOSE_PROFILES` key in an env file is last-wins and silent | T11 |
+| H30 | The affected callers include `quick-fixes.bat`'s four tailscale calls and the recipe in `restore-from-snapshot.md` | `grep -n tailscale scripts/recovery/quick-fixes.bat` (expect `:87`, `:121`, `:122`, `:514` naming the frontend file) and read the runbook row |
 
 **PASS** only when every row holds AND you found no unlisted header claim that
 is false. **FAIL** on any false claim, and say which row.
@@ -490,17 +500,23 @@ from. Never `git add -A`, and never stage in the developer's worktree.)
 
 ```bash
 ruff check .
-git show development:llm-queue/src/llm_queue/__init__.py | sed -n '9p' | awk '{print length}'   # expect 103
-git diff development...work/sl-frontend-solo --name-only | grep '\.py$'                          # expect none
+python -m pytest scripts/stack -q
+git diff development...work/sl-frontend-solo --name-only | grep '\.py$'      # expect none
 ```
 
 **PASS** when `check-project-configs.ps1` exits 0 with "all 8 compose projects
 render clean" (the frontend counted twice — default and `gpu,tailscale`) and
-"stack-services.json inventory matches the compose configs"; and when `ruff`
-reports exactly one error, `E501` in `llm-queue/src/llm_queue/__init__.py:9`,
-which you have confirmed is 103 chars on `development` and in a file this
-branch does not touch. **FAIL** on anything else from ruff, or if the branch
-touches a `.py` file.
+"stack-services.json inventory matches the compose configs"; when `ruff check .`
+is CLEAN; when `pytest scripts/stack` is green (38 tests at the time of writing
+— the branch edits `stack.manifest.toml`, which that suite loads); and when the
+branch touches no `.py` file.
+
+Attempts 1 and 2 carried one pre-existing `E501` in
+`llm-queue/src/llm_queue/__init__.py:9` and this plan used to tell you to expect
+it. The rebase onto `be00d53` picked up the fix (that line is 68 chars on
+`development` now), so there is no longer an expected error to excuse.
+**FAIL on any ruff finding**, any failing driver test, or a `.py` file in the
+diff.
 
 ## T7 - The naming choice, and its cost in both directions
 
@@ -547,7 +563,7 @@ own profiles (T5F); `emergency-recovery.ps1` checks rather than passes (T5G).
 
 ## T9 - The findings note, in full - no enumeration to hide behind
 
-`documentation/notes/stack-layers-sl-frontend-solo-findings.md` has eleven
+`documentation/notes/stack-layers-sl-frontend-solo-findings.md` has twelve
 entries. **Check every one**, not a sample: attempt 1's plan listed four and the
 false claim was in the fifth. For each, ask the two questions this repo's
 protocol asks — is it TRUE, and is it stated at the strength its own
@@ -566,6 +582,10 @@ provenance supports (*read from source* / *observed live* / *not verifiable*)?
   really are unverifiable, or whether they are dodges)
 - §10 — the naming choice's cost on a `stock` host
 - §11 — the render-error WARN
+- §12 — `COMPOSE_PROFILES` is global, the rebase gave it two owners, and what
+  was deliberately LEFT alone (quick-fixes.bat), including the two bare
+  `docker compose` calls there that have hit the empty anchor project since
+  K.5b - verify that sub-claim against the file, it is unrelated to profiles
 
 **PASS** when every entry holds at its stated strength, the corrections in §3
 and §4 are accurate, and nothing is claimed as *observed live* that was only
@@ -591,3 +611,114 @@ both backups are still up with the same uptime class as before you started; your
 worktree is clean; `frontend/_baseline-development.yml` is gone; and any `.env`
 you backed up is restored. **FAIL** on any leftover, any prod container
 restarted/recreated, or an unrestored `.env`.
+
+---
+
+# Cases the rebase added (written by the reviewer `wt-reviewer-frontend`)
+
+These three came from the review, not from the developer. They are reproduced
+here so `queue.ps1` counts them; the reviewer's original wording is in
+`sl-frontend-solo-attempt3-added-cases.md`. Where they name a measured fact,
+**verify it yourself** rather than taking it from the page.
+
+## T11 - `.env.example` has exactly ONE authority for `COMPOSE_PROFILES`
+
+`COMPOSE_PROFILES` is a single GLOBAL compose variable, not a per-plane one.
+
+```bash
+grep -n "COMPOSE_PROFILES" .env.example
+grep -c "^COMPOSE_PROFILES=" .env.example          # expect exactly 1
+grep -n "^COMPOSE_PROFILES" "D:/Open WebUI/ai-stack/.env"   # the LIVE value
+```
+
+```bash
+# duplicate-key semantics, on a throwaway project (one service per profile)
+printf 'COMPOSE_PROFILES=stock
+COMPOSE_PROFILES=local
+' > /tmp/dup.env
+docker compose -f /tmp/dup.yml --env-file /tmp/dup.env config --services
+```
+
+**PASS** when: `.env.example` assigns the variable in exactly ONE place; that
+section enumerates every plane's profiles together (inference `local`; frontend
+`stock` | `gpu` | `tailscale`), says which planes are deliberately NOT part of
+the value (portal's `internet` is passed by `portal-on.ps1`; agent-org and OB1
+load their own env files, so `sl-ob1-profiles` adds nothing here), and gives
+the two canonical values; the value it names for THIS host
+(`local,gpu,tailscale`) is what the live `.env` actually carries; each plane's
+own section describes its profiles but points at the single authority instead of
+assigning again; and no document anywhere on the branch tells the operator to
+set a value that omits another plane's required profile:
+
+```bash
+grep -rn "COMPOSE_PROFILES=gpu,tailscale" --include=*.md --include=*.yml --include=*.ps1 --include=*.bat . | grep -v documentation/evidence
+```
+
+**FAIL** when: two assignments exist (commented or not); or any document names a
+value that drops `local`. And **FAIL** if the duplicate-key measurement does not
+reproduce as last-wins-silently-exit-0 — that is the fact the whole decision
+rests on.
+
+## T12 - `stack.manifest.toml` no longer calls these profiles `pending`
+
+```bash
+sed -n '/\[planes.frontend.profiles/,+4p' stack.manifest.toml
+python -m pytest scripts/stack -q
+```
+
+```bash
+# the driver's equivalent of "enable this profile" - `enable` takes a PLANE or
+# PRODUCT name, and applies that plane's `default = true` profiles. Use a
+# SCRATCH state file: the real one is this host's per-machine enablement.
+python scripts/stack/stack.py --state /tmp/st.json enable frontend
+python scripts/stack/stack.py --state /tmp/st.json list
+rm -f /tmp/st.json
+```
+
+**PASS** when: `planes.frontend.profiles.gpu` and `.tailscale` no longer carry
+`pending = true`; a `stock` entry exists beside them; every description cites
+lines that resolve (T13); and nothing prints the "PENDING profiles enabled … the
+compose files do not carry them yet" note from `scripts/stack/stack.py:648-657`.
+
+**Also judge the `default` decision.** None of the three is `default = true`,
+deliberately: a `default` profile makes the driver pass `--profile …` on every
+invocation, and a CLI `--profile` REPLACES `COMPOSE_PROFILES` rather than adding
+to it — so the host's own value would be silently overridden and a `stock` host
+handed `gpu`. That is parity with `stack.ps1`, which passes no frontend profile
+either. **FAIL** if you think that reasoning is wrong — say so; it is a
+judgement the gate should see. A green `pytest scripts/stack` is NOT sufficient
+evidence here: 38 tests passed against the un-updated manifest, so the suite
+does not cover this.
+
+## T13 - the manifest's `frontend/docker-compose.yml:<line>` citations resolve
+
+The manifest header asserts "EVERY edge below is evidenced in a compose file;
+the evidence is cited in the comment above it as `<file>:<line>`". This branch
+inserts ~130 lines near the top of that file, so every citation was re-derived.
+
+```bash
+grep -n "frontend/docker-compose.yml:" stack.manifest.toml
+for n in 113 151 156 163 239 250 256 283 284 295 304 306 307 310 311 312 313 314 316 325 326 328 329 466 474 479; do
+  printf "%4s: %s
+" "$n" "$(sed -n "${n}p" frontend/docker-compose.yml)"
+done
+```
+
+**PASS** when every citation in `[planes.frontend]` — the `requires anchor`
+networks, the entrypoint override span, the inference / search / ob1 / portal /
+agent-org edges, the two `host` entries and all three profile descriptions —
+points at the construct the comment beside it names. Check the RANGES too, not
+only their first line.
+
+**FAIL** on any that does not. For reference, the pre-fix state: `:290-298`
+(cited as the three `external: true` networks) was `LLAMA_CPP_EMBED_ENABLED` and
+a caddy comment; `:111-114` (the CUDA image + device reservation) was `ports:` /
+`- owui-net`; `:135` (`network_mode`) was a blank line.
+
+**While you are there:** the `host = [...]` entries used to read as a forward
+reference ("sl-frontend-solo makes the stock image the default"). They now
+describe the present tense and split the requirement by profile — the CUDA image
+and NVIDIA runtime are needed under `gpu` only, and the auth key under
+`tailscale` only. **FAIL** if a `host` entry still states a requirement the
+DEFAULT deployment does not have: that is the line a newcomer reads to decide
+whether their machine can run this.
