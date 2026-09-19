@@ -485,18 +485,30 @@ checks. **FAIL** on a silent fall-through either way, and FAIL on a skip.
 
 ## T6 - The gates pass, and `stack-services.json` still matches the render
 
+**Stage the WHOLE delta against the base, not the last commit.** The gates in
+`check-project-configs.ps1` fire per staged FILE TYPE: the compose gate only
+runs when a `.yml`/`.yaml` is staged, the parse gate only when a `.ps1` is. A
+branch whose tip commit is documentation-only therefore makes both skip, and the
+check reports nothing while proving nothing. Stage everything this branch
+changes:
+
 ```powershell
-cd <your own worktree>
-$sha = git rev-parse HEAD
-git reset --soft HEAD~1          # index + working tree untouched; stages this commit
+cd <your own worktree>          # NEVER the developer's
+$base = git merge-base development work/sl-frontend-solo
+$sha  = git rev-parse HEAD
+git reset --soft $base          # index + working tree untouched; stages the FULL delta
+git diff --cached --name-only   # expect every file the branch touches, .yml and .ps1 among them
 powershell -NoProfile -ExecutionPolicy Bypass -File "<worktree>\scripts\checks\check-project-configs.ps1"
 git reset --soft $sha
-git status --porcelain           # expect empty
+git status --porcelain          # expect empty
 ```
 
-(Attempt 1's tester used `git switch --detach b28cbc5` + `git cherry-pick -n`
-in their own worktree instead — equally good; use whichever you can restore
-from. Never `git add -A`, and never stage in the developer's worktree.)
+(Attempt 1's tester used `git switch --detach <base>` + `git cherry-pick -n` per
+commit instead — equally good so long as the staged set ends up being the whole
+delta. Never `git add -A`, and never stage in the developer's worktree.)
+
+**FAIL if the check prints a "skip" line for the compose or parse gate** — that
+means the staged set was too narrow and the run is void, not a pass.
 
 ```bash
 ruff check .
@@ -505,11 +517,11 @@ git diff development...work/sl-frontend-solo --name-only | grep '\.py$'      # e
 ```
 
 **PASS** when `check-project-configs.ps1` exits 0 with "all 8 compose projects
-render clean" (the frontend counted twice — default and `gpu,tailscale`) and
-"stack-services.json inventory matches the compose configs"; when `ruff check .`
-is CLEAN; when `pytest scripts/stack` is green (38 tests at the time of writing
-— the branch edits `stack.manifest.toml`, which that suite loads); and when the
-branch touches no `.py` file.
+render clean" (the inference and frontend entries each rendered with their
+profiles) and "stack-services.json inventory matches the compose configs"; when
+`ruff check .` is CLEAN; when `pytest scripts/stack` is green (**47** tests
+since `sl-ob1-profiles` landed — the branch edits `stack.manifest.toml`, which
+that suite loads); and when the branch touches no `.py` file.
 
 Attempts 1 and 2 carried one pre-existing `E501` in
 `llm-queue/src/llm_queue/__init__.py:9` and this plan used to tell you to expect
@@ -710,18 +722,35 @@ rm -f /tmp/st.json
 
 **PASS** when: `planes.frontend.profiles.gpu` and `.tailscale` no longer carry
 `pending = true`; a `stock` entry exists beside them; every description cites
-lines that resolve (T13); and nothing prints the "PENDING profiles enabled … the
-compose files do not carry them yet" note from `scripts/stack/stack.py:648-657`.
+lines that resolve (T13); and **no `pending` row survives anywhere in the file
+except in the key vocabulary at the top** —
 
-**Also judge the `default` decision.** None of the three is `default = true`,
-deliberately: a `default` profile makes the driver pass `--profile …` on every
-invocation, and a CLI `--profile` REPLACES `COMPOSE_PROFILES` rather than adding
-to it — so the host's own value would be silently overridden and a `stock` host
-handed `gpu`. That is parity with `stack.ps1`, which passes no frontend profile
-either. **FAIL** if you think that reasoning is wrong — say so; it is a
-judgement the gate should see. A green `pytest scripts/stack` is NOT sufficient
-evidence here: 38 tests passed against the un-updated manifest, so the suite
-does not cover this.
+```bash
+grep -n "pending" stack.manifest.toml
+```
+
+— which since the rebase onto `f2bb38f` means: the frontend's three (this
+item), inference's `local` (sl-inference-split's row, flipped here because this
+branch is making the file's profile rows truthful as a set) and OB1's four
+(`sl-ob1-profiles`, already real on `development`, with `research` carrying the
+`requires` key its item added) are ALL live. Confirm nothing prints the "PENDING
+profiles enabled … the compose files do not carry them yet" note from
+`scripts/stack/stack.py`.
+
+**Also judge the `default` decision.** None of the frontend's three is
+`default = true`, deliberately: a `default` profile makes the driver pass
+`--profile …` on every invocation, and a CLI `--profile` REPLACES
+`COMPOSE_PROFILES` rather than adding to it — so the host's own value would be
+silently overridden and a `stock` host handed `gpu`. That is parity with
+`stack.ps1`, which passes no frontend profile either. Note OB1's `idea-refinery`
+IS `default = true`, correctly: `stack.ps1` passes it on every OB1 invocation,
+and OB1 loads its own env file rather than the root `.env`, so there is no
+global value for a flag to override there. **FAIL** if you think either
+reasoning is wrong — say so; it is a judgement the gate should see.
+
+**A green `pytest scripts/stack` is NOT sufficient evidence here** (47 tests
+since `sl-ob1-profiles`): 38 passed against the un-updated manifest at attempt 3,
+so the suite does not cover profile-row content. Check the file.
 
 ## T13 - EVERY `frontend/docker-compose.yml:<line>` citation in the tree resolves
 

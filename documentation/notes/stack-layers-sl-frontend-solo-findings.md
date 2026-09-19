@@ -404,3 +404,42 @@ reading it (read from source, unrelated to profiles): `quick-fixes.bat:120`
 carry no `-f`, so they hit the ROOT anchor project, which has had zero services
 since Part K.5b. Those two have been broken since 2026-08-21, independently of
 anything here.*
+
+## 13. The rebase onto `sl-ob1-profiles` (f2bb38f), and what it did NOT break.
+
+*Observed live, 2026-09-19 (attempt 6).* `development` moved from `be00d53` to
+`f2bb38f` while attempt 5 was under test, touching three files this item also
+edits. Per D18 the developer rebases and the work is re-tested. What happened:
+
+- **`frontend/docker-compose.yml` is unchanged on `development`**, so every one
+  of the 27 citations re-derived in attempt 5 still resolves. Verified by
+  re-running the tree-wide sweep and the construct greps AFTER the rebase rather
+  than reasoning that it must be fine - the checklist in 3 says the file it
+  points INTO is what matters, and "unchanged" is a claim like any other.
+- **`scripts/stack/stack.py` (+83: `profile_closure`, `enable_plane_profiles`)
+  did not conflict** because this branch never touched it.
+- **One conflict, in `scripts/checks/check-project-configs.ps1`**: development
+  gave the inference render target `--profile local`, this branch gave the
+  frontend target `--profile gpu --profile tailscale`. Both kept - they are the
+  same idea applied to two planes, and the resolution says so in one comment
+  rather than two.
+- **`stack.manifest.toml` auto-merged, and that was the thing to check hardest.**
+  `development` still carried the pre-profile frontend rows (`pending = true`
+  x2, citing `frontend/docker-compose.yml:111-114`), so a hunk-level merge could
+  have left a development-era citation beside a re-derived one - attempt 4's
+  failure walking back in. It did not: the frontend block came through wholesale,
+  no `pending` row survives outside the key vocabulary, and OB1's four profiles
+  (with the `requires` key its item added, and `idea-refinery` correctly
+  `default = true`) are intact.
+
+**Checked because a reviewer will ask, and it holds:** the `chat` product
+(development's) is `planes = ["frontend"]` with NO `profiles`, described as
+"Open WebUI on its own - what a fresh clone gets". With no product profiles and
+no `default = true` row, the driver passes no `--profile` for this plane, so
+compose falls back to `COMPOSE_PROFILES` from `--env-file .env` - which on a
+fresh clone is `.env.example`'s `stock`. The promise holds *because* the value
+lives in `.env` rather than in the product row. Had `chat` declared
+`frontend = ["stock"]`, enabling it on the operator's GPU host would have passed
+`--profile stock`, replaced `local,gpu,tailscale` for that invocation and
+collided with the running `openwebui` container - the same reason none of the
+frontend's rows is `default = true` (see 12 and the manifest comment).
