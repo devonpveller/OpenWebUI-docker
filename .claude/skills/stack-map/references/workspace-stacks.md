@@ -3,7 +3,7 @@
 Authoritative inventory of the Docker stacks in this `ai-stack` workspace.
 Cross-check against the live compose files before relying on it — the files
 are the source of truth; this doc is the curated summary.
-Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../documentation/CONTAINER-REGISTRY.md).
+Per-container purpose & justification: [documentation/CONTAINER-REGISTRY.md](../../../../documentation/CONTAINER-REGISTRY.md).
 
 **Last reconciled against live compose: 2026-09-19** (stack-layers
 `sl-readmes`; every profile cell, service count and driver name below was
@@ -458,11 +458,11 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 
 **Scheduled-job slice:** the five always-on services (`openbrain-cron` + the
 four HTTP-triggered jobs) — plus the **profile-gated `openbrain-idea-refinery`**
-drain (Idea Refinery; enable with `--profile idea-refinery`) — live in [`OB1/docker/docker-compose.scheduled.yml`](../../../OB1/docker/docker-compose.scheduled.yml),
+drain (Idea Refinery; enable with `--profile idea-refinery`) — live in [`OB1/docker/docker-compose.scheduled.yml`](../../../../OB1/docker/docker-compose.scheduled.yml),
 included from the main OB1 compose file. Trigger model is event-chained:
 cron fires `openbrain-gmail-pull` at 01:00; pull→prune→digest is wired
 via `NEXT_TRIGGER_URL` env vars, not multiple cron entries. Schedules
-live in [`OB1/docker/cron/crontab`](../../../OB1/docker/cron/crontab)
+live in [`OB1/docker/cron/crontab`](../../../../OB1/docker/cron/crontab)
 (bind-mounted; edit + `docker compose restart openbrain-cron` to reload).
 No docker.sock anywhere — chain hops are HTTP `POST /run` calls on
 `obnet` between long-running services.

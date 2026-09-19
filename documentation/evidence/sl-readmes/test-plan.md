@@ -133,9 +133,29 @@ print("checked", len(files), "files;", len(bad), "broken")
 PY
 ```
 
-**Expect** `0 broken`. Note the plan-store links (`../documentation-plans-ai-stack/...`)
-resolve only if that sibling repo is cloned; if it is not on your machine, say
-so and treat those specific misses as not-checkable rather than as failures.
+**Expect exactly 2 broken, and both must be these two:**
+
+```
+MISSING search/README.md ../../documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md
+MISSING coder/README.md  ../../documentation-plans-ai-stack/implementation-guide/little-coder/Self-improving-little-coder-design.md
+```
+
+Those are **correct links read from the wrong place**, not defects. `../../`
+from `search/README.md` is the parent of the REPO ROOT, which is
+`D:\Open WebUI\` in the main checkout and `.claude\worktrees\` in yours.
+Confirm both targets exist rather than assuming:
+
+```bash
+ls "D:/Open WebUI/documentation-plans-ai-stack/implementation-guide/web-search/guide-Private-Search-Gateway.md"
+ls "D:/Open WebUI/documentation-plans-ai-stack/implementation-guide/little-coder/Self-improving-little-coder-design.md"
+```
+
+Both are pre-existing and untouched by this item (`git diff
+development...work/sl-readmes -- search/README.md coder/README.md` does not
+contain either line). **Any OTHER broken link FAILS** - in particular the
+stack-map reference sits four directories deep
+(`.claude/skills/stack-map/references/`), so a link from it to the repo root
+needs `../../../../`; this item corrected three that had three.
 
 Spot-checks whose numbers are the easiest to get wrong - each with the command
 that settles it:
@@ -143,7 +163,7 @@ that settles it:
 | Claim | Where it is claimed | Command |
 |---|---|---|
 | inference renders 4 without a profile, 8 with `local` | `inference/README.md`, CLAUDE.md | `docker compose -f inference/docker-compose.yml --env-file inference/.env.example config --services \| wc -l` then again with `--profile local` |
-| frontend renders 1 / 2 / 2 / 4 across none / stock / gpu / gpu+tailscale | `frontend/README.md` | four `config --services` runs with `--env-file frontend/.env.example` and the matching `--profile` flags |
+| frontend renders 1 / 2 / 2 / 4 across none / stock / gpu / gpu+tailscale | `frontend/README.md` | see the note below - the **none** row is the one that will fool you |
 | portal renders 10 without a profile, 12 with `internet` | `portal/README.md`, stack-map | `docker compose -f portal/docker-compose.yml --env-file portal/.env.example config --services \| wc -l`, then with `--profile internet` |
 | only `cloudflared` and `tunnel-watcher` carry a `profiles:` key in the portal | `portal/README.md`, stack-map | `grep -n -B8 "profiles: \[internet\]" portal/docker-compose.yml` |
 | OB1 is 30 containers, 29 against the pinned gitlink | CLAUDE.md, stack-map | `docker compose -f OB1/docker/docker-compose.yml config --services \| wc -l`; then with all four profiles; and `git ls-tree HEAD OB1` |
@@ -156,6 +176,35 @@ that settles it:
 | `$Script:<Plane>Services` variables exist and `$MainStackServices` is empty | stack-map section 4 | `grep -n '^\$Script:.*Services' scripts/recovery/emergency-recovery.ps1` |
 | the portal has no rows in the generated inventory | `portal/README.md`, findings 1.2 | a `python -c` over `scripts/lib/stack-services.json` filtering `project == "portal"` |
 | `restore-from-snapshot.ps1` has `caddy` and `authelia` catalog entries | `portal/README.md` | `grep -n "^  'caddy'\|^  'authelia'" scripts/backup/restore-from-snapshot.ps1` |
+
+**The frontend "no profile" row needs a stripped env file, and this is the trap
+the developer fell into first.** `frontend/.env.example` ships
+`COMPOSE_PROFILES=stock`, and compose READS that from whatever `--env-file` you
+pass - so `--env-file frontend/.env.example` with no `--profile` flag renders
+**2** services (the stock pair), not the 1 the README's table claims for an
+EMPTY profile set. Both numbers are right; they answer different questions.
+To check the README's row, strip the assignment first:
+
+```bash
+grep -v '^COMPOSE_PROFILES' frontend/.env.example > /tmp/fe-noprofile.env
+docker compose -f frontend/docker-compose.yml --env-file /tmp/fe-noprofile.env config --services
+```
+
+**Expect** exactly `openwebui-backup` - one service, which is the README's
+"a misconfigured `.env` looks like this" row. Then:
+
+```bash
+for p in stock gpu; do
+  echo -n "$p: "
+  docker compose -f frontend/docker-compose.yml --env-file frontend/.env.example \
+    --profile $p config --services | wc -l
+done
+docker compose -f frontend/docker-compose.yml --env-file frontend/.env.example \
+  --profile gpu --profile tailscale config --services | wc -l
+```
+
+**Expect** 2, 2, 4. (Passing `--profile stock` alongside the file's own `stock`
+is harmless; a CLI `--profile` REPLACES the file's value, and here they agree.)
 
 **FAILS if** any number, path, port, default or interval in a touched file
 disagrees with the file it describes. Record the claim, the command and the
