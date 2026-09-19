@@ -9,6 +9,31 @@
 # forward to - which is why the local model group is gated on the same profile
 # (inference/config/litellm/model_list/local.yaml).
 
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). `x-hardening`
+# below carries the security_opt block the OTHER seven services of this plane
+# also carry; `<<: *hardening` merges it in where the inline block used to sit.
+# This file holds ONE service, so the anchor de-duplicates nothing here on its
+# own - it is declared anyway so all four group files read the same way and a
+# second service added here inherits the plane's hardening by default.
+# IT IS DECLARED HERE AND NOT IN THE SPINE: compose parses each `include:`d file
+# on its own, so a YAML anchor defined in inference/docker-compose.yml is NOT
+# visible in this file - referencing one aborts the whole render with
+# `unknown anchor 'hardening' referenced` (measured, compose v5.3, 2026-09-19).
+# All four group files therefore declare their own. They are byte-identical by
+# CONVENTION, not by necessity: a top-level `x-` key in an INCLUDED file is
+# consumed by that file's own parse and never reaches the merged project model
+# (this plane's `docker compose config` is byte-identical to the pre-change
+# render, x- keys included - the only plane here of which that is true), so
+# four DIFFERING blocks would render clean too. Divergence is a silent
+# readability trap, not an error. Keep them identical.
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - a service needing a
+# second `security_opt` entry spells out the WHOLE list in its own key.
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
 services:
   # =====================================================================
   # llm-queue — B2 front-ended inference ADMISSION CONTROLLER.
@@ -73,8 +98,7 @@ services:
     volumes:
       - llm-queue-data:/data
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     depends_on:
       llama-cpp-upstream:
         condition: service_healthy

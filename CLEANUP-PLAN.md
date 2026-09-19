@@ -752,7 +752,7 @@ as part of this PR. `gym-watch-effort.py` moves to `agent-org/`, not a bucket.
   (key rotated) and coordinate with the +251 uncommitted lines in OB1's k8s
   `index.ts`.
 - **H.2 little-coder — second** (unchanged; consumed by root compose builds +
-  agent-org egress builds at `agent-org/docker/docker-compose.yml:440,516`).
+  agent-org egress builds at `agent-org/docker/docker-compose.yml:520,590`).
 - **H.3 agent-org — defer** until F.1 lands and P-series cadence slows
   (unchanged; it remains the hottest dev area).
 - **H.4 stays in main repo** — unchanged list.

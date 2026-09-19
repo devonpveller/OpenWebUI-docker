@@ -115,19 +115,21 @@ keys     = []
 # The LLM front door. llm-gateway (LiteLLM) carries the `llama-cpp` /
 # `llama-cpp-embed` aliases on ai-stack_llm-net; the real servers sit on the
 # project's native llm-backend-net so callers cannot route around it.
-# requires anchor: inference/docker-compose.yml:83-85, 88-90 (ai-stack_llm-net
+# requires anchor: inference/docker-compose.yml:94-96, 99-101 (ai-stack_llm-net
 # and ai-stack_app-net, both external: true). Re-derived 2026-09-19: these read
 # :448-450, 453-455 until sl-driver-parity's citation sweep - sl-inference-split
 # moved the services into inference/compose/*.yml and left that file 91 lines
-# long, so the old numbers pointed past its end.
+# long, so the old numbers pointed past its end. Moved AGAIN the same day by
+# sl-compose-anchors (+11 lines of include-semantics header above the networks
+# block); the construct each cites is unchanged, only its line number.
 compose  = "inference/docker-compose.yml"
 lease    = "inference"
 requires = ["anchor"]
 optional = []
 host = [
-  "NVIDIA GPU + NVIDIA Container Toolkit (inference/compose/upstreams.yml:100-106 and :152-158) - the `local` profile only",
-  "Chat GGUFs under ${LM_MODELS_DIR} (inference/compose/upstreams.yml:24, :54); sl-inference-split replaced the literal per-user path this line used to cite",
-  "Embedding GGUF bge-m3-f16.gguf in that same store (inference/compose/upstreams.yml:145)",
+  "NVIDIA GPU + NVIDIA Container Toolkit (inference/compose/upstreams.yml:122-128 and :173-179) - the `local` profile only",
+  "Chat GGUFs under ${LM_MODELS_DIR} (inference/compose/upstreams.yml:24, :76); sl-inference-split replaced the literal per-user path this line used to cite",
+  "Embedding GGUF bge-m3-f16.gguf in that same store (inference/compose/upstreams.yml:166)",
 ]
 # LITELLM_MASTER_KEY is required since J.1 (per-caller virtual keys); without it
 # every consumer's bearer is rejected.
@@ -138,7 +140,7 @@ keys = ["LITELLM_DB_PASSWORD", "LITELLM_MASTER_KEY"]
 "8082" = "llama-cpp-embed-upstream (loopback; probes only)"
 
 # NOT `pending`: sl-inference-split landed it. `profiles: [local]` is live in
-# inference/compose/upstreams.yml:41,:130, queue.yml:39 and backups.yml:48, and
+# inference/compose/upstreams.yml:63,:151, queue.yml:64 and backups.yml:71, and
 # the render proves it (4 services without the profile, 8 with). Flipped here by
 # sl-frontend-solo, which is making this file's profile rows truthful as a set -
 # it is inference's row, corrected in the same pass as the frontend's.
@@ -158,10 +160,10 @@ description = "llama.cpp upstreams + llm-queue + the model-store backup, i.e. lo
 # --------------------------------------------------------------------------
 [planes.frontend]
 # Open WebUI + the tailscale netns companion. NEVER restart openwebui alone.
-# requires anchor: frontend/docker-compose.yml:473-481 (ai-stack_default,
+# requires anchor: frontend/docker-compose.yml:502-510 (ai-stack_default,
 # ai-stack_llm-net, ai-stack_app-net, all external: true). NOTE it is the `gpu`
 # profile that attaches to them; under `stock` the plane uses only its own
-# frontend_owui-net (:484) and needs no anchor network at all.
+# frontend_owui-net (:513) and needs no anchor network at all.
 compose  = "frontend/docker-compose.yml"
 lease    = "frontend"
 requires = ["anchor"]
@@ -171,24 +173,24 @@ requires = ["anchor"]
 # OTHER planes, and every one of the toggles defaults TRUE, so a default boot
 # reaches into four planes besides this one. The route table is
 # frontend/entrypoint.sh:93-105; the variables are :54-77, overridden for
-# the two that differ by frontend/docker-compose.yml:311-336.
-# inference: frontend/docker-compose.yml:311,314 (LLAMA_CPP_HOST /
+# the two that differ by frontend/docker-compose.yml:344-369.
+# inference: frontend/docker-compose.yml:344,347 (LLAMA_CPP_HOST /
 #   LLAMA_CPP_EMBED_HOST default to the gateway aliases) behind the
-#   LLAMA_CPP_ENABLED toggle at :313 - OWUI serves without it. Also
+#   LLAMA_CPP_ENABLED toggle at :346 - OWUI serves without it. Also
 #   frontend/entrypoint.sh:70,72 (LITELLM_UI_HOST defaults to llm-gateway-ui, enabled
 #   true) -> the serve route at frontend/entrypoint.sh:103.
-# search: frontend/docker-compose.yml:246 (SEARXNG_QUERY_URL defaults to
+# search: frontend/docker-compose.yml:286 (SEARXNG_QUERY_URL defaults to
 #   http://gateway:8080/search) - web search is off without it, chat is not.
-# ob1: frontend/docker-compose.yml:317 (OPEN_NOTEBOOK_HOST defaults to
-#   open_notebook, an ob1-plane service) with :319 OPEN_NOTEBOOK_ENABLED
-#   defaulting TRUE; ports at :318,:320-321. Consumed by frontend/entrypoint.sh:97 and :99
+# ob1: frontend/docker-compose.yml:350 (OPEN_NOTEBOOK_HOST defaults to
+#   open_notebook, an ob1-plane service) with :352 OPEN_NOTEBOOK_ENABLED
+#   defaulting TRUE; ports at :351,:353-354. Consumed by frontend/entrypoint.sh:97 and :99
 #   (the open-notebook and open-notebook-api serve routes). The image's own
 #   fallback for the wiki route also points at ob1 (frontend/entrypoint.sh:66,
 #   QUARTZ_HOST=${QUARTZ_HOST:-openbrain-wiki-viewer}) before the compose file
 #   overrides it - see the portal edge below.
-# portal: frontend/docker-compose.yml:333 (QUARTZ_HOST defaults to `caddy`, a
-#   PORTAL-plane service) with :335 QUARTZ_ENABLED defaulting TRUE; the comment
-#   at :323-332 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
+# portal: frontend/docker-compose.yml:366 (QUARTZ_HOST defaults to `caddy`, a
+#   PORTAL-plane service) with :368 QUARTZ_ENABLED defaulting TRUE; the comment
+#   at :356-365 explains the route (Tailnet > Caddy > wiki app on caddy:8446,
 #   which resolves because caddy and openwebui share ai-stack_app-net).
 #   Consumed by frontend/entrypoint.sh:101. Note this is the reverse of portal's HARD
 #   requires on frontend: the portal needs openwebui to serve its main vhost,
@@ -198,12 +200,12 @@ requires = ["anchor"]
 #   whose own comment says "agent-org compose project on llm-net, starts after
 #   us". Declared in the IMAGE (frontend/entrypoint.sh, baked into tailscale:local), not
 #   in frontend/docker-compose.yml - the compose file passes this service
-#   exactly one variable (:291-302). A reader of the compose file alone does
+#   exactly one variable (:324-335). A reader of the compose file alone does
 #   not see this edge.
 optional = ["inference", "search", "ob1", "portal", "agent-org"]
 host = [
-  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:158-165, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :257-263. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
-  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:290, network_mode: service:openwebui names the gpu definition)",
+  "Under the `gpu` profile only: image openwebui:local, a LOCAL CUDA build (frontend/docker-compose.yml:198-205, frontend/Dockerfile.openwebui-gpu), plus an NVIDIA container runtime for the device reservation at :297-303. The DEFAULT `stock` profile needs neither: it pulls ghcr.io/open-webui/open-webui:v0.11.0 and runs on any host with Docker",
+  "Under the `tailscale` profile only: a Tailscale auth key (TAILSCALE_AUTH_KEY). That profile requires `gpu`, because the pair is hard-wired (frontend/docker-compose.yml:323, network_mode: service:openwebui names the gpu definition)",
 ]
 keys = ["WEBUI_SECRET_KEY"]
 
@@ -227,16 +229,16 @@ keys = ["WEBUI_SECRET_KEY"]
 # exactly that - something other than the driver's defaults turns it on, and
 # here it is the COMPOSE_PROFILES line in .env.
 opt_in      = true
-description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:115-153). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
+description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-193). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
 opt_in      = true
-description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:158-165, 257-263), the llm-net/app-net seams and the status-pipe mount"
+description = "the CUDA local build + the NVIDIA device reservation (frontend/docker-compose.yml:198-205, 297-303), the llm-net/app-net seams and the status-pipe mount"
 
 [planes.frontend.profiles.tailscale]
 # `requires gpu` is the MACHINE-READABLE form of what this description already
 # says twice: the companion's network_mode names the `gpu` definition of
-# openwebui (frontend/docker-compose.yml:290), so `--profile tailscale` alone is
+# openwebui (frontend/docker-compose.yml:323), so `--profile tailscale` alone is
 # not a deployment - compose refuses it outright with
 #   service "tailscale" depends on undefined service "openwebui"
 # Added by sl-driver-parity using the `requires` key sl-ob1-profiles introduced,
@@ -245,14 +247,14 @@ description = "the CUDA local build + the NVIDIA device reservation (frontend/do
 # profile is `default`, so nothing passes these flags today.
 requires    = ["gpu"]
 opt_in      = true
-description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:290)"
+description = "the tailscale netns companion and its state backup; usable ONLY with `gpu`, whose service its network_mode names (frontend/docker-compose.yml:323)"
 
 # --------------------------------------------------------------------------
 [planes.memory]
 # mnemory (the unified memory layer) + the ONLY cloud door.
-# requires anchor: memory/docker-compose.yml:138-140 (ai-stack_llm-net).
-# requires inference: memory/docker-compose.yml:36 (LLM_BASE_URL =
-#   http://llama-cpp:8080/v1) and :38 (EMBED_BASE_URL =
+# requires anchor: memory/docker-compose.yml:153-155 (ai-stack_llm-net).
+# requires inference: memory/docker-compose.yml:54 (LLM_BASE_URL =
+#   http://llama-cpp:8080/v1) and :56 (EMBED_BASE_URL =
 #   http://llama-cpp-embed:8080/v1). Both are unconditional - mnemory cannot
 #   embed or summarise without them.
 compose  = "memory/docker-compose.yml"
@@ -268,14 +270,14 @@ keys     = ["MCP_API_KEY"]
 # --------------------------------------------------------------------------
 [planes.search]
 # Private Search Gateway: Mullvad VPN (all egress) + redis + SearXNG + gateway.
-# requires anchor: search/docker-compose.yml:173-175 (ai-stack_default, which
+# requires anchor: search/docker-compose.yml:187-189 (ai-stack_default, which
 #   is where OB1 and the frontend resolve `vpn` and `gateway` by name).
 compose  = "search/docker-compose.yml"
 lease    = "search"
 requires = ["anchor"]
 optional = []
 host = [
-  "/dev/net/tun and NET_ADMIN for the WireGuard kill-switch (search/docker-compose.yml:25-28)",
+  "/dev/net/tun and NET_ADMIN for the WireGuard kill-switch (search/docker-compose.yml:43-46)",
   "A Mullvad WireGuard account (key + addresses)",
 ]
 keys = ["MULLVAD_WG_PRIVATE_KEY", "MULLVAD_WG_ADDRESSES"]
@@ -287,9 +289,9 @@ keys = ["MULLVAD_WG_PRIVATE_KEY", "MULLVAD_WG_ADDRESSES"]
 [planes.coder]
 # little-coder control plane: open-terminal (executor) + little-coder (daemon)
 # + lc-egress.
-# requires anchor: coder/docker-compose.yml:212-214 (ai-stack_llm-net).
-# requires inference: coder/docker-compose.yml:28 and :76 join llm-net FOR
-#   llama-cpp, :47-48 exempt `llama-cpp` from the egress proxy, and the agent's
+# requires anchor: coder/docker-compose.yml:226-228 (ai-stack_llm-net).
+# requires inference: coder/docker-compose.yml:46 and :93 join llm-net FOR
+#   llama-cpp, :65-66 exempt `llama-cpp` from the egress proxy, and the agent's
 #   base_url is http://llama-cpp:8080/v1 (little-coder/config/little-coder.config.yaml:11,
 #   little-coder/config/models.json:6). The daemon has no other model backend.
 compose  = "coder/docker-compose.yml"
@@ -435,20 +437,20 @@ opt_in      = true
 # Mattermost + agent-bridge (the governed org bus) + profile-gated slices.
 # No env_file key - project directory agent-org/docker loads its own .env,
 # the same way every plane does since sl-env-split.
-# requires anchor: agent-org/docker/docker-compose.yml:748-750 (ai-stack_llm-net).
-# requires inference: agent-org/docker/docker-compose.yml:127
-#   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :257 (agent-bridge joins
-#   llm-net for the alias); :372-373,457-458 exempt llama-cpp from the workers'
+# requires anchor: agent-org/docker/docker-compose.yml:764-766 (ai-stack_llm-net).
+# requires inference: agent-org/docker/docker-compose.yml:183
+#   (AO_LOCAL_API_BASE = http://llama-cpp:8080/v1) and :313 (agent-bridge joins
+#   llm-net for the alias); :420-421,499-500 exempt llama-cpp from the workers'
 #   egress proxy.
 # NOT an edge: the worker slices RUN images the coder plane BUILDS
-#   (little-coder:local at :294,:392; little-coder-open-terminal:local at
-#   :351,:438). That is a build-time dependency on the IMAGES, not on the coder
+#   (little-coder:local at :345,:437; little-coder-open-terminal:local at
+#   :399,:480). That is a build-time dependency on the IMAGES, not on the coder
 #   plane being up - agent-org talks to no coder container.
-# CONSIDERED, NOT AN EDGE - agent-org -> ob1: agent-org/docker/docker-compose.yml:142
-#   (AO_OPENBRAIN_URL -> http://openbrain-mcp:8000) and :152 (AO_RESEARCH_URL ->
+# CONSIDERED, NOT AN EDGE - agent-org -> ob1: agent-org/docker/docker-compose.yml:198
+#   (AO_OPENBRAIN_URL -> http://openbrain-mcp:8000) and :208 (AO_RESEARCH_URL ->
 #   http://openbrain-research:8000) do name ob1-plane services, but both sit
-#   behind toggles that default OFF - :141 AO_OPENBRAIN_MIRROR_ENABLED false,
-#   :151 AO_GROUNDING_ENABLED false - so a default boot never reaches for ob1
+#   behind toggles that default OFF - :197 AO_OPENBRAIN_MIRROR_ENABLED false,
+#   :207 AO_GROUNDING_ENABLED false - so a default boot never reaches for ob1
 #   and nothing degrades when ob1 is down. By the toggle rule in this file's
 #   header that makes it a latent integration, not an edge. If either default
 #   flips to true, it becomes an `optional` edge and belongs in the list below.
@@ -482,12 +484,14 @@ opt_in      = true
 [planes.portal]
 # The internet-exposed auth front-end. MANUAL on purpose: exposing the stack
 # stays a human action, exactly as scripts/stack/stack.ps1's header says.
-# requires anchor: portal/docker-compose.yml:632-634 (app-net, external: true,
+# requires anchor: portal/docker-compose.yml:618-620 (app-net, external: true,
 #   name: ai-stack_app-net). RE-DERIVED 2026-09-19 (sl-env-split): these two
 #   read :603-605 and :601-602, which were ALREADY four lines short of the
 #   blocks they name at base 4934529 - :603 was `notify-net:`. Corrected to the
-#   real lines, then shifted by the +25 this item added to that file's header.
-# requires frontend: portal/docker-compose.yml:630-631 - caddy joins
+#   real lines, then shifted by the +25 sl-env-split added to that file's
+#   header - and again by the -14 sl-compose-anchors then took out of it,
+#   which is the pair of numbers standing here now.
+# requires frontend: portal/docker-compose.yml:616-617 - caddy joins
 #   ai-stack_app-net "to reach openwebui:8080 and open_notebook", and
 #   config/caddy/Caddyfile:197 proxies openwebui:8080. Without the frontend the
 #   portal's primary vhost 502s.
@@ -495,8 +499,8 @@ opt_in      = true
 #   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
 #   while the rest of the portal serves.
 # optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
-#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:153,
-#   networks at :162-164).
+#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:173,
+#   networks at :182-184).
 compose  = "portal/docker-compose.yml"
 lease    = "portal"
 requires = ["anchor", "frontend"]

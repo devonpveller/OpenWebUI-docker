@@ -10,7 +10,25 @@
 #
 # Doors rule (unchanged): local callers on llm-net talk to mnemory directly;
 # cloud clients get ONLY the host-published mnemory-cloud-gateway (:8060).
+#
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). The hardening
+# boilerplate every service here carried verbatim is declared ONCE below as a
+# YAML extension field and merged in with `<<: *hardening`, at the point in each
+# service where the block it replaces used to sit. `docker compose config`
+# echoes the `x-` blocks back at the top level; they are declarations, not
+# services, and no rendered service definition changed.
+#   x-hardening   security_opt: [ no-new-privileges:true ]
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - so a service needing an
+# extra `security_opt` entry must spell out the WHOLE list (the anchor's entry
+# included) in its own key. Extra hardening under a DIFFERENT key (cap_drop,
+# cap_add, read_only, tmpfs) is just that key, added after the merge key. No
+# service in this file overrides an anchored key.
 name: memory
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
 
 services:
   mnemory:
@@ -47,8 +65,7 @@ services:
     volumes:
       - mnemory-data:/data
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     # (cross-project since K.1 2026-08-21: llm-gateway lives in the inference
     #  project; startup order is enforced by stack.ps1 / recovery, and the
     #  service retries until the gateway answers -- same posture as OB1.)
@@ -82,8 +99,7 @@ services:
       - BOUND_USER_ID=${MNEMORY_CLOUD_USER:-yamaoka01@gmail.com}
       - SHARE_LABEL_VALUE=cloud
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     depends_on:
       mnemory:
         condition: service_healthy
@@ -121,8 +137,7 @@ services:
           sleep "$${BACKUP_INTERVAL}"
         done
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     depends_on:
       mnemory:
         condition: service_healthy

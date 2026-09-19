@@ -9,6 +9,30 @@
 # llama-cpp-upstream, so without them it would tar an empty directory and never
 # pass its liveness probe.
 
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). `x-hardening`
+# below carries the security_opt block both sidecars repeated verbatim; `<<: *hardening`
+# merges it in at the point where that block used to sit.
+# IT IS DECLARED HERE AND NOT IN THE SPINE: compose parses each `include:`d file
+# on its own, so a YAML anchor defined in inference/docker-compose.yml is NOT
+# visible in this file - referencing one aborts the whole render with
+# `unknown anchor 'hardening' referenced` (measured, compose v5.3, 2026-09-19).
+# All four group files therefore declare their own. They are byte-identical by
+# CONVENTION, not by necessity: a top-level `x-` key in an INCLUDED file is
+# consumed by that file's own parse and never reaches the merged project model
+# (this plane's `docker compose config` is byte-identical to the pre-change
+# render, x- keys included - the only plane here of which that is true), so
+# four DIFFERING blocks would render clean too. Divergence is a silent
+# readability trap, not an error. Keep them identical.
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - a service needing a
+# second `security_opt` entry spells out the WHOLE list in its own key.
+# Hardening under a DIFFERENT key (lm-models-backup's cap_drop) is just that
+# key, written after the merge.
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
 services:
   llm-gateway-backup:
     image: postgres:16-alpine
@@ -30,8 +54,7 @@ services:
       - ../../backup/llm-gateway-backup.sh:/scripts/backup.sh:ro
     entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || true; sleep 86400; done"]
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
@@ -89,8 +112,7 @@ services:
           sleep "$${BACKUP_INTERVAL}"
         done
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     cap_drop:
       - ALL
     labels:

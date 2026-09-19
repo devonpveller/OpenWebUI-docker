@@ -28,6 +28,28 @@
 # The default is an in-repo directory; the operator's real path is in .env and
 # documented in .env.example.
 
+# EXTENSION FIELDS (stack-layers sl-compose-anchors, 2026-09-19). `x-hardening`
+# below carries the security_opt block both servers repeated verbatim; `<<: *hardening`
+# merges it in at the point where that block used to sit.
+# IT IS DECLARED HERE AND NOT IN THE SPINE: compose parses each `include:`d file
+# on its own, so a YAML anchor defined in inference/docker-compose.yml is NOT
+# visible in this file - referencing one aborts the whole render with
+# `unknown anchor 'hardening' referenced` (measured, compose v5.3, 2026-09-19).
+# All four group files therefore declare their own. They are byte-identical by
+# CONVENTION, not by necessity: a top-level `x-` key in an INCLUDED file is
+# consumed by that file's own parse and never reaches the merged project model
+# (this plane's `docker compose config` is byte-identical to the pre-change
+# render, x- keys included - the only plane here of which that is true), so
+# four DIFFERING blocks would render clean too. Divergence is a silent
+# readability trap, not an error. Keep them identical.
+# THE RULE WHEN YOU EDIT: a merge key merges MAPS. A LIST written on a service
+# REPLACES the anchored list, it does NOT append to it - a service needing a
+# second `security_opt` entry spells out the WHOLE list in its own key.
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
 services:
   llama-cpp-upstream:
     image: ghcr.io/mostlygeek/llama-swap:cuda
@@ -105,8 +127,7 @@ services:
               device_ids: ["${GPU_LLAMA_CPP_DEVICE_ID:-0}"]
               capabilities: [gpu]
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       # Phase 1: basic liveness. Phase 2: slot watchdog — if any slot stays in
       # "processing" state for > 15 min (900 s), kill llama-server so Docker
@@ -157,8 +178,7 @@ services:
               device_ids: ["${GPU_LLAMA_CPP_EMBED_DEVICE_ID:-1}"]
               capabilities: [gpu]
     restart: unless-stopped
-    security_opt:
-      - no-new-privileges:true
+    <<: *hardening
     healthcheck:
       test: ["CMD", "curl", "-f", "--max-time", "5", "http://localhost:8080/health"]
       interval: 30s

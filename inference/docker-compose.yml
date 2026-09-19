@@ -15,7 +15,7 @@
 #
 # `include:` keeps ONE compose project: the project name, the container names,
 # the volumes and the rendered service definitions are unchanged - only the file
-# a definition lives in moved. Two things `include:` changes that are worth
+# a definition lives in moved. Three things `include:` changes that are worth
 # knowing before editing a group file:
 #   - RELATIVE PATHS resolve against the INCLUDED file's directory, so from
 #     compose/ the plane's own tree is ../ and the repo root is ../../. Since
@@ -28,6 +28,17 @@
 #     validates, so a reference with no local declaration renders clean
 #     (verified 2026-09-19 - a duplicate declaration would be the thing to
 #     avoid, since an include conflict on a top-level key is an error).
+#   - YAML ANCHORS ARE FILE-LOCAL, so this spine CANNOT host them. Each file
+#     is parsed on its own before the models are merged: an `&anchor` defined
+#     here is invisible in compose/*.yml, and a `*alias` there aborts the whole
+#     render with `unknown anchor '<name>' referenced` (measured against compose
+#     v5.3, 2026-09-19). That is why each group file declares its OWN
+#     `x-hardening` block (stack-layers sl-compose-anchors) rather than sharing
+#     one from here. Unlike `networks:`/`volumes:` this is NOT an include
+#     conflict risk either way: a top-level `x-` key in an included file is
+#     consumed by that file's own parse and never reaches the merged model, so
+#     four DIFFERING blocks render clean as well (measured). Keep them
+#     identical anyway - divergence here fails silently, not loudly.
 #
 # THE `local` PROFILE (stack-layers D11). The four services marked [local] above
 # are the ones that need this host's GPUs and model files. Off, the project is a

@@ -187,7 +187,7 @@ No printed line may contain `--env-file`.
 
 ### 4b. BEFORE you trim: the one wildcard that still reaches across
 
-`agent-org/docker/docker-compose.yml:300` and `:398` give `ao-worker-1` and
+`agent-org/docker/docker-compose.yml:351` and `:443` give `ao-worker-1` and
 `ao-worker-2` **`env_file: ../../.env`** - a wildcard grant of the WHOLE root
 file into those two containers. agent-org is out of scope for this change and
 its own `.env` was not touched, but step 5 empties the file those two services
