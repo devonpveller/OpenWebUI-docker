@@ -450,22 +450,66 @@ def test_ob1_and_agent_org_pass_no_env_file_and_read_their_own(root):
     assert manifest.env_file("frontend") == ".env"
 
 
-def test_a_bare_ob1_plane_passes_only_the_default_profile(root):
-    """Enabling the PLANE gets `default` profiles only - the core fleet plus idea-refinery.
+def test_a_bare_ob1_plane_passes_its_default_profile_and_what_that_needs(root):
+    """Enabling the PLANE gets `default` profiles, closed over `requires`.
 
-    The three sl-ob1-profiles groups are reached by enabling a PRODUCT (see
-    test_enable_research_pulls_its_planes_and_ob1_profiles), never by naming the
-    plane. NOTE the deliberate divergence from scripts/stack/stack.ps1, which
-    passes all four on every OB1 invocation because it is the pre-manifest driver
-    and must keep starting the 30 containers running on this host; the comment on
-    its `ob1` row says so. sl-driver-parity reconciles the two.
+    `idea-refinery` is ob1's only default; it `requires` research because
+    openbrain-idea-refinery's only engine is openbrain-research. So a bare plane
+    enable passes BOTH - it used to pass idea-refinery alone, which started a drain
+    that could never drain. `wiki` and `notebook` are surfaces and stay out; they
+    are reached by enabling a PRODUCT.
+
+    NOTE the deliberate divergence from scripts/stack/stack.ps1, which passes all
+    four on every OB1 invocation because it is the pre-manifest driver and must keep
+    starting the 30 containers running on this host; the comment on its `ob1` row
+    says so. sl-driver-parity reconciles the two.
     """
     run(root, "init", "--planes", "inference,search,ob1")
     _, out, _ = run(root, "up", "--dry-run")
     ob1 = [line for line in docker_lines(out) if "OB1/docker" in line]
     assert ob1 == [
-        "docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d"
+        "docker compose -f OB1/docker/docker-compose.yml "
+        "--profile idea-refinery --profile research up -d"
     ]
+
+
+def test_the_idea_refinery_profile_pulls_the_research_engine_it_calls(root):
+    """A profile whose only engine is another profile must pull it in."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    assert manifest.profile_requires("ob1", "idea-refinery") == ["research"]
+    # ...and it is the plane's only default, so this closure runs on every invocation.
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+    # Even the most headless path a person can ask for carries the engine.
+    code, _, _ = run(root, "enable", "open-brain", "--headless")
+    assert code == 0
+    assert set(state_of(root)["planes"]["ob1"]["profiles"]) == {"idea-refinery", "research"}
+
+
+def test_profile_requires_is_transitive_and_order_is_the_manifests(root):
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    manifest.planes["ob1"]["profiles"]["wiki"] = {"description": "x", "requires": ["notebook"]}
+    manifest.planes["ob1"]["profiles"]["research"] = {"description": "y", "requires": ["wiki"]}
+    assert manifest.profile_closure("ob1", {"idea-refinery"}) == {
+        "idea-refinery", "research", "wiki", "notebook"
+    }
+    # The ORDER handed to compose stays the manifest's declaration order, not
+    # discovery order - `--profile` flags are order-insensitive, but a command line
+    # that reshuffles between runs makes diffing two dry-runs pointlessly hard.
+    assert manifest.profile_order("ob1", manifest.profile_closure("ob1", {"idea-refinery"})) == [
+        "idea-refinery", "research", "wiki", "notebook"
+    ]
+
+
+def test_a_profile_requiring_an_unknown_profile_is_refused(root):
+    """The typo has to fail loudly here, not silently pass an unknown flag to compose."""
+    text = (REAL_MANIFEST).read_text(encoding="utf-8").replace(
+        'requires    = ["research"]', 'requires    = ["reserch"]'
+    )
+    path = root / "typo.manifest.toml"
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(stack.Refusal) as exc:
+        stack.Manifest.load(path)
+    assert "ob1.idea-refinery" in str(exc.value) and "reserch" in str(exc.value)
 
 
 def test_enabling_research_drives_ob1_with_every_profile_the_live_set_needs(root):

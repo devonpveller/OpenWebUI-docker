@@ -61,11 +61,21 @@ if ($ymlStaged.Count -gt 0) {
         if (Test-Path $invPath) {
             $inv = Get-Content $invPath -Raw | ConvertFrom-Json
             $known = @{}
+            $rowProfile = @{}
             foreach ($plane in $inv.planes.PSObject.Properties) {
-                foreach ($row in $plane.Value) { $known[$row.container] = $row.project }
+                foreach ($row in $plane.Value) {
+                    $known[$row.container] = $row.project
+                    $rowProfile[$row.container] = $row.profile   # $null when unprofiled
+                }
             }
+            # Each target must pass every profile its project's inventory rows carry, or
+            # the coverage assertion below fails it. `local` was added here 2026-09-19:
+            # without it this render emitted 4 of inference's 8 rows and the other four
+            # (llama-cpp-upstream, llama-cpp-embed-upstream, llm-queue, lm-models-backup)
+            # had never been verified, silently - the same defect the OB1 profiles would
+            # have introduced, already present and unnoticed.
             $renderTargets = @(
-                @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example') }
+                @{ P = 'inference'; F = 'inference\docker-compose.yml'; A = @('--env-file', '.env.example', '--profile', 'local') }
                 @{ P = 'frontend';  F = 'frontend\docker-compose.yml';  A = @('--env-file', '.env.example') }
                 @{ P = 'memory';    F = 'memory\docker-compose.yml';    A = @('--env-file', '.env.example') }
                 @{ P = 'search';    F = 'search\docker-compose.yml';    A = @('--env-file', '.env.example') }
@@ -84,13 +94,41 @@ if ($ymlStaged.Count -gt 0) {
                                            '--profile', 'notebook', '--profile', 'idea-refinery') }
             }
             $drift = @()
+            $coverage = @()
             foreach ($rt in $renderTargets) {
+                # WHAT THIS RENDER MUST COVER: EVERY inventory row for the project.
+                #
+                # Not "every row whose profile this target happens to pass" - that was the
+                # first version of this guard and it was worthless, because it derived the
+                # expectation from the same argument list it was meant to police: dropping
+                # --profile wiki dropped the four wiki rows from BOTH sides and the check
+                # stayed green at 26/26. The expectation has to come from something the
+                # render target cannot move, and the inventory is that thing.
+                #
+                # So a profiled row is covered by PASSING ITS PROFILE here. If a project
+                # ever has rows a single render genuinely cannot reach, the honest fix is
+                # to say so in the target, not to shrink the expectation.
+                #
+                # Why this matters: the check only walks compose -> json, so ANY narrowing
+                # of a render - a dropped --profile, a missing gitignored env file - used
+                # to silently shrink what was verified while the green line still printed.
+                # This item's tester proved it by instrumenting the script: open-brain went
+                # 30 -> 26 rows, exit 0, no new output. inference was quietly verifying 4
+                # of its 8 rows for the same reason, which is why `local` is now passed.
+                $expected = @($known.Keys | Where-Object { $known[$_] -eq $rt.P })
+
                 # Regex extraction, NOT ConvertFrom-Json: PS 5.1's parser rejects
                 # the rendered config's case-duplicate env keys (HTTP_PROXY vs
                 # http_proxy on open-terminal). container_name lines are enough.
                 $argStr = ($rt.A -join ' ')
                 $raw = (cmd /c "docker compose -f $($rt.F) $argStr config --format json 2>nul") -join "`n"
-                if (-not $raw) { continue }
+                if (-not $raw) {
+                    # Was `continue`, which unverified every row of the target in silence.
+                    $drift += ("RENDER PRODUCED NOTHING for $($rt.P) ($($rt.F)) - " +
+                               "$($expected.Count) inventory row(s) went unverified. " +
+                               "Check the compose file and its env/profile arguments.")
+                    continue
+                }
                 $names = [regex]::Matches($raw, '"container_name":\s*"([^"]+)"') |
                     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
                 foreach ($cname in $names) {
@@ -101,13 +139,38 @@ if ($ymlStaged.Count -gt 0) {
                         $drift += "WRONG project for ${cname}: json says '$($known[$cname])', compose says '$($rt.P)'"
                     }
                 }
+                $coverage += "$($rt.P):$($names.Count)/$($expected.Count)"
+                # The other direction, and the one the compose->json walk cannot see.
+                $unseen = @($expected | Where-Object { $names -notcontains $_ })
+                if ($unseen.Count) {
+                    $profilesPassed = @()
+                    for ($i = 0; $i -lt $rt.A.Count; $i++) {
+                        if ($rt.A[$i] -eq '--profile') { $profilesPassed += $rt.A[$i + 1] }
+                    }
+                    $needed = @($unseen | ForEach-Object { $rowProfile[$_] } |
+                                Where-Object { $_ } | Sort-Object -Unique)
+                    $hint = if ($needed) { " (add --profile $($needed -join ' --profile '))" } else { "" }
+                    $drift += ("UNVERIFIED rows for $($rt.P): the render emitted $($names.Count) " +
+                               "container(s), the inventory holds $($expected.Count) - not verified: " +
+                               "$($unseen -join ', ')$hint. Profiles passed: " +
+                               "$(if ($profilesPassed) { $profilesPassed -join ',' } else { '(none)' }). " +
+                               "Either the render lost a profile or an env file, or the row is stale.")
+                }
             }
             if ($drift.Count) {
                 foreach ($d in $drift) { Write-Host "  [configs] INVENTORY DRIFT: $d" -ForegroundColor Red }
                 Write-Host "  [configs] fix scripts\lib\stack-services.json (curated fields are yours; container/project rows must match compose)" -ForegroundColor Yellow
                 $failed += $drift.Count
             }
-            else { Write-Host "  [configs] stack-services.json inventory matches the compose configs" }
+            else {
+                # Say HOW MANY rows each render actually verified, as rendered/expected.
+                # "matches the compose configs" on its own reads as coverage and is really
+                # just the size of whatever the render happened to emit - the number this
+                # item's tester had to add by instrumenting the script to see a silent
+                # 30 -> 26 narrowing. Print it so nobody has to instrument it again.
+                Write-Host ("  [configs] stack-services.json inventory matches the compose configs " +
+                            "[rows verified/expected: $($coverage -join ' ')]")
+            }
         }
     }
 }

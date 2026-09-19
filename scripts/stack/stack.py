@@ -101,6 +101,14 @@ class Manifest:
                         raise Refusal(
                             f"refused: plane '{name}' lists unknown plane '{dep}' under {rel} in {self.path.name}"
                         )
+            declared_profiles = plane.get("profiles", {})
+            for profile, spec in declared_profiles.items():
+                for dep in _spec(spec).get("requires", []):
+                    if dep not in declared_profiles:
+                        raise Refusal(
+                            f"refused: profile '{name}.{profile}' requires unknown profile "
+                            f"'{dep}' in {self.path.name}"
+                        )
         for name, product in self.products.items():
             for plane in list(product.get("planes", [])) + list(product.get("surfaces", {})):
                 if plane not in self.planes:
@@ -137,6 +145,32 @@ class Manifest:
         known = [p for p in declared if p in wanted]
         extra = [p for p in wanted if p not in declared]
         return known + sorted(extra)
+
+    def profile_requires(self, name: str, profile: str) -> list[str]:
+        return list(_spec(self.profiles(name).get(profile, {})).get("requires", []))
+
+    def profile_closure(self, name: str, wanted) -> set[str]:
+        """`wanted` plus every profile those transitively `requires`.
+
+        A profile can name another as a hard prerequisite. The case this exists for:
+        OB1's `idea-refinery` drain calls `openbrain-research` and nothing else, so
+        enabling that profile without `research` starts a drain that can never drain -
+        it comes up healthy and silently produces nothing, which is the failure this
+        whole item is about. `idea-refinery` is also the ONLY `default = true` profile
+        on that plane, so without this expansion a bare `enable ob1` reproduces it.
+
+        Compose has no equivalent: `--profile idea-refinery` on the command line still
+        needs `--profile research` beside it. This is the driver making the manifest's
+        declaration real, not a compose feature.
+        """
+        out, todo = set(), list(wanted)
+        while todo:
+            profile = todo.pop()
+            if profile in out:
+                continue
+            out.add(profile)
+            todo.extend(self.profile_requires(name, profile))
+        return out
 
     def default_profiles(self, name: str) -> list[str]:
         return [p for p, spec in self.profiles(name).items() if _spec(spec).get("default")]
@@ -357,13 +391,22 @@ def compose_command(manifest: Manifest, plane: str, args, context=None, profiles
 
 
 def run_profiles(manifest: Manifest, state: State, plane: str) -> list[str]:
-    """State profiles unioned with the plane's `default = true` ones.
+    """State profiles, unioned with the plane's `default = true` ones, closed over `requires`.
 
-    The union is what keeps parity with stack.ps1, which passes OB1's
-    idea-refinery profile on every invocation whatever the operator asked for.
+    `default` means "passed on every invocation". It exists for profiles a plane is
+    not really usable without, and it deliberately survives `--headless` - which is
+    also why a SURFACE must never be marked default.
+
+    NOT parity with stack.ps1 for the ob1 plane, and the docstring used to say it
+    was: since sl-ob1-profiles, stack.ps1's ob1 row passes all four profiles (it is
+    the pre-manifest driver and has to keep starting the 30 containers on this host),
+    while only `idea-refinery` is `default` here (marking the other three default
+    would make `--headless` a no-op for the plane). The divergence is deliberate and
+    argued at stack.ps1's ob1 row and above stack.manifest.toml's profile tables;
+    sl-driver-parity reconciles the two drivers.
     """
     wanted = set(state.profiles_of(plane)) | set(manifest.default_profiles(plane))
-    return manifest.profile_order(plane, wanted)
+    return manifest.profile_order(plane, manifest.profile_closure(plane, wanted))
 
 
 def subprocess_runner(cmd, cwd) -> int:
@@ -626,7 +669,10 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
         planes_touched = [p for p in full if not manifest.is_implicit(p)]
         for plane in planes_touched:
             profiles = profile_map.get(plane, []) + manifest.default_profiles(plane)
-            profile_map[plane] = manifest.profile_order(plane, set(profiles))
+            # Closed over `requires` here too, not only at drive time: the state file is
+            # a record of what will actually be passed, and one that omits a prerequisite
+            # is a state file the operator has to know the driver corrects behind them.
+            profile_map[plane] = manifest.profile_order(plane, manifest.profile_closure(plane, set(profiles)))
             state.enable(plane, profile_map[plane])
         if headless:
             note = []

@@ -242,10 +242,38 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > The full live set needs all four:
 > `docker compose -f OB1/docker/docker-compose.yml --profile research --profile wiki --profile notebook --profile idea-refinery up -d`
 > — which is exactly what `scripts/stack/stack.ps1`'s `ob1` row passes.
-> **Invariant:** no core service may `depends_on` a profiled one. None does; the
-> per-service reasons and the two surviving core→profiled RUNTIME references
-> (`openbrain-ext`'s `WIKI_RECOMPILE_URL`, `openbrain-podcast`'s `RESEARCH_URL` +
-> `ON_BASE`) are in `OB1/docker/README.md`, "Compose profiles".
+>
+> **Invariant:** no core service may `depends_on` a profiled one. None does.
+> But `depends_on` is not the only way one service reaches another: **six**
+> references cross a group boundary as environment URLs. None blocks a start;
+> each just goes dead at call time, usually inside a `try/catch` — so the stack
+> comes up green and a scheduled job quietly stops producing output.
+>
+> | Caller | Key | Target profile | Dead when that profile is off |
+> |---|---|---|---|
+> | `openbrain-ext` (core) | `WIKI_RECOMPILE_URL` | `wiki` | `wiki_trigger_recompile`; the `wiki_*` readers go stale |
+> | `openbrain-gmail-prune` (**core**) | `WIKI_RECOMPILE_URL` | `wiki` | **the nightly prune completes and never recompiles the vault** |
+> | `openbrain-gmail-pull` (core) | `WIKI_RECOMPILE_URL` | `wiki` | nothing — inherited from the shared `env_file`, its code never reads it |
+> | `openbrain-podcast` (core) | `RESEARCH_URL` | `research` | link-enrichment research; the episode degrades to email-only |
+> | `openbrain-podcast` (core) | `ON_BASE` | `notebook` | **no audio — the chain runs and produces no episode** |
+> | `openbrain-idea-refinery` (`idea-refinery`) | `RESEARCH_URL` | `research` | its only engine — the drain can never drain |
+>
+> The last one is why `stack.manifest.toml` gives the `idea-refinery` profile
+> `requires = ["research"]`: it is the plane's only `default = true` profile, so
+> without that every invocation started a drain with no engine.
+>
+> **Find these by rendering, never by grepping** — `config --format json` with all
+> four profiles, then match every `environment` value against the profiled service
+> names. Two of the six arrive via `env_file: ../recipes/email-history-import/.env`
+> and appear nowhere in the compose text; a grep finds four of six and that is
+> exactly the error the first version of this section shipped. Per-service reasons
+> and the full table with consequences: `OB1/docker/README.md`, "Compose profiles".
+>
+> **Cross-PROJECT blast radius**, which no per-plane doc covers: turning `wiki` or
+> `notebook` off also breaks consumers outside OB1 — `portal/config/caddy/Caddyfile`
+> reverse-proxies `openbrain-workbench`, `openbrain-wiki-viewer` and `open_notebook`,
+> and `status-pipe/modules/system-health/` probes `open_notebook` and
+> `openbrain-research`. All degrade at request time, none at start.
 
 ### Networks
 | Network   | Type                         | Purpose |

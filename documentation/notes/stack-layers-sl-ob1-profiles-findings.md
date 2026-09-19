@@ -98,32 +98,72 @@ reason. Recording it here because the fix was **forced by mechanism, not chosen
 on merit** — it is the kind of change that looks like unrelated scope creep in a
 diff unless the causal chain is written down.
 
-## 5. Two core → profiled references survive at RUNTIME
+## 5. SIX cross-group runtime references — and the method that finds them
 
-No core service `depends_on` a profiled one — audited across all 24 services of
-the main file and all 6 of the scheduled file (the scheduled file has **zero**
-`depends_on` keys at all; `grep -n depends_on OB1/docker/docker-compose.scheduled.yml`
-exits 1). So nothing had to be removed or set `required: false`. That is a
-clean result, not an absent check: every `depends_on` either stays inside a
-group or points from a profiled service down into core, which is always safe.
+> **CORRECTED after attempt 1 FAILED on T14.** This section said "two". It was
+> wrong, and wrong in the way that matters: I enumerated by grepping the two
+> compose files, which cannot see values delivered by `env_file:`. The tester
+> (`wt-tester-ob1`) matched every **rendered** environment value against the
+> profiled service names and found six. I reproduced their result before acting
+> on it; the render is the evidence below.
 
-Two references do cross core → profiled, as environment URLs. They do not
-affect the render and the caller still starts, but the capability behind them
-is dead when the profile is off:
+No core service `depends_on` a profiled one. That part held — the tester
+enumerated 22 edges across 18 owners independently and found none I had missed,
+and the scheduled file has **zero** `depends_on` keys at all. Nothing had to be
+removed or set `required: false`.
 
-| Caller (core) | Reference | Dead without |
-|---|---|---|
-| `openbrain-ext` | `WIKI_RECOMPILE_URL: http://openbrain-wiki:8000/recompile` | `--profile wiki` |
-| `openbrain-podcast` | `RESEARCH_URL: http://openbrain-research:8000`, `ON_BASE: http://open_notebook:5055` | `--profile research`, `--profile notebook` |
+But `depends_on` is not the only way one service reaches another. Six
+references cross a group boundary as environment URLs. None affects the render
+and none stops a container starting — each is a `fetch` that fails at call
+time, usually inside a `try/catch`. That is the dangerous kind: the stack comes
+up green and a scheduled job quietly stops producing output.
 
-Both are commented at their line in the compose file and listed in
-`OB1/docker/README.md`. The podcast one is why the `digest` product's profile
-set grew `notebook` (see below).
+| Caller | Caller group | Key | Target | Target profile | What goes dead | Declared in attempt 1? |
+|---|---|---|---|---|---|---|
+| `openbrain-ext` | core | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | `wiki_trigger_recompile` refused; `wiki_*` readers go stale | yes |
+| `openbrain-gmail-prune` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | **the nightly prune completes and never recompiles the vault** (`prune-short-term.ts:153`, inside a `try/catch`) | **no** |
+| `openbrain-gmail-pull` | **core** | `WIKI_RECOMPILE_URL` | `openbrain-wiki` | `wiki` | nothing — inherited from the shared `env_file`; its code never reads the key | **no** |
+| `openbrain-podcast` | core | `RESEARCH_URL` | `openbrain-research` | `research` | link-enrichment research; episode degrades to email-only | yes |
+| `openbrain-podcast` | core | `ON_BASE` | `open_notebook` | `notebook` | **no audio rendered — the chain runs and produces no episode** | yes |
+| `openbrain-idea-refinery` | `idea-refinery` | `RESEARCH_URL` | `openbrain-research` | `research` | **its only engine** (`index.ts:268` submits, `:295` polls) — the drain can never drain | **no** |
 
-`openbrain-ext` also mounts the `openbrain-wiki-data` volume read-only. The
-volume is declared top-level, so the mount resolves with the wiki profile off —
-`openbrain-ext` starts and serves its 39 tools; the `wiki_*` readers just see
-whatever the vault last held.
+Six references across five callers. (The tester's summary says "five
+references across four services"; their own table lists six rows across five
+callers, and my render agrees with the table, not the summary. Counting
+`openbrain-podcast` once instead of twice is the likely slip. It changes
+nothing about the finding.)
+
+**THE METHOD, which is the real lesson.** Grep the compose files and you find
+four of six. `openbrain-gmail-pull` and `openbrain-gmail-prune` get
+`WIKI_RECOMPILE_URL` from `env_file: ../recipes/email-history-import/.env`,
+which is not in the compose text, and
+`recipes/email-history-import/prune-short-term.ts:32` hard-codes the same URL as
+its default — so even unsetting the variable would not remove the reference.
+Match the render instead:
+
+```bash
+docker compose -f docker-compose.yml --env-file .env \
+  --profile research --profile wiki --profile notebook --profile idea-refinery \
+  config --format json
+```
+
+then match every `environment` **value** against every profiled service name,
+and check `depends_on`, `network_mode`, `links`, network aliases and shared
+named volumes the same way. Verified while redoing it: there are **no**
+`network_mode`, `links` or network aliases anywhere in this project, and
+`openbrain-wiki-data` is the only cross-group volume — written by
+`openbrain-wiki` and `openbrain-workbench` (both `wiki`), mounted **read-only**
+by `openbrain-ext` (core) and `open_notebook`, and declared top-level so the
+core mount resolves with the wiki profile off.
+
+This is CLAUDE.md's "verify against gitignored evidence" rule with a different
+hat on: `.env` files are exactly where a "zero references" verdict dies. The
+method is now stated in the compose header, in `OB1/docker/README.md`, in
+`SERVICE-LIFECYCLE.md` row 8b, and in the test plan's T14 — because the next
+person to add a profile here will reach for `grep` for the same reason I did.
+
+All six are now commented at their line and tabulated with consequences in
+`OB1/docker/README.md`.
 
 ## 6. `digest` needed `notebook` as a PROFILE, not a surface
 
@@ -200,6 +240,75 @@ Whether the digest chain itself should become a `digest` profile is a real
 question — it is five always-on containers a chat-only or core-only deployment
 does not want — but it is the next item's, not this one's.
 
+## 5a. `idea-refinery` now REQUIRES `research` — the decision, and the two I rejected
+
+`openbrain-idea-refinery`'s only engine is `openbrain-research`. It is also the
+`ob1` plane's only `default = true` profile, so before this fix **every**
+invocation of either driver started a drain with no engine —
+`stack.py enable ob1` and `enable open-brain --headless` both did.
+
+Compose has no "profile implies profile". The manifest does now:
+`requires = ["research"]` on the profile, closed over transitively by
+`stack.py`'s new `profile_closure` in both `run_profiles` (what gets passed)
+and `cmd_enable` (what gets written to state, so the state file is not a lie
+the driver silently corrects). A profile requiring an unknown profile is a
+load-time `Refusal`, tested.
+
+The two alternatives, and why not:
+
+- **Mark `research` itself `default = true`.** Rejected: `default` profiles
+  survive `--headless` (that is what `default` means), so this would make
+  `--headless` a no-op for the plane and destroy the whole surfaces split. The
+  tester independently verified this mechanism rather than taking the claim on
+  trust, which is worth noting — it is the obvious-looking fix.
+- **Drop `default` from `idea-refinery`.** This is the *better* long-term
+  answer. The service's own compose comment says it should be off until
+  deliberately enabled; it is on here only because `stack.ps1` has always passed
+  it. But dropping it STOPS a container that has been up six days, and this item
+  deploys nothing. Left for the operator / `sl-driver-parity`, and stated in the
+  manifest at the line rather than left as a silent judgement.
+
+**Consequence, stated rather than discovered later:**
+`enable open-brain --headless` now yields `idea-refinery, research` instead of
+`idea-refinery` alone. A headless knowledge core pulls the research engine in,
+because the profile the driver always passes needs it. That is the honest
+resolution of a contradiction that already existed; removing `default` is what
+removes the research engine, not removing `requires`.
+
+## 5b. The first version of my own coverage guard was worthless
+
+Worth recording because it is a failure mode I have now produced twice in one
+item, in two different materials.
+
+The tester's class-2 note asked for an expected-row-count guard in
+`check-project-configs.ps1`, since a narrowed render silently unverifies rows.
+My first implementation derived the expected set as *rows whose profile the
+render target passes*. Dropping `--profile wiki` then removed the four wiki rows
+from **both** sides and the check stayed green at 26/26 — I ran the tester's own
+break case and watched it pass.
+
+The expectation has to come from something the render target cannot move. It is
+now **every inventory row for the project**, full stop; a profiled row is
+covered by passing its profile. Re-running the three break cases:
+
+| Break | Before | After |
+|---|---|---|
+| drop `--profile wiki` from the OB1 target | green, 26 rows silently unverified | **exit 1**, names the four rows and says `add --profile wiki` |
+| delete the `openbrain-idea-refinery` row | exit 1 (already worked) | exit 1 |
+| point the target at a non-existent compose file | green (`continue` on empty render) | **exit 1**, `RENDER PRODUCED NOTHING … 30 inventory row(s) went unverified` |
+
+Green path now prints what it actually verified:
+`[rows verified/expected: inference:8/8 frontend:4/4 memory:3/3 search:4/4 coder:4/4 open-brain:30/30]`.
+
+**That change exposed a pre-existing hole in another plane.** With expected =
+all rows, `inference` failed at 4/8: its render target passed no
+`--profile local`, so `llama-cpp-upstream`, `llama-cpp-embed-upstream`,
+`llm-queue` and `lm-models-backup` had **never** been verified by this check —
+the exact defect the OB1 profiles would have introduced, already present and
+unnoticed since `sl-inference-split`. Fixed by passing `--profile local` there
+too (verified: that render emits all 8). This is scope I took on because the
+guard cannot be correct without it.
+
 ## 10. `scripts/checks/plan-store.ps1` cannot run from a worktree
 
 CLAUDE.md tells every planning session to run this at start and at stop. From a
@@ -236,3 +345,32 @@ overall state — which phases shipped, what is outstanding — and this item to
 one slice of it. Inventing a status to satisfy a check is the failure mode the
 findings-note rule exists to prevent. The feature's planner should add it; the
 row is one line.
+
+## 12. Carried from the tester, not fixed here (their class 3)
+
+Recorded so they are not lost when the evidence file is cleaned up.
+
+- **`[planes.inference.profiles.local] pending = true` is stale on this base**
+  (`stack.manifest.toml`). `sl-inference-split` merged at 9f64b84 and the
+  `local` profile exists in `inference/compose/*.yml`, so the manifest declares
+  as "not yet in the compose file" something that is in it — the same lie this
+  item removed for `ob1`. Consequence today: no product pulls `local`, so
+  `stack.py up` for the inference plane prints no `--profile local` and would
+  not start `llm-queue` or the upstreams (it does not stop what is already
+  running). Belongs to `sl-inference-split` / `sl-driver-parity`. **Note this is
+  adjacent to, but not the same as, the `check-project-configs.ps1` fix in §5b**:
+  I passed `--profile local` to that check's *render target*, which is a
+  verification concern. The manifest's stale `pending` is a driver concern and I
+  have left it alone.
+- **Profiles have cross-project blast radius no doc named.** Turning `wiki` or
+  `notebook` off breaks consumers outside OB1: `portal/config/caddy/Caddyfile`
+  reverse-proxies `openbrain-workbench`, `openbrain-wiki-viewer` and
+  `open_notebook`; `status-pipe/modules/system-health/` probes `open_notebook`
+  and `openbrain-research`. All degrade at request time, none at start. Partly
+  addressed — `SERVICE-LIFECYCLE.md` row 8a now names "who reaches it from
+  another project" as a fourth place to declare a profile, and the stack-map OB1
+  section lists these consumers — but no check enforces it.
+- **The handoff destination was not in the commit message.** Attempt 1's message
+  named the OB1 branch and SHA but not the branch to push it onto, so an
+  operator reading only the commit knew what to push and not where. Fixed: the
+  destination is in this attempt's ai-stack commit message and in plan T27.
