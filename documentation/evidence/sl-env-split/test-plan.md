@@ -10,7 +10,38 @@ D16, D17).
 
 ---
 
-## Attempt 2 (2026-09-19) - what changed after the FAIL
+## Attempt 3 (2026-09-19) - three defects the attempt-2 FIX introduced
+
+Attempt 2 (`e958187`) passed all twelve cases and the tester agreed with the
+portal design - and failed on three defects the fix commit itself shipped.
+Where to look hardest this time:
+
+* **Case 1 now opens by making you PROVE your stderr capture** on three
+  outcomes before running anything. Attempt 2's plan used
+  `2>&1 1>$null`, which on PS 5.1 captures **nothing** - so its "stderr empty"
+  criterion was unconditionally true and Case 1b's `names-var-and-file` could
+  never print True. That is a check that passes while checking nothing, written
+  into a test plan. Do not skip the proof.
+* **Case 1b's "every plane refuses" paragraph is reversed.** Attempt 2 claimed,
+  `measured`, that agent-org and OB1 render exit 0 with blanks. They exit **1**,
+  by two different mechanisms. The instruction now says so and tells you to
+  confirm with a process-level exit code - attempt 2's measurement read a
+  pipeline's `$?`, which was `head`'s.
+* **Case 11 no longer keeps the anchor `docker-compose.yml` in the
+  line-count-neutral loop** - it grows by 8 in this item, as portal grows by 25.
+  Both are checked separately, by construct.
+* **Step 4b of the runbook now names TWO stranded variables**, from an
+  enumeration that includes the config-named indirections. Case 5 row 3b and
+  Case 9 are the places to check it.
+* Two paths that printed `documentationunbooks\...` are fixed; if you see that
+  string anywhere, the fix did not land.
+
+Findings sections 21-26 record all of it, including how each bad measurement
+was produced.
+
+---
+
+## Attempt 2 (2026-09-19) - what changed after the first FAIL
 
 Attempt 1 (`e777d11`) failed **Case 12**: `portal/docker-compose.yml` had no
 `${VAR:?}` guard, so removing `--env-file` removed the only thing that refused
@@ -116,8 +147,53 @@ committed example, and no real secret is anywhere near it.
 `<plane>/.env` … renders with no unset-variable warning and no `:?` refusal; a
 plane that still needs the root file to render FAILS."
 
-Run **all eleven**, in the clone. `2>&1 >$null` keeps stderr (where compose puts
-warnings) and discards the rendered YAML.
+### FIRST: prove your stderr capture works. Do not skip this.
+
+**`$err = & docker compose ... 2>&1 1>$null` DOES NOT WORK on PS 5.1** - it
+merges stderr into the success stream and then discards the lot. Measured on a
+render that fails loudly: that idiom captured **0** characters while the same
+render written through `cmd` captured **173**. Attempt 2's plan used it, which
+made Case 1's "stderr empty" unconditionally true and Case 1b's
+`names-var-and-file=True` unreachable. Use this helper for both cases:
+
+```powershell
+$ErrorActionPreference = 'Continue'
+function Cap([string]$f, [string[]]$a) {
+  # -q so the rendered YAML never lands in the capture; stderr to a REAL file;
+  # $LASTEXITCODE read immediately, from the process and not from a pipeline.
+  $tmp = [System.IO.Path]::GetTempFileName()
+  cmd /c "docker compose -f $f $($a -join ' ') config -q 2>$tmp 1>nul"
+  $code = $LASTEXITCODE
+  $err  = Get-Content $tmp -Raw; Remove-Item $tmp
+  if ($null -eq $err) { $err = '' }
+  [pscustomobject]@{ exit = $code; chars = $err.Length; text = $err.Trim() }
+}
+```
+
+**Prove it on all three outcomes before you trust it** (expected results are
+what I measured; if yours differ, your capture is broken, not the item):
+
+```powershell
+# 1. clean  -> exit=0 chars=0
+(Cap 'memory\docker-compose.yml' @('--env-file','memory\.env.example')) | Format-List
+# 2. WARNS but does not fail -> exit=0 chars>0, naming MULLVAD_WG_ADDRESSES
+$tmpEnv = 'search\.env.captest'
+(Get-Content search\.env.example) | Where-Object { $_ -notmatch '^MULLVAD_WG_ADDRESSES=' } |
+  Set-Content $tmpEnv -Encoding ASCII
+(Cap 'search\docker-compose.yml' @('--env-file',$tmpEnv)) | Format-List
+Remove-Item $tmpEnv
+# 3. REFUSES -> exit=1 chars>0, naming MCP_API_KEY and memory/.env
+Move-Item memory\.env "$env:TEMP\m.env"
+(Cap 'memory\docker-compose.yml' @()) | Format-List
+Move-Item "$env:TEMP\m.env" memory\.env
+```
+
+A capture that reports `chars=0` for case 2 or 3 cannot see what Case 1 and
+Case 1b exist to look at. **Say so and stop** rather than recording a PASS.
+
+---
+
+Then run **all eleven**, in the clone:
 
 ```powershell
 $targets = @(
@@ -134,14 +210,15 @@ $targets = @(
   @{ n='portal internet';       f='portal\docker-compose.yml';    a=@('--profile','internet') }
 )
 foreach ($t in $targets) {
-  $err = & docker compose -f $t.f @($t.a) config 2>&1 1>$null
-  "{0,-22} exit={1} stderr={2}" -f $t.n, $LASTEXITCODE, (($err | Out-String).Trim())
+  $r = Cap $t.f $t.a
+  "{0,-22} exit={1} stderr-chars={2} {3}" -f $t.n, $r.exit, $r.chars, $r.text
 }
 ```
 
-**PASS:** every line `exit=0` and `stderr=` (empty). Any `variable is not set`
+**PASS:** every line `exit=0` **and `stderr-chars=0`**. Any `variable is not set`
 warning, or any `is required` / `:?` refusal, is a FAIL naming the plane and the
-variable.
+variable. `stderr-chars` is the criterion, not an empty-looking `stderr=` field:
+attempt 2's idiom printed an empty field for every plane whatever happened.
 
 **Note the three deliberate profile combinations you are NOT asked to render:**
 `frontend` with `stock` *and* `gpu` together (compose refuses it — both define
@@ -178,12 +255,11 @@ $cases = @(
 foreach ($c in $cases) {
   $src = "$($c.p)\.env"; $dst = Join-Path $stash "$($c.p).env"
   Move-Item $src $dst                          # throws loudly if it cannot
-  $err  = & docker compose -f "$($c.p)\docker-compose.yml" @($c.a) config 2>&1 1>$null
-  $code = $LASTEXITCODE
+  $r = Cap "$($c.p)\docker-compose.yml" $c.a  # the proven capture from Case 1
   Move-Item $dst $src                          # restore BEFORE reporting
-  $s = ($err | Out-String)
-  $named = ($s -match [regex]::Escape($c.v)) -and ($s -match [regex]::Escape("$($c.p)/.env"))
-  "{0,-10} exit={1} names-var-and-file={2}" -f $c.p, $code, $named
+  $named = ($r.text -match [regex]::Escape($c.v)) -and
+           ($r.text -match [regex]::Escape("$($c.p)/.env"))
+  "{0,-10} exit={1} names-var-and-file={2}" -f $c.p, $r.exit, $named
 }
 Remove-Item $stash -Recurse -Force
 ```
@@ -742,7 +818,7 @@ so check them against the CONSTRUCTS they name (`app-net:` / `external: true` /
 `stack.manifest.toml` cites them at ~66 anchors:
 
 ```powershell
-foreach ($f in 'docker-compose.yml','frontend\docker-compose.yml','inference\docker-compose.yml',
+foreach ($f in 'frontend\docker-compose.yml','inference\docker-compose.yml',
                'inference\compose\upstreams.yml','inference\compose\queue.yml','inference\compose\gateway.yml',
                'inference\compose\backups.yml','memory\docker-compose.yml','search\docker-compose.yml',
                'coder\docker-compose.yml') {
@@ -750,16 +826,29 @@ foreach ($f in 'docker-compose.yml','frontend\docker-compose.yml','inference\doc
   $n = (Get-Content $f | Measure-Object -Line).Lines
   "{0,-38} old={1,-5} new={2,-5} {3}" -f $f, $o, $n, $(if ($o -eq $n) {'OK'} else {'CHANGED - re-derive its citations'})
 }
-# portal is DELIBERATELY absent from that list - it gains 25 lines (see above).
-"portal old={0} new={1} (expect +25)" -f `
-  (git show "<base>:portal/docker-compose.yml" | Measure-Object -Line).Lines, `
-  (Get-Content portal\docker-compose.yml | Measure-Object -Line).Lines
+# TWO compose files DELIBERATELY absent from that loop, because this item adds
+# comment lines to both. Check them separately, by construct, not by arithmetic:
+foreach ($pair in @(@('portal\docker-compose.yml','+25'), @('docker-compose.yml','+8'))) {
+  "{0,-30} old={1,-5} new={2,-5} expect {3}" -f $pair[0], `
+    (git show "<base>:$($pair[0] -replace '\\','/')" | Measure-Object -Line).Lines, `
+    (Get-Content $pair[0] | Measure-Object -Line).Lines, $pair[1]
+}
 ```
 
-**PASS:** every line in the loop `OK`, and portal `+25`. A `CHANGED` in the loop
-means every `stack.manifest.toml` citation into that file needs re-deriving and
-the item did not do it. For portal, the two manifest citations must land on the
-CONSTRUCTS they name - check them, do not assume the arithmetic.
+**PASS:** every line in the loop `OK`; `portal/docker-compose.yml` grows by its
+header block and the ROOT `docker-compose.yml` by its (the per-plane env
+paragraph and the three-mechanism refusal table). A `CHANGED` in the loop means
+every `stack.manifest.toml` citation into that file needs re-deriving and the
+item did not do it.
+
+For the two that DO grow, the citations into them must land on the CONSTRUCTS
+they name - check them, do not add the delta. The manifest has two into portal
+(the `app-net:` block and the caddy seam comment); attempt 2 found both were
+ALREADY four lines wrong at base and re-derived rather than shifted. Nothing
+live cites the anchor compose by line **except** `CLEANUP-PLAN.md:330`, which
+was already stale before this item (it claims an `openwebui` bind mount the
+anchor has not had since Part K) - confirm that reading rather than repointing
+it.
 
 ---
 

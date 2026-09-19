@@ -60,6 +60,15 @@ Push-Location $projectRoot
 # via stack.py: the portal is a `manual` plane, deliberately absent from the
 # driver's enabled set, so `stack.py doctor` never reaches it - which is the
 # whole reason this check lives in the operator's own entrypoint.
+#
+# WHAT THIS DOES NOT COVER, stated so nobody mistakes it for a plane-wide gate:
+# it guards THIS entrypoint only. A portal/.env that exists with, say, a blank
+# AUTHELIA_SESSION_SECRET still renders for portal-off.ps1, for
+# restore-from-snapshot.ps1's `caddy` and `authelia` entries, and for a
+# hand-typed `docker compose -f portal/docker-compose.yml ...`. Only the ABSENT
+# file is refused everywhere, by the compose guard. That is narrower than a
+# plane-wide blank-key check and wider than what regressed; a real one would
+# belong in the driver, behind a `manual` plane it would first have to reach.
 $portalEnv = Join-Path $projectRoot 'portal\.env'
 if (-not (Test-Path $portalEnv)) {
   Write-Host "REFUSED: portal/.env not found at $portalEnv" -ForegroundColor Red
@@ -75,8 +84,7 @@ if (Test-Path $manifestPath) {
   # an unreadable table must DEGRADE to the built-in list below, never silently
   # check nothing.
   $manifestText = Get-Content $manifestPath -Raw
-  $section = [regex]::Match($manifestText, '(?s)\[planes\.portal\](.*?)(?:?
-\[)')
+  $section = [regex]::Match($manifestText, '(?s)\[planes\.portal\](.*?)(?:\r?\n\[)')
   if ($section.Success) {
     $arr = [regex]::Match($section.Groups[1].Value, '(?s)keys\s*=\s*\[(.*?)\]')
     if ($arr.Success) {

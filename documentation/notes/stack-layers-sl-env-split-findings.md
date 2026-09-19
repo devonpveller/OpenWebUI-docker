@@ -241,12 +241,21 @@ targets this item moved are `.env.example` (23), `stack.manifest.toml` (44),
 
 ## 9. What was NOT changed, and why
 
-- **Compose files are line-count-neutral.** `stack.manifest.toml` cites plane
-  compose files at 99 `path:line` anchors. Every guard reword and header edit in
-  `frontend/`, `inference/` (+ its four included files), `memory/`, `search/`,
-  `coder/`, `portal/` and the root `docker-compose.yml` was written to occupy
-  the same number of lines, verified per file. **[measured]** all eight report
-  `lines N -> N`.
+- **Compose files are line-count-neutral - WITH TWO EXCEPTIONS, both added
+  later and both disclosed.** Every guard reword and header edit in `frontend/`,
+  `inference/` (+ its four included files), `memory/`, `search/` and `coder/`
+  was written to occupy the same number of lines, verified per file: nine files,
+  `lines N -> N`. The two that GREW did so in attempt 2 and attempt 3, for the
+  same reason each time - a claim that needed stating where the reader is:
+  `portal/docker-compose.yml` **616 -> 641** (the guard's header block) and the
+  root `docker-compose.yml` **54 -> 62** (the per-plane env paragraph, then the
+  three-mechanism refusal table that replaced the false claim in section 13).
+  Every citation into both was re-derived by construct - see section 20.
+  **[measured]** This bullet said "all eight report `lines N -> N`" through
+  attempt 2, by which time it was already wrong for portal, disclosed one
+  section away. The tester found the anchor half (X-F9). Bookkeeping that
+  contradicts a disclosure in the same document is worth as little as no
+  disclosure.
 - **`check-watchdog-repair-targets.ps1` and `stack-watchdog.ps1`'s repair-arg
   builder needed no change.** Both already read `env_file` from
   `scripts/lib/stack-services.json` behind an `if ($EnvFile)` / `if
@@ -426,25 +435,59 @@ Each was true of five planes and stated of all of them.
 | `env-split-migration.md` step 2 | "a file you forget to fill fails loud on its `:?` guard" | names the six guarded variables, one per plane, then states the asymmetry plainly: forget one of those six and the plane refuses; forget any other and you get a blank string and a stderr warning — which is why step 3 demands an EMPTY stderr and not just exit 0 |
 | `env-split-migration.md` Rollback | "There is no partial state in which a plane silently runs on the wrong value" | deleting the six is safe **because** all six now refuse — with the portal's history stated — and the case that is genuinely NOT covered (a file that exists and is incomplete) is named, with the two mechanisms that do cover it |
 
-## 13. "Every plane refuses" is false for agent-org and OB1 — scoped, with the measurement
+## 13. ~~"Every plane refuses" is false for agent-org and OB1~~ — WRONG, AND CORRECTED IN ATTEMPT 3
 
-**[measured]** With its own env file moved aside, `docker compose -f
-agent-org/docker/docker-compose.yml config -q` exits **0** (warnings for
-`AO_DB_PASSWORD`, `MM_DB_PASSWORD`); `docker compose -f
-OB1/docker/docker-compose.yml config -q` exits **0** (warnings for
-`POSTGRES_PASSWORD`, `SURREAL_USER`, `SURREAL_PASSWORD`). Neither carries a `:?`
-guard on a variable its own file supplies.
+**This section shipped a `measured`-tagged claim that measurement contradicts,
+in the commit whose whole purpose was to fix a `measured`-tagged claim that
+measurement contradicted.** The tester caught it (attempt 2, X-F12). Kept here
+rather than overwritten, because what went wrong is more useful than the
+conclusion.
 
-This matters beyond wording: `scripts/stack/stack.py`'s `render_project` carries
-a comment asserting that agent-org's service-level `env_file:` makes the render
-**exit 1** when that file is absent. On compose v5.3 today it does not. The
-driver's behaviour is unaffected — it checks the path itself, before compose —
-so nothing is broken, but the comment's stated reason is stale. Left alone
-deliberately: it is a claim about another plane's compose, it belongs to whoever
-next touches that code path, and rewriting a comment to match a measurement made
-in passing is how a second wrong claim gets written. Recorded here instead.
+**What it said:** agent-org and OB1 carry no guard and "render exit 0 with
+blanks, measured 2026-09-19".
 
-Both planes are out of scope by the anchor. The prose is now scoped to the six.
+**What is true. [measured 2026-09-19, attempt 3, reading the PROCESS exit code]**
+Both refuse, by different mechanisms:
+
+| plane | mechanism | exit | message |
+|---|---|---|---|
+| `agent-org/docker/` | a service-level `env_file: .env` on agent-bridge (`:109-110`) which compose stats | **1** | `env file ...gent-org\docker\.env not found: GetFileAttributesEx ...` |
+| `OB1/docker/` | its own `:?` guard at `OB1/docker/docker-compose.yml:252` | **1** | `required variable OPS_GATEWAY_KEY is missing a value: openbrain-ops-gateway needs its OWN key, never the cloud one` |
+
+So **all eight planes refuse** an absent env file, by three mechanisms: a
+`${VAR:?}` guard (the six in-repo), a service-level `env_file:` (agent-org),
+and OB1's own guard.
+
+**HOW I GOT IT WRONG, because the mechanism matters more than the fact.** I ran
+
+```
+mv agent-org/docker/.env /tmp/ && docker compose -f ... config -q 2>&1 | head -2; echo "exit=$?"
+```
+
+and `$?` after a pipeline is **`head`'s** exit status, not compose's. `head`
+succeeds whatever compose does. The warnings I saw and quoted were real; the
+`exit=0` beside them was `head`. It is the same defect the tester found in the
+plan's stderr idiom on the same day (X-F13) - I wrote a measurement harness
+that could only return the answer I expected, twice, in different languages.
+Every exit code in attempt 3 is read from the process: `cmd /c "... 2>file"`
+then `$LASTEXITCODE`, or a bare invocation then `$?` with nothing after it.
+
+**The error direction was safe** - it understated how protected those two
+planes are, so nobody would act dangerously on it - which is why the tester
+graded it class 2. That is luck, not design.
+
+**A second thing the bad measurement nearly cost.** On the strength of it I also
+wrote that `scripts/stack/stack.py`'s `render_project` comment - which asserts
+agent-org's service-level `env_file:` makes the render exit 1 when that file is
+absent - was STALE, and recorded it as a note for whoever next touched that code
+path. It is not stale. It is exactly right, and the corrected measurement above
+is the proof. That claim is withdrawn; the comment stands unedited, which is
+also the outcome of having left it alone.
+
+Both planes remain out of scope by the anchor - nothing about either was
+changed. What changed is the prose describing them, in
+`docker-compose.yml`'s header, `README.md`'s plane paragraph and the plan's
+Case 1b, all three of which now say all eight refuse and name the mechanism.
 
 ## 14. The agent-org wildcard that reaches into the root `.env` — a cross-plane consequence I had missed
 
@@ -454,19 +497,44 @@ Found by my own sweep while checking §13, not by the tester.
 `ao-worker-1` / `ao-worker-2` **`env_file: ../../.env`** — the whole ROOT file.
 Of the names the pre-split root `.env.example` carried, **151 reach those
 containers that way and are not overridden by the services' own `environment:`
-block**. The one that matters operationally is **`LC_DEPLOY_TOKEN`**: it is not
-in their `environment:` block, the wildcard is its only route, and the runbook's
-step 5 deletes it from the root file.
+block** (which sets ten).
+
+**ATTEMPT 2 NAMED ONE. THERE ARE TWO.** The tester found the second (X-F10),
+and finding it exposed that I had asserted "the one that matters" without doing
+the enumeration that sentence implies. Attempt 3 does it: intersect the 151 with
+every variable the `little-coder:local` image reads CONTAINER-side - the direct
+`os.environ` reads under `little-coder/src/littlecoder/**` and
+`little-coder/pi-extension/**`, **plus the two INDIRECT ones**, where the config
+names the variable rather than the code (`config.py:38 api_key_env`, `:91
+open_terminal_key_env`, both read at `meta_wiring.py:42,48`). An enumeration
+that missed the indirections would have missed the second one too - which is
+how it was missed.
+
+| name | how the image reads it | after step 5 |
+|---|---|---|
+| **`LC_DEPLOY_TOKEN`** | the clone path, for private work repos | **BREAKS** - public repos still clone, private ones fail |
+| **`LC_LLAMA_API_KEY`** | INDIRECT: `config.py:38 api_key_env` -> `meta_wiring.py:42,48` `os.environ.get(..., "")`, for BOTH the embedder and the chat client | **BREAKS** - an empty bearer to `llama-cpp`, which LiteLLM rejects **401** on every call since the J.1 virtual-key flip |
+| `LITTLE_CODER_VERSION` | **build ARG only** - `little-coder/docker/Dockerfile.agent:36-37`; the workers RUN the prebuilt image | no effect. Ruled out by reading the Dockerfile, not by assuming |
+
+`LC_LLAMA_API_KEY` is the one worth understanding, because the workers LOOK
+covered: they set `LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}`. That is a HOST-side
+interpolation out of `agent-org/docker/.env` injecting a DIFFERENTLY-NAMED
+container variable. The name little-coder actually reads is
+`LC_LLAMA_API_KEY`, and the wildcard is its only route in. (The workers' configs
+come from `agent-org/scripts/gen-worker-configs.py`, which copies
+`little-coder/config/little-coder.config.yaml` verbatim except
+`workspace.open_terminal_url`, so `api_key_env: LC_LLAMA_API_KEY` at `:12` is
+what they run with.) `agent-org/docker/.env.example` carries neither name.
 
 Nothing breaks immediately — a running container keeps the environment it
-started with — but on the workers' next recreate they clone with no deploy
-token: public repos fine, private repos fail. That is the same silent class as
+started with — but on the workers' next recreate one clones with no deploy
+token and both talk to the gateway with an empty bearer. Same silent class as
 the 2026-08 `ao-worker stale deploy token` incident, arriving from the other
 direction, and it would have been mine.
 
-**Handled in the runbook, not in agent-org's compose:** a new blocking step
-**4b**, before the trim, naming the two services, the measurement, the variable,
-and the recreate. Editing another plane's compose to name its variables is the
+**Handled in the runbook, not in agent-org's compose:** a blocking step **4b**
+before the trim, naming the two services, the enumeration, BOTH variables (and
+the third that the enumeration surfaces and rules out), and the recreate. Editing another plane's compose to name its variables is the
 real fix and is out of scope here — it is precisely what
 `scripts/checks/check-env-file-scope.ps1` exists to prevent, and those two grants
 are grandfathered past it.
@@ -618,7 +686,168 @@ recorded rather than silently renumbered — `CLEANUP-PLAN.md:266`, `:330`
 `:358`, `:438`, `:893`, `DECISIONS.md:1705` (`prove-clone-recursive` is in no
 version of `ci.yml`), `WALKTHROUGH.md:384`.
 
-**Compose line-count neutrality still holds everywhere except `portal/`**, which
-is where the fix had to go. Verified per file against `development`; the 66
-`stack.manifest.toml` citations into the other ten compose files are byte-identical
-at their cited lines.
+**Compose line-count neutrality holds everywhere except `portal/` and the root
+anchor** - the two files a claim had to be written into. Verified per file
+against `development`; the `stack.manifest.toml` citations into the other nine
+compose files are byte-identical at their cited lines.
+
+**Attempt 3 re-ran the whole sweep after its own edits** (the anchor grew again,
+58 -> 62): **19 live citations into changed files, 15 flagged, 0 new work** -
+the same 15, each already judged above. Five are this item's own repoints, three
+are attempt 1's `.gitignore` repoints re-verified against the current file, and
+seven were stale before this item and stay recorded. `CLEANUP-PLAN.md:330` now
+lands on the anchor's new refusal table, which changes nothing: it cites an
+`openwebui` bind mount the anchor has not had since Part K, so there is no
+correct line to point it at.
+
+---
+
+# Attempt 3 (2026-09-19) — three defects the FIX commit introduced
+
+Attempt 2 (`e958187`) passed all twelve cases: the attempt-1 regression is gone,
+and the tester independently agreed with the one-guard-plus-pre-flight design
+and proved the key list is manifest-driven. It still failed, on three defects
+**the fix commit itself shipped**. That is the shape worth naming: each of the
+three is a *repair* that was not checked as hard as the thing it repaired.
+
+Sections 13 and 14 above are rewritten in place rather than appended to, because
+leaving a wrong `measured` claim standing with a correction underneath is how a
+reader ends up quoting the wrong half.
+
+## 21. X-F8 — the F1 repair shipped a path that does not exist, twice
+
+Both messages rewritten in attempt 2 to fix attempt 1's stale
+`COMPOSE_PROFILES` advice print:
+
+```
+documentationunbooks\env-split-migration.md
+```
+
+**[measured]** `od -c` confirms the byte is absent, not mis-rendered:
+`d o c u m e n t a t i o n u n b o o k s`. The `\r` of `\runbooks` was consumed
+as a carriage return.
+
+**Cause, exactly.** I applied both edits through a Python helper whose
+replacement strings were ordinary (non-raw) literals containing
+`documentation\runbooks\env-split-migration.md`. Python turned `\r` into CR.
+The other escapes in the same strings (`\c`, `\.`, `\[`) are *invalid* and
+Python emitted a `SyntaxWarning` for each — which I saw and ignored as noise,
+because the edits applied and the asserts passed. `\r` is a **valid** escape, so
+it produced no warning at all: the one that silently did damage was the one that
+looked clean. Every warning in that output was a signal that the string was not
+being read literally.
+
+**[measured] Swept the whole delta for the class**, not just the two known
+sites: for every file this item touches, strip legitimate CRLF and count what
+remains. Three hits, all mine, all fixed:
+
+| file | what | fix |
+|---|---|---|
+| `scripts/recovery/emergency-recovery.ps1:196` | CR inside the runbook path | byte-exact replace of CR+`unbooks` with `\runbooks` |
+| `scripts/checks/stack-watchdog.ps1:306` | same | same |
+| `scripts/portal/portal-on.ps1:78` | a real CR **and** a real LF inside the pre-flight's single-quoted regex (X-F14) | `\r?\n` as escapes |
+
+The sweep now reports zero stray CRs across all changed files, and the
+repo-convention line the tester cited as intact
+(`stack-watchdog.ps1:170`, `documentation\runbooks\SERVICE-LIFECYCLE.md`) is
+untouched. All byte-level edits in attempt 3 are built from `bytes([...])` or
+verified by hex dump, not from escape-bearing literals.
+
+Worth stating plainly: the content of both rewrites was correct and the tester
+checked it line by line. What shipped broken was the **remediation pointer**, in
+an error an operator reads during a frontend outage. A repair that gets the
+diagnosis right and the "here is what to do" wrong is not a repair.
+
+## 22. X-F14 — the pre-flight regex carried literal CR and LF
+
+Same root cause, different blast radius:
+
+```
+'(?s)\[planes\.portal\](.*?)(?:<CR>?<LF>\[)'
+```
+
+It works today — the tester verified the pre-flight still parses five keys and
+that the yellow fallback line does **not** appear — because CR-?-LF matches what
+a CRLF file contains. But if `stack.manifest.toml` is ever normalised to LF, the
+CR vanishes and the pattern becomes `(?:?\n\[)`: `Quantifier ... following
+nothing`, an `ArgumentException` thrown **outside any try**, in an
+incident-adjacent script. `.gitattributes` pins `eol=lf` for `*.sh` only, so
+nothing forces it today. Now `\r?\n`, which costs nothing and cannot rot.
+
+**[measured]** After the fix the pre-flight still refuses correctly and still
+names all three blank keys from the manifest — so the regex is doing its job,
+not merely parsing.
+
+## 23. X-F12 — see section 13
+
+Rewritten in place above, including how the bad measurement was produced
+(`$?` after a pipeline is `head`'s), and the withdrawal of the second claim it
+had propped up (that `stack.py`'s `render_project` comment was stale — it is
+correct).
+
+## 24. X-F10 — see section 14
+
+Rewritten in place above with the full enumeration: the 151 wildcard-delivered
+names intersected against everything the image reads container-side **including
+the two config-named indirections**, yielding two live breakages
+(`LC_DEPLOY_TOKEN`, `LC_LLAMA_API_KEY`) and one ruled out with a reason
+(`LITTLE_CODER_VERSION`, a build ARG). Step 4b checks both names.
+
+## 25. The class-3 items, and the one I am NOT fixing
+
+* **X-F9** — the anchor `docker-compose.yml` grew (54 -> 58 in attempt 2, -> 62
+  in attempt 3) while findings §9 still said all eight compose files were
+  line-count-neutral and the plan's Case 11 kept the anchor in the loop whose
+  PASS criterion is "every line OK". §9 now states both exceptions and why each
+  grew; Case 11 checks the two growing files separately, by construct. No live
+  citation into the anchor broke — the only one is `CLEANUP-PLAN.md:330`, stale
+  since Part K for an unrelated reason.
+* **X-F11** — the runbook's window table said `new-worktree.ps1` leaves "5 of 6
+  planes" failing to render. The portal guard made it **6 of 6**. Written
+  against attempt 1's behaviour and not re-read after the change that
+  invalidated it. Now 6 of 6, with the reason it moved.
+* **X-F13** — the plan's own stderr idiom. See section 26.
+* **X-F15** — the pre-flight guards `portal-on.ps1` and nothing else: a
+  `portal/.env` that EXISTS with a blank `AUTHELIA_SESSION_SECRET` still renders
+  for `portal-off.ps1`, `restore-from-snapshot.ps1`'s caddy/authelia entries and
+  a hand-typed compose command. The tester recorded it as narrower-than-regressed
+  and did not hold it against the item; I have not widened it, because a
+  plane-wide blank-key gate belongs in the driver and the driver deliberately
+  does not reach a `manual` plane. What I HAVE done is say so in the script, so
+  nobody reads the pre-flight as a plane-wide guarantee.
+* **X-F7** (BOM, from attempt 2) remains **OPEN** and unaddressed, correctly.
+
+## 26. X-F13 — the plan told the tester to measure with an instrument that reads nothing
+
+`$err = & docker compose ... 2>&1 1>$null` on PS 5.1 merges stderr into the
+success stream and then discards it. **[measured] on the same failing render:**
+
+| idiom | chars captured | exit |
+|---|---:|---|
+| `2>&1 1>$null` (what the plan said) | **0** | 1 |
+| `2>&1 \| Out-String` | 553 | 1 (but includes stdout - useless with `config`) |
+| `cmd /c "... config -q 2>file 1>nul"` | **173** | 1 |
+
+Consequences in the plan as shipped: Case 1's PASS criterion "stderr empty" was
+satisfied **unconditionally** and could not detect the `variable is not set`
+warning it exists to detect; Case 1b's `names-var-and-file=True` was
+**unreachable** and prints `False` for all six correct planes. The tester
+re-ran both with a working capture and the underlying behaviour passed — so the
+item was fine and the instrument was not.
+
+Both cases now use one helper built on the third idiom, and Case 1 opens by
+making the tester **prove the capture on all three outcomes first** — a clean
+render (exit 0, 0 chars), a warning-only render (exit 0, >0 chars: drop
+`MULLVAD_WG_ADDRESSES` from the search example), and a refusal (exit 1, >0
+chars, naming the variable and the file) — with the instruction to stop and say
+so rather than record a PASS if the capture reports 0 chars for the last two.
+
+**[measured] all three, exactly as written into the plan:** `exit=0 chars=0`,
+`exit=0 chars=133` (`The "MULLVAD_WG_ADDRESSES" variable is not set`), and
+`exit=1 chars=173` naming `MCP_API_KEY` and `memory/.env`.
+
+This is the same failure as section 13's `$? == head's exit`, in PowerShell
+instead of bash, written on the same day. Two measurement harnesses that could
+only return the answer I expected. The lesson the repo already had - a check
+that passes while checking nothing - applies to the instruments in a test plan
+exactly as it applies to the checks in `scripts/checks/`.

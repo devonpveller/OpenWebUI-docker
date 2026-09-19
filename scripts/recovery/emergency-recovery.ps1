@@ -193,7 +193,7 @@ function Confirm-FrontendProfiles {
         }
         if ($svc -notmatch '(?m)^openwebui(-stock)?\s*$') {
             $list = (($svc -split "`n") | Where-Object { $_ }) -join ', '
-            Write-Log "ERROR" "FRONTEND PROFILES MISSING: the frontend plane renders no Open WebUI service (got: $list). Every frontend up/down/stop below will address openwebui-backup ONLY, and any command naming tailscale will exit 1 with 'no such service: openwebui'. FIX: put COMPOSE_PROFILES=gpu,tailscale in frontend\.env - PER-PLANE since sl-env-split (2026-09-19), so `gpu,tailscale` is now the WHOLE correct value there and the inference plane's `local` lives in inference\.env. Editing the ROOT .env changes nothing for this plane. If frontend\.env does not exist at all, this host has not been migrated yet: documentationunbooks\env-split-migration.md. Then re-run; verify with scripts\checks\check-watchdog-repair-targets.ps1."
+            Write-Log "ERROR" "FRONTEND PROFILES MISSING: the frontend plane renders no Open WebUI service (got: $list). Every frontend up/down/stop below will address openwebui-backup ONLY, and any command naming tailscale will exit 1 with 'no such service: openwebui'. FIX: put COMPOSE_PROFILES=gpu,tailscale in frontend\.env - PER-PLANE since sl-env-split (2026-09-19), so `gpu,tailscale` is now the WHOLE correct value there and the inference plane's `local` lives in inference\.env. Editing the ROOT .env changes nothing for this plane. If frontend\.env does not exist at all, this host has not been migrated yet: documentation\runbooks\env-split-migration.md. Then re-run; verify with scripts\checks\check-watchdog-repair-targets.ps1."
             return $false
         }
     }

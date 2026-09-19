@@ -59,10 +59,11 @@ around a network anchor**: the root `docker-compose.yml` owns only the shared
 `docker compose -f <plane>/docker-compose.yml ...` from this
 directory. Each plane owns its environment: compose loads `<plane>/.env`
 natively from the project directory (copy `<plane>/.env.example`). No
-`--env-file` flag, from any cwd. Each of those six carries a `${VAR:?}` guard,
-so a missing file is REFUSED rather than silently blanked; `OB1/docker/` and
-`agent-org/docker/` own their env files the same way but have no such guard
-and render with blanks (measured 2026-09-19).
+`--env-file` flag, from any cwd. **Every one of the eight REFUSES to render
+when its own file is absent** rather than silently blanking - the six in-repo
+planes on a `${VAR:?}` guard, `agent-org/docker/` on a service-level
+`env_file: .env`, `OB1/docker/` on its own `${OPS_GATEWAY_KEY:?}`
+(all measured 2026-09-19).
 
 `WEBUI_SECRET_KEY` encrypts values at rest in `webui.db` — pin it once and
 never rotate casually. All published ports bind to `127.0.0.1`; external
