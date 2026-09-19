@@ -216,7 +216,7 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   where it went is the "v3 CLOSED" section near the top; the successor plan is
   `../documentation-plans-ai-stack/implementation-guide/stack-layers/`
 - little-coder design + workflow → `../documentation-plans-ai-stack/implementation-guide/little-coder/`
-- Private search gateway → `search-gateway/README.md`
+- Private search gateway → `search/gateway/README.md`
 
 ## OB1 submodule (since 2026-08-21)
 
@@ -233,8 +233,9 @@ parent records exactly which OB1 commit is deployed.
   a fresh `--recurse-submodules` clone breaks), then in the parent
   `git add OB1` + commit the new pointer with a message saying what moved.
   Never bump the gitlink to a commit that isn't on the OB1 remote.
-- **openbrain-gateway** source lives HERE (`openbrain-gateway/`, beside its
-  twin `mnemory-gateway/` — the directory that builds the
-  `mnemory-cloud-gateway` container); OB1 consumes the prebuilt
+- **openbrain-gateway** source lives HERE (`openbrain-gateway/`; its twin
+  `memory/mnemory-gateway/` — the directory that builds the
+  `mnemory-cloud-gateway` container — moved into the memory plane); OB1
+  consumes the prebuilt
   `openbrain-gateway:local` image. Rebuild it from this repo:
   `docker build -t openbrain-gateway:local ./openbrain-gateway`.

@@ -80,7 +80,7 @@ services:
     # PINNED, not :latest (research-trust 2026-09-11). Two reasons, both
     # measured: (1) watchtower.enable=false exists so privacy infrastructure
     # is never silently swapped, and a floating tag does exactly that;
-    # (2) the engine policy in search-gateway/searxng/settings.yml REQUIRES
+    # (2) the engine policy in search/gateway/searxng/settings.yml REQUIRES
     # this image - on the 2026-05-17 build that :latest resolved to until
     # today, google/brave/qwant return nothing (TLS fingerprint rejection /
     # CAPTCHA) and `duckduckgo web` does not exist. .env overrides this.
@@ -97,7 +97,7 @@ services:
       - SEARXNG_SECRET=${SEARXNG_SECRET_KEY}
       - SEARXNG_REDIS_URL=redis://redis:6379/0
     volumes:
-      - ../search-gateway/searxng:/etc/searxng:rw
+      - ./gateway/searxng:/etc/searxng:rw
     restart: unless-stopped
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID, DAC_OVERRIDE]
@@ -114,7 +114,7 @@ services:
 
   gateway:
     build:
-      context: ../search-gateway/gateway
+      context: ./gateway/gateway
       dockerfile: Dockerfile
     image: private-search-gateway:local
     container_name: search-gateway

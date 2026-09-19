@@ -148,7 +148,7 @@ health probes, and the sysadmin plane truthful.
 | `frontend/` `inference/` `memory/` `search/` `coder/` | The plane compose projects (one service tree each) |
 | `owui/` | Canonical deploy-by-paste OWUI artifacts: tools/pipes/filters/actions/skills + `manifest.csv` |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/` (Part M issue pipeline), `archive/` |
-| `llm-queue/`, `search-gateway/`, `mnemory-gateway/` (builds the `mnemory-cloud-gateway` container), `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
+| `llm-queue/`, `search/gateway/`, `memory/mnemory-gateway/` (builds the `mnemory-cloud-gateway` container), `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees |
 | `agent-org/` | Governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain — pinned git submodule since 2026-08-21 (bump via PR; incl. the Open Notebook trio since K.5b) |
 | `backup/` + `backups/` | Sidecar scripts/Dockerfiles + produced artifacts |
