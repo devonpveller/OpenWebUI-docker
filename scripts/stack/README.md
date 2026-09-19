@@ -62,7 +62,17 @@ meant to be called from a `.ps1` must not write there.
 | `surfaces` (on a product) | what a **person** needs to reach an engine | pulled in by `enable <product>` unless `--headless` |
 
 Every `requires` and `optional` edge in the manifest carries its evidence as a
-`<compose file>:<line>` citation in the comment above it.
+`<file>:<line>` citation in the comment above it - usually a compose file, but
+for two planes the hostname lives in mounted config or in the image's
+entrypoint, and the citation says so.
+
+**Where the line is** for the common `HOST=${VAR:-<other plane's service>}` plus
+`..._ENABLED=${VAR:-<bool>}` shape: **the toggle's default decides.** Default
+true means a default boot reaches for the other plane and degrades without it -
+an `optional` edge. Default false means a default boot never touches it - not an
+edge, and the manifest records it in the plane's comment as "considered, not an
+edge" with its line numbers, so a reader can tell *seen and rejected* from *not
+seen*.
 
 ### Plane keys
 
@@ -92,8 +102,10 @@ Five names (`inference`, `memory`, `search`, `agent-org`, `portal`) are both a
 plane and a product. A bare name resolves to the **plane**, because that is the
 smaller action and the one whose refusal matters: `enable memory` must refuse
 while inference is off rather than quietly enabling inference too. Force the
-other reading with `--product <name>` (or `--plane <name>`); the driver says so
-whenever a name is ambiguous.
+other reading with `--product <name>` (or `--plane <name>`). **Both `enable` and
+`disable`** print a `# note:` line whenever a name is ambiguous, saying which
+reading they took - `disable` is the destructive half of the pair, so it is the
+one where a silent reading would be worse.
 
 ### Ordering
 
@@ -181,8 +193,15 @@ A **plane**: enables just that plane (plus its `default` profiles).
   that would enable it:
   `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable inference)`
 - **Refuses** when one of the plane's `keys` is blank or missing in the env file
-  that plane reads, naming the key and the file:
-  `refused: search needs these keys ... MULLVAD_WG_PRIVATE_KEY is blank in .env`
+  that plane reads, naming the key, whether it is blank or missing, the file, and
+  the remedy:
+
+  ```text
+  refused: search needs these keys before it can be enabled:
+    MULLVAD_WG_PRIVATE_KEY is blank in .env
+  Set them in .env, then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine).
+  ```
+
 
 A **product**: enables its planes, their `requires` closure, its `profiles`,
 and its `surfaces` unless `--headless`.

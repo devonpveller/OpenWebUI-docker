@@ -538,13 +538,36 @@ def _key_problem_lines(manifest, root, planes, subject) -> list[str]:
     return lines
 
 
-def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> int:
-    kind, target = resolve_target(manifest, name, kind)
+def _key_remedy(manifest, root, planes) -> str:
+    """The requires-refusal names a command; this one must too."""
+    files = []
+    for plane in planes:
+        path = rel(root, manifest.env_path(root, plane))
+        if blank_keys(manifest, root, plane) and path not in files:
+            files.append(path)
+    where = " and ".join(files) if files else "the plane's env file"
+    return (
+        f"Set them in {where}, then re-run "
+        "(`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+    )
+
+
+def _ambiguity_note(manifest, console, kind, target) -> None:
+    """A name that is both a plane and a product resolves to the PLANE - say so.
+
+    Both `enable` and `disable` print this: `disable` is the destructive half of
+    the pair, so it is the one where a silent reading is worse.
+    """
     if kind == "plane" and target in manifest.products:
         console.line(
-            f"# note: '{target}' names both a plane and a product; enabling the PLANE "
+            f"# note: '{target}' names both a plane and a product; acting on the PLANE "
             f"(use `--product {target}` for the product)"
         )
+
+
+def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> int:
+    kind, target = resolve_target(manifest, name, kind)
+    _ambiguity_note(manifest, console, kind, target)
 
     if kind == "plane":
         missing = [
@@ -564,7 +587,7 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
             raise Refusal(
                 f"refused: {target} needs these keys before it can be enabled:\n"
                 + "\n".join(problems)
-                + "\nSet them, then re-run."
+                + "\n" + _key_remedy(manifest, root, [target])
             )
         profiles = manifest.default_profiles(target)
         state.enable(target, profiles)
@@ -595,7 +618,7 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
             raise Refusal(
                 f"refused: product {target} needs these keys before it can be enabled:\n"
                 + "\n".join(problems)
-                + "\nSet them, then re-run."
+                + "\n" + _key_remedy(manifest, root, full)
             )
         # An implicit plane (the anchor) is never written into state: `up` adds it
         # from the requires closure anyway, and leaving it out keeps the state file
@@ -639,6 +662,7 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
 
 def cmd_disable(manifest, state, root, console, name, kind) -> int:
     kind, target = resolve_target(manifest, name, kind)
+    _ambiguity_note(manifest, console, kind, target)
     planes = [target] if kind == "plane" else list(manifest.product(target).get("planes", [])) + list(
         (manifest.product(target).get("surfaces", {}) or {})
     )
@@ -754,12 +778,13 @@ def cmd_init(manifest, state, root, console, args) -> int:
         if code != EXIT_OK:
             return code
     else:
-        problems = _key_problem_lines(manifest, root, order_planes(
-            manifest, dependency_closure(manifest, fresh.planes)), "")
+        chosen = order_planes(manifest, dependency_closure(manifest, fresh.planes))
+        problems = _key_problem_lines(manifest, root, chosen, "")
         if problems:
             raise Refusal(
                 "refused: these keys must be set before that state file would work:\n"
                 + "\n".join(problems)
+                + "\n" + _key_remedy(manifest, root, chosen)
             )
         fresh.save()
 

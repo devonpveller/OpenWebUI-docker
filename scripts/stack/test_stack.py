@@ -132,11 +132,16 @@ def test_manifest_requires_edges_are_the_verified_set():
     assert {name: manifest.optional(name) for name in manifest.order} == {
         "anchor": [],
         "inference": [],
-        "frontend": ["inference", "search"],
+        # Five planes: the tailnet serve routes entrypoint.sh raises at boot, each
+        # behind an ..._ENABLED that defaults TRUE. The first cut of the manifest
+        # listed only inference and search and was WRONG.
+        "frontend": ["inference", "search", "ob1", "portal", "agent-org"],
         "memory": [],
         "search": [],
         "coder": [],
-        "ob1": ["frontend"],
+        "ob1": ["frontend", "agent-org"],
+        # agent-org -> ob1 is deliberately absent: AO_OPENBRAIN_MIRROR_ENABLED and
+        # AO_GROUNDING_ENABLED both default false, so a default boot never reaches.
         "agent-org": [],
         "portal": ["ob1", "inference"],
     }
@@ -271,6 +276,10 @@ def test_enable_search_with_a_blank_key_refuses_and_names_the_key(root):
     assert code == stack.EXIT_REFUSED
     assert "MULLVAD_WG_PRIVATE_KEY" in out
     assert "blank" in out
+    # and, like the requires-refusal, it names a remedy: the file to edit and a
+    # command that lists every such key.
+    assert "Set them in .env" in out
+    assert "stack.py doctor" in out
 
 
 def test_enable_refuses_a_missing_key_too(root):
@@ -366,6 +375,15 @@ def test_the_anchor_is_implicit_never_written_to_state_but_always_started(root):
     assert "anchor" not in state_of(root)["planes"]
     _, out, _ = run(root, "up", "--dry-run")
     assert docker_lines(out)[0] == "docker compose -f docker-compose.yml --env-file .env up -d"
+
+
+def test_disable_says_so_when_a_name_is_ambiguous_too(root):
+    """The note is worth most on the destructive half of the pair."""
+    run(root, "init", "--planes", "inference,memory")
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0
+    assert "names both a plane and a product" in out
+    assert set(state_of(root)["planes"]) == {"inference"}
 
 
 def test_a_plane_name_wins_over_a_product_of_the_same_name(root):

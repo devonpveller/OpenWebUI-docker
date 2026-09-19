@@ -12,7 +12,7 @@ Artifacts under test:
 |---|---|
 | `stack.manifest.toml` | the manifest (9 planes, 10 products) |
 | `scripts/stack/stack.py` | the driver |
-| `scripts/stack/test_stack.py` | hermetic pytest suite (37 tests) |
+| `scripts/stack/test_stack.py` | hermetic pytest suite (38 tests) |
 | `scripts/stack/README.md` | schema + every verb's refusal cases |
 | `.gitignore` | `.stack/` added |
 
@@ -35,34 +35,42 @@ Every case gives the **PowerShell 5.1** form and the **Git Bash** form where
 they differ. `python` resolves to 3.13.3 on this host; the driver requires
 >= 3.11.
 
-### Scratch state, and the rule about `.env`
+### Scratch state, OUT OF TREE, and the rule about `.env`
 
-The driver's real state file is `.stack/state.json`. **Do not create it** -
-several cases depend on it being absent. Cases that need a state file write it
-to a scratch path with `--state`, and the blank-key case uses a scratch *root*
-with `--root`. Everything scratch lives under `.stack/`, which is gitignored, so
-`git status` stays clean.
+The driver's real state file is `.stack/state.json` in the worktree. **It must
+not exist and must never be created** - T4, T5 and T6 all depend on its absence,
+and `stack.py` only writes it when you let it default.
+
+**Write nothing into the worktree.** Every case that needs a state file passes
+`--state <scratch>\...json`, and the blank-key cases pass `--root <scratch>`;
+both flags are documented in `scripts/stack/README.md` under *Global flags*, and
+`--root` exists precisely so a refusal can be provoked without touching the real
+`.env`. Put the scratch directory in your session scratchpad or any temp dir
+**outside the repository** - not in `.stack/`, not anywhere under the worktree.
 
 **Never edit the real `.env`, `OB1/docker/.env` or `agent-org/docker/.env`.**
-T7 builds its own.
 
-Set up once, and tear down at the end:
+Set up once, and delete `$SL` at the end:
 
 ```powershell
-# PowerShell 5.1
-Remove-Item -Recurse -Force .stack -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force .stack\scratch | Out-Null
-Copy-Item stack.manifest.toml .stack\scratch\
-Set-Content -Encoding ascii .stack\scratch\.env "MULLVAD_WG_PRIVATE_KEY=`nMULLVAD_WG_ADDRESSES=10.64.0.2/32"
+# PowerShell 5.1 - point $SL at your scratchpad, NOT at the worktree
+$SL = Join-Path $env:TEMP "sl-manifest-test"
+Remove-Item -Recurse -Force $SL -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force "$SL\root" | Out-Null
+Copy-Item stack.manifest.toml "$SL\root\"
+Set-Content -Encoding ascii "$SL\root\.env" "MULLVAD_WG_PRIVATE_KEY=`nMULLVAD_WG_ADDRESSES=10.64.0.2/32"
 ```
 
 ```bash
 # Git Bash
-rm -rf .stack && mkdir -p .stack/scratch && cp stack.manifest.toml .stack/scratch/
-printf 'MULLVAD_WG_PRIVATE_KEY=\nMULLVAD_WG_ADDRESSES=10.64.0.2/32\n' > .stack/scratch/.env
+SL="${TMPDIR:-/tmp}/sl-manifest-test"
+rm -rf "$SL" && mkdir -p "$SL/root" && cp stack.manifest.toml "$SL/root/"
+printf 'MULLVAD_WG_PRIVATE_KEY=\nMULLVAD_WG_ADDRESSES=10.64.0.2/32\n' > "$SL/root/.env"
 ```
 
-Teardown: `Remove-Item -Recurse -Force .stack` / `rm -rf .stack`.
+Every command below that needs state uses `--state "$SL/<name>.json"` and every
+scratch-root command uses `--root "$SL/root"`. Teardown:
+`Remove-Item -Recurse -Force $SL` / `rm -rf "$SL"`.
 
 ---
 
@@ -73,28 +81,60 @@ cited line and judge it.*
 
 The manifest carries every edge as a cited comment above the plane it belongs
 to. Confirm **each row below** by opening the file at the line, and then hunt
-for an edge that exists in a compose file and is **missing** from the table -
-either direction FAILS.
+for an edge that exists in the stack and is **missing** from the table - either
+direction FAILS.
+
+**Attempt 1 failed here**, on two missing `optional` edges (frontend -> ob1,
+frontend -> portal). Both are in the tables now, together with a third the
+re-hunt found (frontend -> agent-org) and one the failure prompted a re-reading
+of (ob1 -> agent-org). Two things follow for this run:
+
+1. **The reverse hunt is the case.** Confirming the cited lines is necessary and
+   not sufficient - all 19 citations were true at attempt 1 and the item still
+   failed. Sweep independently.
+2. **Do not restrict the sweep to compose files.** Three planes declare a real
+   cross-plane dependency somewhere else: `little-coder/config/*` (coder),
+   `config/caddy/Caddyfile` (portal), `entrypoint.sh` (frontend - baked into the
+   `tailscale:local` image). Sweep those too.
+
+**The rule the manifest now states** (`stack.manifest.toml` header, "WHERE THE
+LINE IS") for the `HOST=${VAR:-<other plane's service>}` + `..._ENABLED` shape:
+the toggle's default decides. Default **true** -> an `optional` edge. Default
+**false** -> not an edge, recorded in the plane's comment as "considered, not an
+edge" with its line numbers. Judge every reference you find against that rule,
+and fail the item if a default-true reference is missing or a default-false one
+is neither listed nor dismissed in writing.
+
+*Sweep hint, learned the hard way:* in `${OPEN_NOTEBOOK_HOST:-open_notebook}`
+the character immediately before the hostname is the `-` of `:-`. A word-boundary
+regex whose lookbehind excludes `-` silently skips every edge of this shape -
+that is exactly how attempt 1 missed two. Seed your sweep with a known hit
+(`frontend/docker-compose.yml:162`) and confirm it is found before trusting a
+clean result.
 
 ### requires (hard - `up` orders by these; `enable` refuses on them)
 
 | Edge | Evidence (open and read) | What it says |
 |---|---|---|
-| every plane -> `anchor` | `inference/docker-compose.yml:446-455`, `frontend/docker-compose.yml:290-298`, `memory/docker-compose.yml:138-140`, `search/docker-compose.yml:173-175`, `coder/docker-compose.yml:212-214`, `OB1/docker/docker-compose.yml:1268-1286`, `agent-org/docker/docker-compose.yml:748-750`, `portal/docker-compose.yml:603-606` | each declares `external: true` + `name: ai-stack_*`, the networks the root `docker-compose.yml` owns |
+| every plane -> `anchor` | `inference/docker-compose.yml:448-450,453-455`, `frontend/docker-compose.yml:290-298`, `memory/docker-compose.yml:138-140`, `search/docker-compose.yml:173-175`, `coder/docker-compose.yml:212-214`, `OB1/docker/docker-compose.yml:1268-1270,1276-1278,1284-1286`, `agent-org/docker/docker-compose.yml:748-750`, `portal/docker-compose.yml:603-605` | each declares `external: true` + `name: ai-stack_*`, the networks the root `docker-compose.yml` owns |
 | `memory` -> `inference` | `memory/docker-compose.yml:36`, `:38` | `LLM_BASE_URL=http://llama-cpp:8080/v1`, `EMBED_BASE_URL=http://llama-cpp-embed:8080/v1` - unconditional |
 | `coder` -> `inference` | `coder/docker-compose.yml:28`, `:47-48`, `:76`; plus `little-coder/config/little-coder.config.yaml:11` and `little-coder/config/models.json:6` | joins `llm-net` "for llama-cpp inference", exempts `llama-cpp` from the egress proxy; the base URL itself is in the mounted config (see finding F5) |
 | `ob1` -> `inference` | `OB1/docker/docker-compose.yml:116`, `:120`, `:406`, `:410`, `:444`, `:493`, `:497`, `:568`, `:571`, `:675`, `:681`, `:846`, `:941`, `:977`, `:1173`; `OB1/docker/docker-compose.scheduled.yml:186`, `:258` | `CHAT_API_BASE` / `EMBEDDING_API_BASE` on the whole fleet |
 | `ob1` -> `search` | `OB1/docker/docker-compose.yml:567`, `:637`, `:982`; `OB1/docker/docker-compose.scheduled.yml:190` | `SEARCH_API_BASE` default `http://gateway:8080`; `FETCH_PROXY_URL` default `http://vpn:8888` on research, the grounding backfiller and the digest chain |
 | `agent-org` -> `inference` | `agent-org/docker/docker-compose.yml:127`, `:257`, `:372-373`, `:457-458` | `AO_LOCAL_API_BASE: http://llama-cpp:8080/v1`; agent-bridge joins `llm-net`; workers exempt `llama-cpp` from their proxy |
-| `portal` -> `frontend` | `portal/docker-compose.yml:601-606` and `config/caddy/Caddyfile:197` | caddy joins `ai-stack_app-net` "to reach openwebui:8080"; `reverse_proxy openwebui:8080` |
+| `portal` -> `frontend` | `portal/docker-compose.yml:601-602` and `config/caddy/Caddyfile:197` | caddy joins `ai-stack_app-net` "to reach openwebui:8080"; `reverse_proxy openwebui:8080` |
 
 ### optional (soft - documentation only; never orders, never refuses)
 
 | Edge | Evidence | Why soft |
 |---|---|---|
-| `frontend` -> `inference` | `frontend/docker-compose.yml:156`, `:158`, `:159` | `LLAMA_CPP_HOST` defaults to the alias but sits behind `LLAMA_CPP_ENABLED` (`:158`); OWUI serves without it |
+| `frontend` -> `inference` | `frontend/docker-compose.yml:156`, `:158`, `:159`; also `entrypoint.sh:70`, `:72` (`LITELLM_UI_HOST` -> `llm-gateway-ui`, enabled true) consumed at `entrypoint.sh:103` | `LLAMA_CPP_HOST` defaults to the alias but sits behind `LLAMA_CPP_ENABLED` (`:158`); OWUI serves without it |
 | `frontend` -> `search` | `frontend/docker-compose.yml:97` | `SEARXNG_QUERY_URL` default `http://gateway:8080/search`; web search off, chat unaffected |
+| **`frontend` -> `ob1`** *(added attempt 2)* | `frontend/docker-compose.yml:162` (`OPEN_NOTEBOOK_HOST=${...:-open_notebook}`), `:164` (`OPEN_NOTEBOOK_ENABLED` default **true**), ports `:163`, `:166`; consumed by `entrypoint.sh:97`, `:99`. Also `entrypoint.sh:66` - the image's own `QUARTZ_HOST` fallback is `openbrain-wiki-viewer` | `open_notebook` is an ob1-plane service (`OB1/docker/docker-compose.yml:1112`); with ob1 down the two tailnet serve routes are dead, OWUI itself is not |
+| **`frontend` -> `portal`** *(added attempt 2)* | `frontend/docker-compose.yml:178` (`QUARTZ_HOST=${...:-caddy}`), `:180` (`QUARTZ_ENABLED` default **true**), comment `:168-177`; consumed by `entrypoint.sh:101` | `caddy` is a portal-plane service (`portal/docker-compose.yml:169`). Note this is the reverse of `portal -> frontend` above: the portal hard-needs openwebui for its main vhost, the frontend's tailnet wiki route softly needs caddy |
+| **`frontend` -> `agent-org`** *(added attempt 2)* | `entrypoint.sh:74` (`MATTERMOST_HOST=${...:-mattermost}`), `:76` (`MATTERMOST_ENABLED` default **true**), route row `:105` | Declared in the **image** (`tailscale:local`), not in `frontend/docker-compose.yml` - that file passes this service one variable (`:136-147`). Same class as coder -> inference (F5) |
 | `ob1` -> `frontend` | `OB1/docker/docker-compose.yml:562` | `OWUI_BASE_URL` default `http://openwebui:8080` on openbrain-research only |
+| **`ob1` -> `agent-org`** *(added attempt 2)* | `OB1/docker/docker-compose.scheduled.yml:253` (`MATTERMOST_URL` -> `http://host.docker.internal:8065`), profile `idea-refinery` (`:236`, `default = true` in the manifest), `extra_hosts` on that service, token at `:254` | **The only edge that does not cross a docker network** - out to the host and back through agent-org's published `8065`, which the manifest declares under `[planes.agent-org.ports]`. Gated by `IDEA_REFINERY_MM_TOKEN`, which is set in `OB1/docker/.env` on this host |
 | `portal` -> `ob1` | `config/caddy/Caddyfile:136`, `:143`, `:242`, `:250` | those vhosts 502; the rest of the portal serves |
 | `portal` -> `inference` | `config/caddy/Caddyfile:295` and `inference/docker-compose.yml:316-327` | the LiteLLM Admin UI vhost; `llm-gateway-ui` joins `app-net` for exactly this. **Not in the brief's edge list** - see finding F4 |
 
@@ -104,6 +144,8 @@ either direction FAILS.
 |---|---|---|
 | `agent-org` -> `coder` | `agent-org/docker/docker-compose.yml:294`, `:351`, `:392`, `:438` | agent-org RUNS `little-coder:local` / `little-coder-open-terminal:local`, images the coder plane BUILDS. No container-to-container traffic. Recorded as a `host` requirement on the agent-org plane instead |
 | `digest` as a plane | `OB1/docker/docker-compose.scheduled.yml:21` (`name: open-brain`) and `OB1/docker/docker-compose.yml:15-16` (`include:`) | the scheduled slice is part of the ob1 project; it is a *product* over `inference + search + ob1`, not a plane |
+| `agent-org` -> `ob1` | `agent-org/docker/docker-compose.yml:142` (`AO_OPENBRAIN_URL` -> `openbrain-mcp:8000`), `:152` (`AO_RESEARCH_URL` -> `openbrain-research:8000`) - **but** `:141` `AO_OPENBRAIN_MIRROR_ENABLED` and `:151` `AO_GROUNDING_ENABLED` both default **false** | By the toggle rule: a default boot never reaches for ob1, so nothing degrades when ob1 is down. Written up in the manifest's agent-org comment as "considered, not an edge", so a reader can tell seen-and-rejected from not-seen. **Check both defaults are still `false`** - if either flips, this becomes an `optional` edge |
+| a host STT server | `OB1/docker/docker-compose.yml:894` (`STT_API_BASE` -> `http://host.docker.internal:8000`), `:897-898` `extra_hosts` | a HOST service, not a plane. Recorded in the ob1 plane's `host = [...]` list, which is where the manifest keeps this kind of requirement |
 
 ### surfaces (PLAN section 1)
 
@@ -114,11 +156,14 @@ either direction FAILS.
 | `agent-org` | *(none)* | agent-org -> mattermost is internal |
 | `open-brain` | `ob1 = ["wiki"]` | the wiki is a surface |
 
-**Pass:** every cited line says what the table says it says; no compose-file
-cross-plane `depends_on` or hardcoded cross-plane URL is missing from the
-manifest; no manifest edge is unevidenced.
-**Fail:** any citation that does not support its edge; any edge found in a
-compose file and absent from the manifest; any manifest edge with no evidence.
+**Pass:** every cited line says what the table says it says; no cross-plane
+`depends_on`, hostname default or hardcoded URL - in the nine compose files, the
+Caddyfile, `entrypoint.sh` or `little-coder/config/` - is missing from the
+manifest or from its written-down list of considered non-edges; no manifest edge
+is unevidenced.
+**Fail:** any citation that does not support its edge; any default-true
+cross-plane reference absent from the manifest; any default-false one that is
+neither listed nor dismissed in writing; any manifest edge with no evidence.
 
 ---
 
@@ -134,13 +179,22 @@ python -m pytest scripts/stack -q
 python -m pytest scripts/stack -q
 ```
 
-**Pass:** `37 passed`, in both shells, in a few seconds. **The suite never
-contacts a Docker daemon** - confirm by reading `scripts/stack/test_stack.py`:
-the only thing passed as `runner` is `Recorder`, which appends to a list and
-returns an exit code. Optional stronger check: stop Docker Desktop and re-run;
-the suite must still pass.
-**Fail:** any failure; any test that reaches `subprocess`; a suite that passes
-only because Docker happens to be running.
+**Pass:** `38 passed`, in both shells, in a few seconds.
+
+**Hermeticity is verified by READING the suite, not by breaking the host.** Do
+not stop Docker to prove it - that would take down the live stack, and the read
+is stronger anyway because it shows there is no path to a daemon at all. Check
+three things in `scripts/stack/test_stack.py`:
+
+1. its imports (top of file) do **not** include `subprocess`;
+2. the only value passed as `runner` is `Recorder`, whose `__call__` appends to a
+   list and returns a dict lookup - it cannot execute anything;
+3. `run()` injects that recorder into `stack.main`, and the `root` fixture builds
+   a throwaway tree (placeholder compose files, generated env files) so nothing
+   resolves to a real project.
+
+**Fail:** any failure; `subprocess` imported or any real command executed; a test
+whose result would differ with Docker stopped.
 
 ---
 
@@ -167,7 +221,9 @@ python -c "import ast,sys,pathlib; t=ast.parse(pathlib.Path('scripts/stack/stack
 
 *Anchor criterion 4, first half.*
 
-Precondition: `.stack/state.json` does not exist (the setup block removed it).
+Precondition: `.stack/state.json` does not exist in the worktree. Check, do not
+assume: `Test-Path .stack\state.json` / `test -e .stack && echo PRESENT || echo absent`.
+Nothing in this plan creates it - every stateful case passes `--state "$SL/..."`.
 
 ```powershell
 python scripts\stack\stack.py list
@@ -258,7 +314,7 @@ test -f .stack/state.json && echo "STATE WRITTEN - FAIL" || echo "no state file 
 **Expected:**
 
 ```text
-# note: 'memory' names both a plane and a product; enabling the PLANE (use `--product memory` for the product)
+# note: 'memory' names both a plane and a product; acting on the PLANE (use `--product memory` for the product)
 refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable inference)
 exit=1
 ```
@@ -280,35 +336,39 @@ happen at all. `scripts/stack/README.md`, *Product keys*.)*
 the real `.env` is never touched.*
 
 ```powershell
-Get-Content .stack\scratch\.env            # MULLVAD_WG_PRIVATE_KEY= is blank
-python scripts\stack\stack.py --root .stack\scratch enable search
+Get-Content "$SL
+oot"\.env            # MULLVAD_WG_PRIVATE_KEY= is blank
+python scripts\stack\stack.py --root "$SL
+oot" enable search
 "exit=$LASTEXITCODE"
 ```
 
 ```bash
-cat .stack/scratch/.env
-python scripts/stack/stack.py --root .stack/scratch enable search; echo "exit=$?"
+cat "$SL/root/.env"
+python scripts/stack/stack.py --root "$SL/root" enable search; echo "exit=$?"
 ```
 
 **Expected:**
 
 ```text
-# note: 'search' names both a plane and a product; enabling the PLANE (use `--product search` for the product)
+# note: 'search' names both a plane and a product; acting on the PLANE (use `--product search` for the product)
 refused: search needs these keys before it can be enabled:
   MULLVAD_WG_PRIVATE_KEY is blank in .env
-Set them, then re-run.
+Set them in .env, then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine).
 exit=1
 ```
 
 **Pass:** exit 1; the message names `MULLVAD_WG_PRIVATE_KEY`, says it is
-**blank**, and names the file it looked in. **Fail:** exit 0; a refusal that
-does not name the key; a refusal that names no file.
+**blank**, names the file it looked in, and - like the requires-refusal in T6 -
+names a remedy: the file to edit and the `doctor` command that lists every such
+key. **Fail:** exit 0; a refusal that does not name the key, the file, or a
+remedy.
 
 Second half - a key that is entirely **absent** must also refuse, and say so:
 
 ```bash
-grep -v '^MULLVAD_WG_PRIVATE_KEY=' .stack/scratch/.env > .stack/scratch/.env.tmp && mv .stack/scratch/.env.tmp .stack/scratch/.env
-python scripts/stack/stack.py --root .stack/scratch enable search; echo "exit=$?"
+grep -v '^MULLVAD_WG_PRIVATE_KEY=' "$SL/root/.env" > "$SL/root/.env".tmp && mv "$SL/root/.env".tmp "$SL/root/.env"
+python scripts/stack/stack.py --root "$SL/root" enable search; echo "exit=$?"
 ```
 
 **Pass:** exit 1 and `MULLVAD_WG_PRIVATE_KEY is missing in .env`.
@@ -320,14 +380,14 @@ python scripts/stack/stack.py --root .stack/scratch enable search; echo "exit=$?
 *Anchor criterion 5, third clause.*
 
 ```powershell
-python scripts\stack\stack.py --state .stack\t-research.json enable research
+python scripts\stack\stack.py --state "$SL\t-research.json" enable research
 "exit=$LASTEXITCODE"
-Get-Content .stack\t-research.json
+Get-Content "$SL\t-research.json"
 ```
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-research.json enable research; echo "exit=$?"
-cat .stack/t-research.json
+python scripts/stack/stack.py --state "$SL/t-research.json" enable research; echo "exit=$?"
+cat "$SL/t-research.json"
 ```
 
 **Expected:**
@@ -339,7 +399,7 @@ enabled product research:
   search
   ob1  profiles: idea-refinery, research, wiki, notebook
 # note: PENDING profiles enabled (ob1:research, ob1:wiki, ob1:notebook) - the compose files do not carry them yet, so enabling them changes nothing until the item that adds them lands.
-state: .stack/t-research.json
+state: "$SL/t-research.json"
 exit=0
 ```
 
@@ -360,13 +420,13 @@ the three profiles are still pending (the compose files do not carry them until
 *Anchor criterion 5, fourth clause.*
 
 ```powershell
-python scripts\stack\stack.py --state .stack\t-headless.json enable research --headless
-Get-Content .stack\t-headless.json
+python scripts\stack\stack.py --state "$SL\t-headless.json" enable research --headless
+Get-Content "$SL\t-headless.json"
 ```
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-headless.json enable research --headless
-cat .stack/t-headless.json
+python scripts/stack/stack.py --state "$SL/t-headless.json" enable research --headless
+cat "$SL/t-headless.json"
 ```
 
 **Expected:**
@@ -379,7 +439,7 @@ enabled product research:
   search
   ob1  profiles: idea-refinery, research
 # note: PENDING profiles enabled (ob1:research) - the compose files do not carry them yet, so enabling them changes nothing until the item that adds them lands.
-state: .stack/t-headless.json
+state: "$SL/t-headless.json"
 ```
 
 **Pass:** the same four planes (the frontend is a `planes` member of `research`,
@@ -390,9 +450,9 @@ research` and **no** `wiki` or `notebook`.
 Cross-check that `--headless` *does* drop a plane that is only a surface:
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-ca.json init --planes inference >/dev/null
-python scripts/stack/stack.py --state .stack/t-ca.json enable coding-agent --headless
-cat .stack/t-ca.json     # inference + coder, no frontend
+python scripts/stack/stack.py --state "$SL/t-ca.json" init --planes inference >/dev/null
+python scripts/stack/stack.py --state "$SL/t-ca.json" enable coding-agent --headless
+cat "$SL/t-ca.json"     # inference + coder, no frontend
 ```
 
 **Pass:** `inference` and `coder` only. Re-running without `--headless` (into a
@@ -405,15 +465,15 @@ fresh `--state` path) adds `frontend`.
 *Anchor criterion 6, first half.*
 
 ```powershell
-python scripts\stack\stack.py --state .stack\t-all.json init --planes inference,frontend,memory,search,coder,ob1,agent-org,portal
-python scripts\stack\stack.py --state .stack\t-all.json up --dry-run
-python scripts\stack\stack.py --state .stack\t-all.json down --dry-run
+python scripts\stack\stack.py --state "$SL\t-all.json" init --planes inference,frontend,memory,search,coder,ob1,agent-org,portal
+python scripts\stack\stack.py --state "$SL\t-all.json" up --dry-run
+python scripts\stack\stack.py --state "$SL\t-all.json" down --dry-run
 ```
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-all.json init --planes inference,frontend,memory,search,coder,ob1,agent-org,portal
-python scripts/stack/stack.py --state .stack/t-all.json up --dry-run
-python scripts/stack/stack.py --state .stack/t-all.json down --dry-run
+python scripts/stack/stack.py --state "$SL/t-all.json" init --planes inference,frontend,memory,search,coder,ob1,agent-org,portal
+python scripts/stack/stack.py --state "$SL/t-all.json" up --dry-run
+python scripts/stack/stack.py --state "$SL/t-all.json" down --dry-run
 ```
 
 **Expected `up`:**
@@ -456,13 +516,13 @@ expected and is not a command.
 *Anchor criterion 6, second half.*
 
 ```powershell
-python scripts\stack\stack.py --state .stack\t-ctx.json init --planes inference,frontend --context inference=optiplex-1
-python scripts\stack\stack.py --state .stack\t-ctx.json up --dry-run
+python scripts\stack\stack.py --state "$SL\t-ctx.json" init --planes inference,frontend --context inference=optiplex-1
+python scripts\stack\stack.py --state "$SL\t-ctx.json" up --dry-run
 ```
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-ctx.json init --planes inference,frontend --context inference=optiplex-1
-python scripts/stack/stack.py --state .stack/t-ctx.json up --dry-run
+python scripts/stack/stack.py --state "$SL/t-ctx.json" init --planes inference,frontend --context inference=optiplex-1
+python scripts/stack/stack.py --state "$SL/t-ctx.json" up --dry-run
 ```
 
 **Expected:**
@@ -480,7 +540,7 @@ docker compose -f frontend/docker-compose.yml --env-file .env up -d
 A malformed pair must be refused:
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-bad.json init --context inference; echo "exit=$?"
+python scripts/stack/stack.py --state "$SL/t-bad.json" init --context inference; echo "exit=$?"
 ```
 
 **Pass:** exit 1 and a message naming `plane=name`.
@@ -493,18 +553,18 @@ python scripts/stack/stack.py --state .stack/t-bad.json init --context inference
 deliberately `ps`-only.*
 
 ```powershell
-docker ps -a --format "{{.Names}} {{.Status}}" | Sort-Object | Out-File -Encoding ascii .stack\before.txt
+docker ps -a --format "{{.Names}} {{.Status}}" | Sort-Object | Out-File -Encoding ascii "$SL\before.txt"
 python scripts\stack\stack.py status
 "exit=$LASTEXITCODE"
-docker ps -a --format "{{.Names}} {{.Status}}" | Sort-Object | Out-File -Encoding ascii .stack\after.txt
-Compare-Object (Get-Content .stack\before.txt) (Get-Content .stack\after.txt)
+docker ps -a --format "{{.Names}} {{.Status}}" | Sort-Object | Out-File -Encoding ascii "$SL\after.txt"
+Compare-Object (Get-Content "$SL\before.txt") (Get-Content "$SL\after.txt")
 ```
 
 ```bash
-docker ps -a --format '{{.Names}} {{.Status}}' | sort > .stack/before.txt
+docker ps -a --format '{{.Names}} {{.Status}}' | sort > "$SL/before.txt"
 python scripts/stack/stack.py status; echo "exit=$?"
-docker ps -a --format '{{.Names}} {{.Status}}' | sort > .stack/after.txt
-diff .stack/before.txt .stack/after.txt && echo "unchanged"
+docker ps -a --format '{{.Names}} {{.Status}}' | sort > "$SL/after.txt"
+diff "$SL/before.txt" "$SL/after.txt" && echo "unchanged"
 ```
 
 With no state file (frontend enabled by default) the expected output is:
@@ -537,28 +597,28 @@ place `ps` is built, and `test_status_only_ever_runs_ps` in T2 pins it.
 *Anchor criterion 7, second half.*
 
 ```powershell
-python scripts\stack\stack.py --state .stack\t-init.json init --planes frontend
-Get-Content .stack\t-init.json
-python scripts\stack\stack.py --state .stack\t-init.json init --planes inference,frontend
+python scripts\stack\stack.py --state "$SL\t-init.json" init --planes frontend
+Get-Content "$SL\t-init.json"
+python scripts\stack\stack.py --state "$SL\t-init.json" init --planes inference,frontend
 "exit=$LASTEXITCODE"
-Get-Content .stack\t-init.json          # unchanged
-python scripts\stack\stack.py --state .stack\t-init.json init --planes inference,frontend --force
-Get-Content .stack\t-init.json          # now both
+Get-Content "$SL\t-init.json"          # unchanged
+python scripts\stack\stack.py --state "$SL\t-init.json" init --planes inference,frontend --force
+Get-Content "$SL\t-init.json"          # now both
 ```
 
 ```bash
-python scripts/stack/stack.py --state .stack/t-init.json init --planes frontend
-cat .stack/t-init.json
-python scripts/stack/stack.py --state .stack/t-init.json init --planes inference,frontend; echo "exit=$?"
-cat .stack/t-init.json
-python scripts/stack/stack.py --state .stack/t-init.json init --planes inference,frontend --force
-cat .stack/t-init.json
+python scripts/stack/stack.py --state "$SL/t-init.json" init --planes frontend
+cat "$SL/t-init.json"
+python scripts/stack/stack.py --state "$SL/t-init.json" init --planes inference,frontend; echo "exit=$?"
+cat "$SL/t-init.json"
+python scripts/stack/stack.py --state "$SL/t-init.json" init --planes inference,frontend --force
+cat "$SL/t-init.json"
 ```
 
 **Expected refusal:**
 
 ```text
-refused: .stack/t-init.json already exists (re-run with --force to overwrite it)
+refused: "$SL/t-init.json" already exists (re-run with --force to overwrite it)
 exit=1
 ```
 
@@ -571,7 +631,7 @@ refusal; an exit 0 on the refusal.
 `init --product` must run the same checks `enable` does:
 
 ```bash
-python scripts/stack/stack.py --root .stack/scratch --state .stack/scratch/t.json init --product research; echo "exit=$?"
+python scripts/stack/stack.py --root "$SL/root" --state "$SL/root/t.json" init --product research; echo "exit=$?"
 ```
 
 **Pass:** exit 1, with one line per key the scratch root cannot satisfy, each
@@ -662,8 +722,9 @@ python scripts/stack/stack.py restart all;                      echo "exit=$?"  
 python scripts/stack/stack.py restart portal;                   echo "exit=$?"   # refuses, names portal-on.ps1
 python scripts/stack/stack.py restart frontend --dry-run;       echo "exit=$?"   # one line, ends in `restart`
 python scripts/stack/stack.py enable nope;                      echo "exit=$?"   # refuses, lists planes and products
-python scripts/stack/stack.py --state .stack/t-dis.json init --planes inference,frontend,memory >/dev/null
-python scripts/stack/stack.py --state .stack/t-dis.json disable inference; echo "exit=$?"  # refuses, names memory
+python scripts/stack/stack.py --state "$SL/t-dis.json" init --planes inference,frontend,memory >/dev/null
+python scripts/stack/stack.py --state "$SL/t-dis.json" disable inference; echo "exit=$?"  # refuses, names memory
+python scripts/stack/stack.py --state "$SL/t-dis.json" disable memory; echo "exit=$?"  # note: acting on the PLANE
 python scripts/stack/stack.py doctor;                           echo "exit=$?"   # report, exit 0 on this host
 ```
 
@@ -671,28 +732,35 @@ python scripts/stack/stack.py doctor;                           echo "exit=$?"  
 exits 1 naming `portal-on.ps1`; `restart frontend --dry-run` prints exactly
 `docker compose -f frontend/docker-compose.yml --env-file .env restart` and
 starts nothing; `enable nope` exits 1 and lists the nine planes and ten
-products; `disable inference` exits 1 naming `memory`; `doctor` reports docker,
+products; `disable inference` exits 1 naming `memory`; `disable memory` prints
+`# note: 'memory' names both a plane and a product; acting on the PLANE (use
+`--product memory` for the product)` before it acts - `disable` is the
+destructive half of the pair, so a silent reading of an ambiguous name is worse
+there than on `enable` (attempt 1 printed the note on `enable` only, which
+`scripts/stack/README.md` already claimed otherwise); `doctor` reports docker,
 compose, python, the manifest, and per enabled plane its compose file, env file,
 blank keys and host requirements.
-**Fail:** any of these silently succeeding, or a refusal that does not name its
-cause.
+**Fail:** any of these silently succeeding; a refusal that does not name its
+cause; `disable` acting on an ambiguous name without saying which reading it
+took.
 
 ---
 
 ## T16 - the repository is left clean
 
 ```powershell
-Remove-Item -Recurse -Force .stack
+Remove-Item -Recurse -Force $SL
 git status --short
 ```
 
 ```bash
-rm -rf .stack
+rm -rf "$SL"
 git -C . status --short
 ```
 
-**Pass:** `git status --short` is empty (every scratch artifact lived under the
-gitignored `.stack/`, and the real `.env` files were never edited).
+**Pass:** `git status --short` is empty, and `.stack/` does not exist in the
+worktree (every scratch artifact lived in `$SL`, outside the repository, and the
+real `.env` files were never edited).
 **Fail:** any modified tracked file; any untracked leftover; any change to
 `.env`, `OB1/docker/.env` or `agent-org/docker/.env`
 (`git diff --stat` on them must be empty, and their mtimes unchanged).

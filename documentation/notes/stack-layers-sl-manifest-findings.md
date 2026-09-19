@@ -185,6 +185,50 @@ ever starts driving the anchor from an agent session.
 
 ---
 
+## F9 - the frontend reaches four other planes at boot, and its compose file shows one of them
+
+Added 2026-09-19 after the tester (`wt-tester-manifest`) failed T1 on two missing
+manifest edges; this is the general fact behind that miss, and it matters to
+`sl-frontend-solo`, which has to make the frontend bring up standalone.
+
+The `tailscale` companion shares openwebui's netns and `entrypoint.sh` raises one
+tailnet **serve route per backend** at boot. The route table is
+`entrypoint.sh:93-105`; every route is a `HOST=${VAR:-<service>}` plus an
+`..._ENABLED` pair declared at `entrypoint.sh:54-77`, and **every toggle defaults
+true**:
+
+| Route | Host default | Plane | Declared in |
+|---|---|---|---|
+| `llama-cpp`, `llama-cpp-embed` | `llama-cpp`, `llama-cpp-embed` | inference | compose `:156,:159` + script `:54,:57` |
+| `litellm-ui` | `llm-gateway-ui` | inference | **script only** `:70,:72` |
+| `open-notebook`, `open-notebook-api` | `open_notebook` | ob1 | compose `:162,:164` + script `:60,:62` |
+| `quartz` | `caddy` (compose) / `openbrain-wiki-viewer` (script fallback) | portal / ob1 | compose `:178,:180` + script `:66,:68` |
+| `mattermost` | `mattermost` | agent-org | **script only** `:74,:76` |
+
+Two consequences worth carrying forward:
+
+1. **`frontend/docker-compose.yml` understates the coupling.** It passes the
+   tailscale service exactly one variable (`:136-147` explains why the wildcard
+   `env_file` was removed), so the `litellm-ui` and `mattermost` routes are
+   invisible to anyone reading compose files - they live in `tailscale:local`.
+   Same class as F5 (coder) and F4 (portal): three of the eight planes declare a
+   real cross-plane dependency somewhere other than a compose file.
+2. **A standalone frontend will try all five.** `sl-frontend-solo` puts tailscale
+   behind a profile, which removes the problem for a fresh clone; while the
+   profile is on, a default boot with nothing else running leaves five serve
+   routes pointing at absent hosts (`entrypoint.sh`'s monitor loop retries them,
+   which is why nobody has noticed).
+
+**How the manifest missed two of them, so the next sweep does not.** The first
+cut grepped for cross-plane hostnames with a word-boundary pattern whose
+lookbehind excluded `-`. In `${OPEN_NOTEBOOK_HOST:-open_notebook}` the character
+immediately before the hostname *is* the `-` of `:-`, so the `${VAR:-default}`
+shape - the exact shape every one of these edges uses - was silently excluded by
+the very sweep meant to find it. A hunt that finds nothing is not evidence until
+you have checked it can find something: seed it with a known hit first.
+
+---
+
 ## Not findings (checked, and fine)
 
 - **agent-org -> coder is not a runtime edge.** The worker slices run
@@ -195,6 +239,22 @@ ever starts driving the anchor from an agent session.
 - **`PUBLIC_DOMAIN` in OB1's compose** appears only inside a comment
   (`OB1/docker/docker-compose.yml:808`); it is not interpolated and is not a
   missing variable.
+- **agent-org -> ob1 is a latent integration, not an edge.**
+  `agent-org/docker/docker-compose.yml:142` (`AO_OPENBRAIN_URL` ->
+  `http://openbrain-mcp:8000`) and `:152` (`AO_RESEARCH_URL` ->
+  `http://openbrain-research:8000`) name ob1-plane services, but `:141`
+  `AO_OPENBRAIN_MIRROR_ENABLED` and `:151` `AO_GROUNDING_ENABLED` both default
+  **false**, so a default boot never reaches for ob1 and nothing degrades when
+  ob1 is down. Recorded in the manifest's agent-org comment as "considered, not
+  an edge" with the line numbers, per the toggle rule in the manifest header.
+- **ob1 -> agent-org goes through the HOST, not a docker network.**
+  `OB1/docker/docker-compose.scheduled.yml:253` sends
+  `openbrain-idea-refinery` to `http://host.docker.internal:8065` - out to the
+  host and back in through agent-org's published loopback port. It is a real
+  edge on this deployment (the `idea-refinery` profile is default-on and
+  `IDEA_REFINERY_MM_TOKEN` is set in `OB1/docker/.env:13`), so the manifest
+  carries it as `optional`, flagged as the one edge that does not cross a docker
+  network. The cluster transition cannot move either plane without breaking it.
 - **The digest is not a separate plane.**
   `OB1/docker/docker-compose.scheduled.yml` declares `name: open-brain` and is
   pulled in by `include:` at `OB1/docker/docker-compose.yml:15-16`, so it is part
