@@ -86,8 +86,11 @@ def installation_token(force: bool = False) -> str:
         f"{API}/app/installations/{inst['id']}/access_tokens", bearer, method="POST", body={}
     )
     expires = tok.get("expires_at", "")
-    # ISO8601 Z -> epoch (tokens live ~1h)
-    exp_epoch = time.mktime(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ")) if expires else time.time() + 3000
+    # ISO8601 Z -> epoch (tokens live ~1h). calendar.timegm, NOT time.mktime:
+    # mktime reads the struct as LOCAL time, which on a UTC-negative host made
+    # the cache overstate lifetime by hours and serve expired tokens (2026-08-23).
+    import calendar
+    exp_epoch = calendar.timegm(time.strptime(expires, "%Y-%m-%dT%H:%M:%SZ")) if expires else time.time() + 3000
     CACHE.write_text(
         json.dumps({"token": tok["token"], "expires_at_epoch": exp_epoch}), encoding="utf-8"
     )

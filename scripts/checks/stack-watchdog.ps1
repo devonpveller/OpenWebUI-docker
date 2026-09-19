@@ -77,6 +77,118 @@ function Write-LogEntry {
     }
 }
 
+# --- repair ROUTING: which compose project actually owns this container? -----
+# (2026-08-28) Part K split the stack into per-plane compose PROJECTS and left
+# the root `ai-stack` project a PURE NETWORK ANCHOR with ZERO services
+# (`docker compose config --services` at the repo root prints nothing). The
+# DETECTION half of this monitor was migrated at K.10 - Test-ServiceHealth below
+# does a name-based `docker inspect` - but the REMEDIATION half was not: every
+# repair still issued a bare `docker compose up -d <name>`, which resolves to the
+# anchor and exits 1 with "no such service".
+#
+# That failure was SILENT for three compounding reasons, all verified 2026-08-28:
+#   1. the command targets a project that cannot see the container, so nothing
+#      is started;
+#   2. an UN-REDIRECTED native stderr write does NOT throw under
+#      $ErrorActionPreference = "Stop" in PS 5.1, so the surrounding catch block
+#      never fired; and
+#   3. the old code piped stdout to Out-Null and never read $LASTEXITCODE, so
+#      the log only ever said "recovery failed" with no hint that the repair
+#      command had not run at all.
+# 22 self-heal paths were dead this way between 2026-08-21 and 2026-08-28.
+#
+# The container -> project mapping is NOT duplicated here. scripts\lib\stack-services.json
+# is the canonical inventory and its (container -> project) rows are machine-verified
+# against the rendered compose configs by the pre-commit check
+# scripts\checks\check-project-configs.ps1, so it cannot drift silently. A container
+# missing from it fails LOUDLY (an ERROR naming the container) instead of no-op'ing.
+$Script:RepairTargets = $null
+
+function Get-RepairTargetMap {
+    [CmdletBinding()]
+    param()
+    if ($null -ne $Script:RepairTargets) { return $Script:RepairTargets }
+
+    $Map = @{}
+    $InvPath = Join-Path $PROJECT_DIR 'scripts\lib\stack-services.json'
+    try {
+        $Inv = Get-Content -Path $InvPath -Raw -ErrorAction Stop | ConvertFrom-Json
+    } catch {
+        Write-LogEntry "Service inventory unreadable ($InvPath): $($_.Exception.Message) - container repairs cannot be routed" "ERROR"
+        $Script:RepairTargets = $Map
+        return $Map
+    }
+
+    $Projects = @{}
+    foreach ($Prop in $Inv.projects.PSObject.Properties) { $Projects[$Prop.Name] = $Prop.Value }
+
+    foreach ($Plane in $Inv.planes.PSObject.Properties) {
+        foreach ($Row in $Plane.Value) {
+            if (-not $Row.container -or -not $Row.project) { continue }
+            if (-not $Projects.ContainsKey($Row.project)) { continue }
+            $Proj = $Projects[$Row.project]
+            # file = null marks a project that owns no services (the anchor).
+            # Such a project can never start anything, so it is not a repair target.
+            if (-not $Proj.file) { continue }
+
+            # Absolute paths: this function must not depend on the caller's CWD.
+            # Invoke-HealthCheck does Set-Location $PROJECT_DIR, but a repair
+            # helper that only works from one directory is a trap for the next
+            # caller.
+            $ComposeArgs = @('-f', (Join-Path $PROJECT_DIR ($Proj.file.Replace('/', [string][char]92))))
+            if ($Proj.env_file) {
+                $ComposeArgs += @('--env-file', (Join-Path $PROJECT_DIR ($Proj.env_file.Replace('/', [string][char]92))))
+            }
+            # 'service' is present only where the compose SERVICE key differs
+            # from the container name (search: redis -> search-redis,
+            # gateway -> search-gateway). `docker compose` wants the service key.
+            $Service = if ($Row.service) { [string]$Row.service } else { [string]$Row.container }
+
+            $Map[[string]$Row.container] = [pscustomobject]@{
+                Container   = [string]$Row.container
+                Project     = [string]$Row.project
+                Service     = $Service
+                ComposeArgs = $ComposeArgs
+            }
+        }
+    }
+    $Script:RepairTargets = $Map
+    return $Map
+}
+
+# Run a compose verb against the project that OWNS $Container, by CONTAINER name.
+# $Action is the verb plus its flags, e.g. @('up','-d') or @('restart'); the
+# resolved service key is appended. Returns $true only when docker exits 0.
+function Invoke-PlaneCompose {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Container,
+        [Parameter(Mandatory)][string[]]$Action
+    )
+    $Target = (Get-RepairTargetMap)[$Container]
+    if (-not $Target) {
+        Write-LogEntry ("Cannot repair '{0}': no compose project owns it in scripts\lib\stack-services.json. Add the row (documentation\runbooks\SERVICE-LIFECYCLE.md step 8) - a repair cannot be routed without it." -f $Container) "ERROR"
+        return $false
+    }
+
+    $Argv = @('compose') + $Target.ComposeArgs + $Action + @($Target.Service)
+    # stderr is deliberately NOT redirected: under $ErrorActionPreference="Stop"
+    # a REDIRECTED native stderr write becomes a terminating NativeCommandError
+    # in PS 5.1. $LASTEXITCODE is the reliable signal, and reading it is exactly
+    # what the pre-2026-08-28 code failed to do.
+    & docker @Argv | Out-Null
+    $Code = $LASTEXITCODE
+
+    if ($Code -ne 0) {
+        Write-LogEntry ("compose '{0}' FAILED for '{1}' (project {2}, service {3}) - exit {4}: docker {5}" -f `
+            ($Action -join ' '), $Container, $Target.Project, $Target.Service, $Code, ($Argv -join ' ')) "ERROR"
+        return $false
+    }
+    Write-LogEntry ("compose '{0}' issued for '{1}' (project {2}, service {3})" -f `
+        ($Action -join ' '), $Container, $Target.Project, $Target.Service) "DEBUG"
+    return $true
+}
+
 # Function to check Docker Compose service health
 function Test-ServiceHealth {
     param($ServiceName)
@@ -306,7 +418,12 @@ function Test-EntrypointHealth {
             $Logs = cmd /c "docker logs tailscale --tail 5 2>&1" | Out-String
             if ($Logs -match "no such file or directory" -and $Logs -match "entrypoint") {
                 Write-LogEntry "CRITICAL: Entrypoint script not found in container. Rebuild required." "ERROR"
-                Write-LogEntry "Run: docker compose build --no-cache tailscale" "INFO"
+                Write-LogEntry "Run: docker compose -f frontend\docker-compose.yml --env-file .env build --no-cache tailscale" "INFO"
+                # (the plane file is REQUIRED: tailscale lives in the frontend
+                #  project, and a bare `docker compose build` would hit the root
+                #  anchor, which declares no services - the operator would be
+                #  handed a command that cannot work, on the one CRITICAL path
+                #  where they most need it to.)
                 return $false
             }
         } catch {
@@ -409,7 +526,7 @@ function Repair-TailscaleService {
         Start-Sleep 45  # Increased wait time for GPU container dependencies
         
         # Verify gentle restart worked
-        if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
+        if ((Test-NetworkConnectivity) -and (Test-TailscaleConnection)) {
             Write-LogEntry "Gentle restart successful" "SUCCESS"
             return $true
         }
@@ -431,7 +548,7 @@ function Repair-TailscaleService {
         Start-Sleep 60  # Increased wait for GPU container + network namespace reattachment
         
         # Final verification
-        if (Test-NetworkConnectivity -and Test-TailscaleConnection) {
+        if ((Test-NetworkConnectivity) -and (Test-TailscaleConnection)) {
             Write-LogEntry "Network namespace recovery successful" "SUCCESS"
             return $true
         }
@@ -474,7 +591,10 @@ function Test-OpenTerminalHealth {
 function Repair-OpenTerminal {
     Write-LogEntry "Attempting to restart open-terminal container..." "WARN"
     try {
-        docker compose up -d open-terminal | Out-Null
+        if (-not (Invoke-PlaneCompose -Container 'open-terminal' -Action @('up','-d'))) {
+            Write-LogEntry "Open Terminal recovery could not be ATTEMPTED (see the ERROR above) - not waiting on a command that never ran" "ERROR"
+            return $false
+        }
         Start-Sleep 10
         if (Test-OpenTerminalHealth) {
             Write-LogEntry "Open Terminal recovered successfully" "SUCCESS"
@@ -496,28 +616,40 @@ function Repair-OpenTerminal {
 # Used for mnemory and the backup sidecars —
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
+#
+# THE PARAMETER IS A CONTAINER NAME, NOT A COMPOSE SERVICE KEY (renamed
+# 2026-08-28). It was called -ServiceName while Test-ServiceHealth looked it up
+# with `docker inspect`, which takes CONTAINER names - and the misnomer did real
+# damage: two call sites passed the search plane's compose SERVICE keys, `redis`
+# and `gateway`, whose containers are named search-redis and search-gateway.
+# `docker inspect redis` returns "no such object", so those two could never read
+# healthy and their repair could never have worked. Where the two differ, the
+# service key comes from stack-services.json via Invoke-PlaneCompose.
 function Confirm-AuxiliaryContainer {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$ServiceName,
+        [Parameter(Mandatory)][string]$Container,
         [int]$RestartWaitSeconds = 15
     )
-    if (Test-ServiceHealth $ServiceName) {
-        Write-LogEntry "$ServiceName container healthy" "DEBUG"
+    if (Test-ServiceHealth $Container) {
+        Write-LogEntry "$Container container healthy" "DEBUG"
         return $true
     }
-    Write-LogEntry "$ServiceName is unhealthy or stopped, attempting recovery..." "WARN"
+    Write-LogEntry "$Container is unhealthy or stopped, attempting recovery..." "WARN"
     try {
-        docker compose up -d $ServiceName | Out-Null
+        if (-not (Invoke-PlaneCompose -Container $Container -Action @('up','-d'))) {
+            Write-LogEntry "$Container recovery could not be ATTEMPTED (see the ERROR above) - not waiting on a command that never ran" "WARN"
+            return $false
+        }
         Start-Sleep $RestartWaitSeconds
-        if (Test-ServiceHealth $ServiceName) {
-            Write-LogEntry "$ServiceName recovered successfully" "SUCCESS"
+        if (Test-ServiceHealth $Container) {
+            Write-LogEntry "$Container recovered successfully" "SUCCESS"
             return $true
         }
-        Write-LogEntry "$ServiceName recovery did not converge - feature may be degraded" "WARN"
+        Write-LogEntry "$Container recovery did not converge - feature may be degraded" "WARN"
         return $false
     } catch {
-        Write-LogEntry "$ServiceName recovery error: $($_.Exception.Message)" "WARN"
+        Write-LogEntry "$Container recovery error: $($_.Exception.Message)" "WARN"
         return $false
     }
 }
@@ -609,10 +741,10 @@ function Repair-LlamaCppEmbed {
     try {
         if (-not (Test-ServiceHealth "llama-cpp-embed-upstream")) {
             Write-LogEntry "llama-cpp-embed-upstream container not running, starting..." "WARN"
-            docker compose up -d llama-cpp-embed-upstream | Out-Null
+            Invoke-PlaneCompose -Container 'llama-cpp-embed-upstream' -Action @('up','-d') | Out-Null
         } else {
             Write-LogEntry "llama-cpp-embed-upstream running but unresponsive, restarting..." "WARN"
-            docker compose restart llama-cpp-embed-upstream | Out-Null
+            Invoke-PlaneCompose -Container 'llama-cpp-embed-upstream' -Action @('restart') | Out-Null
         }
 
         # Wait for the API to come back. bge-m3 model load is fast, but allow
@@ -948,6 +1080,7 @@ function Confirm-ClaudeSessionsBridge {
             Write-LogEntry "claude-sessions bridge healthy (lock port $CLAUDE_BRIDGE_LOCK_PORT listening + MM endpoint reachable)" "DEBUG"
             Remove-Item $sentinel -Force -ErrorAction SilentlyContinue
             Remove-Item $mmSentinel -Force -ErrorAction SilentlyContinue
+            Resolve-Catastrophe -Key 'mattermost' -Message "Mattermost is reachable again."
             return $true
         }
         Write-LogEntry "claude-sessions bridge process is alive but its Mattermost endpoint $CLAUDE_BRIDGE_MM_URL is unreachable -- bridge is deaf (not registering chats)" "WARN"
@@ -955,6 +1088,11 @@ function Confirm-ClaudeSessionsBridge {
             Remove-Item $mmSentinel -Force -ErrorAction SilentlyContinue
             return $true
         }
+        # CATASTROPHE: Mattermost IS the normal channel, so an alert about it
+        # cannot be delivered through it. This is the definitive out-of-band case.
+        Send-CatastropheAlert -Key 'mattermost' -Message "MATTERMOST is unreachable at $CLAUDE_BRIDGE_MM_URL and auto-repair failed - the normal channel is DOWN, which is why this is reaching you here. @bot-claude and @bot-sysadmin cannot respond. Reply 'mm' to bring it up, or 'status'."
+        $script:HealthIssues += 'mattermost'
+
         # Dependency repair failed. Best-effort MM alert (may not land if the MM
         # host path is still down -- notify-mattermost.sh posts via localhost:8065
         # too), throttled 12h via its own sentinel so it retries once MM is back.
@@ -1151,6 +1289,139 @@ function Send-TelegramAlert {
     } catch { Write-LogEntry "Telegram alert failed: $($_.Exception.Message)" "WARN" }
 }
 
+# --- CATASTROPHE tier: alerts that must reach the operator OFF-STACK ----------
+# Added 2026-09-16 after a 94-minute tailnet outage (expired tailscale node key)
+# produced nothing but WARN lines in this log: Send-TelegramAlert was wired ONLY
+# to a full Docker-down, so a single dead container - even one carrying EVERY
+# remote route, Mattermost included - alerted nowhere.
+#
+# Tier (operator decision 2026-09-16): total loss of REMOTE ACCESS, of the COMMS
+# CHANNEL itself, or of INFERENCE - and only AFTER an automatic repair has
+# already FAILED, so a self-healed blip stays quiet. Re-alerts hourly while the
+# fault persists (Send-TelegramAlert throttle); Resolve-Catastrophe sends the
+# all-clear and re-arms the key.
+function Send-CatastropheAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Message
+    )
+    Write-LogEntry "CATASTROPHE [$Key] $Message" "ERROR"
+    # Decide HERE whether this send actually goes out, rather than letting
+    # Send-TelegramAlert decide silently: the "firing" marker must be written
+    # only when a message really left, or a flapping fault re-arms the all-clear
+    # every cycle and pages the operator 6x/hour (found in review 2026-09-16).
+    $sentinel = Join-Path $PROJECT_DIR "logs\.tg-alert-$Key"
+    $willSend = $true
+    try {
+        if (Test-Path $sentinel) {
+            if (((Get-Date) - (Get-Item $sentinel).LastWriteTime).TotalHours -lt 1) { $willSend = $false }
+        }
+    } catch { }
+    if ($willSend) {
+        Send-TelegramAlert ("ALERT ai-stack: " + $Message) -ThrottleKey $Key -ThrottleHours 1
+        try { 'firing' | Out-File (Join-Path $PROJECT_DIR "logs\.tg-state-$Key") -Encoding ascii -Force } catch { }
+    } else {
+        Write-LogEntry "CATASTROPHE [$Key] suppressed by the 1h throttle (still firing)" "DEBUG"
+    }
+    # Mirror into Mattermost as well, best-effort. When Mattermost IS the outage
+    # this no-ops - which is precisely why Telegram is the primary path here.
+    try {
+        $bash = 'C:\Program Files\Git\bin\bash.exe'
+        if (Test-Path $bash) {
+            $scriptPath = ($PROJECT_DIR -replace '\\', '/') + '/scripts/notify-mattermost.sh'
+            $null | & $bash $scriptPath "ALERT $Message" 2>$null | Out-Null
+        }
+    } catch { }
+}
+
+# Clears a catastrophe key and pings the all-clear, but ONLY if that key was
+# actually firing - so a healthy stack stays silent instead of sending an
+# "all good" every cycle.
+function Resolve-Catastrophe {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Message
+    )
+    try {
+        $state = Join-Path $PROJECT_DIR "logs\.tg-state-$Key"
+        if (Test-Path $state) {
+            Remove-Item $state -Force -ErrorAction SilentlyContinue
+            Send-TelegramAlert ("RESOLVED ai-stack: " + $Message)
+            Write-LogEntry "CATASTROPHE RESOLVED [$Key] $Message" "SUCCESS"
+        }
+        # DELIBERATELY does not delete logs\.tg-alert-$Key. That sentinel is the
+        # 1h throttle floor; deleting it here re-armed the alert instantly, so a
+        # service flapping fail/recover each 10-minute cycle sent ALERT+RESOLVED
+        # pairs indefinitely. Leaving it caps each key at one ALERT + one RESOLVED
+        # per hour. Trade-off, accepted 2026-09-16: a genuinely NEW outage of the
+        # same key inside that hour is logged (and visible in WITH ISSUES) but not
+        # re-paged.
+    } catch { }
+}
+
+# Running vs running-but-unhealthy. Test-ServiceHealth collapses BOTH to $false,
+# which is how the 2026-09-16 outage logged "Tailscale container not running"
+# about a container that was running the whole time - and then "fixed" it with
+# `compose up -d`, a NO-OP on an already-running container with unchanged
+# config. The distinction decides start vs recreate.
+function Get-ContainerState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Container)
+    $out = [pscustomobject]@{ Exists = $false; Running = $false; State = 'missing'; Health = 'none' }
+    try {
+        $json = docker inspect $Container --format '{{json .State}}' 2>$null
+        if (-not $json) { return $out }
+        $st = $json | ConvertFrom-Json
+        $out.Exists  = $true
+        $out.State   = $st.Status
+        $out.Running = ($st.Status -eq "running")
+        if ($st.Health) { $out.Health = $st.Health.Status }
+    } catch { }
+    return $out
+}
+
+# Tailnet NODE state - login + node-key expiry.
+# Nothing in this script looked at login state before 2026-09-16, so an expired
+# node key was invisible: the container stayed up, tailscaled stayed alive, and
+# every `tailscale serve` failed with "Logged out." The ExpiresInDays field is
+# the PREVENTIVE half - node keys expire on a schedule, so this gives notice
+# instead of an outage.
+function Test-TailscaleNodeState {
+    [CmdletBinding()]
+    param()
+    $out = [pscustomobject]@{ Reachable = $false; LoggedIn = $false; State = 'unknown'; ExpiresInDays = $null }
+    try {
+        # `docker exec ... 2>$null` is a TRAP here: under $ErrorActionPreference
+        # = "Stop" a single stderr byte from a redirected native call becomes a
+        # TERMINATING error (the gotcha this file already documents elsewhere).
+        # The empty catch below would then hand back Reachable=$false and the
+        # logout alert would silently never fire - the exact class of bug this
+        # check exists to catch. Route stderr through cmd instead.
+        $raw = cmd /c "docker exec tailscale tailscale --socket=/tmp/tailscaled.sock status --json 2>&1"
+        $txt = (($raw -join "`n")).Trim()
+        if (-not $txt -or $txt -notmatch '^\s*\{') {
+            Write-LogEntry "Tailscale node state UNAVAILABLE - 'status --json' returned no JSON; the logout/expiry check cannot run this cycle" "WARN"
+            return $out
+        }
+        $st = $txt | ConvertFrom-Json
+        $out.Reachable = $true
+        $out.State     = "$($st.BackendState)"
+        $out.LoggedIn  = ($st.BackendState -eq 'Running')
+        if ($st.Self -and $st.Self.KeyExpiry) {
+            $exp = [datetime]$st.Self.KeyExpiry
+            $out.ExpiresInDays = [math]::Round(($exp.ToUniversalTime() - (Get-Date).ToUniversalTime()).TotalDays, 1)
+        }
+        # Log on SUCCESS too. Without this, a permanently blind check looks
+        # exactly like a healthy one: clean logs, no alert, no evidence it ran.
+        Write-LogEntry "Tailscale node state: BackendState=$($out.State) keyExpiresInDays=$($out.ExpiresInDays)" "DEBUG"
+    } catch {
+        Write-LogEntry "Tailscale node state check FAILED: $($_.Exception.Message)" "WARN"
+    }
+    return $out
+}
+
 # --- Docker ENGINE liveness + autonomous restart ------------------------------
 # The single most important addition for the "compaction/crash stranded Docker"
 # class. Every other probe in this script issues `docker ...` and assumes the
@@ -1271,8 +1542,65 @@ function Confirm-HostTaskByPort {
     return $false
 }
 
+# --- Bridge FUNCTIONAL health (beyond lock-port liveness) ---------------------
+# 2026-08-23 incident: BOTH bridge personas held their lock ports for weeks while
+# every turn died with WinError 2 -- the claude.exe path cached at startup had
+# been deleted by VS Code extension pruning. Liveness said healthy; turns were
+# dead; nothing alerted. bridge.py now writes state/health.json (60s heartbeat:
+# ts, claude_bin, bin_exists, consecutive_failures) and self-heals a pruned
+# path. This check reads the beacon and acts on what liveness cannot see.
+function Confirm-BridgeFunctionalHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TaskName,
+        [Parameter(Mandatory)][int]$Port,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string]$HealthPath
+    )
+    if (-not (Test-HostLockPort -Port $Port)) { return }  # liveness repair owns that case
+    if (-not (Test-Path $HealthPath)) {
+        Write-LogEntry "$Label : no health beacon at $HealthPath (pre-beacon build, or still waiting for Mattermost)" "DEBUG"
+        return
+    }
+    try { $h = Get-Content $HealthPath -Raw | ConvertFrom-Json } catch {
+        Write-LogEntry "$Label : health beacon unreadable: $($_.Exception.Message)" "WARN"; return
+    }
+    # Epoch-to-epoch ON PURPOSE. (Get-Date "1970-01-01Z") carries the offset in
+    # force at the EPOCH (EST, -5), so a local-time subtraction reads exactly one
+    # DST hour stale all summer -- every cycle would see "60m" and restart both
+    # bridges. Comparing unix seconds to unix seconds has no timezone in it.
+    $ageMin = [int](([int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$h.ts) / 60)
+    if ($ageMin -gt 15) {
+        Write-LogEntry "$Label : health beacon STALE (${ageMin}m) while lock port is held -- poll loop wedged; restarting task '$TaskName'" "WARN"
+        try {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; Start-Sleep 2
+            Start-ScheduledTask -TaskName $TaskName
+        } catch { Write-LogEntry "$Label wedge-restart error: $($_.Exception.Message)" "ERROR" }
+        Send-TelegramAlert "ALERT $Label heartbeat was stale ${ageMin}m (process alive, loop wedged) -- task restarted." -ThrottleKey ("wedge-" + $Port) -ThrottleHours 1
+        return
+    }
+    if (-not $h.bin_exists) {
+        # The bridge self-heals a pruned path; bin_exists=false in a FRESH beacon
+        # means re-resolution itself failed -- a restart cannot fix that.
+        Write-LogEntry "$Label : claude binary UNRESOLVABLE ($($h.claude_bin) missing and no replacement found) -- needs reinstall or BRIDGE_CLAUDE_BIN" "ERROR"
+        Send-TelegramAlert "ALERT $Label cannot resolve any claude.exe (last: $($h.claude_bin)). Reinstall the VS Code extension or set BRIDGE_CLAUDE_BIN." -ThrottleKey ("nobin-" + $Port) -ThrottleHours 1
+        return
+    }
+    if ([int]$h.consecutive_failures -ge 2) {
+        Write-LogEntry "$Label : $($h.consecutive_failures) consecutive failed turns; last error: $($h.last_err)" "ERROR"
+        Send-TelegramAlert "ALERT $Label : $($h.consecutive_failures) consecutive failed turns. Last error: $($h.last_err)" -ThrottleKey ("turns-" + $Port) -ThrottleHours 1
+        return
+    }
+    Write-LogEntry "$Label functionally healthy (beacon ${ageMin}m old, bin ok, fails=$($h.consecutive_failures))" "DEBUG"
+}
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
+    # Faults found this cycle. Checks RECORD into this and carry on rather
+    # than returning early: before 2026-09-16 a single failed repair (e.g.
+    # tailscale) aborted the whole cycle, so inference, backups and the
+    # bridges went unchecked for as long as the fault lasted.
+    $script:HealthIssues = @()
 
     # Change to project directory
     Set-Location $PROJECT_DIR
@@ -1291,10 +1619,12 @@ function Invoke-HealthCheck {
         return $false
     }
 
-    # First, validate entrypoint and detect common issues
+    # First, validate entrypoint and detect common issues. Record and CONTINUE:
+    # this is a validation probe, and aborting the cycle on it skipped every
+    # other check (the 2026-09-16 blind-spot class).
     if (-not (Test-EntrypointHealth)) {
         Write-LogEntry "Entrypoint validation failed. Manual intervention required." "ERROR"
-        return $false
+        $script:HealthIssues += 'entrypoint'
     }
     
     # Check OpenWebUI health first (critical for GPU container)
@@ -1319,44 +1649,107 @@ function Invoke-HealthCheck {
             }
         }
         
-        # Final check after waiting
+        # Final check after waiting. Escalate out-of-band, then CONTINUE: the
+        # rest of this cycle (inference, bridges, backups) does not depend on
+        # OpenWebUI, and the old `return $false` here blinded all of it.
         if (-not (Test-ServiceHealth "openwebui")) {
             Write-LogEntry "OpenWebUI failed to become healthy within ${MaxWaitTime}s - may need manual intervention" "ERROR"
-            return $false
+            Send-CatastropheAlert -Key 'openwebui' -Message "OpenWebUI is UNHEALTHY and did not recover within ${MaxWaitTime}s. The main chat UI is down on both :3000 and the tailnet. Reply 'status' or 'recover'."
+            $script:HealthIssues += 'openwebui'
+        } else {
+            Resolve-Catastrophe -Key 'openwebui' -Message "OpenWebUI is healthy again."
         }
+    } else {
+        # The common recovery case: OWUI came back BETWEEN cycles, so the branch
+        # above never runs. Without this the 'openwebui' key stays armed forever -
+        # no all-clear is ever sent, and the NEXT outage inside the hour is
+        # throttled away (found in review 2026-09-16).
+        Resolve-Catastrophe -Key 'openwebui' -Message "OpenWebUI is healthy again."
     }
     
-    # Check if Tailscale container is running
+    # Tailscale container. Test-ServiceHealth is $false for BOTH "not running"
+    # and "running but unhealthy", so the old code announced "not running" about
+    # a container that was up the whole time, then "fixed" it with `compose up
+    # -d` - a NO-OP on an already-running container with unchanged config. That
+    # is exactly how the 2026-09-16 outage retried a no-op 8 times across 94
+    # minutes and never recovered. Split the two cases: RECREATE when it is up
+    # but unhealthy, so a changed .env (a fresh TAILSCALE_AUTH_KEY, say) is
+    # actually picked up. --no-deps leaves openwebui - which OWNS the netns
+    # tailscale joins - untouched.
     if (-not (Test-ServiceHealth "tailscale")) {
-        Write-LogEntry "Tailscale container not running, starting..." "WARN"
-        docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
-        
-        # Wait longer for GPU container dependencies
-        Start-Sleep 45  # Increased from 30s for GPU container startup
-        
-        # Verify Tailscale started and can attach to OpenWebUI network namespace
-        if (-not (Test-ServiceHealth "tailscale")) {
-            Write-LogEntry "Tailscale failed to start properly, may need OpenWebUI restart" "WARN"
-            return $false
+        $tsState = Get-ContainerState "tailscale"
+        if ($tsState.Running) {
+            # Recreate is DESTRUCTIVE (it flaps all 8 serve routes), so cap it at
+            # once an hour. The container healthcheck also probes 127.0.0.1:8080,
+            # which is OPENWEBUI's port over the shared netns - so an OWUI outage
+            # marks tailscale unhealthy, and an uncapped recreate would rebuild
+            # tailscale every 10 minutes over a fault that is not its own
+            # (found in review 2026-09-16).
+            $rcCooldown = Join-Path $PROJECT_DIR 'logs\.ts-recreate-cooldown'
+            $mayRecreate = $true
+            try {
+                if (Test-Path $rcCooldown) {
+                    if (((Get-Date) - (Get-Item $rcCooldown).LastWriteTime).TotalHours -lt 1) { $mayRecreate = $false }
+                }
+            } catch { }
+            if ($mayRecreate) {
+                Write-LogEntry "Tailscale container is RUNNING but health=$($tsState.Health) - recreating (up -d would be a no-op)..." "WARN"
+                docker compose -f frontend\docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale | Out-Null
+                try { (Get-Date -Format o) | Out-File $rcCooldown -Encoding ascii -Force } catch { }
+            } else {
+                Write-LogEntry "Tailscale container still health=$($tsState.Health) but a recreate ran within the hour - not recreating again (check whether OpenWebUI, whose :8080 the healthcheck probes, is the real fault)" "WARN"
+            }
+        } else {
+            Write-LogEntry "Tailscale container not running (state=$($tsState.State)), starting..." "WARN"
+            docker compose -f frontend\docker-compose.yml --env-file .env up -d tailscale | Out-Null
         }
+
+        # Wait for the container plus its netns reattachment.
+        Start-Sleep 45
+
+        if (-not (Test-ServiceHealth "tailscale")) {
+            # CATASTROPHE: a tailscale container that will not come healthy means
+            # EVERY tailnet route is gone - OpenWebUI, Mattermost :8446, the wiki,
+            # the LiteLLM UI. Alert out-of-band and CARRY ON with the cycle.
+            Send-CatastropheAlert -Key 'tailscale-container' -Message "the TAILNET is down - the tailscale container will not become healthy and auto-repair failed. Remote access to OpenWebUI, Mattermost (:8446), the wiki and the LiteLLM UI is GONE. Reply 'status', or check 'docker logs tailscale'."
+            $script:HealthIssues += 'tailscale-container'
+        } else {
+            Write-LogEntry "Tailscale container recovered" "SUCCESS"
+            Resolve-Catastrophe -Key 'tailscale-container' -Message "the tailscale container is healthy again."
+        }
+    } else {
+        Resolve-Catastrophe -Key 'tailscale-container' -Message "the tailscale container is healthy again."
     }
-    
-    # Test network connectivity
+
+    # Test network connectivity. CATASTROPHE + continue: egress being dead
+    # inside the tailscale netns breaks every tailnet route, but it tells us
+    # nothing about inference or the bridges - which the old early return
+    # stopped us from checking at all.
     if (-not (Test-NetworkConnectivity)) {
         Write-LogEntry "Network connectivity failed, attempting recovery..." "WARN"
         if (-not (Repair-TailscaleService)) {
             Write-LogEntry "Failed to restore network connectivity" "ERROR"
-            return $false
+            Send-CatastropheAlert -Key 'tailnet-connectivity' -Message "no network egress from the tailscale container and auto-repair failed - every tailnet route (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI) is unreachable. Reply 'status' or 'recover'."
+            $script:HealthIssues += 'tailnet-connectivity'
+        } else {
+            Resolve-Catastrophe -Key 'tailnet-connectivity' -Message "tailnet connectivity is restored."
         }
+    } else {
+        Resolve-Catastrophe -Key 'tailnet-connectivity' -Message "tailnet connectivity is restored."
     }
     
-    # Test Tailscale connection
+    # Test the tailscale daemon itself. CATASTROPHE + continue, as above.
     if (-not (Test-TailscaleConnection)) {
         Write-LogEntry "Tailscale connection failed, attempting recovery..." "WARN"
         if (-not (Repair-TailscaleService)) {
             Write-LogEntry "Failed to restore Tailscale connection" "ERROR"
-            return $false
+            Send-CatastropheAlert -Key 'tailscale-daemon' -Message "the tailscale daemon is not answering and auto-repair failed - the tailnet is down (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Reply 'status', or check 'docker logs tailscale'."
+            $script:HealthIssues += 'tailscale-daemon'
+        } else {
+            Resolve-Catastrophe -Key 'tailscale-daemon' -Message "the tailscale daemon is answering again."
         }
+    } else {
+        Resolve-Catastrophe -Key 'tailscale-daemon' -Message "the tailscale daemon is answering again."
     }
     
     # HOST tailscale node (operator remote access) — independent of the
@@ -1366,6 +1759,33 @@ function Invoke-HealthCheck {
     # Test serve configuration. Additive repair: re-add only missing
     # mappings (never `serve reset`, which would wipe working ones --
     # including the per-service mappings the old code didn't know about).
+    # Tailnet NODE login state + key expiry. A logged-out node keeps the
+    # container running and tailscaled alive while EVERY serve route silently
+    # fails with "Logged out." - the 2026-09-16 failure mode, which nothing
+    # here looked for. The expiry warning is the preventive half: node keys
+    # expire on a schedule, so this gives notice instead of an outage.
+    # Only DEFINITIVE logged-out states page. BackendState is one of NoState /
+    # NeedsMachineAuth / NeedsLogin / Stopped / Starting / Running, and treating
+    # "anything but Running" as logged out would page on every restart, since the
+    # container has a 60s start_period (found in review 2026-09-16).
+    $tsNode = Test-TailscaleNodeState
+    if ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsLogin')) {
+        Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node is LOGGED OUT (NeedsLogin) - every serve route is gone (OpenWebUI, Mattermost :8446, wiki, LiteLLM UI). Fix: put a fresh TAILSCALE_AUTH_KEY in .env, then 'docker compose -f frontend/docker-compose.yml --env-file .env up -d --force-recreate --no-deps tailscale'."
+        $script:HealthIssues += 'tailscale-logout'
+    } elseif ($tsNode.Reachable -and ($tsNode.State -eq 'NeedsMachineAuth')) {
+        Send-CatastropheAlert -Key 'tailscale-logout' -Message "the tailscale node needs DEVICE APPROVAL (NeedsMachineAuth) - every serve route is down until it is approved. Approve this machine in the Tailscale admin console; a new auth key will NOT fix this one."
+        $script:HealthIssues += 'tailscale-machineauth'
+    } elseif ($tsNode.Reachable -and -not $tsNode.LoggedIn) {
+        # Starting / NoState / Stopped: transient or mid-restart. Record, do not page.
+        Write-LogEntry "Tailscale node is not Running yet (BackendState=$($tsNode.State)) - not paging; the container-health check covers a persistent failure" "WARN"
+    } elseif ($tsNode.LoggedIn) {
+        Resolve-Catastrophe -Key 'tailscale-logout' -Message "the tailscale node is logged in again."
+        if (($null -ne $tsNode.ExpiresInDays) -and ($tsNode.ExpiresInDays -lt 14)) {
+            Write-LogEntry "Tailscale node key expires in $($tsNode.ExpiresInDays) days" "WARN"
+            Send-TelegramAlert "WARNING ai-stack: the tailscale NODE KEY expires in $($tsNode.ExpiresInDays) days. When it does, every tailnet route - Mattermost included - goes down. Disable key expiry for this node, or re-auth it now." -ThrottleKey 'tailscale-key-expiry' -ThrottleHours 24
+        }
+    }
+
     if (-not (Repair-TailscaleServes)) {
         Write-LogEntry "Some tailscale serve mappings could not be restored (see prior WARN/ERROR lines)" "WARN"
         # Non-fatal: openwebui main path may still work even if open_notebook
@@ -1378,8 +1798,13 @@ function Invoke-HealthCheck {
         Write-LogEntry "llama-cpp connectivity failed, attempting recovery..." "WARN"
         if (-not (Repair-LlamaCppConnectivity)) {
             Write-LogEntry "Failed to restore llama-cpp connectivity" "ERROR"
-            return $false
+            Send-CatastropheAlert -Key 'inference' -Message "INFERENCE is down - llama-cpp is unreachable through the gateway and auto-repair failed. Every LLM path (OpenWebUI, mnemory, research, the agent org) is dead. Reply 'status' or 'recover'."
+            $script:HealthIssues += 'llama-cpp'
+        } else {
+            Resolve-Catastrophe -Key 'inference' -Message "inference (llama-cpp) is reachable again."
         }
+    } else {
+        Resolve-Catastrophe -Key 'inference' -Message "inference (llama-cpp) is reachable again."
     }
 
     # Test llama-cpp-embed connectivity independently. The main llama-cpp test
@@ -1405,13 +1830,13 @@ function Invoke-HealthCheck {
     # Verify remaining compose containers (non-critical — log + attempt recovery
     # but do not fail the overall health check). Order matters: mnemory depends
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
-    Confirm-AuxiliaryContainer -ServiceName "mnemory"            -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory"            -RestartWaitSeconds 20 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
     # open_notebook gets a real API probe below — surrealdb must be up first since
     # open_notebook depends on it.
-    Confirm-AuxiliaryContainer -ServiceName "surrealdb"           -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "surrealdb"           -RestartWaitSeconds 10 | Out-Null
 
     # Test open-notebook API independently (separate from running-state check —
     # the FastAPI process can be unresponsive while the container is still up).
@@ -1424,9 +1849,13 @@ function Invoke-HealthCheck {
     }
 
     # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
-    # Compose SERVICE keys differ from container names here: service tor ->
-    # redis -> search-redis, gateway -> search-gateway (tor retired 2026-08-21). Probe /readyz first (covers the whole plane); only ensure the
-    # individual containers if it is not ready.
+    # Compose SERVICE keys differ from CONTAINER names here (redis ->
+    # search-redis, gateway -> search-gateway; tor retired 2026-08-21). These
+    # calls take CONTAINER names - until 2026-08-28 they passed the service keys
+    # instead, so `docker inspect` never resolved them. The service key is looked
+    # up from stack-services.json when the repair actually runs. Probe /readyz
+    # first (covers the whole plane); only ensure the individual containers if it
+    # is not ready.
     if (Test-SearchGatewayHealth) {
         Write-LogEntry "search-gateway /healthz OK" "DEBUG"
         # Deep readiness is informational only (slow/Tor-flaky); never drives a restart.
@@ -1435,39 +1864,54 @@ function Invoke-HealthCheck {
         }
     } else {
         Write-LogEntry "search-gateway /healthz down, ensuring web-search plane containers..." "WARN"
-        Confirm-AuxiliaryContainer -ServiceName "redis"   -RestartWaitSeconds 10 | Out-Null
-        Confirm-AuxiliaryContainer -ServiceName "searxng" -RestartWaitSeconds 15 | Out-Null
-        Confirm-AuxiliaryContainer -ServiceName "gateway" -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -Container "search-redis"   -RestartWaitSeconds 10 | Out-Null
+        Confirm-AuxiliaryContainer -Container "searxng"        -RestartWaitSeconds 15 | Out-Null
+        Confirm-AuxiliaryContainer -Container "search-gateway" -RestartWaitSeconds 15 | Out-Null
     }
 
     # --- little-coder plane (autonomous coding agent) — non-critical ---
     # open-terminal (checked above) is its workspace; these are the agent + its
     # MCP-as-OpenAPI bridge + the egress proxy.
-    Confirm-AuxiliaryContainer -ServiceName "little-coder" -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "lc-egress"    -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "little-coder" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "lc-egress"    -RestartWaitSeconds 10 | Out-Null
 
     # --- mnemory MCP gateway (the bridge clients reach; mnemory itself above) ---
-    Confirm-AuxiliaryContainer -ServiceName "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "mnemory-cloud-gateway" -RestartWaitSeconds 10 | Out-Null
 
     # --- inference gateway plane (LiteLLM front door + admission queue) ---
     # ALL inference flows through llm-gateway (the llama-cpp:8080 alias) and
     # llm-queue. Test-LlamaCppConnectivity above exercises the data path;
     # these catch the db/UI sidecars the path test can't see.
-    Confirm-AuxiliaryContainer -ServiceName "llm-queue"      -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway"    -RestartWaitSeconds 20 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
+    # CATASTROPHE tier: llm-gateway is the ONLY front door for inference (it
+    # carries the llama-cpp alias) and llm-queue is its admission controller.
+    # If either will not come back, every LLM caller is refused even when the
+    # upstream servers are perfectly healthy. Capture the result instead of
+    # discarding it - Write-LogEntry writes to the INFORMATION stream, so the
+    # success stream here is just the boolean; @()/Select -Last 1 guards that.
+    $queueOk   = [bool](@(Confirm-AuxiliaryContainer -Container "llm-queue"   -RestartWaitSeconds 15) | Select-Object -Last 1)
+    $gatewayOk = [bool](@(Confirm-AuxiliaryContainer -Container "llm-gateway" -RestartWaitSeconds 20) | Select-Object -Last 1)
+    if (-not ($queueOk -and $gatewayOk)) {
+        $dead = @()
+        if (-not $gatewayOk) { $dead += 'llm-gateway' }
+        if (-not $queueOk)   { $dead += 'llm-queue' }
+        Send-CatastropheAlert -Key 'llm-gateway' -Message ("the INFERENCE FRONT DOOR is down - " + ($dead -join ' + ') + " did not recover. All LLM traffic is refused (gateway-only routing). Reply 'status' or 'recover'.")
+        $script:HealthIssues += ($dead -join '+')
+    } else {
+        Resolve-Catastrophe -Key 'llm-gateway' -Message "llm-gateway and llm-queue are healthy again."
+    }
+    Confirm-AuxiliaryContainer -Container "llm-gateway-db" -RestartWaitSeconds 15 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway-ui" -RestartWaitSeconds 15 | Out-Null
 
     # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
     # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
     # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
-    Confirm-AuxiliaryContainer -ServiceName "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
-    Confirm-AuxiliaryContainer -ServiceName "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "llm-gateway-backup"   -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
+    Confirm-AuxiliaryContainer -Container "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
 
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
@@ -1476,24 +1920,40 @@ function Invoke-HealthCheck {
     #     ao-git-egress stale-mount guards, + its nightly pg_dump backup sidecars ---
     Invoke-AgentOrgHealth
 
+    # --- SYSADMIN FIRST (operator directive 2026-08-23: "the sysadmin above all
+    # else doesn't go down"). Liveness + FUNCTIONAL beacon for the sysadmin
+    # persona bridge (48292), then the break-glass Telegram listener (48293),
+    # then the claude-sessions bridge -- in that priority order.
+    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge' -Port 48292 -Label 'sysadmin bridge' | Out-Null
+    Confirm-BridgeFunctionalHealth -TaskName 'sysadmin-bridge' -Port 48292 -Label 'sysadmin bridge' `
+        -HealthPath (Join-Path $PROJECT_DIR 'scripts\sysadmin-mcp\bridge-state\health.json')
+    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
+
     # --- claude-sessions bridge (Mattermost <-> Claude, HOST Scheduled Task) ---
     # After Invoke-AgentOrgHealth so the Mattermost container it connects to has
     # just been confirmed/repaired. Non-fatal for the overall check.
     Confirm-ClaudeSessionsBridge | Out-Null
-
-    # --- sysadmin persona bridge (#sysadmin, 48292) + out-of-band Telegram command
-    # listener (48293), both HOST Scheduled Tasks. Process-liveness + task-restart:
-    # the claude-bridge check above already repairs the shared Mattermost host
-    # port-forward, and the listener needs no container at all. This closes the gap
-    # where nothing watched the sysadmin bridge or the break-glass control channel.
-    Confirm-HostTaskByPort -TaskName 'sysadmin-bridge'            -Port 48292 -Label 'sysadmin bridge'   | Out-Null
-    Confirm-HostTaskByPort -TaskName 'sysadmin-telegram-listener' -Port 48293 -Label 'telegram listener' | Out-Null
+    Confirm-BridgeFunctionalHealth -TaskName 'claude-sessions-bridge' -Port 48291 -Label 'claude-sessions bridge' `
+        -HealthPath (Join-Path $PROJECT_DIR 'scripts\claude-sessions-bridge\state\health.json')
 
     # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
     # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
     # a running sidecar that produces nothing is invisible to container checks.
-    Test-BackupRecency | Out-Null
+    # Feed the result into the cycle summary. NOT catastrophe tier (operator
+    # decision 2026-09-16: stale backups are not a page-the-phone event), but
+    # it must stop the log claiming "All health checks passed".
+    if (-not [bool](@(Test-BackupRecency) | Select-Object -Last 1)) {
+        $script:HealthIssues += 'backup-stale'
+    }
 
+    # Honest summary. This used to print "All health checks passed" even when
+    # checks above had logged ERROR (BACKUP STALE, for one), so the log read
+    # green during real faults.
+    if ($script:HealthIssues.Count -gt 0) {
+        $issues = ($script:HealthIssues | Select-Object -Unique) -join ', '
+        Write-LogEntry "Health check completed WITH ISSUES: $issues" "ERROR"
+        return $false
+    }
     Write-LogEntry "All health checks passed" "SUCCESS"
     return $true
 }

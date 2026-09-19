@@ -1,0 +1,11 @@
+{
+  "goal": "Observe frontier-oracle-on-stall firing on a stall that happened.",
+  "artifact": "An oracle-escalation ledger row produced by queue.ps1 -Fail from real rounds.",
+  "audience": "Whoever checks U4's Validated-by column.",
+  "acceptance": [
+    "The rounds before the threshold record no escalation.",
+    "The threshold round records exactly one escalation naming the local runner."
+  ],
+  "out_of_scope": [ "The live queue namespace - this probe runs in a scratch state dir." ],
+  "findings_sink": "documentation/notes/u4close-findings.md"
+}

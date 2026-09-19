@@ -1,0 +1,9 @@
+# EVIDENCE IS BYTES. `quadrant/guards.py unmodified` re-derives a run's verdict by comparing
+# the SHA-256 of each frozen file in the retained workspace against the item's own copy, so
+# a checkout that translated line endings would turn every committed record into
+# "NOT REPRODUCIBLE - MODIFIED - the item forbids editing it" on any machine whose git
+# normalises differently from the one that produced it. Same reasoning, and the same rule, as
+# scripts/agent-harness/quadrant/items/.gitattributes.
+#
+# -text: store and check out verbatim, on every platform.
+* -text

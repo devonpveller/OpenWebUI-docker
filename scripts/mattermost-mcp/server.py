@@ -156,6 +156,11 @@ def tool_read(args: dict) -> str:
     limit = max(1, min(int(args.get("limit", 15)), 60))
     since = args.get("since")
     exclude_self = bool(args.get("exclude_self", False))
+    # thread filter (2026-08-24, session-separation fix): with several Claude
+    # sessions sharing one channel, a listener must be able to subscribe to
+    # ITS thread only. Matches the thread root id OR posts whose own id is the
+    # root (the opener itself).
+    thread = args.get("thread")
     d = _api("GET", f"/channels/{ch}/posts?per_page={limit}")
     posts = d.get("posts", {}) if isinstance(d, dict) else {}
     order = d.get("order", []) if isinstance(d, dict) else []
@@ -167,6 +172,8 @@ def tool_read(args: dict) -> str:
             continue
         ca = p.get("create_at", 0)
         if since is not None and ca <= int(since):
+            continue
+        if thread and p.get("root_id", "") != thread and pid != thread:
             continue
         uid = p.get("user_id", "")
         from_webhook = bool((p.get("props") or {}).get("from_webhook"))
@@ -302,6 +309,13 @@ def handle(msg: dict):
 
 
 def main() -> None:
+    # MCP frames are UTF-8 JSON; Windows stdio defaults to cp1252, which
+    # mangled every emoji/em-dash on its way to Mattermost (operator report
+    # 2026-08-23: posts rendering as mojibake). Force UTF-8 both directions.
+    if hasattr(sys.stdin, "reconfigure"):
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     for line in sys.stdin:
         line = line.strip()
         if not line:

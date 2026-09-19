@@ -1,0 +1,19 @@
+transport : docker-exec (little-coder), workspace /workspace
+focus     : https://github.com/anthropics/skills
+ownership : restored to 1000:1000 (sampled from the daemon's own clone)
+mirrored  : 7 file(s) into little-coder:/workspace
+task      : 01M1D1ZV0J9JYZ347T8QRDT7WX
+status    : done (outcome=unverified signal=None)
+changed   : 1 file(s) changed, 0 deleted
+copied    : 1 path(s) back to D:\Open WebUI\ai-stack\.claude\worktrees\wt-u4close\documentation\evidence\dfu-u4\quadrant\20260831T232009Z-little-coder-self\workspace
+restore   : re-focused on https://github.com/anthropics/skills
+
+--- the runner's answer ---
+All 9 tests pass. `slugify` in `quadrant-item/slugify.py` now:
+
+1. Normalizes to NFKD and drops non-ASCII (folds accents: `Ünïcödé` → `unicode`)
+2. Lowercases
+3. Replaces any run of non-alphanumeric characters with a single `-`
+4. Strips leading/trailing hyphens
+
+Only `quadrant-item/slugify.py` was modified; the test file is untouched.

@@ -7,7 +7,13 @@
 # Checks, in order of how cheap they are:
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
 #   2. line endings      - repo convention
+#   2b. doc placement    - new plans belong in the documentation-plans repo
 #   3. gateway routing   - inference must go through the LiteLLM alias
+#   3b. corpus exposure  - a direct corpus INSERT must state its plane
+#   4. project configs   - compose renders + ps1 tokenize
+#   5. env_file scope    - a service names the variables it needs
+#   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
+#   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
 
 echo "Running pre-commit validations..."
 
@@ -28,12 +34,57 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+# --- 2b. documentation placement (staged-aware) ----------------------------
+# Fail if this commit ADDS planning material to the code repo. Plans, build logs,
+# task lists and numbered plan sets belong in the private plan store,
+# documentation-plans-ai-stack; this repo carries the one-row status entry in
+# documentation/implementation-guide/README.md and nothing else of a plan.
+#
+# It is a PARTIAL guard and the script header says so plainly: the drift it is
+# named after (a 24-file plan set written into documentation/implementation-guide/
+# on 2026-09-18) was never staged, so this hook would not have seen it. It closes
+# the path where the drift gets committed here permanently. Run the script with
+# -All to see the untracked half, which no commit-time check can reach.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-doc-placement.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (planning material staged into the code repo)!"
+    exit 1
+fi
+
 # --- 3. gateway-only LLM routing -------------------------------------------
 # Fail if any inference/serve endpoint points at a *-upstream real server
 # instead of the LiteLLM gateway alias.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-llm-gateway-routing.ps1'
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (LLM gateway routing bypass)!"
+    exit 1
+fi
+
+# --- 3b. corpus write contract (DFU C.9 H3) --------------------------------
+# Fail if a file INSERTs into `thoughts`/`agent_memories` over PostgREST without stating
+# `exposure` at its own call site. Added 2026-08-31 after the exposure column's own
+# post-condition ("every caller was found") turned out to have swept only the RPC callers:
+# twelve DIRECT-table producers were never searched for, and one of them
+# (openbrain-gmail-pull, daily) had been refused 42501 by the live policy since it landed.
+#
+# THE ENFORCEMENT IS THE DATABASE, NOT THIS CHECK, AND THIS COMMENT USED TO SAY OTHERWISE.
+# It read "the gate DERIVES the producer set from the tree, so producer thirteen breaks the
+# build instead of breaking production." That is FALSE and two verifiers refuted it: the gate
+# derives its set only WITHIN the shapes it recognises, and a producer outside them is neither
+# flagged nor counted. `195-` makes exposure NOT NULL + CHECKed on both tables and makes
+# upsert_thought refuse a payload that omits it - THAT refuses an unlabelled write in every
+# shape, from every language, forever. Producer thirteen, written in a shape this check cannot
+# see, breaks PRODUCTION - and quietly, because the failing producers catch the 42501 and log
+# a zero-row success.
+#
+# So this check is AUTHORING-TIME CONVENIENCE: it moves SOME of those refusals from 05:00 in a
+# cron to `git commit`, which is worth having and is not coverage. It prints its own recognised
+# shapes, its blind spots and the category of text that can clear a counted site on every run
+# (`-ShowShapes` prints them alone). Read those before treating a green here as protection.
+# Self-test: the script's -SelfTest switch.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-corpus-exposure-producers.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (a corpus insert does not state its plane)!"
     exit 1
 fi
 
@@ -44,6 +95,135 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-
 if [ $? -ne 0 ]; then
     echo "Pre-commit validation failed (compose/ps1 structural check)!"
     exit 1
+fi
+
+# --- 5. env_file scope (staged-aware) --------------------------------------
+# Fail if this commit ADDS a service that grants itself a shared .env. Pre-existing
+# grants are reported, not blocked - a guard that fails on old debt gets disabled.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-env-file-scope.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (a service granted itself a shared .env)!"
+    exit 1
+fi
+
+# --- 5b. OB1 recipe tests on gitlink bumps ---------------------------------
+# A gitlink bump IS the deploy of OB1 code to this stack (the live containers
+# bind-mount OB1/recipes from this checkout), and the 08-28 wiki-pages bug
+# shipped exactly there with its own catching test unrun (fixed 09f70f4 /
+# 443c5d8). Skips itself instantly when no OB1 gitlink is staged.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-recipe-tests.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (OB1 recipe tests failed for the staged gitlink)!"
+    exit 1
+fi
+
+# --- 5c. OB1 Deno recipe type-check on gitlink bumps -----------------------
+# 5b above globs *.test.mjs. OB1/recipes/daily-digest is Deno TypeScript - .ts
+# sources, a .test.ts test file - so until 2026-09-04 NOTHING in this chain
+# compiled, type-checked or ran one line of it, while a gitlink bump deployed
+# it to the live bind mounts all the same. Five defects shipped through that
+# hole in the podcast-delivery week (08-29..09-03); one was `retryUntil` called
+# without being imported, which would have aborted every production run, and
+# `deno check` names it in about two seconds.
+#
+# TYPE CHECK ONLY - the recipe's deno test suite is slow and needs --allow-net,
+# so a green here means "it compiles", not "it works". Skips instantly when no
+# OB1 gitlink is staged; REFUSES (does not warn-and-pass) when deno is missing.
+# The reasoning for both is in the script's header.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-deno-recipes.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (OB1 Deno recipe does not type-check for the staged gitlink)!"
+    exit 1
+fi
+
+# --- 5d. OB1 integration images on gitlink bumps ---------------------------
+# 5b runs recipe tests, 5c type-checks the Deno recipe - neither looks at a
+# Dockerfile. OB1/integrations/research-curator crash-looped in production a
+# day after its bump landed: index.ts had gained `./pool.ts`, the
+# Dockerfile COPYs sources BY NAME and never listed it, `docker build` cannot
+# fail on that, and "Module not found" surfaced at CONTAINER START. This gate
+# refuses that at the commit: for every image-bearing integrations/<svc>/ the
+# pin diff touches, the relative-import graph of the entrypoint must be
+# covered by the Dockerfile's COPYs (seconds, no docker), then the image is
+# built under a throwaway ob1-gate/<svc>:<sha7> tag and `deno check` runs
+# inside it (--network none, never :local, tag removed after).
+#
+# Green means "the image builds and its module graph resolves" - NOT that the
+# service starts against a real database or that env/compose wiring is right;
+# the script header lists what it does not prove. Skips instantly when no OB1
+# gitlink is staged or the bump touches no Dockerfile-bearing integration;
+# REFUSES (does not warn-and-pass) when Docker is unreachable. pre-merge-commit
+# execs this file, so a clean merge that bumps the gitlink gets it too.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-integration-images.ps1'
+if [ $? -ne 0 ]; then
+    echo "Pre-commit validation failed (an OB1 integration image does not build or resolve for the staged gitlink)!"
+    exit 1
+fi
+
+# --- 6. ATTESTATION -------------------------------------------------------
+# Record that these checks actually ran, because otherwise nobody can tell.
+#
+# WHY (PLAN 0 A7, FALSIFIED): an agent reached for `--no-verify` on its first
+# commit, and `--no-verify` leaves NO trace in a git object - "the hooks ran" is
+# unprovable from the repo afterwards. Normative rules ("never --no-verify") did
+# not hold; containment has to be mechanical. So the hook leaves proof, and
+# check-hook-attestation.ps1 reads it back.
+#
+# WE ATTEST THE TREE, not a commit sha - the commit does not exist yet, and the
+# tree is the durable identity of the content. `git write-tree` on the current
+# index yields exactly the tree the resulting commit will carry. Attesting the
+# tree also means a rebase or cherry-pick that does not change content KEEPS its
+# attestation, so the check does not fire on the reviewer's normal workflow. A
+# guard that false-positives on legitimate work gets switched off, and then it
+# protects nothing.
+#
+# AND WE ATTEST WHICH HOOK DID IT (2026-09-04). "The hooks ran" was never the
+# question anyone actually had; the question is "did the hook that ran contain
+# the check this evidence claims?". Those came apart on item wiki-mirror-
+# hardening: three commits carried honest attestations written by a genuinely
+# executing hook, and the hook executing was the PRE-5b one - the main checkout
+# did not gain check 5b until 28 minutes after the last of them. Establishing
+# that took a reviewer an hour of reflog archaeology, because the ledger
+# recorded that A hook ran and nothing about WHICH.
+#
+# "$0" is the hook file git is executing RIGHT NOW. Not a path this script
+# computed - that is the entire point. core.hooksPath is an absolute path to
+# one checkout, so a worktree's own edited .githooks/pre-commit is NOT what
+# runs for its commits; any path we derived from the repo would record the file
+# we wish had run instead of the one that did. `git hash-object` on it yields
+# the blob hash of that exact content, which is the same hash the file has in
+# any commit that carries it - so `git cat-file -p <hash>` reads the hook back
+# whenever that state was ever committed, and grepping it answers "was tree X
+# gated by a hook containing check Y". A hash that resolves to nothing is also
+# an answer: the gating hook was an uncommitted local edit. See .githooks/README.md.
+#
+# The lookup DEGRADES TO '?' and can never fail the commit - bookkeeping that
+# can reject work gets switched off, and then none of this exists. Anything that
+# is not a bare hex hash (an error message, an empty result, a git that cannot see
+# the file) becomes '?' rather than corrupting the ledger's column layout.
+#
+# This runs LAST, after every check above has passed, so a rejected commit is
+# never attested - attesting a tree the checks refused would launder it.
+#
+# The ledger lives in the SHARED git dir (--git-common-dir), never the worktree:
+# it must not be committable, and every worktree of this repo must read one
+# ledger, or a reviewer in another worktree could not verify a developer's work.
+# It is APPEND-ONLY (>>): a line is a historical fact and is never rewritten.
+_attest_tree=$(git write-tree 2>/dev/null)
+if [ -n "$_attest_tree" ]; then
+    _git_common=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [ -n "$_git_common" ]; then
+        _attest_hook=$(git hash-object "$0" 2>/dev/null)
+        case "$_attest_hook" in
+            "" | *[!0-9a-f]* ) _attest_hook='?' ;;
+        esac
+        printf '%s %s %s %s\n' \
+            "$_attest_tree" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')" \
+            "$_attest_hook" \
+            >> "$_git_common/hook-attest.log" 2>/dev/null || true
+    fi
 fi
 
 echo "Pre-commit validations passed!"

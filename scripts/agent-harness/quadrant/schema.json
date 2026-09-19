@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "_why": [
+    "THE CONTRACT OF A QUADRANT COMPARISON, as data rather than as source.",
+    "",
+    "PLAN 2's U4 row is validated by 'same anchored item run per quadrant (runner x",
+    "target), outcomes compared'. The failure mode that ruins such a comparison is not a",
+    "wrong number - it is a MISSING quadrant read as an absent one. Two of four ran, the",
+    "report shows two rows, and it reads as a finished comparison. Everything in this file",
+    "exists to make that shape impossible to produce.",
+    "",
+    "THREE MECHANISMS, all enforced in record.py and report.py against this file:",
+    "",
+    "  1. THE REPORT IS BUILT FROM THE MATRIX, NEVER FROM THE RECORDS. Every quadrant the",
+    "     configuration defines gets a row. A quadrant with no record is rendered NOT RUN",
+    "     with 'no record produced', so a silently dropped quadrant cannot occur.",
+    "  2. EVIDENCE-GATED ADMISSION. A record claiming 'completed' is admitted into the",
+    "     comparison only if artifacts on disk attest it: timestamps, a workspace, a",
+    "     transcript, and acceptance entries each carrying the command run and its exit",
+    "     code. A status field is a claim; the evidence is what makes it a measurement.",
+    "     This is A6 (prose verification FALSIFIED) applied to the comparison itself.",
+    "  3. ONE ITEM, PROVEN BY DIGEST. Every record carries the sha256 of the item spec it",
+    "     ran. Records whose digests disagree are not comparable and are refused - that is",
+    "     the 'same anchored item' half of the U4 row, mechanized rather than assumed.",
+    "",
+    "COMPARABILITY IS A RUNNER PROPERTY. The fixture runner exists to prove this harness",
+    "end to end without an LLM. It must never appear in a decision table, so runner",
+    "statuses are split here: `comparable_runner_statuses` may be compared, everything",
+    "else is reported in a separate self-test lane."
+  ],
+  "statuses": {
+    "completed": {
+      "desc": "the runner finished and the acceptance checks were executed against its result",
+      "comparable": true,
+      "requires_evidence": true
+    },
+    "failed": {
+      "desc": "the runner finished but the acceptance checks did not all pass - a real, comparable outcome",
+      "comparable": true,
+      "requires_evidence": true
+    },
+    "error": {
+      "desc": "the harness itself broke while running the quadrant. NOT a result about the quadrant",
+      "comparable": false,
+      "requires_evidence": false
+    },
+    "not_run": {
+      "desc": "preflight refused the quadrant, or nothing ever dispatched it. Carries a reason, never a score",
+      "comparable": false,
+      "requires_evidence": false
+    }
+  },
+  "declared_matrix_lock": "matrix.json",
+  "_declared_matrix_lock_why": [
+    "MEASURED 2026-08-30, as a defect in mechanism 1 above, found by a verifier and not by",
+    "us. 'The report is built from the MATRIX' is only as strong as what 'the matrix' is.",
+    "Building it from the CURRENTLY configured axes moves the failure one layer up:",
+    "narrowing quadrant.runners to a single entry - one line of config - dropped the two",
+    "never-run cells out of the table, and the same evidence rendered COMPARED 2/2,",
+    "complete, exit 0. The module's own stated failure mode, reachable by configuration.",
+    "",
+    "So a comparison is over the DECLARED matrix of a results SET, pinned in this file's",
+    "named lock inside the results directory and APPEND-ONLY. cli._declared_matrix unions",
+    "the lock with the configured cells and with every cell a record on disk names, and",
+    "hands that union to report.render. A declared cell with no configuration renders",
+    "OFF MATRIX and counts against completeness. Adding a runner grows the comparison;",
+    "removing one cannot shrink it.",
+    "",
+    "The bound, stated so nobody over-reads it: a comparison begun in a FRESH results",
+    "directory with narrow axes is genuinely narrow and says so. What this stops is",
+    "reusing an existing evidence set under a smaller matrix."
+  ],
+  "comparable_runner_statuses": [
+    "proven",
+    "unproven"
+  ],
+  "_comparable_runner_statuses_why": "a runner may be unproven and still produce a real, comparable outcome - that is exactly what U4 is measuring. A 'self-test' runner may not: it is scaffolding, and scaffolding in a decision table is a lie about where the number came from.",
+  "required_evidence_keys": [
+    "workspace",
+    "transcript"
+  ],
+  "_required_evidence_keys_why": "the workspace is where the work landed and the transcript is what the runner said while landing it. Both must EXIST on disk at admission time - a path in a JSON field proves nothing, and this check is the difference between an audited record and a decorated one.",
+  "required_acceptance_fields": [
+    "criterion",
+    "check",
+    "exit_code"
+  ],
+  "_required_acceptance_fields_why": "an acceptance result without the command and its exit code is a verdict with no way to re-derive it. PLAN C.7: only an executable check counts.",
+  "required_when_not_run": [
+    "not_run_reason"
+  ],
+  "_required_when_not_run_why": "the whole point. A quadrant that did not run must say why, in words, or it is indistinguishable from one nobody thought about.",
+  "runner_required_fields": [
+    "kind",
+    "status"
+  ],
+  "target_required_fields": [
+    "kind",
+    "status"
+  ],
+  "runner_kind_requirements": {
+    "claude-code": [],
+    "little-coder": [
+      "transport",
+      "submit_path"
+    ],
+    "fixture": []
+  },
+  "runner_transport_requirements": {
+    "docker-exec": [
+      "container",
+      "base_url",
+      "container_workspace"
+    ],
+    "http": [
+      "base_url"
+    ]
+  },
+  "_runner_transport_requirements_why": "A little-coder runner declares HOW it is reached, and the fields that answer 'where' depend on that answer. Until 2026-08-30 this file demanded `endpoint`, which named a host door (127.0.0.1:8090) the running container does not publish - so the two little-coder cells preflighted BLOCKED and the comparison was 2/4 (documentation/notes/u4quad-findings.md F7). scripts/agent-harness/dispatch.ps1 had already replaced that door with `docker exec`; merging the two branches made the demand for `endpoint` a config error on a runner that works. The requirement is now per-transport, so an unknown transport, or a docker-exec runner with no container, is still a LOUD config error rather than a NOT RUN - the distinction this file exists to keep.",
+  "target_kind_requirements": {
+    "self": [],
+    "project": [
+      "scratch_root"
+    ]
+  },
+  "venue_required_fields": [
+    "kind",
+    "repo"
+  ],
+  "target_venue_binding": {
+    "self": "the workspace IS a detached worktree of the venue repository at the venue's ref. The venue above is this cell's subject, and the pin is a fact about it.",
+    "project": "the workspace is a FRESH `git init` scratch repository created for this run under the results directory, holding only the planted item - it is NOT in the venue repository, and its git history is one commit long. That is legitimate under PLAN section 2's preamble, which forbids \"live planes or a real target\": a per-run scratch repo is neither, and the venue is what the cell was DRIVEN from rather than what it worked on. It is stated because the venue heading above would otherwise be read as a claim about this row's working tree too."
+  },
+  "_target_venue_binding_why": "A verifier's question, answered where a reader meets it: nothing tied a `target: project` record to the venue, and the report printed a venue heading over cells whose subject is a scratch directory inside the harness's own repository. The answer is that a `project` cell is venue-INDEPENDENT by construction and permitted by the preamble - but leaving that unsaid is the same shape as the venue defect itself (a dimension the reader has to infer). report.py renders one line per target kind actually present in the declared matrix.",
+  "venue_kinds": {
+    "gym": {
+      "desc": "a disposable training arena - ai-orchestration-gym. The subject of the experiment is a worktree of THAT repository, never the one under test. DECLARED, not measured: no probe can tell an arena from a real target, so this is the operator asserting what the repository is",
+      "must_differ_from_harness_repo": true,
+      "satisfies_gym_column": true
+    },
+    "workspace": {
+      "desc": "the harness's own repository. A legitimate venue for a smoke run of the harness itself, and NOT a venue any 'Gym:' column accepts",
+      "must_differ_from_harness_repo": false,
+      "satisfies_gym_column": false
+    }
+  },
+  "_venue_why": [
+    "THE PLACE THE EXPERIMENT WAS PERFORMED, as data. Added 2026-08-30 after a verifier",
+    "found that this package measured the experiment with four mechanisms and represented",
+    "the VENUE with none. PLAN section 2's preamble, four lines above the phase table:",
+    "\"'gym' means measured runs in `ai-orchestration-gym`, never live planes or a real",
+    "target.\" Every U-phase column beginning 'Gym:' names an experiment AND a place.",
+    "",
+    "So a complete four-cell comparison - real dispatches, real acceptance runs, a declared",
+    "matrix lock, exit 0 - was produced against ai-stack itself, with `target: self`",
+    "resolving to the repository the harness lives in, and nothing in the record, the",
+    "report or the config could say so. That is mechanism 1's failure one layer up: not a",
+    "wrong number, a MISSING dimension read as a satisfied one.",
+    "",
+    "`must_differ_from_harness_repo` is the check. quadrant/venue.py compares GIT COMMON",
+    "DIRS, so a worktree of ai-stack is recognised as ai-stack rather than as a different",
+    "path.",
+    "",
+    "`satisfies_gym_column` IS A DECLARATION, NOT A MEASUREMENT, and the report was",
+    "corrected on 2026-08-30 to print it as one. The preamble forbids \"live planes or a",
+    "real target\"; what venue.py can check is \"a repository ROOT that is not the",
+    "harness's own\". A verifier pointed $AI_STACK_GYM_REPO at a throwaway repository named",
+    "`not-the-arena` and got READY 4/4 and \"satisfies a Gym: column\" at exit 0. The two",
+    "sentences are now rendered separately (venue.what_was_checked), because a printed",
+    "verdict that implies more than it derived is this package's own failure class.",
+    "",
+    "A VENUE IS IDENTIFIED BY ITS REPOSITORY, not by its name. venue.identity_of records",
+    "the root commit reachable from the venue's ref; record.admit compares THAT where both",
+    "the record and the results set's pin carry one. Comparing names alone admitted four",
+    "records whose `venue.repo` had been re-pointed at another repository while the name",
+    "still read `gym` - COMPARED 4/4, exit 0."
+  ],
+  "record_venue_required": true,
+  "_record_venue_required_why": "every record carries the venue it ran in, and admission refuses one that does not - the same move as the item digest (mechanism 3). A results set pins its venue in the declared-matrix lock, so records from another REPOSITORY are refused rather than averaged in - compared by root commit where both sides carry one, and by every label they carry (not the name alone) where neither does. Records produced before 2026-08-30 carry no venue and are therefore no longer admissible: they were real runs in the wrong place, and the honest rendering of that is a refusal with a reason.",
+  "_kind_requirements_why": "a quadrant is misconfigured LOUDLY or not at all. A little-coder runner with no endpoint is not a runner that will fail at dispatch time and report NOT RUN - it is a configuration error, and the difference matters: NOT RUN is a fact about the world, a config error is a fact about the operator's file.",
+  "rounds_fields": {
+    "dispatch_attempts": "how many times the runner had to be handed the item before it produced anything",
+    "test_cycles": "acceptance evaluations performed - the harness's unit of iteration cost",
+    "operator_taps": "human interventions. The gym's central metric: every tap is an orchestration bug, so a quadrant that needs more of them is worse even when it finishes"
+  },
+  "cost_fields": {
+    "wall_seconds": "measured by the harness, always present",
+    "tokens": "reported by the runner where it reports them; null is honest, 0 is a lie",
+    "usd": "null unless the runner reports a real figure",
+    "gpu_seconds": "for local runners; null when unmeasured"
+  },
+  "decision_columns": [
+    {
+      "key": "acceptance_rate",
+      "why": "quality, normalized against the SAME executable criteria in every quadrant - the only reason one item is run four times"
+    },
+    {
+      "key": "wall_seconds",
+      "why": "cost in time, the figure an operator actually feels"
+    },
+    {
+      "key": "rounds",
+      "why": "cost in iterations and taps; a quadrant that converges in one round is worth more than the wall clock alone shows"
+    },
+    {
+      "key": "scope_violations",
+      "why": "did it stay inside the anchor's out_of_scope. A quadrant that finishes by doing extra work has not done the item"
+    },
+    {
+      "key": "containment",
+      "why": "mechanical (git-proxy, egress allowlist) vs normative (rules in a document). A7 says normative containment is FALSIFIED, so this column is a first-class input, not a footnote"
+    },
+    {
+      "key": "confidence",
+      "why": "repeats and variance. n=1 is not a basis for a decision and the report says so in those words rather than implying otherwise by silence"
+    }
+  ],
+  "min_repeats_for_variance": 2,
+  "item_plant_ignore": [
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".DS_Store",
+    "Thumbs.db"
+  ],
+  "_item_plant_ignore_why": "MEASURED 2026-08-30, not anticipated. pytest imported an item's fixture test file once, leaving files/__pycache__/ behind; item.load walked files/ with rglob and swept the .pyc into the planted set. Two consequences, both silent: the item DIGEST changed, so every record produced before that moment became 'a different item' and unadmittable; and the byte-compiled cache was then copied into every run workspace. An experiment whose control moves when someone runs the test suite is not a control."
+}

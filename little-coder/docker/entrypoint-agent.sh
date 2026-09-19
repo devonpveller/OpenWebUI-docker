@@ -22,6 +22,14 @@ chmod -R 0777 /workspace 2>/dev/null || true
 # and registers the model ids it actually serves (see config/models.json).
 mkdir -p /home/lc/.config/little-coder
 cp /app/config/models.json /home/lc/.config/little-coder/models.json 2>/dev/null || true
+# J.1 missed-caller #7 (2026-08-23): the node agent uses models.json apiKey VERBATIM —
+# the "LLAMACPP_API_KEY" string is a placeholder that must be substituted at boot from
+# the environment (compose feeds it from LC_LLAMA_API_KEY). Without this, every LLM
+# call sends the literal placeholder as its bearer (fine in the old permissive gateway,
+# 401 since the master-key flip). Leaves the placeholder when the env is unset.
+if [ -n "${LLAMACPP_API_KEY:-}" ]; then
+  sed -i "s|\"LLAMACPP_API_KEY\"|\"${LLAMACPP_API_KEY}\"|" /home/lc/.config/little-coder/models.json 2>/dev/null || true
+fi
 
 # Route the agent's shell into open-terminal (design §1.5, §3.4): install the
 # bash-override pi extension into little-coder's OWN extensions dir, so pi

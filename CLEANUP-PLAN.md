@@ -185,7 +185,7 @@ unrelated work; one item is partially delivered as a side effect:
 10. **v2's D-5 (LM Studio) was already decided on the operator's own record —
     and the "dead" path has a live runtime cost.** The 0.11.0 upgrade removed
     both LM Studio connections from OWUI
-    (`documentation/implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md:691-693`);
+    (`../documentation-plans-ai-stack/implementation-guide/update-owui-to-0-11-0/UPGRADE-PLAN.md:691-693`);
     no LM Studio inference endpoint survives. Meanwhile the live `.env`
     overrides the sane compose default with the dead link-local host
     (`.env:122-126`: `LMSTUDIO_HOST=169.254.83.107`, `LMSTUDIO_PORT=5506`,
@@ -1158,6 +1158,22 @@ Per-plane playbook (portal-split procedure, now run 3×):
   - Part M written (issues → plans → MM-governed execution with staleness
     audit, maintenance-window interlocks, per-action approvals).
 
+- **K.12 Part M build 1 — EXECUTED 2026-08-22 PM** (operator: "plan it then
+  build it", away, MM-governed): scripts/issue-ops/ subsystem LIVE —
+  GitHub-App auth (agent-org's App, installation tokens minted host-side, no
+  gh CLI), `status` console (issues × plan freshness vs origin/development ×
+  triage × focus), `plan N` (headless-claude planner, bridge-style binary
+  resolution), `radar` (overlap vs open PRs), `focus` lock, `gate PR`
+  harness (M.7 rubric: intent/evidence/scope/lifecycle/security;
+  RECOMMEND-MERGE or DENY + orchestration-adjustment). Founding issues
+  #24/#25/#26 filed from the real backlog; exemplar plans for #24/#25
+  hand-written; #26 planned by the autonomous path. **`development`
+  CREATED + pushed** from the deployed tip (operator approved via the MM
+  listener — the reply-listening loop worked in production). Resilience:
+  GitHub's list index lags App-created issues → local known-issues registry
+  + direct-fetch merge. MM console contract documented in
+  scripts/issue-ops/README.md for future Claude sessions.
+
 ## Part L — NEW (2026-08-21): self-contained plane directories (operator-approved direction)
 
 Operator: "I do want the directories to be self contained" + per-plane env
@@ -1315,8 +1331,94 @@ The generator/verifier split, on the real stack:
   tags each issue simple|bounded|heavy; heavy issues queue for the
   OpenRouter era or the operator/Claude directly, instead of burning local
   worker rounds on work above the driver's ceiling.
+- **TWO-GATE + TWO-HARNESS split (operator, 2026-08-22 evening):** the
+  org's executor (open-terminal) is INTENTIONALLY blind to the live stack —
+  so validation splits by trust: the worker sandbox runs T1 (unit/static,
+  RED→GREEN in its clone); the HOST-side Claude session runs T2 live-twin
+  validation (M.8) — the entity that can reach live services is the trusted
+  verifier, never the sandboxed generator. Claude gates TWICE:
+  `gate-plan <N>` (go/no-go BEFORE dispatch — machine pre-checks: verdict
+  fix + repro confirmed-in-code + fresh base, then an independent review of
+  grounding/scope/validation-realism/live-surface-honesty/security) and
+  `gate <PR#>` on the delivered PR. ORDER LAW on a PR: static gate FIRST,
+  T2 only after the diff reads clean — T2 executes the branch's code near
+  live services, so untrusted code never runs with live reach before a
+  trusted read of it. Everything stays on the local network; human merge +
+  deploy approval unchanged.
 
 Build order when green-lit: M.2 read-only view first (issues + plan
 freshness — zero risk), then M.1 planner, then M.3 staleness, then M.4/M.5
 execution. Each stage its own session with tests.
+
+### M.8 — DRAFT (operator design round, 2026-08-22 evening): live validation tiers
+
+Operator: "validating the fix is only theoretical until tested live … a test
+container could be deployed to run in then taken down." Industry version =
+ephemeral per-PR environments (Heroku Review Apps → GitLab Review Apps →
+Argo CD PR generators / Uffizzi / Render previews) + Testcontainers at the
+integration-test layer. The governing principle everywhere: **staging is the
+SAME definitions as production, parameterized — never a hand-maintained
+parallel stack.** Part K makes ai-stack unusually ready for this: planes are
+self-contained compose projects that attach to *named* external networks, so
+an ephemeral instance is the same files under a different project name +
+namespace.
+
+Three validation tiers, declared per-plan (`validation_tier` frontmatter),
+mapped from triage:
+
+- **T1 — static + unit (triage: simple).** pytest/ruff at the branch, RED at
+  base → GREEN at head. No containers. (#17's harness is exactly this.)
+- **T2 — ephemeral service slice (triage: bounded).** Build the touched
+  service's image from the PR branch, stand it up as
+  `docker compose -p test-issue-<N> …` with test volumes and NO host ports,
+  run the plan's validation commands + the service's health probe inside the
+  namespace, capture output into the PR, `compose down -v` the namespace.
+  Scarce shared deps (GPU inference) are NOT duplicated — the test slice
+  reaches the PROD gateway with a dedicated low-priority virtual key
+  (`test-validation` lane; J.1 + the llm-queue admission controller already
+  make shared-GPU isolation a policy line, not new infrastructure).
+- **T3 — full-plane staging (triage: heavy; rare).** Whole-plane bring-up in
+  a test namespace, `stack.ps1 health`-style probe sweep, torn down after.
+  Scheduled clear of the nightly 01:00–05:30 chain + Sun 03:15 maintenance
+  (M.4 interlocks apply — this is the only tier that can touch shared load).
+
+**T2 CORE BUILT + LIVE-PROVEN same evening** (operator approved the
+direction: "test against the actual codebase deployed services… as long as
+the test space can reach the live containers"). The operator's reachability
+condition SIMPLIFIED the design: T2 twins attach to the LIVE anchor networks
+(no parallel network namespace needed — the parameterized-prefix prereq now
+belongs to T3 only, if ever).
+
+- **LAW (verified empirically 2026-08-22):** two compose projects sharing a
+  service name on one external network DNS ROUND-ROBIN — a prod-named twin
+  would intercept live traffic. T2 twins therefore always run as
+  `test-<service>` (they resolve live services by *their* names; never share
+  an alias).
+- `issue_ops.py t2 <N> <plane> <service> --probe "<cmd>" [--image tag]
+  [--keep]` — generates a probe-shaped twin from the plane compose file
+  (fresh project-scoped volumes, no host ports, no depends_on/healthcheck/
+  GPU-deploy/container_name carryover, live networks resolved to their
+  runtime names, `network_mode` services refused = netns companions are not
+  T2-able), `compose -p test-issue-<N> run --rm --no-deps`, evidence to
+  `state/t2-issue-<N>-evidence.txt`, guaranteed `down -v` in finally.
+- `test-validation` virtual key minted (J.1 flow) → gitignored `.env.test`
+  (+ tracked `.env.test.example`); twins get `TEST_VALIDATION_LLM_KEY`
+  injected.
+- **PROOF RUN:** frontend/openwebui twin on the live nets pulled the model
+  list AND a real completion ("T2-VALIDATION-OK") from live GPU inference
+  through llm-queue; ledger attributed it to the `test-validation` lane;
+  prod openwebui untouched (no restart); zero containers/volumes left.
+
+Remaining M.8 work:
+1. llm-queue policy: pin the `test-validation` lane to LOWEST priority
+   (today it gets the default lane priority — the isolation is attribution,
+   not yet priority). Live-service change → operator-approved window.
+2. `issue_ops.py validate <N>`: plan-driven wrapper (reads validation_tier +
+   commands from the plan, builds the PR-branch image, runs t2, attaches
+   evidence to the PR/MM) — the gate then reviews EVIDENCE, not claims.
+3. CAVEAT to encode in plans: host BIND mounts come along rw (they are live
+   surfaces — e.g. status-pipe/); a plan whose probe writes through a bind
+   mount must declare it and needs the M.4 approval treatment.
+4. disk-guard: treat `test-issue-*` volumes as reclaimable.
+5. T3 full-plane staging when a heavy issue actually needs it.
 

@@ -1,0 +1,149 @@
+{
+  "item": "u4-baseline",
+  "item_digest": "c585bee6fee3043cb51a9d87880cb6d903b947e0c397146fa6831654c60eff48",
+  "venue": {
+    "name": "gym",
+    "kind": "gym",
+    "repo": "D:\\Open WebUI\\ai-orchestration-gym",
+    "ref": "main",
+    "source": "config quadrant.venues.gym.repo",
+    "identity": "root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d"
+  },
+  "satisfies_gym_column": true,
+  "venue_checks": {
+    "checked": [
+      "the venue path is a git repository ROOT (git discovers upward, so a wrong path otherwise silently adopts whatever repository encloses it)",
+      "it is NOT the harness's own repository (git common dirs compared, so a worktree of it is recognised as it)",
+      "the ref resolves to a commit in it",
+      "the repository IDENTITY (root commit reachable from that ref) is recorded with every record in this set, so a record from a different repository is refused however it is labelled"
+    ],
+    "not_checked": [
+      "whether this repository is a DISPOSABLE ARENA rather than a real target. No probe can decide that: a repository holding something precious answers every question above the same way. `kind: \"gym\"` is an ASSERTION in harness.config.json, and \"satisfies a Gym: column\" follows from that assertion, not from a measurement",
+      "whether the work inside it was confined to the venue - see the per-target note below, since a `project` cell's subject is a scratch repository, not this one"
+    ],
+    "declared_satisfies_gym_column": true
+  },
+  "quadrants_total": 4,
+  "configured_total": 4,
+  "declared": [
+    "little-coder::self",
+    "little-coder::project",
+    "claude-code::self",
+    "claude-code::project"
+  ],
+  "off_matrix": [],
+  "compared": 4,
+  "complete": true,
+  "rows": [
+    {
+      "key": "little-coder::self",
+      "label": "little-coder x self",
+      "runner": "little-coder",
+      "target": "self",
+      "status": "completed",
+      "compared": true,
+      "n": 1,
+      "why_not": "",
+      "problems": [],
+      "acceptance": "2/2",
+      "wall_seconds": 65.5,
+      "usd": null,
+      "tokens": null,
+      "rounds": {
+        "dispatch_attempts": 1,
+        "test_cycles": 2,
+        "operator_taps": 0
+      },
+      "scope": {
+        "files_changed": 1,
+        "out_of_scope_hits": [],
+        "frozen_touched": []
+      },
+      "containment": "mechanical (container, git-proxy, egress allowlist)",
+      "agreement": ""
+    },
+    {
+      "key": "little-coder::project",
+      "label": "little-coder x project",
+      "runner": "little-coder",
+      "target": "project",
+      "status": "completed",
+      "compared": true,
+      "n": 1,
+      "why_not": "",
+      "problems": [],
+      "acceptance": "2/2",
+      "wall_seconds": 65.8,
+      "usd": null,
+      "tokens": null,
+      "rounds": {
+        "dispatch_attempts": 1,
+        "test_cycles": 2,
+        "operator_taps": 0
+      },
+      "scope": {
+        "files_changed": 1,
+        "out_of_scope_hits": [],
+        "frozen_touched": []
+      },
+      "containment": "mechanical (container, git-proxy, egress allowlist)",
+      "agreement": ""
+    },
+    {
+      "key": "claude-code::self",
+      "label": "claude-code x self",
+      "runner": "claude-code",
+      "target": "self",
+      "status": "completed",
+      "compared": true,
+      "n": 1,
+      "why_not": "",
+      "problems": [],
+      "acceptance": "2/2",
+      "wall_seconds": 35.4,
+      "usd": 0.47389349999999997,
+      "tokens": 2351,
+      "rounds": {
+        "dispatch_attempts": 1,
+        "test_cycles": 2,
+        "operator_taps": 0
+      },
+      "scope": {
+        "files_changed": 1,
+        "out_of_scope_hits": [],
+        "frozen_touched": []
+      },
+      "containment": "normative (protocol rules) - A7: FALSIFIED as enforcement",
+      "agreement": ""
+    },
+    {
+      "key": "claude-code::project",
+      "label": "claude-code x project",
+      "runner": "claude-code",
+      "target": "project",
+      "status": "completed",
+      "compared": true,
+      "n": 1,
+      "why_not": "",
+      "problems": [],
+      "acceptance": "2/2",
+      "wall_seconds": 35.2,
+      "usd": 0.4635435,
+      "tokens": 2342,
+      "rounds": {
+        "dispatch_attempts": 1,
+        "test_cycles": 2,
+        "operator_taps": 0
+      },
+      "scope": {
+        "files_changed": 1,
+        "out_of_scope_hits": [],
+        "frozen_touched": []
+      },
+      "containment": "normative (protocol rules) - A7: FALSIFIED as enforcement",
+      "agreement": ""
+    }
+  ],
+  "not_compared": [],
+  "min_repeats_for_variance": 2
+}

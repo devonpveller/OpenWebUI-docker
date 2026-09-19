@@ -57,6 +57,8 @@ _EXPECTED = [
     ("authelia",         "authelia-backup",         36),
     ("agent-bridge-db",  "agent-bridge-db-backup",  36),
     ("mattermost-db",    "mattermost-db-backup",    36),
+    ("ao-worker-1-journals", "ao-worker-1-journals-backup", 36),
+    ("ao-worker-2-journals", "ao-worker-2-journals-backup", 36),
     ("llm-gateway",      "llm-gateway-backup",      36),
     ("lm-models",        "lm-models-backup",        204),  # weekly + slack
 ]
@@ -94,6 +96,62 @@ def _newest_artifact_age_h(subdir: str) -> float | None:
     return (time.time() - newest) / 3600.0
 
 
+# The OFF-SITE layer. Everything above this line watches ./backups/ — whether the
+# sidecars are producing locally. Nothing watched whether those artifacts ever
+# reached the NAS, which is the copy that survives this machine dying.
+#
+# On 2026-09-13 that gap cost two weekly syncs: the NAS backup-user password
+# expired, backup-to-nas.ps1 failed at `net use`, its only alert channel (the
+# portal-alerter) had been returning 500 since 2026-08-21, and THIS script
+# exited 0 every day throughout because local artifacts were perfectly fresh.
+# Local freshness says nothing about off-site safety.
+_NAS_LOG_GLOB = "nas-sync-*.log"
+_NAS_MAX_AGE_H = 204          # weekly cadence + slack, same basis as lm-models
+_NAS_SUCCESS_MARKER = "=== NAS sync complete ==="
+
+
+def _offsite_status() -> dict:
+    """Freshness AND outcome of the newest NAS sync log.
+
+    Two distinct failures have to be caught, and only checking mtime catches one:
+      • it never ran        -> newest log is old (or absent)
+      • it ran and FAILED   -> log is fresh but never reached the success marker
+    The 2026-09-06 and 09-13 logs are the fixture for the second: both were written
+    at 04:00 on the day, and both end at 'net use failed'.
+    """
+    logs_dir = os.path.join(_REPO_ROOT, "logs")
+    try:
+        import glob
+        paths = glob.glob(os.path.join(logs_dir, _NAS_LOG_GLOB))
+    except Exception:  # noqa: BLE001
+        paths = []
+    if not paths:
+        return {"name": "nas-offsite", "age_h": None, "max_h": _NAS_MAX_AGE_H,
+                "detail": f"no {_NAS_LOG_GLOB} in ./logs — has the weekly sync ever run?"}
+    newest = max(paths, key=lambda p: os.path.getmtime(p))
+    age_h = (time.time() - os.path.getmtime(newest)) / 3600.0
+    base = os.path.basename(newest)
+    try:
+        with open(newest, "r", encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+    except Exception as e:  # noqa: BLE001
+        return {"name": "nas-offsite", "age_h": round(age_h, 1), "max_h": _NAS_MAX_AGE_H,
+                "detail": f"could not read {base}: {e}"}
+
+    if _NAS_SUCCESS_MARKER not in body:
+        last_err = ""
+        for line in reversed(body.splitlines()):
+            if "[ERROR]" in line:
+                last_err = line.strip()[-220:]
+                break
+        return {"name": "nas-offsite", "age_h": round(age_h, 1), "max_h": _NAS_MAX_AGE_H,
+                "detail": f"{base} ran but did NOT complete. Last error: {last_err or '(none logged)'}"}
+    if age_h > _NAS_MAX_AGE_H:
+        return {"name": "nas-offsite", "age_h": round(age_h, 1), "max_h": _NAS_MAX_AGE_H,
+                "detail": f"newest successful sync is {base}, {round(age_h / 24, 1)} days old"}
+    return {}
+
+
 def evaluate() -> dict:
     running = _running_containers()
     stale, skipped, ok = [], [], []
@@ -108,6 +166,14 @@ def evaluate() -> dict:
             stale.append({"name": subdir, "age_h": round(age, 1), "max_h": max_age_h})
         else:
             ok.append(subdir)
+
+    # The off-site layer is NOT gated on a container running: the NAS sync is a
+    # Windows scheduled task, so "no container" must never make it skippable.
+    offsite = _offsite_status()
+    if offsite:
+        stale.append(offsite)
+    else:
+        ok.append("nas-offsite")
     return {"stale": stale, "skipped": skipped, "ok": ok}
 
 
@@ -116,7 +182,12 @@ def build_message(res: dict) -> str:
              "Newest artifact older than its cadence threshold (container is up but not producing):"]
     for s in res["stale"]:
         age = "no artifacts ever" if s["age_h"] is None else f"{s['age_h']}h (> {s['max_h']}h)"
-        lines.append(f"- **{s['name']}** — {age}")
+        if s.get("detail"):
+            # The off-site row carries WHY, because "nas-offsite is stale" alone
+            # sends the reader to the wrong layer (the sidecars are fine).
+            lines.append(f"- **{s['name']}** — {age} — {s['detail']}")
+        else:
+            lines.append(f"- **{s['name']}** — {age}")
     if res["skipped"]:
         lines.append("\n_Skipped (backup container not running — e.g. portal off): "
                      + ", ".join(res["skipped"]) + "._")

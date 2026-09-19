@@ -1,0 +1,37 @@
+{
+  "id": "u4-baseline",
+  "version": 1,
+  "_why": [
+    "THE CONTROL OF THE EXPERIMENT. U4 compares quadrants by running the same anchored item",
+    "in each; 'the same' is the only control the comparison has, so it is a committed",
+    "artifact with a content digest rather than a prompt somebody retypes per run.",
+    "",
+    "WHY THIS TASK. It has to be (a) small enough that a local model on the little-coder",
+    "runner can plausibly finish it, or the local quadrants measure the task's size rather",
+    "than the runner; (b) discriminating - the accent-folding and separator-collapsing cases",
+    "are where a weaker model's naive regex actually fails, so the acceptance rate carries",
+    "information instead of being 2/2 everywhere; (c) checkable with the standard library",
+    "alone, because a quadrant that fails on a missing package has told you nothing about",
+    "the quadrant; and (d) portable, because the same item must run in a worktree of THIS",
+    "repository (target self) and in a scratch clone (target project) unchanged.",
+    "",
+    "WHY THE TASK TEXT IS A FIELD AND NOT A README IN files/. Whatever is planted is",
+    "writable by the runner. The instructions have to come from outside the workspace or a",
+    "runner can rewrite its own brief - which, unlike editing the tests, would not even",
+    "leave a trace in the acceptance results."
+  ],
+
+  "task": "The directory `quadrant-item/` in this workspace contains two files: `slugify.py`, which holds a stub `slugify(text)` that raises NotImplementedError, and `test_slugify.py`, which specifies exactly what `slugify` must do. Implement `slugify(text)` in `quadrant-item/slugify.py` so that every test in `quadrant-item/test_slugify.py` passes. Use only the Python standard library. Do NOT modify `quadrant-item/test_slugify.py`. Do NOT create or modify any file other than `quadrant-item/slugify.py`. When the implementation is complete, stop.",
+
+  "plant_prefix": "quadrant-item",
+  "anchor": "anchor.json",
+
+  "allowed_paths": ["quadrant-item/slugify.py"],
+  "frozen_paths": ["quadrant-item/test_slugify.py"],
+
+  "fixture_solution": {
+    "from": "solution/slugify.py",
+    "to": "quadrant-item/slugify.py",
+    "_why": "used ONLY by the self-test fixture runner, which is why it lives outside files/ and outside the item digest: it is not part of what a real runner is given."
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "version": 2,
+  "declared": [
+    "little-coder::self",
+    "little-coder::project",
+    "claude-code::self",
+    "claude-code::project"
+  ],
+  "venue": {
+    "name": "gym",
+    "kind": "gym",
+    "repo": "D:\\Open WebUI\\ai-orchestration-gym",
+    "ref": "main",
+    "source": "config quadrant.venues.gym.repo",
+    "identity": "root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d"
+  },
+  "_why": [
+    "The cells THIS results set is a comparison over. Append-only: a cell that",
+    "has ever been declared stays declared, so narrowing quadrant.runners or",
+    "quadrant.targets cannot shrink the comparison into looking complete.",
+    "Delete this file and the declared matrix falls back to the configuration",
+    "plus every cell the records name - which is weaker, and is why it is",
+    "written rather than derived.",
+    "",
+    "`venue` is pinned on FIRST write and never rewritten: a results set is a",
+    "comparison over one PLACE as well as one item, and the report renders THIS",
+    "block rather than whatever the configuration resolves to today.",
+    "",
+    "WHAT record.admit ACTUALLY ENFORCES, corrected 2026-08-30. This text used",
+    "to say it 'refuses a record from any other venue'. It refused a record",
+    "from any other NAME - and a verifier re-pointed four records' venue.repo",
+    "at D:/SomeOther/arena-clone, left the name as `gym`, and all four were",
+    "admitted: COMPARED 4/4, exit 0. Admission now compares the REPOSITORY",
+    "IDENTITY (`identity` below - the root commit reachable from `ref`) where",
+    "both this pin and the record carry one; a pin with an identity refuses a",
+    "record without one; and a set predating identity is compared on every",
+    "label it carries, with the refusal saying that is the weaker check."
+  ],
+  "updated_utc": "20260831T232534Z"
+}

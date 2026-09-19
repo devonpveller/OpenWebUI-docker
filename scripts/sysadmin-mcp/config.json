@@ -17,6 +17,8 @@
     "ao_worker_tmp_warn_gb": 20,
     "container_log_warn_gb": 2,
     "vhdx_trapped_warn_gb": 60,
+    "vhdx_compact_min_gb": 20,
+    "volume_orphan_cold_days": 14,
     "volume_reclaimable_warn_gb": 25,
     "image_reclaimable_warn_gb": 25
   },

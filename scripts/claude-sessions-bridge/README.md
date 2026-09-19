@@ -1,7 +1,7 @@
 # Claude-Sessions bridge — Mattermost threads ⟷ Claude Code sessions
 
 The inbound half of
-[claude-code-mattermost-bridge/DESIGN.md](../../documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md)
+[claude-code-mattermost-bridge/DESIGN.md](../../../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md)
 (P-CCB.1 "thread = session" + the P-CCB.3 mid-turn approval relay), built 2026-07-13.
 
 ## What it does
@@ -89,10 +89,16 @@ Manual foreground run (debugging): `& .venv\Scripts\python.exe scripts\claude-se
    switches without running a turn. **`bypassPermissions` is refused** both via directive and
    flag — that's the bridge's hard floor. Note: headless `auto` is somewhat more conservative
    than interactive auto (e.g. first-time file writes may still ask). `--setting-sources
-   user,project` excludes `settings.local.json`, so allow-rules accumulated in interactive
-   sessions don't widen what a remote message can do.
-3. **Hard gate** — every gated tool call stops for an explicit in-thread `approve`;
-   deny and timeout both return deny to Claude, which then adapts or wraps up.
+   user,project,local` (operator, 2026-08-28) means bridge sessions honour the **same**
+   `.claude/settings.local.json` allow-list as interactive ones — add or remove a rule once and
+   both follow it. (It previously excluded `local`; that left remote sessions with no
+   pre-approved commands at all, so every call fell to the classifier.)
+3. **Hard gate** — a gated tool call stops for an explicit in-thread `approve`; deny and
+   timeout both return deny to Claude, which then adapts or wraps up. **Caveat — the `auto`
+   classifier has three verdicts, not two:** allow, *ask* (→ relayed here for approve/deny),
+   and **deny outright**. A hard deny never reaches the relay, so `approve` cannot lift one —
+   the turn reports it in-thread with the rule to add. Only an allow-rule (or a non-classifier
+   `mode:`) gets that class of command to run.
 4. **Budget rails** — `--max-budget-usd` per turn (default $50). On a subscription nothing is
    billed — this is a runaway-turn backstop (the estimate tracks Max-quota burn), sized to
    never fire on legitimate work; a budget-killed turn says so in-thread with recovery options.
@@ -130,7 +136,7 @@ Creating a bot account needs Mattermost admin rights (bot-pm's token can't — 4
 ## Config (env vars, all optional)
 
 See the docstring at the top of `bridge.py` for the full table. The ones you'll actually
-touch: `BRIDGE_MODEL` (e.g. `haiku` for cheap tests; default = the CLI's default model),
+touch: `BRIDGE_MODEL` (the model every unpinned thread runs on; default `opus`),
 `BRIDGE_OPERATORS`, `BRIDGE_APPROVAL_TIMEOUT` (default 1800 s), `BRIDGE_MAX_BUDGET_USD`,
 `BRIDGE_REPO` (working dir for sessions). `BRIDGE_ALLOW_SELF=1` is **smoke-test only** — it
 lets the bot's own posts drive sessions.
@@ -146,11 +152,16 @@ lets the bot's own posts drive sessions.
 
 - Every result post ends with **`[model:<id>]`** — the model that *actually* ran the turn
   (from its usage report), so behavior can be tracked per model.
+- **The bridge default is `opus`** and is always passed explicitly (operator, 2026-08-28).
+  It used to pass no `--model` at all, which let every unpinned thread inherit the account's
+  default — that silently became the top-tier `claude-fable-5[1m]`, the most expensive model,
+  on 30 of 41 threads. Move the whole bridge with `BRIDGE_MODEL`, never by leaving it unset.
 - **`model: <alias-or-id>`** at the start of any message (colon required) sets the model for
   that thread's turns from then on — e.g. `model: haiku`, `model: sonnet`, `model: fable`.
   Persisted per thread; wins over `BRIDGE_MODEL`; a directive-only message just switches it
-  (🎛️ ack, no turn). Precedence: thread `model:` > `BRIDGE_MODEL` env > CLI default
-  (`~/.claude/settings.json` → currently `claude-fable-5[1m]`).
+  (🎛️ ack, no turn). Precedence: thread `model:` > `BRIDGE_MODEL` env > `opus`.
+- **`model: default`** (or `model: reset`) drops a thread's pin and returns it to the bridge
+  default. It is not a CLI alias, so it is never forwarded as `--model default`.
 - Combine with handoff: put `model: …` on the first line, `handoff`/`fork` after it.
 
 ### Session handoff (desktop → Mattermost)

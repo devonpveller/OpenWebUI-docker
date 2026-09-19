@@ -29,10 +29,16 @@
 #   - openbrain-mcp         running + STALE-POOL guard (db started after mcp -> restart)
 #   - openbrain-mcpo[-ext]  running               (the Open WebUI tool bridge)
 #   - openbrain-research    http://127.0.0.1:8818/health "db":true  (STALE-POOL guard, same class as mcp)
+#   - openbrain-curator     http://127.0.0.1:8816/health "db":true  (same guard; absent = the 2026-09-05 loop)
 #   - openbrain-gateway     http://127.0.0.1:8061/health == "ok"   (functional, no secret)
 #   - openbrain-rest        http://127.0.0.1:3001/   (PostgREST proxy reachable)
 #   - openbrain-postgrest / -wiki / -wiki-viewer / -entity-worker  running
 #   - openbrain-idea-refinery  running (Idea Refinery drain; profile-gated, liveness only)
+#   - research_jobs         status='error' rows in the last 24 h -> WARN naming count +
+#                           newest id + left(error,80); none -> OK. Queried with
+#                           `docker exec <db> psql -U postgres` over the container's
+#                           unix socket - no password leaves this script (the same
+#                           pattern scripts/checks/smoke-agent-memory-live.ps1 uses).
 #
 # Usage:
 #   .\scripts\check-openbrain-health.ps1            # detect + report, exit 0/1
@@ -48,7 +54,13 @@ param(
   # When set, non-suppressed status lines are ALSO appended (timestamped) to this
   # file. The autonomous monitor passes its own logs\tailscale-health.log so the
   # per-container detail survives — Write-Host output is not capturable via 2>&1.
-  [string]$LogPath
+  [string]$LogPath,
+  # The Postgres container the research_jobs query runs in. Defaults to the
+  # production database; a tester points it at an isolated copy so no production
+  # row is ever created. The liveness / stale-pool probes stay on 'openbrain-db'
+  # - they describe THIS stack, the query describes a table.
+  [string]$DbContainer = 'openbrain-db',
+  [string]$DbName = 'openbrain'
 )
 
 $ErrorActionPreference = 'Continue'
@@ -127,6 +139,31 @@ Write-Host "==> Open Brain stack health (project: open-brain)" -ForegroundColor 
 # ---- 1. Database (the dependency the stale-pool bug hinges on) --------------
 $dbUp = Confirm-ObContainer 'openbrain-db' -Critical
 
+# ---- 1b. Failed research runs --------------------------------------------
+# A research job that ended status='error' is invisible on every surface above:
+# the service is running, /health says db:true, the job row just sits there.
+# One query, newest error first; updated_at is stamped by the table's touch
+# trigger when the status flips, so "last 24 h" means "failed in the last 24 h",
+# not "was submitted then". A query failure (table missing, psql absent) is a
+# fault too - an unreadable table is not a clean one.
+if ((Get-CState $DbContainer) -eq 'running') {
+  $rjSql = "SELECT count(*) OVER (), id, left(regexp_replace(coalesce(error, ''), '[[:space:]|]+', ' ', 'g'), 80) FROM public.research_jobs WHERE status = 'error' AND updated_at >= now() - interval '24 hours' ORDER BY updated_at DESC LIMIT 1"
+  $rjOut = (& docker exec $DbContainer psql -U postgres -d $DbName -tA -v ON_ERROR_STOP=1 -c $rjSql 2>&1 | Out-String)
+  $rjRow = ($rjOut -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1)
+  if ($LASTEXITCODE -ne 0) {
+    # (a native stderr line arrives as 'docker.exe : ERROR: ...' under 2>&1 - drop the prefix)
+    $rjRow = $rjRow -replace '^docker(\.exe)? : ', ''
+    Write-Ob 'research_jobs' warn "query failed on ${DbContainer}: $rjRow"; $script:Faults++
+  } elseif (-not $rjRow) {
+    Write-Ob 'research_jobs' ok "no status='error' rows in 24 h ($DbContainer)"
+  } else {
+    $rjF = $rjRow -split '\|', 3
+    Write-Ob 'research_jobs' warn ("{0} error(s) in 24 h; newest {1}: {2}" -f $rjF[0], $rjF[1], $rjF[2]); $script:Faults++
+  }
+} else {
+  Write-Ob 'research_jobs' warn "not queried ($DbContainer is not running)"; $script:Faults++
+}
+
 # ---- 2. MCP server + the stale-pool guard (today's failure mode) -----------
 $mcpUp = Confirm-ObContainer 'openbrain-mcp' -Critical
 if ($dbUp -and $mcpUp) {
@@ -184,6 +221,34 @@ if ((Get-CState 'openbrain-research') -eq 'running') {
   }
 } else {
   Confirm-ObContainer 'openbrain-research' | Out-Null
+}
+
+# openbrain-curator /health is the same shape as research's (`SELECT 1` through
+# the ResilientPool -> {"ok","db"}, 503 when the pool is dead) and it publishes
+# 127.0.0.1:8816 unauthenticated. It was absent from this script entirely while
+# it crash-looped for 14 h on 2026-09-05 ("Module not found file:///app/pool.ts",
+# an image built without a module index.ts imports) -- the operator learned of
+# it from an unrelated disk check. A looping container is never `running`, so
+# the Confirm-ObContainer branch catches that case; the /health branch catches a
+# running curator whose DB pool has gone stale.
+if ((Get-CState 'openbrain-curator') -eq 'running') {
+  if (Test-HttpOk 'http://127.0.0.1:8816/health' 5 '"db":true') {
+    Write-Ob 'openbrain-curator' ok '/health db ok (:8816)'
+  } else {
+    Write-Ob 'openbrain-curator' warn 'STALE DB POOL: /health not db-ok on :8816'
+    if ($Repair) {
+      Write-Ob 'openbrain-curator' fix 'docker restart openbrain-curator (re-open DB pool)'
+      docker restart openbrain-curator 2>&1 | Out-Null
+      Start-Sleep 5
+      if (Test-HttpOk 'http://127.0.0.1:8816/health' 5 '"db":true') { Write-Ob 'openbrain-curator' ok '/health recovered' }
+      else { Write-Ob 'openbrain-curator' down '/health still failing'; $script:Faults++ }
+    } else {
+      Write-Ob 'openbrain-curator' warn 'run with -Repair to restart (fixes research ingest 5xx / stale pool)'
+      $script:Faults++
+    }
+  }
+} else {
+  Confirm-ObContainer 'openbrain-curator' | Out-Null
 }
 
 # Gateway /health is the privacy proxy Claude/cloud clients reach at :8061.

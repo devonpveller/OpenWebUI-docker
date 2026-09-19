@@ -26,8 +26,13 @@ file named `github-chat-mcp.md`). All 8 exported live from `webui.db`
 2026-08-20; the old partial root `skills/` folder (3 of 8, stale names) was
 retired the same day in favour of this complete set.
 
-`manifest.csv` lists `file, type, name, owui_id, bytes` for all 16 function
-files + the 8 skills. Functions are
+`manifest.csv` lists `file, type, name, owui_id, sha256` for all 13 tool/function
+files + the 8 skills — 21 rows (the "16" this line carried until 2026-09-06 was
+the pre-retirement count; `add_web_sources_to_knowledge`, `code_agent` and
+`code_agent_tools` left the manifest in August and the total was never
+recomputed). The `sha256` column is the CR-normalized digest of the repo file,
+which is what `scripts/checks/check-owui-drift.ps1` compares against the live
+row. Functions are
 async-compatible with OWUI **0.11.0** (re-verified 2026-08-20 against v0.11.0
 source: `Files/Groups/Chats/Notes/Knowledges` model methods are still `async`,
 so the 2026-06 async port carries forward unchanged).
@@ -53,11 +58,30 @@ centralized here:
 
 ## Deployment sync status
 
-**2026-08-20 — all 16 files here are byte-identical to the live `webui.db`**
-(CR-normalized SHA-256 compared against the deployed `content` of every tool and
-function). `manifest.csv` byte counts were regenerated at the same time.
+**Ask the check, not this file:**
 
-`tools/deep_research.py` was re-pasted the same day at **v1.2.0** (async
+```powershell
+powershell -NoProfile -File scripts\checks\check-owui-drift.ps1
+```
+
+It compares the CR-normalized SHA-256 of every `manifest.csv` row against the
+live `content` in the `openwebui` container's `webui.db` (hashed inside the
+container; read-only, `mode=ro`) and prints IN SYNC / DIFFERS / MISSING LIVE /
+MISSING REPO per row, exit 1 on any difference and exit 2 — with a sentence —
+if it could not read the container at all. `stack.ps1 health` runs it for the
+drifted count.
+
+A dated sentence here cannot stay true: the 2026-08-20 claim that "all 16 files
+are byte-identical to the live `webui.db`" was checked by hand once and had no
+way to notice the next unpasted fix. **`manifest.csv` digests were regenerated
+2026-09-06**, which dates the column and nothing else — the live side moves
+without touching this repo, so only a run of the check says anything about now.
+
+What the check will not tell you: whether a plugin WORKS, whether OWUI has
+reloaded it, whether its **valves** are right (a separate column, never read),
+or which side is newer when two hashes differ.
+
+`tools/deep_research.py` was re-pasted on 2026-08-20 at **v1.2.0** (async
 completion callback: the tool hands off and the `openbrain-research` engine POSTs
 the finished report back into the chat message). Verified live in `webui.db`.
 The tool reads `callback_armed` from the engine's submit response, so it is safe
@@ -65,7 +89,8 @@ against an older engine — it simply keeps blocking — but the engine needs
 `RESEARCH_OWUI_API_KEY` in **`OB1/docker/.env`** before the callback does
 anything, and a key in the main stack `.env` silently reads as "not armed".
 
-The two drift items previously recorded here are resolved:
+History — the two drift items recorded here were resolved by the 2026-08-20
+hand check; the drift check above is what answers this question now:
 
 - **`pipes/server_status.py`** (Server Status) — WAS stale; rebuilt and
   redeployed during the 0.11.0 upgrade. Since 2026-08-20 its build source is

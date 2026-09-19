@@ -1,0 +1,131 @@
+{
+    "id":  "u4-stall-probe-20260831T232410Z",
+    "branch":  "work/u4-stall-probe-20260831T232410Z",
+    "line":  "refactor/ai-stack-cleanup",
+    "developer":  "observer",
+    "state":  "test-failed",
+    "anchor":  {
+                   "goal":  "Observe frontier-oracle-on-stall firing on a stall that happened.",
+                   "artifact":  "An oracle-escalation ledger row produced by queue.ps1 -Fail from real rounds.",
+                   "audience":  "Whoever checks U4\u0027s Validated-by column.",
+                   "acceptance":  [
+                                      "The rounds before the threshold record no escalation.",
+                                      "The threshold round records exactly one escalation naming the local runner."
+                                  ],
+                   "out_of_scope":  [
+                                        "The live queue namespace - this probe runs in a scratch state dir."
+                                    ],
+                   "findings_sink":  "documentation/notes/u4close-findings.md"
+               },
+    "anchor_file":  "D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.anchor.json",
+    "anchor_confirmed_by":  "observe-oracle-on-stall.ps1 (scratch namespace; PLAN C.1 - NOT an operator confirmation)",
+    "anchor_confirmed_at":  1788218877,
+    "gates":  {
+                  "anchor":  {
+                                 "kind":  "human",
+                                 "by":  "observe-oracle-on-stall.ps1 (scratch namespace; PLAN C.1 - NOT an operator confirmation)",
+                                 "at":  1788218877,
+                                 "profile":  "attended"
+                             },
+                  "pre_review":  {
+                                     "kind":  "",
+                                     "by":  "",
+                                     "at":  0,
+                                     "profile":  ""
+                                 }
+              },
+    "test_plan":  "D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.plan.md",
+    "thread":  "",
+    "attempt":  3,
+    "line_mergeable":  false,
+    "submitted_sha":  "21a9c59a9e67db30bd71bd6c6d52e6b21a32c990",
+    "tested_at_sha":  "21a9c59a9e67db30bd71bd6c6d52e6b21a32c990",
+    "merged_sha":  "",
+    "results":  [
+                    {
+                        "at":  1788218878,
+                        "by":  "observer-tester",
+                        "verdict":  "fail",
+                        "sha":  "97894e7a394edbd0a65970b98c82a02b3d45258f",
+                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
+                        "plan_adequate":  true
+                    },
+                    {
+                        "at":  1788218879,
+                        "by":  "observer-tester",
+                        "verdict":  "fail",
+                        "sha":  "f6753fb40b5a1844a21bec7d4b60b4c8d14a179d",
+                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
+                        "plan_adequate":  true
+                    },
+                    {
+                        "at":  1788218880,
+                        "by":  "observer-tester",
+                        "verdict":  "fail",
+                        "sha":  "21a9c59a9e67db30bd71bd6c6d52e6b21a32c990",
+                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
+                        "plan_adequate":  true
+                    }
+                ],
+    "history":  [
+                    {
+                        "at":  1788218876,
+                        "who":  "observer",
+                        "what":  "anchor proposed"
+                    },
+                    {
+                        "at":  1788218877,
+                        "who":  "observe-oracle-on-stall.ps1 (scratch namespace; PLAN C.1 - NOT an operator confirmation)",
+                        "what":  "anchor confirmed"
+                    },
+                    {
+                        "at":  1788218877,
+                        "who":  "observer",
+                        "what":  "submitted for testing"
+                    },
+                    {
+                        "at":  1788218878,
+                        "who":  "observer-tester",
+                        "what":  "claimed as tester"
+                    },
+                    {
+                        "at":  1788218878,
+                        "who":  "observer-tester",
+                        "what":  "tests FAILED (attempt 1): the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one."
+                    },
+                    {
+                        "at":  1788218879,
+                        "who":  "observer",
+                        "what":  "re-submitted for testing (attempt 2)"
+                    },
+                    {
+                        "at":  1788218879,
+                        "who":  "observer-tester",
+                        "what":  "claimed as tester"
+                    },
+                    {
+                        "at":  1788218879,
+                        "who":  "observer-tester",
+                        "what":  "tests FAILED (attempt 2): the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one."
+                    },
+                    {
+                        "at":  1788218880,
+                        "who":  "observer",
+                        "what":  "re-submitted for testing (attempt 3)"
+                    },
+                    {
+                        "at":  1788218880,
+                        "who":  "observer-tester",
+                        "what":  "claimed as tester"
+                    },
+                    {
+                        "at":  1788218880,
+                        "who":  "observer-tester",
+                        "what":  "tests FAILED (attempt 3): the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one."
+                    }
+                ],
+    "profile":  "local-work-cloud-review"
+}

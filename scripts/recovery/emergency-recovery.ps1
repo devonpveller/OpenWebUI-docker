@@ -50,6 +50,9 @@ $ErrorActionPreference = "Stop"
 # ──────────────────────────────────────────────────────────────────────────
 
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
+# The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
+# filters `docker ps` by it, so it sees the same containers compose does.
+$Script:OB1Project = "open-brain"
 
 # agent-org (teams-chat agent orchestration) is ALSO a separate compose project
 # (project name "agent-org", agent-org\docker\docker-compose.yml). Like OB1 it attaches
@@ -113,7 +116,7 @@ $Script:MainStackServices = @()
 # (PostgREST proxy) so they sort after it.
 $Script:OB1Services = @(
     "openbrain-db", "openbrain-mcp", "openbrain-ext",
-    "openbrain-gateway",
+    "openbrain-gateway", "openbrain-ops-gateway",
     "openbrain-mcpo", "openbrain-mcpo-ext", "openbrain-postgrest",
     "openbrain-rest", "openbrain-entity-worker",
     "openbrain-suggestion-worker", "openbrain-curator", "openbrain-research", "openbrain-chunk-worker",
@@ -275,6 +278,64 @@ function Stop-PlaneStack {
     }
 }
 
+function Wait-ForRestartLoops {
+    # After an OB1 `up -d`, watch the project for $Seconds and NAME every
+    # container seen in a restart loop. `up -d` returns as soon as containers
+    # are created, so the SUCCESS line after it has always meant "compose did
+    # not error", never "the containers stayed up": openbrain-curator looped
+    # for 14 h on 2026-09-05 ("Module not found" at entrypoint) with nothing
+    # in this log saying so. A looping container spends most of its life as
+    # "Up 2 seconds", so one sample at the end would miss it - it is sampled
+    # every $PollSeconds and flagged if it is EVER seen Restarting.
+    #
+    # Function-level testable without the stack: -PsCommand returns the lines
+    # `docker ps` would ("<name>|<status>", one per container) and
+    # -LogsCommand returns the log tail for one name; both default to the
+    # real docker calls. The test plan feeds a synthetic Restarting line and a
+    # stub log command with -Seconds 0. Returns the sorted looping names
+    # (an empty array means clean). Rebuilding an image is a DEPLOY
+    # (scripts/stack/ob1-deploy.ps1), never something recovery does.
+    #
+    # WHAT THIS DOES NOT SEE, by design: a container that flapped ONCE - a
+    # sub-second crash-and-restart that never shows as "Restarting" in any
+    # sample - is not named. This watches PRE-EXISTING containers by their
+    # `docker ps` status and asks "is anything looping NOW?". The deploy
+    # door watches the FRESH container it just created by RestartCount and
+    # fails on any restart at all ("did what I just started stay up?"). The
+    # two answer a once-flap differently on purpose; neither is the other.
+    param(
+        [int]$Seconds = 60,
+        [int]$PollSeconds = 5,
+        [scriptblock]$PsCommand = { docker ps -a --filter "label=com.docker.compose.project=$($Script:OB1Project)" --format "{{.Names}}|{{.Status}}" },
+        [scriptblock]$LogsCommand = { param($Name) docker logs --tail 5 $Name 2>&1 }
+    )
+    $seen = @{}
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ($true) {
+        $lines = @(& $PsCommand)
+        foreach ($line in $lines) {
+            if (-not $line) { continue }
+            $parts = [string]$line -split '\|', 2
+            if ($parts.Count -lt 2) { continue }
+            $name = $parts[0].Trim(); $status = $parts[1].Trim()
+            if ($status -match '^Restarting') { $seen[$name] = $status }
+        }
+        if ((Get-Date) -ge $deadline) { break }
+        Start-Sleep -Seconds $PollSeconds
+    }
+    $looping = @($seen.Keys | Sort-Object)
+    foreach ($name in $looping) {
+        Write-Log "WARN" "RESTART LOOP: $name ($($seen[$name])) - last 5 log lines:"
+        try {
+            foreach ($l in @(& $LogsCommand $name)) { Write-Log "WARN" "    $name | $l" }
+        }
+        catch {
+            Write-Log "WARN" "    $name | (docker logs failed: $_)"
+        }
+    }
+    return ,$looping
+}
+
 function Start-OB1Stack {
     # Bring the Open Brain (OB1) compose project up. OB1's own depends_on
     # handles its internal ordering; it must run AFTER the main stack so
@@ -287,7 +348,14 @@ function Start-OB1Stack {
     try {
         # --profile idea-refinery so the (profile-gated) Idea Refinery drain is (re)started too.
         docker compose -f $Script:OB1Compose --profile idea-refinery up -d
-        Write-Log "SUCCESS" "Open Brain (OB1) stack started"
+        Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it started..."
+        $looping = Wait-ForRestartLoops -Seconds 60
+        if ($looping.Count -eq 0) {
+            Write-Log "SUCCESS" "Open Brain (OB1) stack started - no restart loop in 60 s"
+        }
+        else {
+            Write-Log "WARN" "Open Brain (OB1) stack started WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
+        }
     }
     catch {
         Write-Log "WARN" "Failed to start OB1 stack: $_"
@@ -305,7 +373,14 @@ function Reset-OB1Stack {
         docker compose -f $Script:OB1Compose --profile idea-refinery down
         Start-Sleep -Seconds 5
         docker compose -f $Script:OB1Compose --profile idea-refinery up -d
-        Write-Log "SUCCESS" "OB1 stack recreated"
+        Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it recreated..."
+        $looping = Wait-ForRestartLoops -Seconds 60
+        if ($looping.Count -eq 0) {
+            Write-Log "SUCCESS" "OB1 stack recreated - no restart loop in 60 s"
+        }
+        else {
+            Write-Log "WARN" "OB1 stack recreated WITH $($looping.Count) container(s) in a restart loop: $($looping -join ', ')"
+        }
     }
     catch {
         Write-Log "WARN" "OB1 recreate had issues: $_"
@@ -403,7 +478,15 @@ function Test-BasicConnectivity {
             try {
                 $ob1 = docker compose -f $Script:OB1Compose ps --format json | ConvertFrom-Json
                 $ob1Running = @($ob1 | Where-Object { $_.State -eq "running" }).Count
-                Write-Log "INFO" "OB1    - $ob1Running/$($Script:OB1Services.Count) openbrain containers running"
+                # A looping container is named, not folded into the count: "28/29
+                # running" hid a 14 h curator loop on 2026-09-05.
+                $ob1Looping = @($ob1 | Where-Object { $_.State -eq "restarting" } | ForEach-Object { $_.Name })
+                if ($ob1Looping.Count -gt 0) {
+                    Write-Log "WARN" "OB1    - $ob1Running/$($Script:OB1Services.Count) openbrain containers running; RESTART LOOP: $($ob1Looping -join ', ')"
+                }
+                else {
+                    Write-Log "INFO" "OB1    - $ob1Running/$($Script:OB1Services.Count) openbrain containers running"
+                }
             }
             catch {
                 Write-Log "WARN" "OB1 status unavailable: $_"

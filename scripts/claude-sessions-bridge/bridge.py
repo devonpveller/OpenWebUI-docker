@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Claude-Sessions bridge — Mattermost threads ⟷ headless Claude Code sessions.
 
-The inbound half of documentation/implementation-guide/claude-code-mattermost-bridge/DESIGN.md
+The inbound half of ../documentation-plans-ai-stack/implementation-guide/claude-code-mattermost-bridge/DESIGN.md
 (P-CCB.1 with the P-CCB.3 mid-turn approval relay built in):
 
   #claude-sessions channel
@@ -30,7 +30,7 @@ Config via env (all optional):
   BRIDGE_OPERATORS         comma-separated usernames allowed to drive sessions (default profnovice)
   BRIDGE_REPO              working directory for sessions    (default this repo)
   BRIDGE_CLAUDE_BIN        path to claude CLI                (default: PATH, then newest VS Code ext)
-  BRIDGE_MODEL             model override (e.g. haiku)       (default: CLI default)
+  BRIDGE_MODEL             model for every turn              (default: opus — see MODEL below)
   BRIDGE_MAX_BUDGET_USD    per-turn cost-estimate backstop   (default 50; "" disables)
   BRIDGE_PERMISSION_MODE   default approval level            (default "auto"; per-thread
                            override via `mode: <level>` — bypassPermissions is refused)
@@ -38,8 +38,18 @@ Config via env (all optional):
   BRIDGE_APPROVAL_TIMEOUT  seconds an approval waits         (default 1800)
   BRIDGE_POLL_INTERVAL     channel poll seconds              (default 4)
   BRIDGE_MAX_CONCURRENT    concurrent turns across threads   (default 2)
-  BRIDGE_SETTING_SOURCES   claude --setting-sources          (default "user,project" — excludes
-                           settings.local.json so interactively-saved allows don't widen remote floor)
+  BRIDGE_SETTING_SOURCES   claude --setting-sources          (default "user,project,local" —
+                           ONE allow-list shared with interactive sessions, see SETTING_SOURCES)
+  BRIDGE_WORKTREE_DEFAULT  run threads in their own git worktree (default "off";
+                           per-thread override via `worktree: on|off`)
+
+  The agent harness (scripts/agent-harness) is configured in ITS OWN file, not here -
+  harness.config.json holds the role/model profiles and the on/off switches. From a thread:
+    profile: <name>        which models the worker/tester/reviewer roles run on
+    profile: list          show the profiles and what this thread is using
+    profile: default       drop the thread pin, back to the configured default
+  `model:` is the model of the session you are talking to; `profile:` is the models of the
+  agents it dispatches. With the harness disabled these directives say so and do nothing.
   BRIDGE_ALLOWED_TOOLS     optional extra --allowedTools floor (e.g. "Read Glob Grep")
   BRIDGE_ALLOW_SELF        "1" = treat the bot's own posts as operator input (smoke tests only)
 """
@@ -95,13 +105,20 @@ sys.path.insert(0, os.path.join(_HERE, "..", "mattermost-mcp"))
 sys.path.insert(0, _HERE)
 import server as mmapi  # noqa: E402
 import sessions as sessions_mod  # noqa: E402
+from inbox import Inbox  # noqa: E402
 
 # ── config ───────────────────────────────────────────────────────────────────
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  # #claude-sessions
 OPERATORS = {u.strip().lower() for u in os.environ.get("BRIDGE_OPERATORS", "profnovice").split(",") if u.strip()}
 
 REPO = os.environ.get("BRIDGE_REPO", _REPO_ROOT)
-MODEL = os.environ.get("BRIDGE_MODEL", "")
+# Pinned, NOT "whatever the CLI would pick" (operator, 2026-08-28). Passing no --model let every
+# unpinned thread inherit the account's default, which now resolves to the top-tier model
+# (fable, $10/$50 per Mtok) — 30 of 41 threads were silently running there. `opus` is the
+# operator's choice of floor; raise a single thread with `model: fable`, drop one with
+# `model: sonnet`/`haiku`, or move the whole bridge with BRIDGE_MODEL.
+MODEL = os.environ.get("BRIDGE_MODEL", "opus")
+
 # Per-turn cost-estimate cap. On a subscription nothing is billed — this is purely a
 # runaway-turn backstop (a "$50" turn ≈ a huge chunk of the Max usage window), sized so it
 # never fires on legitimate work. Set to "" to disable entirely.
@@ -114,7 +131,44 @@ TURN_TIMEOUT = int(os.environ.get("BRIDGE_TURN_TIMEOUT", "7200"))
 APPROVAL_TIMEOUT = int(os.environ.get("BRIDGE_APPROVAL_TIMEOUT", "1800"))
 POLL_INTERVAL = max(2, int(os.environ.get("BRIDGE_POLL_INTERVAL", "4")))
 MAX_CONCURRENT = max(1, int(os.environ.get("BRIDGE_MAX_CONCURRENT", "2")))
-SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project")
+# Includes `local` (operator, 2026-08-28), reversing the original "don't let interactively-saved
+# allows widen the remote floor". Rationale: ONE allow-list is the dependency for both session
+# kinds, so a rule added or removed in `.claude/settings.local.json` moves them together — no
+# second list to keep in sync, and no class of command that works at the desk but dies remotely.
+# The hard floor is unchanged and lives elsewhere: bypassPermissions is refused, every gated call
+# still relays to the thread, and only BRIDGE_OPERATORS can drive a session at all.
+SETTING_SOURCES = os.environ.get("BRIDGE_SETTING_SOURCES", "user,project,local")
+# Worktree-per-thread (2026-08-28). OFF by default: it changes WHERE every turn runs, so
+# it opts in per thread (`worktree: on`) until it has soaked. When on, a thread gets its
+# own checkout + branch and can no longer collide with another session's staged work.
+# Tooling and protocol: scripts/agent-harness/, documentation/implementation-guide/
+# multi-agent-concurrency/MERGE-PROTOCOL.md.
+WORKTREE_DEFAULT = os.environ.get("BRIDGE_WORKTREE_DEFAULT", "off").strip().lower() in (
+    "1", "on", "true", "yes")
+WORKTREE_SCRIPTS = os.path.join(_REPO_ROOT, "scripts", "agent-harness")
+# The agent harness is a MODULE (scripts/agent-harness). The bridge reaches it through this
+# one import and nothing else, so removing the module means removing this block and the
+# directives that use it - see scripts/agent-harness/MODULE.md. Import failure is not fatal:
+# a bridge that cannot orchestrate agents is still a bridge.
+sys.path.insert(0, WORKTREE_SCRIPTS)
+try:
+    import config as harness_config  # scripts/agent-harness/config.py
+except Exception as _harness_exc:  # noqa: BLE001
+    harness_config = None
+    _HARNESS_IMPORT_ERROR = str(_harness_exc)
+else:
+    _HARNESS_IMPORT_ERROR = ""
+
+
+def harness_off_reason() -> str:
+    """"" when the harness may be used from Mattermost, else why it may not."""
+    if harness_config is None:
+        return f"the agent harness module could not be loaded ({_HARNESS_IMPORT_ERROR})"
+    try:
+        return harness_config.disabled_reason("mattermost")
+    except Exception as e:  # noqa: BLE001
+        return f"the agent harness configuration is unreadable ({e})"
+
 ALLOWED_TOOLS = os.environ.get("BRIDGE_ALLOWED_TOOLS", "")
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 
@@ -143,6 +197,9 @@ STATE_DIR = os.environ.get("BRIDGE_STATE_DIR") or os.path.join(_HERE, "state")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
 AUDIT_FILE = os.path.join(STATE_DIR, "audit.jsonl")
 APPROVALS_LOG = os.path.join(STATE_DIR, "approvals.jsonl")
+# Durable operator-message log (see inbox.py). Under STATE_DIR so it moves with the
+# rest of the bridge state and BRIDGE_STATE_DIR redirects it for tests.
+INBOX_DIR = os.path.join(STATE_DIR, "inbox")
 
 # Matches approval_server.py — verdict replies during a running turn belong to the approval
 # relay, not to the session's prompt queue.
@@ -191,6 +248,26 @@ CANCEL_EMOJI = {"-1", "thumbsdown"}
 # Per-thread approval level: `mode: <level>` (colon required, like `model:`). bypassPermissions
 # is deliberately NOT reachable from a chat message — that's the bridge's hard floor.
 MODE_DIRECTIVE_RE = re.compile(r"^\s*mode\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
+
+# The pipeline's HUMAN GATE, reachable from a thread: `release: <item-id>` moves a
+# test-passed queue item to ready-review. The token is deliberately NOT "approve": VERDICT_RE
+# above already claims `approve`/`ok`/`yes`/`lgtm` for the mid-turn tool-approval relay, and
+# one word meaning both "run that command" and "send this to review" is a trap. Only operator
+# posts reach execute(), so this is the one place the gate is genuinely authenticated - the
+# local script can only record who claimed to release it.
+RELEASE_DIRECTIVE_RE = re.compile(r"^\s*release\s*[:=]\s*(\S+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
+
+# Per-thread git isolation: `worktree: on|off` (colon required, like the others). `on` gives
+# this thread its own checkout + branch `work/mm-<thread8>`, so two threads editing the same
+# file can never see each other's index. Persisted per thread.
+# `profile: <name>` picks which models the worker/tester/reviewer roles run on, the same
+# shape as `model:` above. Deliberately a SEPARATE directive: `model:` is the model of the
+# session you are talking to, `profile:` is the models of the agents it dispatches. Folding
+# them together would make one word mean two things at different scopes.
+PROFILE_DIRECTIVE_RE = re.compile(r"^\s*profile\s*[:=]\s*(\S+)\s*(.*)\Z",
+                                  re.IGNORECASE | re.DOTALL)
+WORKTREE_DIRECTIVE_RE = re.compile(r"^\s*worktree\s*[:=]\s*(\S+)\s*(.*)\Z",
+                                   re.IGNORECASE | re.DOTALL)
 PERMISSION_MODES = {"auto": "auto", "acceptedits": "acceptEdits", "manual": "manual",
                     "default": "manual", "dontask": "dontAsk", "plan": "plan"}
 
@@ -214,7 +291,17 @@ REMOTE_NOTE = (
     "step and reporting over asking questions you could answer yourself. If you post a Mattermost "
     "message that expects an ASYNC reply (e.g. to another bot such as bot-pm), do not poll for it: "
     "call the approvals MCP server's follow_thread tool with that post's id and end your turn — "
-    "the bridge will automatically wake this session with the reply when it arrives."
+    "the bridge will automatically wake this session with the reply when it arrives. "
+    "If your working directory is under `.claude/worktrees/`, you are in YOUR OWN git worktree: "
+    "commit there freely and never `cd` into the main checkout to mutate it. Before any test "
+    "that MUTATES a plane or needs it stable to trust the result, hold that plane's lease "
+    "(scripts/agent-harness/lease.ps1 -Acquire -Name <plane> -Owner <your-worktree-id>; names in "
+    "lease-names.conf; read-only probes need none; a multi-plane test requests all names in one "
+    "call). Test images tag `:wt-<id>`, never `:local` — prod containers are a gated deploy, "
+    "not a test. Land your work with documentation/implementation-guide/multi-agent-concurrency/"
+    "MERGE-PROTOCOL.md — you do NOT test or merge your own work. Write the test plan, then submit "
+    "it (scripts/agent-harness/queue.ps1 -Submit); a tester who did not write it executes that plan, "
+    "and a reviewer who did not write it rebases and merges. Say what you queued in this thread."
 )
 
 
@@ -316,8 +403,11 @@ def wait_for_mattermost() -> None:
 
 
 def find_claude_bin() -> str:
-    if os.environ.get("BRIDGE_CLAUDE_BIN"):
-        return os.environ["BRIDGE_CLAUDE_BIN"]
+    env_bin = os.environ.get("BRIDGE_CLAUDE_BIN")
+    if env_bin:
+        if os.path.isfile(env_bin):
+            return env_bin
+        log(f"BRIDGE_CLAUDE_BIN points at a missing file ({env_bin}) — falling back to PATH/extension glob")
     on_path = shutil.which("claude")
     if on_path:
         return on_path
@@ -327,6 +417,64 @@ def find_claude_bin() -> str:
     if exts:
         return exts[-1]  # newest version sorts last
     raise RuntimeError("claude CLI not found — set BRIDGE_CLAUDE_BIN")
+
+
+HEALTH_FILE = os.path.join(STATE_DIR, "health.json")
+CLAIMS_FILE = os.path.join(STATE_DIR, "claimed-threads.json")
+
+
+def claimed_threads() -> dict:
+    """Threads CLAIMED by external (terminal/VS Code) Claude sessions
+    (2026-08-24 session-separation fix): the bridge must NOT spawn or resume a
+    headless session for operator messages in a claimed thread — the claiming
+    session's own listener answers there. Claim = add the thread root id to
+    this JSON ({root_id: {"owner": label, ...}}); re-read every poll so claims
+    take effect without a bridge restart."""
+    try:
+        with open(CLAIMS_FILE, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+
+def write_health(claude_bin: str, last_ok: float, last_err: str, fails: int) -> None:
+    """Functional-health beacon for stack-watchdog.ps1. Process liveness (the
+    lock port) says nothing about turns actually working — 2026-08-23 both
+    bridge personas held their locks for weeks while every turn died on a
+    cached claude.exe path that VS Code's extension pruning had deleted."""
+    try:
+        tmp = HEALTH_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"ts": int(time.time()), "pid": os.getpid(),
+                       "claude_bin": claude_bin,
+                       "bin_exists": os.path.isfile(claude_bin),
+                       "last_turn_ok_ts": int(last_ok),
+                       "last_err": (last_err or "")[:400],
+                       "consecutive_failures": fails}, fh, indent=1)
+        os.replace(tmp, HEALTH_FILE)
+    except OSError:
+        pass
+
+
+def telegram_alert(text: str) -> bool:
+    """Out-of-band escalation via the sysadmin Telegram channel (lock 48293's
+    bot). Used when the MM-facing turn machinery itself is broken — an MM post
+    would land in the same channel the operator already can't get answers in."""
+    envs = mm_lib.default_env_files()
+    tok = mm_lib.read_env_key("SYSADMIN_TELEGRAM_BOT_TOKEN", envs)
+    chat = mm_lib.read_env_key("SYSADMIN_TELEGRAM_CHAT_ID", envs)
+    if not (tok and chat):
+        return False
+    try:
+        import urllib.request as _ur
+        req = _ur.Request(f"https://api.telegram.org/bot{tok}/sendMessage",
+                          data=json.dumps({"chat_id": chat, "text": text}).encode(),
+                          headers={"Content-Type": "application/json"})
+        _ur.urlopen(req, timeout=15).read()
+        return True
+    except Exception:  # noqa: BLE001 - escalation must never take the bridge down with it
+        return False
 
 
 def load_state() -> dict:
@@ -492,9 +640,98 @@ def kill_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+def _run_worktree_script(script: str, args: list[str], timeout: int = 900) -> tuple[int, str]:
+    """Run one of scripts/agent-harness/*.ps1 and return (exit_code, combined output).
+
+    Never raises: worktree provisioning failing must produce a readable in-thread message,
+    not a bridge traceback."""
+    cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+           os.path.join(WORKTREE_SCRIPTS, script)] + args
+    try:
+        p = subprocess.run(cmd, cwd=_REPO_ROOT, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        return 1, f"{script} could not be run: {e}"
+    return p.returncode, ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
+
+
+_QUEUE_DIR_CACHE: list[str] = []
+
+
+def queue_dir() -> str:
+    """`<git-common-dir>/agent-worktrees/queue` - the same shared namespace the scripts use.
+    Resolved once; anchoring on the repo (not on a script path) is what makes every worktree
+    and the bridge agree about which queue they are talking about."""
+    if _QUEUE_DIR_CACHE:
+        return _QUEUE_DIR_CACHE[0]
+    try:
+        r = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                           cwd=_REPO_ROOT, capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or not (r.stdout or "").strip():
+            return ""
+        _QUEUE_DIR_CACHE.append(os.path.join((r.stdout or "").strip().splitlines()[0],
+                                             "agent-worktrees", "queue"))
+    except Exception:  # noqa: BLE001
+        return ""
+    return _QUEUE_DIR_CACHE[0]
+
+
+# What each transition says in-thread. `test-passed` is the one that matters: it names the
+# gate and the exact reply that opens it, because a pass that silently waits looks stalled.
+QUEUE_NOTES = {
+    "test-failed": "❌ **{id}** — a test case failed on attempt {attempt}: {detail}",
+    "test-passed": ("✅ **{id}** — every case passed (attempt {attempt}). It is "
+                    "**waiting on you**: reply `release: {id}` to send it to review, or say "
+                    "what you want changed first."),
+    # THE PRINCIPAL IS PART OF THE SENTENCE, not a detail. "released for review" was
+    # byte-identical whether a human typed `release:` or a dark run passed the gate with
+    # nobody watching - and a gate transition reported with no principal reads as human
+    # approval, which is the exact failure the gate ledger exists to prevent. {principal}
+    # is filled by gate_principal_note() below and is never empty for a gate-crossing state.
+    "ready-review": "📋 **{id}** — released for review.{principal}",
+    "merged": "🎉 **{id}** — merged as `{sha}`. Task closed.",
+    "rejected": "🚫 **{id}** — rejected by review: {detail}",
+}
+
+
+# Which pipeline gate a queue state means the item has just crossed. Only states that
+# CROSS a gate belong here: the others are worker/tester transitions with no gate and no
+# principal to name.
+QUEUE_STATE_GATE = {"ready-review": "pre_review"}
+
+
+def gate_principal_note(item: dict, state: str) -> str:
+    """Who or what passed the gate this state transition crossed, as a sentence.
+
+    A gate transition narrated without a principal reads as approval: `ready-review` looked
+    identical whether a person typed `release:` or the `dark` gate profile self-passed it
+    with nobody in the loop, and the audit event {event, from, to} could not answer it
+    either. The queue item already records `gates.<gate> = {kind, by, profile}`; this only
+    refuses to drop it on the floor. An item that records no principal says so rather than
+    staying silent, because silence is what gets read as a human."""
+    gate = QUEUE_STATE_GATE.get(state)
+    if not gate:
+        return ""
+    rec = ((item.get("gates") or {}).get(gate) or {})
+    kind, by, profile = rec.get("kind", ""), rec.get("by", ""), rec.get("profile", "")
+    if kind == "auto":
+        return (f" ⚠️ **No human saw this gate** — auto-passed by `{by or 'auto:?'}`"
+                f" under gate profile `{profile or '?'}`.")
+    if kind == "human" and by:
+        return f" Released by **{by}**."
+    return (" (the queue item names no principal for this gate — do not read it as"
+            " an approval.)")
+
+
+def worktree_id(thread_root: str) -> str:
+    """One worktree per THREAD, stable across resumes — the thread is the unit of work."""
+    return "mm-" + thread_root[:8].lower()
+
+
 def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | None,
              fork: bool = False, model: str = "", on_event=None, title: str = "",
-             permission_mode: str = "", on_proc=None) -> dict:
+             permission_mode: str = "", on_proc=None, cwd: str = "",
+             harness_profile: str = "") -> dict:
     """Run one headless turn, streaming NDJSON events. `on_event` receives each event as it
     arrives (used for the mid-turn progress log); the final `result` event is returned as the
     turn's result dict (same shape as --output-format json)."""
@@ -522,8 +759,16 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
             cmd += ["--fork-session"]
 
     t0 = time.time()
-    proc = subprocess.Popen(cmd, cwd=REPO, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # The thread's harness profile travels as an environment variable, which is the layer
+    # config.ps1/config.py already resolve LAST. So a session started from this thread -
+    # and every harness script it runs - sees the profile the operator chose here, without
+    # the bridge having to thread a parameter through code it does not own.
+    env = None
+    if harness_profile:
+        env = dict(os.environ)
+        env["AI_STACK_HARNESS_PROFILE"] = harness_profile
+    proc = subprocess.Popen(cmd, cwd=(cwd or REPO), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if on_proc is not None:  # register with the bridge so `!stop` can abort a lane-2 turn
         try:
             on_proc(proc)
@@ -746,6 +991,14 @@ class _ThreadQueue:
 class Bridge:
     def __init__(self) -> None:
         self.claude_bin = find_claude_bin()
+        self.turn_fail_count = 0
+        self.last_turn_ok_ts = 0.0
+        self.last_turn_err = ""
+        self._last_tg_alert = 0.0
+        self._last_health_write = 0.0
+        # None until the first poll_queue(), which SEEDS from the queue without posting -
+        # otherwise a bridge restart would replay every item's current state into the channel.
+        self._queue_seen: dict[str, str] | None = None
         self.state = load_state()
         self.state_lock = threading.Lock()
         self.queues: dict[str, _ThreadQueue] = {}
@@ -762,6 +1015,9 @@ class Bridge:
         self.first_poll = True
         self.state.setdefault("follows", {})   # fid → follow record (see follow_matches)
         self._team: str | None = None          # cached team name for permalinks
+        # The crash boundary for operator messages. Constructed before any poll runs,
+        # because poll_once is not allowed to admit a message it cannot first record.
+        self.inbox = Inbox(INBOX_DIR)
 
     # -- worker ---------------------------------------------------------------
     def ensure_worker(self, thread_root: str) -> None:
@@ -783,6 +1039,37 @@ class Bridge:
                 release_once("parked on a question")
                 return
 
+    def ensure_claude_bin(self) -> None:
+        """Self-heal the cached claude path. VS Code prunes old extension dirs
+        on auto-update, so a path resolved at startup can vanish mid-life
+        (2026-08-23: both personas dead for weeks exactly this way). One cheap
+        stat per call; raises only when NOTHING resolves any more."""
+        if os.path.isfile(self.claude_bin):
+            return
+        old = self.claude_bin
+        self.claude_bin = find_claude_bin()
+        log(f"claude binary healed: {old} -> {self.claude_bin} (old path pruned)")
+        audit({"event": "claude_bin_healed", "old": old, "new": self.claude_bin})
+
+    def note_turn(self, ok: bool, err: str = "", infra: bool = False) -> None:
+        """Track turn outcomes for the health beacon; escalate persistent or
+        infrastructure failures OUT-OF-BAND (Telegram), because when turns are
+        broken the MM channel itself is the thing the operator can't use."""
+        if ok:
+            self.turn_fail_count = 0
+            self.last_turn_ok_ts = time.time()
+            self.last_turn_err = ""
+        else:
+            self.turn_fail_count += 1
+            self.last_turn_err = err
+            if (infra or self.turn_fail_count >= 2) and time.time() - self._last_tg_alert > 1800:
+                self._last_tg_alert = time.time()
+                persona = "sysadmin" if os.environ.get("BRIDGE_LOCK_PORT") == "48292" else "claude-sessions"
+                telegram_alert(f"[ai-stack] {persona} bridge: {self.turn_fail_count} consecutive "
+                               f"failed turn(s){' (infra: spawn failure)' if infra else ''}; "
+                               f"last error: {err[:200]}")
+        write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
+
     def worker(self, thread_root: str) -> None:
         q = self.queues[thread_root]
         while True:
@@ -795,6 +1082,10 @@ class Bridge:
                        "kind": item.kind})
                 unreact(item.post_id, "hourglass_flowing_sand")
                 react(item.post_id, "no_entry_sign")
+                # A cancelled item IS resolved - the operator withdrew it. Without this
+                # it would stay pending and be replayed on every restart, resurrecting
+                # exactly the message they cancelled.
+                self.inbox.mark_consumed(thread_root, item.post_id)
                 continue
 
             prompt = item.prompt
@@ -827,13 +1118,22 @@ class Bridge:
                 self.running.add(thread_root)
             try:
                 self.execute(thread_root, prompt, item.post_id, kind=item.kind)
+                self.note_turn(ok=True)
             except Exception as e:  # noqa: BLE001 - a broken turn must not kill the worker
                 log(f"worker {thread_root[:8]} error: {e}")
+                self.note_turn(ok=False, err=str(e),
+                               infra=isinstance(e, (FileNotFoundError, RuntimeError))
+                               or "WinError 2" in str(e))
                 try:
                     post(f"❌ Bridge error running this turn: `{e}`", thread_root)
                 except Exception:  # noqa: BLE001
                     pass
             finally:
+                # THE TURN IS OVER - consume. In `finally` on purpose: it runs for an
+                # errored turn (the operator was told in-thread; replaying forever would
+                # make one poison message an infinite loop) and it does NOT run when the
+                # process is killed, which is the case the inbox exists for.
+                self.inbox.mark_consumed(thread_root, item.post_id)
                 stop_evt.set()
                 release_once()
                 with self.running_lock:
@@ -970,14 +1270,22 @@ class Bridge:
         session_id = meta.get("session_id")
 
         thread_model = meta.get("model", "")
+        if thread_model.lower() in ("default", "reset"):
+            thread_model = ""  # stored by an old `model: default` — never a real CLI alias
         thread_mode = meta.get("mode", "")
+        thread_worktree = bool(meta.get("worktree_enabled", WORKTREE_DEFAULT))
+        thread_profile = meta.get("harness_profile", "")
         changed = []
         while True:  # consume leading directives in any order: `model: …`, `mode: …`
             m = MODEL_DIRECTIVE_RE.match(prompt)
             if m:
-                thread_model = m.group(1)
+                requested = m.group(1)
                 prompt = m.group(2).strip()
-                changed.append(f"model → `{thread_model}`")
+                # `model: default` (or `reset`) DROPS the thread's pin and returns it to the
+                # bridge default — it is not an alias the CLI knows, so it must never be
+                # forwarded as `--model default`.
+                thread_model = "" if requested.lower() in ("default", "reset") else requested
+                changed.append(f"model → `{thread_model or MODEL or 'CLI default'}`")
                 continue
             m = MODE_DIRECTIVE_RE.match(prompt)
             if m:
@@ -997,14 +1305,90 @@ class Bridge:
                 thread_mode = resolved
                 changed.append(f"approvals → `{resolved}`")
                 continue
+            m = RELEASE_DIRECTIVE_RE.match(prompt)
+            if m:
+                item_id = m.group(1)
+                prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off:
+                    post(f"🚫 `release:` is unavailable - {off}.", thread_root)
+                    continue
+                # Single-operator deployments (the norm here) can name the approver; with
+                # several configured we cannot tell which one posted without another API
+                # call, so record the role rather than guess a name.
+                approver = sorted(OPERATORS)[0] if len(OPERATORS) == 1 else "operator"
+                rc, out = _run_worktree_script("queue.ps1",
+                                               ["-Approve", "-Id", item_id, "-By", approver],
+                                               timeout=120)
+                icon = "✅" if rc == 0 else "🚫"
+                fence = "```"
+                detail = (out or "(no output)").strip()[-800:]
+                post("\n".join([f"{icon} `release: {item_id}`", fence, detail, fence]),
+                     thread_root)
+                continue
+            m = PROFILE_DIRECTIVE_RE.match(prompt)
+            if m:
+                requested = m.group(1)
+                prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off:
+                    post(f"🚫 `profile:` is unavailable - {off}.", thread_root)
+                    continue
+                known = harness_config.profile_names()
+                if requested.lower() in ("list", "?"):
+                    lines = [harness_config.describe_profile(n) for n in known]
+                    # The runner half (2026-08-30): picking a profile is picking a
+                    # SUBSTRATE, and the profile line alone never said that little-coder
+                    # is unproven or how the harness reaches it.
+                    runners = [harness_config.describe_runner(n)
+                               for n in harness_config.runner_names()]
+                    post("**Harness profiles** (role -> runner/model)\n\n- "
+                         + "\n- ".join(lines)
+                         + "\n\n**Runners**\n\n- " + "\n- ".join(runners)
+                         + f"\n\nThis thread: `{thread_profile or harness_config.profile_name('mattermost')}`",
+                         thread_root)
+                    continue
+                if requested.lower() in ("default", "reset"):
+                    thread_profile = ""
+                    changed.append(f"profile -> `{harness_config.profile_name('mattermost')}` (default)")
+                    continue
+                if requested not in known:
+                    # Loud, not silently defaulted: a typo that quietly ran the default
+                    # profile is how work ends up on a model nobody chose.
+                    post(f"⚠️ Unknown profile `{requested}` - known: {', '.join(known)}. "
+                         f"Keeping `{thread_profile or harness_config.profile_name('mattermost')}`.",
+                         thread_root)
+                    continue
+                thread_profile = requested
+                changed.append(f"profile -> `{requested}`")
+                continue
+            m = WORKTREE_DIRECTIVE_RE.match(prompt)
+            if m:
+                requested = m.group(1).lower()
+                prompt = m.group(2).strip()
+                off = harness_off_reason()
+                if off and requested in ("on", "1", "true", "yes"):
+                    post(f"🚫 `worktree: on` is unavailable - {off}.", thread_root)
+                    continue
+                if requested in ("on", "1", "true", "yes"):
+                    thread_worktree = True
+                elif requested in ("off", "0", "false", "no"):
+                    thread_worktree = False
+                else:
+                    post(f"⚠️ `worktree: {requested}` is not valid — use `on` or `off`. Keeping "
+                         f"`{'on' if thread_worktree else 'off'}`.", thread_root)
+                    continue
+                changed.append(f"worktree → `{'on' if thread_worktree else 'off'}`")
+                continue
             break
         if changed:
             with self.state_lock:
                 entry = self.state["threads"].setdefault(thread_root, {})
-                if thread_model:
-                    entry["model"] = thread_model
+                entry["model"] = thread_model  # "" = unpinned (a `model: default` reset)
                 if thread_mode:
                     entry["mode"] = thread_mode
+                entry["worktree_enabled"] = thread_worktree
+                entry["harness_profile"] = thread_profile  # "" = the configured default
                 save_state(self.state)
         if not prompt:  # directive-only (or directive-error) message: no turn to run
             if changed:
@@ -1012,6 +1396,19 @@ class Bridge:
                      thread_root)
             return
         mode_label = thread_mode or PERMISSION_MODE
+
+        # Where this turn runs. Resolved BEFORE the header so the operator is told the truth
+        # about the working directory, and fail-closed: if an opted-in thread cannot get its
+        # worktree, the turn does not run in the shared checkout pretending to be isolated.
+        run_cwd = REPO
+        if thread_worktree:
+            run_cwd, wt_err = self.ensure_worktree(thread_root)
+            if not run_cwd:
+                post("🚫 **Could not provision this thread's worktree** — not running the turn "
+                     "in the shared checkout, because that is the collision `worktree: on` "
+                     "exists to prevent.\n```\n" + wt_err + "\n```\nFix it, or reply "
+                     "`worktree: off` to run in the main checkout deliberately.", thread_root)
+                return
 
         fork = False
         handoff = None
@@ -1032,7 +1429,9 @@ class Bridge:
                       + f" Model `{model_label}`, approvals `{mode_label}`.")
         elif not session_id:
             header = (f"🧵 Starting a **new Claude session** for this thread — model "
-                      f"`{model_label}`, approvals `{mode_label}`, working dir `{REPO}`. "
+                      f"`{model_label}`, approvals `{mode_label}`, working dir `{run_cwd}`"
+                      + (f" (its own worktree, branch `work/{worktree_id(thread_root)}`)"
+                         if run_cwd != REPO else "") + ". "
                       + ("Routine actions run automatically; anything the safety classifier "
                          "flags pauses here for your approve/deny." if mode_label == "auto"
                          else "Gated actions pause here for your approve/deny."))
@@ -1101,9 +1500,11 @@ class Bridge:
                 self.proc_kind[thread_root] = kind
                 self.proc_post[thread_root] = trigger_post
 
+        self.ensure_claude_bin()  # heal a pruned path BEFORE spawning, never after a failed turn
         resp = run_turn(self.claude_bin, thread_root, prompt, session_id, fork=fork,
                         model=thread_model or MODEL, on_event=on_event, title=title,
-                        permission_mode=mode_label, on_proc=register_proc)
+                        permission_mode=mode_label, on_proc=register_proc, cwd=run_cwd,
+                        harness_profile=thread_profile)
         dur = int(time.time() - t0)
         if progress["post_id"] and progress["lines"]:
             try:  # final flush so the log is complete, and mark the turn done
@@ -1154,6 +1555,24 @@ class Bridge:
         footer_bits.append(f"[model:{models or 'unknown'}]")
         footer = " · ".join(footer_bits)
 
+        # A classifier denial never reaches the approval relay: in `auto` mode the classifier
+        # returns allow / ask / DENY itself, and only `ask` calls the permission-prompt tool.
+        # So an in-thread `approve` is powerless against one — which "N denied tool call(s)"
+        # alone doesn't tell the operator (2026-08-28: a whole deploy stalled on exactly this).
+        # Auto mode only: under manual/acceptEdits a denial IS the operator's own verdict.
+        deny_note = ""
+        if denials and mode_label == "auto":
+            names = sorted({str(d.get("tool_name") or d.get("tool") or "")
+                            for d in denials if isinstance(d, dict)} - {""})
+            what = f" ({', '.join(names)})" if names else ""
+            deny_note = (
+                f"\n\n🚫 **{len(denials)} tool call(s) blocked by the auto-mode classifier**"
+                f"{what} — that gate denies outright, so it never reached this thread's "
+                f"approve/deny relay and replying `approve` cannot lift it. To let the session "
+                f"run it: add a permission rule to `.claude/settings.local.json` — the same "
+                f"allow-list your interactive sessions use — then reply `continue`. "
+                f"(Setting sources: `{SETTING_SOURCES}`.)")
+
         if resp.get("is_error"):
             subtype = str(resp.get("subtype") or "")
             reason = result_text or "(the CLI returned no error text)"
@@ -1168,9 +1587,9 @@ class Bridge:
             elif "timed out" in reason:
                 hint = "\n💡 Reply in this thread to resume the session where it left off."
             label = f"❌ **Turn failed** — `{subtype or 'error'}`"
-            post_chunked(f"{label}\n{reason}{hint}\n\n{footer}", thread_root)
+            post_chunked(f"{label}\n{reason}{hint}{deny_note}\n\n{footer}", thread_root)
         else:
-            post_chunked(f"{result_text}\n\n---\n{footer}", thread_root)
+            post_chunked(f"{result_text}{deny_note}\n\n---\n{footer}", thread_root)
         audit({"event": "turn_completed", "thread": thread_root, "session": new_sid,
                "seconds": dur, "cost_usd": cost, "is_error": bool(resp.get("is_error")),
                "denials": len(denials)})
@@ -1277,6 +1696,138 @@ class Bridge:
         audit({"event": "session_reopened", "thread": thread_root})
         return True
 
+    def poll_queue(self) -> None:
+        """Report queue transitions into the Mattermost thread the item came from.
+
+        The pipeline runs OUTSIDE the bridge (agents drive queue.ps1 directly), so without
+        this the operator would have to poll `-List` to learn that their item failed, passed,
+        or landed. Only items carrying a `thread` are reported - the queue stays usable with
+        no Mattermost at all. The first pass SEEDS the snapshot without posting, so a bridge
+        restart does not replay every item's current state into the channel."""
+        qdir = queue_dir()
+        if not qdir or not os.path.isdir(qdir):
+            return
+        seeding = self._queue_seen is None
+        if seeding:
+            self._queue_seen = {}
+        for name in os.listdir(qdir):
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(qdir, name), "r", encoding="utf-8") as fh:
+                    item = json.load(fh)
+            except Exception:  # noqa: BLE001 - a half-written item is read again next cycle
+                continue
+            iid, state = item.get("id", ""), item.get("state", "")
+            if not iid or self._queue_seen.get(iid) == state:
+                continue
+            prev = self._queue_seen.get(iid)
+            self._queue_seen[iid] = state
+            thread = item.get("thread", "")
+            if seeding or prev is None or not thread:
+                continue
+            note = QUEUE_NOTES.get(state)
+            if not note:
+                continue
+            last = (item.get("results") or [{}])[-1]
+            try:
+                post(note.format(id=iid, attempt=item.get("attempt", 1),
+                                 sha=str(item.get("merged_sha", ""))[:12],
+                                 principal=gate_principal_note(item, state),
+                                 detail=str(last.get("reason") or last.get("evidence") or "")[:400]),
+                     thread)
+            except Exception as e:  # noqa: BLE001 - reporting must never break the loop
+                log(f"queue report failed for {iid}: {e}")
+            gate = QUEUE_STATE_GATE.get(state, "")
+            grec = ((item.get("gates") or {}).get(gate) or {}) if gate else {}
+            # The audit event carries the principal too. A trail that cannot name who
+            # passed a gate is the same defect one layer down from the narration.
+            audit({"event": "queue_state", "item": iid, "from": prev, "to": state,
+                   "gate": gate, "gate_kind": grec.get("kind", ""),
+                   "principal": grec.get("by", "")})
+
+    def ensure_worktree(self, thread_root: str) -> tuple[str, str]:
+        """Return (path, error) for this thread's worktree, provisioning it on first use.
+
+        ("", error) means provisioning FAILED and the caller must NOT fall back to the shared
+        checkout: running there is precisely the collision this feature exists to remove, and
+        a silent fallback would look like isolation while providing none."""
+        wid = worktree_id(thread_root)
+        with self.state_lock:
+            path = (self.state["threads"].get(thread_root) or {}).get("worktree", "")
+        if path and os.path.isdir(path):
+            # Cheap freshness pass: the operator may have edited .env since this was created.
+            _run_worktree_script("sync-worktree-env.ps1", ["-Id", wid, "-Quiet"], timeout=120)
+            return path, ""
+
+        rc, out = _run_worktree_script("new-worktree.ps1", [
+            "-Id", wid, "-OwnerKind", "bridge", "-OwnerRef", thread_root,
+            "-Thread", thread_root, "-Reuse", "-Json"])
+        path = ""
+        if rc == 0:
+            # -Json prints one compact object; take the last line that parses as one.
+            for line in reversed([ln for ln in out.splitlines() if ln.strip()]):
+                try:
+                    path = (json.loads(line) or {}).get("path", "")
+                except Exception:  # noqa: BLE001
+                    continue
+                if path:
+                    break
+        if not path or not os.path.isdir(path):
+            return "", (out or "no output")[-900:]
+        with self.state_lock:
+            self.state["threads"].setdefault(thread_root, {})["worktree"] = path
+            save_state(self.state)
+        log(f"thread {thread_root[:8]}: worktree ready at {path}")
+        audit({"event": "worktree_created", "thread": thread_root, "path": path, "id": wid})
+        return path, ""
+
+    def _retire_worktree(self, thread_root: str) -> str:
+        """Close-time cleanup. Removes ONLY a worktree that holds nothing unlanded — the
+        script refuses (exit 2) otherwise and we report that instead of forcing, because it
+        may hold the only copy of someone's work."""
+        with self.state_lock:
+            path = (self.state["threads"].get(thread_root) or {}).get("worktree", "")
+        if not path:
+            return ""
+        rc, out = _run_worktree_script("remove-worktree.ps1", ["-Id", worktree_id(thread_root)])
+        if rc == 0:
+            with self.state_lock:
+                entry = self.state["threads"].setdefault(thread_root, {})
+                entry.pop("worktree", None)
+                save_state(self.state)
+            return "removed its worktree"
+        if rc == 2:
+            return (f"**kept** its worktree `{path}` — it still holds uncommitted or unmerged "
+                    f"work (land it, or remove it with `-Force`)")
+        return f"could not remove its worktree (`{(out or '')[:150]}`)"
+
+    def _write_session_rollup(self, thread_root: str, turns: list | None = None) -> bool:
+        """One reviewable memory per closed session (memory-plane §2.4). Never raises.
+
+        The turn texts are PASSED IN by the close handler, which pops the digest as part of
+        its teardown - reading `self.digest` here would find it already gone and write an
+        empty rollup for every session. An empty session still writes a valid rollup rather
+        than nothing, because "this session did nothing" is itself worth reviewing.
+
+        Import is LOCAL and guarded: the bridge must start on a checkout where this module is
+        absent or broken, and a memory feature is never a reason the bridge fails to boot.
+        """
+        try:
+            import memory_writer as _mw
+
+            if not _mw.rollup_enabled():
+                return False
+            lines = turns if turns is not None else self.digest.get(thread_root, [])
+            turns_text = [t for t in lines if isinstance(t, str)]
+            payload = _mw.build_session_rollup(thread_root, turns_text)
+            ok = _mw.write_memory(payload)
+            audit({"event": "memory_rollup", "thread": thread_root, "written": bool(ok)})
+            return bool(ok)
+        except Exception as exc:  # noqa: BLE001 - a memory write never takes the bridge down
+            log(f"session rollup failed for {thread_root[:8]}: {exc}")
+            return False
+
     def _close_session(self, thread_root: str, pid: str) -> None:
         """`close` / `end session` — dispose everything this session left running.
 
@@ -1296,7 +1847,11 @@ class Bridge:
         q = self.queues[thread_root]
         purged = q.purge_lane2()
         kept, _ = q.depth()
-        dropped_digest = len(self.digest.pop(thread_root, []))
+        # CAPTURED, not just counted. The rollup below needs these lines and this pop is
+        # what removes them - reading self.digest afterwards would have silently produced an
+        # empty rollup for every session, with nothing to indicate the lines had existed.
+        digest_lines = self.digest.pop(thread_root, [])
+        dropped_digest = len(digest_lines)
         # 3. A parked question would otherwise hold this session's valve shut forever.
         unparked = False
         if question_parked(thread_root):
@@ -1315,6 +1870,11 @@ class Bridge:
             aborted = True
         if kept == 0:
             q.set_valve(True)
+        # 5. AGENT-MEMORY ROLLUP (memory-plane §2.4). Default off; through the OPS DOOR,
+        #    because this is a host process and openbrain-mcp publishes no host port.
+        #    Last, and never in the way: the teardown above is what the operator is waiting
+        #    on, and write_memory swallows everything by contract.
+        self._write_session_rollup(thread_root, digest_lines)
         bits = [f"dropped **{len(follows)}** follow(s)"
                 + (" (" + ", ".join(f"`{x}`" for x in sorted(follows)) + ")" if follows else ""),
                 f"purged **{purged}** queued background wake(s)"]
@@ -1328,6 +1888,10 @@ class Bridge:
             bits.append("left **your** in-flight turn running")
         if kept:
             bits.append(f"kept **{kept}** of your queued message(s) — they will still run")
+        # 5. The thread's worktree, if it had one. Removed only when it holds nothing unlanded.
+        wt_note = self._retire_worktree(thread_root)
+        if wt_note:
+            bits.append(wt_note)
         log(f"session closed in thread {thread_root[:8]}: follows={len(follows)} "
             f"purged={purged} kept={kept} aborted={aborted}")
         audit({"event": "session_closed", "thread": thread_root, "post": pid,
@@ -1647,6 +2211,13 @@ class Bridge:
             if not msg:
                 continue
             thread_root = p.get("root_id") or pid
+            claims = claimed_threads()
+            if thread_root in claims:
+                log(f"thread {thread_root[:8]} claimed by "
+                    f"{claims[thread_root].get('owner', 'external session')} — leaving to it")
+                audit({"event": "claimed_thread_skipped", "thread": thread_root,
+                       "owner": claims[thread_root].get("owner", "")})
+                continue
             # HUMAN ENGAGEMENT with the session renews its follows' idle window (a live operator
             # message means "still working" — keep the auto-wake alive; the bot's own posts never
             # count, which uid != me guarantees).
@@ -1730,6 +2301,11 @@ class Bridge:
             audit({"event": "message_received", "thread": thread_root, "post": pid,
                    "user": username, "chars": len(msg)})
             self.ensure_worker(thread_root)
+            # DURABILITY BOUNDARY. Recorded before the in-memory admission below, and
+            # therefore before this pass persists last_seen/processed at the end of the
+            # loop. Reverse these two lines and the message is once again only in RAM
+            # between here and the end of its turn (see inbox.py for what that cost).
+            self.inbox.record(thread_root, pid, msg)
             self.queues[thread_root].put_user(_Item("user", msg, pid))  # lane 1 — closes the valve
         if new_last != last_seen:
             with self.state_lock:
@@ -1737,6 +2313,32 @@ class Bridge:
                 self.state["processed"] = list(self.processed)
                 save_state(self.state)
         self.first_poll = False
+
+    def replay_inbox(self) -> int:
+        """Re-admit every message whose turn never finished. Returns how many were replayed.
+
+        This is the half that makes the record useful: recording a message the bridge then
+        ignores forever is only a more detailed way of losing it.
+
+        Safe to run on every start. `record()` is idempotent by post id and this path does NOT
+        re-record, so N restarts with no intervening turn leave a message pending exactly once
+        rather than N times. The poll loop cannot double-admit it either - its id is already in
+        `processed`, and `last_seen` is already past it.
+        """
+        replayed = 0
+        for thread_root in self.inbox.threads():
+            pend = self.inbox.pending(thread_root)
+            if not pend:
+                continue
+            self.ensure_worker(thread_root)
+            for rec in pend:
+                self.queues[thread_root].put_user(
+                    _Item("user", str(rec.get("prompt") or ""), str(rec.get("post_id") or "")))
+                replayed += 1
+            log(f"inbox: replayed {len(pend)} unfinished message(s) into thread "
+                f"{thread_root[:8]}")
+            audit({"event": "inbox_replayed", "thread": thread_root, "count": len(pend)})
+        return replayed
 
     def run(self) -> None:
         os.makedirs(STATE_DIR, exist_ok=True)
@@ -1755,6 +2357,14 @@ class Bridge:
             f"{' [ALLOW_SELF — TEST MODE]' if ALLOW_SELF else ''}")
         audit({"event": "bridge_started", "channel": CHANNEL_ID, "repo": REPO,
                "allow_self": ALLOW_SELF})
+        write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
+        # Anything admitted but never finished - i.e. whatever the last death was holding.
+        try:
+            n = self.replay_inbox()
+            if n:
+                log(f"inbox: {n} message(s) recovered from the previous run")
+        except Exception as e:  # noqa: BLE001 - recovery must never stop the bridge starting
+            log(f"inbox replay failed: {e}")
         errors = 0
         while True:
             try:
@@ -1762,10 +2372,20 @@ class Bridge:
                 self.ingest_follow_requests()
                 self.poll_follows(me)
                 self.poll_cancellations()
+                self.poll_queue()
                 errors = 0
             except Exception as e:  # noqa: BLE001 - transient MM/network outage must not kill the bridge
                 errors += 1
                 log(f"poll error #{errors}: {e}")
+            # idle heartbeat: heal a pruned claude path while nobody is talking and
+            # keep the health beacon fresh for the watchdog's functional check.
+            if time.time() - self._last_health_write > 60:
+                self._last_health_write = time.time()
+                try:
+                    self.ensure_claude_bin()
+                except Exception as e:  # noqa: BLE001
+                    log(f"claude binary UNRESOLVABLE: {e}")
+                write_health(self.claude_bin, self.last_turn_ok_ts, self.last_turn_err, self.turn_fail_count)
             time.sleep(min(60, POLL_INTERVAL + min(errors, 6) * 5))
 
 

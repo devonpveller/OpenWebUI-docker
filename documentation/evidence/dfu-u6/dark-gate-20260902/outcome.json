@@ -1,0 +1,87 @@
+{
+  "what": "U6's section 2 column driven through the REAL gate, both halves, plus the measurement that explains why the broader drill is red.",
+  "column": "PLAN.md section 2, U6 - 'Gym: an unattended run that hits each andon condition halts-and-raises; one that hits none lands with a complete audit trail'",
+  "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/drill-u6-dark-gate.ps1",
+  "run_utc": "2026-09-02",
+  "exit_code": 0,
+  "assertions": {
+    "total": 54,
+    "failed": 0
+  },
+  "red_proof": [
+    {
+      "how": "andon.ps1's board made unable to RAISE ($isClear forced true)",
+      "exit_code": 1,
+      "failed": 25,
+      "of": 54,
+      "which": "the whole HALT half, all five conditions: nothing raises, the dark gate auto-passes, nothing reaches the ledger.",
+      "transcript": "redproof-board-cannot-raise.txt"
+    },
+    {
+      "how": "andon.ps1's config-key-unread detector jammed ON (always fires)",
+      "exit_code": 1,
+      "failed": 21,
+      "of": 54,
+      "which": "the CLEAR half collapses and four of the five HALT fixtures lose their 'and no other' attribution.",
+      "transcript": "redproof-detector-jammed-on.txt"
+    },
+    {
+      "how": "restored (git checkout) and re-run",
+      "exit_code": 0,
+      "failed": 0,
+      "of": 54,
+      "transcript": "transcript.txt"
+    }
+  ],
+  "measurement_shipped_board": {
+    "command": "powershell -File scripts/agent-harness/andon.ps1 -Evaluate",
+    "exit_code": 6,
+    "raised": [
+      "policy-declared-unread",
+      "git-error-swallowed",
+      "work-branch-on-remote",
+      "protected-ref-moved"
+    ],
+    "detail": "policy-declared-unread fires on pipeline.convergence; git-error-swallowed on 27 call sites; work-branch-on-remote on work/pod-key; protected-ref-moved is indeterminate for want of a recorded baseline. A dark run cannot auto-pass a gate in this checkout today, and that is by design - a raised board is exit 6."
+  },
+  "measurement_drill_dark_factory": {
+    "with_shipped_config": {
+      "exit_code": 1,
+      "passed": 146,
+      "failed": 67,
+      "transcript": "drill-dark-factory-shipped-config.txt"
+    },
+    "with_pipeline_convergence_removed": {
+      "exit_code": 0,
+      "passed": 213,
+      "failed": 0,
+      "transcript": "drill-dark-factory-convergence-removed.txt"
+    },
+    "reading": "Every one of the 67 failures traces to one key. drill-dark-factory.ps1 builds each fixture from the SHIPPED config, so every clean-board control inherits a board that fires. The drill is not broken and its red is not noise: its step A2 asserts 'the shipped pipeline block is fully read', which is exactly the defect. Removing the key was a TEMPORARY measurement in a worktree and was reverted; harness.config.json is unchanged.",
+    "what_would_close_it": "An operator decision on pipeline.convergence - wire its reader (queue.ps1/config.py plus the reviewer charter's class gate, which the block's own _status calls a pipeline item), or move the spec out of the config into a document. Either makes drill-dark-factory.ps1 green and wireable as U6's marker."
+  },
+  "not_claimed": [
+    "Not a gym run. U6's mechanism is the harness pipeline, which has no gym scenario; the column's first word is not discharged here, exactly as drill-dark-factory.ps1's own header says of itself.",
+    "Not a claim that the shipped board is clear. It is raised on four conditions - step M measures it and prints it, and that measurement is deliberately not counted in the drill's verdict.",
+    "Not a replacement for drill-dark-factory.ps1, which is broader (213 assertions, ~20 fixtures) and remains the reference instrument for this phase.",
+    "Not re-run by anyone who did not build it."
+  ],
+  "artifact_digests": {
+    "scripts/checks/drill-u6-dark-gate.ps1": "71e35cd751a3ac42",
+    "scripts/agent-harness/drill-dark-factory.ps1": "a4f5019f677b9009",
+    "scripts/agent-harness/harness.config.json": "b552a019998725ba"
+  },
+  "checkout_head_at_write": "fb914aea922d770e620a710b9b403bb82b108547 (the commit BEFORE this update; see git log for the tip that carries it)",
+  "covers": {
+    "halt_half": "FIVE fixtures, one per REQUIRED andon condition (ids read from config.ps1's $script:RequiredAndonConditions, not listed in the drill). Per condition: board RAISED at exit 6 with that condition fired; the dark anchor gate refuses at exit 6; the item stays parked at anchor-draft; the ledger refusal names THAT CONDITION AND NO OTHER; no auto-pass record written.",
+    "clear_half": "one fixture with the parked pipeline.convergence spec block removed from the fixture's copy: board CLEAR 5/5 evaluated 0 disabled, both gates auto-pass signed auto:dark, the run reaches merged with no human, two auto-pass ledger records carrying the andon verdict and its coverage, -VerifyAudit COMPLETE.",
+    "teeth": "three ledger tampers each go exit 1; restoring returns exit 0.",
+    "population_guard": "a required condition with no constructed instance FAILS the drill."
+  },
+  "finding_against_itself": {
+    "what": "the 'names that condition and no other' assertion caught this drill's OWN git-error-swallowed fixture: it committed its bait file, which moved main after the andon baseline and fired protected-ref-moved as well (fired=git-error-swallowed; protected-ref-moved). The gate still halted, so a weaker assertion would have passed over a fixture testing two things at once.",
+    "fix": "the bait file is written, not committed",
+    "transcript": "fixture-fired-two-conditions.txt",
+    "transcript_note": "RE-MEASURED 2026-09-02 rather than kept from the original run. The first capture was overwritten by a later green run, so the file named for the failure held a passing transcript - the name and the content disagreeing, which is the class this item exists to correct. The fixture was put back to committing its bait file, the drill re-run (exit 1, 1 of 54 failed, fired=git-error-swallowed; protected-ref-moved) and the drill restored with git checkout."
+  }
+}

@@ -312,6 +312,10 @@ class GovernanceGate:
         log.info("CLEARED effort=%s decision=%s by=%s",
                  effort_id, decision.decision, actor_role)
 
+    # Set by the orchestrator (memory-plane §2.2). Signature: async (effort_id, lifecycle).
+    # None on a gate nobody has wired, which is every unit test that builds one directly.
+    on_lifecycle = None
+
     async def set_lifecycle(self, effort_id: str, lifecycle: str) -> None:
         """Move an effort's lifecycle (open|done|aborted). Distinct from the gate FSM state:
         a done/aborted effort drops out of the default `/status` view but its gate row stays
@@ -332,6 +336,21 @@ class GovernanceGate:
                 return
             e.lifecycle = lifecycle
             await s.commit()
+        # LIFECYCLE OBSERVER (memory-plane §2.2). Fired only when the transition ACTUALLY
+        # happened - after the commit, and outside every early return above, so a suppressed
+        # done-after-abort or a no-op re-set does not notify.
+        #
+        # A callback rather than a direct memory write: the gate must not learn about the
+        # memory plane. The orchestrator installs it. This is the funnel the plan names -
+        # every lifecycle path crosses it, including ones that never reach _finish_effort -
+        # so hooking here covers future callers that a per-call-site hook would miss.
+        cb = getattr(self, "on_lifecycle", None)
+        if cb is not None:
+            try:
+                await cb(effort_id, lifecycle)
+            except Exception as exc:  # noqa: BLE001 - an observer never breaks the transition
+                log.warning("lifecycle observer failed for %s -> %s: %s",
+                            effort_id, lifecycle, exc)
 
     async def lifecycle_of(self, effort_id: str) -> str | None:
         """This effort's lifecycle (open|done|aborted), or None when unknown. The read counterpart

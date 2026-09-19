@@ -1,0 +1,256 @@
+﻿
+=== A1  operator-checkout-off-branch: RED on a detached/mid-rebase checkout, GREEN on a clean one ===
+  [PASS] GREEN: a checkout on a branch does not fire status=ok
+  [PASS] RED: a DETACHED checkout fires HEAD is DETACHED in C:\Users\yamao\AppData\Local\Temp\dfdrill-139896\repo-a1
+  [PASS] RED: a fired condition raises the board (exit 6) exit=6
+  [PASS] RED: an interrupted REBASE fires even though HEAD is on a branch a rebase is in progress in C:\Users\yamao\AppData\Local\Temp\dfdrill-139896\repo-a1 (rebase-merge, idle 1s)
+  [PASS] andon.enabled=false is NOT-EVALUATED, never 'clear' board=not-evaluated
+  [PASS] and it exits 6, so no gate can read it as a pass exit=6
+  [PASS] the verdict states its COVERAGE: 5 declared, 0 evaluated declared=5 evaluated=0
+  [PASS] an ABSENT andon block is INCOMPLETE (exit 6), not an empty clear board board=incomplete exit=6
+  [PASS] and it NAMES all five required conditions as missing missing=5 ids=operator-checkout-off-branch,policy-declared-unread,git-error-swallowed,work-branch-on-remote,protected-ref-moved
+  [PASS] a switched-off condition is reported DISABLED, never ok status=disabled
+  [PASS] asking only about a switched-off condition evaluates NOTHING (exit 6) board=not-evaluated exit=6
+  [PASS] and the verdict NAMES the condition that was not evaluated operator-checkout-off-branch
+
+=== A2  policy-declared-unread: RED on the PRE-U6 config, GREEN on the shipped one ===
+  [PASS] GREEN: the shipped pipeline block is fully read status=ok
+  [PASS] RED: the pre-U6 human_gates declaration fires pipeline.human_gates
+  [PASS] RED: it names pipeline.human_gates specifically pipeline.human_gates
+  [PASS] RED: keys that are only PREFIXES of live ones are unread, not read status=fire
+  [PASS] RED: and all four truncated keys are named pipeline.claim_ttl, pipeline.anchor_require, pipeline.gate_profil, pipeline.a
+  [PASS] RED: a dead knob in the ANDON block is caught by the andon board's own condition andon.raise.ledger
+
+=== A3  git-error-swallowed: RED on a swallowing function, GREEN on a checking one ===
+  [PASS] GREEN: a function that checks $LASTEXITCODE does not fire status=ok
+  [PASS] RED: a function that discards git's exit code fires fixtures/swallow.ps1:3 in Invoke-SwallowingGit() runs git and does not check the result within 5 line(s)
+  [PASS] RED: it names the offending function, not just the file fixtures/swallow.ps1:3 in Invoke-SwallowingGit() runs git and does not check the result within 5 line(s)
+  [PASS] GREEN: the word 'git' in a COMMENT or STRING does not fire it 
+  [PASS] RED: a git call OUTSIDE any function fires fixtures/toplevel.ps1:2 in (top level) runs git and does not check the result within 5 line(s)
+  [PASS] RED: and it is attributed to the top level, not to some function fixtures/toplevel.ps1:2 in (top level) runs git and does not check the result within 5 line(s)
+  [PASS] RED: a throw BEFORE the git call does not excuse the git call fixtures/amnesty.ps1:6 in Push-Everything() runs git and does not check the result within 5 line(s)
+  [PASS] RED: and the finding names the swallowing function fixtures/amnesty.ps1:6 in Push-Everything() runs git and does not check the result within 5 line(s)
+  [PASS] RED on the REAL repo: it names Invoke-DrillGit, the incident's own function scripts/agent-harness/new-worktree.ps1:161 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/new-worktree.ps1:184 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/observe-oracle-on-stall.ps1:115 in GitCap() runs git and does not check the result within 5 line(s); scripts/agent-harness/observe-oracle-on-stall.ps1:133 in Remove-ProbeBranch() runs git and does not check the result within 5 line(s); scripts/agent-harness/queue.ps1:903 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/remove-worktree.ps1:92 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/remove-worktree.ps1:111 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/remove-worktree.ps1:115 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/remove-worktree.ps1:118 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/remove-worktree.ps1:158 in (top level) runs git and does not check the result within 5 line(s); scripts/agent-harness/verify-merge-protocol.ps1:49 in Invoke-DrillGit() runs git and does not check the result within 5 line(s); scripts/agent-harness/verify-merge-protocol.ps1:53 in Get-DrillGit() runs git and does not check the result within 5 line(s); scripts/agent-harness/verify-oracle-on-stall.ps1:100 in Invoke-DrillGit() runs git and does not check the result within 5 line(s); scripts/agent-harness/verify-oracle-on-stall.ps1:104 in Get-DrillGit() runs git and does not check the result within 5 line(s); scripts/checks/check-env-file-scope.ps1:43 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/check-env-file-scope.ps1:101 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/check-hook-attestation.ps1:67 in Invoke-GitLines() runs git and does not check the result within 5 line(s); scripts/checks/check-project-configs.ps1:18 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/check-staged-secrets.ps1:27 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/check-staged-secrets.ps1:30 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/dfu-done.ps1:1614 in New-DfuSnapshot() runs git and does not check the result within 5 line(s); scripts/checks/drill-personal-plane-exclusion.ps1:734 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/drill-personal-plane-exclusion.ps1:735 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/prove-agent-memory-rls.ps1:144 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/prove-agent-memory-rls.ps1:145 in (top level) runs git and does not check the result within 5 line(s); scripts/checks/validate-lineendings.ps1:16 in (top level) runs git and does not check the result within 5 line(s)
+
+=== A4  work-branch-on-remote: RED once a work branch is pushed, GREEN before ===
+  [PASS] GREEN: an unpushed work branch does not fire status=ok
+  [PASS] RED: the same branch fires once it exists on a remote work/dfdrill is on remote 'origin' (refs/remotes/origin/work/dfdrill)
+
+=== A5  protected-ref-moved: INDETERMINATE with no baseline, GREEN unchanged, RED when main moves ===
+  [PASS] NOT A PASS: with no baseline the condition is INDETERMINATE status=indeterminate
+  [PASS] NOT A PASS: an indeterminate condition still raises the board (exit 6) exit=6
+  [PASS] GREEN: an unmoved protected ref does not fire status=ok
+  [PASS] RED: main moving under the run fires main: cbcc2c050 -> b38d74591
+
+=== A6  a condition naming a predicate nobody implemented is REFUSED, not skipped ===
+  [PASS] a phantom predicate is an ERROR (exit 1), never a silent pass exit=1
+
+=== B  a CLEAN unattended run lands, with a COMPLETE audit trail ===
+  [PASS] propose: the item exists in anchor-draft Anchor PROPOSED for 'dfd'. Nothing may be built yet.
+  [PASS] ANCHOR GATE auto-passed with NO human (exit 0) exit=0 state=ready-to-test
+  [PASS] the auto-pass says so out loud 
+  [PASS] the item's anchor_confirmed_by is the RESERVED auto principal, not a name got 'auto:dark'
+  [PASS] the item records the gate kind as 'auto' got 'auto'
+  [PASS] a tester who is not the developer may claim it exit=0
+  [PASS] PRE-REVIEW GATE auto-passed with NO human exit=0 state=ready-review
+  [PASS] the pre-review auto-pass says so out loud 
+  [PASS] the item records pre_review as 'auto' by the reserved principal kind=auto by=auto:dark
+  [PASS] a reviewer who is not the developer may claim it exit=0
+  [PASS] the unattended run LANDS (state merged) state=merged exit=0
+  [PASS] the ledger holds exactly two gate events for this run count=2
+  [PASS] both are AUTO passes, and each names its gate profile 
+  [PASS] each auto pass records the andon verdict that authorised it clear,clear
+  [PASS] each auto pass states its COVERAGE: 5 of 5 evaluated, none switched off 5/5,5/5
+  [PASS] the board the gate consulted was looking at the SCRATCH repo, not the operator's C:/Users/yamao/AppData/Local/Temp/dfdrill-139896/dark-clean | C:/Users/yamao/AppData/Local/Temp/dfdrill-139896/dark-clean
+  [PASS] no record can be mistaken for a human approval 
+  [PASS] THE COLUMN'S SECOND HALF: the audit trail verifies COMPLETE (exit 0) exit=0 ::   gate an item never reached.
+  [PASS] -Audit flags, in words, that no human was in the loop 
+
+=== C  the completeness check has TEETH: tampered trails must go red ===
+  [PASS] RED: an auto pass relabelled 'human' is caught exit=1
+  [PASS] RED: and the finding names the reserved-namespace violation 
+  [PASS] RED: a MISSING record for a crossed gate is caught exit=1
+  [PASS] RED: and it says which gate has no record 
+  [PASS] RED: an auto pass taken while the board was raised is caught exit=1
+  [PASS] RED: 'clear' with 0 of 5 conditions evaluated is not an authorised pass exit=1
+  [PASS] RED: and the finding says nothing was checked 
+  [PASS] RED: an auto record that does not state its coverage is incomplete exit=1
+  [PASS] GREEN again once the ledger is restored (the check is not stuck red) exit=0
+  [PASS] NOT A PASS: an item with no gate record is COVERAGE INCOMPLETE (exit 7), not green exit=7
+  [PASS] and it is named, not silently dropped 
+  [PASS] asked about it DIRECTLY, 'cannot audit' is a FINDING (exit 1) exit=1
+
+=== D  an unattended run that HITS an andon condition HALTS AND RAISES ===
+  [PASS] the item is proposed 
+  [PASS] HALT: the anchor gate refuses to auto-pass (exit 6) exit=6
+  [PASS] HALT: the item stays PARKED at anchor-draft state=anchor-draft
+  [PASS] RAISE: the halt names the condition that fired 
+  [PASS] RAISE: the refusal is IN THE LEDGER, not just on the console refusals=1
+  [PASS] RAISE: the refusal record carries the fired condition 
+  [PASS] CLEARED: the same submit now auto-passes the gate exit=0 state=ready-to-test
+
+=== D2  a board that cannot be EVALUATED refuses the gate - it does not open it ===
+  [PASS] an UNAVAILABLE board refuses the gate (exit 6), never opens it exit=6
+  [PASS] and the item is still parked at anchor-draft state=anchor-draft
+  [PASS] the refusal records that the board was UNAVAILABLE, not that it was clear unavailable
+
+=== E  attended is unchanged, and the reserved namespace is reserved both ways ===
+  [PASS] attended: an unconfirmed anchor still refuses -Submit with exit 5 exit=5
+  [PASS] a human -By may NOT claim the reserved auto namespace (exit 4) exit=4
+  [PASS] attended: a human confirmation still works exit=0 state=anchor-confirmed
+  [PASS] attended: the record says 'human' and names the person kind=human by=profnovice
+  [PASS] attended: the human pass is in the ledger too human records=1
+
+=== F  switching the board OFF must not open the gates - the revert is not a kill switch ===
+  [PASS] HALT with andon.enabled=false: the anchor gate refuses (exit 6) exit=6
+  [PASS] HALT with andon.enabled=false: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT with andon.enabled=false (route andon-disabled): the refusal is in the ledger, recorded as 'not-evaluated' status=not-evaluated
+  [PASS] HALT with andon.enabled=false: the refusal states 0 condition(s) evaluated evaluated=0
+  [PASS] HALT with the andon block deleted: the anchor gate refuses (exit 6) exit=6
+  [PASS] HALT with the andon block deleted: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT with the andon block deleted (route andon-block-deleted): the refusal is in the ledger, recorded as 'incomplete' status=incomplete
+  [PASS] HALT with the andon block deleted: the refusal states 0 condition(s) evaluated evaluated=0
+  [PASS] HALT with one condition switched off: the anchor gate refuses (exit 6) exit=6
+  [PASS] HALT with one condition switched off: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT with one condition switched off (route condition-disabled): the refusal is in the ledger, recorded as 'partial' status=partial
+  [PASS] HALT with one condition switched off: the refusal states 4 condition(s) evaluated evaluated=4
+
+=== G  'COMPLETE' is checked against the gates the pipeline REQUIRES, not only the ones an item happened to reach ===
+  [PASS] anchor_required=false: an item may be submitted with NO anchor exit=0
+  [PASS] and it auto-passes pre_review under dark state=ready-review
+  [PASS] COMPLETE says WHAT it covered - it does not let 'complete' read as 'all gates enforced'   gate an item never reached.   pipeline.anchor_required=false: an item created without an anchor crosses NO anchor   gate, so completeness cannot account for one. That is configuration, not coverage.
+  [PASS] anchor_required=true: the same anchorless item is INCOMPLETE (exit 1) exit=1
+  [PASS] and the finding names the anchor gate with no pass record 
+
+=== H  a THINNED board must not open the gates either - deleting condition ENTRIES ===
+  [PASS] HALT with ONE condition entry deleted: the anchor gate refuses (exit 6) exit=6 kept=4
+  [PASS] HALT with ONE condition entry deleted: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT with ONE condition entry deleted: nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] HALT with ONE condition entry deleted (route conditions-deleted): the refusal is recorded as 'incomplete', not 'clear' status=incomplete
+  [PASS] HALT with ONE condition entry deleted: the record NAMES every missing id missing_ids=protected-ref-moved
+  [PASS] HALT with ONE condition entry deleted: and the old counters would have said 'full coverage' evaluated=4/4 disabled=0
+  [PASS] HALT with FOUR condition entries deleted: the anchor gate refuses (exit 6) exit=6 kept=1
+  [PASS] HALT with FOUR condition entries deleted: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT with FOUR condition entries deleted: nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] HALT with FOUR condition entries deleted (route conditions-deleted): the refusal is recorded as 'incomplete', not 'clear' status=incomplete
+  [PASS] HALT with FOUR condition entries deleted: the record NAMES every missing id missing_ids=operator-checkout-off-branch,policy-declared-unread,git-error-swallowed,protected-ref-moved
+  [PASS] HALT with FOUR condition entries deleted: and the old counters would have said 'full coverage' evaluated=1/1 disabled=0
+  [PASS] CONTROL: a FULL board still auto-passes the anchor gate (exit 0) exit=0 state=ready-to-test
+  [PASS] CONTROL: and it still says NO HUMAN CONFIRMED IT 
+  [PASS] CONTROL: signed by the reserved auto principal got 'auto:dark'
+  [PASS] CONTROL: the pass record states 0 of 5 required MISSING missing=0/5
+  [PASS] CONTROL: the audit trail still verifies COMPLETE (exit 0) exit=0
+  [PASS] RED: a record still labelled 'clear' but admitting 4 missing conditions is caught exit=1
+  [PASS] RED: and the finding NAMES them 
+  [PASS] RED: a record that cannot state the required set is a FINDING, not a pass exit=1
+  [PASS] GREEN again once the ledger is restored exit=0
+
+=== I  -GateProfile OVERRIDES an attended config, so attended is a default not a lock ===
+  [PASS] the configured profile is attended: -Submit refuses with exit 5 (no confirmed anchor) exit=5
+  [PASS] -GateProfile dark on the SAME item takes the dark path instead (exit 6, andon) exit=6
+  [PASS] so pipeline.gate_profile: attended is a DEFAULT, not a lock 
+
+=== J  a FIRED condition must not open a gate, and must be IN THE RECORD, whatever on_fire says ===
+  [PASS] the condition genuinely FIRES with on_fire=warn status=fire
+  [PASS] and its recorded ACTION is the configured one, not a rewritten halt action=warn
+  [PASS] the BOARD is not clear: warned, exit 6 board=warned exit=6
+  [PASS] the verdict SEPARATES what fired from what halted fired_ids=work-branch-on-remote halted_ids=
+  [PASS] HALT: a downgraded on_fire does NOT auto-pass the anchor gate (exit 6) exit=6
+  [PASS] HALT: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT: nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] THE RECORD (route on-fire-downgraded): the refusal is in the ledger as 'warned', not clear status=warned
+  [PASS] THE RECORD: the fired list NAMES the condition even though it did not halt fired=work-branch-on-remote: work branches exist on a remote: 1
+  [PASS] THE RECORD: the halted list is empty - the two are not one derived list halted=
+  [PASS] THE CONSOLE: the halt names the fired condition too 
+  [PASS] an on_fire the board does not implement is REFUSED (exit 1, no verdict) exit=1
+  [PASS] and the gate treats an unreadable board as UNAVAILABLE, not as clear (exit 6) exit=6
+  [PASS] THE RECORD (route action-word-unimplemented): the refusal is stored as 'unavailable', not as clear and not as a board word status=warned,unavailable
+  [PASS] CONTROL: with the condition CLEARED, the same warn-declared board auto-passes (exit 0) exit=0 state=ready-to-test
+  [PASS] CONTROL: the pass record states 0 fired and 0 halted fired=0 halted=0
+  [PASS] CONTROL: the trail verifies COMPLETE (exit 0) exit=0
+  [PASS] RED: a record labelled clear that admits a FIRE is caught exit=1
+  [PASS] RED: and the finding NAMES the fired condition 
+  [PASS] RED: a record that cannot separate fired from halted is a FINDING, not a pass exit=1
+  [PASS] GREEN again once the ledger is restored exit=0
+
+=== K  an outcome NOBODY ENUMERATED is not a clear board - the fifth way off, and the general one ===
+  [PASS] the condition is genuinely INDETERMINATE - no baseline to compare against status=indeterminate
+  [PASS] and its recorded ACTION is the configured warn, not a rewritten halt action=warn
+  [PASS] the BOARD is not clear: indeterminate, exit 6 board=indeterminate exit=6
+  [PASS] THE CENSUS puts it in the indeterminate bucket, NOT evaluated_ok indeterminate=1 evaluated_ok=4
+  [PASS] the census SUMS to the conditions in scope - nothing landed outside a bucket census_total=5 declared=5
+  [PASS] it fired NOTHING and halted NOTHING - which is exactly why the old verdict called it clear fired= halted=
+  [PASS] HALT: a warn-declared INDETERMINATE does NOT auto-pass the anchor gate (exit 6) exit=6
+  [PASS] HALT: the item stays parked at anchor-draft state=anchor-draft
+  [PASS] HALT: nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] THE RECORD (route on-indeterminate-downgraded): the refusal is in the ledger as 'indeterminate', not clear status=indeterminate
+  [PASS] THE RECORD: the unevaluated condition is NAMED - it was in no field at all before indeterminate=protected-ref-moved: no baseline recorded - run: andon.ps1 -Baseline (expected at C:\Users\yamao\AppData\Local\Temp\dfdrill-139896\state-dark-warn-onindet\audit\andon-baseline.json)
+  [PASS] THE RECORD: the census travels with it census.indeterminate=1
+  [PASS] THE CONSOLE: the halt names the condition that could not be evaluated 
+  [PASS] CONTROL: with a baseline recorded the SAME board is clear (exit 0) board=clear exit=0
+  [PASS] CONTROL: and the census is 5 evaluated_ok, every other bucket empty evaluated_ok=5 total=5
+  [PASS] CONTROL: the clean board auto-passes the anchor gate (exit 0) exit=0 state=ready-to-test
+  [PASS] CONTROL: signed by the reserved auto principal, not a human principal=auto:dark kind=auto
+  [PASS] CONTROL: the trail verifies COMPLETE (exit 0) exit=0
+  [PASS] RED: a record labelled clear whose CENSUS admits a non-ok bucket is caught exit=1
+  [PASS] RED: and the finding NAMES the bucket 
+  [PASS] RED: a record carrying NO census cannot be re-derived, so it is a finding exit=1
+  [PASS] GREEN again once the ledger is restored exit=0
+  [PASS] K2 SETUP: the copy's andon.ps1 is byte-identical to the shipped one 
+  [PASS] K2 SETUP: the word 'quarantine' appears NOWHERE in the shipped andon.ps1 
+  [PASS] K2: an action word the board has never heard of does NOT clear it (exit 6) board=unaccounted exit=6
+  [PASS] K2 (route outcome-unenumerated): the board word is 'unaccounted' - no branch anywhere names 'quarantine' board=unaccounted
+  [PASS] K2: the CENSUS puts it in the unrecognised bucket unrecognised=1
+  [PASS] K2: THE RECORD NAMES THE WORD and the condition unrecognised_ids=work-branch-on-remote (status 'fire', action 'quarantine')
+  [PASS] K2: THE GATE refuses it too (exit 6), item parked exit=6 state=anchor-draft
+  [PASS] K2: THE LEDGER names the unrecognised outcome unrecognised=work-branch-on-remote: status 'fire' action 'quarantine' - work branches exist on a remote: 1
+  [PASS] K3 SETUP: the copy differs from the shipped board by EXACTLY ONE line differing lines=1
+  [PASS] K3 SETUP: and that line is inside a PREDICATE, not the verdict logic line=228 Invoke-AndonEvaluation at 732
+  [PASS] K3 SETUP: the word 'parked' appears NOWHERE in the shipped andon.ps1 or config.ps1 
+  [PASS] K3 CONTROL: the shipped board calls this fixture CLEAR (exit 0) board=clear exit=0
+  [PASS] K3: the same board with ONE novel status is NOT clear (exit 6) board=unaccounted exit=6
+  [PASS] K3 (route outcome-unenumerated): it is 'unaccounted' - a status nobody enumerated is refused, not ignored board=unaccounted
+  [PASS] K3: THE RECORD NAMES THE STATUS and the condition unrecognised_ids=operator-checkout-off-branch (status 'parked', action 'none')
+  [PASS] K3: the census still SUMS - the novel outcome is counted, not dropped total=5 declared=5
+  [PASS] K3: THE GATE refuses it (exit 6), item parked at anchor-draft exit=6 state=anchor-draft
+
+=== L  a params REDIRECT must be visible in the record - the claim README made, now made true ===
+  [PASS] the redirect is NOT refused - the board runs and the gate passes, as README says exit=0 state=ready-to-test
+  [PASS] andon.repo names the checkout the BOARD resolved, NOT the decoy andon.repo=C:/Users/yamao/AppData/Local/Temp/dfdrill-139896/dark-redirect
+  [PASS] RECORD: looked_at NAMES the decoy the condition was pointed at looked_at=operator-checkout-off-branch -> git-checkout-state {"repo":"C:\\Users\\yamao\\AppData\\Local\\Temp\\dfdrill-139896\\repo-decoy","stale_seconds":0} | policy-declared-unread -> config-key-unread {"roots":["pipeline","andon"],"exclude_sources":["test_*","drill-*"]} | git-error-swallowed -> git-error-unchecked {"globs":["scripts/checks/*.ps1","scripts/agent-harness/*.ps1"],"exclude_files":["git-io.ps1"],"check_window_lines":5} | work-branch-on-remote -> branch-on-remote {"branches":[]} | protected-ref-moved -> protected-ref-moved {"refs":["main"]}
+  [PASS] RECORD: and it names the predicate behind every id, so a swap is readable too 
+
+=== M  the ANCHOR gate asks the NARROW branch question - the one README promised ===
+  [PASS] M1: bare -Evaluate asks the BROAD question and FIRES on the foreign branch status=fire
+  [PASS] M1: -RunBranch asks the NARROW one and passes - the foreign branch is not this run's status=ok
+  [PASS] M1 THE GATE: the ANCHOR gate auto-passes - a foreign branch does not block this run exit=0 state=ready-to-test
+  [PASS] M1 THE RECORD: the anchor pass records a clear board with nothing fired status=clear
+  [PASS] M2: the run's OWN branch on a remote still HALTS the anchor gate (exit 6) exit=6 state=anchor-draft
+  [PASS] M2 THE RECORD: the refusal names work-branch-on-remote as fired fired=work-branch-on-remote: work branches exist on a remote: 1
+  [PASS] M3: a branch name that does not resolve leaves the condition UNEVALUATED, and the gate refuses (exit 6) exit=6 state=anchor-draft
+  [PASS] M3 THE RECORD: the halt says the named branch is not present, not that nothing was found halted=work-branch-on-remote: named branch(es) not present in 'C:/Users/yamao/AppData/Local/Temp/dfdrill-139896/dark-missing-branch': work/never-created
+  [PASS] M3 THE WORD: the condition is indeterminate but the BOARD is 'raised' - a halt outranks the bucket word status=raised indeterminate=work-branch-on-remote: named branch(es) not present in 'C:/Users/yamao/AppData/Local/Temp/dfdrill-139896/dark-missing-branch': work/never-created
+  [PASS] M4 CONTROL: the same board with the REAL branch is clear (exit 0) board=clear exit=0
+  [PASS] M4 THE BOARD (a single space): the condition is INDETERMINATE, not ok status=indeterminate
+  [PASS] M4 THE BOARD (a single space): the board is RAISED and refuses (exit 6) board=raised exit=6
+  [PASS] M4 THE BOARD (a single space): and it does NOT say it checked a branch detail=unusable branch name(s) - empty or whitespace, so nothing was asked about them: [ ]
+  [PASS] M4 THE BOARD (a tab): the condition is INDETERMINATE, not ok status=indeterminate
+  [PASS] M4 THE BOARD (a tab): the board is RAISED and refuses (exit 6) board=raised exit=6
+  [PASS] M4 THE BOARD (a tab): and it does NOT say it checked a branch detail=unusable branch name(s) - empty or whitespace, so nothing was asked about them: [	]
+  [PASS] M4 THE DOOR (a single space): -Submit REFUSES at the DOOR (exit 1), before any gate exit=1 out=ERROR: -Branch is empty or whitespace, which is not a branch. It is the name the anchor gate asks the andon board about, and a question asked about nothing comes back clear. Pass the branch this work is on.
+  [PASS] M4 THE DOOR (a single space): the item stays parked at anchor-draft state=anchor-draft
+  [PASS] M4 THE DOOR (a single space): nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] M4 THE DOOR (a tab): -Submit REFUSES at the DOOR (exit 1), before any gate exit=1 out=ERROR: -Branch is empty or whitespace, which is not a branch. It is the name the anchor gate asks the andon board about, and a question asked about nothing comes back clear. Pass the branch this work is on.
+  [PASS] M4 THE DOOR (a tab): the item stays parked at anchor-draft state=anchor-draft
+  [PASS] M4 THE DOOR (a tab): nothing signed the anchor gate anchor_confirmed_by=''
+  [PASS] M4 (an empty string): PowerShell's own binder refuses it before queue.ps1 runs exit=1
+  [PASS] M4 (an empty string): the item stays parked at anchor-draft, nothing signed state=anchor-draft
+  [PASS] M4 (a bare slash): the gate refuses it at the BOARD (exit 6), item parked exit=6 state=anchor-draft
+  [PASS] M4 CONTROL: the real branch still auto-passes the anchor gate (exit 0) exit=0 state=ready-to-test
+
+=== N  every ways-off row was proven by an assertion that RAN - not by a second declaration ===
+  [PASS] N: every declared ways-off route was exercised by a PASSING assertion in this run declared=8 exercised=8 unexercised=
+  [PASS] N: and no assertion cited a route the table does not declare undeclared=
+
+213 checks, 0 failed
+EXIT=0

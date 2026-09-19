@@ -177,6 +177,97 @@ procedure. Prefer the newer slot unless it is the corrupted set.
 
 ---
 
+## 8b. The NAS sync stopped working
+
+**Symptom:** the newest `logs/nas-sync-*.log` ends in an `[ERROR]`, or the slot
+timestamps on the NAS stop advancing. Since 2026-09-13 `check_backups.py` also
+raises a `nas-offsite` row in the daily `#sysadmin` post for both cases.
+
+**By far the most likely cause is an expired password.** Synology expires the
+`backup-user` account on a schedule. It did so between 2026-08-30 and
+2026-09-06, and the sync then missed two weekly runs.
+
+```
+net use: The password of this user has expired.
+net use: System error 2242 has occurred.
+```
+
+**Fix (5 minutes):**
+
+1. Set a new password for `backup-user` in DSM → Control Panel → User.
+2. Put it in the gitignored `.env` at the repo root:
+   ```
+   NAS_BACKUP_USER=backup-user
+   NAS_BACKUP_PASSWORD=<the new one>
+   ```
+   The script reads `.env` **first**, so this alone fixes the next run.
+3. Keep the DPAPI fallback in step:
+   `powershell -File scripts/backup/set-nas-credential.ps1 -FromEnv`
+4. Re-run it now rather than waiting a week:
+   `powershell -File scripts/backup/backup-to-nas.ps1 -NasUncRoot "\\PolyshDesignNAS\backups\ai-stack\portal"`
+
+**There is no hardcoded password to hunt for.** Before 2026-09-13 the only copy
+lived DPAPI-encrypted in `secrets/nas-backup-vault.dat` — unfindable by grep,
+which is exactly why a rotation turned into an investigation. `.env` is now the
+front door; the vault is the fallback.
+
+### Other failures, by name
+
+| net use error | Meaning | Fix |
+|---|---|---|
+| **2242** | password expired | above |
+| **1219** | another session to the same NAS under different credentials — typically an operator's mapped drive (`M:`) | the script opens its session by **IP** to avoid this; if it still fires, `net use` and disconnect the clashing session, or pass the IP as `-NasUncRoot` |
+| **1326** | wrong password, or the account is disabled/locked | check DSM |
+| **53** | share missing / NAS offline / SMB disabled | `Test-NetConnection <nas> -Port 445` |
+
+**Why by IP.** Windows keys SMB sessions by *server name* and allows one
+credential set per name. With the NAS mapped interactively, a hostname session
+as `backup-user` fails with 1219. Connecting by IP gives the backup its own
+session identity, and the two coexist. `-NoIpResolve` restores hostname
+behaviour. The session and the robocopy destination must use the **same**
+spelling, or a second session opens and 1219 returns.
+
+### Do not trust a green alerter
+
+The failure alert goes to the portal-alerter **and** to Mattermost **and** to
+Telegram, and the log records which channels answered. This is deliberate: the
+alerter's Gmail refresh token is dead, so it returns 500 to every `/alert` while
+its `/health` still answers `ready: true` with HTTP 200 — the healthcheck only
+proves the listener is up, not that mail can be sent. Both 2026-09 backup
+failures alerted correctly into that void.
+
+**`portal-alerter` and the daily digest are different services with different
+OAuth clients.** `openbrain-digest` has been sending fine throughout. A working
+digest is *not* evidence that the alerter works, and re-consenting one does
+nothing for the other.
+
+To check the alerter specifically:
+
+```powershell
+docker logs --timestamps portal-alerter | Select-String "Token refresh failed" | Select-Object -Last 3
+```
+
+If present, its refresh token returns `invalid_grant` and must be re-minted:
+
+```powershell
+deno run --allow-net --allow-read --allow-write --allow-env config/alerter/setup-token.ts
+docker compose -f portal/docker-compose.yml up -d --force-recreate portal-alerter
+```
+
+**Do not date the outage from the container log.** The log begins when the
+container was created, not when the token broke. The honest last-known-good is
+`expiry_date` inside `secrets/google/portal-alerter/token.json` — `alerter.ts`
+rewrites that file on every successful refresh, so its timestamp is the last time
+mail actually worked. On 2026-09-13 the log implied 23 days and the token file
+said 14 weeks.
+
+Likewise ignore the 0-byte `config/alerter/token.json` / `credentials.json`:
+those are Docker's bind-mount placeholders, created because the compose file
+mounts `../config/alerter:/app` and then layers the real files from `secrets/`
+over it. They are not the credentials and never were.
+
+---
+
 ## 9. After any restore
 
 - Verify container health: `docker ps` / the sysadmin `stack_health` tool.

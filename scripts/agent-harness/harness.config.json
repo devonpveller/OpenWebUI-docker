@@ -1,0 +1,450 @@
+{
+  "_comment": [
+    "The agent harness configuration. ONE file, two readers (config.ps1 for the",
+    "scripts, config.py for the Mattermost bridge), so a value is never defined",
+    "twice in two languages. Precedence, resolved only in the loaders:",
+    "  built-in defaults < this file < harness.local.json (gitignored) < environment",
+    "This file is committed and MUST NOT contain secrets - it holds policy and",
+    "topology only. Machine-specific or experimental overrides go in",
+    "harness.local.json beside it."
+  ],
+  "version": 1,
+  "enabled": true,
+  "surfaces": {
+    "extension": {
+      "enabled": true,
+      "profile": "all-cloud",
+      "profile_locked": true,
+      "_why_locked": "operator 2026-08-28: the surface the operator drives interactively must never silently degrade to a weaker model."
+    },
+    "mattermost": {
+      "enabled": true,
+      "profile": "all-cloud",
+      "profile_locked": false,
+      "_note": "switchable in a thread with 'profile: <name>', the same shape as the existing 'model:' and 'worktree:' directives."
+    }
+  },
+  "default_profile": "all-cloud",
+  "runners": {
+    "claude-code": {
+      "kind": "claude-code",
+      "status": "proven",
+      "default_model": "opus",
+      "models": {
+        "opus": "opus",
+        "sonnet": "sonnet",
+        "haiku": "haiku"
+      },
+      "_note": "a Claude Code agent - a subagent in an editor session, or 'claude -p' spawned by the bridge. Model names are CLI aliases, not API ids."
+    },
+    "little-coder": {
+      "kind": "little-coder",
+      "status": "unproven",
+      "transport": "docker-exec",
+      "container": "little-coder",
+      "lease": "coder",
+      "base_url": "http://localhost:8090",
+      "health_path": "/health",
+      "project_path": "/project",
+      "submit_path": "/tasks",
+      "task_path": "/tasks/{id}",
+      "events_path": "/tasks/{id}/events",
+      "container_workspace": "/workspace",
+      "_why_container_workspace": [
+        "The daemon's workspace root INSIDE the container (little-coder.config.yaml's",
+        "workspace.path), which is also the agent's cwd for every task. The quadrant",
+        "comparison mirrors a run workspace into this directory and mirrors the changed",
+        "files back out, because little-coder's workspace is a docker VOLUME shared with",
+        "open-terminal - there is no bind mount from a host worktree into the container, and",
+        "the daemon's own focus path clones from a git-host URL only (urlnorm.py rejects",
+        "local paths and file://). Declared here rather than assumed in code so a config",
+        "change is the whole change if the daemon's workspace ever moves."
+      ],
+      "default_model": "local-default",
+      "_note": "the local substrate: little-coder reaches llama-cpp through LiteLLM. Dispatched by dispatch.ps1 (Invoke-HarnessTask).",
+      "_why_lease": [
+        "Focusing this runner WIPES its workspace and a task runs arbitrary commands in it,",
+        "so a dispatch is a live-plane mutation. dispatch.ps1's Assert-RunnerLease refuses",
+        "unless the named lease is held BY THE CALLER (lease.ps1 -Acquire -Name coder).",
+        "A runner without this key needs no lease - the policy lives here, not in the code.",
+        "Added 2026-08-30: the code claimed 'callers take the coder lease' in a comment while",
+        "nothing acquired, asserted or checked one."
+      ],
+      "_why_docker_exec": [
+        "This runner declared endpoint 'http://127.0.0.1:8090' until 2026-08-30. That door did",
+        "not exist: coder/docker-compose.yml DECLARES only 127.0.0.1:9091->9090 (Prometheus),",
+        "so `curl http://127.0.0.1:8090/health` from the host is connection-refused while",
+        "`docker exec little-coder curl http://localhost:8090/health` answers. Nothing called",
+        "it, so nothing noticed. base_url is therefore CONTAINER-LOCAL and only meaningful",
+        "with transport 'docker-exec'.",
+        "DECLARES, not publishes: not even 9091 exists on the running container - `docker port`",
+        "prints nothing and .NetworkSettings.Ports is {\"9090/tcp\":[]}. That disagreement is",
+        "measured; its CAUSE IS NOT ESTABLISHED. See MODULE.md's DECLARED-is-not-EXISTS note.",
+        "The port stays unpublished deliberately: daemon.py's own header says 'It is NOT the",
+        "task-trigger authentication surface; that is lc-mcpo', and lc-mcpo was retired",
+        "2026-08-20 - so POST /tasks (arbitrary agent execution) and POST /admin/shutdown are",
+        "unauthenticated. Reaching them through `docker exec` needs Docker access, which is",
+        "already an admin-equivalent boundary; publishing them on the host loopback would hand",
+        "them to every process on the machine for no capability the harness needs.",
+        "REVERT: set transport to 'http', base_url to 'http://127.0.0.1:8090', and add",
+        "'127.0.0.1:8090:8090' to little-coder's ports in coder/docker-compose.yml.",
+        "dispatch.ps1's Invoke-LcApi already implements the http transport."
+      ]
+    },
+    "fixture": {
+      "kind": "fixture",
+      "status": "self-test",
+      "_note": "scaffolding for the quadrant comparison's own proof: performs an item deterministically with no model at all. status 'self-test' is load-bearing - quadrant/schema.json's comparable_runner_statuses excludes it, so it can never appear in a decision table, and test_quadrant.py asserts no profile assigns a role to it."
+    }
+  },
+  "targets": {
+    "_comment": [
+      "The TARGET axis (PLAN 1 L3), orthogonal to the runner axis and living in",
+      "configuration rather than code: 'Nothing in the pipeline layer knows which",
+      "quadrant it is in.'"
+    ],
+    "self": {
+      "kind": "self",
+      "status": "proven",
+      "_note": "the org works on THE REPOSITORY IT IS POINTED AT - a worktree off that repo's ref, plane leases for shared runtime, that repo's branch policy. Which repository is the VENUE's question, not this target's: in a gym run 'self' is a worktree of the arena, and in a workspace-venue smoke run it is ai-stack. The quadrant harness uses a DETACHED worktree so a comparison never leaves a branch behind."
+    },
+    "project": {
+      "kind": "project",
+      "status": "unproven",
+      "scratch_root": ".quadrant/scratch",
+      "_note": "the org pointed at an external project: agent-org's clone/workspace model, git-proxy containment, the GitHub App as the door. For a COMPARISON the workspace is a local disposable repo - a comparison must never be the first thing to touch a real target."
+    }
+  },
+  "quadrant": {
+    "_comment": [
+      "The runner x target comparison. PLAN 2's U4 column, QUOTED IN FULL because the",
+      "first word is the one this config used to drop:",
+      "",
+      "  \"Gym: same anchored item run per quadrant (runner x target), outcomes",
+      "   compared; stall -> oracle observed firing at least once\"",
+      "",
+      "'Gym:' is bound four lines above that table: \"'gym' means measured runs in",
+      "`ai-orchestration-gym`, never live planes or a real target.\" The restatement",
+      "here previously began at 'same anchored item', so the one clause naming the",
+      "VENUE was the one clause missing from the config's own copy of the",
+      "requirement - and a four-cell comparison was then run against ai-stack and",
+      "read as satisfying the column. `venue` below is that clause, as data.",
+      "",
+      "Listing the axes here rather than in code is what lets a fifth runner or a",
+      "third target be a config edit; the harness derives the matrix, and its report",
+      "always renders one row per configured cell whether or not that cell produced",
+      "a record."
+    ],
+    "venue": "gym",
+    "venues": {
+      "gym": {
+        "kind": "gym",
+        "repo": "../ai-orchestration-gym",
+        "ref": "main",
+        "repo_env": "AI_STACK_GYM_REPO",
+        "_why": [
+          "THE ARENA. The gym's own README: `main` is the arena holding the training",
+          "project the org iterates on, force-swapped per scenario and never built on",
+          "by hand; the harness branch holds the scenario catalog and the run ledger.",
+          "So `ref` is `main` - a run against the harness branch would be working on",
+          "the gym's tooling, not in its arena.",
+          "The path is RELATIVE and is resolved against the MAIN CHECKOUT of this repo",
+          "(the git common dir's parent), not against the caller's worktree: harness",
+          "sessions run in .claude/worktrees/wt-<id>, where '..' means something else",
+          "entirely. Override per machine with $AI_STACK_GYM_REPO or --repo.",
+          "quadrant/venue.py REFUSES this venue if it resolves to this repository."
+        ]
+      },
+      "workspace": {
+        "kind": "workspace",
+        "repo": ".",
+        "ref": "HEAD",
+        "_why": [
+          "ai-stack itself - the venue a smoke run of the HARNESS uses. It does NOT",
+          "satisfy any 'Gym:' column and quadrant/schema.json says so in the venue",
+          "kind's own rules, so selecting it cannot quietly produce evidence for U4."
+        ]
+      }
+    },
+    "runners": [
+      "little-coder",
+      "claude-code"
+    ],
+    "targets": [
+      "self",
+      "project"
+    ],
+    "repeats": 1,
+    "_repeats_note": "1 means every cell is n=1 and the report says so in those words. Raise it to 2+ before treating any difference between quadrants as real.",
+    "results_dir": ".quadrant/runs",
+    "item": "u4-baseline",
+    "_results_dir_note": "NOT under .claude/. Measured 2026-08-30: a claude-code run whose workspace lived at .claude/quadrant-runs/.../workspace had every Write and Edit turned into a permission request - Claude Code treats .claude/ as a sensitive path - so the quadrant scored 1/2 on a task the model had already solved correctly in its reply. The harness would have been measuring its own directory choice."
+  },
+  "profiles": {
+    "all-cloud": {
+      "_desc": "the default everywhere; all three roles on cloud opus",
+      "worker": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "tester": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
+    },
+    "all-local": {
+      "_desc": "no cloud calls at all; needs the inference plane healthy",
+      "worker": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "little-coder",
+        "model": "local-default"
+      }
+    },
+    "local-work-cloud-review": {
+      "_desc": "cheap production, expensive judgement - the reviewer is the last gate before a merge",
+      "worker": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
+    },
+    "cloud-work-local-test": {
+      "_desc": "expensive production, cheap verification - useful when the test plan is mechanical",
+      "worker": {
+        "runner": "claude-code",
+        "model": "opus"
+      },
+      "tester": {
+        "runner": "little-coder",
+        "model": "local-default"
+      },
+      "reviewer": {
+        "runner": "claude-code",
+        "model": "opus"
+      }
+    }
+  },
+
+  "gate_profiles": {
+    "_comment": [
+      "WHO passes a pipeline gate. Deliberately a SEPARATE block from `profiles`",
+      "above, not another key inside it. `profiles` is keyed by ROLE and every reader",
+      "iterates the three roles; a gate is not a role, and folding gates in would make",
+      "`resolve_role` and `describe_profile` iterate keys that are not roles. The",
+      "stronger reason is coupling: an operator switching to a cheaper MODEL profile",
+      "must not thereby also turn the human gates off. Those are two unrelated",
+      "decisions and one name must not carry both - the same reasoning that produced",
+      "`profile_locked` on the extension surface.",
+      "",
+      "This block is TUNING (who passes). What a gate DOES - the state transitions,",
+      "the duty separation, the refusal of self-service - stays in queue.ps1, because",
+      "that is BEHAVIOUR. Turning a gate to `auto` is an operator decision with a real",
+      "cost: nobody looks at the work before it moves on.",
+      "",
+      "Values: `human` (a person runs -ConfirmAnchor / -Approve) or `auto` (the gate",
+      "self-passes). Every auto-pass is refused unless the andon board is clear, and",
+      "every auto-pass writes an audit record under a RESERVED principal namespace",
+      "(`auto:<profile>`) that no human -By value is allowed to occupy."
+    ],
+    "attended": {
+      "_desc": "today's behaviour, unchanged - a human confirms the anchor and releases for review",
+      "anchor": "human",
+      "pre_review": "human"
+    },
+    "dark": {
+      "_desc": "unattended: both gates self-pass, andon-clear, and say so in the record",
+      "anchor": "auto",
+      "pre_review": "auto"
+    }
+  },
+
+  "andon": {
+    "_comment": [
+      "THE ANDON BOARD. Conditions are DATA here and executable predicates in andon.ps1;",
+      "a condition naming a predicate that does not exist is refused, so this block cannot",
+      "declare a detector nobody implements.",
+      "",
+      "Every condition here has a real incident behind it from the 2026-08-30 unattended",
+      "run - see `incident` on each. None was invented to round out a taxonomy.",
+      "",
+      "`on_fire` and `on_indeterminate` are both `halt` by default and on purpose: a",
+      "condition that could not be evaluated has NOT passed. A skip that counts as a pass",
+      "is one of the failure shapes this board exists to catch.",
+      "",
+      "THE ONLY TWO WORDS EITHER MAY TAKE are `halt` and `warn` (config.ps1",
+      "$script:AllowedAndonActions / config.py ALLOWED_ANDON_ACTIONS); anything else is",
+      "refused with exit 1 and no verdict, which every gate reads as `not clear`. And `warn`",
+      "does NOT buy a pass: a condition that FIRED is never a clear board, so no unattended",
+      "gate passes over one either way. It changes the board's WORD (`warned` rather than",
+      "`raised`) and the record, which is triage for a human, not permission for a machine.",
+      "Until 2026-08-30 it did buy a pass - the condition fired, the board said `clear`, the",
+      "dark gate auto-passed at exit 0 and the ledger recorded `fired=[]`, because `fired`",
+      "was derived from `action -eq halt`.",
+      "",
+      "WHICH CONDITIONS MUST EXIST IS NOT DECIDED HERE. The required ids live in code",
+      "(config.ps1 $script:RequiredAndonConditions / config.py REQUIRED_ANDON_CONDITIONS),",
+      "and a board missing any of them is `incomplete`: exit 6, the ids named, no auto-pass.",
+      "Deleting an entry from the list below is therefore visible, not silent - which it was",
+      "not until 2026-08-30, when a board pruned to one of five reported `clear` with 1 of 1",
+      "evaluated and a dark gate auto-passed at exit 0. A required list kept in THIS file",
+      "would be deleted alongside the entry it names."
+    ],
+    "enabled": true,
+    "ledger_dir_name": "audit",
+    "raise": {
+      "stderr": true,
+      "_ledger_note": [
+        "There is no `ledger` knob here and there deliberately never was one that worked.",
+        "A raise ALWAYS goes to the gate ledger - queue.ps1 writes a decision=refused record",
+        "at the gate that halted - because a run able to switch off the record of its own",
+        "halt is the failure this whole board exists to prevent. `ledger: true` sat here",
+        "until 2026-08-30 with ZERO executable readers: the dead-knob detector shipped a dead",
+        "knob, inside its own block. `roots` below now includes `andon`, so the detector",
+        "covers this block and the next one cannot hide here."
+      ]
+    },
+    "conditions": [
+      {
+        "id": "operator-checkout-off-branch",
+        "detects": "the operator's main checkout is detached, or has a rebase/merge/cherry-pick/bisect in progress",
+        "predicate": "git-checkout-state",
+        "params": { "repo": "", "stale_seconds": 0 },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md"
+      },
+      {
+        "id": "policy-declared-unread",
+        "detects": "a policy knob declared in harness.config.json that no executable source reads - a setting that governs nothing while reading as though it does",
+        "predicate": "config-key-unread",
+        "params": {
+          "roots": ["pipeline", "andon"],
+          "exclude_sources": ["test_*", "drill-*"],
+          "_exclude_note": "GLOB patterns for what does NOT count as a reader: a test or drill that names a key exercises it rather than consuming it. config.ps1/config.py are NOT excluded - they hold the accessors, and the scan matches the DOTTED PATH, which their defaults blocks do not contain.",
+          "_roots_note": "policy KNOBS. `andon` is a root so this condition covers its OWN block - it shipped with a dead `andon.raise.ledger` in it. Named data COLLECTIONS keyed by name (profiles, gate_profiles) are not roots: they are consumed generically by a loop, so a path scan says nothing true about them. `andon.conditions` is a leaf here - the list is read whole by Get-AndonConditions - so the scan asks only whether the list itself is read, never whether each condition is. WHICH conditions are present is a different question, answered by the required-set check in andon.ps1 against config.ps1's $script:RequiredAndonConditions, not by this scan.",
+          "_match_note": "the dotted path is matched ANCHORED. Unanchored, any key that is a PREFIX of a live one reported 'read': with pipeline.gate_profile in the sources, pipeline.gate_profil, pipeline.claim_ttl and pipeline.a all passed (reproduced 2026-08-30). A container key counts as read when its own path OR any leaf beneath it is matched, which is why andon.raise is alive on the strength of andon.raise.stderr and pipeline.human_gates was not."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "pipeline.human_gates and runners.*.status both had zero executable readers (verified 2026-08-30); Resolve-RoleTarget had zero executable callers"
+      },
+      {
+        "id": "git-error-swallowed",
+        "detects": "a function that runs git and neither inspects $LASTEXITCODE nor raises - it cannot report a git failure, so a check built on it cannot fail",
+        "predicate": "git-error-unchecked",
+        "params": {
+          "globs": ["scripts/checks/*.ps1", "scripts/agent-harness/*.ps1"],
+          "exclude_files": ["git-io.ps1"],
+          "check_window_lines": 5,
+          "_window_note": "the unit is the CALL SITE, not the function body. Asking whether a body mentioned $LASTEXITCODE anywhere gave every git call in it an amnesty from an unrelated guard clause at the top (reproduced 2026-08-30), and code OUTSIDE any function was not scanned at all - a top-level `git push | Out-Null` reported ok. A check must fall within this many lines AFTER its call to count as its check.",
+          "_exclude_note": "git-io.ps1 is the adapter that deliberately RETURNS output and leaves $LASTEXITCODE for its callers - that contract is stated in the file and is the reason callers can check at all."
+        },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
+      },
+      {
+        "id": "work-branch-on-remote",
+        "detects": "a work branch of this run exists on a remote - an outward action CLAUDE.md does not grant without an explicit ask",
+        "predicate": "branch-on-remote",
+        "params": { "branches": [] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "DECISIONS.md 2026-08-30 'THE ORCHESTRATOR'S OWN THREE ERRORS' #3 - eleven work/* branches reached origin under an authorisation nobody gave"
+      },
+      {
+        "id": "protected-ref-moved",
+        "detects": "a protected ref moved since this run recorded its baseline",
+        "predicate": "protected-ref-moved",
+        "params": { "refs": ["main"] },
+        "on_fire": "halt",
+        "on_indeterminate": "halt",
+        "incident": "PLAN.md section C.2 class 4 - merging or promoting anything to main is the operator's, and no U-phase needs it"
+      }
+    ]
+  },
+
+  "pipeline": {
+    "claim_ttl_minutes": 60,
+    "anchor_required": true,
+    "gate_profile": "attended",
+    "convergence": {
+      "max_class1_rounds": 3,
+      "reset_on": "class-1-only",
+      "_status": "SPEC + NUMBER, NOT YET LIVE. Per this file's own policy-declared-unread andon rule, this block governs NOTHING until queue.ps1/config.py read it AND the reviewer charter enforces the class gate below. Wiring the reader + the severity contract is a pipeline item, not a config edit - written here as the agreed number and its derivation so the implementation has a target it cannot silently soften.",
+      "_semantics": [
+        "A verification round SENDS THE ITEM BACK only on a CLASS-1 finding: it fails an acceptance criterion, is unsafe, or is wrong. CLASS-2 (correct but weaker) and CLASS-3 (cosmetic - clearer message, less-vacuous check, doc) are filed to the findings sink and NEVER hold a merge.",
+        "Convergence is a POSITIVE condition: acceptance checks pass from a clean clone with zero class-1 outstanding. It is NOT 'the refuters found nothing' - a capable refuter against a real artifact always finds SOMETHING, which is exactly why the old open-ended loop ran for tens of hours.",
+        "max_class1_rounds caps the build->refute->fix cycles that a class-1 finding may trigger. Reaching the cap with a class-1 still open is an ANDON ESCALATION to the operator, never a silent pass. Rounds that find only class-2/3 do not count against it and do not extend it - they merge and file."
+      ],
+      "_derivation": "Empirical, from THIS project's own runs (measured 2026-08-31). Classified every round of every multi-round item by finding severity. The LAST class-1 finding: u5 (security) at round 3 ('absence must deny', the final leak-path fix); u6dark at round 4 ('a fire that does not halt'); u4close ~round 4. Rounds 5+ everywhere were meta-verification polish - u6dark 6-7 (a check's alphabet/vacuity), u4close 8-9 (a banked check's vacuous pass, MODULE.md, a footer), u5rls round 4 (gate completeness), u8h3's 26 commits. N=2 would have CLIPPED u5's round-3 security fix; N=4+ bought only polish. So 3 - and the severity gate is what makes 3 sufficient rather than 9, because it stops polish from counting as a round at all.",
+      "_per_item_override": "An anchor MAY raise max_class1_rounds for genuinely high-stakes work (the personal-plane boundary is the archetype - a security item where a 4th round is cheap insurance). The default of 3 is the floor the evidence supports; raising it is a recorded anchor decision, lowering it below 2 is refused."
+    },
+    "_note": "the role -> state -> duty table stays in queue.ps1: it is behavior, not tuning. `gate_profile` names a row in `gate_profiles` above and decides WHO passes each gate. It replaced `human_gates` on 2026-08-30 (U6): that pair of booleans had zero executable readers in any language - it read as policy and governed nothing, which is exactly what the `policy-declared-unread` andon condition now refuses. THIS NOTE CALLED gate_profile THE ONLY KNOB THAT DECIDES WHETHER A HUMAN SEES A GATE, AND THAT WAS FALSE: `anchor_required: false` removes the anchor gate outright for an item created without an anchor, under ANY profile including `attended` - the item advances to ready-to-test with no anchor, no human, no gate record and no andon consultation, because a gate that is not a gate is not passed by anybody. queue.ps1 -VerifyAudit says so in words rather than counting a narrower complete. So: gate_profile decides who passes a gate; anchor_required decides whether the anchor gate exists at all."
+  },
+  "worktree": {
+    "root": ".claude/worktrees",
+    "dir_prefix": "wt-",
+    "branch_prefix": "work/",
+    "work_line_env": "AI_STACK_WORK_LINE",
+    "work_line_fallback": "development",
+    "state_dir_env": "AI_STACK_WORKTREE_STATE",
+    "state_dir_name": "agent-worktrees",
+    "_env_files_note": [
+      "Runtime files a worktree needs but git will not materialize. The two recipe",
+      ".env files live INSIDE the OB1 submodule, so a fresh worktree clone never has",
+      "them and `docker compose -f OB1/docker/docker-compose.yml config` fails there",
+      "while passing in the main checkout - which is how the offline harness came to",
+      "fail only in worktrees. An ARRAY of lines, like _comment above: a JSON string",
+      "cannot contain a raw newline, and the first version of this note did. PowerShell",
+      "ConvertFrom-Json accepted it; Python json.loads did not - and this file has BOTH",
+      "readers (config.ps1 and config.py), so it would have broken the bridge alone."
+    ],
+    "env_files": [
+      ".env",
+      ".env.test",
+      "OB1/docker/.env",
+      "OB1/recipes/daily-digest/.env",
+      "OB1/recipes/email-history-import/.env",
+      "agent-org/docker/.env"
+    ],
+    "test_image_tag_prefix": "wt-"
+  },
+  "leases": {
+    "names_file": "lease-names.conf",
+    "default_ttl_minutes": 30
+  },
+  "reap": {
+    "_note": [
+      "The docker label a worker puts on anything it creates to prove out its work:",
+      "  docker run --label ai-stack.harness.owner=<your-wt-id> ...",
+      "reap.ps1 reads it, and remove-worktree.ps1 reaps that owner's containers and",
+      "networks when the worktree is retired. Ownership is recorded at CREATION because",
+      "the runs that leak are the ones killed before their own cleanup line - a label",
+      "outlives the script, an `finally` block does not.",
+      "WHICH KINDS get reaped (containers and networks, never images or volumes) is",
+      "deliberately NOT a key here. Widening it should be a code change that shows up in",
+      "a diff and passes a reviewer, the same reasoning config.ps1 records for",
+      "$script:RequiredAndonConditions."
+    ],
+    "owner_label": "ai-stack.harness.owner"
+  }
+}

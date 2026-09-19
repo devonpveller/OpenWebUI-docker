@@ -224,6 +224,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-mcp` | Core MCP server | — (internal only) | obnet, llm-net |
 | `openbrain-ext` | Extensions MCP server (39 tools) | — (internal only) | obnet |
 | `openbrain-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8061 | obnet |
+| `openbrain-ops-gateway` | Same image, OPS profile: agent-memory tools for HOST processes, own key | 127.0.0.1:8062 | obnet |
 | `openbrain-mcpo` | MCP→OpenAPI bridge (core) | — | obnet, llm-net |
 | `openbrain-mcpo-ext` | MCP→OpenAPI bridge (extensions) | — | obnet, llm-net |
 | `openbrain-postgrest` | PostgREST API over openbrain-db | — | obnet |
@@ -290,7 +291,7 @@ binaries never enter the vault git history).
 File: `agent-org/docker/docker-compose.yml`. Run with:
 `docker compose -f agent-org/docker/docker-compose.yml ...`. `.env` lives next to the file at
 `agent-org/docker/.env` (template: `.env.example`). Design corpus:
-`documentation/implementation-guide/teams-chat-agent-orchestration/`.
+`../documentation-plans-ai-stack/implementation-guide/teams-chat-agent-orchestration/`.
 
 > **Why separate:** like OB1, `agent-org` is its own compose project (`name: agent-org`). It
 > attaches to the main stack's `ai-stack_llm-net` as an **external** network for LOCAL
@@ -324,6 +325,7 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 | `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/parked-effort/project/scope/audit) | — | ao-net | default |
 | `agent-bridge-db-backup` | Nightly `pg_dump` of `agent-bridge-db` (governance/effort/project state) → repo-root `./backups/agent-bridge-db/` (generic `backup/pg-backup.sh`) | — | ao-net | default |
 | `mattermost-db-backup` | Nightly `pg_dump` of `mattermost-db` (conversation content) → `./backups/mattermost-db/` | — | ao-net | default |
+| `ao-worker-1-journals-backup` / `ao-worker-2-journals-backup` | Nightly tar of each worker's append-only task journals → `./backups/ao-worker-{1,2}-journals/` (generic `backup/generic-tar-backup.sh`). One sidecar per volume so each archive restores 1:1; profile-gated with the workers | — | none (volume-only) | workers |
 | `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-ot-1` / `ao-ot-2` | Per-worker `open-terminal` workspace planes (reuse `little-coder-open-terminal:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`); allowlist is the **bridge-written** `ao-egress-config` file, reloaded on change (custom `docker/egress/tinyproxy.conf` + `egress-reload.sh` command override) so the org can work on any onboarded repo | — | ao-worker-net, default | workers |
@@ -334,9 +336,15 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 ### Volumes
 `mattermost-db-data`, `mattermost-data`, `mattermost-config`, `mattermost-logs`,
 `mattermost-plugins`, `mattermost-client-plugins`, `agent-bridge-db-data`,
-`ao-worker-1-workspace`, `ao-worker-1-sessions`, `ao-worker-2-workspace`,
-`ao-worker-2-sessions`, `ao-egress-config` (bridge-written git-egress allowlist, shared with
+`ao-worker-1-workspace`, `ao-worker-1-sessions`, `ao-worker-1-journals`,
+`ao-worker-2-workspace`, `ao-worker-2-sessions`, `ao-worker-2-journals`,
+`ao-egress-config` (bridge-written git-egress allowlist, shared with
 `ao-git-egress`), `llm-gateway-cloud-db-data`.
+
+The two `*-journals` volumes (added 2026-08-29, memory-plane Phase 0.3) are the
+only ao-worker volumes that are BACKED UP: workspaces are re-clonable and
+sessions are regenerable per-effort continuity, but the journals are the
+append-only evidence corpus and nothing can reproduce them once lost.
 
 ---
 

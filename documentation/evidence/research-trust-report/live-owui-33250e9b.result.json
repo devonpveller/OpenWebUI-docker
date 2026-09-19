@@ -1,0 +1,381 @@
+{
+ "_provenance": "captured 2026-09-12 from the LIVE Open WebUI run of job 33250e9b (a used Dell OptiPlex 3050 buyer's question), whole and unedited. It is the artefact harness item research-trust-report was built from: 26 cited lines across seven needs, delivered as a facts/sources/gaps list with the footer 'needs answered 0 of 7 (7 partly)'. The human-facing copy lives at documentation/evidence/research-trust-report/ in the PARENT repo; this one is canonical, because an OB1 test may never read a file outside OB1.",
+ "_expect": "the BEFORE document of research-trust-report; re-rendering its synthesis is the item's own acceptance",
+ "gaps": [
+  "What are the specific symptoms and failure rates associated with motherboard capacitor degradation in the Dell OptiPlex 3050?",
+  "How do thermal management issues, such as fan failure or poor airflow, manifest in the OptiPlex 3050 and what are the common causes?",
+  "Are there known reliability issues with the power supply unit (PSU) in the OptiPlex 3050, and what are the typical failure modes?",
+  "What are the risks, benefits, and specific procedures for applying BIOS modifications to the Dell OptiPlex 3050?",
+  "What are the common problems related to RAM slot compatibility, stability, or physical damage in the OptiPlex 3050?",
+  "What are the known issues with the CPU socket, including pin damage or compatibility problems, in the Dell OptiPlex 3050?",
+  "What are the primary red flags to look for when purchasing a used Dell OptiPlex 3050, particularly regarding water damage and overall condition?"
+ ],
+ "needs": [
+  "What are the specific symptoms and failure rates associated with motherboard capacitor degradation in the Dell OptiPlex 3050?",
+  "How do thermal management issues, such as fan failure or poor airflow, manifest in the OptiPlex 3050 and what are the common causes?",
+  "Are there known reliability issues with the power supply unit (PSU) in the OptiPlex 3050, and what are the typical failure modes?",
+  "What are the risks, benefits, and specific procedures for applying BIOS modifications to the Dell OptiPlex 3050?",
+  "What are the common problems related to RAM slot compatibility, stability, or physical damage in the OptiPlex 3050?",
+  "What are the known issues with the CPU socket, including pin damage or compatibility problems, in the Dell OptiPlex 3050?",
+  "What are the primary red flags to look for when purchasing a used Dell OptiPlex 3050, particularly regarding water damage and overall condition?"
+ ],
+ "prose": "# Dell OptiPlex 3050 Shows Documented PSU Failure, Fragile Socket Pins, and BIOS-Modding Difficulty\n\n**Answer.** The evidence establishes a recurring 180 W PSU failure mode (green LED on for 1–2 seconds, then no power), a fragile LGA 1151 socket with reported bent pins, a RAM-slot anomaly where only DIMM slot 2 accepted working modules after a thermal service, and a recognized difficulty area for BIOS modification. Capacitor-failure and thermal-overheating information available is generic to all motherboards and Dell desktops rather than 3050-specific. For used purchases, the 3050 is positioned as a Linux-oriented budget unit that will lose practical value after Windows 10 end-of-life in 2025.\n\n## What the evidence supports\n\n- **PSU failure is a documented, recurring issue.** A 180 W APFC PSU in an OptiPlex 3050 SFF showed a green LED for only 1–2 seconds before the system appeared dead; replacing the PSU restored function, but the same failure recurred three months later after a hard shutdown during a power outage [Source 7].\n- **A second community report** describes the same brief-green-LED, no-power-on symptom; removing the CMOS battery for 15 minutes did not resolve it (the 15-minute figure is unverified) [Source 8].\n- **The PSU is proprietary** in both unit and connector, making aftermarket PSU swaps for higher-power GPUs difficult [Source 13].\n- **RAM slot anomaly after thermal service.** After cleaning and reapplying thermal paste, one user found only DIMM slot 2 accepted a working module; both tested sticks worked exclusively in that slot, raising suspicion of CPU damage during the service [Source 12].\n- **Bent CPU socket pins reported.** A community user found bent pins on the LGA 1151 (Socket H4) socket and asked whether individual pins could be replaced; the thread remained unsolved [Source 14].\n- **Dell's own manual warns the socket pins are \"fragile and can be permanently damaged\"** and instructs technicians to avoid bending them during CPU removal [Source 15].\n- **BIOS modding is a known difficulty area.** Win-Raid hosts threads titled \"[Problem] vBIOS+GOP Update of Dell Optiplex 3050 BIOS\" and \"Optiplex 3050 bios flashing\" under its BIOS Modding Guides section [Source 10, 11].\n- **Thermal and fan issues follow standard Dell guidance:** obstructed vents, physical fan damage, and dust/lint accumulation are cited as common causes of overheating, abnormal fan noise, and potential damage to the processor, RAM, and other components [Source 5, 6].\n- **Motherboard failure indicators** include failed POST, unexplained shutdowns, BSOD errors, graphics artifacts, non-functional USB ports, abnormal RAM beeps, and a burning odor [Source 3].\n- **Capacitor-failure signs are generic to all boards:** bulging or cracked top vents, crooked casings, rust-colored electrolyte leakage, or a detached capacitor case; symptoms include slow operation, random freezes/restarts, or refusal to boot [Source 1].\n- **Motherboard-level repair is a documented path.** YouTube guides exist for both SFF (\"Motherboard Diagnostic and Replacement #194\") and Micro (\"Full Disassembly & Repair Guide\") form factors [Source 2, 4].\n- **Used-purchase positioning.** A 2023 market analysis calls the 3050 a Linux-oriented budget option, notes off-lease units sell for a fraction of original cost, warns that 7th-gen units lose utility after Windows 10 EOL in 2025, and recommends the 3060 (8th-gen, under $200) for Windows 11 compatibility [Source 17].\n\n## What was not found\n\n- What specific failure modes, corrosion patterns, or repair steps apply to water-damaged OptiPlex 3050 units?\n- What is the actual failure rate or prevalence of motherboard capacitor failures on the 3050 platform specifically?\n- What are the concrete BIOS-modding procedures, bricking risks, or community-verified workarounds for the 3050 beyond the existence of problem-report threads?\n- What specific inspection checklist (LED codes, BIOS version checks, component wear indicators) should a buyer use when evaluating a used 3050?\n- Does the proprietary PSU connector or form factor meaningfully limit long-term repairability or parts availability?\n\n_— needs answered 0 of 7 (7 partly) · sources 19 relevant of 42 fetched (56 hits)_",
+ "curator": {
+  "claims": {
+   "gaps": [
+    "No provided source documents water-damage-specific failure modes, corrosion patterns, or repair guidance for the Dell OptiPlex 3050.",
+    "No provided source quantifies the specific failure rate or prevalence of motherboard capacitor failures on the Dell OptiPlex 3050 platform; the capacitor-failure information available is generic to all motherboards.",
+    "No provided source details specific BIOS-modding procedures, known bricking risks, or community-verified workarounds for the OptiPlex 3050 beyond the existence of problem-report threads on Win-Raid.",
+    "No provided source lists a comprehensive set of \"red flags\" to inspect when purchasing a used Dell OptiPlex 3050 (e.g., specific LED codes, BIOS version checks, or component wear indicators) beyond the general motherboard and fan troubleshooting guidance.",
+    "No provided source addresses whether the OptiPlex 3050's proprietary PSU connector or form factor limits long-term repairability or parts availability."
+   ],
+   "claimIds": [
+    "047e8518-a89c-4212-aad5-0888d330a7e3",
+    "93a935b0-a300-4bd3-a550-dd826a1a9ec3",
+    "58b37bff-61ee-40bf-bf99-df60f688331e",
+    "7710c810-d231-4625-a30d-5fe25015f409",
+    "ed5e32ab-6a44-485f-acb0-ff81a7432ac0",
+    "a9ec31f1-a6ac-40c1-8729-41c73400ed80",
+    "c98cdcef-5239-4ea7-8d7b-4dc59bcf1aac",
+    "1377b8b8-dec6-48cc-9e30-cfddf38c33a3",
+    "1f8697a4-f991-45a1-b903-0f7e0f4da2e7",
+    "20e76dee-c5af-47d1-9b8e-1effb76c02d1",
+    "f534eea0-4e94-49c0-b168-54341b0f65e1",
+    "62cdc871-0b72-40cd-b848-15da792c6dc7",
+    "5775cf99-7d65-4072-8969-cac1221e9928",
+    "415d035c-be72-41e7-bc55-f472ac0a3ca8",
+    "a08c6789-a3bc-4782-9792-0bc7c68b455a",
+    "a4493b90-c184-491e-90bf-5dcc89015ef2",
+    "2a11bb44-e0fe-4899-aa45-0ccef739a2f3",
+    "9c0bcd22-e690-4433-86e3-795606bbd7fb"
+   ],
+   "conflicts": 0,
+   "metaSkipped": 1,
+   "edgesSkipped": 0,
+   "edgesWritten": 20,
+   "claimsDeduped": 0,
+   "claimsWritten": 18,
+   "ungroundedSkipped": 0
+  },
+  "persist": {
+   "threaded": true,
+   "thread_id": "17f23d10-dc2a-48b3-884f-afdec65b6998",
+   "session_id": "9bda31c4-048f-4436-9618-be3d93297d64",
+   "source_ids": [
+    "c4108334-9f8c-4240-8b82-5d8e35472190",
+    "ec84a839-eab8-4a3a-a59a-74312c39f41d",
+    "517244e8-c73e-49d5-b1ce-25f67807f514",
+    "abd64c4e-f6b9-418f-86a4-2a5c860eb9c3",
+    "6a720ce1-e65a-47f8-a831-a72f7c9beefe",
+    "288c0ec8-87e6-490f-8dc3-37a1245997ff",
+    "921cc28f-0856-4632-b671-7d501a13b276",
+    "16b93152-85bc-40e3-8088-50acb637778e",
+    "f7b50efe-2e04-43da-8d8a-3a66f5adcc28",
+    "1783adfd-1a0b-458a-a45b-a1b70cfddbd8",
+    "f9fdcf61-6229-4836-b6b9-01ef637a5cec",
+    "7fc4763f-f789-4865-98d3-0ef37d41440a",
+    "a8f3fffb-e2f3-415a-ad93-a24d73d8d8fb",
+    "65385c94-4372-4503-b7fb-35f58066a9b0",
+    "3dbc1eb5-f62e-4680-ac8d-eb456dd5786b",
+    "765034d9-e9af-4304-a5c6-9d5d7836bb8c",
+    "9e37608e-4e4d-4cb5-a536-2942b81004a9"
+   ],
+   "synthesis_id": "bf7d1d34-4d24-4ec8-a850-c020110d9367",
+   "sources_written": 17
+  },
+  "shortlist": [
+   {
+    "name": "Windows Power Management",
+    "distance": 0.4572847758105254,
+    "thread_id": "91b0e6d0-3e8f-493e-8412-161fbdace002"
+   },
+   {
+    "name": "Used Desktop Hardware Diagnostics",
+    "distance": 0.5017943083170389,
+    "thread_id": "17f23d10-dc2a-48b3-884f-afdec65b6998"
+   },
+   {
+    "name": "ai-sbc-hardware",
+    "distance": 0.5342427671768752,
+    "thread_id": "9bacfe21-abcb-465e-90f6-8a688f9296f4"
+   },
+   {
+    "name": "nvidia-dgx-spark",
+    "distance": 0.5355063996020786,
+    "thread_id": "e1cec3d3-274d-4367-8c8f-460ff07c081a"
+   },
+   {
+    "name": "iPhone Hardware & Camera Systems",
+    "distance": 0.5595283316722501,
+    "thread_id": "95491a27-def0-4f1e-b1a5-6af167ea6112"
+   }
+  ],
+  "thread_id": "17f23d10-dc2a-48b3-884f-afdec65b6998",
+  "thread_name": "Used Desktop Hardware Diagnostics",
+  "claims_error": null,
+  "thread_decision": "existing",
+  "thread_confidence": 0.95
+ },
+ "outcome": "complete",
+ "skeptic": null,
+ "backstop": "complete",
+ "contract": null,
+ "rendered": "# Dell OptiPlex 3050 Shows Documented PSU Failure, Fragile Socket Pins, and BIOS-Modding Difficulty\n\n**Answer.** The evidence establishes a recurring 180 W PSU failure mode (green LED on for 1–2 seconds, then no power), a fragile LGA 1151 socket with reported bent pins, a RAM-slot anomaly where only DIMM slot 2 accepted working modules after a thermal service, and a recognized difficulty area for BIOS modification. Capacitor-failure and thermal-overheating information available is generic to all motherboards and Dell desktops rather than 3050-specific. For used purchases, the 3050 is positioned as a Linux-oriented budget unit that will lose practical value after Windows 10 end-of-life in 2025.\n\n## What the evidence supports\n\n- **PSU failure is a documented, recurring issue.** A 180 W APFC PSU in an OptiPlex 3050 SFF showed a green LED for only 1–2 seconds before the system appeared dead; replacing the PSU restored function, but the same failure recurred three months later after a hard shutdown during a power outage [Source 7].\n- **A second community report** describes the same brief-green-LED, no-power-on symptom; removing the CMOS battery for 15 minutes did not resolve it (the 15-minute figure is unverified) [Source 8].\n- **The PSU is proprietary** in both unit and connector, making aftermarket PSU swaps for higher-power GPUs difficult [Source 13].\n- **RAM slot anomaly after thermal service.** After cleaning and reapplying thermal paste, one user found only DIMM slot 2 accepted a working module; both tested sticks worked exclusively in that slot, raising suspicion of CPU damage during the service [Source 12].\n- **Bent CPU socket pins reported.** A community user found bent pins on the LGA 1151 (Socket H4) socket and asked whether individual pins could be replaced; the thread remained unsolved [Source 14].\n- **Dell's own manual warns the socket pins are \"fragile and can be permanently damaged\"** and instructs technicians to avoid bending them during CPU removal [Source 15].\n- **BIOS modding is a known difficulty area.** Win-Raid hosts threads titled \"[Problem] vBIOS+GOP Update of Dell Optiplex 3050 BIOS\" and \"Optiplex 3050 bios flashing\" under its BIOS Modding Guides section [Source 10, 11].\n- **Thermal and fan issues follow standard Dell guidance:** obstructed vents, physical fan damage, and dust/lint accumulation are cited as common causes of overheating, abnormal fan noise, and potential damage to the processor, RAM, and other components [Source 5, 6].\n- **Motherboard failure indicators** include failed POST, unexplained shutdowns, BSOD errors, graphics artifacts, non-functional USB ports, abnormal RAM beeps, and a burning odor [Source 3].\n- **Capacitor-failure signs are generic to all boards:** bulging or cracked top vents, crooked casings, rust-colored electrolyte leakage, or a detached capacitor case; symptoms include slow operation, random freezes/restarts, or refusal to boot [Source 1].\n- **Motherboard-level repair is a documented path.** YouTube guides exist for both SFF (\"Motherboard Diagnostic and Replacement #194\") and Micro (\"Full Disassembly & Repair Guide\") form factors [Source 2, 4].\n- **Used-purchase positioning.** A 2023 market analysis calls the 3050 a Linux-oriented budget option, notes off-lease units sell for a fraction of original cost, warns that 7th-gen units lose utility after Windows 10 EOL in 2025, and recommends the 3060 (8th-gen, under $200) for Windows 11 compatibility [Source 17].\n\n## What was not found\n\n- What specific failure modes, corrosion patterns, or repair steps apply to water-damaged OptiPlex 3050 units?\n- What is the actual failure rate or prevalence of motherboard capacitor failures on the 3050 platform specifically?\n- What are the concrete BIOS-modding procedures, bricking risks, or community-verified workarounds for the 3050 beyond the existence of problem-report threads?\n- What specific inspection checklist (LED codes, BIOS version checks, component wear indicators) should a buyer use when evaluating a used 3050?\n- Does the proprietary PSU connector or form factor meaningfully limit long-term repairability or parts availability?\n\n_— needs answered 0 of 7 (7 partly) · sources 19 relevant of 42 fetched (56 hits)_\n\n\n---\n\n**Sources** (only those the synthesis cited):\n1. [Motherboard Has a Faulty Capacitor - iFixit](https://www.ifixit.com/Wiki/Motherboard_Has_a_Faulty_Capacitor)\n2. [Dell OptiPlex 3050 Motherboard Diagnostic and Replacement #194 - YouTube](https://www.youtube.com/watch?v=adp8Pmk6j3c)\n3. [Is your motherboard defective? Here's how to identify warning signs | PCWorld](https://www.pcworld.com/article/2290235/how-to-identify-warning-signals-that-indicate-a-defective-mainboard.html)\n4. [Dell OptiPlex 3050 Micro Motherboard Replacement | Full Disassembly & Repair Guide - YouTube](https://www.youtube.com/watch?v=gK2CpMfobtk)\n5. [How to Troubleshoot Fan Issues | Dell US](https://www.dell.com/support/kbdoc/en-us/000179087/how-to-troubleshoot-fan-issues)\n6. [How to Troubleshoot Fan Issues | Dell India](https://www.dell.com/support/kbdoc/en-in/000179087/how-to-troubleshoot-fan-issues)\n7. [‎OptiPlex 3050 SFF with 180W Standard Power Supply (APFC) - Won't Power On | DELL Technologies](https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-with-180w-standard-power-supply-apfc-wont-power-on/647f9c42f4ccf8a8de051e70)\n8. [‎Optiplex 3050 SFF Won't power on | DELL Technologies](https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-wont-power-on/647f9f7df4ccf8a8de453089)\n9. [OptiPlex 3050 Tower Owner's Manual | Dell US](https://www.dell.com/support/manuals/en-us/optiplex-3050-desktop/optiplex-3050-desktop-tower-owners-manual/diagnostic-and-power-led-codes?guid=guid-7d615d96-eb00-4be6-b8dc-191949e0f418&lang=en-us)\n10. [[Problem] vBIOS+GOP Update of Dell Optiplex 3050 BIOS - BIOS Modding Guides and Problems - Win-Raid Forum](https://winraid.level1techs.com/t/problem-vbios-gop-update-of-dell-optiplex-3050-bios/112284)\n11. [Optiplex 3050 bios flashing - BIOS Modding Guides and Problems - Win-Raid Forum](https://winraid.level1techs.com/t/optiplex-3050-bios-flashing/33243)\n12. [‎Optiplex 3050 SFF ram problem | DELL Technologies](https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-ram-problem/691e4c7e64beda13cbe40522)\n13. [Dell OptiPlex 3050 SFF – Specs and upgrade options](https://www.hardware-corner.net/desktop-models/Dell-OptiPlex-3050-SFF/)\n14. [‎Some processors pins bent | DELL Technologies](https://www.dell.com/community/en/conversations/optiplex-desktops/some-processors-pins-bent/647f9a46f4ccf8a8dede5d4b)\n15. [OptiPlex 3050 Micro Owner's Manual | Dell US](https://www.dell.com/support/manuals/en-us/optiplex-3050-micro/optiplex_3050-mff_om/removing-processor?guid=guid-acc44e01-9fcc-466c-b01a-2636d17c17e2&lang=en-us)\n16. [User manual Dell OptiPlex 3050 (English - 73 pages)](https://www.manua.ls/dell/optiplex-3050/manual)\n17. [Is it time to stop buying used Dell Optiplexes? - The Silicon Underground](https://dfarq.homeip.net/is-it-time-to-stop-buying-used-dell-optiplexes/)\n\n\n**Open gaps** (NOT grounded — recorded for a future run):\n- What are the specific symptoms and failure rates associated with motherboard capacitor degradation in the Dell OptiPlex 3050?\n- How do thermal management issues, such as fan failure or poor airflow, manifest in the OptiPlex 3050 and what are the common causes?\n- Are there known reliability issues with the power supply unit (PSU) in the OptiPlex 3050, and what are the typical failure modes?\n- What are the risks, benefits, and specific procedures for applying BIOS modifications to the Dell OptiPlex 3050?\n- What are the common problems related to RAM slot compatibility, stability, or physical damage in the OptiPlex 3050?\n- What are the known issues with the CPU socket, including pin damage or compatibility problems, in the Dell OptiPlex 3050?\n- What are the primary red flags to look for when purchasing a used Dell OptiPlex 3050, particularly regarding water damage and overall condition?\n\n\n> ⚠ This research is grounded but INCOMPLETE — it left gaps open. The open gaps above are not answered by any source. Do NOT fill them from your own knowledge or other web/fetch tools (that fabricates). To pursue a gap, call deep_research again with a query targeting it; otherwise present the gaps as open unknowns.",
+ "synthesis": "[SOURCED] A Dell OptiPlex 3050 SFF equipped with the 180 W Standard Power Supply (APFC) has a documented recurring failure mode in which the unit will not power on: the green LED on the back of the PSU illuminates for only 1–2 seconds and then the system behaves as if dead; in one reported case, replacing the PSU (after a motherboard swap had not resolved the issue) restored function, and the same failure recurred three months later after a hard power-button shutdown during a regional power outage. [Source 7]\n[UNCERTAIN] A second Dell community report describes an OptiPlex 3050 SFF that shows only a brief green LED when plugged in and will not power on; removing the CMOS battery for 15 minutes did not resolve the issue. (unverified figure: 15) [Source 8]\n[SOURCED] The Dell OptiPlex 3050 SFF uses a proprietary power supply and proprietary power connector, which makes it difficult for users to install aftermarket PSUs to support higher-power GPUs. [Source 13]\n[SOURCED] A Dell OptiPlex 3050 SFF user reported that after cleaning the unit and reapplying thermal paste, the system refused to boot and the fan spun loudly; subsequent testing revealed that only DIMM slot 2 accepted a working RAM module, and both tested modules worked only in that single slot, prompting the user to wonder whether the CPU had been damaged during the thermal-paste service. [Source 12]\n[SOURCED] The Dell OptiPlex 3050 SFF supports up to 32 GB of DDR4-2133/2400 DIMM RAM across two DIMM slots. [Source 13]\n[SOURCED] A Dell community user reported bent processor pins on an OptiPlex 3050 motherboard and asked whether the pins could be replaced individually or whether a new motherboard was required; the thread remained unsolved. [Source 14]\n[SOURCED] The Dell OptiPlex 3050 Micro Owner's Manual explicitly warns that \"the processor socket pins are fragile and can be permanently damaged\" and instructs the technician to be careful not to bend the pins when removing the processor from the socket. [Source 15]\n[SOURCED] The Dell OptiPlex 3050 uses the LGA 1151 (Socket H4) processor socket. [Source 16]\n[SOURCED] Win-Raid forum threads exist specifically titled \"[Problem] vBIOS+GOP Update of Dell Optiplex 3050 BIOS\" and \"Optiplex 3050 bios flashing,\" both filed under the \"BIOS Modding Guides and Problems\" section, indicating that BIOS modification and flashing of the OptiPlex 3050 is a known area of difficulty. [Source 10, 11]\n[SOURCED] The Dell OptiPlex 3050 Tower Owner's Manual includes dedicated sections for updating the BIOS (in Windows, in Linux/Ubuntu, via USB drive, and from the F12 One-Time Boot menu) and for clearing CMOS settings, confirming that BIOS updates are a supported maintenance procedure. [Source 9]\n[SOURCED] General Dell fan-troubleshooting guidance (applicable to OptiPlex desktops) identifies obstructed fans or air vents, physical damage to fans or vents, and dust/lint accumulation as common root causes of overheating, abnormal fan noise, and potential hardware failure of the processor, RAM, and other components. [Source 5, 6]\n[SOURCED] General motherboard-failure guidance notes that a failed POST, unexplained shutdowns, Blue Screen of Death errors, graphics artifacts (possibly indicating a faulty PCIe slot), non-functional USB ports, and abnormal RAM beeps or memory errors can all point to a defective motherboard; a burning odor is also listed as a possible indicator of serious motherboard damage. [Source 3]\n[SOURCED] General capacitor-failure guidance (iFixit) states that failed capacitors on a motherboard can cause a system to run slower, randomly freeze or restart, or refuse to boot; visual signs include bulging or cracking of the capacitor's top vent, the casing sitting crooked, rust-colored electrolyte leakage onto the board, or a missing/detached capacitor case. [Source 1]\n[SOURCED] A YouTube video titled \"Dell OptiPlex 3050 Motherboard Diagnostic and Replacement #194\" exists, indicating that motherboard-level diagnostic and replacement is a recognized repair procedure for this model. [Source 2]\n[SOURCED] A YouTube video titled \"Dell OptiPlex 3050 Micro Motherboard Replacement | Full Disassembly & Repair Guide\" exists, confirming that full motherboard replacement is a documented repair path for the Micro form factor. [Source 4]\n[SOURCED] The Dell OptiPlex 3050 SFF does not officially meet Windows 11 hardware requirements because all models with Intel 7th-generation (Kaby Lake) CPUs or older are not supported; a TPM 2.0 and UEFI Secure Boot BIOS are also required for the official upgrade path. [Source 13]\n[SOURCED] Dell documentation states that \"Microsoft Windows 7 is not supported with the Intel 7th Generation processors,\" meaning an OptiPlex 3050 with a 7th-gen CPU cannot officially run Windows 7. [Source 16]\n[SOURCED] A 2023 analysis of the used Dell OptiPlex market notes that the 3050 \"runs Linux just fine and costs even less\" than a 3060, and that off-lease OptiPlex units can be purchased for a fraction of their original cost; however, the author argues the \"golden age\" of used OptiPlexes ended around 4th-gen i5 systems due to supply/dynamics, and that 7th-gen (3050-era) units will become less useful after Windows 10 reaches end-of-life in 2025. [Source 17]\n[SOURCED] The same used-purchase analysis recommends the Dell OptiPlex 3060 (8th-gen Intel) as a better secondhand option for Windows 11 compatibility, noting it is typically available for under $200, while the 3050 is positioned as a Linux-oriented budget option. [Source 17]\n[GAP] No provided source documents water-damage-specific failure modes, corrosion patterns, or repair guidance for the Dell OptiPlex 3050.\n[GAP] No provided source quantifies the specific failure rate or prevalence of motherboard capacitor failures on the Dell OptiPlex 3050 platform; the capacitor-failure information available is generic to all motherboards.\n[GAP] No provided source details specific BIOS-modding procedures, known bricking risks, or community-verified workarounds for the OptiPlex 3050 beyond the existence of problem-report threads on Win-Raid.\n[GAP] No provided source lists a comprehensive set of \"red flags\" to inspect when purchasing a used Dell OptiPlex 3050 (e.g., specific LED codes, BIOS version checks, or component wear indicators) beyond the general motherboard and fan troubleshooting guidance.\n[GAP] No provided source addresses whether the OptiPlex 3050's proprietary PSU connector or form factor limits long-term repairability or parts availability.",
+ "thread_id": "17f23d10-dc2a-48b3-884f-afdec65b6998",
+ "fetch_stats": {
+  "errors": 13,
+  "reused": 3,
+  "search": {
+   "ok": 7,
+   "calls": 7,
+   "empty": 0,
+   "errors": 0,
+   "offtopic": 0,
+   "collapsed": 0,
+   "unfloored": 0,
+   "query_padded": 0,
+   "entity_missing": 0,
+   "entity_rejected": 0
+  },
+  "sources": 42,
+  "attempts": 55,
+  "readable": 23,
+  "timeouts": 0,
+  "errorKinds": {
+   "http": 11,
+   "network": 0,
+   "non_html": 2,
+   "empty_extract": 0
+  }
+ },
+ "report_type": "general-report",
+ "reuse_ratio": 0.7727272727272727,
+ "needs_status": [
+  {
+   "need": "What are the specific symptoms and failure rates associated with motherboard capacitor degradation in the Dell OptiPlex 3050?",
+   "status": "partial"
+  },
+  {
+   "need": "How do thermal management issues, such as fan failure or poor airflow, manifest in the OptiPlex 3050 and what are the common causes?",
+   "status": "partial"
+  },
+  {
+   "need": "Are there known reliability issues with the power supply unit (PSU) in the OptiPlex 3050, and what are the typical failure modes?",
+   "status": "partial"
+  },
+  {
+   "need": "What are the risks, benefits, and specific procedures for applying BIOS modifications to the Dell OptiPlex 3050?",
+   "status": "partial"
+  },
+  {
+   "need": "What are the common problems related to RAM slot compatibility, stability, or physical damage in the OptiPlex 3050?",
+   "status": "partial"
+  },
+  {
+   "need": "What are the known issues with the CPU socket, including pin damage or compatibility problems, in the Dell OptiPlex 3050?",
+   "status": "partial"
+  },
+  {
+   "need": "What are the primary red flags to look for when purchasing a used Dell OptiPlex 3050, particularly regarding water damage and overall condition?",
+   "status": "partial"
+  }
+ ],
+ "reuse_claims": [
+  {
+   "id": "4c1c1862-ba4b-4d37-8e01-fcf4c8b1e62e",
+   "text": "Out-of-RAM errors and general system instability have been reported alongside thermal issues."
+  },
+  {
+   "id": "46df450d-af95-4d25-a577-1eb92e4d3558",
+   "text": "Out-of-RAM errors and general system instability have been reported alongside thermal issues."
+  },
+  {
+   "id": "bc206bf6-9858-498d-8d86-6c502d642416",
+   "text": "ACPI thermal firmware bugs log \"No valid trip points!\" errors."
+  },
+  {
+   "id": "7f6745b8-bf3e-4abe-88ef-51c09b5ebeec",
+   "text": "Motherboard BIOS options that control system behavior after a power interruption are commonly labeled as \"Restore AC Power Loss,\" \"AC BACK,\" or \"AC Recovery.\""
+  },
+  {
+   "id": "c2941375-4275-4e02-b0a5-e64692396c43",
+   "text": "The platform's hardware requirements for 2025 encompass specific specifications for CPU, GPU, RAM, storage, and operating system."
+  },
+  {
+   "id": "5996be5c-1b3a-48d8-9009-9c7b27feeb1e",
+   "text": "Available documentation only illustrates the BIOS navigation path for ASUS motherboards, locating the setting under Advanced > APM Configuration > Restore AC Power Loss."
+  },
+  {
+   "id": "a19b463e-aa5e-4ba9-b56b-82e6f48d8850",
+   "text": "Troubleshooting display issues requires verifying Windows display settings, ensuring the SDK installation folder path remains unchanged, and confirming a USB 3.0 or 3.1 connection."
+  },
+  {
+   "id": "2d19722c-af6b-40ca-baf8-3254be10e711",
+   "text": "The system may automatically shut down or hard reboot due to temperatures reaching approximately 95°C or due to driver and kernel panics."
+  },
+  {
+   "id": "b456fe7d-ee93-483a-9a41-1fa9bb9e1f9e",
+   "text": "System startup behavior when AC power is restored is typically controlled by motherboard BIOS or UEFI firmware settings, such as \"Restore AC Power Loss,\" which offers options like Power Off, Power On, or Last State."
+  },
+  {
+   "id": "9046e8b4-331d-42e6-a7fc-164fd524f205",
+   "text": "CUDA and software compatibility issues have been widely reported, with some users noting that official support responses contained inaccurate version information."
+  },
+  {
+   "id": "d9e11384-d39d-4be0-aed7-39b25d4184f9",
+   "text": "CUDA and software compatibility issues have been widely reported, with some users noting that official support responses contained inaccurate version information."
+  },
+  {
+   "id": "11f146ee-9716-47af-bc71-3d977dfe4104",
+   "text": "General BIOS setup guides indicate this power recovery feature is typically located within a \"Power Management\" or \"APM Configuration\" section, with common alternative names including \"AC BACK\", \"AC Recovery\", and \"Restore after AC Power Loss\"."
+  }
+ ],
+ "cited_sources": [
+  {
+   "url": "https://www.ifixit.com/Wiki/Motherboard_Has_a_Faulty_Capacitor",
+   "title": "Motherboard Has a Faulty Capacitor - iFixit"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=adp8Pmk6j3c",
+   "title": "Dell OptiPlex 3050 Motherboard Diagnostic and Replacement #194 - YouTube"
+  },
+  {
+   "url": "https://www.pcworld.com/article/2290235/how-to-identify-warning-signals-that-indicate-a-defective-mainboard.html",
+   "title": "Is your motherboard defective? Here's how to identify warning signs | PCWorld"
+  },
+  {
+   "url": "https://www.youtube.com/watch?v=gK2CpMfobtk",
+   "title": "Dell OptiPlex 3050 Micro Motherboard Replacement | Full Disassembly & Repair Guide - YouTube"
+  },
+  {
+   "url": "https://www.dell.com/support/kbdoc/en-us/000179087/how-to-troubleshoot-fan-issues",
+   "title": "How to Troubleshoot Fan Issues | Dell US"
+  },
+  {
+   "url": "https://www.dell.com/support/kbdoc/en-in/000179087/how-to-troubleshoot-fan-issues",
+   "title": "How to Troubleshoot Fan Issues | Dell India"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-with-180w-standard-power-supply-apfc-wont-power-on/647f9c42f4ccf8a8de051e70",
+   "title": "‎OptiPlex 3050 SFF with 180W Standard Power Supply (APFC) - Won't Power On | DELL Technologies"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-wont-power-on/647f9f7df4ccf8a8de453089",
+   "title": "‎Optiplex 3050 SFF Won't power on | DELL Technologies"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-desktop/optiplex-3050-desktop-tower-owners-manual/diagnostic-and-power-led-codes?guid=guid-7d615d96-eb00-4be6-b8dc-191949e0f418&lang=en-us",
+   "title": "OptiPlex 3050 Tower Owner's Manual | Dell US"
+  },
+  {
+   "url": "https://winraid.level1techs.com/t/problem-vbios-gop-update-of-dell-optiplex-3050-bios/112284",
+   "title": "[Problem] vBIOS+GOP Update of Dell Optiplex 3050 BIOS - BIOS Modding Guides and Problems - Win-Raid Forum"
+  },
+  {
+   "url": "https://winraid.level1techs.com/t/optiplex-3050-bios-flashing/33243",
+   "title": "Optiplex 3050 bios flashing - BIOS Modding Guides and Problems - Win-Raid Forum"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/optiplex-3050-sff-ram-problem/691e4c7e64beda13cbe40522",
+   "title": "‎Optiplex 3050 SFF ram problem | DELL Technologies"
+  },
+  {
+   "url": "https://www.hardware-corner.net/desktop-models/Dell-OptiPlex-3050-SFF/",
+   "title": "Dell OptiPlex 3050 SFF – Specs and upgrade options"
+  },
+  {
+   "url": "https://www.dell.com/community/en/conversations/optiplex-desktops/some-processors-pins-bent/647f9a46f4ccf8a8dede5d4b",
+   "title": "‎Some processors pins bent | DELL Technologies"
+  },
+  {
+   "url": "https://www.dell.com/support/manuals/en-us/optiplex-3050-micro/optiplex_3050-mff_om/removing-processor?guid=guid-acc44e01-9fcc-466c-b01a-2636d17c17e2&lang=en-us",
+   "title": "OptiPlex 3050 Micro Owner's Manual | Dell US"
+  },
+  {
+   "url": "https://www.manua.ls/dell/optiplex-3050/manual",
+   "title": "User manual Dell OptiPlex 3050 (English - 73 pages)"
+  },
+  {
+   "url": "https://dfarq.homeip.net/is-it-time-to-stop-buying-used-dell-optiplexes/",
+   "title": "Is it time to stop buying used Dell Optiplexes? - The Silicon Underground"
+  }
+ ],
+ "search_record": {
+  "ok": 7,
+  "hits": 56,
+  "empty": 0,
+  "errors": 0,
+  "fetched": 42,
+  "queries": [
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 motherboard capacitor failure symptoms",
+    "overlap": 0.88,
+    "verdict": "ok",
+    "entityShare": 0.75,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 thermal fan failure airflow issues",
+    "overlap": 1,
+    "verdict": "ok",
+    "entityShare": 0.5,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 PSU power supply failure modes",
+    "overlap": 1,
+    "verdict": "ok",
+    "entityShare": 0.875,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 BIOS mod risks procedure",
+    "overlap": 0.88,
+    "verdict": "ok",
+    "entityShare": 0.875,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 RAM slot compatibility problems",
+    "overlap": 1,
+    "verdict": "ok",
+    "entityShare": 1,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 CPU socket pin damage issues",
+    "overlap": 1,
+    "verdict": "ok",
+    "entityShare": 0.875,
+    "entityStatus": "used"
+   },
+   {
+    "hits": 8,
+    "query": "OptiPlex 3050 used purchase red flags water damage",
+    "overlap": 0.75,
+    "verdict": "ok",
+    "entityShare": 0.75,
+    "entityStatus": "used"
+   }
+  ],
+  "offtopic": 0,
+  "readable": 23,
+  "relevant": 19,
+  "collapsed": 0,
+  "unfloored": 0,
+  "query_padded": 0,
+  "entity_missing": 0,
+  "entity_rejected": 0
+ },
+ "followup_queries": [],
+ "ungrounded_numbers": [
+  "15"
+ ]
+}

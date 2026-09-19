@@ -27,6 +27,7 @@ skipped.
 | 8 | **Sysadmin plane** | `scripts/lib/stack-services.json`: add the row with the correct `project` field (feeds the sysadmin MCP's stack_health/container tooling). If the service writes big logs, give it json-file caps in compose so the disk rotation stays boring. |
 | 9 | **Status surfaces** | If operators should see it in OWUI's Server Status pipe: extend the relevant `status-pipe/` module (then re-paste per `status-pipe/README`). |
 | 10 | **Docs** | Stack-map reference (`/stack-map` checks drift), `documentation/CONTAINER-REGISTRY.md` (purpose + why), CLAUDE.md counts if a project's size line changes. |
+| 11 | **Deploy door (`build:` services)** | A service built from source (today: the OB1 integrations) is deployed by `scripts/stack/ob1-deploy.ps1 -Service <svc> [-Recreate <dependent,...>]`, never by `docker compose up -d` alone: the door refuses when OB1 on disk is not the gitlink, builds with `--build-arg OB1_SHA=<pin>`, force-recreates the named dependents, waits for healthy and refuses success over a restart loop (runbooks/UPDATE-MANAGEMENT.md "Everything else"). Give the Dockerfile `ARG OB1_SHA=` + `LABEL org.opencontainers.image.revision="$OB1_SHA"` (copy research-curator's) so the label is not empty, and a compose `healthcheck:` - without one the door can only wait for "running". |
 
 ## When you EXPOSE a service (portal or tailnet)
 
@@ -67,6 +68,7 @@ stack); keep old backup archives on the NAS even when the target is gone.
 
 ```powershell
 .\scripts\stack\stack.ps1 health        # functional probes, all planes
+powershell scripts\stack\ob1-deploy.ps1 -Service <svc> -WhatIfOnly   # what a build: deploy WOULD do
 powershell scripts\checks\check-backup-coverage.ps1   # every byte has a sidecar
 # pre-commit runs: secrets, line endings, gateway routing, compose+ps1 parse
 ```

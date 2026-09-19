@@ -1,0 +1,24 @@
+﻿venue      : gym (gym) - D:\Open WebUI\ai-orchestration-gym @ main
+source     : 7 outcome record(s) from 7 in documentation/evidence/
+banked     : [fd500152ab692af3] python scripts/checks/check_quadrant_evidence_reproduces.py --auto
+registry   : D:\Open WebUI\ai-stack\.git\agent-worktrees\durable-checks.json
+sandbox    : D:\Open WebUI\ai-orchestration-gym\.gym-sandbox\u3-evidence-20260902T093709Z
+
+  seed                                                  pre-existing   this check
+  -  PRISTINE copy (the control)                        n/a            green
+     nothing changed
+  A  frozen file dropped from the retained workspace    missed         caught
+     deleted 20260831T232009Z-little-coder-self\workspace\quadrant-item\test_slugify.py
+  B  retained artifact edited after the verdict         missed         caught
+     overwrote 20260831T232009Z-little-coder-self\workspace\quadrant-item\slugify.py with a stub
+  C  retained workspace removed entirely                CAUGHT         caught
+     removed 20260831T232009Z-little-coder-self\workspace
+
+  2 of 3 seeds are caught ONLY by the banked check - that set is its value.
+  1 of 3 are caught by the gate that ALREADY existed (record.admit), which the banked check then skips as inadmissible - correctly: a record admission refuses is in no comparison.
+  0 of 3 are caught by NEITHER.
+  Stating the second number is the point of measuring a counterfactual rather than asserting one. It read 0 until the seeds were measured in the tree they were seeded into - see copy_run.
+
+sandbox removed (u3-evidence-20260902T093709Z). Pass --keep to retain it.
+
+U3 GYM RUN: every seeded regression was caught, in the arena, with the counterfactual measured on the seeded copies - and the report says which gate caught which. The seeds nothing already caught are the durable check's, and it was born from a tester finding in a prior round.

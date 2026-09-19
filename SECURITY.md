@@ -34,7 +34,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
   llm-queue via the `x-ai-stack-caller` header injected by the pre-call hook
   (`config/litellm/custom_callbacks.py`). Verified: junk key → 401, virtual
   key → 200 with correct lane attribution. Runbook:
-  `documentation/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`.
+  `../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`.
 - SurrealDB image pinned by digest; its datastore still accepts the
   persisted first-boot root login (network isolation is the boundary) — a
   DEFINE USER rotation pass remains open.
@@ -222,8 +222,8 @@ In approximate priority order:
 
 ## 10. References
 
-- Implementation plan: [documentation/implementation-guide/open-source authentication front ends for ai stack/plan-internet-exposed-front-end.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/plan-internet-exposed-front-end.md)
-- Post-implementation audit (2026-05-29): [documentation/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](documentation/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
+- Implementation plan: [documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md](documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
+- Post-implementation audit (2026-05-29): [../documentation-plans-ai-stack/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](../documentation-plans-ai-stack/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
 - Incident response playbook: [documentation/runbooks/incident-response.md](documentation/runbooks/incident-response.md)
 - Backup conventions (new services): [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md)
 - Restore workflow: [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md) + [scripts/backup/restore-from-snapshot.ps1](scripts/backup/restore-from-snapshot.ps1)

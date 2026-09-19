@@ -135,9 +135,11 @@ services:
       # semaphore: no live GPU-occupancy signal (/slots dead on llama-swap — C6).
       AO_MAX_CONCURRENT_WORKERS: ${AO_MAX_CONCURRENT_WORKERS:-1}
       AO_WORKER_INSTANCE_URLS: ${AO_WORKER_INSTANCE_URLS:-}
-      # Audit mirror to Open Brain (P6.2) — off unless the operator wires the OB gateway.
+      # Audit mirror to Open Brain (P6.2) — off unless the operator turns it on (an ops step
+      # after a live smoke). Target is openbrain-mcp, the FIRST-PARTY lane we share llm-net
+      # with; openbrain-gateway is the cloud door and is obnet-only, i.e. unreachable here.
       AO_OPENBRAIN_MIRROR_ENABLED: ${AO_OPENBRAIN_MIRROR_ENABLED:-false}
-      AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-gateway:8061}
+      AO_OPENBRAIN_URL: ${AO_OPENBRAIN_URL:-http://openbrain-mcp:8000}
       AO_OPENBRAIN_KEY: ${AO_OPENBRAIN_KEY:-}
       # Comms model (COMMS-MODEL — channel = project, effort = thread). Defaults are safe;
       # set AO_DEFAULT_REPO to point efforts at a real project channel (#proj-<repo-slug>).
@@ -235,6 +237,21 @@ services:
       # Read-only mount of the App key directory. The DIR always exists (.gitkeep), so `up` never
       # breaks before the App is set up; the .pem is gitignored + dropped in by the operator (P-APL.0).
       - ../agent-bridge/secrets:/etc/agent-bridge/secrets:ro
+      # THE ANCHOR SCHEMA, READ-ONLY (dark-factory-unification U2).
+      #
+      # The shared intent object lives in scripts/agent-harness/, and the bridge is the
+      # reader U2 actually needs - the set_goal seam consuming anchors. The recorded finding
+      # (documentation/notes/anchor-schema-findings.md F1) said it was unreachable "at build
+      # time and at run time" because the build context is ../agent-bridge. The build-time
+      # half is right. The RUN-TIME half is not: a bind mount is a HOST path resolved by the
+      # daemon at container start and has nothing to do with the build context.
+      #
+      # So the container reads THE SAME FILE the harness does. No generate step to forget,
+      # no widened context pulling in OB1/ and every worktree, no moved module boundary, and
+      # nothing copied that could drift. The three options that finding weighed all carried
+      # one of those costs, because each assumed a copy had to exist somewhere.
+      - ../../scripts/agent-harness/anchor.schema.json:/app/anchor/anchor.schema.json:ro
+      - ../../scripts/agent-harness/anchor_schema.py:/app/anchor/anchor_schema.py:ro
     networks:
       - ao-net
       - llm-net       # reach the existing llm-gateway via the llama-cpp alias
@@ -291,6 +308,12 @@ services:
       # matching ao-ot-1's API_KEY — independent of the main stack's open-terminal.
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - LC_OPEN_TERMINAL_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 missed-caller #7 (found 2026-08-23 by the issue-17 dry run): pi resolves
+      # models.json apiKey "LLAMACPP_API_KEY" against its own env; the agent.py session
+      # injection did not reach the wake path's pi, so the LITERAL var name went to the
+      # gateway (401 "expected sk-"). Define it at container level so every spawn path
+      # sees the real lc-coder lane key.
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       - LC_WORKSPACE=/workspace
       - LITTLE_CODER_NO_CTX_PROBE=1
       # Floor hook (P3.3) — block irreversible actions without a cleared decision.
@@ -302,6 +325,11 @@ services:
       - ../agent-bridge/worker-configs/worker-1:/app/config:ro
       - ao-worker-1-workspace:/workspace
       - ao-worker-1-sessions:/var/lib/little-coder/sessions
+      # Append-only task journals (little-coder design §4; the config's journals.dir).
+      # Without this mount they land in the container's writable layer and a recreate
+      # deletes them — the evidence corpus the later skills lane reads from would be
+      # silently reset on every image bump. Durable now; MINTING stays off (Phase 5).
+      - ao-worker-1-journals:/var/lib/little-coder/journals
     networks:
       - ao-worker-net
       - llm-net
@@ -328,6 +356,9 @@ services:
       # reads API_KEY); set both to the pool key so the worker's Bearer matches.
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
+      # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace is a bind-mount; git 2.36+ refuses to discover a submodule's gitdir across the
       # mount boundary unless this is set — without it a RECURSIVE clone leaves nested submodule
       # content unpopulated (MSB1009) and the git-proxy's own `git remote` probe returns "known:
@@ -372,6 +403,12 @@ services:
       - LC_OPEN_TERMINAL_URL=http://ao-ot-2:8000
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - LC_OPEN_TERMINAL_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 missed-caller #7 (found 2026-08-23 by the issue-17 dry run): pi resolves
+      # models.json apiKey "LLAMACPP_API_KEY" against its own env; the agent.py session
+      # injection did not reach the wake path's pi, so the LITERAL var name went to the
+      # gateway (401 "expected sk-"). Define it at container level so every spawn path
+      # sees the real lc-coder lane key.
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       - LC_WORKSPACE=/workspace
       - LITTLE_CODER_NO_CTX_PROBE=1
       - AO_BRIDGE_URL=http://agent-bridge:8000
@@ -380,6 +417,8 @@ services:
       - ../agent-bridge/worker-configs/worker-2:/app/config:ro
       - ao-worker-2-workspace:/workspace
       - ao-worker-2-sessions:/var/lib/little-coder/sessions
+      # See ao-worker-1: journals must outlive the container (little-coder design §4).
+      - ao-worker-2-journals:/var/lib/little-coder/journals
     networks:
       - ao-worker-net
       - llm-net
@@ -404,6 +443,9 @@ services:
       # reads API_KEY); set both to the pool key so the worker's Bearer matches.
       - OPEN_TERMINAL_API_KEY=${AO_OPEN_TERMINAL_KEY}
       - API_KEY=${AO_OPEN_TERMINAL_KEY}
+      # J.1 miss #7 second half: with LC_ROUTE_EXEC=1 the pi process can run inside
+      # the executor, so the gateway lane key must exist HERE too (see ao-worker note).
+      - LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}
       # /workspace bind-mount: let git discover submodule gitdirs across the boundary (git 2.36+).
       # Without it a recursive clone leaves submodules unpopulated (MSB1009) + the proxy's `git
       # remote` probe sees "known: none" and denies fetches. Proxy still governs all ops.
@@ -563,6 +605,90 @@ services:
     labels:
       - "com.centurylinklabs.watchtower.enable=false"
 
+  # Worker task journals (memory-plane Phase 0.3). Append-only JSONL that is safe to tar
+  # live, so these are generic-tar sidecars, not pg dumps.
+  #
+  # Backed up rather than excluded, unlike ao-worker-*-sessions: sessions are regenerable
+  # per-effort continuity, but the journals ARE the accruing evidence record — nothing
+  # else can reproduce them once the volume is gone.
+  #
+  # ONE SIDECAR PER VOLUME, deliberately. A single container tarring both volumes would
+  # produce one archive holding two volumes' worth of data, and every entry in
+  # scripts/backup/restore-from-snapshot.ps1 maps ONE archive to ONE volume — a combined
+  # archive would have no mechanical restore path, which is how you end up with backups
+  # that exist and cannot be used. Two archives, two targets, no new restore machinery.
+  ao-worker-1-journals-backup:
+    image: alpine:3.21
+    container_name: ao-worker-1-journals-backup
+    # Same profile as the worker it backs up. Ungated, this would run with no worker ever
+    # having written a journal — and check_backups.py treats a RUNNING sidecar with no
+    # artifacts as stale, so an ungated sidecar would alarm exactly when nothing is wrong.
+    profiles: ["workers"]
+    volumes:
+      - ao-worker-1-journals:/data:ro
+      - ../../backups/ao-worker-1-journals:/backups
+      - ../../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=ao-worker-1-journals
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+      # No network attachment — the volume is the only source, so there is nothing to
+      # probe. The script's dir-exists + dir-nonempty prechecks are the guard: a worker
+      # that has never run leaves an empty corpus, which must NOT overwrite a good tar.
+      - HEALTH_TCP=
+      - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] ao-worker-1-journals-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-1-journals backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  ao-worker-2-journals-backup:
+    image: alpine:3.21
+    container_name: ao-worker-2-journals-backup
+    profiles: ["workers"]      # see ao-worker-1-journals-backup
+    volumes:
+      - ao-worker-2-journals:/data:ro
+      - ../../backups/ao-worker-2-journals:/backups
+      - ../../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=ao-worker-2-journals
+      - RETAIN_COUNT=${AO_BACKUP_RETAIN_COUNT:-7}
+      - HEALTH_TCP=
+      - BACKUP_INTERVAL=${AO_JOURNALS_BACKUP_INTERVAL:-86400}   # daily
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "[$$(date -u +%FT%TZ)] ao-worker-2-journals-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] ao-worker-2-journals backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
   mattermost-db-backup:
     image: postgres:15-alpine
     container_name: mattermost-db-backup
@@ -599,8 +725,10 @@ volumes:
   agent-bridge-db-data:
   ao-worker-1-workspace:
   ao-worker-1-sessions:
+  ao-worker-1-journals:     # append-only task journals — BACKED UP (ao-journals-backup)
   ao-worker-2-workspace:
   ao-worker-2-sessions:
+  ao-worker-2-journals:     # append-only task journals — BACKED UP (ao-journals-backup)
   ao-egress-config:        # bridge-written git-egress allowlist, shared with ao-git-egress
   llm-gateway-cloud-db-data:
 

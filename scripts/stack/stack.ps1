@@ -139,15 +139,68 @@ switch ($Action) {
         Probe "frontend: 8 tailnet serve routes" {
             $r = docker exec tailscale sh -c "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null | grep -c 'proxy http'" 2>$null
             [int]$r -ge 8 }
+        # owui/ plugins deploy BY PASTE: nothing links the repo file to the live
+        # webui.db row, so a committed fix can sit unpasted for weeks (the
+        # deep_research banner, 2026-09-04..06). Count only - the names are in
+        # scripts\checks\check-owui-drift.ps1's own output. REFUSED reads as FAIL.
+        #
+        # The 'Continue' dance is not optional. The check REFUSES (exit 2, sentence
+        # on stderr) rather than reporting a clean bill, and PowerShell 5.1 turns a
+        # native command's stderr into a TERMINATING NativeCommandError under this
+        # script's 'Stop' preference - `2>$null` does not prevent it. The first
+        # version of this probe assigned outside any Probe scriptblock and so DIED
+        # here whenever openwebui was down: 5 of 14 probe lines, no summary, and the
+        # eight later probes (memory, search, coder, OB1 x4, agent-org) never ran.
+        # A stopped openwebui must cost one FAILED line, not the rest of the sweep.
+        $owuiEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $owuiOut = @()
+        try {
+            $owuiOut = @(& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\checks\check-owui-drift.ps1') -CountOnly 2>&1)
+        } catch { }
+        $ErrorActionPreference = $owuiEap
+        $owuiVals = @($owuiOut | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] })
+        $owuiErrs = @($owuiOut | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] })
+        $owuiDrift = 'REFUSED'
+        if ($owuiVals.Count -gt 0) { $owuiDrift = "$($owuiVals[$owuiVals.Count - 1])".Trim() }
+        if ($owuiDrift -notmatch '^\d+$') {
+            $owuiWhy = 'the check produced no answer'
+            if ($owuiErrs.Count -gt 0) { $owuiWhy = ("$($owuiErrs[0])" -replace '^REFUSED:\s*', '').Trim() }
+            $owuiDrift = "REFUSED - $owuiWhy"
+        }
+        Probe "frontend: owui/ manifest rows drifted from live webui.db: $owuiDrift" { $owuiDrift -eq '0' }
         Probe "memory: cloud door http://127.0.0.1:8060/health" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8060/health).StatusCode -eq 200 }
         Probe "search: gateway http://127.0.0.1:8085/healthz" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8085/healthz).StatusCode -eq 200 }
+        # /healthz said 200 through the whole 2026-09-11 outage: bing answered
+        # every query with ten results for its first word, HTTP 200, no error.
+        # /health reports which engines actually put results in recent payloads.
+        # 'unknown' (nothing searched since the gateway started) is NOT a failure
+        # here - only a measured DEGRADED is, and this probe prints the number.
+        $searchEngines = 'REFUSED'
+        try {
+            $sh = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8085/health).Content | ConvertFrom-Json
+            $n = 0
+            foreach ($p in $sh.providers.PSObject.Properties) {
+                if ($p.Value.engines_answering_now -gt $n) { $n = [int]$p.Value.engines_answering_now }
+            }
+            $searchEngines = "$($sh.search) - $n engine(s) answering"
+        } catch { }
+        Probe "search: $searchEngines" {
+            $searchEngines -ne 'REFUSED' -and $searchEngines -notmatch '^DEGRADED' }
         Probe "coder: little-coder daemon :8090/health" {
             docker exec little-coder curl -fsS --max-time 8 http://localhost:8090/health 2>$null | Out-Null
             $LASTEXITCODE -eq 0 }
         Probe "OB1: open_notebook API :5055/api/config" {
             (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:5055/api/config).StatusCode -eq 200 }
+        Probe "OB1: ops door :8062/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8062/health).StatusCode -eq 200 }
+        # The curator answers 503 with {"ok":false,"db":false} when its DB is gone and
+        # nothing at all while crash-looping (2026-09-05: "Module not found pool.ts",
+        # noticed 14 h late from a disk check). Either reads as FAIL here.
+        Probe "OB1: research-curator http://127.0.0.1:8816/health" {
+            (Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 http://127.0.0.1:8816/health).StatusCode -eq 200 }
         Probe "OB1: openbrain-db accepting connections" {
             docker exec openbrain-db pg_isready -U postgres -d openbrain -t 5 2>$null | Out-Null
             $LASTEXITCODE -eq 0 }

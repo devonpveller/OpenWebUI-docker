@@ -157,3 +157,183 @@ async def test_readiness_gate_anchored_to_project_summary(db_url):
 
 async def _canned(text: str) -> str:
     return text
+
+
+# ── memory-plane Phase 0.2: the survey map is DURABLE ────────────────────────
+# The cache was in-memory only, so every bridge bounce threw away the map and the next
+# effort paid for a re-survey — the cost P8 #5 added the cache to avoid, reintroduced by
+# the process lifetime. These tests pin the map to the DB and, critically, pin the
+# empty-result caching that survives the trip (the retry-storm trap).
+
+
+def _fake_store() -> tuple[dict, dict]:
+    """An in-memory stand-in for the orchestrator's three DB callbacks."""
+    rows: dict[str, tuple[str, str]] = {}
+
+    async def load() -> dict[str, tuple[str, str]]:
+        return dict(rows)
+
+    async def save(project: str, base_sha: str, summary: str) -> None:
+        rows[project] = (base_sha, summary)
+
+    async def delete(project: str | None) -> None:
+        rows.clear() if project is None else rows.pop(project, None)
+
+    return rows, {"load_fn": load, "save_fn": save, "delete_fn": delete}
+
+
+async def test_survey_is_persisted_on_first_build():
+    rows, fns = _fake_store()
+
+    async def survey(repo: str) -> str:
+        return "the-map"
+
+    pc = ProjectContext(survey, enabled=True, **fns)
+    await pc.ensure("proj", "git://x", base_sha="base-1")
+    assert rows == {"proj": ("base-1", "the-map")}
+
+
+async def test_survey_survives_a_restart_without_resurveying():
+    """THE named validation: write a survey, drop the whole object (a bridge bounce), build a
+    fresh one against the same store, hydrate — and the map is there, unsurveyed."""
+    rows, fns = _fake_store()
+    calls: list[str] = []
+
+    async def survey(repo: str) -> str:
+        calls.append(repo)
+        return "the-map"
+
+    pc = ProjectContext(survey, enabled=True, **fns)
+    assert await pc.ensure("proj", "git://x", base_sha="base-1") == "the-map"
+    assert len(calls) == 1
+
+    del pc                                                  # the process dies
+    revived = ProjectContext(survey, enabled=True, **fns)   # ...and comes back
+    assert await revived.hydrate() == 1
+    assert revived.get("proj") == "the-map"                 # map restored
+    assert await revived.ensure("proj", "git://x", base_sha="base-1") == "the-map"
+    assert len(calls) == 1                                  # NOT re-surveyed
+
+
+async def test_restart_still_resurveys_when_the_base_moved():
+    """Durability must not become staleness: a restored map at a different base is still
+    stale and must be re-surveyed exactly once (P8 #5's rule, now across a restart)."""
+    rows, fns = _fake_store()
+    calls: list[str] = []
+
+    async def survey(repo: str) -> str:
+        calls.append(repo)
+        return f"map-{len(calls)}"
+
+    pc = ProjectContext(survey, enabled=True, **fns)
+    await pc.ensure("proj", "git://x", base_sha="base-1")
+
+    revived = ProjectContext(survey, enabled=True, **fns)
+    await revived.hydrate()
+    assert await revived.ensure("proj", "git://x", base_sha="base-2") == "map-2"
+    assert len(calls) == 2
+    assert rows["proj"] == ("base-2", "map-2")      # the row was REPLACED, not duplicated
+
+
+async def test_empty_survey_result_is_persisted_and_still_not_retried():
+    """project_context.py's empty-result caching is load-bearing (a flaky survey must not be
+    retried on every request). Persistence must PRESERVE it — an empty summary that fails to
+    round-trip brings the retry storm back one restart later, which is the named trap."""
+    rows, fns = _fake_store()
+    calls: list[str] = []
+
+    async def boom(repo: str) -> str:
+        calls.append(repo)
+        raise RuntimeError("no worker")
+
+    pc = ProjectContext(boom, enabled=True, **fns)
+    assert await pc.ensure("proj", "git://x", base_sha="b1") == ""
+    assert rows == {"proj": ("b1", "")}             # the EMPTY result was stored
+
+    revived = ProjectContext(boom, enabled=True, **fns)
+    await revived.hydrate()
+    assert await revived.ensure("proj", "git://x", base_sha="b1") == ""
+    assert len(calls) == 1                          # still not retried, across the restart
+
+
+async def test_invalidate_clears_the_durable_row_too():
+    """An invalidate that only cleared memory would be undone by the next restart."""
+    rows, fns = _fake_store()
+
+    async def survey(repo: str) -> str:
+        return "the-map"
+
+    pc = ProjectContext(survey, enabled=True, **fns)
+    await pc.ensure("proj", "git://x")
+    await pc.invalidate("proj")
+    assert rows == {}
+    assert ProjectContext(survey, enabled=True, **fns).get("proj") == ""
+
+
+async def test_persistence_failures_never_reach_the_caller():
+    """Best-effort, like every other path in this module: a broken store costs a re-survey
+    after the next restart, never the caller's request."""
+
+    async def survey(repo: str) -> str:
+        return "the-map"
+
+    async def bad_load():
+        raise RuntimeError("db down")
+
+    async def bad_save(project, base_sha, summary):
+        raise RuntimeError("db down")
+
+    async def bad_delete(project):
+        raise RuntimeError("db down")
+
+    pc = ProjectContext(survey, enabled=True,
+                        load_fn=bad_load, save_fn=bad_save, delete_fn=bad_delete)
+    assert await pc.hydrate() == 0                             # degrades to an empty cache
+    assert await pc.ensure("proj", "git://x") == "the-map"     # request still served
+    await pc.invalidate("proj")                                # and no raise here either
+
+
+async def test_context_without_callbacks_behaves_exactly_as_before():
+    """The callbacks are optional — every existing construction site keeps working."""
+    async def survey(repo: str) -> str:
+        return "the-map"
+
+    pc = ProjectContext(survey, enabled=True)
+    assert await pc.hydrate() == 0
+    assert await pc.ensure("proj", "git://x") == "the-map"
+    await pc.invalidate()
+    assert pc.get("proj") == ""
+
+
+# ── the real DB callbacks (orchestrator wiring), not the fake store ──────────
+async def test_orchestrator_survey_callbacks_round_trip_through_sqlite(db_url):
+    """The fake store proves the module's logic; this proves the ORCHESTRATOR's three
+    callbacks actually talk to the table — including survival across a real second
+    Orchestrator built on the same file-backed DB."""
+    settings = Settings(
+        _env_file=None, chat_adapter="fake",
+        profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
+        floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
+        max_concurrent_workers=1, database_url=db_url,
+    )
+    db = Database(db_url)
+    try:
+        orch = Orchestrator(settings, db, FakeChatAdapter(),
+                            model_client=FakeModelClient(), harness=FakeHarness())
+        await orch.setup()
+        await orch._save_project_survey("proj", "base-1", "the-map")
+        assert await orch._load_project_surveys() == {"proj": ("base-1", "the-map")}
+
+        # A second orchestrator on the SAME database file = the restart.
+        orch2 = Orchestrator(settings, db, FakeChatAdapter(),
+                             model_client=FakeModelClient(), harness=FakeHarness())
+        await orch2.setup()                                   # setup() hydrates
+        assert orch2.project_context.get("proj") == "the-map"
+
+        await orch2._save_project_survey("proj", "base-2", "map-2")   # upsert, not insert
+        assert await orch2._load_project_surveys() == {"proj": ("base-2", "map-2")}
+
+        await orch2._delete_project_survey("proj")
+        assert await orch2._load_project_surveys() == {}
+    finally:
+        await db.dispose()
