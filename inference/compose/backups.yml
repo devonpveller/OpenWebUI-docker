@@ -1,0 +1,97 @@
+# inference/compose/backups.yml - the plane's two backup sidecars.
+#
+# Included by inference/docker-compose.yml; see upstreams.yml's header for the
+# relative-path rule (../../ = the repo root).
+#
+# llm-gateway-backup is NOT profiled: it dumps the spend ledger, which exists
+# whatever the gateway is serving. lm-models-backup IS in the `local` profile:
+# it tars the GGUF store the local upstreams serve and probes
+# llama-cpp-upstream, so without them it would tar an empty directory and never
+# pass its liveness probe.
+
+services:
+  llm-gateway-backup:
+    image: postgres:16-alpine
+    container_name: llm-gateway-backup
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    networks:
+      - llm-net
+    environment:
+      - BACKUP_DIR=/backups
+      - PGHOST=llm-gateway-db
+      - PGUSER=litellm
+      - PGDATABASE=litellm
+      - PGPASSWORD=${LITELLM_DB_PASSWORD}
+      - RETAIN_DAYS=${LITELLM_BACKUP_RETAIN_DAYS:-7}
+    volumes:
+      - ../../backups/llm-gateway:/backups
+      - ../../backup/llm-gateway-backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "while true; do /scripts/backup.sh || true; sleep 86400; done"]
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # lm-models-backup -- weekly tar of the host GGUF model store (llama.cpp
+  # models; the .lmstudio path is historical). Sleep-loop; HEALTH_TCP probes
+  # llama-cpp-upstream (probe-only backend-net member, no inference client).
+  # Set LM_MODELS_BACKUP_INTERVAL= (empty) in .env to disable.
+  lm-models-backup:
+    image: alpine:3.21
+    container_name: lm-models-backup
+    # `local` profile (stack-layers, 2026-09-19): it tars the GGUF store the
+    # local upstreams serve and probes llama-cpp-upstream. Without them it
+    # would tar an empty directory and never pass its liveness probe.
+    profiles: [local]
+    # On llm-backend-net so its HEALTH_TCP liveness probe can reach the real
+    # inference server (llama-cpp-upstream:8080). Probe-only member with no
+    # inference client (cap_drop ALL) — it does NOT bypass the gateway. (Before
+    # isolation it sat on `default` and the cross-network probe never resolved.)
+    networks:
+      - llm-backend-net
+    volumes:
+      - ${LM_MODELS_DIR:-../../data/models/gguf}:/data:ro
+      - ../../backups/lm-models:/backups
+      - ../../backup/generic-tar-backup.sh:/scripts/backup.sh:ro
+    environment:
+      - DATA_DIR=/data
+      - BACKUP_DIR=/backups
+      - PREFIX=lm-models
+      - RETAIN_COUNT=${LM_MODELS_BACKUP_RETAIN_COUNT:-2}
+      # llama-cpp-upstream serves models from this directory; backup runs when
+      # that REAL inference server is reachable. Probe the upstream by name, NOT
+      # the bare `llama-cpp` alias (which now resolves to llm-gateway and would
+      # report "reachable" even while the model server is down/paused). Empty
+      # HEALTH_TCP disables the probe (e.g., if you keep the upstream paused).
+      - HEALTH_TCP=${LM_MODELS_BACKUP_HEALTH_TCP:-llama-cpp-upstream:8080}
+      # 2026-08-01: crond -> sleep-loop (see openbrain-wiki-backup rationale).
+      # Weekly, since the llama.cpp model store (incl. the live ThinkingCap
+      # GGUF) rarely changes. MIN_AGE_SECS skips the expensive ~120 GB tar on
+      # start if a fresh-enough backup already exists (prevents restart-storm
+      # re-tars and an immediate re-tar right after a manual capture).
+      - BACKUP_INTERVAL=${LM_MODELS_BACKUP_INTERVAL:-604800}   # weekly
+      - MIN_AGE_SECS=${LM_MODELS_BACKUP_MIN_AGE_SECS:-43200}   # 12h
+      - TZ=UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        if [ -z "$${BACKUP_INTERVAL}" ]; then
+          echo "[$$(date -u +%FT%TZ)] lm-models-backup DISABLED (LM_MODELS_BACKUP_INTERVAL is empty). Container will exit."
+          exit 0
+        fi
+        echo "[$$(date -u +%FT%TZ)] lm-models-backup started (sleep-loop; interval=$${BACKUP_INTERVAL}s, min_age=$${MIN_AGE_SECS}s, retain=$${RETAIN_COUNT})"
+        while true; do
+          sh /scripts/backup.sh || echo "[$$(date -u +%FT%TZ)] lm-models backup.sh exited $$?"
+          sleep "$${BACKUP_INTERVAL}"
+        done
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"

@@ -1,0 +1,189 @@
+# inference/compose/gateway.yml - the LiteLLM front door, its ledger DB and the
+# Admin-UI sidecar.
+#
+# Included by inference/docker-compose.yml; see upstreams.yml's header for the
+# relative-path rule (../../ = the repo root).
+#
+# NOT PROFILED - deliberately. These three are what an inference node always
+# runs; the `local` profile toggles the BACKENDS behind them. That is why
+# llm-gateway's depends_on entries for the profiled services carry
+# `required: false`: without it compose refuses to render at all when the
+# profile is off ("depends on undefined service").
+#
+# WHICH MODELS THE GATEWAY REGISTERS is decided at container start by
+# config/litellm/assemble-config.py - see the entrypoint comment on llm-gateway.
+
+services:
+  # =====================================================================
+  # LiteLLM gateway - the caller-facing FRONT DOOR. It holds the llama-cpp /
+  # llama-cpp-embed aliases on llm-net, so every caller's
+  # http://llama-cpp:8080 lands here and is forwarded by model name (cut-in
+  # applied 2026-06-12; see
+  # documentation/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md).
+  # ENFORCING since J.1 (2026-08-21): master_key is set and each caller needs
+  # its own sk- virtual key; the key's metadata.lane becomes the
+  # x-ai-stack-caller header llm-queue attributes on (custom_callbacks.py).
+  # NOT profiled: this service is the plane's only unconditional member - the
+  # gateway is what a cloud-only node runs. What it REGISTERS is conditional;
+  # see the entrypoint below.
+  # =====================================================================
+
+  llm-gateway:
+    # Digest-pinned — supply-chain hardening (guide §19/D9; CVE-2025-55182).
+    # Bump deliberately: docker pull ghcr.io/berriai/litellm:main-stable;
+    #   docker inspect ... --format '{{index .RepoDigests 0}}'; confirm the
+    #   release is outside any known compromise window; paste sha256; recreate;
+    #   re-run the model-list + spend-log verification.
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway
+    networks:
+      llm-net:
+        aliases:
+          - llama-cpp           # transparent flip: callers' http://llama-cpp:8080 land here
+          - llama-cpp-embed     # transparent flip: callers' http://llama-cpp-embed:8080 land here
+      # The gateway is the ONLY member of both planes: it faces callers on
+      # llm-net (aliases above) and reaches the isolated real servers on
+      # llm-backend-net (below). This is what makes it the sole ingress to
+      # *-upstream — callers on llm-net cannot reach the upstreams directly.
+      llm-backend-net: {}
+    # NO host port: the gateway sits ONLY on the internal-only `llm-net`, so
+    # Docker silently suppresses any host publish (a `ports:` mapping here would
+    # show in `docker inspect .HostConfig.PortBindings` but NEVER bind — verified:
+    # NetworkSettings.Ports is empty and 127.0.0.1:4000 is unreachable). Keeping
+    # the gateway off any internet-capable bridge is the supply-chain posture
+    # (guide §19 — no outbound). Admin / spend-ledger access is IN-NETWORK only:
+    #   docker exec llm-gateway python -c "...urllib... http://localhost:8080/..."
+    #   docker exec llm-gateway-db psql -U litellm -d litellm -c '...'
+    # The llm-traffic OWUI module reaches it the same way (OWUI is on llm-net).
+    volumes:
+      # BASE config only (general_settings + litellm_settings). It no longer
+      # carries a model_list - see the entrypoint below.
+      - ../../config/litellm.config.yaml:/app/config.base.yaml:ro
+      # One file per model group; the assembler decides which ones apply.
+      - ../../config/litellm/model_list:/app/conf.d:ro
+      - ../../config/litellm/assemble-config.py:/app/assemble-config.py:ro
+      # J.1 (2026-08-21): pre-call hook injecting x-ai-stack-caller from the
+      # virtual key's metadata - the identity signal llm-queue lanes key on.
+      - ../../config/litellm/custom_callbacks.py:/app/custom_callbacks.py:ro
+    # NEVER REGISTER A MODEL WHOSE BACKEND IS ABSENT (stack-layers D11).
+    # LiteLLM YAML has no conditionals, so the config is assembled at start:
+    # assemble-config.py merges the base file with the fragments in /app/conf.d,
+    # keeping a local group only when `local` is in COMPOSE_PROFILES and a cloud
+    # model only when its os.environ/<KEY> is non-empty, and writes the result to
+    # /app/config.yaml - the path `command:` already passes to --config, which is
+    # why that line is unchanged. It runs in the SAME process tree and `exec`s the
+    # image's own entrypoint, so a failure to assemble fails the container instead
+    # of booting a gateway with a wrong model list. `$$@` is escaped for compose:
+    # the shell sees `$@`, i.e. the `command:` below.
+    entrypoint: ["/bin/sh", "-c", "python /app/assemble-config.py && exec docker/prod_entrypoint.sh \"$$@\"", "--"]
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      # DATABASE_URL expands ${LITELLM_DB_PASSWORD} from .env at compose-parse time.
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      # J.1: master_key (virtual-key enforcement) - config reads it via os.environ
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch at boot (guide §19/D10)
+      # Read by assemble-config.py, NOT by LiteLLM. This is the same variable
+      # compose reads to decide whether the profiled services start, so the model
+      # list cannot drift from what is actually running. Setting the profile with
+      # the `--profile local` CLI flag instead does NOT set it here: the gateway
+      # then registers no local models - the safe direction (a listed model always
+      # has a backend), but the reason to keep COMPOSE_PROFILES in .env.
+      - COMPOSE_PROFILES=${COMPOSE_PROFILES:-}
+      # Blank by default => no cloud model is registered and nothing changes.
+      # Read config/litellm/model_list/cloud.openrouter.yaml BEFORE setting it:
+      # this gateway has no egress (both its networks are internal:true).
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    depends_on:
+      # required:false on all three (compose >= 2.20): they live in the `local`
+      # profile, and compose REFUSES a hard dependency on a service the active
+      # profiles exclude. `required: false` keeps the ordering when the profile
+      # is on (still waits for service_healthy) and makes the dependency simply
+      # not apply when it is off - which is exactly the cloud-only case.
+      llama-cpp-upstream:
+        condition: service_healthy
+        required: false
+      llama-cpp-embed-upstream:
+        condition: service_healthy
+        required: false
+      # B2: LiteLLM forwards chat through llm-queue (api_base), so the queue must
+      # be up first. The embed plane still goes direct to *-upstream until P4.
+      llm-queue:
+        condition: service_healthy
+        required: false
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # The litellm image is wolfi-based and has NO curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s   # first boot runs prisma migrations (~60-90s, T0 finding)
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-db:
+    image: postgres:16-alpine
+    container_name: llm-gateway-db
+    networks:
+      - llm-net
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD:?set via --env-file .env from the repo root, or scripts/stack/stack.ps1}
+    volumes:
+      - llm-gateway-db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm -d litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  llm-gateway-ui:
+    # Same digest-pinned image as llm-gateway (keep them in lockstep on bumps so
+    # the shared Postgres schema/prisma migrations never diverge).
+    image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
+    container_name: llm-gateway-ui
+    # llm-net (reaches llm-gateway-db) + app-net (2026-08-22: the portal Caddy
+    # fronts /ui at litellm.devinveller.ai behind Authelia). NO aliases — must
+    # never be an inference path. NOT on llm-backend-net (can't reach the
+    # upstreams).
+    networks:
+      - llm-net
+      - app-net
+    volumes:
+      - ../../config/litellm.ui.config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "8080"]
+    environment:
+      - DATABASE_URL=postgres://litellm:${LITELLM_DB_PASSWORD}@llm-gateway-db:5432/litellm
+      - LITELLM_LOCAL_MODEL_COST_MAP=True   # bundled cost map; no GitHub fetch (guide §19/D10)
+      # master_key UNLOCKS the Admin UI (and is enforced on THIS instance's API
+      # only — which has no callers). UI_USERNAME/PASSWORD set the dashboard login.
+      - LITELLM_MASTER_KEY=${LITELLM_UI_MASTER_KEY}
+      - UI_USERNAME=${LITELLM_UI_USERNAME}
+      - UI_PASSWORD=${LITELLM_UI_PASSWORD}
+    depends_on:
+      llm-gateway-db:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # wolfi-based image has no curl (T0 finding) — use python.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8080/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"

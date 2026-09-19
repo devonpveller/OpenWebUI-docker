@@ -1,0 +1,90 @@
+# inference/compose/queue.yml - the B2 admission controller.
+#
+# Included by inference/docker-compose.yml; see upstreams.yml's header for what
+# `include:` does to relative paths (they resolve against THIS directory, hence
+# ../../ for the build context).
+#
+# PROFILE `local`: the queue exists to schedule the local GPU. With no local
+# upstreams there is nothing to admit, and the gateway's api_base has nothing to
+# forward to - which is why the local model group is gated on the same profile
+# (config/litellm/model_list/local.yaml).
+
+services:
+  # =====================================================================
+  # llm-queue — B2 front-ended inference ADMISSION CONTROLLER.
+  # Sits BETWEEN LiteLLM (the caller-facing front door) and the *-upstream real
+  # servers, on llm-backend-net only. It holds-and-dispatches requests instead of
+  # letting llama-swap drop the overflow with a flat `429 Too many requests`:
+  #   callers → llama-cpp:8080 → llm-gateway (LiteLLM) → llm-queue → *-upstream
+  # LiteLLM stays the front door + ledger; the queue is the admission/scheduling
+  # layer it forwards through (design B2, NOT B1). It is a SECOND member of the
+  # backend plane, DOWNSTREAM of the gateway, so "LiteLLM is the front door" holds.
+  # The mutating control API is NEVER exposed on llm-net or a host port (design
+  # §10.3.1) — read-only state reaches llm-net via a LiteLLM pass-through (P2).
+  # Tuning invariant (design §10.2): LLM_QUEUE_SLOTS == llama-swap --parallel (3),
+  # LLM_QUEUE_MAX_IN_FLIGHT <= SLOTS+1, and llama-swap concurrencyLimit == 0 so
+  # the ordered depth lives in OUR heap, not llama.cpp's opaque FIFO.
+  # Docs: ../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md
+  # =====================================================================
+
+  llm-queue:
+    build:
+      context: ../../llm-queue
+      dockerfile: Dockerfile
+    image: llm-queue:local
+    container_name: llm-queue
+    # `local` profile (stack-layers, 2026-09-19): the admission controller
+    # exists to schedule the local GPU. No local upstreams => nothing to
+    # admit, so it goes with them.
+    profiles: [local]
+    # llm-backend-net ONLY: reachable by llm-gateway, reaches *-upstream. Keeping
+    # it off llm-net is what keeps the mutating control API operator-only (§3.3).
+    networks:
+      - llm-backend-net
+    environment:
+      # Forward targets — the ONLY sanctioned *-upstream references outside the
+      # gateway config. check-llm-gateway-routing.ps1 sanctions the
+      # LLM_QUEUE_UPSTREAM token specifically (§3.2).
+      - LLM_QUEUE_UPSTREAM_BASE_URL=http://llama-cpp-upstream:8080
+      - LLM_QUEUE_EMBED_UPSTREAM_BASE_URL=http://llama-cpp-embed-upstream:8080
+      # Admission sizing — MUST track LLAMA_SWAP_QWEN36_27B_N_PARALLEL (.env;
+      # 2 since 2026-07-09). Values live in .env next to that var.
+      - LLM_QUEUE_SLOTS=${LLM_QUEUE_SLOTS:-3}
+      - LLM_QUEUE_MAX_IN_FLIGHT=${LLM_QUEUE_MAX_IN_FLIGHT:-4}
+      - LLM_QUEUE_BACKSTOP_DEPTH=${LLM_QUEUE_BACKSTOP_DEPTH:-24}
+      - LLM_QUEUE_MAX_TOTAL_CONNECTIONS=${LLM_QUEUE_MAX_TOTAL_CONNECTIONS:-128}
+      # Rolling completion-T metric.
+      - LLM_QUEUE_T_WINDOW=${LLM_QUEUE_T_WINDOW:-5}
+      - LLM_QUEUE_T_INITIAL_S=${LLM_QUEUE_T_INITIAL_S:-30}
+      # P2 (2026-06-14): budget enforcement ON. Admission gated by per-service
+      # projected-wait budgets (§8b) on top of the depth backstop; priority
+      # classes (§8c) order dispatch; per-key max-concurrency (§8d) caps batch
+      # callers. Budgets are generous (owui-chat 30s … batch 600s) so normal load
+      # passes; only genuine saturation rejects-with-estimate. Set to false to
+      # revert to P1 depth-only admission.
+      - LLM_QUEUE_ENFORCE_BUDGET=${LLM_QUEUE_ENFORCE_BUDGET:-true}
+      - LLM_QUEUE_UPSTREAM_TIMEOUT_S=${LLM_QUEUE_UPSTREAM_TIMEOUT_S:-600}
+      - LLM_QUEUE_LOG_LEVEL=${LLM_QUEUE_LOG_LEVEL:-INFO}
+      # P3 analytics: admit/finish/reject events with estimate-vs-actual →
+      # llm-queue's OWN SQLite store (NOT LiteLLM's schema-managed Postgres, §4.4).
+      # The db is on llm-net (unreachable from llm-backend-net), so the queue keeps
+      # its own store and the §5 join happens at query time.
+      - LLM_QUEUE_EVENTS_DB_PATH=${LLM_QUEUE_EVENTS_DB_PATH:-/data/events.db}
+    volumes:
+      - llm-queue-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      llama-cpp-upstream:
+        condition: service_healthy
+    healthcheck:
+      # Liveness only — NEVER probes the upstream (a probe would force a
+      # llama-swap model load → swap thrash, design §4.2).
+      test: ["CMD", "curl", "-fsS", "--max-time", "5", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
