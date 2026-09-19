@@ -156,7 +156,7 @@ services:
   openwebui:
     profiles: [ gpu ]
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile.openwebui-gpu
     # Pinned to the proven image (retagged from ai-stack-openwebui at the K.5
     # split). Rebuild DELIBERATELY only (docker compose ... build openwebui):
@@ -277,7 +277,7 @@ services:
   tailscale:
     profiles: [ tailscale ]
     build:
-      context: ..
+      context: .
       dockerfile: dockerfile.tailscale
     # Pinned like openwebui (retagged from ai-stack-tailscale at K.5).
     image: tailscale:local

@@ -53,7 +53,7 @@ LLM_GATEWAY_URL = os.environ.get("LLM_GATEWAY_URL", "http://llm-gateway:8080").r
 
 # ---------------------------------------------------------------------------
 # Service registry — single source of truth for the pipe.
-# Defaults mirror docker-compose.yml + entrypoint.sh + .env.example.
+# Defaults mirror frontend/docker-compose.yml + frontend/entrypoint.sh + .env.example.
 # ---------------------------------------------------------------------------
 
 SERVICE_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -503,7 +503,7 @@ def build_inventory() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 # Paths we'll try to read tailnet-info.json from, in priority order.
-# The tailscale container writes this file (see entrypoint.sh).
+# The tailscale container writes this file (see frontend/entrypoint.sh).
 _TAILNET_INFO_CANDIDATES = [
     "/host_project/data/tailscale/tailnet-info.json",  # inside openwebui
     "/var/lib/tailscale/tailnet-info.json",            # inside tailscale container

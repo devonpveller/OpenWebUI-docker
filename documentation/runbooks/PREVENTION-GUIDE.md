@@ -15,7 +15,7 @@ The repository now includes a `.gitattributes` file that enforces:
 - Windows line endings (CRLF) for PowerShell scripts (`*.ps1`)
 
 ### 2. Enhanced Docker Build Process
-The `dockerfile.tailscale` now includes:
+The `frontend/dockerfile.tailscale` now includes:
 - `dos2unix` utility installation
 - Automatic line ending conversion during build
 - Validation that shebang is properly formatted
@@ -36,7 +36,7 @@ The `dockerfile.tailscale` now includes:
 
 #### Enhanced Health Monitoring
 The health monitoring script now detects:
-- Windows line endings in `entrypoint.sh`
+- Windows line endings in `frontend/entrypoint.sh`
 - Missing entrypoint files in containers
 - Provides specific fix commands
 
@@ -51,7 +51,7 @@ Git pre-commit hook validates:
 ### If Line Ending Issues Occur
 ```powershell
 # PowerShell - Fix specific file
-(Get-Content .\entrypoint.sh -Raw) -replace "`r`n", "`n" | Set-Content .\entrypoint.sh -NoNewline
+(Get-Content .\frontend\entrypoint.sh -Raw) -replace "`r`n", "`n" | Set-Content .\frontend\entrypoint.sh -NoNewline
 
 # PowerShell - Fix all shell scripts
 Get-ChildItem -Filter "*.sh" -Recurse | ForEach-Object {
@@ -65,10 +65,10 @@ Get-ChildItem -Filter "*.sh" -Recurse | ForEach-Object {
 
 ```bash
 # Linux/WSL - Fix with dos2unix
-dos2unix entrypoint.sh
+dos2unix frontend/entrypoint.sh
 
 # Or with sed
-sed -i 's/\r$//' entrypoint.sh
+sed -i 's/\r$//' frontend/entrypoint.sh
 ```
 
 ### If Container Won't Start

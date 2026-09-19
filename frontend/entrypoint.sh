@@ -36,7 +36,7 @@ wait_for_network() {
 }
 
 # Persist tailnet info so other containers (the openwebui admin pipe) can read
-# the FQDN/MagicDNS suffix -- STATE_DIR maps to ./data/tailscale on the host,
+# the FQDN/MagicDNS suffix -- STATE_DIR maps to <repo>/data/tailscale on the host,
 # which openwebui mounts read-only.
 write_tailnet_info() {
     if ts status --json > "$STATE_DIR/tailnet-info.json.tmp" 2>/dev/null \

@@ -89,7 +89,7 @@ echo   - OpenWebUI: https://github.com/open-webui/open-webui/releases/latest
 echo   - llama.cpp: https://github.com/ggml-org/llama.cpp/releases/latest
 echo.
 echo [INFO] Current Dockerfile base image:
-findstr "FROM ghcr.io/open-webui" Dockerfile.openwebui-gpu
+findstr "FROM ghcr.io/open-webui" frontend\Dockerfile.openwebui-gpu
 cd /d "%SCRIPT_DIR%"
 
 if "%1"=="" (
@@ -170,14 +170,14 @@ if not defined FULL_UPDATE (
 
 REM Step 3: Update Dockerfile
 echo.
-echo [STEP 3/8] Updating Dockerfile.openwebui-gpu...
-powershell -Command "(Get-Content '..\Dockerfile.openwebui-gpu') -replace 'FROM ghcr.io/open-webui/open-webui:v[0-9.]+', 'FROM ghcr.io/open-webui/open-webui:%VERSION%' | Set-Content '..\Dockerfile.openwebui-gpu'"
+echo [STEP 3/8] Updating frontend\Dockerfile.openwebui-gpu...
+powershell -Command "(Get-Content '%SCRIPT_DIR%\..\..\frontend\Dockerfile.openwebui-gpu') -replace 'FROM ghcr.io/open-webui/open-webui:v[0-9.]+', 'FROM ghcr.io/open-webui/open-webui:%VERSION%' | Set-Content '%SCRIPT_DIR%\..\..\frontend\Dockerfile.openwebui-gpu'"
 echo [SUCCESS] Dockerfile updated to %VERSION%
 
 REM Step 4: Rebuild custom GPU image (CRITICAL - must use custom Dockerfile)
 echo.
 echo [STEP 4/8] Rebuilding OpenWebUI with GPU support (custom CUDA PyTorch)...
-echo [INFO] This builds from Dockerfile.openwebui-gpu with CUDA-enabled PyTorch
+echo [INFO] This builds from frontend\Dockerfile.openwebui-gpu with CUDA-enabled PyTorch
 echo [INFO] This may take several minutes...
 cd /d "%SCRIPT_DIR%\..\.."
 docker compose build --no-cache openwebui
@@ -210,11 +210,11 @@ cd /d "%SCRIPT_DIR%"
 if %CUDA_VERIFY_RESULT% NEQ 0 (
     echo [ERROR] Built image does NOT have working CUDA PyTorch!
     echo [ERROR] The health check will timeout waiting for GPU initialization
-    echo [INFO] Check Dockerfile.openwebui-gpu has correct PyTorch CUDA install commands
+    echo [INFO] Check frontend\Dockerfile.openwebui-gpu has correct PyTorch CUDA install commands
     echo [INFO] Verify: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
     set /p FORCE_CONTINUE="Continue anyway? (y/n): "
     if /i not "!FORCE_CONTINUE!"=="y" (
-        echo [INFO] Update aborted - fix Dockerfile.openwebui-gpu and retry
+        echo [INFO] Update aborted - fix frontend\Dockerfile.openwebui-gpu and retry
         set OPENWEBUI_UPDATE_SUCCESS=0
         if "%1"=="" (
             if not defined FULL_UPDATE (

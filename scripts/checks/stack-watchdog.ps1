@@ -456,12 +456,12 @@ function Test-EntrypointHealth {
     
     try {
         # Check if entrypoint.sh has Windows line endings
-        $EntrypointPath = Join-Path $PROJECT_DIR "entrypoint.sh"
+        $EntrypointPath = Join-Path $PROJECT_DIR "frontend\entrypoint.sh"
         if (Test-Path $EntrypointPath) {
             $Content = Get-Content $EntrypointPath -Raw
             if ($Content -match "`r`n") {
                 Write-LogEntry "WARNING: entrypoint.sh has Windows line endings (CRLF). This can cause container startup failures." "WARN"
-                Write-LogEntry "Run: (Get-Content .\entrypoint.sh -Raw) -replace '`r`n', '`n' | Set-Content .\entrypoint.sh -NoNewline" "INFO"
+                Write-LogEntry "Run: (Get-Content .\frontend\entrypoint.sh -Raw) -replace '`r`n', '`n' | Set-Content .\frontend\entrypoint.sh -NoNewline" "INFO"
                 return $false
             }
         }
