@@ -2,8 +2,7 @@
 #
 # Included by inference/docker-compose.yml; see upstreams.yml's header for what
 # `include:` does to relative paths (they resolve against THIS directory, hence
-# ../llm-queue for the build context - the source tree moved INTO the plane at
-# sl-colo-inference, 2026-09-19).
+# ../llm-queue for the build context - the source moved into the plane 2026-09-19).
 #
 # PROFILE `local`: the queue exists to schedule the local GPU. With no local
 # upstreams there is nothing to admit, and the gateway's api_base has nothing to

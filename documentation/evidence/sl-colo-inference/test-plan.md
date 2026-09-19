@@ -2,10 +2,17 @@
 
 **Item:** `sl-colo-inference2` — the reopen of `sl-colo-inference` (stack-layers PLAN 2.7,
 Part L.1, wave 2). Same branch, same worktree.
-**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`b9fff95`** (which
-contains `sl-inference-split`, `sl-closeout`, `sl-ob1-profiles` and `sl-frontend-solo`).
-**Revision 5:** attempt 1 of the reopened item PASSED 15/15 — T14's independent
-155-citation index found none broken. `development` then moved to **`b9fff95`**
+**Branch:** `work/sl-colo-inference` · **Base:** `development` @ **`ae915c3`** (which
+contains `sl-inference-split`, `sl-closeout`, `sl-ob1-profiles`, `sl-frontend-solo` and
+`sl-colo-gateways`).
+**Revision 6:** attempt 2 FAILED on **T14 only** (14/15). `stack.manifest.toml:119-120`
+cites `profiles: [local]` at `upstreams.yml:41,:130, queue.yml:39 and backups.yml:48` — the
+second and later as **bare basenames** — and this branch's +1 in `queue.yml` had pushed
+that line to `:40`. The path-anchored sweep saw one of three. Fixed the way F7a's own
+principle says: `queue.yml`'s header is now **line-neutral** (`3 3`), so nothing outside
+the plane needed touching, and T14a below enumerates **both citation forms**. Also
+rebased onto `ae915c3` (`sl-colo-gateways`). **Revision 5:** attempt 1 of the reopened
+item PASSED 15/15 — T14's independent 155-citation index found none broken. `development` then moved to **`b9fff95`**
 (`sl-frontend-solo`), which REPLACED `frontend/docker-compose.yml` with a 479-line profiled
 file and re-derived every citation into it for itself. Per D18 the branch rebased before
 review: three conflicts (`workspace-stacks.md`, `.env.example`, `stack.manifest.toml`), and
@@ -808,10 +815,34 @@ cd "$SCRATCH/head"
 git -C "$W" diff --name-only development..work/sl-colo-inference | sort          # the changed set
 git -C "$W" diff --numstat development..work/sl-colo-inference                   # and their line deltas
 
+# (a) PATH form
 MSYS_NO_PATHCONV=1 git grep -n -E \
   '(frontend/docker-compose\.yml|inference/docker-compose\.yml|inference/compose/[a-z]+\.yml|inference/config/[A-Za-z0-9._/-]+|inference/llm-queue/[A-Za-z0-9._/-]+|check-llm-gateway-routing\.ps1|workspace-stacks\.md|litellm-cloud\.config\.yaml|\.env\.example|README\.md|SECURITY\.md):[0-9]+' \
   -- . ':!OB1' ':!documentation/archive' ':!scripts/archive'
+
+# (b) BARE BASENAME form - this half is why attempt 2 failed. Run it for EVERY
+#     changed file's basename, not just the ones you expect to be cited.
+for b in $(git -C "$W" diff --name-only development..work/sl-colo-inference | xargs -n1 basename | sort -u); do
+  MSYS_NO_PATHCONV=1 git grep -nE "(^|[^/A-Za-z0-9_-])${b}:[0-9]" -- . ':!OB1' ':!documentation/archive' ':!scripts/archive'
+done
 ```
+
+**Why (b) exists, in the words of the failure.** Attempt 2 swept only form (a) and reported
+a clean tree. `stack.manifest.toml:119-120` reads:
+
+```
+# inference/compose/upstreams.yml:41,:130, queue.yml:39 and backups.yml:48
+```
+
+— one path-form citation followed by two **bare basenames**, which is simply how anyone
+writes a list. The path-anchored grep saw one of the three, and `queue.yml:39` was broken by
+this branch (a +1 in that file's header pushed `profiles: [local]` to `:40`) and correct on
+the base. **A sweep that only matches the first item of a list is not a sweep.**
+
+**Ambiguity is a finding, not a guess.** `README.md`, `config.py`, `pyproject.toml` and
+`docker-compose.yml` each name five or more files in this repo. A resolver that picks one
+is inventing evidence; report the candidate list and resolve it by reading the citing
+sentence.
 
 **T14b — resolve each one.** For every hit, open the cited file at the cited line and read
 it. A small script beats doing it by hand, and it is what the developer used:
@@ -874,25 +905,35 @@ fails only if the note does not DECLARE the judgement and that clash, or if a re
 substantive claim (what was checked, and the result) was altered. Diff them and confirm only digits moved:
 `git -C "$W" diff development..work/sl-colo-inference -- documentation/evidence/stack-layers/sl-manifest-test-plan.md`.
 
-**Also PASS — the four that were SAVED rather than renumbered, which is the better
-outcome.** `.env.example:255` cites `inference/compose/backups.yml:41,75,82-84`, `:268`
-cites `:13,31`, `documentation/notes/stack-layers-sl-closeout-findings.md:282` cites both
-sets, and `documentation/notes/stack-layers-sl-inference-split-findings.md:194` +
-`documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428` cite
-`inference/compose/upstreams.yml:66,75`. Both of those compose headers were re-wrapped to
-be **line-neutral**, so all four citations stay correct untouched:
+**Also PASS — the citations SAVED rather than renumbered, which is the better outcome, and
+now covers three files.**
 
 ```bash
-git -C "$W" diff --numstat development..work/sl-colo-inference -- inference/compose/backups.yml inference/compose/upstreams.yml
-#   expect   1  1   and   4  4   (equal insertions and deletions = no shift)
+git -C "$W" diff --numstat development..work/sl-colo-inference -- \
+  inference/compose/backups.yml inference/compose/queue.yml inference/compose/upstreams.yml
+#   expect   1 1   and   3 3   and   4 4   (equal insertions and deletions = no shift)
 ```
 
-Confirm the targets by construct: `backups.yml:13,31,41,75,82-84` are
-`llm-gateway-backup:`, the `sleep 86400` entrypoint, the disable comment, the
-`BACKUP_INTERVAL` default and the `DISABLED … exit 0` block; `upstreams.yml:66,75` are the
-two `/models/lmstudio-community/…gguf` model paths.
-**FAIL:** either numstat shows a net shift, or any of those six/two lines is not what the
-citing sentence says — the neutrality was the whole point of that edit.
+| file | cited by | targets to confirm by construct |
+|---|---|---|
+| `backups.yml` | `.env.example:333` (`:41,75,82-84`), `.env.example:346` (`:13,31`), `sl-closeout-findings.md:282` (both sets), `sl-inference-split-test-plan.md:430` (`:39`), `stack.manifest.toml:120` (`:48`) | `llm-gateway-backup:`, the `sleep 86400` entrypoint, the disable comment, the `BACKUP_INTERVAL` default, the `DISABLED … exit 0` block, the ".lmstudio path is historical" comment, `profiles: [local]` |
+| `queue.yml` | `stack.manifest.toml:120` (`queue.yml:39`) | `profiles: [local]` |
+| `upstreams.yml` | `stack.manifest.toml:120` (`:41`, `:130`) | `profiles: [local]` twice |
+
+**FAIL:** any numstat shows a net shift, or any target line is not what the citing sentence
+says. Neutrality was the whole point of those edits — and `queue.yml` is on this list
+*because* attempt 2 failed on it: it was `4 3` then, and the fix was to make it neutral
+rather than to renumber the manifest.
+
+**NOT a fail — `upstreams.yml:66,75` is pre-existing drift, see F7b item 3.**
+`sl-inference-split`'s findings (`:194`) and test plan (`:428`) cite those two lines for the
+`/models/lmstudio-community/…gguf` paths, which actually live at **`:69` and `:78`** — on
+this branch **and on `development`**, where the file is 169 lines on both sides. Check that
+yourself (`git show development:inference/compose/upstreams.yml | sed -n '66p;69p'`) rather
+than taking it from the note. An earlier F7a claimed those two "stay correct untouched"
+because the edit was line-neutral; line-neutral means this branch did not break them, not
+that they were right, and F7b now says so. **FAIL if F7b omits that correction**, because a
+true headline on a false mechanism is the failure mode this item keeps paying for.
 
 **FAIL:** any citation that lands on something other than what its sentence claims, **where
 the citing file and the cited line were consistent on `development`**. That is a stale
@@ -968,8 +1009,10 @@ make the deliverable un-actionable rather than merely shorter.
    as written and the plan renders with the flags. Recorded rather than deleted: a
    declaration that quietly vanishes leaves the gate unable to tell whether it was
    resolved or dropped.
-2. **T9** — the grep exemption list does not cover `documentation/evidence/`, which holds
-   merged items' execution records that must not be rewritten.
+2. **T9 — SETTLED by the gate.** This used to declare that the anchor's exempt list
+   (`archive/`, `notes/`, `CLEANUP-PLAN.md`) does not name `documentation/evidence/`. The
+   gate ruled the list **is** read as including `documentation/evidence/` for completed
+   records. Kept rather than deleted so the resolution is visible; F7c records it too.
 3. **T9** — `agent-org/config/litellm-cloud.config.yaml` is a substring collision with
    `config/litellm`; the four agent-org hits are correct as written.
 4. **F1 (findings)** — the anchor's artifact line "agent-org's mount of config/litellm

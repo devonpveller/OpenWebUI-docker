@@ -294,32 +294,42 @@ Four more, in other items' records, shifted by the same insert and re-derived th
 > re-derive rather than apply the table. I did not edit their note to say so, which would
 > have been the same over-reach in the other direction.
 
-**Four citations were SAVED rather than renumbered — the better outcome.** Two of this
-item's edits were comment rewraps that had grown their file for no reason:
+**Citations SAVED rather than renumbered — the better outcome, applied to three files.**
+Three of this item's edits were comment rewraps that had grown their file for no reason;
+each was re-wrapped to be **line-neutral** instead:
 
-- `inference/compose/backups.yml` is cited by `.env.example:333` (`:41,75,82-84`),
-  `.env.example:346` (`:13,31`) and
-  `documentation/notes/stack-layers-sl-closeout-findings.md:282` (both sets).
-- `inference/compose/upstreams.yml` is cited by
-  `documentation/notes/stack-layers-sl-inference-split-findings.md:194` and
-  `documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428`, both at
-  `:66,75` (the `/models/lmstudio-community/…` model paths).
+| file | `git diff --numstat development --` | what that saves |
+|---|---|---|
+| `inference/compose/backups.yml` | `1 1` | `.env.example:333` (`:41,75,82-84`), `.env.example:346` (`:13,31`), `documentation/notes/stack-layers-sl-closeout-findings.md:282` (both sets), `…/sl-inference-split-test-plan.md:430` (`:39`) — all **verified correct** by opening each line |
+| `inference/compose/queue.yml` | `3 3` | `stack.manifest.toml:120` (`queue.yml:39`, `profiles: [local]`) — **verified correct** |
+| `inference/compose/upstreams.yml` | `4 4` | `stack.manifest.toml:120` (`:41`, `:130`, both `profiles: [local]`) — **verified correct**. Its other two citations are stale for a reason that is not this branch's: see F7b item 3 |
 
-Both headers were re-wrapped to be **line-neutral** (`git diff --numstat development --`
-prints `1 1` and `4 4`), so all four stay correct untouched and two files that would
-otherwise have been edited were not. **Where a shift buys nothing, not shifting beats
-renumbering** — fewer files touched, fewer conflicts for the branches landing beside this
-one, and nothing to get wrong. It is also the only class of fix a base change cannot make
-stale: these four survived the `sl-frontend-solo` rebase without a second look.
+> **`queue.yml` is here because attempt 2 failed on it, and because this paragraph used to
+> say the opposite.** It read: "`inference/compose/gateway.yml` (+1) and
+> `inference/compose/queue.yml` (+1) are cited by nothing outside this item's own note and
+> plan". That was **false for `queue.yml`** — `stack.manifest.toml:119-120` cites it — and
+> the +1 pushed `profiles: [local]` from `:39` to `:40`, a citation correct on the base and
+> broken by this branch. The sentence was false because the sweep behind it was: the
+> manifest names the file as a **bare basename** (`…upstreams.yml:41,:130, queue.yml:39 and
+> backups.yml:48`), the second and later items of a list whose first item carried the path,
+> and a path-anchored grep saw one of three. The fix is `queue.yml` line-neutral like the
+> other two, so nothing outside the plane needed touching at all; the sweep is fixed in F7c.
 
-**The remaining shifted files carry no incoming citations**, checked rather than assumed:
+**Where a shift buys nothing, not shifting beats renumbering** — fewer files touched, fewer
+conflicts for the branches landing beside this one, and nothing to get wrong. It is also
+the only class of fix a base change cannot make stale: these survived both the
+`sl-frontend-solo` and `sl-colo-gateways` rebases without a second look, while every
+renumbered citation had to be re-derived again.
+
+**The remaining shifted files carry no incoming citations — re-checked in BOTH forms**
+(`git grep -nE '(^|[^/A-Za-z0-9_-])<basename>:[0-9]'` as well as the path form):
 `scripts/checks/check-llm-gateway-routing.ps1` (+4),
 `.claude/skills/stack-map/references/workspace-stacks.md` (+1),
-`agent-org/config/litellm-cloud.config.yaml` (+1), `inference/compose/gateway.yml` (+1) and
-`inference/compose/queue.yml` (+1) are cited by nothing outside this item's own note and
-plan, and those two are re-derived (`check-llm-gateway-routing.ps1:77`,
-`litellm-cloud.config.yaml:8-9`). `inference/docker-compose.yml` (+5) is the exception and
-it is F7b's, not F7a's.
+`agent-org/config/litellm-cloud.config.yaml` (+1) and `inference/compose/gateway.yml` (+1).
+`gateway.yml` returns **zero** hits either form, which is why its +1 is left alone. The
+first two are cited only by this item's own note and plan and are re-derived there
+(`check-llm-gateway-routing.ps1:77`, `litellm-cloud.config.yaml:8-9`).
+`inference/docker-compose.yml` (+5) is the exception and it is F7b's, not F7a's.
 
 ### F7b — drift this item only FOUND (pre-existing; not touched)
 
@@ -337,6 +347,18 @@ reason — the files they point into were restructured, so renumbering would not
 2. `stack.manifest.toml:421,423,426` — three comments cite `config/caddy/Caddyfile:197`,
    `:143`, `:136`, `:295`. `sl-colo-portal` moved that tree to `portal/config/caddy/`
    (confirmed present at `portal/config/caddy/Caddyfile`); there is no `config/caddy/`.
+3. `documentation/notes/stack-layers-sl-inference-split-findings.md:194` and
+   `documentation/evidence/stack-layers/sl-inference-split-test-plan.md:428` both cite
+   `inference/compose/upstreams.yml:66,75` for the two
+   `/models/lmstudio-community/…gguf` model paths. Those paths are at **`:69` and
+   `:78`** — on this branch **and on `development`**, where the file is 169 lines on
+   both sides and this branch's edit to it is line-neutral (`4 4`). So the drift is
+   real and it is **not this branch's**: something grew `upstreams.yml` between
+   sl-inference-split and now. **An earlier version of F7a claimed these two “stay
+   correct untouched” because the edit was line-neutral.** Line-neutral means this
+   branch did not break them; it does not mean they were right. Correcting the reason
+   as well as the claim is the point — a true headline on a false mechanism misleads
+   the next reader exactly as much as a wrong one.
 
 **One entry has been REMOVED from this list because someone fixed it.** The first version
 of F7b reported that `[planes.inference.profiles.local]` still carried
@@ -368,7 +390,37 @@ commit as a whole breaks a citation nobody's eye passes over: the broken file is
 diff does not touch. **Inserting N lines into a file is an edit to every citation into that
 file below the insertion point**, and the only way to see it is to enumerate them from the
 tree. The plan's T14 does that by construct and fails on any stale citation this branch
-caused. The same reasoning produced the six-line cap on the compose comment: evidence
+caused.
+
+**And citations do not all name their file the same way.** Attempt 2 failed on exactly
+this: `stack.manifest.toml:119-120` reads
+
+```
+# inference/compose/upstreams.yml:41,:130, queue.yml:39 and backups.yml:48
+```
+
+— one path-form citation followed by two **bare basenames**, which is how anyone writes a
+list. A path-anchored `git grep 'inference/compose/queue\.yml:[0-9]'` sees one of the
+three and reports a clean sweep. **Enumerate both forms**, and treat an ambiguous basename
+as a finding rather than guessing which file it means:
+
+```bash
+git grep -nE '(^|[^/A-Za-z0-9_-])queue\.yml:[0-9]' -- . ':!OB1'   # and each other basename
+```
+
+The repo has several genuinely ambiguous basenames — `README.md`, `config.py`,
+`pyproject.toml`, `docker-compose.yml` each name five or more files — so a resolver must
+report those for a human rather than pick one. The third defence is the one that needs no
+sweep at all: **make the edit line-neutral** and the citation cannot go stale.
+
+**The `documentation/evidence/` question is settled.** Earlier revisions of this item
+declared a gap: the anchor exempts `archive/`, `notes/` and `CLEANUP-PLAN.md` from the
+stale-pointer criterion but does not name `documentation/evidence/`, and this item both
+left merged items' execution records alone (T9) and updated their line numbers (F7a).
+**The gate ruled: the exempt list is read as including `documentation/evidence/` for
+completed records.** So a stale path in a merged item's evidence file is not a failure of
+this item; updating a line NUMBER in one, as F7a does, remains a judgement the gate has
+seen and accepted rather than an obligation. The same reasoning produced the six-line cap on the compose comment: evidence
 belongs in this file, not in the deliverable (CLAUDE.md, "findings go to
 `documentation/notes/`"), and a 30-line comment was both a policy breach and the mechanism
 of the breakage.
