@@ -157,11 +157,29 @@ foreach ($plane in $Inv.planes.PSObject.Properties) {
 
 $ServiceCache = @{}
 function Get-DeclaredServices([string]$File, [string]$EnvFile) {
+    # EVERY DECLARED PROFILE IS SWITCHED ON for the render (2026-09-19). A bare
+    # `config --services` omits profile-gated services entirely, so a watchdog
+    # target sitting behind a profile would come back NOT DECLARED and this
+    # script would report a repair path broken that is in fact fine.
+    #
+    # It was green only by luck: no profile-gated container was in the watchdog's
+    # managed set yet. The same blind spot in the pre-commit inventory verifier
+    # was NOT luck - it hid openbrain-idea-refinery from stack-services.json for
+    # as long as that check existed, and the watchdog then refused to repair a
+    # container that had been running for days. `stack.py inventory` can carry
+    # profiled rows now, which left this script as the last place that could not
+    # see them.
     $key = "$File|$EnvFile"
     if ($ServiceCache.ContainsKey($key)) { return $ServiceCache[$key] }
-    $a = @('compose', '-f', (Join-Path $RepoRoot $File.Replace('/', [string][char]92)))
-    if ($EnvFile) { $a += @('--env-file', (Join-Path $RepoRoot $EnvFile.Replace('/', [string][char]92))) }
+    $base = @('compose', '-f', (Join-Path $RepoRoot $File.Replace('/', [string][char]92)))
+    if ($EnvFile) { $base += @('--env-file', (Join-Path $RepoRoot $EnvFile.Replace('/', [string][char]92))) }
+
+    $profiles = @(& docker @base config --profiles 2>$null |
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $a = $base
+    foreach ($pr in $profiles) { $a += @('--profile', $pr) }
     $a += @('config', '--services')
+
     $out = & docker @a 2>$null
     if ($LASTEXITCODE -ne 0) { $out = @() }
     $list = @($out | ForEach-Object { "$_".Trim() } | Where-Object { $_ })

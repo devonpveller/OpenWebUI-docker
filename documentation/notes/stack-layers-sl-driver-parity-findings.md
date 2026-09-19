@@ -84,22 +84,25 @@ checkout owns. That is why the inventory's project names are declared in
 worktree would create a second, near-empty project alongside `ai-stack`. Nobody
 should try it to find out; the driver is not what would do it.
 
-## F4 — `ruff check .` is already red on `development`
+## F4 — `ruff check .` was red on `development`; **CLOSED by `sl-closeout`**
 
-**[measured]** with every change in this worktree stashed (`git stash -u`),
-`ruff check .` from the repo root still reports:
+**[measured]** at base `9f64b84`, with every change in this worktree stashed
+(`git stash -u`), `ruff check .` from the repo root reported:
 
 ```text
 E501 Line too long (103 > 100)
   --> llm-queue\src\llm_queue\__init__.py:9:101
 ```
 
-It is a docstring line carrying the `../documentation-plans-ai-stack/...` path the
-2026-09-18 plan-store move rewrote — the rewrite lengthened the line past
-`llm-queue`'s own 100-column limit (the root `ruff.toml` allows 120, the
-subproject's config does not). The CI `ruff` job runs `ruff check .` from the root,
-so that job is red on the work line for a reason that predates this item and has
-nothing to do with it. One line; left alone deliberately.
+A docstring line carrying the `../documentation-plans-ai-stack/...` path the
+2026-09-18 plan-store move rewrote — the rewrite pushed it past `llm-queue`'s own
+100-column limit (the root `ruff.toml` allows 120, the subproject's does not).
+
+**[measured]** after rebasing onto `be00d53`, `ruff check .` from the repo root is
+`All checks passed!` — `sl-closeout` fixed that line. The entry is kept rather than
+deleted because the first attempt's test plan told the tester to expect the red,
+and a sink that silently drops a resolved claim is how a reader ends up trusting a
+stale one.
 
 ## F5 — one redundant field removed from the inventory, and one row added
 
@@ -177,3 +180,77 @@ renderable plane exactly — all 16 OB1 ports, both agent-org ports, both infere
 and portal declare none and publish none. The `sl-manifest` reviewer flagged those
 tables as having no consumer; `inventory --check` is now one, in both directions
 (a declared port nothing publishes, and a published port nothing declares).
+
+---
+
+## Added after test attempt 1 (tester `wt-tester-driver`, T9 FAIL)
+
+## F11 — `SERVICE-LIFECYCLE.md` step 8 could not be followed as written, and the generator was the thing that was wrong
+
+**[measured]** the tester executed step 8 for an imaginary `fake-probe-svc` added
+to `memory/docker-compose.yml`: a sidecar row "in the right plane group, with
+`critical` and any `host_health`", exactly as the row says, then
+`inventory --write`:
+
+```text
+[FAIL] WRONG project for fake-probe-svc: the sidecar says 'None', the render says 'memory'
+```
+
+Two ways to close it: add `project` to the instructions, or derive it. **Derived**
+— the render already knows which project owns a container, `_row()` was comparing
+the render's answer against `None`, and the instruction was the correct one. The
+field is optional in the sidecar now and filled from the render; where it IS
+recorded it is still audited (a wrong one is still drift); and it stays REQUIRED
+for a container whose project may not be renderable at all — `open-brain`, because
+CI has no submodule — where the refusal names that case explicitly. Reproduced the
+tester's walkthrough after the fix **[measured]**: `wrote
+scripts/lib/stack-services.json`, row generated as
+`{"container": "fake-probe-svc", "project": "memory", "critical": false,
+"host_health": "..."}`.
+
+The general lesson is the one worth keeping: **an instruction is verified by
+executing it, not by reading it.** Three readers (developer, then the doc pass)
+read row 8 and saw nothing wrong with it.
+
+## F12 — `check-watchdog-repair-targets.ps1` rendered without profiles — **FIXED here**
+
+**[source]** `Get-DeclaredServices` ran `config --services` with no `--profile`,
+so compose omitted every profile-gated service and any such watchdog target would
+have been reported `NOT DECLARED`. **[measured]** the difference that function
+consumes, on the inference plane:
+
+```text
+bare     : llm-gateway llm-gateway-backup llm-gateway-db llm-gateway-ui
+--profile local : + llama-cpp-embed-upstream llama-cpp-upstream llm-queue lm-models-backup
+```
+
+Green today only because no profile-gated container is in the watchdog's managed
+set. Fixed the same way `check-project-configs.ps1` was: read `config --profiles`,
+switch them all on, then render. **[measured]** the script still reports
+`REPAIR TARGETS OK: 24 container(s)`, exit 0. It is in the artifact's spirit — this
+item made the inventory able to carry profiled rows, and this was the last consumer
+that could not see them.
+
+## F13 — `check-project-configs.ps1` section 1b degrades quietly in its exit code
+
+**[source]** when python or docker is missing, 1b prints
+`service inventory NOT VERIFIED (this is a gap, not a pass)` and does **not**
+increment `$failed`, so the hook exits 0. Deliberate, and it matches how section 3
+treats a missing python: a pre-commit hook that hard-failed on a machine without
+docker would be worse than one that says what it could not do. Recorded so nobody
+reads a green hook as a verified inventory. The CI `stack-driver` job has both
+tools and no such escape hatch, which is where the guarantee actually lives.
+
+## F14 — the probe threshold had no test, only the parse did
+
+**[measured]** the tester weakened probe 5 from `>= 8` to `>= 0` in the driver and
+the whole suite stayed green: the two cases around it covered `""` and
+`"not a number"`, both of which fail under either threshold. Closed here with
+`test_a_serve_route_count_below_the_threshold_fails`, which pins the boundary in
+both directions (3 and 7 FAIL, 8 and 9 PASS). Re-ran the tester's mutation after
+adding it **[measured]**: `>= 0` now turns that test RED, 79 passed / 1 failed.
+
+Worth stating plainly because this item's own headline is probe parity: a pinned
+list of probe NAMES proves none was dropped, and proves nothing at all about
+whether one was weakened. Those are two different guarantees and they need two
+different tests.

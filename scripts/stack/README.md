@@ -301,7 +301,12 @@ plane's `host` requirements. Exits 1 if anything is `[FAIL]`. Read-only.
 The fifteen functional probes `stack.ps1 health` ran, one for one, with the same
 pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code:
 **the number of failed probes**. Read-only - `docker ps`, `docker network
-inspect`, four read-only `docker exec`s and six HTTP GETs.
+inspect`, **five** read-only `docker exec`s (`llm-gateway`, `tailscale`,
+`little-coder`, `openbrain-db`, `agent-bridge`), one `powershell -File
+check-owui-drift.ps1 -CountOnly`, and **seven** HTTP GETs - `:3000/health`,
+`:8060/health`, `:8085/healthz`, `:8085/health`, `:5055/api/config`,
+`:8062/health`, `:8816/health`. Seven, not six, because `search` gets two of
+them; that is the whole point of the third rule below.
 
 Rules the probes encode, each bought with an outage:
 
@@ -341,7 +346,16 @@ Exactly one of the two flags is required.
 |---|---|
 | `projects.*` (compose file, `--env-file`, the command line) | `stack.manifest.toml`. A `manual` plane (the portal) is deliberately absent: the watchdog must not auto-repair a plane a human starts by hand. `file: null` marks a project that owns no services - the anchor - and the watchdog skips those instead of issuing `up -d` into the void |
 | `container`, `service`, `profile` | the compose **render**, with every declared profile switched on |
+| `project` | the render too - a sidecar row may omit it. Record it only where the render cannot answer: a project whose compose file may be absent (`open-brain` - CI has no submodule). Where recorded, it is audited against the render |
 | the plane GROUPING and row order; `critical`, `host_health`, `stale_pool_guard`, `note` | `scripts/lib/stack-services.curated.json`, hand-owned. Edit **that** file, then `--write` |
+
+So the minimum a new service needs in the sidecar is its **plane group**, its
+`container` name and its `critical` flag (plus `host_health` if it has one) -
+which is exactly what `SERVICE-LIFECYCLE.md` step 8 tells you to write. A
+tester followed that step literally and the generator refused, because the row
+carried no `project` and nothing filled it in; `project` is derived now, and
+the refusal that remains is the honest one - a container in **no** render, with
+no project to attribute it to, is named and explained.
 
 The render is also the verifier. `--check` fails, naming the row, on: a
 container in a render that the sidecar does not list (`--write` refuses outright

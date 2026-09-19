@@ -842,6 +842,24 @@ def test_a_probe_that_throws_is_one_failed_probe_not_a_crash(root):
     assert code == 1
 
 
+def test_a_serve_route_count_below_the_threshold_fails(root):
+    """The THRESHOLD, not just the parse.
+
+    A tester weakened this probe from `>= 8` to `>= 0` in the driver and the
+    whole suite stayed green: the two cases around it only covered an empty and
+    an unparseable answer, both of which fail either way. Eight routes is the
+    tailnet's full serve table; seven means one backend stopped being published,
+    which is precisely the silent failure the probe exists for.
+    """
+    code, out = sweep(FakeHost(serve_routes="3"), root)
+    assert ("FAIL", "frontend: 8 tailnet serve routes") in probe_lines(out)
+    assert code == 1
+    # ...and the boundary itself holds in both directions.
+    assert sweep(FakeHost(serve_routes="7"), root)[0] == 1
+    assert sweep(FakeHost(serve_routes="8"), root)[0] == 0
+    assert sweep(FakeHost(serve_routes="9"), root)[0] == 0
+
+
 def test_the_liveliness_probe_never_gets_litellms_bare_health(root):
     """A GET of LiteLLM /health through the alias makes it load every model."""
     host = FakeHost()
@@ -1433,3 +1451,60 @@ def test_every_profile_the_real_manifest_declares_is_accounted_for():
     manifest = stack.Manifest.load(REAL_MANIFEST)
     unaccounted = {p: manifest.unaccounted_profiles(p) for p in manifest.order}
     assert not any(unaccounted.values()), unaccounted
+
+
+def test_an_unknown_key_in_a_profile_table_is_tolerated(mini_root):
+    """A profile table may grow keys this item does not know about.
+
+    `sl-ob1-profiles` adds `requires` to profile tables (a profile that pulls in
+    another). Whichever of the two lands second has enough to adapt without the
+    accounting gate ALSO refusing the new key, so the gate reads the three
+    deployment flags and ignores everything else.
+    """
+    curated_file(mini_root)
+    manifest_path = mini_root / stack.MANIFEST_NAME
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            'description = "the idea-refinery services"',
+            'description = "the idea-refinery services"\nrequires    = ["research"]',
+        ),
+        encoding="utf-8",
+    )
+    manifest = stack.Manifest.load(manifest_path)
+    assert manifest.default_profiles("ob1") == ["idea-refinery"]
+    assert manifest.unaccounted_profiles("ob1") == []
+    code, out, _c = inventory(mini_root, "--write")
+    assert code == 0, out
+
+
+def test_a_sidecar_row_may_omit_project_and_the_render_fills_it_in(mini_root):
+    """SERVICE-LIFECYCLE.md step 8, executed.
+
+    Step 8 says: add the row in the right plane group, with `critical` and any
+    `host_health`. A tester followed that literally for a new service and the
+    generator refused - the row had no `project`, and the render's answer was
+    compared against `None`. The instruction was right and the generator was
+    wrong; the render fills the field in now.
+    """
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["memory"].append({"container": "mnemory-cloud-gateway-2", "critical": False})
+    render = json.loads(json.dumps(FIXTURE_RENDER))
+    render["memory/docker-compose.yml"]["services"]["mnemory-cloud-gateway-2"] = {
+        "container_name": "mnemory-cloud-gateway-2"
+    }
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write", compose=FakeCompose(render))
+    assert code == 0, out
+    written = {r["container"]: r for g in generated(mini_root)["planes"].values() for r in g}
+    assert written["mnemory-cloud-gateway-2"]["project"] == "memory"
+
+
+def test_a_row_in_no_render_at_all_must_name_its_project(mini_root):
+    """The honest refusal that remains: nothing to derive it from."""
+    rows = json.loads(json.dumps(CURATED_ROWS))
+    rows["memory"].append({"container": "typo-svc", "critical": False})
+    curated_file(mini_root, rows=rows)
+    code, out, _c = inventory(mini_root, "--write")
+    assert code != 0
+    assert "NO `project` for typo-svc" in out
+    assert "not declared in any plane's compose file" in out

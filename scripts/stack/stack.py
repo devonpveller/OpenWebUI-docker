@@ -194,6 +194,9 @@ class Manifest:
     def pending_profiles(self, name: str) -> list[str]:
         return [p for p, spec in self.profiles(name).items() if _spec(spec).get("pending")]
 
+    # NOTE for whoever extends a profile table (sl-ob1-profiles adds `requires`):
+    # these accessors read the three deployment flags and IGNORE every other key.
+    # An unknown key is never a refusal - a profile table is allowed to grow.
     def opt_in_profiles(self, name: str) -> list[str]:
         """Profiles nothing turns on automatically - the operator or an env does."""
         return [p for p, spec in self.profiles(name).items() if _spec(spec).get("opt_in")]
@@ -1530,6 +1533,22 @@ class Inventory:
         return out
 
     def _row(self, group: str, curated_row: dict, renders: dict, seen: dict) -> dict:
+        """One generated row.
+
+        `project` is OPTIONAL in the sidecar. Whenever the container turns up in
+        a render, the render supplies it - which is what makes
+        SERVICE-LIFECYCLE.md step 8 followable as written: add the service to its
+        plane's compose file, add a sidecar row with its group and its `critical`
+        flag, run `--write`. A tester followed that literally and the generator
+        refused, because the row had no `project` and the old code compared the
+        render's answer against `None`. The fix is to fill it in, not to add a
+        field to the instructions.
+
+        Where the sidecar DOES record a project it is still audited against the
+        render, and it remains REQUIRED for a container whose project may not be
+        renderable at all (the OB1 submodule is absent in CI) - there is nothing
+        to fill it in from there, and the refusal says so.
+        """
         container = curated_row["container"]
         project = curated_row.get("project")
         row = {"container": container, "project": project}
@@ -1540,12 +1559,12 @@ class Inventory:
             # otherwise pass unnoticed on a machine that can render the project
             # and then produce a different file on one that cannot.
             rendered_project, service, profiles = seen[container]
-            if rendered_project != project:
+            row["project"] = rendered_project
+            if project is not None and rendered_project != project:
                 self.drift.append(
                     f"WRONG project for {container}: the sidecar says '{project}', the render says "
                     f"'{rendered_project}'"
                 )
-                row["project"] = rendered_project
             derived = {}
             if service != container:
                 derived["service"] = service
@@ -1562,7 +1581,15 @@ class Inventory:
             row.update(derived)
         else:
             render = renders.get(project)
-            if render is None:
+            if project is None:
+                self.drift.append(
+                    f"NO `project` for {container} in {CURATED_REL.as_posix()}, and no compose render "
+                    "produced that container, so there is nothing to fill it in from. Either the "
+                    "service is not declared in any plane's compose file yet, or its project cannot be "
+                    "rendered here (the OB1 submodule is absent in CI) - in which case the row must "
+                    'name it: "project": "<compose project>".'
+                )
+            elif render is None:
                 self.drift.append(
                     f"UNKNOWN project '{project}' for {container} (group {group}) - it is not in "
                     f"{CURATED_REL.as_posix()}'s projects map"

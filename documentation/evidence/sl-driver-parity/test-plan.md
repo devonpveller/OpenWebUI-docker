@@ -1,7 +1,11 @@
 # sl-driver-parity — test plan
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
-**Branch:** `work/sl-driver-parity`, base `development` @ `9f64b84`
+**Branch:** `work/sl-driver-parity`, base `development` @ `be00d53`
+**Attempt:** 2 — attempt 1 failed T9 only (three false doc claims and a runbook
+row that could not be followed). What changed is listed under *Attempt 2* below;
+T1-T8 and T10 passed and are unchanged, but **re-run them** — the branch was
+rebased onto `be00d53` and the driver changed.
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-driver-parity`
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-driver-parity.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-driver-parity-findings.md`
@@ -26,8 +30,9 @@ Artifacts under test:
 
 **Everything here is read-only against the live stack.** No case starts, stops,
 restarts or recreates a container. The live docker calls are `docker ps`,
-`docker network inspect`, four read-only `docker exec`s, `docker compose ... ps`
-and `docker compose ... config`. **No plane lease is required** (MERGE-PROTOCOL
+`docker network inspect`, **five** read-only `docker exec`s (`llm-gateway`,
+`tailscale`, `little-coder`, `openbrain-db`, `agent-bridge`),
+`docker compose ... ps` and `docker compose ... config`. **No plane lease is required** (MERGE-PROTOCOL
 §1 rule 4: read-only inspection of a running plane is not "touching" it).
 
 **`up`, `down` and `restart` are only ever run with `--dry-run`.** If a case
@@ -60,10 +65,31 @@ New-Item -ItemType Directory -Force $SL | Out-Null
 SL="${TMPDIR:-/tmp}/sl-driver-parity-test"; rm -rf "$SL"; mkdir -p "$SL"
 ```
 
-**Never edit `.env`, `OB1/docker/.env` or `agent-org/docker/.env`.** Two cases
-(T3b, T6b) deliberately modify a file **inside** the worktree and restore it;
-each says exactly how, and T10 proves the tree came back clean. Do them in the
-order written.
+**Never edit `.env`, `OB1/docker/.env` or `agent-org/docker/.env`.**
+
+### Mutating cases run in a SCRATCH COPY of the branch, never in the worktree
+
+T2, T3b, T3c and T8 each need a modified tree. **Do not write in the
+developer's worktree** - build a throwaway copy of the branch instead and work
+there. `git ls-files` gives exactly what CI would check out; add the two env
+files and the submodule by hand:
+
+```bash
+# Git Bash, from the developer worktree (READ-ONLY use of it)
+WT="D:/Open WebUI/ai-stack/.claude/worktrees/wt-sl-driver-parity"
+COPY="$SL/branch"; rm -rf "$COPY"; mkdir -p "$COPY"
+cd "$WT" && git ls-files -z | xargs -0 -n 200 cp --parents -t "$COPY"
+cp -r "$WT/OB1" "$COPY/"          # the submodule, so all eight projects render
+cp "$WT/.env" "$COPY/.env"
+cp "$WT/agent-org/docker/.env" "$COPY/agent-org/docker/.env"
+cp "$WT/OB1/docker/.env" "$COPY/OB1/docker/.env"
+cd "$COPY"
+```
+
+Every mutation below happens in `$COPY`. The one exception is T2's base-script
+extraction, which needs a real repo root for `$PSScriptRoot` - put it in
+`$COPY/scripts/stack/` too, not in the worktree. T10 then checks the worktree
+is untouched, which it will be because you never wrote to it.
 
 ---
 
@@ -72,17 +98,20 @@ order written.
 *Anchor criterion 1. The case that cannot be automated away: read both lists and
 judge them.*
 
-Get the old probe list from the base commit and the new one from the driver:
+Get the old probe list and the new one. **The old one comes from `9f64b84`, the
+branch's original base** — `development` has moved since, and while `sl-closeout`
+did not touch `stack.ps1`, pinning the blob is what makes the line numbers in the
+table below resolve:
 
 ```bash
-git show development:scripts/stack/stack.ps1 | grep -n 'Probe "' 
+git show 9f64b84:scripts/stack/stack.ps1 | grep -n 'Probe "'
 grep -n 'self.probe(' scripts/stack/stack.py
 ```
 
 Fill in this table by reading both sides. **A probe missing, merged into a
 neighbour, or with a weaker pass condition FAILS the item.**
 
-| # | Probe label | `development` `stack.ps1` | `stack.py` `HealthSweep.run()` | Pass condition must be |
+| # | Probe label | `9f64b84:stack.ps1` | `stack.py` `HealthSweep.run()` | Pass condition must be |
 |---|---|---|---|---|
 | 1 | `0 unhealthy containers (found: …)` | `:128-129` | `docker ps --filter health=unhealthy` | the name list is empty |
 | 2 | `anchor: ai-stack_llm-net exists` | `:132-133` | `docker network inspect … --format {{.Name}}` | stdout is exactly `ai-stack_llm-net` |
@@ -103,8 +132,8 @@ neighbour, or with a weaker pass condition FAILS the item.**
 Then confirm the count from both sides:
 
 ```bash
-git show development:scripts/stack/stack.ps1 | grep -c 'Probe "'      # expect 15
-grep -c 'self.probe(' scripts/stack/stack.py                          # expect 15
+git show 9f64b84:scripts/stack/stack.ps1 | grep -c 'Probe "'   # expect 15
+grep -c 'self.probe(' scripts/stack/stack.py                   # expect 15
 ```
 
 **Pass:** fifteen rows, each present on both sides with the same pass condition,
@@ -114,10 +143,18 @@ and the two headers (`== container health (all projects)` and
 turned into `> 0`, a `== 200` turned into "no exception", a `REFUSED` treated as
 anything but FAIL); the exit code no longer being the failed count.
 
-*Also confirm the guard:* `PS1_PROBES` in `scripts/stack/test_stack.py` lists the
-same fifteen labels, so this comparison cannot silently rot. Delete one entry
-from that list, run `python -m pytest scripts/stack -q -k probes_stack_ps1_ran`,
-and the suite must go RED; restore it.
+*Also confirm BOTH guards* (in `$COPY`, not the worktree):
+
+1. `PS1_PROBES` in `scripts/stack/test_stack.py` pins the fifteen labels, so a
+   dropped or renamed probe fails. Delete one entry, run
+   `python -m pytest scripts/stack -q -k probes_stack_ps1_ran` — RED.
+2. A pinned name list proves nothing about a **weakened** pass condition, which is
+   a different guarantee needing a different test. Attempt 1 had no such test and
+   the tester proved it: weakening probe 5 from `>= 8` to `>= 0` left the suite
+   green. Repeat that mutation now — change `) >= 8,` to `) >= 0,` in
+   `HealthSweep.run()` — and
+   `test_a_serve_route_count_below_the_threshold_fails` must go RED (it pins 3 and
+   7 FAIL, 8 and 9 PASS). A green suite under that mutation FAILS the item.
 
 ---
 
@@ -131,7 +168,7 @@ not in the code.
 
 ```powershell
 # PowerShell 5.1, from the worktree root
-git show development:scripts/stack/stack.ps1 | Set-Content -Encoding utf8 scripts\stack\stack.base.ps1
+git show 9f64b84:scripts/stack/stack.ps1 | Set-Content -Encoding utf8 scripts\stack\stack.base.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stack\stack.base.ps1 health > "$SL\base.txt" 2>&1
 "base exit=$LASTEXITCODE"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\stack\stack.ps1 health > "$SL\shim.txt" 2>&1
@@ -142,15 +179,15 @@ Compare-Object (Get-Content "$SL\base.txt") (Get-Content "$SL\shim.txt")
 
 ```bash
 # Git Bash equivalent
-git show development:scripts/stack/stack.ps1 > scripts/stack/stack.base.ps1
+git show 9f64b84:scripts/stack/stack.ps1 > scripts/stack/stack.base.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stack/stack.base.ps1 health > "$SL/base.txt" 2>&1; echo "base exit=$?"
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stack/stack.ps1       health > "$SL/shim.txt" 2>&1; echo "shim exit=$?"
 rm -f scripts/stack/stack.base.ps1
 diff --strip-trailing-cr "$SL/base.txt" "$SL/shim.txt" && echo IDENTICAL
 ```
 
-**The base copy must live at `scripts/stack/stack.base.ps1` inside the worktree
-and be deleted immediately after** — the old script resolves the repo root from
+**The base copy must live at `scripts/stack/stack.base.ps1` inside `$COPY`** (a
+real repo root, never the developer's worktree) — the old script resolves the repo root from
 `$PSScriptRoot`, so a copy in `$SL` would `Set-Location` into your temp
 directory and report nothing but "couldn't find env file". T10 checks it is gone.
 
@@ -161,6 +198,17 @@ since a CRLF-only difference is not a behaviour difference.
 
 **Developer's run, 2026-09-19:** both printed the same 19 lines, all fifteen
 probes `[OK]`, `ALL HEALTH PROBES PASSED`, exit 0 from each.
+
+**What this case can and cannot show.** On a healthy stack every probe is
+`[OK]`, so this compares the two drivers on the GREEN path only - it cannot
+exercise a FAIL path, and you must not break a plane to make it. The FAIL
+shapes are covered by reading (T1's table) and by the hermetic suite
+(`test_health_exit_code_is_the_number_of_failed_probes`,
+`test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep`,
+`test_healthz_alone_cannot_pass_search`,
+`test_a_probe_that_throws_is_one_failed_probe_not_a_crash`,
+`test_a_serve_route_count_below_the_threshold_fails`). Say in your evidence that
+the live comparison was green-path only.
 
 **Pass:** the same `[OK]`/`[FAIL]` verdict for the same probe label on both
 sides, the same summary line, and the same exit code.
@@ -371,7 +419,7 @@ docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery up -d
 docker compose -f agent-org/docker/docker-compose.yml up -d
 ```
 
-Compare that list against `git show development:scripts/stack/stack.ps1` lines
+Compare that list against `git show 9f64b84:scripts/stack/stack.ps1` lines
 41-50 (the `$Projects` registry) and `:52-60` (`Invoke-Project`): the same eight projects, the same order, the same `--env-file` on the six
 that take one and none on `ob1`/`agent-org`, and the same single
 `--profile idea-refinery`. **The portal is absent from both** (it is `manual`).
@@ -407,10 +455,13 @@ $errs.Count      # must be 0
 Select-String -Path scripts\stack\stack.ps1 -Pattern 'Probe|Invoke-WebRequest|docker |\$Projects' 
 ```
 
-**Pass:** 0 parse errors, and the `Select-String` returns exactly **two** lines,
-neither of them an invocation: the usage comment at `:26` and the `Write-Host`
-advice at `:66` telling an operator without python how to run compose by hand.
-No `Probe`, no `Invoke-WebRequest`, no `$Projects`, no `& docker`. Read the file
+**Pass:** 0 parse errors, and every `Select-String` hit is a COMMENT or a
+`Write-Host` string - never an invocation. `Select-String` is case-insensitive,
+so `Probe` also matches the word "probes" in prose; read each hit rather than
+counting them. On the developer's run there were four, all in the header block
+or in the `Write-Host` advice at `:66` that tells an operator without python how
+to run compose by hand. What must NOT appear: a live `Probe` call, an
+`Invoke-WebRequest`, a `$Projects` array, or an `& docker` invocation. Read the file
 top to bottom (92 lines) and confirm it contains no logic that could drift from
 the driver — the only executable statements are the python-on-PATH guard, the
 `$Action`→argv mapping, and `& python $Driver @Argv; exit $LASTEXITCODE`.
@@ -523,8 +574,8 @@ And the gate that forces the next item to declare itself:
 
 ```bash
 python -c "
-import sys; sys.path.insert(0,'scripts/stack'); import stack
-m = stack.Manifest.load('stack.manifest.toml')
+import sys, pathlib; sys.path.insert(0,'scripts/stack'); import stack
+m = stack.Manifest.load(pathlib.Path('stack.manifest.toml'))   # a Path, not a str
 for p in m.order:
     print(p, 'default=', m.default_profiles(p), 'opt_in=', m.opt_in_profiles(p),
           'pending=', m.pending_profiles(p), 'UNACCOUNTED=', m.unaccounted_profiles(p))
@@ -566,7 +617,35 @@ Check each claim against the file, not against its neighbours:
 | `README.md:69` | now says **15** probes and points at the driver (it said 12) |
 | `CLAUDE.md` | the new **Driver** row names the verbs the driver actually has; the container rule now names `stack-services.curated.json` + `inventory --write` |
 | `documentation/runbooks/SERVICE-LIFECYCLE.md` rows 5 and 8 | row 5 sends you to `HealthSweep.run()` **and** `PS1_PROBES`; row 8 sends you to the sidecar, then `--write`. Follow row 8 literally for an imaginary service and confirm the instructions are sufficient |
-| `documentation/notes/stack-layers-sl-driver-parity-findings.md` | **every** claim: open each cited file at the cited line; re-run each `[measured]` command. A false claim here is worse than one in the artifact (MERGE-PROTOCOL §2) |
+| `documentation/notes/stack-layers-sl-driver-parity-findings.md` | **every** claim: open each cited file at the cited line; re-run each `[measured]` command. A false claim here is worse than one in the artifact (MERGE-PROTOCOL §2). F4 now records a claim that was true at `9f64b84` and is not at `be00d53`; F11-F14 are new |
+
+**The four claims attempt 1 failed on — check these first, they are the case:**
+
+1. **`SERVICE-LIFECYCLE.md` row 8, EXECUTED not read.** In `$COPY`: add a service
+   with a `container_name` to `memory/docker-compose.yml` (inside `services:`,
+   above the `volumes:` block), then do exactly what row 8 says — a sidecar row in
+   the right plane group, with `critical` and a `host_health`, and **no `project`
+   field** — and run `python scripts/stack/stack.py inventory --write`.
+   **Pass:** `wrote scripts/lib/stack-services.json`, exit 0, and the generated row
+   carries `"project": "memory"`, filled in from the render. **Fail:** any refusal
+   — the row's audience is the next person to add a service, and they will follow
+   it literally.
+   Then the refusal that must REMAIN: add a row for a container that is in no
+   compose file at all and give it no `project`. **Pass:** exit non-zero,
+   ``NO `project` for <name>`` naming both reasons (not declared anywhere / its
+   project cannot be rendered here).
+2. **`SERVICE-LIFECYCLE.md` row 4** must no longer send a new-plane author to
+   `stack.ps1`'s `$Projects` registry — this item deleted it. It should name a
+   `[planes.<name>]` table in `stack.manifest.toml`. Sweep the tree for any other
+   live doc still pointing at `$Projects`
+   (`coder-plane-findings.md:164` is a dated findings note about the pre-change
+   file and is fine).
+3. **`scripts/stack/README.md`'s `health` section counts.** Count them yourself in
+   `HealthSweep`: `docker exec` calls and HTTP GETs. The README must say **five**
+   and **seven** (attempt 1 said four and six; the missing GET was the second
+   `search` probe, the one the same README spends a paragraph justifying).
+4. **`scripts/stack/README.md`'s `inventory` "comes from" table** must account for
+   `project` — attempt 1 omitted it from both columns.
 
 **Pass:** every claim checked and true; every cited line number resolving to what
 the text says is there.
@@ -598,6 +677,25 @@ on them empty, mtimes unchanged).
 
 ---
 
+---
+
+## Attempt 2 — what changed since the failed run
+
+| Change | Why |
+|---|---|
+| `_row()` fills `project` from the render when the sidecar omits it; a row in NO render with no `project` is refused by name | T9(1) — makes `SERVICE-LIFECYCLE.md` row 8 true as written. Where `project` IS recorded it is still audited against the render |
+| `SERVICE-LIFECYCLE.md` row 4 points at `stack.manifest.toml`, not the deleted `$Projects` registry | T9(2) |
+| `scripts/stack/README.md` health counts corrected to five `docker exec`s and seven GETs, and the `inventory` table gains a `project` row | T9(3) and T9(4) |
+| `test_a_serve_route_count_below_the_threshold_fails` added | finding F-T2: `>= 8` -> `>= 0` left the suite green |
+| `test_an_unknown_key_in_a_profile_table_is_tolerated` added | finding F-T1: `sl-ob1-profiles` adds a `requires` key to profile tables; this item's gate must not refuse it |
+| `check-watchdog-repair-targets.ps1` renders with every declared profile | finding F-T3: it was the last inventory consumer that could not see a profiled row |
+| Plan: mutating cases moved to a scratch copy; T8's snippet takes a `Path`; T6b no longer claims "exactly two lines"; T2 states it is green-path only | plan defects P1-P4 |
+| Rebased onto `be00d53` (`sl-closeout`), keeping both intents in `README.md` and `CLAUDE.md` | the work line moved |
+
+80 tests now (was 76).
+
+---
+
 ## Out of scope for this item (do not fail it for these)
 
 - Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python — both keep
@@ -606,9 +704,10 @@ on them empty, mtimes unchanged).
 - Archiving `stack.ps1` — it stays as the shim until every caller has moved.
 - The probe set's known gaps, `open-terminal` above all: this item reproduced the
   fifteen probes one for one **including** what they do not cover. See finding F9.
-- `ruff check .` from the repo root is RED on `development` for a pre-existing
-  `llm-queue` E501 (finding F4). `ruff check scripts/stack` is clean. Do not fail
-  this item for the pre-existing one; do fail it for any new violation.
+- `ruff check .` from the repo root is now **clean** — the pre-existing `llm-queue`
+  E501 that attempt 1's plan told you to expect was fixed by `sl-closeout`, which
+  is in this branch's new base. Finding F4 records both states. Any violation is
+  now this item's to answer for.
 - Everything in `documentation/notes/stack-layers-sl-driver-parity-findings.md` is
   a finding about other files, recorded rather than fixed, per CLAUDE.md — except
   F1 and F6, which this item did fix because the artifact depends on them.
