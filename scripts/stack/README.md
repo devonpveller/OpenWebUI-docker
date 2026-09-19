@@ -305,13 +305,28 @@ plane's `host` requirements. Exits 1 if anything is `[FAIL]`. Read-only.
 
 The fifteen functional probes `stack.ps1 health` ran, one for one, with the same
 pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code:
-**the number of failed probes**. Read-only - `docker ps`, `docker network
-inspect`, **five** read-only `docker exec`s (`llm-gateway`, `tailscale`,
-`little-coder`, `openbrain-db`, `agent-bridge`), one `powershell -File
-check-owui-drift.ps1 -CountOnly`, and **seven** HTTP GETs - `:3000/health`,
-`:8060/health`, `:8085/healthz`, `:8085/health`, `:5055/api/config`,
-`:8062/health`, `:8816/health`. Seven, not six, because `search` gets two of
-them; that is the whole point of the third rule below.
+**the number of failed probes**. Read-only, and this is everything it touches:
+
+* `docker ps` - twice, once for unhealthy containers and once, with
+  `--filter name=tailscale`, by the deployment guard below;
+* `docker network inspect ai-stack_llm-net`;
+* **one `docker compose -f frontend/docker-compose.yml --env-file .env config
+  --services`** - the tailnet guard asking whether the `tailscale` profile is
+  part of this deployment (added with `sl-frontend-solo`; it was missing from
+  this list until a tester counted);
+* **five** read-only `docker exec`s - `llm-gateway`, `tailscale`,
+  `little-coder`, `openbrain-db`, `agent-bridge`;
+* one `powershell -File check-owui-drift.ps1 -CountOnly`;
+* **seven** HTTP GETs - `:3000/health`, `:8060/health`, `:8085/healthz`,
+  `:8085/health`, `:5055/api/config`, `:8062/health`, `:8816/health`. Seven, not
+  six, because `search` gets two of them; that is the whole point of the third
+  rule below.
+
+**Why that render uses `.env` and not `.env.example`:** it is asking what THIS
+host deploys, so it must read this host's `COMPOSE_PROFILES`. The inventory
+generator asks the opposite question - what does the compose file DECLARE,
+identically on every machine - and renders with `.env.example` for exactly that
+reason. Same command, two questions; see `render_env_path`.
 
 Rules the probes encode, each bought with an outage:
 

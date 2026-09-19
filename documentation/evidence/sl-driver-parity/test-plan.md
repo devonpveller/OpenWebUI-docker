@@ -1,13 +1,13 @@
 # sl-driver-parity — test plan
 
 **Item:** `sl-driver-parity` (stack-layers wave 2)
-**Branch:** `work/sl-driver-parity`, base `development` @ `b9fff95`
-**Attempt:** 5. Attempt 4 PASSED 11/11 and was withdrawn by its developer, not
-failed: `development` moved again, to `b9fff95` (`sl-frontend-solo`). Per D18 a
-rebase that rewrites commits needs a re-test at the new tip. **Re-run every
-case**; **T11** covers the `sl-ob1-profiles` seam and the new **T12** covers the
-`sl-frontend-solo` one. Two tester findings from attempt 4 are fixed and have
-cases of their own: F-T14 in T12d, F-T15 in T9.
+**Branch:** `work/sl-driver-parity`, base `development` @ `ae915c3`
+**Attempt:** 6. Attempt 5 PASSED 12/12 and was released for review; a reviewer
+requeued it under D18 because `development` moved again, to `ae915c3`
+(`sl-colo-gateways`), before anyone claimed it. **Re-run every case.** The rebase
+itself was clean - see *Attempt 6* below for the four shared files and the
+expected values that moved. **T11** covers the `sl-ob1-profiles` seam, **T12**
+the `sl-frontend-solo` one; F-T14 is T12d and F-T15 is T9.
 **Developer worktree:** `D:\Open WebUI\ai-stack\.claude\worktrees\wt-sl-driver-parity`
 **Anchor:** `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-driver-parity.json`
 **Findings sink:** `documentation/notes/stack-layers-sl-driver-parity-findings.md`
@@ -636,6 +636,12 @@ twice since). Check each with `git show <blob>:<path> | sed -n '<n>p'`:
 | `check-project-configs.ps1:67` / `:77` / `:96` | `9f64b84` | `$renderTargets = @(` / the `}` closing the conditional `open-brain` / the `}` closing the name loop |
 | `stack-watchdog.ps1:107` / `:145` / `:162` / `:170` | HEAD | `Get-RepairTargetMap` / the `service`-else-container fallback / `function Invoke-PlaneCompose` / the "Cannot repair" log |
 | `check-watchdog-repair-targets.ps1:214` | HEAD | `$svc = if ($row.service)`. **`:196` also appears in F16's text as the OLD value, quoted deliberately** |
+
+**Two places quote broken citations on purpose and label themselves as doing so:**
+F16 (`...:196`) and F27's left-hand column (the five `inference/docker-compose.yml`
+line numbers, `scheduled.yml:NNN`, and the unprefixed `index.ts:268`). A sweep
+will report those; they are quotations of what was wrong, not claims. Every other
+citation in this branch must resolve - 86 did on the developer's run.
 | `test_stack.py:716` | `5133de9` | `assert sweep(FakeHost(serve_routes="9"), root)[0] == 0` |
 | `memory/README.md:126` / `:183` / `:186` | `be00d53` | the three `$Projects` / `stack-services.json` lines this branch repointed |
 | `llm-queue/src/llm_queue/__init__.py:9` | `9f64b84` | the 103-character docstring line (68 at `be00d53`) |
@@ -973,6 +979,64 @@ Run T11d's staged-scratch recipe. **Pass:** the coverage list carries
 `frontend:4/4` alongside `inference:8/8 … open-brain:30/30`, because
 `sl-frontend-solo` added a frontend render target with its two profiles.
 **Fail:** `frontend` missing from the list, or a count below 4/4.
+
+---
+
+---
+
+## Attempt 6 - what the `ae915c3` rebase touched
+
+`sl-colo-gateways` moved the two gateway source trees into their planes
+(`search-gateway/` -> `search/gateway/`, `mnemory-gateway/` ->
+`memory/mnemory-gateway/`). **Git merged all four shared files with no
+conflict**, which is not the same as being right, so each was opened and checked;
+each kept both intents:
+
+| file | theirs | mine | result |
+|---|---|---|---|
+| `.github/workflows/ci.yml` | `pytest-search-gateway` now installs `./search/gateway[dev]` and runs `search/gateway/tests` | the `stack-driver` job | both present; run both in T7 |
+| `CLAUDE.md` | the "its twin ... moved into the memory plane" sentence and its pointers | the **Driver** row and the container-rule edit | both present |
+| `README.md` | the repo-map row naming `search/gateway/` and `memory/mnemory-gateway/` | the shim pointer under `stack.ps1 health` | both present |
+| `memory/README.md` | path repoints at `:33` and `:151` | the `$Projects` / inventory repoints at `:126`, `:183`, `:186` | both present; mine now sit at `:127`, `:184-186`, `:192` |
+
+**Expected values that moved, and the cases they belong to:**
+
+* **T7** - `ci.yml` carries TWO recently-added jobs now. Run both locally:
+  `python -m pip install -e "./search/gateway[dev]"` +
+  `python -m pytest search/gateway/tests -q` (theirs), and the `stack-driver`
+  steps (mine). A failure in theirs is not this item's - say so rather than
+  skipping it.
+* **T9** - `README.md`'s repo-map row and `memory/README.md`'s line numbers are
+  the ones above. The findings note's `memory/README.md` citations stay pinned to
+  `be00d53` and are correct there.
+* **T12** - untouched by this rebase; re-run it anyway.
+
+**Also fixed in this pass** (both from attempt 5's tester):
+
+* **F-T16** - `scripts/stack/README.md`'s enumeration of what `health` touches
+  omitted the `docker compose ... config --services` render that
+  `sl-frontend-solo`'s tailnet guard added. The list is itemised now and carries
+  it, plus the second `docker ps`. Count them yourself in `HealthSweep`.
+* **F-T17** - why `health` renders with `.env` and the inventory with
+  `.env.example` is stated at BOTH call sites (`tailscale_deployed` and
+  `render_env_path`) and in the README: one asks what this host DEPLOYS, the
+  other what the compose file DECLARES, and an answer that changed with the
+  machine would make the generated inventory unreproducible.
+
+**And an inherited-citation sweep.** Every `path:line` in every file this branch
+touches was re-derived by CONSTRUCT, in the path form and the bare-basename form
+(`scheduled.yml:186` resolves to no file at all - the name is
+`docker-compose.scheduled.yml`). After the fixes, **every live citation in the
+branch resolves**: the sweep reports 104 matches, 98 resolving and 8 that are the
+labelled quotations above (F16's `:196` and F27's left-hand column). Before those
+fixes the count was 86 found / 79 resolving. Seven were broken
+before this pass, every one inherited in `stack.manifest.toml`: five
+`inference/docker-compose.yml` citations pointing past the end of a file
+`sl-inference-split` left 91 lines long, and two unresolvable basenames. Spot-check
+the re-derived ones - `inference/docker-compose.yml:78-80` is
+`name: ai-stack_llm-net`, `inference/compose/upstreams.yml:145` is
+`LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf`, `inference/compose/gateway.yml:152` is
+`llm-gateway-ui:` - and treat any citation that does not resolve as a defect.
 
 ---
 

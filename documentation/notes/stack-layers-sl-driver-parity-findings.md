@@ -537,3 +537,61 @@ exact-versus-substring name match that `stt-tts-tailscale` would otherwise defea
 probe that is dropped from the file it pins. It does not catch a probe changed in
 the file being REPLACED. When a driver absorbs another, diff the absorbed file
 across the range, do not just count what you kept.
+
+---
+
+## Added at the rebase onto `ae915c3` (sl-colo-gateways merged)
+
+## F27 - seven inherited citations in `stack.manifest.toml` were broken, five of them by an item that had already merged
+
+The sweep - re-derive every `path:line` in every file this branch touches, by
+CONSTRUCT and in both spellings - found 86 citations and 7 defects, none written
+by this item:
+
+**The left-hand column below quotes the BROKEN citations verbatim, so they do not
+resolve and are not meant to** - the same device F16 uses when it quotes
+`check-watchdog-repair-targets.ps1:196`. A sweep run over this note will report
+them; that is the quotation, not a live claim. Everything in the right-hand
+column resolves.
+
+| citation (quoted, BROKEN) | why it was false | now |
+|---|---|---|
+| `inference/docker-compose.yml:448-450, 453-455` | `sl-inference-split` moved the services into `inference/compose/*.yml`; that file is **91 lines** | `:78-80, 83-85` |
+| `inference/docker-compose.yml:83-86, 129-132` (GPU) | same | `inference/compose/upstreams.yml:100-106, :152-158` |
+| `inference/docker-compose.yml:34` (chat GGUF path) | same - and the line itself said that path was being replaced by `LM_MODELS_DIR` | `inference/compose/upstreams.yml:24, :54` |
+| `inference/docker-compose.yml:111,119` (embedding GGUF) | same | `inference/compose/upstreams.yml:145` |
+| `inference/docker-compose.yml:320-327` (llm-gateway-ui on app-net) | same | `inference/compose/gateway.yml:152, :161-163` |
+| `scheduled.yml:186` / `:190` / `:253` / `:254` / `:258` | **names no file** - it is `docker-compose.scheduled.yml`. A bare basename that does not exist resolves for a human reading the paragraph above it, and for nothing else | full paths |
+| `integrations/openbrain-idea-refinery/index.ts:268` | a path relative to the OB1 submodule root with no `OB1/` prefix; 26 files in this tree are named `index.ts` | `OB1/integrations/...` |
+
+Each replacement was verified by READING the line, not by counting: `:78-80` is
+`llm-net` / `external: true` / `name: ai-stack_llm-net`; `upstreams.yml:145` is
+`LLAMA_ARG_MODEL=/models/bge-m3-f16.gguf`; `gateway.yml:152` is
+`llm-gateway-ui:`; `index.ts:268` is the `fetch(${RESEARCH_URL}/research)` call.
+
+**The rule this makes concrete, and the second half is the one that keeps being
+missed:** a citation is invalidated by any edit to the file it points into -
+including another item's, landing after yours. And a citation must be
+*resolvable by a machine*, which a bare basename is not unless a file of exactly
+that name exists. F16 stated the first half; this is the second.
+
+## F28 - `health` renders with `.env` and the inventory with `.env.example`, on purpose
+
+Two calls that look identical and answer opposite questions. The tailnet guard
+asks *what does THIS HOST deploy*, so it must see this host's
+`COMPOSE_PROFILES` and renders with the real `.env`. The inventory generator asks
+*what does the compose file DECLARE*, which has to be identical on a laptop, this
+host and a CI runner, so `render_env_path` uses the `.example`. Stated now at
+both call sites and in `scripts/stack/README.md`, because a reader who noticed
+the asymmetry had no way to tell which one was the mistake.
+
+## F29 - a clean three-way merge is not a checked one
+
+`git rebase` onto `ae915c3` reported no conflict in any of the four files the two
+items share, because the edits sat in different regions of each. Every one was
+still opened and confirmed to carry both intents - their CI job and mine, their
+CLAUDE.md sentence and my Driver row, their repo-map row and my shim pointer,
+their `memory/README.md` repoints at `:33`/`:151` and my three at
+`:126`/`:183`/`:186` (now `:127`/`:184`/`:192`). Recorded because "no conflict" is
+the easiest thing there is to mistake for "nothing to check", and this four-file
+overlap was flagged in advance precisely because it was real.

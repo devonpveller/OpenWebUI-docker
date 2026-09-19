@@ -115,17 +115,20 @@ keys     = []
 # The LLM front door. llm-gateway (LiteLLM) carries the `llama-cpp` /
 # `llama-cpp-embed` aliases on ai-stack_llm-net; the real servers sit on the
 # project's native llm-backend-net so callers cannot route around it.
-# requires anchor: inference/docker-compose.yml:448-450, 453-455 (ai-stack_llm-net
-# and ai-stack_app-net, both external: true).
+# requires anchor: inference/docker-compose.yml:78-80, 83-85 (ai-stack_llm-net
+# and ai-stack_app-net, both external: true). Re-derived 2026-09-19: these read
+# :448-450, 453-455 until sl-driver-parity's citation sweep - sl-inference-split
+# moved the services into inference/compose/*.yml and left that file 91 lines
+# long, so the old numbers pointed past its end.
 compose  = "inference/docker-compose.yml"
 env_file = ".env"
 lease    = "inference"
 requires = ["anchor"]
 optional = []
 host = [
-  "NVIDIA GPU + NVIDIA Container Toolkit (inference/docker-compose.yml:83-86, 129-132)",
-  "Chat GGUFs at the HOST path hardcoded in inference/docker-compose.yml:34 - sl-inference-split replaces it with LM_MODELS_DIR",
-  "Embedding GGUF at data/models/embeddings/bge-m3-f16.gguf (inference/docker-compose.yml:111,119)",
+  "NVIDIA GPU + NVIDIA Container Toolkit (inference/compose/upstreams.yml:100-106 and :152-158) - the `local` profile only",
+  "Chat GGUFs under ${LM_MODELS_DIR} (inference/compose/upstreams.yml:24, :54); sl-inference-split replaced the literal per-user path this line used to cite",
+  "Embedding GGUF bge-m3-f16.gguf in that same store (inference/compose/upstreams.yml:145)",
 ]
 # LITELLM_MASTER_KEY is required since J.1 (per-caller virtual keys); without it
 # every consumer's bearer is rejected.
@@ -315,23 +318,23 @@ keys     = ["OPEN_TERMINAL_API_KEY"]
 #   ai-stack_app-net, ai-stack_default - the last aliased `search-gw-net`).
 # requires inference: OB1/docker/docker-compose.yml:116,120 (openbrain-mcp),
 #   406,410, 444, 493,497, 568,571, 675,681, 846, 941, 977, 1173 - CHAT_API_BASE
-#   and EMBEDDING_API_BASE across the fleet; scheduled.yml:186,258.
+#   and EMBEDDING_API_BASE across the fleet; OB1/docker/docker-compose.scheduled.yml:186,258.
 # requires search: OB1/docker/docker-compose.yml:567 (openbrain-research
 #   SEARCH_API_BASE -> http://gateway:8080), :637 (FETCH_PROXY_URL ->
 #   http://vpn:8888), :982 (grounding-backfiller, same proxy) and
-#   scheduled.yml:190 (the digest chain's fetches). Defaults, not toggles: with
+#   OB1/docker/docker-compose.scheduled.yml:190 (the digest chain's fetches). Defaults, not toggles: with
 #   the search plane down these resolve to nothing and research/backfill fail.
 # optional frontend: OB1/docker/docker-compose.yml:562 (openbrain-research
 #   OWUI_BASE_URL -> http://openwebui:8080) - research pushes results into OWUI;
 #   the rest of the fleet does not care.
-# optional agent-org: OB1/docker/docker-compose.scheduled.yml:253
+# optional agent-org: OB1/docker/docker-compose.OB1/docker/docker-compose.scheduled.yml:253
 #   (openbrain-idea-refinery MATTERMOST_URL defaults to
 #   http://host.docker.internal:8065) under the `idea-refinery` profile, which
 #   is `default = true` below. THE ONLY EDGE IN THIS MANIFEST THAT DOES NOT
 #   CROSS A DOCKER NETWORK: it goes out to the host and back in through the
 #   loopback port this manifest declares at [planes.agent-org.ports] "8065",
 #   via `extra_hosts: host.docker.internal:host-gateway`. Gated in practice by
-#   IDEA_REFINERY_MM_TOKEN (scheduled.yml:254, blank by default); it is set on
+#   IDEA_REFINERY_MM_TOKEN (OB1/docker/docker-compose.scheduled.yml:254, blank by default); it is set on
 #   this host. The cluster transition has to treat this one specially - a host
 #   hop does not follow a plane to another node.
 compose  = "OB1/docker/docker-compose.yml"
@@ -365,8 +368,9 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 
 [planes.ob1.profiles.idea-refinery]
 # requires research: openbrain-idea-refinery's ONLY engine is openbrain-research
-# (OB1/docker/docker-compose.scheduled.yml RESEARCH_URL; integrations/
-# openbrain-idea-refinery/index.ts:268 submits the job, :295 polls it). Found by
+# (OB1/docker/docker-compose.scheduled.yml RESEARCH_URL;
+# OB1/integrations/openbrain-idea-refinery/index.ts:268 submits the job, :295
+# polls it - the path needs its OB1/ prefix or nothing resolves it). Found by
 # this item's TESTER, not by its developer, who grepped the compose files and so
 # never saw it. Without this line the plane's one `default = true` profile starts
 # a drain with no engine - `stack.py enable ob1` and `enable open-brain --headless`
@@ -493,7 +497,8 @@ opt_in      = true
 #   (openbrain-workbench:8000), :242/:250 (open_notebook) - those vhosts 502
 #   while the rest of the portal serves.
 # optional inference: config/caddy/Caddyfile:295 proxies llm-gateway-ui:8080,
-#   which joins ai-stack_app-net for exactly that (inference/docker-compose.yml:320-327).
+#   which joins ai-stack_app-net for exactly that (inference/compose/gateway.yml:152,
+#   networks at :161-163).
 compose  = "portal/docker-compose.yml"
 env_file = ".env"
 lease    = "portal"

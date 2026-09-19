@@ -1186,6 +1186,11 @@ class HealthSweep:
             running -> that is a host whose .env lost the frontend profiles from
             COMPOSE_PROFILES. Probe anyway, and say that too.
         """
+        # `.env`, NOT `.env.example`, and the asymmetry with the inventory
+        # generator is deliberate. This asks what THIS HOST DEPLOYS, so it has to
+        # read this host's COMPOSE_PROFILES; render_env_path() asks what the
+        # compose file DECLARES and uses the .example so the answer is identical
+        # on a laptop, this host and a CI runner. Same command, two questions.
         rendered = self.capture(
             ["docker", "compose", "-f", "frontend/docker-compose.yml", "--env-file", ".env",
              "config", "--services"],
@@ -1380,6 +1385,12 @@ def render_env_path(manifest: Manifest, root: Path, plane: str) -> Path:
     Deterministic on purpose. `.env.example` is kept complete (CLEANUP-PLAN v3
     A.4) so compose interpolation resolves with no real secret, which is how the
     same inventory comes out of a laptop, this host and a CI runner.
+
+    CONTRAST with HealthSweep.tailscale_deployed(), which renders the frontend
+    plane with the REAL `.env`. That one asks what THIS HOST DEPLOYS and so must
+    see this host's COMPOSE_PROFILES; this one asks what the compose file
+    DECLARES, and an answer that changed with the machine would make the
+    generated inventory unreproducible. The two uses look alike and are not.
     """
     real = manifest.env_path(root, plane)
     example = real.with_name(real.name + ".example")
