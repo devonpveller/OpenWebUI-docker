@@ -52,9 +52,14 @@
   AND THE EXTENT COMES BEFORE THE SHAPE. Where the value ENDS is decided by
   indentation alone - every line deeper than the `env_file:` key is part of it, a blank
   or comment-only line does not end it, and the first line at or below the key's indent
-  does. Only then is each line inside read as a shape, and a line the reader does not
-  recognise is treated as a VALUE rather than as the end of the block. See
-  Scan-ComposeText for what getting that order backwards cost.
+  does, WITH ONE CARVE-OUT: a line at exactly the key's indent whose body starts with
+  `-` is part of the value, because YAML lets a block sequence sit at its parent key's
+  own indent and compose files are commonly written that way. A bare SCALAR at the
+  key's indent is not the value - YAML cannot read it as one - so the carve-out is for
+  the dash alone. Only then is each line inside read as a shape, and a line the reader
+  does not recognise is treated as a VALUE rather than as the end of the block. See
+  Scan-ComposeText for what getting that order backwards cost, and what getting the
+  boundary one column too narrow cost after that.
 
   Three earlier attempts did the other thing, and each one shipped a silent hole: a
   flow sequence and a long-form mapping whose punctuation got swallowed as a path
@@ -362,7 +367,8 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
             continue
         }
 
-        # Block value: everything indented deeper than the key.
+        # Block value: everything indented deeper than the key, PLUS the one carve-out
+        # below.
         $keyIndent = Get-IndentWidth $line
         $pendingDash = -1        # indent of a bare `-` whose item is on a deeper line
         $j = $i + 1
@@ -371,8 +377,20 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
             if ($l -match '^\s*$') { $j = $j + 1; continue }
             if ($l -match '^\s*#') { $j = $j + 1; continue }
             $ind = Get-IndentWidth $l
-            if ($ind -le $keyIndent) { break }
             $body = (Remove-YamlComment $l).Trim()
+            if ($ind -le $keyIndent) {
+                # YAML lets a BLOCK SEQUENCE sit at its parent key's own indent, and
+                # compose files are commonly written that way:
+                #     env_file:
+                #     - ../../.env
+                # "deeper than the key" alone made the boundary one column too narrow and
+                # the dash was read as the END of the value. A line at EXACTLY the key's
+                # indent whose body starts with `-` is part of the value; anything else at
+                # or below the key's indent still ends it. A bare SCALAR at the key's
+                # indent is NOT the value - YAML cannot read it as one, and docker refuses
+                # the file - so the carve-out is for the dash only.
+                if ($ind -ne $keyIndent -or $body -notmatch '^-(\s|$)') { break }
+            }
             if (-not $body) { $j = $j + 1; continue }
 
             $token = ''
