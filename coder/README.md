@@ -126,7 +126,7 @@ python scripts/stack/stack.py down coder
 python scripts/stack/stack.py up coder --dry-run   # print the docker line, run nothing
 ```
 
-`.\scripts\stack\stack.ps1 up coder` is a shim over the same driver.
+`scripts/stack/stack.ps1 up coder` is a shim over the same driver.
 
 By hand, **from the repository root**:
 

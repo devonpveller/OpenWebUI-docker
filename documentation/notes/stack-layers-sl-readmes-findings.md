@@ -514,3 +514,143 @@ evidence line in a closed item's note.
   not even wrong - but it is the one `--env-file` a reader of the inference plane
   will meet. Compose-file edit, out of scope.
 - **`agent-org/README.md`** and the OB1 tree: explicitly out of scope.
+
+---
+
+# `sl-readmes2` - the stack-map reference, audited row by row
+
+**Item:** `sl-readmes2`, the fix item reopened after `sl-readmes` merged as
+`17878b9`. **Developer:** `wt-sl-readmes2`, branch `work/sl-readmes2` from
+`development` at `17878b9`. **Written:** 2026-09-19.
+
+`sl-readmes` shipped `.claude/skills/stack-map/references/workspace-stacks.md`
+with a tester's **41/0** audit of that file and a reviewer's sample behind it.
+A refutation sweep run in parallel, landing *after* the merge, found **six false
+claims in it**. A merged item cannot return to test, so this is the fix.
+
+## 7a. Why 41/0 was not a contradiction, and what it actually measured
+
+The tester checked **41 claims and found 0 false**, honestly. The six it missed
+were not among the 41. Reconstructing the coverage from the plan the tester was
+given (`documentation/evidence/sl-readmes/test-plan.md`, T2):
+
+- **T2 was unbounded in wording and a SPOT-CHECK LIST in practice.** It named
+  thirteen claim classes in a table - render counts, profile keys, port numbers,
+  backup intervals, scheduled-task times, the `$Script:<Plane>Services` names -
+  and said "do not stop at the spot-checks below". A tester working from a list
+  of thirteen checks thirteen things well.
+- **What the list did not contain was a row-by-row obligation.** No case said
+  "every row of every table". So the *tables* were verified where a listed claim
+  happened to touch them - the portal's profile column, the OB1 counts - and the
+  network-owner column, the volume rows and the sidecar ordering item were never
+  anyone's assignment.
+- **Five of the six sit in cells and preambles that no spot-check named**; the
+  sixth is an ordering item in a numbered list nobody was asked to walk.
+
+So the failure is not the tester's diligence. **It is that a plan which
+enumerates claim CLASSES cannot bound a document whose content is claim
+INSTANCES in table cells.** The replacement is mechanical and is this item's
+second deliverable: the test plan enumerates every table and every ordering
+item BY NAME, so a tester cannot sample without visibly skipping a case.
+
+## 7b. The six, each re-derived from source
+
+| # | The claim (as merged) | Source that refutes it | Corrected to |
+|---|---|---|---|
+| 1 | §1 Networks preamble: "Only the first three are the ANCHOR's" | `docker-compose.yml` declares `llm-net` (:49), `default` (:55), `app-net` (:60) - and nothing else. Those are table rows **1, 7 and 10**; rows 2-3 are `search-net` and `lc-net`, which belong to the search and coder projects | the preamble NAMES the three and says the table is grouped by subject, not by owner |
+| 2 | the same preamble: "the workspace's whole network surface" | `agent-org/docker/docker-compose.yml`'s `networks:` block declares `ao-net`, `ao-worker-net`, `ao-cloud-egress-net` (plus external `llm-net` and a project `default`). None is a row | the claim is dropped and replaced by a pointer to section 3, plus the rule for reading an owner cell |
+| 3 | §1 Volumes, `open-brain` row lists three | `OB1/docker/docker-compose.yml` at gitlink `5005197` declares **four**: `openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets`, `wiki-viewer-srv` | `wiki-viewer-srv` added, with what it holds and why it is not backed up. §2's own Volumes prose had the same omission and is fixed too |
+| 4 | §1 Volumes preamble: "Every volume belongs to a plane project" with a row per plane | `agent-org` has no row, and its compose declares **fifteen** volumes | an `agent-org` row |
+| 5 | ordering item 7: "each starts after its target is healthy" | `tailscale-backup`, `lm-models-backup` and `little-coder-backup` carry **no `depends_on` at all**; `openwebui-backup`, `llm-gateway-backup` and `mnemory-backup` do | a three-and-three table, plus what the three without it have instead (a runtime `HEALTH_TCP` precheck - or, for `little-coder-backup`, none) and why a failing precheck is exit 0 |
+| 6 | ordering item 1: "Every other plane declares those `external: true`, so without this they fail to render" | `frontend/docker-compose.yml`'s `owui-net` comment: the `stock` profile uses only the project-local net, and compose does not require an UNUSED external network to exist. `memory`, `coder`, `portal`, `agent-org` and `open-brain` each declare their own project-local `default` bridge | the item names who really fails, and states both exceptions |
+
+**The seventh reported claim is NOT in the merged tree.**
+`grep -rn "three compose files" .claude/skills/stack-map/` returns nothing at
+`17878b9`. It was true of an older revision of `SKILL.md` (which said "two
+compose projects" until `sl-readmes` rewrote it to nine) and the sweep appears
+to have read a pre-merge copy. **[measured]** Recorded because a non-finding
+reported with the six is itself a data point: a refutation sweep needs the same
+"check it against the tree you are grading" discipline it is enforcing.
+
+## 7c. Eight more the row audit found, all in the same file
+
+The anchor puts "anything else false in that file" in scope. Auditing the file
+row by row - **[measured]** on the corrected file, **20 tables, 134 data rows
+and the 10-item ordering list** (counted with a script that walks the
+header-separator lines, stripping a leading `> ` so the two tables inside §2's
+blockquote are not silently skipped - they were, on the first count, which is
+the same "a check that passes while checking nothing" shape this item is about;
+the merged file measured **19 tables / 129 rows** the same way, the difference
+being this item's own sidecar table and its added rows) - turned up
+eight more, every one in a Networks column and every one of the same shape:
+**a cell that says "—" or names one network where the render names more.**
+
+| # | Row | Said | Render says |
+|---|---|---|---|
+| 7 | §1b `llm-gateway-ui` | `llm-net` | `llm-net, app-net` - it joins app-net so the portal Caddy can front `/ui`, which the row's own prose half-admits |
+| 8 | §1e `little-coder-backup` | `—` | `default` (`coder_default`) - it declares no `networks:` key, so compose attaches the project default |
+| 9 | §3 `ao-worker-{1,2}-journals-backup` | `none (volume-only)` | `default` (`agent-org_default`) - same mechanism. The volume is their only SOURCE; that is not the same as having no network |
+| 10 | §2 Networks table | four rows | five - `default` (`open-brain_default`) is missing, and it is where `surrealdb`, `open_notebook`, `open-notebook-backup` and `openbrain-wiki-backup` sit |
+| 11 | §2 rows 431/450/459 | `tor` as the live egress | tor was retired 2026-08-21 - §1's own `search-net` row says so, and every `FETCH_PROXY_URL` in OB1 defaults to `http://vpn:8888` (`OB1/docker/docker-compose.yml:637,982`, `docker-compose.scheduled.yml:190`) |
+| 12 | §2 `openbrain-digest` | `obnet` | `obnet, llm-net` |
+| 13 | §2 `openbrain-wiki-backup` | `—` | `default` (`open-brain_default`) |
+| 14 | §1 Networks, `obnet` row | owner cell `external (open-brain_obnet)` | it is OB1's own bridge. "external" described the pre-K.5b world where the root project's aux trio attached to it; the root project now has **zero services**, so nothing in it attaches to anything |
+
+Two navigability fixes in the same pass, neither a false claim: the §1c memory
+rows now say which `default` they mean (`memory_default`, matching how §1e
+already wrote it), and the Portal container table says out loud that it is TEN
+of the twelve because the two backup sidecars are rows in the Backups table
+above it.
+
+**The pattern worth carrying forward:** seven of the eight are the Networks
+column, and six of those are a sidecar or a second-network attachment. A
+service that declares no `networks:` key still GETS one - the project default -
+and a table written from the compose text rather than the render will say "—"
+every time. **Render, then read the key back. Do not read the file.**
+
+## 7d. Found while auditing, NOT changed - source discrepancies
+
+- **[source]** `inference/compose/queue.yml` contradicts itself about the
+  admission sizing. Its header states the invariant as
+  "`LLM_QUEUE_SLOTS` == llama-swap `--parallel` (3)", and twelve lines below,
+  the `LLM_QUEUE_SLOTS` environment entry says "MUST track
+  `LLAMA_SWAP_QWEN36_27B_N_PARALLEL` (inference/.env; **2** since 2026-07-09)".
+  The stack-map's `llm-queue` row quotes the first, so the row is a faithful
+  quotation of a source that disagrees with itself. Not corrected here, because
+  deciding which number is right is a compose change and an inference-tuning
+  question, not a documentation one. *Whoever resolves it must fix the row too.*
+- **[source]** The anchor's own artifact text says agent-org has "fourteen
+  volumes". It has **fifteen** - `awk` over the `volumes:` block and the render
+  both give 15, and the stack-map's §3 Volumes prose already listed all fifteen
+  correctly. The new §1 row says fifteen. **Declared rather than silently
+  written**, per the protocol's rule about an acceptance criterion that is
+  itself wrong.
+- **[source]** The anchor's acceptance asks that "coder/README.md carries no
+  backslash driver invocation". The PROSE one is fixed
+  (`scripts/stack/stack.ps1`, matching every other README's prose). One
+  remains at `coder/README.md`'s "Checking it" block:
+  `.\scripts\stack\stack.ps1 health`, inside a ` ```powershell ` fence - and it
+  is the house style, identical to `memory/README.md` and `search/README.md`'s
+  fenced blocks, which this item was not asked to touch. **Declared rather than
+  resolved unilaterally:** changing it alone makes coder inconsistent with its
+  two siblings; changing all three is out of scope. `.\` is correct PowerShell
+  and the fence says PowerShell, so nothing there is false.
+
+## 7e. The method that replaces sampling
+
+For the next person auditing a document of tables:
+
+1. **Render every plane once** and keep the JSON:
+   `docker compose -f <plane> --env-file <plane>/.env.example --profile <each> config --format json`,
+   then read `container_name`, `networks`, `ports`, `profiles` and `depends_on`
+   back per service. Seven of this round's eight extra findings fall out of that
+   one step.
+2. **Enumerate the document's tables and lists BY NAME before checking any of
+   them**, and put that enumeration in the test plan. A claim-class list lets a
+   conscientious tester finish while whole tables remain untouched - which is
+   exactly what happened to the 41/0 audit.
+3. **Count rows against the render's service count** and make the difference
+   explainable (the portal's 10 + 2 backups = 12; agent-org's 13 rows collapse
+   three worker pairs into 16 services; OB1's 27 + the Open Notebook trio = 30).
+   A table that silently omits rows is the failure that a per-row check catches
+   and a per-claim check does not.
