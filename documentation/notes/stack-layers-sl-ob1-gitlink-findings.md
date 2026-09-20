@@ -260,3 +260,39 @@ expect those two rows to fail, and should read this note rather than the plan.
   carried it as open). At `f9b18f2` the manifest says "NOT `pending`: sl-inference-split
   landed it" and `check-project-configs.ps1` passes `--profile local`. Closed by
   someone else; recorded so it is not carried forward a third time.
+
+## 10. What a fresh clone cannot do, and why none of it is this item's fault
+
+The anchor's verification runs in a short-path scratch clone
+(`git -c core.longpaths=true clone --recurse-submodules … C:\gl\a`). That worked —
+`git rev-parse HEAD:OB1` and `git -C OB1 rev-parse HEAD` both returned `fe3e045`
+after `git submodule update --init`, which is T1's whole point. But four gitignored
+files the clone does not have each produce a refusal that looks like a failure of
+this branch and is not. Every one was reproduced at `5005197` too:
+
+| Missing in a clone | What refuses | Same at 5005197? |
+|---|---|---|
+| `OB1/recipes/daily-digest/.env`, `OB1/recipes/email-history-import/.env` | `inventory --check` -> "`config --profiles` exited 1 … env file … not found" | YES — identical, naming the other recipe |
+| the ROOT `.env` | `inventory --check` -> `[FAIL] projects.ai-stack` (`file: null` vs `docker-compose.yml`) | yes (host shape, not pin) |
+| `<plane>/.env` | `init --product research` refuses on missing keys; seeding the examples still leaves `LITELLM_MASTER_KEY` and `MULLVAD_WG_ADDRESSES` blank | yes |
+| `agent-org/docker/.env` | `[ -- ] NOT VERIFIED - agent-org` (non-fatal) | yes |
+
+**One of those is worth more than a setup note.** `docker compose … config --services`
+exits **0** on a tree with a missing `env_file:` target, while `config --profiles`
+exits **1** on the same tree. So the render half of a verification can pass while
+`inventory --check` refuses, on identical inputs — and the difference is which
+subcommand was used, not which files are present. Anyone debugging "the renders work
+but the driver refuses" will otherwise look for the fault in the driver.
+
+With those seeded (the recipe envs can be EMPTY files — compose only needs them to
+exist), the clone reproduces every number in this note:
+bare 20, all four 30, `diff` clean against the 30 running container names,
+`inventory --check` exit 0 with no `declared, not rendered` line,
+`init --product research --force` writing all four profiles, `up --all --dry-run`
+emitting all four `--profile` flags on the OB1 line, `ruff` clean, 107 driver tests
+green, and `check-project-configs.ps1` reporting `open-brain:30/30`.
+
+The red/green pair for §6's gate was re-run there against the identical staged delta:
+the BASE version of `check-project-configs.ps1` (`git show f9b18f2:…`) exits 0 having
+printed no render lines at all; the branch version prints
+`all 9 compose projects render clean` and `open-brain:30/30`.

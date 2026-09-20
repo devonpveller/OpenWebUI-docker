@@ -30,11 +30,34 @@ git -c core.longpaths=true clone --recurse-submodules "D:\Open WebUI\ai-stack" C
 cd C:\gl\t
 git checkout work/sl-ob1-gitlink
 git submodule update --init
-cp "D:\Open WebUI\ai-stack\OB1\docker\.env" OB1/docker/.env   # gitignored; or seed from OB1/docker/.env.example
 ```
 
 If the clone or `submodule update` cannot fetch, STOP — that is T1 failing, and
 nothing below is meaningful.
+
+**Then give the clone a host shape.** Every file below is GITIGNORED, so a clone has
+none of them; the developer hit each one, and each refusal is PRE-EXISTING (verified
+to behave identically at `5005197`). Seeding them is setup, not a finding:
+
+```bash
+cp "D:\Open WebUI\ai-stack\OB1\docker\.env" OB1/docker/.env   # or seed from OB1/docker/.env.example
+# compose needs these two to EXIST; empty is enough for a render
+touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
+cp .env.example .env                                          # root: the anchor plane
+for p in inference frontend search memory coder portal; do cp $p/.env.example $p/.env; done
+cp agent-org/docker/.env.example agent-org/docker/.env
+```
+
+Symptoms if you skip them, so they are not misread as failures of this item:
+
+| Missing | Symptom |
+|---|---|
+| `OB1/recipes/*/.env` | `inventory --check` REFUSES: "`config --profiles` exited 1 ... env file ...\.env not found". Note `config --services` exits 0 on the same tree - only `--profiles` fails, which is why T2/T3 can pass while T5 refuses |
+| root `.env` | `inventory --check` FAILS `projects.ai-stack` (`file: null` vs `docker-compose.yml`) - the anchor plane could not be rendered |
+| `<plane>/.env` | T8's `init --product research` REFUSES, naming the blank keys. Seeding the examples still leaves `LITELLM_MASTER_KEY` and `MULLVAD_WG_ADDRESSES` blank; append any non-blank placeholder to `inference/.env` and `search/.env`. **Placeholders only - never a real key in a scratch clone** |
+| `agent-org/docker/.env` | `inventory --check` prints `[ -- ] NOT VERIFIED - agent-org` (non-fatal) |
+
+**Delete `C:\gl\t` when you are done** - it holds a copy of the host's OB1 env.
 
 ---
 
@@ -251,9 +274,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\checks\check-proje
 ```
 
 **Disproves it:** the run ending after `parse clean` with no render lines — that is
-the hole findings §6 describes, and it means the gate fix did not take. To prove the
-gate is load-bearing, revert just the two-line trigger change in that script and
-re-run with the SAME staged delta: the render lines must disappear.
+the hole findings §6 describes, and it means the gate fix did not take.
+
+To prove the gate is load-bearing, swap in the BASE version of that one script and
+re-run against the SAME staged delta:
+
+```bash
+cp scripts/checks/check-project-configs.ps1 /tmp/cfg-fixed.ps1
+git show f9b18f2:scripts/checks/check-project-configs.ps1 > scripts/checks/check-project-configs.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/checks/check-project-configs.ps1
+cp /tmp/cfg-fixed.ps1 scripts/checks/check-project-configs.ps1
+```
+
+**Expect:** the base version exits **0** and prints ONLY the two inventory lines and
+the two parse/json lines - no `all 9 compose projects render clean`, no
+`rows verified/expected`. Green while verifying nothing is the whole point.
+**Disproves it:** the base version printing the render lines anyway (then the gate
+change is decoration, not a fix).
 
 The `NOT VERIFIED: project 'agent-org'` line is expected and pre-existing.
 
@@ -264,7 +301,7 @@ cd C:\gl\t
 ruff check .                                         # expect: All checks passed!
 python -m pytest scripts/stack/test_stack.py -q      # expect: 107 passed
 git log --format='%H %s' -2                          # both messages end with the Co-Authored-By trailer
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\checks\check-hook-attestation.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\checks\check-hook-attestation.ps1 -Branch work/sl-ob1-gitlink -Base development
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\checks\validate-lineendings.ps1
 git diff development...work/sl-ob1-gitlink | grep -c $'\r'    # expect 0 stray CR in the diff body
 ```
