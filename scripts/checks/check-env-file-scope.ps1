@@ -354,9 +354,19 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
         if ($line -notmatch '^\s*env_file\s*:\s*(\S.*)?$') { continue }
         $inline = $Matches[1]
 
-        if ($inline) {
+        # A TRAILING COMMENT ON THE KEY IS NOT A VALUE. `env_file:  # the shared file`
+        # matches the capture group, so the inline branch used to take it, find nothing
+        # once the comment was stripped, and `continue` PAST the block value below -
+        # which docker reads and honours. Found at review, 2026-09-20; inherited from
+        # every earlier tip. So the inline branch is entered only when the capture
+        # actually yields entries; a capture that yields none falls THROUGH to the block
+        # scan. Fail closed: "I read nothing here" must never mean "there is nothing
+        # below", which is the same mistake as ending the extent on an unrecognised line.
+        $entries = @()
+        if ($inline) { $entries = @(Get-InlineValueEntries $inline) }
+        if ($entries.Count) {
             # Value on the key's own line: a scalar, or a flow sequence.
-            foreach ($entry in (Get-InlineValueEntries $inline)) {
+            foreach ($entry in $entries) {
                 $raw = $entry.Trim()
                 $p = ''
                 if ($raw -eq '?') { $p = '?' } else { $p = Get-EntryPath $raw }

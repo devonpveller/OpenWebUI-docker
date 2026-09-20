@@ -5,7 +5,9 @@ Five rounds each fixed the previous counter-example and shipped a new one. This 
 stops a sixth: it does not ask whether the current script is right, it asks whether the
 current script sees everything its predecessors saw.
 
-Usage: python regress.py <clone-root> <out.md>
+Usage: python documentation/evidence/sl-ao-envfile/regression-matrix.py <clone-root> <out.md>
+
+Runtime is about 12 minutes: it launches one PowerShell per row per tip.
 """
 import io
 import os
@@ -26,6 +28,7 @@ TIPS = [
     ('86b5a7b', 'attempt 3'),
     ('2168396', 'attempt 4'),
     ('5ee330c', 'attempt 5'),
+    ('ab430e7', 'attempt 6'),
     ('HEAD', 'this tip'),
 ]
 
@@ -125,10 +128,36 @@ ROWS = [
     ('v', 'dash-at-key-indent-two', 1, '', '    env_file:\n    - .env\n    - ../../.env\n', 'R'),
     ('v', 'bare-dash-at-key-indent', 1, '', '    env_file:\n    -\n      ../../.env\n', 'R'),
     ('v', 'dash-then-sibling-key', 1, '', '    env_file:\n    - .env\n    image: x\n', 'G'),
+    # ---- T6a-vi: a trailing COMMENT on the key is not a value (review, 2026-09-20) ----
+    ('vi', 'cmt-key-block-list', 1, '', '    env_file:  # the shared root file\n      - ../../.env\n', 'R'),
+    ('vi', 'cmt-key-next-scalar', 1, '', '    env_file:  # note\n      ../../.env\n', 'R'),
+    ('vi', 'cmt-key-dash-keyind', 1, '', '    env_file:  # note\n    - ../../.env\n', 'R'),
+    ('vi', 'cmt-key-block-own', 1, '', '    env_file:  # the plane own file\n      - .env\n', 'G'),
+    ('vi', 'cmt-key-scalar-own', 1, '', '    env_file:  # note\n      .env\n', 'G'),
+    ('vi', 'cmt-key-dash-own', 1, '', '    env_file:  # note\n    - .env\n', 'G'),
+    # ---- T6a-vii: the six rows the attempt-6 TESTER wrote, which lived only in their
+    # evidence file until now. The plan's own rule is that a row living only in a
+    # document is a row this detector cannot defend.
+    ('vii', 'dash-key-indent-2sp', 1, '', '    env_file:\n    -  ../../.env\n', 'R'),
+    ('vii', 'dash-key-indent-tab', 1, '', '    env_file:\n    -\t../../.env\n', 'R'),
+    ('vii', 'dash-key-indent-then-path', 1, '', '    env_file:\n    - path: ../../.env\n', 'R'),
+    ('vii', 'bare-dash-key-then-path', 1, '', '    env_file:\n    -\n      path: ../../.env\n', 'R'),
+    ('vii', 'comment-between-key-dashes', 1, '', '    env_file:\n    - .env\n    # note\n    - ../../.env\n', 'R'),
+    ('vii', 'sibling-key-then-other-list', 1, '', '    env_file:\n    - .env\n    hostname: x\n    dns:\n    - 1.1.1.1\n', 'G'),
+    # ---- T6a-viii: the three the REVIEWER planted ------------------------------------
+    ('viii', 'flow-map-quoted-path-key', 1, '', '    env_file:\n      - {"path": ../../.env, required: false}\n', 'R'),
+    ('viii', 'multi-line-flow-seq', 1, '', '    env_file: [\n      ../../.env\n    ]\n', 'R'),
+    ('viii', 'backslash-separators', 1, '', '    env_file:\n      - ..\\..\\.env\n', 'R'),
 ]
 
 # Rows allowed to be GREEN here while an earlier tip was RED. Each needs a REASON, and
 # the reason must be a documented decision, not "it is green now".
+#
+# KEYED BY ROW NAME, so a name must be unique across every table above and must not
+# be reused for a different plant: renaming a row silently drops its exemption (the
+# run then fails loudly, which is the safe direction), and REUSING a name silently
+# lends one row's exemption to another, which is not. Add a name here only with the
+# reason written out, and only for a row whose green is a decision someone made.
 DELIBERATE_GREENS = {
     'own-dir': "the plane's own .env - the shape the rule exists to permit",
     'own-dir-quoted-cmt': 'same, quoted with a trailing comment',
