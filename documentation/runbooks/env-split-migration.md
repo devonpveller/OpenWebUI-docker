@@ -271,7 +271,12 @@ sentence:
 To find the value it does not guess: **the extent is decided by indentation
 before any shape is read**. The value is every line indented deeper than the
 `env_file:` key; a blank or comment-only line does not end it; it ends at the
-first line at or below the key's indent. Every line inside that extent is read
+first line at or below the key's indent - with one carve-out, that a line at
+EXACTLY the key's indent whose body starts with `-` IS part of the value, because
+YAML lets a block sequence sit at its parent key's own indent and compose files
+are commonly written that way. A bare SCALAR at that indent is not the value -
+YAML cannot read it as one and docker refuses the file - so the carve-out is for
+the dash alone. Every line inside that extent is read
 in the four shapes compose accepts - a scalar, a flow sequence, a sequence item,
 a long-form `path:` - including a scalar written on the line AFTER the key and
 an item written under a bare `-`, both of which docker honours. A line inside

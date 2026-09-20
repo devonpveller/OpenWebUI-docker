@@ -420,12 +420,44 @@ yourself (`cp .env.example .env`, plant, `docker compose ... config`, grep for
 * Rows 14-15, deeper variant: the file does not render at all
   (`mapping values are not allowed in this context`). The check says RED; the renderer
   refuses it for its own reason. Two refusals, one file.
-* Row 12: docker refuses the file (`could not find expected ':'`) because a value at the
-  key's indent is not the value. The check says nothing, which is correct rather than
-  lenient - it is not a grant.
+* Row 12: docker refuses the file (`could not find expected ':'`) because a bare
+  SCALAR at the key's indent cannot be read as the value. The check says nothing,
+  which is correct rather than lenient - it is not a grant. **Note the word scalar.**
+  Attempt 5 wrote this as "a value at the key's indent is not the value", which is
+  false of a SEQUENCE - and that over-generalisation is exactly what T6a-v exists to
+  pin down.
 
 Rows 1-2 and 4-6 are the ones to render as well as check: each must put all three root
 names on `ao-ot-1` under docker, which is what makes a green from the check a defect.
+
+### T6a-v — the block sequence at the key's OWN indent
+
+Attempt 5's regression, and the shape its own extent rule excluded. YAML lets a block
+sequence sit at its parent key's indent, and compose files are commonly written that
+way:
+
+```yaml
+    env_file:
+    - ../../.env
+```
+
+Attempt 4's scanner refused this; attempt 5's passed it, and docker delivers all three
+root names. The clause under test: **a line at exactly the key's indent whose body
+starts with `-` is part of the value; anything else at or below the key's indent still
+ends the extent.**
+
+| # | block under `ao-ot-1` | expect |
+|---|---|---|
+| 1 | `env_file:` / `- ../../.env` at the key's indent | RED |
+| 2 | the same, quoted | RED |
+| 3 | `env_file:` / `- .env` at the key's indent | **GREEN** |
+| 4 | two items at the key's indent, only the second bad | RED on the second |
+| 5 | a bare `-` at the key's indent, item on the next deeper line | RED |
+| 6 | `env_file:` / `- .env` / `image: x`, both at the key's indent | **GREEN** (a non-dash line still ends the extent) |
+
+Render row 1 as well as checking it: all three root names must land on `ao-ot-1`, which
+is what makes a green from the check a defect. Row 6 is the boundary in the other
+direction - if it goes red the carve-out is swallowing the service.
 
 ### T6b — these shapes are real grants, per docker, not per this plan
 
@@ -457,6 +489,42 @@ YAML at all:
   all three names - and the check reports the `x-` block's line. That is what
 makes a green from the check on those shapes a defect and not a style preference.
 Restore the file afterwards.
+
+### T6c-0 — the regression matrix: does this script still see what its predecessors saw?
+
+**Run this first.** Five rounds produced five defects, and four of the five repairs
+shipped the next counter-example. This is the case that would have caught that, and it
+is the one most likely to catch a sixth.
+
+```bash
+cd /d/t/br
+python documentation/evidence/sl-ao-envfile/regression-matrix.py /d/t/br /d/t/regression-matrix.md
+echo "exit=$?"
+diff -u documentation/evidence/sl-ao-envfile/regression-matrix.md /d/t/regression-matrix.md
+```
+
+It plants every row from T6a-i, ii, iii, iv and v, stages each, and runs the
+`check-env-file-scope.ps1` blob from EVERY attempt tip (`4b714de`, `1bf6802`,
+`86b5a7b`, `2168396`, `5ee330c`) and from the tip under test. 87 rows x 6 tips.
+
+Expect: **exit 0**, and the regenerated table identical to the committed one except for
+the `HEAD` sha line if you are testing a different commit. The assertions inside it:
+
+* no row's result at this tip differs from its expected value;
+* **no row is GREEN at this tip where any earlier tip was RED**, unless it is in the
+  generator's `DELIBERATE_GREENS` map with a stated reason. On the submitted tip exactly
+  two rows qualify - `plane-own-flow` and `plane-own-longform`, RED at attempt 1 only,
+  because attempt 1 refused any target containing `..` and both are `../.env` from
+  `inference/compose`, the inference plane's own file.
+
+Read the table, do not just read the exit code. Each of the five defects appears as a
+lone `G` ending at the round that fixed it; attempt 5's regression is the opposite
+shape, a `G` in the middle of a row of `R`s. If you add a row of your own to any
+matrix, add it to the generator too - a row that exists only in the plan is a row this
+detector cannot defend.
+
+Note the generator STAGES plants and resets after each row: run it in a scratch clone,
+never in a worktree you care about.
 
 ### T6c — unplanted, before/after, and no exemption
 
@@ -698,6 +766,21 @@ literal in every shape" was true of the shapes and false of the PLACEMENTS.
 | 50 | `.githooks/README.md:27` and runbook 4b describe the extent rule, and both quote the allowlist regex AND the policy message byte-for-byte | those two files | extract `$script:PlainPathText` and `$script:IndirectionMessage` from the script and grep both documents for each exact string |
 
 
+### Attempt 6 - the sentences THIS round introduces
+
+Attempt 5 failed on T6 and T10 row 43. Rows 51-55 are the claims the repair adds; row 43
+is restated because its wording is what excluded the shape.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| 43' | The extent is every line indented deeper than the key, PLUS a line at exactly the key's indent whose body starts with `-`; anything else at or below the key's indent ends it | script header, `Scan-ComposeText`, findings 3g, runbook 4b, `.githooks/README.md:27` | T6a-v rows 1-6, and T6a-iv rows 12, 13, 18 for the other boundary |
+| 51 | The carve-out is for the DASH only: a bare scalar at the key's indent is not the value, because YAML cannot read it as one and docker refuses the file | script header, findings 3g | T6a-v row 3 vs T6a-iv row 12, and render T6a-iv row 12 to see docker refuse it |
+| 52 | `env_file:` with `- ../../.env` at the key's indent is a REAL grant docker honours | findings 3g, T6a-v | render T6a-v row 1 and count the root names on `ao-ot-1` |
+| 53 | Attempt 4's script caught this shape, so it is a regression attempt 5 introduced rather than a hole that survived | findings 3g, commit message | the `dash-at-key-indent` row of the regression matrix: `R R R R G R` |
+| 54 | Attempt 5's stated reasoning for the key-indent row ("a value at the key's indent is not the value") was an over-generalisation - true of scalars, false of sequences | findings 3g, T6a-iv note | read both rows together; a correct verdict resting on a wrong sentence is still a defect |
+| 55 | The regression matrix asserts that no row is GREEN here where an earlier tip was RED, except two documented deliberate greens | `regression-matrix.py`, `regression-matrix.md`, findings 3g, T6c-0 | T6c-0: rerun the generator and compare its output to the committed table |
+
+
 ---
 
 ## Verdict
@@ -711,8 +794,10 @@ the defect; attempt 2 passed a 37-shape matrix and the shape it did not plant wa
 the defect; attempt 3 passed 52 and the shape it did not plant - one anchor name
 defined twice - was the defect. The answer to that sequence is not a longer
 table, it is the policy in T6a-iii: the check stopped interpreting YAML. So the
-most useful thing you can do here is try to find a grant the check does not SEE -
-attempt 4's defect was not a value it judged wrongly, it was a value it never
-read. Two questions worth attacking: is there a placement under the key that the
-extent rule misses, and is there a value that is not a plain path literal and
-still reaches the resolver? Plant it and report it.
+most useful thing you can do here is try to find a grant the check does not SEE.
+Attempts 4 and 5 were both that: not a value judged wrongly, a value never read.
+Three questions worth attacking, in order of how much they have cost: is there a
+PLACEMENT under or beside the key that the extent rule misses; does any row the
+regression matrix covers behave differently from the committed table; and is
+there a value that is not a plain path literal and still reaches the resolver?
+Plant it, render it to see whether docker honours it, and report both.

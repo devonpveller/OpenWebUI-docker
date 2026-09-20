@@ -537,6 +537,75 @@ And one where it is deliberately quieter: a value at exactly the key's indent is
 the value per YAML - docker refuses the file (`could not find expected ':'`) - so the
 check says nothing, which is correct rather than lenient.
 
+### 3g. One column too narrow - and the table that should have existed four rounds ago
+
+The extent rule from 3f said "every line indented DEEPER than the key", and stopped at
+the first line at or below it. YAML does not agree. A block sequence is allowed to sit
+at its parent key's own indent, and compose files are commonly written that way:
+
+```yaml
+    env_file:
+    - ../../.env
+```
+
+GREEN in both modes; docker delivers all three root names. **Attempt 4's scanner caught
+this one** - `git show 2168396:scripts/checks/check-env-file-scope.ps1` exits 1 on it -
+so it is not a hole that survived five rounds, it is one my own fix opened. The same
+plant with `- .env` was green too, which is the tell: the reader was not judging the
+value leniently, it was not seeing the value at all.
+
+**The clause**, in `Scan-ComposeText`: a line at exactly the key's indent whose body
+starts with `-` (followed by whitespace or end of line) is part of the value; anything
+else at or below the key's indent still ends the extent. The body is computed before the
+boundary test now, because the boundary depends on it.
+
+**Why the dash and not everything at that indent.** A bare SCALAR at the key's indent is
+not the value - YAML cannot read it as one, and docker refuses the file outright with
+`could not find expected ':'`. So that row stays green. Which means the reasoning I
+wrote for it in 3f was an over-generalisation: "a value at the key's indent is not the
+value" is true of scalars and false of sequences, and the row was right for a reason
+narrower than the one I gave it. A correct verdict resting on a wrong sentence is still
+a defect, because the next person extends the sentence.
+
+### The regression table
+
+Five rounds, five defects, and every one of them was *fixed*. The pattern that matters
+is not any individual miss - it is that four of the five repairs shipped the next
+counter-example, and nothing in the process would have noticed. The matrices grew each
+round, but each new matrix only ever ran against the NEW script.
+
+So: `documentation/evidence/sl-ao-envfile/regression-matrix.py` runs **every** row from
+every matrix against the `check-env-file-scope.ps1` blob at **every attempt tip**, and
+writes `regression-matrix.md` beside it. 87 rows x 6 tips = 522 cells. The assertion is
+deliberately not "the current script is right" - it is **the current script sees
+everything its predecessors saw**: no row may be GREEN at this tip where an earlier tip
+was RED, unless it is a named deliberate green with a reason.
+
+The history reads straight off it - each defect is a lone `G` ending at the round that
+fixed it, and attempt 5's regression is the opposite shape, a lone `G` in the middle:
+
+| row | a1 `4b714de` | a2 `1bf6802` | a3 `86b5a7b` | a4 `2168396` | a5 `5ee330c` | this tip |
+|---|---|---|---|---|---|---|
+| `flow-seq` | **G** | R | R | R | R | R |
+| `longform-path` | **G** | R | R | R | R | R |
+| `alias-scalar` | **G** | **G** | R | R | R | R |
+| `alias-DUPLICATE-anchor` | **G** | **G** | **G** | R | R | R |
+| `next-line-scalar` | **G** | **G** | **G** | **G** | R | R |
+| `bare-dash-item` | **G** | **G** | **G** | **G** | R | R |
+| **`dash-at-key-indent`** | R | R | R | R | **G** | R |
+
+Run at `8b9d915`: 0 rows differ from their expected value, and 2 rows are GREEN here
+having been RED at an earlier tip - `plane-own-flow` and `plane-own-longform`, both RED
+at attempt 1 only, because attempt 1 refused any target containing `..` and both are
+`../.env` from `inference/compose`, i.e. the inference plane's OWN file. Both are in the
+generator's `DELIBERATE_GREENS` map with that reason, so the run exits 0.
+
+**What this does and does not prove.** It proves no shape the check has ever refused now
+passes. It cannot prove there is no sixth shape - the rows are still only the ones
+someone thought to write. But it converts "did my fix break an older case?" from a
+question nobody asked into a command that answers it, and that is the specific failure
+mode this item produced five times.
+
 ---
 
 ## 4. Out of scope, found anyway
