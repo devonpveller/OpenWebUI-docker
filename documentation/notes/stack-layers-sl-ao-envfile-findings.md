@@ -606,6 +606,75 @@ someone thought to write. But it converts "did my fix break an older case?" from
 question nobody asked into a command that answers it, and that is the specific failure
 mode this item produced five times.
 
+### 3h. "I read nothing here" is not "there is nothing below" - and why this one was a misfit
+
+Found at REVIEW, not at test, which matters: the item had passed a tester and was
+being read for fit against its own documents when the reviewer planted this.
+
+```yaml
+    env_file:  # the shared root file
+      - ../../.env
+```
+
+The capture group in `^\s*env_file\s*:\s*(\S.*)?$` matched the COMMENT. The inline
+branch took it because the capture was truthy, `Get-InlineValueEntries` stripped the
+comment to nothing and returned an empty list, the `foreach` ran zero times, and
+`continue` skipped the block value underneath. Docker reads that block: measured, all
+three root names land on `ao-ot-1`. Same with a next-line scalar and with a dash at the
+key's indent under a commented key.
+
+**It was green at every earlier tip, including `bdcc7f1`.** So it is inherited, not
+introduced - and it is still a misfit rather than a carry, because the four documents
+this item wrote assert the opposite property in so many words. A check that had never
+claimed to read commented keys could have carried this; one whose runbook paragraph
+says "it reads EVERY line indented deeper than the key" cannot.
+
+**The fix is the same sentence as 3f and 3g, in a third place.** Three rounds running,
+the defect has been a form of *an empty read treated as an absent value*:
+
+| round | the empty read | what it was taken to mean |
+|---|---|---|
+| 3f | a line the shape reader did not recognise | the value ended here |
+| 3g | a dash at the key's own indent | the value ended here |
+| 3h | an inline capture that strips to nothing | there is no value at all |
+
+So the inline branch is now entered only when the capture actually YIELDS entries; a
+capture that yields none falls THROUGH to the block scan. Six rows verified against the
+old blob, the new one and docker: comment-on-key with a block list, with a next-line
+scalar, and with a dash at the key indent, each naming `../../.env` - old GREEN, new
+RED, docker leaks 3; the same three naming the plane's own `.env` - GREEN either way,
+no grant.
+
+### The regression table, second edition
+
+The table from 3g is why this round could be short. It also gained 15 rows and a
+seventh tip column:
+
+* the **six comment-on-key** shapes above;
+* the **six rows the attempt-6 tester wrote**, which until now lived only in their
+  evidence file. Their own recommendation, and the plan's own rule: a row that lives
+  only in a document is a row the detector cannot defend. Reconstructed from their
+  names, then checked against their reported per-tip pattern and their reported docker
+  behaviour, both of which reproduce exactly - including `dash-key-indent-tab` being a
+  render error rather than a grant, and `bare-dash-key-then-path` being green at every
+  tip before attempt 6;
+* the **three the reviewer planted**: a flow map with a quoted `path` key, a multi-line
+  flow sequence, and `..\..\.env` with backslash separators. All three are grants
+  docker honours; all three are red here.
+
+**102 rows x 7 tips = 714 cells**, about nine minutes. At `264217d`: 0 rows differ from
+their expected value, 2 rows are greener than an earlier tip and both are the
+documented `plane-own-*` pair, 0 undocumented. The comment-on-key grants are the
+table's newest signature - `G G G G G G | R` - a shape green at every tip this item
+ever shipped and red only now.
+
+Also fixed in the generator, both cosmetic and both the kind of thing that erodes trust
+in a tool: its usage string named `regress.py`, a file that does not exist, and
+`DELIBERATE_GREENS` did not say it is keyed by ROW NAME. It now says so, and says why
+it matters - renaming a row drops its exemption and the run fails loudly, which is
+safe, but REUSING a name would lend one row's exemption to another silently, which is
+not.
+
 ---
 
 ## 4. Out of scope, found anyway

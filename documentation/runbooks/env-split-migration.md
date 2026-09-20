@@ -276,7 +276,11 @@ EXACTLY the key's indent whose body starts with `-` IS part of the value, becaus
 YAML lets a block sequence sit at its parent key's own indent and compose files
 are commonly written that way. A bare SCALAR at that indent is not the value -
 YAML cannot read it as one and docker refuses the file - so the carve-out is for
-the dash alone. Every line inside that extent is read
+the dash alone. A trailing COMMENT on the key (`env_file:  # note`) neither ends
+the value nor replaces it: the block below is still the value and is still read.
+An `env_file:` line whose only content is a comment used to be taken for an inline
+value, read as empty, and the block under it skipped - a grant docker honours,
+green at every tip before 2026-09-20. Every line inside that extent is read
 in the four shapes compose accepts - a scalar, a flow sequence, a sequence item,
 a long-form `path:` - including a scalar written on the line AFTER the key and
 an item written under a bare `-`, both of which docker honours. A line inside

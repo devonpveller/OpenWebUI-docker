@@ -1,6 +1,9 @@
 # Test plan — `sl-ao-envfile`
 
 Item: the agent-org worker pool stops granting itself the whole root `.env`.
+Reopened as **`sl-ao-envfile2`** after `sl-ao-envfile` was rejected at review as a
+MISFIT: a commented `env_file:` key let a docker-honoured grant pass, which the
+item's own four documents assert cannot happen. Same branch, same worktree.
 Branch `work/sl-ao-envfile`, base `development` at `bdcc7f1`.
 Anchor: `../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-ao-envfile.json`.
 Findings: `documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
@@ -459,6 +462,61 @@ Render row 1 as well as checking it: all three root names must land on `ao-ot-1`
 is what makes a green from the check a defect. Row 6 is the boundary in the other
 direction - if it goes red the carve-out is swallowing the service.
 
+### T6a-vi — a trailing comment on the key is not a value
+
+The reject. `env_file:  # note` matches the inline capture, so the inline branch took
+it, found nothing once the comment was stripped, and skipped the block value below -
+which docker reads and honours. Green at EVERY tip before this one, `bdcc7f1` included.
+
+| # | block under `ao-ot-1` | expect |
+|---|---|---|
+| 1 | `env_file:  # the shared root file` / `  - ../../.env` | RED |
+| 2 | `env_file:  # note` / `  ../../.env` (next-line scalar) | RED |
+| 3 | `env_file:  # note` / `- ../../.env` at the key indent | RED |
+| 4-6 | the same three naming `.env` | **GREEN** |
+
+Render rows 1-3: each must put all three root names on `ao-ot-1`. Then run the OLD blob
+against the same plants to see the green this replaced:
+
+```bash
+git show ab430e7:scripts/checks/check-env-file-scope.ps1 > /d/t/old.ps1
+# plant row 1, stage, then:
+powershell -NoProfile -ExecutionPolicy Bypass -File /d/t/old.ps1 ; echo "old=$?"   # 0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1 ; echo "new=$?"   # 1
+```
+
+### T6a-vii — the six rows the attempt-6 tester wrote
+
+They lived only in that tester's evidence file, which the plan's own rule says is a row
+the detector cannot defend. They are now in `regression-matrix.py` ROWS, reconstructed
+from their names and checked against the tester's reported per-tip pattern AND their
+reported docker behaviour. Verify the reconstruction rather than trusting it: run each
+and compare to the attempt-6 evidence.
+
+| row | expect | docker |
+|---|---|---|
+| `dash-key-indent-2sp` (`-` + two spaces) | RED | leaks 3 |
+| `dash-key-indent-tab` (`-` + tab) | RED | render error |
+| `dash-key-indent-then-path` (`- path:` at the key indent) | RED | leaks 3 |
+| `bare-dash-key-then-path` (bare `-` at key indent, `path:` deeper) | RED | leaks 3 |
+| `comment-between-key-dashes` | RED | leaks 3 |
+| `sibling-key-then-other-list` (`hostname:` ends the extent, a later `dns:` list is not env_file) | **GREEN** | no grant |
+
+`bare-dash-key-then-path` is the interesting one: green at every tip before attempt 6,
+so it is a shape no earlier round caught rather than one this round restored.
+
+### T6a-viii — the three the reviewer planted
+
+| row | expect | docker |
+|---|---|---|
+| flow map with a QUOTED `path` key: `- {"path": ../../.env, required: false}` | RED | leaks 3 |
+| multi-line flow sequence: `env_file: [` / `  ../../.env` / `]` | RED | leaks 3 |
+| backslash separators: `- ..\..\.env` | RED | leaks 3 |
+
+All three are in ROWS. Check the REASON on each: the flow map is caught as a repo-root
+target, the multi-line sequence as `[` failing the plain-path-text allowlist, the
+backslash form as a repo-root target after separator normalisation.
+
 ### T6b — these shapes are real grants, per docker, not per this plan
 
 The point of T6a-i's flow-sequence and long-form rows is that docker HONOURS them.
@@ -503,9 +561,11 @@ echo "exit=$?"
 diff -u documentation/evidence/sl-ao-envfile/regression-matrix.md /d/t/regression-matrix.md
 ```
 
-It plants every row from T6a-i, ii, iii, iv and v, stages each, and runs the
+It plants every row from T6a-i through T6a-viii, stages each, and runs the
 `check-env-file-scope.ps1` blob from EVERY attempt tip (`4b714de`, `1bf6802`,
-`86b5a7b`, `2168396`, `5ee330c`) and from the tip under test. 87 rows x 6 tips.
+`86b5a7b`, `2168396`, `5ee330c`, `ab430e7`) and from the tip under test.
+**102 rows x 7 tips = 714 cells, and it takes about 9 minutes** - one PowerShell
+launch per cell. Start it first and let it run while you do T1-T5.
 
 Expect: **exit 0**, and the regenerated table identical to the committed one except for
 the `HEAD` sha line if you are testing a different commit. The assertions inside it:
@@ -779,6 +839,23 @@ is restated because its wording is what excluded the shape.
 | 53 | Attempt 4's script caught this shape, so it is a regression attempt 5 introduced rather than a hole that survived | findings 3g, commit message | the `dash-at-key-indent` row of the regression matrix: `R R R R G R` |
 | 54 | Attempt 5's stated reasoning for the key-indent row ("a value at the key's indent is not the value") was an over-generalisation - true of scalars, false of sequences | findings 3g, T6a-iv note | read both rows together; a correct verdict resting on a wrong sentence is still a defect |
 | 55 | The regression matrix asserts that no row is GREEN here where an earlier tip was RED, except two documented deliberate greens | `regression-matrix.py`, `regression-matrix.md`, findings 3g, T6c-0 | T6c-0: rerun the generator and compare its output to the committed table |
+
+
+### Reopen (sl-ao-envfile2) - the sentences THIS round introduces
+
+`sl-ao-envfile` was rejected at review as a misfit. Rows 56-61 are the claims the
+repair adds; row 43 is restated again, because the extent sentence was incomplete in a
+way that made the reject possible.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| 43'' | A trailing comment on the `env_file:` key neither ends the value nor replaces it - the block below is still read | script header, `Scan-ComposeText`, findings 3h, runbook 4b, `.githooks/README.md:27` | T6a-vi rows 1-6 |
+| 56 | An inline capture that yields no entries falls THROUGH to the block scan instead of skipping it | script header, findings 3h | read the `$entries.Count` guard; then T6a-vi rows 1-3 |
+| 57 | All three comment-on-key shapes are grants docker honours | findings 3h, T6a-vi | render rows 1-3 and count the root names |
+| 58 | It was green at every earlier tip including `bdcc7f1`, so it is inherited - but a misfit rather than a carry, because this item's four documents assert the opposite | findings 3h, the reopen anchor | the `T6a-vi` rows of the regression table (`G G G G G G | R`); then read the runbook and hook-table sentences and judge the misfit call yourself |
+| 59 | This is the third round whose defect is an EMPTY READ treated as an ABSENT VALUE | findings 3h | read 3f, 3g and 3h together and judge whether the generalisation is earned |
+| 60 | The attempt-6 tester's six rows and the reviewer's three are now in ROWS, and the tester's reconstruct faithfully | findings 3h, `regression-matrix.py`, T6a-vii/viii | compare the table's `T6a-vii` columns against the attempt-6 evidence file's own table, row by row |
+| 61 | The generator's usage string names its own file, and `DELIBERATE_GREENS` documents that it is keyed by row name | `regression-matrix.py` | read the docstring and the comment above the map |
 
 
 ---
