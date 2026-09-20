@@ -49,6 +49,13 @@
   SEMANTICS. A `*alias`, an `&anchor`, a `!tag`, a `>`/`|` block scalar and a `${VAR}`
   are refused with the token printed and the reason named, never resolved.
 
+  AND THE EXTENT COMES BEFORE THE SHAPE. Where the value ENDS is decided by
+  indentation alone - every line deeper than the `env_file:` key is part of it, a blank
+  or comment-only line does not end it, and the first line at or below the key's indent
+  does. Only then is each line inside read as a shape, and a line the reader does not
+  recognise is treated as a VALUE rather than as the end of the block. See
+  Scan-ComposeText for what getting that order backwards cost.
+
   Three earlier attempts did the other thing, and each one shipped a silent hole: a
   flow sequence and a long-form mapping whose punctuation got swallowed as a path
   segment; then `*root_env`, which carries no punctuation and walked through a guard
@@ -294,53 +301,117 @@ function Get-GrantVerdict([string]$composeRel, [string]$path, [string]$raw) {
 
 $violations = @()
 
+# THE VALUE'S EXTENT IS DECIDED BY INDENTATION, BEFORE ANY SHAPE IS READ.
+#
+# Attempt 4 shipped a scanner that knew four shapes and, for a block value, accepted only
+# three kinds of line: `- item`, a `path:`/`required:`/`format:` continuation, and a blank.
+# ANY other line silently ENDED the value, and the text on it was never looked at. Two
+# plain-path spellings docker honours went green that way:
+#
+#     env_file:                    env_file:
+#       ../../.env                   -
+#                                      ../../.env
+#
+# The first is a next-line scalar; the second is a sequence item written under a bare
+# dash. Neither is exotic, both deliver the whole root file, and the scanner's own
+# structure is what hid them: it decided what the value WAS before deciding where it
+# ENDED, so every line it did not recognise looked like the end of the value.
+#
+# So the extent comes first and it is pure indentation, no semantics:
+#   * the key's indent is the `env_file:` line's own indent;
+#   * the value is EVERY following line indented DEEPER than the key;
+#   * a blank line and a comment-only line do not end it - they are skipped;
+#   * it ends at the first line whose indent is AT or BELOW the key's.
+# Inside that extent every non-comment line is read, and anything not recognised as a
+# sequence dash or a `path:`/`required:`/`format:` key is treated as a VALUE. That is the
+# fail-closed direction: an unrecognised line becomes a token and faces the indirection
+# policy, the allowlist and the directory rules, instead of ending the scan.
+#
+# Tabs: indent width counts a tab as advancing to the next multiple of 8, so a
+# tab-indented block and a space-indented one both compare monotonically.
+function Get-IndentWidth([string]$line) {
+    $w = 0
+    foreach ($ch in $line.ToCharArray()) {
+        if ($ch -eq ' ') { $w = $w + 1 }
+        elseif ($ch -eq "`t") { $w = $w + 8 - ($w % 8) }
+        else { break }
+    }
+    return $w
+}
+
 function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$lines) {
-    # Walk the file rather than regex it whole: `env_file:` and its list entries are on
-    # separate lines, and a service's own comment mentioning env_file must not match.
+    # Walk the file rather than regex it whole: a service's own comment mentioning
+    # env_file must not match, and the value may span many lines.
     $out = @()
-    $inList = $false
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($line -match '^\s*#') { continue }
-        if ($line -match '^\s*env_file\s*:\s*(\S.*)?$') {
-            $inline = $Matches[1]
-            if ($inline) {
-                foreach ($entry in (Get-InlineValueEntries $inline)) {
-                    $raw = $entry.Trim()
-                    $p = ''
-                    if ($raw -eq '?') { $p = '?' } else { $p = Get-EntryPath $raw }
-                    if (-not $p) { continue }
-                    $why = Get-GrantVerdict $composeRel $p $raw
-                    if ($why) { $out += "${displayPath}:$($i+1): env_file: $raw -- $why" }
-                }
-                $inList = $false
-            } else { $inList = $true }
+        if ($line -notmatch '^\s*env_file\s*:\s*(\S.*)?$') { continue }
+        $inline = $Matches[1]
+
+        if ($inline) {
+            # Value on the key's own line: a scalar, or a flow sequence.
+            foreach ($entry in (Get-InlineValueEntries $inline)) {
+                $raw = $entry.Trim()
+                $p = ''
+                if ($raw -eq '?') { $p = '?' } else { $p = Get-EntryPath $raw }
+                if (-not $p) { continue }
+                $why = Get-GrantVerdict $composeRel $p $raw
+                if ($why) { $out += "${displayPath}:$($i+1): env_file: $raw -- $why" }
+            }
             continue
         }
-        if ($inList) {
-            if ($line -match '^\s*-\s*(\S.*)$') {
-                $entry = $Matches[1]
-                $raw = (Remove-YamlComment $entry).Trim()
-                $p = Get-EntryPath $entry
-                if ($p) {
-                    $why = Get-GrantVerdict $composeRel $p $raw
-                    if ($why) { $out += "${displayPath}:$($i+1): env_file -> $raw -- $why" }
-                }
-            } elseif ($line -match '^\s+(path|required|format)\s*:\s*(\S.*)?$') {
-                # A long-form entry whose keys span lines: `- required: false` on one line
-                # and `  path: ../../.env` on the next. The path key is the only one that
-                # names a file; the others are read and ignored so the list stays open.
-                if ($Matches[1] -eq 'path') {
-                    $raw = (Remove-YamlComment $Matches[2]).Trim()
-                    $why = Get-GrantVerdict $composeRel (Remove-Quotes $raw) $raw
-                    if ($why) { $out += "${displayPath}:$($i+1): env_file -> path: $raw -- $why" }
-                }
-            } elseif ($line -match '^\s*$') {
-                # A blank line inside a block sequence does not end it.
+
+        # Block value: everything indented deeper than the key.
+        $keyIndent = Get-IndentWidth $line
+        $pendingDash = -1        # indent of a bare `-` whose item is on a deeper line
+        $j = $i + 1
+        while ($j -lt $lines.Count) {
+            $l = $lines[$j]
+            if ($l -match '^\s*$') { $j = $j + 1; continue }
+            if ($l -match '^\s*#') { $j = $j + 1; continue }
+            $ind = Get-IndentWidth $l
+            if ($ind -le $keyIndent) { break }
+            $body = (Remove-YamlComment $l).Trim()
+            if (-not $body) { $j = $j + 1; continue }
+
+            $token = ''
+            $label = 'env_file ->'
+            if ($pendingDash -ge 0 -and $ind -gt $pendingDash) {
+                # The item a bare `-` was waiting for. It may itself be `path: x`.
+                $token = $body
+                $pendingDash = -1
+            } elseif ($body -eq '-') {
+                $pendingDash = $ind
+                $j = $j + 1
+                continue
+            } elseif ($body -match '^-\s+(\S.*)$') {
+                $pendingDash = -1
+                $token = $Matches[1].Trim()
+            } elseif ($body -match '^(path|required|format)\s*:\s*(\S.*)?$') {
+                $pendingDash = -1
+                if ($Matches[1] -ne 'path') { $j = $j + 1; continue }
+                $token = $Matches[2]
+                if (-not $token) { $j = $j + 1; continue }
+                $token = $token.Trim()
+                $label = 'env_file -> path:'
             } else {
-                $inList = $false
+                # Anything else inside the extent IS the value - the next-line scalar
+                # case, and every spelling nobody has thought of yet. Read it, do not
+                # treat it as the end of the block.
+                $pendingDash = -1
+                $token = $body
             }
+
+            $p = ''
+            if ($token -eq '?') { $p = '?' } else { $p = Get-EntryPath $token }
+            if ($p) {
+                $why = Get-GrantVerdict $composeRel $p $token
+                if ($why) { $out += "${displayPath}:$($j+1): $label $token -- $why" }
+            }
+            $j = $j + 1
         }
+        $i = $j - 1
     }
     return $out
 }
