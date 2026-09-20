@@ -302,6 +302,86 @@ a matrix run against a scratch clone proves nothing unless the script under test
 was copied in AFTER the last edit. I read one green matrix off a clone holding
 the attempt-1 script before noticing.
 
+### 3d. The same mistake a third time, in a costume with no punctuation at all
+
+Found by the tester again. Attempt 2's guard refused a value that was not plain
+path text - and it decided that by listing what it disliked: `[ ] { } ,`,
+whitespace, `$`. A YAML alias contains none of those.
+
+```yaml
+x-root-env: &root_env ../../.env     # before services:
+  ao-ot-1:
+    env_file: *root_env              # and `- *root_env`
+```
+
+`*root_env` cleared the guard, `Resolve-RepoRelative` took it for a directory
+name, the result landed in the compose file's own directory and was ALLOWED. The
+`..` backstop could not fire, because the raw value has no `..` in it - the `..`
+is in the anchor, three hundred lines away. A real grant: rendered on `ao-ot-1`,
+`render exit 0` and all THREE root names (`NAS_BACKUP_USER`,
+`NAS_BACKUP_PASSWORD`, `TEST_VALIDATION_LLM_KEY`) appear on a service that
+carries none of them. Re-measured here for both alias spellings.
+
+**Twice is a pattern, and the pattern is the denylist.** Both defects are the
+same sentence: *a value that was not path text got normalized into a path
+instead of refused*. A list of forbidden characters is only ever as good as the
+last shape someone thought of, and the next shape is never on it. So the guard
+is inverted:
+
+```
+$script:PlainPathText = '^[A-Za-z0-9_./\\~-]+$'
+```
+
+Letters, digits, `_ . / \ ~ -` and nothing else. That covers every
+env_file path this repo has or would plausibly name - `.env`, `./.env`,
+`../.env`, `../../.env`, `.env.test` - and refuses, with the raw token printed,
+an alias, an `&anchor`, a `${VAR}`, a Windows drive letter, whitespace, quotes
+and any flow residue. Two consequences worth stating rather than discovering:
+
+* `D:/x/.env` is now refused as "not plain path text" rather than "resolves
+  outside the repository" (the `:`). Still red, different sentence.
+* `~/.env` is allowed THROUGH the guard and then refused by the directory rule
+  as `agent-org/docker/~` - which is what compose would look for too, since it
+  does not expand `~` in an env_file path. Red for an accurate reason.
+
+**The one indirection that is followed rather than refused** is the alias,
+because refusing every alias would be a check that cannot read a legal compose
+file. `Get-AnchorMap` scans the file once for `&name <scalar>`; a `*name` is
+resolved to that text, which must ITSELF be plain path text. An anchor on a
+block (nothing after the name on its line), an anchor that is a flow list, and
+an undefined alias are all refused with the reason spelled out. Cheap on
+purpose: this is a text check, not a YAML engine, and the honest answer to a
+construct it cannot expand is a refusal, not a guess.
+
+**Proof, 52 shapes now**, each planted alone, staged, run through the check, from
+a clean clone with the script copied in AFTER the last edit (my own trap from
+attempt 2). 27 on `ao-ot-1` and 10 on `llama-cpp-upstream` as before - both
+re-run at this tip, 0 mismatches - plus 15 new ones:
+
+| shape | verdict |
+|---|---|
+| `env_file: *root_env` | RED, `is the repo root env file` |
+| `- *root_env` | RED, same |
+| `env_file: [*root_env]` | RED, same |
+| `- path: *root_env` | RED, same |
+| alias whose anchor is inside an `x-` block mapping | RED, same |
+| `env_file: *envs` where `&envs [../../.env]` | RED, `is the alias '*envs' -> ``&envs [../../.env]``, which is not plain path text` |
+| `env_file: *nosuch` (undefined) | RED, `no &nosuch <path> scalar is defined in this file` |
+| `env_file: *own_env` where `&own_env .env` | **GREEN** - the alias resolves to the plane's own file |
+| `env_file: &e ../../.env` (anchor on the value) | RED, not plain path text |
+| `env_file: &e .env` | RED, not plain path text |
+| `D:/x/.env` | RED, not plain path text |
+| `/etc/shared/.env` | RED, resolves outside the repository |
+| `"../../my env/.env"` | RED, not plain path text |
+| `config/dev.env` (a SUBdirectory of the compose dir) | RED, `belongs to another directory` |
+| `~/.env` | RED, `belongs to another directory (agent-org/docker/~)` |
+
+The subdirectory row is the one place this is stricter than it strictly needs to
+be, and deliberately: the allowance is the compose file's own directory or a
+parent below the repo root, nothing else. If a layout ever genuinely needs
+`env/dev.env`, that is a rule change made on purpose and written into the
+header - not something to find out by noticing the check said nothing.
+
 ---
 
 ## 4. Out of scope, found anyway

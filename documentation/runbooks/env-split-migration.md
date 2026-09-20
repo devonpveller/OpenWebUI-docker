@@ -259,12 +259,20 @@ A running worker keeps the environment it started with, so nothing breaks until
 that recreate - which is exactly why this was easy to miss.
 
 **The check that now holds the line:** `scripts/checks/check-env-file-scope.ps1`
-refuses any `env_file` target that resolves to the repo root `.env` - in every
-value shape compose accepts (scalar, flow sequence, block sequence, long-form
-`path:`), in a staged compose file or across the whole tree with `-All`, and it
-refuses a value it cannot parse rather than guessing at it. It used to grandfather grants
-already present in HEAD, which is how these two survived it; that clause was
-removed with them. The history is in
+refuses any `env_file` target that resolves to the repo root `.env`, in a staged
+compose file or across the whole tree with `-All`. It checks the PATH, which it
+reads out of every value shape compose accepts - a scalar, a flow sequence, a
+block sequence, a long-form `path:` entry, and a YAML alias, which it follows to
+a `&name <scalar>` in the same file. What reaches the resolver is an ALLOWLIST:
+after quotes and comments are stripped a path must be `^[A-Za-z0-9_./\\~-]+$`,
+and anything else - an alias it cannot resolve, an `&anchor`, a `${VAR}`,
+whitespace, flow residue - is REFUSED and printed rather than normalized into
+something that looks like a path. Two grants got past earlier versions of this
+check by being normalized instead of refused; the allowlist is what that
+repays.
+
+The check also used to grandfather grants already present in HEAD, which is how
+the two ao-worker ones survived it for weeks; that clause was removed with them. The history is in
 `documentation/notes/stack-layers-sl-env-split-findings.md` (section 14) and
 `documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
 

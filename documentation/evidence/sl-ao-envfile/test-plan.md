@@ -221,7 +221,7 @@ Criterion: acceptance #3. **Attempt 1 failed here**: two valid shapes rendered b
 docker as real grants passed the check green. So this case is now a shape MATRIX,
 and a pass requires every row.
 
-### T6a — the matrix
+### T6a-i — the value-shape matrix
 
 Plant one shape at a time, stage it, run the check in staged mode, restore.
 **Anchor the plant on the service HEADING at column 2 with a regex** — `"  ao-ot-1:\n"`
@@ -298,7 +298,9 @@ mis-parsed value looks like; `parent-plane-own` (`- ../.env` = `agent-org/.env`)
 ALLOWED, because a parent that is not the repo root is a plane's own file. Read the reasons, not
 just the exits — a RED row for the wrong reason is still a defect worth reporting.
 
-Then the same driver against a compose file one level BELOW its plane directory,
+### T6a-ii — the same driver from a `compose/` fragment
+
+Run it against a compose file one level BELOW its plane directory,
 where `../.env` is the plane's OWN file and `../../.env` is the repo root — the pair
 the resolution has to tell apart in every shape. Edit `SHAPES` to the ten rows below
 and run it on `inference/compose/upstreams.yml` / `llama-cpp-upstream`:
@@ -309,20 +311,59 @@ and run it on `inference/compose/upstreams.yml` / `llama-cpp-upstream`:
 | `env_file: ../../.env` · `[../../.env]` · `- ../../.env` · `- path: ../../.env` · `- {path: ../../.env, required: false}` | RED, `is the repo root env file` |
 | `- .env` | GREEN |
 
-### T6b — the two shapes are real grants, per docker, not per this plan
+### T6a-iii — YAML anchors/aliases and the allowlist boundary
 
-The point of T6a's flow-sequence and long-form rows is that docker HONOURS them.
+Attempt 2 failed on exactly this: `*root_env` contains none of the characters the old
+guard disliked, so it cleared the guard and was resolved as if it were a directory
+name. These rows plant a PRELUDE before `services:` as well as a block under the
+service, so extend the driver with a third tuple field and insert it at the `services:`
+key (`re.search(r'^services:[ \t]*$', base, re.M).start()`), remembering to offset the
+service cut by the prelude's length:
+
+| # | prelude (before `services:`) | block under `ao-ot-1` | expect |
+|---|---|---|---|
+| 1 | `x-root-env: &root_env ../../.env` | `env_file: *root_env` | RED `is the repo root env file` |
+| 2 | same | `env_file:` / `  - *root_env` | RED same |
+| 3 | same | `env_file: [*root_env]` | RED same |
+| 4 | same | `env_file:` / `  - path: *root_env` / `    required: false` | RED same |
+| 5 | `x-shared:` / `  env: &blk_env ../../.env` | `env_file: *blk_env` | RED same (anchor inside an `x-` block) |
+| 6 | `x-envs: &envs [../../.env]` | `env_file: *envs` | RED, alias resolves to text that is not plain path text |
+| 7 | none | `env_file: *nosuch` | RED, no such anchor in the file |
+| 8 | `x-own-env: &own_env .env` | `env_file: *own_env` | **GREEN** - the alias resolves to the plane's own file |
+| 9 | none | `env_file: &e ../../.env` | RED, not plain path text (an anchor ON the value) |
+| 10 | none | `env_file: &e .env` | RED, same - refused even though the path is legal |
+| 11 | none | `- D:/x/.env` | RED, not plain path text (the `:`) |
+| 12 | none | `- /etc/shared/.env` | RED, resolves outside the repository |
+| 13 | none | `- "../../my env/.env"` | RED, not plain path text (the space) |
+| 14 | none | `- config/dev.env` | RED, `belongs to another directory` - a SUBdirectory of the compose dir is not the allowance |
+| 15 | none | `- ~/.env` | RED, `belongs to another directory (agent-org/docker/~)` |
+
+Rows 9-15 are the allowlist's boundary, and rows 11 and 14 are where a reasonable
+person might disagree with the design rather than find a bug - judge them, and say so
+either way. Row 8 is the one that stops this being "refuse everything": an alias to a
+legal path must still pass, or the check cannot read a legal compose file.
+
+**Read the reasons, not only the exits.** A row that is RED for the wrong reason is a
+defect: it means the value took a different path through the guard than the one this
+table claims.
+
+### T6b — these shapes are real grants, per docker, not per this plan
+
+The point of T6a-i's flow-sequence and long-form rows is that docker HONOURS them.
 Confirm it yourself rather than taking the claim:
 
 ```bash
 cd /d/t/br && cp .env.example .env          # the root file the grant would deliver
 # plant env_file: [../../.env] on ao-ot-1 (same regex anchor as above), then:
-docker compose -f agent-org/docker/docker-compose.yml --profile workers config | grep -nE "NAS_BACKUP_USER|TEST_VALIDATION_LLM_KEY"
-# repeat with the long form: - path: ../../.env / required: false
+docker compose -f agent-org/docker/docker-compose.yml --profile workers config | grep -nE "NAS_BACKUP_USER|NAS_BACKUP_PASSWORD|TEST_VALIDATION_LLM_KEY"
+# repeat with the long form:  - path: ../../.env / required: false
+# and with the alias:         x-root-env: &root_env ../../.env before services:,
+#                             then  env_file: *root_env  (and  - *root_env)
 ```
 
-Expect BOTH shapes to inject the root file's names into `ao-ot-1`, a service that
-carries none of them otherwise — render exit 0, two leaked names each. That is what
+Expect ALL FOUR spellings to inject the root file's names into `ao-ot-1`, a service
+that carries none of them otherwise — render exit 0; the two alias spellings deliver
+all three names the seeded root file holds. That is what
 makes a green from the check on those shapes a defect and not a style preference.
 Restore the file afterwards.
 
@@ -494,10 +535,10 @@ is restated because its wording is what the failure refuted.
 
 | # | claim | stated in | settled by |
 |---|---|---|---|
-| 10' | The check refuses any target resolving to the repo root `.env` **in every value shape compose accepts**, at any depth, with no exemption | script header, findings section 3/3c, runbook 4b, `.githooks/README.md:27` | T6a's 27-row matrix and T6's fragment table - the claim now says "in every value shape", and attempt 1's version was refuted by two of them |
-| 18 | The verdict parses the value into PATHS before resolving: scalar, flow sequence, block sequence, long-form `path:` (inline, on a continuation line, or as a flow mapping), quoted, commented | script header, `Get-EntryPath`/`Get-InlineValueEntries`, findings 3c | T6a matrix rows - each shape planted alone and staged |
-| 19 | A value that does not parse into plain path text is REFUSED, not normalized | script header, findings 3c | T6a rows `flow-seq-unterminated` (`is not plain path text ('[../../.env')`) and `interpolated` (`${SOME_ENV_FILE}`) |
-| 20 | A value that climbs with `..` and resolves back inside the compose file's own directory is refused (the fail-closed backstop for shapes nobody has thought of) | script header, findings 3c | T6a row `climb-back-to-own-dir` - RED with the climb message |
+| 10' | The check refuses any target resolving to the repo root `.env` **in every value shape compose accepts**, at any depth, with no exemption | script header, findings section 3/3c, runbook 4b, `.githooks/README.md:27` | T6a-i's 27-row matrix and T6a-ii's fragment table - the claim now says "in every value shape", and attempt 1's version was refuted by two of them |
+| 18 | The verdict parses the value into PATHS before resolving: scalar, flow sequence, block sequence, long-form `path:` (inline, on a continuation line, or as a flow mapping), quoted, commented | script header, `Get-EntryPath`/`Get-InlineValueEntries`, findings 3c | T6a-i matrix rows - each shape planted alone and staged |
+| 19 | A value that does not parse into plain path text is REFUSED, not normalized | script header, findings 3c | T6a-i rows `flow-seq-unterminated` (`is not plain path text ('[../../.env')`) and `interpolated` (`${SOME_ENV_FILE}`) |
+| 20 | A value that climbs with `..` and resolves back inside the compose file's own directory is refused (the fail-closed backstop for shapes nobody has thought of) | script header, findings 3c | T6a-i row `climb-back-to-own-dir` - RED with the climb message |
 | 21 | `env_file: [../../.env]` and `- path: ../../.env` are REAL grants: docker honours both | findings 3c, this plan's T6b | T6b - render each on `ao-ot-1` with a root `.env` present and see the root names appear in a service that has none |
 | 22 | It was a REGRESSION this item introduced, not a hole it inherited | findings 3c, commit message | run `git show bdcc7f1:scripts/checks/check-env-file-scope.ps1` on the same two plants: its `Test-BroadTarget` (`-match '\.\.[\\/]'`) goes red on both |
 | 23 | `.githooks/README.md` row 5 describes the check as it now behaves | `.githooks/README.md:27` | T8 item 4, read against the script header and T6c |
@@ -507,12 +548,35 @@ is restated because its wording is what the failure refuted.
 | 27 | The base's no-root-`.env` gate failure aborts EARLIER than the tip's, on agent-org's render refusal, not on the `projects.ai-stack` row | findings section 4 | run `stack.py inventory --check` at `bdcc7f1` and at the tip, each in a clone with no root `.env`, and read both messages |
 
 
+### Attempt 3 - the sentences THIS round introduces
+
+Attempt 2 failed on T6/T8/T10 again, on a shape the guard's denylist did not list.
+Rows 28-34 are what the repair adds; rows 10' and 19 are restated, because the wording
+of both is what the failure refuted.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| 10'' | The check refuses any target resolving to the repo root `.env` in every value shape compose accepts, **including a YAML alias**, with no exemption | script header, findings 3d, runbook 4b, `.githooks/README.md:27` | T6a-iii rows 1-5, plus T6a-i/T6a-ii unchanged |
+| 19' | What may reach the resolver is an **ALLOWLIST** - `^[A-Za-z0-9_./\\~-]+$` after quotes and comments are stripped - and anything else is REFUSED and printed with the raw token | script header (`$script:PlainPathText`), findings 3d, runbook 4b, hook table | T6a-iii rows 9-13; read the script and confirm there is no remaining character DENYlist |
+| 28 | An alias is followed, not refused: `&name <scalar>` looked up anywhere in the same file, and the looked-up text must itself be plain path text | script header, `Get-AnchorMap`, findings 3d | T6a-iii rows 1-8; row 6 for the flow-list anchor, row 8 for the legal one |
+| 29 | An alias with no `&name <scalar>` in the file is refused, not ignored | script header, findings 3d | T6a-iii row 7 |
+| 30 | `env_file: *root_env` is a REAL grant docker honours | findings 3d, T6b | T6b's alias spellings - all three root names land on `ao-ot-1` |
+| 31 | The `..` backstop could not have caught the alias, because the raw value has no `..` | findings 3d | read the backstop: it tests the RESOLVED text now, and reason about the alias case - the `..` lives in the anchor |
+| 32 | The allowance is the compose file's own directory or a parent below the repo root - a SUBdirectory is refused too, on purpose | script header, findings 3d | T6a-iii row 14 |
+| 33 | `~` passes the allowlist and is then refused by the directory rule, which is what compose would look for too (it does not expand `~` in env_file) | findings 3d | T6a-iii row 15 |
+| 34 | `.githooks/README.md:27` and runbook 4b's closing paragraph describe the allowlist, the alias lookup and the refuse-otherwise behaviour | those two files | T8 items 1 and 4 - and check that the regex they quote is character-for-character the one in the script |
+
+
 ---
 
 ## Verdict
 
 PASS requires every case above to pass on its own output, with T2's three
 non-worker diff rows explicitly judged (not waved through), T5 re-measured
-from source rather than read off this document, and T6a/T6b run in full -
-attempt 1 passed a T6 that planted one shape, and the two it did not plant
-were the defect.
+from source rather than read off this document, and T6a-i/T6a-ii/T6a-iii/T6b run
+in full -
+attempt 1 passed a T6 that planted one shape and the two it did not plant were
+the defect; attempt 2 passed a 37-shape matrix and the shape it did not plant
+was the defect. Plant the ones in T6a-iii, and if you think of a shape none of
+the three tables holds, plant that too and report it - that is how both of the
+last two defects were found.
