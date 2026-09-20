@@ -80,10 +80,13 @@
 #                               later stack-layers item adds it. Enabling one is
 #                               a no-op until then, and the driver says so.
 #                               NOT the same as a profile whose compose file is
-#                               a PINNED SUBMODULE that has not caught up - see
-#                               the ob1 tables, and `inventory --check`, which
-#                               reports those as `[declared, not rendered]`
-#                               rather than as drift.
+#                               a PINNED SUBMODULE that has not caught up:
+#                               `inventory --check` reports THOSE as
+#                               `[declared, not rendered]` rather than as drift,
+#                               and verifies them against the render the moment
+#                               the gitlink moves. No plane is in that state
+#                               today - ob1 was, until sl-ob1-gitlink bumped the
+#                               OB1 gitlink to fe3e045 on 2026-09-20.
 #                 requires    - other profiles ON THE SAME PLANE that this one
 #                               cannot work without. The driver closes over these
 #                               transitively (stack.py `profile_closure`), so
@@ -387,32 +390,41 @@ keys = ["MCP_ACCESS_KEY", "POSTGRES_PASSWORD", "OPS_GATEWAY_KEY", "OPENBRAIN_GAT
 # knowledge core pulls the research engine in, because the profile the driver
 # always passes needs it. That is the honest resolution of a contradiction that
 # was already there; removing `default` is what removes the research engine.
-description = "the idea-refinery drain; scripts/stack/stack.ps1 passes this on every OB1 invocation"
+description = "the idea-refinery drain; `default = true`, so BOTH drivers pass it on every OB1 invocation (stack.ps1 is a shim over stack.py since sl-driver-parity)"
 default     = true
 requires    = ["research"]
 
-# The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles). They are
-# `opt_in`, never `default`: `default` means "passed on every invocation" AND it
-# survives --headless, and the whole point of the research product's surfaces
-# split is that --headless can drop wiki and notebook. `opt_in` is the flag for
-# "something other than the driver's defaults turns this on" - here, a PRODUCT
-# (`enable research`, `enable open-brain`, `enable digest`) or the `requires`
-# edge from idea-refinery.
+# The three below became real in OB1 on 2026-09-19 (sl-ob1-profiles) and are IN
+# THE PINNED GITLINK since sl-ob1-gitlink bumped it 5005197 -> fe3e045 (2026-09-20,
+# reachable on origin/feature/integrated-knowledge-system). They are `opt_in`,
+# never `default`: `default` means "passed on every invocation" AND it survives
+# --headless, and the whole point of the research product's surfaces split is that
+# --headless can drop wiki and notebook. `opt_in` is the flag for "something other
+# than the driver's defaults turns this on" - here, a PRODUCT (`enable research`,
+# `enable open-brain`, `enable digest`), the `requires` edge from idea-refinery, or
+# COMPOSE_PROFILES in OB1/docker/.env.
 #
 # HOW sl-ob1-profiles' stack.ps1 ROW WAS RECONCILED (sl-driver-parity): that
 # script is now a shim with no plane registry, so its four-profile line has no
-# landing place and is not carried forward. The equivalent is the DRIVER'S
-# STATE. Today's host has no .stack/state.json, so `stack.ps1 up` -> `stack.py
-# up --all` passes idea-refinery plus research (the `requires` closure) and
-# nothing else - which starts exactly the same 30 containers, because the PINNED
-# OB1 gitlink (5005197) does not carry these three profiles at all and compose
-# ignores a profile it does not know. AFTER THE GITLINK BUMPS that stops being
-# true: wiki and notebook would then gate seven running containers that a bare
-# `up` no longer starts. The operator runs `stack.py init --product research`
-# (or `enable research`) once, at that bump, and the state file carries them
-# from then on. That is the wave-4 step; it is recorded in
-# documentation/notes/stack-layers-sl-driver-parity-findings.md and in
-# `inventory --check`'s own `[declared, not rendered]` output.
+# landing place and is not carried forward. The equivalent is the DRIVER'S STATE.
+#
+# WHAT THE BUMP CHANGED, measured at fe3e045 (`config --services`, this worktree,
+# 2026-09-20): the bare render is 20 services, +2 with `research`, +4 with `wiki`,
+# +3 with `notebook`, +1 with `idea-refinery`, and 30 with all four - the same 30
+# names `docker ps` shows for the open-brain project. Before the bump compose did
+# not know three of the four and ignored them, so idea-refinery+research and all
+# four started the same containers; that is over. This host's .stack/state.json
+# (written 2026-09-19, read 2026-09-20) does not list `ob1` at all, so the driver
+# resolves its profiles from the manifest alone and passes
+# `--profile idea-refinery --profile research` only (the `default` plus its
+# `requires` closure) = 22: wiki and notebook gate SEVEN running containers that
+# `up` would no longer start. The operator closes that either way, and both
+# were measured to work: `stack.py init --product research --force` (or `enable
+# research`), which writes idea-refinery, research, wiki, notebook to the state
+# file; or COMPOSE_PROFILES=research,wiki,notebook,idea-refinery in OB1/docker/.env,
+# which raw compose honours AND `effective_profiles()` unions into whatever flags
+# the driver passes. Recorded in
+# documentation/notes/stack-layers-sl-ob1-gitlink-findings.md.
 
 [planes.ob1.profiles.research]
 # OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which

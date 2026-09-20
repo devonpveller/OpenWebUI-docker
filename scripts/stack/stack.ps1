@@ -37,12 +37,17 @@
 # on this host. The registry does not exist any more, so there is nowhere in this
 # file for that line to live; the SAME SET is expressed in the driver instead:
 # `idea-refinery` is `default = true` in stack.manifest.toml and `requires`
-# `research`, so `up` passes both. Measured 2026-09-19 against the PINNED OB1
-# gitlink (5005197, which declares only `idea-refinery`): two profiles and four
-# profiles render the same 30 services, and 30 are running. `wiki` and `notebook`
-# gate nothing until the gitlink bumps - at which point the operator runs
-# `stack.py init --product research` ONCE, which `inventory --check` says out loud
-# every time it runs until then.
+# `research`, so `up` passes both. THAT IS NO LONGER THE WHOLE SET: sl-ob1-gitlink
+# bumped the OB1 gitlink 5005197 -> fe3e045 on 2026-09-20, and the pinned compose
+# now declares all four. Measured at fe3e045 (`config --services`): bare 20,
+# idea-refinery+research 22, all four 30 - the 30 that are running. So `wiki` and
+# `notebook` gate SEVEN live containers this script's `up` will not start on its
+# own. The operator closes that ONCE, either with
+# `stack.py init --product research --force` (writes all four to .stack/state.json)
+# or with COMPOSE_PROFILES=research,wiki,notebook,idea-refinery in OB1/docker/.env
+# (the driver unions the plane env's list into the flags it passes - see
+# effective_profiles in stack.py). Both were measured; neither is done by this
+# script.
 #
 # `restart` with no plane still refuses - the refusal is the DRIVER's
 # (stack.py cmd_restart), reached by forwarding "all" rather than reimplemented

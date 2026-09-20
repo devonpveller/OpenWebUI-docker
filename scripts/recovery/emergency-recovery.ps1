@@ -388,8 +388,17 @@ function Start-OB1Stack {
     }
     Write-Log "INFO" "Starting Open Brain (OB1) stack ($($Script:OB1Services.Count) containers)..."
     try {
-        # --profile idea-refinery so the (profile-gated) Idea Refinery drain is (re)started too.
-        docker compose -f $Script:OB1Compose --profile idea-refinery up -d
+        # ALL FOUR profiles, or this starts 21 of the 30 it just said it would start.
+        # Until 2026-09-20 the OB1 gitlink pinned 5005197, whose compose declared
+        # only `idea-refinery`; compose ignores a profile it does not know, so one
+        # flag started all 30. sl-ob1-gitlink bumped the gitlink to fe3e045, which
+        # gates ten containers behind four profiles (measured `config --services`
+        # at fe3e045: bare 20, all four 30). A CLI --profile REPLACES
+        # COMPOSE_PROFILES rather than adding to it, so an operator setting the set
+        # in OB1/docker/.env would NOT save this line - it has to carry them itself.
+        # $Script:OB1Services above is the 30 this script claims to start; that is
+        # the number these flags have to keep true.
+        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it started..."
         $looping = Wait-ForRestartLoops -Seconds 60
         if ($looping.Count -eq 0) {
@@ -412,9 +421,13 @@ function Reset-OB1Stack {
     }
     Write-Log "INFO" "Recreating Open Brain (OB1) stack..."
     try {
-        docker compose -f $Script:OB1Compose --profile idea-refinery down
+        # All four profiles on BOTH halves - see the note in Start-OB1Stack. On the
+        # `up` half a missing profile silently leaves nine containers down after a
+        # recreate; on the `down` half it is the difference between tearing the
+        # project down and leaving part of it behind for the `up` to collide with.
+        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery down
         Start-Sleep -Seconds 5
-        docker compose -f $Script:OB1Compose --profile idea-refinery up -d
+        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it recreated..."
         $looping = Wait-ForRestartLoops -Seconds 60
         if ($looping.Count -eq 0) {

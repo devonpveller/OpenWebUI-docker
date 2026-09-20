@@ -1,12 +1,21 @@
 # check-project-configs.ps1 - pre-commit structural validation (Part K.8, 2026-08-21).
 #
 # Two cheap gates, each run ONLY when the staged changes make them relevant:
-#   1. compose validation - any staged *.yml/*.yaml => render every project's
-#      compose file with `docker compose config -q` against ITS OWN
-#      `<plane>/.env.example` (each kept complete for that plane, v3 A.4 +
-#      sl-env-split D10). Catches exactly the drift class
+#   1. compose validation - any staged *.yml/*.yaml, OR A STAGED `OB1` GITLINK,
+#      => render every project's compose file with `docker compose config -q`
+#      against ITS OWN `<plane>/.env.example` (each kept complete for that plane,
+#      v3 A.4 + sl-env-split D10). Catches exactly the drift class
 #      the Part K restructure kept finding by hand: broken includes, dead
 #      depends_on, missing env guards, bad network refs.
+#      THE GITLINK IS PART OF THAT TRIGGER because of a hole sl-ob1-gitlink walked
+#      into: bumping the OB1 submodule pointer REPLACES OB1/docker/docker-compose.yml
+#      and its included scheduled file wholesale, yet stages no path matching
+#      *.yml - `git status` shows one entry, `OB1`. So the gitlink bump that took
+#      OB1's bare render from 29 services to 20 ran this check and got
+#      "2 staged .ps1 file(s) parse clean", with the compose renders and the
+#      inventory coverage assertion below never executed. A check that sits out
+#      the one commit shape it most needs to see is the silent-narrowing class
+#      this file already guards against twice (see the render-target notes below).
 #   2. PowerShell parse - staged *.ps1 files are tokenized with PSParser so a
 #      syntax error can never reach a commit (the ops plane is PS 5.1).
 #
@@ -23,7 +32,11 @@ $failed = 0
 
 # --- 1. compose project validation -----------------------------------------
 $ymlStaged = @($staged | Where-Object { $_ -match '\.(yml|yaml)$' })
-if ($ymlStaged.Count -gt 0) {
+# A staged `OB1` entry is a submodule gitlink bump: no *.yml path is staged, but
+# OB1/docker/docker-compose.yml (and the scheduled file it includes) change
+# wholesale underneath. Treat it as a compose change - see the header note.
+$gitlinkStaged = @($staged | Where-Object { $_ -eq 'OB1' })
+if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
     $dockerOk = $true
     try { docker compose version | Out-Null } catch { $dockerOk = $false }
     if (-not $dockerOk -or $LASTEXITCODE -ne 0) {
