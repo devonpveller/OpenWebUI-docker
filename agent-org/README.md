@@ -61,6 +61,34 @@ cp agent-org/docker/.env.example agent-org/docker/.env   # then fill in the pass
 docker compose -f agent-org/docker/docker-compose.yml up -d   # default plane (P0.1)
 ```
 
+### Environment — one file, `agent-org/docker/.env`
+
+Compose loads it NATIVELY from the project directory, so nothing passes
+`--env-file` and your shell's cwd does not matter. **Every variable any service in
+this plane reads is declared there**, and `docker/.env.example` is the complete
+template.
+
+Since 2026-09-19 that includes the worker pool. `ao-worker-1` / `ao-worker-2` used
+to carry `env_file: ../../.env`, a wildcard grant of the whole ROOT `.env`; they
+have no `env_file:` key at all now. The two variables the `little-coder:local`
+image reads that the wildcard was carrying are named in each service's
+`environment:` block and interpolated from this plane's own file:
+
+| name | why the pool needs it |
+|---|---|
+| `LC_DEPLOY_TOKEN` | the clone path's global fallback deploy token for private work repos (a per-project `LC_<ORG>_TOKEN` or `AO_TOKEN_X` overrides it) |
+| `LC_LLAMA_API_KEY` | the name little-coder itself reads for its inference bearer (`config.py` `inference.api_key_env`). The `LLAMACPP_API_KEY` the compose file also sets is a different container name, read by `pi` — it does not cover this one |
+
+`coder/.env` declares the same two names for the MAIN stack's little-coder, with
+its own values: D10 says a value two planes read is declared in EACH, not shared.
+
+After changing either value, **recreate the pool** - a running worker keeps the
+environment it started with:
+
+```bash
+docker compose -f agent-org/docker/docker-compose.yml --profile workers up -d --force-recreate ao-worker-1 ao-worker-2
+```
+
 ### P0.2 — Mattermost bot (one-time)
 1. Open `http://127.0.0.1:8065`, create the admin account + a team, and an `#mgmt` channel.
 2. System Console → Integrations → **Bot Accounts** → create `@pm` (or `@bridge`) →

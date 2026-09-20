@@ -185,68 +185,85 @@ python scripts\stack\stack.py up --dry-run      # prints commands; starts nothin
 
 No printed line may contain `--env-file`.
 
-### 4b. BEFORE you trim: the one wildcard that still reaches across
+### 4b. BEFORE you trim: the two names the agent-org worker pool needs
 
-`agent-org/docker/docker-compose.yml:351` and `:443` give `ao-worker-1` and
-`ao-worker-2` **`env_file: ../../.env`** - a wildcard grant of the WHOLE root
-file into those two containers. agent-org is out of scope for this change and
-its own `.env` was not touched, but step 5 empties the file those two services
-are reading, so the consequence lands on them.
+`ao-worker-1` and `ao-worker-2` in `agent-org/docker/docker-compose.yml` used to
+carry **`env_file: ../../.env`** - a wildcard grant of the WHOLE root file into
+those two containers. **That grant is gone** (item `sl-ao-envfile`, 2026-09-19):
+neither worker service has an `env_file:` key any more, and the two variables the
+`little-coder:local` image actually reads through it are named explicitly in each
+service's `environment:` block, interpolated from `agent-org/docker/.env`:
 
-**Measured (2026-09-19):** of the names the pre-split root `.env.example`
-carried, **151** reach those workers through that wildcard and are NOT
-overridden by the services' own `environment:` block (which sets ten:
-`LC_CONFIG`, `LC_ROUTE_EXEC`, `LC_OPEN_TERMINAL_URL`, `LC_OPEN_TERMINAL_KEY`,
-`OPEN_TERMINAL_API_KEY`, `LLAMACPP_API_KEY`, `LC_WORKSPACE`,
-`LITTLE_CODER_NO_CTX_PROBE`, `AO_BRIDGE_URL`, `AO_SUBJECT`).
+```yaml
+- LC_DEPLOY_TOKEN=${LC_DEPLOY_TOKEN}
+- LC_LLAMA_API_KEY=${LC_LLAMA_API_KEY}
+```
 
-Intersecting those 151 with **every variable the `little-coder:local` image
-actually reads container-side** - the direct `os.environ` reads in
+So trimming the root `.env` in step 5 can no longer reach the pool. What is left
+for you here is making sure those two values EXIST in agent-org's own file before
+the pool is next recreated.
+
+**How the set was measured** (kept because the reasoning, not the answer, is the
+reusable part). Of the names the pre-split root `.env.example` carried, 151
+reached those containers through the wildcard and were not overridden by the
+services' own `environment:` block (which sets ten: `LC_CONFIG`, `LC_ROUTE_EXEC`,
+`LC_OPEN_TERMINAL_URL`, `LC_OPEN_TERMINAL_KEY`, `OPEN_TERMINAL_API_KEY`,
+`LLAMACPP_API_KEY`, `LC_WORKSPACE`, `LITTLE_CODER_NO_CTX_PROBE`, `AO_BRIDGE_URL`,
+`AO_SUBJECT`). Intersecting those 151 with **every variable the image actually
+reads container-side** - the direct `os.environ` reads in
 `little-coder/src/littlecoder/**` and `little-coder/pi-extension/**`, PLUS the
-two INDIRECT ones, where the config names the variable
-(`config.py:38 api_key_env` and `:91 open_terminal_key_env`, read at
-`meta_wiring.py:42,48`) - leaves exactly **three**, of which **two are live
-breakage**:
+INDIRECT ones where the config names the variable rather than the code
+(`config.py` `inference.api_key_env` and `workspace.open_terminal_key_env`, read
+at `meta_wiring.py` and `daemon.py`) - leaves four, of which two were already set
+by the block (`LC_ROUTE_EXEC`, `OPEN_TERMINAL_API_KEY`) and two were not:
 
-| name | read by | after step 5 |
+| name | read by | if it is missing |
 |---|---|---|
-| **`LC_DEPLOY_TOKEN`** | the clone path, for private work repos | **BREAKS**: public repos still clone, private ones fail |
-| **`LC_LLAMA_API_KEY`** | `config.py:38 api_key_env` -> `meta_wiring.py:42,48` `os.environ.get(..., "")` for BOTH the embedder and the chat client | **BREAKS**: an empty bearer to `llama-cpp`, which LiteLLM rejects **401** on every call since the J.1 virtual-key flip |
-| `LITTLE_CODER_VERSION` | **build ARG only** (`little-coder/docker/Dockerfile.agent:36-37`); the workers RUN the prebuilt image | no effect - ruled out by reading the Dockerfile, not by assuming |
+| **`LC_DEPLOY_TOKEN`** | `littlecoder/daemon.py`, the clone path's global fallback token (a per-request token from the bridge overrides it) | public repos still clone, private ones fail |
+| **`LC_LLAMA_API_KEY`** | INDIRECT: `config.py` `inference.api_key_env` -> `meta_wiring.py` `os.environ.get(..., "")`, for BOTH the embedder and the chat client | an empty bearer to `llama-cpp`, which LiteLLM rejects **401** on every call since the J.1 virtual-key flip |
+
+A third, `LITTLE_CODER_VERSION`, is a **build ARG only**
+(`little-coder/docker/Dockerfile.agent`); the workers RUN the prebuilt image, so
+it has no effect - ruled out by reading the Dockerfile, not by assuming.
 
 `LC_LLAMA_API_KEY` is the subtle one: the workers DO set
 `LLAMACPP_API_KEY=${LC_LLAMA_API_KEY}`, but that is a HOST-side interpolation
-out of `agent-org/docker/.env` injecting a DIFFERENTLY-NAMED container
-variable. The name little-coder reads is `LC_LLAMA_API_KEY` itself, and its
-only route into the container is the wildcard. (The worker configs under
+injecting a DIFFERENTLY-NAMED container variable, read by `pi`. The name
+little-coder itself reads is `LC_LLAMA_API_KEY`. (The worker configs under
 `agent-org/agent-bridge/worker-configs/` are generated by
 `agent-org/scripts/gen-worker-configs.py`, which copies
 `little-coder/config/little-coder.config.yaml` verbatim except for
-`workspace.open_terminal_url` - so `api_key_env: LC_LLAMA_API_KEY` at `:12`
-is what the workers run with.)
+`workspace.open_terminal_url` - so `api_key_env: LC_LLAMA_API_KEY` is what the
+workers run with.)
 
-Both are the same silent class as the 2026-08 `ao-worker stale deploy token`
-incident, arriving from the other direction.
-
-So, before step 5 - **check BOTH names**:
+**So: check BOTH names in agent-org's own file** -
 
 ```powershell
 Select-String -Path agent-org\docker\.env -Pattern '^(LC_DEPLOY_TOKEN|LC_LLAMA_API_KEY)='
 ```
 
-For each that is absent, copy the value there from the root `.env`, then
-recreate the pool the next time you touch it (`docker compose -f
-agent-org/docker/docker-compose.yml --profile workers up -d --force-recreate
-ao-worker-1 ao-worker-2`). A running worker keeps the environment it started
-with, so nothing breaks until that recreate - which is exactly why this is easy
-to miss. Note `agent-org/docker/.env.example` carries neither name, so a fresh
-agent-org still warns `The "LC_LLAMA_API_KEY" variable is not set` on render.
+Both are declared in `agent-org/docker/.env.example`, so a file copied from the
+template since 2026-09-19 already has them; an older one does not. For each that
+is absent, add it (the LLM key is the pool's own LiteLLM virtual key, minted from
+the inference plane - D10: a value two planes read is declared in EACH, which is
+why `coder/.env` carries the same two names with the main stack's own values).
 
-**The real fix is not in this runbook:** `scripts/checks/check-env-file-scope.ps1`
-exists to stop exactly this wildcard, and those two grants are grandfathered.
-Naming the variables those services actually need, and deleting
-`env_file: ../../.env`, is a follow-up item in agent-org - recorded in
-`documentation/notes/stack-layers-sl-env-split-findings.md`.
+Then recreate the pool the next time you touch it:
+
+```powershell
+docker compose -f agent-org/docker/docker-compose.yml --profile workers up -d --force-recreate ao-worker-1 ao-worker-2
+```
+
+A running worker keeps the environment it started with, so nothing breaks until
+that recreate - which is exactly why this was easy to miss.
+
+**The check that now holds the line:** `scripts/checks/check-env-file-scope.ps1`
+refuses any `env_file` target that resolves to the repo root `.env`, in a staged
+compose file or across the whole tree with `-All`. It used to grandfather grants
+already present in HEAD, which is how these two survived it; that clause was
+removed with them. The history is in
+`documentation/notes/stack-layers-sl-env-split-findings.md` (section 14) and
+`documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
 
 ### 5. Trim the root `.env`
 
