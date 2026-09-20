@@ -56,10 +56,12 @@
   `-` is part of the value, because YAML lets a block sequence sit at its parent key's
   own indent and compose files are commonly written that way. A bare SCALAR at the
   key's indent is not the value - YAML cannot read it as one - so the carve-out is for
-  the dash alone. Only then is each line inside read as a shape, and a line the reader
-  does not recognise is treated as a VALUE rather than as the end of the block. See
-  Scan-ComposeText for what getting that order backwards cost, and what getting the
-  boundary one column too narrow cost after that.
+  the dash alone. A TRAILING COMMENT ON THE KEY (`env_file:  # note`) neither ends the
+  value nor replaces it: the block below is still the value and is still read. Only
+  then is each line inside read as a shape, and a line the reader does not recognise is
+  treated as a VALUE rather than as the end of the block. See Scan-ComposeText for what
+  getting that order backwards cost, what getting the boundary one column too narrow
+  cost after that, and what treating an empty read as an absent value cost after that.
 
   Three earlier attempts did the other thing, and each one shipped a silent hole: a
   flow sequence and a long-form mapping whose punctuation got swallowed as a path
