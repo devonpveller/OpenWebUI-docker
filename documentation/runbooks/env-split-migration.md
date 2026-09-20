@@ -204,9 +204,10 @@ for you here is making sure those two values EXIST in agent-org's own file befor
 the pool is next recreated.
 
 **How the set was measured** (kept because the reasoning, not the answer, is the
-reusable part). Of the names the pre-split root `.env.example` carried, 151
-reached those containers through the wildcard and were not overridden by the
-services' own `environment:` block (which sets ten: `LC_CONFIG`, `LC_ROUTE_EXEC`,
+reusable part). The pre-split root `.env.example` carried 157 assignments, 153
+unique names; exactly two of them were overridden by the services' own
+`environment:` block, so **151** reached those containers through the wildcard
+unopposed. The block sets ten: `LC_CONFIG`, `LC_ROUTE_EXEC`,
 `LC_OPEN_TERMINAL_URL`, `LC_OPEN_TERMINAL_KEY`, `OPEN_TERMINAL_API_KEY`,
 `LLAMACPP_API_KEY`, `LC_WORKSPACE`, `LITTLE_CODER_NO_CTX_PROBE`, `AO_BRIDGE_URL`,
 `AO_SUBJECT`). Intersecting those 151 with **every variable the image actually
