@@ -97,7 +97,7 @@ Each of those is a thin wrapper. `stack.ps1` has been a shim over
 `python scripts/stack/stack.py` since 2026-09-19, and the driver reads
 [`../stack.manifest.toml`](../stack.manifest.toml); `up search` resolves to
 `docker compose -f search/docker-compose.yml up -d` and nothing
-else - `python scripts\stack\stack.py up search --dry-run` prints that exact
+else - `python scripts/stack/stack.py up search --dry-run` prints that exact
 line without running it. `restart` maps to `docker compose restart`, which restarts the existing
 containers **without recreating them** - a changed `.env` value or compose
 setting needs an `up -d`, not a restart. `health` takes no plane argument, runs

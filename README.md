@@ -19,19 +19,24 @@ product menu below, pick one more thing, and turn it on.
 You need **Docker** and **Python 3.11 or newer** (the driver is standard-library
 only, so a fresh host needs nothing else).
 
-**The commands here are PowerShell**, because this stack is developed on
-Windows + Docker Desktop and every script in `scripts/` is a `.ps1`. Only the
-two `Copy-Item` lines below are shell-specific - `cp` does the same job - and
-`stack.py` is plain Python that runs anywhere Docker and Python do.
+**The commands here are written for PowerShell**, because this stack is
+developed on Windows + Docker Desktop. The driver itself is Python
+(`scripts/stack/stack.py`, standard library only) and runs anywhere Docker and
+Python do; what is PowerShell-only is the **lifecycle, recovery and check
+scripts** these READMEs point at - `portal-on.ps1`, `emergency-recovery.ps1`,
+`stack-watchdog.ps1` and the rest, which are `.ps1` and assume PowerShell 5.1.
+In the block below only the two `Copy-Item` lines are shell-specific - `cp`
+does the same job - because the two `python` lines are written with forward
+slashes, which both shells accept on Windows.
 
 ```powershell
 git config core.hooksPath .githooks       # pre-commit checks (.githooks/pre-commit)
 Copy-Item .env.example .env               # the anchor's own; nearly empty
-Copy-Item frontend\.env.example frontend\.env
+Copy-Item frontend/.env.example frontend/.env
 #   then set WEBUI_SECRET_KEY in frontend/.env - it is REQUIRED and encrypts
 #   values at rest in webui.db, so pin it once and never rotate casually
-python scripts\stack\stack.py init        # writes .stack/state.json: frontend, alone
-python scripts\stack\stack.py up          # the anchor's networks, then Open WebUI
+python scripts/stack/stack.py init        # writes .stack/state.json: frontend, alone
+python scripts/stack/stack.py up          # the anchor's networks, then Open WebUI
 ```
 
 Open WebUI is then on **http://127.0.0.1:3000**. That is two containers:
@@ -42,10 +47,10 @@ local build, no other plane - `frontend/.env.example` ships
 Check on it:
 
 ```powershell
-python scripts\stack\stack.py list        # planes, what is enabled, the products
-python scripts\stack\stack.py status      # docker compose ps per plane
-python scripts\stack\stack.py doctor      # docker, compose, env files, blank keys
-python scripts\stack\stack.py health      # 15 functional probes; exit code = failures
+python scripts/stack/stack.py list        # planes, what is enabled, the products
+python scripts/stack/stack.py status      # docker compose ps per plane
+python scripts/stack/stack.py doctor      # docker, compose, env files, blank keys
+python scripts/stack/stack.py health      # 15 functional probes; exit code = failures
 ```
 
 `init` refuses if a key a plane needs is missing or blank, and names the key
@@ -63,7 +68,7 @@ A **product** is a vertical slice: the planes it needs to run, the compose
 profiles it turns on, and the surfaces a person reads it through. All of it is
 declared in [`stack.manifest.toml`](stack.manifest.toml), which is the file of
 record - the table below is derived from it, and
-`python scripts\stack\stack.py list` prints the same set.
+`python scripts/stack/stack.py list` prints the same set.
 
 | `enable <product>` | Starts (planes, in order) | Profiles it turns on | Surfaces (`--headless` drops these) | Keys it will ask for | What the host must provide |
 |---|---|---|---|---|---|
@@ -103,11 +108,11 @@ Two more things that table is saying quietly and are worth saying out loud:
 ## Add one thing, after the first run
 
 ```powershell
-python scripts\stack\stack.py enable search       # a plane, or
-python scripts\stack\stack.py enable research     # a product
-python scripts\stack\stack.py enable open-brain --headless   # engines, no reading surface
-python scripts\stack\stack.py up                  # start what is now enabled, in order
-python scripts\stack\stack.py disable search      # take it back out
+python scripts/stack/stack.py enable search       # a plane, or
+python scripts/stack/stack.py enable research     # a product
+python scripts/stack/stack.py enable open-brain --headless   # engines, no reading surface
+python scripts/stack/stack.py up                  # start what is now enabled, in order
+python scripts/stack/stack.py disable search      # take it back out
 ```
 
 Before it writes anything, `enable` refuses in two ways, and both name the
@@ -178,11 +183,11 @@ gateway advertises. `/health/liveliness` is the one to probe.
 ## Health and recovery
 
 ```powershell
-python scripts\stack\stack.py status              # per-plane container states
-python scripts\stack\stack.py health              # 15 functional probes across every plane
-python scripts\stack\stack.py up|down [plane]     # dependency-ordered; --all for every plane
-python scripts\stack\stack.py restart <plane>     # one plane in place
-python scripts\stack\stack.py stats               # inference demand + queue statistics
+python scripts/stack/stack.py status              # per-plane container states
+python scripts/stack/stack.py health              # 15 functional probes across every plane
+python scripts/stack/stack.py up|down [plane]     # dependency-ordered; --all for every plane
+python scripts/stack/stack.py restart <plane>     # one plane in place
+python scripts/stack/stack.py stats               # inference demand + queue statistics
 ```
 
 `health` is read-only and its exit code is the NUMBER of failed probes. A

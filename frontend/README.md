@@ -142,11 +142,11 @@ in one env file is last-wins and silent, so keep exactly one.
 Then the driver:
 
 ```powershell
-python scripts\stack\stack.py init      # writes .stack/state.json enabling frontend alone
-python scripts\stack\stack.py up        # anchor, then frontend
-python scripts\stack\stack.py up frontend --dry-run   # print the docker line, run nothing
-python scripts\stack\stack.py status
-python scripts\stack\stack.py health    # 15 probes; exit code = failures
+python scripts/stack/stack.py init      # writes .stack/state.json enabling frontend alone
+python scripts/stack/stack.py up        # anchor, then frontend
+python scripts/stack/stack.py up frontend --dry-run   # print the docker line, run nothing
+python scripts/stack/stack.py status
+python scripts/stack/stack.py health    # 15 probes; exit code = failures
 ```
 
 `init` refuses while `WEBUI_SECRET_KEY` is missing or blank, naming the key and

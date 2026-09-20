@@ -158,9 +158,9 @@ exactly how a checker starts checking nothing. So, in the same commit:
 ## The one-command checks
 
 ```powershell
-python scripts\stack\stack.py health           # 15 functional probes, all planes; exit code = failures
-python scripts\stack\stack.py doctor           # docker, compose, env files, blank keys, host requirements
-python scripts\stack\stack.py inventory --check  # manifest vs sidecar vs compose renders; writes nothing
+python scripts/stack/stack.py health           # 15 functional probes, all planes; exit code = failures
+python scripts/stack/stack.py doctor           # docker, compose, env files, blank keys, host requirements
+python scripts/stack/stack.py inventory --check  # manifest vs sidecar vs compose renders; writes nothing
 powershell scripts\stack\ob1-deploy.ps1 -Service <svc> -WhatIfOnly   # what a build: deploy WOULD do
 powershell scripts\checks\check-backup-coverage.ps1   # every byte has a sidecar
 # pre-commit (.githooks/pre-commit) runs, in this order: staged secrets, line

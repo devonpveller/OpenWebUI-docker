@@ -121,9 +121,9 @@ Preferred - the workspace driver knows the plane order (`up`, `down`,
 loads `coder/.env` itself from the project directory.
 
 ```powershell
-python scripts\stack\stack.py up coder
-python scripts\stack\stack.py down coder
-python scripts\stack\stack.py up coder --dry-run   # print the docker line, run nothing
+python scripts/stack/stack.py up coder
+python scripts/stack/stack.py down coder
+python scripts/stack/stack.py up coder --dry-run   # print the docker line, run nothing
 ```
 
 `.\scripts\stack\stack.ps1 up coder` is a shim over the same driver.

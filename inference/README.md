@@ -154,11 +154,11 @@ models.
 Then the driver, which knows the plane order and starts the anchor first:
 
 ```powershell
-python scripts\stack\stack.py enable inference        # writes .stack/state.json
-python scripts\stack\stack.py up inference            # this plane only
-python scripts\stack\stack.py up                      # everything this machine enables
-python scripts\stack\stack.py up inference --dry-run  # print the docker line, run nothing
-python scripts\stack\stack.py health                  # 15 probes; exit code = failures
+python scripts/stack/stack.py enable inference        # writes .stack/state.json
+python scripts/stack/stack.py up inference            # this plane only
+python scripts/stack/stack.py up                      # everything this machine enables
+python scripts/stack/stack.py up inference --dry-run  # print the docker line, run nothing
+python scripts/stack/stack.py health                  # 15 probes; exit code = failures
 ```
 
 `enable inference` refuses while `anchor` is off and while either key above is

@@ -27,6 +27,18 @@ git -C "<worktree>" show work/sl-readmes:<path>
 Every `<worktree>` below is a checkout of `work/sl-readmes`. Your own harness
 worktree is fine; you do **not** need the developer's.
 
+**Which shell YOU are in matters, and this plan does not assume one.** The
+artifact's commands are written for PowerShell; the commands in THIS PLAN are a
+mix - `git`, `grep`, `docker`, `python` and the `for` loops are written for a
+POSIX shell (Git Bash on this host), while anything invoking a `.ps1` is
+PowerShell. Each block says which. Where a case asks you to run something out
+of the artifact, **run it in the shell the artifact says it is written for**,
+or make the substitution the artifact itself names - never a substitution of
+your own, silently, because then you are testing your paraphrase rather than
+the document. Attempt 2 failed on exactly this axis: a paragraph claiming the
+quickstart was POSIX-runnable "bar two lines" was false because four of its
+five lines used backslash paths, and only running it in Git Bash showed that.
+
 **Never print a `.env` value.** `docker compose config` interpolates secrets in
 plaintext - `grep` the section you need, or use `config --services` /
 `config -q`, both of which are used below and neither of which prints values.
@@ -711,6 +723,73 @@ own.
 
 **FAILS if** any of the four is missing, or if a sink entry states a conclusion
 its own labelled provenance does not support.
+
+---
+
+## T10 - every sentence a FIX ROUND introduced, checked as a new claim
+
+**Why this case exists.** T1-T9 were written against attempt 1's artifact. Each
+fix round then adds sentences that no case was written for, and **twice now the
+new sentence has been the only failure**: attempt 2 failed solely on a
+paragraph added during the attempt-1 fix round, which did not exist when the
+plan was written. A fix is not a smaller change than the original; it is an
+unreviewed one.
+
+**Method.** Diff the attempt you are testing against the previous one, read
+every ADDED line as a fresh claim, and check it the way T2 checks the rest -
+against the file it describes, not against the sentence next to it.
+
+```bash
+git -C "<worktree>" log --oneline development..work/sl-readmes
+# then, for the most recent fix round:
+git -C "<worktree>" diff <previous attempt sha>..work/sl-readmes -- '*.md'
+```
+
+Attempt shas are on the queue item (`queue.ps1 -Show -Id sl-readmes`):
+attempt 1 `6e45f65`, attempt 2 `75b4984`.
+
+**The sentences THIS round introduced, listed so you do not have to find them**
+(the list is the developer's; treat it as a starting point, and the diff above
+as the authority - a sentence missing from this list is itself a finding):
+
+| Where | The new claim | What settles it |
+|---|---|---|
+| `README.md` quickstart | "The commands here are written for PowerShell" | the block is `Copy-Item` + `.ps1` idiom |
+| `README.md` quickstart | the driver is Python and "runs anywhere Docker and Python do" | `head -1 scripts/stack/stack.py`; the module imports only stdlib (`scripts/stack/test_stack.py` pins this) |
+| `README.md` quickstart | "what is PowerShell-only is the lifecycle, recovery and check scripts these READMEs point at - `portal-on.ps1`, `emergency-recovery.ps1`, `stack-watchdog.ps1`" | those three are `.ps1`; **and check the generalisation is not overreaching** - `git ls-files 'scripts/**' \| grep -c '\.py$'` vs `'\.ps1$'` gives **117 Python and 89 PowerShell**, so "every script in `scripts/` is a `.ps1`" (attempt 2's wording) was false and its replacement must not imply it |
+| `README.md` quickstart | "only the two `Copy-Item` lines are shell-specific ... the two `python` lines are written with forward slashes, which both shells accept on Windows" | **run the block** - see the sub-case below |
+| `README.md` product table | "Reading the keys column" - the union-of-planes convention | T4 |
+| `portal/README.md` | the hardening table's exceptions column and "must come to twelve" | T2 |
+| `frontend/README.md` | the `openwebui` / `tailscale` catalog keys, "keyed by what you restore, not by the plane" | `grep -nE "^  '[a-z0-9_-]+' = @\{" scripts/backup/restore-from-snapshot.ps1` |
+| `inference/README.md` | "this plane's one key is `lm-models`"; "the LiteLLM ledger has no orchestrated entry" | the same grep - expect no `llm-gateway` key |
+| `SERVICE-LIFECYCLE.md` row 8a | "Profiled planes today, FIVE" incl. `frontend` | `stack.manifest.toml` - count the `[planes.*.profiles.*]` tables |
+| `CLAUDE.md` OB1 row | "29 bare and 30 with `idea-refinery`, both against pin 5005197" | the two renders plus `git ls-tree HEAD OB1` |
+| the sink | the port-count row: 6 distinct host ports / 7 `ports:` entries / 8 grep lines | the grep in that row, run as written |
+| the sink | §5c's "the first correction repeated the defect" paragraph | it is self-describing; check the numbers it states are 9/2/1 |
+
+**Sub-case: run the quickstart block in a POSIX shell.** The artifact claims
+only the `Copy-Item` lines need substituting. Prove or refute it - in a
+**scratch clone** (T5's, or a fresh one), never the live checkout:
+
+```bash
+cd <scratch clone>
+git config core.hooksPath .githooks
+cp .env.example .env
+cp frontend/.env.example frontend/.env
+python scripts/stack/stack.py init
+python scripts/stack/stack.py up --dry-run    # --dry-run, NOT `up` - see T5 on the anchor line
+```
+
+**Expect** every line to exit 0, `init` to write `.stack/state.json`, and the
+dry-run to print the two `docker compose` lines. **FAILS if** any line needs a
+change beyond `Copy-Item` to `cp` - a backslash path, for instance, which
+Git Bash silently strips (`python scripts\stack\stack.py list` fails with
+`can't open file '...scriptsstackstack.py'`). That is the exact defect this
+sub-case exists to catch, and it shipped once.
+
+**FAILS if** any sentence added by a fix round is false, or if the diff
+contains an added claim this list does not account for and no other case
+checks.
 
 ---
 
