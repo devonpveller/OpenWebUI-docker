@@ -87,9 +87,18 @@ networks and starts nothing), or `python scripts/stack/stack.py up anchor`.
 
 ### Networks
 
-Only the first three are the ANCHOR's. The rest are listed here because they are
-the workspace's whole network surface, but each is **native to the plane project
-named in its row** and is created and destroyed with that project.
+**The ANCHOR owns exactly three** - `llm-net`, `app-net` and `default`
+(`docker-compose.yml`'s `networks:` block, and nothing else in that file). They
+are rows 1, 7 and 10 below, not the first three: the table is grouped by subject
+rather than by owner. Every other row is **native to the plane project named in
+its row** and is created and destroyed with that project.
+
+**This is not every network in the workspace.** The agent-org project declares
+three more of its own - `ao-net`, `ao-worker-net` and `ao-cloud-egress-net` -
+listed in section 3 rather than here, and OB1 owns `obnet` plus a project
+`default` (section 2). The rule for reading any row: a network with an owner
+named **anchor** exists once for the whole workspace; anything else is
+`<project>_<name>` and dies with its project.
 
 | Network      | Type / owner    | Purpose |
 |--------------|-----------------|---------|
@@ -103,7 +112,7 @@ named in its row** and is created and destroyed with that project.
 | `edge-net`   | bridge; **portal project** | portal ingress: cloudflared ↔ caddy |
 | `notify-net` | bridge; **portal project** | portal egress chokepoint (portal-alerter → Gmail; portal-cron) - the plane's ONLY internet egress |
 | `default`    | bridge; **anchor** (`ai-stack_default`) | host-reachable / internet egress; the cross-project DNS seam for search's `vpn` + `gateway` |
-| `obnet`      | external (`open-brain_obnet`) | so `open_notebook` (IKS) can reach OB1's Postgres |
+| `obnet`      | bridge; **open-brain project** (`open-brain_obnet`) | OB1's internal plane. Listed here because it used to be attached `external: true` by the aux trio in the root project; since K.5b that trio lives IN open-brain and reaches `openbrain-db` on obnet natively, so no anchor-project service attaches to it - the anchor has none |
 
 ### Planes & containers
 
@@ -123,7 +132,9 @@ Re-read from `portal/docker-compose.yml` 2026-09-19: **only two of the twelve
 carry a `profiles:` key.** A bare `docker compose -f portal/docker-compose.yml
 up -d` starts ten of them with no tunnel - which is why the documented path is
 `portal-on.ps1`, not a bare `up`. (Render: 10 services without a profile, 12
-with `--profile internet`.)
+with `--profile internet`.) **The table below is TEN of the twelve** - the two
+backup sidecars, `caddy-backup` and `authelia-backup`, are rows in the Backups
+table above, not here.
 
 | Container | Role | Networks | Profile |
 |-----------|------|----------|---------|
@@ -158,7 +169,8 @@ carries that project's prefix:
 | `search` | none, deliberately (redis is in-memory) |
 | `coder` | `little-coder-journals`, `-skill`, `-cohorts`, `-polyglot`, `-sessions`, `-workspace` |
 | `portal` | `caddy-data`, `caddy-config`, `authelia-data`, `tripwire-data` |
-| `open-brain` | `openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets` |
+| `open-brain` | `openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets`, `wiki-viewer-srv` (the viewer's published `/srv` snapshots - derived and rebuildable, kept so a recreate never shows the "Building..." splash) |
+| `agent-org` | **fifteen**: `mattermost-db-data`, `mattermost-data`, `mattermost-config`, `mattermost-logs`, `mattermost-plugins`, `mattermost-client-plugins`, `agent-bridge-db-data`, `ao-worker-{1,2}-workspace`, `-sessions`, `-journals`, `ao-egress-config`, `llm-gateway-cloud-db-data`. Only the two `*-journals` are backed up - see section 3 |
 
 The pre-split `ai-stack_*` copies still exist on the daemon (data was copied,
 not moved, at the 2026-08-21 cutover) and deleting them is the operator's call.
@@ -290,7 +302,7 @@ this project owns.
 |-----------|------|-----------|----------|-----|
 | `llm-gateway` | **LiteLLM analytics front door** (holds the `llama-cpp` + `llama-cpp-embed` network aliases on :8080; all callers reach inference through it). Routes `/v1/*` by model name; **both chat AND embed** forward to **`llm-queue`** (api_base, since B2/P4); `num_retries:3` (a queue 429 → retry → hold-and-dispatch); read-only `/observe/*` pass-through to `llm-queue` for the live board; master_key + per-caller virtual keys since J.1 2026-08-21 (x-ai-stack-caller lane header) — per-caller spend ledger; `background_health_checks:false` (a model health-probe forces a llama-swap load → thrash) | — (internal-only; admin/ledger via `docker exec`, not host :4000 — `llm-net` is `internal:true` so host publish is inert) | llm-net, llm-backend-net (sole bridge) | no |
 | `llm-queue` **[profile `local`]** | **B2 front-ended inference admission controller** (`inference/llm-queue/` — the source tree moved INTO the plane at sl-colo-inference 2026-09-19, design `DESIGN-B2-inference-queue.md`). Sits between LiteLLM and the `*-upstream` servers (chat + embed): holds-and-dispatches (release-on-completion semaphore, priority heap w/ per-key caps, rolling-T wait estimate, per-model depth backstop — chat 24, embed 256) instead of llama-swap dropping overflow with a flat `429`. Replaces the bare `Too many requests` with a structured 429 + `Retry-After`; `enforce_budget:true` (per-service wait budgets §8b). Read-only state reachable from `llm-net` via the gateway's `/observe/*` pass-through; the **mutating** control API (`POST /queue/{id}/priority`/`cancel`, `/keys/{key}/policy`) is operator-only (`docker exec`, never `llm-net`). Analytics events → own SQLite (`llm-queue-data` volume). Tuning invariant: `LLM_QUEUE_SLOTS` == llama-swap `--parallel` (3) and llama-swap `concurrencyLimit: 0` | — (internal-only) | llm-backend-net | no |
-| `llm-gateway-ui` | **LiteLLM Admin-UI sidecar** (analytics dashboard at `/ui`, added 2026-06-14). A SECOND LiteLLM instance run **with** a `master_key` (`inference/config/litellm.ui.config.yaml` + `.env` `LITELLM_UI_*`) — which LiteLLM 1.88.1 requires for the UI to log in. Serves **no inference** (carries NO `llama-cpp` alias, no caller points at it), shares `llm-gateway-db` so the dashboard reads the SAME spend ledger `llm-gateway` writes. The master_key is isolated here so the permissive main gateway + its junk-key callers stay untouched. Reached only via the tailnet **:8445** serve route (`frontend/entrypoint.sh`) | — (internal-only; tailnet :8445/ui) | llm-net | no |
+| `llm-gateway-ui` | **LiteLLM Admin-UI sidecar** (analytics dashboard at `/ui`, added 2026-06-14). A SECOND LiteLLM instance run **with** a `master_key` (`inference/config/litellm.ui.config.yaml` + `.env` `LITELLM_UI_*`) — which LiteLLM 1.88.1 requires for the UI to log in. Serves **no inference** (carries NO `llama-cpp` alias, no caller points at it), shares `llm-gateway-db` so the dashboard reads the SAME spend ledger `llm-gateway` writes. The master_key is isolated here so the permissive main gateway + its junk-key callers stay untouched. Reached via the tailnet **:8445** serve route (`frontend/entrypoint.sh`) and by the portal Caddy, which is why it also joins `app-net` | — (internal-only; tailnet :8445/ui) | llm-net, app-net | no |
 | `llm-gateway-db` | Postgres for the LiteLLM spend-log ledger (`llm-gateway-db-data` volume) — shared by `llm-gateway` (writes) and `llm-gateway-ui` (reads) | — | llm-net | no |
 | `llama-cpp-upstream` **[profile `local`]** | llama-swap inference (was `llama-cpp`) — `qwen36-27b` (∥2); 35B is in llama-swap config but **not registered in the gateway**; one model resident at a time; `--no-mmap` (mmap over the C: bind mount hangs) | 127.0.0.1:8081 | llm-backend-net (isolated) | yes (device 0) |
 | `llama-cpp-embed-upstream` **[profile `local`]** | bge-m3 embeddings server (was `llama-cpp-embed`) | 127.0.0.1:8082 | llm-backend-net (isolated) | yes (device 1) |
@@ -312,8 +324,8 @@ this project owns.
 | Container | Role | Host port | Networks |
 |-----------|------|-----------|----------|
 | `mnemory` | Unified memory layer (mgmt :8051) | — (internal only) | llm-net |
-| `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default |
-| `mnemory-backup` | nightly tar of mnemory-data (output still `./backups/mnemory`) | — | default |
+| `mnemory-cloud-gateway` | Privacy-enforcing MCP proxy for cloud clients | 127.0.0.1:8060 | llm-net, default (project-local `memory_default`) |
+| `mnemory-backup` | nightly tar of mnemory-data (output still `./backups/mnemory`) | — | default (project-local) |
 
 ---
 
@@ -348,7 +360,7 @@ this project owns.
 | `open-terminal` | Workspace plane — executes agent commands (egress via `lc-egress`) | — | lc-net, llm-net |
 | `little-coder` | Control daemon — decides (daemon :8090) | 127.0.0.1:9091 (metrics) | lc-net, llm-net |
 | `lc-egress` | Egress allowlist proxy (git host only) | — | lc-net, default (project-local) |
-| `little-coder-backup` | nightly tar of the expertise volumes (output still `./backups/little-coder`) | — | — |
+| `little-coder-backup` | nightly tar of the expertise volumes (output still `./backups/little-coder`) | — | default (project-local `coder_default`; it declares no `networks:` key, so compose attaches the project default) |
 
 ## 2. Open Brain — compose project `open-brain` (SEPARATE)
 
@@ -428,7 +440,8 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `obnet`   | bridge                       | OB1 internal + host-published ports |
 | `llm-net` | external (`ai-stack_llm-net`)| reach llama-cpp / llama-cpp-embed |
 | `app-net` | external (`ai-stack_app-net`)| wiki-viewer / workbench reachable by the portal Caddy |
-| `search-gw-net` | external (`ai-stack_default`) | research/grounding/podcast reach the private SearXNG `gateway` + `tor` |
+| `search-gw-net` | external (`ai-stack_default`) | research/grounding/podcast reach the private SearXNG `gateway` and the Mullvad egress proxy `vpn:8888`. **Not tor** - that was retired 2026-08-21 and every `FETCH_PROXY_URL` in this project defaults to `http://vpn:8888` |
+| `default` | bridge (`open-brain_default`) | the project's own default, which `surrealdb`, `open_notebook`, `open-notebook-backup` and `openbrain-wiki-backup` sit on |
 
 ### Containers
 | Container | Role | Host port | Networks |
@@ -447,7 +460,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-curator` **[profile `research`]** | Research-package ingestion inlet (`POST /ingest/research-package`); resolves deep-research onto the best existing thread (pgvector shortlist + LLM decision), delegates the write to openbrain-mcp `/research/persist`, writes grounded claim→source edges (Research Engine P2); deno-postgres + llama-cpp + llama-cpp-embed | 127.0.0.1:8816 | obnet, llm-net |
 | `openbrain-research` **[profile `research`]** | Shared research harness (Research Engine P3/P4; `POST /research` → job_id, `GET /research/jobs/:id[/stream]`); reuses grounded claims → gap analysis → stages gaps (SearXNG + per-page fetch) → synthesizes verbatim with `[Source N]` citations → enforces grounding (honest `[GAP]`s, never fabricates) → delegates placement+claims to openbrain-curator; deno-postgres + llama-cpp + llama-cpp-embed + SearXNG gateway | 127.0.0.1:8818 | obnet, llm-net, search-gw-net (=ai-stack_default, to reach the private `gateway`) |
 | `openbrain-chunk-worker` | Writer-agnostic chunk-embedding worker (Integrated Knowledge System); chunks any OB1 source into `source_chunks` (1200/150 + bge-m3) so passage-level vector retrieval works for every frontend, incl. Open Notebook "ask your knowledge base"; periodic scan + `POST /chunks`; deno-postgres + llama-cpp-embed | 127.0.0.1:8817 | obnet, llm-net |
-| `openbrain-grounding-backfiller` | S2 brain-health worker. (1) Drains `ungrounded_claims` — per claim extracts its entity (local `:nothink` LLM) → fetches the Wikipedia page (Tor) → `find_or_create_source` + `link_claim_to_source 'corroborates'` so confidence recomputes and the claim leaves the view; `POST /backfill?limit=N {thread_ids?}`. (2) Heals thin/failed web **sources** whose ingestion truncated them (~150-char stubs) — `POST /refetch?limit=N` re-fetches (Tor-first, direct fallback), updates content (chunk-worker re-embeds), 3-attempt cap then `refetch_failed`. Cron: backfill 07:00 UTC, refetch 07:30 UTC. deno-postgres | 127.0.0.1:8819 | obnet, llm-net, search-gw-net (Tor) |
+| `openbrain-grounding-backfiller` | S2 brain-health worker. (1) Drains `ungrounded_claims` — per claim extracts its entity (local `:nothink` LLM) → fetches the Wikipedia page (through the Mullvad `vpn` proxy) → `find_or_create_source` + `link_claim_to_source 'corroborates'` so confidence recomputes and the claim leaves the view; `POST /backfill?limit=N {thread_ids?}`. (2) Heals thin/failed web **sources** whose ingestion truncated them (~150-char stubs) — `POST /refetch?limit=N` re-fetches (proxy-first, direct fallback), updates content (chunk-worker re-embeds), 3-attempt cap then `refetch_failed`. Cron: backfill 07:00 UTC, refetch 07:30 UTC. deno-postgres | 127.0.0.1:8819 | obnet, llm-net, search-gw-net (the `vpn` proxy) |
 | `openbrain-wiki` **[profile `wiki`]** | Wiki compiler + scheduler | 127.0.0.1:8811 | obnet, llm-net |
 | `openbrain-wiki-viewer` **[profile `wiki`]** | Quartz 4 read-only wiki viewer (also tailnet HTTPS `:8444` + Caddy `wiki.${PUBLIC_DOMAIN}`) | 127.0.0.1:8812 | obnet, app-net |
 | `openbrain-workbench` **[profile `wiki`]** | Deno+Hono read/write API behind the viewer (`/workbench/*` via portal Caddy `handle`, X-Brain-Key injected); deno-postgres writes + PostgREST reads | 127.0.0.1:8814 (debug only) | obnet, llm-net, app-net |
@@ -455,11 +468,11 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 | `openbrain-cron` | supercronic + curl; fires HTTP-trigger chain (no docker.sock) | — (internal only) | obnet |
 | `openbrain-gmail-pull` | HTTP-triggered Gmail ingest; chains to prune on success | — (internal only) | obnet, llm-net |
 | `openbrain-gmail-prune` | HTTP-triggered short-term prune; chains to digest + wiki recompile | — (internal only) | obnet, llm-net |
-| `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send; chains to podcast after delivery | — (internal only) | obnet |
-| `openbrain-podcast` | HTTP-triggered chain tail (digest → podcast); spawns the link-enrich pipeline — follow newsletter links (Tor) → grounded research via openbrain-research (article mode) → two-host script → Open Notebook audio → loop-close (episode source linked to the day's threads); best-effort, never blocks the email | — (internal only) | obnet, llm-net, search-gw-net (=ai-stack_default, Tor) |
+| `openbrain-digest` | HTTP-triggered daily digest; mechanical formatting, Gmail send; chains to podcast after delivery | — (internal only) | obnet, llm-net |
+| `openbrain-podcast` | HTTP-triggered chain tail (digest → podcast); spawns the link-enrich pipeline — follow newsletter links (through the `vpn` proxy) → grounded research via openbrain-research (article mode) → two-host script → Open Notebook audio → loop-close (episode source linked to the day's threads); best-effort, never blocks the email | — (internal only) | obnet, llm-net, search-gw-net (=ai-stack_default; the `vpn` proxy) |
 | `openbrain-idea-refinery` | **Idea Refinery drain** (IR.1–IR.5/IR.7): `POST /run` walks the owed-idea queue (`ideas`/`idea_revisions`, init-ideas.sql), researches each via openbrain-research (bounded submit-on-complete + rollover), posts the gap-centered dossier to Mattermost `#ideas` (via `host.docker.internal:8065`), ages to dormant + resurfaces. Stand-alone cron `03:00 UTC` (before the 05:00-UTC gmail/wiki chain → new claims feed the 1am-local wiki compile). **PROFILE-GATED (`idea-refinery`)** — NOT started by a plain `up`. deno-postgres | — (internal only) | obnet, llm-net |
 | `openbrain-db-backup` | Nightly `pg_dump` of `openbrain-db` (moved from ai-stack 2026-08-21 — OB1 owns its backups; output still lands in `ai-stack/backups/openbrain-db` for the NAS mirror + freshness watchers) | — | obnet |
-| `openbrain-wiki-backup` **[profile `wiki`]** | Daily tar of `openbrain-wiki-data` + `wiki-assets` (moved from ai-stack 2026-08-21; output still `ai-stack/backups/openbrain-wiki`) | — | — |
+| `openbrain-wiki-backup` **[profile `wiki`]** | Daily tar of `openbrain-wiki-data` + `wiki-assets` (moved from ai-stack 2026-08-21; output still `ai-stack/backups/openbrain-wiki`) | — | default (project-local `open-brain_default`; it declares no `networks:` key) |
 
 **Scheduled-job slice:** the five always-on services (`openbrain-cron` + the
 four HTTP-triggered jobs) — plus the **profile-gated `openbrain-idea-refinery`**
@@ -483,10 +496,13 @@ entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
 `openbrain-ext` directly on internal networks and are unaffected.
 
 ### Volumes
-`openbrain-db-data`, `openbrain-wiki-data`, `wiki-assets` (binary assets —
-images now, audio later — written by `openbrain-workbench`, served read-only by
-`openbrain-wiki-viewer`; deliberately NOT mounted into `openbrain-wiki` so
-binaries never enter the vault git history).
+**Four**, at the pinned gitlink `5005197`: `openbrain-db-data`,
+`openbrain-wiki-data`, `wiki-assets` (binary assets — images now, audio later —
+written by `openbrain-workbench`, served read-only by `openbrain-wiki-viewer`;
+deliberately NOT mounted into `openbrain-wiki` so binaries never enter the vault
+git history) and `wiki-viewer-srv` (the viewer's published `/srv` snapshots,
+persisted across recreates so a deploy never shows the "Building…" splash;
+derived and rebuildable, so it is NOT backed up).
 
 ---
 
@@ -538,7 +554,7 @@ File: `agent-org/docker/docker-compose.yml`. Run with:
 | `agent-bridge-db` | Postgres — the bridge's fail-safe state store (gate/effort/parked-effort/project/scope/audit) | — | ao-net | default |
 | `agent-bridge-db-backup` | Nightly `pg_dump` of `agent-bridge-db` (governance/effort/project state) → repo-root `./backups/agent-bridge-db/` (generic `backup/pg-backup.sh`) | — | ao-net | default |
 | `mattermost-db-backup` | Nightly `pg_dump` of `mattermost-db` (conversation content) → `./backups/mattermost-db/` | — | ao-net | default |
-| `ao-worker-1-journals-backup` / `ao-worker-2-journals-backup` | Nightly tar of each worker's append-only task journals → `./backups/ao-worker-{1,2}-journals/` (generic `backup/generic-tar-backup.sh`). One sidecar per volume so each archive restores 1:1; profile-gated with the workers | — | none (volume-only) | workers |
+| `ao-worker-1-journals-backup` / `ao-worker-2-journals-backup` | Nightly tar of each worker's append-only task journals → `./backups/ao-worker-{1,2}-journals/` (generic `backup/generic-tar-backup.sh`). One sidecar per volume so each archive restores 1:1; profile-gated with the workers | — | default (project-local `agent-org_default`; they declare no `networks:` key, so compose attaches the project default - the volume is their only SOURCE, but the render gives them a network) | workers |
 | `ao-worker-1` / `ao-worker-2` | Pooled `little-coder` control daemons (reuse `little-coder:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-ot-1` / `ao-ot-2` | Per-worker `open-terminal` workspace planes (reuse `little-coder-open-terminal:local`) | — | ao-worker-net, llm-net | workers |
 | `ao-git-egress` | Shared git-allowlist egress for the worker pool (mirrors `lc-egress`); allowlist is the **bridge-written** `ao-egress-config` file, reloaded on change (custom `docker/egress/tinyproxy.conf` + `egress-reload.sh` command override) so the org can work on any onboarded repo | — | ao-worker-net, default | workers |
@@ -603,8 +619,17 @@ relative order.
 Plane by plane (start in this order; `down` reverses it):
 
 1. **anchor** (`docker compose up -d` at the root) — creates
-    `ai-stack_llm-net` / `app-net` / `default` and starts nothing. Every other
-    plane declares those `external: true`, so without this they fail to render.
+    `ai-stack_llm-net` / `app-net` / `default` and starts nothing. A plane that
+    USES one of those fails to render without it (`network ai-stack_llm-net
+    declared as external, but could not be found`) - which is inference, memory,
+    search, coder, portal, ob1, agent-org, and the frontend's `gpu` profile.
+    **Two exceptions, both deliberate:** the frontend's `stock` profile declares
+    the three externals but uses only its project-local `owui-net`, and compose
+    does not require an UNUSED external network to exist - which is what lets a
+    fresh clone come up with no anchor at all; and `memory`, `coder`,
+    `portal`, `agent-org` and `open-brain` each declare their OWN project-local
+    `default` bridge, so "default" in one of their rows is `<project>_default`,
+    not the anchor's.
 2. **inference** (`docker compose -f inference/docker-compose.yml up -d`) — its
     internal `depends_on` runs the upstreams → `llm-queue` → `llm-gateway-db`
     → `llm-gateway` (+ ui/backups); one command, ordered and health-gated. Every
@@ -616,11 +641,24 @@ Plane by plane (start in this order; `down` reverses it):
     waiting on `mnemory`.
 5. **search** — `vpn` and `redis` in parallel → `searxng` → `gateway`.
 6. **coder** — `open-terminal` → `little-coder`; `lc-egress` waits on nothing.
-7. **Backup sidecars** generally — each starts after its target is healthy and
-    idles otherwise (`mnemory-backup`, `openwebui-backup`, `tailscale-backup`,
-    `little-coder-backup`, `lm-models-backup`, `llm-gateway-backup`; the
-    openbrain-db / wiki / open-notebook backups belong to the OB1 project and
-    come up with it).
+7. **Backup sidecars** — and they do NOT all wait. Read from the service
+    definitions, the six in-repo sidecars split three and three:
+
+    | Waits on `depends_on: service_healthy` | Starts immediately |
+    |---|---|
+    | `openwebui-backup` (both openwebui definitions, `required: false`) | `tailscale-backup` |
+    | `llm-gateway-backup` (`llm-gateway-db`) | `lm-models-backup` |
+    | `mnemory-backup` (`mnemory`) | `little-coder-backup` |
+
+    The three on the right carry **no `depends_on` at all**; what they have
+    instead is a RUNTIME precheck inside the loop. `lm-models-backup` probes
+    `HEALTH_TCP=llama-cpp-upstream:8080` before each tar; `tailscale-backup`
+    sets `HEALTH_TCP=` empty on purpose (a non-empty directory is its only
+    precheck); `little-coder-backup` sets no `HEALTH_TCP` key at all. **A
+    precheck that fails is a SKIP, and a skip is exit 0** - which is why backup
+    freshness is watched by `stack-watchdog.ps1` against the artifact's age and
+    never by a sidecar's exit code. The openbrain-db / wiki / open-notebook
+    backups belong to the OB1 project and come up with it.
 8. **OB1** (`docker compose -f OB1/docker/docker-compose.yml up -d`) — after
     `llm-gateway` is healthy. It also `requires` search: `openbrain-research`
     and the grounding backfiller reach `gateway` and `vpn` by name.

@@ -187,11 +187,24 @@ python scripts/stack/stack.py status              # per-plane container states
 python scripts/stack/stack.py health              # 15 functional probes across every plane
 python scripts/stack/stack.py up|down [plane]     # dependency-ordered; --all for every plane
 python scripts/stack/stack.py restart <plane>     # one plane in place
-python scripts/stack/stack.py stats               # inference demand + queue statistics
+python scripts/stack/stack.py stats               # inference demand + queue statistics (WINDOWS ONLY)
 ```
 
 `health` is read-only and its exit code is the NUMBER of failed probes. A
 failing probe never stops the sweep.
+
+**`stats` is the driver's one Windows-gated verb.** It delegates to
+`scripts/stack/stack-stats.ps1`, which reads the llm-queue `/observe` board and
+the LiteLLM spend ledger through `docker exec ... psql` and is PowerShell 5.1
+only. Off Windows it does not degrade - it REFUSES, and names the two ways out:
+
+> refused: `stats` reads the LiteLLM ledger through scripts/stack/stack-stats.ps1,
+> which is PowerShell 5.1 only and is not ported. Run it on the Windows host
+> (`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stack/stack-stats.ps1`),
+> or read the queue board directly at llm-queue's `/observe/queue`.
+
+Every other verb is platform-neutral. A verb that silently printed nothing and
+exited 0 is the failure class this repo hunts, which is why this one is loud.
 
 Manual recovery, escalating:
 
