@@ -341,10 +341,22 @@ EOF
 ```
 
 Expect: `ruff=0`; `inventory=0`; `configs=0`; attestation 0 with every commit
-attested; no `CR:` lines; `no BOM | non-ascii bytes: 0`.
+attested (5 commits, one gating hook file); no `CR:` lines;
+`no BOM | non-ascii bytes: 0`. Note the .ps1 blob in git is LF - `.gitattributes`
+says `*.ps1 text eol=crlf`, i.e. CRLF in the working tree, LF in the object - so
+do NOT run the CR sweep over the .ps1 (the loop above skips it).
 
-If `inventory` is non-zero, re-run it at `bdcc7f1` and compare byte for byte
-before calling it a defect of this item.
+**Both `inventory --check` and `check-project-configs.ps1` need a root `.env` to
+exist in the clone** - without one the anchor project cannot be rendered and the
+`projects.ai-stack` row comes out as a FAIL that has nothing to do with this
+item. So run T9 in a clone where you have done `cp .env.example .env`, which
+means NOT the T1 clone (T1 requires the root file to be absent) - either make a
+third clone or run T9 after T1/T2, once `/d/t/br/.env` exists. Measured: with the
+root file present, both gates exit 0 at the tip and `inventory --check`'s output
+is byte-identical to `bdcc7f1`'s; without it, both exit 1 on that one row.
+
+If `inventory` is non-zero anyway, re-run it at `bdcc7f1` under the SAME seeding
+and compare byte for byte before calling it a defect of this item.
 
 Disproves it: any non-zero; a CR in a non-`.ps1` blob; a BOM or any non-ASCII
 byte in the check script.

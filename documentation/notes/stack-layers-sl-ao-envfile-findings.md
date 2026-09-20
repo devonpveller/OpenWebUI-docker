@@ -265,6 +265,15 @@ scanning every YAML in the tree.
   bring-up. That is why the plane's env contract was easy to lose track of. It
   has one now.
 
+* **`inventory --check` and `check-project-configs.ps1` fail in a clone with no
+  root `.env`**, on the `projects.ai-stack` row: the anchor project cannot be
+  rendered, so the generated row says `file: docker-compose.yml` where the
+  committed row says `file: null`. Nothing to do with this item - measured at
+  `bdcc7f1` and at the tip, both exit 1 without the file and 0 with it, and with
+  it the tip's output is byte-identical to the base's. Worth knowing because the
+  clone this item's T1 needs is precisely one with NO root `.env`, so the two
+  cases cannot share a clone.
+
 * **A recreate is still owed.** `ao-worker-1` and `ao-worker-2` are running with
   the environment they started with, which still includes the pre-trim root
   `.env`. Nothing in this item touches a container. The recreate
