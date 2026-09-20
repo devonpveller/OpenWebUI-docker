@@ -215,41 +215,129 @@ that no read supports; any live-root name the source reads.
 
 ---
 
-## T6 — the check refuses a planted grant, and had no exemption naming the workers
+## T6 — the check refuses a grant in EVERY value shape compose accepts, and carries no exemption
 
-Criterion: acceptance #3.
+Criterion: acceptance #3. **Attempt 1 failed here**: two valid shapes rendered by
+docker as real grants passed the check green. So this case is now a shape MATRIX,
+and a pass requires every row.
+
+### T6a — the matrix
+
+Plant one shape at a time, stage it, run the check in staged mode, restore.
+**Anchor the plant on the service HEADING at column 2 with a regex** — `"  ao-ot-1:\n"`
+occurs TWICE in agent-org's compose file (the second is the six-space `depends_on`
+entry), so a `count(...)==1` assert aborts and dropping the assert plants the block
+inside `depends_on`, where it is not an `env_file` at all. Attempt 1's plan had that
+bug; this is the fixed driver:
+
+```bash
+cd /d/t/br && git config core.hooksPath .githooks
+cat > /d/t/shapes.py <<'PYEOF'
+import io, os, re, subprocess, sys
+ROOT, REL, SERVICE = sys.argv[1], sys.argv[2], sys.argv[3]
+PS = os.path.join(ROOT, 'scripts', 'checks', 'check-env-file-scope.ps1')
+TARGET = os.path.join(ROOT, *REL.split('/'))
+SHAPES = [
+ ('scalar',                '    env_file: ../../.env\n', True),
+ ('scalar-quoted',         '    env_file: "../../.env"\n', True),
+ ('scalar-comment',        '    env_file: ../../.env  # shared\n', True),
+ ('flow-seq',              '    env_file: [../../.env]\n', True),
+ ('flow-seq-quoted',       '    env_file: ["../../.env"]\n', True),
+ ('flow-seq-two-one-bad',  '    env_file: [.env, ../../.env]\n', True),
+ ('flow-seq-unterminated', '    env_file: [../../.env\n', True),
+ ('block-item',            '    env_file:\n      - ../../.env\n', True),
+ ('block-item-quoted-cmt', '    env_file:\n      - "../../.env" # shared\n', True),
+ ('block-item-dotslash',   '    env_file:\n      - ./../../.env\n', True),
+ ('longform-path',         '    env_file:\n      - path: ../../.env\n        required: false\n', True),
+ ('longform-path-quoted',  '    env_file:\n      - path: "../../.env"\n        required: true\n', True),
+ ('longform-required-1st', '    env_file:\n      - required: false\n        path: ../../.env\n', True),
+ ('longform-flow-map',     '    env_file:\n      - {path: ../../.env, required: false}\n', True),
+ ('deeper-root',           '    env_file:\n      - ../../../.env\n', True),
+ ('absolute',              '    env_file:\n      - D:/x/.env\n', True),
+ ('root-envtest',          '    env_file:\n      - ../../.env.test\n', True),
+ ('cross-plane',           '    env_file:\n      - ../../coder/.env\n', True),
+ ('interpolated',          '    env_file:\n      - ${SOME_ENV_FILE}\n', True),
+ ('own-dir',               '    env_file:\n      - .env\n', False),
+ ('own-dir-quoted-cmt',    '    env_file:\n      - ".env"  # the plane\'s own\n', False),
+ ('own-dir-dotslash',      '    env_file:\n      - ./.env\n', False),
+ ('own-dir-flow',          '    env_file: [.env]\n', False),
+ ('own-dir-longform',      '    env_file:\n      - path: .env\n        required: false\n', False),
+ ('blank-line-in-list',    '    env_file:\n      - .env\n\n      - ../../.env\n', True),
+ ('climb-back-to-own-dir', '    env_file:\n      - ../docker/.env\n', True),
+ ('parent-plane-own',      '    env_file:\n      - ../.env\n', False),
+]
+def run(a):
+    p = subprocess.run(a, cwd=ROOT, capture_output=True, text=True)
+    return p.returncode, (p.stdout or '') + (p.stderr or '')
+base = io.open(TARGET, encoding='utf-8', newline='').read()
+h = re.search(r'^  ' + re.escape(SERVICE) + r':[ \t]*$', base, re.M)
+assert h, 'service heading not found at column 2'
+cut = h.end() + 1
+fails = 0
+for name, block, red in SHAPES:
+    io.open(TARGET, 'w', encoding='utf-8', newline='').write(base[:cut] + block + base[cut:])
+    run(['git', 'add', '--', REL])
+    code, out = run(['powershell','-NoProfile','-ExecutionPolicy','Bypass','-File',PS])
+    line = next((l.strip() for l in out.splitlines() if ' -- ' in l), '')
+    ok = 'OK ' if (code == 1) == red else 'BAD'
+    fails += 0 if (code == 1) == red else 1
+    print('%s %-22s expect=%-5s exit=%d  %s' % (ok, name, 'RED' if red else 'GREEN', code, line[:120]))
+io.open(TARGET, 'w', encoding='utf-8', newline='').write(base)
+run(['git', 'add', '--', REL]); run(['git', 'reset', '-q'])
+print('--- mismatches:', fails)
+sys.exit(1 if fails else 0)
+PYEOF
+python /d/t/shapes.py /d/t/br agent-org/docker/docker-compose.yml ao-ot-1
+```
+
+Expect: 27 rows, **`mismatches: 0`**, exit 0 from the driver. Two rows carry the
+reasoning, not just a verdict: `climb-back-to-own-dir` (`- ../docker/.env` from
+`agent-org/docker/`) is REFUSED by the fail-closed backstop even though it resolves
+somewhere legal, because a value that climbs and lands back home is what a
+mis-parsed value looks like; `parent-plane-own` (`- ../.env` = `agent-org/.env`) is
+ALLOWED, because a parent that is not the repo root is a plane's own file. Read the reasons, not
+just the exits — a RED row for the wrong reason is still a defect worth reporting.
+
+Then the same driver against a compose file one level BELOW its plane directory,
+where `../.env` is the plane's OWN file and `../../.env` is the repo root — the pair
+the resolution has to tell apart in every shape. Edit `SHAPES` to the ten rows below
+and run it on `inference/compose/upstreams.yml` / `llama-cpp-upstream`:
+
+| shape | expect |
+|---|---|
+| `env_file: ../.env` · `[../.env]` · `- ../.env` · `- path: ../.env` | GREEN (= `inference/.env`) |
+| `env_file: ../../.env` · `[../../.env]` · `- ../../.env` · `- path: ../../.env` · `- {path: ../../.env, required: false}` | RED, `is the repo root env file` |
+| `- .env` | GREEN |
+
+### T6b — the two shapes are real grants, per docker, not per this plan
+
+The point of T6a's flow-sequence and long-form rows is that docker HONOURS them.
+Confirm it yourself rather than taking the claim:
+
+```bash
+cd /d/t/br && cp .env.example .env          # the root file the grant would deliver
+# plant env_file: [../../.env] on ao-ot-1 (same regex anchor as above), then:
+docker compose -f agent-org/docker/docker-compose.yml --profile workers config | grep -nE "NAS_BACKUP_USER|TEST_VALIDATION_LLM_KEY"
+# repeat with the long form: - path: ../../.env / required: false
+```
+
+Expect BOTH shapes to inject the root file's names into `ao-ot-1`, a service that
+carries none of them otherwise — render exit 0, two leaked names each. That is what
+makes a green from the check on those shapes a defect and not a style preference.
+Restore the file afterwards.
+
+### T6c — unplanted, before/after, and no exemption
 
 ```bash
 cd /d/t/br
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1 -All; echo "exit=$?"     # expect 0
-git config core.hooksPath .githooks
-# plant on a service that has no env_file today
-python - <<'EOF'
-import io
-p='agent-org/docker/docker-compose.yml'
-s=io.open(p,encoding='utf-8',newline='').read()
-old="  ao-ot-1:\n"
-assert s.count(old)==1
-io.open(p,'w',encoding='utf-8',newline='').write(s.replace(old, old+"    env_file:\n      - ../../.env\n",1))
-EOF
-git add agent-org/docker/docker-compose.yml
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1;      echo "staged exit=$?"   # expect 1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1 -All; echo "all exit=$?"      # expect 1
-git checkout HEAD -- agent-org/docker/docker-compose.yml && git reset -q
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1 -All; echo "exit=$?"          # expect 0 again
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-env-file-scope.ps1 -All; echo "exit=$?"   # expect 0
+git status --short                                                                                                 # expect clean
 ```
 
-Then the three other verdicts (all in the branch clone, each restored after):
+`- .env` on agent-bridge is ALLOWED: it is in the file throughout every run above and
+must never appear in any output. State that you observed its absence.
 
-* `- .env` on agent-bridge — ALLOWED. It is in the file already; it is never
-  reported in any of the runs above. State that you observed its absence from
-  the output.
-* `- ../.env` planted on a service in `inference/compose/upstreams.yml`
-  (= `inference/.env`, a parent that is not the root) — ALLOWED, exit 0.
-* `- ../../coder/.env` planted in the same place — REFUSED with
-  `belongs to another directory (coder)`, exit 1.
-
-And the before/after that answers "why did the two grants pass":
+The before/after that answers "why did the two grants pass at all":
 
 ```bash
 cd /d/t/dev && printf '\n# scratch\n' >> agent-org/docker/docker-compose.yml && git add agent-org/docker/docker-compose.yml
@@ -259,15 +347,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File /d/t/new-check.ps1 -Root "D:
 ```
 
 Expect OLD: two `(pre-existing, not blocked)` lines then
-`no new shared-.env grants staged`, **exit 0**. NEW on the identical staged
-state: two violations, **exit 1**.
+`no new shared-.env grants staged`, **exit 0**. NEW on the identical staged state:
+two violations, **exit 1**.
 
-Finally, read the script end to end and confirm there is **no service name, no
-path allow-list and no HEAD comparison** left in it. A grep for `ao-worker`,
-`exempt`, `allow`, `HEAD:` must return nothing but prose in the header.
+Finally read the script end to end: **no service name, no path allow-list, no HEAD
+comparison.** `grep -n "ao-worker\|exempt\|allow\|HEAD:"` must return nothing but
+prose in the header.
 
-Disproves it: a planted root grant passing; agent-bridge's own `.env` being
-flagged; a legitimate plane-own `../.env` being flagged; any per-service
+Disproves it: any matrix mismatch; a shape docker honours that the check passes; a
+legitimate plane-own `../.env` or own-directory `.env` flagged; any per-service
 exemption surviving; the OLD/NEW pair not differing.
 
 ---
@@ -294,7 +382,7 @@ carrying them (which would make the D10 sentence false).
 
 ---
 
-## T8 — the three documents say what is true NOW
+## T8 — the four documents say what is true NOW
 
 Criterion: acceptance #5. Read each against
 `/d/t/br/agent-org/docker/docker-compose.yml`, not against memory.
@@ -313,7 +401,16 @@ Criterion: acceptance #5. Read each against
    claim: compose loads `agent-org/docker/.env` natively; the workers have no
    `env_file`; the two names are in each worker's `environment:`;
    `coder/.env` declares the same two names with its own values; a running
-   worker keeps its environment so a change needs `--force-recreate`.
+   worker keeps its environment so a change needs `--force-recreate`. Attempt 1
+   also said `.env.example` was "the complete template", which
+   `AO_OT1_IMAGE`/`AO_OT2_IMAGE` refuted; check the replacement sentence the same
+   way - grep the compose file for names it gives a `:-` default, and the example
+   for the two now documented there as commented optional overrides.
+4. `.githooks/README.md` row 5 — the pre-commit table, the first place anyone
+   looks to learn what check 5 blocks on. Attempt 1 left it describing the
+   grandfathering clause the item deleted ("a commit ADDING a service that grants
+   itself a shared .env (pre-existing grants are reported, not blocked)"). Read
+   the row against the script header and against T6c's OLD/NEW pair.
 
 Disproves it: any sentence in any of the three that the compose file refutes;
 a live-sounding instruction to do something about a grant that is gone.
@@ -341,7 +438,8 @@ EOF
 ```
 
 Expect: `ruff=0`; `inventory=0`; `configs=0`; attestation 0 with every commit
-attested (5 commits, one gating hook file); no `CR:` lines;
+attested - the count is whatever the branch carries, do NOT check it against a
+number in this plan (attempt 1's plan said 5 when there were 6); no `CR:` lines;
 `no BOM | non-ascii bytes: 0`. Note the .ps1 blob in git is LF - `.gitattributes`
 says `*.ps1 text eol=crlf`, i.e. CRLF in the working tree, LF in the object - so
 do NOT run the CR sweep over the .ps1 (the loop above skips it).
@@ -389,10 +487,32 @@ judgement call.
 | 16 | The live root `.env` holds 23 assignments, none of which the worker source reads | findings §4 | the T5 negative half |
 | 17 | No container was touched by the developer, and the recreate is the landing step | findings §4, commit messages, anchor | `docker ps --format "{{.Names}}\t{{.CreatedAt}}"` for `ao-worker-1`/`-2` showing a creation time OLDER than the branch's first commit. **Read-only — do not restart them.** |
 
+### Attempt 2 - the sentences THIS round introduces
+
+Attempt 1 failed on T6/T8/T10. Rows 18-27 are the claims the repair adds; row 10
+is restated because its wording is what the failure refuted.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| 10' | The check refuses any target resolving to the repo root `.env` **in every value shape compose accepts**, at any depth, with no exemption | script header, findings section 3/3c, runbook 4b, `.githooks/README.md:27` | T6a's 27-row matrix and T6's fragment table - the claim now says "in every value shape", and attempt 1's version was refuted by two of them |
+| 18 | The verdict parses the value into PATHS before resolving: scalar, flow sequence, block sequence, long-form `path:` (inline, on a continuation line, or as a flow mapping), quoted, commented | script header, `Get-EntryPath`/`Get-InlineValueEntries`, findings 3c | T6a matrix rows - each shape planted alone and staged |
+| 19 | A value that does not parse into plain path text is REFUSED, not normalized | script header, findings 3c | T6a rows `flow-seq-unterminated` (`is not plain path text ('[../../.env')`) and `interpolated` (`${SOME_ENV_FILE}`) |
+| 20 | A value that climbs with `..` and resolves back inside the compose file's own directory is refused (the fail-closed backstop for shapes nobody has thought of) | script header, findings 3c | T6a row `climb-back-to-own-dir` - RED with the climb message |
+| 21 | `env_file: [../../.env]` and `- path: ../../.env` are REAL grants: docker honours both | findings 3c, this plan's T6b | T6b - render each on `ao-ot-1` with a root `.env` present and see the root names appear in a service that has none |
+| 22 | It was a REGRESSION this item introduced, not a hole it inherited | findings 3c, commit message | run `git show bdcc7f1:scripts/checks/check-env-file-scope.ps1` on the same two plants: its `Test-BroadTarget` (`-match '\.\.[\\/]'`) goes red on both |
+| 23 | `.githooks/README.md` row 5 describes the check as it now behaves | `.githooks/README.md:27` | T8 item 4, read against the script header and T6c |
+| 24 | "Every variable a service in this plane needs SET is declared there"; names the compose file gives a `${VAR:-default}` are deliberately absent | `agent-org/README.md` | grep the compose file for `:-` defaults; confirm every interpolated name that is NOT in `.env.example` has one |
+| 25 | `AO_OT1_IMAGE`/`AO_OT2_IMAGE` are documented in `agent-org/docker/.env.example` as COMMENTED optional overrides | `.env.example`, `agent-org/README.md` | grep the example for `#AO_OT1_IMAGE=`; confirm both lines are commented |
+| 26 | Adding them to the example changes NO render | implied by 25 | re-run T2's normalized diff against the attempt-1 tip `4b714de` as well as against `bdcc7f1`: the tip-to-tip render diff must be EMPTY |
+| 27 | The base's no-root-`.env` gate failure aborts EARLIER than the tip's, on agent-org's render refusal, not on the `projects.ai-stack` row | findings section 4 | run `stack.py inventory --check` at `bdcc7f1` and at the tip, each in a clone with no root `.env`, and read both messages |
+
+
 ---
 
 ## Verdict
 
 PASS requires every case above to pass on its own output, with T2's three
-non-worker diff rows explicitly judged (not waved through) and T5 re-measured
-from source rather than read off this document.
+non-worker diff rows explicitly judged (not waved through), T5 re-measured
+from source rather than read off this document, and T6a/T6b run in full -
+attempt 1 passed a T6 that planted one shape, and the two it did not plant
+were the defect.

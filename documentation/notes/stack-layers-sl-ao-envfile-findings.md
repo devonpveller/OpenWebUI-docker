@@ -238,6 +238,70 @@ widening, so it added no violations; planting `- ../../.env` in
 `compose/` directory nor ends `.override.yml`. Recording that rather than
 scanning every YAML in the tree.
 
+### 3c. The regression attempt 1 shipped: the verdict resolved a token that was not a path
+
+Found by the tester, not by me, and it is the defect that failed the attempt.
+The resolving verdict in 3's table took the RAW token and split it on `/`. For
+the two value shapes where the token is not bare path text, the unparsed leading
+fragment was swallowed as an ordinary path SEGMENT and the following `..` popped
+it, so the target resolved to the compose file's OWN directory and was ALLOWED:
+
+| shape | what the old parser saw | verdict |
+|---|---|---|
+| `env_file: [../../.env]` | segments `[..`, `..`, `.env` | allowed (wrong) |
+| `- path: ../../.env` + `required: false` | segments `path: ..`, `..`, `.env` | allowed (wrong) |
+
+Both are real grants. Rendered on `ao-ot-1` with a root `.env` present, docker
+injected `NAS_BACKUP_USER` and `TEST_VALIDATION_LLM_KEY` into a container that
+had neither - re-measured here, `render exit 0 | leaked lines: 2` for each.
+And it was a REGRESSION, not an inherited hole: `bdcc7f1`'s `Test-BroadTarget`
+matched `\.\.[\\/]` against the raw text and went red on both.
+
+**The lesson is the shape of the mistake, not the two shapes.** Replacing a
+substring test with a semantic one buys precision and pays for it in a
+dependency the substring test did not have: the semantic test must PARSE. I
+added the parse's consumer and not the parse. So the fix is not two more cases -
+it is reading the value into paths first and REFUSING what will not read:
+
+* `Remove-YamlComment` (quote-aware), `Remove-Quotes`, `Get-EntryPath` (scalar,
+  `path:` long form, `{path: ..., required: ...}` flow mapping, `required:`/
+  `format:` entries which name no file), `Get-InlineValueEntries` (scalar or
+  flow sequence, one entry each so a two-item sequence reports the bad ITEM).
+* A `path:` key on a CONTINUATION line keeps the block sequence open, so
+  `- required: false` / `  path: ../../.env` is caught; so does a blank line.
+* Plain-path-text guard: a residual `[`, `]`, `{`, `}`, `,`, whitespace or `$`
+  means the value did not parse or its target is not knowable from the file.
+  REFUSED, printed, not normalized.
+* Fail-closed backstop for the shapes nobody has thought of yet: a value whose
+  raw text climbs with `..` and whose resolution lands back inside the compose
+  file's own directory is refused, because that is what a lost fragment looks
+  like. It also refuses `../<thisdir>/.env`, which should be written `.env`.
+
+**Proof, 37 planted shapes, each staged and run through the check alone** (27 on
+`ao-ot-1` in agent-org's compose, 10 on `llama-cpp-upstream` in
+`inference/compose/upstreams.yml`, which sits one level BELOW its plane so
+`../.env` is the plane's own file and `../../.env` is the root - the pair the
+resolution has to tell apart in every shape). RED: scalar, quoted scalar,
+scalar with trailing comment, flow sequence, quoted flow sequence, two-item flow
+sequence with one bad item, unterminated flow sequence, block item, quoted block
+item with comment, `./`-prefixed, long-form `path:`, quoted long-form,
+`required:`-first with `path:` on the next line, long-form flow mapping,
+`../../../.env`, an absolute `D:/x/.env`, `../../.env.test`, `../../coder/.env`,
+`${SOME_ENV_FILE}`, a blank line mid-list then a bad item, all five root shapes
+from the `compose/` fragment, and `../docker/.env` - which resolves somewhere
+LEGAL and is refused anyway, by the backstop, because climbing and landing back
+home is what a mis-parsed value looks like. GREEN: `.env`, quoted `.env` with
+comment, `./.env`, `[.env]`, long-form `path: .env`, `../.env` from agent-org's
+own compose file (= `agent-org/.env`, a parent that is not the root), and all
+four plane-own `../.env` shapes from the fragment. Mismatches: 0.
+
+Two process notes, because both cost me a wrong measurement in this round:
+`git checkout -- <path>` after a `git add` restores from the INDEX, so it
+restores the PLANT - `git checkout HEAD -- <path>` is the one that unplants; and
+a matrix run against a scratch clone proves nothing unless the script under test
+was copied in AFTER the last edit. I read one green matrix off a clone holding
+the attempt-1 script before noticing.
+
 ---
 
 ## 4. Out of scope, found anyway
@@ -266,13 +330,36 @@ scanning every YAML in the tree.
   has one now.
 
 * **`inventory --check` and `check-project-configs.ps1` fail in a clone with no
-  root `.env`**, on the `projects.ai-stack` row: the anchor project cannot be
-  rendered, so the generated row says `file: docker-compose.yml` where the
-  committed row says `file: null`. Nothing to do with this item - measured at
-  `bdcc7f1` and at the tip, both exit 1 without the file and 0 with it, and with
-  it the tip's output is byte-identical to the base's. Worth knowing because the
-  clone this item's T1 needs is precisely one with NO root `.env`, so the two
-  cases cannot share a clone.
+  root `.env`** - but NOT for the same reason at both commits, which is a
+  correction to what this note said in attempt 1. At the TIP the failure is the
+  `projects.ai-stack` row: the anchor project cannot be rendered, so the
+  generated row says `file: docker-compose.yml` where the committed row says
+  `file: null`. At `bdcc7f1` it aborts EARLIER, on `refused: docker compose -f
+  agent-org/docker/docker-compose.yml config --format json exited 1` - the
+  wildcard itself - and never reaches the anchor row. Attempt 1 of this note
+  attributed both to the anchor row; measured by the tester, and re-measured
+  here. With a root `.env` present both exit 0 and the tip's output is
+  byte-identical to the base's. Worth knowing because the clone this item's T1
+  needs is precisely one with NO root `.env`, so the two cases cannot share a
+  clone - and because the base's earlier abort is one more piece of evidence
+  that the plane could not stand on its own before this item.
+
+* **`.githooks/README.md:27` described the deleted grandfathering clause.** The
+  pre-commit contract table is the first place anyone looks to learn what check 5
+  blocks on, and attempt 1 changed the check without changing the row. Found by
+  the tester. Fixed: the row now states the resolution rule, that HEAD no longer
+  exempts anything, that a plane's own `.env` is fine, and that an unparseable
+  value is refused.
+
+* **`agent-org/README.md`'s "`docker/.env.example` is the complete template" was
+  refuted by `AO_OT1_IMAGE`/`AO_OT2_IMAGE`** - read by agent-bridge's environment
+  block and by both `ao-ot` `image:` lines, absent from the example, present in
+  the live root `.env`. Found by the tester. Every OTHER interpolated name the
+  example omits carries a `${VAR:-default}`, so the sentence now says "every
+  variable a service needs SET", and the two image selectors are documented in
+  the example as COMMENTED optional overrides - commented, so the render is
+  unchanged, which I verified by diffing the `--profile workers` render at this
+  tip against the one at `4b714de`: empty.
 
 * **A recreate is still owed.** `ao-worker-1` and `ao-worker-2` are running with
   the environment they started with, which still includes the pre-trim root

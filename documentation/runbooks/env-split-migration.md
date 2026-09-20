@@ -259,8 +259,10 @@ A running worker keeps the environment it started with, so nothing breaks until
 that recreate - which is exactly why this was easy to miss.
 
 **The check that now holds the line:** `scripts/checks/check-env-file-scope.ps1`
-refuses any `env_file` target that resolves to the repo root `.env`, in a staged
-compose file or across the whole tree with `-All`. It used to grandfather grants
+refuses any `env_file` target that resolves to the repo root `.env` - in every
+value shape compose accepts (scalar, flow sequence, block sequence, long-form
+`path:`), in a staged compose file or across the whole tree with `-All`, and it
+refuses a value it cannot parse rather than guessing at it. It used to grandfather grants
 already present in HEAD, which is how these two survived it; that clause was
 removed with them. The history is in
 `documentation/notes/stack-layers-sl-env-split-findings.md` (section 14) and
