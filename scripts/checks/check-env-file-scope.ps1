@@ -1,7 +1,7 @@
 #requires -Version 5
 <#
 .SYNOPSIS
-  Block a compose service from granting itself the WHOLE root .env via `env_file`.
+  Block a compose service from granting itself a shared .env via `env_file`.
 
 .DESCRIPTION
   THE RULE: a service names the variables it needs.
@@ -24,13 +24,80 @@
   A WILDCARD GRANT IS SAFE UNTIL THE THING IT WILDCARDS GROWS. Nothing was watching the
   size of the blast radius, so nothing complained.
 
-.NOTES
-  STAGED-ONLY, deliberately. This fails on a NEWLY ADDED grant, not on ones already in
-  the tree - a guard that blocks unrelated commits over pre-existing debt gets disabled,
-  and then it guards nothing. Known remaining grants are reported as a warning so they
-  stay visible without being a gate. Run with -All to audit the whole tree.
+  WHAT COUNTS AS A GRANT (2026-09-19, sl-ao-envfile). The target is resolved against the
+  directory of the compose file that names it, and the verdict is about WHERE it lands:
 
-  Exit code 0 = clean, 1 = a new grant was staged.
+    * the repo root `.env`                     -> REFUSED. The shared file every plane
+                                                  used to reach into; per D10 no plane
+                                                  reads it any more.
+    * outside the repo, or an absolute path    -> REFUSED. Nothing in-tree can audit it.
+    * a directory that is neither the compose
+      file's own nor one of its parents
+      (a cross-plane borrow)                   -> REFUSED. Same wildcard, other plane.
+    * the compose file's own directory, or a
+      parent that is not the repo root
+      (a plane's own .env)                     -> ALLOWED. Scoped by construction.
+
+  So `agent-org/docker/docker-compose.yml` may name `- .env` (its own) and could name
+  `- ../.env` (agent-org's own), but not `- ../../.env` (the repo root).
+
+  AN env_file VALUE MUST BE A PLAIN PATH LITERAL. That is a POLICY, not a parse, and
+  the difference is the whole design. The check reads the SHAPES compose accepts - a
+  scalar, a flow sequence `[a, b]`, a block sequence, long-form entries (`- path: x` /
+  `required: false`, or `- {path: x, required: false}`), quoted, with a trailing
+  comment - because a shape is just where the text sits. It does NOT interpret YAML
+  SEMANTICS. A `*alias`, an `&anchor`, a `!tag`, a `>`/`|` block scalar and a `${VAR}`
+  are refused with the token printed and the reason named, never resolved.
+
+  AND THE EXTENT COMES BEFORE THE SHAPE. Where the value ENDS is decided by
+  indentation alone - every line deeper than the `env_file:` key is part of it, a blank
+  or comment-only line does not end it, and the first line at or below the key's indent
+  does, WITH ONE CARVE-OUT: a line at exactly the key's indent whose body starts with
+  `-` is part of the value, because YAML lets a block sequence sit at its parent key's
+  own indent and compose files are commonly written that way. A bare SCALAR at the
+  key's indent is not the value - YAML cannot read it as one - so the carve-out is for
+  the dash alone. A TRAILING COMMENT ON THE KEY (`env_file:  # note`) neither ends the
+  value nor replaces it: the block below is still the value and is still read. Only
+  then is each line inside read as a shape, and a line the reader does not recognise is
+  treated as a VALUE rather than as the end of the block. See Scan-ComposeText for what
+  getting that order backwards cost, what getting the boundary one column too narrow
+  cost after that, and what treating an empty read as an absent value cost after that.
+
+  Three earlier attempts did the other thing, and each one shipped a silent hole: a
+  flow sequence and a long-form mapping whose punctuation got swallowed as a path
+  segment; then `*root_env`, which carries no punctuation and walked through a guard
+  that listed characters it disliked; then a DUPLICATE anchor - `&root_env .env`
+  followed by `&root_env ../../.env` - where the lookup kept the first definition and
+  YAML resolves to the last preceding one. Alias-before-anchor, anchors on mappings and
+  merge keys are the same category and the list has no end. A pre-commit guard that
+  re-implements YAML will always be one corner behind the parser it imitates, and every
+  corner is silent. So it stopped imitating.
+
+  What may reach the resolver is an ALLOWLIST: after quotes and comments are stripped a
+  path must match $script:PlainPathText - letters, digits and `_ . / \ ~ -` - and
+  anything else is refused and printed with the raw token. Refused too: a value that
+  climbs with `..` and lands back inside the compose file's own directory, and one that
+  lands in a SUBdirectory of it - the allowance is the compose file's own directory or
+  a parent below the repo root, nothing else. If a real layout ever needs
+  `env/dev.env`, widen the rule deliberately and say so here; do not discover that the
+  check quietly allowed it.
+
+  THE COST IS DELIBERATE: an alias to a perfectly legal path is refused too, and the
+  fix is to write the path. A compose file in this repo has never used one.
+
+  Fail closed: a value this script cannot read is a value it cannot vouch for.
+
+.NOTES
+  STAGED-ONLY, deliberately: it fails on what a commit leaves in a compose file it
+  touches, and -All audits the whole tree. Until 2026-09-19 it ALSO grandfathered any
+  grant already present in HEAD, which is why `env_file: ../../.env` on ao-worker-1 and
+  ao-worker-2 passed pre-commit for weeks while -All reported them red. Item
+  sl-ao-envfile removed those two grants, leaving the tree with none - so the debt clause
+  now has nothing to protect, and its only possible effect would be to re-admit the exact
+  thing that was just paid off. It is gone: a grant in a staged compose file blocks
+  whether or not HEAD carries it. There is no per-service exemption list, on purpose.
+
+  Exit code 0 = clean, 1 = a grant was staged (or, with -All, found in the tree).
 #>
 [CmdletBinding()]
 param(
@@ -43,63 +110,388 @@ $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = (git rev-parse --show-toplevel 2>$null) }
 if (-not $Root) { $Root = (Get-Location).Path }
 $Root = $Root.Trim()
+$RootFull = $Root
+try { $RootFull = (Resolve-Path -LiteralPath $Root).Path } catch { }
+$RootFull = $RootFull.TrimEnd('\', '/')
 
-# A grant is "broad" when the env_file target resolves to a .env that is NOT beside the
-# compose file that names it. A plane keeping its own .env next to its compose file is
-# scoped by construction and is fine; reaching up the tree for a shared one is not.
-function Test-BroadTarget([string]$target) {
-    $t = $target.Trim().TrimStart('-').Trim().Trim('"').Trim("'")
-    if (-not $t) { return $false }
-    return ($t -match '\.\.[\\/]')
+# Repo-relative directory of a repo-relative file path ('' when the file sits at the root).
+function Get-ParentDir([string]$relPath) {
+    $p = ($relPath -replace '\\', '/')
+    $i = $p.LastIndexOf('/')
+    if ($i -lt 0) { return '' }
+    return $p.Substring(0, $i)
+}
+
+# Resolve an env_file target against the compose file's directory, both repo-relative with
+# '/' separators. Returns $null when it is absolute or climbs out of the repo - neither is
+# something this tree can audit, and both are refused by the caller.
+function Resolve-RepoRelative([string]$baseDir, [string]$target) {
+    $t = ($target -replace '\\', '/')
+    if ($t -match '^[A-Za-z]:' -or $t.StartsWith('/')) { return $null }
+    $parts = @()
+    if ($baseDir) { $parts = @(($baseDir -split '/') | Where-Object { $_ -ne '' }) }
+    foreach ($seg in ($t -split '/')) {
+        if ($seg -eq '' -or $seg -eq '.') { continue }
+        if ($seg -eq '..') {
+            if ($parts.Count -eq 0) { return $null }
+            if ($parts.Count -eq 1) { $parts = @() }
+            else { $parts = @($parts[0..($parts.Count - 2)]) }
+        } else {
+            $parts += $seg
+        }
+    }
+    if ($parts.Count -eq 0) { return $null }
+    return ($parts -join '/')
+}
+
+# --- reading an env_file VALUE -------------------------------------------------------
+# THE REGRESSION THIS REPAYS (found by the tester, attempt 1 of sl-ao-envfile). The first
+# version of the resolving verdict below took the raw token and split it on '/'. For the
+# two shapes where the token is not bare path text - the flow sequence
+# `env_file: [../../.env]` and the compose-spec long form `- path: ../../.env` - the
+# unparsed leading fragment ('[..', 'path: ..') was swallowed as an ordinary path SEGMENT,
+# which the following '..' then popped. The target therefore resolved to the compose
+# file's OWN directory and was allowed. Both are real grants: docker rendered them and
+# injected the root file's variables. The predecessor matched '\.\.[\\/]' on the raw text
+# and caught both, so this was a regression, not an inherited hole.
+#
+# So: parse the value into PATHS first, resolve second. Compose accepts
+#   env_file: ../.env                     scalar
+#   env_file: "../.env"                   quoted scalar
+#   env_file: [a, "b"]                    flow sequence
+#   env_file:                             block sequence
+#     - a
+#     - path: b                           long form, optionally with `required:` after it
+#       required: false
+#     - {path: c, required: false}        long form as a flow mapping
+# and any of them may carry a trailing comment.
+#
+# Anything that does not parse into plain path text is REFUSED, not normalized - see
+# Get-GrantVerdict. Fail closed: a value this script cannot read is a value it cannot
+# vouch for, and the failure mode above was precisely a value read wrongly and passed.
+
+# Cut a trailing YAML comment, respecting quotes. A '#' only starts a comment when it is
+# at the start or preceded by whitespace, which is what keeps a '#' inside a path intact.
+function Remove-YamlComment([string]$s) {
+    $inSingle = $false
+    $inDouble = $false
+    for ($i = 0; $i -lt $s.Length; $i++) {
+        $c = $s[$i]
+        if ($c -eq "'" -and -not $inDouble) { $inSingle = -not $inSingle; continue }
+        if ($c -eq '"' -and -not $inSingle) { $inDouble = -not $inDouble; continue }
+        if ($c -eq '#' -and -not $inSingle -and -not $inDouble) {
+            if ($i -eq 0) { return '' }
+            $prev = $s[$i - 1]
+            if ($prev -eq ' ' -or $prev -eq "`t") { return $s.Substring(0, $i) }
+        }
+    }
+    return $s
+}
+
+function Remove-Quotes([string]$s) {
+    $t = $s.Trim()
+    if ($t.Length -ge 2) {
+        $a = $t[0]
+        $b = $t[$t.Length - 1]
+        if (($a -eq '"' -and $b -eq '"') -or ($a -eq "'" -and $b -eq "'")) {
+            return $t.Substring(1, $t.Length - 2)
+        }
+    }
+    return $t
+}
+
+# One sequence ENTRY -> the path it names. A long-form entry is a mapping whose `path` key
+# carries it; `required:`/`format:` entries carry none and return ''. An entry this cannot
+# read returns the special marker '?' so the caller refuses it rather than guessing.
+function Get-EntryPath([string]$entry) {
+    $e = (Remove-YamlComment $entry).Trim()
+    if (-not $e) { return '' }
+    if ($e.StartsWith('{')) {
+        if (-not $e.EndsWith('}')) { return '?' }
+        $inner = $e.Substring(1, $e.Length - 2)
+        foreach ($kv in ($inner -split ',')) {
+            if ($kv -match '^\s*(["'']?)path\1\s*:\s*(.+)$') { return (Remove-Quotes $Matches[2]) }
+        }
+        return ''
+    }
+    if ($e -match '^(["'']?)path\1\s*:\s*(.+)$') { return (Remove-Quotes $Matches[2]) }
+    if ($e -match '^(required|format)\s*:') { return '' }
+    return (Remove-Quotes $e)
+}
+
+# The value on the `env_file:` line itself, split into ENTRIES: a flow sequence yields one
+# per item, anything else yields itself. The caller reads each entry's path out of it, so
+# a two-item sequence with one bad item reports the bad ITEM rather than the whole value.
+function Get-InlineValueEntries([string]$value) {
+    $v = (Remove-YamlComment $value).Trim()
+    if (-not $v) { return @() }
+    if ($v.StartsWith('[')) {
+        # An unterminated flow sequence is handed back whole: the '[' it still carries
+        # trips the plain-path-text guard, which refuses it and PRINTS it.
+        if (-not $v.EndsWith(']')) { return @($v) }
+        $inner = $v.Substring(1, $v.Length - 2)
+        return @(($inner -split ',') | Where-Object { $_.Trim() })
+    }
+    return @($v)
+}
+
+# THE POLICY, AND WHY IT IS A POLICY AND NOT A PARSER (2026-09-19, attempt 4).
+# An env_file value must be a PLAIN PATH LITERAL. Not "a path once this script has
+# worked out what YAML meant" - a literal, in the file, where a reader sees it.
+#
+# Three attempts tried the other thing. Each one taught the check one more YAML
+# feature and each feature turned out to have a semantics corner underneath it:
+#   1. flow sequences and long-form `path:` mappings - shapes, fine, still here;
+#   2. aliases - so the check learned to look up `&name <scalar>`;
+#   3. a DUPLICATE anchor - `&root_env .env` then `&root_env ../../.env`. The lookup
+#      kept the FIRST definition. YAML resolves to the LAST preceding one. Docker
+#      delivered the root file; the check said nothing.
+# Alias-before-anchor, anchors on mappings and merge keys are the same category, and
+# the list does not end. A pre-commit guard that re-implements YAML semantics is the
+# wrong design: it will always be one corner behind the parser it is imitating, and
+# every corner is silent.
+#
+# So indirection is REFUSED rather than resolved. `*alias`, `&anchor`, a `!tag`, a
+# `>`/`|` block scalar, a `${VAR}`: the check does not work out what they mean, it
+# says no and prints the token. The cost is deliberate and small - an alias to a
+# LEGAL path is refused too, and the fix is to write the path.
+#
+# MERGE KEYS need no special handling. `<<: *tpl` pulling `env_file` in from an `x-`
+# block is caught at the SOURCE: this scans every `env_file:` line in the file at any
+# indentation, `x-` blocks included, so the block's own env_file list is judged where
+# it is written. The service that merges it never needs to be understood.
+$script:YamlIndirection = '[*&!<>|$]'
+$script:IndirectionMessage = 'env_file values must be plain path literals; YAML anchors and aliases are refused by policy (rewrite as the path)'
+
+# PLAIN PATH TEXT, AS AN ALLOWLIST. Everything the resolver is allowed to see must match
+# this; everything else is refused and PRINTED. Stated positively on purpose - the
+# defects this check shipped were denylists that did not list the next shape.
+# Letters, digits, `_ . / \ ~ -` covers every env_file path in this repo and every path a
+# compose file here would plausibly name (`.env`, `./.env`, `../.env`, `../../.env`,
+# `.env.test`). Not allowed, each refused rather than guessed at: `:` (a Windows drive
+# letter, or mapping residue), whitespace, quotes, and flow punctuation.
+$script:PlainPathText = '^[A-Za-z0-9_./\\~-]+$'
+
+# $composeRel is the compose file's repo-relative path. $path is already EXTRACTED from
+# the YAML value; $raw is the text it came from, used for the message, the policy test
+# and the fail-closed check. Returns '' when the target is scoped, otherwise the reason
+# it is refused.
+function Get-GrantVerdict([string]$composeRel, [string]$path, [string]$raw) {
+    if ($path -eq '?') { return "is an env_file value this check cannot parse ('$raw')" }
+    $t = $path.Trim()
+    if (-not $t) { return '' }
+    # Policy first, so the message names the rule rather than the symptom. Tested against
+    # the RAW token as well as the extracted path: a `*` anywhere in the value - in a
+    # sibling `required:` key, say - means the value is not a plain literal either.
+    if ($t -match $script:YamlIndirection -or $raw -match $script:YamlIndirection) {
+        return "$($script:IndirectionMessage) - got '$raw'"
+    }
+    if ($t -notmatch $script:PlainPathText) {
+        return "is not plain path text ('$t') - an absolute path, whitespace or unparsed residue, so its target cannot be checked"
+    }
+    $composeDir = Get-ParentDir $composeRel
+    $resolved = Resolve-RepoRelative $composeDir $t
+    if ($null -eq $resolved) { return 'resolves outside the repository' }
+    $targetDir = Get-ParentDir $resolved
+    if ($targetDir -eq '') { return 'is the repo root env file' }
+    if ($targetDir -ne $composeDir -and -not (($composeDir + '/').StartsWith($targetDir + '/'))) {
+        return "belongs to another directory ($targetDir)"
+    }
+    # FAIL CLOSED. The raw value climbed, and the result did not: either the value was
+    # read wrongly (the regression above), or it is spelled `../<thisdir>/.env`, which
+    # should be written `.env`. Either way this script will not vouch for it.
+    if ($t -match '\.\.' -and (($targetDir + '/').StartsWith($composeDir + '/'))) {
+        return 'climbs with .. yet resolves back inside the compose file''s own directory - write it without the ..'
+    }
+    return ''
 }
 
 $violations = @()
 
-function Scan-ComposeText([string]$path, [string[]]$lines) {
-    # Walk the file rather than regex it whole: `env_file:` and its list items are on
-    # separate lines, and a service's own comment mentioning env_file must not match.
+# THE VALUE'S EXTENT IS DECIDED BY INDENTATION, BEFORE ANY SHAPE IS READ.
+#
+# Attempt 4 shipped a scanner that knew four shapes and, for a block value, accepted only
+# three kinds of line: `- item`, a `path:`/`required:`/`format:` continuation, and a blank.
+# ANY other line silently ENDED the value, and the text on it was never looked at. Two
+# plain-path spellings docker honours went green that way:
+#
+#     env_file:                    env_file:
+#       ../../.env                   -
+#                                      ../../.env
+#
+# The first is a next-line scalar; the second is a sequence item written under a bare
+# dash. Neither is exotic, both deliver the whole root file, and the scanner's own
+# structure is what hid them: it decided what the value WAS before deciding where it
+# ENDED, so every line it did not recognise looked like the end of the value.
+#
+# So the extent comes first and it is pure indentation, no semantics:
+#   * the key's indent is the `env_file:` line's own indent;
+#   * the value is EVERY following line indented DEEPER than the key;
+#   * a blank line and a comment-only line do not end it - they are skipped;
+#   * it ends at the first line whose indent is AT or BELOW the key's.
+# Inside that extent every non-comment line is read, and anything not recognised as a
+# sequence dash or a `path:`/`required:`/`format:` key is treated as a VALUE. That is the
+# fail-closed direction: an unrecognised line becomes a token and faces the indirection
+# policy, the allowlist and the directory rules, instead of ending the scan.
+#
+# Tabs: indent width counts a tab as advancing to the next multiple of 8, so a
+# tab-indented block and a space-indented one both compare monotonically.
+function Get-IndentWidth([string]$line) {
+    $w = 0
+    foreach ($ch in $line.ToCharArray()) {
+        if ($ch -eq ' ') { $w = $w + 1 }
+        elseif ($ch -eq "`t") { $w = $w + 8 - ($w % 8) }
+        else { break }
+    }
+    return $w
+}
+
+function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$lines) {
+    # Walk the file rather than regex it whole: a service's own comment mentioning
+    # env_file must not match, and the value may span many lines.
     $out = @()
-    $inList = $false
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($line -match '^\s*#') { continue }
-        if ($line -match '^\s*env_file\s*:\s*(\S.*)?$') {
-            $inline = $Matches[1]
-            if ($inline) {
-                if (Test-BroadTarget $inline) { $out += "${path}:$($i+1): env_file: $inline" }
-                $inList = $false
-            } else { $inList = $true }
+        if ($line -notmatch '^\s*env_file\s*:\s*(\S.*)?$') { continue }
+        $inline = $Matches[1]
+
+        # A TRAILING COMMENT ON THE KEY IS NOT A VALUE. `env_file:  # the shared file`
+        # matches the capture group, so the inline branch used to take it, find nothing
+        # once the comment was stripped, and `continue` PAST the block value below -
+        # which docker reads and honours. Found at review, 2026-09-20; inherited from
+        # every earlier tip. So the inline branch is entered only when the capture
+        # actually yields entries; a capture that yields none falls THROUGH to the block
+        # scan. Fail closed: "I read nothing here" must never mean "there is nothing
+        # below", which is the same mistake as ending the extent on an unrecognised line.
+        $entries = @()
+        if ($inline) { $entries = @(Get-InlineValueEntries $inline) }
+        if ($entries.Count) {
+            # Value on the key's own line: a scalar, or a flow sequence.
+            foreach ($entry in $entries) {
+                $raw = $entry.Trim()
+                $p = ''
+                if ($raw -eq '?') { $p = '?' } else { $p = Get-EntryPath $raw }
+                if (-not $p) { continue }
+                $why = Get-GrantVerdict $composeRel $p $raw
+                if ($why) { $out += "${displayPath}:$($i+1): env_file: $raw -- $why" }
+            }
             continue
         }
-        if ($inList) {
-            if ($line -match '^\s*-\s*(\S.*)$') {
-                if (Test-BroadTarget $Matches[1]) { $out += "${path}:$($i+1): env_file -> $($Matches[1].Trim())" }
-            } else { $inList = $false }
+
+        # Block value: everything indented deeper than the key, PLUS the one carve-out
+        # below.
+        $keyIndent = Get-IndentWidth $line
+        $pendingDash = -1        # indent of a bare `-` whose item is on a deeper line
+        $j = $i + 1
+        while ($j -lt $lines.Count) {
+            $l = $lines[$j]
+            if ($l -match '^\s*$') { $j = $j + 1; continue }
+            if ($l -match '^\s*#') { $j = $j + 1; continue }
+            $ind = Get-IndentWidth $l
+            $body = (Remove-YamlComment $l).Trim()
+            if ($ind -le $keyIndent) {
+                # YAML lets a BLOCK SEQUENCE sit at its parent key's own indent, and
+                # compose files are commonly written that way:
+                #     env_file:
+                #     - ../../.env
+                # "deeper than the key" alone made the boundary one column too narrow and
+                # the dash was read as the END of the value. A line at EXACTLY the key's
+                # indent whose body starts with `-` is part of the value; anything else at
+                # or below the key's indent still ends it. A bare SCALAR at the key's
+                # indent is NOT the value - YAML cannot read it as one, and docker refuses
+                # the file - so the carve-out is for the dash only.
+                if ($ind -ne $keyIndent -or $body -notmatch '^-(\s|$)') { break }
+            }
+            if (-not $body) { $j = $j + 1; continue }
+
+            $token = ''
+            $label = 'env_file ->'
+            if ($pendingDash -ge 0 -and $ind -gt $pendingDash) {
+                # The item a bare `-` was waiting for. It may itself be `path: x`.
+                $token = $body
+                $pendingDash = -1
+            } elseif ($body -eq '-') {
+                $pendingDash = $ind
+                $j = $j + 1
+                continue
+            } elseif ($body -match '^-\s+(\S.*)$') {
+                $pendingDash = -1
+                $token = $Matches[1].Trim()
+            } elseif ($body -match '^(path|required|format)\s*:\s*(\S.*)?$') {
+                $pendingDash = -1
+                if ($Matches[1] -ne 'path') { $j = $j + 1; continue }
+                $token = $Matches[2]
+                if (-not $token) { $j = $j + 1; continue }
+                $token = $token.Trim()
+                $label = 'env_file -> path:'
+            } else {
+                # Anything else inside the extent IS the value - the next-line scalar
+                # case, and every spelling nobody has thought of yet. Read it, do not
+                # treat it as the end of the block.
+                $pendingDash = -1
+                $token = $body
+            }
+
+            $p = ''
+            if ($token -eq '?') { $p = '?' } else { $p = Get-EntryPath $token }
+            if ($p) {
+                $why = Get-GrantVerdict $composeRel $p $token
+                if ($why) { $out += "${displayPath}:$($j+1): $label $token -- $why" }
+            }
+            $j = $j + 1
         }
+        $i = $j - 1
     }
     return $out
 }
 
+function Write-TheRule {
+    Write-Host ""
+    Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
+    Write-Host "`${VAR} in a compose 'environment:' block is interpolated by the compose CLI from"
+    Write-Host "the project environment - it does NOT need env_file. Listing the variables is"
+    Write-Host "the whole fix. See the header of this script for what this rule is repaying."
+}
+
 if ($All) {
-    $files = @(Get-ChildItem -Path $Root -Recurse -File -Include "docker-compose*.yml", "compose*.yml" -ErrorAction SilentlyContinue |
-               Where-Object { $_.FullName -notmatch '[\\/](\.git|\.claude|node_modules|OB1)[\\/]' })
+    # A plane split its compose file by service group in 2026-09 (inference/compose/*.yml),
+    # and none of those four basenames matches "compose*.yml" - so the four files that
+    # define the inference plane's services were invisible to this guard. .gitattributes
+    # already carries a */compose/*.yml rule for the same reason. Override files are in
+    # for the same reason: an override is exactly where a grant would be added quietly.
+    $files = @(Get-ChildItem -Path $RootFull -Recurse -File -Include "docker-compose*.yml", "compose*.yml", "*.override.yml", "*.override.yaml" -ErrorAction SilentlyContinue)
+    $files += @(Get-ChildItem -Path $RootFull -Recurse -File -Include "*.yml", "*.yaml" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Directory -and $_.Directory.Name -eq "compose" })
+    $files = @($files | Sort-Object -Property FullName -Unique)
     foreach ($f in $files) {
-        $violations += Scan-ComposeText $f.FullName (Get-Content -Path $f.FullName)
+        # Skip vendored/nested trees by their position UNDER the scan root, not by their
+        # absolute path: a worktree lives under .claude\worktrees\, so matching the
+        # ABSOLUTE path excluded every file in it - the audit reported a clean tree from
+        # inside a worktree that held two grants (found 2026-09-19, sl-ao-envfile).
+        $rel = $f.FullName
+        if ($rel.StartsWith($RootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $rel.Substring($RootFull.Length)
+        }
+        $rel = $rel.TrimStart('\', '/') -replace '\\', '/'
+        if ($rel -match '(^|/)(\.git|\.claude|node_modules|OB1)/') { continue }
+        $violations += Scan-ComposeText $f.FullName $rel (Get-Content -Path $f.FullName)
     }
     if ($violations.Count) {
         Write-Host "Compose services granting themselves a shared .env ($($violations.Count)):" -ForegroundColor Yellow
         $violations | ForEach-Object { Write-Host "  $_" }
-        Write-Host ""
-        Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
+        Write-TheRule
         exit 1
     }
     Write-Host "env_file scope: clean - no service grants itself a shared .env." -ForegroundColor Green
     exit 0
 }
 
-# --- staged mode: only what this commit ADDS ----------------------------------------
+# --- staged mode: what this commit leaves in a compose file it touches ---------------
 $staged = @(git diff --cached --name-only --diff-filter=ACMR 2>$null) |
-          Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or $_ -match '(^|/)docker-compose[^/]*\.ya?ml$' }
+          Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or
+                         $_ -match '(^|/)compose/[^/]+\.ya?ml$' -or
+                         $_ -match '\.override\.ya?ml$' }
 if (-not $staged -or -not $staged.Count) {
     Write-Host "env_file scope: no compose files staged - skipped." -ForegroundColor DarkGray
     exit 0
@@ -112,36 +504,16 @@ foreach ($rel in $staged) {
     $content = @(git show ":$rel" 2>$null)
     $ErrorActionPreference = $prev
     if ($LASTEXITCODE -ne 0 -or -not $content) { continue }
-    $found = Scan-ComposeText $rel $content
-    if (-not $found.Count) { continue }
-    # Present in HEAD already? Then it is pre-existing debt, not something this commit
-    # introduces - report it, do not block on it.
-    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    $head = @(git show "HEAD:$rel" 2>$null)
-    $ErrorActionPreference = $prev
-    $headFound = if ($LASTEXITCODE -eq 0 -and $head) { @(Scan-ComposeText $rel $head) } else { @() }
-    $headTargets = @($headFound | ForEach-Object { ($_ -split ': ', 2)[1] })
-    foreach ($f in $found) {
-        $target = ($f -split ': ', 2)[1]
-        if ($headTargets -contains $target) {
-            Write-Host "  (pre-existing, not blocked) $f" -ForegroundColor DarkYellow
-        } else {
-            $violations += $f
-        }
-    }
+    $violations += Scan-ComposeText $rel $rel $content
 }
 
 if ($violations.Count) {
     Write-Host ""
-    Write-Host "NEW env_file grant of a shared .env ($($violations.Count)):" -ForegroundColor Red
+    Write-Host "env_file grant of a shared .env in a staged compose file ($($violations.Count)):" -ForegroundColor Red
     $violations | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-    Write-Host ""
-    Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
-    Write-Host "`${VAR} in a compose 'environment:' block is interpolated by the compose CLI from"
-    Write-Host "the project environment - it does NOT need env_file. Listing the variables is"
-    Write-Host "the whole fix. See the header of this script for what this rule is repaying."
+    Write-TheRule
     exit 1
 }
 
-Write-Host "env_file scope: no new shared-.env grants staged." -ForegroundColor Green
+Write-Host "env_file scope: no shared-.env grants in the staged compose files." -ForegroundColor Green
 exit 0

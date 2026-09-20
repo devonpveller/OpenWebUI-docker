@@ -493,8 +493,11 @@ Case 1b, all three of which now say all eight refuse and name the mechanism.
 
 Found by my own sweep while checking §13, not by the tester.
 
-**[measured]** `agent-org/docker/docker-compose.yml:300` and `:398` give
-`ao-worker-1` / `ao-worker-2` **`env_file: ../../.env`** — the whole ROOT file.
+**[measured]** The `ao-worker-1` and `ao-worker-2` services in
+`agent-org/docker/docker-compose.yml` gave themselves **`env_file: ../../.env`**
+— the whole ROOT file. (Line numbers are deliberately not cited: the two this
+note first carried were already stale by the time the follow-up removed the
+grants. Search the service names.)
 Of the names the pre-split root `.env.example` carried, **151 reach those
 containers that way and are not overridden by the services' own `environment:`
 block** (which sets ten).
@@ -539,9 +542,18 @@ real fix and is out of scope here — it is precisely what
 `scripts/checks/check-env-file-scope.ps1` exists to prevent, and those two grants
 are grandfathered past it.
 
-**OPEN, follow-up in agent-org:** replace `env_file: ../../.env` on
-`ao-worker-1`/`-2` with the named variables they actually need, so the check can
-stop grandfathering them.
+**CLOSED 2026-09-19 by item `sl-ao-envfile`** (everything above this line is the
+state at the time of THIS item, kept as the record of how it was found). Both
+`env_file: ../../.env` entries are gone; each worker's `environment:` block now
+names `LC_DEPLOY_TOKEN` and `LC_LLAMA_API_KEY`, interpolated from
+`agent-org/docker/.env`, which compose loads natively from the project directory
+and whose `.env.example` now declares both. `check-env-file-scope.ps1` no longer
+grandfathers anything: it refuses any `env_file` target that resolves to the repo
+root `.env`, staged or under `-All`, with no per-service exemption. Runbook step
+4b is now the "make sure agent-org's own file carries both names before the pool
+is recreated" step, not a warning about a wildcard. The recreate of
+`ao-worker-1`/`-2` is the landing step and is recorded with that item; see
+`documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
 
 ## 15. F1 — five live operator messages still quoted the retired global value
 
