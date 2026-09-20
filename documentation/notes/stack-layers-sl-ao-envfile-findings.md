@@ -468,6 +468,75 @@ mismatches each), from a clean clone with the script taken from the commit:
 * STILL GREEN (3): `- .env`, `[.env]`, `- path: .env`. The check has not become
   "refuse everything"; a plain path literal in any shape still passes.
 
+### 3f. The extent defect: it decided what the value WAS before deciding where it ENDED
+
+Found by the tester. The policy from 3e held - all 68 rows of the three matrices were
+correct, the guard sat in the right place, the merge-key claim checked out. The hole
+was one layer down, in the scanner that finds the value in the first place.
+
+With no inline value, `Scan-ComposeText` set a flag and then accepted exactly three
+kinds of line: `- item`, a `path:`/`required:`/`format:` continuation, and a blank.
+**Any other line cleared the flag**, which ended the block - and the text on that line
+was never looked at. So both of these went green, in staged mode and under `-All`:
+
+```yaml
+    env_file:                        env_file:
+      ../../.env                       -
+                                         ../../.env
+```
+
+A scalar on the line after the key, and an item under a bare dash. Neither is exotic;
+both are plain path literals, so the policy from 3e had nothing to object to - they
+simply never reached it. Measured: each renders `exit 0` and puts all three root names
+on `ao-ot-1`.
+
+**The rule this is the fourth instance of:** a text scanner must define the value's
+EXTENT before it reads shapes, and it must fail toward reading too much rather than too
+little. The old structure had it backwards - it inferred the extent FROM the shapes it
+knew, so every shape it did not know looked like the end of the value. That is the same
+error as 3c and 3d in a different place: an unrecognised input was treated as
+"nothing to see" instead of "something I cannot vouch for".
+
+**The extent rule as implemented** (`Get-IndentWidth` + `Scan-ComposeText`), all
+indentation, no semantics:
+
+* the key's indent is the `env_file:` line's own indent;
+* the value is EVERY following line indented deeper than the key;
+* a blank line and a comment-only line are skipped and do NOT end it;
+* it ends at the first line whose indent is at or below the key's;
+* inside the extent, a line that is `-` alone means the next deeper line is the item;
+  a `- item`, a `path:`/`required:`/`format:` key and a flow/long-form entry are read as
+  before; **anything else is a VALUE**, which is how the next-line scalar is caught and
+  how the next spelling nobody has thought of will be;
+* tab indents count a tab as advancing to the next multiple of 8, so tab- and
+  space-indented blocks compare monotonically.
+
+Every token found this way still goes through the indirection policy, the allowlist and
+the directory rules - the extent fix adds tokens, it does not add exemptions.
+
+**Proof, 18 placement rows in T6a-iv** (plus the earlier 27 + 10 + 31 re-run unchanged,
+0 mismatches each), from a clean clone with the script taken from the commit. RED:
+next-line scalar plain and quoted; bare-dash item plain, quoted, and with `path:` under
+it; a second item indented deeper than the first; a comment inside the extent; a blank
+inside the extent; a comment and a blank before a next-line scalar; `- path:` with
+`required:` on a deeper line and on the same; two items where only the second is bad; a
+tab-indented item. GREEN: a next-line scalar naming the plane's OWN `.env`; a bare-dash
+item naming it; a value at exactly the key's indent; a shallower line ending the extent;
+and an own-`.env` block followed by a sibling `labels:` key - the last two being the
+check that the extent does not swallow the rest of the service.
+
+**Two rows where the check is deliberately STRICTER than docker, measured rather than
+assumed:**
+
+| plant | docker | the check | why |
+|---|---|---|---|
+| `- .env` then a deeper `- ../../.env` | renders exit 0 and does NOT deliver the root file (it loads `agent-org/docker/.env` only) | RED | the line says `- ../../.env` inside an env_file block; YAML's handling of a deeper dash after a scalar item is surprising enough that refusing is the honest answer |
+| `- path: ../../.env` with `required:` deeper | the file does not render at all (`mapping values are not allowed in this context`) | RED | the path token is still read and named; the renderer refuses it for its own reason |
+
+And one where it is deliberately quieter: a value at exactly the key's indent is not
+the value per YAML - docker refuses the file (`could not find expected ':'`) - so the
+check says nothing, which is correct rather than lenient.
+
 ---
 
 ## 4. Out of scope, found anyway

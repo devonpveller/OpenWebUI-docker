@@ -215,7 +215,7 @@ that no read supports; any live-root name the source reads.
 
 ---
 
-## T6 — the check refuses a grant in EVERY value shape compose accepts, and carries no exemption
+## T6 — the check SEES every grant (extent), READS every shape, and refuses indirection by policy
 
 Criterion: acceptance #3. **Attempt 1 failed here**: two valid shapes rendered by
 docker as real grants passed the check green. So this case is now a shape MATRIX,
@@ -368,6 +368,64 @@ broken in the other direction, and that is a FAIL too.
 **Read the reasons, not only the exits.** A policy row that goes red via the allowlist
 message, or an allowlist row that goes red via the policy message, means the value took
 a different route than this table claims - report it.
+
+### T6a-iv — WHERE the value sits, not only what it says
+
+Attempt 4 failed here, and the three tables above did not catch it because every row in
+them varies the CONTENT of the value and none varies its PLACEMENT. The scanner decided
+what the value WAS before deciding where it ENDED, so any line it did not recognise
+silently ended the block and was never read. Two plain-path spellings went green:
+
+```yaml
+    env_file:                        env_file:
+      ../../.env                       -
+                                         ../../.env
+```
+
+The extent rule the fix implements, which these rows test: **the value is every line
+indented deeper than the `env_file:` key; a blank or comment-only line does not end it;
+it ends at the first line at or below the key's indent; inside the extent a line the
+reader does not recognise is treated as a VALUE, not as the end of the block.**
+
+Use the T6a-i driver with a two-field tuple (name, block, expect) — no prelude needed:
+
+| # | block under `ao-ot-1` | expect |
+|---|---|---|
+| 1-2 | `env_file:` / `  ../../.env` — plain, then quoted | RED, repo root env file |
+| 3 | `env_file:` / `  .env` (next-line scalar, plane's own) | **GREEN** |
+| 4-6 | `env_file:` / `  -` / `    ../../.env` — plain, quoted, and `path: ../../.env` | RED |
+| 7 | `env_file:` / `  -` / `    .env` | **GREEN** |
+| 8 | `env_file:` / `  - .env` / `      - ../../.env` (second item indented deeper) | RED — see the note below |
+| 9 | a `# comment` line between the key and `- ../../.env` | RED |
+| 10 | a BLANK line between the key and `- ../../.env` | RED |
+| 11 | a comment AND a blank, then a next-line scalar `../../.env` | RED |
+| 12 | `env_file:` / `../../.env` at EXACTLY the key's indent | **GREEN** — see the note |
+| 13 | `env_file:` / `  - .env` / `image: x` at a shallower indent | **GREEN** (the shallower line ends the extent) |
+| 14-15 | `- path: ../../.env` with `required: false` on a DEEPER line, then on the SAME | RED |
+| 16 | two items, only the second bad | RED on the second |
+| 17 | a TAB-indented item | RED |
+| 18 | `env_file:` / `  - .env` then a sibling `labels:` key and its own list | **GREEN** (the extent must not swallow the rest of the service) |
+
+Rows 3, 7, 12, 13 and 18 are the other direction: if the extent rule over-reaches, they
+go red and that is a FAIL.
+
+**Three rows where the check and docker deliberately disagree.** Measure docker
+yourself (`cp .env.example .env`, plant, `docker compose ... config`, grep for
+`NAS_BACKUP_USER`) and judge whether the disagreement is the right way round:
+
+* Row 8: docker renders exit 0 and does NOT deliver the root file (it loads
+  `agent-org/docker/.env` only). The check says RED anyway. The claim is that a line
+  reading `- ../../.env` inside an env_file block should not pass merely because YAML's
+  handling of a deeper dash is surprising.
+* Rows 14-15, deeper variant: the file does not render at all
+  (`mapping values are not allowed in this context`). The check says RED; the renderer
+  refuses it for its own reason. Two refusals, one file.
+* Row 12: docker refuses the file (`could not find expected ':'`) because a value at the
+  key's indent is not the value. The check says nothing, which is correct rather than
+  lenient - it is not a grant.
+
+Rows 1-2 and 4-6 are the ones to render as well as check: each must put all three root
+names on `ao-ot-1` under docker, which is what makes a green from the check a defect.
 
 ### T6b — these shapes are real grants, per docker, not per this plan
 
@@ -621,6 +679,25 @@ following an alias to its anchor - has been deleted.
 | 42 | `.githooks/README.md:27` and runbook 4b state the policy, and the allowlist regex they quote is byte-for-byte the script's | those two files | extract `$script:PlainPathText` from the script and grep both documents for that exact string - do not eyeball it |
 
 
+### Attempt 5 - the sentences THIS round introduces
+
+Attempt 4 failed on T6, T8 and T10 row 39. Rows 43-49 are the claims the repair adds;
+row 39 is restated, because "shape parsing is unchanged and still passes a plain path
+literal in every shape" was true of the shapes and false of the PLACEMENTS.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| 39' | Every plain path literal is read wherever it sits under the key, and the four shapes still behave as before | script header, findings 3f | T6a-iv in full, plus T6a-i/ii/iii re-run unchanged |
+| 43 | The value's EXTENT is decided by indentation before any shape is read: every line deeper than the key, ending at the first line at or below it | script header, `Scan-ComposeText`, findings 3f, runbook 4b, `.githooks/README.md:27` | T6a-iv rows 12, 13, 18 for the boundary; 1-11, 14-17 for what is inside |
+| 44 | A blank line and a comment-only line do not end the extent | script header, findings 3f, runbook 4b | T6a-iv rows 9, 10, 11 |
+| 45 | A line inside the extent that the reader does not recognise is treated as a VALUE, never as the end of the block | script header, findings 3f, runbook 4b, hook table | T6a-iv rows 1-3 (the next-line scalar reaches the verdict at all) |
+| 46 | A bare `-` means the next deeper line is the item | script header, findings 3f | T6a-iv rows 4-7 |
+| 47 | Tab indents compare monotonically with space indents (tab advances to the next multiple of 8) | script header, findings 3f | T6a-iv row 17 |
+| 48 | Both spellings attempt 4 missed are real grants docker honours | findings 3f, T6a-iv | render rows 1-2 and 4-6 and count the root names on `ao-ot-1` |
+| 49 | The check is deliberately stricter than docker on rows 8 and 14-15, and deliberately quieter on row 12 | findings 3f, T6a-iv | render all three and compare; then judge the direction, do not just confirm the measurement |
+| 50 | `.githooks/README.md:27` and runbook 4b describe the extent rule, and both quote the allowlist regex AND the policy message byte-for-byte | those two files | extract `$script:PlainPathText` and `$script:IndirectionMessage` from the script and grep both documents for each exact string |
+
+
 ---
 
 ## Verdict
@@ -634,5 +711,8 @@ the defect; attempt 2 passed a 37-shape matrix and the shape it did not plant wa
 the defect; attempt 3 passed 52 and the shape it did not plant - one anchor name
 defined twice - was the defect. The answer to that sequence is not a longer
 table, it is the policy in T6a-iii: the check stopped interpreting YAML. So the
-most useful thing you can do here is try to find a value that is NOT a plain path
-literal and still reaches the resolver. Plant it and report it.
+most useful thing you can do here is try to find a grant the check does not SEE -
+attempt 4's defect was not a value it judged wrongly, it was a value it never
+read. Two questions worth attacking: is there a placement under the key that the
+extent rule misses, and is there a value that is not a plain path literal and
+still reaches the resolver? Plant it and report it.

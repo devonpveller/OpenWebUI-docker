@@ -263,17 +263,27 @@ refuses any `env_file` target that resolves to the repo root `.env`, in a staged
 compose file or across the whole tree with `-All`.
 
 Its rule is a POLICY, not a parse: an `env_file` value must be a PLAIN PATH
-LITERAL — a `*alias`, an `&anchor`, a `!tag`, a `>`/`|` block scalar and a
-`${VAR}` are REFUSED by policy with the token printed, never resolved. It reads the
-SHAPES compose accepts - a scalar, a flow sequence, a block sequence, a long-form
-`path:` entry - but it interprets no YAML SEMANTICS, because three attempts at
-doing so each shipped a silent hole (a swallowed flow-sequence bracket, then an
-alias, then a DUPLICATE anchor where the lookup kept the first definition and
-YAML takes the last). What reaches the resolver is an allowlist - `^[A-Za-z0-9_./\\~-]+$`
-after quotes and comments are stripped - and anything else is refused and printed
-rather than normalized into something that looks like a path. A merge key
-(`<<: *tpl`) needs no special handling: the `x-` block's own `env_file:` line is
-scanned where it is written, so the grant is caught at its source.
+LITERAL. A `*alias`, an `&anchor`, a `!tag`, a `>`/`|` block scalar and a
+`${VAR}` are refused rather than resolved, with the token printed and this
+sentence:
+`env_file values must be plain path literals; YAML anchors and aliases are refused by policy (rewrite as the path)`.
+
+To find the value it does not guess: **the extent is decided by indentation
+before any shape is read**. The value is every line indented deeper than the
+`env_file:` key; a blank or comment-only line does not end it; it ends at the
+first line at or below the key's indent. Every line inside that extent is read
+in the four shapes compose accepts - a scalar, a flow sequence, a sequence item,
+a long-form `path:` - including a scalar written on the line AFTER the key and
+an item written under a bare `-`, both of which docker honours. A line inside
+the extent that the reader does not recognise is treated as a VALUE, never as
+the end of the block: that is the fail-closed direction, and getting it backwards
+is what hid two grants until 2026-09-20.
+
+What reaches the resolver is an allowlist - `^[A-Za-z0-9_./\\~-]+$` after quotes and
+comments are stripped - and anything else is refused and printed rather than
+normalized into something that looks like a path. A merge key (`<<: *tpl`) needs
+no special handling: the `x-` block's own `env_file:` line is scanned where it is
+written, so the grant is caught at its source.
 
 The check also used to grandfather grants already present in HEAD, which is how
 the two ao-worker ones survived it for weeks; that clause was removed with them.
