@@ -1418,7 +1418,7 @@ def test_the_profile_flags_each_plane_gets_are_pinned(root):
     compose declared only `idea-refinery`: compose ignored `--profile research` and
     `up --all` brought up the same thirty containers. sl-ob1-gitlink bumped the
     gitlink to fe3e045 on 2026-09-20 and it DOES matter now - measured there, this
-    two-profile set renders 22 of the 30, so the operator declares the other two
+    two-profile set renders 23 of the 30, so the operator declares the other two
     once (`stack.py init --product research --force`, or COMPOSE_PROFILES in
     OB1/docker/.env). This test still asserts the driver's DEFAULT closure, not the
     operator's deployment set.

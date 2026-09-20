@@ -50,6 +50,53 @@ $ErrorActionPreference = "Stop"
 # ──────────────────────────────────────────────────────────────────────────
 
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
+# ONE profile list for EVERY `docker compose -f $Script:OB1Compose ...` in this
+# file. There are eight of them and they must not drift apart, which is why this
+# is a variable and not eight argument lists.
+#
+# WHY IT EXISTS AT ALL. Until 2026-09-20 the OB1 gitlink pinned 5005197, whose
+# compose declared one profile (`idea-refinery`); compose ignores a profile it
+# does not know, so profiles here barely mattered. sl-ob1-gitlink bumped the pin
+# to fe3e045, which puts TEN of the thirty containers behind four profiles
+# (measured `config --services` at fe3e045: bare 20, idea-refinery+research 23,
+# all four 30). From that commit on, an OB1 compose verb WITHOUT these flags
+# addresses 20 of the 30.
+#
+# THAT IS TRUE OF `stop` AND `down`, NOT ONLY `up` - the part that is easy to get
+# wrong, because `down` reads like "tear down the project". Measured 2026-09-20
+# in a THROWAWAY two-service compose project (compose v5.3.0), one service behind
+# a profile, no container of any real project touched:
+#     docker compose stop                   -> only the unprofiled one stops
+#     docker compose down                   -> only the unprofiled one is removed,
+#                                              then `Network <proj>_default
+#                                              Removing` / `Resource is still in
+#                                              use` - the network CANNOT drop
+#                                              while the profiled container holds
+#                                              an endpoint on it
+#     docker compose --profile x stop|down  -> both, and the network drops
+# Stop-OB1Stack and Invoke-NuclearRecovery exist precisely to free
+# ai-stack_llm-net / app-net before the root `docker compose down` recreates
+# them, and seven of the ten gated OB1 containers hold endpoints on those
+# networks - so a bare teardown there does not merely miss containers, it makes
+# the network drop that follows it FAIL.
+#
+# The `ps` sites carry the list too although they do not need it: `ps` is a LABEL
+# query and bare and profiled both report all 30 (measured at fe3e045,
+# `--format json` -> 30 lines either way). They carry it so the rule in this file
+# is "every OB1 compose invocation uses $Script:OB1Profiles", with no per-site
+# judgement for the next person to get wrong.
+#
+# An operator can ALSO put COMPOSE_PROFILES=research,wiki,notebook,idea-refinery
+# in OB1/docker/.env (the per-plane env file, D17), which repairs a bare verb on
+# its own - proved in the same probe, and it is the LANDING STEP for this host.
+# These flags do not conflict with that: a CLI --profile REPLACES
+# COMPOSE_PROFILES, and this list IS the full set.
+$Script:OB1Profiles = @(
+    '--profile', 'research',
+    '--profile', 'wiki',
+    '--profile', 'notebook',
+    '--profile', 'idea-refinery'
+)
 # The project name that file declares (`name: open-brain`). Wait-ForRestartLoops
 # filters `docker ps` by it, so it sees the same containers compose does.
 $Script:OB1Project = "open-brain"
@@ -253,7 +300,10 @@ function Stop-OB1Stack {
     if (-not (Test-OB1Available)) { return }
     Write-Log "INFO" "Stopping Open Brain (OB1) stack..."
     try {
-        docker compose -f $Script:OB1Compose stop
+        # Profiles, or this stops 20 of 30 and the llm-net drop this function
+        # exists to enable fails afterwards - see $Script:OB1Profiles.
+        $prof = $Script:OB1Profiles
+        docker compose -f $Script:OB1Compose @prof stop
     }
     catch {
         Write-Log "WARN" "OB1 stop had issues, continuing: $_"
@@ -388,7 +438,8 @@ function Start-OB1Stack {
     }
     Write-Log "INFO" "Starting Open Brain (OB1) stack ($($Script:OB1Services.Count) containers)..."
     try {
-        # ALL FOUR profiles, or this starts 21 of the 30 it just said it would start.
+        # ALL FOUR profiles ($Script:OB1Profiles), or this starts 21 of the 30 it
+        # just said it would start.
         # Until 2026-09-20 the OB1 gitlink pinned 5005197, whose compose declared
         # only `idea-refinery`; compose ignores a profile it does not know, so one
         # flag started all 30. sl-ob1-gitlink bumped the gitlink to fe3e045, which
@@ -398,7 +449,8 @@ function Start-OB1Stack {
         # in OB1/docker/.env would NOT save this line - it has to carry them itself.
         # $Script:OB1Services above is the 30 this script claims to start; that is
         # the number these flags have to keep true.
-        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery up -d
+        $prof = $Script:OB1Profiles
+        docker compose -f $Script:OB1Compose @prof up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it started..."
         $looping = Wait-ForRestartLoops -Seconds 60
         if ($looping.Count -eq 0) {
@@ -421,13 +473,15 @@ function Reset-OB1Stack {
     }
     Write-Log "INFO" "Recreating Open Brain (OB1) stack..."
     try {
-        # All four profiles on BOTH halves - see the note in Start-OB1Stack. On the
-        # `up` half a missing profile silently leaves nine containers down after a
-        # recreate; on the `down` half it is the difference between tearing the
-        # project down and leaving part of it behind for the `up` to collide with.
-        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery down
+        # $Script:OB1Profiles on BOTH halves. On the `up` half a missing profile
+        # silently leaves seven containers down after a recreate; on the `down`
+        # half it is the difference between tearing the project down and leaving
+        # part of it behind for the `up` to collide with - measured in the probe
+        # transcribed at $Script:OB1Profiles, not assumed.
+        $prof = $Script:OB1Profiles
+        docker compose -f $Script:OB1Compose @prof down
         Start-Sleep -Seconds 5
-        docker compose -f $Script:OB1Compose --profile research --profile wiki --profile notebook --profile idea-refinery up -d
+        docker compose -f $Script:OB1Compose @prof up -d
         Write-Log "INFO" "OB1 up -d returned - watching 60 s for restart loops before calling it recreated..."
         $looping = Wait-ForRestartLoops -Seconds 60
         if ($looping.Count -eq 0) {
@@ -531,7 +585,8 @@ function Test-BasicConnectivity {
         # Open Brain (OB1) — separate compose project, reported as a count.
         if (Test-OB1Available) {
             try {
-                $ob1 = docker compose -f $Script:OB1Compose ps --format json | ConvertFrom-Json
+                $prof = $Script:OB1Profiles
+                $ob1 = docker compose -f $Script:OB1Compose @prof ps --format json | ConvertFrom-Json
                 $ob1Running = @($ob1 | Where-Object { $_.State -eq "running" }).Count
                 # A looping container is named, not folded into the count: "28/29
                 # running" hid a 14 h curator loop on 2026-09-05.
@@ -944,7 +999,8 @@ function Invoke-EmergencyRecovery {
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
-            docker compose -f $Script:OB1Compose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+            $prof = $Script:OB1Profiles
+            docker compose -f $Script:OB1Compose @prof ps --format "table {{.Service}}\t{{.Status}}" 2>$null
         }
     }
     catch {
@@ -995,7 +1051,13 @@ function Invoke-NuclearRecovery {
     # ai-stack_llm-net network OB1 attaches to as an external network.
     if (Test-OB1Available) {
         Write-Log "INFO" "Tearing down Open Brain (OB1) stack..."
-        try { docker compose -f $Script:OB1Compose down }
+        # Profiles, or this removes 20 of 30 and leaves TEN containers holding
+        # endpoints on ai-stack_llm-net / app-net / default - the networks the
+        # root `docker compose down` further down is about to drop. That drop
+        # then fails with `Resource is still in use` and nuclear stops doing what
+        # it says. See $Script:OB1Profiles for the measurement.
+        $prof = $Script:OB1Profiles
+        try { docker compose -f $Script:OB1Compose @prof down }
         catch { Write-Log "WARN" "OB1 teardown had issues: $_" }
     }
 
@@ -1058,7 +1120,8 @@ function Invoke-NuclearRecovery {
 
         if (Test-OB1Available) {
             Write-Log "INFO" "Open Brain (OB1) status:"
-            docker compose -f $Script:OB1Compose ps --format "table {{.Service}}\t{{.Status}}" 2>$null
+            $prof = $Script:OB1Profiles
+            docker compose -f $Script:OB1Compose @prof ps --format "table {{.Service}}\t{{.Status}}" 2>$null
         }
     }
     else {

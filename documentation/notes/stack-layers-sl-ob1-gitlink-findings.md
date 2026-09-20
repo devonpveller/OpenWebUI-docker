@@ -40,6 +40,7 @@ stderr empty on every one:
 | `--profile research` | 22 | +2 `openbrain-curator`, `openbrain-research` |
 | `--profile notebook` | 23 | +3 `surrealdb`, `open_notebook`, `open-notebook-backup` |
 | `--profile wiki` | 24 | +4 `openbrain-wiki`, `-wiki-backup`, `-wiki-viewer`, `-workbench` |
+| `idea-refinery` + `research` (**the driver's default set**) | **23** | the three above them |
 | all four | **30** | the ten above |
 
 The all-four set is IDENTICAL to what is running: the 30 names from
@@ -84,9 +85,13 @@ COMPOSE_PROFILES from its own env file"). It does.
 | Invocation | State written for `ob1` | Flags at drive time | Services |
 |---|---|---|---|
 | `init --product research --force` | `idea-refinery, research, wiki, notebook` | all four | 30 |
-| `init --product research --headless --force` | `idea-refinery, research` | two | 22 |
-| `enable ob1` (bare plane) | `idea-refinery, research` | two | 22 |
-| no state entry for `ob1` at all | — | `idea-refinery, research` | 22 |
+| `init --product research --headless --force` | `idea-refinery, research` | two | **23** |
+| `enable ob1` (bare plane) | `idea-refinery, research` | two | **23** |
+| no state entry for `ob1` at all | — | `idea-refinery, research` | **23** |
+
+Every count in that column is a RENDER of the flag list beside it, not 20 plus the
+deltas in §2. Attempt 1 wrote 22 there — the count for `--profile research` ALONE —
+and it propagated to eight shipped files before a tester rendered the pair. See §11.
 
 `enable ob1` refuses first until `inference` and `search` are enabled, naming both
 and the two commands — worth knowing before reading the refusal as a bug.
@@ -94,7 +99,7 @@ and the two commands — worth knowing before reading the refusal as a bug.
 **This host is in the last row.** `.stack/state.json` exists in the main checkout
 (written 2026-09-19) and lists `anchor, coder, frontend, inference, memory, search`
 — **not `ob1`**. `OB1/docker/.env` has no `COMPOSE_PROFILES` line. So after this
-branch lands, a `stack.py up` for OB1 passes two profiles and would start 22 of the
+branch lands, a `stack.py up` for OB1 passes two profiles and would start 23 of the
 30 that are running: the `wiki` four and the `notebook` three would not come up.
 Closing that is the ORCHESTRATOR's landing step, not this item's, and it is one
 command either way (§3).
@@ -126,8 +131,9 @@ a gitlink bump IS a compose change to the deployed OB1. So it is fixed here, to 
 four profiles at all three sites, with the reasoning at the line. This RESTORES the
 script's pre-bump behaviour (30 containers); it is not a deployment change.
 
-The operator's `OB1/docker/.env` cannot rescue that line even if they set
-`COMPOSE_PROFILES` — §3's last bullet measured why.
+The operator's `OB1/docker/.env` cannot rescue a line that passes ONE flag even if
+they set `COMPOSE_PROFILES` — §3's last bullet measured why. (It DOES rescue a line
+that passes none; §5a.)
 
 **Checked and NOT changed** (each verified, not assumed):
 
@@ -142,10 +148,125 @@ The operator's `OB1/docker/.env` cannot rescue that line even if they set
   running containers at `fe3e045` exactly as it did at `5005197` (measured both).
   So the status/report sites in `emergency-recovery.ps1` (lines ~521, ~934, ~1048)
   need no profiles and were left alone.
-- The bare `stop` (line ~256) and bare `down` (line ~985) were left alone: whether
-  a profile-less `down` reaches profiled containers cannot be measured without
-  stopping them, and this item touches no container. Flagged here so the next
-  person does not read the silence as a verdict.
+- ~~The bare `stop` and bare `down` were left alone: whether a profile-less `down`
+  reaches profiled containers cannot be measured without stopping them.~~
+  **THAT SENTENCE WAS WRONG, AND IT WAS THE EXPENSIVE KIND OF WRONG — see §11.**
+  It is measurable in two minutes in a throwaway compose project, touching nothing
+  real. Both sites are fixed in attempt 2; the measurement is below.
+
+## 5a. `stop` and `down` miss profiled containers too — measured, in a throwaway project
+
+Attempt 1 fixed three of five mutating OB1 call sites in
+`scripts/recovery/emergency-recovery.ps1` and excused the other two with a claim that
+could not survive a two-minute experiment (§11). The experiment:
+
+A throwaway compose project, `name: glx-profile-probe`, two `busybox` services, one
+behind `profiles: ["extra"]`. No image build, no network of any real project, and no
+container of any real project touched. Compose **v5.3.0**, the version this host runs.
+
+```
+$ docker compose --profile extra up -d      -> glx-probe-core running, glx-probe-gated running
+
+$ docker compose stop                       # BARE
+   Container glx-probe-core Stopping / Stopped
+   docker ps -a -> glx-probe-core exited, glx-probe-gated RUNNING
+
+$ docker compose --profile extra stop       # PROFILED - the fix's shape
+   Container glx-probe-gated Stopping / Stopped
+   Container glx-probe-core  Stopping / Stopped
+   docker ps -a -> both exited
+
+$ docker compose down                       # BARE, both running first
+   Container glx-probe-core Stopping / Stopped / Removing / Removed
+   Network glx-profile-probe_default Removing
+   Network glx-profile-probe_default Resource is still in use      <-- THE POINT
+   docker ps -a -> glx-probe-gated STILL RUNNING; the network still exists
+
+$ docker compose --profile extra down       # PROFILED - the fix's shape
+   Container glx-probe-gated Stopping / Stopped / Removing / Removed
+   Network glx-profile-probe_default Removed
+   -> 0 containers, 0 networks
+
+$ printf 'COMPOSE_PROFILES=extra\n' > .env  # the OTHER fix, (b)
+$ docker compose up -d ; docker compose stop   # BARE
+   -> BOTH stop
+$ docker compose up -d ; docker compose down   # BARE
+   -> both removed, `Network ... Removed`, 0 containers, 0 networks
+```
+
+Probe torn down with `--profile extra down -v` and the directory deleted;
+`docker ps -a` for that project is empty.
+
+**So the bare `down` does not merely miss containers — it cannot drop the network.**
+Applied to OB1 at `fe3e045`: `Stop-OB1Stack` addressed 20 of 30, and
+`Invoke-NuclearRecovery`'s OB1 teardown removed 20 and left ten running. Both
+functions carry a comment saying they run FIRST so the root `docker compose down` can
+drop `ai-stack_llm-net`. Seven of the ten gated containers hold endpoints on
+`ai-stack_llm-net` / `app-net` / `default` (the tester enumerated this with
+`docker inspect`; it is why those ten matter and not just that they are ten), so the
+drop those functions exist to enable would have failed exactly as the probe's did.
+
+**Honest history** (the tester's class-3 note, kept): at `5005197`
+`openbrain-idea-refinery` was already profiled, so the bare `stop` already missed
+**one** container. This branch takes that from 1 to 10, seven of them on the anchor
+networks. An amplification of an existing bug, not a new class — and the amplification
+is what makes it a regression this branch causes.
+
+### The fix: ONE list, eight call sites
+
+`$Script:OB1Profiles` is declared beside `$Script:OB1Compose` and used by **every**
+`docker compose -f $Script:OB1Compose ...` in the file — there is no second argument
+list for a ninth site to drift from:
+
+| Function | Verb | Was |
+|---|---|---|
+| `Stop-OB1Stack` | `stop` | **bare** |
+| `Start-OB1Stack` | `up -d` | four literal flags (attempt 1) |
+| `Reset-OB1Stack` | `down` | four literal flags (attempt 1) |
+| `Reset-OB1Stack` | `up -d` | four literal flags (attempt 1) |
+| `Invoke-NuclearRecovery` | `down` | **bare** |
+| `Test-*` health path | `ps --format json` | bare |
+| two report paths | `ps --format "table ..."` | bare |
+
+The three `ps` sites do **not** need the flags — `ps` is a label query and bare and
+profiled both report all 30 (measured at `fe3e045`: `ps --format json` yields 30 lines
+either way). They carry them anyway so the rule in that file is "every OB1 compose
+invocation uses `$Script:OB1Profiles`", with no per-site judgement left for the next
+person to get wrong. That is the whole reason attempt 1 failed here: it made a
+per-site judgement, on five sites, and got two of them wrong.
+
+Splatting (`$prof = $Script:OB1Profiles; docker compose -f $C @prof stop`) was verified
+to pass the flags as separate arguments under PS 5.1 — `@prof config --services` with
+a two-profile list rendered 26 (20 + 2 + 4), which is only possible if both flags
+arrived.
+
+### And the env-file half, which is the operator's
+
+`OB1/docker/.env` has no `COMPOSE_PROFILES` line, while `frontend/.env` carries
+`gpu,tailscale` and `inference/.env` carries `local` (read 2026-09-20). Of the five
+profiled planes, `portal` deliberately has none (CLAUDE.md says so) and `agent-org`'s
+`workers`/`cloud` are operator-driven slices; OB1 is the one whose absence now bites,
+because its bare verbs are in the recovery path. Adding
+`COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` there repairs every bare verb
+at once — proved in the probe above — and is now named as the landing step in
+SERVICE-LIFECYCLE row 8a and the stack-map OB1 section alongside the driver state.
+
+**The price, stated rather than discovered later.** `effective_profiles()` unions the
+plane env's list into the driver's flags, so on a host whose `OB1/docker/.env` carries
+all four, `--headless` becomes a NO-OP for this plane. Measured — and the transcript is
+almost comic:
+
+```
+$ stack.py init --product research --headless --force
+  # --headless: dropped surface profiles ob1:wiki, ob1:notebook
+  ob1  profiles: idea-refinery, research
+$ stack.py up ob1 --dry-run
+  docker compose -f OB1/docker/docker-compose.yml --profile idea-refinery --profile research --profile wiki --profile notebook up -d
+```
+
+The driver says it dropped them and then passes them. On this host, which runs all 30,
+that is the right trade. A deployment that genuinely wants a headless OB1 must leave
+the env line out and use the driver state alone. Both docs now say this.
 
 ## 6. SCOPE TAKEN ON: a gitlink bump staged NO `.yml`, so the compose check sat out
 
@@ -160,9 +281,14 @@ own delta the check printed, in full:
 ```
   [configs]   [ ~~ ] mutually exclusive - openwebui: ...
   [configs]   [OK]   scripts/lib/stack-services.json matches ...
-  [configs] 2 staged .ps1 file(s) parse clean
+  [configs] 3 staged .ps1 file(s) parse clean
   [configs] 2 staged .json file(s) are strict-valid
 ```
+
+(That transcript is from the tip, not from the moment the hole was found: the run that
+found it printed "2 staged .ps1", before `emergency-recovery.ps1` joined the delta.
+Corrected because a quoted transcript that does not reproduce is worse than a
+paraphrase — the tester caught the drift as class 3.)
 
 No renders. No `rows verified/expected`. Green, on the one commit shape that most
 needed the render — the commit that took OB1's bare render from 29 services to 20.
@@ -219,7 +345,7 @@ them would be falsifying a record):
 | `stack.manifest.toml` `pending` flag doc | "see the ob1 tables" as the live example | no plane is in that state today |
 | `stack.manifest.toml` above the three profile tables | "AFTER THE GITLINK BUMPS that stops being true" | the measured post-bump numbers |
 | `stack.manifest.toml` `idea-refinery` description | "scripts/stack/stack.ps1 passes this" | `default = true`, so both drivers do (stack.ps1 is a shim) |
-| `scripts/stack/stack.ps1` header | "gitlink 5005197 … two profiles and four render the same 30" | bare 20 / two 22 / four 30, and the one-time operator step |
+| `scripts/stack/stack.ps1` header | "gitlink 5005197 … two profiles and four render the same 30" | bare 20 / two 23 / four 30, and the one-time operator step |
 | `scripts/stack/stack.py` `unpinned_profiles` docstring | "how research/wiki/notebook are described today" | how they WERE; empty for every plane now |
 | `scripts/stack/README.md` (two places) | "not yet in the pinned submodule" | landed; the mechanism has no current user |
 | `scripts/stack/test_stack.py` (two comments) | "changes NOTHING about what starts today" | it does now; the test still asserts the DEFAULT closure |
@@ -296,3 +422,97 @@ The red/green pair for §6's gate was re-run there against the identical staged 
 the BASE version of `check-project-configs.ps1` (`git show f9b18f2:…`) exits 0 having
 printed no render lines at all; the branch version prints
 `all 9 compose projects render clean` and `open-brain:30/30`.
+
+## 11. Attempt 1 FAILED. Both findings were the same mistake in two materials
+
+Tester `wt-tester-gitlink`, evidence `C:\tgl\sl-ob1-gitlink-evidence-a1.md`, tip
+`bdec3ab`. All twelve plan cases PASSED as written and the item still failed, which is
+the part worth keeping: **the plan was the defect**.
+
+### F1 — the headline number was arithmetic, not a measurement
+
+I rendered `bare`, and each profile ALONE, and `all four`. I never rendered
+`idea-refinery + research` — the set the driver actually passes on this host. I added
+20 + 1 + 2 in my head, wrote **22**, and shipped it to eight files. 22 is the count for
+`--profile research` alone, which I *had* measured; I reused a real number for a
+different set.
+
+The render is **23**. My own sentences convict the arithmetic: they say `wiki` and
+`notebook` gate **seven** running containers, and 30 − 7 = 23.
+
+Nothing operational changed — the operator still owes the same one command and the
+missing seven are still seven — but the acceptance criterion is literally "a stale
+sentence FAILS", and this was the item's headline number in `CLAUDE.md`,
+`stack.manifest.toml`, `stack.ps1`, `stack/README.md`, `test_stack.py`,
+`SERVICE-LIFECYCLE.md`, the stack-map reference, and this note.
+
+**The rule that would have caught it, now in the plan and in two of the docs:
+render the set you are about to describe. Never derive a count by adding deltas.**
+A delta table is a summary of renders; it is not a calculator.
+
+### F2 — I declared the decisive test impossible instead of trying it
+
+§5 of attempt 1 said a profile-less `down` "cannot be measured without stopping them,
+and this item touches no container". The tester built a two-service throwaway project
+and had the answer in about two minutes, touching nothing real. §5a above reproduces it.
+
+Two things make this worse than a missed test:
+
+1. **I had already asserted the answer.** My own `Reset-OB1Stack` comment said a
+   missing profile on the `down` half "is the difference between tearing the project
+   down and leaving part of it behind" — stated as fact, two functions away from the
+   bare `down` I excused as unmeasurable. If it was solid enough to write into a
+   comment, it was solid enough to act on; if it was not, it did not belong in a
+   comment.
+2. **I wrote the impossibility into the plan's "Anything NOT claimed" block**, which
+   is meant to stop a reader inferring what was not checked. Used that way it stopped
+   the tester's *expectations* rather than the tester — a fence around the one case
+   that mattered. A scope fence must say "out of scope", never "unmeasurable", unless
+   unmeasurable has itself been tested.
+
+**The generalisation.** "Touch no container" is a constraint on WHICH containers, not
+on whether behaviour can be observed. A throwaway project is two files and two minutes
+and is not a shared resource. Before writing "cannot be measured", cost the experiment
+that would settle it — the honest sentence is almost always "I did not measure this",
+and that one invites the tester to.
+
+### What both have in common
+
+Each was a place where I substituted a plausible inference for an observation I could
+cheaply have made, and then wrote the inference down in a form that looked measured.
+Findings notes and code comments are where that is hardest to spot afterwards, because
+the surrounding sentences *are* measured. The class is recorded in
+`documentation/notes/agent-harness-findings-note-audit.md` (2026-09-05) as "a check
+that accepts the author's enumeration is not a check"; this is the same thing one level
+down — a note that accepts the author's arithmetic.
+
+### What attempt 2 changed
+
+- 22 -> 23 in eight files plus this note, each re-rendered rather than recomputed, and
+  the occurrences that legitimately mean `--profile research` alone (stack-map's render
+  table, §2 and §3 here) deliberately left at 22.
+- `emergency-recovery.ps1`: one `$Script:OB1Profiles` list, every OB1 compose
+  invocation using it (§5a). The two bare sites are fixed; the `ps` sites carry it for
+  uniformity.
+- The landing step named explicitly in SERVICE-LIFECYCLE row 8a and the stack-map OB1
+  section — `COMPOSE_PROFILES` in `OB1/docker/.env` **and** the driver state — with the
+  `--headless` no-op consequence stated (§5a).
+- §5's false premise struck through rather than deleted, because the mistake is the
+  finding.
+- The plan: a case that RENDERS the two-profile set, the throwaway-project method in
+  place of the impossibility claim, the two missing claim rows, and corrections to
+  T2/T3's "stderr empty" and T11's "0 stray CR" (both of which the tester showed were
+  wrong about the environment, not about the deliverable).
+
+### Carried from the tester, not fixed here
+
+- **C3-c**: the attempt-1 commit message claims "OB1 recipe tests 54/54 and `deno check`
+  clean for the staged gitlink". Those are the pre-commit hook's own output on that
+  commit (`check-ob1-recipe-tests.ps1`, `check-ob1-deno-recipes.ps1`, both gated on a
+  staged OB1 gitlink) and they re-ran green on this round's gitlink commit. The tester
+  correctly notes they did not re-measure it; it is hook output, not a claim about OB1's
+  behaviour.
+- **C3-d**: `scripts/stack/README.md` still closes with "Per-plane `.env` files
+  (`sl-env-split`): this item still encodes the single root `.env`", stale since D10.
+  Pre-existing, untouched by this branch, and not in its surface. Recorded so it is not
+  lost.

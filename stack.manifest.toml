@@ -417,8 +417,11 @@ requires    = ["research"]
 # (written 2026-09-19, read 2026-09-20) does not list `ob1` at all, so the driver
 # resolves its profiles from the manifest alone and passes
 # `--profile idea-refinery --profile research` only (the `default` plus its
-# `requires` closure) = 22: wiki and notebook gate SEVEN running containers that
-# `up` would no longer start. The operator closes that either way, and both
+# `requires` closure). RENDERED, not derived: that pair is 23 (20 + 1 + 2), so
+# wiki and notebook gate the SEVEN running containers `up` would no longer start.
+# (23, not 22 - 22 is `--profile research` ALONE. Attempt 1 shipped the wrong one
+# of those two numbers into eight files; the fix is to render the set you are
+# about to describe rather than add up the deltas.) The operator closes that either way, and both
 # were measured to work: `stack.py init --product research --force` (or `enable
 # research`), which writes idea-refinery, research, wiki, notebook to the state
 # file; or COMPOSE_PROFILES=research,wiki,notebook,idea-refinery in OB1/docker/.env,

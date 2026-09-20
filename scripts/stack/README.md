@@ -409,7 +409,7 @@ still drift, so the exemption cannot launder a typo.
 every run until it happened: declare the full profile set once, or `up` starts
 fewer containers than are running. Measured at `fe3e045`: the bare OB1 render is
 **20** services, all four profiles render **30**, and a driver with no ob1 entry in
-its state passes `idea-refinery` + `research` only and would start **22**. Either
+its state passes `idea-refinery` + `research` only, which RENDERS **23**. Either
 `python scripts/stack/stack.py init --product research --force` (or `enable
 research`), which writes all four into `.stack/state.json`, or
 `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`, which

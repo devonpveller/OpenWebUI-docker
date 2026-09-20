@@ -40,7 +40,7 @@
 # `research`, so `up` passes both. THAT IS NO LONGER THE WHOLE SET: sl-ob1-gitlink
 # bumped the OB1 gitlink 5005197 -> fe3e045 on 2026-09-20, and the pinned compose
 # now declares all four. Measured at fe3e045 (`config --services`): bare 20,
-# idea-refinery+research 22, all four 30 - the 30 that are running. So `wiki` and
+# idea-refinery+research 23, all four 30 - the 30 that are running. So `wiki` and
 # `notebook` gate SEVEN live containers this script's `up` will not start on its
 # own. The operator closes that ONCE, either with
 # `stack.py init --product research --force` (writes all four to .stack/state.json)
