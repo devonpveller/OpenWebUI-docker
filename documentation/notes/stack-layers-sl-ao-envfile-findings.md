@@ -425,6 +425,10 @@ means:
 > an `env_file` value must be a plain path literal; YAML anchors and aliases are
 > refused by policy (rewrite as the path)
 
+The check prints that rule verbatim when it fires, so the sentence a tester sees
+and the sentence written here are the same string:
+`env_file values must be plain path literals; YAML anchors and aliases are refused by policy (rewrite as the path)`.
+
 Deleted: `Get-AnchorMap` and the alias-resolution branch of `Get-GrantVerdict` - 14
 lines of lookup and 9 of the function. Added: `$script:YamlIndirection = '[*&!<>|$]'`,
 tested against the extracted path AND the raw token, refusing with the sentence above

@@ -321,6 +321,11 @@ interprets YAML semantics at all**:
 > an `env_file` value must be a plain path literal; YAML anchors and aliases are
 > refused by policy (rewrite as the path)
 
+A policy refusal prints that rule verbatim. Match on this exact string when you
+judge a row's REASON, and report any drift between it and the script's
+`$script:IndirectionMessage`:
+`env_file values must be plain path literals; YAML anchors and aliases are refused by policy (rewrite as the path)`.
+
 So **every alias row is RED, including an alias to a perfectly legal path.** That is
 the deliberate trade, not an oversight - if you think a green belongs on the
 `*own_env -> .env` row, say so, but the design says red.
