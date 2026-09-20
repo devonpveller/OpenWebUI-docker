@@ -44,12 +44,29 @@
   THE VERDICT IS ABOUT THE PATH, SO THE PATH IS PARSED FIRST. Compose accepts the value
   as a scalar, a flow sequence `[a, b]`, a block sequence, and long-form entries
   (`- path: x` / `required: false`, or `- {path: x, required: false}`), any of them
-  quoted and any of them with a trailing comment. All of those shapes are read; see
-  Get-EntryPath. A value that does NOT parse into plain path text - an unterminated
-  sequence, a `${VAR}` whose target is not knowable from the file - is REFUSED rather
-  than normalized, and so is a value that climbs with `..` and lands back inside the
-  compose file's own directory. Fail closed: a value this script cannot read is a value
-  it cannot vouch for, and reading one wrongly is exactly how it was caught out once.
+  quoted and any of them with a trailing comment, and any of them written as a YAML
+  ALIAS (`x-root-env: &root_env ../../.env` up top, `env_file: *root_env` on the
+  service - which docker honours, delivering the whole file). All of those shapes are
+  read; see Get-EntryPath, Get-InlineValueEntries and Get-AnchorMap.
+
+  WHAT THE RESOLVER IS ALLOWED TO SEE IS AN ALLOWLIST, NOT A DENYLIST. This script has
+  now been caught out twice by the same mistake in two different costumes: a value that
+  was not path text, normalized into a path instead of refused. The first was a flow
+  sequence and a long-form mapping whose punctuation was swallowed as a path segment;
+  the second was `*root_env`, which carries no punctuation at all and so passed a guard
+  that listed the characters it disliked. A list of what is forbidden is only ever as
+  good as the last shape someone thought of. So: after quotes and comments are stripped,
+  a path must match $script:PlainPathText - letters, digits and `_ . / \ ~ -` - and
+  ANYTHING else is refused and printed with the raw token. An alias is the one
+  indirection that is followed rather than refused, and only the cheap way: `&name
+  <scalar>` anywhere in the same file, whose text must itself be plain path text.
+  Refused too: a value that climbs with `..` and lands back inside the compose file's
+  own directory, and one that lands in a SUBdirectory of it - the allowance is the
+  compose file's own directory or a parent below the repo root, nothing else. If a real
+  layout ever needs `env/dev.env`, widen the rule deliberately and say so here; do not
+  discover that the check quietly allowed it.
+
+  Fail closed: a value this script cannot read is a value it cannot vouch for.
 
 .NOTES
   STAGED-ONLY, deliberately: it fails on what a commit leaves in a compose file it
@@ -199,17 +216,58 @@ function Get-InlineValueEntries([string]$value) {
     return @($v)
 }
 
+# YAML ANCHORS AND ALIASES. `x-root-env: &root_env ../../.env` up top and
+# `env_file: *root_env` on a service is a grant docker honours - measured, it delivers the
+# whole root file - and the alias carries no '..' and no punctuation, so it sailed through
+# a guard written as a DENYLIST and resolved as though `*root_env` were a directory name.
+# That is the third shape of the same mistake, so the guard below is now an ALLOWLIST and
+# this resolves the alias rather than leaving it to be normalized. Cheap on purpose: find
+# `&name <scalar>` anywhere in the same file. An anchor on a block (nothing after the name
+# on its line) is not found and the alias is refused, which is the right answer for a
+# check that cannot expand it.
+function Get-AnchorMap([string[]]$lines) {
+    $map = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^\s*#') { continue }
+        if ($line -match '&([A-Za-z0-9_.-]+)[ \t]+(\S.*)$') {
+            $name = $Matches[1]
+            $val = (Remove-YamlComment $Matches[2]).Trim()
+            if ($val -and -not $map.ContainsKey($name)) { $map[$name] = $val }
+        }
+    }
+    return $map
+}
+
+# PLAIN PATH TEXT, AS AN ALLOWLIST. Everything the resolver is allowed to see must match
+# this; everything else is refused and PRINTED. Stated positively on purpose - the two
+# defects this check shipped were both a denylist that did not list the next shape.
+# Letters, digits, `_ . / \ ~ -` covers every env_file path in this repo and every path a
+# compose file here would plausibly name (`.env`, `./.env`, `../.env`, `../../.env`,
+# `.env.test`, `config/dev.env`). Deliberately NOT allowed, each refused rather than
+# guessed at: `*alias` and `&anchor` (YAML indirection), `$` (interpolation), `:` (a
+# Windows drive letter, or mapping residue), whitespace, quotes, and flow punctuation.
+$script:PlainPathText = '^[A-Za-z0-9_./\\~-]+$'
+
 # $composeRel is the compose file's repo-relative path. $path is already EXTRACTED from
-# the YAML value; $raw is the text it came from, used only for the fail-closed check.
-# Returns '' when the target is scoped, otherwise the reason it is refused.
-function Get-GrantVerdict([string]$composeRel, [string]$path, [string]$raw) {
-    if ($path -eq '?') { return 'is an env_file value this check cannot parse' }
+# the YAML value; $raw is the text it came from, used for the message and the fail-closed
+# check. $anchors is the file's anchor map. Returns '' when the target is scoped,
+# otherwise the reason it is refused.
+function Get-GrantVerdict([string]$composeRel, [string]$path, [string]$raw, $anchors) {
+    if ($path -eq '?') { return "is an env_file value this check cannot parse ('$raw')" }
     $t = $path.Trim()
     if (-not $t) { return '' }
-    # Plain path text only. A bracket, a brace, a comma, whitespace or an interpolation
-    # means either an unparsed value or one whose target is not knowable from the file.
-    if ($t -match '[\[\]{},]' -or $t -match '\s' -or $t -match '\$') {
-        return "is not plain path text ('$t') - unparsed or interpolated, so its target cannot be checked"
+    if ($t -match '^\*([A-Za-z0-9_.-]+)$') {
+        $name = $Matches[1]
+        if ($null -eq $anchors -or -not $anchors.ContainsKey($name)) {
+            return "is the alias '$t', and no `&$name <path>` scalar is defined in this file - nothing to check"
+        }
+        $t = (Remove-Quotes $anchors[$name]).Trim()
+        if ($t -notmatch $script:PlainPathText) {
+            return "is the alias '$raw' -> ``&$name $($anchors[$name])``, which is not plain path text"
+        }
+    }
+    if ($t -notmatch $script:PlainPathText) {
+        return "is not plain path text ('$t') - a YAML alias/anchor, an interpolation, an absolute path or unparsed residue, so its target cannot be checked"
     }
     $composeDir = Get-ParentDir $composeRel
     $resolved = Resolve-RepoRelative $composeDir $t
@@ -222,7 +280,7 @@ function Get-GrantVerdict([string]$composeRel, [string]$path, [string]$raw) {
     # FAIL CLOSED. The raw value climbed, and the result did not: either the value was
     # read wrongly (the regression above), or it is spelled `../<thisdir>/.env`, which
     # should be written `.env`. Either way this script will not vouch for it.
-    if ($raw -match '\.\.' -and (($targetDir + '/').StartsWith($composeDir + '/'))) {
+    if ($t -match '\.\.' -and (($targetDir + '/').StartsWith($composeDir + '/'))) {
         return 'climbs with .. yet resolves back inside the compose file''s own directory - write it without the ..'
     }
     return ''
@@ -235,6 +293,7 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
     # separate lines, and a service's own comment mentioning env_file must not match.
     $out = @()
     $inList = $false
+    $anchors = Get-AnchorMap $lines
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = $lines[$i]
         if ($line -match '^\s*#') { continue }
@@ -246,7 +305,7 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
                     $p = ''
                     if ($raw -eq '?') { $p = '?' } else { $p = Get-EntryPath $raw }
                     if (-not $p) { continue }
-                    $why = Get-GrantVerdict $composeRel $p $raw
+                    $why = Get-GrantVerdict $composeRel $p $raw $anchors
                     if ($why) { $out += "${displayPath}:$($i+1): env_file: $raw -- $why" }
                 }
                 $inList = $false
@@ -259,7 +318,7 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
                 $raw = (Remove-YamlComment $entry).Trim()
                 $p = Get-EntryPath $entry
                 if ($p) {
-                    $why = Get-GrantVerdict $composeRel $p $raw
+                    $why = Get-GrantVerdict $composeRel $p $raw $anchors
                     if ($why) { $out += "${displayPath}:$($i+1): env_file -> $raw -- $why" }
                 }
             } elseif ($line -match '^\s+(path|required|format)\s*:\s*(\S.*)?$') {
@@ -268,7 +327,7 @@ function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$
                 # names a file; the others are read and ignored so the list stays open.
                 if ($Matches[1] -eq 'path') {
                     $raw = (Remove-YamlComment $Matches[2]).Trim()
-                    $why = Get-GrantVerdict $composeRel (Remove-Quotes $raw) $raw
+                    $why = Get-GrantVerdict $composeRel (Remove-Quotes $raw) $raw $anchors
                     if ($why) { $out += "${displayPath}:$($i+1): env_file -> path: $raw -- $why" }
                 }
             } elseif ($line -match '^\s*$') {
