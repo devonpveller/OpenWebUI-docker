@@ -1833,9 +1833,12 @@ class Inventory:
         """Profiles the manifest declares that the PINNED compose does not carry.
 
         Empty for every plane whose compose file lives in this repo - there the
-        two must agree. For ob1 it is how `research` / `wiki` / `notebook` are
-        described today: real on the OB1 branch, absent from the commit the
-        gitlink pins (5005197), and verified automatically the moment it bumps.
+        two must agree. It is how `research` / `wiki` / `notebook` WERE described
+        on ob1 until 2026-09-20: real on the OB1 branch, absent from the commit
+        the gitlink pinned (5005197), and verified automatically the moment it
+        bumped - which sl-ob1-gitlink did, to fe3e045. So this returns the empty
+        set for every plane today; the mechanism stays for the next submodule
+        profile that lands ahead of its gitlink.
         """
         if not (render.available and render.pinned):
             return set()

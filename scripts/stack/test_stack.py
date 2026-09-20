@@ -1414,12 +1414,14 @@ def test_the_profile_flags_each_plane_gets_are_pinned(root):
     starts a queue that can never empty without it) and `run_profiles` closes over
     `requires`.
 
-    It changes NOTHING about what starts today: the pinned OB1 gitlink (5005197)
-    declares only `idea-refinery`, so compose ignores `--profile research`, and
-    `up --all` still brings up the same thirty containers. After the gitlink bumps
-    it does matter - see `inventory --check`'s `[declared, not rendered]` block and
-    finding F18 for the one-time `stack.py init --product research` the operator
-    runs at that point.
+    It changed nothing about what started while the gitlink pinned 5005197, whose
+    compose declared only `idea-refinery`: compose ignored `--profile research` and
+    `up --all` brought up the same thirty containers. sl-ob1-gitlink bumped the
+    gitlink to fe3e045 on 2026-09-20 and it DOES matter now - measured there, this
+    two-profile set renders 23 of the 30, so the operator declares the other two
+    once (`stack.py init --product research --force`, or COMPOSE_PROFILES in
+    OB1/docker/.env). This test still asserts the driver's DEFAULT closure, not the
+    operator's deployment set.
 
     If a later item puts more OB1 services behind more profiles, this test is
     where "the shim now starts fewer containers" surfaces.
@@ -1580,9 +1582,12 @@ def test_a_row_in_no_render_at_all_must_name_its_project(mini_root):
 #
 # The sl-ob1-profiles / sl-driver-parity seam. That item made OB1's research,
 # wiki and notebook profiles real on the OB1 BRANCH and declared them in the
-# manifest; the gitlink still pins 5005197, whose compose declares only
-# `idea-refinery`. Calling that drift would be the check lying, and dropping the
-# declaration would lose something the watchdog and the coverage guard read.
+# manifest while the gitlink still pinned 5005197, whose compose declared only
+# `idea-refinery`. Calling that drift would have been the check lying, and dropping
+# the declaration would have lost something the watchdog and the coverage guard
+# read. sl-ob1-gitlink closed that gap on 2026-09-20 (gitlink -> fe3e045), so no
+# plane is in this state today - the tests below use a synthetic mini tree, not
+# ob1, precisely so the mechanism stays covered once no real plane exercises it.
 
 
 def submodule_root(mini_root: Path) -> Path:

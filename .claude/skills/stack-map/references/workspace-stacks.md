@@ -375,17 +375,77 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > servers must be healthy first) is up; tear it down *before* the main stack so
 > `docker compose down` can drop `llm-net`.
 
-> **Profiles (since 2026-09-19, `sl-ob1-profiles`):** four profiles are declared
-> for this plane in `stack.manifest.toml`, and the tables below mark each gated
-> container **[profile `x`]**. **Against the PINNED gitlink (`5005197`) only
-> `idea-refinery` exists in the compose file**, so today a bare
-> `docker compose -f OB1/docker/docker-compose.yml config --services` renders
-> **29 of the 30** and all four profiles render 30 (measured 2026-09-19).
-> `python scripts/stack/stack.py inventory --check` reports `research`, `wiki`
-> and `notebook` as `[declared, not rendered]` and says so on every run until the
-> gitlink bumps - at which point they start gating real services and the operator
-> runs `stack.py init --product research --force` once. The rows below describe
-> the post-bump shape:
+> **Profiles (since 2026-09-19, `sl-ob1-profiles`; LIVE IN THE PINNED GITLINK
+> since `sl-ob1-gitlink` bumped it `5005197` -> `fe3e045` on 2026-09-20):** four
+> profiles are declared for this plane in `stack.manifest.toml`, all four are in
+> the pinned compose file, and the tables below mark each gated container
+> **[profile `x`]**. Measured at `fe3e045` with `config --services`:
+>
+> | Render | Services |
+> |---|---|
+> | bare (`docker compose -f OB1/docker/docker-compose.yml config --services`) | **20** |
+> | `--profile idea-refinery` | 21 (+1) |
+> | `--profile research` | 22 (+2) |
+> | `--profile notebook` | 23 (+3) |
+> | `--profile wiki` | 24 (+4) |
+> | `--profile idea-refinery --profile research` (**what the driver passes by default**) | **23** |
+> | all four | **30** - the same 30 names `docker ps` lists for the `open-brain` project |
+>
+> Every row is a RENDER, including the two-profile one. It is listed because the set
+> the driver actually passes deserves a measurement of its own: attempt 1 of this item
+> described it with the **22** from the `research` row - a real number for a different
+> set - and shipped that to eight files. Render the set you are about to describe.
+>
+> So a bare `up` starts **20, not 30**: ten containers are now gated, and seven of
+> them (`wiki` + `notebook`) are ones no driver default passes. It is not only `up` —
+> **a bare `stop` addresses 20 of 30, and a bare `down` removes 20, leaves the ten
+> gated ones running, and then FAILS to drop the project network**
+> (`Resource is still in use`), measured 2026-09-20 in a throwaway two-service
+> compose project. Seven of the ten gated OB1 containers hold endpoints on
+> `ai-stack_llm-net` / `app-net` / `default` — the anchor networks
+> `emergency-recovery.ps1` tears OB1 down first in order to free.
+>
+> **THE LANDING STEP for this host, both halves:**
+>
+> - **`COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`** —
+>   the per-plane env file (D17). Read 2026-09-20: `frontend/.env` carries
+>   `gpu,tailscale`, `inference/.env` carries `local`, and `OB1/docker/.env` carries
+>   nothing. (`portal` deliberately has none — CLAUDE.md, it is started by hand — and
+>   `agent-org`'s `workers`/`cloud` are operator-driven slices. OB1 is the one whose
+>   absence now bites, because its bare verbs sit in the recovery path.) Raw
+>   `docker compose` honours it (renders the same 30), and it is what repairs a bare
+>   `stop`/`down`.
+> - **the driver's state** —
+>   `python scripts/stack/stack.py init --product research --force`, or
+>   `enable research`, writes `idea-refinery, research, wiki, notebook` into
+>   `.stack/state.json`, and `up --dry-run` then prints all four `--profile` flags
+>   on the OB1 line.
+>
+> They do not fight — `stack.py` UNIONS the plane env's list into whatever flags it
+> passes (`effective_profiles`). **The consequence, stated rather than discovered:**
+> because it unions, a host whose `OB1/docker/.env` carries all four makes
+> **`--headless` a no-op for this plane** — the driver drops `wiki`/`notebook` and the
+> env file puts them back. On this host, which runs all 30, that is the right trade;
+> a deployment that genuinely wants a headless OB1 must omit the env line and rely on
+> the driver state alone.
+>
+> `scripts/recovery/emergency-recovery.ps1` does not depend on either: it carries the
+> four in one `$Script:OB1Profiles` list used by **every** OB1 compose invocation in
+> that file (eight of them, `stop` / `up` / `down` / `ps`), because a CLI `--profile`
+> REPLACES `COMPOSE_PROFILES` and a recovery script cannot rely on a host's env file
+> being right.
+>
+> Neither is set on this host yet (read 2026-09-20: `OB1/docker/.env` has no
+> `COMPOSE_PROFILES` line, and `.stack/state.json` does not list the `ob1` plane at
+> all). Without one of them, `stack.py up ob1` passes
+> `--profile idea-refinery --profile research` only (the `default` plus its
+> `requires` closure), which renders **23** — seven short. (23, not 22: 22 is the
+> `--profile research` row above, on its own. Render the pair; do not add deltas.)
+> Note that a bare `docker compose --profile X`
+> **REPLACES** `COMPOSE_PROFILES` rather than adding to it - measured here: with all
+> four in the env file, `--profile research` alone renders 22.
+>
+> The rows below name what each profile gates:
 >
 > | Profile | Turns on | Why not core |
 > |---------|----------|--------------|
@@ -398,9 +458,10 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > `docker compose -f OB1/docker/docker-compose.yml --profile research --profile wiki --profile notebook --profile idea-refinery up -d`
 > — and `python scripts/stack/stack.py up ob1` passes `idea-refinery` (the
 > plane's one `default = true` profile) plus `research` (its `requires` closure)
-> unless the state file enables more; `stack.ps1` is a shim with no profile list
-> of its own. Against the pinned gitlink two profiles and four render the same
-> 30 services, because compose ignores a profile it does not know.
+> unless the state file or `OB1/docker/.env` enables more; `stack.ps1` is a shim
+> with no profile list of its own. Before the gitlink bumped, two profiles and four
+> rendered the same 30 services because compose ignores a profile it does not know;
+> at `fe3e045` that is over — that pair renders 23 and four render 30.
 >
 > **Invariant:** no core service may `depends_on` a profiled one. None does.
 > But `depends_on` is not the only way one service reaches another: **six**
@@ -496,7 +557,8 @@ entity worker, the wiki compiler) keep talking to `openbrain-mcp` /
 `openbrain-ext` directly on internal networks and are unaffected.
 
 ### Volumes
-**Four**, at the pinned gitlink `5005197`: `openbrain-db-data`,
+**Four**, at the pinned gitlink `fe3e045` (unchanged by the 2026-09-20 bump):
+`openbrain-db-data`,
 `openbrain-wiki-data`, `wiki-assets` (binary assets — images now, audio later —
 written by `openbrain-workbench`, served read-only by `openbrain-wiki-viewer`;
 deliberately NOT mounted into `openbrain-wiki` so binaries never enter the vault

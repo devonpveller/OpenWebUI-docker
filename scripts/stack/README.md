@@ -395,21 +395,26 @@ is stale. `ob1` is different - `OB1/docker/docker-compose.yml` comes from a
 submodule pinned by gitlink, so the manifest can legitimately describe the branch
 the gitlink will move to.
 
-Today `stack.manifest.toml` declares `research`, `wiki` and `notebook` on that
-plane (sl-ob1-profiles) while the pinned commit `5005197` declares only
-`idea-refinery`. `inventory --check` prints those, and the nine container rows
-that name them, as `[ ~~ ] declared, not rendered` and **passes**; the moment the
-gitlink bumps, the render carries them and every one is verified for real. The
-submodule set is read from `.gitmodules`, so this is not an `ob1` special case in
-the code - and a curated `profile` the MANIFEST never declared is still drift,
-so the exemption cannot launder a typo.
+That is how `research`, `wiki` and `notebook` were carried between 2026-09-19
+(sl-ob1-profiles put them in the manifest) and 2026-09-20 (sl-ob1-gitlink bumped
+the gitlink `5005197` -> `fe3e045`): `inventory --check` printed those three, and
+the nine container rows that named them, as `[ ~~ ] declared, not rendered` and
+**passed**. **The bump has happened**, so the render carries all four and every
+row is verified for real - `unpinned_profiles` returns the empty set for every
+plane today. The submodule set is read from `.gitmodules`, so this is not an `ob1`
+special case in the code - and a curated `profile` the MANIFEST never declared is
+still drift, so the exemption cannot launder a typo.
 
-**One thing the operator owes at that bump**, which `--check` says out loud every
-time until it happens: run `python scripts/stack/stack.py init --product research
---force` (or `enable research`) once. Until the bump, `wiki` and `notebook` gate
-nothing - compose ignores a profile it does not know, and `up --all` starts the
-same thirty OB1 containers it does today (measured). After it, they gate seven
-running containers that a bare `up` would no longer start.
+**The one thing the operator owes at that bump**, which `--check` said out loud on
+every run until it happened: declare the full profile set once, or `up` starts
+fewer containers than are running. Measured at `fe3e045`: the bare OB1 render is
+**20** services, all four profiles render **30**, and a driver with no ob1 entry in
+its state passes `idea-refinery` + `research` only, which RENDERS **23**. Either
+`python scripts/stack/stack.py init --product research --force` (or `enable
+research`), which writes all four into `.stack/state.json`, or
+`COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`, which
+compose honours natively and which `effective_profiles` unions into the driver's
+own flags. Neither is set on this host yet.
 
 **Rendering with every profile is the point.** The check this replaced rendered
 without any, so it could not see a profile-gated container at all - which is how
@@ -478,9 +483,10 @@ Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python; both still
 carry their own ordering and their own probes. Executing against remote docker
 contexts - the `--context` prefix is passed through and nothing more
 (`cluster-transition`). Archiving `stack.ps1`: it stays as the shim until every
-caller has moved. Adding compose profiles to a plane - the manifest still only
-*declares* `frontend`'s pending `gpu`/`tailscale` (`sl-frontend-solo`) and
-`ob1`'s `research`/`wiki`/`notebook` are real in the manifest since
-`sl-ob1-profiles`, and not yet in the pinned submodule - see
-*[declared, not rendered]* above. Per-plane
+caller has moved. Adding compose profiles to a plane - both of the
+gaps this paragraph used to name are now closed: `frontend`'s `stock`/`gpu`/
+`tailscale` are live in `frontend/docker-compose.yml` (`sl-frontend-solo`) and
+`ob1`'s `research`/`wiki`/`notebook` are live in the pinned submodule since the
+gitlink bumped to `fe3e045` (`sl-ob1-gitlink`, 2026-09-20), so *[declared, not
+rendered]* above describes a mechanism no plane currently needs. Per-plane
 `.env` files (`sl-env-split`): this item still encodes the single root `.env`.
