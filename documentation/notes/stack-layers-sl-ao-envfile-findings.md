@@ -304,6 +304,11 @@ the attempt-1 script before noticing.
 
 ### 3d. The same mistake a third time, in a costume with no punctuation at all
 
+> **SUPERSEDED BY 3e.** The alias LOOKUP this section describes was deleted one
+> round later: an anchor defined twice broke it, and the decision was to stop
+> following anchors at all. Kept because the allowlist it introduced is still the
+> guard, and because the sequence of three defects is the argument 3e rests on.
+
 Found by the tester again. Attempt 2's guard refused a value that was not plain
 path text - and it decided that by listing what it disliked: `[ ] { } ,`,
 whitespace, `$`. A YAML alias contains none of those.
@@ -381,6 +386,83 @@ be, and deliberately: the allowance is the compose file's own directory or a
 parent below the repo root, nothing else. If a layout ever genuinely needs
 `env/dev.env`, that is a rule change made on purpose and written into the
 header - not something to find out by noticing the check said nothing.
+
+### 3e. The design decision: a pre-commit check is not a YAML parser
+
+Found by the tester, again, and this time the fix is not another shape.
+
+```yaml
+x-a: &root_env .env
+x-b: &root_env ../../.env          # same name, redefined
+  ao-ot-1:
+    env_file: *root_env
+```
+
+`Get-AnchorMap` kept the FIRST definition of a name. YAML resolves an alias to the
+LAST preceding one. So the check looked up `.env`, called it the plane's own file
+and said nothing, while docker delivered the root file - re-measured here,
+`render exit 0` and all three root names on `ao-ot-1`.
+
+**Three rounds, three defects, one shape of mistake each time:**
+
+| round | the shape | what the check had just learned |
+|---|---|---|
+| 1 | `[../../.env]`, `- path: ../../.env` | resolve the token as a path |
+| 2 | `*root_env` | refuse tokens containing forbidden characters |
+| 3 | `&root_env` defined twice | resolve an alias by looking up its anchor |
+
+Each fix taught the check one more YAML feature, and each feature had a semantics
+corner underneath it. The next three were already visible from here -
+alias-before-anchor, anchors on mappings, merge keys - and the list does not end,
+because the thing being imitated is a parser. **A guard that re-implements YAML
+semantics will always be one corner behind, and every corner is silent.** That is
+the finding; the alias is just where it became undeniable.
+
+**The decision (operator, final for this item): stop following anchors.** The rule
+is a POLICY about how a compose file must be WRITTEN, not a deduction about what it
+means:
+
+> an `env_file` value must be a plain path literal; YAML anchors and aliases are
+> refused by policy (rewrite as the path)
+
+Deleted: `Get-AnchorMap` and the alias-resolution branch of `Get-GrantVerdict` - 14
+lines of lookup and 9 of the function. Added: `$script:YamlIndirection = '[*&!<>|$]'`,
+tested against the extracted path AND the raw token, refusing with the sentence above
+and the token printed. Kept unchanged: the shape parsing (a shape is where the text
+sits, not what it means, and it has been stable for two rounds), the allowlist
+`^[A-Za-z0-9_./\\~-]+$`, the directory rules, the `..` backstop.
+
+**The cost, stated rather than discovered:** an alias to a perfectly legal path -
+`&own_env .env` then `*own_env` - is now refused too. That row is RED in the matrix
+on purpose. No compose file in this repo has ever used an alias in an `env_file`, and
+the remedy is to write the path.
+
+**Merge keys need no special handling, and this is worth understanding rather than
+trusting.** `<<: *tpl` pulling `env_file` in from an `x-` block is caught at the
+SOURCE: the check scans every `env_file:` line in the file at any indentation, `x-`
+blocks included, so the block's own list is judged where it is written and the service
+that merges it never has to be understood. Measured both halves: with
+`<<: [*hardening, *tpl]` on `ao-ot-1`, docker renders exit 0 and delivers all three
+root names, and the check reports `agent-org/docker/docker-compose.yml:88: env_file ->
+../../.env -- is the repo root env file` - the `x-` block's line, not the service's.
+
+**Proof, 31 rows in T6a-iii** (plus T6a-i's 27 and T6a-ii's 10 re-run unchanged, 0
+mismatches each), from a clean clone with the script taken from the commit:
+
+* REFUSED BY POLICY (17): alias as a scalar, as a block item, inside a flow sequence,
+  as a long-form `path:`; alias to an anchor inside an `x-` block; alias to a flow
+  list; undefined alias; **alias to the plane's own `.env`** (the trade); **duplicate
+  anchor** (attempt 3's defect); alias BEFORE its anchor; `&e` on the value itself,
+  both to a root path and to a legal one; `&shared` on a list item; `!!str`; a custom
+  `!mytag`; `>` folded; `|` literal; `${SOME_ENV_FILE}`.
+* REFUSED BY THE ALLOWLIST OR THE DIRECTORY RULES (8): `D:/x/.env`, `/etc/shared/.env`,
+  a path with a space, a path with a tab, a tab as the key separator, a trailing
+  backslash, `config/dev.env` (a SUBdirectory), `~/.env`.
+* CAUGHT AT THE SOURCE (1): the merge-key case above.
+* A CRLF file (1): still red on `../../.env` - the trailing `\r` is trimmed with the
+  rest of the whitespace.
+* STILL GREEN (3): `- .env`, `[.env]`, `- path: .env`. The check has not become
+  "refuse everything"; a plain path literal in any shape still passes.
 
 ---
 

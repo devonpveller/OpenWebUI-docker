@@ -260,19 +260,24 @@ that recreate - which is exactly why this was easy to miss.
 
 **The check that now holds the line:** `scripts/checks/check-env-file-scope.ps1`
 refuses any `env_file` target that resolves to the repo root `.env`, in a staged
-compose file or across the whole tree with `-All`. It checks the PATH, which it
-reads out of every value shape compose accepts - a scalar, a flow sequence, a
-block sequence, a long-form `path:` entry, and a YAML alias, which it follows to
-a `&name <scalar>` in the same file. What reaches the resolver is an ALLOWLIST:
-after quotes and comments are stripped a path must be `^[A-Za-z0-9_./\\~-]+$`,
-and anything else - an alias it cannot resolve, an `&anchor`, a `${VAR}`,
-whitespace, flow residue - is REFUSED and printed rather than normalized into
-something that looks like a path. Two grants got past earlier versions of this
-check by being normalized instead of refused; the allowlist is what that
-repays.
+compose file or across the whole tree with `-All`.
+
+Its rule is a POLICY, not a parse: an `env_file` value must be a PLAIN PATH
+LITERAL — a `*alias`, an `&anchor`, a `!tag`, a `>`/`|` block scalar and a
+`${VAR}` are REFUSED by policy with the token printed, never resolved. It reads the
+SHAPES compose accepts - a scalar, a flow sequence, a block sequence, a long-form
+`path:` entry - but it interprets no YAML SEMANTICS, because three attempts at
+doing so each shipped a silent hole (a swallowed flow-sequence bracket, then an
+alias, then a DUPLICATE anchor where the lookup kept the first definition and
+YAML takes the last). What reaches the resolver is an allowlist - `^[A-Za-z0-9_./\\~-]+$`
+after quotes and comments are stripped - and anything else is refused and printed
+rather than normalized into something that looks like a path. A merge key
+(`<<: *tpl`) needs no special handling: the `x-` block's own `env_file:` line is
+scanned where it is written, so the grant is caught at its source.
 
 The check also used to grandfather grants already present in HEAD, which is how
-the two ao-worker ones survived it for weeks; that clause was removed with them. The history is in
+the two ao-worker ones survived it for weeks; that clause was removed with them.
+The history is in
 `documentation/notes/stack-layers-sl-env-split-findings.md` (section 14) and
 `documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
 

@@ -311,41 +311,58 @@ and run it on `inference/compose/upstreams.yml` / `llama-cpp-upstream`:
 | `env_file: ../../.env` · `[../../.env]` · `- ../../.env` · `- path: ../../.env` · `- {path: ../../.env, required: false}` | RED, `is the repo root env file` |
 | `- .env` | GREEN |
 
-### T6a-iii — YAML anchors/aliases and the allowlist boundary
+### T6a-iii — YAML indirection is refused BY POLICY, and the allowlist boundary
 
-Attempt 2 failed on exactly this: `*root_env` contains none of the characters the old
-guard disliked, so it cleared the guard and was resolved as if it were a directory
-name. These rows plant a PRELUDE before `services:` as well as a block under the
-service, so extend the driver with a third tuple field and insert it at the `services:`
-key (`re.search(r'^services:[ \t]*$', base, re.M).start()`), remembering to offset the
-service cut by the prelude's length:
+Attempt 3 failed here: the check FOLLOWED aliases, and an anchor defined twice broke
+the lookup (it kept the first definition; YAML takes the last preceding one). The
+decision that followed is the thing this case now tests - **the check no longer
+interprets YAML semantics at all**:
 
-| # | prelude (before `services:`) | block under `ao-ot-1` | expect |
+> an `env_file` value must be a plain path literal; YAML anchors and aliases are
+> refused by policy (rewrite as the path)
+
+So **every alias row is RED, including an alias to a perfectly legal path.** That is
+the deliberate trade, not an oversight - if you think a green belongs on the
+`*own_env -> .env` row, say so, but the design says red.
+
+Plant a PRELUDE before `services:` as well as a block under the service (insert at
+`re.search(r'^services:[ \t]*$', base, re.M).start()` and offset the service cut by
+the prelude's length). Rows:
+
+| # | prelude | block under `ao-ot-1` | expect |
 |---|---|---|---|
-| 1 | `x-root-env: &root_env ../../.env` | `env_file: *root_env` | RED `is the repo root env file` |
-| 2 | same | `env_file:` / `  - *root_env` | RED same |
-| 3 | same | `env_file: [*root_env]` | RED same |
-| 4 | same | `env_file:` / `  - path: *root_env` / `    required: false` | RED same |
-| 5 | `x-shared:` / `  env: &blk_env ../../.env` | `env_file: *blk_env` | RED same (anchor inside an `x-` block) |
-| 6 | `x-envs: &envs [../../.env]` | `env_file: *envs` | RED, alias resolves to text that is not plain path text |
-| 7 | none | `env_file: *nosuch` | RED, no such anchor in the file |
-| 8 | `x-own-env: &own_env .env` | `env_file: *own_env` | **GREEN** - the alias resolves to the plane's own file |
-| 9 | none | `env_file: &e ../../.env` | RED, not plain path text (an anchor ON the value) |
-| 10 | none | `env_file: &e .env` | RED, same - refused even though the path is legal |
-| 11 | none | `- D:/x/.env` | RED, not plain path text (the `:`) |
-| 12 | none | `- /etc/shared/.env` | RED, resolves outside the repository |
-| 13 | none | `- "../../my env/.env"` | RED, not plain path text (the space) |
-| 14 | none | `- config/dev.env` | RED, `belongs to another directory` - a SUBdirectory of the compose dir is not the allowance |
-| 15 | none | `- ~/.env` | RED, `belongs to another directory (agent-org/docker/~)` |
+| 1-4 | `x-root-env: &root_env ../../.env` | `env_file: *root_env` / `  - *root_env` / `[*root_env]` / `- path: *root_env` | RED, policy |
+| 5 | `x-shared:` / `  env: &blk_env ../../.env` | `env_file: *blk_env` | RED, policy |
+| 6 | `x-envs: &envs [../../.env]` | `env_file: *envs` | RED, policy |
+| 7 | none | `env_file: *nosuch` | RED, policy |
+| 8 | `x-own-env: &own_env .env` | `env_file: *own_env` | **RED, policy** - the trade |
+| 9 | `x-a: &root_env .env` + `x-b: &root_env ../../.env` | `env_file: *root_env` | **RED, policy** - attempt 3's defect |
+| 10 | none, anchor appended at END of file | `env_file: *late_env` | RED, policy (alias before anchor) |
+| 11-12 | none | `env_file: &e ../../.env` / `env_file: &e .env` | RED, policy |
+| 13 | none | `env_file:` / `  - &shared ../../.env` | RED, policy |
+| 14-15 | none | `env_file: !!str ../../.env` / `!mytag ../../.env` | RED, policy |
+| 16-17 | none | `env_file: >` + indented path / `env_file: |` + indented path | RED, policy |
+| 18 | none | `env_file: ${SOME_ENV_FILE}` | RED, policy |
+| 19 | `x-tpl: &tpl` / `  env_file:` / `    - ../../.env` | anything; the service may `<<: *tpl` | RED **at the `x-` block's line**, not the service's |
+| 20-21 | none | `- D:/x/.env` / `- /etc/shared/.env` | RED, allowlist / outside repo |
+| 22-23 | none | `- "../../my env/.env"` / a path containing a TAB | RED, allowlist |
+| 24 | none | `env_file:<TAB>../../.env` (tab as separator) | RED, repo root env file |
+| 25 | none | `- ../../.env\` (trailing backslash) | RED, repo root env file |
+| 26-27 | none | `- config/dev.env` / `- ~/.env` | RED, belongs to another directory |
+| 28 | none | the whole file rewritten with CRLF line endings | RED, repo root env file |
+| 29-31 | none | `- .env` / `[.env]` / `- path: .env` | **GREEN** - a plain path literal in every shape still passes |
 
-Rows 9-15 are the allowlist's boundary, and rows 11 and 14 are where a reasonable
-person might disagree with the design rather than find a bug - judge them, and say so
-either way. Row 8 is the one that stops this being "refuse everything": an alias to a
-legal path must still pass, or the check cannot read a legal compose file.
+Row 19 is the merge-key claim and the one to read carefully: the check does not
+understand `<<: *tpl` and does not need to, because the `x-` block's own `env_file:`
+line is scanned where it is written. Confirm the violation's LINE NUMBER is the `x-`
+block's, not the service's.
 
-**Read the reasons, not only the exits.** A row that is RED for the wrong reason is a
-defect: it means the value took a different path through the guard than the one this
-table claims.
+Rows 29-31 are what stops this being "refuse everything". If they go red the check is
+broken in the other direction, and that is a FAIL too.
+
+**Read the reasons, not only the exits.** A policy row that goes red via the allowlist
+message, or an allowlist row that goes red via the policy message, means the value took
+a different route than this table claims - report it.
 
 ### T6b — these shapes are real grants, per docker, not per this plan
 
@@ -363,7 +380,18 @@ docker compose -f agent-org/docker/docker-compose.yml --profile workers config |
 
 Expect ALL FOUR spellings to inject the root file's names into `ao-ot-1`, a service
 that carries none of them otherwise — render exit 0; the two alias spellings deliver
-all three names the seeded root file holds. That is what
+all three names the seeded root file holds.
+
+Two more worth rendering, because they are the reason the check stopped resolving
+YAML at all:
+
+* the DUPLICATE anchor - `x-a: &root_env .env` then `x-b: &root_env ../../.env`,
+  service `env_file: *root_env`. Render exit 0, all three root names on `ao-ot-1`:
+  YAML took the LAST definition, and attempt 3's lookup had kept the first.
+* the MERGE KEY - `x-tpl: &tpl` / `  env_file:` / `    - ../../.env`, and on
+  `ao-ot-1` replace `<<: *hardening` with `<<: [*hardening, *tpl]` (a second bare
+  `<<:` key is a YAML duplicate-key error, so merge both in one). Render exit 0,
+  all three names - and the check reports the `x-` block's line. That is what
 makes a green from the check on those shapes a defect and not a style preference.
 Restore the file afterwards.
 
@@ -556,15 +584,36 @@ of both is what the failure refuted.
 
 | # | claim | stated in | settled by |
 |---|---|---|---|
-| 10'' | The check refuses any target resolving to the repo root `.env` in every value shape compose accepts, **including a YAML alias**, with no exemption | script header, findings 3d, runbook 4b, `.githooks/README.md:27` | T6a-iii rows 1-5, plus T6a-i/T6a-ii unchanged |
-| 19' | What may reach the resolver is an **ALLOWLIST** - `^[A-Za-z0-9_./\\~-]+$` after quotes and comments are stripped - and anything else is REFUSED and printed with the raw token | script header (`$script:PlainPathText`), findings 3d, runbook 4b, hook table | T6a-iii rows 9-13; read the script and confirm there is no remaining character DENYlist |
-| 28 | An alias is followed, not refused: `&name <scalar>` looked up anywhere in the same file, and the looked-up text must itself be plain path text | script header, `Get-AnchorMap`, findings 3d | T6a-iii rows 1-8; row 6 for the flow-list anchor, row 8 for the legal one |
-| 29 | An alias with no `&name <scalar>` in the file is refused, not ignored | script header, findings 3d | T6a-iii row 7 |
+| 10'' | The check refuses any target resolving to the repo root `.env` in every value shape compose accepts, **including a YAML alias**, with no exemption | script header, findings 3d, runbook 4b, `.githooks/README.md:27` | superseded by row 10''' below - the ROW NUMBERS it cited belong to attempt 3's T6a-iii table, which no longer exists |
+| 19' | What may reach the resolver is an **ALLOWLIST** - `^[A-Za-z0-9_./\\~-]+$` after quotes and comments are stripped - and anything else is REFUSED and printed with the raw token | script header (`$script:PlainPathText`), findings 3d, runbook 4b, hook table | T6a-iii rows 20-27 (the allowlist boundary in the CURRENT table); read the script and confirm there is no remaining character DENYlist |
+| 28 | An alias is followed, not refused: `&name <scalar>` looked up anywhere in the same file, and the looked-up text must itself be plain path text | script header, `Get-AnchorMap`, findings 3d | WITHDRAWN - see the attempt-4 table |
+| 29 | An alias with no `&name <scalar>` in the file is refused, not ignored | findings 3d | WITHDRAWN - see the attempt-4 table |
 | 30 | `env_file: *root_env` is a REAL grant docker honours | findings 3d, T6b | T6b's alias spellings - all three root names land on `ao-ot-1` |
 | 31 | The `..` backstop could not have caught the alias, because the raw value has no `..` | findings 3d | read the backstop: it tests the RESOLVED text now, and reason about the alias case - the `..` lives in the anchor |
-| 32 | The allowance is the compose file's own directory or a parent below the repo root - a SUBdirectory is refused too, on purpose | script header, findings 3d | T6a-iii row 14 |
-| 33 | `~` passes the allowlist and is then refused by the directory rule, which is what compose would look for too (it does not expand `~` in env_file) | findings 3d | T6a-iii row 15 |
+| 32 | The allowance is the compose file's own directory or a parent below the repo root - a SUBdirectory is refused too, on purpose | script header, findings 3d/3e | T6a-iii row 26 |
+| 33 | `~` passes the allowlist and is then refused by the directory rule, which is what compose would look for too (it does not expand `~` in env_file) | findings 3d | T6a-iii row 27 |
 | 34 | `.githooks/README.md:27` and runbook 4b's closing paragraph describe the allowlist, the alias lookup and the refuse-otherwise behaviour | those two files | T8 items 1 and 4 - and check that the regex they quote is character-for-character the one in the script |
+
+
+### Attempt 4 - the sentences THIS round introduces
+
+Attempt 3 failed on T6 and T10 row 28 (the alias lookup). Rows 35-42 are the claims
+the repair adds; rows 28 and 29 are WITHDRAWN, because the behaviour they described -
+following an alias to its anchor - has been deleted.
+
+| # | claim | stated in | settled by |
+|---|---|---|---|
+| ~~28~~ | ~~An alias is followed to `&name <scalar>`~~ | WITHDRAWN | the behaviour is deleted; `grep -n "Get-AnchorMap" scripts/checks/check-env-file-scope.ps1` returns nothing |
+| ~~29~~ | ~~An alias with no anchor is refused as such~~ | WITHDRAWN | it is now refused as policy, like every other alias |
+| 10''' | The check refuses any target resolving to the repo root `.env` in every value SHAPE compose accepts, and refuses YAML INDIRECTION outright instead of resolving it | script header, findings 3e, runbook 4b, `.githooks/README.md:27` | T6a-i, T6a-ii and T6a-iii together |
+| 35 | An `env_file` value must be a plain path literal; `*alias`, `&anchor`, `!tag`, `>`/`|` block scalar and `${VAR}` are refused BY POLICY with the token printed, never resolved | script header, `$script:YamlIndirection`, findings 3e, runbook 4b, `.githooks/README.md:27` | T6a-iii rows 1-18 - and read the messages: each must name the policy, not a symptom |
+| 36 | The alias lookup is DELETED, not disabled | commit message, findings 3e | `grep -n "Get-AnchorMap\|anchors" scripts/checks/check-env-file-scope.ps1` returns nothing but prose |
+| 37 | An alias to a LEGAL path is refused too, deliberately | script header, findings 3e, T6a-iii row 8 | T6a-iii row 8 goes RED; judge whether the trade is acceptable and say so |
+| 38 | The duplicate-anchor case docker honours: YAML takes the LAST definition | findings 3e | T6b's duplicate-anchor render - all three root names |
+| 39 | Shape parsing is unchanged and still passes a plain path literal in every shape | findings 3e | T6a-i and T6a-ii re-run unchanged (0 mismatches), T6a-iii rows 29-31 GREEN |
+| 40 | A merge key needs no special handling because the `x-` block's own `env_file:` line is scanned where it is written | script header, findings 3e, hook table, runbook 4b | T6a-iii row 19 - check the violation's LINE NUMBER is the `x-` block's; plus T6b's merge render |
+| 41 | Three rounds produced three defects of one kind - a guard re-implementing YAML is always one corner behind | findings 3e, commit message | read 3c, 3d and 3e in sequence and judge whether the generalisation is earned or retrofitted |
+| 42 | `.githooks/README.md:27` and runbook 4b state the policy, and the allowlist regex they quote is byte-for-byte the script's | those two files | extract `$script:PlainPathText` from the script and grep both documents for that exact string - do not eyeball it |
 
 
 ---
@@ -576,7 +625,9 @@ non-worker diff rows explicitly judged (not waved through), T5 re-measured
 from source rather than read off this document, and T6a-i/T6a-ii/T6a-iii/T6b run
 in full -
 attempt 1 passed a T6 that planted one shape and the two it did not plant were
-the defect; attempt 2 passed a 37-shape matrix and the shape it did not plant
-was the defect. Plant the ones in T6a-iii, and if you think of a shape none of
-the three tables holds, plant that too and report it - that is how both of the
-last two defects were found.
+the defect; attempt 2 passed a 37-shape matrix and the shape it did not plant was
+the defect; attempt 3 passed 52 and the shape it did not plant - one anchor name
+defined twice - was the defect. The answer to that sequence is not a longer
+table, it is the policy in T6a-iii: the check stopped interpreting YAML. So the
+most useful thing you can do here is try to find a value that is NOT a plain path
+literal and still reaches the resolver. Plant it and report it.
