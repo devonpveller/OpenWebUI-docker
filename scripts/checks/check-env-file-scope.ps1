@@ -1,7 +1,7 @@
 #requires -Version 5
 <#
 .SYNOPSIS
-  Block a compose service from granting itself the WHOLE root .env via `env_file`.
+  Block a compose service from granting itself a shared .env via `env_file`.
 
 .DESCRIPTION
   THE RULE: a service names the variables it needs.
@@ -24,13 +24,34 @@
   A WILDCARD GRANT IS SAFE UNTIL THE THING IT WILDCARDS GROWS. Nothing was watching the
   size of the blast radius, so nothing complained.
 
-.NOTES
-  STAGED-ONLY, deliberately. This fails on a NEWLY ADDED grant, not on ones already in
-  the tree - a guard that blocks unrelated commits over pre-existing debt gets disabled,
-  and then it guards nothing. Known remaining grants are reported as a warning so they
-  stay visible without being a gate. Run with -All to audit the whole tree.
+  WHAT COUNTS AS A GRANT (2026-09-19, sl-ao-envfile). The target is resolved against the
+  directory of the compose file that names it, and the verdict is about WHERE it lands:
 
-  Exit code 0 = clean, 1 = a new grant was staged.
+    * the repo root `.env`                     -> REFUSED. The shared file every plane
+                                                  used to reach into; per D10 no plane
+                                                  reads it any more.
+    * outside the repo, or an absolute path    -> REFUSED. Nothing in-tree can audit it.
+    * a directory that is neither the compose
+      file's own nor one of its parents
+      (a cross-plane borrow)                   -> REFUSED. Same wildcard, other plane.
+    * the compose file's own directory, or a
+      parent that is not the repo root
+      (a plane's own .env)                     -> ALLOWED. Scoped by construction.
+
+  So `agent-org/docker/docker-compose.yml` may name `- .env` (its own) and could name
+  `- ../.env` (agent-org's own), but not `- ../../.env` (the repo root).
+
+.NOTES
+  STAGED-ONLY, deliberately: it fails on what a commit leaves in a compose file it
+  touches, and -All audits the whole tree. Until 2026-09-19 it ALSO grandfathered any
+  grant already present in HEAD, which is why `env_file: ../../.env` on ao-worker-1 and
+  ao-worker-2 passed pre-commit for weeks while -All reported them red. Item
+  sl-ao-envfile removed those two grants, leaving the tree with none - so the debt clause
+  now has nothing to protect, and its only possible effect would be to re-admit the exact
+  thing that was just paid off. It is gone: a grant in a staged compose file blocks
+  whether or not HEAD carries it. There is no per-service exemption list, on purpose.
+
+  Exit code 0 = clean, 1 = a grant was staged (or, with -All, found in the tree).
 #>
 [CmdletBinding()]
 param(
@@ -43,19 +64,58 @@ $ErrorActionPreference = 'Stop'
 if (-not $Root) { $Root = (git rev-parse --show-toplevel 2>$null) }
 if (-not $Root) { $Root = (Get-Location).Path }
 $Root = $Root.Trim()
+$RootFull = $Root
+try { $RootFull = (Resolve-Path -LiteralPath $Root).Path } catch { }
+$RootFull = $RootFull.TrimEnd('\', '/')
 
-# A grant is "broad" when the env_file target resolves to a .env that is NOT beside the
-# compose file that names it. A plane keeping its own .env next to its compose file is
-# scoped by construction and is fine; reaching up the tree for a shared one is not.
-function Test-BroadTarget([string]$target) {
+# Repo-relative directory of a repo-relative file path ('' when the file sits at the root).
+function Get-ParentDir([string]$relPath) {
+    $p = ($relPath -replace '\\', '/')
+    $i = $p.LastIndexOf('/')
+    if ($i -lt 0) { return '' }
+    return $p.Substring(0, $i)
+}
+
+# Resolve an env_file target against the compose file's directory, both repo-relative with
+# '/' separators. Returns $null when it is absolute or climbs out of the repo - neither is
+# something this tree can audit, and both are refused by the caller.
+function Resolve-RepoRelative([string]$baseDir, [string]$target) {
+    $t = ($target -replace '\\', '/')
+    if ($t -match '^[A-Za-z]:' -or $t.StartsWith('/')) { return $null }
+    $parts = @()
+    if ($baseDir) { $parts = @(($baseDir -split '/') | Where-Object { $_ -ne '' }) }
+    foreach ($seg in ($t -split '/')) {
+        if ($seg -eq '' -or $seg -eq '.') { continue }
+        if ($seg -eq '..') {
+            if ($parts.Count -eq 0) { return $null }
+            if ($parts.Count -eq 1) { $parts = @() }
+            else { $parts = @($parts[0..($parts.Count - 2)]) }
+        } else {
+            $parts += $seg
+        }
+    }
+    if ($parts.Count -eq 0) { return $null }
+    return ($parts -join '/')
+}
+
+# $composeRel is the compose file's repo-relative path. Returns '' when the target is
+# scoped, otherwise the reason it is refused.
+function Get-GrantVerdict([string]$composeRel, [string]$target) {
     $t = $target.Trim().TrimStart('-').Trim().Trim('"').Trim("'")
-    if (-not $t) { return $false }
-    return ($t -match '\.\.[\\/]')
+    if (-not $t) { return '' }
+    $composeDir = Get-ParentDir $composeRel
+    $resolved = Resolve-RepoRelative $composeDir $t
+    if ($null -eq $resolved) { return 'resolves outside the repository' }
+    $targetDir = Get-ParentDir $resolved
+    if ($targetDir -eq '') { return 'is the repo root env file' }
+    if ($targetDir -eq $composeDir) { return '' }
+    if (($composeDir + '/').StartsWith($targetDir + '/')) { return '' }
+    return "belongs to another directory ($targetDir)"
 }
 
 $violations = @()
 
-function Scan-ComposeText([string]$path, [string[]]$lines) {
+function Scan-ComposeText([string]$displayPath, [string]$composeRel, [string[]]$lines) {
     # Walk the file rather than regex it whole: `env_file:` and its list items are on
     # separate lines, and a service's own comment mentioning env_file must not match.
     $out = @()
@@ -66,38 +126,57 @@ function Scan-ComposeText([string]$path, [string[]]$lines) {
         if ($line -match '^\s*env_file\s*:\s*(\S.*)?$') {
             $inline = $Matches[1]
             if ($inline) {
-                if (Test-BroadTarget $inline) { $out += "${path}:$($i+1): env_file: $inline" }
+                $why = Get-GrantVerdict $composeRel $inline
+                if ($why) { $out += "${displayPath}:$($i+1): env_file: $($inline.Trim()) -- $why" }
                 $inList = $false
             } else { $inList = $true }
             continue
         }
         if ($inList) {
             if ($line -match '^\s*-\s*(\S.*)$') {
-                if (Test-BroadTarget $Matches[1]) { $out += "${path}:$($i+1): env_file -> $($Matches[1].Trim())" }
+                $item = $Matches[1]
+                $why = Get-GrantVerdict $composeRel $item
+                if ($why) { $out += "${displayPath}:$($i+1): env_file -> $($item.Trim()) -- $why" }
             } else { $inList = $false }
         }
     }
     return $out
 }
 
+function Write-TheRule {
+    Write-Host ""
+    Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
+    Write-Host "`${VAR} in a compose 'environment:' block is interpolated by the compose CLI from"
+    Write-Host "the project environment - it does NOT need env_file. Listing the variables is"
+    Write-Host "the whole fix. See the header of this script for what this rule is repaying."
+}
+
 if ($All) {
-    $files = @(Get-ChildItem -Path $Root -Recurse -File -Include "docker-compose*.yml", "compose*.yml" -ErrorAction SilentlyContinue |
-               Where-Object { $_.FullName -notmatch '[\\/](\.git|\.claude|node_modules|OB1)[\\/]' })
+    $files = @(Get-ChildItem -Path $RootFull -Recurse -File -Include "docker-compose*.yml", "compose*.yml" -ErrorAction SilentlyContinue)
     foreach ($f in $files) {
-        $violations += Scan-ComposeText $f.FullName (Get-Content -Path $f.FullName)
+        # Skip vendored/nested trees by their position UNDER the scan root, not by their
+        # absolute path: a worktree lives under .claude\worktrees\, so matching the
+        # ABSOLUTE path excluded every file in it - the audit reported a clean tree from
+        # inside a worktree that held two grants (found 2026-09-19, sl-ao-envfile).
+        $rel = $f.FullName
+        if ($rel.StartsWith($RootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $rel = $rel.Substring($RootFull.Length)
+        }
+        $rel = $rel.TrimStart('\', '/') -replace '\\', '/'
+        if ($rel -match '(^|/)(\.git|\.claude|node_modules|OB1)/') { continue }
+        $violations += Scan-ComposeText $f.FullName $rel (Get-Content -Path $f.FullName)
     }
     if ($violations.Count) {
         Write-Host "Compose services granting themselves a shared .env ($($violations.Count)):" -ForegroundColor Yellow
         $violations | ForEach-Object { Write-Host "  $_" }
-        Write-Host ""
-        Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
+        Write-TheRule
         exit 1
     }
     Write-Host "env_file scope: clean - no service grants itself a shared .env." -ForegroundColor Green
     exit 0
 }
 
-# --- staged mode: only what this commit ADDS ----------------------------------------
+# --- staged mode: what this commit leaves in a compose file it touches ---------------
 $staged = @(git diff --cached --name-only --diff-filter=ACMR 2>$null) |
           Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or $_ -match '(^|/)docker-compose[^/]*\.ya?ml$' }
 if (-not $staged -or -not $staged.Count) {
@@ -112,36 +191,16 @@ foreach ($rel in $staged) {
     $content = @(git show ":$rel" 2>$null)
     $ErrorActionPreference = $prev
     if ($LASTEXITCODE -ne 0 -or -not $content) { continue }
-    $found = Scan-ComposeText $rel $content
-    if (-not $found.Count) { continue }
-    # Present in HEAD already? Then it is pre-existing debt, not something this commit
-    # introduces - report it, do not block on it.
-    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    $head = @(git show "HEAD:$rel" 2>$null)
-    $ErrorActionPreference = $prev
-    $headFound = if ($LASTEXITCODE -eq 0 -and $head) { @(Scan-ComposeText $rel $head) } else { @() }
-    $headTargets = @($headFound | ForEach-Object { ($_ -split ': ', 2)[1] })
-    foreach ($f in $found) {
-        $target = ($f -split ': ', 2)[1]
-        if ($headTargets -contains $target) {
-            Write-Host "  (pre-existing, not blocked) $f" -ForegroundColor DarkYellow
-        } else {
-            $violations += $f
-        }
-    }
+    $violations += Scan-ComposeText $rel $rel $content
 }
 
 if ($violations.Count) {
     Write-Host ""
-    Write-Host "NEW env_file grant of a shared .env ($($violations.Count)):" -ForegroundColor Red
+    Write-Host "env_file grant of a shared .env in a staged compose file ($($violations.Count)):" -ForegroundColor Red
     $violations | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
-    Write-Host ""
-    Write-Host "THE RULE: a service names the variables it needs." -ForegroundColor Yellow
-    Write-Host "`${VAR} in a compose 'environment:' block is interpolated by the compose CLI from"
-    Write-Host "the project environment - it does NOT need env_file. Listing the variables is"
-    Write-Host "the whole fix. See the header of this script for what this rule is repaying."
+    Write-TheRule
     exit 1
 }
 
-Write-Host "env_file scope: no new shared-.env grants staged." -ForegroundColor Green
+Write-Host "env_file scope: no shared-.env grants in the staged compose files." -ForegroundColor Green
 exit 0
