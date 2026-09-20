@@ -64,9 +64,12 @@ docker compose -f agent-org/docker/docker-compose.yml up -d   # default plane (P
 ### Environment — one file, `agent-org/docker/.env`
 
 Compose loads it NATIVELY from the project directory, so nothing passes
-`--env-file` and your shell's cwd does not matter. **Every variable any service in
-this plane reads is declared there**, and `docker/.env.example` is the complete
-template.
+`--env-file` and your shell's cwd does not matter. **Every variable a service in this
+plane needs SET is declared there**, and `docker/.env.example` is the template to copy.
+Not every interpolated name is an assignment in it: the ones the compose file gives a
+`${VAR:-default}` are deliberately absent, and `AO_OT1_IMAGE` / `AO_OT2_IMAGE` - the
+env-template hot-swap selectors for the two open-terminal sidecars - are documented
+there as commented optional overrides rather than as values you must fill in.
 
 Since 2026-09-19 that includes the worker pool. `ao-worker-1` / `ao-worker-2` used
 to carry `env_file: ../../.env`, a wildcard grant of the whole ROOT `.env`; they
