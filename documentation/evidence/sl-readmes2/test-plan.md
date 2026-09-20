@@ -151,7 +151,7 @@ file it names - `depends_on` edges inside a plane, and `stack.manifest.toml`'s
 | Item | Claim to settle | Command |
 |---|---|---|
 | 1 | anchor: creates three networks, starts nothing; who really fails without it; the two exceptions | T1 #6 |
-| 2 | inference: upstreams -> llm-queue -> llm-gateway-db -> llm-gateway | `sm inference`, read `dep=` |
+| 2 | inference: upstreams -> llm-queue -> llm-gateway-db -> llm-gateway | `sm inference`, read `dep=`. **That arrow chain is a valid linear EXTENSION, not the `depends_on` graph** - there is no `llm-queue -> llm-gateway-db` edge; the real edges are `llm-queue -> llama-cpp-upstream`, `llm-gateway -> {both upstreams, llm-gateway-db, llm-queue}`, and `llm-gateway-ui`/`llm-gateway-backup -> llm-gateway-db`. Settle the EDGES against §1b's container table, which states them per service; settle only the ORDER here, and a linear extension is all an ordering list can carry |
 | 3 | frontend: openwebui -> tailscale; backup waits on whichever definition is active | `sm frontend` - `openwebui-backup` must show BOTH openwebui names in `dep=` |
 | 4 | memory: mnemory -> gateway, backup also waits on mnemory | `sm memory` |
 | 5 | search: vpn+redis parallel -> searxng -> gateway | `sm search` |
@@ -275,7 +275,7 @@ is itself a finding.**
 | ordering item 7 | the three/three split; a failed precheck is a SKIP and exit 0 | the six service definitions; `backup/generic-tar-backup.sh`'s precheck |
 | `README.md` | `stats` is the driver's one Windows-gated verb; the quoted refusal | T4 #1 |
 | sink §7a | the 41/0 audit checked claim classes, not rows | read `documentation/evidence/sl-readmes/test-plan.md` T2 |
-| sink §7c | 18 tables / 124 rows now, 17 / 119 merged | re-run the counting script |
+| sink §7c | **20 tables / 134 rows** now, **19 / 129** merged | re-run the counting script from T2 - the one that strips a leading `> `. The naive parser's 18 / 124 and 17 / 119 are the numbers T2 warns about, and an earlier draft of THIS row quoted them |
 
 **FAILS if** any introduced sentence is false.
 
