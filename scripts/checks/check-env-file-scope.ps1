@@ -152,7 +152,15 @@ function Write-TheRule {
 }
 
 if ($All) {
-    $files = @(Get-ChildItem -Path $RootFull -Recurse -File -Include "docker-compose*.yml", "compose*.yml" -ErrorAction SilentlyContinue)
+    # A plane split its compose file by service group in 2026-09 (inference/compose/*.yml),
+    # and none of those four basenames matches "compose*.yml" - so the four files that
+    # define the inference plane's services were invisible to this guard. .gitattributes
+    # already carries a */compose/*.yml rule for the same reason. Override files are in
+    # for the same reason: an override is exactly where a grant would be added quietly.
+    $files = @(Get-ChildItem -Path $RootFull -Recurse -File -Include "docker-compose*.yml", "compose*.yml", "*.override.yml", "*.override.yaml" -ErrorAction SilentlyContinue)
+    $files += @(Get-ChildItem -Path $RootFull -Recurse -File -Include "*.yml", "*.yaml" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Directory -and $_.Directory.Name -eq "compose" })
+    $files = @($files | Sort-Object -Property FullName -Unique)
     foreach ($f in $files) {
         # Skip vendored/nested trees by their position UNDER the scan root, not by their
         # absolute path: a worktree lives under .claude\worktrees\, so matching the
@@ -178,7 +186,9 @@ if ($All) {
 
 # --- staged mode: what this commit leaves in a compose file it touches ---------------
 $staged = @(git diff --cached --name-only --diff-filter=ACMR 2>$null) |
-          Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or $_ -match '(^|/)docker-compose[^/]*\.ya?ml$' }
+          Where-Object { $_ -match '(^|/)(docker-)?compose[^/]*\.ya?ml$' -or
+                         $_ -match '(^|/)compose/[^/]+\.ya?ml$' -or
+                         $_ -match '\.override\.ya?ml$' }
 if (-not $staged -or -not $staged.Count) {
     Write-Host "env_file scope: no compose files staged - skipped." -ForegroundColor DarkGray
     exit 0
