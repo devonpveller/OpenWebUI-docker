@@ -377,6 +377,17 @@ no longer describes it** - return the item rather than merging it:
 That is not a rejection; nothing is wrong with the work. Use `-Reject` only when the work
 itself should not land.
 
+**And "changes what would land" includes a clean replay (D18, 2026-09-19, from
+`sl-ob1-profiles`).** `-Merged` runs `git merge-base --is-ancestor
+<tested_at_sha> <merge sha>` and refuses when it fails, so **a reviewer rebase that
+rewrites commits is a requeue for re-test, never a hand-off** - even a byte-identical
+replay gives every commit a new sha, and the commit the tests passed at is then not an
+ancestor of anything you can merge. Hand off only when merge-base already equals the work
+line's tip, i.e. when the rebase was a no-op. The deviation on record: `sl-ob1-profiles`
+was merged as `f2bb38f` before its re-test, and recording it honestly afterwards took a
+re-test at the rebased tip (`19c54f5`) plus a `-Merged -Sha f2bb38f` against the merge
+that already existed.
+
 **Step 5 - the REVIEWER merges, in a dedicated merge worktree.**
 
 ```powershell

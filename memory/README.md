@@ -107,7 +107,9 @@ docker compose -f memory/docker-compose.yml down
 ```
 
 A bare `up` without `memory/.env` (copy `memory/.env.example`) fails loudly on
-the `${MCP_API_KEY:?}` guard — by design. Note the asymmetry:
+the `${MCP_API_KEY:?}` guard — by design. Migrating an existing host off the
+single root `.env` is
+[`env-split-migration.md`](../documentation/runbooks/env-split-migration.md). Note the asymmetry:
 `MNEMORY_GATEWAY_KEY`, `MCP_API_KEYS` and `MNEMORY_CLOUD_USER` have **no** `:?`
 guard, so a partially-populated file gives you a gateway with an empty key
 instead of a hard failure.
@@ -200,7 +202,7 @@ plane actually appears on today are:
 - `documentation/CONTAINER-REGISTRY.md`,
   `documentation/runbooks/restore-from-snapshot.md`,
   `documentation/runbooks/backup-restore-runbook.md`
-- `scripts/worktree/lease-names.conf` — the `memory` lease name, if the plane's
+- `scripts/agent-harness/lease-names.conf` — the `memory` lease name, if the plane's
   fault domain changes
 
 Run `/stack-map` afterwards; it checks for drift between these.

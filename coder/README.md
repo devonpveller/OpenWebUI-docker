@@ -116,13 +116,17 @@ that reason.
 
 ## Bringing it up and down
 
-Preferred - the workspace driver knows the plane order and passes the root
-`.env` for you (`up`, `down`, `restart`, `status` all take a plane name):
+Preferred - the workspace driver knows the plane order (`up`, `down`,
+`restart`, `status` all take a plane name). It passes no `--env-file`: compose
+loads `coder/.env` itself from the project directory.
 
 ```powershell
-.\scripts\stack\stack.ps1 up coder
-.\scripts\stack\stack.ps1 down coder
+python scripts/stack/stack.py up coder
+python scripts/stack/stack.py down coder
+python scripts/stack/stack.py up coder --dry-run   # print the docker line, run nothing
 ```
+
+`.\scripts\stack\stack.ps1 up coder` is a shim over the same driver.
 
 By hand, **from the repository root**:
 
@@ -134,6 +138,8 @@ docker compose -f coder/docker-compose.yml down
 **`coder/.env` is not optional** - copy `coder/.env.example`. Compose loads it from
 the PROJECT DIRECTORY, so it is found whatever your cwd; you run these from the repo
 root only because the `-f coder/docker-compose.yml` path is written relative to it.
+Migrating an existing host off the single root `.env`:
+[`env-split-migration.md`](../documentation/runbooks/env-split-migration.md).
 That file feeds the compose CLI's `${VAR}` interpolation, including the
 `${OPEN_TERMINAL_API_KEY:?...}` guard that makes a bare `up` fail loudly rather than
 start a keyless executor. There is no `env_file:` in any service here - that
@@ -155,7 +161,9 @@ project - is `scripts/recovery/emergency-recovery.ps1`, not this file.
 
 ## Where it sits in the dependency order
 
-`scripts/stack/stack.ps1` runs planes top to bottom on `up`, reversed on `down`:
+The driver (`scripts/stack/stack.py`, topologically sorting the `requires`
+edges in [`../stack.manifest.toml`](../stack.manifest.toml)) runs planes top to
+bottom on `up`, reversed on `down`:
 
 ```
 anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
@@ -164,8 +172,9 @@ anchor -> inference -> frontend -> memory -> search -> CODER -> ob1 -> agent-org
 - **Needs first:** the root **anchor**, which creates `ai-stack_llm-net` (without it
   the external network reference fails outright), and the **inference** plane answering
   on the `llama-cpp` alias. There is no cross-project `depends_on` - compose cannot
-  express one - so order is enforced by `stack.ps1` and `emergency-recovery.ps1`, and
-  the services retry until the gateway answers.
+  express one - so order is enforced by the driver (from `requires = ["anchor",
+  "inference"]` in [`../stack.manifest.toml`](../stack.manifest.toml)) and by
+  `emergency-recovery.ps1`, and the services retry until the gateway answers.
 - Inside the plane `little-coder` waits on `open-terminal` being healthy. `lc-egress`
   has no `depends_on` and nothing waits on it; tinyproxy starts fast and requests
   retry, but a very early clone can race it.
@@ -213,10 +222,16 @@ docker exec open-terminal curl -fsS http://localhost:8000/health
   a latent overflow. Restart `little-coder` after changing it.
 - **Adding, removing or moving a container is never a one-file edit.** The full checklist
   is [`SERVICE-LIFECYCLE.md`](../documentation/runbooks/SERVICE-LIFECYCLE.md); at minimum
-  it is this compose file plus `scripts/recovery/emergency-recovery.ps1`
-  (`$Script:CoderServices`), `scripts/stack/stack.ps1`, `scripts/checks/stack-watchdog.ps1`,
-  `scripts/checks/check-backup-coverage.ps1`, the backup and restore runbooks, and the
-  stack-map reference. Run `/stack-map` to check for drift.
+  it is this compose file plus [`../stack.manifest.toml`](../stack.manifest.toml)
+  (the `[planes.coder]` table - the inventory of record),
+  `scripts/recovery/emergency-recovery.ps1` (`$Script:CoderServices`),
+  `scripts/stack/stack.py` (the plane's probe in `HealthSweep.run()` and its label
+  in `PS1_PROBES`; `stack.ps1` is a shim and holds no plane list),
+  `scripts/checks/stack-watchdog.ps1`,
+  `scripts/checks/check-backup-coverage.ps1`,
+  `scripts/lib/stack-services.curated.json` followed by
+  `python scripts/stack/stack.py inventory --write`, the backup and restore
+  runbooks, and the stack-map reference. Run `/stack-map` to check for drift.
 - **Never route inference around LiteLLM.** Both containers reach it through the
   `llama-cpp` alias on `llm-net`; `scripts/checks/check-llm-gateway-routing.ps1`
   enforces this pre-commit.

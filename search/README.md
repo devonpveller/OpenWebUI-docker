@@ -81,7 +81,9 @@ interpolates from it, and `MULLVAD_WG_PRIVATE_KEY` carries a `${...:?}` guard
 that aborts the `up` if it is missing. Compose finds that file itself - it is
 the PROJECT DIRECTORY's `.env`, so no `--env-file` is needed and your cwd does
 not matter to it. **Still run by hand from the repo root**, because the
-`-f search/docker-compose.yml` path below is written relative to it.
+`-f search/docker-compose.yml` path below is written relative to it. Migrating
+an existing host off the single root `.env`:
+[`env-split-migration.md`](../documentation/runbooks/env-split-migration.md).
 
 ```powershell
 .\scripts\stack\stack.ps1 up search        # this plane only - see the anchor note above
@@ -91,9 +93,12 @@ not matter to it. **Still run by hand from the repo root**, because the
                                            # includes GET 127.0.0.1:8085/healthz
 ```
 
-Each of those is a thin wrapper: `up search` runs
-`docker compose -f search\docker-compose.yml up -d` and nothing
-else. `restart` maps to `docker compose restart`, which restarts the existing
+Each of those is a thin wrapper. `stack.ps1` has been a shim over
+`python scripts/stack/stack.py` since 2026-09-19, and the driver reads
+[`../stack.manifest.toml`](../stack.manifest.toml); `up search` resolves to
+`docker compose -f search/docker-compose.yml up -d` and nothing
+else - `python scripts/stack/stack.py up search --dry-run` prints that exact
+line without running it. `restart` maps to `docker compose restart`, which restarts the existing
 containers **without recreating them** - a changed `.env` value or compose
 setting needs an `up -d`, not a restart. `health` takes no plane argument, runs
 every probe in the workspace, and exits with the number of failures.
@@ -119,10 +124,11 @@ Retagging `private-search-gateway:local` is a deploy, not a test. Under the
 [merge protocol](../documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md)
 that is a gated step: test builds tag `:wt-<id>` and leave `:local` alone.
 
-Relative paths inside the compose file (`../.env`, `./gateway`,
-`./searxng`) resolve against the **file**, not your shell's
-working directory - so `-f search/docker-compose.yml` works from anywhere in the
-repo, but a copy of the file somewhere else will not.
+Relative paths inside the compose file (`./gateway`, `./searxng`) resolve
+against the **file**, not your shell's working directory - so
+`-f search/docker-compose.yml` works from anywhere in the repo, but a copy of
+the file somewhere else will not. Both of the plane's own paths are now inside
+this directory; no bind here reaches out of it.
 
 ### Is it up, and is it working?
 
@@ -145,8 +151,9 @@ Expect a gap between the two after a cold start: SearXNG has a 90 s
 
 ### Environment
 
-Read straight from the root `.env` - see the "Private Search Gateway" and
-"Search plane" blocks in [`../.env.example`](../.env.example):
+Read from this plane's own [`.env`](.env.example) - compose loads it natively
+from the project directory (per-plane since `sl-env-split`, 2026-09-19; the
+migration is [`env-split-migration.md`](../documentation/runbooks/env-split-migration.md)):
 
 | Key | Notes |
 |---|---|
@@ -157,11 +164,18 @@ Read straight from the root `.env` - see the "Private Search Gateway" and
 | `SEARCH_NET_SUBNET` | Passed to gluetun as `FIREWALL_OUTBOUND_SUBNETS`. It opens the kill-switch firewall to subnets gluetun is *not* attached to; the in-plane services never need it, because they share `search-net` with `vpn`. |
 | `VPN_IMAGE`, `SEARXNG_IMAGE`, `SEARCH_REDIS_IMAGE` | Pin the three pulled images. |
 
-`gateway` additionally inherits the whole root `.env` through
-`env_file: ../.env` - notably `GATEWAY_API_KEY`, `PROVIDER_PRIORITY`,
-`CACHE_TTL_SECONDS`, the `CIRCUIT_*` values and `LOG_QUERIES`. Those are the
-application's knobs, and
-[`gateway/README.md`](gateway/README.md) explains them.
+`gateway` inherits nothing wholesale. `env_file: ../.env` was removed from that
+service on 2026-08-28, and its `environment:` block names exactly three
+variables: `GATEWAY_API_KEY` (from this plane's `.env`, and the gateway's one
+REQUIRED Settings field - it crash-loops without it), plus the two in-cluster
+URLs `SEARXNG_URL` and `REDIS_URL`. The other seven pydantic Settings fields -
+`CACHE_TTL_SECONDS`, `PROVIDER_PRIORITY`, `REQUEST_TIMEOUT_SECONDS`, the two
+`CIRCUIT_*` values, `LOG_LEVEL` and `LOG_QUERIES` - are real fields that
+**nothing currently puts into the container**, so they run on their code
+defaults; `search/.env.example` lists them as prose with each default, and
+[`gateway/README.md`](gateway/README.md) explains what they do. Making one
+adjustable means adding it to that `environment:` block AND to
+`search/.env.example`, in the same change.
 
 None of these values belong in a paste. `docker compose config` renders them
 interpolated in plaintext, so grep the section you need rather than printing the

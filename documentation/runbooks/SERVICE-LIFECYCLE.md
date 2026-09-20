@@ -10,6 +10,26 @@ anchor. "A service" always lives in exactly one project
 (`frontend/ inference/ memory/ search/ coder/ portal/ OB1/docker/
 agent-org/docker/`).
 
+> ## The inventory of record is `stack.manifest.toml`
+>
+> One committed file declares every PLANE - its compose file, what it
+> `requires` to run, its `optional` edges, its `profiles`, its published
+> `ports`, the `keys` that must be non-blank and what the `host` must provide -
+> and every PRODUCT that groups planes into a vertical slice. `python
+> scripts/stack/stack.py` reads it; `scripts/stack/stack.ps1` is a shim with no
+> registry of its own. Per-host enablement lives in the gitignored
+> `.stack/state.json`, and **the driver never writes the manifest**.
+>
+> So a service-level change starts here: if the plane, port, profile, key or
+> host requirement you are adding is not in that file, nothing downstream can
+> know about it. The GENERATED companion is
+> `scripts/lib/stack-services.json` (row 8 below) - written by `stack.py
+> inventory --write` from the manifest, the curated sidecar and the compose
+> renders, and refused by `inventory --check` if hand-edited.
+>
+> Each plane also carries its own `README.md` with a "Changing this plane"
+> section naming the surfaces that plane actually appears on. Update it too.
+
 ## When you ADD a service (or move one between projects)
 
 Work top to bottom; every row is a file or system that will silently lie if
@@ -25,7 +45,7 @@ skipped.
 | 6 | **StackWatchdog** | `scripts/checks/stack-watchdog.ps1`: add tailnet-serve rows if it gets a serve route; recovery hooks if the watchdog should repair it. (Its `Test-ServiceHealth` already falls back to container-name lookup for non-root projects.) |
 | 7 | **Backups** | Stateful data ⇒ a backup sidecar IN THE SAME PROJECT (runbooks/backup-conventions.md): script in `backup/` (or the project's own `backup/` dir for submodules), sleep-loop for interval tars / supercronic for cron-timed dumps, sha256 sentinel, output under `./backups/<name>/`. Then: `scripts/sysadmin-mcp/check_backups.py` `_EXPECTED` row, `scripts/checks/check-backup-coverage.ps1` volume map, and a restore entry in BOTH `scripts/backup/restore-from-snapshot.ps1` (catalog) and `runbooks/restore-from-snapshot.md`. |
 | 8 | **Sysadmin plane** | `scripts/lib/stack-services.json` is **GENERATED** since 2026-09-19. Add the row to `scripts/lib/stack-services.curated.json` instead — in the right plane group, with `critical` and any `host_health` — then run `python scripts/stack/stack.py inventory --write` and commit both files. The container name, its compose SERVICE key, its profile and its project all come from the compose render — you write none of them; a container the render produces and the sidecar does not list makes `--write` REFUSE, naming it (only a person can say which group it joins). A NEW PLANE additionally needs its project in the sidecar's `projects` map and its `[planes.*]` table (compose file, `ports`, `profiles`) in `stack.manifest.toml` — `inventory --check` refuses a non-`manual` plane with no project. If the service writes big logs, give it json-file caps in compose so the disk rotation stays boring. |
-| 8a | **Profile?** | If the service sits behind a compose `profiles:` key, say so in FOUR places or it becomes invisible. (1) `scripts/lib/stack-services.curated.json`: the row's `profile` field + the project's `profiles` list, then `python scripts/stack/stack.py inventory --write` (`scripts/lib/stack-services.json` is GENERATED - see row 8). Where the plane's compose file is a PINNED SUBMODULE whose commit does not carry the profile yet, the curated `profile` is a DECLARATION: `inventory --check` prints it as `[declared, not rendered]` and verifies it once the gitlink bumps. (2) `stack.manifest.toml`: the `[planes.<plane>.profiles.<name>]` table, the product that pulls it (`profiles` for an engine the product needs, `surfaces` for something `--headless` may drop), and `requires` if the profile's service calls an engine that lives in ANOTHER profile — otherwise it comes up healthy and silently produces nothing. (3) `scripts/checks/check-project-configs.ps1`: the render target must pass the profile, or the coverage assertion fails the commit (it compares rendered containers against ALL inventory rows for the project, deliberately not against the profiles the target passes — deriving the expectation from the argument list makes the guard police itself). (4) **Who reaches it from another project**: `portal/config/caddy/Caddyfile`, `status-pipe/modules/`, `frontend/entrypoint.sh` routes. Profiled planes today: `inference` (`local`), `agent-org` (`workers`, `cloud`), `portal` (`internet`), `ob1` (`research`, `wiki`, `notebook`, `idea-refinery`). |
+| 8a | **Profile?** | If the service sits behind a compose `profiles:` key, say so in FOUR places or it becomes invisible. (1) `scripts/lib/stack-services.curated.json`: the row's `profile` field + the project's `profiles` list, then `python scripts/stack/stack.py inventory --write` (`scripts/lib/stack-services.json` is GENERATED - see row 8). Where the plane's compose file is a PINNED SUBMODULE whose commit does not carry the profile yet, the curated `profile` is a DECLARATION: `inventory --check` prints it as `[declared, not rendered]` and verifies it once the gitlink bumps. (2) `stack.manifest.toml`: the `[planes.<plane>.profiles.<name>]` table, the product that pulls it (`profiles` for an engine the product needs, `surfaces` for something `--headless` may drop), and `requires` if the profile's service calls an engine that lives in ANOTHER profile — otherwise it comes up healthy and silently produces nothing. (3) `scripts/checks/check-project-configs.ps1`: the render target must pass the profile, or the coverage assertion fails the commit (it compares rendered containers against ALL inventory rows for the project, deliberately not against the profiles the target passes — deriving the expectation from the argument list makes the guard police itself). (4) **Who reaches it from another project**: `portal/config/caddy/Caddyfile`, `status-pipe/modules/`, `frontend/entrypoint.sh` routes. Profiled planes today, FIVE: `frontend` (`stock`, `gpu`, `tailscale`), `inference` (`local`), `agent-org` (`workers`, `cloud`), `portal` (`internet`), `ob1` (`research`, `wiki`, `notebook`, `idea-refinery` - only the last is in the PINNED gitlink). |
 | 8b | **Who reaches the profiled service, really** | Enumerate cross-profile references from the **rendered** config (`docker compose … config --format json`, every profile on), matching each profiled service's name against every `environment` value — plus `depends_on`, `network_mode`, `links`, network aliases and shared named volumes. **A grep over the compose files under-reports**: values delivered by `env_file:` never appear in the compose text, and a service may hard-code the same URL as a default anyway. `sl-ob1-profiles` grepped, found two such references, wrote "two" into three documents, and its tester rendered and found six. A `depends_on` that crosses into a profile is a start-time failure and must be removed or made `required: false`; an environment URL that crosses is a *silent* failure and must at minimum be documented at its line with what goes dead. |
 | 9 | **Status surfaces** | If operators should see it in OWUI's Server Status pipe: extend the relevant `status-pipe/` module (then re-paste per `status-pipe/README`). |
 | 10 | **Docs** | Stack-map reference (`/stack-map` checks drift), `documentation/CONTAINER-REGISTRY.md` (purpose + why), CLAUDE.md counts if a project's size line changes. |
@@ -68,11 +88,14 @@ stack); keep old backup archives on the NAS even when the target is gone.
 
 ## When you PROFILE-GATE a service
 
-Four planes are profile-gated today: `frontend` (`stock` | `gpu` | `tailscale`,
-2026-09-19), `portal` (`internet`), `agent-org` (`workers`, `cloud`) and OB1
-(`idea-refinery`). A profiled service is INVISIBLE to anything that renders the
-plane without its profile, and that is exactly how a checker starts checking
-nothing. So, in the same commit:
+**Five** planes are profile-gated today, and row 8a above now names the same
+five (it listed four and omitted `frontend` until 2026-09-19):
+`frontend` (`stock` | `gpu` | `tailscale`), `inference` (`local`),
+`portal` (`internet`), `agent-org` (`workers`, `cloud`) and OB1
+(`idea-refinery` today, plus `research` / `wiki` / `notebook` declared in the
+manifest and not yet carried by the pinned gitlink). A profiled service is
+INVISIBLE to anything that renders the plane without its profile, and that is
+exactly how a checker starts checking nothing. So, in the same commit:
 
 - **Decide where the profile set comes from and say it out loud.** compose
   reads `COMPOSE_PROFILES` from **that plane's own `<plane>/.env`** (per-plane
@@ -118,7 +141,8 @@ nothing. So, in the same commit:
   running while the render denies it, keep checking and log why: a checker that
   goes silent on its own uncertainty is worse than one that cries wolf. Live
   example: `Test-TailscaleDeployed` in `scripts/checks/stack-watchdog.ps1` and
-  the matching skip in `scripts/stack/stack.ps1`'s `health` action.
+  the matching `tailscale_deployed()` skip in `HealthSweep.run()`
+  (`scripts/stack/stack.py`), which `stack.ps1 health` now forwards to.
 - **Two definitions of one container is a legitimate shape, and compose polices
   it.** `frontend` has `openwebui` (gpu) and `openwebui-stock` (stock) sharing
   one `container_name` and one data volume, because compose can gate a SERVICE
@@ -134,8 +158,13 @@ nothing. So, in the same commit:
 ## The one-command checks
 
 ```powershell
-.\scripts\stack\stack.ps1 health        # functional probes, all planes
+python scripts/stack/stack.py health           # 15 functional probes, all planes; exit code = failures
+python scripts/stack/stack.py doctor           # docker, compose, env files, blank keys, host requirements
+python scripts/stack/stack.py inventory --check  # manifest vs sidecar vs compose renders; writes nothing
 powershell scripts\stack\ob1-deploy.ps1 -Service <svc> -WhatIfOnly   # what a build: deploy WOULD do
 powershell scripts\checks\check-backup-coverage.ps1   # every byte has a sidecar
-# pre-commit runs: secrets, line endings, gateway routing, compose+ps1 parse
+# pre-commit (.githooks/pre-commit) runs, in this order: staged secrets, line
+# endings, doc placement, gateway-only LLM routing, the corpus write contract,
+# project configs (compose renders + inventory coverage), env_file scope, three
+# OB1 checks that fire only on a gitlink bump, and the attestation gate.
 ```
