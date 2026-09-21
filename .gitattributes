@@ -35,7 +35,12 @@ docker-compose*.yaml text eol=lf
 # overwrite it.
 #
 # The drift was PURE LINE ENDINGS (verified 2026-09-21: the worktree blob and the
-# index blob hash identically at 9c1d75f9, 190 bytes each). core.autocrlf=true
+# index blob hash identically at d1687154cc7905352769c97795981f302dec4478, 190
+# bytes each; the 196-byte CRLF form of the same content hashes
+# 745619174b12b87f3559503248648461a68b5ea2. Both re-derived 2026-09-21 with
+# `git hash-object --no-filters` - WITHOUT that flag git applies the clean
+# filter and both spellings return the LF hash, which is how attempt 1 came to
+# quote a number that reproduced nowhere.) core.autocrlf=true
 # checks the file out as CRLF, Authelia - a Linux process - writes it back as LF,
 # and `git status` has shown it modified after every portal start ever since.
 # Pinning eol=lf makes the checked-out bytes the bytes Authelia writes, so the

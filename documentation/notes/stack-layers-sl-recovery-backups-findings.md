@@ -13,9 +13,15 @@ The name list was derived by grepping `documentation/runbooks/`, every
 `README.md`, `SERVICE-LIFECYCLE.md`, `.claude/skills/stack-map/references/workspace-stacks.md`,
 `CLAUDE.md` and `scripts/checks/stack-watchdog.ps1` for `\.(ps1|py|sh|bat|cmd)\b`
 and filtering to the recovery/backup/restore family. 114 distinct
-*path-as-written* forms collapsed to **41 distinct real files**.
+*path-as-written* forms collapsed to **43 distinct real files**.
 
-**Summary: 41 named, 41 found on disk, 2 broken (both fixed), 14 as-written doc
+The last two rows, `access-query.ps1` and `dev-helper.ps1`, are here because
+attempt 1 left them out: they are not recovery/backup/restore scripts (the
+ARTIFACT line's scope), but the ACCEPTANCE line says *every* script named in
+those documents, and this item corrected both of their paths. A row whose path
+this change edited belongs in the table that says the paths are right.
+
+**Summary: 43 named, 43 found on disk, 2 broken (both fixed), 14 as-written doc
 paths that did not resolve (all corrected).** No named script is missing.
 
 ### Parse / dry-run results
@@ -66,6 +72,8 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | `scripts/portal/portal-off.ps1` | yes | OK | **RAN** `-WhatIf` |
 | `scripts/portal/portal-status.ps1` | yes | OK | **RAN**: portal up, all services `[OK]` |
 | `scripts/sysadmin-mcp/compact-vhdx.ps1` | yes | OK | **none** — compacts a VHDX |
+| `scripts/portal/access-query.ps1` | yes | OK | **RAN** parse only; named 6× in incident-response / monitoring-access and its path is one this item corrected, so it belongs here even though it is a log-query tool rather than a recovery script |
+| `scripts/checks/dev-helper.ps1` | yes | OK | **RAN** parse only; named 7× in PREVENTION-GUIDE, path also corrected here |
 | `scripts/notify-mattermost.sh` | yes | OK | not run (would post) |
 
 ### As-written doc paths that did not resolve — all corrected
@@ -281,7 +289,11 @@ become a directory, and Authelia's read-only root would fail on the write. It ha
 to stay tracked and stay writable.
 
 **The drift was purely line endings**, verified rather than assumed — worktree
-blob and index blob both `9c1d75f9…`, 190 bytes each, `git diff` empty, yet
+blob and index blob both `d1687154cc7905352769c97795981f302dec4478`, 190 bytes
+each (the 196-byte CRLF form of the same content is
+`745619174b12b87f3559503248648461a68b5ea2`; both re-derived 2026-09-21 with
+`git hash-object --no-filters`, because without that flag the clean filter
+makes both spellings return the LF hash), `git diff` empty, yet
 `git status` shows ` M` and `git update-index --refresh` says `needs update`.
 Cause: `core.autocrlf=true` with no attribute checks the file out as CRLF (196
 bytes); Authelia, a Linux process, writes it back as LF (190); the index entry's
@@ -373,11 +385,15 @@ chat returned `500 upstream command exited prematurely`.
 
 **Key handling.** `inference/.env` is read (via the existing `read_env_file`) only
 to confirm `LITELLM_MASTER_KEY` is CONFIGURED, so an unmigrated host gets a
-sentence naming the file instead of a 401 to decode. The value is never handled:
+sentence naming the file instead of a 401 to decode. **`read_env_file` does
+return a dict containing the value, so the string is briefly in this process's
+memory — attempt 1 claimed "never reaches this process", which is false.** What
+holds, and is what matters, is that it is read for a PRESENCE CHECK only and is
+never passed as an argument, logged, or printed:
 the request is made by a script running INSIDE `llm-gateway` that reads the
 container's own environment, which compose populated from that same file
 (`LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}`, `inference/compose/gateway.yml:107`).
-Nothing secret reaches this process, its argv, or a probe line — pinned by a test.
+No secret value reaches an argv, a log line or a probe line — pinned by a test.
 (`llm-gateway` publishes no host port by deliberate design, so `docker exec` is
 the only route in anyway.)
 
@@ -400,16 +416,15 @@ completion: it cycles every few minutes and a cold load per cycle would be worse
 than the bug. The completion belongs to `stack.py health`, which an operator runs
 once after a recreate — which is how SERVICE-LIFECYCLE row 5 now words it.
 
-### Open — a count this change makes stale in two files I do not own
+### CLOSED in attempt 2 — the probe count
 
-`PS1_PROBES` is now 16 and `stack.py`'s own header comment says so. Two documents
-still say fifteen and are owned by the parallel item `sl-docs-posture`:
-
-- `scripts/stack/README.md:306` — "The fifteen functional probes…"
-- `CLAUDE.md` — "`health` (15 probes, exit code = failures)"
-
-Left untouched deliberately to avoid conflicting with that item mid-flight.
-**Whoever lands second must update both to sixteen.**
+Attempt 1 left the count to `sl-docs-posture` to avoid conflicting with it
+mid-flight. That item merged (`6979e9e`) **keeping "15"**, so the count was
+briefly unowned: `PS1_PROBES` said 16 and seven sentences across six documents
+said fifteen. Landing second, this item now owns every one of them — see §10.3
+for the full list and what changed in each. `scripts/stack/README.md:306` is the
+one that needed more than a digit: it is the probe LIST, and the sixteenth probe
+has an entry there describing what it checks and what fails it.
 
 ---
 
@@ -430,5 +445,180 @@ Left untouched deliberately to avoid conflicting with that item mid-flight.
   (`stack-watchdog.ps1` 57 non-ASCII chars, `emergency-recovery.ps1` 936,
   `check-backup-coverage.ps1` 9). Stripping a BOM from a file containing UTF-8
   would make PS 5.1 read it as ANSI and mangle those characters, so the BOMs
-  stay. **Every line this item ADDS is pure ASCII** — verified over the whole
-  `.ps1` diff.
+  stay. **Every line this item ADDS is pure ASCII once a leading BOM is
+  discounted** (measured 2026-09-21: 0). The blunt `byte > 127` sweep over the
+  added `.ps1` diff returns **6**, not 0 — six first lines whose header comment
+  changed, each carrying its file's pre-existing BOM. That is the sweep seeing
+  the BOM, not new non-ASCII: **BOM state is unchanged on all nine pre-existing
+  `.ps1` files this item touches** (`efbbbf` at base and at tip on all eight
+  that had one; the new `check-backup-freshness.ps1` has none), which is what
+  this paragraph actually argues for. Attempt 1 stated the expectation as 0 and
+  it did not reproduce.
+
+---
+
+## 10. Attempt 2 (2026-09-21) — what attempt 1 got wrong
+
+Attempt 1 was FAILED by the tester on one defect and refuted on three more. All
+are fixed here. Rebased onto `development` after `sl-checks-worktree` (5b42432)
+and `sl-docs-posture` (6979e9e) landed.
+
+### 10.1 FAIL — four BACKSPACE bytes shipped in three scripts
+
+A `\b` inside a **non-raw** Python replacement string during §1's path rewrite
+put `0x08` into three files. Base blobs held zero:
+
+| File | Line | Class |
+|---|---|---|
+| `scripts/backup/backup-to-nas.ps1` | 48 | comment |
+| `scripts/backup/install-nas-backup-task.ps1` | 27 | comment |
+| `scripts/backup/set-nas-credential.ps1` | 19 | comment |
+| `scripts/backup/set-nas-credential.ps1` | 139 | **executable `Write-Host`** |
+
+The last one matters most: a backspace ERASES the preceding character when
+rendered, so an operator setting up NAS credentials was told to run
+`.\scriptackup\install-nas-backup-task.ps1`, which does not exist. It also
+directly refuted this item's own §1 claim that the scripts' usage headers were
+"corrected to their real paths".
+
+**This is the same escape-sequence class as the `\s` bug this item fixed in
+`status_check.py` — introduced by the very pass that fixed it, in the same
+sitting.** It then happened a THIRD time while writing attempt 2: one `0x08`
+landed in this item's own test plan, in the row describing the bug. The new gate
+caught that one before it was committed, which is the whole argument for it.
+
+**Why every gate passed.** `check-project-configs.ps1` only TOKENIZES `.ps1`, and
+`0x08` is whitespace to the tokenizer — it reported "parse clean" on a file
+carrying the bug. `validate-lineendings.ps1` looks only at CR/LF. The anchor's
+encoding sweep tests `byte > 127`, and `0x08` is 8. Nothing in the repo had ever
+looked BELOW 0x20. That is this workspace's recurring shape: a check that passes
+while checking nothing.
+
+**Fix, beyond the four characters:** `check-project-configs.ps1` gains **gate 4**
+— any byte in `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]` in an ADDED line of any staged
+text file is refused, pre-commit, naming the file, the byte and the line. Proven
+both ways: planting the exact shipped bug gives exit 1 (while the same file still
+reports "parse clean" beside it), and the shipped tree gives exit 0. It is not
+`.ps1`-only — the markdown case above was caught by the same gate.
+
+**ADDED LINES, not whole files, deliberately.** Eleven such bytes already sit in
+older files (measured 2026-09-21): `documentation/evidence/podlinks/test-plan.md`
+(4× 0x08), `documentation/evidence/sl-env-split/test-plan.md` (0x07, 0x0C),
+`documentation/implementation-guide/dark-factory-unification/DECISIONS.md` (2×
+0x07), `documentation/notes/stack-layers-sl-env-split-findings.md` (0x07),
+`documentation/notes/u8floor-findings.md` (0x08), `documentation/notes/u8h4-findings.md`
+(0x07). **So this class has been shipping for months, across at least four
+earlier items.** A whole-file rule would fail the next commit that touched any of
+them for an unrelated reason; an added-line rule catches what a commit
+INTRODUCES, which is the failure mode. Cleaning up the eleven is a separate,
+safe change and is NOT done here.
+
+### 10.2 REFUTED — the UTC parser was an hour early for eight months a year
+
+`_parse_iso_z` used `time.mktime(strptime(...)) - time.timezone`. `mktime`
+interprets the struct as LOCAL time while `time.timezone` is the STANDARD
+offset, so inside DST the pair is 3600 s out. Measured on this host
+(`timezone=18000`, `altzone=14400`, `daylight=1`) against `calendar.timegm`:
+
+| stamp | delta |
+|---|---|
+| `2026-07-04T12:00:00Z` | **-3600 s** |
+| `2026-09-20T12:00:00Z` | **-3600 s** |
+| `2026-01-15T12:00:00Z` | 0 s |
+
+`_skip_is_current` compares that value against an artifact mtime, so a **real,
+current** `PRECHECK SKIP` was judged "superseded" whenever it was less than about
+an hour newer than the last artifact — the row went GREEN. The tester reproduced
+it against the live red-probe sidecar: a planted artifact 2 h old reported stale;
+1 h, 30 min and 5 min did not.
+
+It failed in the safe direction (false green, never false red) and the next
+sidecar cycle would catch it — but the shape this whole item exists for is a
+recreate with a wrong bind, which is exactly when a sidecar runs minutes after a
+success. Fixed with `calendar.timegm`; all three deltas are now 0 s.
+
+**The shipped test passed by a 60-second margin** — a 1 h artifact against a skip
+stamped `now + 60 s`, i.e. the bug's own offset plus a minute. Both tests are now
+DISCRIMINATING: a skip **30 minutes newer than a 2 h artifact**, a gap smaller
+than the offset, so the hour moves the skip to the wrong side of it. Verified by
+monkeypatching the old expression back: **4 checks FAIL**, including
+`test_evaluate_reports_the_mount` raising `IndexError` because under the bug
+there is no stale `lm-models` row at all. Under the fix: **32 passed, 0 failed**.
+
+The PowerShell twin `Get-BackupSkipReason` is unaffected — it compares ISO-8601
+`Z` strings lexically and never converts to epoch.
+
+### 10.3 The probe count, now owned end to end
+
+Attempt 1 left this to `sl-docs-posture`, which merged keeping "15". Landing
+second, this item owns all of it. Seven sentences updated, plus two the sweep
+found that the map did not:
+
+| File | What changed |
+|---|---|
+| `CLAUDE.md` | driver row: `health` (15 -> **16** probes) |
+| `README.md` ×2 | both `stack.py health` comments |
+| `inference/README.md` | `# 15 -> 16 probes` |
+| `frontend/README.md` | `# 15 -> 16 probes` |
+| `documentation/runbooks/SERVICE-LIFECYCLE.md` ×2 | row 5 prose + the command comment near the bottom |
+| `scripts/stack/README.md` (:51) | `the 15-probe sweep` -> `the 16-probe sweep` |
+| `scripts/stack/README.md` (:306) | **the probe LIST** — a full entry for the sixteenth, not a digit change |
+| `scripts/stack/test_stack.py` | section comment (found by sweep, not in the map) |
+
+The list entry states what the probe checks (`.gguf` census -> `/running` -> one
+completion) and **what fails it** (empty or missing `/models`; a completion that
+is not 200; the upstream not running; `LITELLM_MASTER_KEY` absent). The "what the
+sweep touches" list was RE-MEASURED rather than incremented: **seven** `docker
+exec`s now (five as before plus two on `llama-cpp-upstream`) and seven HTTP GETs,
+with `docker inspect` and the landing completion marked CONDITIONAL. The old
+list's "`docker ps` — twice" is now qualified: the second call only fires when
+the frontend render has no `tailscale` service, so it is one call on this host.
+
+### 10.4 Three citations that did not reproduce
+
+- **The blob hash.** `.gitattributes` and §6 both said `9c1d75f9…`. It reproduces
+  nowhere. Measured 2026-09-21 with `git hash-object --no-filters`: the 190-byte
+  LF form is **`d1687154cc7905352769c97795981f302dec4478`** and the 196-byte CRLF
+  form is **`745619174b12b87f3559503248648461a68b5ea2`**. `--no-filters` is the
+  trap: without it git applies the clean filter and BOTH spellings return the LF
+  hash, which is almost certainly how a wrong number came to be written down with
+  confidence. The substantive claim was always true and the tester verified it
+  independently; only the number was wrong, in a committed file.
+- **"Every added `.ps1` line is pure ASCII."** The plan's own command returns
+  **6**, not 0 — see §9, now reworded to the claim that actually reproduces.
+- **"The key never reaches this process."** False as written: `read_env_file`
+  returns a dict of every value, so the string is briefly in memory. The material
+  property — never passed as an argument, logged, or printed — holds, and is what
+  §8, the code comment and claim C22 now say instead.
+
+### 10.5 A plan defect that would have paged the operator
+
+T3c's RED case set `$PROJECT_DIR` to the live main checkout. `Test-BackupRecency`'s
+stale branch is not inert: it posts via `scripts/notify-mattermost.sh` and writes
+`logs\.backup-recency-alert`, a **12-hour suppression sentinel**. Anyone running
+that case verbatim would have paged the operator with a FALSE stale and left a
+sentinel that swallows the next REAL backup alert for twelve hours. The tester
+spotted it and used a scratch root instead.
+
+The plan now uses a scratch `$PROJECT_DIR` for the RED case, pre-creates all 13
+backup dirs with fresh artifacts so the `lm-models` MOUNT row is the ONLY stale
+line, and verifies `Test-Path "$MAIN\logs\.backup-recency-alert"` is False
+afterwards. Re-run while writing this: live sentinel **absent**, scratch sentinel
+present, one stale row. The notifier is not stubbed and need not be — the scratch
+root has no `scripts/` directory, so the path the alerting branch builds cannot
+exist, and the call is inside a `try/catch`.
+
+One more trap recorded there: the header lines fed to `Set-Content` must be
+NEWLINE-separated inside `@( )`, not comma-separated. With commas, `+` binds
+tighter than `,`, the whole array collapses into one space-joined string, and the
+generated script fails to parse. Attempt 1's plan had the comma form.
+
+### 10.6 Two inventory rows attempt 1 omitted
+
+`scripts/portal/access-query.ps1` (named 6× in incident-response and
+monitoring-access) and `scripts/checks/dev-helper.ps1` (7× in PREVENTION-GUIDE)
+were not in the table. They are not recovery/backup/restore scripts — the
+ARTIFACT line's scope — but the ACCEPTANCE line says *every* script named in
+those documents, and **this item corrected both of their paths**. A script whose
+path this change edited belongs in the table that claims the paths are right.
+Both added, both parse clean. The table is now **43 rows, 43 present on disk**.

@@ -32,10 +32,10 @@ cannot reproduce one has found a defect.
 
 | # | Claim | Where asserted | Case |
 |---|---|---|---|
-| C1 | Every recovery/backup/restore script named in the runbooks, READMEs, SERVICE-LIFECYCLE, the stack-map reference and the watchdog exists on disk; all 41 parse | findings §1 | T1 |
+| C1 | Every script named in the runbooks, READMEs, SERVICE-LIFECYCLE, the stack-map reference and the watchdog exists on disk; all **43** parse (41 in the recovery/backup/restore family, plus `access-query.ps1` and `dev-helper.ps1` whose paths this item corrected) | findings §1 | T1 |
 | C2 | 14 as-written doc paths did not resolve and now do | findings §1 | T1b |
 | C3 | `breach-killswitch.ps1` could not run on PS 5.1 (`Get-Date -AsUTC`); it can now | findings §2a | T1c |
-| C4 | `status_check.py:97` emitted a SyntaxWarning (`\s`); it no longer does | findings §2b | T1d |
+| C4 | `status_check.py`'s `log_info` in `start_missing_services()` emitted a SyntaxWarning (`\s`); it no longer does | findings §2b | T1d |
 | C5 | A current `PRECHECK SKIP` naming an empty/absent DATA_DIR is a FAILURE that names the mount, whatever the artifact age says | `check_backups.py`, `stack-watchdog.ps1` | T2, T2b, T3c |
 | C6 | An unreachable-`HEALTH_TCP` skip is a reason beside a stale age, never a failure by itself | `check_backups.py` | T2c |
 | C7 | A skip superseded by a later line from the same container is NOT current — and both live `ao-worker-*-journals-backup` are in exactly that state | `check_backups.py`, `Get-BackupSkipReason` | T2d |
@@ -53,11 +53,109 @@ cannot reproduce one has found a defect.
 | C19 | The serving-depth probe passes and names the resident model on a healthy host | `stack.py` | T8 |
 | C20 | It FAILS, naming the host bind, against an empty models mount — and does not attempt a completion | `stack.py` | T8b, T8c |
 | C21 | With nothing resident it makes exactly ONE completion, through `llm-gateway`, never the upstream | `stack.py` | T8d |
-| C22 | The caller key value never reaches this process, an argv, or a probe line | `stack.py` | T8e |
+| C22 | The caller key is read for a PRESENCE CHECK only and is never passed as an argument, logged, or printed (it IS briefly in process memory — `read_env_file` returns every value) | `stack.py` | T8e |
 | C23 | `health` is now 16 probes, `PS1_PROBES` is pinned to 16, and the exit code is still the number of failures | `test_stack.py` | T8f |
 | C24 | `$ExpectedBackupRecency` is 13 rows and `_EXPECTED` is 15; the two ao-worker journal dirs are the difference | `stack-watchdog.ps1` comment | T3b |
 | C25 | `portal-alerter` `/alert` returns HTTP 500 today | findings §3 | T9 |
-| C26 | `scripts/stack/README.md` and `CLAUDE.md` still say fifteen probes and are owned by `sl-docs-posture` | findings §8 | T10 |
+| C26 | Every sentence stating the probe COUNT now says sixteen, and the probe LIST carries an entry for the sixteenth | 7 documents | T10 |
+
+### Claims added by attempt 2 (2026-09-21)
+
+| # | Claim | Where asserted | Case |
+|---|---|---|---|
+| C27 | Four `0x08` BACKSPACE bytes shipped in attempt 1 at `backup-to-nas.ps1:48`, `install-nas-backup-task.ps1:27`, `set-nas-credential.ps1:19` and `:139`; base blobs held zero; all four are now repaired to `.\scripts\backup\…` | the three scripts | G1 |
+| C28 | A control character in an added line is now refused PRE-COMMIT by `check-project-configs.ps1` gate 4 — and the same file still reports `parse clean`, which is why the parse gate never caught it | `check-project-configs.ps1` | G1 |
+| C29 | That gate scans ADDED LINES, not whole files, because 11 such bytes already sit in older `documentation/evidence` and `documentation/notes` files and a whole-file rule would fail unrelated commits | `check-project-configs.ps1` comment | G1b |
+| C30 | `_parse_iso_z` used `mktime - time.timezone` and read every stamp **3600 s early inside DST** (measured: `timezone=18000`, `altzone=14400`; delta −3600 s in July and September, 0 s in January) | `check_backups.py` | T2g |
+| C31 | That hour made `_skip_is_current` call a real skip "superseded" whenever the gap to the artifact was under an hour; `calendar.timegm` fixes it | `check_backups.py` | T2g |
+| C32 | The new tests DISCRIMINATE: a skip 30 min newer than a 2 h artifact. Under the old expression `test_stamp_parsing_is_utc_all_year` and `test_evaluate_reports_the_mount` fail (4 checks); under the new they pass (32/32) | `test_check_backups.py` | T2g |
+| C33 | `health` touches **seven** `docker exec`s now (five as before, plus two on `llama-cpp-upstream`) and seven HTTP GETs; `docker inspect` and the landing completion are conditional | `scripts/stack/README.md` | T8g |
+| C34 | The `.healthcheck.env` blobs are `d1687154…` (190 bytes, LF) and `745619174b12…` (196 bytes, CRLF), both via `git hash-object --no-filters`; attempt 1's `9c1d75f9` reproduces nowhere | `.gitattributes`, findings §6 | T7c |
+| C35 | The caller key IS briefly in process memory (`read_env_file` returns every value); what holds is that it is read for a presence check and never passed as an argument, logged, or printed | `stack.py`, findings §8 | T8e |
+| C36 | The blunt `byte > 127` sweep returns **6**, all pre-existing BOMs on changed first lines; BOM state is unchanged on all nine pre-existing `.ps1` files | findings §9 | G2 |
+| C37 | T3c's RED case must use a scratch `$PROJECT_DIR`: against `$MAIN` it pages the operator and writes a 12 h suppression sentinel into the live tree | this plan, T3c | T3c |
+
+### T2g — the timezone fix, both directions
+
+```bash
+cd "$WT"
+# the deltas
+python -c "
+import calendar, time, sys; sys.path.insert(0,'scripts/sysadmin-mcp'); import check_backups as cb
+for s in ('2026-07-04T12:00:00Z','2026-09-20T12:00:00Z','2026-01-15T12:00:00Z'):
+    print(s, '%+d s' % (cb._parse_iso_z(s) - calendar.timegm(time.strptime(s,'%Y-%m-%dT%H:%M:%SZ'))))"
+```
+**Expected:** `+0 s` on all three.
+
+```bash
+# the tests must FAIL under the old expression, or they do not discriminate
+cd "$WT" && python - <<'EOF'
+import sys, time, io, contextlib
+sys.path.insert(0, 'scripts/sysadmin-mcp')
+import check_backups as cb
+cb._parse_iso_z = lambda s: time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+import test_check_backups as t
+for name in ("test_stamp_parsing_is_utc_all_year", "test_evaluate_reports_the_mount"):
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf): getattr(t, name)()
+        print(f"{name}: completed")
+    except Exception as e:
+        print(f"{name}: RAISED {type(e).__name__} (the stale row it asserts is absent)")
+    for l in buf.getvalue().splitlines():
+        if "FAIL" in l: print("   ", l.strip())
+print("OLD expression:", t._failed, "check(s) FAILED")
+EOF
+```
+**Expected:** **4 checks FAILED** — the two DST deltas, the 30-min-gap
+currency check, and `test_evaluate_reports_the_mount` raising `IndexError`
+because under the bug there is no stale `lm-models` row **at all** (the false
+green this fixes). Then `python scripts/sysadmin-mcp/test_check_backups.py`
+alone: **32 passed, 0 failed**.
+**Disproves this criterion:** the old expression passing either test — that
+would mean the margin is not discriminating and the bug could ship again.
+
+### T7c — the blob hashes reproduce
+
+```bash
+cd "$WT" && python -c "
+d=open('portal/config/authelia/.healthcheck.env','rb').read()
+open('lf.tmp','wb').write(d.replace(b'
+',b'
+'))
+open('crlf.tmp','wb').write(d.replace(b'
+',b'
+').replace(b'
+',b'
+'))"
+git hash-object --no-filters lf.tmp crlf.tmp && rm -f lf.tmp crlf.tmp
+```
+**Expected:** `d1687154cc7905352769c97795981f302dec4478` then
+`745619174b12b87f3559503248648461a68b5ea2`.
+**`--no-filters` is load-bearing:** without it git applies the clean filter and
+BOTH spellings return the LF hash — which is how attempt 1 came to publish a
+number that reproduced nowhere.
+
+### T8g — what the sweep touches
+
+```bash
+cd "$WT" && python - <<'EOF'
+import io, sys, collections
+sys.path.insert(0, 'scripts/stack')
+import stack
+calls, gets = [], []
+def cap(cmd, cwd):
+    calls.append(list(cmd)); return stack.subprocess_capture(cmd, cwd)
+def http(url, timeout=8):
+    gets.append(url); return stack.urllib_get(url, timeout)
+code = stack.main(["--root", ".", "health"], stdout=io.StringIO(), capture=cap, http=http)
+execs = [c[2] for c in calls if c[:2] == ["docker","exec"]]
+print("exit:", code, "| execs:", len(execs), sorted(collections.Counter(execs).items()))
+print("HTTP GETs:", len(gets))
+EOF
+```
+**Expected:** `execs: 7` including **two** on `llama-cpp-upstream`, `HTTP GETs: 7`,
+matching the list in `scripts/stack/README.md`.
 
 ---
 
@@ -316,19 +414,66 @@ $g | Set-Content "$env:TEMP\tbr_green.ps1" -Encoding ASCII
 ```
 **Expected:** `backup recency OK (13 dirs checked)` and `True`.
 
+**READ THIS BEFORE THE RED CASE — attempt 1's plan got it wrong and the tester
+caught it.** `Test-BackupRecency`'s stale branch is not inert: it posts to
+Mattermost via `scripts/notify-mattermost.sh` and writes
+`logs\.backup-recency-alert` under `$PROJECT_DIR` — a **12-hour suppression
+sentinel**. Pointing `$PROJECT_DIR` at the live main checkout for the RED case,
+as attempt 1's plan did, pages the operator with a **false** STALE and leaves
+that sentinel in the live tree, where it will swallow the next REAL backup alert
+for twelve hours. So the RED case uses a **scratch `$PROJECT_DIR`**. The notifier is not stubbed
+and does not need to be: the alerting branch builds its script path as
+`$PROJECT_DIR/scripts/notify-mattermost.sh`, the scratch root has no `scripts/`
+directory, and the call is inside a `try/catch` — so the post cannot fire, and
+the sentinel lands in the scratch tree. Only the GREEN case above may point at
+`$MAIN`, because its stale set is empty and the alerting branch is never reached.
+
+**Verified while writing this plan:** with the scratch root, `Test-Path
+"$MAIN\logs\.backup-recency-alert"` stayed **False** and the sentinel appeared
+under `$scratch\logs` instead.
+
 ```powershell
-# RED: stub the reader to the lm-models shape. Its real artifacts are FRESH,
-# so a pass here would prove the mount branch is dead code.
-$r = @('$PROJECT_DIR = "' + $MAIN + '"',
-       'function Write-LogEntry { param($Message,$Level="INFO") Write-Host "  [$Level] $Message" }',
-       'function Get-BackupSkipReason { param([string]$Container) if($Container -eq "lm-models-backup"){return "/data is empty"} return "" }') +
-     (Slice '^\$ExpectedBackupRecency') + (Slice '^function Test-BackupRecency')
+# RED: scratch PROJECT_DIR (NOT $MAIN), reader stubbed to the lm-models shape.
+# lm-models' real artifacts are FRESH, so a pass here would prove the mount
+# branch is dead code.
+#
+# The header lines are NEWLINE-separated inside @( ), not comma-separated: with
+# commas, `+` binds tighter than `,` and the whole array collapses into ONE
+# space-joined string that PowerShell then refuses to parse. (Measured while
+# writing this; the GREEN block above has the same shape for the same reason.)
+$scratch = "$env:TEMP\tbr-red-root"
+New-Item -ItemType Directory -Force "$scratch\logs" | Out-Null
+# All 13 dirs, so the ONLY stale row is the one under test. With just lm-models
+# you get twelve "backup dir missing" lines drowning the signal.
+foreach ($d in 'agent-bridge-db','authelia','caddy','little-coder','llm-gateway',
+                'lm-models','mattermost-db','mnemory','open-notebook',
+                'openbrain-db','openbrain-wiki','openwebui','tailscale') {
+  New-Item -ItemType Directory -Force "$scratch\backups\$d" | Out-Null
+  Set-Content "$scratch\backups\$d\$d-fresh.tar.gz" 'x'      # fresh artifact
+}
+$hdr = @(
+  ('$PROJECT_DIR = "' + $scratch + '"')
+  'function Write-LogEntry { param($Message,$Level="INFO") Write-Host "  [$Level] $Message" }'
+  'function Get-BackupSkipReason { param([string]$Container) if($Container -eq "lm-models-backup"){return "/data is empty"} return "" }'
+)
+$r = $hdr + (Slice '^\$ExpectedBackupRecency') + (Slice '^function Test-BackupRecency')
 $r | Set-Content "$env:TEMP\tbr_red.ps1" -Encoding ASCII
 . "$env:TEMP\tbr_red.ps1"; @(Test-BackupRecency) | Select-Object -Last 1
 ```
-**Expected:** `[ERROR] BACKUP STALE - lm-models: MOUNT /data is empty or absent
-inside lm-models-backup - it is producing nothing …` and `False`.
+**Expected:** exactly ONE stale row -
+`[ERROR] BACKUP STALE - lm-models: MOUNT /data is empty or absent inside
+lm-models-backup - it is producing nothing (PRECHECK SKIP: /data is empty)` -
+and `False`.
 **Disproves:** `True`, or a message that reports an age instead of the mount.
+
+**Confirm nothing leaked into the live tree, and clean up:**
+```powershell
+Test-Path "$MAIN\logs\.backup-recency-alert"   # MUST be False
+Get-ChildItem "$scratch\logs"                  # the sentinel, if any, is HERE
+Remove-Item -Recurse -Force $scratch, "$env:TEMP\tbr_red.ps1", "$env:TEMP\tbr_green.ps1"
+```
+(The scratch root has no `scripts\notify-mattermost.sh`, so the notifier path
+cannot fire even if the stub is dropped — belt and braces.)
 
 ---
 
@@ -606,17 +751,28 @@ the finding is stale.
 
 ---
 
-## T10 — the count this change makes stale elsewhere (C26)
+## T10 — the probe count, everywhere (C26)
+
+Attempt 1 deferred this to `sl-docs-posture`; that item merged keeping "15", so
+this item owns all of it now.
 
 ```bash
-cd "$WT" && grep -rn "fifteen\|15 probes" scripts/stack/README.md CLAUDE.md scripts/stack/stack.py
+cd "$WT" && grep -rniE "15[- ](functional[- ])?probe|fifteen (functional )?probe"   --include=*.md --include=*.py --include=*.ps1 .   | grep -v '\.claude/worktrees' | grep -v documentation/evidence
 ```
-**Expected:** `stack.py` says sixteen; `scripts/stack/README.md:306` and
-`CLAUDE.md` still say fifteen. Both are owned by the parallel item
-`sl-docs-posture` and were left alone deliberately.
-**This is a REPORTABLE, not a failure of this item** — but whoever merges second
-must fix both, and the tester should say so in the verdict.
+**Expected:** every surviving hit is HISTORICALLY correct — a sentence saying the
+other fifteen probes were green through the outage. **Nothing claiming the sweep
+IS fifteen.** Then confirm each of the eight sentences in findings §10.3 says
+sixteen, and that `scripts/stack/README.md` carries a real ENTRY for the
+sixteenth probe — naming what it checks and what fails it — not just a changed
+digit.
 
+```bash
+cd "$WT" && sed -n '/^#### The sixteenth/,/^#### What the sweep touches/p' scripts/stack/README.md
+```
+**Expected:** the entry names the `.gguf` census, `/running`, the one completion,
+and a "What fails it" sentence covering all four failure modes.
+**Disproves:** any document still asserting a count of fifteen, or a list entry
+that says only that a sixteenth probe exists.
 ---
 
 ## Gates
@@ -629,25 +785,118 @@ python scripts/sysadmin-mcp/test_check_backups.py
 python scripts/stack/stack.py inventory --check
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-project-configs.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/validate-lineendings.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-hook-attestation.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-hook-attestation.ps1 \
+  -Branch work/sl-recovery-backups -Base development
 ```
-**Expected:** all green; `114 passed`; `27 passed, 0 failed`.
+**Expected:** all green; `114 passed`; `32 passed, 0 failed`; attestation `[OK]`
+on all commits. (`check-hook-attestation.ps1` takes mandatory `-Branch`/`-Base`;
+without them it exits 1 on a binding error, which is not a verdict.)
 
-**No BOM / non-ASCII in what this item ADDED** (the pre-existing BOMs in
-`stack-watchdog.ps1`, `emergency-recovery.ps1` and `check-backup-coverage.ps1`
-stay — those files contain UTF-8 and PS 5.1 would read them as ANSI without a
-BOM; findings §9):
+### G1 — CONTROL CHARACTERS in added lines (the attempt-1 failure)
+
+Attempt 1 shipped four BACKSPACE bytes (`0x08`) from a `\b` in a non-raw
+replacement string — one of them on an executable `Write-Host` that told the
+operator to run `.\scriptackup\install-nas-backup-task.ps1`. **Every gate passed:**
+the `.ps1` parse gate treats `0x08` as whitespace, the line-ending check looks
+only at CR/LF, and the encoding sweep below tests `byte > 127` — and `0x08` is 8.
+
+The rule now lives in **`scripts/checks/check-project-configs.ps1`, gate 4**, so
+it runs pre-commit on every commit. Verify it both ways:
 
 ```bash
-cd "$WT" && git diff development -- '*.ps1' | grep '^+' | grep -v '^+++' | \
-  python -c "
+# GREEN — the tree as shipped
+cd "$WT"
+python - <<'EOF'
+import subprocess, os
+files = subprocess.run(["git","diff","--name-only","development"],
+                       capture_output=True, text=True).stdout.split()
+bad = []
+for f in files:
+    if not os.path.isfile(f): continue
+    d = open(f, "rb").read()
+    for i, c in enumerate(d):
+        if c < 0x20 and c not in (0x09, 0x0a, 0x0d):
+            bad.append((f, d[:i].count(b"\n") + 1, hex(c)))
+print("control characters in changed files:", len(bad))
+for b in bad: print("  ", b)
+EOF
+```
+**Expected:** `0`. **Disproves:** any hit — the attempt-1 bug, or a new one.
+
+```powershell
+# RED — plant the exact shipped bug and watch the pre-commit gate refuse it
+cd $WT
+python -c "open('scripts/checks/_ctrl_red.ps1','wb').write(rb'# .\scripts' + b'\x08' + rb'ackup\x.ps1' + b'\r\n')"
+git add scripts/checks/_ctrl_red.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\checks\check-project-configs.ps1
+"exit = $LASTEXITCODE"
+git rm -q --cached scripts\checks\_ctrl_red.ps1; Remove-Item scripts\checks\_ctrl_red.ps1
+```
+**Expected:** `[configs] CONTROL CHARACTER in staged added line(s):` naming the
+file and `0x08`, **exit 1** — and note it ALSO prints `parse clean` for the same
+file, which is the point. **Disproves this gate:** exit 0.
+
+Also confirm the four originals are actually repaired, rendered rather than
+merely present:
+```bash
+cd "$WT"
+sed -n '48p' scripts/backup/backup-to-nas.ps1 | cat -v
+sed -n '27p' scripts/backup/install-nas-backup-task.ps1 | cat -v
+sed -n '19p;139p' scripts/backup/set-nas-credential.ps1 | cat -v
+```
+**Expected:** every one reads `.\scripts\backup\…` with no `^H`, and
+`scripts\backup\install-nas-backup-task.ps1` / `scripts\backup\set-nas-credential.ps1`
+both exist on disk.
+
+### G2 — BOM / non-ASCII, stated so it reproduces
+
+Attempt 1's expectation here was `0` and the real answer is **6**: six added
+`.ps1` first lines carry their file's **pre-existing** BOM because the header
+comment on that line changed. The substantive claim is that BOM state does not
+change and no new non-ASCII content appears, so check exactly that:
+
+```bash
+cd "$WT"
+# (a) non-ASCII CONTENT, discounting a leading BOM on the line
+git diff development -- '*.ps1' | grep '^+' | grep -v '^+++' | python -c "
 import sys
-bad = [l for l in sys.stdin.buffer if any(c > 127 for c in l)]
-print('added .ps1 lines with non-ASCII:', len(bad))
-for l in bad[:5]: print(l[:100])"
+bom = b'+\xef\xbb\xbf'
+bad = []
+for l in sys.stdin.buffer:
+    body = b'+' + l[len(bom):] if l.startswith(bom) else l
+    if any(c > 127 for c in body): bad.append(body)
+print('added .ps1 lines with non-ASCII CONTENT:', len(bad))
+for l in bad[:5]: print('   ', l[:80])"
+
+# (b) BOM state per changed .ps1, base vs tip
+for f in $(git diff --name-only development -- '*.ps1'); do
+  b=$(git show development:$f 2>/dev/null | head -c3 | od -An -tx1 | tr -d ' \n')
+  t=$(head -c3 "$f" | od -An -tx1 | tr -d ' \n')
+  printf "%-46s base=%-6s tip=%-6s %s\n" "$f" "${b:0:6}" "${t:0:6}" \
+    "$([ "$b" = "$t" ] && echo SAME || echo CHANGED)"
+done
 ```
-**Expected:** `0`. And the new file carries no BOM:
+**Expected:** (a) `0`. (b) `SAME` on all eight pre-existing BOM'd files
+(`efbbbf` -> `efbbbf`), `SAME` on `check-project-configs.ps1` (never had one),
+and the only `CHANGED` is the NEW `check-backup-freshness.ps1`, which has no BOM
+at all. **Disproves:** a BOM added or removed from a pre-existing file, or any
+non-ASCII content in an added line.
+
+The pre-existing BOMs stay on purpose: `stack-watchdog.ps1` (57 non-ASCII chars),
+`emergency-recovery.ps1` (936) and `check-backup-coverage.ps1` (9) contain UTF-8,
+and PS 5.1 reads a BOM-less file as ANSI — stripping the BOM would mangle them.
+
+### G3 — no stale probe count anywhere
+
 ```bash
-python -c "print('BOM:', open('scripts/checks/check-backup-freshness.ps1','rb').read(3) == b'\xef\xbb\xbf')"
+cd "$WT" && grep -rniE "15[- ](functional[- ])?probe|fifteen (functional )?probe" \
+  --include=*.md --include=*.py --include=*.ps1 . \
+  | grep -v '\.claude/worktrees' | grep -v documentation/evidence
 ```
-**Expected:** `BOM: False`.
+**Expected:** only sentences where "fifteen" is HISTORICALLY correct — i.e. the
+ones saying the other fifteen probes were green during the outage. No line
+claiming the sweep *is* fifteen. Cross-check the live count:
+```bash
+cd "$WT" && python scripts/stack/stack.py health 2>&1 | grep -cE '^\s+\[(OK|FAIL)\]'
+```
+**Expected:** `16`.
