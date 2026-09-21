@@ -93,6 +93,26 @@ Every count in that column is a RENDER of the flag list beside it, not 20 plus t
 deltas in §2. Attempt 1 wrote 22 there — the count for `--profile research` ALONE —
 and it propagated to eight shipped files before a tester rendered the pair. See §11.
 
+> **CORRECTION, 2026-09-20 (`sl-docs-posture`): the LANDING STEP is `enable
+> research`, not `init --product research --force`.** Every `init … --force` in
+> this note is a MEASUREMENT against a `--state <scratch>` file, and stays as
+> written because that is what was run. It is not advice for this host, and §3's
+> phrasing ("one command either way") read as though it were. On a host that
+> already has a `.stack/state.json` the two verbs differ: `cmd_init` builds a
+> fresh `State({})` and saves it (REPLACE), `cmd_enable` mutates the state it
+> loaded (MERGE). Measured 2026-09-20 against two scratch state files seeded
+> with the same six planes (`frontend, inference, memory, search, coder,
+> agent-org`): `init --product research --force` left **four**
+> (`frontend, inference, ob1, search`) — `memory`, `coder` and `agent-org` gone —
+> while `enable research` left **seven**, `ob1` carrying the same four profiles.
+> Both print an identical `enabled product research:` summary, because `cmd_init`
+> calls `cmd_enable` to do the work. Read 2026-09-20, this host's
+> `.stack/state.json` now lists SEVEN planes - `anchor, coder, frontend,
+> inference, memory, ob1, search`, i.e. the landing step above has been taken -
+> so the wrong verb here would silently un-enable `coder`, `memory` and the
+> explicit `anchor` entry. Semantics: `scripts/stack/README.md`, the `init`
+> section.
+
 `enable ob1` refuses first until `inference` and `search` are enabled, naming both
 and the two commands — worth knowing before reading the refusal as a bug.
 
