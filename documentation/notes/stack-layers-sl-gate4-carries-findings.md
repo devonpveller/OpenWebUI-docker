@@ -76,9 +76,22 @@ line" then means:
   still there) would go red for a move that introduced nothing.
 * Leaving rename detection at git's default `-M` and simply DROPPING the
   `--diff-filter` keeps the rename as an `R` entry whose hunk holds exactly the
-  lines the commit introduced. Proven: the rename-with-edit reproduction above
-  now reports ONE line,
-  `documentation/notes/renamed-policy-findings.md:121`, and not the other 120.
+  lines the commit introduced.
+
+  Measured on the same index 2026-09-22, `git diff --cached -U0 --text | grep -c
+  '^+'`: **3** as shipped (the `+++` header, the appended blank line, the planted
+  line) against **123** with `--no-renames` (a `+++ /dev/null` for the delete
+  half, a `+++ b/` for the add half, and all 121 lines of the moved file). The
+  source file is 119 lines, re-derived.
+
+  Be precise about what that buys, because the obvious claim is wrong: for THIS
+  plant the reported HIT count is 1 either way, since the other 120 lines are
+  clean. The difference bites where a moved file ALREADY carries a control byte,
+  and that case was measured too: a pure `git mv` of
+  `documentation/notes/u8floor-findings.md` - which has a `0x08` at line 100 -
+  gives `R100` on `--name-status` and **exit 0**. Under `--no-renames` all 121+
+  of its lines would be added lines and the move would go red for a commit that
+  introduced nothing.
 
 Dropping the filter entirely, rather than widening it to `ACMR`, is the same
 lesson gate 1 in this file already writes down twice: a filter is a list of
@@ -155,9 +168,14 @@ enforce" out of scope:
   `git mv old.ps1 new.ps1` plus an edit that breaks its syntax is NOT parsed by
   gate 2; the same move on a `*.yml` does NOT trigger the compose render or
   `stack.py inventory --check`; a renamed `*.json` is not strict-parsed.
-* Verified at base and after this change by the same `R099` mechanism as
-  reproduction (b): a rename is absent from `git diff --cached --name-only
-  --diff-filter=ACM` output entirely.
+* MEASURED, not inferred, on this branch's tip 2026-09-22:
+  `git mv scripts/checks/dev-helper.ps1 scripts/checks/dev-helper-moved.ps1`,
+  append an unclosed `function Broken {` to the moved file, `git add -A`.
+  `git diff --cached --name-status` says `R099`. The check exits **0** and
+  prints one line, gate 4's `no control characters in staged added lines` -
+  gate 2 never saw the file, and a `.ps1` that cannot be parsed would have been
+  committed. (Gate 4 itself is correct here: the rename's hunk really does hold
+  no control bytes.)
 
 The fix is one word (`ACMR`, or dropping the filter as gate 4 did) but it
 WIDENS what three gates enforce on commit shapes nobody has measured, which is
