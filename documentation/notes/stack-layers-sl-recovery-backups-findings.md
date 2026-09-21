@@ -33,7 +33,7 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | Script | Exists | Parses | Dry / help form — RESULT |
 |---|---|---|---|
 | `scripts/recovery/emergency-recovery.ps1` | yes | OK | **none exists** — every mode (`recover`/`nuclear`/`gpu-reset`) mutates. Parse only. |
-| `scripts/recovery/gpu_check.py` | yes | OK | **NOT read-only** (corrected 2026-09-22, sl-gate4-carries): `restart_gpu_services()` runs `docker compose restart openwebui llama-cpp-upstream llama-cpp-embed-upstream` at line 146, and `main()` restarts `llama-cpp-upstream` (line 214) and `llama-cpp-embed-upstream` (line 228) on their own. Not run: a bare `python scripts/recovery/gpu_check.py` mutates the running stack. |
+| `scripts/recovery/gpu_check.py` | yes | OK | **NOT read-only** (corrected 2026-09-20, sl-gate4-carries): `restart_gpu_services()` runs `docker compose restart openwebui llama-cpp-upstream llama-cpp-embed-upstream` at line 146, and `main()` restarts `llama-cpp-upstream` (line 214) and `llama-cpp-embed-upstream` (line 228) on their own. Not run: a bare `python scripts/recovery/gpu_check.py` mutates the running stack. |
 | `scripts/recovery/namespace_reset.py` | yes | OK | **none** — destructive |
 | `scripts/recovery/nuclear_option.py` | yes | OK | **none** — destructive |
 | `scripts/recovery/rebuild_tailscale.py` | yes | OK | **none** — destructive |
@@ -46,7 +46,7 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | `scripts/backup/install-nas-backup-task.ps1` | yes | OK | **none** — registers a scheduled task |
 | `scripts/backup/restore-from-snapshot.ps1` | yes | OK | **RAN** plan-only (no `-Apply`): discovered the 2026-09-20 little-coder archive and mapped all five subdirs to their volumes |
 | `scripts/backup/set-nas-credential.ps1` | yes | OK | **none** — writes a credential vault |
-| `scripts/maintenance/weekly-maintenance.ps1` | yes | OK | **none** — no dry-run form, and a bare run compacts the VHDX. Its `param()` block (lines 25-29) declares THREE parameters, not one (corrected 2026-09-22, sl-gate4-carries): `[switch]$Register`, `[switch]$SkipCompact` ("reclaim + report only" - the closest thing to a safe form) and `[int]$CompactWaitMinutes = 25`. |
+| `scripts/maintenance/weekly-maintenance.ps1` | yes | OK | **none** — no dry-run form, and a bare run compacts the VHDX. Its `param()` block (lines 25-29) declares THREE parameters, not one (corrected 2026-09-20, sl-gate4-carries): `[switch]$Register`, `[switch]$SkipCompact` ("reclaim + report only" - the closest thing to a safe form) and `[int]$CompactWaitMinutes = 25`. |
 | `backup/authelia-backup.sh` | yes | OK | container entrypoint; not host-runnable |
 | `backup/caddy-backup.sh` | yes | OK | container entrypoint |
 | `backup/generic-tar-backup.sh` | yes | OK | container entrypoint; its precheck strings are the basis of §3 |
@@ -101,7 +101,7 @@ it is a false positive — `UPDATE-MANAGEMENT.md`'s `../../../documentation-plan
 resolves correctly from the MAIN checkout (whose parent holds the plan store) and
 only fails from a worktree three levels deeper.
 
-**Corrected 2026-09-22 (sl-gate4-carries).** That sweep was WRONG: it found one
+**Corrected 2026-09-20 (sl-gate4-carries).** That sweep was WRONG: it found one
 unresolved href where an unbounded one finds THREE. Re-run with
 `documentation/evidence/sl-gate4-carries/href-sweep.py` — every `](...)` target in
 `documentation/runbooks/**/*.md` that is not `http(s):`, `mailto:` or a bare

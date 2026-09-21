@@ -17,6 +17,30 @@ Changed files:
 
 ---
 
+## ROUND 2 - what changed since attempt 1 failed
+
+Attempt 1 (`f50a80b`) failed testing. Its 9 cases all passed and 38 of its 39
+claims re-measured true; it failed on input SHAPE. The gate read the file's
+identity out of the diff's `+++ b/<path>` text, which git renders three ways this
+plan never tried: C-QUOTED when the path is non-ASCII (`core.quotepath` defaults
+to true), TAB-TERMINATED when the path contains a space, and
+INDISTINGUISHABLE from an added content line whose own text begins `++ `. Two of
+those were DETECTION REGRESSIONS - a planted byte base reported, attempt 1
+passed green with no printed skip.
+
+Round 2 does not patch that parser, it deletes it. File identity now comes from
+`git diff --cached -M --name-status -z`; `check-attr` is called with `-z` on both
+sides; the patch is cut into records at `diff --git ` BY POSITION and paired with
+that list by index, with the record header ending at the first `@@` so a `+` line
+after it is data whatever it looks like. Cases 9, 10 and 11 are the three
+shapes, each against base as well, because two of them are regressions and an
+after-shot with no before-shot proves nothing. Cases 12 and 13 cover the two
+things the redesign newly introduces (a positional-pairing assertion and a
+preview cap). Cases 1-8 are unchanged and MUST be re-run: a redesign that fixes
+three shapes and breaks one of the eight is not a pass.
+
+---
+
 ## READ THIS BEFORE YOU PLANT ANYTHING
 
 **The thing under test is a pre-commit gate, and it will fire on YOU.** Cases 1-3
@@ -27,7 +51,7 @@ the commit - correctly, that is the whole point of the change. So:
 
 * **Never `git commit` a planted file.** Every case below stages with `git add`
   and then runs the check SCRIPT directly. Nothing here needs a commit.
-* A plain `git clone` does NOT inherit `core.hooksPath` (measured 2026-09-22:
+* A plain `git clone` does NOT inherit `core.hooksPath` (measured 2026-09-20:
   `git config --get core.hooksPath` in a fresh clone of this repo exits 1 with
   no value), so in a scratch clone the hooks are OFF unless you turn them on.
   A **git worktree** of the main checkout is the opposite case: it shares the
@@ -242,7 +266,8 @@ git reset
 ```
 
 **Expected:** **7** staged paths (the seven in the table at the top of this
-file), `EXITCODE=0`, and the developer measured `TOTAL_SECONDS=0.5`. (`reset --soft` and `reset` never touch the working tree,
+file), `EXITCODE=0`, and the developer measured `TOTAL_SECONDS=0.8` (0.5 at
+attempt 1 - host noise on a sub-second run, not a signal). (`reset --soft` and `reset` never touch the working tree,
 so this is non-destructive; restore HEAD with the recorded `$TIP`.)
 
 **Disproved if:** exit 1, or the path count is not 7 (then the tester is not
@@ -258,17 +283,33 @@ git reset --soft $ROOT ; git add -A
 git reset --soft $TIP ; git reset
 ```
 
-**Expected:** 1201 staged paths, 337,737 diff lines, and **exit 1** - it
+**Expected:** 1202 staged paths, 338,373 diff lines, and **exit 1** - it
 reports 9 control bytes in 8 pre-existing `documentation/` files, which the
 anchor puts out of scope and which are only visible because staging every line
 as ADDED is exactly the condition under which "added lines only" stops
-protecting them. That is the gate working. Developer's timings on this host:
-gate 4 alone **9.21 s** (2.73 capture + 1.83 `check-attr` + 4.65 scan), whole
-check **44.2 s** - the rest is the nine `docker compose config` renders.
+protecting them. That is the gate working. (Your path count moves by one for
+each file added to the branch since; the 9 hits do not.)
+
+Developer's round-2 timings on this host, with round 1's three stages replayed
+on the SAME index straight afterwards:
+
+| stage | round 2 | round 1 |
+|---|---|---|
+| `--name-status -z` | 0.25 | - |
+| `check-attr` (one call) | 0.11 | 1.74 |
+| patch diff capture | 0.58 | 2.37 |
+| the scan | 1.67 | 3.52 |
+| **gate 4 total** | **2.61** | **7.63** |
+
+whole check **28.6 s**. Round 2 is ~3x FASTER than the version it replaces,
+because `cmd` redirecting into a file that `ReadAllBytes` reads costs far less
+than PowerShell capturing a native command's stdout object by object - the same
+change that makes the bytes trustworthy.
 
 **Disproved if:** it exits 0 (then the gate is not seeing lines it should), or
-gate 4's share is a large multiple of 9 s (then the `check-attr` batching or
-the per-line scan regressed and pre-commit has become expensive).
+gate 4 is SLOWER than round 1's 7.6 s on your host (the redesign is supposed to
+cost less, not more; per-file `git diff` invocations would be the obvious way to
+get this wrong and are deliberately not used).
 
 ## Case 5 - ACCEPTANCE: backup coverage prints no size digits and still exits 0
 
@@ -396,7 +437,153 @@ one-line fix).
 
 ---
 
-## Case 9 - the claims this item makes
+## Case 9 - REGRESSION GUARD: a non-ASCII (C-quoted) path
+
+**Why:** `core.quotepath` defaults to true here (`git config --get core.quotepath`
+returns nothing in the main checkout and in a fresh clone), so git renders such a
+path as `+++ "b/na\\303\\257ve.txt"`. Attempt 1 could not match that and
+latched its skip flag on.
+
+Plant, on BASE and then on the BRANCH, the same index both times:
+
+```
+python -c "import base64; open('caf\u00e9.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))"
+python -c "open('na\u00efve.txt','wb').write(b'alpha\nbad\x08byte\n')"
+git add -A
+powershell -NoProfile -ExecutionPolicy Bypass -File <checkout>\scripts\checks\check-project-configs.ps1
+```
+
+**Expected:**
+
+| version | result |
+|---|---|
+| base `f3eee64` | **exit 1**, 3 hits, and the file names print BLANK (`  : 0x08 in an added line -> bad<CTRL>byte`) |
+| attempt 1 `f50a80b` | **exit 0**, 0 hits, NO skip line - the regression |
+| this branch | **exit 1**, exactly 1 hit `naïve.txt:2 : 0x08 ...`, plus `binary per .gitattributes - control-character scan skipped: café.png` |
+
+The name renders in the console's codepage (CP437 here: `0x82` for `é`,
+`0x8b` for `ï`), so it reads correctly on the console and will look like
+mojibake if you pipe it through a UTF-8 tool. Check the BYTES if in doubt; what
+must not happen is a blank, a `?`, or a missing file.
+
+**Then prove it is not configuration-dependent** - the whole point of `-z`:
+
+```
+git -c core.quotepath=false ...     # or set GIT_CONFIG_PARAMETERS="'core.quotepath=false'"
+```
+and re-run. **Expected: identical output**, both skip line and hit. Attempt 1
+passed under `quotepath=false` and failed under the default, which is how the
+defect hid.
+
+**Disproved if:** the branch exits 0; or the PNG is not skipped; or the hit
+count is 3 (then the PNG is being scanned as well and the skip is not working);
+or the two `quotepath` settings disagree.
+
+## Case 10 - REGRESSION GUARD: a path containing a SPACE
+
+**Why:** git TAB-terminates `+++ b/<path>` when the path has a space
+(`cat -A` shows `+++ b/a file with spaces.png^I$`). Attempt 1 kept the tab, so
+`check-attr` was asked about `<path>` + TAB, answered `unspecified`, and the
+staged PNG was NOT skipped - the item's headline defect, unfixed for that shape.
+
+```
+python -c "import base64; open('a file with spaces.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))"
+python -c "open('spaced text file.txt','wb').write(b'one\ntwo\x08three\n')"
+git add -A ; <run the check>
+```
+
+**Expected:**
+
+| version | result |
+|---|---|
+| base `f3eee64` | exit 1, 3 hits, every label carrying a stray TAB |
+| attempt 1 `f50a80b` | exit 1, 3 hits, same stray TAB - the PNG still fails |
+| this branch | **exit 1, exactly 1 hit**, `spaced text file.txt:2 : 0x08 ...` with NO tab, and `... scan skipped: a file with spaces.png` |
+
+Pipe the branch output through `cat -A` (or check the bytes) and confirm there
+is no `^I` before the `:`. Then do the same on a TRACKED spaced path, which this
+repo really has:
+
+```
+python -c "p='documentation/archive/AI/Tutorial Docker Compose Setup for Open WebUI.md'; d=open(p,'rb').read(); open(p,'wb').write(d+b'\nplanted\x08byte\n')"
+git add -A ; <run the check>
+```
+**Expected:** exit 1,
+`documentation/archive/AI/Tutorial Docker Compose Setup for Open WebUI.md:349 : 0x08 ...`
+- a `path:line` you can paste into an editor. Developer measured exactly that.
+
+**Disproved if:** any printed label contains a tab; or the PNG is not skipped;
+or the line number is not 349 (re-derive it - the file's length is the authority).
+
+## Case 11 - REGRESSION GUARD: an added line whose text looks like a header
+
+**Why:** a content line beginning `++ ` reaches the diff as `+++ ...` and attempt
+1 ate it as a file header, silencing the rest of the hunk. `git grep '^++ '`
+finds 0 such lines in the tree today, so this is evasion/bad luck rather than an
+accident waiting - but the gate is a protection check.
+
+```
+python -c "open('evade1.txt','wb').write(b'harmless\n++ /dev/null\nsneaky\x08byte\nlast\n')"
+python -c "open('evade2.txt','wb').write(b'harmless\n++ b/docs-test.png\nsneaky\x08byte\nlast\n')"
+python -c "import base64; open('docs-test.png','wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))"
+git add -A ; <run the check>
+```
+
+**Expected:**
+
+| version | result |
+|---|---|
+| base `f3eee64` | exit 1, 4 hits - and evade2's byte MISATTRIBUTED to `docs-test.png` |
+| attempt 1 `f50a80b` | **exit 0**, 0 hits - two planted bytes pass |
+| this branch | **exit 1, 2 hits**: `evade1.txt:3` and `evade2.txt:3`, each on its OWN file, plus the PNG skipped by name |
+
+**Disproved if:** the branch exits 0; or either hit is attributed to
+`docs-test.png` (the misattribution base made); or only one of the two is found
+(then one `++ ` line is still being consumed).
+
+## Case 12 - the positional pairing, and its assertion
+
+The redesign pairs patch record N with `--name-status` entry N. If that ever
+drifted, every label after the divergence would be wrong, so the gate asserts it.
+
+**(a) It holds on the hardest index available.** With the whole repository
+staged (case 4's worst case), instrument or simply observe: developer measured
+**1202 `diff --git` records against 1202 `--name-status` entries**, and no
+`CANNOT ATTRIBUTE` line. Reproduce the two counts yourself:
+
+```
+git diff --cached -M -U0 --text | grep -c "^diff --git "
+git diff --cached -M --name-status -z | python -c "import sys; f=sys.stdin.buffer.read().split(b'\x00'); n=0; i=0
+while i < len(f):
+    if not f[i]: i+=1; continue
+    n+=1; i += 3 if f[i][:1] in (b'R', b'C') else 2
+print(n)"
+```
+**Expected: equal.** Do it on a MIXED index too - an add, a modify, a delete, a
+rename-with-edit and a pure rename in one commit - since that is where a naive
+pairing would break. Developer measured 7 = 7 on exactly such an index (a spaced
+PNG, a non-ASCII PNG, a rename, a delete, and three adds).
+
+**(b) The assertion is not decorative.** Read it in
+`check-project-configs.ps1` and confirm a mismatch FAILS (`$failed++`) rather
+than warning. `grep -n "CANNOT ATTRIBUTE" scripts/checks/check-project-configs.ps1`.
+
+**Disproved if:** the counts differ on any index while the check still prints a
+confident `path:line`; or the mismatch branch only warns.
+
+## Case 13 - the preview cap
+
+Lossless byte handling means a binary file git was NOT told is binary now
+renders as one very long line. Case 1's second half (`docs-test.bin`) shows it:
+
+**Expected:** the `0x00` hit's preview ends with ` ...[truncated]` and the whole
+line is bounded, while `docs-test.bin:3` - the actionable part - is intact and
+exact. Developer measured the preview cut at 120 characters.
+
+**Disproved if:** an entire binary file is printed (then the cap is not
+applied), or the cap has eaten the `path:line` prefix.
+
+## Case 14 - the claims this item makes
 
 Every sentence below is something this work asserts. Each is either measurable
 or it should not have been written. Tick or break each one.
@@ -415,7 +602,7 @@ or it should not have been written. Tick or break each one.
    `$staged` and on gate 4's own diff. (Case 0b, and read the base file)
 7. `--no-renames` on the same index does see the byte. (Case 0b)
 
-**About the tree as measured 2026-09-22:**
+**About the tree as measured 2026-09-20:**
 8. The repo tracks 1198 files.
 9. ZERO of them have `git check-attr binary` = set.
 10. ZERO of them contain a NUL byte in their first 8000 bytes.
@@ -466,10 +653,10 @@ or it should not have been written. Tick or break each one.
     append an unclosed `function Broken {`, `git add -A` -> `--name-status`
     says `R099`, the check exits **0** and prints only gate 4's green line.
     Gate 2 never saw the file.)
-25. The whole delta staged against `f3eee64` exits 0 in ~0.5 s over 7 paths.
+25. The whole delta staged against `f3eee64` exits 0 in ~0.8 s over 7 paths.
     (Case 4)
-26. Gate 4 alone costs 9.21 s on a 1201-path / 337,737-line diff, ~21% of the
-    44.2 s whole check. (Case 4, worst case)
+26. SUPERSEDED by claim 56 - attempt 1's figure. Round 2's is 2.61 s on a
+    1202-path / 338,373-line diff, ~9% of the 28.6 s whole check. (Case 4)
 
 **About the documentation changes:**
 27. `check-backup-coverage.ps1` exits 0 and its `wiki-viewer-srv` line prints no
@@ -502,3 +689,48 @@ or it should not have been written. Tick or break each one.
 39. A plain `git clone` of this repo does not inherit `core.hooksPath`; a git
     worktree of the main checkout does. (`git config --get core.hooksPath` in
     each)
+
+**ROUND 2 - everything this attempt adds as a claim:**
+40. `core.quotepath` is unset (default true) in the main checkout and in a fresh
+    clone. (`git config --get core.quotepath`)
+41. At base, the non-ASCII index gives exit 1 with BLANK file names. (Case 9)
+42. At attempt 1 `f50a80b`, the same index gives **exit 0, 0 hits, no skip
+    line** - a detection regression. (Case 9)
+43. On this branch it gives exit 1, one hit `naïve.txt:2`, and the PNG skipped
+    by name. (Case 9)
+44. `core.quotepath=false` and the default `true` produce identical output on
+    this branch. (Case 9)
+45. Git tab-terminates `+++ b/<path>` when the path has a space. (`cat -A` on
+    the raw diff)
+46. At base AND at attempt 1, the spaced-path index gives 3 hits with a stray
+    TAB in every label, and the spaced PNG is NOT skipped. (Case 10)
+47. On this branch: 1 hit, no tab, PNG skipped. (Case 10)
+48. The tracked spaced path
+    `documentation/archive/AI/Tutorial Docker Compose Setup for Open WebUI.md`
+    reports as `...md:349` with no tab. (Case 10)
+49. `git grep '^++ '` finds 0 such lines in the tree. (Case 11)
+50. At base the `++ ` index gives 4 hits with evade2's byte misattributed to
+    `docs-test.png`; at attempt 1 it gives **exit 0**; on this branch 2 hits,
+    correctly attributed. (Case 11)
+51. `diff --git` record count equals `--name-status -z` entry count: 1202 = 1202
+    on the whole-repository stage, 7 = 7 on a mixed add/modify/delete/rename
+    index. (Case 12)
+52. A count mismatch FAILS the check rather than warning. (Case 12, read the
+    source)
+53. A bare `diff --git ` line cannot be produced by content, because every line
+    inside a hunk carries a `+`, `-`, space or `\\` prefix. (read any diff)
+54. `git check-attr -z --stdin binary` takes NUL-separated paths and emits
+    NUL-separated `path, attribute, value` triples. (run it)
+55. The preview is capped at 120 characters with ` ...[truncated]`. (Case 13)
+56. Round-2 gate 4 costs 2.61 s where round 1 cost 7.63 s on the same
+    whole-repository index - ~3x faster, and no per-file `git diff` is used.
+    (Case 4)
+57. Re-measured at this branch tip: 1201 tracked files, 0 with the binary
+    attribute set, 0 carrying a NUL in their first 8000 bytes (1198 / 0 / 0 at
+    `f3eee64`). (`git ls-files`, `check-attr --stdin`, read the bytes; `OB1` is
+    a gitlink, not a file)
+58. Cases 1-8 and 0a/0b all re-run to the same outputs they had at attempt 1.
+    (re-run them)
+59. Nothing in section 3 or section 4 of the findings note changed: gates 1-3
+    still cannot see a rename, and the runbook still points at a compose file
+    with no services. (read them; re-run case 3c)
