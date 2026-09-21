@@ -11,7 +11,7 @@ code changed, in either repo.**
 
 | | |
 |---|---|
-| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`** then **`fdfb7af`** (attempt 2 fixes T3) |
+| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`**, **`fdfb7af`** (attempt 2: T3), **`1218eff`** (attempt 3: C59) |
 | OB1 base | cut from **`fe3e045`** = `origin/feature/integrated-knowledge-system` tip |
 | OB1 files touched | `docker/README.md`, `docker/.env.example` — nothing else |
 | ai-stack branch | `work/sl-ob1-docs`, based on `a2d3644` (the `sl-ob1-gitlink` merge, which is what pins OB1 at `fe3e045`) |
@@ -69,6 +69,23 @@ endings against the BLOB, not the checkout —
 both files. Attempt 1's tester worked in a scratch clone; this paragraph exists
 so the next one does not open a finding about it.
 
+## THE FOURTH TRAP — `--env-file` changes the warning count, and it is why attempt 2 failed
+
+**Do not pass `--env-file` to any render in this plan.** Copy the env file you
+want to `.env` in the project directory instead.
+
+With a `.env` present in `OB1/docker` AND a different file passed as
+`--env-file`, the substitutions in `docker-compose.yml` resolve against your
+`--env-file` while those in `docker-compose.scheduled.yml` — pulled in by
+`include:` — keep resolving against the project directory's `.env`. For
+`OB_APP_MEMORY_PASSWORD` that splits nine warnings into eight, because the ninth
+site is the one in the scheduled file.
+
+Attempt 2 measured with `--env-file`, got 8, could not explain it, and shipped
+"compose dedupes somewhere" into `OB1/docker/.env.example` as a fact about
+compose. It was a fact about the command. **A number you cannot explain is a
+signal your instrument is wrong, not a curiosity to document.**
+
 ## THE THIRD TRAP — renders are NOT stderr-clean on every seed
 
 Attempt 1's plan said "stderr must be empty on every render". That was false for
@@ -90,16 +107,22 @@ Run from `<wt>/OB1/docker`, with `COMPOSE_PROFILES=` blanked on every line.
 every one"; it depends on the env file seeding the render, and each case is
 measured:
 
-| Seed | Expected stderr |
+**Copy the env file to `.env`; do NOT pass `--env-file`** (see the fourth trap
+below — `--env-file` changes the answer and produced attempt 2's wrong number).
+
+| `.env` is | Expected stderr |
 |---|---|
 | a real `.env` that sets everything (the developer's worktree) | empty |
-| **this commit's `.env.example`** (`--env-file .env.example`) | **empty** |
-| the PREVIOUS commit's example (`aa4a31d`) | **8** × `The "OB_APP_MEMORY_PASSWORD" variable is not set. Defaulting to a blank string.` |
+| **this commit's `.env.example`** | **empty** |
+| the PREVIOUS commit's example (`aa4a31d`), or this one minus its `OB_APP_MEMORY_PASSWORD` line | **9** x `The "OB_APP_MEMORY_PASSWORD" variable is not set. Defaulting to a blank string.` |
 
-The third row is why `OB_APP_MEMORY_PASSWORD` was added this round. Note **8
-warnings for 9 substitution sites** — compose dedupes somewhere and the reason is
-not explained here because it was not established; 8 is measured, identical for
-the bare and the all-four render. Anything OTHER than these is a finding.
+The third row is why `OB_APP_MEMORY_PASSWORD` was added this round. **Nine sites,
+nine warnings — there is no dedupe.** Identical for the bare and the all-four
+render. Anything OTHER than these is a finding.
+
+Check the exit code on every render you take a warning count from. A `config`
+that exits 1 stops emitting partway and leaves a TRUNCATED stderr, which looks
+exactly like a real count and is not one.
 
 | Flags | Expected |
 |---|---|
@@ -173,8 +196,19 @@ before this item (with both guards). Ten added in commit 1 -> 72. Attempt 1's
 plan and findings printed 96/72 using guard 2 ALONE, over-counting PUBLIC_DOMAIN
 by one; the true figures at that commit were 95/71. One more variable
 (OB_APP_MEMORY_PASSWORD) added this round -> **70**. So: a direction-B count of
-72 means you dropped guard 1, 84 means you dropped guard 2, 85 means you dropped
-both.
+**71 means you dropped guard 1, 72 means you dropped guard 2, 73 means you
+dropped both** — measured, all four variants:
+
+| variant | substituted | direction B |
+|---|---|---|
+| both guards | 95 | **70** |
+| no comment strip | 96 | 71 |
+| no `$$` guard | 97 | 72 |
+| neither | 98 | 73 |
+
+(Attempt 2's plan printed 72/84/85 here. Those figures occur under no variant at
+all; they were written from memory rather than measured, which is the same defect
+as C59 in a different place.)
 
 Verify each guard yourself rather than trusting this paragraph:
 
@@ -334,12 +368,12 @@ Four claims, four commands, from `<wt>/OB1/docker`:
 ## T5 — commit shape and blast radius (acceptance criteria 4 and 5)
 
 ```bash
-git -C "<wt>/OB1" log --oneline -2                      # fdfb7af, aa4a31d
+git -C "<wt>/OB1" log --oneline -3                      # 1218eff, fdfb7af, aa4a31d
 git -C "<wt>/OB1" merge-base HEAD origin/feature/integrated-knowledge-system   # fe3e045
 git -C "<wt>/OB1" diff --stat fe3e045 HEAD             # exactly 2 files, both docs
 git -C "<wt>/OB1" status --porcelain                    # clean
 git -C "<wt>" status --porcelain                        # ` M OB1` + the 2 ai-stack files, NO `M  OB1`
-git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 2 commits, unpushed
+git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 3 commits, unpushed
 ```
 
 **The pre-commit's OB1 gates (5b recipe tests, 5c `deno check`, 5d integration
@@ -574,11 +608,10 @@ described was rewritten, not patched.
   nine sites, eight in `docker-compose.yml` and one in the scheduled file, every
   one a `DB_PASSWORD`. -> `grep -nE 'OB_APP_MEMORY_PASSWORD' docker-compose*.yml`;
   all nine are code lines, none a comment
-- **C59** `docker compose config` warns about it 8 times per render - nine sites,
-  eight warnings, "compose dedupes somewhere; measured, not explained". -> T1's
-  stderr table. **The honesty of this one is the point**: the mismatch is stated
-  rather than papered over with an invented reason. If you can explain it, that
-  is a class-3 note worth having.
+- **C59 — REPLACED after attempt 2 FAILED on it.** It now reads: `docker compose
+  config` warns NINE times, once per site. -> T1's stderr table. The retired
+  version said 8 and called the gap "compose dedupes somewhere; measured, not
+  explained". See C65-C68 for what replaced it and why the old number appeared.
 - **C60** It was in neither ai-stack's root template nor this one before now, and
   it is a FOURTEENTH variable beyond the anchor's thirteen, added because
   acceptance criterion 2's literal wording asks for it and because it is the trap
@@ -595,6 +628,36 @@ described was rewritten, not patched.
 - **C63** Direction A is still empty and 25 names are declared. -> T2
 - **C64** Both committed blobs are pure LF; a `core.autocrlf=true` clone shows CR
   in the working copy only. -> the CRLF trap section
+
+## B.10 Sentences introduced by attempt 3
+
+- **C65** `OB_APP_MEMORY_PASSWORD` has nine substitution sites and `docker compose
+  config` warns **nine** times, once per site; there is no dedupe. -> T1's stderr
+  table, with `.env` = the previous example and NO `--env-file`. Measured three
+  ways: bare render, all-four render, and this commit's example minus only that
+  line.
+- **C66** Eight appears only when `--env-file <other>` is passed while a `.env`
+  exists in the project directory: `docker-compose.yml`'s eight sites resolve
+  against the `--env-file`, and `docker-compose.scheduled.yml`'s one site, coming
+  in through `include:`, still resolves against the project directory's `.env`.
+  -> T1 / trap 4. **Proven by attribution, not by subtraction**: renaming the
+  scheduled file's variable to a sentinel in a scratch copy and re-running that
+  shape gives eight warnings for the main file's name and **zero** for the
+  sentinel.
+- **C67** Therefore `--env-file` should not be passed to this project at all;
+  compose reads `.env` from the project directory on its own. -> follows from C66
+- **C68** A `config` render that exits non-zero truncates its stderr, so a
+  warning count taken without checking the exit code can be an artefact. -> check
+  `$?` on any render you count warnings from
+- **C69** The rebuild grep returns **21 lines in 13 files in a fresh clone**, 23
+  in 15 on a deployed host; the two extra are the gitignored
+  `agent-org/docker/.env:58` and `frontend/.env:127`. Two of the 21 are prose in
+  Markdown. -> T3c
+- **C70** That grep does NOT surface `frontend/entrypoint.sh:60`
+  (`OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}`), because the
+  pattern needs the service name to follow the host token directly and here it
+  sits behind a `:-`. The grep is the sweep; reading the file is the audit. ->
+  run the grep and confirm the absence
 
 # What a FAIL looks like, ranked
 
@@ -614,7 +677,9 @@ described was rewritten, not patched.
      attempt 1's tester, so one of the two is wrong;
    - **C34** and **C42** — inherited from the old root template and then
      corrected against the source, which is where a copied-through error hides;
-   - **C59** (8 warnings, 9 sites) — deliberately unexplained.
+   - **C65-C68** (the nine-warning count and the `--env-file`/`include:` rule) —
+     this is where attempt 2 failed, and the correct number depends on the
+     command shape, so reproduce the shape exactly.
 
 **Not a fail:** anything in the excluded host-side class (T3d), the CRLF smudge
 in a fresh clone (trap 2), or a render that warns exactly as T1's stderr table

@@ -6,8 +6,9 @@ Everything below was checked by reading the named file or running the named
 command in the worktree `.claude/worktrees/wt-sl-ob1-docs`. Nothing is carried
 over from a sibling item's report without re-measuring it here.
 
-Artifact: OB1 `work/sl-ob1-docs` @ **`fdfb7af`** (two commits: `aa4a31d`, then
-`fdfb7af` fixing the attempt-1 failure), merge-base `fe3e045`
+Artifact: OB1 `work/sl-ob1-docs` @ **`1218eff`** (three commits: `aa4a31d`,
+`fdfb7af` fixing the attempt-1 failure, `1218eff` fixing the attempt-2 one),
+merge-base `fe3e045`
 (= `origin/feature/integrated-knowledge-system` tip), two files, **not pushed**
 (D4). ai-stack: this note + `documentation/evidence/sl-ob1-docs/test-plan.md`,
 no gitlink staged.
@@ -450,11 +451,11 @@ tester ran a render the way a NEWCOMER would:
    **zero**. That turned the tester's class-3 note - "state the expected warning
    and count" - into a fix rather than a caveat.
 
-**An honest loose end:** nine substitution sites, eight warnings, identical for
-the bare and the all-four render, and all nine are code lines (checked - none is a
-comment, so it is not another `PUBLIC_DOMAIN`). Compose dedupes somewhere and I
-did not establish where. The `.env.example` comment and the test plan both say
-"measured, not explained" rather than inventing a mechanism.
+**That "honest loose end" was wrong, and attempt 3 fixed it - see section 14.**
+Attempt 2 wrote here, and shipped into `OB1/docker/.env.example`, that there were
+nine sites but eight warnings, "compose dedupes somewhere; measured, not
+explained". It warns **nine** times. The eight was an artefact of my own command
+shape.
 
 Direction B is therefore **70**, not 71. The enumerated list in section 3 was
 re-checked name-for-name against the live `comm` output after the change: 70 = 70,
@@ -502,3 +503,87 @@ substitutes. Where such a signal exists, prefer it to the grep it is checking.
 That is how `PUBLIC_DOMAIN` can be proven comment-only without reading line 867
 at all: it is unset and default-less, exactly like `OB_APP_MEMORY_PASSWORD`, and
 compose warns eight times about one and never about the other.
+
+## 14. "Measured, not explained" is not honesty - it is an unexamined instrument
+
+Attempt 2 FAILED on one claim, and it is the one I was most pleased with.
+
+I measured `docker compose config` emitting **8** `OB_APP_MEMORY_PASSWORD is not
+set` warnings against **9** substitution sites, could not account for the gap,
+and wrote the gap down: "9 sites, 8 warnings - compose dedupes somewhere;
+measured, not explained". I put that in the test plan as a claim, flagged it to
+the tester as deliberately unexplained, and shipped the sentence into
+`OB1/docker/.env.example`, which is the artifact a newcomer reads.
+
+It warns **nine** times, once per site. There is no dedupe.
+
+### What the 8 actually was
+
+My command was `docker compose -f docker-compose.yml --env-file <a copy of the
+old example> config --services`, run in `OB1/docker`, where a real `.env` exists
+and declares `OB_APP_MEMORY_PASSWORD`. In that shape:
+
+- the **eight** sites in `docker-compose.yml` resolve against the `--env-file`,
+  which does not declare it -> eight warnings;
+- the **one** site in `docker-compose.scheduled.yml`, which arrives through
+  `include:`, still resolves against the project directory's `.env`, which does
+  declare it -> silent.
+
+Eight is the site count of one file. I had measured a property of my command and
+written it down as a property of compose.
+
+### Proven by attribution, not by subtraction
+
+The tester supplied this explanation and it would have been easy to transcribe.
+Instead I renamed the scheduled file's variable to a sentinel (`OB_SCHED_ONLY`)
+in a scratch copy of both compose files and re-ran the same shape. Result, exit
+0: **8 warnings for `OB_APP_MEMORY_PASSWORD`, 0 for `OB_SCHED_ONLY`.** The split
+falls exactly on the file boundary. Nine-versus-eight is now a measured rule
+rather than a plausible story, and the rule is stated in the README and the
+example because it silently renders two halves of one project against two
+different env files.
+
+### A second instrument error found while checking the first
+
+Several cells of my first correction matrix disagreed with each other. The cause:
+`docker compose config` **exits 1 and truncates its stderr** when the env file is
+too sparse for the render to complete. A truncated stderr looks exactly like a
+low warning count. Every number in the corrected matrix is now taken with its
+exit code beside it, and the plan tells the tester to do the same.
+
+### The generalisation, which is the point
+
+"Measured, not explained" reads like rigour. It is the opposite whenever the
+measurement is cheap to repeat under a different shape: **an unexplained number
+is evidence the instrument is wrong, not a fact awaiting an explanation.** The
+correct response was to vary the command until the number moved - which takes
+about a minute, and which I did only after a tester failed the claim.
+
+This item has now produced the same class of error three times at three
+magnifications: computing a render count instead of rendering it (the sibling
+items' defect, which this plan's rule 3 warns about); copying a grep yield from a
+filtered run (section 13); and this. Every one was a figure obtained by a method
+slightly different from the one the document told the reader to use.
+
+## 15. Numbers corrected this round
+
+| | attempt 2 shipped | measured |
+|---|---|---|
+| `OB_APP_MEMORY_PASSWORD` warnings | 8 (9 sites) | **9** (9 sites) |
+| rebuild grep yield | 23 lines / 15 files | **21 / 13 fresh clone**, 23 / 15 with the two gitignored `.env` files |
+| guard diagnostic: no comment strip | "72" | **71** |
+| guard diagnostic: no `$$` guard | "84" | **72** |
+| guard diagnostic: neither | "85" | **73** |
+
+The guard figures were the worse of the two: 84 and 85 occur under no variant of
+the command at all. They were written from memory in a paragraph whose entire
+purpose was to let a tester diagnose a mismatched count - so a tester who dropped
+a guard and got 71 would have found no row matching, and concluded the artifact
+was broken rather than their command.
+
+Also recorded: the rebuild grep does not surface `frontend/entrypoint.sh:60`
+(`OPEN_NOTEBOOK_HOST=${OPEN_NOTEBOOK_HOST:-open_notebook}`) because the service
+name sits behind a `:-` rather than following the host token directly. Row 4 of
+the consumer table was found by reading the file. The README now says so, because
+a grep presented as the way to rebuild a list that it cannot fully rebuild is the
+same shape of defect as everything else in section 14.
