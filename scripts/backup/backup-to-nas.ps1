@@ -45,7 +45,7 @@
 #   .\scripts\backup\backup-to-nas.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
 #
 # Install as scheduled task:
-#   .\scriptsackup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
+#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
 
 [CmdletBinding()]
 param(

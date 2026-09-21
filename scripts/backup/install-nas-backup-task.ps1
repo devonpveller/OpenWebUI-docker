@@ -24,7 +24,7 @@
 #   cmdkey /add:192.168.1.50 /user:nasuser /pass:nas-password
 #
 #   # Step 2 - register the task (admin PowerShell):
-#   .\scriptsackup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal" -RunNow
+#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal" -RunNow
 
 [CmdletBinding()]
 param(

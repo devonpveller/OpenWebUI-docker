@@ -353,6 +353,58 @@ if ($jsonStaged.Count -gt 0) {
     }
 }
 
+# --- 4. control characters in ADDED lines ----------------------------------
+# A `\b` in a non-raw Python replacement string put four BACKSPACE bytes (0x08)
+# into three shipped scripts during sl-recovery-backups. One of them was an
+# executable Write-Host: rendered on a terminal the backspace ERASES the
+# preceding character, so an operator setting up NAS credentials was told to run
+# `.\scriptackup\install-nas-backup-task.ps1`, a path that does not exist. The
+# same escape-sequence class as the `\s` that item fixed in status_check.py.
+#
+# EVERY gate passed. This file parsed it (0x08 is whitespace to the tokenizer),
+# the line-ending check only looks at CR/LF, and the anchor's hand-run encoding
+# sweep tested `byte > 127` - and 0x08 is 8. That is the workspace's recurring
+# "a check that passes while checking nothing" shape, and it survived purely
+# because nothing had ever looked BELOW 0x20.
+#
+# ADDED LINES, not whole files, and deliberately so: eleven such bytes already
+# sit in older documentation/evidence and documentation/notes files (measured
+# 2026-09-21), and a whole-file rule would fail the next commit that touches one
+# of them for an unrelated reason. This catches what a commit INTRODUCES, which
+# is the failure mode.
+#
+# Tab, LF and CR are legal. Everything else below 0x20 - and 0x7F - is not: none
+# of them survives a copy-paste, a terminal render or a code review intact.
+$ctrlBad = @()
+$prev = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+# -U0 so only changed lines carry a '+', and --text so a file git has not been
+# told is binary is still scanned rather than summarised away.
+$addedDiff = @(& git diff --cached -U0 --text --diff-filter=ACM)
+$ErrorActionPreference = $prev
+$curFile = ''
+foreach ($line in $addedDiff) {
+    if ($line -like '+++ b/*') { $curFile = $line.Substring(6); continue }
+    if ($line -notlike '+*' -or $line -like '+++*') { continue }
+    # The staged blob is what ships, so scan the diff's own bytes.
+    $hit = [regex]::Match($line, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
+    if ($hit.Success) {
+        $code = '0x{0:X2}' -f [int][char]$hit.Value
+        $shown = $line.Substring(1) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '<CTRL>'
+        $ctrlBad += "$curFile : $code in an added line -> $($shown.Trim())"
+    }
+}
+if ($ctrlBad.Count -gt 0) {
+    Write-Host "  [configs] CONTROL CHARACTER in staged added line(s):" -ForegroundColor Red
+    $ctrlBad | ForEach-Object { Write-Host "             $_" -ForegroundColor Red }
+    Write-Host "             Tab/LF/CR are fine; nothing else below 0x20 is." -ForegroundColor Red
+    Write-Host "             Usual cause: a backslash escape in a NON-RAW replacement string" -ForegroundColor Red
+    Write-Host "             (\b -> 0x08, \a -> 0x07, \f -> 0x0C). Use rb'' / r'' literals." -ForegroundColor Red
+    $failed += $ctrlBad.Count
+} elseif ($staged.Count -gt 0) {
+    Write-Host "  [configs] no control characters in staged added lines"
+}
+
 Pop-Location
 if ($failed -gt 0) { exit 1 }
 exit 0
