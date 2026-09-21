@@ -410,11 +410,14 @@ every run until it happened: declare the full profile set once, or `up` starts
 fewer containers than are running. Measured at `fe3e045`: the bare OB1 render is
 **20** services, all four profiles render **30**, and a driver with no ob1 entry in
 its state passes `idea-refinery` + `research` only, which RENDERS **23**. Either
-`python scripts/stack/stack.py init --product research --force` (or `enable
-research`), which writes all four into `.stack/state.json`, or
+`python scripts/stack/stack.py enable research`, which merges all four into
+`.stack/state.json` and leaves every other enabled plane alone, or
 `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`, which
 compose honours natively and which `effective_profiles` unions into the driver's
-own flags. Neither is set on this host yet.
+own flags. Neither is set on this host yet. **Use `enable`, not `init --force`**
+- on a host that already has a state file the two are not interchangeable, and
+`init --force` would silently drop the planes that file already names. The
+measured difference is under `init` below.
 
 **Rendering with every profile is the point.** The check this replaced rendered
 without any, so it could not see a profile-gated container at all - which is how
@@ -435,6 +438,29 @@ identically on a fresh host, in CI and under a script.
   plane whose key is blank is a bring-up failure deferred, not avoided.
 - `--context plane=name` is repeatable; a malformed pair is refused.
 - **Refuses** to overwrite an existing state file without `--force`.
+
+**`init --force` REPLACES the state file; `enable` MERGES into it. To add a
+product on a host that already has a state file, the verb is `enable`.** The two
+read almost identically on screen - `init --product X` calls `cmd_enable`
+internally, so it prints the same `enabled product X:` block - but `cmd_init`
+builds a *fresh* `State({})` and saves that, while `cmd_enable` mutates the state
+it loaded. Measured against two scratch state files, both seeded by enabling
+`frontend, inference, memory, search, coder, agent-org` (six planes):
+
+| | Before | Command | After |
+|---|---|---|---|
+| replace | those six | `init --product research --force` | `frontend, inference, ob1, search` - **four**. `memory`, `coder` and `agent-org` are gone from the file, and a later `up` no longer starts them. |
+| merge | those six | `enable research` | `frontend, inference, memory, search, coder, agent-org, ob1` - **seven**, with `ob1` carrying `idea-refinery, research, wiki, notebook`. |
+
+Both printed the same four-line `enabled product research:` summary naming
+`inference, frontend, search, ob1`; only the resulting file differs, and only
+`init` adds the `wrote <path>` line and the `list` dump after it. Without
+`--force`, `init` refuses an existing file outright:
+`refused: <path> already exists (re-run with --force to overwrite it)`, exit 1.
+
+So `init --force` is for a host whose state you intend to start over from - a
+fresh machine, a scratch tree under `--root`/`--state`, or a deliberate reset.
+`enable` is for everything else.
 
 ---
 

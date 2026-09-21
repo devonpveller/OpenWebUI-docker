@@ -32,7 +32,7 @@ for the rendered topology — networks, ports, dependency order.
 | **Coder** ([`coder/README.md`](coder/README.md), own project since 2026-08-21 K.4) | `docker compose -f coder/docker-compose.yml ...` | little-coder control plane: `open-terminal` (executor — moved in from core), `little-coder` (daemon :8090; metrics host :9091), `lc-egress`, `little-coder-backup`. Owns `lc-net` + the 6 coder volumes. **4 services.** |
 | **Frontend** ([`frontend/README.md`](frontend/README.md), own project since 2026-08-21 K.5) | `docker compose -f frontend/docker-compose.yml ...` | `openwebui` (host :3000) + `tailscale` (netns companion — never restart openwebui alone; the project's depends_on encodes the order) + both backups. PROFILE-GATED (2026-09-19): `stock` = Open WebUI alone on the pinned upstream image (a fresh clone); `gpu` = the CUDA build + device reservation; `tailscale` = the netns node + its backup, and it needs `gpu`. This host sets `COMPOSE_PROFILES=gpu,tailscale` in **`frontend/.env`** — since sl-env-split (D17) each plane's own `.env` carries only its own profiles. Images pinned `openwebui:local`/`tailscale:local` — rebuild deliberately only. Build inputs are plane-internal since 2026-09-19 (`frontend/Dockerfile.openwebui-gpu`, `frontend/dockerfile.tailscale`, `frontend/entrypoint.sh`, `frontend/.dockerignore`; both `build.context` values are `.`) — the `..`-rooted bind mounts stay, those trees are not plane-internal. **4 services.** |
 | **Portal** ([`portal/README.md`](portal/README.md), own compose project since 2026-08-21) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | 12 services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end; attaches to `ai-stack_app-net` externally to reach openwebui/open_notebook — positioned to front more apps later. |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | **30 containers**, PROFILE-GATED since the gitlink bumped 5005197 -> **fe3e045** (2026-09-20, `sl-ob1-gitlink`; the commit that added the profiles, reachable on `origin/feature/integrated-knowledge-system`). Measured at fe3e045: a bare render gives **20**, and all four profiles — `research` (+2), `wiki` (+4), `notebook` (+3), `idea-refinery` (+1) — give 30. So a bare `up` starts 20, not 30: **an operator keeping this deployment declares the four once**, either in the driver state (`stack.py init --product research --force`, or `enable research`) or as `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env` — both measured, and the driver unions the env's list into its own flags. Neither is set on this host yet, so `stack.py up ob1` passes only `idea-refinery`+`research` and starts **23** (20 + 1 + 2), seven short. The thirty are: the `openbrain-*` fleet + its two backup sidecars + the **Open Notebook trio** (`surrealdb`, `open_notebook`, `open-notebook-backup` — moved in K.5b 2026-08-21; ON stays live until the wiki workbench matures). Attaches to `ai-stack_llm-net`/`app-net` externally. Bring up **after** `llm-gateway` is healthy; tear down before the planes it depends on. |
+| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | **30 containers**, PROFILE-GATED since the gitlink bumped 5005197 -> **fe3e045** (2026-09-20, `sl-ob1-gitlink`; the commit that added the profiles, reachable on `origin/feature/integrated-knowledge-system`). Measured at fe3e045: a bare render gives **20**, and all four profiles — `research` (+2), `wiki` (+4), `notebook` (+3), `idea-refinery` (+1) — give 30. So a bare `up` starts 20, not 30: **an operator keeping this deployment declares the four once**, either in the driver state (`stack.py enable research` — NOT `init --force`, which REPLACES the state file rather than merging into it; see `scripts/stack/README.md`) or as `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env` — both measured, and the driver unions the env's list into its own flags. Neither is set on this host yet, so `stack.py up ob1` passes only `idea-refinery`+`research` and starts **23** (20 + 1 + 2), seven short. The thirty are: the `openbrain-*` fleet + its two backup sidecars + the **Open Notebook trio** (`surrealdb`, `open_notebook`, `open-notebook-backup` — moved in K.5b 2026-08-21; ON stays live until the wiki workbench matures). Attaches to `ai-stack_llm-net`/`app-net` externally. Bring up **after** `llm-gateway` is healthy; tear down before the planes it depends on. |
 | **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
 | **Driver** | `python scripts/stack/stack.py <verb>` (`scripts/stack/stack.ps1` is a thin shim over it since 2026-09-19) | **The front door.** Reads `stack.manifest.toml` + `.stack/state.json`. Verbs: `list`, `status`/`up`/`down` (a plane, `--all`, or the enabled set), `restart <plane>`, `enable`/`disable <plane\|product>` (`--headless` drops a product's surfaces), `doctor`, `health` (15 probes, exit code = failures), `stats`, `inventory --write\|--check` (generates `scripts/lib/stack-services.json`), `init` (writes the state file; a fresh clone defaults to `frontend` alone). `up`/`down`/`restart` take `--dry-run`. The shim forwards only `up down status restart health stats list doctor inventory` — `enable`, `disable` and `init` are `stack.py` only. Design: `scripts/stack/README.md`. |
 | **Recovery** | `scripts/recovery/emergency-recovery.ps1` | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. (The `.bat` twin was archived 2026-08-21 — redundant next to this + `stack.ps1` + the Mattermost/sysadmin channel.) |
@@ -54,6 +54,88 @@ is per-plane too (D17) - `stock`/`gpu,tailscale` in `frontend/.env`, `local` in
 `inference/.env`, and deliberately NONE in `portal/.env`. Each plane ships a
 `<plane>/.env.example`; migrating an existing host is
 `documentation/runbooks/env-split-migration.md`, an operator step.
+
+**Posture (stack-layers D14, resolved 2026-09-20): PRIVATE and LOCAL-FIRST,
+cloud-CAPABLE, everything cloud shipped INERT.** No component sends a prompt, a
+document or a memory to a model provider by default; the cloud-capable parts
+stay in the tree, off, each behind a profile, a credential or a hand-run script.
+**That is NOT "nothing reaches the internet"** - three containers do from a
+fresh clone (see the end of this paragraph). The full table is `README.md`'s
+"Posture: local-first, cloud-capable" section. **Derive the set the way that
+section does, in TWO stages, if you ever re-check it:** render every plane
+(`docker compose config --format json`, every profile) and take every service
+joining a NON-internal network as a candidate — resolving `external:` names
+against the anchor, where `ai-stack_llm-net` is internal and `ai-stack_app-net`
+/ `ai-stack_default` are not — THEN read each candidate's source for an actual
+outbound call. A grep for provider names does stage 2 only and missed four
+unprofiled services the first time this was written. The set:
+(1) the LiteLLM CLOUD MODEL GROUP `cloud-large`/`cloud-small` in
+`inference/config/litellm/model_list/cloud.openrouter.yaml`, enabled by
+`OPENROUTER_API_KEY` in `inference/.env` — `assemble-config.py` drops any model
+whose `os.environ/VAR` is unset or empty, so blank means not registered;
+(2) the agent-org CLOUD PROFILE (`llm-gateway-cloud`, its db, `ao-egress`) with
+`agent-org/config/litellm-cloud.config.yaml`, enabled by `cloud` in
+`COMPOSE_PROFILES` + `OPENROUTER_API_KEY`/`AO_CLOUD_*`/`AO_CLOUD_ENABLED=true`
+in `agent-org/docker/.env`; (3) the agent-org `workers` profile's
+`ao-git-egress` (default-deny tinyproxy; allowlist written by agent-bridge onto
+the `ao-egress-config` volume — and only `ao-ot-1`/`-2` are PROXIED through it,
+`ao-worker-1`/`-2` carry no proxy and are confined by `ao-worker-net` instead);
+(4) `agent-bridge`'s GITHUB APP, off until `AO_GITHUB_APP_ID` plus a readable
+`agent-org/agent-bridge/secrets/github-app-key.pem`, reaching `api.github.com`
+straight off `ao-net`, NOT through `ao-egress`; (5) `lc-egress` in the coder
+plane — UNPROFILED, so it is up whenever coder is, with
+`github.com`/`githubusercontent.com` baked into the image from
+`little-coder/docker/egress-allowlist.txt`; (6) the search plane's Mullvad
+`vpn` — UNPROFILED and it dials out itself, which is the point: `searxng` is on
+an `internal: true` net and `search/searxng/settings.yml` routes it at
+`http://vpn:8888`; keyed by `MULLVAD_WG_PRIVATE_KEY`/`MULLVAD_WG_ADDRESSES` in
+`search/.env`; (7) the portal's `cloudflared` (`internet` profile, passed on the
+command line by `scripts/portal/portal-on.ps1`, `CLOUDFLARE_TUNNEL_TOKEN` in
+`portal/.env`) and `portal-alerter`, which mails Google from `notify-net` — one
+of the portal's FOUR non-internal networks, not its only way out; (8) the
+frontend's `tailscale` (`tailscale`+`gpu` in `frontend/.env`'s
+`COMPOSE_PROFILES`, `TAILSCALE_AUTH_KEY`); (9) `openwebui` ITSELF under either
+profile — both definitions sit on an internet-capable bridge, and
+`SEARXNG_QUERY_URL` bounds the search QUERY only, not what OWUI's own loaders
+fetch — together with `openwebui-backup`, which is UNPROFILED, renders under
+`stock`, and runs `apk add --no-cache pigz` at every start; (10) the INBOUND
+doors — `mnemory-cloud-gateway` (:8060) and `openbrain-gateway` (:8061, cloud
+clients, `share=cloud`) with its sibling `openbrain-ops-gateway` (:8062, HOST
+processes, `exposure=ops`, a DIFFERENT key) — all loopback-published and none
+dialling out ITSELF, **but the cloud door's default `WRITE_TOOLS` allowlist
+includes `ingest_url`/`ingest_urls`**, so a remote key-holder can drive (11);
+(11) `openbrain-mcp` — UNPROFILED, on `obnet`, and its ingest tools call a bare
+`fetch(url)` with `redirect: "follow"` on a CALLER-SUPPLIED url with no proxy
+client anywhere in that file: the broadest egress in the stack, gated by
+nothing; (12) `openbrain-grounding-backfiller` — UNPROFILED, `WIKI_BASE`
+defaults to `https://en.wikipedia.org`, and `REFETCH_ALLOW_DIRECT` defaults
+TRUE so its refetch falls back to an unproxied fetch when the tunnel is thin
+(it fails OPEN; `REFETCH_ALLOW_DIRECT=false` in `OB1/docker/.env` closes it);
+(13) `openbrain-wiki`'s `WIKI_GIT_REMOTE`, blank today, one SSH URL away from
+force-pushing the compiled vault to GitHub; (14) OB1's scheduled
+`openbrain-digest`/`-gmail-pull`/`-gmail-prune`/`-podcast`, gated on Google
+OAuth files under `OB1/secrets/` that a clone does not have; (15)
+`openbrain-research`, the ONE OB1 fetcher that is genuinely proxy-bound
+(`FETCH_PROXY_URL` → `http://vpn:8888`) — do not generalise it to (11) or (12).
+**HOST-SIDE, invisible to any compose render:** `scripts/sysadmin-mcp/`'s
+Telegram notifier AND listener (the listener POLLS, so it is an inbound control
+path), `scripts/claude-sessions-bridge/bridge.py` (runs the `claude` CLI with
+`BRIDGE_MODEL` defaulting to `opus` — the one frontier-provider call in the
+repo — and posts to Telegram), and the `owui/` plugins
+(`github_chat_mcp_tools.py` → `api.github.com`; `fileshed.py` permits
+`curl`/`wget`/network `git` inside the openwebui container). **THE MECHANISM,
+stated because it is the part that gets misread:** `llm-gateway` is attached to
+`llm-net` (the anchor declares it `internal: true`) and `llm-backend-net`
+(`internal: true` in `inference/docker-compose.yml`) and to nothing else, so
+setting `OPENROUTER_API_KEY` makes the cloud models LISTED, never REACHABLE — a
+call fails where LiteLLM tries to leave. Making it real needs an egress path for
+that container (an internet-capable network, or a dual-homed allowlisted proxy
+as `llm-gateway-cloud` uses `ao-egress`). **Do not add one as a side effect of
+anything**; agent-org deliberately put its cloud lane on a separate gateway
+instead. **The three that DO reach the internet from a fresh clone**, measured
+from the renders: search's `vpn` (dials Mullvad), frontend's `openwebui-backup`
+(the Alpine CDN, and it is in the quickstart), and coder's `lc-egress` (up with
+the plane; it initiates nothing itself but it is `open-terminal`'s route).
 
 **Inference plane:** every service reaches inference through
 `http://llama-cpp:8080` / `http://llama-cpp-embed:8080` — **network aliases on

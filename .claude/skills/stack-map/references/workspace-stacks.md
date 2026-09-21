@@ -416,10 +416,16 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 >   `docker compose` honours it (renders the same 30), and it is what repairs a bare
 >   `stop`/`down`.
 > - **the driver's state** —
->   `python scripts/stack/stack.py init --product research --force`, or
->   `enable research`, writes `idea-refinery, research, wiki, notebook` into
+>   `python scripts/stack/stack.py enable research` writes
+>   `idea-refinery, research, wiki, notebook` into
 >   `.stack/state.json`, and `up --dry-run` then prints all four `--profile` flags
->   on the OB1 line.
+>   on the OB1 line. **`enable`, never `init --product research --force`, on a
+>   host that already has a state file**: `init` builds a FRESH state and saves
+>   it, so it drops whatever the file already named. Measured 2026-09-20 —
+>   six planes in, four out (`memory`, `coder`, `agent-org` gone) — while
+>   `enable research` merged the same input to seven. The two print the same
+>   `enabled product research:` summary, so nothing on screen tells you which
+>   happened. Semantics: `scripts/stack/README.md`, the `init` section.
 >
 > They do not fight — `stack.py` UNIONS the plane env's list into whatever flags it
 > passes (`effective_profiles`). **The consequence, stated rather than discovered:**

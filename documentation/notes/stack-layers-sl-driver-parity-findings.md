@@ -406,6 +406,19 @@ instruction on every run until the bump, next to the `[declared, not rendered]`
 lines, so it cannot be met cold. This is the wave-4 step; it is a deployment
 change and neither item makes it.
 
+> **CORRECTION, 2026-09-20 (`sl-docs-posture`).** Two of the premises above have
+> moved, and the first sentence is now wrong advice. (1) The host HAS a
+> `.stack/state.json` — written 2026-09-19, listing `anchor, coder, frontend,
+> inference, memory, search`; `sl-ob1-gitlink` recorded the same correction.
+> (2) On a host with a state file the two verbs are **not** alternatives.
+> `cmd_init` builds a fresh `State({})` and saves it, so `init --force`
+> REPLACES; `cmd_enable` mutates the loaded state, so `enable` MERGES. Measured
+> here against scratch state files: six planes in, `init --product research
+> --force` leaves **four** (`memory`, `coder`, `agent-org` dropped), `enable
+> research` leaves **seven**. Both print the same `enabled product research:`
+> summary. **The one-time step is `enable research`.** The semantics are written
+> up in `scripts/stack/README.md` under `init`.
+
 ## F19 — a pinned submodule can legitimately disagree with the manifest, and only it can
 
 The rule this item added rather than suppressing the noise or failing on it.
