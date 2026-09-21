@@ -26,7 +26,16 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $repoRoot
 
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { $_ }
-if (-not $staged) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
+# The SAME `--diff-filter=ACM` gate 4 below had to drop: it discards a rename
+# outright, so `git mv old new` plus an edit, staged alone, left $staged empty
+# and the whole check exited 0 on "nothing staged" (reproduced at f3eee64,
+# 2026-09-20). Gates 1-3 keep the ACM list on purpose - widening what THEY
+# enforce is a separate change - but the EARLY EXIT must not be able to skip a
+# commit that really did stage something. The gates 1-3 half of this is left
+# open deliberately and written down in
+# documentation/notes/stack-layers-sl-gate4-carries-findings.md.
+$stagedAny = @(& git diff --cached --name-only) | Where-Object { $_ }
+if (-not $stagedAny) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
 
 $failed = 0
 
@@ -376,32 +385,207 @@ if ($jsonStaged.Count -gt 0) {
 # Tab, LF and CR are legal. Everything else below 0x20 - and 0x7F - is not: none
 # of them survives a copy-paste, a terminal render or a code review intact.
 $ctrlBad = @()
+
+# FILE IDENTITY NEVER COMES FROM THE DIFF'S `+++` / `---` TEXT.
+#
+# The first version of this gate read the path out of `+++ b/<path>` with a
+# Substring(6). Its tester broke that three ways on this host, two of them
+# DETECTION REGRESSIONS against the gate's own base - a planted byte that
+# f3eee64 reported, the parsing version passed green:
+#   * `core.quotepath` defaults to TRUE, so a non-ASCII path arrives C-quoted as
+#     `+++ "b/na\303\257ve.txt"`. That matched no `+++ b/*` pattern, the path
+#     came out empty, and the skip flag latched ON for the whole file: a 0x08 in
+#     it went unreported with NO printed skip - the silent skip this gate exists
+#     to abolish.
+#   * an ADDED CONTENT line whose text begins `++ /dev/null` or `++ b/x` reaches
+#     the diff as `+++ ...` and was eaten as a file header, silencing the rest of
+#     its hunk. (0 such lines exist in this tree today; a protection check does
+#     not get to rely on that.)
+#   * git TAB-TERMINATES `+++ b/<path>` when the path contains a space, so
+#     `check-attr` was asked about `<path>\t`, answered `unspecified`, and a
+#     staged PNG whose name has a space still failed pre-commit with the
+#     raw-string advice - the headline defect, unfixed for that shape.
+#
+# All three are the same mistake: treating a human-readable rendering as data.
+# So the three questions are asked separately, and none of them is answered by
+# reading header text:
+#
+#   WHICH PATHS   `git diff --cached -M --name-status -z` - NUL-separated, never
+#                 quoted, never tab-terminated, and it carries both halves of an
+#                 R/C entry. Order is the diff queue's own, so entry N of this
+#                 list is record N of the patch below (asserted, not assumed -
+#                 see the count check).
+#   WHICH BINARY  `git check-attr -z --stdin binary`, fed those exact bytes.
+#   WHICH LINES   one patch diff, split into records at `diff --git ` BY
+#                 POSITION; a record's header ends at its first `@@`, so every
+#                 `+` line after that is DATA even when it reads like a header,
+#                 and line numbers still come from the `@@` header.
+#
+# Bytes are carried as ISO-8859-1 strings end to end: that mapping is byte <->
+# char and lossless, so no decoder can swallow the control byte this gate is
+# looking for, and a path written back out to `check-attr` is the exact bytes
+# git handed over. Paths are re-decoded as UTF-8 only to PRINT them.
+#
+# -M stays (a rename's hunk holds only the lines the commit introduced, so a
+# pure move of one of the eleven pre-existing control bytes in documentation/
+# stays green). --text stays, so a file git has not been TOLD is binary is
+# scanned rather than summarised away - the .gitattributes skip below is the
+# deliberate, PRINTED exit from the scan, never git's silent content heuristic.
+# No --diff-filter anywhere: `ACM` dropped renames outright, which is how a
+# `git mv` plus an edit injecting 0x08 used to make the WHOLE check print
+# "nothing staged - skip" and exit 0.
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
-# -U0 so only changed lines carry a '+', and --text so a file git has not been
-# told is binary is still scanned rather than summarised away.
-$addedDiff = @(& git diff --cached -U0 --text --diff-filter=ACM)
-$ErrorActionPreference = $prev
-$curFile = ''
-foreach ($line in $addedDiff) {
-    if ($line -like '+++ b/*') { $curFile = $line.Substring(6); continue }
-    if ($line -notlike '+*' -or $line -like '+++*') { continue }
-    # The staged blob is what ships, so scan the diff's own bytes.
-    $hit = [regex]::Match($line, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
-    if ($hit.Success) {
-        $code = '0x{0:X2}' -f [int][char]$hit.Value
-        $shown = $line.Substring(1) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '<CTRL>'
-        $ctrlBad += "$curFile : $code in an added line -> $($shown.Trim())"
+$ctrlEnc = [System.Text.Encoding]::GetEncoding(28591)   # ISO-8859-1
+
+function Get-CtrlGitBytes {
+    # Runs git with cmd doing the redirect and reads the raw bytes back. Not a
+    # PowerShell pipeline: PS 5.1 re-encodes a native command's output through the
+    # console codepage, and it writes a UTF-8 BOM and a CR into a native command's
+    # stdin (measured - that is how the first attempt's check-attr came to answer
+    # about a path that did not exist).
+    param([string]$GitArgs)
+    $t = [System.IO.Path]::GetTempFileName()
+    cmd /c "git $GitArgs > ""$t"" 2>nul" | Out-Null
+    $bytes = [System.IO.File]::ReadAllBytes($t)
+    Remove-Item $t -Force -ErrorAction SilentlyContinue
+    return ([System.Text.Encoding]::GetEncoding(28591)).GetString($bytes)
+}
+function ConvertTo-CtrlDisplay {
+    param([string]$Raw)
+    return [System.Text.Encoding]::UTF8.GetString(
+        ([System.Text.Encoding]::GetEncoding(28591)).GetBytes($Raw))
+}
+
+# (i) WHICH PATHS, in diff-record order.
+$nsFields = (Get-CtrlGitBytes 'diff --cached -M --name-status -z').Split([char]0)
+$ctrlPaths = New-Object System.Collections.ArrayList
+$ctrlAsk = New-Object System.Collections.ArrayList
+$i = 0
+while ($i -lt $nsFields.Count) {
+    $st = $nsFields[$i]
+    if ($st.Length -eq 0) { $i++; continue }
+    # R/C entries are three fields (status, source, destination); the destination
+    # is the path that ships, and it is the one whose attributes govern.
+    if ($st[0] -eq 'R' -or $st[0] -eq 'C') { $take = 2; $step = 3 }
+    else { $take = 1; $step = 2 }
+    if (($i + $take) -lt $nsFields.Count) {
+        $path = $nsFields[$i + $take]
+        [void]$ctrlPaths.Add($path)
+        # A deletion has no added lines; asking about it only adds noise to the
+        # skip list, so it keeps its POSITION but not its attribute query.
+        if ($st[0] -ne 'D') { [void]$ctrlAsk.Add($path) }
+    }
+    $i += $step
+}
+
+# (ii) WHICH OF THEM ARE BINARY - .gitattributes, NOT a NUL-byte content probe.
+# Measured on this tree at f50a80b 2026-09-20 and re-derived at this branch tip
+# 2026-09-21: 1201 tracked files, 0 with the attribute set
+# and 0 carrying a NUL in their first 8000 bytes, so the choice is entirely about
+# what a future commit stages. The attribute wins because 0x00 is inside this
+# gate's OWN class: a content probe would fall silent on a NUL injected into a
+# text file, its worst input. The cost is stated rather than hidden - a binary
+# type .gitattributes does not cover yet (.pdf, .woff2, .wasm, .zip) still
+# reaches the scan and still fails, so the failure text below names that case and
+# its one-line fix.
+$binarySkip = @{}
+if ($ctrlAsk.Count -gt 0) {
+    # -z on BOTH sides: NUL-separated in, NUL-separated `path, attr, value`
+    # triples out. argv is not an option - `git check-attr binary -- <paths>`
+    # over a whole-tree stage dies with WinError 206 (measured at 1198 paths).
+    $inT = [System.IO.Path]::GetTempFileName()
+    $outT = [System.IO.Path]::GetTempFileName()
+    $nul = [string][char]0
+    [System.IO.File]::WriteAllBytes($inT, $ctrlEnc.GetBytes((($ctrlAsk -join $nul) + $nul)))
+    cmd /c "git check-attr -z --stdin binary < ""$inT"" > ""$outT"" 2>nul" | Out-Null
+    $af = $ctrlEnc.GetString([System.IO.File]::ReadAllBytes($outT)).Split([char]0)
+    Remove-Item $inT, $outT -Force -ErrorAction SilentlyContinue
+    for ($k = 0; ($k + 2) -lt $af.Count; $k += 3) {
+        if ($af[$k + 1] -eq 'binary' -and $af[$k + 2] -eq 'set') { $binarySkip[$af[$k]] = $true }
     }
 }
-if ($ctrlBad.Count -gt 0) {
+foreach ($b in ($binarySkip.Keys | Sort-Object)) {
+    Write-Host ("  [configs] binary per .gitattributes - control-character scan skipped: " +
+                (ConvertTo-CtrlDisplay $b))
+}
+
+# (iii) THE SCAN.
+$diffLines = (Get-CtrlGitBytes 'diff --cached -M -U0 --text').Split([char]10)
+$ErrorActionPreference = $prev
+$ctrlRx = [regex]'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+$recIdx = -1
+$inHunks = $false
+$curFile = ''
+$curLine = 0
+$skipFile = $true
+foreach ($line in $diffLines) {
+    # A bare `diff --git ` line can only be a record boundary: inside a hunk every
+    # line is prefixed with '+', '-', ' ' or '\', so content can never spell it.
+    if ($line.StartsWith('diff --git ')) {
+        $recIdx++
+        $inHunks = $false
+        if ($recIdx -lt $ctrlPaths.Count) {
+            $curFile = $ctrlPaths[$recIdx]
+            $skipFile = $binarySkip.ContainsKey($curFile)
+        } else {
+            $curFile = ''
+            $skipFile = $true
+        }
+        continue
+    }
+    if ($line.StartsWith('@@')) {
+        # First `@@` ends the record header. '@@ -a,b +c,d @@': c is the first
+        # NEW-file line in the hunk, which is what turns a hit into file:line.
+        $inHunks = $true
+        $h = [regex]::Match($line, '^@@ -\S+ \+(\d+)')
+        if ($h.Success) { $curLine = [int]$h.Groups[1].Value }
+        continue
+    }
+    # Still in the record header (`index`, `old mode`, `rename from/to`, `---`,
+    # `+++`): not data, whatever it looks like.
+    if (-not $inHunks) { continue }
+    if (-not $line.StartsWith('+')) { continue }
+    $n = $curLine
+    $curLine++
+    if ($skipFile) { continue }
+    # The staged blob is what ships, so scan the diff's own bytes.
+    $hit = $ctrlRx.Match($line)
+    if ($hit.Success) {
+        $code = '0x{0:X2}' -f [int][char]$hit.Value
+        $shown = ((ConvertTo-CtrlDisplay ($line.Substring(1))) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '<CTRL>').Trim()
+        # CAP THE PREVIEW. A "line" of a binary file git was not told is binary can
+        # be the whole file: under --text the PNG that started this item renders as
+        # one 70-byte line, and a 5 MB font would render as one 5 MB line. The
+        # file:line is the actionable part; the preview is orientation.
+        if ($shown.Length -gt 120) { $shown = $shown.Substring(0, 120) + ' ...[truncated]' }
+        $ctrlBad += ((ConvertTo-CtrlDisplay $curFile) + ":${n} : $code in an added line -> " + $shown)
+    }
+}
+
+# The positional pairing is ASSERTED, never assumed. If the patch ever emits a
+# different number of records than --name-status emits entries (an unmerged
+# index is the shape that would do it), every path label after the divergence is
+# wrong - so say so and fail, rather than print confident nonsense.
+$ctrlRecs = @($diffLines | Where-Object { $_.StartsWith('diff --git ') }).Count
+if ($ctrlRecs -ne $ctrlPaths.Count) {
+    Write-Host ("  [configs] CONTROL-CHARACTER SCAN CANNOT ATTRIBUTE ITS DIFF: " +
+                "$ctrlRecs patch record(s) against $($ctrlPaths.Count) --name-status entry(ies). " +
+                "Paths would be mislabelled, so nothing is claimed. Usual cause: an " +
+                "unmerged index - finish the merge, then commit.") -ForegroundColor Red
+    $failed++
+}
+elseif ($ctrlBad.Count -gt 0) {
     Write-Host "  [configs] CONTROL CHARACTER in staged added line(s):" -ForegroundColor Red
     $ctrlBad | ForEach-Object { Write-Host "             $_" -ForegroundColor Red }
     Write-Host "             Tab/LF/CR are fine; nothing else below 0x20 is." -ForegroundColor Red
     Write-Host "             Usual cause: a backslash escape in a NON-RAW replacement string" -ForegroundColor Red
     Write-Host "             (\b -> 0x08, \a -> 0x07, \f -> 0x0C). Use rb'' / r'' literals." -ForegroundColor Red
+    Write-Host "             If the file is BINARY, this gate is the wrong place to argue with it:" -ForegroundColor Red
+    Write-Host "             declare the type in .gitattributes (e.g. '*.woff2 binary') and the next" -ForegroundColor Red
+    Write-Host "             run skips it BY NAME on a printed line." -ForegroundColor Red
     $failed += $ctrlBad.Count
-} elseif ($staged.Count -gt 0) {
+} elseif ($stagedAny.Count -gt 0) {
     Write-Host "  [configs] no control characters in staged added lines"
 }
 
