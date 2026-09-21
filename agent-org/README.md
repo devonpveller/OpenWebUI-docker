@@ -64,7 +64,7 @@ line at all and both slices are profile-gated.
 |---|---|---|---|
 | **`llm-gateway-cloud` + `llm-gateway-cloud-db`** (a second LiteLLM, config [`config/litellm-cloud.config.yaml`](config/litellm-cloud.config.yaml)) | `profiles: ["cloud"]` — it does not render, and `agent-bridge` keeps every role on the local lane because `AO_CLOUD_ENABLED` defaults to `false`. | The `cloud` profile, plus `OPENROUTER_API_KEY`, `AO_CLOUD_DB_PASSWORD` and `AO_CLOUD_MASTER_KEY` in `docker/.env`; then `AO_CLOUD_ENABLED=true` and a `POST /profiles/lane` per judgment role (Pc.3, below). | It has no internet leg: `ao-net` plus `ao-cloud-egress-net` (`internal: true`), with `HTTP_PROXY`/`HTTPS_PROXY` set to `http://ao-egress:8888`. |
 | **`ao-egress`** | `profiles: ["cloud"]`. | Same profile. | The one dual-homed container in the cloud lane: `ao-cloud-egress-net` plus the project's `default` bridge. **Read the allowlist warning below before relying on it.** |
-| **`ao-git-egress`**, with the `ao-worker-*` / `ao-ot-*` pool that is proxied through it | `profiles: ["workers"]` — neither the proxy nor the pool renders. | The `workers` profile. | A default-deny tinyproxy (`FilterDefaultDeny Yes`) whose filter is `/egress/egress-allowlist.txt` on the shared `ao-egress-config` volume. [`docker/egress/egress-reload.sh`](docker/egress/egress-reload.sh) seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it, which is how `/project add` and `/egress allow` change worker scope from chat with no rebuild. |
+| **`ao-git-egress`**, with the worker pool behind it | `profiles: ["workers"]` — neither the proxy nor the pool renders. | The `workers` profile. | A default-deny tinyproxy (`FilterDefaultDeny Yes`) whose filter is `/egress/egress-allowlist.txt` on the shared `ao-egress-config` volume. [`docker/egress/egress-reload.sh`](docker/egress/egress-reload.sh) seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it, which is how `/project add` and `/egress allow` change worker scope from chat with no rebuild. **The pool is confined two DIFFERENT ways, so do not say "proxied through it" of all four:** in the render only `ao-ot-1`/`ao-ot-2` carry `HTTP_PROXY`/`HTTPS_PROXY`; `ao-worker-1`/`-2` carry none and are confined by `ao-worker-net` (`internal: true`) having no route out at all. |
 | **The GitHub App** (the capability plane's root of trust) | `Settings.github_app_enabled` in [`agent-bridge/app/config.py`](agent-bridge/app/config.py) is false unless `github_app_id` is set **and** the private key file is readable, so every capability call is gated off and the bridge otherwise runs normally. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `docker/.env` (they are not in `.env.example` — this plane omits names the compose file gives a `${VAR:-}` default) and a `.pem` at `agent-bridge/secrets/github-app-key.pem`, which is gitignored and mounted read-only. | `https://api.github.com` **directly from `ao-net`**, which is an ordinary bridge — this path does not go through `ao-egress`. |
 
 **`ao-egress`'s allowlist does not match its documentation, and it fails
@@ -88,7 +88,12 @@ that its cloud model group stays listed-but-unreachable
 `config/litellm-cloud.config.yaml` says not to add OpenRouter to it. Two
 gateways, two lanes. `ao-net` is a plain bridge so host port publishing works;
 "no cloud" there is enforced at the application layer — no cloud credential is
-set on any default service.
+set on any default service. **One candidate the render raises and this repo
+cannot settle:** `mattermost` is on `ao-net`, so it has a route out, and nothing
+here sets `MM_LOGSETTINGS_ENABLEDIAGNOSTICS`. Whether Team Edition phones home
+on its own defaults is upstream behaviour, not a fact in this tree — flagged
+rather than cleared, and recorded in
+[`../documentation/notes/stack-layers-sl-docs-posture-findings.md`](../documentation/notes/stack-layers-sl-docs-posture-findings.md).
 
 ## Bring-up (operator)
 

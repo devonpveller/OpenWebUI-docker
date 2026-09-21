@@ -68,9 +68,19 @@ render at all when the profile is off.
 ## Posture: local-first, cloud-capable
 
 This plane is where the repo-wide posture (stack-layers **D14**; the whole table
-is in the root [`README.md`](../README.md)) is decided for inference. **This
-plane holds exactly one cloud-capable component, and it is off:** the model
-group in
+is in the root [`README.md`](../README.md)) is decided for inference.
+
+**Classified the way the root README classifies: render, take every service on a
+non-internal network, then read its source for an outbound call.** Rendered with
+`--profile local`, seven of this plane's eight services touch only `llm-net` and
+`llm-backend-net`, both internal-only, so they have no route off the host at
+all. The eighth, `llm-gateway-ui`, is on `app-net` (an ordinary bridge) so the
+portal's Caddy can front `/ui` - a route, but no call: its
+`config/litellm.ui.config.yaml` declares no `model_list`, sets
+`telemetry: false`, and the service sets `LITELLM_LOCAL_MODEL_COST_MAP=True`.
+
+**So this plane holds exactly one cloud-capable component, and it is off:** the
+model group in
 [`config/litellm/model_list/cloud.openrouter.yaml`](config/litellm/model_list/cloud.openrouter.yaml),
 two entries named `cloud-large` and `cloud-small`, both
 `openrouter/qwen/qwen-2.5-*` placeholders with

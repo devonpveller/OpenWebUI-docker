@@ -7,6 +7,12 @@ advice with `enable`. Anything that turned out to be a real problem in the
 compose files, the configs or the scripts is written here instead of being
 fixed, because fixing it would put a non-Markdown change in this item's diff.
 
+**Attempt 1 FAILED (T1, T3, T8) and the method changed.** The component set was
+originally derived from a grep for provider names, which missed four unprofiled
+services outright. It is now derived from the RENDERS - see F12 - and F6 was
+rewritten because its original claim was false. F7 through F12 are new in
+attempt 2.
+
 Everything below was measured on 2026-09-20 in the worktree
 `.claude/worktrees/wt-sl-docs-posture` (branch `work/sl-docs-posture`, based on
 `development` at `a2d3644`), by reading the named file to the end or running the
@@ -191,17 +197,147 @@ from the example and why, so the reader is not left hunting.
 
 ---
 
-## F6 - checked, not a defect: the search plane's `vpn` is the one egress
-## container that starts from a fresh clone's examples
+## F6 (REWRITTEN after attempt 1 FAILED) - THREE containers reach the internet
+## from a fresh clone's examples, not one
 
-`search/docker-compose.yml`'s `vpn` carries no `profiles:` key, so it renders and
-starts whenever the search plane does. `search/.env.example` ships
-`MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key` - a placeholder and not a
-blank, because the `${...:?}` guard rejects empty - so the container starts and
-the WireGuard tunnel cannot establish. This is the plane's purpose rather than a
-leak: `searxng` is on `search-net` (`internal: true`) and
-`search/searxng/settings.yml` sets `outgoing.proxies` to `http://vpn:8888`, so
-there is no other route out for a search query. The acceptance wording "no
-egress service starts" is therefore true of every plane except this one, and
-both posture sections say so explicitly rather than letting a tester discover
-the exception.
+The original F6, and the README sentence it backed, said the search plane's
+`vpn` was "the one egress container that starts from a fresh clone's examples".
+That is false, and it contradicted the artifact's own `lc-egress` row two tables
+above it. The tester caught it; this is the corrected measurement.
+
+Derived by rendering every plane from the seeded examples
+(`docker compose config --format json`) and classifying each service by the
+internality of the networks it joins, then reading the source of each candidate:
+
+| Container | Plane | Why it reaches the internet |
+|---|---|---|
+| `vpn` | search | Unprofiled; brings up a WireGuard tunnel to Mullvad itself at start. The plane's purpose. Cannot connect on the example's placeholder key. |
+| `openwebui-backup` | frontend | Unprofiled, renders under `stock` - i.e. in the QUICKSTART deployment - and its `command:` begins `apk add --no-cache pigz` on every container start, against the Alpine CDN. The compose comment beside its `networks:` list says exactly this. It is the only runtime package install in any compose file here. |
+| `lc-egress` | coder | Unprofiled; dual-homed on `lc-net` (`internal: true`) and the project bridge. It initiates nothing itself, but it is up and it is `open-terminal`'s only route out. |
+
+`search`'s `vpn` is still the only one that is *meant* to carry traffic, and the
+placeholder-key point is still true. What was wrong was the absolute.
+
+---
+
+## F7 - `openbrain-mcp` fetches any URL a caller names, unproxied, and nothing
+## gates it
+
+**Severity: real, and the broadest egress in the stack.** Not fixed here
+(documentation-only item); it wants an owner.
+
+`OB1/integrations/kubernetes-deployment/index.ts`, inside `ingestOne`, which
+backs the `ingest_url` and `ingest_urls` tools, calls `fetch(url)` with
+`redirect: "follow"` and a `User-Agent` header and nothing else. The URL is
+caller-supplied and redirects are followed. A search for `proxy` over that whole
+file returns **zero** hits - unlike `openbrain-research`, which builds a proxied
+client from `FETCH_PROXY_URL`. `openbrain-mcp` carries no compose profile and
+renders on `obnet` (a bridge), so it is live whenever Open Brain is.
+
+**And it is reachable from outside.** `openbrain-gateway/app.py`'s default write
+allowlist is `WRITE_TOOLS = _tool_set("GATEWAY_WRITE_TOOLS", {"capture_thought",
+"ingest_url", "ingest_urls"})`, so a remote client holding
+`OPENBRAIN_GATEWAY_KEY` can name a URL and have this host fetch it. The cloud
+door is therefore not simply "a door in": the gateway process makes no outbound
+call, but two of the tools it forwards do. The root `README.md` row was
+corrected to say this rather than "nothing outbound".
+
+Options for whoever takes it: give `ingestOne` the proxied client
+`openbrain-research` already builds; or drop `ingest_url`/`ingest_urls` from the
+cloud door's default write allowlist (a `GATEWAY_WRITE_TOOLS` override does that
+with no code change); or both. Both are OB1-side or env-side changes.
+
+---
+
+## F8 - `openbrain-grounding-backfiller` fails OPEN: its proxy fallback is
+## direct, and defaults to on
+
+`OB1/integrations/grounding-backfiller/index.ts` sets `WIKI_BASE` to
+`https://en.wikipedia.org` by default and `REFETCH_ALLOW_DIRECT` to `"true"` by
+default, and its `refetchOne` tries the proxied fetch first, then - when the
+result is thin and `REFETCH_ALLOW_DIRECT` is on - repeats it DIRECT.
+
+The service is unprofiled, on `obnet` + `llm-net` + `ai-stack_default`, and its
+`FETCH_PROXY_URL` defaults to `http://vpn:8888` exactly like
+`openbrain-research`'s. The difference is the fallback: a thin proxied response
+silently becomes an unproxied one. `REFETCH_ALLOW_DIRECT=false` in
+`OB1/docker/.env` closes it.
+
+This is why the posture table now says "**this one** connects TO the privacy
+boundary" on the `openbrain-research` row and warns against generalising: of
+OB1's three URL fetchers, one is proxy-bound, one falls back to direct, and one
+(F7) has no proxy at all.
+
+---
+
+## F9 - `openbrain-wiki`'s `WIKI_GIT_REMOTE` is the present-but-inert pattern,
+## and was missing from the first table
+
+`OB1/docker/docker-compose.yml` sets `WIKI_GIT_REMOTE: ""` with the real SSH URL
+commented out directly beneath it and `WIKI_GIT_SSH_KEY` still pointed at a
+deploy key. Blank means local-commits-only; restoring the URL force-pushes the
+compiled vault to a private GitHub repo. Not a defect - it is exactly the shape
+the posture section exists to enumerate, and it is now a row.
+
+---
+
+## F10 - FLAGGED, not settled: `mattermost` telemetry
+
+`mattermost` renders on `ao-net`, a plain bridge, and nothing in this repo sets
+`MM_LOGSETTINGS_ENABLEDIAGNOSTICS`. Whether Mattermost Team Edition phones home
+on its defaults is an upstream fact that cannot be established from this tree,
+so it is listed in the README's "network-capable, no outbound call" section as
+FLAGGED rather than cleared, and named again in `agent-org/README.md`. Settling
+it means reading the deployed version's defaults or watching the container's
+traffic - neither is a documentation change.
+
+---
+
+## F11 - scope: three egressing things are NOT containers
+
+A compose render cannot see them, so the "component" framing had to widen. All
+three are in this repo and all three are host processes:
+
+| Thing | The call | Off when |
+|---|---|---|
+| `scripts/sysadmin-mcp/telegram_notify.py` + `telegram_listener.py` | POST to `https://api.telegram.org/bot{tok}/...`; the LISTENER polls, which makes it an inbound control path into the host that no firewall rule sees | no bot token / chat id |
+| `scripts/claude-sessions-bridge/bridge.py` | runs the `claude` CLI headless with `MODEL = os.environ.get("BRIDGE_MODEL", "opus")`, so every turn is a call to Anthropic from the host; also posts to Telegram | the operator does not run it |
+| `owui/tools/github_chat_mcp_tools.py`, `owui/tools/fileshed.py` | `GITHUB_API_BASE = "https://api.github.com"`; `fileshed` permits `curl`/`wget` and network `git` subcommands inside the `openwebui` container, behind its own valves | the plugin is not pasted into OWUI - they are deploy-by-paste, tracked in `owui/manifest.csv` |
+
+The claude-sessions bridge is the one place in the repo that talks to a frontier
+provider at all, which is why the posture section's opening sentence is scoped
+to "no COMPONENT sends a prompt ... by default" and the host-side paragraph
+names it immediately after.
+
+---
+
+## F12 - the classification, for anyone re-deriving it
+
+Stage 1 (render, then classify by network) over every plane and profile, with
+`external:` names resolved against the anchor (`ai-stack_llm-net` internal;
+`ai-stack_app-net` and `ai-stack_default` bridges). Services with NO
+non-internal network, i.e. with no route off the host at all:
+
+- **inference**: `llm-gateway`, `llm-gateway-db`, `llm-gateway-backup`,
+  `llm-queue`, `llama-cpp-upstream`, `llama-cpp-embed-upstream`,
+  `lm-models-backup` - seven of eight. Only `llm-gateway-ui` (on `app-net`) has
+  a route, and its source makes no call.
+- **memory**: `mnemory`.
+- **search**: `redis`, `searxng`.
+- **coder**: `little-coder`, `open-terminal`.
+- **portal**: `authelia`, `authelia-watcher`, `authelia-notif-bridge`,
+  `integrity-tripwire`.
+- **agent-org**: `ao-ot-1`, `ao-ot-2`, `ao-worker-1`, `ao-worker-2`.
+- **OB1**: none. All 30 are on `obnet`, a bridge, so the whole plane goes to
+  stage 2 and the source read is what separates them.
+
+Stage 2 (read the candidate's source for an outbound call) is what puts
+`llm-gateway-ui`, the search `gateway`, `openbrain-ext`, the portal watchers,
+`status-pipe/` and the backup sidecars other than `openwebui-backup` into
+"network-capable, no outbound call", and it is what found F7 and F8.
+
+**Neither stage alone is sufficient**, which is the method lesson of attempt 1:
+stage 1 alone would list all 30 OB1 services indiscriminately; stage 2 alone - a
+grep for provider names, which is what attempt 1 did - missed F7, F8, F9 and the
+`openwebui-backup` `apk add`, every one of them unprofiled and therefore on by
+default.
