@@ -16,8 +16,9 @@
 | `documentation/notes/stack-layers-sl-checks-worktree-findings.md` | new - the sweep of all 50 scripts |
 | `documentation/evidence/sl-checks-worktree/test-plan.md` | this file |
 
-**Nothing about WHAT any check enforces was touched.** T15 is the case that tries to
-falsify that sentence.
+**Nothing about WHAT any check enforces was touched.** T12 is the case that tries to
+falsify that sentence, and T6 is the one that tries to catch the fix having widened the
+allow-list by accident.
 
 ## Environment - build these two trees first
 
