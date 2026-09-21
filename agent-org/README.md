@@ -51,6 +51,45 @@ Charters are also delivered to workers as Agent Skills under
 - **Cloud inference** (judgment roles, CONDITIONAL) goes through a *separate*
   `llm-gateway-cloud` → `ao-egress` → openrouter.ai. That air-gap split is preserved.
 
+## Posture: local-first, cloud-capable
+
+The stack-wide posture is stack-layers **D14** — private, local-first,
+cloud-capable, with every cloud-capable component present and inert; the full
+cross-plane table is in the root [`README.md`](../README.md). This plane holds
+**four** of them, and a default `docker compose -f agent-org/docker/docker-compose.yml
+up -d` starts none, because `docker/.env.example` sets no `COMPOSE_PROFILES`
+line at all and both slices are profile-gated.
+
+| Component | What it does when off | What turns it on | Where it egresses |
+|---|---|---|---|
+| **`llm-gateway-cloud` + `llm-gateway-cloud-db`** (a second LiteLLM, config [`config/litellm-cloud.config.yaml`](config/litellm-cloud.config.yaml)) | `profiles: ["cloud"]` — it does not render, and `agent-bridge` keeps every role on the local lane because `AO_CLOUD_ENABLED` defaults to `false`. | The `cloud` profile, plus `OPENROUTER_API_KEY`, `AO_CLOUD_DB_PASSWORD` and `AO_CLOUD_MASTER_KEY` in `docker/.env`; then `AO_CLOUD_ENABLED=true` and a `POST /profiles/lane` per judgment role (Pc.3, below). | It has no internet leg: `ao-net` plus `ao-cloud-egress-net` (`internal: true`), with `HTTP_PROXY`/`HTTPS_PROXY` set to `http://ao-egress:8888`. |
+| **`ao-egress`** | `profiles: ["cloud"]`. | Same profile. | The one dual-homed container in the cloud lane: `ao-cloud-egress-net` plus the project's `default` bridge. **Read the allowlist warning below before relying on it.** |
+| **`ao-git-egress`**, with the `ao-worker-*` / `ao-ot-*` pool that is proxied through it | `profiles: ["workers"]` — neither the proxy nor the pool renders. | The `workers` profile. | A default-deny tinyproxy (`FilterDefaultDeny Yes`) whose filter is `/egress/egress-allowlist.txt` on the shared `ao-egress-config` volume. [`docker/egress/egress-reload.sh`](docker/egress/egress-reload.sh) seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it, which is how `/project add` and `/egress allow` change worker scope from chat with no rebuild. |
+| **The GitHub App** (the capability plane's root of trust) | `Settings.github_app_enabled` in [`agent-bridge/app/config.py`](agent-bridge/app/config.py) is false unless `github_app_id` is set **and** the private key file is readable, so every capability call is gated off and the bridge otherwise runs normally. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `docker/.env` (they are not in `.env.example` — this plane omits names the compose file gives a `${VAR:-}` default) and a `.pem` at `agent-bridge/secrets/github-app-key.pem`, which is gitignored and mounted read-only. | `https://api.github.com` **directly from `ao-net`**, which is an ordinary bridge — this path does not go through `ao-egress`. |
+
+**`ao-egress`'s allowlist does not match its documentation, and it fails
+closed.** `AO_EGRESS_ALLOWLIST` (default `openrouter.ai`) is set on that service
+in `docker/docker-compose.yml`, but `ao-egress` builds from
+`../../little-coder/docker/Dockerfile.egress` and runs that image's `CMD`
+unchanged: tinyproxy against `/etc/tinyproxy/egress-allowlist.txt`, COPYd in at
+build time from `little-coder/docker/egress-allowlist.txt`. Nothing in that
+image reads `EGRESS_ALLOWLIST`, so the effective allowlist is the baked
+`github.com` / `githubusercontent.com` pair and `openrouter.ai` would be
+DENIED. `ao-git-egress` is unaffected — it overrides both the conf file and the
+command. Turning the cloud lane on therefore needs the allowlist wired the way
+`ao-git-egress` wires it, or the pattern added to the image. Recorded in
+[`../documentation/notes/stack-layers-sl-docs-posture-findings.md`](../documentation/notes/stack-layers-sl-docs-posture-findings.md).
+
+**What is NOT in this plane.** `agent-bridge` reaches local inference through the
+`llama-cpp` alias on the main stack's `llm-gateway`, which sits on two
+`internal: true` networks and has no egress of its own; the repo-wide rule is
+that its cloud model group stays listed-but-unreachable
+(`inference/config/litellm/model_list/cloud.openrouter.yaml`), and
+`config/litellm-cloud.config.yaml` says not to add OpenRouter to it. Two
+gateways, two lanes. `ao-net` is a plain bridge so host port publishing works;
+"no cloud" there is enforced at the application layer — no cloud credential is
+set on any default service.
+
 ## Bring-up (operator)
 
 Prereqs: the main `ai-stack` is up (so `ai-stack_llm-net` + `llm-gateway`/`llama-cpp` exist).

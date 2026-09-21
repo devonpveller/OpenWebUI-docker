@@ -180,6 +180,79 @@ topology: the upstreams live on a network native to the inference project.
 And never GET LiteLLM `/health` through the alias - it loads every model the
 gateway advertises. `/health/liveliness` is the one to probe.
 
+## Posture: local-first, cloud-capable
+
+**Nothing in this stack sends anything to a model provider by default.** Every
+model call goes to llama.cpp on this host through the LiteLLM gateway, and the
+gateway that holds the `llama-cpp` alias is attached to two networks that are
+both `internal: true` - `llm-net`, declared that way by the anchor
+[`docker-compose.yml`](docker-compose.yml), and `llm-backend-net`, declared that
+way by [`inference/docker-compose.yml`](inference/docker-compose.yml). The
+cloud-capable parts are all present in the tree and all inert: each one is gated
+behind a compose profile, a credential, or a script the operator runs by hand.
+That is stack-layers decision **D14** - keep the components, ship them off, and
+write down what turns each one on.
+
+The table is measured from the compose files, the LiteLLM model-list fragments
+and the `.env.example` files; where a sentence here and a compose file disagree,
+the compose file wins.
+
+| Cloud-capable component | Where it is defined | What it does when off | What turns it on | Where it egresses |
+|---|---|---|---|---|
+| LiteLLM cloud model group (`cloud-large`, `cloud-small`) | `inference/config/litellm/model_list/cloud.openrouter.yaml` | `config/litellm/assemble-config.py` drops every model entry whose `os.environ/VAR` reference is unset or empty, and logs the drop with its reason. The two models are not registered, so `/v1/models` does not list them and nothing else about the gateway changes. | `OPENROUTER_API_KEY` in `inference/.env`. It is blank in `inference/.env.example`. | **Nowhere.** See the D14 paragraph below: the key makes these models LISTED, not reachable. |
+| agent-org cloud lane: `llm-gateway-cloud`, `llm-gateway-cloud-db`, `ao-egress` | `agent-org/docker/docker-compose.yml`, `agent-org/config/litellm-cloud.config.yaml` | All three carry `profiles: ["cloud"]`, and `agent-org/docker/.env.example` sets no `COMPOSE_PROFILES` at all, so none of them renders. `AO_CLOUD_ENABLED=false` separately keeps `agent-bridge` on the local lane. | `cloud` in `COMPOSE_PROFILES` (or `--profile cloud`), plus `OPENROUTER_API_KEY`, `AO_CLOUD_DB_PASSWORD`, `AO_CLOUD_MASTER_KEY` and `AO_CLOUD_ENABLED=true` in `agent-org/docker/.env`. | `llm-gateway-cloud` has no internet leg of its own: it sits on `ao-net` and `ao-cloud-egress-net` (`internal: true`) with `HTTP_PROXY`/`HTTPS_PROXY` pointed at `ao-egress`, the one dual-homed container. Read the allowlist note under the table before turning this on. |
+| `ao-git-egress`, and the `ao-worker-*` / `ao-ot-*` pool proxied through it | `agent-org/docker/docker-compose.yml` | `profiles: ["workers"]`, so with no `COMPOSE_PROFILES` none of them renders. | The `workers` profile. | A default-deny tinyproxy. Its filter file lives on the shared `ao-egress-config` volume: `agent-org/docker/egress/egress-reload.sh` seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it as projects and hosts are onboarded from Mattermost. |
+| `agent-bridge`'s GitHub App (the capability plane) | `agent-org/agent-bridge/app/config.py`, `agent-org/docker/docker-compose.yml` | `Settings.github_app_enabled` is false unless `github_app_id` is set **and** the private-key file exists, so the plane stays offline and the bridge runs normally without it. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `agent-org/docker/.env` (absent from the example - this plane leaves `${VAR:-}` names out on purpose), and a readable key at `agent-org/agent-bridge/secrets/github-app-key.pem`. | `https://api.github.com`, directly from `ao-net`, which is a plain bridge. This one does **not** go through `ao-egress`. |
+| `lc-egress`, and the `open-terminal` proxied through it | `coder/docker-compose.yml`, `little-coder/docker/Dockerfile.egress` | Nothing: it is unprofiled and starts whenever the coder plane starts. What is "off" is the destination set - tinyproxy runs `FilterDefaultDeny Yes`, so any host not matching the allowlist is refused. | No variable. The allowlist is baked into the image from `little-coder/docker/egress-allowlist.txt`, which ships `github.com` and `githubusercontent.com`; widening it is an edit plus a rebuild. | `CONNECT` to 443 and 22 on allowlisted hosts, out of the coder project's own `default` bridge. `open-terminal` has no other route: it is on `lc-net` (`internal: true`) and `llm-net`. |
+| `vpn` (Mullvad WireGuard, gluetun) | `search/docker-compose.yml` | **This is the one egress meant to be on.** It is unprofiled, so it renders and starts with the search plane. From the examples it cannot connect: `search/.env.example` ships `MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`, a placeholder rather than a blank because the `${...:?}` guard rejects empty. | Real values for `MULLVAD_WG_PRIVATE_KEY` and `MULLVAD_WG_ADDRESSES` in `search/.env`. | Mullvad, over WireGuard. It exists so search does **not** leak: `searxng` sits on `search-net` (`internal: true`) and `search/searxng/settings.yml` points `outgoing.proxies` at `http://vpn:8888`, so engine queries and page fetches have no other way out and HTTPS `CONNECT` resolves DNS at the far end of the tunnel. |
+| `cloudflared` | `portal/docker-compose.yml` | `profiles: [internet]`, and `portal/.env.example` deliberately carries no `COMPOSE_PROFILES` line. The whole plane is `manual` in `stack.manifest.toml`, so the driver never starts it either. | `scripts/portal/portal-on.ps1`, which passes `--profile internet` on the command line, plus `CLOUDFLARE_TUNNEL_TOKEN` in `portal/.env` (blank in the example). | Cloudflare's edge, from `edge-net`. It is the portal's only ingress - `caddy` publishes no host port. |
+| `portal-alerter` | `portal/docker-compose.yml` | Unprofiled, but it can only start when the portal does, which is by hand. | The portal being up, plus Google OAuth files at `secrets/google/portal-alerter/credentials.json` and `token.json`. | `oauth2.googleapis.com` and `gmail.googleapis.com`, on `notify-net`. The portal has exactly two non-internal networks, `notify-net` (the alerter and `portal-cron`) and `edge-net` (`cloudflared` to `caddy`); `auth-net`, where Authelia and the watchers sit, is `internal: true`, which is why the alerter is on two of them. |
+| `tailscale` | `frontend/docker-compose.yml` | `profiles: [tailscale]`, and `frontend/.env.example` ships `COMPOSE_PROFILES=stock`, so a fresh clone renders neither it nor its backup. | `tailscale` in `COMPOSE_PROFILES` in `frontend/.env` - necessarily together with `gpu`, because `network_mode: service:openwebui` names the `gpu` definition - plus `TAILSCALE_AUTH_KEY`, which the example leaves as `putyourtskeyhere`. | Tailscale's coordination servers and DERP relays, from inside `openwebui`'s network namespace. |
+| `openwebui` on the `gpu` profile | `frontend/docker-compose.yml` | The `stock` profile's Open WebUI is on the project-local `owui-net` and nothing else. | The `gpu` profile. | It joins `ai-stack_default`, an ordinary bridge, so this container can reach the internet. Its web search does not: `SEARXNG_QUERY_URL` points at the search plane's gateway. |
+| `mnemory-cloud-gateway` | `memory/docker-compose.yml` | Nothing - it starts with the memory plane. It is a **door in, not a way out**: cloud clients dial it, it dials nothing. | It is on whenever `memory` is. `MNEMORY_GATEWAY_KEY` is the key a cloud client presents; that client never holds `MCP_API_KEY`, which the gateway injects upstream. | It makes no outbound calls, and publishes on `127.0.0.1:8060` only. |
+| `openbrain-gateway` and `openbrain-ops-gateway` | `OB1/docker/docker-compose.yml`; the image is built from `openbrain-gateway/` in this repo | The same shape as the mnemory door and the same direction: in. Two instances of one image with different profiles - the CLOUD door force-filters reads to `share == "cloud"` and blocks the aggregate tools, while the OPS door (`GATEWAY_PROFILE: ops`, for host processes such as the claude-sessions bridge) filters on `exposure == "ops"` and allowlists only the agent-memory tools. | `OPENBRAIN_GATEWAY_KEY` / `OPS_GATEWAY_KEY` in `OB1/docker/.env` - and they must differ; the ops door's `${OPS_GATEWAY_KEY:?…never the cloud one}` guard says so. | Nothing outbound; `127.0.0.1:8061` and `127.0.0.1:8062`. |
+| OB1's scheduled chain: `openbrain-digest`, `openbrain-gmail-pull`, `openbrain-gmail-prune`, `openbrain-podcast` | `OB1/docker/docker-compose.scheduled.yml` | Unprofiled, but each mounts a Google OAuth client secret and token from `OB1/secrets/`, which is gitignored and absent from a fresh clone. | Putting those OAuth files in place - and the `open-brain` product being enabled at all. | Google's APIs (Gmail read and send, Calendar read), plus `wttr.in` for the digest's weather brief, out of `obnet`. |
+| `openbrain-research` | `OB1/docker/docker-compose.yml` | `profiles: ["research"]`. | The `research` profile, which `enable research` writes. | Page fetches go through `FETCH_PROXY_URL`, defaulting to `http://vpn:8888` - the search plane's Mullvad tunnel - and searches to `http://gateway:8080`. It connects TO the privacy boundary rather than around it. |
+
+**The D14 mechanism, exactly.** Setting `OPENROUTER_API_KEY` in `inference/.env`
+makes `assemble-config.py` keep the two cloud entries, so `llm-gateway`
+registers them and `/v1/models` lists them. It does **not** make them work.
+`llm-gateway` is attached to `llm-net` and `llm-backend-net` and to nothing
+else, and both are internal-only, so the container has no route off this host
+and a request for `cloud-large` fails where LiteLLM tries to reach
+openrouter.ai. Making it real would mean giving that container an egress path -
+attaching it to an internet-capable network, or pointing it at a dual-homed
+allowlisted proxy the way `llm-gateway-cloud` points at `ao-egress`. **Neither
+is done here, and neither is a casual change**: keeping the gateway off every
+internet-capable bridge is the supply-chain posture that also explains
+`LITELLM_LOCAL_MODEL_COST_MAP=True` (no cost-map fetch at boot) and the
+digest-pinned image. agent-org took the other route deliberately - its cloud
+lane is a *separate* LiteLLM behind its own egress proxy, and
+`agent-org/config/litellm-cloud.config.yaml` says in as many words not to add
+OpenRouter to the local gateway.
+
+**Before you enable the agent-org cloud lane, read its allowlist.** `ao-egress`
+builds from `little-coder/docker/Dockerfile.egress`, whose `CMD` runs tinyproxy
+against the allowlist COPYd into the image at build time. The `EGRESS_ALLOWLIST`
+environment variable the compose file sets on that service is read by nothing in
+that image, so the effective allowlist is the baked `github.com` /
+`githubusercontent.com` pair and `openrouter.ai` would be denied. That fails
+closed, which is the safe direction, but it means the cloud lane does not work
+as shipped. Recorded in
+[`documentation/notes/stack-layers-sl-docs-posture-findings.md`](documentation/notes/stack-layers-sl-docs-posture-findings.md);
+fixing it is a compose or image change, not a documentation one.
+
+**What a fresh clone actually does.** Copy each plane's `.env.example` and:
+every cloud credential in them is blank (`OPENROUTER_API_KEY`,
+`CLOUDFLARE_TUNNEL_TOKEN`, `AO_CLOUD_API_KEY`, `LC_DEPLOY_TOKEN`,
+`LC_SELF_REMOTE_PAT`) or an unmistakable placeholder
+(`TAILSCALE_AUTH_KEY=putyourtskeyhere`,
+`MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`); no `COMPOSE_PROFILES`
+line anywhere names `cloud`, `internet`, `workers` or `tailscale`; and the one
+egress container that starts from the examples is the search plane's `vpn`,
+whose tunnel cannot come up on a placeholder key. The quickstart above enables
+`frontend` alone, which is Open WebUI on `owui-net` plus a backup sidecar.
+
 ## Health and recovery
 
 ```powershell

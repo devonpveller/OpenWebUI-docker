@@ -65,6 +65,46 @@ that can serve CLOUD models from a machine with no GPU (stack-layers D11).
 `required: false` for exactly that reason - without it compose refuses to
 render at all when the profile is off.
 
+## Posture: local-first, cloud-capable
+
+This plane is where the repo-wide posture (stack-layers **D14**; the whole table
+is in the root [`README.md`](../README.md)) is decided for inference. **This
+plane holds exactly one cloud-capable component, and it is off:** the model
+group in
+[`config/litellm/model_list/cloud.openrouter.yaml`](config/litellm/model_list/cloud.openrouter.yaml),
+two entries named `cloud-large` and `cloud-small`, both
+`openrouter/qwen/qwen-2.5-*` placeholders with
+`extra_body.provider.data_collection: "deny"`.
+
+| | |
+|---|---|
+| **What it does when off** | Nothing at all. `config/litellm/assemble-config.py` runs at container start and applies two fail-closed admission rules: a fragment declaring `x-requires-profile: <name>` is skipped unless that name is in `COMPOSE_PROFILES`, and **any model entry referencing an `os.environ/VAR` that is unset or empty is dropped**, with the reason logged to stderr. The cloud fragment has no `x-requires-profile` on purpose - a cloud model needs no local service, so its credential is the only thing that can make it real. Blank key, therefore: the two models are never written into `/app/config.yaml`, `/v1/models` does not list them, and `docker logs llm-gateway` carries `[assemble-config] DROP cloud-large (cloud.openrouter.yaml) - env not set: OPENROUTER_API_KEY`. |
+| **What turns it on** | `OPENROUTER_API_KEY` in `inference/.env`. `inference/.env.example` ships it blank, and `llm-gateway` passes it through as `${OPENROUTER_API_KEY:-}`. |
+| **Where it egresses** | **Nowhere, today.** |
+
+**The key makes the models LISTED, not REACHABLE, and that is deliberate.**
+`llm-gateway` is attached to `llm-net` and `llm-backend-net` and to nothing else
+(`compose/gateway.yml`). `llm-backend-net` is declared `internal: true` in this
+plane's [`docker-compose.yml`](docker-compose.yml); `llm-net` is `external` here
+and is declared `internal: true` by the anchor's root `docker-compose.yml`. A
+container on internal-only networks has no route off the host, so with a key set
+the gateway advertises `cloud-large` and a call to it fails where LiteLLM tries
+to reach openrouter.ai. The same isolation is why this service publishes no host
+port and why `LITELLM_LOCAL_MODEL_COST_MAP=True` (no cost-map fetch at boot).
+
+**Making it real is an egress decision, not a config one.** It would take either
+attaching `llm-gateway` to an internet-capable network, or setting
+`HTTP_PROXY`/`HTTPS_PROXY` on it to a dual-homed allowlisted proxy - the shape
+agent-org already uses, where `llm-gateway-cloud` sits on an `internal: true`
+net and is proxied through `ao-egress`. **Neither is done here and neither
+should be done as a side effect**: it is the supply-chain posture of the plane
+(LiteLLM-Proxy guide section 19 - the gateway makes no outbound calls), and
+`agent-org/config/litellm-cloud.config.yaml` states the counterpart policy in as
+many words - *"The LOCAL llm-gateway is a DIFFERENT, air-gapped instance … Do
+NOT add OpenRouter to it"*. Whether this gateway ever carries a cloud lane is an
+operator decision that has not been taken; the fragment exists because D11
+requires the gateway to be ABLE to run cloud-only, e.g. on a node with no GPU.
+
 ## Requires
 
 | Needs | What makes it so |
