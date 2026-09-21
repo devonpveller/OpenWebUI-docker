@@ -678,7 +678,8 @@ def test_a_corrupt_state_file_is_refused_not_ignored(root):
 
 
 # --------------------------------------------------------------------------
-# health - the fifteen probes stack.ps1 ran, one for one
+# health - the fifteen probes stack.ps1 ran, one for one, plus the sixteenth
+# (inference serving depth) that has no .ps1 ancestor
 # --------------------------------------------------------------------------
 #
 # The point of pinning the NAMES is parity. A probe dropped, merged into a

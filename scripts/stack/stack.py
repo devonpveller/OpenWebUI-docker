@@ -1275,7 +1275,11 @@ class HealthSweep:
         made inside llm-gateway by a script that reads the container's own
         environment, which compose populated from that same file
         (`LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}` in inference/compose/gateway.yml).
-        Nothing secret reaches this process, its argv, or the probe line.
+        Being precise, because the loose version of this sentence was wrong once:
+        read_env_file returns a dict of EVERY value in that file, so the key IS
+        briefly in this process's memory. What is guaranteed is narrower and is
+        the part that matters - it is read for a PRESENCE CHECK only, and no
+        secret value is ever passed as an argument, logged, or printed.
         """
         upstream = "llama-cpp-upstream"
         listing = self.docker(

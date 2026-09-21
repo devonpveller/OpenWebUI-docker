@@ -48,7 +48,7 @@ python scripts/stack/stack.py up                  # start them, in dependency or
 python scripts/stack/stack.py up --all            # every declared plane (what stack.ps1 up did)
 python scripts/stack/stack.py up coder            # exactly one plane
 python scripts/stack/stack.py doctor              # docker, env files, blank keys
-python scripts/stack/stack.py health              # the 15-probe sweep (read-only)
+python scripts/stack/stack.py health              # the 16-probe sweep (read-only)
 python scripts/stack/stack.py stats               # inference demand + queue board
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 ```
@@ -303,19 +303,60 @@ plane's `host` requirements. Exits 1 if anything is `[FAIL]`. Read-only.
 
 ### `health`
 
-The fifteen functional probes `stack.ps1 health` ran, one for one, with the same
-pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code:
-**the number of failed probes**. Read-only, and this is everything it touches:
+**Sixteen** probes: the fifteen `stack.ps1 health` ran, one for one, with the
+same pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit
+code - **the number of failed probes** - plus one that has no `.ps1` ancestor.
 
-* `docker ps` - twice, once for unhealthy containers and once, with
-  `--filter name=tailscale`, by the deployment guard below;
+#### The sixteenth: `inference: serving depth`
+
+Added by `sl-recovery-backups` (2026-09-21) because **all fifteen of the others
+were green for thirty hours while every chat returned
+`500 upstream command exited prematurely`** (2026-09-19 18:54 -> 09-21 00:57).
+`llama-cpp-upstream` had been recreated with `LM_MODELS_DIR` unset, so compose
+bound its default `../../data/models/gguf` - an empty directory - at `/models`.
+The container was healthy, the anchor network existed, LiteLLM's
+`/health/liveliness` answered 200, and llama-swap's `/health` answers **without
+loading a model**. Nothing asked whether inference could actually serve.
+
+What it checks, in the cheapest order that cannot be fooled:
+
+1. **`.gguf` census** - `find /models` inside the upstream. **Zero FAILS**, and
+   the line names the HOST path of the bind (`docker inspect`), because the host
+   path is what an operator edits. Checked FIRST so an empty store yields a
+   diagnosis instead of a 500.
+2. **`/running`** - llama-swap's own list. A model in state `ready` PASSES and
+   the line names it. Zero cost, and the normal case.
+3. **One completion**, only when nothing is resident: `max_tokens` 3, THROUGH the
+   gateway (never around it), 600 s timeout because a cold load is minutes -
+   257 s measured on this host. 200 with a choice PASSES; anything else FAILS
+   with the gateway's own sentence.
+
+**What fails it:** an empty or missing `/models`; a completion that does not
+return 200; `llama-cpp-upstream` not running; or `LITELLM_MASTER_KEY` missing
+from `inference/.env`, which is reported as a named refusal rather than left to
+surface as a 401. Steps 1-2 read `*-upstream` directly, which `CLAUDE.md` permits
+for health/GPU/recovery probes; step 3 goes through the gateway like any caller.
+The key value is never passed as an argument or logged - the request is made by a
+script running inside `llm-gateway` that reads the container's own environment.
+
+#### What the sweep touches
+
+Read-only, and this is everything (counts measured 2026-09-21 on a healthy host):
+
+* `docker ps` - once for unhealthy containers, and a second time with
+  `--filter name=tailscale` ONLY when the frontend render has no `tailscale`
+  service (the deployment guard's fallback, so one call on this host);
 * `docker network inspect ai-stack_llm-net`;
 * **one `docker compose -f frontend/docker-compose.yml config --services`** -
   the tailnet guard asking whether the `tailscale` profile is
   part of this deployment (added with `sl-frontend-solo`; it was missing from
   this list until a tester counted);
-* **five** read-only `docker exec`s - `llm-gateway`, `tailscale`,
-  `little-coder`, `openbrain-db`, `agent-bridge`;
+* **seven** read-only `docker exec`s - `llm-gateway`, `tailscale`,
+  `little-coder`, `openbrain-db`, `agent-bridge`, and **two on
+  `llama-cpp-upstream`** (the `.gguf` census and `/running`);
+* conditionally, and only on the serving-depth probe's failure or cold paths:
+  one `docker inspect llama-cpp-upstream` (to name the bind) or one further
+  `docker exec llm-gateway` (the landing completion);
 * one `powershell -File check-owui-drift.ps1 -CountOnly`;
 * **seven** HTTP GETs - `:3000/health`, `:8060/health`, `:8085/healthz`,
   `:8085/health`, `:5055/api/config`, `:8062/health`, `:8816/health`. Seven, not
