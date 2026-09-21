@@ -94,7 +94,11 @@ def start_missing_services():
     `docker compose up -d watchtower` until 2026-08-22; watchtower itself
     was retired 2026-08-20."""
     print()
-    log_info("Missing-service report (start with: scripts\stack\stack.ps1 up <plane>):")
+    # Raw string: `\s` and `\t` are not valid escapes, so Python 3.12 raises a
+    # SyntaxWarning here and 3.14 makes it a SyntaxError. The path printed was
+    # never wrong - `\s` survives as a literal backslash-s - but a recovery
+    # script that warns on import is one an operator learns to ignore.
+    log_info(r"Missing-service report (start with: scripts\stack\stack.ps1 up <plane>):")
     inv = load_inventory()
     if not inv:
         return False

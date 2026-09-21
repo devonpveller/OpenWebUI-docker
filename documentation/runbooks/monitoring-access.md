@@ -47,7 +47,7 @@ empty the file -- next login from every device will alert again.
 
 ## Interactive log query — when an alert isn't enough
 
-[`scripts/portal/access-query.ps1`](../scripts/portal/access-query.ps1) is the
+[`scripts/portal/access-query.ps1`](../../scripts/portal/access-query.ps1) is the
 operator's "show me what happened" tool. It reads the tail of
 `authelia.log` and `caddy-access.log` from inside the watcher container,
 applies filters, and prints a table.
@@ -56,22 +56,22 @@ Common patterns:
 
 ```powershell
 # Quick "anyone hit the portal in the last hour?" sweep
-.\scripts\access-query.ps1 -Hours 1
+.\scripts\portal\access-query.ps1 -Hours 1
 
 # Just Authelia activity (sign-in attempts, etc.)
-.\scripts\access-query.ps1 -Hours 24 -OnlyAuth
+.\scripts\portal\access-query.ps1 -Hours 24 -OnlyAuth
 
 # Filter by hostname (subdomain)
-.\scripts\access-query.ps1 -Subdomain openwebui
+.\scripts\portal\access-query.ps1 -Subdomain openwebui
 
 # Only failed/forbidden requests
-.\scripts\access-query.ps1 -Status 401 -Status 403
+.\scripts\portal\access-query.ps1 -Status 401 -Status 403
 
 # Investigate a specific IP that fired a new-IP alert
-.\scripts\access-query.ps1 -IP 2a09:bac3:b936
+.\scripts\portal\access-query.ps1 -IP 2a09:bac3:b936
 
 # Summary view: who's been hitting the portal at all?
-.\scripts\access-query.ps1 -Hours 168 -UniqueIPs   # 1 week
+.\scripts\portal\access-query.ps1 -Hours 168 -UniqueIPs   # 1 week
 ```
 
 Time range is in `-Hours` (default 24). Output is sorted newest-first.

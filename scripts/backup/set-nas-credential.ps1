@@ -1,4 +1,4 @@
-﻿# scripts/set-nas-credential.ps1
+﻿# scripts/backup/set-nas-credential.ps1
 #
 # One-time setup: prompts for the dedicated NAS backup user's username and
 # password, encrypts them with Windows DPAPI (LocalMachine scope), writes
@@ -16,7 +16,7 @@
 #     `secrets/` rule.
 #
 # Usage:
-#   .\scripts\set-nas-credential.ps1
+#   .\scriptsackup\set-nas-credential.ps1
 #
 # Run this whenever you rotate the dedicated backup user's NAS password.
 
@@ -136,4 +136,4 @@ Write-Host "    ACLs  :"
 icacls $NasVaultPath | ForEach-Object { Write-Host "      $_" }
 Write-Host ""
 Write-Host "==> Next: register or re-fire the scheduled task" -ForegroundColor Cyan
-Write-Host "    .\scripts\install-nas-backup-task.ps1 -NasUncRoot ""\\<your-nas>\<share>\..."" -RunNow"
+Write-Host "    .\scriptsackup\install-nas-backup-task.ps1 -NasUncRoot ""\\<your-nas>\<share>\..."" -RunNow"

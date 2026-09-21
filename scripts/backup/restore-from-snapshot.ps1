@@ -1,4 +1,4 @@
-﻿# scripts/restore-from-snapshot.ps1
+﻿# scripts/backup/restore-from-snapshot.ps1
 #
 # Disaster-recovery driver: restore one or more services from a snapshot
 # directory. The snapshot directory layout is the same as `./backups/` —
@@ -10,14 +10,14 @@
 #
 # USAGE
 #   # Plan only (no changes; default mode):
-#   .\scripts\restore-from-snapshot.ps1 -SnapshotRoot .\backups -Date 2026-05-30
+#   .\scripts\backup\restore-from-snapshot.ps1 -SnapshotRoot .\backups -Date 2026-05-30
 #
 #   # Restore one service:
-#   .\scripts\restore-from-snapshot.ps1 -SnapshotRoot .\backups -Date 2026-05-30 `
+#   .\scripts\backup\restore-from-snapshot.ps1 -SnapshotRoot .\backups -Date 2026-05-30 `
 #     -Services tailscale -Apply
 #
 #   # Restore everything (BIG hammer; use after a host wipe):
-#   .\scripts\restore-from-snapshot.ps1 -SnapshotRoot \\nas\share\ai-stack\portal\slot-A `
+#   .\scripts\backup\restore-from-snapshot.ps1 -SnapshotRoot \\nas\share\ai-stack\portal\slot-A `
 #     -Date 2026-05-30 -Services all -Apply
 #
 # SAFETY

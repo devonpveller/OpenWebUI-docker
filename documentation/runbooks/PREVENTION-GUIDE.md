@@ -25,13 +25,13 @@ The `frontend/dockerfile.tailscale` now includes:
 #### PowerShell Development Script
 ```powershell
 # Validate everything before committing
-.\scripts\dev-helper.ps1 -Action validate
+.\scripts\checks\dev-helper.ps1 -Action validate
 
 # Fix line ending issues automatically
-.\scripts\dev-helper.ps1 -Action fix-lineendings
+.\scripts\checks\dev-helper.ps1 -Action fix-lineendings
 
 # Full development check (fix + rebuild)
-.\scripts\dev-helper.ps1 -Action full-check
+.\scripts\checks\dev-helper.ps1 -Action full-check
 ```
 
 #### Enhanced Health Monitoring
@@ -74,10 +74,10 @@ sed -i 's/\r$//' frontend/entrypoint.sh
 ### If Container Won't Start
 ```powershell
 # 1. Check for line ending issues
-.\scripts\dev-helper.ps1 -Action validate
+.\scripts\checks\dev-helper.ps1 -Action validate
 
 # 2. Fix and rebuild
-.\scripts\dev-helper.ps1 -Action full-check
+.\scripts\checks\dev-helper.ps1 -Action full-check
 
 # 3. Manual rebuild if needed
 docker compose build --no-cache tailscale
@@ -89,7 +89,7 @@ docker compose up -d tailscale
 ### For Windows Developers
 1. **Always run validation before committing**:
    ```powershell
-   .\scripts\dev-helper.ps1 -Action validate
+   .\scripts\checks\dev-helper.ps1 -Action validate
    ```
 
 2. **Use WSL or Git Bash for shell script editing**
@@ -107,7 +107,7 @@ docker compose up -d tailscale
 1. **Test Docker builds locally** before pushing
 2. **Run health checks** after updates:
    ```powershell
-   .\scripts\stack-watchdog.ps1 -Mode check
+   .\scripts\checks\stack-watchdog.ps1 -Mode check
    ```
 3. **Monitor container logs** for early warning signs
 
@@ -120,7 +120,7 @@ The enhanced health monitoring system now provides:
 
 Run comprehensive health check:
 ```powershell
-.\scripts\stack-watchdog.ps1 -Mode check
+.\scripts\checks\stack-watchdog.ps1 -Mode check
 ```
 
 ## Emergency Recovery
@@ -129,7 +129,7 @@ If issues occur despite prevention measures:
 
 1. **Quick fix for line endings**:
    ```powershell
-   .\scripts\dev-helper.ps1 -Action fix-lineendings
+   .\scripts\checks\dev-helper.ps1 -Action fix-lineendings
    ```
 
 2. **Emergency rebuild**:
@@ -140,7 +140,7 @@ ecovery\emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)
 
 3. **Full system recovery**:
    ```powershell
-   .\scripts\stack-watchdog.ps1 -Mode check
+   .\scripts\checks\stack-watchdog.ps1 -Mode check
    ```
 
 ## Monitoring and Alerts

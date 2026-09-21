@@ -1,4 +1,4 @@
-﻿# scripts/backup-to-nas.ps1
+﻿# scripts/backup/backup-to-nas.ps1
 #
 # Weekly NAS sync of the portal backup archives, two-slot alternating.
 # Mirrors `./backups/` to `<NasUncRoot>\slot-A\` or `<NasUncRoot>\slot-B\`
@@ -21,7 +21,7 @@
 #                  ISO week.
 #   -NasVaultPath  Optional. Path to the DPAPI-encrypted NAS credentials
 #                  file. Default: secrets/nas-backup-vault.dat under the
-#                  project root. Created by scripts/set-nas-credential.ps1.
+#                  project root. Created by scripts/backup/set-nas-credential.ps1.
 #                  The file is DPAPI-encrypted with LocalMachine scope so
 #                  the scheduled task (running under S4U logon with no
 #                  password) can still decrypt it.
@@ -42,10 +42,10 @@
 #   3  - integrity verification of a .sha256 sentinel failed
 #
 # Run manually:
-#   .\scripts\backup-to-nas.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
+#   .\scripts\backup\backup-to-nas.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
 #
 # Install as scheduled task:
-#   .\scripts\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
+#   .\scriptsackup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
 
 [CmdletBinding()]
 param(

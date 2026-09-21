@@ -2,7 +2,7 @@
 
 For partial restores (one service went bad, everything else is fine).
 For total disaster recovery, see
-[`scripts/backup/restore-from-snapshot.ps1`](../scripts/backup/restore-from-snapshot.ps1)
+[`scripts/backup/restore-from-snapshot.ps1`](../../scripts/backup/restore-from-snapshot.ps1)
 which orchestrates the whole stack in dependency order.
 
 **Pre-flight, every restore**:
