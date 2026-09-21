@@ -6,9 +6,9 @@ Everything below was checked by reading the named file or running the named
 command in the worktree `.claude/worktrees/wt-sl-ob1-docs`. Nothing is carried
 over from a sibling item's report without re-measuring it here.
 
-Artifact: OB1 `work/sl-ob1-docs` @ **`1218eff`** (three commits: `aa4a31d`,
-`fdfb7af` fixing the attempt-1 failure, `1218eff` fixing the attempt-2 one),
-merge-base `fe3e045`
+Artifact: OB1 `work/sl-ob1-docs` @ **`e7a39a7`** (four commits: `aa4a31d`,
+`fdfb7af` fixing the attempt-1 failure, `1218eff` the attempt-2 one, `e7a39a7`
+the attempt-3 one), merge-base `fe3e045`
 (= `origin/feature/integrated-knowledge-system` tip), two files, **not pushed**
 (D4). ai-stack: this note + `documentation/evidence/sl-ob1-docs/test-plan.md`,
 no gitlink staged.
@@ -517,39 +517,72 @@ the tester as deliberately unexplained, and shipped the sentence into
 
 It warns **nine** times, once per site. There is no dedupe.
 
-### What the 8 actually was
+### What the 8 actually was - OBSERVABLE ONLY
 
 My command was `docker compose -f docker-compose.yml --env-file <a copy of the
 old example> config --services`, run in `OB1/docker`, where a real `.env` exists
-and declares `OB_APP_MEMORY_PASSWORD`. In that shape:
+and declares `OB_APP_MEMORY_PASSWORD`. In that shape the render reports **8**
+warnings; with the same values in `.env` and no `--env-file` at all it reports
+**9**.
 
-- the **eight** sites in `docker-compose.yml` resolve against the `--env-file`,
-  which does not declare it -> eight warnings;
-- the **one** site in `docker-compose.scheduled.yml`, which arrives through
-  `include:`, still resolves against the project directory's `.env`, which does
-  declare it -> silent.
+**That is the whole of what this item asserts.** Passing `--env-file` changes how
+the `include:`d `docker-compose.scheduled.yml` resolves variables and changes the
+count, so counts taken with it are not comparable with counts taken without it.
+The artifact now says exactly that and stops - see section 16 for why.
 
-Eight is the site count of one file. I had measured a property of my command and
-written it down as a property of compose.
+**No claim is made about which file wins.** Attempt 3 shipped one ("the included
+file still resolves against this directory's `.env`") and it is refuted below.
 
-### Proven by attribution, not by subtraction
+### The measurements, recorded as measurements
 
-The tester supplied this explanation and it would have been easy to transcribe.
-Instead I renamed the scheduled file's variable to a sentinel (`OB_SCHED_ONLY`)
-in a scratch copy of both compose files and re-ran the same shape. Result, exit
-0: **8 warnings for `OB_APP_MEMORY_PASSWORD`, 0 for `OB_SCHED_ONLY`.** The split
-falls exactly on the file boundary. Nine-versus-eight is now a measured rule
-rather than a plausible story, and the rule is stated in the README and the
-example because it silently renders two halves of one project against two
-different env files.
+From the tester (`wt-tester-ob1docs`, attempt 3), each reproduced here before
+being written down. Sentinel runs use a scratch copy of both compose files with
+the scheduled file's one site renamed to `OB_SCHED_ONLY`; `.env` = this commit's
+example with a value, `--env-file` = the `aa4a31d` example. All exit 0.
 
-### A second instrument error found while checking the first
+**A. Two env files, DIFFERENT values, all four profiles.** `.env` →
+`OB_APP_MEMORY_PASSWORD=FROM_DOTENV`, `--env-file` → `...=FROM_ENVFILE`. All
+**nine** rendered sites carry `FROM_ENVFILE`, **including the one in
+`docker-compose.scheduled.yml`** (`openbrain-idea-refinery`). With no
+`--env-file`, all nine carry `FROM_DOTENV`.
 
-Several cells of my first correction matrix disagreed with each other. The cause:
-`docker compose config` **exits 1 and truncates its stderr** when the env file is
-too sparse for the render to complete. A truncated stderr looks exactly like a
-low warning count. Every number in the corrected matrix is now taken with its
-exit code beside it, and the plan tells the tester to do the same.
+**B. The sentinel matrix.**
+
+| sentinel declared in | `OB_APP` warnings | `SENTINEL` warnings |
+|---|---|---|
+| nowhere, `--env-file` passed | 8 | **1** |
+| `.env` only, `--env-file` passed | 8 | 0 |
+| `--env-file` only, `.env` passed | 8 | **0** |
+| nowhere, NO `--env-file` | 0 | 1 |
+
+**C. A tenth occurrence that is not a substitution.** The full render also shows
+`open_notebook` carrying `OB_APP_MEMORY_PASSWORD` directly: that service has
+`env_file: ./.env` (`docker-compose.yml:1252-1253`), which injects the entire
+project `.env` as environment. It is the only `./.env` env_file in either compose
+file, `--env-file` does not affect it, and it is outside the nine-site count. Now
+noted in `.env.example`'s header, because it means everything in that file
+reaches that one container.
+
+A model consistent with all of A and B: the top-level file sees only
+`--env-file`, and the included file sees `--env-file` first with the project
+`.env` as a fallback, making the 9→8 drop that fallback. **This is recorded as
+consistent-with, NOT verified as compose's rule, and nothing in the artifact
+depends on it.**
+
+### My sentinel experiment was not wrong; my inference from it was
+
+Findings section 14 previously claimed the split was "proven by attribution, not
+by subtraction": rename the scheduled site to a sentinel, re-run, get 8 for the
+main name and 0 for the sentinel. **The number is correct** - it is row 2 of the
+matrix above, and I reproduced it again. What the write-up omitted is that I had
+appended `OB_SCHED_ONLY=v` **to `.env` myself** before running it. A sentinel
+that is present in `.env` goes silent under every model, so the cell could not
+discriminate between them. I set up an experiment that could only agree with me
+and reported its agreement as proof.
+
+Row 3 is the cell I never ran: the sentinel in the `--env-file` and **nowhere
+else**. It also yields 0, which my model forbids. One minute of work, and it
+separates the two models.
 
 ### The generalisation, which is the point
 
@@ -559,17 +592,22 @@ is evidence the instrument is wrong, not a fact awaiting an explanation.** The
 correct response was to vary the command until the number moved - which takes
 about a minute, and which I did only after a tester failed the claim.
 
-This item has now produced the same class of error three times at three
+This item has now produced the same class of error four times at four
 magnifications: computing a render count instead of rendering it (the sibling
 items' defect, which this plan's rule 3 warns about); copying a grep yield from a
-filtered run (section 13); and this. Every one was a figure obtained by a method
-slightly different from the one the document told the reader to use.
+filtered run (section 13); measuring the warning count under an unexamined
+command shape (this section); and then explaining that count with an experiment
+built to agree with me (section 16). The first three were figures obtained by a
+method slightly different from the one the document told the reader to use. The
+fourth is worse, and it is the subject of section 16.
 
 ## 15. Numbers corrected this round
 
-| | attempt 2 shipped | measured |
+| | shipped | measured |
 |---|---|---|
-| `OB_APP_MEMORY_PASSWORD` warnings | 8 (9 sites) | **9** (9 sites) |
+| `OB_APP_MEMORY_PASSWORD` warnings (attempt 2) | 8 (9 sites) | **9** (9 sites) |
+| which file the `include:`d site resolves against (attempt 3) | "still ... this directory's `.env`" | **refuted** - it renders the `--env-file` value; no mechanism is now asserted |
+| "renders one way in the core services and the other way in the scheduled ones" (attempt 3) | shipped in README | **false** - with different values in the two files, all nine sites take the `--env-file` value |
 | rebuild grep yield | 23 lines / 15 files | **21 / 13 fresh clone**, 23 / 15 with the two gitignored `.env` files |
 | guard diagnostic: no comment strip | "72" | **71** |
 | guard diagnostic: no `$$` guard | "84" | **72** |
@@ -587,3 +625,43 @@ name sits behind a `:-` rather than following the host token directly. Row 4 of
 the consumer table was found by reading the file. The README now says so, because
 a grep presented as the way to rebuild a list that it cannot fully rebuild is the
 same shape of defect as everything else in section 14.
+
+## 16. An explanation that fits one non-discriminating experiment is not a mechanism
+
+This is the tester's generalisation, and it is sharper than mine.
+
+Section 14 already said: *an unexplained number is evidence the instrument is
+wrong, not a fact awaiting an explanation*. I acted on that, varied the command,
+found the 8, and then did the thing the rule does not cover - I **explained** it.
+The explanation fit my measurement. I ran a confirming experiment. It confirmed.
+I wrote "proven by attribution, not by subtraction" and shipped the mechanism
+into the README and `.env.example`, where it told a reader that a variable
+disagreeing across the two files would "render one way in the core services and
+the other way in the scheduled ones, silently".
+
+That consequence is false, and a reader acting on it would have gone looking for
+a split that does not exist.
+
+**The experiment I ran could not have contradicted me.** The sentinel was
+declared in `.env`, so it goes silent whether the included file reads `.env`,
+reads `--env-file` with `.env` as fallback, or reads both. The cell that
+separates those - sentinel in the `--env-file` and nowhere else - takes the same
+minute to run and I did not run it, because I already had an answer and was
+looking for agreement rather than for the cell that would break it.
+
+**The operational rule, which is now the artifact's:** when a measurement
+surprises you, fix the instrument (section 14) and then **stop at the
+observable**. State what changes and what to do about it. An explanation of a
+tool's internals is a claim like any other, it needs a discriminating experiment
+like any other, and a document does not need it to be useful - "pass no
+`--env-file`, counts taken with it are not comparable" carries every consequence
+a reader acts on, with no model attached. The mechanism sentences have been
+removed from both files rather than corrected, on the coordinator's decision, and
+that is the right call: the corrected mechanism would have been one more
+unverified model in a file whose job is to be trusted by someone who cannot check
+it.
+
+**Three times in one item** an explanation went out where a measurement was owed.
+CLAUDE.md's rule for briefing an agent - *name the claim, name what would
+DISPROVE it* - is written for delegation, and every one of these was me failing
+to do it for myself.

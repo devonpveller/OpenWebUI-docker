@@ -11,7 +11,7 @@ code changed, in either repo.**
 
 | | |
 |---|---|
-| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`**, **`fdfb7af`** (attempt 2: T3), **`1218eff`** (attempt 3: C59) |
+| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`**, **`fdfb7af`** (a2: T3), **`1218eff`** (a3: C59), **`e7a39a7`** (a4: C66) |
 | OB1 base | cut from **`fe3e045`** = `origin/feature/integrated-knowledge-system` tip |
 | OB1 files touched | `docker/README.md`, `docker/.env.example` — nothing else |
 | ai-stack branch | `work/sl-ob1-docs`, based on `a2d3644` (the `sl-ob1-gitlink` merge, which is what pins OB1 at `fe3e045`) |
@@ -74,17 +74,20 @@ so the next one does not open a finding about it.
 **Do not pass `--env-file` to any render in this plan.** Copy the env file you
 want to `.env` in the project directory instead.
 
-With a `.env` present in `OB1/docker` AND a different file passed as
-`--env-file`, the substitutions in `docker-compose.yml` resolve against your
-`--env-file` while those in `docker-compose.scheduled.yml` — pulled in by
-`include:` — keep resolving against the project directory's `.env`. For
-`OB_APP_MEMORY_PASSWORD` that splits nine warnings into eight, because the ninth
-site is the one in the scheduled file.
+Passing `--env-file` changes how the `include:`d `docker-compose.scheduled.yml`
+resolves variables and changes what the render reports: `OB_APP_MEMORY_PASSWORD`
+gives **9** warnings with no `--env-file` and **8** with one. Counts taken that
+way are not comparable with counts taken without it. That is the whole of what
+the artifact claims, and it is all you need to run this plan.
 
-Attempt 2 measured with `--env-file`, got 8, could not explain it, and shipped
-"compose dedupes somewhere" into `OB1/docker/.env.example` as a fact about
-compose. It was a fact about the command. **A number you cannot explain is a
-signal your instrument is wrong, not a curiosity to document.**
+**Do not expect the artifact to tell you which file wins — it deliberately does
+not say.** Attempt 2 measured with `--env-file`, got 8, could not explain it, and
+shipped "compose dedupes somewhere" as a fact about compose; attempt 3 fixed the
+number and then shipped an explanation of the 8 that a discriminating experiment
+refuted. Both failed. The mechanism sentences are now removed rather than
+corrected. **If you can establish the real rule, that is a class-3 note and a
+genuinely useful one — but it is not required to pass any case here, and the
+artifact asserting it again would be the third repeat of the same defect.**
 
 ## THE THIRD TRAP — renders are NOT stderr-clean on every seed
 
@@ -368,12 +371,12 @@ Four claims, four commands, from `<wt>/OB1/docker`:
 ## T5 — commit shape and blast radius (acceptance criteria 4 and 5)
 
 ```bash
-git -C "<wt>/OB1" log --oneline -3                      # 1218eff, fdfb7af, aa4a31d
+git -C "<wt>/OB1" log --oneline -4                      # e7a39a7, 1218eff, fdfb7af, aa4a31d
 git -C "<wt>/OB1" merge-base HEAD origin/feature/integrated-knowledge-system   # fe3e045
 git -C "<wt>/OB1" diff --stat fe3e045 HEAD             # exactly 2 files, both docs
 git -C "<wt>/OB1" status --porcelain                    # clean
 git -C "<wt>" status --porcelain                        # ` M OB1` + the 2 ai-stack files, NO `M  OB1`
-git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 3 commits, unpushed
+git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 4 commits, unpushed
 ```
 
 **The pre-commit's OB1 gates (5b recipe tests, 5c `deno check`, 5d integration
@@ -636,19 +639,26 @@ described was rewritten, not patched.
   table, with `.env` = the previous example and NO `--env-file`. Measured three
   ways: bare render, all-four render, and this commit's example minus only that
   line.
-- **C66** Eight appears only when `--env-file <other>` is passed while a `.env`
-  exists in the project directory: `docker-compose.yml`'s eight sites resolve
-  against the `--env-file`, and `docker-compose.scheduled.yml`'s one site, coming
-  in through `include:`, still resolves against the project directory's `.env`.
-  -> T1 / trap 4. **Proven by attribution, not by subtraction**: renaming the
-  scheduled file's variable to a sentinel in a scratch copy and re-running that
-  shape gives eight warnings for the main file's name and **zero** for the
-  sentinel.
+- **C66 — REPLACED after attempt 3 FAILED on it.** It now claims only the
+  observable: passing `--env-file` changes how the `include:`d
+  `docker-compose.scheduled.yml` resolves variables and changes the count
+  (measured 9 without, 8 with), so counts taken that way are not comparable. ->
+  T1 / trap 4. **No claim is made about which file wins.** The retired version
+  said the included file "still resolves against this directory's `.env`" and
+  drew from it that a variable disagreeing across the two files renders "one way
+  in the core services and the other way in the scheduled ones, silently" — both
+  refuted by the tester, who gave the two files DIFFERENT values and found all
+  nine sites, the scheduled one included, rendering the `--env-file` value. The
+  measurements are in findings section 14; the artifact depends on none of them.
 - **C67** Therefore `--env-file` should not be passed to this project at all;
   compose reads `.env` from the project directory on its own. -> follows from C66
 - **C68** A `config` render that exits non-zero truncates its stderr, so a
   warning count taken without checking the exit code can be an artefact. -> check
-  `$?` on any render you count warnings from
+  `$?` on any render you count warnings from. **Use `config --services`, not a
+  bare `config`**: the full render also resolves `env_file:` targets, two of
+  which (`../recipes/*/.env`) are gitignored, so a bare `config` exits 1 in a
+  fresh clone with `env file ... not found` while `--services` exits 0 on the
+  same tree.
 - **C69** The rebuild grep returns **21 lines in 13 files in a fresh clone**, 23
   in 15 on a deployed host; the two extra are the gitignored
   `agent-org/docker/.env:58` and `frontend/.env:127`. Two of the 21 are prose in
@@ -658,6 +668,33 @@ described was rewritten, not patched.
   pattern needs the service name to follow the host token directly and here it
   sits behind a `:-`. The grep is the sweep; reading the file is the audit. ->
   run the grep and confirm the absence
+
+## B.11 Sentences introduced by attempt 4
+
+- **C71** Passing `--env-file` changes how the `include:`d
+  `docker-compose.scheduled.yml` resolves variables and changes the warning count
+  (9 without, 8 with), so counts taken that way are not comparable. -> T1. This
+  is the observable; it is what both the README and `.env.example` now say, and
+  it is the only claim either makes about `--env-file`.
+- **C72** The artifact asserts NO mechanism for which env file wins. -> read both
+  files; a sentence naming which file a site "resolves against" is a regression.
+  Attempt 3's version was refuted, attempt 2's was refuted, and the third attempt
+  at one is not wanted.
+- **C73** `open_notebook` carries `env_file: ./.env`
+  (`docker-compose.yml:1252-1253`) — the only `./.env` env_file in either compose
+  file — so the WHOLE of `.env` is injected into that one container as
+  environment, including keys no other service sees. This is not a substitution
+  and is outside the nine-site count. -> `grep -nE '^\s*-?\s*\./\.env\s*$'`
+  over both compose files returns exactly that one line. Stated in
+  `.env.example`'s header as a blast-radius note.
+- **C74** A bare `docker compose config` exits 1 in a fresh clone on gitignored
+  `env_file:` targets (`../recipes/*/.env`), while `config --services` exits 0 on
+  the same tree. -> C68; run both and compare exit codes.
+- **C75** (findings only) The attempt-3 sentinel experiment's NUMBER was correct
+  and reproduces; the inference drawn from it was invalid, because the sentinel
+  had been declared in `.env`, which makes it silent under every candidate model.
+  -> findings section 14; the matrix there has the discriminating row that was
+  never run.
 
 # What a FAIL looks like, ranked
 
@@ -677,9 +714,11 @@ described was rewritten, not patched.
      attempt 1's tester, so one of the two is wrong;
    - **C34** and **C42** — inherited from the old root template and then
      corrected against the source, which is where a copied-through error hides;
-   - **C65-C68** (the nine-warning count and the `--env-file`/`include:` rule) —
-     this is where attempt 2 failed, and the correct number depends on the
-     command shape, so reproduce the shape exactly.
+   - **C71/C72** — attempts 2 and 3 both failed here. The count depends on the
+     command shape, so reproduce the shape exactly; and check that neither file
+     has regrown a sentence saying which env file wins. **A mechanism claim in
+     the artifact is a FAIL even if it is true**, because it is not established
+     by anything in the evidence.
 
 **Not a fail:** anything in the excluded host-side class (T3d), the CRLF smudge
 in a fresh clone (trap 2), or a render that warns exactly as T1's stderr table
