@@ -57,7 +57,7 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | `scripts/checks/check-backup-coverage.ps1` | yes | OK | **RAN**: was `1 GAPS` (exit 1) on `wiki-viewer-srv`; now `CLEAN` (exit 0) — §4 |
 | `scripts/checks/check-backup-freshness.ps1` | **NEW** | OK | **RAN** both ways — §3 |
 | `scripts/sysadmin-mcp/check_backups.py` | yes | OK | **RAN** `--dry` and `--check` — §3 |
-| `scripts/checks/stack-watchdog.ps1` | yes | OK | `-Mode check` **NOT run**: check mode calls `Repair-*`, which restarts live containers. Verified by parse + `check-watchdog-repair-targets.ps1` + isolated function runs (§3, §6). |
+| `scripts/checks/stack-watchdog.ps1` | yes | OK | `-Mode check` **NOT run**: check mode calls `Repair-*`, which restarts live containers. Verified by parse + `check-watchdog-repair-targets.ps1` + isolated function runs (§3). |
 | `scripts/checks/check-watchdog-repair-targets.ps1` | yes | OK | **RAN** `-SkipDocker`: `REPAIR TARGETS OK: 24 container(s)` |
 | `scripts/checks/check-openbrain-health.ps1` | yes | OK | not run (probes OB1; owned by the watchdog) |
 | `scripts/checks/check-agent-org-health.ps1` | yes | OK | not run (same) |
@@ -97,8 +97,10 @@ only fails from a worktree three levels deeper.
 
 ## 2. Two recovery scripts were actually broken
 
-**(a) `scripts/portal/breach-killswitch.ps1` could not run at all.** Lines 29 and
-43 used `Get-Date -AsUTC`, which arrived in PowerShell 7. This host is 5.1, so:
+**(a) `scripts/portal/breach-killswitch.ps1` could not run at all.** The `$ts`
+assignment at the top of its `try` block and the `timestamp_utc` field of its
+alert body (lines 29 and 43 BEFORE this change; 35 and 49 after) used
+`Get-Date -AsUTC`, which arrived in PowerShell 7. This host is 5.1, so:
 
 ```
 breach-killswitch.ps1 : A parameter cannot be found that matches parameter name 'AsUTC'.
@@ -117,7 +119,7 @@ the killswitch never got the same fix. **Fixed** to `[DateTime]::UtcNow.ToString
 apparently never run on this host — the inventory's dry-run column is the first
 thing that did.
 
-**(b) `scripts/recovery/status_check.py:97`** had `"...scripts\stack\stack.ps1..."`
+**(b) `scripts/recovery/status_check.py`** — the `log_info` in `start_missing_services()` (line 101 after this change; it was 97 before) had `"...scripts\stack\stack.ps1..."`
 in a non-raw string. `\s` is not a valid escape: Python 3.12 emits a
 `SyntaxWarning` on import and 3.14 makes it a `SyntaxError`. The printed path was
 never wrong. **Fixed** by making it a raw string; it now compiles clean under
@@ -413,7 +415,7 @@ Left untouched deliberately to avoid conflicting with that item mid-flight.
 
 ## 9. Things seen and deliberately not touched
 
-- `scripts/checks/stack-watchdog.ps1:941` and `:972` name
+- `scripts/checks/stack-watchdog.ps1:984` and `:1015` (re-derived after this item's own edits shifted the file ~119 lines) name
   `scripts\check-openbrain-health.ps1` / `scripts\check-agent-org-health.ps1` in
   COMMENTS; both live in `scripts\checks\`. The runtime `Join-Path $SCRIPT_DIR …`
   calls are correct, so only the comments are stale. `sl-checks-worktree` owns
