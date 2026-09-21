@@ -689,6 +689,9 @@ PS1_PROBES = [
     "0 unhealthy containers (found: )",
     "anchor: ai-stack_llm-net exists",
     "inference: llm-gateway liveliness",
+    # sl-recovery-backups (2026-09-21) added the sixteenth: liveliness answers
+    # 200 with an EMPTY model store, and did for thirty hours.
+    "inference: serving depth: qwen36-27b resident on llama-cpp-upstream (/running)",
     "frontend: OWUI http://127.0.0.1:3000/health",
     "frontend: 8 tailnet serve routes",
     "frontend: owui/ manifest rows drifted from live webui.db: 0",
@@ -733,6 +736,17 @@ class FakeHost:
             ["openwebui", "openwebui-backup", "tailscale", "tailscale-backup"],
         )
         self.running = broken.get("running", [])
+        # sl-recovery-backups: the inference serving-depth probe. Defaults are a
+        # stocked model store with one model already resident - the state this
+        # host is in when it is working.
+        self.gguf_count = broken.get("gguf_count", "3")
+        self.gguf_code = broken.get("gguf_code", 0)
+        self.models_bind = broken.get("models_bind", r"C:\Users\yamao\.lmstudio\models")
+        self.llama_running = broken.get(
+            "llama_running",
+            '{"running":[{"model":"qwen36-27b","state":"ready"}]}',
+        )
+        self.landing = broken.get("landing", "")
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -748,10 +762,26 @@ class FakeHost:
             return stack.CommandResult(0, "\n".join(self.unhealthy), "")
         if cmd[:2] == ["docker", "network"]:
             return stack.CommandResult(0, self.network, "")
+        if cmd[:2] == ["docker", "inspect"]:
+            return stack.CommandResult(0, self.models_bind, "")
         if cmd[:2] == ["docker", "exec"]:
             container = cmd[2]
             if container == "tailscale":
                 return stack.CommandResult(0, self.serve_routes, "")
+            if container == "llama-cpp-upstream":
+                # Two different reads of the same container: the .gguf census
+                # (sh -c find) and llama-swap's /running (curl).
+                if "curl" in cmd:
+                    return stack.CommandResult(0, self.llama_running, "")
+                return stack.CommandResult(
+                    self.gguf_code, self.gguf_count,
+                    "" if self.gguf_code == 0 else "Error: No such container: llama-cpp-upstream",
+                )
+            # Matched on the SCRIPT, not on the container: llm-gateway also
+            # carries the liveliness probe's `python -c`, and swallowing that one
+            # here would let exec_codes stop breaking it.
+            if cmd[-1] == stack._LANDING_COMPLETION:
+                return stack.CommandResult(0, self.landing, "")
             return stack.CommandResult(self.exec_codes.get(container, 0), "", "")
         raise AssertionError(f"unscripted docker call: {cmd}")
 
@@ -782,6 +812,107 @@ def test_health_runs_exactly_the_probes_stack_ps1_ran_in_the_same_order(root):
     assert [name for _state, name in probe_lines(out)] == PS1_PROBES
     assert code == 0
     assert "ALL HEALTH PROBES PASSED" in out
+
+
+# --- the inference serving-depth probe (sl-recovery-backups, 2026-09-21) ----
+# Fifteen probes stayed green for thirty hours while chat was dead: the upstream
+# was recreated with an EMPTY /models bind, llama-swap answered /health without
+# loading anything, and the first real completion returned 500. Each of these
+# pins one branch of the probe that exists so that cannot repeat.
+
+
+def depth_line(out: str) -> tuple[str, str]:
+    """(state, label) of the serving-depth probe line."""
+    for state, name in probe_lines(out):
+        if name.startswith("inference: serving depth"):
+            return state, name
+    raise AssertionError(f"no serving-depth probe in:\n{out}")
+
+
+def test_serving_depth_passes_and_names_the_resident_model(root):
+    _code, out = sweep(FakeHost(), root)
+    state, label = depth_line(out)
+    assert state == "OK"
+    assert "qwen36-27b" in label
+
+
+def test_serving_depth_fails_on_an_empty_models_mount_and_names_the_bind(root):
+    """THE REGRESSION. A probe that passes here has not done its job."""
+    host = FakeHost(gguf_count="0", models_bind=r"D:\Open WebUI\data\models\gguf")
+    code, out = sweep(host, root)
+    state, label = depth_line(out)
+    assert state == "FAIL"
+    assert "NO .gguf files" in label
+    assert r"D:\Open WebUI\data\models\gguf" in label, "the label must name the bind to fix"
+    assert "LM_MODELS_DIR" in label
+    assert code == 1, "one failed probe, one exit code"
+    # And it must NOT have gone on to spend a cold-load timeout on a store that
+    # provably has nothing to load.
+    assert not any(cmd[-1] == stack._LANDING_COMPLETION for cmd in host.calls)
+
+
+def test_serving_depth_with_nothing_resident_makes_one_completion(root):
+    host = FakeHost(
+        llama_running='{"running":[]}',
+        landing="OK a 3-token completion through the gateway returned 200 in 257s (qwen36-27b loaded)",
+    )
+    _code, out = sweep(host, root)
+    state, label = depth_line(out)
+    assert state == "OK"
+    assert "nothing was resident" in label
+    assert "257s" in label
+    landings = [cmd for cmd in host.calls if cmd[-1] == stack._LANDING_COMPLETION]
+    assert len(landings) == 1, "ONE completion, not one per retry"
+    assert landings[0][:3] == ["docker", "exec", "llm-gateway"], "through the gateway, never the upstream"
+
+
+def test_serving_depth_fails_when_the_landing_completion_does(root):
+    host = FakeHost(
+        llama_running='{"running":[]}',
+        landing="FAIL the gateway answered HTTP 500: upstream command exited prematurely",
+    )
+    code, out = sweep(host, root)
+    state, label = depth_line(out)
+    assert state == "FAIL"
+    assert "upstream command exited prematurely" in label
+    assert code == 1
+
+
+def test_serving_depth_fails_when_the_upstream_is_not_running(root):
+    host = FakeHost(gguf_code=1, gguf_count="")
+    code, out = sweep(host, root)
+    state, label = depth_line(out)
+    assert state == "FAIL"
+    assert "No such container" in label or "upstream running" in label
+    assert code == 1
+
+
+def test_serving_depth_refuses_without_a_caller_key_rather_than_guessing(root):
+    """An unmigrated host gets a sentence naming the file, not a 401 to decode."""
+    env = root / "inference" / ".env"
+    env.write_text(
+        "\n".join(line for line in env.read_text(encoding="utf-8").splitlines()
+                  if not line.startswith("LITELLM_MASTER_KEY=")) + "\n",
+        encoding="utf-8",
+    )
+    host = FakeHost(llama_running='{"running":[]}')
+    code, out = sweep(host, root)
+    state, label = depth_line(out)
+    assert state == "FAIL"
+    assert "LITELLM_MASTER_KEY" in label and "inference/.env" in label
+    assert code == 1
+    assert not any(cmd[-1] == stack._LANDING_COMPLETION for cmd in host.calls)
+
+
+def test_the_landing_completion_never_prints_the_key(root):
+    """The script reads the container's own env; no value crosses this process."""
+    assert "LITELLM_MASTER_KEY" in stack._LANDING_COMPLETION
+    assert 'os.environ.get("LITELLM_MASTER_KEY"' in stack._LANDING_COMPLETION
+    host = FakeHost(llama_running='{"running":[]}', landing="OK done in 1s (m loaded)")
+    sweep(host, root)
+    for cmd in host.calls:
+        assert "value-for-LITELLM_MASTER_KEY" not in " ".join(cmd), \
+            "the key value must never reach an argv"
 
 
 def test_health_exit_code_is_the_number_of_failed_probes(root):
@@ -816,7 +947,7 @@ def test_one_dead_plane_costs_its_own_probes_and_not_the_rest_of_the_sweep(root)
     )
     code, out = sweep(host, root)
     rows = probe_lines(out)
-    assert len(rows) == 15
+    assert len(rows) == 16          # sixteen since the serving-depth probe
     assert [name for state, name in rows if state == "FAIL"] == [
         "frontend: OWUI http://127.0.0.1:3000/health",
         "frontend: 8 tailnet serve routes",
@@ -1711,7 +1842,7 @@ def test_the_tailnet_probe_skips_itself_where_the_profile_is_not_deployed(root):
     assert "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)" in out
     names = [name for _s, name in probe_lines(out)]
     assert "frontend: 8 tailnet serve routes" not in names
-    assert len(names) == 14          # the other fourteen all still ran
+    assert len(names) == 15          # the other fifteen all still ran
     assert "ALL HEALTH PROBES PASSED" in out
 
 
