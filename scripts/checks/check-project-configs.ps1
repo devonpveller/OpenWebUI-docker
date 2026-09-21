@@ -26,7 +26,16 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $repoRoot
 
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { $_ }
-if (-not $staged) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
+# The SAME `--diff-filter=ACM` gate 4 below had to drop: it discards a rename
+# outright, so `git mv old new` plus an edit, staged alone, left $staged empty
+# and the whole check exited 0 on "nothing staged" (reproduced at f3eee64,
+# 2026-09-22). Gates 1-3 keep the ACM list on purpose - widening what THEY
+# enforce is a separate change - but the EARLY EXIT must not be able to skip a
+# commit that really did stage something. The gates 1-3 half of this is left
+# open deliberately and written down in
+# documentation/notes/stack-layers-sl-gate4-carries-findings.md.
+$stagedAny = @(& git diff --cached --name-only) | Where-Object { $_ }
+if (-not $stagedAny) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
 
 $failed = 0
 
@@ -379,19 +388,105 @@ $ctrlBad = @()
 $prev = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'
 # -U0 so only changed lines carry a '+', and --text so a file git has not been
-# told is binary is still scanned rather than summarised away.
-$addedDiff = @(& git diff --cached -U0 --text --diff-filter=ACM)
+# TOLD is binary is still scanned rather than summarised away (the .gitattributes
+# skip below is the deliberate, PRINTED exit from the scan - never git's silent
+# content heuristic).
+#
+# NO --diff-filter, and rename detection left at git's default (-M). Both are
+# corrections to this gate's first version; each reproduction at f3eee64 is
+# recorded in documentation/notes/stack-layers-sl-gate4-carries-findings.md.
+#   * `--diff-filter=ACM` DROPPED a rename outright. `git mv` plus an edit that
+#     injected a 0x08 produced an EMPTY diff here, and because the same filter
+#     feeds $staged at the top of the file the whole check printed
+#     "nothing staged - skip" and exited 0. No filter at all cannot drop a
+#     change class - the same silent-narrowing shape gate 1 above already
+#     carries twice. Deletions arrive too, and a deletion has no added lines,
+#     so they cost nothing.
+#   * rename detection STAYS ON rather than --no-renames. --no-renames respells
+#     a move as delete+add, which makes EVERY line of the moved file an "added"
+#     line: it would report lines the commit did not author, and a pure move of
+#     any of the eleven pre-existing control bytes already sitting in
+#     documentation/ would go red. With -M the rename's hunk holds exactly the
+#     lines the commit introduced, which is what "added line" is meant to mean.
+$addedDiff = @(& git diff --cached -U0 --text)
 $ErrorActionPreference = $prev
-$curFile = ''
+
+# WHICH FILES ARE BINARY: `git check-attr`, i.e. .gitattributes - NOT a NUL-byte
+# content probe. Measured on this tree 2026-09-22: 1198 tracked files, 0 with
+# the binary attribute set and 0 carrying a NUL byte in their first 8000 bytes,
+# so neither test changes anything about what is here today and the choice is
+# entirely about what a future commit stages. The attribute wins because a
+# content probe would skip a file BECAUSE of a byte (0x00) that is itself inside
+# this gate's own class: inject a NUL into a text file and a NUL-probing gate
+# falls silent on precisely its worst input. .gitattributes is a declaration
+# somebody made on purpose and it is reviewable in the diff. The cost is that a
+# binary type .gitattributes does not cover yet (.pdf, .woff2, .wasm, .zip)
+# still reaches the scan and fails - so the failure text below names that case
+# and its one-line fix, instead of blaming a non-raw Python string as it did for
+# the 70-byte PNG that started this.
+$ctrlFiles = @()
 foreach ($line in $addedDiff) {
-    if ($line -like '+++ b/*') { $curFile = $line.Substring(6); continue }
-    if ($line -notlike '+*' -or $line -like '+++*') { continue }
+    if ($line -like '+++ b/*') { $ctrlFiles += $line.Substring(6) }
+}
+$binarySkip = @{}
+if ($ctrlFiles.Count -gt 0) {
+    # --stdin, NOT a path list: `git check-attr binary -- <path>...` over a
+    # whole-tree stage blows the Windows command-line limit (measured
+    # 2026-09-22 on this tree: WinError 206 at 1198 paths).
+    #
+    # And a TEMP FILE redirected by cmd, not a PowerShell pipeline into git:
+    # PS 5.1 terminates every line it writes to a native command's stdin with
+    # CRLF, and `git check-attr --stdin` takes the trailing CR as part of the
+    # path. Measured 2026-09-22: the pipeline form answered
+    # `"docs-test.png\r": binary: unspecified` for a file .gitattributes marks
+    # binary - a skip that silently never happens, which is the failure this
+    # gate was rewritten to stop making.
+    $attrTmp = [System.IO.Path]::GetTempFileName()
+    [System.IO.File]::WriteAllText($attrTmp, (($ctrlFiles -join "`n") + "`n"))
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $attrOut = @(cmd /c "git check-attr --stdin binary < ""$attrTmp"" 2>nul")
+    $ErrorActionPreference = $prev
+    Remove-Item $attrTmp -Force -ErrorAction SilentlyContinue
+    foreach ($a in $attrOut) {
+        $m = [regex]::Match("$a", '^(.*): binary: (.*)$')
+        if ($m.Success -and $m.Groups[2].Value -eq 'set') {
+            $binarySkip[$m.Groups[1].Value] = $true
+        }
+    }
+}
+foreach ($b in ($binarySkip.Keys | Sort-Object)) {
+    Write-Host "  [configs] binary per .gitattributes - control-character scan skipped: $b"
+}
+
+$ctrlRx = [regex]'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+$curFile = ''
+$curLine = 0
+$skipFile = $true
+foreach ($line in $addedDiff) {
+    if ($line -like '+++ *') {
+        # '+++ /dev/null' is a deletion - no added lines follow it, so park it.
+        if ($line -like '+++ b/*') { $curFile = $line.Substring(6) } else { $curFile = '' }
+        $skipFile = ($curFile -eq '') -or $binarySkip.ContainsKey($curFile)
+        continue
+    }
+    if ($line -like '@@*') {
+        # -U0 hunk header '@@ -a,b +c,d @@': c is the first NEW-file line number
+        # in the hunk, which is what turns a hit into a file:line.
+        $h = [regex]::Match("$line", '^@@ -\S+ \+(\d+)')
+        if ($h.Success) { $curLine = [int]$h.Groups[1].Value }
+        continue
+    }
+    if ($line -notlike '+*') { continue }
+    $n = $curLine
+    $curLine++
+    if ($skipFile) { continue }
     # The staged blob is what ships, so scan the diff's own bytes.
-    $hit = [regex]::Match($line, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]')
+    $hit = $ctrlRx.Match("$line")
     if ($hit.Success) {
         $code = '0x{0:X2}' -f [int][char]$hit.Value
-        $shown = $line.Substring(1) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '<CTRL>'
-        $ctrlBad += "$curFile : $code in an added line -> $($shown.Trim())"
+        $shown = "$line".Substring(1) -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '<CTRL>'
+        $ctrlBad += "${curFile}:${n} : $code in an added line -> $($shown.Trim())"
     }
 }
 if ($ctrlBad.Count -gt 0) {
@@ -400,8 +495,11 @@ if ($ctrlBad.Count -gt 0) {
     Write-Host "             Tab/LF/CR are fine; nothing else below 0x20 is." -ForegroundColor Red
     Write-Host "             Usual cause: a backslash escape in a NON-RAW replacement string" -ForegroundColor Red
     Write-Host "             (\b -> 0x08, \a -> 0x07, \f -> 0x0C). Use rb'' / r'' literals." -ForegroundColor Red
+    Write-Host "             If the file is BINARY, this gate is the wrong place to argue with it:" -ForegroundColor Red
+    Write-Host "             declare the type in .gitattributes (e.g. '*.woff2 binary') and the next" -ForegroundColor Red
+    Write-Host "             run skips it BY NAME on a printed line." -ForegroundColor Red
     $failed += $ctrlBad.Count
-} elseif ($staged.Count -gt 0) {
+} elseif ($stagedAny.Count -gt 0) {
     Write-Host "  [configs] no control characters in staged added lines"
 }
 
