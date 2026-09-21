@@ -89,7 +89,7 @@ Every backup container, regardless of shape, must have:
 
 For a new service whose data is "files in a volume / bind mount, no
 database under active writes," copy this block into
-[`docker-compose.yml`](../docker-compose.yml) (adjust the marked lines):
+[`docker-compose.yml`](../../docker-compose.yml) (adjust the marked lines):
 
 ```yaml
   <SERVICE>-backup:
@@ -127,7 +127,7 @@ database under active writes," copy this block into
 Then:
 
 1. Add `<SERVICE>_BACKUP_RETAIN_COUNT=2` and `<SERVICE>_BACKUP_CRON=` to
-   [`.env.example`](../.env.example).
+   [`.env.example`](../../.env.example).
 2. Add `./backups/<SERVICE>/` to the inventory in
    [`scripts/checks/check-backup-coverage.ps1`](../../scripts/checks/check-backup-coverage.ps1).
 3. Add a restore section to [`restore-from-snapshot.md`](./restore-from-snapshot.md).

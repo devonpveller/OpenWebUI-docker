@@ -33,7 +33,7 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | Script | Exists | Parses | Dry / help form — RESULT |
 |---|---|---|---|
 | `scripts/recovery/emergency-recovery.ps1` | yes | OK | **none exists** — every mode (`recover`/`nuclear`/`gpu-reset`) mutates. Parse only. |
-| `scripts/recovery/gpu_check.py` | yes | OK | read-only by design; not run (touches the GPU probe path) |
+| `scripts/recovery/gpu_check.py` | yes | OK | **NOT read-only** (corrected 2026-09-22, sl-gate4-carries): `restart_gpu_services()` runs `docker compose restart openwebui llama-cpp-upstream llama-cpp-embed-upstream` at line 146, and `main()` restarts `llama-cpp-upstream` (line 214) and `llama-cpp-embed-upstream` (line 228) on their own. Not run: a bare `python scripts/recovery/gpu_check.py` mutates the running stack. |
 | `scripts/recovery/namespace_reset.py` | yes | OK | **none** — destructive |
 | `scripts/recovery/nuclear_option.py` | yes | OK | **none** — destructive |
 | `scripts/recovery/rebuild_tailscale.py` | yes | OK | **none** — destructive |
@@ -46,7 +46,7 @@ for `.sh`. `.bat` has no parse-only form and none was invented.
 | `scripts/backup/install-nas-backup-task.ps1` | yes | OK | **none** — registers a scheduled task |
 | `scripts/backup/restore-from-snapshot.ps1` | yes | OK | **RAN** plan-only (no `-Apply`): discovered the 2026-09-20 little-coder archive and mapped all five subdirs to their volumes |
 | `scripts/backup/set-nas-credential.ps1` | yes | OK | **none** — writes a credential vault |
-| `scripts/maintenance/weekly-maintenance.ps1` | yes | OK | **none** — `-Register` is the only switch; a bare run compacts the VHDX |
+| `scripts/maintenance/weekly-maintenance.ps1` | yes | OK | **none** — no dry-run form, and a bare run compacts the VHDX. Its `param()` block (lines 25-29) declares THREE parameters, not one (corrected 2026-09-22, sl-gate4-carries): `[switch]$Register`, `[switch]$SkipCompact` ("reclaim + report only" - the closest thing to a safe form) and `[int]$CompactWaitMinutes = 25`. |
 | `backup/authelia-backup.sh` | yes | OK | container entrypoint; not host-runnable |
 | `backup/caddy-backup.sh` | yes | OK | container entrypoint |
 | `backup/generic-tar-backup.sh` | yes | OK | container entrypoint; its precheck strings are the basis of §3 |
@@ -100,6 +100,25 @@ literal in `documentation/runbooks/*.md` against disk: **1 unresolved left**, an
 it is a false positive — `UPDATE-MANAGEMENT.md`'s `../../../documentation-plans-ai-stack/...`
 resolves correctly from the MAIN checkout (whose parent holds the plan store) and
 only fails from a worktree three levels deeper.
+
+**Corrected 2026-09-22 (sl-gate4-carries).** That sweep was WRONG: it found one
+unresolved href where an unbounded one finds THREE. Re-run with
+`documentation/evidence/sl-gate4-carries/href-sweep.py` — every `](...)` target in
+`documentation/runbooks/**/*.md` that is not `http(s):`, `mailto:` or a bare
+`#anchor`, resolved against the directory of the file carrying it, no allowlist:
+**17 relative hrefs, 3 unresolved at f3eee64**. Two of them were genuine
+pre-existing `../` vs `../../` errors in `backup-conventions.md` — line 92
+`](../docker-compose.yml)` and line 130 `](../.env.example)`, both resolving into
+a `documentation/` directory that holds neither file — and they are the same
+one-level-short mistake as the `](../scripts/...)` row above, in the same file,
+missed because the original sweep matched only the `../scripts/` spelling. Both
+are FIXED (now `../../`). The third is the `UPDATE-MANAGEMENT.md` plan-store link,
+which is the false positive the sentence above describes and is confirmed as one:
+resolved from `D:\Open WebUI\ai-stack\documentation\runbooks` it lands on an
+existing file, and it fails only at the extra depth of `.claude/worktrees/<id>/`.
+So the honest statement is: **at main-checkout depth the sweep is now zero
+unresolved; inside a nested worktree exactly one survivor remains, and it is
+depth-dependent, not broken.**
 
 ---
 

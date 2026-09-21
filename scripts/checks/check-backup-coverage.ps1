@@ -87,7 +87,12 @@ try {
     @{ Volume = 'llm-gateway-cloud-db-data'; Reason = 'Cloud LiteLLM spend-log (profile:cloud) - non-authoritative telemetry, same class as llm-gateway-db' }
     # Measured 2026-09-21 (read-only: docker run --rm --network none -v
     # open-brain_wiki-viewer-srv:/v:ro alpine): 7.6 GB, six build-<n>/ snapshot
-    # trees plus a `current` symlink into the newest. It is the wiki BUILDER's
+    # trees plus a `current` symlink into the newest. The size stays HERE, dated,
+    # and out of the printed Reason below: the builder adds a snapshot tree per
+    # run, so a figure baked into the [SKIP] line would be read as current by
+    # every operator who ran the check and would be wrong within days. The
+    # verdict does not depend on the number - a regenerable cache is excluded at
+    # 760 MB as surely as at 7.6 GB. It is the wiki BUILDER's
     # output, regenerated from the vault, and it goes stale within hours - the
     # same verdict backups/wiki-viewer/RESTORE.md already records under "What
     # this does NOT cover (by design)". The inputs ARE backed up: the vault by
@@ -96,7 +101,7 @@ try {
     # backups/wiki-viewer/ (RESTORE.md paths A/B/C); the serving tree rebuilds
     # itself afterwards, which is why freezing 7.6 GB of it nightly would buy
     # only a faster first page load.
-    @{ Volume = 'wiki-viewer-srv'; Reason = 'Wiki viewer SERVING TREE (7.6 GB of build-<n> snapshots + a current symlink) - a cache the builder regenerates from the vault; viewer VERSION restores from the image tars in backups/wiki-viewer/ per its RESTORE.md, content from openbrain-wiki + openbrain-db' }
+    @{ Volume = 'wiki-viewer-srv'; Reason = 'Wiki viewer SERVING TREE (build-<n> snapshots + a current symlink; size measured in the comment above) - a cache the builder regenerates from the vault; viewer VERSION restores from the image tars in backups/wiki-viewer/ per its RESTORE.md, content from openbrain-wiki + openbrain-db' }
   )
 
   # ----- Mapping: volume name -> backup container that covers it -----
