@@ -6,9 +6,9 @@ Everything below was checked by reading the named file or running the named
 command in the worktree `.claude/worktrees/wt-sl-ob1-docs`. Nothing is carried
 over from a sibling item's report without re-measuring it here.
 
-Artifact: OB1 `work/sl-ob1-docs` @ **`e7a39a7`** (four commits: `aa4a31d`,
-`fdfb7af` fixing the attempt-1 failure, `1218eff` the attempt-2 one, `e7a39a7`
-the attempt-3 one), merge-base `fe3e045`
+Artifact: OB1 `work/sl-ob1-docs` @ **`556195b`** (five commits: `aa4a31d`,
+`fdfb7af`, `1218eff`, `e7a39a7`, and `556195b` for the review rejection that
+reopened this as `sl-ob1-docs2`), merge-base `fe3e045`
 (= `origin/feature/integrated-knowledge-system` tip), two files, **not pushed**
 (D4). ai-stack: this note + `documentation/evidence/sl-ob1-docs/test-plan.md`,
 no gitlink staged.
@@ -665,3 +665,99 @@ it.
 CLAUDE.md's rule for briefing an agent - *name the claim, name what would
 DISPROVE it* - is written for delegation, and every one of these was me failing
 to do it for myself.
+
+## 17. The same paragraph, a fourth time: every count must state the condition it was taken under
+
+REJECTED at review (misfits) and reopened as `sl-ob1-docs2`. Reviewer
+`wt-reviewer-ob1docs`; full reason at `C:/tod/sl-ob1-docs-review-reject.md`
+(the queue holds a placeholder - the reason exceeded the command-line limit).
+
+Three attempts at one paragraph, three different defects, one class:
+
+| attempt | what shipped | defect |
+|---|---|---|
+| 2 | "9 sites, 8 warnings - compose dedupes somewhere" | wrong COUNT (measured under an unexamined command shape) |
+| 3 | "the include:d file still resolves against this directory's `.env`" | false MECHANISM (confirmed by a non-discriminating experiment) |
+| 4 | "nine warnings with no `--env-file`, eight with one" | two counts from two different `.env` STATES, paired as if one |
+
+### The reviewer's matrix, reproduced here before being written down
+
+`.env` held fixed, the flag toggled. All four profiles, exit 0 on every cell,
+fresh compose files from the commit under review:
+
+| `.env` state | no `--env-file` | `--env-file` copy WITH the name | `--env-file` copy WITHOUT it |
+|---|---|---|---|
+| name present (**as the template ships it**) | **0** | 0 | 8 |
+| name absent | **9** | 0 | 9 |
+
+**Holding `.env` fixed and toggling only the flag changes nothing** - 0 to 0, 9
+to 9. The 8 appears only when the `--env-file`'s CONTENT differs from `.env` on
+that name: it is an artefact of comparing two files, not an effect of passing
+the flag. **No single state produces the pair (9, 8)**, so the sentence I shipped
+was not reproducible by anyone.
+
+### The part that makes it a class-2 defect rather than a wrong number
+
+`.env.example` told the reader, four lines above, to seed the template as `.env`
+and pass no `--env-file` - and the template SHIPS `OB_APP_MEMORY_PASSWORD=`.
+Follow the instruction literally and you are in the top-left cell: **zero**
+warnings. The "warns NINE times" safety signal never fires for the audience the
+file is written for. The number was not just unreproducible; it was 0 in the one
+configuration the document itself prescribes.
+
+And the blank value is the quieter failure: `OB_APP_MEMORY_PASSWORD=` is a real
+declaration, so compose warns zero times and renders `DB_PASSWORD: ""` at all
+nine sites (measured: 9 in an all-four-profile render, 5 in a bare one). The
+rewritten paragraph now leads with that, because it is the case a newcomer
+actually lands in.
+
+### What the paragraph says now, in both files
+
+One observable per named `.env` state, no flag comparison anywhere:
+
+- name **absent** from `.env` -> every render warns once per site, nine times,
+  and those nine services get a blank password;
+- the template **ships** the name -> a `.env` seeded from it warns **zero**
+  times;
+- so warnings naming this variable mean exactly one thing: your `.env` has lost
+  the line;
+- and a blank value warns zero times while still rendering `DB_PASSWORD: ""`.
+
+### The rule this item has now paid for four times
+
+**Every count states the condition it was taken under.** Not "measured" - the
+condition. A number with an unstated condition is not a weak claim, it is an
+unfalsifiable one, and each of these four passed my own review precisely because
+there was nothing in the sentence to check it against.
+
+The progression is worth keeping because each fix created the next defect:
+attempt 3 corrected attempt 2's count for the no-flag case and left the other
+operand at its old value, which is exactly how the pair became unreproducible.
+**Correcting one operand of a comparison without re-measuring the other under the
+same conditions is its own failure mode**, and it is invisible in a diff - the
+sentence still reads as one measurement.
+
+### Three smaller things fixed in the same pass
+
+1. **`README.md:145` told the reader to pass `--env-file .env`** on the
+   cross-group rebuild render, 62 lines above a paragraph saying not to pass it.
+   Pre-existing (it came in with `sl-ob1-profiles`), and a flat contradiction
+   inside one section once my paragraph landed. The two tokens are deleted; the
+   render is identical without them, since compose loads `.env` from the project
+   directory anyway.
+2. **`.env.example:87-92` shipped harness process prose** into a user-facing
+   template - "the one variable added here that the sl-ob1-docs anchor did not
+   name, added because the anchor's own acceptance criterion ... asks for it". To
+   a newcomer with only the OB1 checkout, "anchor" and "acceptance criterion"
+   name nothing. Removed; the justification lives in section 11 of this note,
+   which is where it was always supposed to be. The file keeps the bare
+   item reference (`ai-stack item sl-ob1-docs`), matching `README.md:66`.
+   **This is the findings-note rule applied to my own work** - the reason for a
+   change belongs in the note, not in the deliverable.
+3. **The `open_notebook` blast-radius sentence was the inverse of the risk.** It
+   said the whole `.env` reaches that container "including keys no other service
+   sees", which reads as a minor extra. Measured: of the 25 names declared in
+   `.env.example`, only **4** are substituted into `open_notebook` (its own
+   `SURREAL_*` and `OPEN_NOTEBOOK_*` keys); the other **21** belong to other
+   services and reach it anyway through `env_file: ./.env`. The interesting
+   number is 21, not the leftovers.

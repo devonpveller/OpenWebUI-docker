@@ -1,7 +1,13 @@
-# Test plan — `sl-ob1-docs` (OB1's own profiles + variables documentation)
+# Test plan — `sl-ob1-docs2` (OB1's own profiles + variables documentation)
 
-Anchor: `queue.ps1 -Show -Id sl-ob1-docs`, full text at
-`../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-ob1-docs.json`.
+Anchor: `queue.ps1 -Show -Id sl-ob1-docs2`, full text at
+`../documentation-plans-ai-stack/implementation-guide/stack-layers/anchors/sl-ob1-docs2.json`.
+
+Reopen of `sl-ob1-docs`, REJECTED at review (misfits) 2026-09-20 on the
+warning-count paragraph. Same ai-stack branch, same worktree, same OB1 branch;
+the four earlier OB1 commits stand and a fifth was added. The reviewer's full
+reason is at `C:/tod/sl-ob1-docs-review-reject.md` - the queue holds a
+placeholder because the text exceeded the command-line limit.
 
 **What changed, in one line:** two documentation files inside the OB1 submodule —
 `OB1/docker/README.md` and `OB1/docker/.env.example` — so that a newcomer holding
@@ -11,7 +17,7 @@ code changed, in either repo.**
 
 | | |
 |---|---|
-| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`**, **`fdfb7af`** (a2: T3), **`1218eff`** (a3: C59), **`e7a39a7`** (a4: C66) |
+| OB1 branch | `work/sl-ob1-docs`, 5 commits: **`aa4a31d`**, **`fdfb7af`** (a2: T3), **`1218eff`** (a3: C59), **`e7a39a7`** (a4: C66), **`556195b`** (review: the .env-state pairing) |
 | OB1 base | cut from **`fe3e045`** = `origin/feature/integrated-knowledge-system` tip |
 | OB1 files touched | `docker/README.md`, `docker/.env.example` — nothing else |
 | ai-stack branch | `work/sl-ob1-docs`, based on `a2d3644` (the `sl-ob1-gitlink` merge, which is what pins OB1 at `fe3e045`) |
@@ -69,25 +75,35 @@ endings against the BLOB, not the checkout —
 both files. Attempt 1's tester worked in a scratch clone; this paragraph exists
 so the next one does not open a finding about it.
 
-## THE FOURTH TRAP — `--env-file` changes the warning count, and it is why attempt 2 failed
+## THE FOURTH TRAP — a count means nothing until you say what `.env` held
 
 **Do not pass `--env-file` to any render in this plan.** Copy the env file you
-want to `.env` in the project directory instead.
+want to `.env` in the project directory instead. That is the state every number
+below was taken under, and it is the state the template tells its reader to use.
 
-Passing `--env-file` changes how the `include:`d `docker-compose.scheduled.yml`
-resolves variables and changes what the render reports: `OB_APP_MEMORY_PASSWORD`
-gives **9** warnings with no `--env-file` and **8** with one. Counts taken that
-way are not comparable with counts taken without it. That is the whole of what
-the artifact claims, and it is all you need to run this plan.
+This item has been rejected once and failed twice on ONE paragraph, each time
+for a different reason and always the same class — a number whose condition was
+not stated:
 
-**Do not expect the artifact to tell you which file wins — it deliberately does
-not say.** Attempt 2 measured with `--env-file`, got 8, could not explain it, and
-shipped "compose dedupes somewhere" as a fact about compose; attempt 3 fixed the
-number and then shipped an explanation of the 8 that a discriminating experiment
-refuted. Both failed. The mechanism sentences are now removed rather than
-corrected. **If you can establish the real rule, that is a class-3 note and a
-genuinely useful one — but it is not required to pass any case here, and the
-artifact asserting it again would be the third repeat of the same defect.**
+| attempt | shipped | defect |
+|---|---|---|
+| 2 | "9 sites, 8 warnings — compose dedupes somewhere" | wrong count, unexamined command shape |
+| 3 | "the include:d file still resolves against this directory's `.env`" | false mechanism from a non-discriminating experiment |
+| 4 | "nine warnings without `--env-file`, eight with one" | two counts from two different `.env` states, paired |
+
+The reviewer's matrix (reproduce it if you want the whole picture; `.env` fixed,
+flag toggled, all four profiles, exit 0 everywhere):
+
+| `.env` state | no `--env-file` | `--env-file` WITH the name | `--env-file` WITHOUT it |
+|---|---|---|---|
+| name present (**as shipped**) | 0 | 0 | 8 |
+| name absent | 9 | 0 | 9 |
+
+Toggling the flag alone changes nothing. **No state yields the pair (9, 8).**
+
+**So: a sentence in either OB1 file that pairs two counts without naming a
+single `.env` state for both is a FAIL, and so is any sentence explaining which
+env file wins.** Neither is needed — see C76-C79.
 
 ## THE THIRD TRAP — renders are NOT stderr-clean on every seed
 
@@ -113,11 +129,14 @@ measured:
 **Copy the env file to `.env`; do NOT pass `--env-file`** (see the fourth trap
 below — `--env-file` changes the answer and produced attempt 2's wrong number).
 
-| `.env` is | Expected stderr |
+**Every row names the `.env` state it was taken under. A row that does not is
+the defect this item was rejected for.**
+
+| `.env` state | Expected stderr |
 |---|---|
 | a real `.env` that sets everything (the developer's worktree) | empty |
-| **this commit's `.env.example`** | **empty** |
-| the PREVIOUS commit's example (`aa4a31d`), or this one minus its `OB_APP_MEMORY_PASSWORD` line | **9** x `The "OB_APP_MEMORY_PASSWORD" variable is not set. Defaulting to a blank string.` |
+| **this commit's `.env.example`** — ships `OB_APP_MEMORY_PASSWORD=` | **0** |
+| the PREVIOUS example (`aa4a31d`), or this one **minus** its `OB_APP_MEMORY_PASSWORD` line | **9** x `The "OB_APP_MEMORY_PASSWORD" variable is not set. Defaulting to a blank string.` |
 
 The third row is why `OB_APP_MEMORY_PASSWORD` was added this round. **Nine sites,
 nine warnings — there is no dedupe.** Identical for the bare and the all-four
@@ -371,12 +390,12 @@ Four claims, four commands, from `<wt>/OB1/docker`:
 ## T5 — commit shape and blast radius (acceptance criteria 4 and 5)
 
 ```bash
-git -C "<wt>/OB1" log --oneline -4                      # e7a39a7, 1218eff, fdfb7af, aa4a31d
+git -C "<wt>/OB1" log --oneline -5                      # 556195b, e7a39a7, 1218eff, fdfb7af, aa4a31d
 git -C "<wt>/OB1" merge-base HEAD origin/feature/integrated-knowledge-system   # fe3e045
 git -C "<wt>/OB1" diff --stat fe3e045 HEAD             # exactly 2 files, both docs
 git -C "<wt>/OB1" status --porcelain                    # clean
 git -C "<wt>" status --porcelain                        # ` M OB1` + the 2 ai-stack files, NO `M  OB1`
-git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 4 commits, unpushed
+git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 5 commits, unpushed
 ```
 
 **The pre-commit's OB1 gates (5b recipe tests, 5c `deno check`, 5d integration
@@ -671,11 +690,9 @@ described was rewritten, not patched.
 
 ## B.11 Sentences introduced by attempt 4
 
-- **C71** Passing `--env-file` changes how the `include:`d
-  `docker-compose.scheduled.yml` resolves variables and changes the warning count
-  (9 without, 8 with), so counts taken that way are not comparable. -> T1. This
-  is the observable; it is what both the README and `.env.example` now say, and
-  it is the only claim either makes about `--env-file`.
+- **C71 — RETIRED at review.** It claimed "9 without `--env-file`, 8 with", which
+  no single `.env` state produces. Both files now make no `--env-file` claim at
+  all. See C76-C79.
 - **C72** The artifact asserts NO mechanism for which env file wins. -> read both
   files; a sentence naming which file a site "resolves against" is a regression.
   Attempt 3's version was refuted, attempt 2's was refuted, and the third attempt
@@ -696,6 +713,39 @@ described was rewritten, not patched.
   -> findings section 14; the matrix there has the discriminating row that was
   never run.
 
+## B.12 Sentences introduced by attempt 5 (the review rejection)
+
+Every one names its `.env` state. That is the point of this round.
+
+- **C76** With `OB_APP_MEMORY_PASSWORD` **absent from `.env`**, every
+  `docker compose config` warns once per site — **nine** — and renders those nine
+  services with a blank database password. -> T1 row 3; measured bare and
+  all-four, exit 0.
+- **C77** The template **ships** the line, so a `.env` seeded from it warns
+  **zero** times. -> T1 row 2. **This is the sentence that makes the other one
+  useful**: without it a reader following the template sees zero warnings and has
+  no idea whether that is good news.
+- **C78** Therefore warnings naming this variable mean exactly one thing: your
+  `.env` has lost the line. -> follows from C76 + C77, which between them cover
+  both states.
+- **C79** A BLANK value is a real declaration: compose warns **zero** times and
+  renders `DB_PASSWORD: ""` at all nine sites — nine in an all-four-profile
+  render, five in a bare one. -> render with `.env` = the template unchanged and
+  grep the output. This is the quiet failure the warning cannot catch.
+- **C80** `README.md`'s cross-group rebuild render no longer passes
+  `--env-file .env`; it contradicted the same section's advice and is unnecessary
+  because compose loads `.env` from the project directory. -> the render is
+  identical with and without those two tokens.
+- **C81** Of the 25 names declared in `.env.example`, only **4** are substituted
+  into `open_notebook` (its own `SURREAL_*` / `OPEN_NOTEBOOK_*` keys); the other
+  **21** belong to other services and reach that container anyway through
+  `env_file: ./.env`. -> parse the `open_notebook` service block for `${...}`
+  names and intersect with the template's declared names.
+- **C82** No harness process vocabulary (anchor, acceptance criterion, item
+  workflow) survives in `.env.example`; a bare `ai-stack item <id>` reference is
+  the shape the file already used at `README.md:66`. -> grep both files for
+  `anchor`/`acceptance`/`attempt`.
+
 # What a FAIL looks like, ranked
 
 1. **A runtime reach by container name that the table omits** → this is what
@@ -714,11 +764,12 @@ described was rewritten, not patched.
      attempt 1's tester, so one of the two is wrong;
    - **C34** and **C42** — inherited from the old root template and then
      corrected against the source, which is where a copied-through error hides;
-   - **C71/C72** — attempts 2 and 3 both failed here. The count depends on the
-     command shape, so reproduce the shape exactly; and check that neither file
-     has regrown a sentence saying which env file wins. **A mechanism claim in
-     the artifact is a FAIL even if it is true**, because it is not established
-     by anything in the evidence.
+   - **C76-C79** — this paragraph has now failed twice and been rejected once,
+     for a wrong count, a false mechanism, and mismatched states. Check that
+     every count names its `.env` state, that no sentence pairs two counts from
+     different states, and that neither file has regrown a sentence saying which
+     env file wins. **A mechanism claim in the artifact is a FAIL even if it is
+     true**, because nothing in the evidence establishes it.
 
 **Not a fail:** anything in the excluded host-side class (T3d), the CRLF smudge
 in a fresh clone (trap 2), or a render that warns exactly as T1's stderr table
