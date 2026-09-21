@@ -741,6 +741,49 @@ function Test-LlamaCppConnectivity {
     }
 }
 
+# --- Inference serving depth: /health answers with an EMPTY model store -----
+# The 2026-09-19 outage in one sentence: llama-cpp-upstream was recreated with
+# LM_MODELS_DIR unset, compose bound its default `../../data/models/gguf` (an
+# empty directory) at /models, llama-swap kept answering /health because it does
+# not load a model to do so, and the FIRST REAL COMPLETION 500'd. Nothing in this
+# watchdog could see it. This counts .gguf files in the mount and names the HOST
+# path when there are none, because the host path is the thing an operator fixes.
+#
+# Deliberately NOT a completion: this cycle runs every few minutes and a cold
+# load is minutes long (257 s measured 2026-09-21). The completion belongs to
+# `python scripts/stack/stack.py health`, which an operator runs once after a
+# recreate. Here we only need the condition that was invisible.
+#
+# Read-only, and it targets the upstream directly - which CLAUDE.md permits for
+# exactly this class ("only health/GPU/recovery probes may target *-upstream").
+function Test-InferenceServingDepth {
+    [CmdletBinding()]
+    param()
+    if (-not (Test-ServiceHealth "llama-cpp-upstream")) {
+        Write-LogEntry "serving depth: llama-cpp-upstream is not running - skipping the model-store check" "DEBUG"
+        return $true
+    }
+    try {
+        $count = docker exec llama-cpp-upstream sh -c "find /models -maxdepth 4 -name '*.gguf' 2>/dev/null | head -n 5 | wc -l" 2>$null
+        $found = 0
+        if ($count) { [void][int]::TryParse(($count | Select-Object -Last 1).ToString().Trim(), [ref]$found) }
+        if ($found -gt 0) {
+            Write-LogEntry "serving depth OK - llama-cpp-upstream's /models holds GGUF files" "DEBUG"
+            Resolve-Catastrophe -Key 'inference-models' -Message "llama-cpp-upstream's /models has models again."
+            return $true
+        }
+        $bind = docker inspect llama-cpp-upstream --format '{{range .Mounts}}{{if eq .Destination "/models"}}{{.Source}}{{end}}{{end}}' 2>$null
+        if (-not $bind) { $bind = '<no /models mount>' }
+        Write-LogEntry "INFERENCE MODELS EMPTY - llama-cpp-upstream's /models has no .gguf files (host bind: $bind). /health still answers; the next real completion will 500. Set LM_MODELS_DIR in inference\.env and recreate llama-cpp-upstream + lm-models-backup." "ERROR"
+        Send-CatastropheAlert -Key 'inference-models' -Message "INFERENCE cannot serve: llama-cpp-upstream's /models is EMPTY (host bind: $bind). Health checks pass and every chat will 500. Fix LM_MODELS_DIR in inference/.env and recreate the upstream."
+        return $false
+    }
+    catch {
+        Write-LogEntry "serving-depth check failed to run: $($_.Exception.Message)" "WARN"
+        return $true
+    }
+}
+
 # Function to test llama-cpp-embed connectivity (independent of main llama-cpp).
 # Embed has its own model/process and can fail while main llama-cpp is healthy.
 #
@@ -1222,6 +1265,20 @@ function Confirm-ClaudeSessionsBridge {
 # five sidecars go silent for ~5 weeks (2026-05-29 → 07-05) unnoticed. This
 # watches the OUTPUT instead: newest artifact per backups/<dir> must be
 # younger than its cadence allows. Alerts to the log + Mattermost (throttled).
+#
+# Since 2026-09-21 a stale row also carries the REASON, when the sidecar wrote
+# one down. backup/generic-tar-backup.sh prints `<PREFIX> PRECHECK SKIP: <why>`
+# and exits 0, and until now that sentence lived only in `docker logs` - so
+# lm-models read as "350h old" for two days when its own log said `/data is
+# empty`, and the age sent the reader hunting for a dead cron instead of a
+# wrong mount. Get-BackupSkipReason reads it back out.
+#
+# NOTE (measured 2026-09-21, not fixed here): this list is THIRTEEN dirs and
+# scripts/sysadmin-mcp/check_backups.py's is FIFTEEN - the two ao-worker journal
+# sidecars are watched there and not here. Adding them here would also add a
+# false STALE whenever the agent-org `workers` profile is down, because this
+# list has no container gate the way check_backups.py does; closing that
+# properly means gating per row, which is its own change.
 $ExpectedBackupRecency = @(
     @{ Dir = 'agent-bridge-db'; MaxAgeHours = 52 }
     @{ Dir = 'authelia';        MaxAgeHours = 52 }
@@ -1237,26 +1294,68 @@ $ExpectedBackupRecency = @(
     @{ Dir = 'openwebui';       MaxAgeHours = 52 }
     @{ Dir = 'tailscale';       MaxAgeHours = 52 }
 )
+# The sidecar's own explanation, read back out of its log. Returns '' when it
+# has not declined, or when the decline has already been superseded by a later
+# line - both live ao-worker journal sidecars carry a first-boot `/data is empty`
+# in the same tail as last night's successful tar, and reporting on the marker
+# alone would call two healthy sidecars broken.
+# The min-age guard's `<PREFIX> SKIP:` (no PRECHECK) is deliberately not matched:
+# it means a fresh artifact already exists.
+function Get-BackupSkipReason {
+    [CmdletBinding()]
+    param([string]$Container)
+    try {
+        $log = cmd /c "docker logs --tail 60 $Container 2>&1" | Out-String
+        if (-not $log) { return '' }
+        $skipTs = $null; $skipWhy = ''; $newestTs = $null
+        foreach ($line in ($log -split "`r?`n")) {
+            if ($line -match '^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\]') {
+                $ts = $matches[1]
+                if (-not $newestTs -or $ts -gt $newestTs) { $newestTs = $ts }
+                if ($line -match 'PRECHECK SKIP:\s*(.+?)\s*$') { $skipTs = $ts; $skipWhy = $matches[1] }
+            }
+        }
+        if (-not $skipWhy) { return '' }
+        # Superseded by a later line from the same container (ISO-8601 Z strings
+        # sort lexically, which is why they are compared as strings).
+        if ($newestTs -and $skipTs -and ($skipTs -lt $newestTs)) { return '' }
+        return $skipWhy
+    }
+    catch { return '' }
+}
+
 function Test-BackupRecency {
     [CmdletBinding()]
     param()
     $stale = @()
     foreach ($exp in $ExpectedBackupRecency) {
         $dir = Join-Path $PROJECT_DIR "backups\$($exp.Dir)"
+        # The reason, if the sidecar left one. Sidecar name = <dir>-backup for
+        # every row in this list.
+        $why = Get-BackupSkipReason -Container "$($exp.Dir)-backup"
+        $because = if ($why) { " -- the sidecar declined its last run: PRECHECK SKIP: $why" } else { '' }
+        # An empty or absent DATA_DIR is the wrong-mount signature and does not
+        # heal on its own, so it is STALE on its own terms - even while the last
+        # artifact from before the mount moved still looks fresh. That is the
+        # lm-models shape exactly, and an age-only check cannot see it.
+        if ($why -match '^(\S+) (is empty|does not exist)$') {
+            $stale += "$($exp.Dir): MOUNT $($matches[1]) is empty or absent inside $($exp.Dir)-backup - it is producing nothing (PRECHECK SKIP: $why)"
+            continue
+        }
         if (-not (Test-Path $dir)) {
-            $stale += "$($exp.Dir): backup dir missing"
+            $stale += "$($exp.Dir): backup dir missing$because"
             continue
         }
         $newest = Get-ChildItem $dir -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notlike '*.sha256' } |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if (-not $newest) {
-            $stale += "$($exp.Dir): no artifacts at all"
+            $stale += "$($exp.Dir): no artifacts at all$because"
             continue
         }
         $ageH = [math]::Round(((Get-Date) - $newest.LastWriteTime).TotalHours, 1)
         if ($ageH -gt $exp.MaxAgeHours) {
-            $stale += "$($exp.Dir): newest artifact $($newest.Name) is ${ageH}h old (max $($exp.MaxAgeHours)h)"
+            $stale += "$($exp.Dir): newest artifact $($newest.Name) is ${ageH}h old (max $($exp.MaxAgeHours)h)$because"
         }
     }
     # Sentinel = the outstanding-alert marker. Its presence means a STALE ping
@@ -1885,6 +1984,16 @@ function Invoke-HealthCheck {
         Resolve-Catastrophe -Key 'inference' -Message "inference (llama-cpp) is reachable again."
     }
 
+    # SERVING DEPTH, separate from reachability on purpose. Test-LlamaCppConnectivity
+    # above is satisfied by llama-swap's /health, which answers without loading a
+    # model - so it passed for thirty hours (2026-09-19 18:54 -> 09-21 00:57) while
+    # every chat returned `500 upstream command exited prematurely`, because a
+    # recreate had bound the compose default (an empty directory) at /models.
+    # Reachable is not the same as able to serve, and only this check can tell.
+    if (-not (Test-InferenceServingDepth)) {
+        $script:HealthIssues += 'inference-models-empty'
+    }
+
     # Test llama-cpp-embed connectivity independently. The main llama-cpp test
     # above does not exercise the embed endpoint, so a broken embed server can
     # silently degrade RAG and mnemory while the rest of the stack looks fine.
@@ -2014,7 +2123,9 @@ function Invoke-HealthCheck {
     Confirm-BridgeFunctionalHealth -TaskName 'claude-sessions-bridge' -Port 48291 -Label 'claude-sessions bridge' `
         -HealthPath (Join-Path $PROJECT_DIR 'scripts\claude-sessions-bridge\state\health.json')
 
-    # --- backup OUTPUT recency (all 14 backups/<dir> trees, incl. portal + OB) ---
+    # --- backup OUTPUT recency (the 13 backups/<dir> trees in $ExpectedBackupRecency,
+    #     portal + OB included; counted 2026-09-21, and see that list's note on the
+    #     two ao-worker journal dirs check_backups.py watches and this does not) ---
     # Non-fatal for the overall check, but logs ERROR + Mattermost-alerts:
     # a running sidecar that produces nothing is invisible to container checks.
     # Feed the result into the cycle summary. NOT catastrophe tier (operator
