@@ -69,7 +69,7 @@ means the trees are not equivalent - reconcile before trusting T1.
 
 ## T2 - a planted bypass in a worktree's staged compose file goes RED on the branch
 
-*Acceptance 1, second half. Claims C1, C4.*
+*Acceptance 1, second half. Claims C1, C8.*
 
 ```sh
 # in A
@@ -212,7 +212,7 @@ it contains the sibling worktrees. **Disproves the note:** A scanning fewer than
 
 ## T10 - encoding, parse, lint, attestation
 
-*Acceptance 3. Claims C24, C25.*
+*Acceptance 3. Claim C30.*
 
 ```sh
 # no BOM, ASCII only, in both touched .ps1
@@ -339,6 +339,12 @@ inherits.
   `git show a2d3644:scripts/checks/check-llm-gateway-routing.ps1 | grep -n claude`.
 * **C28** - "validate-lineendings' export vacuity is unchanged and still open." (run it in a
   `git archive` export with no `.git`: still `No tracked shell scripts to check`, exit 0)
+
+### In this plan and the commits
+
+* **C30** - "ASCII, no BOM, PowerShell 5.1 in every touched .ps1; ruff clean; every commit
+  attested." (T10 - and the ledger is in the SHARED git dir, so read it with
+  `git rev-parse --git-common-dir`, not from the worktree's `.git` file.)
 
 ## What a fair failure looks like
 
