@@ -333,6 +333,9 @@ inherits.
 
 * **C25** - the FIXED section's table of seven runs reproduces. (T1-T5)
 * **C26** - "the pre-commit chain passes from the worktree itself." (T11)
+* **C29** - "the glob sat at `check-llm-gateway-routing.ps1:77` at `a2d3644`" - the note
+  originally said `:73`, and the correction is itself a claim:
+  `git show a2d3644:scripts/checks/check-llm-gateway-routing.ps1 | grep -n claude`.
 * **C28** - "validate-lineendings' export vacuity is unchanged and still open." (run it in a
   `git archive` export with no `.git`: still `No tracked shell scripts to check`, exit 0)
 

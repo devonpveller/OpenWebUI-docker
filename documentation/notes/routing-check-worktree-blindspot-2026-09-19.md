@@ -8,8 +8,10 @@ other check for the same class is
 **Found by:** the sl-inference-split tester (harness item, stack-layers plan), while trying
 to get a real green for the routing guard from `.claude/worktrees/wt-sl-inference-split`.
 
-**Claim [read from source]:** `scripts/checks/check-llm-gateway-routing.ps1:73` carried
-`'*\.claude\*'` in its prune/allow list. Harness worktrees live at
+**Claim [read from source]:** `scripts/checks/check-llm-gateway-routing.ps1:77` carried
+`'*\.claude\*'` in its prune/allow list. (This note said `:73` when it was written; the
+line is 77 at `a2d3644`, re-derived 2026-09-20. A citation moves - re-derive it, do not
+recheck it.) Harness worktrees live at
 `.claude/worktrees/wt-<id>/` (`scripts/agent-harness/harness.config.json` -> `worktree.root`),
 so every path under a worktree matched the prune pattern: the check examined zero files
 and exited 0. The pre-commit hook in a worktree therefore reported the routing guard green
