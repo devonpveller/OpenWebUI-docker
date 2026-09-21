@@ -11,7 +11,7 @@ code changed, in either repo.**
 
 | | |
 |---|---|
-| OB1 branch | `work/sl-ob1-docs`, commit **`aa4a31d`** |
+| OB1 branch | `work/sl-ob1-docs`, commits **`aa4a31d`** then **`fdfb7af`** (attempt 2 fixes T3) |
 | OB1 base | cut from **`fe3e045`** = `origin/feature/integrated-knowledge-system` tip |
 | OB1 files touched | `docker/README.md`, `docker/.env.example` — nothing else |
 | ai-stack branch | `work/sl-ob1-docs`, based on `a2d3644` (the `sl-ob1-gitlink` merge, which is what pins OB1 at `fe3e045`) |
@@ -54,6 +54,29 @@ Both of those are claims under T1 and T4. Confirm the env file actually has the
 line before you conclude anything from either number:
 `grep -n '^COMPOSE_PROFILES' "<wt>/OB1/docker/.env"`.
 
+## THE SECOND TRAP — CRLF smudge in a fresh clone
+
+Both committed blobs are **pure LF** (`git show <sha>:docker/.env.example |
+grep -c $'\r'` → 0). But `core.autocrlf=true` is set on this host, so a fresh
+`git clone` writes CRLF into the WORKING COPY. If you grep the working copy with
+a `$`-anchored pattern you may match differently than against the blob, and
+`git diff` may report the file as modified the moment anything touches it
+(`warning: LF will be replaced by CRLF the next time Git touches it`).
+
+This is not a defect in the commit and it is not something to "fix": check line
+endings against the BLOB, not the checkout —
+`git -C <clone>/OB1 show HEAD:docker/README.md | grep -c $'\r'` must be 0 for
+both files. Attempt 1's tester worked in a scratch clone; this paragraph exists
+so the next one does not open a finding about it.
+
+## THE THIRD TRAP — renders are NOT stderr-clean on every seed
+
+Attempt 1's plan said "stderr must be empty on every render". That was false for
+the audience this item is written for, and the tester was right to refute it. See
+T1 for the corrected bar: what stderr contains depends on which env file seeds
+the render, and the expected content is now stated per case rather than assumed
+empty.
+
 ---
 
 # Part A — one case per acceptance criterion
@@ -62,8 +85,21 @@ line before you conclude anything from either number:
 
 Run from `<wt>/OB1/docker`, with `COMPOSE_PROFILES=` blanked on every line.
 `wc -l` of `docker compose -f docker-compose.yml <flags> config --services`.
-**stderr must be empty on every one** (a render that warns is a render you
-cannot trust).
+
+**The stderr bar, corrected — attempt 1 got this wrong.** It is not "empty on
+every one"; it depends on the env file seeding the render, and each case is
+measured:
+
+| Seed | Expected stderr |
+|---|---|
+| a real `.env` that sets everything (the developer's worktree) | empty |
+| **this commit's `.env.example`** (`--env-file .env.example`) | **empty** |
+| the PREVIOUS commit's example (`aa4a31d`) | **8** × `The "OB_APP_MEMORY_PASSWORD" variable is not set. Defaulting to a blank string.` |
+
+The third row is why `OB_APP_MEMORY_PASSWORD` was added this round. Note **8
+warnings for 9 substitution sites** — compose dedupes somewhere and the reason is
+not explained here because it was not established; 8 is measured, identical for
+the bare and the all-four render. Anything OTHER than these is a finding.
 
 | Flags | Expected |
 |---|---|
@@ -110,32 +146,48 @@ is a FAIL.
 
 ```bash
 cd "<wt>/OB1/docker"
-# compose-SUBSTITUTED names. The leading (^|[^$]) is load-bearing: it excludes
-# $${VAR} shell escapes inside the backup containers' command blocks.
-grep -oE '(^|[^$])\$\{[A-Za-z_][A-Za-z0-9_]*' docker-compose.yml docker-compose.scheduled.yml \
+# compose-SUBSTITUTED names. TWO guards, both load-bearing, both established by
+# a refutation rather than by design:
+#   guard 1 - strip whole-line YAML comments: a name appearing ONLY in a comment
+#             is never substituted (PUBLIC_DOMAIN, docker-compose.yml:867)
+#   guard 2 - the leading (^|[^$]) excludes $${VAR} shell escapes inside the
+#             backup containers' inline command: blocks (RETAIN_COUNT, BACKUP_INTERVAL)
+grep -hvE '^[[:space:]]*#' docker-compose.yml docker-compose.scheduled.yml \
+  | grep -oE '(^|[^$])\$\{[A-Za-z_][A-Za-z0-9_]*' \
   | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | sed 's/\${//' | sort -u > /tmp/cv.txt
 grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' .env.example | sed 's/=$//' | sort -u > /tmp/ev.txt
 comm -23 /tmp/ev.txt /tmp/cv.txt    # direction A
 comm -13 /tmp/ev.txt /tmp/cv.txt    # direction B
 ```
 
-- **Direction A — every example variable is read by a service. MUST BE EMPTY.**
+- **Direction A - every example variable is read by a service. MUST BE EMPTY.**
   A name here is a variable the template invites an operator to set that nothing
   substitutes: a FAIL, and the specific failure the anchor calls out ("a variable
   added that nothing reads FAILS").
-- **Direction B — compose reads it, the template lacks it. Expect 72 names**,
-  all pre-existing; they are enumerated in the findings note §3. 82 was the count
-  before this change; 72 is 82 minus the ten added. A count above 72 means the
-  developer missed one of the ten; a count below 72 means they added something
-  outside the anchor's scope.
-- Counts to confirm while you are there: **96** compose-substituted names, **24**
-  template-declared names.
+- **Direction B - compose reads it, the template lacks it. Expect 70 names**,
+  all pre-existing; enumerated in the findings note section 3.
+- **95** compose-substituted names, **25** template-declared.
 
-**If you drop the `(^|[^$])` guard you will get 98 and 84** and conclude the
-numbers are wrong. `RETAIN_COUNT` and `BACKUP_INTERVAL` are the two extra names,
-and they are `$${...}` — escaped for the container's shell, never substituted by
-compose. Check them yourself rather than trusting this paragraph:
-`grep -nE '\$+\{(RETAIN_COUNT|BACKUP_INTERVAL)\}' docker-compose.yml`.
+**The arithmetic, since three different figures are now in circulation.** 82
+before this item (with both guards). Ten added in commit 1 -> 72. Attempt 1's
+plan and findings printed 96/72 using guard 2 ALONE, over-counting PUBLIC_DOMAIN
+by one; the true figures at that commit were 95/71. One more variable
+(OB_APP_MEMORY_PASSWORD) added this round -> **70**. So: a direction-B count of
+72 means you dropped guard 1, 84 means you dropped guard 2, 85 means you dropped
+both.
+
+Verify each guard yourself rather than trusting this paragraph:
+
+```bash
+grep -nE 'PUBLIC_DOMAIN' docker-compose.yml docker-compose.scheduled.yml   # ONE hit, :867, inside a #
+grep -nE '\$+\{(RETAIN_COUNT|BACKUP_INTERVAL)\}' docker-compose.yml       # all $${...}, in command: blocks
+```
+
+A second proof of guard 1 that involves no line-reading at all: compose warns for
+every unset name that has no default. Seeded from the previous example it warned
+8 times for `OB_APP_MEMORY_PASSWORD` (unset, default-less) and **never** for
+`PUBLIC_DOMAIN`, which is equally unset and equally default-less - because
+compose never sees it.
 
 ### T2b — each added variable's default matches the compose
 
@@ -160,26 +212,92 @@ The two deliberate departures from the old root template are **C42**
 `POSTGRES_DB` are not read at all) below; both are claims, verify them rather
 than accepting the diff's word.
 
-## T3 — the outside-OB1 consumer list (acceptance criterion 3)
+## T3 - the outside-OB1 consumer list (acceptance criterion 3)
 
-In the **ai-stack** tree (the worktree root, not `OB1/`):
+**THIS IS THE CASE ATTEMPT 1 FAILED.** The table listed two consumer kinds and
+closed with "BOTH consumers reach these services by container name" - a
+universal over a set that was missing four surfaces. Attack the completeness
+claim first; the individual rows were all correct last time and are the easy
+half.
+
+### T3a - every row has a line behind it
+
+| README row | Check |
+|---|---|
+| 1 `openbrain-workbench:8000` | `portal/config/caddy/Caddyfile:136` |
+| 2 `openbrain-wiki-viewer:8080` | `portal/config/caddy/Caddyfile:143` |
+| 3 `open_notebook:5055`, `:8502` | `portal/config/caddy/Caddyfile:242`, `:250` |
+| 4 tailscale companion -> `open_notebook` | `frontend/entrypoint.sh:60` (host default), route table `:97`, `:99` |
+| 5 agent-bridge -> `openbrain-research` | `agent-org/docker/docker-compose.yml:208` delivers `AO_RESEARCH_URL`; `agent-org/agent-bridge/app/config.py:373` is the default; `app/modules/grounding.py:12` states the mechanism |
+| 6 Deep Research tool -> `openbrain-research` | `owui/tools/deep_research.py:47`, deployed per `owui/manifest.csv:10` |
+| 7 Server Status, TWO modules | `status-pipe/modules/system-health/service/system_health.py:58`, `:66`; `status-pipe/serve/tailscale_serve_pipe.py:119`, `:135`, `:652` |
+| operator path | `scripts/backup/restore-from-snapshot.ps1:432` |
+
+`critical: False` on the two system-health probes is a claim; confirm it, because
+"degrades rather than alarms" depends on it.
+
+### T3b - the row-4 correction, which is the subtle one
+
+The README says row 4 reaches Open Notebook DIRECTLY but reaches the wiki
+THROUGH portal Caddy. **Attempt 1's tester reported it as a direct
+`openbrain-wiki-viewer` reach; that is wrong and the README now says why.**
+Verify the correction rather than either previous claim:
 
 ```bash
-grep -nE "openbrain-workbench|openbrain-wiki-viewer|open_notebook" portal/config/caddy/Caddyfile
-grep -rnE "open_notebook|openbrain-research" status-pipe/modules/system-health/
+grep -n "QUARTZ_HOST" frontend/docker-compose.yml frontend/entrypoint.sh frontend/.env frontend/.env.example
 ```
 
-Every row of the README's "Consumers outside this project" table must have a
-line behind it, and **no consumer of a profiled service may be missing from the
-table**. Search widely enough to be able to say that second half honestly:
-`grep -rn` the four wiki/notebook/research service names across `portal/`,
-`status-pipe/`, `scripts/`, `owui/` and the other planes' compose files. If you
-find a consumer the table omits, that is a FAIL — the table's value is that it
-is complete.
+Expect `frontend/docker-compose.yml:366` = `${QUARTZ_HOST:-caddy}`,
+`frontend/.env:133` = `caddy`, and `entrypoint.sh:66` = `${QUARTZ_HOST:-openbrain-wiki-viewer}`
+- a fallback the compose always overrides. `frontend/docker-compose.yml:361-364`
+gives the reason it moved behind Caddy. (The tester also cited `:350` for
+QUARTZ_HOST; that line is OPEN_NOTEBOOK_HOST.) If you conclude the README is
+wrong here, say which of those four lines says so.
 
-`critical: False` on the two status-pipe probes is a claim (C19/C20); confirm it
-in `status-pipe/modules/system-health/service/system_health.py`, because the
-"degrades rather than alarms" wording depends on it.
+### T3c - THE COMPLETENESS TEST: re-derive, do not spot-check
+
+Run the README's own rebuild grep from the ai-stack worktree root, unbounded:
+
+```bash
+grep -rnE "(https?://|\"host\"[: ]+\"|target_host[\"'=: ]+|_HOST[=:] *|reverse_proxy +)(openbrain-research|openbrain-wiki|openbrain-wiki-viewer|openbrain-workbench|openbrain-curator|openbrain-idea-refinery|open_notebook|surrealdb)" . \
+  --exclude-dir=OB1 --exclude-dir=.git --exclude-dir=node_modules \
+  --exclude-dir=archive --exclude-dir=documentation --exclude-dir=backups
+```
+
+**Expect 23 lines in 15 files** (21 in configuration or code, plus two prose
+mentions in `owui/README.md` and `CLEANUP-PLAN.md`). Read every one at its line
+and classify it:
+
+- a **runtime reach by container name** -> must be in the table (13 call sites
+  across the 7 surfaces);
+- an **.env / .env.example delivery line** for one of those 7
+  (`agent-org/docker/.env:58`, `.env.example:114`, `frontend/.env:127`,
+  `.env.example:127`) -> not a separate surface;
+- **prose or inventory** (`stack.manifest.toml:466`, `:593`) -> not a surface.
+
+Then widen it yourself in a way the developer did not, and say how you widened
+it. Two suggestions that would have caught last round's misses: a bare
+name-only grep (~60 files - mostly inventories, but read the outliers), and a
+grep for the SERVICE PORTS (`8502`, `5055`, `8446`, `8818`, `8816`) in case a
+consumer builds the host from a variable.
+
+**A single runtime reach by container name that the table omits is a FAIL.** The
+table now states its scope explicitly, so a host-side `127.0.0.1` probe or a
+`docker exec` is NOT a miss - those are named in the excluded class. If you
+believe something in that excluded class belongs in the table, that is a class-3
+note, not a fail.
+
+### T3d - the excluded class is named, not forgotten
+
+Confirm the three named exclusions are real and really are host-side:
+
+```bash
+grep -nE "127.0.0.1:(8818|8816)" scripts/checks/check-openbrain-health.ps1
+grep -nE "docker exec (open_notebook|openbrain-wiki-viewer)" scripts/checks/stack-watchdog.ps1 scripts/checks/wiki-latency-probe.ps1
+```
+
+If one of them turns out to reach by container name over a shared network after
+all, it belongs in the table and this is a FAIL.
 
 ## T4 — how-to-set, measured (acceptance criterion 1, second half)
 
@@ -216,12 +334,12 @@ Four claims, four commands, from `<wt>/OB1/docker`:
 ## T5 — commit shape and blast radius (acceptance criteria 4 and 5)
 
 ```bash
-git -C "<wt>/OB1" log --oneline -1                      # aa4a31d
+git -C "<wt>/OB1" log --oneline -2                      # fdfb7af, aa4a31d
 git -C "<wt>/OB1" merge-base HEAD origin/feature/integrated-knowledge-system   # fe3e045
-git -C "<wt>/OB1" show --stat HEAD                      # exactly 2 files, both docs
+git -C "<wt>/OB1" diff --stat fe3e045 HEAD             # exactly 2 files, both docs
 git -C "<wt>/OB1" status --porcelain                    # clean
 git -C "<wt>" status --porcelain                        # ` M OB1` + the 2 ai-stack files, NO `M  OB1`
-git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 1 commit, unpushed
+git -C "<wt>/OB1" log origin/feature/integrated-knowledge-system..HEAD --oneline   # exactly 2 commits, unpushed
 ```
 
 **The pre-commit's OB1 gates (5b recipe tests, 5c `deno check`, 5d integration
@@ -297,7 +415,13 @@ FAIL even if it sounds right; that is the whole reason this list exists.
 - **C17** If you want `--headless` to mean anything for this plane, do not put
   the surface profiles in `.env`. → follows from C15/C16
 
-## B.3 `README.md` — "Consumers outside this project"
+## B.3 `README.md` — "Consumers outside this project" — **SUPERSEDED by B.7**
+
+> Attempt 1 FAILED on this section and it was rewritten, not patched. C18-C25
+> below describe the OLD two-row table and are kept only so a reader comparing
+> the two attempts can see what changed. **Check B.7 instead.** C19 (paths are
+> ai-stack-relative) and C25 (nothing in OB1 records these edges) survive
+> verbatim as C56 and are still live claims.
 
 - **C18** Turning `wiki`, `notebook` or `research` off breaks callers in other
   compose projects; none fails at start, all fail at request time. → T3, plus the
@@ -397,18 +521,102 @@ FAIL even if it sounds right; that is the whole reason this list exists.
 
 ---
 
+## B.7 Sentences introduced by attempt 2 (the T3 fix)
+
+Attempt 1's B.3 claims C18-C25 are SUPERSEDED by these; the section they
+described was rewritten, not patched.
+
+- **C45** The table's scope is a runtime reach by container name to one of the
+  ten profiled services over a shared `ai-stack_*` network. -> the scope sentence
+  is the thing that makes completeness checkable at all; if you disagree with the
+  scope, say so as a class-3 note rather than failing a row
+- **C46** There are **seven** such surfaces at **thirteen** call sites, in three
+  compose projects (`portal`, `frontend` - including the OWUI-hosted tool and
+  pipes that run inside `openwebui` - and `agent-org`). -> T3a, T3c
+- **C47** Rows 1-3: portal Caddy reaches `openbrain-workbench:8000` (`:136`),
+  `openbrain-wiki-viewer:8080` (`:143`), `open_notebook:5055` (`:242`) and
+  `:8502` (`:250`). -> T3a (unchanged from attempt 1, re-verified)
+- **C48** Row 4: the `frontend` plane's `tailscale` companion reaches
+  `open_notebook` at `:8502` and `:5055/api/config` through its serve route
+  table, with the host defaulted at `entrypoint.sh:60`. -> T3a
+- **C49** Row 4 reaches the wiki THROUGH portal Caddy, not directly:
+  `frontend/docker-compose.yml:366` is `${QUARTZ_HOST:-caddy}` and the deployed
+  value is `caddy:8446`; `entrypoint.sh:66`'s `openbrain-wiki-viewer` fallback is
+  always overridden. So `wiki` off breaks the tailnet wiki route via row 2. ->
+  **T3b. This contradicts attempt 1's tester and is the single most likely place
+  for attempt 2 to be wrong. Check it first.**
+- **C50** Row 5: `agent-org`'s `agent-bridge` reaches `openbrain-research:8000`;
+  grounding (P4.0a) and the Tier-2 advisor stop producing when `research` is off.
+  -> T3a
+- **C51** Row 6: the deployed OWUI Deep Research tool reaches
+  `openbrain-research:8000`. -> T3a
+- **C52** Row 7 is TWO status-pipe modules, not one; the earlier table named only
+  `modules/system-health/`, which does not cover `serve/tailscale_serve_pipe.py`.
+  -> T3a
+- **C53** `scripts/backup/restore-from-snapshot.ps1:432` `docker exec`s into
+  `open-notebook-backup` and has it reach `surrealdb:8000`; both ends are
+  `notebook`. -> T3a
+- **C54** The excluded host-side class - `check-openbrain-health.ps1`
+  (`127.0.0.1:8818`, `:8816`), `stack-watchdog.ps1` and `wiki-latency-probe.ps1`
+  (`docker exec`) - addresses published ports or the docker CLI, not container
+  names, and `stack-watchdog.ps1` repairs rather than consumes. -> T3d
+- **C55** Inventories (`scripts/lib/stack-services.json`, `stack.manifest.toml`,
+  `status-pipe/orchestrator.py`'s docstring) and `.env` delivery lines are not
+  separate surfaces. -> T3c classification
+- **C56** Nothing in the OB1 project records these edges, so the list must be
+  re-derived rather than maintained; the README carries the grep that does it.
+  -> `grep -rn` the consumer paths inside `OB1/` finds only the README's own rows
+- **C57** That grep returns 23 lines in 15 files (21 config/code + 2 prose). -> T3c
+
+## B.8 Sentences introduced by attempt 2 (`.env.example`)
+
+- **C58** `OB_APP_MEMORY_PASSWORD` is REQUIRED: substituted with no default at
+  nine sites, eight in `docker-compose.yml` and one in the scheduled file, every
+  one a `DB_PASSWORD`. -> `grep -nE 'OB_APP_MEMORY_PASSWORD' docker-compose*.yml`;
+  all nine are code lines, none a comment
+- **C59** `docker compose config` warns about it 8 times per render - nine sites,
+  eight warnings, "compose dedupes somewhere; measured, not explained". -> T1's
+  stderr table. **The honesty of this one is the point**: the mismatch is stated
+  rather than papered over with an invented reason. If you can explain it, that
+  is a class-3 note worth having.
+- **C60** It was in neither ai-stack's root template nor this one before now, and
+  it is a FOURTEENTH variable beyond the anchor's thirteen, added because
+  acceptance criterion 2's literal wording asks for it and because it is the trap
+  the item's goal names. -> `git show 4934529:.env.example | grep -c
+  OB_APP_MEMORY_PASSWORD` -> 0; `git show fe3e045:docker/.env.example | grep -c`
+  -> 0
+
+## B.9 Corrected numbers (attempt 1 shipped these wrong)
+
+- **C61** 95 compose-substituted names, not 96: `PUBLIC_DOMAIN` occurs once, in a
+  YAML comment at `docker-compose.yml:867`. -> T2
+- **C62** Direction B is 70: 82 before the item, 72 after ten were added, 71 once
+  `PUBLIC_DOMAIN` is excluded, 70 with `OB_APP_MEMORY_PASSWORD` added. -> T2
+- **C63** Direction A is still empty and 25 names are declared. -> T2
+- **C64** Both committed blobs are pure LF; a `core.autocrlf=true` clone shows CR
+  in the working copy only. -> the CRLF trap section
+
 # What a FAIL looks like, ranked
 
-1. Any render count wrong → the item's core deliverable is wrong. Not fixable by
-   editing prose; the number must be re-rendered.
-2. T2 direction A non-empty → the template invites an operator to set something
+1. **A runtime reach by container name that the table omits** → this is what
+   attempt 1 failed on, and the table's whole value is that it is complete. A
+   gap makes it worse than no table, because a reader will trust it. Run T3c
+   before anything else, and widen the sweep in a way the developer did not.
+2. Any render count wrong → the item's core deliverable. Not fixable by editing
+   prose; the number must be re-rendered.
+3. T2 direction A non-empty → the template invites an operator to set something
    inert. The anchor names this an outright FAIL.
-3. A consumer of a profiled service missing from the C20-C24 table → the table
-   claims completeness; a gap makes it worse than no table, because a reader will
-   trust it.
 4. `M  OB1` staged in the ai-stack worktree, or anything pushed → scope breach,
    regardless of whether the content is right.
 5. Any B-part claim you cannot reproduce → delete the sentence rather than keep
-   a plausible one nobody has checked. C34 and C42 are the two that were
-   inherited from the old root template and then corrected against the source;
-   they are where a copied-through error would have survived.
+   a plausible one nobody has checked. The three to attack hardest:
+   - **C49** (row 4 reaches the wiki via Caddy, not directly) — it contradicts
+     attempt 1's tester, so one of the two is wrong;
+   - **C34** and **C42** — inherited from the old root template and then
+     corrected against the source, which is where a copied-through error hides;
+   - **C59** (8 warnings, 9 sites) — deliberately unexplained.
+
+**Not a fail:** anything in the excluded host-side class (T3d), the CRLF smudge
+in a fresh clone (trap 2), or a render that warns exactly as T1's stderr table
+predicts. Each of those cost a previous attempt or tester time; they are written
+down so the next one spends it elsewhere.

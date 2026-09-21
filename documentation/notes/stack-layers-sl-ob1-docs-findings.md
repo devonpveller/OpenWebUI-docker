@@ -6,14 +6,15 @@ Everything below was checked by reading the named file or running the named
 command in the worktree `.claude/worktrees/wt-sl-ob1-docs`. Nothing is carried
 over from a sibling item's report without re-measuring it here.
 
-Artifact: OB1 `work/sl-ob1-docs` @ **`aa4a31d`**, merge-base `fe3e045`
+Artifact: OB1 `work/sl-ob1-docs` @ **`fdfb7af`** (two commits: `aa4a31d`, then
+`fdfb7af` fixing the attempt-1 failure), merge-base `fe3e045`
 (= `origin/feature/integrated-knowledge-system` tip), two files, **not pushed**
 (D4). ai-stack: this note + `documentation/evidence/sl-ob1-docs/test-plan.md`,
 no gitlink staged.
 
 ---
 
-## 1. The anchor says "the thirteen variables". Ten were added, and that is the correct number.
+## 1. The anchor says "the thirteen variables". Ten of them were added, and that is the correct number.
 
 The anchor and `stack-layers-sl-env-split-findings.md` §7 both name thirteen
 variables as documented only in ai-stack's pre-split root `.env.example`. Two of
@@ -65,9 +66,11 @@ template as a **prose note** saying they are not read from that file and where
 to change them instead, with no assignment. The documentation the root template
 carried survives; the misleading invitation to set them does not.
 
-Ten assignments added: the three backup groups' retain/cron/interval knobs
-(6), the two SurrealDB credentials, the Open Notebook encryption key, and its
-embedding API key.
+Ten assignments added from the anchor's thirteen: the three backup groups'
+retain/cron/interval knobs (6), the two SurrealDB credentials, the Open Notebook
+encryption key, and its embedding API key. An ELEVENTH assignment,
+`OB_APP_MEMORY_PASSWORD`, was added in attempt 2 from OUTSIDE that set - see
+section 11 for why a fourteenth variable is in scope.
 
 **Follow-on, NOT done here:** sl-env-split §7 says the root `.env.example`'s
 pointer block should be deleted "once OB1's own example carries them". It still
@@ -97,7 +100,7 @@ The other nine defaults match the compose exactly (`:-2`, `:-0 2 * * *`,
 `:-86400`, `:-20 2 * * *`, and three with no default at all). Checked one by one,
 not by inspection of the group.
 
-## 3. The two-way variable diff: direction A clean, direction B is 72 and was 82
+## 3. The two-way variable diff: direction A clean, direction B is 70 and was 82
 
 Method, and the guard that matters:
 
@@ -116,17 +119,28 @@ have inflated the gap by two and, worse, invited someone to "fix" it by adding
 two variables that compose does not read — the exact failure the anchor's
 direction-A criterion exists to catch.
 
-| | before | after |
-|---|---|---|
-| compose-substituted names | 96 | 96 |
-| template-declared names | 14 | 24 |
-| **A**: in template, not substituted | **0** | **0** |
-| **B**: substituted, not in template | 82 | **72** |
+| | before | after commit 1 | after commit 2 |
+|---|---|---|---|
+| compose-substituted names | 95 | 95 | 95 |
+| template-declared names | 14 | 24 | **25** |
+| **A**: in template, not substituted | **0** | **0** | **0** |
+| **B**: substituted, not in template | 82 | 72 | **70** |
+
+> **CORRECTED after attempt 1 FAILED.** This table first said 96 substituted and
+> 72 direction-B. Both were one too high: `PUBLIC_DOMAIN` occurs exactly once in
+> either compose file, at `docker-compose.yml:867`, **inside a `#` comment**, so
+> compose never substitutes it. The tester refuted it and I reproduced the
+> refutation two ways — reading the line, and observing that compose emits unset
+> warnings for `OB_APP_MEMORY_PASSWORD` (unset, default-less) and never for
+> `PUBLIC_DOMAIN`, which is equally unset and equally default-less. The method
+> therefore needs a SECOND guard, `grep -hvE '^[[:space:]]*#'`, to strip
+> whole-line YAML comments before matching. Direction B then falls to 71, and to
+> **70** once `OB_APP_MEMORY_PASSWORD` is added (§11).
 
 Direction A empty in both states is the criterion that passes. Direction B is
 the pre-existing gap the anchor asked me to report rather than close.
 
-### The 72 still missing (all pre-existing, none introduced here)
+### The 70 still missing (all pre-existing, none introduced here)
 
 `BACKFILL_BATCH` `BACKFILL_CHAT_MODEL` `BACKFILL_CONCURRENCY`
 `BACKFILL_FETCH_PROXY_URL` `BACKFILL_INTERVAL_MS` `BACKUPS_DIR` `CHUNK_BATCH`
@@ -135,9 +149,9 @@ the pre-existing gap the anchor asked me to report rather than close.
 `EXTRACT_STT_API_BASE` `EXTRACT_STT_PATH` `GAP_DIVE_CEILING` `GAP_DIVE_ENABLED`
 `GAP_DIVE_MAX_AGE_DAYS` `GAP_DIVE_MAX_ATTEMPTS` `GAP_DIVE_MIN_TAGGED`
 `GAP_DIVE_WAIT_MS` `IDEA_BRAINSTORM_OPERATORS` `IDEA_REFINERY_MM_TOKEN`
-`IDEA_REFINERY_MM_URL` `MM_SITE_URL` `OB_APP_MEMORY_PASSWORD` `OB_DIGEST_LLM_KEY`
+`IDEA_REFINERY_MM_URL` `MM_SITE_URL` `OB_DIGEST_LLM_KEY`
 `OB_ENTITY_LLM_KEY` `OB_MCP_LLM_KEY` `OB_PODCAST_LLM_KEY` `OB_RESEARCH_LLM_KEY`
-`OB_WIKI_LLM_KEY` `ON_JOB_WAIT_MS` `ON_PUBLIC_BASE` `PUBLIC_DOMAIN`
+`OB_WIKI_LLM_KEY` `ON_JOB_WAIT_MS` `ON_PUBLIC_BASE`
 `RESEARCH_CHAT_MODEL` `RESEARCH_CLAIM_SHORTLIST_K` `RESEARCH_COLLAPSE_STREAK_MAX`
 `RESEARCH_CONFIDENCE_FLOOR` `RESEARCH_FETCH_CONCURRENCY`
 `RESEARCH_FETCH_DEGRADED_MIN_HITS` `RESEARCH_FETCH_DEGRADED_RATIO`
@@ -157,11 +171,11 @@ the pre-existing gap the anchor asked me to report rather than close.
 optional.** Four are worth a follow-up, and I checked each substitution site
 rather than sorting them by how the name reads:
 
-- **`OB_APP_MEMORY_PASSWORD`** — the only one of the 72 with **no default at
-  all**: `${OB_APP_MEMORY_PASSWORD}` on NINE services (eight in
-  `docker-compose.yml`, one in the scheduled file), every one of them a
-  `DB_PASSWORD`. A fresh clone renders them blank. This is the strongest
-  candidate for the next item.
+- **`OB_APP_MEMORY_PASSWORD`** — was the only one with **no default at all**:
+  `${OB_APP_MEMORY_PASSWORD}` on NINE services (eight in `docker-compose.yml`,
+  one in the scheduled file), every one of them a `DB_PASSWORD`. Called "the
+  strongest candidate for the next item" here in attempt 1; **it was added in
+  attempt 2 instead** (§11), which is why the list above is 70 and not 71.
 - **`OB_*_LLM_KEY` (six names: `MCP`, `ENTITY`, `RESEARCH`, `WIKI`, `PODCAST`,
   `DIGEST`)** — 17 substitution sites. **They all HAVE defaults**
   (`:-not-needed`, and `:-no-key` for the digest), which is exactly why they are
@@ -298,29 +312,88 @@ and says what to do if you want `--headless` back (do not declare the surface
 profiles in `.env`); `sl-driver-parity` or the feature's planner should decide
 whether that is the intended end state.
 
-## 8. The outside-OB1 consumers, verified in this tree
+## 8. The outside-OB1 consumer list - I claimed completeness over a set I had never enumerated, and attempt 1 FAILED on it
 
-`portal/config/caddy/Caddyfile`:
+This is the finding worth the most, and it is about method, not about the four
+rows I missed.
 
-| line | reverse_proxy | profile |
-|---|---|---|
-| 136 | `openbrain-workbench:8000` | `wiki` |
-| 143 | `openbrain-wiki-viewer:8080` | `wiki` |
-| 242 | `open_notebook:5055` | `notebook` |
-| 250 | `open_notebook:8502` | `notebook` |
+My first version of the table had five rows in two consumer kinds and closed:
+"**Both** consumers reach these services by container name across the shared
+`ai-stack_*` networks." Every row was correct - the tester verified all five at
+their lines - and the case failed anyway, because the sentence was a **universal
+quantifier over a set I had never enumerated**. My own test plan made it the test
+("no consumer of a profiled service may be missing ... the table's value is that
+it is complete") and ranked it FAIL #3, and then I satisfied it by grepping the
+two directories I had already thought of.
 
-`status-pipe/modules/system-health/service/system_health.py`: `open_notebook`
-:5055 `/api/config` and `openbrain-research` :8000 `/health`, both
-`"critical": False`. `status-pipe/orchestrator.py` and
-`status-pipe/serve/tailscale_serve_pipe.py` additionally list `surrealdb`,
-`open_notebook`, `openbrain-wiki` and `openbrain-wiki-viewer` in their service
-inventories — display-only, so they degrade rather than break, and I left them
-out of the README table to keep it to consumers that actually reach the service.
-Naming that choice because "the table is complete" is one of its claims and this
-is the edge I decided sits outside it.
+**What I actually did wrong:** I ran `grep` over `portal/` and `status-pipe/` -
+the two places the `sl-ob1-profiles` findings section 12 had already named - and
+treated reproducing a prior item's list as having derived my own. A carried
+finding is a starting point, not an enumeration.
 
-No `openbrain-curator` consumer outside OB1 was found. The Caddyfile has no
-`openbrain-research` route either — the status pipe is its only outside caller.
+**The evidence was in front of me and I read past it.** `docker-compose.yml:864-867`
+- the very lines I later used to prove `PUBLIC_DOMAIN` is comment-only - say that
+"the portal Caddy ... and the tailscale container - which shares openwebui's
+netns, and openwebui is on app-net - can reach openbrain-wiki-viewer:8080 by
+name". OB1's own compose names the frontend tailscale companion as a consumer. I
+quoted those lines for a different purpose and never read them for this one.
+
+### The re-derived list: seven surfaces, thirteen call sites
+
+Method: an unbounded grep over the whole ai-stack tree (excluding `OB1/`, `.git`,
+`node_modules`, `archive`, `documentation`, `backups`) for a URL/host-field shape
+in front of any of the ten profiled service names, then every hit read at its
+line. **23 lines in 15 files** (21 config/code, 2 prose in Markdown). The grep is
+in `OB1/docker/README.md` so the list can be rebuilt rather than maintained.
+
+| # | Surface | Sites | Profile |
+|---|---|---|---|
+| 1-3 | portal Caddy | `portal/config/caddy/Caddyfile:136`, `:143`, `:242`, `:250` | `wiki`, `notebook` |
+| 4 | `frontend`'s `tailscale` companion | `frontend/entrypoint.sh:97`, `:99` (host at `:60`) | `notebook` |
+| 5 | `agent-org`'s `agent-bridge` | `agent-org/docker/docker-compose.yml:208` -> `app/config.py:373`, `app/modules/grounding.py:12` | `research` |
+| 6 | OWUI Deep Research tool | `owui/tools/deep_research.py:47` (`owui/manifest.csv:10`) | `research` |
+| 7 | OWUI Server Status - **two** modules | `status-pipe/modules/system-health/service/system_health.py:58`, `:66`; `status-pipe/serve/tailscale_serve_pipe.py:119`, `:135`, `:652` | `notebook`, `research` |
+| + | operator path | `scripts/backup/restore-from-snapshot.ps1:432` (`docker exec open-notebook-backup` -> `surrealdb:8000`) | `notebook` |
+
+Rows 4, 5, 6 and the second half of 7 are the four the tester found. The operator
+path is not among their four; I found it while re-deriving.
+
+### TWO CORRECTIONS TO THE TESTER'S OWN CITATIONS
+
+A tester's report is not evidence until the part you act on is checked - the A9
+rule applies to their output as much as to a subagent's. Both of these would have
+gone into the README as errors if I had transcribed the report.
+
+1. **Row 4 does NOT reach the wiki directly.** The tester wrote
+   "`QUARTZ_HOST=openbrain-wiki-viewer:8080` (:60,66;
+   `frontend/docker-compose.yml:350`) - hits notebook AND wiki". Measured:
+   `frontend/docker-compose.yml:366` is `QUARTZ_HOST=${QUARTZ_HOST:-caddy}`,
+   `frontend/.env:133` is `caddy`, `QUARTZ_PORT` is `8446`. `entrypoint.sh:66`'s
+   `openbrain-wiki-viewer` default is never reached because the compose always
+   supplies a value - and the comment at `frontend/docker-compose.yml:361-364`
+   says why it moved ("Pre-Caddy this pointed straight at
+   openbrain-wiki-viewer:8080, which had NO /workbench routing -> 404 on
+   tailnet"). So the tailnet wiki route breaks THROUGH the portal Caddy row, not
+   as an eighth direct edge. **The tester's conclusion - that row 4 is a missing
+   surface - is right; their mechanism for the wiki half is not.**
+2. **The cited `frontend/docker-compose.yml:350` is `OPEN_NOTEBOOK_HOST`**, not
+   `QUARTZ_HOST`. The notebook half of row 4 is correct, at that line.
+
+### The scope sentence is the actual fix
+
+Adding four rows would have left the same defect: a table that asserts
+completeness with no stated boundary cannot be checked, only doubted. The section
+now states what counts as a consumer (a runtime reach by container name over a
+shared `ai-stack_*` network), gives the count, and names the **excluded** class
+explicitly - host-side probes on `127.0.0.1` (`check-openbrain-health.ps1` at
+`:8818`/`:8816`), `docker exec` drivers (`stack-watchdog.ps1`, which repairs
+rather than consumes; `wiki-latency-probe.ps1`), inventories
+(`scripts/lib/stack-services.json`, `stack.manifest.toml`,
+`status-pipe/orchestrator.py`'s docstring) and `.env` delivery lines.
+
+That is what makes the next tester's job finite: they can disagree with the
+boundary, which is a note, or find something inside it, which is a fail. Before,
+every host-side probe was an argument.
 
 ## 9. The pre-commit's OB1 gates do not run for this item, and that is the right evidence
 
@@ -357,3 +430,75 @@ The renders in §5 are the only machine check this artifact receives.
   `POSTGRES_USER` comes "from env_file ./OB1/docker/.env"; per §1 it comes from a
   compose literal. Correcting it is a one-line OB1 change, but it is in a script,
   and this item's anchor says docs only and names the two files. Left.
+
+## 11. `OB_APP_MEMORY_PASSWORD` added - a fourteenth, and why that is not scope creep
+
+Attempt 1's section 3 named it "the strongest candidate for the next item" and
+left it. Attempt 2 added it, for three reasons that only became visible once the
+tester ran a render the way a NEWCOMER would:
+
+1. **Acceptance criterion 2's literal wording asks for it** - "a variable the
+   compose reads that the example lacks FAILS". I had read that as bounded by the
+   anchor's thirteen; read literally it is unbounded, and this is the one name in
+   the 71 where the literal reading and the item's GOAL agree.
+2. **It is the only default-less one.** Nine substitution sites, every one a
+   `DB_PASSWORD`. A newcomer following the template gets a fleet that cannot reach
+   its store - precisely the failure the goal ("a newcomer ... can see every
+   variable the plane reads") exists to prevent.
+3. **It was measurably noisy.** A render seeded from the previous example emits
+   **8** `OB_APP_MEMORY_PASSWORD is not set` warnings; seeded from this one,
+   **zero**. That turned the tester's class-3 note - "state the expected warning
+   and count" - into a fix rather than a caveat.
+
+**An honest loose end:** nine substitution sites, eight warnings, identical for
+the bare and the all-four render, and all nine are code lines (checked - none is a
+comment, so it is not another `PUBLIC_DOMAIN`). Compose dedupes somewhere and I
+did not establish where. The `.env.example` comment and the test plan both say
+"measured, not explained" rather than inventing a mechanism.
+
+Direction B is therefore **70**, not 71. The enumerated list in section 3 was
+re-checked name-for-name against the live `comm` output after the change: 70 = 70,
+nothing missing, nothing extra.
+
+## 13. The count I added to catch the miss was itself wrong for twenty minutes
+
+Worth recording because it is the same failure one layer up.
+
+The fix for section 8 was a rebuild grep plus its expected yield, so the next
+person can tell a complete list from a plausible one. I wrote "21 lines in 11
+files" into the README from a run I had FILTERED (`| grep -vE "\.md:"`) and
+counted by eye. Running the command exactly as the README prints it gives **23
+lines in 15 files** - the two extra are prose mentions in `owui/README.md` and
+`CLEANUP-PLAN.md`, which the printed command does not exclude.
+
+I caught it only because the test plan told the tester to execute the command
+and compare, and I executed the plan's own text before committing it. The OB1
+commit had already been made with the wrong figure and was amended.
+
+**The rule this argues for:** when a document tells someone to run a command and
+expect a number, the number must come from running THAT command, as printed,
+with no filter you applied in your shell and forgot. Copying a figure from a
+neighbouring run is the same class of error as computing a render count instead
+of rendering it - which is the defect this whole item exists to avoid, and which
+I had already written into the test plan as rule 3.
+
+## 12. The method gained a second guard, and both came from refutations
+
+The variable diff now needs TWO guards, and **neither was designed - each was
+added after something refuted the version without it**:
+
+- `(^|[^$])` excludes `$${VAR}` shell escapes in the backup containers' inline
+  `command:` blocks (`RETAIN_COUNT`, `BACKUP_INTERVAL`). Found by me, in attempt
+  1, because the number looked wrong.
+- `grep -hvE '^[[:space:]]*#'` strips whole-line YAML comments, because a name
+  appearing only in a comment is never substituted (`PUBLIC_DOMAIN`). Found by
+  the TESTER, in attempt 1, because I did not think to look.
+
+The generalisable shape: **a text-matching audit over a structured file will
+over-count until something independent contradicts it** - and the thing that
+contradicted it here was not a closer reading, it was compose's own
+unset-variable warnings, which are ground truth about what compose actually
+substitutes. Where such a signal exists, prefer it to the grep it is checking.
+That is how `PUBLIC_DOMAIN` can be proven comment-only without reading line 867
+at all: it is unset and default-less, exactly like `OB_APP_MEMORY_PASSWORD`, and
+compose warns eight times about one and never about the other.
