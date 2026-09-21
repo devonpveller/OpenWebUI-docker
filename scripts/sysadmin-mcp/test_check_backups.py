@@ -186,6 +186,54 @@ def test_precheck() -> None:
           cb._skip_is_current(skip, skip["at"] - 3600))
 
 
+def test_stamp_parsing_is_utc_all_year() -> None:
+    """The attempt-1 defect: a UTC stamp read one hour early for 8 months a year.
+
+    `mktime(strptime(...)) - time.timezone` interprets the struct as LOCAL time
+    while time.timezone is the STANDARD offset, so inside the host's DST window
+    the pair is 3600 s out. _skip_is_current compares that value against an
+    artifact mtime, so a real, CURRENT skip less than an hour newer than the last
+    artifact was called "superseded" and the row went green.
+
+    The margins below are DISCRIMINATING on purpose. Attempt 1's test planted a
+    1 h old artifact and a skip stamped now+60s - it passed with a sixty-second
+    margin, i.e. the bug's offset plus a minute, which is why the bug shipped.
+    A 30-minute-newer skip against a 2 h artifact fails under the old code and
+    passes under calendar.timegm.
+    """
+    print("\nSTAMPS - one hour is the difference between a red row and a green one")
+    import calendar
+
+    for stamp in ("2026-07-04T12:00:00Z", "2026-09-20T12:00:00Z", "2026-01-15T12:00:00Z"):
+        want = float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
+        got = cb._parse_iso_z(stamp)
+        check(f"{stamp} parses as UTC (delta 0 s)", got == want,
+              f"delta {None if got is None else got - want:+} s")
+
+    # THE DISCRIMINATING SPACING. What matters is the GAP between the artifact
+    # and the skip, not how old either is: the old expression shifts the skip one
+    # hour EARLIER, so it only changes the verdict when that gap is under an hour.
+    # Artifact 2 h ago, skip 30 MINUTES AFTER IT (= 90 min ago): the shift puts
+    # the skip at 150 min ago, BEFORE the artifact, and it is wrongly superseded.
+    now = time.time()
+    artifact = now - 2 * 3600                  # last artifact two hours ago
+    skip_at = artifact + 30 * 60               # skip 30 min AFTER it -> 90 min ago
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(skip_at))
+    skip = cb.precheck_skip("x", f"[{stamp}] lm-models PRECHECK SKIP: /data is empty")
+    check("a skip 30 min NEWER than a 2 h old artifact is CURRENT",
+          cb._skip_is_current(skip, artifact), str(skip))
+
+    # The old expression run side by side, so the margin is demonstrated and not
+    # asserted. Only meaningful while the host is actually in DST.
+    broken_at = time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    if time.daylight and time.localtime().tm_isdst:
+        check("  ... and the OLD expression called it superseded (this is the bug)",
+              not (broken_at > artifact),
+              f"broken_at-artifact={broken_at - artifact:+.0f}s")
+    else:
+        print("  SKIP  the old-expression contrast (host is not in DST right now)")
+
+
 def test_evaluate_reports_the_mount() -> None:
     """End to end: a fresh-looking age must not hide a mount pointing nowhere."""
     print("\nEVALUATE - the wrong-mount row fails even when the age looks fine")
@@ -197,21 +245,31 @@ def test_evaluate_reports_the_mount() -> None:
         os.makedirs(os.path.join(root, "logs"))
         d = os.path.join(root, "backups", "lm-models")
         os.makedirs(d)
-        # An artifact from BEFORE the mount moved: 1 h old, well inside the 204 h
+        # An artifact from BEFORE the mount moved: 2 h old, well inside the 204 h
         # threshold. Age alone says this sidecar is healthy.
+        #
+        # TWO hours, and the skip below is THIRTY MINUTES ago, because attempt 1
+        # planted a 1 h artifact against a skip stamped now+60s and passed with a
+        # sixty-second margin - which is the DST offset plus a minute, so the
+        # one-hour stamp bug sailed through. This spacing is smaller than that
+        # offset in the right direction: it fails under the old expression.
         art = os.path.join(d, "lm-models-20260921T000000Z.tar.gz")
         with open(art, "w", encoding="utf-8") as fh:
             fh.write("x")
-        when = time.time() - 3600
+        when = time.time() - 2 * 3600
         os.utime(art, (when, when))
 
         cb._REPO_ROOT = root
         cb._BACKUPS = os.path.join(root, "backups")
         cb._EXPECTED = [("lm-models", "lm-models-backup", 204)]
         cb._running_containers = lambda: {"lm-models-backup"}
-        # The skip is NEWER than that artifact -> the sidecar's last word.
-        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 60))
-        cb._container_log_tail = lambda c: f"[{now}] lm-models PRECHECK SKIP: /models is empty\n"
+        # The skip is NEWER than that artifact -> the sidecar's last word. Only
+        # THIRTY MINUTES newer, which is what makes this discriminating: the old
+        # `mktime - time.timezone` read every stamp an hour early inside DST, so a
+        # gap under an hour put the skip BEFORE the artifact and the row went
+        # green. Attempt 1 used a 60-second margin and never noticed.
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when + 30 * 60))
+        cb._container_log_tail = lambda c: f"[{stamp}] lm-models PRECHECK SKIP: /models is empty\n"
 
         res = cb.evaluate()
         names = [s["name"] for s in res["stale"]]
@@ -249,6 +307,7 @@ if __name__ == "__main__":
         pass
     test_offsite()
     test_precheck()
+    test_stamp_parsing_is_utc_all_year()
     test_evaluate_reports_the_mount()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

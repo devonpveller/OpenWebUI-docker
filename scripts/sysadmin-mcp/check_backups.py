@@ -25,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import os
@@ -153,8 +154,25 @@ def _container_log_tail(container: str) -> str:
 
 
 def _parse_iso_z(stamp: str) -> float | None:
+    """Epoch seconds for a `...Z` stamp. UTC in, UTC out, all year round.
+
+    `calendar.timegm`, NOT `mktime(...) - time.timezone`. mktime interprets the
+    struct as LOCAL time and time.timezone is the STANDARD offset, so inside the
+    host's DST window the pair is one hour off (measured here: timezone=18000,
+    altzone=14400 - every stamp in April..October parsed 3600 s early, January
+    exactly right). That hour is not cosmetic: _skip_is_current compares this
+    value against an artifact mtime, so a real, current PRECHECK SKIP less than
+    an hour newer than the last artifact was judged "superseded" and the row went
+    GREEN. Measured against the live red-probe sidecar: a planted artifact 2 h old
+    reported stale, 1 h / 30 min / 5 min did not.
+
+    It bit in the safe-ish direction (false green, never false red) and the next
+    sidecar cycle would catch it - but a recreate with a wrong bind is exactly the
+    case where a sidecar runs minutes after a success, which is the shape this
+    whole check exists for.
+    """
     try:
-        return time.mktime(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+        return float(calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")))
     except Exception:  # noqa: BLE001
         return None
 
