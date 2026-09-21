@@ -474,7 +474,9 @@ function Reset-OB1Stack {
     Write-Log "INFO" "Recreating Open Brain (OB1) stack..."
     try {
         # $Script:OB1Profiles on BOTH halves. On the `up` half a missing profile
-        # silently leaves seven containers down after a recreate; on the `down`
+        # silently leaves TEN containers down after a recreate (measured at
+        # fe3e045: 30 services with all four profiles, 20 with none; the
+        # wiki+notebook pair alone accounts for seven of the ten); on the `down`
         # half it is the difference between tearing the project down and leaving
         # part of it behind for the `up` to collide with - measured in the probe
         # transcribed at $Script:OB1Profiles, not assumed.
@@ -1051,9 +1053,12 @@ function Invoke-NuclearRecovery {
     # ai-stack_llm-net network OB1 attaches to as an external network.
     if (Test-OB1Available) {
         Write-Log "INFO" "Tearing down Open Brain (OB1) stack..."
-        # Profiles, or this removes 20 of 30 and leaves TEN containers holding
-        # endpoints on ai-stack_llm-net / app-net / default - the networks the
-        # root `docker compose down` further down is about to drop. That drop
+        # Profiles, or this removes 20 of 30 and leaves TEN containers behind,
+        # SEVEN of which hold endpoints on ai-stack_llm-net / app-net / default -
+        # the networks the root `docker compose down` further down is about to
+        # drop. (Measured at fe3e045 from the rendered config: the other three,
+        # surrealdb / open-notebook-backup / openbrain-wiki-backup, sit on
+        # open-brain_default only and block nothing of the anchor's.) That drop
         # then fails with `Resource is still in use` and nuclear stops doing what
         # it says. See $Script:OB1Profiles for the measurement.
         $prof = $Script:OB1Profiles
