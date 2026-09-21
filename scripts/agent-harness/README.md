@@ -146,6 +146,13 @@ a per-worktree `info/exclude` is **not** honored — verified).
   watch for: the hooks are the repo's only automatic guard against secrets, line endings,
   gateway-routing bypasses and env_file scope, and an agent that skips them is removing
   the check that exists precisely because humans and agents forget.
+- **A check that passes in your worktree must say WHAT IT SCANNED.**
+  `check-llm-gateway-routing.ps1` pruned `.claude` by absolute-path substring, and a
+  worktree lives under `<repo>\.claude\worktrees\<id>\` - so from a worktree it filtered
+  every candidate away, read nothing and printed a green (fixed 2026-09-20: it matches
+  root-relative, prints `N file(s) scanned` on every verdict, and refuses zero). Until a
+  check names how much it examined, its green from a worktree is not evidence - see
+  `documentation/notes/stack-layers-sl-checks-worktree-findings.md` for the sweep of all 50.
 
 - **An agent's PATH is not the operator's PATH.** A tester concluded that a README
   command was unrunnable because `Get-Command grep` returned nothing in its process; I

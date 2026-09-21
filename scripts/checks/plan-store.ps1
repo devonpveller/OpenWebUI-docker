@@ -56,7 +56,38 @@ $ErrorActionPreference = 'Stop'
 $Root = (git rev-parse --show-toplevel 2>$null)
 if (-not $Root) { throw "not inside the code repo" }
 $Root = $Root.Trim()
-if (-not $Store) { $Store = Join-Path (Split-Path $Root -Parent) 'documentation-plans-ai-stack' }
+# WHERE THE STORE IS WHEN THIS RUNS FROM A WORKTREE. $Root is the toplevel of the checkout
+# we are standing in, and for a harness session worktree that is
+# `<repo>\.claude\worktrees\<id>` - whose parent is `...\worktrees`, not the directory the
+# plan store was cloned beside. Measured 2026-09-20: every worktree run died with
+# "plan store not found at D:\...\.claude\worktrees\documentation-plans-ai-stack", and
+# CLAUDE.md asks every planning session - which is a worktree session whenever it will
+# commit - to run this at its start and again before it stops.
+#
+# `git rev-parse --git-common-dir` answers with the SHARED git directory: an absolute path
+# to the MAIN checkout's .git from a worktree, and a bare relative '.git' from the main
+# checkout itself (which is why it is resolved against $Root before its parent is taken).
+# So its parent is the main checkout, and the store sits beside THAT. The checkout's own
+# parent is still tried first, so a plain clone with the store beside it is unaffected and
+# -Store still overrides everything.
+if (-not $Store) {
+    $storeDirs = @(Split-Path $Root -Parent)
+    $common = (git rev-parse --git-common-dir 2>$null)
+    if ($common) {
+        $common = $common.Trim()
+        if (-not [System.IO.Path]::IsPathRooted($common)) { $common = Join-Path $Root $common }
+        $mainRoot = Split-Path $common -Parent
+        if ($mainRoot) { $storeDirs += (Split-Path $mainRoot -Parent) }
+    }
+    foreach ($dir in $storeDirs) {
+        if (-not $dir) { continue }
+        $candidate = Join-Path $dir 'documentation-plans-ai-stack'
+        if (Test-Path (Join-Path $candidate '.git')) { $Store = $candidate; break }
+    }
+    # Nothing found: keep the checkout-relative path so the refusal below names the place a
+    # plain clone would have put it.
+    if (-not $Store) { $Store = Join-Path (Split-Path $Root -Parent) 'documentation-plans-ai-stack' }
+}
 if (-not (Test-Path (Join-Path $Store '.git'))) { throw "plan store not found at $Store (clone devonpveller/documentation-plans-ai-stack beside the code repo)" }
 
 $IndexPath = Join-Path $Root 'documentation/implementation-guide/README.md'
