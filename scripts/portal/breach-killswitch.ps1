@@ -1,4 +1,4 @@
-﻿# scripts/breach-killswitch.ps1
+﻿# scripts/portal/breach-killswitch.ps1
 #
 # Emergency stop for the internet-exposed portal (plan sec.8 Step 6, sec.12.6).
 # Distinct from portal-off.ps1:
@@ -11,8 +11,8 @@
 #   5. Prints recovery steps and EXITS -- does NOT auto-restart anything.
 #
 # Usage:
-#   .\scripts\breach-killswitch.ps1            # do it for real
-#   .\scripts\breach-killswitch.ps1 -DryRun    # print intended actions only
+#   .\scripts\portal\breach-killswitch.ps1            # do it for real
+#   .\scripts\portal\breach-killswitch.ps1 -DryRun    # print intended actions only
 #
 # Stop the moment a Gmail alert looks credible. False-positive cost: ~5 min.
 # Missed-true-positive cost: severe.
@@ -26,7 +26,13 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $projectRoot
 try {
-  $ts = (Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ')
+  # PS 5.1 has no `Get-Date -AsUTC` (it arrived in PowerShell 7). This host runs
+  # 5.1, so the -AsUTC form here made the FIRST LINE of the killswitch throw
+  # `A parameter cannot be found that matches parameter name 'AsUTC'` - the
+  # documented `-DryRun` rehearsal and the real incident run both died before
+  # step 1, and nothing exercised either until 2026-09-21. The same trap was
+  # already fixed, and commented, in scripts/lib/portal-alerter-client.ps1:158.
+  $ts = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
   $incidentDir = Join-Path $projectRoot "incident/$ts"
 
   Write-Host "==> BREACH KILLSWITCH" -ForegroundColor Red
@@ -40,7 +46,7 @@ try {
   $alertBody = @{
     severity      = 'critical'
     event         = 'killswitch.fired'
-    timestamp_utc = (Get-Date -AsUTC -Format 'yyyy-MM-ddTHH:mm:ssZ')
+    timestamp_utc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')   # PS 5.1: no -AsUTC
     log_line      = "breach-killswitch.ps1 invoked at $ts on $env:COMPUTERNAME by $env:USERNAME"
   } | ConvertTo-Json -Compress
 

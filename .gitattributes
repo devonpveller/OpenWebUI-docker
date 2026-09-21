@@ -27,6 +27,27 @@ docker-compose*.yaml text eol=lf
 # PowerShell scripts can use CRLF on Windows
 *.ps1 text eol=crlf
 
+# Authelia REWRITES this tracked file on every start. portal/docker-compose.yml
+# binds it as a FILE (`./config/authelia/.healthcheck.env:/app/.healthcheck.env`),
+# so it cannot simply be untracked and ignored: docker would create a DIRECTORY
+# in its place on a fresh clone and Authelia's read-only root would fail on the
+# write. It has to exist in the tree, and the container has to be free to
+# overwrite it.
+#
+# The drift was PURE LINE ENDINGS (verified 2026-09-21: the worktree blob and the
+# index blob hash identically at d1687154cc7905352769c97795981f302dec4478, 190
+# bytes each; the 196-byte CRLF form of the same content hashes
+# 745619174b12b87f3559503248648461a68b5ea2. Both re-derived 2026-09-21 with
+# `git hash-object --no-filters` - WITHOUT that flag git applies the clean
+# filter and both spellings return the LF hash, which is how attempt 1 came to
+# quote a number that reproduced nowhere.) core.autocrlf=true
+# checks the file out as CRLF, Authelia - a Linux process - writes it back as LF,
+# and `git status` has shown it modified after every portal start ever since.
+# Pinning eol=lf makes the checked-out bytes the bytes Authelia writes, so the
+# main checkout stays clean. It stays `text` rather than `-text` so a real
+# content change (a port, a scheme) is still a readable diff.
+portal/config/authelia/.healthcheck.env text eol=lf
+
 # Binary files should not be modified
 *.png binary
 *.jpg binary

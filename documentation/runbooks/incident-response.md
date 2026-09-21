@@ -47,7 +47,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 1. From the host (or a Tailscale-reachable RDP session):
    ```powershell
    cd "D:\Open WebUI\ai-stack"
-   .\scripts\breach-killswitch.ps1
+   .\scripts\portal\breach-killswitch.ps1
    ```
    The script:
    - Emits a final `killswitch.fired` email (the last alert before the alerter goes down)
@@ -65,7 +65,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 
 3. Confirm portal containers are stopped:
    ```powershell
-   .\scripts\portal-status.ps1
+   .\scripts\portal\portal-status.ps1
    ```
    Expected: every portal container shows `[DOWN]` or `not present`; `openwebui` shows `[OK]`.
 
@@ -123,7 +123,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 
 3. **Bring the portal back up one tier at a time** using `portal-on.ps1` (which does this in dependency order):
    ```powershell
-   .\scripts\portal-on.ps1
+   .\scripts\portal\portal-on.ps1
    ```
    After each tier comes up, check logs for clean startup. Stop if anything looks wrong.
 
@@ -218,13 +218,13 @@ Within 7 days of recovery, write a short post-mortem covering:
 
 ```powershell
 # Status
-.\scripts\portal-status.ps1
+.\scripts\portal\portal-status.ps1
 
 # Emergency stop
-.\scripts\breach-killswitch.ps1
+.\scripts\portal\breach-killswitch.ps1
 
 # Dry-run the killswitch (no changes — see what it would do)
-.\scripts\breach-killswitch.ps1 -DryRun
+.\scripts\portal\breach-killswitch.ps1 -DryRun
 
 # Manual /alert email (test)
 docker exec portal-alerter wget -qO- --post-data='{"severity":"medium","event":"manual.test","timestamp_utc":"2026-05-28T00:00:00Z"}' --header='Content-Type: application/json' http://127.0.0.1:8080/alert

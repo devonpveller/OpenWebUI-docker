@@ -50,7 +50,7 @@ Check on it:
 python scripts/stack/stack.py list        # planes, what is enabled, the products
 python scripts/stack/stack.py status      # docker compose ps per plane
 python scripts/stack/stack.py doctor      # docker, compose, env files, blank keys
-python scripts/stack/stack.py health      # 15 functional probes; exit code = failures
+python scripts/stack/stack.py health      # 16 functional probes; exit code = failures
 ```
 
 `init` refuses if a key a plane needs is missing or blank, and names the key
@@ -351,7 +351,7 @@ backup sidecar. Bring up `coder` or `search` and the other two join it.
 
 ```powershell
 python scripts/stack/stack.py status              # per-plane container states
-python scripts/stack/stack.py health              # 15 functional probes across every plane
+python scripts/stack/stack.py health              # 16 functional probes across every plane
 python scripts/stack/stack.py up|down [plane]     # dependency-ordered; --all for every plane
 python scripts/stack/stack.py restart <plane>     # one plane in place
 python scripts/stack/stack.py stats               # inference demand + queue statistics (WINDOWS ONLY)

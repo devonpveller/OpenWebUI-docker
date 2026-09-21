@@ -981,10 +981,13 @@ def cmd_init(manifest, state, root, console, args) -> int:
 # health probes
 # --------------------------------------------------------------------------
 #
-# These fifteen probes are scripts/stack/stack.ps1's `health` sweep, one for
-# one, with the same pass condition, the same [OK]/[FAIL] line shape and the
-# same exit code (the number of FAILED probes). The .ps1 is now a shim over
-# this code, so the comments that were paid for in outages live HERE:
+# Fifteen of these sixteen probes are scripts/stack/stack.ps1's `health` sweep,
+# one for one, with the same pass condition, the same [OK]/[FAIL] line shape and
+# the same exit code (the number of FAILED probes). The sixteenth, inference
+# serving depth, is NEW (sl-recovery-backups, 2026-09-21) and has no .ps1
+# ancestor: the fifteen inherited ones all stayed green through a thirty-hour
+# chat outage. The .ps1 is now a shim over this code, so the comments that were
+# paid for in outages live HERE:
 #
 #   * a failing probe never stops the sweep. A stopped openwebui costs one
 #     FAILED line, not the eight probes after it (see the owui-drift note).
@@ -1035,6 +1038,63 @@ def urllib_get(url: str, timeout: int = 8) -> HttpResult:
         return HttpResult(exc.code, "")
     except Exception as exc:  # noqa: BLE001 - URLError, timeout, ssl, OSError all mean "no answer"
         return HttpResult(0, str(exc))
+
+
+# Runs INSIDE llm-gateway (`docker exec llm-gateway python -c`). It reads the
+# caller key from the container's own environment, so the value never appears in
+# this process, in an argv, or in a probe line. It prints exactly one line:
+# `OK <sentence>` or `FAIL <sentence>` - the sweep quotes that sentence verbatim,
+# which is why the failure text is written here, next to the request that
+# produced it, rather than reconstructed from a status code by the caller.
+#
+# The 600 s read timeout is the cold-load budget: 257 s measured 2026-09-21 for
+# qwen36-27b on this host, and a bigger model or a cold page cache is worse.
+_LANDING_COMPLETION = r"""
+import json, os, time, urllib.error, urllib.request
+KEY = os.environ.get("LITELLM_MASTER_KEY", "")
+BASE = "http://localhost:8080"
+HEAD = {"Authorization": "Bearer " + KEY, "Content-Type": "application/json",
+        "x-ai-stack-caller": "stack-health"}
+
+
+def call(path, payload=None, timeout=30):
+    body = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(BASE + path, data=body, headers=HEAD)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8", "replace"))
+
+
+try:
+    _, listing = call("/v1/models")
+    ids = [d.get("id", "") for d in (listing.get("data") or [])]
+    # The embedding models load on a different upstream; a completion against one
+    # proves nothing about the chat backend that was empty.
+    chat = [i for i in ids if i and "embed" not in i.lower() and "bge" not in i.lower()]
+    if not chat:
+        print("FAIL the gateway advertises no chat model (models: %s)" % (ids or "none"))
+        raise SystemExit(0)
+    model = chat[0]
+    started = time.time()
+    status, answer = call("/v1/chat/completions", {
+        "model": model, "max_tokens": 3,
+        "messages": [{"role": "user", "content": "ping"}]}, 600)
+    took = int(time.time() - started)
+    if status == 200 and (answer.get("choices") or []):
+        print("OK a 3-token completion through the gateway returned 200 in %ds (%s loaded)"
+              % (took, model))
+    else:
+        print("FAIL %s returned HTTP %s with %d choice(s) after %ds"
+              % (model, status, len(answer.get("choices") or []), took))
+except urllib.error.HTTPError as exc:
+    detail = ""
+    try:
+        detail = exc.read().decode("utf-8", "replace")[:200].replace("\n", " ")
+    except Exception:
+        pass
+    print("FAIL the gateway answered HTTP %s: %s" % (exc.code, detail))
+except Exception as exc:
+    print("FAIL %s: %s" % (type(exc).__name__, str(exc)[:200].replace("\n", " ")))
+"""
 
 
 class HealthSweep:
@@ -1096,6 +1156,8 @@ class HealthSweep:
                 "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
             ).code == 0,
         )
+        depth, depth_ok = self.inference_serving_depth()
+        self.probe(f"inference: {depth}", depth_ok)
         self.probe(
             "frontend: OWUI http://127.0.0.1:3000/health",
             lambda: self.http_ok("http://127.0.0.1:3000/health"),
@@ -1176,7 +1238,106 @@ class HealthSweep:
             self.console.line(f"{self.failed} probe(s) FAILED")
         return self.failed
 
-    # -- the two probes whose LABEL carries the measurement ----------------
+    # -- the probes whose LABEL carries the measurement --------------------
+
+    def inference_serving_depth(self):
+        """(what the label should say, did it pass?). Never raises.
+
+        THE OUTAGE THIS EXISTS FOR (2026-09-19 18:54 -> 2026-09-21 00:57, ~30 h):
+        llama-cpp-upstream was recreated with LM_MODELS_DIR unset, so compose
+        bound its default `../../data/models/gguf` - an empty directory - at
+        /models. Every probe in this sweep stayed GREEN for thirty hours:
+        the container was healthy, the anchor network existed, and LiteLLM's
+        /health/liveliness answered 200. llama-swap's own /health answers
+        without loading a model, so nothing anywhere asked the one question
+        that mattered. The first real chat returned
+        `500 upstream command exited prematurely`.
+
+        So this probe asks it, in the cheapest order that still cannot be fooled:
+
+          1. Are there any .gguf files under the upstream's /models? Zero is a
+             FAIL that names the HOST path of the bind, and it is checked FIRST
+             because a completion against an empty store costs a 500 and a
+             confusing message instead of a diagnosis.
+          2. Is a model already resident? llama-swap's /running says so. That is
+             proof of serving depth at zero cost, and it is the normal case.
+          3. Only if nothing is resident: ONE completion of at most three tokens
+             through the GATEWAY (never around it - CLAUDE.md; the /models and
+             /running reads above are the health/GPU/recovery exception, and they
+             read, they do not serve). A cold load is minutes, not seconds - the
+             2026-09-21 repair measured 257 s - so the in-container timeout is
+             generous on purpose. A probe that times out at 30 s and calls that a
+             failure would page the operator for a working stack.
+
+        The caller key is LITELLM_MASTER_KEY. This reads inference/.env only to
+        confirm it is CONFIGURED - an unmigrated host gets a named refusal
+        instead of a 401 to decode - and never handles the value: the request is
+        made inside llm-gateway by a script that reads the container's own
+        environment, which compose populated from that same file
+        (`LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY}` in inference/compose/gateway.yml).
+        Being precise, because the loose version of this sentence was wrong once:
+        read_env_file returns a dict of EVERY value in that file, so the key IS
+        briefly in this process's memory. What is guaranteed is narrower and is
+        the part that matters - it is read for a PRESENCE CHECK only, and no
+        secret value is ever passed as an argument, logged, or printed.
+        """
+        upstream = "llama-cpp-upstream"
+        listing = self.docker(
+            "exec", upstream, "sh", "-c",
+            "find /models -maxdepth 4 -name '*.gguf' 2>/dev/null | head -n 5 | wc -l",
+        )
+        if listing.code != 0:
+            why = (listing.stderr or listing.stdout or "no output").strip().splitlines()
+            return (f"serving depth: cannot read {upstream}'s /models "
+                    f"({why[0] if why else 'no output'}) - is the upstream running? "
+                    f"(the `local` profile lives in inference/.env)"), False
+        try:
+            found = int((listing.stdout or "0").strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            found = 0
+        if found == 0:
+            return (f"serving depth: {upstream}'s /models holds NO .gguf files "
+                    f"(host bind: {self.models_bind(upstream)}) - llama-swap will answer "
+                    f"/health and then 500 the first completion. Set LM_MODELS_DIR in "
+                    f"inference/.env and recreate the upstream."), False
+
+        running = self.docker(
+            "exec", upstream, "curl", "-s", "--max-time", "10",
+            "http://localhost:8080/running",
+        )
+        resident = ""
+        try:
+            for entry in (json.loads(running.stdout or "{}").get("running") or []):
+                if (entry or {}).get("state") == "ready":
+                    resident = str(entry.get("model") or "")
+                    break
+        except (ValueError, AttributeError, TypeError):
+            resident = ""
+        if resident:
+            return f"serving depth: {resident} resident on {upstream} (/running)", True
+
+        key_present = bool(read_env_file(self.root / "inference" / ".env").get("LITELLM_MASTER_KEY"))
+        if not key_present:
+            return ("serving depth: nothing resident and LITELLM_MASTER_KEY is missing from "
+                    "inference/.env, so the landing completion cannot be attempted "
+                    "(documentation/runbooks/env-split-migration.md)"), False
+
+        result = self.docker("exec", "llm-gateway", "python", "-c", _LANDING_COMPLETION)
+        answer = (result.stdout or "").strip().splitlines()
+        answer = answer[-1] if answer else ""
+        if answer.startswith("OK "):
+            return f"serving depth: nothing was resident; {answer[3:]}", True
+        detail = answer or (result.stderr or "no output").strip().splitlines()[-1:]
+        return (f"serving depth: nothing resident and the landing completion FAILED - "
+                f"{detail if isinstance(detail, str) else (detail[0] if detail else 'no output')}"), False
+
+    def models_bind(self, container: str) -> str:
+        """The HOST path bound at /models, or a stand-in. Names what to fix."""
+        out = self.docker(
+            "inspect", container, "--format",
+            '{{range .Mounts}}{{if eq .Destination "/models"}}{{.Source}}{{end}}{{end}}',
+        )
+        return (out.stdout or "").strip() or "<no /models mount on the container>"
 
     def tailscale_deployed(self):
         """(is it part of THIS deployment?, a note to print first).

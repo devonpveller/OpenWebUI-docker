@@ -1,4 +1,4 @@
-﻿# scripts/install-nas-backup-task.ps1
+﻿# scripts/backup/install-nas-backup-task.ps1
 #
 # Registers a Windows Scheduled Task that runs backup-to-nas.ps1 weekly
 # on Sundays at 04:00 (local time, intentionally after the nightly compose
@@ -24,7 +24,7 @@
 #   cmdkey /add:192.168.1.50 /user:nasuser /pass:nas-password
 #
 #   # Step 2 - register the task (admin PowerShell):
-#   .\scripts\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal" -RunNow
+#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal" -RunNow
 
 [CmdletBinding()]
 param(
@@ -113,7 +113,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Settings $settings `
   -Principal $principal `
-  -Description "Weekly two-slot mirror of D:\Open WebUI\ai-stack\backups\ to the NAS. See scripts/backup-to-nas.ps1." | Out-Null
+  -Description "Weekly two-slot mirror of D:\Open WebUI\ai-stack\backups\ to the NAS. See scripts/backup/backup-to-nas.ps1." | Out-Null
 
 Write-Host ""
 Write-Host "==> Registered. Verify with:" -ForegroundColor Green
