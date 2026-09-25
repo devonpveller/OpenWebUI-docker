@@ -19,8 +19,7 @@
        documentation/archive/ - the three journal directories that moved to the store
        on 2026-09-25 (adoption-closeout ac-journal-move). The refusal names the store
        path to use instead.
-    2. a new ROOT-LEVEL plan or journal DOCUMENT, or a root-level directory named like
-       one: names starting PLAN, TEST-PLAN (TEST_PLAN, TESTPLAN), CLEANUP-PLAN, BUILD-LOG or
+    2. a new ROOT-LEVEL plan or journal DOCUMENT (files only, not directories): names starting PLAN, TEST-PLAN (TEST_PLAN, TESTPLAN), CLEANUP-PLAN, BUILD-LOG or
        FINDINGS, or carrying -FINDINGS / _FINDINGS - as a plain prefix for .md .markdown
        .rst .adoc and extensionless names, at a word boundary for .txt, never for code or
        config extensions; and TASKS.md / ROADMAP.md / bare TASKS / ROADMAP. See the
@@ -104,11 +103,10 @@ $JournalDirs = [ordered]@{
 #   * any other extension (.py .json .cfg .yml .png ...): never. PLANNER.py passes ONLY
 #     because .py is not a document extension - PLANNER.md would be refused.
 #   * TASKS.md / ROADMAP.md / bare TASKS / ROADMAP, exactly.
-#   * a ROOT-LEVEL DIRECTORY whose name starts with one of the stems (TEST-PLAN-x/README.md):
-#     a plan set is a directory as often as a file. No tracked root directory matches
-#     (.claude .githooks .github .vscode agent-org backup coder documentation frontend
-#     inference little-coder memory openbrain-gateway owui portal scripts search smolcrawl
-#     status-pipe system-prompts tailscale-state, 2026-09-25).
+#   * FILES AT THE ROOT ONLY. Attempt 4 also refused a root-level DIRECTORY named with a stem;
+#     that refused code folders sharing a prefix (planner/__init__.py, plantuml/x.cfg,
+#     Plans/tool.py - A4-1) and the anchor scopes this rule to files, so it was dropped
+#     (orchestrator decision). A plan-set directory at the root is therefore NOT refused.
 $RootDocExt   = @('md', 'markdown', 'rst', 'adoc')
 $RootStems    = '(TEST[-_]?PLAN|CLEANUP-PLAN|BUILD-LOG|PLAN|FINDINGS)'
 $RootPrefix   = '(?i)^(' + $RootStems + '|.*[-_]FINDINGS)'
@@ -116,11 +114,7 @@ $RootWord     = '(?i)^(' + $RootStems + '|.*[-_]FINDINGS)([-_.].*)?$'
 $RootExactDoc = '(?i)^(TASKS?|ROADMAP)(\.md)?$'
 
 function Test-RootJournal([string]$p) {
-    $parts = $p -split '/'
-    if ($parts.Count -gt 1) {
-        # Root-level directory named like a plan set.
-        return ($parts[0] -match ('(?i)^' + $RootStems))
-    }
+    if ($p -match '/') { return $false }   # root FILES only - see the note above
     $name = $p
     if ($name -match $RootExactDoc) { return $true }
     $dot = $name.LastIndexOf('.')
@@ -157,7 +151,6 @@ function Get-JournalTarget([string]$p) {
         }
     }
     if (Test-RootJournal $p) {
-        if ($p -match '/') { return ($StoreRel + '/implementation-guide/<feature>/  (a plan-set directory: ' + ($p -split '/')[0] + '/)') }
         if ($p -match '(?i)^TEST[-_]?PLAN') { return ($StoreRel + '/implementation-guide/<feature>/test-plans/' + $p + '  (or journal/test-plans/' + $p + ')') }
         if ($p -match '(?i)(^|[-_])FINDINGS') { return ($StoreRel + '/implementation-guide/<feature>/findings/' + $p + '  (or journal/notes/' + $p + ')') }
         return ($StoreRel + '/implementation-guide/<feature>/' + $p)
