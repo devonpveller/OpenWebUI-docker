@@ -659,7 +659,7 @@ update, or network-namespace break.
 |------|------|
 | `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
 | `scripts/recovery/status_check.py` | Read-only overview by container name (`docker ps` / `exec` / `inspect`); no compose project involved |
-| `scripts/archive/legacy-recovery/` | ARCHIVED 2026-09-25: `quick-fixes.bat`, `update-stack.bat`, the five Python helpers the `.bat` drove, and `dev-helper.ps1`. All issued bare `docker compose` commands, which since Part K address the zero-service root anchor. Replacements are in `scripts/archive/README.md`. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
+| `scripts/archive/legacy-recovery/` | ARCHIVED 2026-09-25: `quick-fixes.bat`, `update-stack.bat`, five Python helpers orphaned since 2026-08-20, and `dev-helper.ps1`. Each issued bare `docker compose` commands from the repo root, which since Part K address the zero-service root anchor (`quick-fixes.bat`'s `-f <plane>` calls did work; the per-script detail is in `scripts/archive/README.md`). Replacements are in `scripts/archive/README.md`. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery script holds a PER-PLANE service inventory - `$Script:InferenceServices`,

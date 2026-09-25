@@ -21,8 +21,8 @@
 pins CWD to the repo root — it was silently CWD-dependent before), plus `status_check.py`, a read-only overview
 (`docker ps`, then per-container `docker exec`/`docker inspect` probes and the
 `scripts/lib/stack-services.json` inventory - no compose project involved).
-`quick-fixes.bat`, `update-stack.bat` and the five Python helpers the `.bat`
-drove were archived 2026-09-25 to `scripts/archive/legacy-recovery/` (see the
+`quick-fixes.bat`, `update-stack.bat` and five orphaned Python helpers
+were archived 2026-09-25 to `scripts/archive/legacy-recovery/` (see the
 provenance row in `archive/README.md` for what replaces each).
 
 `verify-recovery-gates.ps1` is the executable proof for `emergency-recovery.ps1`'s

@@ -4,8 +4,10 @@
 # which a plain `docker compose ...` from the ai-stack project dir CANNOT see.
 # This is the single, canonical Open Brain probe — called by both:
 #   - the autonomous monitor  (check-tailscale-health.ps1, with -Repair)
-#   - by hand, with or without -Repair (quick-fixes.bat :status_check /
-#     :openbrain_check also called it until that .bat was archived 2026-09-25)
+#   - by hand, with or without -Repair. (quick-fixes.bat :status_check /
+#     :openbrain_check named it as %SCRIPT_DIR%check-openbrain-health.ps1,
+#     i.e. under scripts/recovery/, where it is not; that .bat was archived
+#     2026-09-25.)
 #
 # It addresses a class of failure that simple liveness checks MISS: a container
 # that is "Up" (green) yet functionally dead. The signature case (2026-06-05):

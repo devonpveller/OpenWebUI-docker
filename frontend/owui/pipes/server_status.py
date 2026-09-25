@@ -74,14 +74,16 @@ compose projects: main `ai-stack` + separate `open-brain`).
             Internal-only containers (search-net, lc-net, OB1's obnet)
             cannot be tailnet-exposed by design.
 
-─ Emergency recovery  ────────────────────── → modules/emergency-recovery
-  Triggers: fix network · fix gpu · rebuild tailscale · restart openwebui ·
-            nuclear option · validate gpu · fix lmstudio · recovery · repair
-  Output:   Diagnostics + corrective action; for hard issues, the host
-            scripts at scripts/emergency-recovery.{ps1,bat}.
-  Coverage: ★ ALL containers across both compose projects — graceful
-            shutdown in reverse dependency order, dependency-ordered startup,
-            OB1 stack brought up after main stack is healthy.
+─ Recovery advice  ────────────────────────────── → modules/help-system
+  Triggers: recovery · repair · emergency (not with serve/serving/expose; a
+            message an earlier route matches, e.g. one naming gpu, goes there)
+  Output:   What to run on the HOST, from the repo root:
+            scripts/recovery/emergency-recovery.ps1 -Action recover|gpu-reset|nuclear
+            (ordered restart of every plane with health gates),
+            scripts/recovery/status_check.py and scripts/stack/stack.py health
+            (read-only checks). Nothing is executed from the pipe; the old
+            modules/emergency-recovery was archived 2026-08-20 (CLEANUP-PLAN v3
+            D-15, scripts/archive/emergency-recovery-module/).
 
 ─ GPU status  ────────────────────────────────────── → modules/gpu-status
   Triggers: gpu · gpu status · cuda · graphics · nvidia
