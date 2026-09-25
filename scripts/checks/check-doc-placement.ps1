@@ -19,8 +19,12 @@
        documentation/archive/ - the three journal directories that moved to the store
        on 2026-09-25 (adoption-closeout ac-journal-move). The refusal names the store
        path to use instead.
-    2. a new ROOT-LEVEL plan or journal file, with any extension or none: PLAN*,
-       TEST-PLAN*, *-FINDINGS*, CLEANUP-PLAN*, BUILD-LOG*, TASKS[.*], ROADMAP[.*].
+    2. a new ROOT-LEVEL plan or journal DOCUMENT: a name starting PLAN, TEST-PLAN
+       (TEST_PLAN, TESTPLAN), CLEANUP-PLAN or BUILD-LOG, or carrying -FINDINGS / _FINDINGS,
+       at a word boundary, with a document extension (.md .markdown .txt .rst .adoc) or
+       none; and TASKS.md / ROADMAP.md / bare TASKS / ROADMAP. Code and config files that
+       merely share a prefix (tasks.py, PLANNER.py, roadmap.png) are not journal.
+       Rules 1 and 2 admit NO exemption.
     3. under documentation/implementation-guide/: a file in a NEW feature directory,
        or a plan-shaped file (plan / build log / task list / NN-name.md) anywhere.
 
@@ -83,19 +87,45 @@ $JournalDirs = [ordered]@{
     'documentation/archive/'  = 'journal/archive/'
 }
 
-# Root-level plan / journal files. A path with no slash is at the root. ANY extension or none:
-# the rule CLAUDE.md, the charters and the hook comment state is "a root PLAN* / TEST-PLAN* /
-# *-FINDINGS* file", and the first version matched `.md` only, so TEST-PLAN-foo.txt,
-# TEST-PLAN-foo and PLAN-foo.markdown walked through (ac-journal-move tester probe X1).
-# Tracked root files on 2026-09-25 (.env.example .gitattributes .gitignore .gitmodules CLAUDE.md
-# OB1 README.md SECURITY.md docker-compose.yml ruff.toml stack.manifest.toml) match none of it.
-$RootJournal = '(?i)^(PLAN[^/]*|TEST-PLAN[^/]*|[^/]*-FINDINGS[^/]*|CLEANUP-PLAN[^/]*|BUILD-LOG[^/]*|TASKS?(\.[^/]*)?|ROADMAP(\.[^/]*)?)$'
+# Root-level plan / journal files: DOCUMENT-shaped names only (a path with no slash is at the
+# root). History, because each version was wrong in a direction a tester measured:
+#   attempt 1 matched `.md` only - TEST-PLAN-foo.txt, TEST-PLAN-foo, PLAN-foo.txt walked
+#             through while every routing surface promised refusal (probe X1);
+#   attempt 2 took ANY extension and a bare prefix - so tasks.py, Tasks.json, PLANNER.py,
+#             planets.txt, plantuml.cfg, roadmap.png, build-logger.py and
+#             pre-findings-parser.py would all have been refused as journal (A2-2).
+# The rule now (orchestrator decision A2-2): the stem PLAN, TEST-PLAN (also TEST_PLAN and
+# TESTPLAN - the same intent spelled differently, A2-3), CLEANUP-PLAN or BUILD-LOG at the
+# START of the name, or FINDINGS after a `-` or `_`, each at a word boundary (followed by `-`,
+# `_`, `.` or the end), case-insensitive, and ONLY with a document extension or none. TASKS
+# and ROADMAP count only as the exact document names TASKS.md / ROADMAP.md or bare.
+$RootDocExt   = @('md', 'markdown', 'txt', 'rst', 'adoc')
+$RootDocStem  = '(?i)^((TEST[-_]?PLAN|CLEANUP-PLAN|BUILD-LOG|PLAN)([-_.].*)?|.*[-_]FINDINGS([-_.].*)?)$'
+$RootExactDoc = '(?i)^(TASKS?|ROADMAP)(\.md)?$'
+
+function Test-RootJournal([string]$name) {
+    if ($name -match '/') { return $false }
+    if ($name -match $RootExactDoc) { return $true }
+    $base = $name
+    $dot = $name.LastIndexOf('.')
+    if ($dot -gt 0) {
+        $ext = $name.Substring($dot + 1).ToLowerInvariant()
+        if ($RootDocExt -notcontains $ext) { return $false }
+        $base = $name.Substring(0, $dot)
+    }
+    return ($base -match $RootDocStem)
+}
 
 # Deliberately kept in the code repo (plan store README, "What stays in the code repo").
+# THESE EXEMPT FROM THE implementation-guide RULES ONLY. They are consulted after the journal
+# and root rules have had their say, so no exemption can admit a new file under
+# documentation/notes|evidence|archive or a root journal file. Each is pinned to the exact
+# place it names: the MERGE-PROTOCOL entry used to be `(^|/)MERGE-PROTOCOL\.md$`, matching at
+# any depth, which let documentation/notes/MERGE-PROTOCOL.md through (A2-1).
 $Exempt = @(
     '(?i)^documentation/implementation-guide/README\.md$',
     '(?i)^documentation/implementation-guide/multi-agent-concurrency/',
-    '(?i)(^|/)MERGE-PROTOCOL\.md$'
+    '(?i)^documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL\.md$'
 )
 
 function Test-Exempt([string]$path) {
@@ -110,9 +140,9 @@ function Get-JournalTarget([string]$p) {
             return ($StoreRel + '/' + $JournalDirs[$k] + $p.Substring($k.Length))
         }
     }
-    if ($p -notmatch '/' -and $p -match $RootJournal) {
-        if ($p -match '(?i)^TEST-PLAN') { return ($StoreRel + '/implementation-guide/<feature>/test-plans/' + $p + '  (or journal/test-plans/' + $p + ')') }
-        if ($p -match '(?i)-FINDINGS') { return ($StoreRel + '/implementation-guide/<feature>/findings/' + $p + '  (or journal/notes/' + $p + ')') }
+    if (Test-RootJournal $p) {
+        if ($p -match '(?i)^TEST[-_]?PLAN') { return ($StoreRel + '/implementation-guide/<feature>/test-plans/' + $p + '  (or journal/test-plans/' + $p + ')') }
+        if ($p -match '(?i)[-_]FINDINGS') { return ($StoreRel + '/implementation-guide/<feature>/findings/' + $p + '  (or journal/notes/' + $p + ')') }
         return ($StoreRel + '/implementation-guide/<feature>/' + $p)
     }
     return $null
@@ -140,7 +170,7 @@ try {
         $bad = 0
 
         $tracked = Split-Nul ((& git ls-files -z) -join "`0")
-        $trackedJournal = @($tracked | Where-Object { (Get-JournalTarget $_) -and -not (Test-Exempt $_) })
+        $trackedJournal = @($tracked | Where-Object { Get-JournalTarget $_ })
         Write-Host ("Tracked files examined for journal placement: " + $tracked.Count)
         if ($tracked.Count -eq 0) {
             Write-Host "FAIL: git ls-files returned nothing - this audit examined no files, which is not a clean result." -ForegroundColor Red
@@ -156,8 +186,8 @@ try {
         $untracked = Split-Nul ((& git ls-files -z --others --exclude-standard) -join "`0")
         $misplaced = @()
         foreach ($p in $untracked) {
-            if (Test-Exempt $p) { continue }
             if (Get-JournalTarget $p) { $misplaced += $p; continue }
+            if (Test-Exempt $p) { continue }
             if ($p -like ($GuidePrefix + '*')) { $misplaced += $p }
         }
         Write-Host ("Untracked files examined: " + $untracked.Count)
@@ -189,7 +219,7 @@ try {
 
 $violations = @()
 foreach ($p in $stagedACR) {
-    if (Test-Exempt $p) { continue }
+    # NO exemption is consulted here - see the note on $Exempt.
     $target = Get-JournalTarget $p
     if ($target) {
         $violations += [pscustomobject]@{ Path = $p; Why = 'operator journal (notes / findings / evidence / test plans / archive / closed plans)'; Use = $target }
