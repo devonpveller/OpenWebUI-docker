@@ -352,10 +352,12 @@ jobs:
   # from backslashes - see ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md for the sweep.
   # `TEMP` is set per job because these scripts stage throwaway fixtures under `$env:TEMP`,
   # and that variable does not exist on Linux. It is set by each job's FIRST STEP, from
-  # $RUNNER_TEMP into $GITHUB_ENV. Until ac-ci (2026-09-25) it was a job-level `env:` reading `runner.temp`
-  # at job level, where the `runner` context is not available: actionlint reported it five
-  # times and GitHub refuses a workflow file with an invalid expression before any job
-  # starts, so no job in this file could have run. OB1 is checked out because the drills build
+  # $RUNNER_TEMP into $GITHUB_ENV. Until ac-ci (2026-09-25) it was a job-level `env:` reading
+  # `runner.temp`, and the `runner` context is not available there (GitHub's context-
+  # availability table): actionlint reports it five times, and the VS Code Actions extension
+  # reports "Unrecognized named-value: 'runner'", which GitHub raises as an invalid workflow
+  # file. No real run of that version has been observed, so "no job could have run" is the
+  # expected consequence, not a measured one. OB1 is checked out because the drills build
   # from the RECORDED GITLINK; it is a PUBLIC repo and the pinned commit is on its remote,
   # so `submodules: recursive` needs no extra credential.
   #
