@@ -228,9 +228,11 @@ else
   done
   check "ai-stack_llm-net is internal" \
     "$([ "$(dx docker network inspect ai-stack_llm-net --format '{{.Internal}}' 2>/dev/null)" = "true" ]; echo $?)"
-  STRAY="$(dx docker network ls --format '{{.Name}}' | grep -E "^${DIR_NAME}_" | tr '\n' ' ')"
-  check "no network is named after the clone directory '${DIR_NAME}_*' (found: ${STRAY:-none})" \
-    "$([ -z "$STRAY" ] || [ "$DIR_NAME" = "ai-stack" ]; echo $?)"
+  if [ "$DIR_NAME" != "ai-stack" ]; then
+    STRAY="$(dx docker network ls --format '{{.Name}}' | grep -E "^${DIR_NAME}_" | tr '\n' ' ')"
+    check "no network is named after the clone directory '${DIR_NAME}_*' (found: ${STRAY:-none})" \
+      "$([ -z "$STRAY" ]; echo $?)"
+  fi
   check "stack.py health exited 0 (exit $HEALTH)" "$HEALTH"
 fi
 
