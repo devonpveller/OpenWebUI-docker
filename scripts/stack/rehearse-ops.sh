@@ -38,6 +38,13 @@
 #      and is restarted by `unless-stopped`; `stack.py recover frontend` exits 1
 #      naming the settle window or the restart loop (RED at 19ae98f, where the
 #      gate passed it as "running after 3s")
+#  14. PLANTED ONE-SHOT: init-once (restart "no") exits 0 after 2 s; recover
+#      exits 0 and the gate passes on the exit (RED at 00e80e3: refused as "a
+#      crash inside the settle window")
+#  15. PLANTED INIT: init-once runs 25 s and after-init depends_on it with
+#      service_completed_successfully; recover's gate for init-once is
+#      COMPLETION and after-init starts after init-once finished (RED at
+#      00e80e3: after-init started while init-once still ran)
 #   then tears the DinD down.
 #
 # Exit code: 0 when every check passed, 1 when any failed, 2 on a usage error.
@@ -317,6 +324,59 @@ check "the refusal names openwebui-backup and the settle window or the restart l
   "$(echo "$OUT" | grep 'refused: recover stopped at frontend: openwebui-backup (openwebui-backup)' | grep -qE 'settle window|restart loop'; echo $?)"
 check "recover did not claim every container passed" \
   "$(echo "$OUT" | grep -q 'every container passed its gate'; [ $? -ne 0 ]; echo $?)"
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 14. a one-shot init job (attempt 2, R1): restart "no", exits 0 after 2 s, nothing waits on it
+echo ""
+echo "== 14. PLANTED ONE-SHOT: init-once (restart \"no\") exits 0 after 2 s; recover must accept exit 0"
+plant_init() {  # plant_init <seconds> <with a dependant: 0|1>
+  docker exec -i "$NAME" sh -c "cat > /tmp/init.awk" <<AWK
+{ print }
+/^services:\$/ {
+  print "  init-once:"
+  print "    image: alpine:3.21"
+  print "    restart: \"no\""
+  print "    command: [ \"sh\", \"-c\", \"sleep $1; exit 0\" ]"
+  if ($2 == 1) {
+    print "  after-init:"
+    print "    image: alpine:3.21"
+    print "    restart: unless-stopped"
+    print "    command: [ \"sleep\", \"infinity\" ]"
+    print "    depends_on:"
+    print "      init-once:"
+    print "        condition: service_completed_successfully"
+  }
+}
+AWK
+  dw sh -c 'awk -f /tmp/init.awk frontend/docker-compose.yml > /tmp/c.yml && cp /tmp/c.yml frontend/docker-compose.yml'
+}
+plant_init 2 0
+check "init-once is in the rendered compose" \
+  "$(dw docker compose -f frontend/docker-compose.yml config --services | grep -qx init-once; echo $?)"
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+check "recover with a one-shot that exits 0 exited 0 (exit $RV)" "$RV"
+check "the one-shot's gate passed on its exit 0" \
+  "$(echo "$OUT" | grep -q '\[ok\] frontend/init-once (frontend-init-once-1): exited 0'; echo $?)"
+check "nothing called the exit 0 a crash" "$(echo "$OUT" | grep -qi 'crash'; [ $? -ne 0 ]; echo $?)"
+dx docker rm -f frontend-init-once-1 >/dev/null 2>&1
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 15. an init job something waits on (attempt 2, R2): its dependant must start only after it exits 0
+echo ""
+echo "== 15. PLANTED INIT: init-once runs 25 s; after-init depends_on it with service_completed_successfully"
+plant_init 25 1
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+INIT_DONE="$(dx docker inspect -f '{{.State.FinishedAt}}' frontend-init-once-1 2>/dev/null)"
+AFTER_START="$(dx docker inspect -f '{{.State.StartedAt}}' frontend-after-init-1 2>/dev/null)"
+echo "   init-once FinishedAt $INIT_DONE, after-init StartedAt $AFTER_START"
+check "recover with an init dependency exited 0 (exit $RV)" "$RV"
+check "the init's gate was COMPLETION, printed as such" \
+  "$(echo "$OUT" | grep -q '\[ok\] frontend/init-once (frontend-init-once-1): completed (exit 0)'; echo $?)"
+check "after-init started AFTER init-once finished ($AFTER_START > $INIT_DONE)" \
+  "$([ -n "$INIT_DONE" ] && [ -n "$AFTER_START" ] && [ "$AFTER_START" \> "$INIT_DONE" ]; echo $?)"
+dx docker rm -f frontend-init-once-1 frontend-after-init-1 >/dev/null 2>&1
 dw git checkout -q -- frontend/docker-compose.yml
 
 echo ""

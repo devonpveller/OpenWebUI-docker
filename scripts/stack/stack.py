@@ -2126,6 +2126,7 @@ class Service(NamedTuple):
     mounts: tuple                # ((type, source, target, read_only), ...)
     environment: dict = {}       # the rendered environment (never printed)
     restart_delay: float = 0.0   # deploy.restart_policy.delay, seconds
+    restart: str = ""            # `restart:` (or deploy.restart_policy.condition), "" when unset
 
 
 class PlaneRender(NamedTuple):
@@ -2178,12 +2179,16 @@ def plane_render(manifest: Manifest, state: State, root: Path, plane: str, captu
         env = spec.get("environment") or {}
         if isinstance(env, list):
             env = dict(item.split("=", 1) if "=" in item else (item, "") for item in env)
-        delay = ((spec.get("deploy") or {}).get("restart_policy") or {}).get("delay")
+        policy = (spec.get("deploy") or {}).get("restart_policy") or {}
+        delay = policy.get("delay")
+        restart = str(spec.get("restart") or "")
+        if not restart and policy.get("condition"):
+            restart = {"none": "no", "any": "always"}.get(str(policy["condition"]), str(policy["condition"]))
         services[key] = Service(key, spec.get("container_name"), depends,
                                 mode[len("service:"):] if mode.startswith("service:") else None,
                                 health, str(spec.get("image") or ""), mounts,
                                 {str(k): str(v) for k, v in env.items() if v is not None},
-                                parse_duration(delay, 0.0))
+                                parse_duration(delay, 0.0), restart)
     volumes = {}
     for key, spec in (data.get("volumes") or {}).items():
         spec = spec or {}
@@ -2297,6 +2302,37 @@ def settle_seconds(service: Service) -> float:
     return SETTLE_SECONDS
 
 
+GATE_COMPLETES = "completes"   # something waits on it with service_completed_successfully
+GATE_HEALTHY = "healthy"       # a compose healthcheck
+GATE_ONE_SHOT = "one-shot"     # restart "no" (or none): exit 0 is success, or it settles running
+GATE_SETTLE = "settle"         # a restart policy and no healthcheck: running, not restarted
+
+
+def gate_kind(render: PlaneRender, key: str, completes=None) -> str:
+    """Which gate a service gets, derived from the render (attempt 3).
+
+    completes - another service depends_on it with `service_completed_successfully`:
+                its dependants may start only after it EXITS 0. Attempt 2 let such a
+                service pass the settle window while still running and started its
+                dependant 3.4 s before it finished (tester, R2).
+    healthy   - a compose healthcheck: wait for `healthy`.
+    one-shot  - `restart: "no"` or no restart policy at all: exiting is allowed, so exit 0
+                passes (attempt 2 refused an init job's exit 0 as "a crash", R1), a
+                non-zero exit fails, and a service that keeps running settles as below.
+    settle    - a restart policy and no healthcheck: running, unrestarted, for the window.
+    """
+    if completes is None:
+        completes = one_shot_services(render)
+    if key in completes:
+        return GATE_COMPLETES
+    svc = render.services[key]
+    if svc.healthcheck:
+        return GATE_HEALTHY
+    if svc.restart in ("", "no"):
+        return GATE_ONE_SHOT
+    return GATE_SETTLE
+
+
 def one_shot_services(render: PlaneRender) -> set[str]:
     """Services something waits on with `service_completed_successfully`: exit 0 is their success."""
     return {dep for svc in render.services.values()
@@ -2339,7 +2375,7 @@ def _last_health_output(state: dict) -> str:
     return text[:200]
 
 
-def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = False,
+def wait_gate(capture, root, docker, name: str, timeout: int, kind: str = GATE_SETTLE,
               settle: float = SETTLE_SECONDS):
     """(passed, what was seen). Polls `docker inspect` until a verdict or the timeout.
 
@@ -2357,6 +2393,10 @@ def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = F
                                         still passes - that is the one thing this gate
                                         cannot see (findings O4).
     anything else (starting, created, absent) -> keep waiting
+
+    kind=completes: only the EXIT counts - exit 0 passes, any other exit fails, and
+    running (or restarting under an on-failure policy) keeps waiting until the timeout.
+    kind=one-shot: as above for running containers, but an exit 0 at any point passes.
     """
     started = monotonic()
     window = None            # (monotonic at first running, RestartCount, StartedAt)
@@ -2370,6 +2410,17 @@ def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = F
             health = (state.get("Health") or {}).get("Status")
             restarts = state.get("RestartCount")
             last = f"{status}/{health}" if health else status
+            if kind == GATE_COMPLETES:
+                if status in ("exited", "dead"):
+                    code = state.get("ExitCode")
+                    if code == 0:
+                        return True, f"completed (exit 0) after {elapsed}s"
+                    return False, (f"exited with exit code {code} - a service others wait on with "
+                                   "service_completed_successfully must exit 0")
+                if elapsed >= timeout:
+                    return False, f"did not complete within {timeout}s (last seen: {last})"
+                sleep(GATE_POLL_SECONDS)
+                continue
             if health == "healthy":
                 return True, f"healthy after {elapsed}s"
             if health == "unhealthy":
@@ -2377,8 +2428,8 @@ def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = F
                 return False, "unhealthy" + (f" - last healthcheck output: {output}" if output else "")
             if status in ("exited", "dead"):
                 code = state.get("ExitCode")
-                if one_shot and code == 0:
-                    return True, "completed (exit 0)"
+                if kind == GATE_ONE_SHOT and code == 0:
+                    return True, f"exited 0 after {elapsed}s (restart: \"no\" - a one-shot, exit 0 is its success)"
                 if window is not None:
                     return False, (f"exited with exit code {code} {int(now - window[0])}s after it was first "
                                    "seen running (a crash inside the settle window)")
@@ -2406,12 +2457,18 @@ def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = F
 
 def _gate_note(render: PlaneRender, key: str, timeout: int) -> str:
     svc = render.services[key]
-    if svc.healthcheck:
+    kind = gate_kind(render, key)
+    if kind == GATE_COMPLETES:
+        what = "exits 0 (another service waits on it with service_completed_successfully)"
+    elif kind == GATE_HEALTHY:
         what = "healthy (compose healthcheck)"
+    elif kind == GATE_ONE_SHOT:
+        what = (f"exits 0, or runs unrestarted for {int(settle_seconds(svc))}s (restart: "
+                f"{svc.restart or 'unset'} - a one-shot may exit)")
     else:
-        what = (f"running and not restarted for {int(settle_seconds(svc))}s (no compose healthcheck; "
-                "an image healthcheck is honoured if it has one)")
-    return f"#   gate: {container_of(render, key)} {what}, up to {timeout}s"
+        what = (f"running and not restarted for {int(settle_seconds(svc))}s (restart: {svc.restart}; no "
+                "compose healthcheck; an image healthcheck is honoured if it has one)")
+    return f"#   gate [{kind}]: {container_of(render, key)} {what}, up to {timeout}s"
 
 
 def cmd_recover(manifest, state, root, console, runner, capture, plane, every: bool, dry_run: bool,
@@ -2516,8 +2573,8 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
                 for key, limit in gates:
                     name = container_of(renders[p], key)
                     svc = renders[p].services[key]
-                    passed, seen = wait_gate(capture, root, docker[p], name, limit, key in one_shots[p],
-                                             settle_seconds(svc))
+                    passed, seen = wait_gate(capture, root, docker[p], name, limit,
+                                             gate_kind(renders[p], key, one_shots[p]), settle_seconds(svc))
                     console.line(f"  [{'ok' if passed else 'FAIL'}] {p}/{key} ({name}): {seen}")
                     if not passed:
                         failure = f"{key} ({name}) {seen}"

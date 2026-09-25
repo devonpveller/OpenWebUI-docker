@@ -439,16 +439,20 @@ order, restart in dependency order, wait for health). Selection is the same as
 3. **Start**: the anchor's networks are ensured first (always, even for one
    plane - a recovery on a daemon that lost them would otherwise fail at the
    first `up`); then planes in `up`'s order, each plane's services level by
-   level (`up -d --no-deps <services>`), and **every container is gated**:
-   `healthy` passes, `unhealthy` fails at once, `exited` fails (unless something
-   waits on it with `service_completed_successfully` and it exited 0),
-   `restarting` fails at once, and a container with **no health status must
-   settle**: once it is first seen `running` it has to stay `running`, with the
-   same `RestartCount` and `StartedAt`, for 15 s (or its declared
-   `deploy.restart_policy.delay` plus one poll, if longer). A restart or an exit
-   inside that window fails the gate with a named reason (`restart loop: ...`,
-   `exited with exit code N ... inside the settle window`). A container that
-   crashes only AFTER the window still passes - the gate cannot see that. The budget
+   level (`up -d --no-deps <services>`), and **every container is gated**. The
+   gate's KIND is derived from the render and printed in `--dry-run` as
+   `gate [<kind>]`:
+
+   | kind | when | passes | fails |
+   |---|---|---|---|
+   | `completes` | another service depends_on it with `condition: service_completed_successfully` | it EXITS 0 - its dependants start only after that | any other exit code, or still not exited at the budget |
+   | `healthy` | a compose healthcheck | `healthy` | `unhealthy` (at once), `exited`, `restarting` |
+   | `one-shot` | `restart: "no"`, or no restart policy | exit 0 at any point; or running, unrestarted, for the settle window | a non-zero exit, a restart |
+   | `settle` | a restart policy and no healthcheck | running with the same `RestartCount` and `StartedAt` for 15 s (or the declared `deploy.restart_policy.delay` plus one poll) | a restart, an exit or `restarting` inside the window (`restart loop: ...`, `exited with exit code N ... inside the settle window`) |
+
+   A container that crashes only AFTER its window, or turns unhealthy after it
+   was healthy, still passes - the gates cannot see that. The gates of one
+   level run one after another, so each settle window adds its 15 s. The budget
    is the healthcheck's own worst case - `start_period + retries x (interval +
    timeout) + interval + 30 s` - or 300 s when the compose file declares none;
    `--timeout` sets one budget for all.

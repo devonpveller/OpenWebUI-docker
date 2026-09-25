@@ -2991,8 +2991,11 @@ def test_every_backup_consumer_is_declared_and_every_declared_consumer_is_real()
 # (scripts/stack/rehearse-ops.sh) checks the same against a real daemon.
 
 
-def _svc(image, container=None, depends=None, netns=None, health=False, volumes=()):
+def _svc(image, container=None, depends=None, netns=None, health=False, volumes=(), restart="unless-stopped"):
+    # Every service in this repo's real renders carries `restart: unless-stopped`.
     spec = {"image": image}
+    if restart:
+        spec["restart"] = restart
     if container:
         spec["container_name"] = container
     if depends:
@@ -3241,8 +3244,9 @@ def test_every_start_line_names_the_gate_and_its_budget(root):
     code, out = ops(root, OpsDaemon(RENDERS), "recover", "frontend", "--dry-run")
     assert code == 0, out
     # 60 s start_period + 3 x (15 s interval + 15 s timeout) + one 15 s interval + 30 s margin
-    assert "#   gate: openwebui healthy (compose healthcheck), up to 195s" in out
-    assert "#   gate: openwebui-backup running and not restarted for 15s (no compose healthcheck" in out
+    assert "#   gate [healthy]: openwebui healthy (compose healthcheck), up to 195s" in out
+    assert ("#   gate [settle]: openwebui-backup running and not restarted for 15s (restart: unless-stopped; "
+            "no compose healthcheck") in out
 
 
 def test_gate_timeout_is_the_healthchecks_own_worst_case_and_can_be_overridden():
@@ -3800,3 +3804,98 @@ def test_stats_keeps_the_table_when_one_container_vanishes_mid_run(root, monkeyp
     assert code == 0, out
     assert re.search(r"openwebui\s+1\.00%", out)
     assert "(gone: the container disappeared between `compose ps` and `docker stats`)" in out
+
+
+# --- attempt 3: one-shot and init services (tester, attempt 2: R1, R2) -----------
+
+
+def _with_init(runs_for=None, dependant=False):
+    """FRONTEND_GPU plus `init-once` (restart "no"); optionally tailscale-backup waits on it."""
+    render = json.loads(json.dumps(FRONTEND_GPU))
+    render["services"]["init-once"] = _svc("alpine:3.21", restart="no")
+    if dependant:
+        render["services"]["tailscale-backup"]["depends_on"] = {
+            "init-once": {"condition": "service_completed_successfully", "required": True}}
+    return {"frontend/docker-compose.yml": render}
+
+
+def test_the_gate_kind_is_derived_from_the_render():
+    render = stack.PlaneRender("frontend", "frontend", {
+        "db": stack.Service("db", "db", {}, None, {"test": ["CMD", "true"]}, "i", (), {}, 0.0, "always"),
+        "init": stack.Service("init", "init", {}, None, None, "i", (), {}, 0.0, "no"),
+        "bare": stack.Service("bare", "bare", {}, None, None, "i", (), {}, 0.0, ""),
+        "side": stack.Service("side", "side", {}, None, None, "i", (), {}, 0.0, "unless-stopped"),
+        "app": stack.Service("app", "app", {"init": "service_completed_successfully"}, None, None, "i", (), {},
+                             0.0, "unless-stopped"),
+    }, {})
+    assert {k: stack.gate_kind(render, k) for k in render.services} == {
+        "db": "healthy", "init": "completes", "bare": "one-shot", "side": "settle", "app": "settle"}
+
+
+def test_a_restart_no_one_shot_that_exits_0_passes(root, fast_clock):
+    """R1: attempt 2 refused an init job's exit 0 as 'a crash inside the settle window'. RED at 00e80e3."""
+    _enable(root, "frontend")
+    run2 = [{"Status": "running", "RestartCount": 0, "StartedAt": "t0"}]
+    done = [{"Status": "exited", "ExitCode": 0, "RestartCount": 0, "StartedAt": "t0"}]
+    daemon = OpsDaemon(_with_init(), states={"frontend-init-once-1": run2 + done})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert 'frontend/init-once (frontend-init-once-1): exited 0 after 3s (restart: "no" - a one-shot' in out
+    assert "crash" not in out
+
+
+def test_a_restart_no_one_shot_that_exits_non_zero_fails_by_name(root, fast_clock):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_with_init(), states={"frontend-init-once-1": [{"Status": "exited", "ExitCode": 2}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "refused: recover stopped at frontend: init-once (frontend-init-once-1) exited with exit code 2" in out
+
+
+def test_a_completion_dependency_must_exit_0_before_its_dependant_starts(root, fast_clock):
+    """R2: attempt 2 passed a still-running init job after its settle window and started the
+    service that waits on it (service_completed_successfully) 3.4 s early. RED at 00e80e3."""
+    _enable(root, "frontend")
+    running = [{"Status": "running", "RestartCount": 0, "StartedAt": "t0"}] * 10   # ~30 s, past the window
+    done = [{"Status": "exited", "ExitCode": 0, "RestartCount": 0, "StartedAt": "t0"}]
+    daemon = OpsDaemon(_with_init(dependant=True), states={"frontend-init-once-1": running + done})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert "frontend/init-once (frontend-init-once-1): completed (exit 0) after 30s" in out
+    ups = [c for c in daemon.streamed if "--no-deps" in c]
+    init_level = next(i for i, c in enumerate(ups) if "init-once" in c)
+    dependant_level = next(i for i, c in enumerate(ups) if "tailscale-backup" in c)
+    assert init_level < dependant_level
+    # and the dependant's `up` came only after the last inspect of init-once (the exit)
+    last_inspect = max(i for i, c in enumerate(daemon.commands) if c[:2] == ["docker", "inspect"]
+                       and c[-1] == "frontend-init-once-1")
+    dependant_up = next(i for i, c in enumerate(daemon.commands) if "--no-deps" in c and "tailscale-backup" in c)
+    assert last_inspect < dependant_up
+
+
+def test_a_completion_dependency_that_fails_or_never_finishes_is_a_named_refusal(root, fast_clock):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_with_init(dependant=True), states={"frontend-init-once-1": [{"Status": "exited",
+                                                                                      "ExitCode": 1}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert ("init-once (frontend-init-once-1) exited with exit code 1 - a service others wait on with "
+            "service_completed_successfully must exit 0") in out
+    assert not any("--no-deps" in c and "tailscale-backup" in c for c in daemon.streamed)
+    daemon = OpsDaemon(_with_init(dependant=True), states={"frontend-init-once-1": [{"Status": "running"}]})
+    code, out = ops(root, daemon, "recover", "frontend", "--timeout", "20")
+    assert code == stack.EXIT_REFUSED
+    assert "init-once (frontend-init-once-1) did not complete within 20s (last seen: running)" in out
+
+
+def test_the_dry_run_prints_each_gate_kind(root):
+    _enable(root, "frontend")
+    code, out = ops(root, OpsDaemon(_with_init(dependant=True)), "recover", "frontend", "--dry-run")
+    assert code == 0, out
+    assert ("#   gate [completes]: frontend-init-once-1 exits 0 (another service waits on it with "
+            "service_completed_successfully)") in out
+    assert "#   gate [healthy]: openwebui healthy" in out
+    assert "#   gate [settle]: openwebui-backup running and not restarted for 15s" in out
+    code, out = ops(root, OpsDaemon(_with_init()), "recover", "frontend", "--dry-run")
+    assert '#   gate [one-shot]: frontend-init-once-1 exits 0, or runs unrestarted for 15s (restart: no' in out
+
