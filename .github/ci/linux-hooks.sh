@@ -29,7 +29,6 @@ case "$expected" in
   *) echo "usage: $0 <pwsh|python3>" >&2; exit 2 ;;
 esac
 
-src="$(git -c safe.directory='*' -C "$(dirname "$0")" rev-parse --show-toplevel)" || { echo "not inside a git checkout" >&2; exit 2; }
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 fails=0
@@ -37,20 +36,44 @@ check() {  # check <description> <0|nonzero>
   if [ "$2" -eq 0 ]; then echo "  [OK]   $1"; else echo "  [FAIL] $1"; fails=$((fails + 1)); fi
 }
 
-# The runner's checkout (or a read-only bind mount of it) may belong to another uid;
-# safe.directory is scoped to this one clone command, not written to any config.
-sha="$(git -c safe.directory='*' -C "$src" rev-parse --verify 'HEAD^{commit}')" || { echo "RESULT: FAIL (rev-parse)"; exit 1; }
-git -c safe.directory='*' clone -q --no-local --no-checkout "$src" "$work/clone" || { echo "RESULT: FAIL (clone)"; exit 1; }
+# READING THE SOURCE CHECKOUT. It may belong to another uid (the python3 step mounts the
+# runner's checkout read-only into a container running as root), and git then refuses
+# it as "dubious ownership". `-c safe.directory=*` is NOT enough: a local clone's
+# upload-pack runs with GIT_CONFIG_PARAMETERS cleared. So the exception lives in a
+# throwaway global config used only by the commands that read the source; the clone
+# itself, where the commits happen, runs with the environment's own config.
+printf '[safe]\n\tdirectory = *\n' > "$work/src.gitconfig"
+srcgit() { GIT_CONFIG_GLOBAL="$work/src.gitconfig" git "$@"; }
+src="$(srcgit -C "$(dirname "$0")" rev-parse --show-toplevel)" || { echo "not inside a git checkout" >&2; exit 2; }
+sha="$(srcgit -C "$src" rev-parse --verify 'HEAD^{commit}')" || { echo "RESULT: FAIL (rev-parse)"; exit 1; }
+srcgit clone -q --no-local --no-checkout "$src" "$work/clone" || { echo "RESULT: FAIL (clone)"; exit 1; }
 cd "$work/clone"
 # A CI checkout is often a detached HEAD (a pull request's merge ref); pin the clone to
 # exactly the commit under test, on a local branch the commits below can move.
 git checkout -q -B ci-hooks "$sha" || { echo "RESULT: FAIL (checkout $sha)"; exit 1; }
+# THE OB1 SUBMODULE, as the README's `git clone --recurse-submodules` gives it. It is
+# not optional for this job: with PowerShell present the corpus-exposure gate scans
+# OB1's producers, and in a clone without them it finds zero insert sites and REFUSES
+# every commit as vacuous (measured in this job's first local run). It is taken from
+# the source checkout's own OB1 (the workflow checks out `submodules: recursive`), so
+# this script makes no network call; a source without it is a failed check, not a skip.
+if [ -e "$src/OB1/.git" ]; then
+  git config submodule.OB1.url "$src/OB1"
+  GIT_CONFIG_GLOBAL="$work/src.gitconfig" git -c protocol.file.allow=always submodule update -q --init OB1 \
+    || { echo "RESULT: FAIL (OB1 submodule from $src/OB1)"; exit 1; }
+  ob1_state="OB1 at $(git -C OB1 rev-parse --short HEAD) (the recorded gitlink is $(git ls-files -s OB1 | awk '{print substr($2,1,7)}'))"
+else
+  ob1_state="OB1 NOT AVAILABLE in the source checkout"
+  echo "  [FAIL] the source checkout has no OB1 submodule to clone ($src/OB1) - check out with submodules"
+  fails=$((fails + 1))
+fi
 git config user.email ci@example.invalid
 git config user.name "ci hooks job"
 git config core.hooksPath .githooks
 echo "== fresh clone at $(git log -1 --format='%h %s' | cut -c1-90)"
 echo "   $(uname -s), git $(git --version | awk '{print $3}'), expected gate host: $expected"
 echo "   pwsh on PATH: $(command -v pwsh || echo no); python3: $(command -v python3 || echo no)"
+echo "   $ob1_state"
 
 echo ""
 echo "== 1. the hooks can execute"

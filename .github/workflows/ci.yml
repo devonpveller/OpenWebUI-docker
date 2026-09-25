@@ -226,6 +226,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The README clones with --recurse-submodules, and the job's clone has to be that
+          # clone: under pwsh the corpus-exposure gate scans OB1, and without it every
+          # commit is refused as vacuous. linux-hooks.sh takes OB1 from this checkout.
+          submodules: recursive
       # ubuntu-latest has pwsh, so the hook picks it and runs every gate.
       - name: pwsh host - a clean commit passes, a planted gateway key is refused
         run: bash .github/ci/linux-hooks.sh pwsh
