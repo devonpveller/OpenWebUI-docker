@@ -4,9 +4,11 @@
 > `UPDATE-QUICK-START.md` + `UPDATE-MANAGEMENT.md`, both archived under
 > `../documentation-plans-ai-stack/journal/archive/`).
 
-How the stack takes updates. Everything is **manual and verified** — the only
-auto-updater is Watchtower, scoped to the `openwebui` image and pending
-retirement (CLEANUP-PLAN v3, decision D-2).
+How the stack takes updates. Everything is **manual and verified** - there is
+no auto-updater (Watchtower was retired 2026-08-20, CLEANUP-PLAN v3 D-2).
+Run every command below from the repo root. Each `docker compose` command below
+that you are meant to run names its plane's compose file with `-f`: a bare `docker compose` addresses the root anchor, which has no
+services.
 
 ## Open WebUI
 
@@ -29,7 +31,15 @@ the pattern to copy is
 
 - Model swaps follow the written-plan pattern:
   `qwen3.8-model-swap/` in the plan store is the reference execution.
-- `scripts/recovery/update-stack.bat` drives image updates for the llama-cpp upstreams.
+- The llama-cpp upstreams run floating tags (`llama-swap:cuda`,
+  `llama.cpp:server-cuda`, both in `inference/compose/upstreams.yml`). To take a
+  new build: `docker compose -f inference/docker-compose.yml pull llama-cpp-upstream llama-cpp-embed-upstream`,
+  then `docker compose -f inference/docker-compose.yml up -d --no-deps llama-cpp-upstream llama-cpp-embed-upstream`,
+  then `python scripts/stack/stack.py health`. Add `--dry-run` after the `-f <file>`
+  to see what either compose step would do first. Both services sit behind the
+  `local` profile, which `inference/.env` supplies. (`update-stack.bat` used to do
+  this with bare `docker compose` calls; it was archived 2026-09-25 to
+  `scripts/archive/legacy-recovery/`.)
 - LiteLLM (`llm-gateway`) and `llm-queue` are pinned images / local builds —
   bump deliberately, one PR each, and re-run
   `scripts/checks/check-llm-gateway-routing.ps1`.
@@ -37,7 +47,7 @@ the pattern to copy is
 ## Everything else
 
 Images are digest- or tag-pinned in the compose files. Updating one means:
-bump the pin → `docker compose up -d <service>` → verify via
+bump the pin → `docker compose -f <plane>/docker-compose.yml up -d <service>` → verify via
 `scripts/checks/stack-watchdog.ps1` (main), `check-openbrain-health.ps1`
 (OB1), or `check-agent-org-health.ps1` (agent-org). The **container rule**
 applies to anything that adds/removes/renames a service: compose + recovery

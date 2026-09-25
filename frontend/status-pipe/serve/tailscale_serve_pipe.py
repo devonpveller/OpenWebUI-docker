@@ -510,13 +510,42 @@ _TAILNET_INFO_CANDIDATES = [
 ]
 
 
+def _host_repo_root() -> Optional[str]:
+    """The checkout this file lives in, found by walking UP to stack.manifest.toml.
+
+    Host-side only. This file sits at <repo>/frontend/status-pipe/serve/ since
+    ac-planes-contained (2026-09-25); it was <repo>/status-pipe/serve/ before,
+    and a fixed parent count broke silently on that move (two parents up became
+    frontend/, which has its own docker-compose.yml). stack.manifest.toml exists
+    only at the repo root, so the walk does not depend on the depth. Inside the
+    openwebui container the walk finds nothing (the mount is
+    /host_project/status-pipe, with no manifest above it) and returns None.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    while True:
+        if os.path.isfile(os.path.join(d, "stack.manifest.toml")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _host_tailnet_info_path() -> Optional[str]:
+    """Host-side fallback: <repo>/data/tailscale/tailnet-info.json - the same
+    directory frontend/docker-compose.yml binds as ../data/tailscale."""
+    root = _host_repo_root()
+    if not root:
+        return None
+    return os.path.join(root, "data", "tailscale", "tailnet-info.json")
+
+
 def _read_tailnet_info() -> Optional[Dict[str, Any]]:
     """Read the tailnet-info.json dump produced by the tailscale entrypoint."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = list(_TAILNET_INFO_CANDIDATES) + [
-        # Host-side fallback for development: <repo>/data/tailscale/tailnet-info.json
-        os.path.join(here, "..", "..", "data", "tailscale", "tailnet-info.json"),
-    ]
+    candidates = list(_TAILNET_INFO_CANDIDATES)
+    host_path = _host_tailnet_info_path()
+    if host_path:
+        candidates.append(host_path)
     for path in candidates:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -891,10 +920,9 @@ def _resolve_workspace_root() -> str:
     """Best-effort detection of the ai-stack project root."""
     if os.path.exists("/host_project/docker-compose.yml"):
         return "/host_project"
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidate = os.path.dirname(os.path.dirname(here))  # scripts/ai_pipes -> repo root
-    if os.path.exists(os.path.join(candidate, "docker-compose.yml")):
-        return candidate
+    root = _host_repo_root()
+    if root and os.path.exists(os.path.join(root, "docker-compose.yml")):
+        return root
     return os.getcwd()
 
 

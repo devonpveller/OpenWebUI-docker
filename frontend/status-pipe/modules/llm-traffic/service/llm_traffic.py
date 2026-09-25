@@ -279,7 +279,7 @@ class LLMTrafficModule:
             lines += [
                 f"> Could not reach the LiteLLM gateway: {live.get('error', 'unknown')}",
                 "> The module runs from the OWUI container over `llm-net`. Check the gateway is up:",
-                "> `docker compose exec llm-gateway python -c \"import urllib.request;print(urllib.request.urlopen('http://localhost:8080/health/liveliness').status)\"`",
+                "> `docker exec llm-gateway python -c \"import urllib.request;print(urllib.request.urlopen('http://localhost:8080/health/liveliness').status)\"`",
             ]
             return "\n".join(lines)
         if not agg:

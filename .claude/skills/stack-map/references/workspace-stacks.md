@@ -69,8 +69,11 @@ Source files:
 Files: `docker-compose.yml` — **networks only, no `include:`, no services**; the
 plane projects are `frontend|inference|memory|search|coder|portal/docker-compose.yml`,
 each its own project with its own `.env`.
-Run with: `docker compose up -d` from the workspace root (it creates the three
-networks and starts nothing), or `python scripts/stack/stack.py up anchor`.
+Run with: `python scripts/stack/stack.py up anchor`, which creates any of the
+three networks that is missing and leaves an existing one as it is.
+`emergency-recovery.ps1` does the same through `Confirm-AnchorNetworks`. A
+bare `docker compose up -d` at the root does NOT create them: on a project with
+no services it exits `no service selected` (compose v5.3, ac-recovery-gates R6).
 
 > **Profiles: FIVE planes are profile-gated, not one.** `frontend`
 > (`stock` | `gpu` | `tailscale`), `inference` (`local`), `portal` (`internet`),
@@ -223,8 +226,8 @@ does not help, because the reference resolves at project load. `openwebui` is
 the one exception (`restart openwebui`, `build --no-cache openwebui` work) —
 the gpu definition names nothing outside its own profile. So the value is
 required for the watchdog's seven tailscale repairs (plus two advice strings),
-for `emergency-recovery.ps1`, for `scripts/recovery/quick-fixes.bat`'s four
-tailscale calls, and for the `stop tailscale openwebui` recipe documented in
+for `emergency-recovery.ps1`, for the manual tailscale rebuild in
+`documentation/runbooks/PREVENTION-GUIDE.md`, and for the `stop tailscale openwebui` recipe documented in
 `backup/openwebui-restore.sh:9`. TWO callers are independent of it because they pass the
 profiles themselves: `scripts/backup/restore-from-snapshot.ps1` (its frontend
 and tailscale entries, as the portal and agent-org entries there already did)
@@ -655,7 +658,8 @@ update, or network-namespace break.
 | File | Role |
 |------|------|
 | `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
-| `scripts/recovery/quick-fixes.bat`, `scripts/recovery/update-stack.bat` | Present, but NOT a recovery path any more: both issue bare `docker compose` commands at the repo root, which since Part K is the zero-service anchor. Use the `.ps1` above. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
+| `scripts/recovery/status_check.py` | Read-only overview: `docker ps`, then `docker exec` / `docker inspect` by container name; no compose project involved |
+| `scripts/archive/legacy-recovery/` | ARCHIVED 2026-09-25: `quick-fixes.bat`, `update-stack.bat`, five Python helpers orphaned since 2026-08-20, and `dev-helper.ps1`. Seven of them issued bare `docker compose` commands from the repo root, which since Part K address the zero-service root anchor (`quick-fixes.bat`'s `-f <plane>` calls did work). The eighth, `namespace_reset.py`, issued none: it only printed advice and returned 0, and it was archived as an orphan. The per-script detail is in `scripts/archive/README.md`. Replacements are in `scripts/archive/README.md`. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 
 The recovery script holds a PER-PLANE service inventory - `$Script:InferenceServices`,
@@ -672,8 +676,9 @@ stays complete.
 
 **The Portal plane is deliberately excluded** from recovery: it is profile-gated
 (`profiles: [internet]`) and managed by `scripts/portal/portal-on.ps1` / `portal-off.ps1`.
-A nuclear `docker compose down` stops a running portal; recovery detects this and
-**warns** rather than auto-restoring the internet front-end.
+Nuclear runs no root `down` (since ac-recovery-gates) and never stops or starts the
+portal; when caddy is running it **warns** that the portal stays up, attached to
+`ai-stack_app-net`, which recovery never removes.
 
 ---
 
@@ -688,7 +693,8 @@ relative order.
 
 Plane by plane (start in this order; `down` reverses it):
 
-1. **anchor** (`docker compose up -d` at the root) — creates
+1. **anchor** (`python scripts/stack/stack.py up anchor`; a bare root
+    `docker compose up -d` exits `no service selected`) — creates
     `ai-stack_llm-net` / `app-net` / `default` and starts nothing. A plane that
     USES one of those fails to render without it (`network ai-stack_llm-net
     declared as external, but could not be found`) - which is inference, memory,

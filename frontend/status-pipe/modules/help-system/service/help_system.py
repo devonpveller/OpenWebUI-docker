@@ -66,15 +66,16 @@ class HelpSystemModule:
                 "title": "Emergency Recovery Procedures",
                 "description": "Multi-tier recovery system for autonomous problem resolution",
                 "quick_fixes": [
-                    "scripts\\quick-fixes.bat namespace - Network namespace reset (most common)",
-                    "scripts\\quick-fixes.bat gpu - GPU availability check and restart",
-                    "scripts\\quick-fixes.bat status - System overview",
-                    "scripts\\quick-fixes.bat nuclear - Complete restart (last resort)"
+                    "Run these on the HOST, from the ai-stack repo root.",
+                    "python scripts\\recovery\\status_check.py - System overview, read-only (containers, CUDA in openwebui, gateway, upstreams, tailscale)",
+                    "python scripts\\stack\\stack.py health - Health probes for the enabled planes it covers (not the portal: use scripts\\portal\\portal-status.ps1), read-only (exit code = failed probes)",
+                    "docker exec openwebui nvidia-smi - Is the GPU visible inside Open WebUI? (read-only)",
+                    "python scripts\\stack\\stack.py restart frontend - Restart openwebui and tailscale together (never restart openwebui alone)"
                 ],
                 "advanced_recovery": [
-                    ".\\scripts\\emergency-recovery.ps1 -Action recover - Standard recovery",
-                    ".\\scripts\\emergency-recovery.ps1 -Action gpu-reset - GPU-specific recovery",
-                    ".\\scripts\\emergency-recovery.ps1 -Action nuclear - Complete system restart"
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover - Repairs a broken openwebui/tailscale network namespace (most common). If basic connectivity checks pass it first tries a gentle pass: restart both llama-cpp upstreams, then openwebui (waits for healthy), then tailscale, then 'up -d' for llm-queue/llm-gateway, memory, search, coder, and OB1 and agent-org when deployed. Otherwise, or if that fails, it stops and restarts frontend, inference, memory, search, coder, and OB1 and agent-org when deployed, in dependency order with health gates. It never touches the portal.",
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - GPU recovery: takes down inference, memory and frontend and REBUILDS the openwebui image (heavy)",
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action nuclear - Last resort. It tries the same gentle pass first when connectivity checks pass. Otherwise it runs 'down' on OB1, frontend, coder, search, memory and inference and brings them back up, plus agent-org when deployed. It never stops or starts the portal."
                 ]
             },
             "common_issues": {
@@ -83,14 +84,14 @@ class HelpSystemModule:
                     "network_unreachable": {
                         "symptoms": ["Network unreachable", "Tailscale can't connect", "Connection timeout"],
                         "cause": "OpenWebUI container recreation breaks shared network namespace",
-                        "solution": "scripts\\quick-fixes.bat namespace",
-                        "explanation": "Resets network namespace sharing between containers"
+                        "solution": ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover (host, repo root)",
+                        "explanation": "Ordered restart: openwebui first, then tailscale, which re-joins openwebui's network namespace"
                     },
                     "gpu_not_available": {
                         "symptoms": ["CUDA not available", "GPU models slow", "Reranker using CPU"],
                         "cause": "GPU passthrough issues or PyTorch CPU-only installation",
-                        "solution": "scripts\\quick-fixes.bat gpu",
-                        "explanation": "Checks and restarts GPU services for CUDA availability"
+                        "solution": "Check: python scripts\\recovery\\status_check.py - then, if CUDA is still unavailable: .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset (host, repo root)",
+                        "explanation": "status_check.py reports CUDA inside openwebui read-only; gpu-reset takes inference, memory and frontend down, rebuilds the openwebui image, and brings frontend back, then inference once openwebui is healthy, then memory, coder, OB1 and agent-org once llama-cpp is healthy and CUDA answers"
                     },
                     "lmstudio_connectivity": {
                         "symptoms": ["LM Studio not accessible via Tailscale", "Port 8234 not working", "LM Studio proxy issues"],
@@ -103,7 +104,7 @@ class HelpSystemModule:
                     "pipe_function_not_working": {
                         "symptoms": ["Pipe function not accessible", "Module not found", "Import errors"],
                         "cause": "Scripts not mounted or incorrect volume configuration",
-                        "solution": "Check: docker compose exec openwebui ls /host_project/status-pipe/",
+                        "solution": "Check: docker exec openwebui ls /host_project/status-pipe/",
                         "explanation": "Verify script mount and container access"
                     }
                 }
@@ -132,14 +133,14 @@ class HelpSystemModule:
             "commands": {
                 "title": "Essential Commands",
                 "diagnostics": [
-                    "docker compose ps - Check service status",
-                    "docker compose logs openwebui - Check OpenWebUI logs",
-                    "docker compose exec openwebui python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\" - GPU check"
+                    "python scripts\\stack\\stack.py status - Check service status (docker compose ps per enabled plane)",
+                    "docker logs --tail 100 openwebui - Check OpenWebUI logs",
+                    "docker exec openwebui python -c \"import torch; print('CUDA available:', torch.cuda.is_available())\" - GPU check"
                 ],
                 "pipe_function_testing": [
-                    "docker compose exec openwebui ls /host_project/status-pipe/ - Verify subsystem mount",
-                    "docker compose exec openwebui python /host_project/status-pipe/orchestrator.py - Test the orchestrator",
-                    "docker compose exec openwebui python /host_project/status-pipe/router.py '{\"input\": \"gpu status\"}' - Test router"
+                    "docker exec openwebui ls /host_project/status-pipe/ - Verify subsystem mount",
+                    "docker exec openwebui python /host_project/status-pipe/orchestrator.py - Test the orchestrator",
+                    "docker exec openwebui python /host_project/status-pipe/router.py '{\"input\": \"gpu status\"}' - Test router"
                 ]
             }
         }

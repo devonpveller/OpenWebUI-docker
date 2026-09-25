@@ -532,7 +532,7 @@ class AIStackRouter:
             return "gpu-status"
 
         # Recovery questions route to help-system, which points at the real
-        # recovery story (scripts/emergency-recovery.ps1). The old
+        # recovery story (scripts/recovery/emergency-recovery.ps1). The old
         # emergency-recovery module (stale, ollama-era) was archived
         # 2026-08-20 (CLEANUP-PLAN v3 D-15).
         elif any(keyword in input_lower for keyword in ["recovery", "repair", "emergency"]) and \
