@@ -25,6 +25,32 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Push-Location $repoRoot
 
+# THIS FILE ALSO RUNS UNDER pwsh ON LINUX AND macOS (ac-hooks-portable, 2026-09-25).
+# .githooks/pre-commit falls back to pwsh where powershell.exe does not exist. Three
+# things in here were Windows-only, and the first was SILENT: gate 4 below ran git
+# through `cmd /c`, which does not exist there, so its byte reads came back empty and
+# a planted 0x08 passed as "no control characters in staged added lines" (measured at
+# 3c3ff75 in a Linux container). The others: `cmd /c` for the compose renders, the
+# backslash paths handed to docker as native arguments, and a python named `python`
+# where only `python3` exists. Each is now chosen per host. ON WINDOWS every command
+# line below is byte-for-byte the one it was; only the non-Windows branch is new.
+$script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or ($IsWindows -eq $true)
+# A path handed to a NATIVE program (docker) as an argument - PowerShell's own
+# cmdlets accept either separator on every OS, native programs do not.
+function ConvertTo-NativePath([string]$Path) {
+    if ($script:OnWindows) { return $Path }
+    return $Path.Replace('\', '/')
+}
+# Run one shell command line with the host's shell doing any redirection.
+function Invoke-HostShell([string]$Line) {
+    if ($script:OnWindows) { cmd /c $Line } else { sh -c $Line }
+}
+$script:NullDev = if ($script:OnWindows) { 'nul' } else { '/dev/null' }
+# `python` on Windows (unchanged); `python3` where that is the only name.
+$script:PyName = 'python'
+if (-not (Get-Command python -ErrorAction SilentlyContinue) -and
+    (Get-Command python3 -ErrorAction SilentlyContinue)) { $script:PyName = 'python3' }
+
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { $_ }
 # The SAME `--diff-filter=ACM` gate 4 below had to drop: it discards a rename
 # outright, so `git mv old new` plus an edit, staged alone, left $staged empty
@@ -85,12 +111,13 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
             @{ N = 'portal';    F = 'portal\docker-compose.yml';    A = @('--env-file', 'portal\.env.example', '--profile', 'internet') }
         )
         foreach ($p in $projects) {
-            # cmd /c so compose's stderr WARNINGS (e.g. an unset optional var)
+            # cmd /c (sh -c off Windows) so compose's stderr WARNINGS (e.g. an unset optional var)
             # can't become PS 5.1 NativeCommandErrors under EAP=Stop.
-            $argStr = ($p.A -join ' ')
-            cmd /c "docker compose -f $($p.F) $argStr config -q 2>nul" | Out-Null
+            $argStr = (($p.A | ForEach-Object { ConvertTo-NativePath $_ }) -join ' ')
+            $pf = ConvertTo-NativePath $p.F
+            Invoke-HostShell "docker compose -f $pf $argStr config -q 2>$script:NullDev" | Out-Null
             if ($LASTEXITCODE -ne 0) {
-                $msg = (cmd /c "docker compose -f $($p.F) $argStr config -q 2>&1" | Select-Object -First 2) -join ' '
+                $msg = (Invoke-HostShell "docker compose -f $pf $argStr config -q 2>&1" | Select-Object -First 2) -join ' '
                 Write-Host "  [configs] COMPOSE INVALID: $($p.N) - $msg" -ForegroundColor Red
                 $failed++
             }
@@ -191,8 +218,8 @@ if ($ymlStaged.Count -gt 0 -or $gitlinkStaged.Count -gt 0) {
                 # Regex extraction, NOT ConvertFrom-Json: PS 5.1's parser rejects
                 # the rendered config's case-duplicate env keys (HTTP_PROXY vs
                 # http_proxy on open-terminal). container_name lines are enough.
-                $argStr = ($rt.A -join ' ')
-                $raw = (cmd /c "docker compose -f $($rt.F) $argStr config --format json 2>nul") -join "`n"
+                $argStr = (($rt.A | ForEach-Object { ConvertTo-NativePath $_ }) -join ' ')
+                $raw = (Invoke-HostShell "docker compose -f $(ConvertTo-NativePath $rt.F) $argStr config --format json 2>$script:NullDev") -join "`n"
                 if (-not $raw) {
                     # Was `continue`, which unverified every row of the target in silence.
                     $drift += ("RENDER PRODUCED NOTHING for $($rt.P) ($($rt.F)) - " +
@@ -285,7 +312,7 @@ $invInputs = @($staged | Where-Object {
         $_ -match '^scripts/lib/stack-services(\.curated)?\.json$'
     })
 if ($invInputs.Count -gt 0) {
-    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    $py = (Get-Command $script:PyName -ErrorAction SilentlyContinue)
     $dockerOk = $true
     try { docker compose version | Out-Null } catch { $dockerOk = $false }
     if (-not $py) {
@@ -301,7 +328,7 @@ if ($invInputs.Count -gt 0) {
         # docker warning underneath it can.
         $prev = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $invOut = & python 'scripts/stack/stack.py' inventory --check 2>&1
+        $invOut = & $script:PyName 'scripts/stack/stack.py' inventory --check 2>&1
         $invCode = $LASTEXITCODE
         $ErrorActionPreference = $prev
         foreach ($line in $invOut) { Write-Host ("  [configs] " + ("$line").TrimEnd()) }
@@ -341,7 +368,7 @@ if ($ps1Staged.Count -gt 0 -and $failed -eq 0) {
 # and skips - a check that cannot run must never masquerade as one that passed.
 $jsonStaged = @($staged | Where-Object { $_ -match '\.json$' -and (Test-Path $_) })
 if ($jsonStaged.Count -gt 0) {
-    $py = (Get-Command python -ErrorAction SilentlyContinue)
+    $py = (Get-Command $script:PyName -ErrorAction SilentlyContinue)
     if (-not $py) {
         Write-Host "  [configs] python not found - staged JSON NOT validated (this is a gap, not a pass)" -ForegroundColor Yellow
     } else {
@@ -349,7 +376,7 @@ if ($jsonStaged.Count -gt 0) {
         foreach ($f in $jsonStaged) {
             $prev = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
-            $out = & python -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" $f 2>&1
+            $out = & $script:PyName -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" $f 2>&1
             $code = $LASTEXITCODE
             $ErrorActionPreference = $prev
             if ($code -ne 0) {
@@ -446,7 +473,9 @@ function Get-CtrlGitBytes {
     # about a path that did not exist).
     param([string]$GitArgs)
     $t = [System.IO.Path]::GetTempFileName()
-    cmd /c "git $GitArgs > ""$t"" 2>nul" | Out-Null
+    # (sh, single-quoted, off Windows: the quoting cmd needs is not the quoting sh needs.)
+    if ($script:OnWindows) { cmd /c "git $GitArgs > ""$t"" 2>nul" | Out-Null }
+    else { sh -c "git $GitArgs > '$t' 2>/dev/null" | Out-Null }
     $bytes = [System.IO.File]::ReadAllBytes($t)
     Remove-Item $t -Force -ErrorAction SilentlyContinue
     return ([System.Text.Encoding]::GetEncoding(28591)).GetString($bytes)
@@ -498,7 +527,8 @@ if ($ctrlAsk.Count -gt 0) {
     $outT = [System.IO.Path]::GetTempFileName()
     $nul = [string][char]0
     [System.IO.File]::WriteAllBytes($inT, $ctrlEnc.GetBytes((($ctrlAsk -join $nul) + $nul)))
-    cmd /c "git check-attr -z --stdin binary < ""$inT"" > ""$outT"" 2>nul" | Out-Null
+    if ($script:OnWindows) { cmd /c "git check-attr -z --stdin binary < ""$inT"" > ""$outT"" 2>nul" | Out-Null }
+    else { sh -c "git check-attr -z --stdin binary < '$inT' > '$outT' 2>/dev/null" | Out-Null }
     $af = $ctrlEnc.GetString([System.IO.File]::ReadAllBytes($outT)).Split([char]0)
     Remove-Item $inT, $outT -Force -ErrorAction SilentlyContinue
     for ($k = 0; ($k + 2) -lt $af.Count; $k += 3) {

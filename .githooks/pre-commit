@@ -14,25 +14,153 @@
 #   5. env_file scope    - a service names the variables it needs
 #   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
 #   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
+#   5d. OB1 int. images  - and its integration images must build and resolve
 
 echo "Running pre-commit validations..."
+
+# --- 0. which host runs the gates (ac-hooks-portable, 2026-09-25) ----------
+# Every gate below is a .ps1, and until this block the hook called
+# `powershell.exe` by name. On Linux or macOS that is "not found" (exit 127), and
+# the first gate then reported "secret detected in staged files" - a blanket
+# failure with a false reason. (That was only reachable once the hook was made
+# executable: at 3c3ff75 every hook was committed 100644, so a real Linux clone
+# skipped them all with a `hint:` and committed anything - see step 0b.)
+#
+# THE ORDER, and the first match wins:
+#   1. powershell.exe - Windows, and ONLY in a native Windows git shell: `uname -s`
+#      is MINGW*/MSYS*/CYGWIN* (Git for Windows' bash says MINGW64_NT-...). Every
+#      gate then runs exactly as it always has: the command line is the one this
+#      hook has always used, and nothing else (not even a Python probe) happens on
+#      this path. WHY THE uname TEST (ac-hooks-portable2, review blocker 1): WSL puts
+#      Windows' powershell.exe on PATH through interop. Picking it there ran the
+#      gates in Windows PowerShell with WINDOWS git against a \\wsl.localhost path;
+#      that git refused the repo ("dubious ownership"), the secret guard read the
+#      refusal as "nothing staged - skip", and the summary listed it RAN (measured
+#      by the reviewer on this host's Ubuntu). On WSL, or any Linux with a
+#      powershell.exe on PATH, the hook now falls through to pwsh, then Python.
+#   2. pwsh           - PowerShell 7, any OS. The same .ps1 gates, the same flags.
+#   3. python3        - only the gates that have a Python twin under
+#      scripts/checks/ run: the secret guard, line endings and gateway routing.
+#      Each twin mirrors its .ps1 rule for rule; its header says what it copies.
+#      Every other gate prints `SKIPPED <gate>: ...` and does not fail the commit.
+#
+# THE THREE THAT ARE NEVER SKIPPED. The secret guard, line endings and gateway
+# routing have a twin precisely so that no host can leave them out. If neither a
+# PowerShell host nor Python 3 is present, run_gate REFUSES the commit on them
+# instead of skipping - a secret guard that can be skipped is not a guard.
+#
+# A skip is never silent: it prints a line as it happens, the summary at the
+# end names every gate RAN and SKIPPED, and the attestation (step 6) records the
+# skipped ones in a fifth column, so the ledger cannot claim a check that did
+# not run. On Windows nothing is skipped and the ledger line is unchanged.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) _native_windows=yes ;;
+    *) _native_windows= ;;
+esac
+if [ -n "$_native_windows" ] && command -v powershell.exe >/dev/null 2>&1; then
+    PS_HOST=powershell.exe
+elif command -v pwsh >/dev/null 2>&1; then
+    PS_HOST=pwsh
+else
+    PS_HOST=
+fi
+PY_HOST=
+if [ -z "$PS_HOST" ]; then
+    for _cand in python3 python; do
+        if command -v "$_cand" >/dev/null 2>&1 &&
+           "$_cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+            PY_HOST=$_cand
+            break
+        fi
+    done
+fi
+GATES_RAN=
+GATES_SKIPPED=
+
+print_summary() {
+    echo "Pre-commit gates (host: ${PS_HOST:-${PY_HOST:-none}}) - RAN:${GATES_RAN:- (none)} | SKIPPED:${GATES_SKIPPED:- (none)}"
+}
+
+# run_gate <gate> <ps1> <python twin, or ''> <never-skip: yes|no> <failure line>
+run_gate() {
+    _gate=$1; _ps1=$2; _py=$3; _never_skip=$4; _fail=$5
+    if [ -n "$PS_HOST" ]; then
+        "$PS_HOST" -NoProfile -ExecutionPolicy Bypass -File "$_ps1"
+        _rc=$?
+    elif [ -n "$_py" ] && [ -n "$PY_HOST" ]; then
+        "$PY_HOST" "$_py"
+        _rc=$?
+    elif [ "$_never_skip" = yes ]; then
+        echo "REFUSED $_gate: this gate is never skipped, and neither PowerShell (powershell.exe, pwsh) nor Python 3 is on PATH to run it."
+        echo "  Install python3 (runs $_py) or pwsh (runs $_ps1), then commit again."
+        print_summary
+        exit 1
+    else
+        echo "SKIPPED $_gate: needs PowerShell (install pwsh to run it)"
+        GATES_SKIPPED="$GATES_SKIPPED $_gate"
+        return 0
+    fi
+    if [ $_rc -ne 0 ]; then
+        echo "$_fail"
+        print_summary
+        exit 1
+    fi
+    GATES_RAN="$GATES_RAN $_gate"
+}
+
+# --- 0b. hook modes (inline, needs no host) ---------------------------------
+# git RUNS A HOOK ONLY IF IT IS EXECUTABLE. A hook committed as mode 100644 is
+# checked out 0644 by every Linux/macOS clone, and git then skips it with a
+# one-line `hint:` - no gate runs, a staged secret commits with exit 0, and no
+# attestation is written. Until 2026-09-25 all three hooks here were 100644, and
+# nobody on this Windows host could see it: core.fileMode=false, and Git for
+# Windows runs a hook whatever its mode. (Found by ac-hooks-portable's tester in
+# a genuine Linux clone; every earlier container run had copied a Docker Desktop
+# bind mount, where every file reads -rwxrwxrwx.)
+#
+# A hook cannot report its OWN missing x bit - by then it is not running. What
+# it can do is refuse to commit a tree in which any hook has lost it, which is
+# how a Windows commit (the one place this hook always runs) would reintroduce
+# the problem. Silent when every hook is 100755.
+#
+# ONLY A FILE NAMED AS A GIT HOOK is checked (ac-hooks-portable2, review carry):
+# a README, a NOTES.MD or a sourced helper such as lib.sh is never executed by
+# git and needs no x bit. A SYMLINK (120000) is skipped too: git runs its
+# target, whose mode this index entry does not hold. And the index query FAILS
+# CLOSED: if git cannot answer, this step refuses rather than finding nothing.
+_hook_names=' applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-receive update proc-receive post-receive post-update reference-transaction push-to-checkout pre-auto-gc post-rewrite sendemail-validate fsmonitor-watchman p4-changelist p4-prepare-changelist p4-post-changelist p4-pre-submit post-index-change '
+if ! _hook_index=$(git ls-files -s -- .githooks); then
+    echo "hook-modes: git ls-files failed - cannot tell whether the hooks are executable."
+    echo "Pre-commit validation failed (a hook is not executable in the index)!"
+    print_summary
+    exit 1
+fi
+_bad_modes=$(printf '%s\n' "$_hook_index" | awk -v names="$_hook_names" '
+    NF == 0 { next }
+    { mode = $1; path = $0; sub(/^[^\t]*\t/, "", path); leaf = path; sub(/^.*\//, "", leaf) }
+    mode != "100755" && mode != "120000" && index(names, " " leaf " ") { print path }')
+if [ -n "$_bad_modes" ]; then
+    echo "Hook file(s) staged without the executable bit - git would SKIP them on Linux/macOS:"
+    printf '    %s\n' $_bad_modes
+    echo "  Fix: git update-index --chmod=+x <file>   (works on Windows too, where chmod does not)"
+    echo "Pre-commit validation failed (a hook is not executable in the index)!"
+    print_summary
+    exit 1
+fi
+GATES_RAN="$GATES_RAN hook-modes"
 
 # --- 1. secrets (staged content only, so it stays fast) --------------------
 # Added 2026-08-20 after two .env.bak-* files reached a commit and were only
 # stopped at push time by GitHub push protection - which matched 2 GitHub PATs
 # while each file held ~25 live credentials. Catch it at commit time instead.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-staged-secrets.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (secret detected in staged files)!"
-    exit 1
-fi
+run_gate secrets './scripts/checks/check-staged-secrets.ps1' \
+    './scripts/checks/check_staged_secrets.py' yes \
+    "Pre-commit validation failed (secret detected in staged files)!"
 
 # --- 2. line endings -------------------------------------------------------
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/validate-lineendings.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (line endings)!"
-    exit 1
-fi
+run_gate line-endings './scripts/checks/validate-lineendings.ps1' \
+    './scripts/checks/validate_lineendings.py' yes \
+    "Pre-commit validation failed (line endings)!"
 
 # --- 2b. documentation placement (staged-aware) ----------------------------
 # Fail if this commit ADDS planning material to the code repo. Plans, build logs,
@@ -48,20 +176,15 @@ fi
 # on 2026-09-18) was never staged, so this hook would not have seen it. It closes
 # the path where the drift gets committed here permanently. Run the script with
 # -All to see the untracked half, which no commit-time check can reach.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-doc-placement.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (planning or journal material staged into the code repo)!"
-    exit 1
-fi
+run_gate doc-placement './scripts/checks/check-doc-placement.ps1' '' no \
+    "Pre-commit validation failed (planning or journal material staged into the code repo)!"
 
 # --- 3. gateway-only LLM routing -------------------------------------------
 # Fail if any inference/serve endpoint points at a *-upstream real server
 # instead of the LiteLLM gateway alias.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-llm-gateway-routing.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (LLM gateway routing bypass)!"
-    exit 1
-fi
+run_gate gateway-routing './scripts/checks/check-llm-gateway-routing.ps1' \
+    './scripts/checks/check_llm_gateway_routing.py' yes \
+    "Pre-commit validation failed (LLM gateway routing bypass)!"
 
 # --- 3b. corpus write contract (DFU C.9 H3) --------------------------------
 # Fail if a file INSERTs into `thoughts`/`agent_memories` over PostgREST without stating
@@ -85,40 +208,28 @@ fi
 # shapes, its blind spots and the category of text that can clear a counted site on every run
 # (`-ShowShapes` prints them alone). Read those before treating a green here as protection.
 # Self-test: the script's -SelfTest switch.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-corpus-exposure-producers.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (a corpus insert does not state its plane)!"
-    exit 1
-fi
+run_gate corpus-exposure './scripts/checks/check-corpus-exposure-producers.ps1' '' no \
+    "Pre-commit validation failed (a corpus insert does not state its plane)!"
 
 # --- 4. project configs (staged-aware, K.8) ---------------------------------
 # Any staged yml => render all compose projects against .env.example;
 # any staged ps1 => PSParser tokenize. Skips itself when neither is staged.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-project-configs.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (compose/ps1 structural check)!"
-    exit 1
-fi
+run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
+    "Pre-commit validation failed (compose/ps1 structural check)!"
 
 # --- 5. env_file scope (staged-aware) --------------------------------------
 # Fail if this commit ADDS a service that grants itself a shared .env. Pre-existing
 # grants are reported, not blocked - a guard that fails on old debt gets disabled.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-env-file-scope.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (a service granted itself a shared .env)!"
-    exit 1
-fi
+run_gate env-file-scope './scripts/checks/check-env-file-scope.ps1' '' no \
+    "Pre-commit validation failed (a service granted itself a shared .env)!"
 
 # --- 5b. OB1 recipe tests on gitlink bumps ---------------------------------
 # A gitlink bump IS the deploy of OB1 code to this stack (the live containers
 # bind-mount OB1/recipes from this checkout), and the 08-28 wiki-pages bug
 # shipped exactly there with its own catching test unrun (fixed 09f70f4 /
 # 443c5d8). Skips itself instantly when no OB1 gitlink is staged.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-recipe-tests.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (OB1 recipe tests failed for the staged gitlink)!"
-    exit 1
-fi
+run_gate ob1-recipe-tests './scripts/checks/check-ob1-recipe-tests.ps1' '' no \
+    "Pre-commit validation failed (OB1 recipe tests failed for the staged gitlink)!"
 
 # --- 5c. OB1 Deno recipe type-check on gitlink bumps -----------------------
 # 5b above globs *.test.mjs. OB1/recipes/daily-digest is Deno TypeScript - .ts
@@ -133,11 +244,8 @@ fi
 # so a green here means "it compiles", not "it works". Skips instantly when no
 # OB1 gitlink is staged; REFUSES (does not warn-and-pass) when deno is missing.
 # The reasoning for both is in the script's header.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-deno-recipes.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (OB1 Deno recipe does not type-check for the staged gitlink)!"
-    exit 1
-fi
+run_gate ob1-deno-recipes './scripts/checks/check-ob1-deno-recipes.ps1' '' no \
+    "Pre-commit validation failed (OB1 Deno recipe does not type-check for the staged gitlink)!"
 
 # --- 5d. OB1 integration images on gitlink bumps ---------------------------
 # 5b runs recipe tests, 5c type-checks the Deno recipe - neither looks at a
@@ -157,11 +265,8 @@ fi
 # gitlink is staged or the bump touches no Dockerfile-bearing integration;
 # REFUSES (does not warn-and-pass) when Docker is unreachable. pre-merge-commit
 # execs this file, so a clean merge that bumps the gitlink gets it too.
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-ob1-integration-images.ps1'
-if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (an OB1 integration image does not build or resolve for the staged gitlink)!"
-    exit 1
-fi
+run_gate ob1-integration-images './scripts/checks/check-ob1-integration-images.ps1' '' no \
+    "Pre-commit validation failed (an OB1 integration image does not build or resolve for the staged gitlink)!"
 
 # --- 6. ATTESTATION -------------------------------------------------------
 # Record that these checks actually ran, because otherwise nobody can tell.
@@ -220,14 +325,27 @@ if [ -n "$_attest_tree" ]; then
         case "$_attest_hook" in
             "" | *[!0-9a-f]* ) _attest_hook='?' ;;
         esac
-        printf '%s %s %s %s\n' \
+        # FIFTH COLUMN, ONLY WHEN A GATE WAS SKIPPED (ac-hooks-portable). A host
+        # with no PowerShell runs the Python twins and skips the rest; without
+        # this column the line would read exactly like one from a host that ran
+        # every gate, and the ledger would vouch for checks that never ran.
+        # `skipped=<gate>,<gate>`; absent when nothing was skipped, so a Windows
+        # line keeps its four columns. Readers split on whitespace and read
+        # columns 1 and 4 only, so a fifth column changes no verdict.
+        _attest_skipped=
+        if [ -n "$GATES_SKIPPED" ]; then
+            _attest_skipped=" skipped=$(echo $GATES_SKIPPED | tr ' ' ',')"
+        fi
+        printf '%s %s %s %s%s\n' \
             "$_attest_tree" \
             "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')" \
             "$_attest_hook" \
+            "$_attest_skipped" \
             >> "$_git_common/hook-attest.log" 2>/dev/null || true
     fi
 fi
 
+print_summary
 echo "Pre-commit validations passed!"
 exit 0
