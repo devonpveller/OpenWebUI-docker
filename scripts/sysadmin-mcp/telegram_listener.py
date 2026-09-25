@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -203,6 +204,51 @@ def _handle_docker_up() -> None:
            "Docker Desktop quit/restart or host reboot.")
 
 
+# emergency-recovery.ps1 writes every line as "[<timestamp>] [<LEVEL>] <message>" (Write-Log).
+_ISSUE_RE = re.compile(r"\[(ERROR|WARN)\]")
+_TAIL_LINES = 15
+_MAX_ISSUE_LINES = 25
+_TELEGRAM_LIMIT = 3900  # sendMessage rejects > 4096 chars, and tn.send() fails silently
+
+
+def _recovery_report(action: str, rc: int, out: str) -> str:
+    """The Telegram reply for a recovery run: the exit code, every ERROR/WARN line
+    from the WHOLE run, then the last lines.
+
+    Why not the tail alone: a run can exit 0 with its only ERROR near the top.
+    Confirm-AnchorNetworks logs `[ERROR]   [DIFFERS] <net>: ...` when an existing
+    ai-stack_* network differs from its declaration, creates nothing, and recovery
+    CONTINUES; a 15-line tail of a long run never reaches that line, so a drifted
+    anchor read as a clean recover (ac-recovery-gates review, R6). ERROR/WARN lines
+    already inside the tail are not repeated; past _MAX_ISSUE_LINES the rest are
+    counted, not shown; the reply is cut to stay under Telegram's size limit,
+    keeping the head, which is the part this exists for.
+    """
+    lines = out.splitlines() if out else []
+    tail = lines[-_TAIL_LINES:]
+    before_tail = lines[:-_TAIL_LINES] if len(lines) > _TAIL_LINES else []
+    issues = [ln for ln in before_tail if _ISSUE_RE.search(ln)]
+    n_err = sum(1 for ln in lines if "[ERROR]" in ln)
+    n_warn = sum(1 for ln in lines if "[WARN]" in ln)
+    parts = [f"{action} finished (exit {rc}); the run logged {n_err} ERROR and {n_warn} WARN line(s)."]
+    if n_err and rc == 0:
+        parts.append("Exit 0 does NOT mean clean - read the ERROR lines.")
+    if issues:
+        shown = issues[:_MAX_ISSUE_LINES]
+        parts.append("ERROR/WARN earlier in the run:")
+        parts.extend(shown)
+        if len(issues) > len(shown):
+            parts.append(f"(+{len(issues) - len(shown)} more ERROR/WARN line(s) not shown)")
+    parts.append("Last lines:" if lines else "(no output)")
+    parts.extend(tail)
+    parts.append("")
+    parts.append("Send 'status' to confirm.")
+    text = "\n".join(parts)
+    if len(text) > _TELEGRAM_LIMIT:
+        text = text[: _TELEGRAM_LIMIT - 40].rstrip() + "\n...(truncated)\nSend 'status' to confirm."
+    return text
+
+
 def _handle_recover() -> None:
     if not os.path.exists(_RECOVERY):
         _reply(f"recovery script not found at {_RECOVERY}")
@@ -210,8 +256,7 @@ def _handle_recover() -> None:
     _reply("running emergency-recovery.ps1 recover (ordered restart, this takes a few minutes)...")
     rc, out = _run([_PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
                     "-File", _RECOVERY, "recover"], timeout=1200)
-    tail = "\n".join(out.splitlines()[-15:]) if out else "(no output)"
-    _reply(f"recover finished (exit {rc}).\n{tail}\n\nSend 'status' to confirm.")
+    _reply(_recovery_report("recover", rc, out))
 
 
 def _mm_health() -> str:
@@ -289,8 +334,7 @@ def _handle_destructive(action: str) -> None:
     _reply(f"running emergency-recovery.ps1 {action} (this is heavy)...")
     rc, out = _run([_PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
                     "-File", _RECOVERY, action], timeout=1800)
-    tail = "\n".join(out.splitlines()[-15:]) if out else "(no output)"
-    _reply(f"{action} finished (exit {rc}).\n{tail}\n\nSend 'status' to confirm.")
+    _reply(_recovery_report(action, rc, out))
 
 
 _HELP = (
