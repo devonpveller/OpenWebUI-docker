@@ -77,7 +77,13 @@ function Get-PlaneBindDir {
   $path = Join-Path $projectRoot $EnvFile
   if (Test-Path $path) {
     foreach ($line in (Get-Content $path)) {
-      if ($line -match "^\s*$Key\s*=(.*)$") { $value = $Matches[1].Trim().Trim('"').Trim("'") }
+      if ($line -match "^\s*$Key\s*=(.*)$") {
+        $raw = $Matches[1].Trim()
+        # Compose's .env rules: a quoted value is taken inside its quotes; an unquoted
+        # one ends at the first ' #' (an inline comment).
+        if ($raw -match '^"([^"]*)"' -or $raw -match "^'([^']*)'") { $value = $Matches[1] }
+        else { $value = ($raw -replace '\s+#.*$', '').Trim() }
+      }
     }
   }
   if (-not $value) { $value = $Default }
