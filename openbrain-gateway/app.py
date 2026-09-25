@@ -113,6 +113,32 @@ def _force_write_extra(args: dict) -> dict:
     return args
 
 
+def _typed(v, kind: str):
+    """Return (ok, value) for a policed argument: DECODE-THEN-POLICE.
+
+    Some MCP clients send list/object arguments as JSON strings, and the
+    upstream's tool layer may decode such a string itself - so a string must
+    never reach it for a policed argument. A string that decodes (strictly, as
+    a body would) to the expected type is replaced by the decoded value, and
+    the policy is applied to that; anything else is refused (-32602).
+    None/absent is accepted. kind: "object" | "str_list" | "obj_list".
+    """
+    if v is None:
+        return True, None
+    if isinstance(v, str):
+        try:
+            v = _strict_json(v)
+        except _BodyRefused:
+            return False, None
+    if kind == "object":
+        return isinstance(v, dict), v
+    if kind == "str_list":
+        return isinstance(v, list) and all(isinstance(x, str) for x in v), v
+    if kind == "obj_list":
+        return isinstance(v, list), v   # items are checked one by one by the caller
+    raise ValueError(kind)
+
+
 def _rpc_error(rpc_id, code, message):
     return {"jsonrpc": "2.0", "id": rpc_id,
             "error": {"code": code, "message": message}}
@@ -131,14 +157,32 @@ def _apply_policy(msg: dict):
 
     if method == "tools/call":
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            return msg, _rpc_error(rpc_id, -32602, "params must be an object")
         name = params.get("name")
         args = params.get("arguments") or {}
+        if not isinstance(name, str) or not isinstance(args, dict):
+            return msg, _rpc_error(
+                rpc_id, -32602, "tools/call needs a string name and object arguments")
 
         if name not in ALLOWED_TOOLS:
             return msg, _rpc_error(
                 rpc_id, -32601,
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
+
+        # The policed arguments must be JSON objects: a JSON string that decodes
+        # (strictly) to an object is replaced by the object and then policed;
+        # anything else is refused (-32602), never forwarded. Policed pairs:
+        # every READ_TOOLS tool -> metadata_filter; every WRITE_TOOLS tool ->
+        # metadata_extra (see _force_read_filter / _force_write_extra).
+        for tools, key in ((READ_TOOLS, "metadata_filter"), (WRITE_TOOLS, "metadata_extra")):
+            if name in tools:
+                ok, v = _typed(args.get(key), "object")
+                if not ok:
+                    return msg, _rpc_error(rpc_id, -32602, f"{name}: {key} must be an object")
+                if key in args:
+                    args[key] = v
 
         if name in READ_TOOLS:
             params["arguments"] = _force_read_filter(args)
@@ -160,19 +204,82 @@ def _filter_tools_list(payload: dict) -> dict:
     return payload
 
 
+class _BodyRefused(ValueError):
+    """A request body the gateway cannot apply its policy to."""
+
+
+def _no_constant(name):
+    raise _BodyRefused(f"non-standard JSON constant {name}")
+
+
+def _strict_json(txt: str):
+    """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
+    bounded nesting); raises _BodyRefused. Used for the request body and for
+    string-encoded policed arguments alike."""
+    if txt.startswith("\ufeff"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        return json.loads(txt, parse_constant=_no_constant)
+    except _BodyRefused:
+        raise
+    except (ValueError, RecursionError) as e:
+        raise _BodyRefused(f"not a JSON document ({e.__class__.__name__})")
+
+
 def _parse_body(raw: bytes):
-    """MCP streamable-http body is a single JSON-RPC object (or batch)."""
-    txt = raw.decode("utf-8", "replace").strip()
-    if not txt:
-        return None
-    return json.loads(txt)
+    """Parse the MCP streamable-http body STRICTLY: one JSON-RPC object, or a
+    non-empty batch of objects, as plain UTF-8 JSON.
+
+    FAIL CLOSED. The upstream's own parser accepts more than this (a byte-order
+    mark, other encodings), so a body this function cannot parse is REFUSED,
+    never forwarded as received: the gateway only ever sends upstream what it
+    parsed here and re-serialised after policy. Raises _BodyRefused.
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        txt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _BodyRefused("not a UTF-8 JSON document (UnicodeDecodeError)")
+    msg = _strict_json(txt)
+    if isinstance(msg, dict):
+        return msg
+    if isinstance(msg, list) and msg and all(isinstance(m, dict) for m in msg):
+        return msg
+    raise _BodyRefused("not a JSON-RPC object or a non-empty batch of objects")
+
+
+def _refuse(reason: str):
+    return JSONResponse(
+        _rpc_error(None, -32700, f"Request refused by the gateway: {reason}."),
+        status_code=400)
+
+
+# Hop-by-hop headers (RFC 9110 section 7.6.1) describe the CLIENT's connection,
+# not the request, and the gateway frames the bytes it rebuilt itself: none of
+# them is forwarded, nor any header the client's Connection header names.
+# content-encoding goes too - the body sent upstream is the gateway's own plain
+# JSON, never the client's encoding of it.
+_HOP_BY_HOP = frozenset((
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
+    "trailer", "upgrade", "proxy-authorization", "proxy-authenticate",
+    "content-encoding",
+))
+
+
+def _connection_named(req) -> set:
+    names = set()
+    for v in req.headers.getlist("connection"):
+        names.update(t.strip().lower() for t in v.split(",") if t.strip())
+    return names
 
 
 def _upstream_headers(req):
+    drop = {"host", "content-length", "authorization", "x-brain-key"}
+    drop |= _HOP_BY_HOP | _connection_named(req)
     h = {}
     for k, v in req.headers.items():
-        lk = k.lower()
-        if lk in ("host", "content-length", "authorization", "x-brain-key"):
+        if k.lower() in drop:
             continue
         h[k] = v
     h["x-brain-key"] = OPENBRAIN_KEY
@@ -194,15 +301,21 @@ async def mcp(request):
     up_headers = _upstream_headers(request)
 
     short_circuit = None
-    out_body = body
+    out_body = None  # only bytes re-serialised below ever go upstream
     is_tools_list = False
 
-    if method == "POST" and body:
+    if body and method != "POST":
+        return _refuse(f"{method} with a body")
+    if method == "POST":
         try:
             msg = _parse_body(body)
-        except Exception:
-            msg = None
+        except _BodyRefused as e:
+            return _refuse(str(e))
         if isinstance(msg, list):  # JSON-RPC batch
+            # tools/list is filtered on the way back only for a single request,
+            # so inside a batch it is refused rather than answered unfiltered.
+            if any(m.get("method") == "tools/list" for m in msg):
+                return _refuse("tools/list inside a batch")
             mutated, sc = [], None
             for m in msg:
                 mm, r = _apply_policy(m)
@@ -230,7 +343,7 @@ async def mcp(request):
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.request(
             method, f"{OPENBRAIN_URL}/",
-            content=out_body if method in ("POST", "PUT", "PATCH") else None,
+            content=out_body,
             headers=up_headers,
             params=dict(request.query_params))
 
