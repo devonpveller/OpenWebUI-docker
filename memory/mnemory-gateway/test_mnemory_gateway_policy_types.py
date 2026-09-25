@@ -1,11 +1,13 @@
-"""The mnemory cloud gateway refuses policed arguments of the wrong JSON type,
-refuses tools/list inside a batch, and forwards no hop-by-hop header.
+"""The mnemory cloud gateway polices arguments by their DECODED type, refuses
+tools/list inside a batch, and forwards no hop-by-hop header.
 
 mnemory's FastMCP JSON-decodes a STRING argument whose parameter is not typed
-str, so an argument the policy inspects or rewrites (labels, categories,
-memories and each memory's labels/categories) sent string-encoded would skip
-the policy here and still reach mnemory as a list or object. Each such call
-must be refused with -32602 and never forwarded.
+str, and some MCP clients send lists/objects as JSON strings. So an argument
+the policy inspects or rewrites (labels, categories, memories and each
+memory's labels/categories) that arrives as a JSON string decoding to the
+expected type is decoded, policed and forwarded TYPED; anything else is
+refused with -32602 and never forwarded. mnemory never receives a string for
+a policed argument.
 
 Run: python -m pytest memory/mnemory-gateway -q
 """
@@ -35,23 +37,68 @@ AUTH = {"authorization": f"Bearer {GATEWAY_KEY}", "content-type": "application/j
 _LOCAL_LABELS = {"share": "local", "origin": "local"}
 _ITEM = {"content": "c", "labels": _LOCAL_LABELS, "categories": ["personal"]}
 
-# (tool, arguments) where a policed argument has the wrong JSON type.
+# (tool, arguments) where a policed argument is neither the expected type nor
+# a JSON string that strictly decodes to it.
 WRONG_TYPE = {
-    "search_memories-labels-str": ("search_memories", {"query": "q", "labels": json.dumps(_LOCAL_LABELS)}),
-    "find_memories-labels-str": ("find_memories", {"question": "q", "labels": json.dumps(_LOCAL_LABELS)}),
-    "list_memories-labels-str": ("list_memories", {"labels": json.dumps(_LOCAL_LABELS)}),
+    "search_memories-labels-plainstr": ("search_memories", {"query": "q", "labels": "share=local"}),
+    "find_memories-labels-str-of-list": ("find_memories", {"question": "q", "labels": "[1]"}),
     "list_memories-labels-list": ("list_memories", {"labels": [["share", "local"]]}),
-    "add_memory-labels-str": ("add_memory", {"content": "c", "labels": json.dumps(_LOCAL_LABELS)}),
-    "add_memory-categories-str": ("add_memory", {"content": "c", "categories": '["personal"]'}),
+    "list_memories-labels-bom-str": ("list_memories", {"labels": "\ufeff" + json.dumps(_LOCAL_LABELS)}),
+    "add_memory-labels-nan-str": ("add_memory", {"content": "c", "labels": '{"share": NaN}'}),
+    "add_memory-categories-plainstr": ("add_memory", {"content": "c", "categories": "personal"}),
+    "add_memory-categories-str-of-str": ("add_memory", {"content": "c", "categories": '"personal"'}),
+    "add_memory-categories-str-of-obj": ("add_memory", {"content": "c", "categories": '{"a": 1}'}),
     "add_memory-categories-nonstr-item": ("add_memory", {"content": "c", "categories": [["personal"]]}),
-    "add_memories-memories-str": ("add_memories", {"memories": json.dumps([_ITEM])}),
+    "add_memory-categories-double-encoded": ("add_memory", {"content": "c", "categories": json.dumps(json.dumps(["personal"]))}),
     "add_memories-memories-missing": ("add_memories", {}),
-    "add_memories-item-str": ("add_memories", {"memories": [json.dumps(_ITEM)]}),
-    "add_memories-item-labels-str": ("add_memories", {"memories": [
-        {"content": "c", "labels": json.dumps(_LOCAL_LABELS)}]}),
-    "add_memories-item-categories-str": ("add_memories", {"memories": [
-        {"content": "c", "categories": '["personal"]'}]}),
+    "add_memories-memories-plainstr": ("add_memories", {"memories": "not json"}),
+    "add_memories-memories-str-of-obj": ("add_memories", {"memories": json.dumps(_ITEM)}),
+    "add_memories-item-number": ("add_memories", {"memories": [1]}),
+    "add_memories-item-plainstr": ("add_memories", {"memories": ["not json"]}),
+    "add_memories-item-labels-plainstr": ("add_memories", {"memories": [
+        {"content": "c", "labels": "share=local"}]}),
+    "add_memories-item-categories-plainstr": ("add_memories", {"memories": [
+        {"content": "c", "categories": "personal"}]}),
 }
+
+_STAMPED = {"share": "cloud", "origin": "cloud"}
+
+# (tool, arguments, check(forwarded_arguments)) - a JSON-string policed
+# argument that decodes to the expected type: forwarded TYPED and policed.
+DECODED = {
+    "search_memories-labels-str": (
+        "search_memories", {"query": "q", "labels": json.dumps(_LOCAL_LABELS)},
+        lambda a: a["labels"] == {"share": "cloud"}),
+    "find_memories-labels-str": (
+        "find_memories", {"question": "q", "labels": json.dumps(_LOCAL_LABELS)},
+        lambda a: a["labels"] == {"share": "cloud"}),
+    "list_memories-labels-str": (
+        "list_memories", {"labels": json.dumps(_LOCAL_LABELS)},
+        lambda a: a["labels"] == {"share": "cloud"}),
+    "add_memory-labels-str": (
+        "add_memory", {"content": "c", "labels": json.dumps(_LOCAL_LABELS)},
+        lambda a: a["labels"] == _STAMPED),
+    "add_memory-categories-str": (
+        "add_memory", {"content": "c", "categories": '["personal", "work"]'},
+        lambda a: a["categories"] == ["work"]),
+    "add_memories-memories-str": (
+        "add_memories", {"memories": json.dumps([_ITEM])},
+        lambda a: a["memories"] == [{"content": "c", "labels": _STAMPED, "categories": []}]),
+    "add_memories-item-str": (
+        "add_memories", {"memories": [json.dumps(_ITEM)]},
+        lambda a: a["memories"] == [{"content": "c", "labels": _STAMPED, "categories": []}]),
+    "add_memories-item-labels-str": (
+        "add_memories", {"memories": [{"content": "c", "labels": json.dumps(_LOCAL_LABELS)}]},
+        lambda a: a["memories"][0]["labels"] == _STAMPED),
+    "add_memories-item-categories-str": (
+        "add_memories", {"memories": [{"content": "c", "categories": '["personal"]'}]},
+        lambda a: a["memories"][0]["categories"] == []),
+}
+
+# mnemory normalises categories with strip().lower() and "<prefix>:<name>" is
+# a subcategory (mnemory/categories.py, validate_categories).
+PERSONAL_SPELLINGS = ["personal", "Personal", "PERSONAL", " personal ", "personal:family",
+                      "Personal:Family", " PERSONAL:x "]
 
 
 def _call(tool, args, rpc_id=1):
@@ -99,6 +146,33 @@ def test_wrong_type_policed_argument_is_refused_inside_a_batch(upstream, case):
     assert r.status_code < 500, r.status_code
     assert r.json().get("error", {}).get("code") == -32602, r.text[:200]
     assert upstream == []
+
+
+@pytest.mark.parametrize("case", sorted(DECODED))
+def test_json_string_argument_is_decoded_policed_and_forwarded_typed(upstream, case):
+    tool, args, check = DECODED[case]
+    r = _post(_call(tool, args))
+    assert r.status_code == 200, r.text[:200]
+    (sent,) = upstream
+    fwd = json.loads(sent)["params"]["arguments"]
+    for v in fwd.values():
+        assert not (isinstance(v, str) and v.startswith(("[", "{"))), f"{case}: string forwarded {fwd}"
+    assert check(fwd), f"{case}: {fwd}"
+
+
+@pytest.mark.parametrize("spelled", PERSONAL_SPELLINGS)
+def test_personal_category_stripped_in_every_spelling(upstream, spelled):
+    _post(_call("add_memory", {"content": "c", "categories": [spelled, "work"]}))
+    _post(_call("add_memories", {"memories": [{"content": "c", "categories": [spelled]}]}))
+    one, many = (json.loads(b)["params"]["arguments"] for b in upstream)
+    assert one["categories"] == ["work"]
+    assert many["memories"][0]["categories"] == []
+
+
+def test_non_personal_prefix_lookalikes_are_kept(upstream):
+    keep = ["personality", "work", "project:personal", "personal-x"]
+    _post(_call("add_memory", {"content": "c", "categories": keep}))
+    assert json.loads(upstream[0])["params"]["arguments"]["categories"] == keep
 
 
 def test_correct_types_are_forwarded_with_policy(upstream):

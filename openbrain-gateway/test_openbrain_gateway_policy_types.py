@@ -2,8 +2,9 @@
 refuses tools/list inside a batch, and forwards no hop-by-hop header.
 
 The policy forces metadata_filter.share on every read tool and stamps
-metadata_extra on every write tool. Each of those arguments must arrive as a
-JSON object (or be absent/null); a string, list or other type is refused with
+metadata_extra on every write tool. Each must be a JSON object (or absent/null).
+A JSON string that strictly decodes to an object is decoded, policed and
+forwarded as the object; any other string, list or type is refused with
 -32602 and never forwarded.
 
 Run: python -m pytest openbrain-gateway -q
@@ -31,7 +32,8 @@ _spec.loader.exec_module(gw)
 AUTH = {"authorization": f"Bearer {GATEWAY_KEY}", "content-type": "application/json"}
 
 _LOCAL = {"share": "local"}
-_BAD_VALUES = {"str": json.dumps(_LOCAL), "list": [["share", "local"]], "number": 1}
+_BAD_VALUES = {"plainstr": "share=local", "str-of-list": "[1]", "bom-str": "\ufeff" + json.dumps(_LOCAL),
+               "list": [["share", "local"]], "number": 1}
 
 # Default (cloud) profile: every read tool x metadata_filter, every write tool
 # x metadata_extra, each with every wrong type.
@@ -84,6 +86,22 @@ def test_wrong_type_policed_argument_is_refused_never_forwarded(upstream, case):
     assert r.status_code < 500, r.status_code
     assert r.json().get("error", {}).get("code") == -32602, r.text[:200]
     assert upstream == [], f"{case}: forwarded {upstream}"
+
+
+DECODED = {}
+for _t in sorted(gw.READ_TOOLS):
+    DECODED[f"{_t}-metadata_filter"] = (_t, "metadata_filter", {"share": "cloud"})
+for _t in sorted(gw.WRITE_TOOLS):
+    DECODED[f"{_t}-metadata_extra"] = (_t, "metadata_extra", {"share": "cloud", "origin": "cloud"})
+
+
+@pytest.mark.parametrize("case", sorted(DECODED))
+def test_json_string_argument_is_decoded_policed_and_forwarded_typed(upstream, case):
+    tool, key, want = DECODED[case]
+    r = _post(_call(tool, {key: json.dumps(_LOCAL)}))
+    assert r.status_code == 200, r.text[:200]
+    (sent,) = upstream
+    assert json.loads(sent)["params"]["arguments"][key] == want
 
 
 def test_correct_types_are_forwarded_with_policy(upstream):

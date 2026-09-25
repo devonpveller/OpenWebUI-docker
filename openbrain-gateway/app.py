@@ -113,8 +113,30 @@ def _force_write_extra(args: dict) -> dict:
     return args
 
 
-def _is_obj(v) -> bool:
-    return v is None or isinstance(v, dict)
+def _typed(v, kind: str):
+    """Return (ok, value) for a policed argument: DECODE-THEN-POLICE.
+
+    Some MCP clients send list/object arguments as JSON strings, and the
+    upstream's tool layer may decode such a string itself - so a string must
+    never reach it for a policed argument. A string that decodes (strictly, as
+    a body would) to the expected type is replaced by the decoded value, and
+    the policy is applied to that; anything else is refused (-32602).
+    None/absent is accepted. kind: "object" | "str_list" | "obj_list".
+    """
+    if v is None:
+        return True, None
+    if isinstance(v, str):
+        try:
+            v = _strict_json(v)
+        except _BodyRefused:
+            return False, None
+    if kind == "object":
+        return isinstance(v, dict), v
+    if kind == "str_list":
+        return isinstance(v, list) and all(isinstance(x, str) for x in v), v
+    if kind == "obj_list":
+        return isinstance(v, list), v   # items are checked one by one by the caller
+    raise ValueError(kind)
 
 
 def _rpc_error(rpc_id, code, message):
@@ -149,15 +171,18 @@ def _apply_policy(msg: dict):
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
 
-        # The policed arguments must already be JSON objects (-32602 otherwise):
-        # a string, list or other type is refused, never coerced or forwarded.
-        # Policed pairs: every READ_TOOLS tool -> metadata_filter; every
-        # WRITE_TOOLS tool -> metadata_extra (see _force_read_filter /
-        # _force_write_extra).
-        if name in READ_TOOLS and not _is_obj(args.get("metadata_filter")):
-            return msg, _rpc_error(rpc_id, -32602, f"{name}: metadata_filter must be an object")
-        if name in WRITE_TOOLS and not _is_obj(args.get("metadata_extra")):
-            return msg, _rpc_error(rpc_id, -32602, f"{name}: metadata_extra must be an object")
+        # The policed arguments must be JSON objects: a JSON string that decodes
+        # (strictly) to an object is replaced by the object and then policed;
+        # anything else is refused (-32602), never forwarded. Policed pairs:
+        # every READ_TOOLS tool -> metadata_filter; every WRITE_TOOLS tool ->
+        # metadata_extra (see _force_read_filter / _force_write_extra).
+        for tools, key in ((READ_TOOLS, "metadata_filter"), (WRITE_TOOLS, "metadata_extra")):
+            if name in tools:
+                ok, v = _typed(args.get(key), "object")
+                if not ok:
+                    return msg, _rpc_error(rpc_id, -32602, f"{name}: {key} must be an object")
+                if key in args:
+                    args[key] = v
 
         if name in READ_TOOLS:
             params["arguments"] = _force_read_filter(args)
@@ -187,6 +212,20 @@ def _no_constant(name):
     raise _BodyRefused(f"non-standard JSON constant {name}")
 
 
+def _strict_json(txt: str):
+    """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
+    bounded nesting); raises _BodyRefused. Used for the request body and for
+    string-encoded policed arguments alike."""
+    if txt.startswith("\ufeff"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        return json.loads(txt, parse_constant=_no_constant)
+    except _BodyRefused:
+        raise
+    except (ValueError, RecursionError) as e:
+        raise _BodyRefused(f"not a JSON document ({e.__class__.__name__})")
+
+
 def _parse_body(raw: bytes):
     """Parse the MCP streamable-http body STRICTLY: one JSON-RPC object, or a
     non-empty batch of objects, as plain UTF-8 JSON.
@@ -199,11 +238,10 @@ def _parse_body(raw: bytes):
     if raw.startswith(b"\xef\xbb\xbf"):
         raise _BodyRefused("byte-order mark")
     try:
-        msg = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
-    except _BodyRefused:
-        raise
-    except (UnicodeDecodeError, ValueError, RecursionError) as e:
-        raise _BodyRefused(f"not a UTF-8 JSON document ({e.__class__.__name__})")
+        txt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _BodyRefused("not a UTF-8 JSON document (UnicodeDecodeError)")
+    msg = _strict_json(txt)
     if isinstance(msg, dict):
         return msg
     if isinstance(msg, list) and msg and all(isinstance(m, dict) for m in msg):

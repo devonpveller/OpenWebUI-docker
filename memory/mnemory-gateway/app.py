@@ -76,49 +76,96 @@ def _force_write_labels(args: dict) -> dict:
     args["labels"] = labels
     cats = args.get("categories")
     if isinstance(cats, list):
-        args["categories"] = [c for c in cats if c != "personal"]
+        args["categories"] = [c for c in cats if not _is_personal(c)]
     for k in _STRIP_ARGS:
         args.pop(k, None)
     return args
 
 
-def _is_obj(v) -> bool:
-    return v is None or isinstance(v, dict)
+def _typed(v, kind: str):
+    """Return (ok, value) for a policed argument: DECODE-THEN-POLICE.
+
+    Some MCP clients send list/object arguments as JSON strings, and the
+    upstream's tool layer may decode such a string itself - so a string must
+    never reach it for a policed argument. A string that decodes (strictly, as
+    a body would) to the expected type is replaced by the decoded value, and
+    the policy is applied to that; anything else is refused (-32602).
+    None/absent is accepted. kind: "object" | "str_list" | "obj_list".
+    """
+    if v is None:
+        return True, None
+    if isinstance(v, str):
+        try:
+            v = _strict_json(v)
+        except _BodyRefused:
+            return False, None
+    if kind == "object":
+        return isinstance(v, dict), v
+    if kind == "str_list":
+        return isinstance(v, list) and all(isinstance(x, str) for x in v), v
+    if kind == "obj_list":
+        return isinstance(v, list), v   # items are checked one by one by the caller
+    raise ValueError(kind)
 
 
-def _is_str_list(v) -> bool:
-    return v is None or (isinstance(v, list) and all(isinstance(x, str) for x in v))
+def _is_personal(cat) -> bool:
+    """mnemory normalises a category with cat.strip().lower() and treats
+    "<prefix>:<name>" as a subcategory of <prefix> (mnemory/categories.py,
+    validate_categories). Match the same way: "personal", " Personal " and
+    "PERSONAL:family" are all the personal category."""
+    if not isinstance(cat, str):
+        return False
+    c = cat.strip().lower()
+    return c == "personal" or c.split(":", 1)[0] == "personal"
 
 
-def _policed_type_error(name: str, args: dict):
-    """Every argument the policy reads or rewrites must ALREADY have the JSON
-    type the policy expects, or the call is refused (-32602).
-
-    mnemory's FastMCP JSON-decodes a STRING argument whose parameter is not
-    typed str, so a list or object sent string-encoded would skip the policy
-    here and still arrive at mnemory as a list or object. Never coerced here,
-    never forwarded. The policed pairs (see _force_read_labels /
-    _force_write_labels):
+def _normalise_policed_args(name: str, args: dict):
+    """Bring every argument the policy reads or rewrites to the JSON type the
+    policy expects (decoding a JSON string, see _typed), in place. Returns an
+    error message for -32602, or None. The policed pairs (see
+    _force_read_labels / _force_write_labels):
       search_memories, find_memories, list_memories: labels (object)
       add_memory: labels (object), categories (list of strings)
-      add_memories: memories (list of objects), and in each item labels
-                    (object), categories (list of strings)
+      add_memories: memories (list of objects, required); in each item
+                    labels (object), categories (list of strings)
     user_id / agent_id are removed whatever their type.
     """
+    def fix(d, key, kind, label):
+        ok, v = _typed(d.get(key), kind)
+        if not ok:
+            return label
+        if key in d:
+            d[key] = v
+        return None
+
     if name in READ_TOOLS or name == "add_memory":
-        if not _is_obj(args.get("labels")):
-            return "labels must be an object"
-    if name == "add_memory" and not _is_str_list(args.get("categories")):
-        return "categories must be a list of strings"
+        err = fix(args, "labels", "object", "labels must be an object")
+        if err:
+            return err
+    if name == "add_memory":
+        err = fix(args, "categories", "str_list", "categories must be a list of strings")
+        if err:
+            return err
     if name == "add_memories":
-        mems = args.get("memories")
-        if not (isinstance(mems, list) and all(isinstance(m, dict) for m in mems)):
+        if args.get("memories") is None:
             return "memories must be a list of objects"
-        for m in mems:
-            if not _is_obj(m.get("labels")):
-                return "each memory's labels must be an object"
-            if not _is_str_list(m.get("categories")):
-                return "each memory's categories must be a list of strings"
+        err = fix(args, "memories", "obj_list", "memories must be a list of objects")
+        if err:
+            return err
+        items = []
+        for m in args["memories"]:
+            ok, m = _typed(m, "object")
+            if not ok or m is None:
+                return "memories must be a list of objects"
+            for key, kind, label in (
+                    ("labels", "object", "each memory's labels must be an object"),
+                    ("categories", "str_list",
+                     "each memory's categories must be a list of strings")):
+                err = fix(m, key, kind, label)
+                if err:
+                    return err
+            items.append(m)
+        args["memories"] = items
     return None
 
 
@@ -167,7 +214,7 @@ def _apply_policy(msg: dict):
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
 
-        bad = _policed_type_error(name, args)
+        bad = _normalise_policed_args(name, args)
         if bad:
             return msg, _rpc_error(rpc_id, -32602, f"{name}: {bad}")
 
@@ -210,6 +257,20 @@ def _no_constant(name):
     raise _BodyRefused(f"non-standard JSON constant {name}")
 
 
+def _strict_json(txt: str):
+    """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
+    bounded nesting); raises _BodyRefused. Used for the request body and for
+    string-encoded policed arguments alike."""
+    if txt.startswith("\ufeff"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        return json.loads(txt, parse_constant=_no_constant)
+    except _BodyRefused:
+        raise
+    except (ValueError, RecursionError) as e:
+        raise _BodyRefused(f"not a JSON document ({e.__class__.__name__})")
+
+
 def _parse_body(raw: bytes):
     """Parse the MCP streamable-http body STRICTLY: one JSON-RPC object, or a
     non-empty batch of objects, as plain UTF-8 JSON.
@@ -222,11 +283,10 @@ def _parse_body(raw: bytes):
     if raw.startswith(b"\xef\xbb\xbf"):
         raise _BodyRefused("byte-order mark")
     try:
-        msg = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
-    except _BodyRefused:
-        raise
-    except (UnicodeDecodeError, ValueError, RecursionError) as e:
-        raise _BodyRefused(f"not a UTF-8 JSON document ({e.__class__.__name__})")
+        txt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _BodyRefused("not a UTF-8 JSON document (UnicodeDecodeError)")
+    msg = _strict_json(txt)
     if isinstance(msg, dict):
         return msg
     if isinstance(msg, list) and msg and all(isinstance(m, dict) for m in msg):
