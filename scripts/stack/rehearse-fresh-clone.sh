@@ -270,16 +270,22 @@ else
   echo "   exit $UP"
 
   echo ""
-  echo "== waiting up to ${HEALTH_TIMEOUT}s for http://localhost:3000/health inside the DinD"
   CODE=000
   START=$(date +%s)
-  while :; do
-    CODE="$(dx curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3000/health 2>/dev/null)"
-    [ "$CODE" = "200" ] && break
-    [ $(( $(date +%s) - START )) -ge "$HEALTH_TIMEOUT" ] && break
-    sleep 5
-  done
-  echo "   /health -> HTTP $CODE after $(( $(date +%s) - START ))s"
+  if [ "$UP" -ne 0 ]; then
+    # `up` already failed, and that check fails below whatever /health says. Waiting out
+    # the whole timeout would only delay a red result (15 minutes in the CI job).
+    echo "== /health NOT polled: stack.py up exited $UP"
+  else
+    echo "== waiting up to ${HEALTH_TIMEOUT}s for http://localhost:3000/health inside the DinD"
+    while :; do
+      CODE="$(dx curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:3000/health 2>/dev/null)"
+      [ "$CODE" = "200" ] && break
+      [ $(( $(date +%s) - START )) -ge "$HEALTH_TIMEOUT" ] && break
+      sleep 5
+    done
+    echo "   /health -> HTTP $CODE after $(( $(date +%s) - START ))s"
+  fi
 
   echo ""
   echo "== docker ps -a (inside the DinD)"
