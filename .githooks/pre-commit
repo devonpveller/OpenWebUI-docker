@@ -94,6 +94,31 @@ run_gate() {
     GATES_RAN="$GATES_RAN $_gate"
 }
 
+# --- 0b. hook modes (inline, needs no host) ---------------------------------
+# git RUNS A HOOK ONLY IF IT IS EXECUTABLE. A hook committed as mode 100644 is
+# checked out 0644 by every Linux/macOS clone, and git then skips it with a
+# one-line `hint:` - no gate runs, a staged secret commits with exit 0, and no
+# attestation is written. Until 2026-09-25 all three hooks here were 100644, and
+# nobody on this Windows host could see it: core.fileMode=false, and Git for
+# Windows runs a hook whatever its mode. (Found by ac-hooks-portable's tester in
+# a genuine Linux clone; every earlier container run had copied a Docker Desktop
+# bind mount, where every file reads -rwxrwxrwx.)
+#
+# A hook cannot report its OWN missing x bit - by then it is not running. What
+# it can do is refuse to commit a tree in which any hook has lost it, which is
+# how a Windows commit (the one place this hook always runs) would reintroduce
+# the problem. Silent when every hook is 100755. README.md is not a hook.
+_bad_modes=$(git ls-files -s -- .githooks | awk '$1 != "100755" { sub(/^[^\t]*\t/, ""); print }' | grep -v '\.md$')
+if [ -n "$_bad_modes" ]; then
+    echo "Hook file(s) staged without the executable bit - git would SKIP them on Linux/macOS:"
+    printf '    %s\n' $_bad_modes
+    echo "  Fix: git update-index --chmod=+x <file>   (works on Windows too, where chmod does not)"
+    echo "Pre-commit validation failed (a hook is not executable in the index)!"
+    print_summary
+    exit 1
+fi
+GATES_RAN="$GATES_RAN hook-modes"
+
 # --- 1. secrets (staged content only, so it stays fast) --------------------
 # Added 2026-08-20 after two .env.bak-* files reached a commit and were only
 # stopped at push time by GitHub push protection - which matched 2 GitHub PATs
@@ -121,7 +146,8 @@ run_gate line-endings './scripts/checks/validate-lineendings.ps1' \
 # on 2026-09-18) was never staged, so this hook would not have seen it. It closes
 # the path where the drift gets committed here permanently. Run the script with
 # -All to see the untracked half, which no commit-time check can reach.
-run_gate doc-placement './scripts/checks/check-doc-placement.ps1' '' no \n    "Pre-commit validation failed (planning or journal material staged into the code repo)!"
+run_gate doc-placement './scripts/checks/check-doc-placement.ps1' '' no \
+    "Pre-commit validation failed (planning or journal material staged into the code repo)!"
 
 # --- 3. gateway-only LLM routing -------------------------------------------
 # Fail if any inference/serve endpoint points at a *-upstream real server

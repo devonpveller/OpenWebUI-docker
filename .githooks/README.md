@@ -13,7 +13,24 @@ Verify:
 
 ```bash
 git config --get core.hooksPath   # -> .githooks
+ls -l .githooks/                   # pre-commit, commit-msg, pre-merge-commit: -rwxr-xr-x
 ```
+
+**The hooks must be executable, and git does not tell you loudly when they are not.** A
+hook without the `x` bit is skipped: `git commit` prints one `hint: The '.githooks/pre-commit'
+hook was ignored because it's not set as executable.`, no check runs, and the commit
+succeeds. The hooks are committed as mode `100755`, so a normal `git clone` gets it right.
+A copy that lost the bit (for example, one made through a filesystem that keeps no modes)
+needs it back:
+
+```bash
+chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/pre-merge-commit
+```
+
+`pre-commit` also refuses to commit a tree in which any hook file has lost `100755` in the
+index (`git update-index --chmod=+x <file>` fixes it, on Windows too). That catches the
+regression where it would be committed; the hook cannot report its own missing bit, since
+at that point it is not running.
 
 ## Which host runs the gates
 
@@ -42,7 +59,7 @@ A skip is never silent. The hook prints each `SKIPPED` line as it happens, ends 
 summary such as
 
 ```text
-Pre-commit gates (host: python3) - RAN: secrets line-endings gateway-routing | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
+Pre-commit gates (host: python3) - RAN: hook-modes secrets line-endings gateway-routing | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
 ```
 
 and adds a fifth column to the attestation line (below), `skipped=<gate>,<gate>,...`.

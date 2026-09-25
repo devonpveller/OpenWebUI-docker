@@ -28,7 +28,14 @@
 
 $ErrorActionPreference = 'Stop'
 
-# --- staged, still-present files (Added/Copied/Modified/Renamed) ------------
+# --- staged, still-present files (Added/Copied/Modified/Renamed/Type-changed)
+# TYPE CHANGE (T) added 2026-09-25 (ac-hooks-portable attempt 1, tester): a tracked
+# file turned into a SYMLINK is status T, outside ACMR, so `ln -sf <key> SECURITY.md`
+# and a tracked `frontend/.env` turned into a symlink both passed as "nothing
+# staged". A symlink's staged blob IS its target text, and that text is what the
+# commit publishes - so `git show :<path>` below scans exactly it, and the name rules
+# test the link's own name. (A link pointing at a key FILE publishes only the path;
+# the key file itself is scanned if it is staged too.)
 # RENAMED (R) was missing until 2026-09-25 (ac-hooks-portable F1, anchor amended):
 # rename detection is on by default, so `git mv x frontend/.env` - or a rename
 # plus an edit that adds a key - was status R, outside ACM, and this guard said
@@ -56,13 +63,13 @@ if ($zPaths) {
     $gitlinks = @(((& git ls-files --stage -z) -join "`n").Split([char]0) |
         Where-Object { $_ -match '^160000 ' } |
         ForEach-Object { ($_ -split '\t', 2)[1] })
-    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACMR) -join "`n").Split([char]0)) |
+    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACMRT) -join "`n").Split([char]0)) |
         Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 } else {
 $gitlinks = @(& git ls-files --stage |
     Where-Object { $_ -match '^160000 ' } |
     ForEach-Object { ($_ -split '\t', 2)[1] })
-$staged = @(& git diff --cached --name-only --diff-filter=ACMR) |
+$staged = @(& git diff --cached --name-only --diff-filter=ACMRT) |
     Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 }
 

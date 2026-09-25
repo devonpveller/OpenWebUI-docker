@@ -10,10 +10,13 @@ other, then re-run the side-by-side parity cases (item ac-hooks-portable's test 
 against both.
 
 What it mirrors, rule for rule (see the .ps1 for WHY each rule exists):
-  * the file set is `git diff --cached --diff-filter=ACMR`, minus submodule gitlinks
+  * the file set is `git diff --cached --diff-filter=ACMRT`, minus submodule gitlinks
     (mode 160000). RENAMED paths are in it (since 2026-09-25; before that a
     `git mv x frontend/.env` passed both twins): `--name-only` gives a rename's
     DESTINATION, which is the name tested and the blob read. Copies were always in.
+    TYPE CHANGES (T) too, since the same day: a tracked file turned into a symlink. A
+    symlink's staged blob is its target text - what the commit publishes - so that text
+    is scanned and the link's own name is tested.
   * rule 1, filenames: the LEAF is tested, case-insensitively (PowerShell -eq/-like/
     -contains are case-insensitive), allowlist first.
   * rule 2, content: the STAGED blob, one violation per (pattern, file) at its first
@@ -109,7 +112,7 @@ def main() -> int:
         meta, _, p = rec.partition('\t')
         if meta.startswith('160000 '):
             gitlinks.add(p)
-    staged = [p for p in _z(_git('diff', '--cached', '--name-only', '-z', '--diff-filter=ACMR'))
+    staged = [p for p in _z(_git('diff', '--cached', '--name-only', '-z', '--diff-filter=ACMRT'))
               if p.strip() and p not in gitlinks]
 
     if not staged:
