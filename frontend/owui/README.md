@@ -43,7 +43,7 @@ Self-contained plugins live **only** here. Plugins that front a **service** keep
 their service code in the service's own folder; only the OWUI-facing artifact is
 centralized here:
 
-- `pipes/little_coder.py` ← service: [`little-coder/`](../little-coder/)
+- `pipes/little_coder.py` ← service: [`little-coder/`](../../little-coder/)
 - `tools/deep_research.py` ← service: `OB1/integrations/research-service/` (the
   `openbrain-research` Deno engine). The Python harness that used to live at
   `smolcrawl/deep_research/`, and the v1.0.0 client snapshot at

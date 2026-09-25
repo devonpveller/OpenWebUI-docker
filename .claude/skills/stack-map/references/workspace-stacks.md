@@ -194,9 +194,11 @@ nothing** - confirm with
 > inputs — `frontend/Dockerfile.openwebui-gpu`, `frontend/dockerfile.tailscale`
 > and the tailscale container's `frontend/entrypoint.sh` — live inside the plane
 > directory, and both `build.context` values are `.` (the plane) rather than the
-> repo root. The `..`-rooted BIND mounts (`../status-pipe`, `../system-prompts`,
-> `../data/tailscale`, `../backup`, `../backups`) are unchanged: those trees are
-> not plane-internal. The root `.dockerignore` moved with them to
+> repo root. The status pipe and the system prompts are plane-internal too since
+> ac-planes-contained (2026-09-25): `./status-pipe`, `./system-prompts`. The
+> `..`-rooted BIND mounts (`../data/tailscale`, `../backup`, `../backups`) remain:
+> those trees are not plane-internal (`backup/` is the shared module the manifest
+> declares as `[modules.backup]`). The root `.dockerignore` moved with them to
 > `frontend/.dockerignore`; no build context is rooted at the repo root now.
 
 **PROFILE-GATED since 2026-09-19 (stack-layers §2.5 / D8).** This plane renders
@@ -498,7 +500,7 @@ Run with: `docker compose -f OB1/docker/docker-compose.yml ...`.
 > **Cross-PROJECT blast radius**, which no per-plane doc covers: turning `wiki` or
 > `notebook` off also breaks consumers outside OB1 — `portal/config/caddy/Caddyfile`
 > reverse-proxies `openbrain-workbench`, `openbrain-wiki-viewer` and `open_notebook`,
-> and `status-pipe/modules/system-health/` probes `open_notebook` and
+> and `frontend/status-pipe/modules/system-health/` probes `open_notebook` and
 > `openbrain-research`. All degrade at request time, none at start.
 
 ### Networks

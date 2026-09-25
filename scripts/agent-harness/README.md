@@ -204,7 +204,7 @@ a per-worktree `info/exclude` is **not** honored — verified).
 
 `merged` used to be the last thing the board said about an item, and for some items that
 is a lie: a merge that bumps the OB1 gitlink does not rebuild the image, and a merge that
-changes a file under `owui/` does not paste it into Open WebUI. Since 2026-09-06 `-Merged`
+changes a file under `frontend/owui/` does not paste it into Open WebUI. Since 2026-09-06 `-Merged`
 works out what the merge SHIPS and records it, so `-List` can say `merged, not live`:
 
 ```text
@@ -218,10 +218,10 @@ Three flags, in the operator's terms:
   The list is DERIVED at `-Merged` from `git diff --name-only <first parent>..<merge sha>`,
   never from anything the author typed: an OB1 gitlink move whose OB1 diff touches an
   `integrations/<dir>/` that has a `Dockerfile` becomes `image:<the compose service that
-  builds it>`; a changed `owui/` file **that `owui/manifest.csv` lists** becomes
+  builds it>`; a changed `frontend/owui/` file **that `frontend/owui/manifest.csv` lists** becomes
   `paste:<that file>` (the manifest is the file-to-OWUI-id map, so it is the authority on
-  what is pasteable at all - a change to the manifest or to `owui/README.md` derives
-  nothing, and an unlisted `owui/` file is reported as a NOTE); a changed build context of
+  what is pasteable at all - a change to the manifest or to `frontend/owui/README.md` derives
+  nothing, and an unlisted `frontend/owui/` file is reported as a NOTE); a changed build context of
   a `:local`-tagged service in this repository becomes `image:<that service>`. Most merges
   derive nothing and record an empty list. Items merged before that date have no surfaces
   and read as plain `merged`.

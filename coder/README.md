@@ -67,7 +67,7 @@ Everything else is deliberately unpublished:
 
 - **`little-coder:8090`** accepts work, so it stays off the host's TCP stack.
   In-stack callers use the DNS name over `llm-net` - OWUI's pipe defaults to
-  `http://little-coder:8090` (`owui/pipes/little_coder.py`).
+  `http://little-coder:8090` (`frontend/owui/pipes/little_coder.py`).
 - **`open-terminal:8000`** is arbitrary command execution behind an API key.
 - **`lc-egress:8888`** is reachable from `lc-net` only.
 - `llm-net` is itself `internal: true`, so a port published on a service attached

@@ -181,7 +181,7 @@ does not rebuild an existing image - keep it that way.
 |---|---|---|
 | `frontend_openwebui-data` to `/app/backend/data` | named volume | **Yes - the plane's real state.** `webui.db` (chats, users, plugins, connection secrets) plus uploads. Shared by BOTH openwebui definitions on purpose, so a host can move between `stock` and `gpu` and keep it. Migrated from `ai-stack_openwebui-data` on 2026-08-21 (data copied, ~10 GB). |
 | `../data/tailscale` to `tailscale:/var/lib/tailscale` | host bind | **Yes.** The node's identity and state. Also mounted read-only into `openwebui` at `/host_project/data/tailscale` for the status pipe, and read-only into `tailscale-backup`. |
-| `../status-pipe`, `../system-prompts` to `/host_project/...:ro` | host binds | Code, not state - and the ONLY code mounts into the container. They replaced an old whole-repo mount that shipped every on-disk secret into the internet-facing frontend. |
+| `./status-pipe`, `./system-prompts` to `/host_project/...:ro` | host binds | Code, not state - and the ONLY code mounts into the container. They replaced an old whole-repo mount that shipped every on-disk secret into the internet-facing frontend. |
 | `backups/openwebui`, `backups/tailscale` | host binds | Backup output, not a source of truth. |
 
 There is **no `/app/config` mount** on either definition (removed 2026-09-19):
@@ -241,6 +241,12 @@ the surfaces this plane appears on today are:
   inputs beside it ([`Dockerfile.openwebui-gpu`](Dockerfile.openwebui-gpu),
   [`dockerfile.tailscale`](dockerfile.tailscale), [`entrypoint.sh`](entrypoint.sh),
   `.dockerignore`) - both `build.context` values are `.`
+- the plane-internal trees Open WebUI reads (moved here from the repo root
+  2026-09-25, ac-planes-contained): [`status-pipe/`](status-pipe/README.md) and
+  [`system-prompts/`](system-prompts/), bind-mounted read-only; and
+  [`owui/`](owui/README.md), the deploy-by-paste plugin sources with their
+  `manifest.csv`, which `scripts/checks/check-owui-drift.ps1` compares with the
+  live `webui.db`. `.dockerignore` keeps all three out of both build contexts
 - [`../stack.manifest.toml`](../stack.manifest.toml) - the `[planes.frontend]`
   table, its three `profiles` sub-tables, and the `chat` product
 - `scripts/stack/stack.py` - the two frontend probes in `HealthSweep.run()`, the

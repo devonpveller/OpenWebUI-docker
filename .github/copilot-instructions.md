@@ -56,7 +56,7 @@ project into per-plane projects; root `ai-stack` = the network anchor):
 
 ## Where things are
 
-`owui/` = canonical OWUI plugin/skill exports (paste-deployed; `manifest.csv`
+`frontend/owui/` = canonical OWUI plugin/skill exports (paste-deployed; `manifest.csv`
 maps file → OWUI id). `scripts/` = ops plane (recovery, checks, portal,
 backups, bridges). `documentation/runbooks/` = operational procedures.
 `documentation/implementation-guide/README.md` = per-feature status index.

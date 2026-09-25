@@ -259,7 +259,7 @@ who disagrees has something to argue with:
   `http://` or a bare port, which disables auto-HTTPS (the `https://` strings in
   that file are redirect TARGETS and comments). `authelia`'s notifier is `filesystem`
   and it is on `auth-net` (`internal: true`).
-- **`status-pipe/`** - every request target is an internal `host:port`.
+- **`frontend/status-pipe/`** - every request target is an internal `host:port`.
 - **the backup sidecars other than `openwebui-backup`** - on a project bridge,
   but each only runs its own script; the NAS sync (`scripts/backup/backup-to-nas.ps1`)
   is SMB to a LAN address, not the internet.
@@ -284,9 +284,9 @@ them. They run on the host, from this repo:
   Telegram. This is the one place the stack talks to a frontier provider at all.
   It is a scheduled host process, not part of any plane; it is off unless the
   operator runs it.
-- **The Open WebUI plugins in `owui/`** - deploy-by-paste, tracked in
-  `owui/manifest.csv`. `owui/tools/github_chat_mcp_tools.py` targets
-  `https://api.github.com`, and `owui/tools/fileshed.py` permits `curl`, `wget`
+- **The Open WebUI plugins in `frontend/owui/`** - deploy-by-paste, tracked in
+  `frontend/owui/manifest.csv`. `frontend/owui/tools/github_chat_mcp_tools.py` targets
+  `https://api.github.com`, and `frontend/owui/tools/fileshed.py` permits `curl`, `wget`
   and network `git` subcommands from inside the `openwebui` container, behind
   its own valves. They live in the OWUI database, not in a compose file.
 
@@ -448,13 +448,13 @@ telling the truth.
 | [`scripts/stack/`](scripts/stack/README.md) | The driver (`stack.py`, standard library only) and its design doc. `stack.ps1` is a shim. |
 | `docker-compose.yml` | The platform ANCHOR - shared networks only |
 | `frontend/` `inference/` `memory/` `search/` `coder/` `portal/` | The plane projects: compose file, `.env.example`, README, and (since 2026-09-19) their own source, config and build inputs |
-| `owui/` | Canonical deploy-by-paste Open WebUI artifacts: tools, pipes, filters, actions, skills + `manifest.csv` |
-| `status-pipe/` | The Server Status pipe subsystem - the only code mount into the Open WebUI container |
+| `frontend/owui/` | Canonical deploy-by-paste Open WebUI artifacts: tools, pipes, filters, actions, skills + `manifest.csv` |
+| `frontend/status-pipe/`, `frontend/system-prompts/` | The Server Status pipe subsystem and the system prompts - the only code mounts into the Open WebUI container |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, the bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/`, `agent-harness/`, `archive/` |
-| `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees that are not plane-internal (the search gateway is `search/gateway/`, mnemory's cloud gateway is `memory/mnemory-gateway/`, and the queue is `inference/llm-queue/`) |
+| `openbrain-gateway/`, `little-coder/` | Service source trees that are not plane-internal (the search gateway is `search/gateway/`, mnemory's cloud gateway is `memory/mnemory-gateway/`, and the queue is `inference/llm-queue/`) |
 | `agent-org/` | The governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain - a pinned git submodule since 2026-08-21 (bump via PR), including the Open Notebook trio |
-| `backup/` + `backups/` | Sidecar scripts and Dockerfiles, and the artifacts they produce |
+| `backup/` + `backups/` | Sidecar scripts and Dockerfiles, and the artifacts they produce. `backup/` is a SHARED module, declared as `[modules.backup]` in the manifest with the planes that consume it |
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates, the env-split migration) |
 | `documentation/implementation-guide/` | The per-feature status INDEX (it spans two repos) plus `multi-agent-concurrency/`, the one plan set that must stay here. Plans themselves live in the private `documentation-plans-ai-stack` repo. |
 | `../documentation-plans-ai-stack/` (a separate, private checkout beside this one) | The plan store: plans, and since 2026-09-25 the operator journal under `journal/` - notes and findings, evidence, test plans, retired docs, and the closed 2026-08 restructure plan (`journal/CLEANUP-PLAN.md`). New material of those kinds goes there, not here; CLAUDE.md has the routing table. |

@@ -1,7 +1,7 @@
 #requires -Version 5
 <#
 .SYNOPSIS
-  Report which owui/ deploy-by-paste snapshots differ from what Open WebUI is
+  Report which frontend/owui/ deploy-by-paste snapshots differ from what Open WebUI is
   actually running right now.
 
 .DESCRIPTION
@@ -12,7 +12,7 @@
   "all 16 files are byte-identical" note in owui/README.md (2026-08-20) stopped
   being able to say the moment it was written.
 
-  For every row of owui/manifest.csv this compares:
+  For every row of frontend/owui/manifest.csv this compares:
     repo side - CR-normalised SHA-256 of the file on disk (bytes read, every
                 0x0D dropped, then hashed)
     live side - CR-normalised SHA-256 of that row's `content` column, computed
@@ -101,7 +101,7 @@ function Die([string]$sentence) {
 # --- inputs ----------------------------------------------------------------
 if (-not $Manifest) {
     $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $Manifest = Join-Path $repoRoot 'owui\manifest.csv'
+    $Manifest = Join-Path $repoRoot 'frontend\owui\manifest.csv'
 }
 if (-not (Test-Path -LiteralPath $Manifest)) {
     Die "the manifest '$Manifest' does not exist, so there is no list of files to compare."
@@ -198,7 +198,7 @@ function Get-CrNormalisedSha([string]$path) {
 $tableFor = @{ tool = 'tool'; action = 'function'; filter = 'function'; pipe = 'function'; skill = 'skill' }
 
 $inSync = 0; $differs = 0; $missingLive = 0; $missingRepo = 0; $unknown = 0
-Say ("== owui/ snapshots vs live webui.db in container '$Container'")
+Say ("== frontend/owui/ snapshots vs live webui.db in container '$Container'")
 Say ("   manifest: $Manifest")
 Say ''
 foreach ($r in ($rows | Sort-Object File)) {
