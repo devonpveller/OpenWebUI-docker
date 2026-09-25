@@ -32,7 +32,7 @@ the parser (never runs a recovery), drives them against a stubbed `docker`, and 
 throwaway `--network none` container that exits at once and is removed. It also
 fails if a bare `docker compose` (no `-f`, so the zero-service root anchor) other
 than the anchor's own `up -d` / `down` / `version` reappears in the script.
-The Python primitives and the two `.bat` files above still issue bare
+The Python primitives above, `update-stack.bat` and `quick-fixes.bat` still issue bare
 `docker compose <service>` verbs and are NOT fixed by that item - see its findings.
 
 ## `checks/`
