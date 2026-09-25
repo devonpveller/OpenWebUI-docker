@@ -113,6 +113,10 @@ def _force_write_extra(args: dict) -> dict:
     return args
 
 
+def _is_obj(v) -> bool:
+    return v is None or isinstance(v, dict)
+
+
 def _rpc_error(rpc_id, code, message):
     return {"jsonrpc": "2.0", "id": rpc_id,
             "error": {"code": code, "message": message}}
@@ -144,6 +148,16 @@ def _apply_policy(msg: dict):
                 rpc_id, -32601,
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
+
+        # The policed arguments must already be JSON objects (-32602 otherwise):
+        # a string, list or other type is refused, never coerced or forwarded.
+        # Policed pairs: every READ_TOOLS tool -> metadata_filter; every
+        # WRITE_TOOLS tool -> metadata_extra (see _force_read_filter /
+        # _force_write_extra).
+        if name in READ_TOOLS and not _is_obj(args.get("metadata_filter")):
+            return msg, _rpc_error(rpc_id, -32602, f"{name}: metadata_filter must be an object")
+        if name in WRITE_TOOLS and not _is_obj(args.get("metadata_extra")):
+            return msg, _rpc_error(rpc_id, -32602, f"{name}: metadata_extra must be an object")
 
         if name in READ_TOOLS:
             params["arguments"] = _force_read_filter(args)
@@ -203,11 +217,31 @@ def _refuse(reason: str):
         status_code=400)
 
 
+# Hop-by-hop headers (RFC 9110 section 7.6.1) describe the CLIENT's connection,
+# not the request, and the gateway frames the bytes it rebuilt itself: none of
+# them is forwarded, nor any header the client's Connection header names.
+# content-encoding goes too - the body sent upstream is the gateway's own plain
+# JSON, never the client's encoding of it.
+_HOP_BY_HOP = frozenset((
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
+    "trailer", "upgrade", "proxy-authorization", "proxy-authenticate",
+    "content-encoding",
+))
+
+
+def _connection_named(req) -> set:
+    names = set()
+    for v in req.headers.getlist("connection"):
+        names.update(t.strip().lower() for t in v.split(",") if t.strip())
+    return names
+
+
 def _upstream_headers(req):
+    drop = {"host", "content-length", "authorization", "x-brain-key"}
+    drop |= _HOP_BY_HOP | _connection_named(req)
     h = {}
     for k, v in req.headers.items():
-        lk = k.lower()
-        if lk in ("host", "content-length", "authorization", "x-brain-key"):
+        if k.lower() in drop:
             continue
         h[k] = v
     h["x-brain-key"] = OPENBRAIN_KEY
@@ -240,6 +274,10 @@ async def mcp(request):
         except _BodyRefused as e:
             return _refuse(str(e))
         if isinstance(msg, list):  # JSON-RPC batch
+            # tools/list is filtered on the way back only for a single request,
+            # so inside a batch it is refused rather than answered unfiltered.
+            if any(m.get("method") == "tools/list" for m in msg):
+                return _refuse("tools/list inside a batch")
             mutated, sc = [], None
             for m in msg:
                 mm, r = _apply_policy(m)

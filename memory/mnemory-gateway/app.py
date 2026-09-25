@@ -82,6 +82,46 @@ def _force_write_labels(args: dict) -> dict:
     return args
 
 
+def _is_obj(v) -> bool:
+    return v is None or isinstance(v, dict)
+
+
+def _is_str_list(v) -> bool:
+    return v is None or (isinstance(v, list) and all(isinstance(x, str) for x in v))
+
+
+def _policed_type_error(name: str, args: dict):
+    """Every argument the policy reads or rewrites must ALREADY have the JSON
+    type the policy expects, or the call is refused (-32602).
+
+    mnemory's FastMCP JSON-decodes a STRING argument whose parameter is not
+    typed str, so a list or object sent string-encoded would skip the policy
+    here and still arrive at mnemory as a list or object. Never coerced here,
+    never forwarded. The policed pairs (see _force_read_labels /
+    _force_write_labels):
+      search_memories, find_memories, list_memories: labels (object)
+      add_memory: labels (object), categories (list of strings)
+      add_memories: memories (list of objects), and in each item labels
+                    (object), categories (list of strings)
+    user_id / agent_id are removed whatever their type.
+    """
+    if name in READ_TOOLS or name == "add_memory":
+        if not _is_obj(args.get("labels")):
+            return "labels must be an object"
+    if name == "add_memory" and not _is_str_list(args.get("categories")):
+        return "categories must be a list of strings"
+    if name == "add_memories":
+        mems = args.get("memories")
+        if not (isinstance(mems, list) and all(isinstance(m, dict) for m in mems)):
+            return "memories must be a list of objects"
+        for m in mems:
+            if not _is_obj(m.get("labels")):
+                return "each memory's labels must be an object"
+            if not _is_str_list(m.get("categories")):
+                return "each memory's categories must be a list of strings"
+    return None
+
+
 def _rpc_error(rpc_id, code, message):
     return {"jsonrpc": "2.0", "id": rpc_id,
             "error": {"code": code, "message": message}}
@@ -127,15 +167,15 @@ def _apply_policy(msg: dict):
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
 
+        bad = _policed_type_error(name, args)
+        if bad:
+            return msg, _rpc_error(rpc_id, -32602, f"{name}: {bad}")
+
         if name in READ_TOOLS:
             params["arguments"] = _force_read_labels(args)
         elif name in WRITE_TOOLS:
             if name == "add_memories":
-                mems = args.get("memories")
-                if isinstance(mems, list):
-                    args["memories"] = [
-                        _force_write_labels(m) if isinstance(m, dict) else m
-                        for m in mems]
+                args["memories"] = [_force_write_labels(m) for m in args["memories"]]
                 for k in _STRIP_ARGS:
                     args.pop(k, None)
                 params["arguments"] = args
@@ -222,10 +262,30 @@ _DROP_HEADERS = frozenset((
 ))
 
 
+# Hop-by-hop headers (RFC 9110 section 7.6.1) describe the CLIENT's connection,
+# not the request, and the gateway frames the bytes it rebuilt itself: none of
+# them is forwarded, nor any header the client's Connection header names.
+# content-encoding goes too - the body sent upstream is the gateway's own plain
+# JSON, never the client's encoding of it.
+_HOP_BY_HOP = frozenset((
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
+    "trailer", "upgrade", "proxy-authorization", "proxy-authenticate",
+    "content-encoding",
+))
+
+
+def _connection_named(req) -> set:
+    names = set()
+    for v in req.headers.getlist("connection"):
+        names.update(t.strip().lower() for t in v.split(",") if t.strip())
+    return names
+
+
 def _upstream_headers(req):
+    drop = _DROP_HEADERS | _HOP_BY_HOP | _connection_named(req)
     h = {}
     for k, v in req.headers.items():
-        if k.lower() in _DROP_HEADERS:
+        if k.lower() in drop:
             continue
         h[k] = v
     h["Authorization"] = f"Bearer {MNEMORY_KEY}"
@@ -259,6 +319,10 @@ async def mcp(request):
         except _BodyRefused as e:
             return _refuse(str(e))
         if isinstance(msg, list):  # JSON-RPC batch
+            # tools/list is filtered on the way back only for a single request,
+            # so inside a batch it is refused rather than answered unfiltered.
+            if any(m.get("method") == "tools/list" for m in msg):
+                return _refuse("tools/list inside a batch")
             mutated, sc = [], None
             for m in msg:
                 mm, r = _apply_policy(m)
