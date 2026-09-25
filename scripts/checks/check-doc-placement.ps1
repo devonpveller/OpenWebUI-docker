@@ -5,8 +5,8 @@
   belong in the private plan store, documentation-plans-ai-stack.
 
 .DESCRIPTION
-  THE RULE (CLAUDE.md, "Plans live in the plan store" and "Findings go to the plan
-  store"): a plan, a build log, a task list or a numbered plan set is written in the
+  THE RULE (CLAUDE.md, "Where documentation goes - the plan store", and its routing
+  table): a plan, a build log, a task list or a numbered plan set is written in the
   sibling repo `documentation-plans-ai-stack` under implementation-guide/<feature>/;
   so is the operator journal - notes, findings, evidence, test plans, retired docs -
   under implementation-guide/<feature>/findings|test-plans/ or journal/. The code repo

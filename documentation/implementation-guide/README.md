@@ -8,8 +8,8 @@
 > **This index spans two repos.** A row is the feature's status wherever its plan
 > lives. NEW plans, build logs and plan sets are written in the private plan store
 > `documentation-plans-ai-stack` (`implementation-guide/<feature>/`), committed and
-> pushed there, and get a row here naming that location - see CLAUDE.md, "Plans live
-> in the plan store". **Phase 2 ran 2026-09-18**: the feature directories that
+> pushed there, and get a row here naming that location - see CLAUDE.md, "Where
+> documentation goes - the plan store". **Phase 2 ran 2026-09-18**: the feature directories that
 > were still here moved to the store, so every row below is marked **@ plan store**
 > except the one that stays here for a MECHANICAL reason - `multi-agent-concurrency/`
 > (MERGE-PROTOCOL.md must travel with every worktree). `dark-factory-unification/` was

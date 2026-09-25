@@ -264,8 +264,9 @@ the surfaces this plane appears on today are:
   `-Services openwebui` is what restores `frontend_openwebui-data`
 - `scripts/lib/stack-services.curated.json` - edit the CURATED sidecar, then run
   `python scripts/stack/stack.py inventory --write`
-- `.claude/skills/stack-map/references/workspace-stacks.md` section 1a, and the
-  plane table in [`../CLAUDE.md`](../CLAUDE.md)
+- `.claude/skills/stack-map/references/workspace-stacks.md` section 1a, the
+  plane's entry in [`../stack.manifest.toml`](../stack.manifest.toml), and the layout table in
+  [`../README.md`](../README.md)
 - `documentation/CONTAINER-REGISTRY.md` and the backup / restore runbooks
 - `scripts/agent-harness/lease-names.conf` - the `frontend` lease name
 

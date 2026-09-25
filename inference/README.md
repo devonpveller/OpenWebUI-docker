@@ -303,8 +303,9 @@ the surfaces this plane appears on today are:
   `python scripts/stack/stack.py inventory --write`;
   `scripts/lib/stack-services.json` is generated and `inventory --check`
   refuses a hand edit
-- `.claude/skills/stack-map/references/workspace-stacks.md` section 1b, and the
-  plane table in [`../CLAUDE.md`](../CLAUDE.md)
+- `.claude/skills/stack-map/references/workspace-stacks.md` section 1b, the
+  plane's entry in [`../stack.manifest.toml`](../stack.manifest.toml), and the layout table in
+  [`../README.md`](../README.md)
 - `documentation/CONTAINER-REGISTRY.md` and the backup / restore runbooks
 - `scripts/agent-harness/lease-names.conf` - the `inference` lease name
 
