@@ -32,8 +32,9 @@ succeeds. Two causes:
   chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/pre-merge-commit
   ```
 
-* **The checkout is on a `noexec` mount.** There `ls -l` still shows `-rwxr-xr-x` and
-  `test -x` still says yes, but nothing on the mount can execute, and `chmod` does not help.
+* **The checkout is on a `noexec` mount.** There `ls -l` still shows `-rwxr-xr-x` (and
+  some shells' `test -x` still says yes), but nothing on the mount can execute, and `chmod`
+  does not help.
   The verify line above fails with `Permission denied`. Clone somewhere that allows execution.
 
 `pre-commit` also refuses to commit a tree in which a file named as a git hook
