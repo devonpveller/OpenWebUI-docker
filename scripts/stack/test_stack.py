@@ -85,6 +85,12 @@ def _powershell_present(monkeypatch):
     # raising=False: the same file must RUN against a driver that predates the
     # function, so the base-red reproduction fails on the behaviour, not on setup.
     monkeypatch.setattr(stack, "powershell_command", lambda: ("powershell",), raising=False)
+    # Hermetic means no daemon, ever: a verb that falls back to the real capture
+    # (doctor's network check, the shipped-placeholder render) gets "no docker"
+    # instead of reaching this machine's daemon. A test that wants docker passes
+    # a FakeDaemon/FakeHost capture.
+    monkeypatch.setattr(stack, "subprocess_capture",
+                        lambda cmd, cwd: stack.CommandResult(127, "", "hermetic test: no docker"))
 
 
 def run(root: Path, *args, runner=None, capture=None):
@@ -706,7 +712,7 @@ def test_a_corrupt_state_file_is_refused_not_ignored(root):
 
 PS1_PROBES = [
     "0 unhealthy containers (found: )",
-    "anchor: ai-stack_llm-net exists",
+    "anchor: ai-stack_llm-net exists and is internal",
     "inference: llm-gateway liveliness",
     # sl-recovery-backups (2026-09-21) added the sixteenth: liveliness answers
     # 200 with an EMPTY model store, and did for thirty hours.
@@ -740,7 +746,7 @@ class FakeHost:
 
     def __init__(self, **broken):
         self.unhealthy = broken.get("unhealthy", [])
-        self.network = broken.get("network", "ai-stack_llm-net")
+        self.network = broken.get("network", "ai-stack_llm-net true")
         self.exec_codes = broken.get("exec_codes", {})
         self.serve_routes = broken.get("serve_routes", "8")
         self.drift_stdout = broken.get("drift_stdout", "0")
@@ -2154,10 +2160,13 @@ class FakeDaemon:
     Any docker call it has not been taught is an AssertionError, never a silent 0.
     """
 
-    def __init__(self, networks=None, exit_codes=None, render=None):
-        self.networks = {k: dict(v) for k, v in (networks or {}).items()}
+    def __init__(self, networks=None, exit_codes=None, render=None, plane_renders=None):
+        self.networks = {k: {"driver": "bridge", "attachable": False, "options": {}, "labels": {}, **v}
+                         for k, v in (networks or {}).items()}
         self.exit_codes = exit_codes or {}
         self.render = render if render is not None else {"name": "ai-stack", "networks": ANCHOR_NETWORKS}
+        # compose file -> its `config --no-interpolate` render (the shipped-placeholder check)
+        self.plane_renders = plane_renders or {}
         self.commands: list[list[str]] = []   # everything, in order
         self.streamed: list[list[str]] = []   # what went through the runner
         self.created: list[str] = []
@@ -2177,10 +2186,16 @@ class FakeDaemon:
         args = list(cmd[1:])
         if args[:1] == ["--context"]:
             args = args[2:]
+        if args == ["compose", "version"]:
+            return stack.CommandResult(0, "Docker Compose version v5.3.0", "")
         if args[:2] == ["compose", "-f"]:
             compose_file, rest = args[2], args[3:]
             while rest[:1] == ["--profile"]:
                 rest = rest[2:]
+            if rest[:1] == ["config"] and compose_file != "docker-compose.yml":
+                if compose_file not in self.plane_renders:
+                    raise AssertionError(f"FakeDaemon has no render for {compose_file}")
+                return stack.CommandResult(0, json.dumps(self.plane_renders[compose_file]), "")
             if rest[:1] == ["config"]:
                 data = dict(self.render)
                 if "--no-interpolate" not in rest:
@@ -2200,14 +2215,19 @@ class FakeDaemon:
             name = args[2]
             if name not in self.networks:
                 return stack.CommandResult(1, "", f"Error response from daemon: network {name} not found")
-            return stack.CommandResult(0, str(self.networks[name]["internal"]).lower(), "")
+            net = self.networks[name]
+            return stack.CommandResult(0, json.dumps({
+                "Name": name, "Driver": net["driver"], "Internal": net["internal"],
+                "Attachable": net["attachable"], "Options": net["options"], "Labels": net["labels"],
+            }), "")
         if args[:2] == ["network", "create"]:
             name = args[-1]
             if name in self.networks:
                 return stack.CommandResult(1, "", f"network with name {name} already exists")
             labels = dict(a.split("=", 1) for a in args[args.index("create"):] if "=" in a and "." in a)
             self.networks[name] = {"internal": "--internal" in args, "labels": labels,
-                                   "driver": args[args.index("--driver") + 1]}
+                                   "driver": args[args.index("--driver") + 1],
+                                   "attachable": "--attachable" in args, "options": {}}
             self.created.append(name)
             return stack.CommandResult(0, "id-of-" + name, "")
         if args[:1] == ["network"]:
@@ -2268,16 +2288,78 @@ def test_a_second_up_creates_nothing_and_alters_nothing(root):
     assert out.count("[exists]") == 3
 
 
-def test_an_existing_network_is_left_alone_even_when_its_flags_differ(root):
+def test_an_existing_matching_network_is_left_alone_with_its_own_labels(root):
     """On a running host every plane is attached to these; never recreate, never 'fix'."""
-    seeded = {"ai-stack_llm-net": {"internal": False, "labels": {"mine": "1"}}}
+    seeded = {"ai-stack_llm-net": {"internal": True, "labels": {"mine": "1"}}}
     daemon = FakeDaemon(networks=seeded)
     code, out, _ = up_for_real(root, daemon)
     assert code == 0, out
-    assert daemon.networks["ai-stack_llm-net"] == {"internal": False, "labels": {"mine": "1"}}
+    assert daemon.networks["ai-stack_llm-net"]["labels"] == {"mine": "1"}
     assert "ai-stack_llm-net" not in daemon.created
     assert daemon.mutations == []
-    assert "ai-stack_llm-net (left as is) - NOTE it is NOT internal" in out
+    assert "[exists] ai-stack_llm-net (matches docker-compose.yml; left as is)" in out
+
+
+def test_a_less_isolated_llm_net_is_a_refusal_not_a_note(root):
+    """attempt-1 defect D2: a NON-internal llm-net printed a NOTE and the bring-up went on."""
+    seeded = {"ai-stack_llm-net": {"internal": False}}
+    daemon = FakeDaemon(networks=seeded)
+    code, out, _ = up_for_real(root, daemon)
+    assert code == stack.EXIT_REFUSED
+    assert "[DIFFERS] ai-stack_llm-net: internal is false, declared true" in out
+    assert "# up stopped: anchor" in out
+    assert daemon.networks["ai-stack_llm-net"]["internal"] is False   # never altered
+    assert daemon.created == []                                         # refused BEFORE creating the others
+    assert daemon.mutations == []
+    assert not any("frontend/docker-compose.yml" in " ".join(c) for c in daemon.commands)
+
+
+@pytest.mark.parametrize("seed, phrase", [
+    ({"driver": "macvlan"}, "driver is 'macvlan', declared 'bridge'"),
+    ({"attachable": True}, "attachable is true, declared false"),
+])
+def test_every_declared_network_flag_is_compared(root, seed, phrase):
+    daemon = FakeDaemon(networks={"ai-stack_app-net": {"internal": False, **seed}})
+    code, out, _ = up_for_real(root, daemon)
+    assert code == stack.EXIT_REFUSED
+    assert phrase in out
+
+
+def test_a_declared_driver_opt_and_label_are_compared_too():
+    spec = {"driver": "bridge", "driver_opts": {"com.docker.network.bridge.name": "br-x"},
+            "labels": {"tier": "seam"}}
+    have = {"Driver": "bridge", "Internal": False, "Attachable": False,
+            "Options": {"com.docker.network.bridge.name": "br-y", "com.docker.network.enable_ipv4": "true"},
+            "Labels": {"tier": "seam", "com.docker.compose.project": "ai-stack"}}
+    assert stack.network_drift(spec, have) == [
+        "driver_opt com.docker.network.bridge.name is 'br-y', declared 'br-x'"]
+
+
+def test_doctor_and_health_flag_a_non_internal_llm_net(root, monkeypatch):
+    monkeypatch.setattr(stack.shutil, "which", lambda name: "/usr/bin/docker")
+    daemon = FakeDaemon(networks={"ai-stack_llm-net": {"internal": False}})
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "[FAIL] network ai-stack_llm-net differs from docker-compose.yml: internal is false, declared true" in out
+    code, out = sweep(FakeHost(network="ai-stack_llm-net false"), root, planes="frontend")
+    assert ("FAIL", "anchor: ai-stack_llm-net exists and is internal") in probe_lines(out)
+    assert code == 1
+
+
+def test_a_partial_create_failure_keeps_what_was_made_and_a_rerun_finishes(root):
+    failing = ("docker", "network", "create", "--driver", "bridge",
+               "--label", "com.docker.compose.network=default",
+               "--label", "com.docker.compose.project=ai-stack", "ai-stack_default")
+    daemon = FakeDaemon(exit_codes={failing: 7})
+    code, out, _ = up_for_real(root, daemon)
+    assert code == stack.EXIT_REFUSED
+    assert daemon.created == ["ai-stack_app-net"]          # render order: app-net, default, llm-net
+    assert "# up stopped: anchor exited 7" in out
+    assert not any("frontend/docker-compose.yml" in " ".join(c) for c in daemon.commands)
+    daemon.exit_codes = {}
+    code, out, _ = up_for_real(root, daemon)
+    assert code == 0, out
+    assert daemon.created == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
 
 
 def test_a_network_key_the_driver_cannot_translate_is_refused_before_anything_starts(root):
@@ -2334,18 +2416,20 @@ def _copy_real_frontend_example(root):
 
 def test_up_refuses_the_shipped_secret_placeholder_and_starts_nothing(root):
     _copy_real_frontend_example(root)
-    daemon = FakeDaemon()
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
     code, out, _ = up_for_real(root, daemon)
     assert code == stack.EXIT_REFUSED
     line = [ln for ln in out.splitlines() if "WEBUI_SECRET_KEY" in ln]
     assert line and "frontend/.env" in line[0] and "frontend/.env.example" in line[0], out
-    assert daemon.commands == []           # not even the anchor's networks
+    assert daemon.streamed == []           # nothing run, not even the anchor's networks
+    assert all("config" in c for c in daemon.commands)   # only read-only renders
     assert "Nothing was started" in out
 
 
 def test_up_dry_run_refuses_the_placeholder_too(root):
     _copy_real_frontend_example(root)
-    code, out, recorder = run(root, "up", "--dry-run")
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
+    code, out, recorder = run(root, "up", "--dry-run", capture=daemon.capture)
     assert code == stack.EXIT_REFUSED
     assert "WEBUI_SECRET_KEY" in out
     assert recorder.commands == []
@@ -2353,7 +2437,8 @@ def test_up_dry_run_refuses_the_placeholder_too(root):
 
 def test_doctor_names_the_file_and_the_key_of_a_placeholder(root):
     _copy_real_frontend_example(root)
-    code, out, _ = run(root, "doctor")
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
     assert code == stack.EXIT_REFUSED
     assert ("[FAIL] WEBUI_SECRET_KEY is still the placeholder shipped in frontend/.env.example "
             "in frontend/.env") in out
@@ -2375,7 +2460,7 @@ def test_a_replaced_placeholder_passes(root):
     env = root / "frontend" / ".env"
     env.write_text(env.read_text(encoding="utf-8").replace(
         "WEBUI_SECRET_KEY=change-me-to-a-long-random-string", "WEBUI_SECRET_KEY=3f9a0c"), encoding="utf-8")
-    daemon = FakeDaemon()
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
     code, out, _ = up_for_real(root, daemon)
     assert code == 0, out
 
@@ -2411,7 +2496,7 @@ def test_every_shipped_example_value_of_a_required_key_is_refused_verbatim(root)
 
 FRONTEND_ONLY_PROBES = [
     "0 unhealthy containers (found: )",
-    "anchor: ai-stack_llm-net exists",
+    "anchor: ai-stack_llm-net exists and is internal",
     "frontend: OWUI http://127.0.0.1:3000/health",
     "frontend: 8 tailnet serve routes",
     "frontend: owui/ manifest rows drifted from live webui.db: 0",
@@ -2502,6 +2587,176 @@ def test_enable_ob1_without_the_submodule_names_the_command_not_five_missing_key
 def test_doctor_on_a_fresh_clone_does_not_fail_the_anchor_for_a_root_env_it_never_reads(root, monkeypatch):
     monkeypatch.setattr(stack.shutil, "which", lambda name: "/usr/bin/docker")
     (root / ".env").unlink()
-    code, out, _ = run(root, "doctor")
+    daemon = FakeDaemon()
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
     assert "[ -- ] env .env absent - not needed" in out
+    assert "[ -- ] network ai-stack_llm-net absent (`up` creates it)" in out
     assert code == 0, out
+
+
+
+# --- attempt 2 / D1: every shipped placeholder, derived from the .env.example files ----
+
+FRONTEND_RENDER = {"services": {
+    "openwebui-stock": {"profiles": ["stock"], "environment": {"WEBUI_SECRET_KEY": "${WEBUI_SECRET_KEY:?x}"}},
+    "openwebui": {"profiles": ["gpu"], "environment": {
+        "WEBUI_SECRET_KEY": "${WEBUI_SECRET_KEY:?x}", "OWUI_CHAT_LLM_API_KEY": "${OWUI_CHAT_LLM_API_KEY}"}},
+    "tailscale": {"profiles": ["tailscale"], "environment": {"TS_AUTHKEY": "${TAILSCALE_AUTH_KEY}"}},
+    "openwebui-backup": {"command": ["sh", "-c", "echo $$HOME"]},
+}}
+
+SEARCH_RENDER = {"services": {
+    "gateway": {"environment": {"GATEWAY_API_KEY": "${GATEWAY_API_KEY}"}},
+    "searxng": {"environment": {"SEARXNG_SECRET": "${SEARXNG_SECRET_KEY}"}},
+    "vpn": {"environment": {"WIREGUARD_PRIVATE_KEY": "${MULLVAD_WG_PRIVATE_KEY:?x}",
+                            "WIREGUARD_ADDRESSES": "${MULLVAD_WG_ADDRESSES}"}},
+}}
+
+AGENT_ORG_RENDER = {"services": {
+    # a bulk env_file is NOT a read: agent-bridge loads the whole .env that way
+    "agent-bridge": {"env_file": [{"path": ".env"}], "environment": {"AO_DB_PASSWORD": "${AO_DB_PASSWORD}"}},
+    "llm-gateway-cloud": {"profiles": ["cloud"], "environment": {
+        "LITELLM_MASTER_KEY": "${AO_CLOUD_MASTER_KEY}", "DB": "${AO_CLOUD_DB_PASSWORD}"}},
+    "ao-ot-1": {"profiles": ["workers"], "environment": {"KEY": "${AO_OPEN_TERMINAL_KEY}"}},
+}}
+
+
+def _real_example_into(root, rel_dir):
+    text = (REPO_ROOT / rel_dir / ".env.example").read_text(encoding="utf-8")
+    (root / rel_dir / ".env.example").write_text(text, encoding="utf-8")
+    return root / rel_dir / ".env", text
+
+
+def test_the_placeholder_pattern_matches_the_shapes_and_no_real_default():
+    for value in ("change-me-to-a-long-random-string", "sk-change-me-owui-virtual-key", "CHANGE_ME",
+                  "REPLACE_WITH_64_HEX_CHARS", "your-mnemory-api-key-here", "putyourtskeyhere",
+                  "<your token>", "ai.example.com", "you@example.com", "placeholder-value"):
+        assert stack.is_placeholder(value), value
+    for value in ("llama", "8080", "http://gateway:8080/search?q=<query>", "stock", "true",
+                  "/models/lmstudio-community/x.gguf", "q4_0", "", "gateway", "86400"):
+        assert not stack.is_placeholder(value), value
+
+
+def test_every_placeholder_in_every_shipped_example_is_derived_not_listed():
+    """The rule is data-driven: each .env.example's placeholders come from its own values."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    found = {}
+    for plane in manifest.order:
+        example = stack.example_path(manifest.env_path(REPO_ROOT, plane))
+        if example.is_file():
+            found[plane] = {k for k, v in stack.read_env_file(example).items() if stack.is_placeholder(v)}
+    # the ones attempt 1 missed are all derived
+    assert {"GATEWAY_API_KEY", "SEARXNG_SECRET_KEY"} <= found["search"]
+    assert {"OWUI_CHAT_LLM_API_KEY", "TAILSCALE_AUTH_KEY", "WEBUI_SECRET_KEY"} <= found["frontend"]
+    assert {"AO_OPEN_TERMINAL_KEY", "AO_CLOUD_DB_PASSWORD", "AO_CLOUD_MASTER_KEY"} <= found["agent-org"]
+    if "ob1" in found:
+        assert "MCPO_API_KEY" in found["ob1"]
+
+
+def test_a_copied_search_env_refuses_the_gateway_and_searxng_secrets(root):
+    """attempt-1 defect D1, the tester's repro: both went up at the public placeholder."""
+    env, text = _real_example_into(root, "search")
+    env.write_text(text.replace("MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key",
+                                "MULLVAD_WG_PRIVATE_KEY=abc").replace("MULLVAD_WG_ADDRESSES=",
+                                                                      "MULLVAD_WG_ADDRESSES=10.0.0.2/32"),
+                   encoding="utf-8")
+    daemon = FakeDaemon(plane_renders={"search/docker-compose.yml": SEARCH_RENDER})
+    code, out, _ = run(root, "enable", "search", "--plane", capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "GATEWAY_API_KEY is still the placeholder shipped in search/.env.example in search/.env" in out
+    assert "SEARXNG_SECRET_KEY is still the placeholder" in out
+    assert "refused: search cannot be enabled yet:" in out
+    run(root, "init", "--planes", "frontend", "--force")
+    state = state_of(root)
+    state["planes"]["search"] = {"profiles": [], "context": None}
+    (root / stack.STATE_REL).write_text(json.dumps(state), encoding="utf-8")
+    code, out, _ = up_for_real(root, daemon)
+    assert code == stack.EXIT_REFUSED
+    assert "search: GATEWAY_API_KEY in search/.env" in out
+    assert daemon.streamed == []
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
+    assert "[FAIL] SEARXNG_SECRET_KEY is still the placeholder" in out
+
+
+def test_a_profile_gated_placeholder_counts_only_under_its_profile(root):
+    """TAILSCALE_AUTH_KEY / OWUI_CHAT_LLM_API_KEY: refused under gpu,tailscale, not under stock."""
+    env, text = _real_example_into(root, "frontend")
+    env.write_text(text.replace("WEBUI_SECRET_KEY=change-me-to-a-long-random-string", "WEBUI_SECRET_KEY=3f9a"),
+                   encoding="utf-8")          # COMPOSE_PROFILES=stock, as shipped
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
+    code, out, _ = up_for_real(root, daemon)
+    assert code == 0, out                      # a stock newcomer is not blocked by the tailnet key
+    env.write_text(env.read_text(encoding="utf-8").replace("COMPOSE_PROFILES=stock",
+                                                           "COMPOSE_PROFILES=gpu,tailscale"), encoding="utf-8")
+    daemon = FakeDaemon(plane_renders={"frontend/docker-compose.yml": FRONTEND_RENDER})
+    code, out, _ = up_for_real(root, daemon)
+    assert code == stack.EXIT_REFUSED
+    assert "TAILSCALE_AUTH_KEY in frontend/.env" in out
+    assert "OWUI_CHAT_LLM_API_KEY in frontend/.env" in out
+
+
+def test_a_bulk_env_file_is_not_a_read_and_cloud_keys_wait_for_their_profile(root):
+    env, text = _real_example_into(root, "agent-org/docker")
+    daemon = FakeDaemon(plane_renders={"agent-org/docker/docker-compose.yml": AGENT_ORG_RENDER})
+    state = stack.State({"agent-org": {"profiles": [], "context": None}}, None, True)
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    env.write_text(text, encoding="utf-8")
+    keys = {k for k, _w, _p in stack.shipped_placeholders(manifest, state, root, "agent-org", daemon.capture)}
+    assert "AO_CLOUD_MASTER_KEY" not in keys and "AO_OPEN_TERMINAL_KEY" not in keys
+    state = stack.State({"agent-org": {"profiles": ["cloud", "workers"], "context": None}}, None, True)
+    keys = {k for k, _w, _p in stack.shipped_placeholders(manifest, state, root, "agent-org", daemon.capture)}
+    assert {"AO_CLOUD_MASTER_KEY", "AO_CLOUD_DB_PASSWORD", "AO_OPEN_TERMINAL_KEY"} <= keys
+
+
+def test_an_unrenderable_plane_fails_closed_and_says_why(root):
+    env, text = _real_example_into(root, "search")
+    env.write_text(text, encoding="utf-8")
+    broken = ("docker", "compose", "-f", "search/docker-compose.yml", "config", "--no-interpolate", "--format", "json")
+    daemon = FakeDaemon(exit_codes={broken: 1})
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    state = stack.State({"search": {"profiles": [], "context": None}}, None, True)
+    found = stack.shipped_placeholders(manifest, state, root, "search", daemon.capture)
+    assert {k for k, _w, _p in found} == {"GATEWAY_API_KEY", "SEARXNG_SECRET_KEY"}
+    assert all("could not render search/docker-compose.yml" in why for _k, why, _p in found)
+
+
+def test_a_replaced_or_blank_non_required_value_is_not_a_placeholder(root):
+    env, text = _real_example_into(root, "search")
+    env.write_text(text.replace("GATEWAY_API_KEY=change-me-to-a-long-random-string", "GATEWAY_API_KEY=abc")
+                   .replace("SEARXNG_SECRET_KEY=change-me-to-another-long-random-string", "SEARXNG_SECRET_KEY="),
+                   encoding="utf-8")
+    daemon = FakeDaemon(plane_renders={"search/docker-compose.yml": SEARCH_RENDER})
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    state = stack.State({"search": {"profiles": [], "context": None}}, None, True)
+    assert stack.shipped_placeholders(manifest, state, root, "search", daemon.capture) == []
+
+
+# --- attempt 2 / D3: the refusal names the cause it actually has ----------------
+
+
+def test_a_submodule_only_refusal_does_not_talk_about_placeholders(root):
+    run(root, "init", "--planes", "inference,search,frontend,ob1", "--force")
+    _without_ob1(root)
+    code, out, _ = up_for_real(root, FakeDaemon())
+    assert code == stack.EXIT_REFUSED
+    assert "placeholder" not in out.lower()
+    assert "Nothing was started. Initialise the submodule with the command named above, and re-run." in out
+    code, out, _ = run(root, "enable", "ob1")
+    assert "refused: ob1 cannot be enabled yet:" in out
+    assert "needs these keys" not in out
+
+
+# --- attempt 2 / D4: health probes exactly the enabled planes + the anchor -------
+
+
+def test_health_does_not_probe_a_required_plane_nobody_enabled(root):
+    """A hand-written state {coder, memory}: inference is required, but not enabled -> not probed."""
+    (root / stack.STATE_REL).parent.mkdir(parents=True, exist_ok=True)
+    (root / stack.STATE_REL).write_text(json.dumps({"version": 1, "planes": {"coder": {}, "memory": {}}}),
+                                        encoding="utf-8")
+    host = FakeHost()
+    code, out = sweep(host, root, planes=None)
+    names = [name for _s, name in probe_lines(out)]
+    assert not any(n.startswith("inference:") for n in names)
+    assert any(n.startswith("coder:") for n in names) and any(n.startswith("memory:") for n in names)
+    assert "probes not run: inference, frontend, search, ob1, agent-org" in out

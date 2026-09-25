@@ -111,10 +111,10 @@ seen*.
 | `lease` | the `scripts/agent-harness/lease-names.conf` name for the plane. Absent = no canonical lease name (the anchor). |
 | `requires` / `optional` | see above. |
 | `implicit` | the plane is started whenever anything runs and never has to be enabled. Only the anchor. No refusal ever names it, and `enable` never writes it into the state file. |
-| `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist, leaving any that does exactly as it is. `down` still runs `docker compose down`. |
+| `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist. An existing network is never altered: if it MATCHES the declaration (driver, internal, attachable, each declared driver_opt and label) it is left as is; if it DIFFERS - e.g. an `ai-stack_llm-net` that is not internal - `up` REFUSES before creating anything, and `doctor` reports it as a FAIL. `down` still runs `docker compose down`. |
 | `manual` | present when the driver must **not** start or stop this plane; the value names what does. Only the portal: exposing the stack to the internet stays a human action, exactly as `stack.ps1`'s header says. |
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
-| `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. |
+| `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
 | `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
 
@@ -310,8 +310,11 @@ missing because its submodule is not initialised names `git submodule update
 same pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit
 code - **the number of failed probes** - plus one that has no `.ps1` ancestor.
 
-**Only the planes this machine enables are probed** (ac-front-door), plus what
-they require - always the anchor. A fresh clone runs the frontend's and the
+**Only the planes this machine enables are probed** (ac-front-door), plus the
+implicit anchor - not the wider requires-closure `up` starts (on any state the
+driver wrote the two are equal; on a hand-edited one they are not, and a plane
+nobody enabled is not probed). The anchor probe checks that `ai-stack_llm-net`
+exists AND is internal. A fresh clone runs the frontend's and the
 anchor's probes and names the other six planes on one `[skip] not enabled on
 this machine` line; the exit code counts failures among the probes that ran.
 All sixteen run when every plane is enabled. The owui-drift probe needs

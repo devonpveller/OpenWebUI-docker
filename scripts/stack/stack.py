@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -462,6 +463,123 @@ def submodule_remedy(submodule: str) -> str:
     return f"`git submodule update --init {submodule}`"
 
 
+# --------------------------------------------------------------------------
+# shipped placeholders beyond the manifest's `keys`
+# --------------------------------------------------------------------------
+#
+# THE RULE, data-driven from the .env.example files themselves (ac-front-door,
+# attempt 2 - the first attempt read only the manifest's `keys`, and a copied
+# search/.env went up with GATEWAY_API_KEY and SEARXNG_SECRET_KEY still at the
+# public placeholder). A value in a plane's `.env.example` is a PLACEHOLDER when
+# it matches PLACEHOLDER_PATTERN:
+#     change-me / change_me / changeme anywhere   (change-me-to-a-long-random-string,
+#                                                  sk-change-me-owui-virtual-key)
+#     starts with replace-with / REPLACE_WITH      (REPLACE_WITH_64_HEX_CHARS)
+#     starts with your- / your_ / putyour          (your-mnemory-api-key-here,
+#                                                  putyourtskeyhere)
+#     the whole value is <...>                     (<your token>)
+#     an example.com/.org/.net domain or address   (ai.example.com, you@example.com)
+#     contains the word placeholder
+# A new placeholder written in any of those shapes is covered without touching
+# the manifest. A real default (a port, a URL, `llama`) matches none of them -
+# checked against every .env.example in the tree when this was written.
+#
+# WHICH ONES COUNT: only a key a service THIS DEPLOYMENT RUNS actually reads.
+# That is decided from compose's own render (`config --no-interpolate`, which
+# keeps `${VAR}` references visible and lists every service with its
+# `profiles`), filtered to the profiles this plane runs with. So frontend's
+# TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`, and
+# agent-org's AO_CLOUD_* only under `cloud`. A bulk `env_file:` is NOT a read:
+# agent-bridge loads its whole .env that way, and counting it would make every
+# profile-gated secret "in use" on every host.
+#
+# The manifest `keys` rule (blank_keys) is separate and stays profile-blind:
+# those keys are required everywhere.
+
+PLACEHOLDER_PATTERN = re.compile(
+    r"change[-_ ]?me|^replace[-_ ]?with|^your[-_]|^putyour|^<[^<>]*>$"
+    r"|(^|[@.])example\.(com|org|net)$|placeholder",
+    re.IGNORECASE,
+)
+_VAR_REF = re.compile(r"(?<!\$)\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def is_placeholder(value: str) -> bool:
+    return bool(value.strip()) and bool(PLACEHOLDER_PATTERN.search(value.strip()))
+
+
+def active_profiles(manifest, state, root, plane, extra=()) -> set[str]:
+    """The profiles compose will run this plane with, as the driver would invoke it."""
+    flags = set(effective_profiles(manifest, state, root, plane)) | set(extra)
+    if flags:
+        return flags | set(compose_profiles_env(manifest, root, plane))
+    shell = os.environ.get("COMPOSE_PROFILES")
+    if shell is not None:
+        return {p.strip() for p in shell.split(",") if p.strip()}
+    return set(compose_profiles_env(manifest, root, plane))
+
+
+def _strings(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield str(key)
+            yield from _strings(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value)
+    elif node is not None:
+        yield str(node)
+
+
+def referenced_vars(manifest, root, plane, capture, profiles, context=None):
+    """({VAR, ...} the active services interpolate, None) or (None, why the render failed)."""
+    cmd = compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"], context=context)
+    result = capture(cmd, root)
+    if result.code != 0:
+        return None, (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[0:1]
+    try:
+        services = (json.loads(result.stdout) or {}).get("services") or {}
+    except ValueError:
+        return None, ["the render is not JSON"]
+    refs = set()
+    for service in services.values():
+        gated = (service or {}).get("profiles") or []
+        if gated and not set(gated) & set(profiles):
+            continue
+        for text in _strings({k: v for k, v in (service or {}).items() if k != "env_file"}):
+            refs.update(_VAR_REF.findall(text))
+    return refs, None
+
+
+def shipped_placeholders(manifest, state, root, plane, capture, extra_profiles=()):
+    """[(key, why, env path)] for keys OUTSIDE the manifest's `keys` still at a shipped placeholder.
+
+    Only keys a running service reads (see the block comment above). When the
+    render fails the answer cannot be narrowed, so every candidate counts and
+    `why` says the render failed - failing closed, since the fix (replace the
+    value) is the same either way.
+    """
+    env_path = manifest.env_path(root, plane)
+    values = read_env_file(env_path)
+    shipped = read_env_file(example_path(env_path))
+    required = set(manifest.keys(plane))
+    candidates = [
+        key for key, value in shipped.items()
+        if key not in required and is_placeholder(value)
+        and key in values and values[key].strip() == value.strip()
+    ]
+    if not candidates:
+        return []
+    why = placeholder_reason(root, env_path)
+    profiles = active_profiles(manifest, state, root, plane, extra_profiles)
+    refs, failed = referenced_vars(manifest, root, plane, capture, profiles, state.context_of(plane))
+    if refs is None:
+        note = f" (could not render {manifest.plane(plane)['compose']} to tell whether it is read: " \
+               f"{failed[0] if failed else 'no output'})"
+        return [(key, why + note, env_path) for key in candidates]
+    return [(key, why, env_path) for key in candidates if key in refs]
+
+
 def rel(root: Path, path: Path) -> str:
     try:
         return path.relative_to(root).as_posix()
@@ -642,11 +760,73 @@ def anchor_networks(manifest: Manifest, root: Path, plane: str, capture, context
     return project, out
 
 
+def network_drift(spec: dict, inspected: dict) -> list[str]:
+    """Every way an EXISTING network differs from its declaration, as readable phrases.
+
+    Compared: driver (compose's default is bridge), internal, attachable, each
+    declared driver_opt, each declared label. Labels and options the network
+    carries beyond the declaration (compose's own, docker's enable_ipv4/6) are
+    not drift. An empty list means it matches.
+    """
+    problems = []
+    want_driver = spec.get("driver") or "bridge"
+    if (inspected.get("Driver") or "") != want_driver:
+        problems.append(f"driver is {inspected.get('Driver')!r}, declared {want_driver!r}")
+    for flag, field in (("internal", "Internal"), ("attachable", "Attachable")):
+        want = bool(spec.get(flag, False))
+        have = bool(inspected.get(field, False))
+        if want != have:
+            problems.append(f"{flag} is {str(have).lower()}, declared {str(want).lower()}")
+    options = inspected.get("Options") or {}
+    for opt, value in sorted((spec.get("driver_opts") or {}).items()):
+        if str(options.get(opt)) != str(value):
+            problems.append(f"driver_opt {opt} is {options.get(opt)!r}, declared {str(value)!r}")
+    labels = inspected.get("Labels") or {}
+    for label, value in sorted((spec.get("labels") or {}).items()):
+        if str(labels.get(label)) != str(value):
+            problems.append(f"label {label} is {labels.get(label)!r}, declared {str(value)!r}")
+    return problems
+
+
+def inspect_network(capture, root, docker, name):
+    """The parsed `docker network inspect` of one network, or None when it does not exist."""
+    found = capture(docker + ["network", "inspect", name, "--format", "{{json .}}"], root)
+    if found.code != 0:
+        return None
+    try:
+        data = json.loads(found.stdout.strip() or "{}")
+    except ValueError:
+        raise Refusal(f"refused: `docker network inspect {name}` did not return JSON") from None
+    return data if isinstance(data, dict) else {}
+
+
+def anchor_network_report(manifest, root, capture, plane, context=None):
+    """[(name, key, spec, inspected-or-None, drift)] for every network the plane declares."""
+    project, networks = anchor_networks(manifest, root, plane, capture, context)
+    docker = ["docker"] + (["--context", context] if context else [])
+    rows = []
+    for key, spec in networks:
+        name = spec.get("name") or f"{project}_{key}"
+        inspected = inspect_network(capture, root, docker, name)
+        rows.append((project, name, key, spec,
+                     inspected, network_drift(spec, inspected) if inspected is not None else []))
+    return rows
+
+
 def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_run) -> int:
     """Create the plane's declared networks that do not exist; touch none that do.
 
     Idempotent: a second run finds every network and runs no create at all.
-    Returns 0, or the exit code of the first `docker network create` that failed.
+
+    An existing network whose flags DIFFER from the declaration is a REFUSAL,
+    decided before anything is created: ai-stack_llm-net is the isolation
+    boundary (internal: true is what keeps every inference caller off the
+    internet), so a bring-up on top of a weaker one would be a silent downgrade.
+    stack.py still never alters it - recreating a network means detaching every
+    plane on it, which is an operator's decision, not a side effect of `up`.
+
+    Returns 0, EXIT_REFUSED on drift, or the exit code of the first
+    `docker network create` that failed.
     """
     context = state.context_of(plane)
     compose_rel = manifest.plane(plane)["compose"]
@@ -656,18 +836,23 @@ def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_
     if dry_run:
         console.line("# (dry run: nothing rendered, inspected or created)")
         return EXIT_OK
-    project, networks = anchor_networks(manifest, root, plane, capture, context)
+    rows = anchor_network_report(manifest, root, capture, plane, context)
+    drifted = [(name, drift) for _p, name, _k, _s, inspected, drift in rows if inspected is not None and drift]
+    for _p, name, _k, _s, inspected, drift in rows:
+        if inspected is not None and not drift:
+            console.line(f"  [exists] {name} (matches {compose_rel}; left as is)")
+    if drifted:
+        for name, drift in drifted:
+            console.line(f"  [DIFFERS] {name}: " + "; ".join(drift))
+        console.line(
+            f"# refused: an existing network differs from {compose_rel}, and stack.py never alters one. "
+            "Nothing was created or started. To rebuild it: stop every plane attached to it "
+            "(`docker network inspect <name>` lists them), `docker network rm <name>`, then re-run `up`."
+        )
+        return EXIT_REFUSED
     docker = ["docker"] + (["--context", context] if context else [])
-    for key, spec in networks:
-        name = spec.get("name") or f"{project}_{key}"
-        found = capture(docker + ["network", "inspect", name, "--format", "{{.Internal}}"], root)
-        if found.code == 0:
-            declared = bool(spec.get("internal", False))
-            actual = found.stdout.strip().lower() == "true"
-            note = "" if declared == actual else (
-                f" - NOTE it is {'internal' if actual else 'NOT internal'} while {compose_rel} declares "
-                f"internal: {str(declared).lower()}; stack.py never alters an existing network")
-            console.line(f"  [exists] {name} (left as is){note}")
+    for project, name, key, spec, inspected, _drift in rows:
+        if inspected is not None:
             continue
         cmd = docker + ["network", "create", "--driver", spec.get("driver") or "bridge"]
         if spec.get("internal"):
@@ -685,7 +870,8 @@ def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_
         console.line(" ".join(cmd))
         code = runner(cmd, root)
         if code != 0:
-            console.line(f"# creating {name} exited {code}")
+            console.line(f"# creating {name} exited {code}; the networks created before it are kept, "
+                         "and a re-run creates only what is still missing")
             return code
     return EXIT_OK
 
@@ -839,31 +1025,48 @@ def _requires_note(manifest, console, plane: str, driven) -> None:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
 
-def _preflight(manifest, root, planes, verb: str) -> None:
+def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
     """Refuse BEFORE anything runs: a missing submodule, or a key still at its placeholder.
 
     Both are checked for every plane first, so a refusal never lands halfway
     through a bring-up with the anchor's networks made and nothing else.
-    Blank and missing keys are NOT refused here: `enable`/`doctor` name those,
-    and each plane's compose `:?` guards refuse them at render time.
+    Placeholders are the manifest `keys` rule AND the shipped-placeholder rule
+    (shipped_placeholders: any key a running service reads whose value is still
+    the .env.example placeholder). Blank and missing keys are NOT refused here:
+    `enable`/`doctor` name those, and each plane's compose `:?` guards refuse
+    them at render time.
     """
-    lines = []
+    submodule_lines, placeholder_lines = [], []
     for plane in planes:
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
-            lines.append(
+            submodule_lines.append(
                 f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
     for plane in planes:
-        for key, why, env_path in placeholder_keys(manifest, root, plane):
-            lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
-    if lines:
+        if missing_submodule(manifest, root, plane):
+            continue
+        found = placeholder_keys(manifest, root, plane) + shipped_placeholders(
+            manifest, state, root, plane, capture)
+        for key, why, env_path in found:
+            placeholder_lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
+    if submodule_lines or placeholder_lines:
+        steps = []
+        if submodule_lines:
+            steps.append("initialise the submodule with the command named above")
+        if placeholder_lines:
+            steps.append("replace each placeholder with a value of your own (for a secret: "
+                         "`openssl rand -hex 32`)")
         raise Refusal(
-            f"refused: fix these before `{verb}` starts anything:\n" + "\n".join(lines)
-            + "\nNothing was started. Replace each placeholder with a value of your own (for a secret: "
-            "`openssl rand -hex 32`), then re-run."
+            f"refused: fix these before `{verb}` starts anything:\n"
+            + "\n".join(submodule_lines + placeholder_lines)
+            + "\nNothing was started. " + _sentence("; then ".join(steps)) + ", and re-run."
         )
+
+
+def _sentence(text: str) -> str:
+    return text[:1].upper() + text[1:]
 
 
 def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool, capture=None) -> int:
@@ -872,7 +1075,7 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
         console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
         return EXIT_OK
     driven = [p for p in ordered if not manifest.manual(p)]
-    _preflight(manifest, root, driven, "up")
+    _preflight(manifest, state, root, driven, "up", capture or subprocess_capture)
     if mode == "one":
         _requires_note(manifest, console, plane, driven)
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
@@ -925,8 +1128,14 @@ def cmd_status(manifest, state, root, console, runner, plane=None, every: bool =
     return EXIT_REFUSED if failures else EXIT_OK
 
 
-def _key_problem_lines(manifest, root, planes, subject) -> list[str]:
-    lines = []
+def _key_problems(manifest, state, root, planes, subject, capture, profile_map=None):
+    """(problem lines, env files to edit, uninitialised submodules) for enable/init refusals.
+
+    A key problem is a manifest `keys` entry that is missing, blank or still its
+    placeholder (blank_keys), or any other key a running service reads that is
+    still its .env.example placeholder (shipped_placeholders).
+    """
+    lines, files, submodules = [], [], []
     for plane in planes:
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
@@ -937,28 +1146,23 @@ def _key_problem_lines(manifest, root, planes, subject) -> list[str]:
                 f"  {manifest.plane(plane)['compose']} is missing (plane {plane}): the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
-            continue
-        for key, why, env_path in blank_keys(manifest, root, plane):
-            where = f" (read by plane {plane})" if plane != subject else ""
-            lines.append(
-                f"  {key} is {why} in {rel(root, env_path)}{where}"
-            )
-    return lines
-
-
-def _key_remedy(manifest, root, planes) -> str:
-    """The requires-refusal names a command; this one must too."""
-    files = []
-    submodules = []
-    for plane in planes:
-        submodule = missing_submodule(manifest, root, plane)
-        if submodule:
             if submodule not in submodules:
                 submodules.append(submodule)
             continue
-        path = rel(root, manifest.env_path(root, plane))
-        if blank_keys(manifest, root, plane) and path not in files:
-            files.append(path)
+        extra = (profile_map or {}).get(plane, ())
+        found = blank_keys(manifest, root, plane) + shipped_placeholders(
+            manifest, state, root, plane, capture, extra)
+        for key, why, env_path in found:
+            where = f" (read by plane {plane})" if plane != subject else ""
+            lines.append(f"  {key} is {why} in {rel(root, env_path)}{where}")
+            path = rel(root, env_path)
+            if path not in files:
+                files.append(path)
+    return lines, files, submodules
+
+
+def _key_remedy(files, submodules) -> str:
+    """The requires-refusal names a command; this one must too."""
     first = "".join(f"Run {submodule_remedy(s)}. " for s in submodules)
     if submodules and not files:
         return first + "Then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
@@ -982,7 +1186,8 @@ def _ambiguity_note(manifest, console, kind, target) -> None:
         )
 
 
-def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> int:
+def cmd_enable(manifest, state, root, console, name, kind, headless: bool, capture=None) -> int:
+    capture = capture or subprocess_capture
     kind, target = resolve_target(manifest, name, kind)
     _ambiguity_note(manifest, console, kind, target)
 
@@ -999,12 +1204,12 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
                 + (", which is not enabled" if len(missing) == 1 else ", which are not enabled")
                 + f" ({remedies})"
             )
-        problems = _key_problem_lines(manifest, root, [target], target)
+        problems, files, submodules = _key_problems(manifest, state, root, [target], target, capture)
         if problems:
             raise Refusal(
-                f"refused: {target} needs these keys before it can be enabled:\n"
+                f"refused: {target} cannot be enabled yet:\n"
                 + "\n".join(problems)
-                + "\n" + _key_remedy(manifest, root, [target])
+                + "\n" + _key_remedy(files, submodules)
             )
         profiles = enable_plane_profiles(manifest, state, target, manifest.default_profiles(target))
         planes_touched = [target]
@@ -1029,12 +1234,12 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool) -> in
                     profile_map[plane].append(profile)
 
         full = order_planes(manifest, dependency_closure(manifest, wanted))
-        problems = _key_problem_lines(manifest, root, full, target)
+        problems, files, submodules = _key_problems(manifest, state, root, full, target, capture, profile_map)
         if problems:
             raise Refusal(
-                f"refused: product {target} needs these keys before it can be enabled:\n"
+                f"refused: product {target} cannot be enabled yet:\n"
                 + "\n".join(problems)
-                + "\n" + _key_remedy(manifest, root, full)
+                + "\n" + _key_remedy(files, submodules)
             )
         # An implicit plane (the anchor) is never written into state: `up` adds it
         # from the requires closure anyway, and leaving it out keeps the state file
@@ -1105,7 +1310,8 @@ def cmd_disable(manifest, state, root, console, name, kind) -> int:
     return EXIT_OK
 
 
-def cmd_doctor(manifest, state, root, console, runner) -> int:
+def cmd_doctor(manifest, state, root, console, runner, capture=None) -> int:
+    capture = capture or subprocess_capture
     problems = 0
     console.line("== host")
     docker = shutil.which("docker")
@@ -1163,9 +1369,12 @@ def cmd_doctor(manifest, state, root, console, runner) -> int:
         else:
             console.line(f"    [FAIL] env file missing: {rel(root, env_path)} ({loaded})")
             problems += 1
-        for key, why, path in blank_keys(manifest, root, plane):
+        for key, why, path in blank_keys(manifest, root, plane) + shipped_placeholders(
+                manifest, state, root, plane, capture):
             console.line(f"    [FAIL] {key} is {why} in {rel(root, path)}")
             problems += 1
+        if manifest.networks_only(plane) and docker and compose_path.is_file():
+            problems += _doctor_networks(manifest, state, root, console, capture, plane)
         for requirement in manifest.plane(plane).get("host", []):
             console.line(f"    [ -- ] host: {requirement}")
     console.line("")
@@ -1173,7 +1382,28 @@ def cmd_doctor(manifest, state, root, console, runner) -> int:
     return EXIT_OK if problems == 0 else EXIT_REFUSED
 
 
-def cmd_init(manifest, state, root, console, args) -> int:
+def _doctor_networks(manifest, state, root, console, capture, plane) -> int:
+    """One line per declared network: matches, absent (up creates it), or DIFFERS (a FAIL)."""
+    try:
+        rows = anchor_network_report(manifest, root, capture, plane, state.context_of(plane))
+    except Refusal as refusal:
+        console.line(f"    [FAIL] {str(refusal).splitlines()[0]}")
+        return 1
+    failed = 0
+    for _project, name, _key, _spec, inspected, drift in rows:
+        if inspected is None:
+            console.line(f"    [ -- ] network {name} absent (`up` creates it)")
+        elif drift:
+            console.line(f"    [FAIL] network {name} differs from {manifest.plane(plane)['compose']}: "
+                         + "; ".join(drift) + " (stack.py never alters it; `up` refuses)")
+            failed += 1
+        else:
+            console.line(f"    [OK]   network {name} matches {manifest.plane(plane)['compose']}")
+    return failed
+
+
+def cmd_init(manifest, state, root, console, args, capture=None) -> int:
+    capture = capture or subprocess_capture
     path = state.path
     if path.is_file() and not args.force:
         raise Refusal(f"refused: {rel(root, path)} already exists (re-run with --force to overwrite it)")
@@ -1201,17 +1431,17 @@ def cmd_init(manifest, state, root, console, args) -> int:
     # `init --product X` runs the SAME checks `enable X` does; a state file that
     # names a plane whose key is blank is a bring-up failure deferred, not avoided.
     if args.product:
-        code = cmd_enable(manifest, fresh, root, console, args.product, "product", args.headless)
+        code = cmd_enable(manifest, fresh, root, console, args.product, "product", args.headless, capture)
         if code != EXIT_OK:
             return code
     else:
         chosen = order_planes(manifest, dependency_closure(manifest, fresh.planes))
-        problems = _key_problem_lines(manifest, root, chosen, "")
+        problems, files, submodules = _key_problems(manifest, fresh, root, chosen, "", capture)
         if problems:
             raise Refusal(
-                "refused: these keys must be set before that state file would work:\n"
+                "refused: that state file would not work yet:\n"
                 + "\n".join(problems)
-                + "\n" + _key_remedy(manifest, root, chosen)
+                + "\n" + _key_remedy(files, submodules)
             )
         fresh.save()
 
@@ -1401,10 +1631,12 @@ class HealthSweep:
             self.console.line("  [skip] not enabled on this machine, probes not run: " + ", ".join(skipped))
         if self.on("anchor"):
             self.probe(
-                "anchor: ai-stack_llm-net exists",
+                # Exists AND internal: llm-net is the isolation boundary, so a
+                # non-internal one is a failure however healthy everything else is.
+                "anchor: ai-stack_llm-net exists and is internal",
                 lambda: self.docker(
-                    "network", "inspect", "ai-stack_llm-net", "--format", "{{.Name}}"
-                ).stdout.strip() == "ai-stack_llm-net",
+                    "network", "inspect", "ai-stack_llm-net", "--format", "{{.Name}} {{.Internal}}"
+                ).stdout.strip() == "ai-stack_llm-net true",
             )
         if self.on("inference"):
             self.probe(
@@ -1730,12 +1962,14 @@ def powershell_command():
 def cmd_health(manifest, state, root, console, capture, http) -> int:
     """Exit code is the NUMBER OF FAILED PROBES among the probes that RAN.
 
-    Only the planes this machine enables (plus what they require - the anchor)
-    are probed; the rest are named on one [skip] line.
+    Only the planes this machine ENABLES, plus the implicit anchor, are probed;
+    the rest are named on one [skip] line. Deliberately NOT the requires-closure
+    `up` starts: `enable` already refuses a plane whose requirements are off, so
+    on any state the driver wrote the two sets are equal, and on a hand-edited
+    state that differs, probing a plane nobody enabled is exactly the noise this
+    scoping removes.
     """
-    enabled = [p for p in manifest.order if state.is_enabled(p)]
-    planes = dependency_closure(manifest, enabled) if enabled else set()
-    planes |= {p for p in manifest.order if manifest.is_implicit(p)}
+    planes = {p for p in manifest.order if state.is_enabled(p) or manifest.is_implicit(p)}
     return HealthSweep(console, root, capture, http, planes).run()
 
 
@@ -2533,13 +2767,13 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
         if args.verb == "restart":
             return cmd_restart(manifest, state, root, console, runner, args.plane, args.dry_run)
         if args.verb == "enable":
-            return cmd_enable(manifest, state, root, console, args.name, args.kind, args.headless)
+            return cmd_enable(manifest, state, root, console, args.name, args.kind, args.headless, capture)
         if args.verb == "disable":
             return cmd_disable(manifest, state, root, console, args.name, args.kind)
         if args.verb == "doctor":
-            return cmd_doctor(manifest, state, root, console, runner)
+            return cmd_doctor(manifest, state, root, console, runner, capture)
         if args.verb == "init":
-            return cmd_init(manifest, state, root, console, args)
+            return cmd_init(manifest, state, root, console, args, capture)
         if args.verb == "health":
             return cmd_health(manifest, state, root, console, capture, http)
         if args.verb == "stats":

@@ -63,6 +63,10 @@
 #               ships for it: for a key listed here that shipped value is a
 #               placeholder by construction (`change-me-...`, `REPLACE_WITH_...`,
 #               `ai.example.com`). `enable`, `doctor` and `up` all refuse it.
+#               A key NOT listed here is refused too when its .env.example value
+#               matches stack.py's PLACEHOLDER_PATTERN and a service the plane
+#               runs (under its active profiles) interpolates it - derived from
+#               the .env.example files, so a new placeholder needs no entry here.
 #   ports     - published HOST ports -> what answers on them.
 #   profiles  - compose profiles. Each is a sub-table with a `description`, an
 #               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
