@@ -45,6 +45,10 @@
 #      service_completed_successfully; recover's gate for init-once is
 #      COMPLETION and after-init starts after init-once finished (RED at
 #      00e80e3: after-init started while init-once still ran)
+#  16. PLANTED (review of ac-ops-portable): after-backup depends_on openwebui-backup
+#      - which has no healthcheck - with service_healthy. `recover` and
+#      `recover --dry-run` refuse it by name, say nothing was stopped, and every
+#      container keeps its ID and StartedAt (RED at c2e5560: "recovered")
 #   then tears the DinD down.
 #
 # Exit code: 0 when every check passed, 1 when any failed, 2 on a usage error.
@@ -377,6 +381,37 @@ check "the init's gate was COMPLETION, printed as such" \
 check "after-init started AFTER init-once finished ($AFTER_START > $INIT_DONE)" \
   "$([ -n "$INIT_DONE" ] && [ -n "$AFTER_START" ] && [ "$AFTER_START" \> "$INIT_DONE" ]; echo $?)"
 dx docker rm -f frontend-init-once-1 frontend-after-init-1 >/dev/null 2>&1
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 16. the reviewer's case (ac-ops-portable2): service_healthy on a target with NO healthcheck
+echo ""
+echo "== 16. PLANTED: after-backup depends_on openwebui-backup (no healthcheck) with service_healthy"
+docker exec -i "$NAME" sh -c 'cat > /tmp/healthy.awk' <<'AWK'
+{ print }
+/^services:$/ {
+  print "  after-backup:"
+  print "    image: alpine:3.21"
+  print "    restart: unless-stopped"
+  print "    command: [ \"sleep\", \"infinity\" ]"
+  print "    depends_on:"
+  print "      openwebui-backup:"
+  print "        condition: service_healthy"
+}
+AWK
+dw sh -c 'awk -f /tmp/healthy.awk frontend/docker-compose.yml > /tmp/c.yml && cp /tmp/c.yml frontend/docker-compose.yml'
+BEFORE="$(dx docker ps -a --format '{{.ID}} {{.Names}}' | sort | while read -r id n; do echo "$id $n $(dx docker inspect -f '{{.State.StartedAt}}' "$id")"; done)"
+echo "$BEFORE" | sed 's/^/   before: /'
+DRY="$(sp recover frontend --dry-run)"; RD=$?
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+AFTER="$(dx docker ps -a --format '{{.ID}} {{.Names}}' | sort | while read -r id n; do echo "$id $n $(dx docker inspect -f '{{.State.StartedAt}}' "$id")"; done)"
+check "recover --dry-run refused (exit $RD)" "$([ "$RD" -ne 0 ]; echo $?)"
+check "recover refused (exit $RV)" "$([ "$RV" -ne 0 ]; echo $?)"
+check "the refusal names frontend/after-backup, openwebui-backup and service_healthy" \
+  "$(echo "$OUT" | grep -q 'frontend/after-backup depends_on openwebui-backup with condition service_healthy, but openwebui-backup has no healthcheck'; echo $?)"
+check "it says nothing was stopped, and it did not say recovered" \
+  "$(echo "$OUT" | grep -q 'Nothing was stopped.' && ! echo "$OUT" | grep -q '^recovered'; echo $?)"
+check "container IDs and start times are unchanged" "$([ "$BEFORE" = "$AFTER" ] && [ -n "$BEFORE" ]; echo $?)"
 dw git checkout -q -- frontend/docker-compose.yml
 
 echo ""

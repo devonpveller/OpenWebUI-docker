@@ -434,6 +434,14 @@ order, restart in dependency order, wait for health). Selection is the same as
 1. **Every plane is rendered first** (`docker compose -f <file> [--profile ...]
    config --format json`, with exactly the profiles `up` passes). A plane that
    cannot be rendered is a refusal while the stack is still running.
+   Then every `depends_on` condition is checked, because the `up -d --no-deps`
+   below skips compose's own checks: `service_healthy` on a service with no
+   healthcheck (none in the compose file and none in its image, asked with a
+   read-only `docker image inspect`) and `service_completed_successfully` on a
+   service with `restart: always` / `unless-stopped` are **refused, naming the
+   plane, the service and the target, before anything is stopped** - in
+   `--dry-run` too. An image that is not on the daemon cannot be asked; that is
+   a `# WARNING`, not a refusal.
 2. **Stop**, planes in reverse of `up`'s order; inside a plane, its services in
    reverse depends_on levels (`docker compose ... stop --timeout 30 <services>`).
 3. **Start**: the anchor's networks are ensured first (always, even for one

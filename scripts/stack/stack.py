@@ -2127,6 +2127,7 @@ class Service(NamedTuple):
     environment: dict = {}       # the rendered environment (never printed)
     restart_delay: float = 0.0   # deploy.restart_policy.delay, seconds
     restart: str = ""            # `restart:` (or deploy.restart_policy.condition), "" when unset
+    healthcheck_disabled: bool = False  # `healthcheck: disable: true` / test NONE (overrides the image's)
 
 
 class PlaneRender(NamedTuple):
@@ -2170,8 +2171,9 @@ def plane_render(manifest: Manifest, state: State, root: Path, plane: str, captu
             depends = {name: (cond or {}).get("condition", "service_started") for name, cond in depends.items()}
         mode = spec.get("network_mode") or ""
         health = spec.get("healthcheck") or None
+        disabled = False
         if health and (health.get("disable") or list(health.get("test") or [])[:1] == ["NONE"]):
-            health = None
+            health, disabled = None, True
         mounts = tuple(
             (m.get("type"), m.get("source"), m.get("target"), bool(m.get("read_only")))
             for m in (spec.get("volumes") or []) if isinstance(m, dict)
@@ -2188,7 +2190,7 @@ def plane_render(manifest: Manifest, state: State, root: Path, plane: str, captu
                                 mode[len("service:"):] if mode.startswith("service:") else None,
                                 health, str(spec.get("image") or ""), mounts,
                                 {str(k): str(v) for k, v in env.items() if v is not None},
-                                parse_duration(delay, 0.0), restart)
+                                parse_duration(delay, 0.0), restart, disabled)
     volumes = {}
     for key, spec in (data.get("volumes") or {}).items():
         spec = spec or {}
@@ -2306,6 +2308,67 @@ GATE_COMPLETES = "completes"   # something waits on it with service_completed_su
 GATE_HEALTHY = "healthy"       # a compose healthcheck
 GATE_ONE_SHOT = "one-shot"     # restart "no" (or none): exit 0 is success, or it settles running
 GATE_SETTLE = "settle"         # a restart policy and no healthcheck: running, not restarted
+
+
+def image_has_healthcheck(capture, root, docker, image: str):
+    """True / False from `docker image inspect` (read-only), or None when the image is not here."""
+    found = capture(docker + ["image", "inspect", "--format", "{{json .Config.Healthcheck}}", image], root)
+    if found.code != 0:
+        return None
+    try:
+        data = json.loads((found.stdout or "").strip() or "null")
+    except ValueError:
+        return None
+    test = list((data or {}).get("Test") or [])
+    return bool(test) and test[:1] != ["NONE"]
+
+
+def check_depends_conditions(renders: dict, capture, root, dockers: dict) -> list[str]:
+    """Refuse, BEFORE anything is stopped, a depends_on condition compose itself would refuse.
+
+    recover starts each level with `up -d --no-deps`, which skips compose's own condition
+    checks, so they are made here (review of ac-ops-portable, 2026-09-25: a service_healthy
+    dependency on a target with no healthcheck waited out the settle window and printed
+    "recovered", where plain `docker compose up` refuses the configuration):
+      * `service_healthy` on a target with no healthcheck - none in the compose file (or
+        `disable: true`) and none in its image (`docker image inspect`, read-only);
+      * `service_completed_successfully` on a target with `restart: always` or
+        `unless-stopped` - docker restarts it after it exits, so it can never complete.
+    Returns warnings for what cannot be decided (an image not on this daemon); raises
+    Refusal for a definite violation, naming plane, service and target.
+    """
+    problems, warnings = [], []
+    for plane, render in renders.items():
+        for svc in render.services.values():
+            for target, condition in sorted(svc.depends.items()):
+                dep = render.services.get(target)
+                if dep is None:
+                    continue
+                if condition == "service_healthy" and not dep.healthcheck:
+                    if dep.healthcheck_disabled:
+                        problems.append(f"  {plane}/{svc.key} depends_on {target} with condition service_healthy, "
+                                        f"but {target} disables its healthcheck in the compose file")
+                        continue
+                    has = image_has_healthcheck(capture, root, dockers[plane], dep.image)
+                    if has is False:
+                        problems.append(f"  {plane}/{svc.key} depends_on {target} with condition service_healthy, "
+                                        f"but {target} has no healthcheck (none in the compose file, none in its "
+                                        f"image {dep.image})")
+                    elif has is None:
+                        warnings.append(f"# WARNING: {plane}/{svc.key} depends_on {target} with condition "
+                                        f"service_healthy; {target} has no compose healthcheck and its image "
+                                        f"{dep.image} is not on this daemon, so whether it has one is unknown")
+                if condition == "service_completed_successfully" and dep.restart in ("always", "unless-stopped"):
+                    problems.append(f"  {plane}/{svc.key} depends_on {target} with condition "
+                                    f"service_completed_successfully, but {target} has restart: {dep.restart}, "
+                                    "so docker restarts it after it exits and it can never complete")
+    if problems:
+        raise Refusal("refused: a depends_on condition in these renders cannot be met - docker compose's own "
+                      "`up` refuses such a configuration, and recover's `up -d --no-deps` would not check it:\n"
+                      + "\n".join(problems)
+                      + "\nNothing was stopped. Fix the compose file (add the healthcheck, or change the "
+                        "condition), then re-run.")
+    return warnings
 
 
 def gate_kind(render: PlaneRender, key: str, completes=None) -> str:
@@ -2527,7 +2590,14 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     renders = {p: plane_render(manifest, state, root, p, capture) for p in work}
     levels = {p: start_levels(renders[p]) for p in work}
     one_shots = {p: one_shot_services(renders[p]) for p in work}
+    # Compose's depends_on conditions, checked here because `up -d --no-deps` skips them.
+    # Before the plan is printed and before anything stops - dry run included.
+    condition_warnings = check_depends_conditions(
+        renders, capture, root,
+        {p: ["docker"] + (["--context", state.context_of(p)] if state.context_of(p) else []) for p in work})
 
+    for line in condition_warnings:
+        console.line(line)
     console.line(f"# recover: {', '.join(anchors + work)} (dependency order from {MANIFEST_NAME}; containers "
                  "in depends_on order from each plane's render)")
     if mode == "one":

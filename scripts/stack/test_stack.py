@@ -3070,6 +3070,7 @@ class OpsDaemon(FakeDaemon):
         self.stats = []                        # docker stats rows
         self.execs: dict = {}                  # container -> CommandResult
         self.removed: list[str] = []           # helper containers `rm -f`-ed
+        self.images: dict = {}                 # image -> its .Config.Healthcheck (None = none)
         self.pipe_codes: list[int] = []        # scripted exit codes for pipe(), consumed in order
         self.stats_gone: set = set()           # ids `docker stats` says no longer exist
 
@@ -3106,6 +3107,12 @@ class OpsDaemon(FakeDaemon):
             self.volumes[name] = b""
             self.volume_labels[name] = dict(a.split("=", 1) for a in args if a.startswith("com.docker"))
             return stack.CommandResult(0, name, "")
+        if args[:2] == ["image", "inspect"]:
+            self.commands.append(list(cmd))
+            image = args[-1]
+            if image not in self.images:
+                return stack.CommandResult(1, "", f"Error: No such image: {image}")
+            return stack.CommandResult(0, json.dumps(self.images[image]), "")
         if args[:2] == ["rm", "-f"]:
             self.commands.append(list(cmd))
             self.removed.append(args[2])
@@ -3387,6 +3394,7 @@ def test_an_exited_container_fails_its_gate_unless_it_is_a_one_shot_that_exited_
     render = json.loads(json.dumps(FRONTEND_GPU))
     render["services"]["openwebui"]["depends_on"] = {
         "tailscale-backup": {"condition": "service_completed_successfully", "required": True}}
+    render["services"]["tailscale-backup"]["restart"] = "no"   # a job that can complete
     daemon = OpsDaemon({"frontend/docker-compose.yml": render},
                        states={"tailscale-backup": [{"Status": "exited", "ExitCode": 0}]})
     code, out = ops(root, daemon, "recover", "frontend")
@@ -3898,4 +3906,73 @@ def test_the_dry_run_prints_each_gate_kind(root):
     assert "#   gate [settle]: openwebui-backup running and not restarted for 15s" in out
     code, out = ops(root, OpsDaemon(_with_init()), "recover", "frontend", "--dry-run")
     assert '#   gate [one-shot]: frontend-init-once-1 exits 0, or runs unrestarted for 15s (restart: no' in out
+
+
+# --- ac-ops-portable2: depends_on conditions compose would refuse (review, 2026-09-25) ---
+
+
+def _healthy_on_the_backup():
+    """The reviewer's planted case: tailscale-backup waits service_healthy on openwebui-backup,
+    which has no healthcheck (alpine:3.21 has none either)."""
+    render = json.loads(json.dumps(FRONTEND_GPU))
+    render["services"]["tailscale-backup"]["depends_on"] = {
+        "openwebui-backup": {"condition": "service_healthy", "required": True}}
+    return {"frontend/docker-compose.yml": render}
+
+
+@pytest.mark.parametrize("dry", [True, False])
+def test_service_healthy_on_a_target_without_a_healthcheck_is_refused_before_anything_stops(root, fast_clock, dry):
+    """RED at c2e5560: it waited out the settle window and printed 'recovered'."""
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_healthy_on_the_backup())
+    daemon.images["alpine:3.21"] = None
+    code, out = ops(root, daemon, "recover", "frontend", *(["--dry-run"] if dry else []))
+    assert code == stack.EXIT_REFUSED, out
+    assert ("frontend/tailscale-backup depends_on openwebui-backup with condition service_healthy, but "
+            "openwebui-backup has no healthcheck (none in the compose file, none in its image alpine:3.21)") in out
+    assert "Nothing was stopped." in out
+    assert "recovered" not in out
+    assert daemon.streamed == [] and daemon.created == []     # no stop, no up, no network create
+    assert not any(c[:3] == ["docker", "compose", "-f"] and ("stop" in c or "up" in c) for c in daemon.commands)
+
+
+def test_an_image_healthcheck_satisfies_service_healthy(root, fast_clock):
+    """Compose accepts service_healthy on a target whose IMAGE declares the healthcheck."""
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_healthy_on_the_backup())
+    daemon.images["alpine:3.21"] = {"Test": ["CMD-SHELL", "true"], "Interval": 5000000000}
+    code, out = ops(root, daemon, "recover", "frontend", "--dry-run")
+    assert code == 0, out
+
+
+def test_an_image_not_on_the_daemon_is_a_warning_not_a_refusal(root):
+    _enable(root, "frontend")
+    code, out = ops(root, OpsDaemon(_healthy_on_the_backup()), "recover", "frontend", "--dry-run")
+    assert code == 0, out
+    assert ("# WARNING: frontend/tailscale-backup depends_on openwebui-backup with condition service_healthy; "
+            "openwebui-backup has no compose healthcheck and its image alpine:3.21 is not on this daemon") in out
+
+
+def test_a_disabled_healthcheck_under_service_healthy_is_refused_without_asking_the_image(root):
+    render = _healthy_on_the_backup()
+    render["frontend/docker-compose.yml"]["services"]["openwebui-backup"]["healthcheck"] = {"disable": True}
+    _enable(root, "frontend")
+    daemon = OpsDaemon(render)
+    code, out = ops(root, daemon, "recover", "frontend", "--dry-run")
+    assert code == stack.EXIT_REFUSED
+    assert "but openwebui-backup disables its healthcheck in the compose file" in out
+    assert not any(c[1:3] == ["image", "inspect"] for c in daemon.commands)
+
+
+@pytest.mark.parametrize("policy", ["always", "unless-stopped"])
+def test_service_completed_successfully_on_a_restarting_target_is_refused(root, policy):
+    """A target docker restarts after it exits can never 'complete'."""
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_with_init(dependant=True))
+    daemon.plane_renders["frontend/docker-compose.yml"]["services"]["init-once"]["restart"] = policy
+    code, out = ops(root, daemon, "recover", "frontend", "--dry-run")
+    assert code == stack.EXIT_REFUSED
+    assert (f"frontend/tailscale-backup depends_on init-once with condition service_completed_successfully, "
+            f"but init-once has restart: {policy}") in out
+    assert daemon.streamed == []
 
