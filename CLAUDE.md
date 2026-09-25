@@ -93,7 +93,7 @@ internal hosts, ports and file:line anchors, so they go to the private plan stor
 | a note or finding with no feature | `journal/notes/<topic>-<yyyy-mm-dd>.md` |
 | evidence: logs, transcripts, measured output | `journal/evidence/<id>/` |
 | a retired doc or closed plan | `journal/archive/` |
-| EXCEPTION: agent-org / little-coder subproject docs (all of `agent-org/docs/`, incl. its `log/`; `little-coder/`'s docs) | stay in THIS repo, beside their code |
+| EXCEPTION: live agent-org / little-coder subproject docs (all of `agent-org/docs/`, incl. its `log/`; `little-coder/`'s docs) | stay in THIS repo, beside their code; a retired one follows the archive rule like any doc |
 
 1. Run `scripts/checks/plan-store.ps1` at the start and before you stop; fix what it lists.
 2. Commit **and push** the store in the same sitting (`git pull --rebase` first); a new
@@ -105,7 +105,7 @@ internal hosts, ports and file:line anchors, so they go to the private plan stor
 **This repo keeps** only what someone needs with just this checkout: `CLAUDE.md`,
 `README.md`, `SECURITY.md`, `documentation/runbooks/`, the status index and
 `multi-agent-concurrency/`, per-plane and per-module READMEs, the agent-org / little-coder
-subproject docs (never move them to the store), and evidence that CODE reads (beside
+subproject docs (live ones stay here), and evidence that CODE reads (beside
 that code). Enforced by `scripts/checks/check-doc-placement.ps1`; a deliberate exception
 is `AI_STACK_PLAN_IN_CODE_REPO=1` with the reason in the commit message.
 

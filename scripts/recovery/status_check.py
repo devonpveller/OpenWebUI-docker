@@ -347,8 +347,8 @@ def check_service_accessibility():
     else:
         log_error("OpenWebUI accessibility: FAILED")
 
-    # NOTE: the Ollama API check was removed — the ollama container is disabled
-    # in this stack (see CLAUDE.md). Inference is direct to llama-cpp.
+    # NOTE: the Ollama API check was removed — the ollama container was retired
+    # from this stack. Inference is direct to llama-cpp.
 
     # Check llama-cpp accessibility
     result = run_docker_command(
