@@ -484,8 +484,12 @@ function Stop-OB1Stack {
 function Start-InferenceStack {
     # Bring the inference compose project up. Internal depends_on ordering
     # (upstreams -> llm-queue -> llm-gateway-db -> llm-gateway) is declared in
-    # the project file; a single `up -d` runs it. Requires the anchor networks
-    # (any root-project `up` creates them).
+    # the project file; a single `up -d` runs it. Requires the anchor networks:
+    # recover (full path) and nuclear call Confirm-AnchorNetworks before any plane
+    # starts; gpu-reset does not, and relies on them still existing (it takes
+    # down plane projects only, which never removes an external network). A
+    # root-project `up` does NOT create them: on the zero-service anchor it exits
+    # "no service selected" (ac-recovery-gates R6).
     Write-Log "INFO" "Starting inference project (upstreams -> llm-queue -> LiteLLM gateway)..."
     try {
         docker compose -f $Script:InferenceCompose up -d
@@ -516,7 +520,8 @@ function Stop-InferenceStack {
 function Start-PlaneStack {
     # Generic driver for a Part K plane project: one `up -d` (the project's
     # own depends_on orders it), then an optional health gate by container
-    # name. Requires the anchor networks (any root-project `up` creates them).
+    # name. Requires the anchor networks - see Start-InferenceStack for which
+    # modes ensure them first (a root-project `up` creates nothing).
     param([string]$Label, [string]$ComposePath, [string]$GateContainer = "", [int]$GateTimeout = 90)
     Write-Log "INFO" "Starting $Label project..."
     try {
