@@ -79,9 +79,11 @@ compose projects: main `ai-stack` + separate `open-brain`).
             message an earlier route matches, e.g. one naming gpu, goes there)
   Output:   What to run on the HOST, from the repo root:
             scripts/recovery/emergency-recovery.ps1 -Action recover|gpu-reset|nuclear
-            (ordered restart of every plane with health gates),
-            scripts/recovery/status_check.py and scripts/stack/stack.py health
-            (read-only checks). Nothing is executed from the pipe; the old
+            (a gentle restart first when basic checks pass, else an ordered
+            restart of the service planes with health gates - never the
+            portal), scripts/recovery/status_check.py and
+            scripts/stack/stack.py health (read-only checks). The module only
+            prints this advice and runs none of it; the old
             modules/emergency-recovery was archived 2026-08-20 (CLEANUP-PLAN v3
             D-15, scripts/archive/emergency-recovery-module/).
 

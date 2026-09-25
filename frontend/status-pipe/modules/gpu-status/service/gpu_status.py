@@ -189,7 +189,7 @@ class GPUStatusModule:
                     "Verify: docker exec openwebui nvidia-smi"
                 ],
                 "escalation_path": [
-                    "If CUDA is still unavailable, run (host, repo root): .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - it rebuilds the openwebui image and restarts the GPU planes",
+                    "If CUDA is still unavailable, run (host, repo root): .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - it takes inference, memory and frontend down, rebuilds the openwebui image, brings frontend and then inference back, and starts memory, coder, OB1 and agent-org only once llama-cpp is healthy and CUDA answers",
                     "Or rebuild only the image, deliberately: docker compose -f frontend/docker-compose.yml build --no-cache openwebui"
                 ]
             }

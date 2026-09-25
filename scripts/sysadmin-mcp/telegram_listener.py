@@ -204,7 +204,8 @@ def _handle_docker_up() -> None:
            "Docker Desktop quit/restart or host reboot.")
 
 
-# emergency-recovery.ps1 writes every line as "[<timestamp>] [<LEVEL>] <message>" (Write-Log).
+# emergency-recovery.ps1's Write-Log writes its lines as "[<timestamp>] [<LEVEL>] <message>";
+# docker/compose output that passes through unformatted is not matched.
 _ISSUE_RE = re.compile(r"\[(ERROR|WARN)\]")
 _TAIL_LINES = 15
 _MAX_ISSUE_LINES = 25
@@ -212,13 +213,13 @@ _TELEGRAM_LIMIT = 3900  # sendMessage rejects > 4096 chars, and tn.send() fails 
 
 
 def _recovery_report(action: str, rc: int, out: str) -> str:
-    """The Telegram reply for a recovery run: the exit code, every ERROR/WARN line
-    from the WHOLE run, then the last lines.
+    """The Telegram reply for a recovery run: the exit code, the ERROR/WARN lines
+    from the WHOLE run (up to _MAX_ISSUE_LINES shown before the tail), then the last lines.
 
     Why not the tail alone: a run can exit 0 with its only ERROR near the top.
     Confirm-AnchorNetworks logs `[ERROR]   [DIFFERS] <net>: ...` when an existing
     ai-stack_* network differs from its declaration, creates nothing, and recovery
-    CONTINUES; a 15-line tail of a long run never reaches that line, so a drifted
+    CONTINUES; a 15-line tail of a long run does not reach that line, so a drifted
     anchor read as a clean recover (ac-recovery-gates review, R6). ERROR/WARN lines
     already inside the tail are not repeated; past _MAX_ISSUE_LINES the rest are
     counted, not shown; the reply is cut to stay under Telegram's size limit,

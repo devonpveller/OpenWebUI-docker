@@ -485,8 +485,9 @@ function Start-InferenceStack {
     # Bring the inference compose project up. Internal depends_on ordering
     # (upstreams -> llm-queue -> llm-gateway-db -> llm-gateway) is declared in
     # the project file; a single `up -d` runs it. Requires the anchor networks:
-    # recover (full path) and nuclear call Confirm-AnchorNetworks before any plane
-    # starts; gpu-reset does not, and relies on them still existing (it takes
+    # the full paths of recover and nuclear call Confirm-AnchorNetworks before
+    # they call this function (their gentle pass, Invoke-MinimalRecovery, runs
+    # plain `up -d`s without it and never calls this); gpu-reset does not, and relies on them still existing (it takes
     # down plane projects only, which never removes an external network). A
     # root-project `up` does NOT create them: on the zero-service anchor it exits
     # "no service selected" (ac-recovery-gates R6).

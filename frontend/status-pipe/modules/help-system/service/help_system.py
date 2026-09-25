@@ -68,14 +68,14 @@ class HelpSystemModule:
                 "quick_fixes": [
                     "Run these on the HOST, from the ai-stack repo root.",
                     "python scripts\\recovery\\status_check.py - System overview, read-only (containers, CUDA in openwebui, gateway, upstreams, tailscale)",
-                    "python scripts\\stack\\stack.py health - Health probes for every enabled plane, read-only (exit code = failed probes)",
+                    "python scripts\\stack\\stack.py health - Health probes for the enabled planes it covers (not the portal: use scripts\\portal\\portal-status.ps1), read-only (exit code = failed probes)",
                     "docker exec openwebui nvidia-smi - Is the GPU visible inside Open WebUI? (read-only)",
                     "python scripts\\stack\\stack.py restart frontend - Restart openwebui and tailscale together (never restart openwebui alone)"
                 ],
                 "advanced_recovery": [
-                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover - Ordered restart of every plane with health gates; repairs a broken openwebui/tailscale network namespace (most common)",
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover - Repairs a broken openwebui/tailscale network namespace (most common). If basic connectivity checks pass it first tries a gentle pass: restart both llama-cpp upstreams, then openwebui (waits for healthy), then tailscale, then 'up -d' for llm-queue/llm-gateway, memory, search, coder, and OB1 and agent-org when deployed. Otherwise, or if that fails, it stops and restarts frontend, inference, memory, search, coder, and OB1 and agent-org when deployed, in dependency order with health gates. It never touches the portal.",
                     ".\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - GPU recovery: takes down inference, memory and frontend and REBUILDS the openwebui image (heavy)",
-                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action nuclear - Stop and restart every plane (last resort)"
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action nuclear - Last resort. It tries the same gentle pass first when connectivity checks pass. Otherwise it runs 'down' on OB1, frontend, coder, search, memory and inference and brings them back up, plus agent-org when deployed. It never stops or starts the portal."
                 ]
             },
             "common_issues": {
@@ -91,7 +91,7 @@ class HelpSystemModule:
                         "symptoms": ["CUDA not available", "GPU models slow", "Reranker using CPU"],
                         "cause": "GPU passthrough issues or PyTorch CPU-only installation",
                         "solution": "Check: python scripts\\recovery\\status_check.py - then, if CUDA is still unavailable: .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset (host, repo root)",
-                        "explanation": "status_check.py reports CUDA inside openwebui read-only; gpu-reset rebuilds the openwebui image and restarts the GPU planes"
+                        "explanation": "status_check.py reports CUDA inside openwebui read-only; gpu-reset takes inference, memory and frontend down, rebuilds the openwebui image, and brings frontend back, then inference once openwebui is healthy, then memory, coder, OB1 and agent-org once llama-cpp is healthy and CUDA answers"
                     },
                     "lmstudio_connectivity": {
                         "symptoms": ["LM Studio not accessible via Tailscale", "Port 8234 not working", "LM Studio proxy issues"],

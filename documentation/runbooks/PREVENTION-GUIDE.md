@@ -132,7 +132,9 @@ If issues occur despite prevention measures:
 1. **Quick fix for line endings**: the PowerShell or `dos2unix` commands under
    "If Line Ending Issues Occur" above.
 
-2. **Emergency recovery** (ordered restart of every plane with health gates):
+2. **Emergency recovery** (a gentle restart of openwebui, tailscale and the llama-cpp
+   upstreams first when basic checks pass; otherwise an ordered restart of frontend,
+   inference, memory, search, coder, OB1 and agent-org with health gates; never the portal):
    ```powershell
    .\scripts\recovery\emergency-recovery.ps1 -Action recover
    ```

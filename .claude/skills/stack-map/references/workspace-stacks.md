@@ -658,7 +658,7 @@ update, or network-namespace break.
 | File | Role |
 |------|------|
 | `scripts/recovery/emergency-recovery.ps1` | Primary recovery — `recover` / `nuclear` / `gpu-reset`; 5-phase ordered restart that also drives the OB1 project |
-| `scripts/recovery/status_check.py` | Read-only overview by container name (`docker ps` / `exec` / `inspect`); no compose project involved |
+| `scripts/recovery/status_check.py` | Read-only overview: `docker ps`, then `docker exec` / `docker inspect` by container name; no compose project involved |
 | `scripts/archive/legacy-recovery/` | ARCHIVED 2026-09-25: `quick-fixes.bat`, `update-stack.bat`, five Python helpers orphaned since 2026-08-20, and `dev-helper.ps1`. Seven of them issued bare `docker compose` commands from the repo root, which since Part K address the zero-service root anchor (`quick-fixes.bat`'s `-f <plane>` calls did work). The eighth, `namespace_reset.py`, issued none: it only printed advice and returned 0, and it was archived as an orphan. The per-script detail is in `scripts/archive/README.md`. Replacements are in `scripts/archive/README.md`. (The `emergency-recovery.bat` twin was archived 2026-08-21.) |
 | `scripts/archive/emergency-recovery-module/` | ARCHIVED 2026-08-20 (was OWUI-reachable stale guidance; recovery keywords now route to help-system) |
 

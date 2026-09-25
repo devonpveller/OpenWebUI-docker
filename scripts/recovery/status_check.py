@@ -2,8 +2,8 @@
 """
 Status Check - read-only overview of every inventoried container.
 
-Every probe is by CONTAINER name (docker ps / exec / inspect), so it needs no
-compose project; it outlived quick-fixes.bat (archived 2026-09-25), whose
+Its probes are `docker ps` plus `docker exec`/`docker inspect` by CONTAINER
+name, so it needs no compose project; it outlived quick-fixes.bat (archived 2026-09-25), whose
 `status` option it used to mirror.
 
 Comprehensive system status check with detailed diagnostics.

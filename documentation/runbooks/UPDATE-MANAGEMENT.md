@@ -6,8 +6,8 @@
 
 How the stack takes updates. Everything is **manual and verified** - there is
 no auto-updater (Watchtower was retired 2026-08-20, CLEANUP-PLAN v3 D-2).
-Every command below runs from the repo root and names its plane's compose file
-with `-f`: a bare `docker compose` addresses the root anchor, which has no
+Run every command below from the repo root. Each `docker compose` command below
+that you are meant to run names its plane's compose file with `-f`: a bare `docker compose` addresses the root anchor, which has no
 services.
 
 ## Open WebUI
