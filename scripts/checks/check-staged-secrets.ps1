@@ -28,7 +28,14 @@
 
 $ErrorActionPreference = 'Stop'
 
-# --- staged, still-present files (Added/Copied/Modified) --------------------
+# --- staged, still-present files (Added/Copied/Modified/Renamed) ------------
+# RENAMED (R) was missing until 2026-09-25 (ac-hooks-portable F1, anchor amended):
+# rename detection is on by default, so `git mv x frontend/.env` - or a rename
+# plus an edit that adds a key - was status R, outside ACM, and this guard said
+# "nothing staged - skip" and exited 0 on every host. `--name-only` prints a
+# rename's DESTINATION path, which is the name the rules must test and the blob
+# `git show :<path>` must read. Copies (C) were already inside ACM.
+# check_staged_secrets.py carries the same filter; keep them in step.
 # Exclude submodule gitlinks (mode 160000): they are commit pointers, not
 # blobs, so `git show :<path>` errors on them. `--diff-filter` can't express
 # "not a gitlink", so filter by mode from the staged index listing.
@@ -49,13 +56,13 @@ if ($zPaths) {
     $gitlinks = @(((& git ls-files --stage -z) -join "`n").Split([char]0) |
         Where-Object { $_ -match '^160000 ' } |
         ForEach-Object { ($_ -split '\t', 2)[1] })
-    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACM) -join "`n").Split([char]0)) |
+    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACMR) -join "`n").Split([char]0)) |
         Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 } else {
 $gitlinks = @(& git ls-files --stage |
     Where-Object { $_ -match '^160000 ' } |
     ForEach-Object { ($_ -split '\t', 2)[1] })
-$staged = @(& git diff --cached --name-only --diff-filter=ACM) |
+$staged = @(& git diff --cached --name-only --diff-filter=ACMR) |
     Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 }
 
