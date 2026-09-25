@@ -39,8 +39,9 @@ $ErrorActionPreference = 'Stop'
 # exits 1 and the commit is refused (by accident, but closed). Under pwsh 7 a
 # native command's stderr no longer throws, so the same file fell to the
 # `$LASTEXITCODE -ne 0` skip below and its content was never read, and its
-# quoted leaf (`...env"`) matched no filename rule either: a non-ASCII `.env`
-# committed clean (measured at 3c3ff75, pwsh 7.4 in a Linux container). Off
+# quoted leaf (`...env"`) matched no filename rule either: with a non-ASCII
+# `.env`, or a non-ASCII file holding a gw- key, staged, this script exited 0
+# (measured at 3c3ff75, pwsh 7.4 in a Linux container). Off
 # Windows the names are therefore read NUL-separated (-z), which git never
 # quotes. On Windows the two git calls below are exactly the ones they were.
 $zPaths = ($PSVersionTable.PSEdition -eq 'Core') -and ($IsWindows -ne $true)
