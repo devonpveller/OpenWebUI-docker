@@ -1,4 +1,4 @@
-﻿# check-staged-secrets.ps1 - pre-commit secret guard
+# check-staged-secrets.ps1 - pre-commit secret guard
 #
 # WHY THIS EXISTS (2026-08-20):
 #   .env.bak-pre-mtp and .env.bak-pre-qwen38 were committed and only caught at
@@ -32,11 +32,31 @@ $ErrorActionPreference = 'Stop'
 # Exclude submodule gitlinks (mode 160000): they are commit pointers, not
 # blobs, so `git show :<path>` errors on them. `--diff-filter` can't express
 # "not a gitlink", so filter by mode from the staged index listing.
+#
+# PATH NAMES UNDER pwsh OFF WINDOWS (ac-hooks-portable, 2026-09-25). git C-quotes
+# a non-ASCII name (`"caf\303\251.env"`), and `git show ":<quoted>"` then fails.
+# Under Windows PowerShell 5.1 that stderr, with EAP=Stop, THROWS - the script
+# exits 1 and the commit is refused (by accident, but closed). Under pwsh 7 a
+# native command's stderr no longer throws, so the same file fell to the
+# `$LASTEXITCODE -ne 0` skip below and its content was never read, and its
+# quoted leaf (`...env"`) matched no filename rule either: a non-ASCII `.env`
+# committed clean (measured at 3c3ff75, pwsh 7.4 in a Linux container). Off
+# Windows the names are therefore read NUL-separated (-z), which git never
+# quotes. On Windows the two git calls below are exactly the ones they were.
+$zPaths = ($PSVersionTable.PSEdition -eq 'Core') -and ($IsWindows -ne $true)
+if ($zPaths) {
+    $gitlinks = @(((& git ls-files --stage -z) -join "`n").Split([char]0) |
+        Where-Object { $_ -match '^160000 ' } |
+        ForEach-Object { ($_ -split '\t', 2)[1] })
+    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACM) -join "`n").Split([char]0)) |
+        Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
+} else {
 $gitlinks = @(& git ls-files --stage |
     Where-Object { $_ -match '^160000 ' } |
     ForEach-Object { ($_ -split '\t', 2)[1] })
 $staged = @(& git diff --cached --name-only --diff-filter=ACM) |
     Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
+}
 
 if (-not $staged -or $staged.Count -eq 0) {
     Write-Host "  [secrets] nothing staged - skip"

@@ -15,6 +15,41 @@ Verify:
 git config --get core.hooksPath   # -> .githooks
 ```
 
+## Which host runs the gates
+
+Every gate is a PowerShell script, and they run on Linux and macOS too. At the top of
+`pre-commit` the hook picks a host, first match wins:
+
+| Mode | When | What runs |
+|------|------|-----------|
+| **Windows PowerShell** | `powershell.exe` is on `PATH` (Windows) | every gate, with the same command line the hook has always used |
+| **PowerShell 7** | no `powershell.exe`, `pwsh` is on `PATH` (any OS) | every gate, the same `.ps1` files |
+| **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped, through their Python twins; every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
+
+The three never-skipped gates and their twins, both under `scripts/checks/`:
+
+| Gate | PowerShell | Python twin |
+|------|-----------|-------------|
+| secret guard | `check-staged-secrets.ps1` | `check_staged_secrets.py` |
+| line endings | `validate-lineendings.ps1` | `validate_lineendings.py` |
+| gateway routing | `check-llm-gateway-routing.ps1` | `check_llm_gateway_routing.py` |
+
+Each twin copies its `.ps1`'s rules and says in its header what it copies. **Change one
+and you change both.** With no PowerShell and no Python 3 at all, the hook refuses the
+commit at the secret guard (`REFUSED secrets: ...`) rather than skip it.
+
+A skip is never silent. The hook prints each `SKIPPED` line as it happens, ends with a
+summary such as
+
+```text
+Pre-commit gates (host: python3) - RAN: secrets line-endings gateway-routing | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
+```
+
+and adds a fifth column to the attestation line (below), `skipped=<gate>,<gate>,...`.
+Install `pwsh` to run every gate. `commit-msg` needs no PowerShell in any mode: it is
+POSIX `sh` with `git`, `grep`, `awk` and `sort`. `pre-merge-commit` runs `pre-commit`,
+so it picks its host the same way.
+
 ## What `pre-commit` enforces
 
 | # | Check | Script | Blocks on |
@@ -38,6 +73,12 @@ not a path the hook computed. That distinction is the whole feature: `core.hooks
 **absolute** path to one checkout, so a worktree's own edited `.githooks/pre-commit` is not
 what runs for that worktree's commits, and any derived path would record the hook we wish
 had run.
+
+A fifth column, `skipped=<gate>,<gate>,...`, appears only when the hook ran in Python-only
+mode (see [Which host runs the gates](#which-host-runs-the-gates)) and names the gates it
+did not run. Without it such a line would read exactly like one from a host that ran every
+gate. `check-hook-attestation.ps1` reads columns 1 and 4 only, so the fifth column changes
+no verdict; it is there for a human reading the ledger.
 
 Ask which hook gated a commit:
 

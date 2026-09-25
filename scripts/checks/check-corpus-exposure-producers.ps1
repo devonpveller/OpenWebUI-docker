@@ -448,7 +448,12 @@ $allowPathLike = @(
 )
 
 function Test-Allowed([string]$path) {
-    foreach ($glob in $allowPathLike) { if ($path -like $glob) { return $true } }
+    # The globs are written with `\`. Under pwsh on Linux/macOS a path arrives with `/`,
+    # so without this none of them matched and documentation/, docs/ and scripts/archive/
+    # were scanned there (measured at 3c3ff75: 844 files scanned under pwsh on Linux, 773
+    # on Windows for the same tree). On Windows the path already uses `\` - a no-op.
+    $p = $path.Replace('/', '\')
+    foreach ($glob in $allowPathLike) { if ($p -like $glob) { return $true } }
     return $false
 }
 
