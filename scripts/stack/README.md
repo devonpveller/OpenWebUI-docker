@@ -114,6 +114,7 @@ seen*.
 | `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist. An existing network is never altered: if it MATCHES the declaration (driver, internal, attachable, each declared driver_opt and label) it is left as is; if it DIFFERS - e.g. an `ai-stack_llm-net` that is not internal - `up` REFUSES before creating anything, and `doctor` reports it as a FAIL. `down` still runs `docker compose down`. |
 | `manual` | present when the driver must **not** start or stop this plane; the value names what does. Only the portal: exposing the stack to the internet stays a human action, exactly as `stack.ps1`'s header says. |
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
+| `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, why, remedy }` with `path` repo-root-relative. Unlike `host` this is checked: while one is missing, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). Only memory declares one: `../mnemory`, its build context. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
 | `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
@@ -168,6 +169,15 @@ other reading with `--product <name>` (or `--plane <name>`). **Both `enable` and
 `disable`** print a `# note:` line whenever a name is ambiguous, saying which
 reading they took - `disable` is the destructive half of the pair, so it is the
 one where a silent reading would be worse.
+
+### Shared modules
+
+`[modules.<name>]` declares a repo-root tree that more than one plane consumes,
+so it is not any one plane's internals: `path` (repo-root-relative) and
+`consumers` (`plane = "how it is consumed"`). The driver reads nothing from it;
+`scripts/stack/test_stack.py` holds it to the compose files - the planes whose
+compose files reference `../backup` must be exactly the declared consumers.
+Today there is one: `backup`.
 
 ### Ordering
 

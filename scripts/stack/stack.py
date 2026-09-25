@@ -463,6 +463,23 @@ def submodule_remedy(submodule: str) -> str:
     return f"`git submodule update --init {submodule}`"
 
 
+def missing_host_paths(manifest: Manifest, root: Path, plane: str) -> list[dict]:
+    """The plane's `host_paths` entries (repo-root-relative) that do not exist.
+
+    A path OUTSIDE the checkout that the plane builds from - memory's sibling
+    ../mnemory. Each entry carries the `remedy` command that creates it.
+    """
+    return [
+        spec for spec in manifest.plane(plane).get("host_paths", [])
+        if not (root / Path(spec["path"])).exists()
+    ]
+
+
+def host_path_line(spec: dict, plane: str) -> str:
+    return (f"{spec['path']} is missing (plane {plane}): {spec.get('why', 'the plane builds from it')} "
+            f"- run `{spec['remedy']}` from the repo root")
+
+
 # --------------------------------------------------------------------------
 # shipped placeholders beyond the manifest's `keys`
 # --------------------------------------------------------------------------
@@ -1129,14 +1146,20 @@ def cmd_status(manifest, state, root, console, runner, plane=None, every: bool =
 
 
 def _key_problems(manifest, state, root, planes, subject, capture, profile_map=None):
-    """(problem lines, env files to edit, uninitialised submodules) for enable/init refusals.
+    """(problem lines, env files to edit, remedy commands) for enable/init refusals.
 
     A key problem is a manifest `keys` entry that is missing, blank or still its
     placeholder (blank_keys), or any other key a running service reads that is
-    still its .env.example placeholder (shipped_placeholders).
+    still its .env.example placeholder (shipped_placeholders). The remedy
+    commands are the submodule inits and the `host_paths` remedies.
     """
     lines, files, submodules = [], [], []
     for plane in planes:
+        for spec in missing_host_paths(manifest, root, plane):
+            lines.append("  " + host_path_line(spec, plane))
+            command = f"`{spec['remedy']}`"
+            if command not in submodules:
+                submodules.append(command)
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
             # Its env file lives inside the submodule too, so listing every key
@@ -1146,8 +1169,8 @@ def _key_problems(manifest, state, root, planes, subject, capture, profile_map=N
                 f"  {manifest.plane(plane)['compose']} is missing (plane {plane}): the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
-            if submodule not in submodules:
-                submodules.append(submodule)
+            if submodule_remedy(submodule) not in submodules:
+                submodules.append(submodule_remedy(submodule))
             continue
         extra = (profile_map or {}).get(plane, ())
         found = blank_keys(manifest, root, plane) + shipped_placeholders(
@@ -1162,8 +1185,12 @@ def _key_problems(manifest, state, root, planes, subject, capture, profile_map=N
 
 
 def _key_remedy(files, submodules) -> str:
-    """The requires-refusal names a command; this one must too."""
-    first = "".join(f"Run {submodule_remedy(s)}. " for s in submodules)
+    """The requires-refusal names a command; this one must too.
+
+    `submodules` holds ready-formatted remedy commands (submodule inits and
+    `host_paths` remedies), as _key_problems returns them.
+    """
+    first = "".join(f"Run {command}. " for command in submodules)
     if submodules and not files:
         return first + "Then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
     where = " and ".join(files) if files else "the plane's env file"
@@ -1356,6 +1383,12 @@ def cmd_doctor(manifest, state, root, console, runner, capture=None) -> int:
         else:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
+        for spec in manifest.plane(plane).get("host_paths", []):
+            if spec in missing_host_paths(manifest, root, plane):
+                console.line("    [FAIL] " + host_path_line(spec, plane))
+                problems += 1
+            else:
+                console.line(f"    [OK]   host path {spec['path']}")
         env_path = manifest.env_path(root, plane)
         loaded = (f"--env-file {manifest.env_file(plane)}" if manifest.env_file(plane)
                   else "compose loads it from the project dir")
