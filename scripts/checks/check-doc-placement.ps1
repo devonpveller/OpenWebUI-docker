@@ -19,8 +19,8 @@
        documentation/archive/ - the three journal directories that moved to the store
        on 2026-09-25 (adoption-closeout ac-journal-move). The refusal names the store
        path to use instead.
-    2. a new ROOT-LEVEL plan or journal file: PLAN*.md, TEST-PLAN*.md, *-FINDINGS*.md,
-       CLEANUP-PLAN*.md, BUILD-LOG*.md, TASKS.md, ROADMAP.md.
+    2. a new ROOT-LEVEL plan or journal file, with any extension or none: PLAN*,
+       TEST-PLAN*, *-FINDINGS*, CLEANUP-PLAN*, BUILD-LOG*, TASKS[.*], ROADMAP[.*].
     3. under documentation/implementation-guide/: a file in a NEW feature directory,
        or a plan-shaped file (plan / build log / task list / NN-name.md) anywhere.
 
@@ -83,8 +83,13 @@ $JournalDirs = [ordered]@{
     'documentation/archive/'  = 'journal/archive/'
 }
 
-# Root-level plan / journal files. A path with no slash is at the root.
-$RootJournal = '(?i)^(PLAN[^/]*|TEST-PLAN[^/]*|[^/]*-FINDINGS[^/]*|CLEANUP-PLAN[^/]*|BUILD-LOG[^/]*|TASKS?|ROADMAP)\.md$'
+# Root-level plan / journal files. A path with no slash is at the root. ANY extension or none:
+# the rule CLAUDE.md, the charters and the hook comment state is "a root PLAN* / TEST-PLAN* /
+# *-FINDINGS* file", and the first version matched `.md` only, so TEST-PLAN-foo.txt,
+# TEST-PLAN-foo and PLAN-foo.markdown walked through (ac-journal-move tester probe X1).
+# Tracked root files on 2026-09-25 (.env.example .gitattributes .gitignore .gitmodules CLAUDE.md
+# OB1 README.md SECURITY.md docker-compose.yml ruff.toml stack.manifest.toml) match none of it.
+$RootJournal = '(?i)^(PLAN[^/]*|TEST-PLAN[^/]*|[^/]*-FINDINGS[^/]*|CLEANUP-PLAN[^/]*|BUILD-LOG[^/]*|TASKS?(\.[^/]*)?|ROADMAP(\.[^/]*)?)$'
 
 # Deliberately kept in the code repo (plan store README, "What stays in the code repo").
 $Exempt = @(

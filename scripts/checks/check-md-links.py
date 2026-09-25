@@ -2,7 +2,8 @@
 """Relative-link sweep over EVERY tracked Markdown file in the code repo.
 
     python scripts/checks/check-md-links.py [--root <repo>] [--store <plan-store>]
-                                            [--require-store] [--quiet]
+                                            [--require-store] [--require-submodules]
+                                            [--quiet]
 
 WHY. The journal (notes, evidence, archive, closed plans, test plans) moved out of this
 repo into the private plan store, `documentation-plans-ai-stack`, on 2026-09-25
@@ -30,6 +31,10 @@ HOW A TARGET RESOLVES. Against the directory of the file that carries it, after 
     deeper, under .claude/worktrees/<id>/), else `--store`.
 A store link with NO store on this machine (CI, a stranger's clone) cannot be checked: it
 is counted and listed as UNVERIFIABLE, and it fails the run only under `--require-store`.
+The same holds for a link into a git SUBMODULE (OB1) that is not initialised in this
+checkout - a clone made without `--recurse-submodules` has an empty directory there. Such
+links are counted and listed as UNVERIFIABLE (submodule not initialised) and fail the run
+only under `--require-submodules`. An INITIALISED submodule's links are checked normally.
 
 EXIT. 0 = every checkable link resolves; 1 = at least one does not, each listed with the
 file, line and resolved path; 2 = misuse, or NOTHING WAS EXAMINED (zero tracked .md files,
@@ -78,6 +83,22 @@ def find_store(root: str, explicit: str | None) -> str | None:
     return None
 
 
+def uninitialised_submodules(root: str):
+    """Absolute paths of gitlinks (mode 160000) whose checkout is absent or empty here."""
+    out = []
+    ls = git(root, "ls-files", "-s", "-z")
+    if ls.returncode != 0:
+        return out
+    for rec in ls.stdout.split("\0"):
+        if not rec.startswith("160000 "):
+            continue
+        rel = rec.split("\t", 1)[1]
+        d = os.path.normpath(os.path.join(root, *rel.split("/")))
+        if not os.path.exists(os.path.join(d, ".git")):
+            out.append(d)
+    return out
+
+
 def targets(text: str):
     """(line_number, raw_target) for every link outside code."""
     in_fence = None
@@ -107,6 +128,7 @@ def main(argv=None) -> int:
     ap.add_argument("--root", default=None)
     ap.add_argument("--store", default=None)
     ap.add_argument("--require-store", action="store_true")
+    ap.add_argument("--require-submodules", action="store_true")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
 
@@ -124,9 +146,10 @@ def main(argv=None) -> int:
         return 2
     files = sorted(p for p in ls.stdout.split("\0") if p)
     store = find_store(root, a.store)
+    bare_subs = uninitialised_submodules(root)
 
     checked = in_repo = in_store = skipped = 0
-    unresolved, unverifiable = [], []
+    unresolved, unverifiable, in_bare_sub = [], [], []
     store_prefix = os.pardir + os.sep + STORE_NAME + os.sep
     for rel in files:
         path = os.path.join(root, *rel.split("/"))
@@ -156,6 +179,11 @@ def main(argv=None) -> int:
             if os.path.exists(resolved):
                 in_repo += 1
                 continue
+            bare = next((b for b in bare_subs
+                         if resolved == b or resolved.startswith(b + os.sep)), None)
+            if bare is not None:
+                in_bare_sub.append((rel, line, raw, os.path.relpath(bare, root)))
+                continue
             from_root = os.path.relpath(resolved, root)
             if from_root.startswith(store_prefix):
                 rest = from_root[len(store_prefix):]
@@ -180,6 +208,13 @@ def main(argv=None) -> int:
         if not a.quiet:
             for rel, line, raw, rest in unverifiable:
                 print("    {0}:{1}  {2}".format(rel, line, raw))
+    if in_bare_sub:
+        subs = sorted({x[3] for x in in_bare_sub})
+        print("  UNVERIFIABLE  : {0} link(s) into submodule(s) not initialised here ({1}) - run "
+              "`git submodule update --init` to check them".format(len(in_bare_sub), ", ".join(subs)))
+        if not a.quiet:
+            for rel, line, raw, _sub in in_bare_sub:
+                print("    {0}:{1}  {2}".format(rel, line, raw))
     print("  unresolved    : {0}".format(len(unresolved)))
     for rel, line, raw, where in unresolved:
         print("    {0}:{1}  ({2})  ->  {3}".format(rel, line, raw, where))
@@ -189,6 +224,10 @@ def main(argv=None) -> int:
               "nothing is not a clean sweep.".format(len(files), checked))
         return 2
     if unresolved:
+        return 1
+    if in_bare_sub and a.require_submodules:
+        print("FAIL: --require-submodules and {0} submodule link(s) could not be checked".format(
+            len(in_bare_sub)))
         return 1
     if unverifiable and a.require_store:
         print("FAIL: --require-store and {0} store link(s) could not be checked".format(len(unverifiable)))
