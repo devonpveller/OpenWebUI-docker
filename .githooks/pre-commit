@@ -22,7 +22,9 @@ echo "Running pre-commit validations..."
 # Every gate below is a .ps1, and until this block the hook called
 # `powershell.exe` by name. On Linux or macOS that is "not found" (exit 127), and
 # the first gate then reported "secret detected in staged files" - a blanket
-# failure with a false reason, so nobody off Windows could commit at all.
+# failure with a false reason. (That was only reachable once the hook was made
+# executable: at 3c3ff75 every hook was committed 100644, so a real Linux clone
+# skipped them all with a `hint:` and committed anything - see step 0b.)
 #
 # THE ORDER, and the first match wins:
 #   1. powershell.exe - Windows. Every gate runs exactly as it always has: the
