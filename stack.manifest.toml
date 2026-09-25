@@ -51,10 +51,18 @@
 #               enabled; no requires-refusal ever names it.
 #   manual    - present when the driver must NOT start/stop this plane; the
 #               value names what does. `up`/`down`/`restart` skip or refuse it.
+#   networks_only - the compose file declares networks and NO service (the
+#               anchor). `up` does not run `docker compose up -d` on it - compose
+#               exits 1 on a project with no service - but creates each declared
+#               network that is missing and leaves every existing one untouched.
 #   host      - what the machine itself must provide, in prose.
 #   keys      - variable names that must be present and non-blank in the plane's
 #               OWN env file (`<project dir>/.env`). A blank one makes `enable`
-#               refuse, naming the key and the file.
+#               refuse, naming the key and the file. A key is also refused while
+#               its value EQUALS the non-blank value `<project dir>/.env.example`
+#               ships for it: for a key listed here that shipped value is a
+#               placeholder by construction (`change-me-...`, `REPLACE_WITH_...`,
+#               `ai.example.com`). `enable`, `doctor` and `up` all refuse it.
 #   ports     - published HOST ports -> what answers on them.
 #   profiles  - compose profiles. Each is a sub-table with a `description`, an
 #               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
@@ -106,9 +114,13 @@
 # account of it.
 compose  = "docker-compose.yml"
 implicit = true
+# Compose will not `up` a project with no service ("no service selected",
+# exit 1), so `up` ENSURES these networks instead: stack.py's ensure_networks()
+# creates each one that is missing and never touches one that exists.
+networks_only = true
 requires = []
 optional = []
-host     = ["Docker Engine (Docker Desktop on this host); creates the networks, starts no container"]
+host     = ["Docker Engine (Docker Desktop on this host); `up` creates the missing networks and starts no container"]
 keys     = []
 
 [planes.anchor.ports]

@@ -1,9 +1,12 @@
 # docker-compose.yml — the ai-stack PLATFORM ANCHOR (Part K, 2026-08-21).
 #
 # This project owns NO services anymore — only the shared seam networks that
-# every plane project attaches to externally. `docker compose up -d` here
-# creates the networks and starts nothing; run it once before any plane on a
-# cold host (scripts/stack/stack.ps1 does this for you).
+# every plane project attaches to externally. Compose will NOT `up` it:
+# `docker compose up -d` on a project with no service prints "no service
+# selected" and exits 1 (measured, compose v2.33 and v5.3). So
+# `python scripts/stack/stack.py up` does not run it; it creates each network
+# declared below that does not exist yet, with these flags, and leaves any that
+# does exist exactly as it is (ensure_networks() in scripts/stack/stack.py).
 #
 # The service trees are self-contained compose projects, each driven with
 # `docker compose -f <dir>/docker-compose.yml ...` from this directory. Since
@@ -27,8 +30,10 @@
 #   OB1/docker/ Open Brain — incl. the Open Notebook trio since K.5b
 #   agent-org/docker/  Mattermost + the governed agent-bridge org
 #
-# Keeping the project name `ai-stack` is what keeps every external reference
-# (ai-stack_llm-net / ai-stack_app-net / ai-stack_default) valid unchanged.
+# The project name is PINNED by `name: ai-stack` below. Without it compose
+# names the project after the directory this file sits in, so a clone into
+# `openwebui-docker/` made `openwebui-docker_llm-net` while every plane attaches
+# to `ai-stack_llm-net` / `ai-stack_app-net` / `ai-stack_default` externally.
 # Container rule still applies: adding/removing/moving a service = the plane
 # compose file + recovery scripts + the stack-map doc together.
 
@@ -38,6 +43,8 @@
 # was removed; the volume itself is untouched on the daemon, and deleting it
 # (with the other pre-split volumes) stays the operator's call — CLEANUP-PLAN v3
 # K.6 / stack-layers D7.
+
+name: ai-stack
 
 networks:
   # Internal-only CALLER plane: no internet access. Every inference consumer

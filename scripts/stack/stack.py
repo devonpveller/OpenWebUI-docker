@@ -149,6 +149,15 @@ class Manifest:
     def is_implicit(self, name: str) -> bool:
         return bool(self.plane(name).get("implicit", False))
 
+    def networks_only(self, name: str) -> bool:
+        """The plane's compose file declares networks and NO service (the anchor).
+
+        `docker compose up -d` on such a project exits 1 with "no service
+        selected" (measured on compose v2.33 and v5.3), so `up` must not issue
+        it: ensure_networks() creates what is missing instead.
+        """
+        return bool(self.plane(name).get("networks_only", False))
+
     def manual(self, name: str) -> str | None:
         return self.plane(name).get("manual")
 
@@ -394,20 +403,63 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def example_path(env_path: Path) -> Path:
+    """`frontend/.env` -> `frontend/.env.example`: the file a newcomer copies."""
+    return env_path.with_name(env_path.name + ".example")
+
+
+def placeholder_reason(root: Path, env_path: Path) -> str:
+    return f"still the placeholder shipped in {rel(root, example_path(env_path))}"
+
+
 def blank_keys(manifest: Manifest, root: Path, plane: str) -> list[tuple[str, str, Path]]:
-    """[(key, 'blank'|'missing', env path)] for every key that would fail the plane."""
+    """[(key, why, env path)] for every key that would fail the plane.
+
+    `why` is 'missing', 'blank', or 'still the placeholder shipped in <x>.example'.
+
+    THE PLACEHOLDER RULE. A manifest `keys` entry is a value this machine must
+    supply - a secret, a domain - so it has no value that is right everywhere.
+    Whatever its `.env.example` ships NON-BLANK for it is therefore a
+    placeholder by construction (`change-me-...`, `REPLACE_WITH_...`,
+    `ai.example.com`), and an env file still holding exactly that value was
+    copied and never filled in. Frontend's WEBUI_SECRET_KEY is the case that
+    matters: the shipped value passes the compose file's `:?` guard, so Open
+    WebUI would start encrypting webui.db with a key printed in a public repo.
+    A key the example ships BLANK is caught by the 'blank' rule instead.
+    """
     wanted = manifest.keys(plane)
     if not wanted:
         return []
     env_path = manifest.env_path(root, plane)
     values = read_env_file(env_path)
+    shipped = read_env_file(example_path(env_path))
     problems = []
     for key in wanted:
         if key not in values:
             problems.append((key, "missing", env_path))
         elif values[key].strip() == "":
             problems.append((key, "blank", env_path))
+        elif shipped.get(key, "").strip() and values[key].strip() == shipped[key].strip():
+            problems.append((key, placeholder_reason(root, env_path), env_path))
     return problems
+
+
+def placeholder_keys(manifest: Manifest, root: Path, plane: str) -> list[tuple[str, str, Path]]:
+    """The subset of blank_keys() that is a shipped placeholder (what `up` refuses)."""
+    return [p for p in blank_keys(manifest, root, plane) if p[1] not in ("missing", "blank")]
+
+
+def missing_submodule(manifest: Manifest, root: Path, plane: str) -> str | None:
+    """The submodule path when the plane's compose file is absent because of it."""
+    compose_rel = manifest.plane(plane)["compose"]
+    if (root / Path(compose_rel)).is_file():
+        return None
+    first = compose_rel.replace("\\", "/").split("/")[0]
+    return first if first in submodule_paths(root) else None
+
+
+def submodule_remedy(submodule: str) -> str:
+    return f"`git submodule update --init {submodule}`"
 
 
 def rel(root: Path, path: Path) -> str:
@@ -514,6 +566,131 @@ def subprocess_runner(cmd, cwd) -> int:
 
 
 # --------------------------------------------------------------------------
+# the anchor: ensure its networks, never `up` it
+# --------------------------------------------------------------------------
+#
+# WHY NOT `docker compose up -d` (the step this replaces). The root compose file
+# declares networks and ZERO services, and compose refuses to act on a project
+# with no service: `up -d`, `up --no-start` and `up -d --no-start` all print
+# "no service selected" and exit 1 (measured on compose v2.33.0 in a DinD, and
+# the same message is what a real `stack.py up` printed at 3c3ff75). `_drive`
+# stops at the first non-zero exit, so EVERY real `up` ended at the anchor
+# before it reached a single plane. Every earlier test used --dry-run, which
+# never calls the runner. `docker compose create` exits 0 but creates nothing.
+#
+# WHY `docker network create`, and how it stays compose-compatible:
+#   * the SPEC comes from compose's own render, never from parsing YAML here:
+#     `config --no-interpolate --format json`. The flag is load-bearing. A
+#     plain `config` PRUNES networks no service uses, which for this project is
+#     all of them - it renders `{"name": ..., "services": {}}` and nothing else
+#     (measured, v2.33.0 and v5.3.0). `--no-interpolate` keeps them. The anchor
+#     interpolates no variable today; one that ever does is refused, not guessed.
+#   * the LABELS are the two compose reads back when it later resolves a network
+#     it owns: com.docker.compose.project and com.docker.compose.network. The
+#     config-hash label is deliberately NOT written - compose treats a network
+#     without one as not diverged (an older compose's network), whereas a hash
+#     that disagreed with its own would make it offer to recreate the network.
+#   * a network that ALREADY EXISTS is inspected and left exactly as it is -
+#     never recreated, never altered, never disconnected - even when its flags
+#     differ from the declaration (that is printed, not repaired). On a running
+#     host every plane is attached to these three networks.
+#   * a key in the render this function does not translate (ipam, enable_ipv6,
+#     ...) is a REFUSAL naming it, never a silently weaker network.
+
+_NETWORK_KEYS_TRANSLATED = {"name", "driver", "internal", "attachable", "driver_opts", "labels", "external"}
+
+
+def _network_spec_refusal(compose_rel: str, key: str, why: str) -> Refusal:
+    return Refusal(
+        f"refused: network '{key}' in {compose_rel} {why}; stack.py creates the anchor's networks "
+        f"itself (compose cannot `up` a project with no service) and will not create a weaker one. "
+        f"Create it by hand with `docker network create`, or teach ensure_networks() the key."
+    )
+
+
+def anchor_render_command(manifest: Manifest, plane: str, context=None) -> list[str]:
+    return compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"],
+                           context=context)
+
+
+def anchor_networks(manifest: Manifest, root: Path, plane: str, capture, context=None):
+    """(project name, [(key, spec)]) for every NON-external network the plane declares."""
+    compose_rel = manifest.plane(plane)["compose"]
+    cmd = anchor_render_command(manifest, plane, context)
+    result = capture(cmd, root)
+    if result.code != 0:
+        raise Refusal(
+            f"refused: `{' '.join(cmd)}` exited {result.code}\n"
+            + (result.stderr.strip() or result.stdout.strip())
+        )
+    try:
+        data = json.loads(result.stdout)
+    except ValueError as exc:
+        raise Refusal(f"refused: the render of {compose_rel} is not JSON ({exc})") from None
+    project = data.get("name") or ""
+    out = []
+    for key, spec in (data.get("networks") or {}).items():
+        spec = spec or {}
+        if spec.get("external"):
+            continue
+        unknown = sorted(set(spec) - _NETWORK_KEYS_TRANSLATED)
+        if unknown:
+            raise _network_spec_refusal(compose_rel, key, "declares " + ", ".join(unknown))
+        if "${" in json.dumps(spec) or "${" in project:
+            raise _network_spec_refusal(compose_rel, key, "interpolates a variable")
+        out.append((key, spec))
+    return project, out
+
+
+def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_run) -> int:
+    """Create the plane's declared networks that do not exist; touch none that do.
+
+    Idempotent: a second run finds every network and runs no create at all.
+    Returns 0, or the exit code of the first `docker network create` that failed.
+    """
+    context = state.context_of(plane)
+    compose_rel = manifest.plane(plane)["compose"]
+    console.line(f"# {plane}: {compose_rel} declares networks and no service, so it is not `up`-ed;"
+                 " each missing network is created and an existing one is left exactly as it is")
+    console.line(" ".join(anchor_render_command(manifest, plane, context)))
+    if dry_run:
+        console.line("# (dry run: nothing rendered, inspected or created)")
+        return EXIT_OK
+    project, networks = anchor_networks(manifest, root, plane, capture, context)
+    docker = ["docker"] + (["--context", context] if context else [])
+    for key, spec in networks:
+        name = spec.get("name") or f"{project}_{key}"
+        found = capture(docker + ["network", "inspect", name, "--format", "{{.Internal}}"], root)
+        if found.code == 0:
+            declared = bool(spec.get("internal", False))
+            actual = found.stdout.strip().lower() == "true"
+            note = "" if declared == actual else (
+                f" - NOTE it is {'internal' if actual else 'NOT internal'} while {compose_rel} declares "
+                f"internal: {str(declared).lower()}; stack.py never alters an existing network")
+            console.line(f"  [exists] {name} (left as is){note}")
+            continue
+        cmd = docker + ["network", "create", "--driver", spec.get("driver") or "bridge"]
+        if spec.get("internal"):
+            cmd.append("--internal")
+        if spec.get("attachable"):
+            cmd.append("--attachable")
+        for opt, value in sorted((spec.get("driver_opts") or {}).items()):
+            cmd += ["--opt", f"{opt}={value}"]
+        labels = dict(spec.get("labels") or {})
+        labels["com.docker.compose.project"] = project
+        labels["com.docker.compose.network"] = key
+        for label, value in sorted(labels.items()):
+            cmd += ["--label", f"{label}={value}"]
+        cmd.append(name)
+        console.line(" ".join(cmd))
+        code = runner(cmd, root)
+        if code != 0:
+            console.line(f"# creating {name} exited {code}")
+            return code
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # name resolution
 # --------------------------------------------------------------------------
 
@@ -589,8 +766,15 @@ def cmd_list(manifest: Manifest, state: State, root: Path, console: Console) -> 
     return EXIT_OK
 
 
-def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, label) -> int:
+def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, label, capture=None) -> int:
     for plane in planes:
+        if verb_args[:1] == ["up"] and manifest.networks_only(plane):
+            code = ensure_networks(manifest, state, root, console, runner,
+                                   capture or subprocess_capture, plane, dry_run)
+            if code != 0:
+                console.line(f"# {label} stopped: {plane} exited {code}")
+                return EXIT_REFUSED
+            continue
         cmd = compose_command(
             manifest,
             plane,
@@ -655,15 +839,43 @@ def _requires_note(manifest, console, plane: str, driven) -> None:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
 
-def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool) -> int:
+def _preflight(manifest, root, planes, verb: str) -> None:
+    """Refuse BEFORE anything runs: a missing submodule, or a key still at its placeholder.
+
+    Both are checked for every plane first, so a refusal never lands halfway
+    through a bring-up with the anchor's networks made and nothing else.
+    Blank and missing keys are NOT refused here: `enable`/`doctor` name those,
+    and each plane's compose `:?` guards refuse them at render time.
+    """
+    lines = []
+    for plane in planes:
+        submodule = missing_submodule(manifest, root, plane)
+        if submodule:
+            lines.append(
+                f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
+                f"submodule is not initialised - run {submodule_remedy(submodule)}"
+            )
+    for plane in planes:
+        for key, why, env_path in placeholder_keys(manifest, root, plane):
+            lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
+    if lines:
+        raise Refusal(
+            f"refused: `{verb}` would start nothing until these are fixed:\n" + "\n".join(lines)
+            + "\nNothing was started. Replace each placeholder with a value of your own (for a secret: "
+            "`openssl rand -hex 32`), then re-run."
+        )
+
+
+def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool, capture=None) -> int:
     ordered, mode = select_planes(manifest, state, plane, every, "up")
     if not ordered:
         console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
         return EXIT_OK
     driven = [p for p in ordered if not manifest.manual(p)]
+    _preflight(manifest, root, driven, "up")
     if mode == "one":
         _requires_note(manifest, console, plane, driven)
-    code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up")
+    code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
     _manual_notes(manifest, console, [p for p in ordered if manifest.manual(p)], "start")
     return code
 
@@ -716,6 +928,16 @@ def cmd_status(manifest, state, root, console, runner, plane=None, every: bool =
 def _key_problem_lines(manifest, root, planes, subject) -> list[str]:
     lines = []
     for plane in planes:
+        submodule = missing_submodule(manifest, root, plane)
+        if submodule:
+            # Its env file lives inside the submodule too, so listing every key
+            # as "missing" there would send a newcomer to edit a file that
+            # cannot exist yet. Name the one step that fixes all of it.
+            lines.append(
+                f"  {manifest.plane(plane)['compose']} is missing (plane {plane}): the {submodule} "
+                f"submodule is not initialised - run {submodule_remedy(submodule)}"
+            )
+            continue
         for key, why, env_path in blank_keys(manifest, root, plane):
             where = f" (read by plane {plane})" if plane != subject else ""
             lines.append(
@@ -727,14 +949,23 @@ def _key_problem_lines(manifest, root, planes, subject) -> list[str]:
 def _key_remedy(manifest, root, planes) -> str:
     """The requires-refusal names a command; this one must too."""
     files = []
+    submodules = []
     for plane in planes:
+        submodule = missing_submodule(manifest, root, plane)
+        if submodule:
+            if submodule not in submodules:
+                submodules.append(submodule)
+            continue
         path = rel(root, manifest.env_path(root, plane))
         if blank_keys(manifest, root, plane) and path not in files:
             files.append(path)
+    first = "".join(f"Run {submodule_remedy(s)}. " for s in submodules)
+    if submodules and not files:
+        return first + "Then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
     where = " and ".join(files) if files else "the plane's env file"
     return (
-        f"Set them in {where}, then re-run "
-        "(`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+        f"{first}Set them in {where} (a value still equal to the .env.example placeholder counts as unset), "
+        "then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
     )
 
 
@@ -908,8 +1139,14 @@ def cmd_doctor(manifest, state, root, console, runner) -> int:
     for plane in order_planes(manifest, dependency_closure(manifest, enabled)):
         console.line(f"  {plane}")
         compose_path = root / Path(manifest.plane(plane)["compose"])
+        submodule = missing_submodule(manifest, root, plane)
         if compose_path.is_file():
             console.line(f"    [OK]   compose {manifest.plane(plane)['compose']}")
+        elif submodule:
+            console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']} - the "
+                         f"{submodule} submodule is not initialised; run {submodule_remedy(submodule)}")
+            problems += 1
+            continue  # its env file and keys live inside the submodule too
         else:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
@@ -918,6 +1155,11 @@ def cmd_doctor(manifest, state, root, console, runner) -> int:
                   else "compose loads it from the project dir")
         if env_path.is_file():
             console.line(f"    [OK]   env {rel(root, env_path)} ({loaded})")
+        elif manifest.networks_only(plane) and not manifest.keys(plane):
+            # The anchor declares networks and interpolates nothing, so a fresh
+            # clone without a root .env is complete, not broken.
+            console.line(f"    [ -- ] env {rel(root, env_path)} absent - not needed: this plane "
+                         "declares only networks and reads no key")
         else:
             console.line(f"    [FAIL] env file missing: {rel(root, env_path)} ({loaded})")
             problems += 1
@@ -1100,13 +1342,21 @@ except Exception as exc:
 class HealthSweep:
     """Runs the probes, prints them, counts the failures."""
 
-    def __init__(self, console: Console, root: Path, capture, http):
+    # The planes that own probes, in sweep order. `run` probes a plane only when
+    # it is in `planes` (None = every one, the pre-scoping behaviour).
+    PROBED_PLANES = ("anchor", "inference", "frontend", "memory", "search", "coder", "ob1", "agent-org")
+
+    def __init__(self, console: Console, root: Path, capture, http, planes=None):
         self.console = console
         self.root = root
         self.capture = capture
         self.http = http
+        self.planes = None if planes is None else set(planes)
         self.failed = 0
         self.results: list[tuple[str, bool]] = []
+
+    def on(self, plane: str) -> bool:
+        return self.planes is None or plane in self.planes
 
     def probe(self, name: str, ok) -> None:
         try:
@@ -1129,107 +1379,134 @@ class HealthSweep:
     # -- the sweep ---------------------------------------------------------
 
     def run(self) -> int:
-        self.console.line("== container health (all projects)")
-        unhealthy = [
-            line.strip()
-            for line in self.docker(
-                "ps", "--filter", "health=unhealthy", "--format", "{{.Names}}"
-            ).stdout.splitlines()
-            if line.strip()
-        ]
-        self.probe(f"0 unhealthy containers (found: {', '.join(unhealthy)})", len(unhealthy) == 0)
+        # SCOPED TO THE ENABLED PLANES (ac-front-door). A probe for a plane this
+        # machine does not run can only ever FAIL - a fresh clone running Open
+        # WebUI alone used to get fourteen FAIL lines and exit 14. The skipped
+        # planes are named on ONE line, so a reader can tell "not run here" from
+        # "not checked". The anchor's probes always run: every plane needs it.
+        skipped = [p for p in self.PROBED_PLANES if not self.on(p)]
+        if self.on("anchor"):
+            self.console.line("== container health (all projects)")
+            unhealthy = [
+                line.strip()
+                for line in self.docker(
+                    "ps", "--filter", "health=unhealthy", "--format", "{{.Names}}"
+                ).stdout.splitlines()
+                if line.strip()
+            ]
+            self.probe(f"0 unhealthy containers (found: {', '.join(unhealthy)})", len(unhealthy) == 0)
 
         self.console.line("== functional gates")
-        self.probe(
-            "anchor: ai-stack_llm-net exists",
-            lambda: self.docker(
-                "network", "inspect", "ai-stack_llm-net", "--format", "{{.Name}}"
-            ).stdout.strip() == "ai-stack_llm-net",
-        )
-        self.probe(
-            "inference: llm-gateway liveliness",
-            # /health/liveliness, never /health: a GET of LiteLLM's /health
-            # through the alias makes it load every model it advertises.
-            lambda: self.docker(
-                "exec", "llm-gateway", "python", "-c",
-                "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
-                "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
-            ).code == 0,
-        )
-        depth, depth_ok = self.inference_serving_depth()
-        self.probe(f"inference: {depth}", depth_ok)
-        self.probe(
-            "frontend: OWUI http://127.0.0.1:3000/health",
-            lambda: self.http_ok("http://127.0.0.1:3000/health"),
-        )
-        # The frontend plane is profile-gated since sl-frontend-solo: a deployment
-        # without the `tailscale` profile has no tailscale container, and telling
-        # its operator that eight serve routes are missing is a FAIL line about a
-        # container that is not meant to exist. This guard and its two fail-open
-        # paths came across from that item's stack.ps1 when this sweep replaced it.
-        deployed, note = self.tailscale_deployed()
-        if deployed:
-            if note:
-                self.console.line("  [warn] " + note)
+        if skipped:
+            self.console.line("  [skip] not enabled on this machine, probes not run: " + ", ".join(skipped))
+        if self.on("anchor"):
             self.probe(
-                "frontend: 8 tailnet serve routes",
-                lambda: int(
-                    self.docker(
-                        "exec", "tailscale", "sh", "-c",
-                        "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null "
-                        "| grep -c 'proxy http'",
-                    ).stdout.strip()
-                ) >= 8,
+                "anchor: ai-stack_llm-net exists",
+                lambda: self.docker(
+                    "network", "inspect", "ai-stack_llm-net", "--format", "{{.Name}}"
+                ).stdout.strip() == "ai-stack_llm-net",
             )
-        else:
-            self.console.line(
-                "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)"
+        if self.on("inference"):
+            self.probe(
+                "inference: llm-gateway liveliness",
+                # /health/liveliness, never /health: a GET of LiteLLM's /health
+                # through the alias makes it load every model it advertises.
+                lambda: self.docker(
+                    "exec", "llm-gateway", "python", "-c",
+                    "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
+                    "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
+                ).code == 0,
             )
-        drift = self.owui_drift()
-        self.probe(f"frontend: owui/ manifest rows drifted from live webui.db: {drift}", drift == "0")
-        self.probe(
-            "memory: cloud door http://127.0.0.1:8060/health",
-            lambda: self.http_ok("http://127.0.0.1:8060/health"),
-        )
-        self.probe(
-            "search: gateway http://127.0.0.1:8085/healthz",
-            lambda: self.http_ok("http://127.0.0.1:8085/healthz"),
-        )
-        engines = self.search_engines()
-        self.probe(f"search: {engines}", engines != "REFUSED" and not engines.startswith("DEGRADED"))
-        self.probe(
-            "coder: little-coder daemon :8090/health",
-            lambda: self.docker(
-                "exec", "little-coder", "curl", "-fsS", "--max-time", "8",
-                "http://localhost:8090/health",
-            ).code == 0,
-        )
-        self.probe(
-            "OB1: open_notebook API :5055/api/config",
-            lambda: self.http_ok("http://127.0.0.1:5055/api/config"),
-        )
-        self.probe("OB1: ops door :8062/health", lambda: self.http_ok("http://127.0.0.1:8062/health"))
-        # The curator answers 503 with {"ok":false,"db":false} when its DB is gone
-        # and nothing at all while crash-looping (2026-09-05: "Module not found
-        # pool.ts", noticed 14 h late from a disk check). Either reads as FAIL.
-        self.probe(
-            "OB1: research-curator http://127.0.0.1:8816/health",
-            lambda: self.http_ok("http://127.0.0.1:8816/health"),
-        )
-        self.probe(
-            "OB1: openbrain-db accepting connections",
-            lambda: self.docker(
-                "exec", "openbrain-db", "pg_isready", "-U", "postgres", "-d", "openbrain", "-t", "5"
-            ).code == 0,
-        )
-        self.probe(
-            "agent-org: mattermost ping",
-            lambda: self.docker(
-                "exec", "agent-bridge", "python", "-c",
-                "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
-                "'http://mattermost:8065/api/v4/system/ping', timeout=8).status==200 else 1)",
-            ).code == 0,
-        )
+            depth, depth_ok = self.inference_serving_depth()
+            self.probe(f"inference: {depth}", depth_ok)
+        if self.on("frontend"):
+            self.probe(
+                "frontend: OWUI http://127.0.0.1:3000/health",
+                lambda: self.http_ok("http://127.0.0.1:3000/health"),
+            )
+            # The frontend plane is profile-gated since sl-frontend-solo: a deployment
+            # without the `tailscale` profile has no tailscale container, and telling
+            # its operator that eight serve routes are missing is a FAIL line about a
+            # container that is not meant to exist. This guard and its two fail-open
+            # paths came across from that item's stack.ps1 when this sweep replaced it.
+            deployed, note = self.tailscale_deployed()
+            if deployed:
+                if note:
+                    self.console.line("  [warn] " + note)
+                self.probe(
+                    "frontend: 8 tailnet serve routes",
+                    lambda: int(
+                        self.docker(
+                            "exec", "tailscale", "sh", "-c",
+                            "tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null "
+                            "| grep -c 'proxy http'",
+                        ).stdout.strip()
+                    ) >= 8,
+                )
+            else:
+                self.console.line(
+                    "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)"
+                )
+            shell = powershell_command()
+            if shell is None:
+                # check-owui-drift.ps1 is PowerShell-only. Off Windows, with no
+                # `pwsh` on PATH, the probe cannot run - and saying so on a [skip]
+                # line is honest where a FAIL about a missing interpreter is not.
+                self.console.line(
+                    "  [skip] frontend: owui/ manifest drift (scripts/checks/check-owui-drift.ps1 needs "
+                    "PowerShell; neither Windows nor `pwsh` on PATH)"
+                )
+            else:
+                drift = self.owui_drift(shell)
+                self.probe(f"frontend: owui/ manifest rows drifted from live webui.db: {drift}", drift == "0")
+        if self.on("memory"):
+            self.probe(
+                "memory: cloud door http://127.0.0.1:8060/health",
+                lambda: self.http_ok("http://127.0.0.1:8060/health"),
+            )
+        if self.on("search"):
+            self.probe(
+                "search: gateway http://127.0.0.1:8085/healthz",
+                lambda: self.http_ok("http://127.0.0.1:8085/healthz"),
+            )
+            engines = self.search_engines()
+            self.probe(f"search: {engines}", engines != "REFUSED" and not engines.startswith("DEGRADED"))
+        if self.on("coder"):
+            self.probe(
+                "coder: little-coder daemon :8090/health",
+                lambda: self.docker(
+                    "exec", "little-coder", "curl", "-fsS", "--max-time", "8",
+                    "http://localhost:8090/health",
+                ).code == 0,
+            )
+        if self.on("ob1"):
+            self.probe(
+                "OB1: open_notebook API :5055/api/config",
+                lambda: self.http_ok("http://127.0.0.1:5055/api/config"),
+            )
+            self.probe("OB1: ops door :8062/health", lambda: self.http_ok("http://127.0.0.1:8062/health"))
+            # The curator answers 503 with {"ok":false,"db":false} when its DB is gone
+            # and nothing at all while crash-looping (2026-09-05: "Module not found
+            # pool.ts", noticed 14 h late from a disk check). Either reads as FAIL.
+            self.probe(
+                "OB1: research-curator http://127.0.0.1:8816/health",
+                lambda: self.http_ok("http://127.0.0.1:8816/health"),
+            )
+            self.probe(
+                "OB1: openbrain-db accepting connections",
+                lambda: self.docker(
+                    "exec", "openbrain-db", "pg_isready", "-U", "postgres", "-d", "openbrain", "-t", "5"
+                ).code == 0,
+            )
+        if self.on("agent-org"):
+            self.probe(
+                "agent-org: mattermost ping",
+                lambda: self.docker(
+                    "exec", "agent-bridge", "python", "-c",
+                    "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen("
+                    "'http://mattermost:8065/api/v4/system/ping', timeout=8).status==200 else 1)",
+                ).code == 0,
+            )
 
         self.console.line("")
         if self.failed == 0:
@@ -1392,7 +1669,7 @@ class HealthSweep:
                           "migrated - documentation/runbooks/env-split-migration.md")
         return False, ""
 
-    def owui_drift(self) -> str:
+    def owui_drift(self, shell=("powershell",)) -> str:
         """'0', a drifted count, or 'REFUSED - <why>'. Never raises.
 
         owui/ plugins deploy BY PASTE: nothing links the repo file to the live
@@ -1403,7 +1680,7 @@ class HealthSweep:
         """
         script = self.root / "scripts" / "checks" / "check-owui-drift.ps1"
         result = self.capture(
-            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-CountOnly"],
+            [*shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-CountOnly"],
             self.root,
         )
         values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
@@ -1438,9 +1715,28 @@ class HealthSweep:
             return "REFUSED"
 
 
-def cmd_health(root, console, capture, http) -> int:
-    """Exit code is the NUMBER OF FAILED PROBES, exactly as stack.ps1 health."""
-    return HealthSweep(console, root, capture, http).run()
+def powershell_command():
+    """The interpreter for the .ps1 checks, or None when there is none.
+
+    `powershell` on Windows (5.1 is what those scripts are written for); off
+    Windows, `pwsh` when it is on PATH. A function rather than a constant so a
+    test can ask either question without touching the host.
+    """
+    if WINDOWS:
+        return ("powershell",)
+    return ("pwsh",) if shutil.which("pwsh") else None
+
+
+def cmd_health(manifest, state, root, console, capture, http) -> int:
+    """Exit code is the NUMBER OF FAILED PROBES among the probes that RAN.
+
+    Only the planes this machine enables (plus what they require - the anchor)
+    are probed; the rest are named on one [skip] line.
+    """
+    enabled = [p for p in manifest.order if state.is_enabled(p)]
+    planes = dependency_closure(manifest, enabled) if enabled else set()
+    planes |= {p for p in manifest.order if manifest.is_implicit(p)}
+    return HealthSweep(console, root, capture, http, planes).run()
 
 
 # --------------------------------------------------------------------------
@@ -2230,7 +2526,8 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
         if args.verb == "status":
             return cmd_status(manifest, state, root, console, runner, args.plane, args.every)
         if args.verb == "up":
-            return cmd_up(manifest, state, root, console, runner, args.plane, args.every, args.dry_run)
+            return cmd_up(manifest, state, root, console, runner, args.plane, args.every, args.dry_run,
+                          capture)
         if args.verb == "down":
             return cmd_down(manifest, state, root, console, runner, args.plane, args.every, args.dry_run)
         if args.verb == "restart":
@@ -2244,7 +2541,7 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
         if args.verb == "init":
             return cmd_init(manifest, state, root, console, args)
         if args.verb == "health":
-            return cmd_health(root, console, capture, http)
+            return cmd_health(manifest, state, root, console, capture, http)
         if args.verb == "stats":
             return cmd_stats(root, console, runner)
         if args.verb == "inventory":
