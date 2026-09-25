@@ -68,7 +68,7 @@ $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 # `*\.claude\*` entry that used to sit in this list allowed the ENTIRE tree:
 # the guard filtered every candidate away, read none of them, and exited 0. Measured
 # 2026-09-19 by planting a bypass in a worktree and watching it pass - see
-# documentation/notes/routing-check-worktree-blindspot-2026-09-19.md.
+# ../documentation-plans-ai-stack/journal/notes/routing-check-worktree-blindspot-2026-09-19.md.
 # check-env-file-scope.ps1 was fixed the same way on 2026-09-20, and
 # check-corpus-exposure-producers.ps1 documents why it never copied the glob in.
 #

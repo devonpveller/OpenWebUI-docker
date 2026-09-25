@@ -249,7 +249,7 @@ USAGE_REPORT_BUDGET_S = 3.0
 # The live risk while it is unset is the inverse of the plan's: with no floor, recall returns
 # the top-K by distance whatever their relevance. That is why AO_MEMORY_RECALL_ENABLED is a
 # SEPARATE flag from the writeback one - writes build the corpus while reads stay shut.
-# Calibration steps: documentation/notes/agent-memory-recall-threshold.md.
+# Calibration steps: ../documentation-plans-ai-stack/journal/notes/agent-memory-recall-threshold.md.
 
 
 def _recall_lines(items: list) -> list:

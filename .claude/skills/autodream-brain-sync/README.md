@@ -12,7 +12,7 @@ Whenever Claude Code saves a memory (via dreaming, autodream, or explicit reques
 
 ## Prerequisites
 
-- Working Open Brain setup with `capture_thought` tool available ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup with `capture_thought` tool available ([guide](../../../OB1/docs/01-getting-started.md))
 - Claude Code with auto-memory enabled
 
 ## Installation

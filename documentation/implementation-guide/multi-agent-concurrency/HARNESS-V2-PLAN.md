@@ -203,7 +203,7 @@ next real workload — each is a genuine repo fix and a test of the loop.
 |---|---|---|
 | 2 | `Repair-OpenTerminal` + 3 siblings target the empty anchor project | narrow, verifiable, has a real failing repro |
 | 3 | `stack.ps1 health` cannot see a dead executor | requires a design choice, not just an edit |
-| 4 | `CLEANUP-PLAN.md` K.4 record is wrong and was copied into 8+ docs | touches overlapping code; tests conflict handling |
+| 4 | `CLEANUP-PLAN.md` (now `../documentation-plans-ai-stack/journal/CLEANUP-PLAN.md`) K.4 record is wrong and was copied into 8+ docs | touches overlapping code; tests conflict handling |
 | 5 | `little-coder-backup.sh` header says four volumes, five are mounted | trivial; a control for cycle-time measurement |
 | 6 | `test_git_proxy.py` docstring describes a mount that does not exist | tests whether an agent will correct a *comment* honestly |
 

@@ -19,6 +19,17 @@ Agents follow
 `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`;
 you follow this.
 
+**Where an item's paperwork goes: the plan store, never this repo.** Anchors,
+findings sinks, test plans and evidence for a harness item live in the private
+sibling repo `../documentation-plans-ai-stack/`:
+`implementation-guide/<feature>/anchors/<id>.json`,
+`implementation-guide/<feature>/findings/<id>.md`,
+`implementation-guide/<feature>/test-plans/<id>.md`, and `journal/evidence/<id>/` (or
+`journal/notes/` when there is no feature). Commit and push the store in the same
+sitting. The code repo's pre-commit refuses new files under `documentation/notes`,
+`documentation/evidence`, `documentation/archive` and new root-level `TEST-PLAN*` /
+`*-FINDINGS*` files (CLAUDE.md, "Where documentation goes").
+
 ## First: is it even on?
 
 ```powershell

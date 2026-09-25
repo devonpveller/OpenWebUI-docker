@@ -73,7 +73,7 @@
         "findings_sink": {
           "required": false,
           "kind": "string",
-          "why": "where incidental discoveries go, so real findings are neither lost nor pasted into the deliverable. Its contents are held to the SAME standard as the artifact - a claim about what a script does is verified against that code path, not against its comments"
+          "why": "where incidental discoveries go, so real findings are neither lost nor pasted into the deliverable. It is a path in the PLAN STORE (../documentation-plans-ai-stack/implementation-guide/<feature>/findings/<id>.md, or journal/notes/ there when there is no feature) - the code repo refuses new journal files since 2026-09-25. Its contents are held to the SAME standard as the artifact - a claim about what a script does is verified against that code path, not against its comments"
         }
       },
       "forbidden": {}

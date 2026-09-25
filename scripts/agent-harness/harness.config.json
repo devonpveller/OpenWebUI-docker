@@ -329,7 +329,7 @@
         "params": { "repo": "", "stale_seconds": 0 },
         "on_fire": "halt",
         "on_indeterminate": "halt",
-        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md"
+        "incident": "../documentation-plans-ai-stack/journal/notes/drill-rebased-the-work-line-incident.md"
       },
       {
         "id": "policy-declared-unread",
@@ -359,7 +359,7 @@
         },
         "on_fire": "halt",
         "on_indeterminate": "halt",
-        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
+        "incident": "../documentation-plans-ai-stack/journal/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
       },
       {
         "id": "work-branch-on-remote",

@@ -1,7 +1,7 @@
 """The little-coder runner's `docker exec` transport for the quadrant comparison.
 
 WHY THIS EXISTS AS A TRANSPORT AND NOT AS AN HTTP CALL. Three constraints were measured on
-2026-08-30 (`documentation/notes/dfu-u4-findings.md` F2/F3/F5/F6), and together they decide
+2026-08-30 (`../documentation-plans-ai-stack/journal/notes/dfu-u4-findings.md` F2/F3/F5/F6), and together they decide
 the whole shape of this file:
 
   1. **The task API is not published.** `docker inspect little-coder --format

@@ -33,7 +33,7 @@ $staged = @(& git diff --cached --name-only --diff-filter=ACM) | Where-Object { 
 # enforce is a separate change - but the EARLY EXIT must not be able to skip a
 # commit that really did stage something. The gates 1-3 half of this is left
 # open deliberately and written down in
-# documentation/notes/stack-layers-sl-gate4-carries-findings.md.
+# ../documentation-plans-ai-stack/journal/notes/stack-layers-sl-gate4-carries-findings.md.
 $stagedAny = @(& git diff --cached --name-only) | Where-Object { $_ }
 if (-not $stagedAny) { Write-Host "  [configs] nothing staged - skip"; Pop-Location; exit 0 }
 
@@ -377,7 +377,7 @@ if ($jsonStaged.Count -gt 0) {
 # because nothing had ever looked BELOW 0x20.
 #
 # ADDED LINES, not whole files, and deliberately so: eleven such bytes already
-# sit in older documentation/evidence and documentation/notes files (measured
+# sit in older ../documentation-plans-ai-stack/journal/evidence and ../documentation-plans-ai-stack/journal/notes files (measured
 # 2026-09-21), and a whole-file rule would fail the next commit that touches one
 # of them for an unrelated reason. This catches what a commit INTRODUCES, which
 # is the failure mode.

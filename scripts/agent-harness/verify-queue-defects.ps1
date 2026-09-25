@@ -43,7 +43,7 @@
 #       whose T5 and T6 headings read `PASS (scoped ...)` and `PASS (... chat half NOT
 #       run)` - the tester wrote the truth on the line and the tool recorded one word for
 #       the whole item. The REAL curator2 plan and evidence are replayed here, unedited,
-#       from documentation/evidence/passplan/fixtures/, and must be refused naming T5 and
+#       from scripts/agent-harness/fixtures/passplan/, and must be refused naming T5 and
 #       T6. Then the synthetic matrix: absent, FAIL, SKIPPED, 'PASS (scoped', 'PASS
 #       (partial', anything after PASS - each refused by name; all-bare-PASS accepted; the
 #       per-case rows land in results[] and -Show prints them; -Fail records them without
@@ -84,7 +84,7 @@
 #   D15 [needs hand-off] came from line_mergeable, set at -Submit and never cleared, so 32 of
 #       the live board's 42 rows wore it and 31 of those were terminal - the one row where it
 #       was TRUE was one in thirty-two (counted 2026-09-06; the reconciliation of three
-#       readings is the table in documentation/notes/deploy-gate-2026-09-06.md, which is the
+#       readings is the table in ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md, which is the
 #       figure of record). Terminal states never show it now; moving ones still do.
 #   D16 -Submit after -AmendAnchor left `attempt` alone, so the next -Pass would overwrite
 #       the previous attempt's evidence file (D1 through another door). It bumps now, and
@@ -237,7 +237,7 @@ Set-Content -Path $anchorFile -Encoding ascii -Value @(
     '    "It contains exactly one line. Fail: it is empty or contradictory."',
     '  ],',
     '  "out_of_scope": ["Anything outside WORK.md."],',
-    '  "findings_sink": "documentation/notes/queue-defect-drill.md"',
+    '  "findings_sink": "../documentation-plans-ai-stack/journal/notes/queue-defect-drill.md"',
     '}')
 # Plans carry CASE HEADINGS (`## Case <n>` / `## T<n>`) since D8: -Submit refuses a plan
 # the case parser cannot read, and -Pass checks the evidence against these headings. The
@@ -643,11 +643,11 @@ Step "D8  a scoped, skipped, failed or MISSING case cannot become a pass"
 # two cases existed to exercise had never been built. The tester told the truth on the
 # heading line. The tool did not read it.
 #
-# THE REPLAY IS THE REAL FILES. documentation/evidence/passplan/fixtures/ holds the
+# THE REPLAY IS THE REAL FILES. scripts/agent-harness/fixtures/passplan/ holds the
 # curator2 plan and evidence byte-for-byte as they sit in the live queue. Their headings are
 # the fixture: the checks below prove the two lines are still there BEFORE driving them
 # through -Pass, so an edit that made the case easier makes this drill red instead.
-$fixDir = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "documentation\evidence\passplan\fixtures"
+$fixDir = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path "scripts\agent-harness\fixtures\passplan"
 $c2Plan = Join-Path $fixDir "curator2.plan.md"
 $c2Ev = Join-Path $fixDir "curator2.attempt1.evidence.md"
 Check "D8 fixture: the real curator2 plan and evidence are committed beside this drill" `

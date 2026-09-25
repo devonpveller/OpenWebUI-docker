@@ -1,8 +1,8 @@
 """Which engines are actually answering — measured, not inferred from errors.
 
-research-trust 2026-09-11. The operational hazard the audit and
-``documentation/notes/search-engine-alternatives-2026-09-11.md`` §5 both land
-on: **the failing engine is the one that never reports a failure.** Over seven
+research-trust 2026-09-11. The operational hazard the audit and the plan
+store's ``journal/notes/search-engine-alternatives-2026-09-11.md`` §5 both
+land on: **the failing engine is the one that never reports a failure.** Over seven
 days of live SearXNG logs, mojeek raised 47 errors, wikipedia 21, google 3 —
 and bing, which returned ten irrelevant hits for the first token of every
 single query, raised one timeout. Any alert keyed off engine errors shows bing

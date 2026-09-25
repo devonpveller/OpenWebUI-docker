@@ -130,19 +130,21 @@ CHECK_CMD = "python scripts/checks/check_quadrant_evidence_reproduces.py --auto"
 
 #: WHERE THIS DRILL LOOKS FOR THE REAL RUN EVIDENCE IT SEEDS. `.quadrant/gym-runs` is the
 #: WORKING location - gitignored, per-checkout, thrown away with the worktree that produced
-#: it; `documentation/evidence/` is the COMMITTED one. Only the first was searched until
+#: it; `scripts/agent-harness/quadrant/evidence/` is the COMMITTED one (it was
+#: `documentation/evidence/` until 2026-09-25, when the journal moved to the plan store and
+#: the run records CODE reads moved beside the code - see check_quadrant_evidence_reproduces.py). Only the first was searched until
 #: 2026-09-02, and that is why this drill answered `NO EVIDENCE`, exit 2, in every checkout
 #: but the one that ran the arena dispatch: its gym records had been deleted with their
 #: worktree - byte for byte the loss that destroyed U4's quadrant comparison, where
 #: .gitignore's "run artifacts, not source" rule took the audit trail with it. This is U4's
 #: own fix applied to the drill that first earned the rule; see
 #: check_quadrant_evidence_reproduces.py, whose DISCOVERY_ROOTS gained
-#: `documentation/evidence` on 2026-08-31 for exactly this reason.
+#: its committed root on 2026-08-31 for exactly this reason.
 #:
 #: WIDENING THE SEARCH DOES NOT WIDEN WHAT IS ADMISSIBLE, which is the whole reason it is
 #: safe: every candidate is still filtered on `record.venue.name == <the configured venue>`,
 #: and the venue gate above is untouched - this drill still REFUSES to run outside the arena.
-SOURCE_ROOTS = (".quadrant/gym-runs", "documentation/evidence")
+SOURCE_ROOTS = (".quadrant/gym-runs", "scripts/agent-harness/quadrant/evidence")
 
 
 def _source_roots_phrase() -> str:

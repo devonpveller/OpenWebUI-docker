@@ -69,7 +69,7 @@
   alphabet was worth doing and was still NOT the fix.
 
   A producer this gate cannot see breaks PRODUCTION, not this gate - and per the section 16
-  finding in documentation/notes/u8h3-findings.md it breaks it QUIETLY, because the producers
+  finding in ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md it breaks it QUIETLY, because the producers
   that fail this way CATCH the 42501 and carry on. `openbrain-gmail-pull` ran for a day
   logging `Ingested: 0 email(s)` and exiting 0. Fail-closed is not fail-visibly.
 

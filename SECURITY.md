@@ -222,7 +222,7 @@ In approximate priority order:
 
 ## 10. References
 
-- Implementation plan: [documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md](documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
+- Implementation plan: [../documentation-plans-ai-stack/journal/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md](../documentation-plans-ai-stack/journal/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
 - Post-implementation audit (2026-05-29): [../documentation-plans-ai-stack/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](../documentation-plans-ai-stack/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
 - Incident response playbook: [documentation/runbooks/incident-response.md](documentation/runbooks/incident-response.md)
 - Backup conventions (new services): [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md)

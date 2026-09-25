@@ -9,7 +9,7 @@
 # Do not read a count into that. This comment said "every drill here ... three and three",
 # which was a claim about NINE scripts made from a survey of six, and the findings note's
 # version of it was corrected twice more before it was right. The current numbers live in
-# finding 5 of documentation/notes/harness-reap-findings-2026-09-07.md, with the enumeration
+# finding 5 of ../documentation-plans-ai-stack/journal/notes/harness-reap-findings-2026-09-07.md, with the enumeration
 # they came from; the last correction happened because a grep for `} finally {` missed a
 # `finally` written at column 0 and the miss was reported as a fact about the script.
 #
@@ -61,7 +61,7 @@
 # `,@("--label","k=v")` and a call site wrapped it again as `@(Get-Args ...)`, producing an
 # array containing an array, which a native call flattens into one space-joined argument.
 # Self-inflicted, mistaken for a language rule. See finding 9 (and the correction to
-# finding 2) in documentation/notes/harness-reap-findings-2026-09-07.md.
+# finding 2) in ../documentation-plans-ai-stack/journal/notes/harness-reap-findings-2026-09-07.md.
 
 function Get-HarnessOwnerLabelKey {
     # THE KEY IS READ, NOT COPIED. `scripts/agent-harness/harness.config.json` is the single

@@ -220,61 +220,73 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   The FULL checklist is
   `documentation/runbooks/SERVICE-LIFECYCLE.md`; `/stack-map` checks drift.
 - **Archive, don't delete:** retired code goes to `scripts/archive/` (see its
-  README provenance table), retired docs to `documentation/archive/`.
-- **Findings go to `documentation/notes/`, not into the deliverable** (2026-08-28):
-  work on one thing turns up true problems with another. Neither deleting the
-  finding nor pasting it into the artifact is right — write it to a notes file
-  with what was checked and when. A harness anchor names the file as its
+  README provenance table); retired docs go to the plan store,
+  `../documentation-plans-ai-stack/journal/archive/`.
+- **Where documentation goes - the default is the PLAN STORE** (operator, 2026-09-25;
+  replaces the 2026-08-28 "findings go to documentation/notes/" rule). The private
+  sibling repo **`documentation-plans-ai-stack`**
+  (`https://github.com/devonpveller/documentation-plans-ai-stack.git`, cloned beside
+  this one as `../documentation-plans-ai-stack`) holds everything that is read
+  deliberately rather than needed to run the stack. Write NEW material there:
+
+  | What | Where (in the plan store) |
+  |---|---|
+  | a plan, build log, task list, `NN-*.md` plan set | `implementation-guide/<feature>/` |
+  | a harness anchor | `implementation-guide/<feature>/anchors/<id>.json` |
+  | a work item's findings (its `findings_sink`) | `implementation-guide/<feature>/findings/<id>.md` |
+  | a work item's test plan | `implementation-guide/<feature>/test-plans/<id>.md` |
+  | a note or finding with no feature | `journal/notes/<topic>-<yyyy-mm-dd>.md` |
+  | evidence: logs, transcripts, measured output | `journal/evidence/<id>/` |
+  | a retired doc or closed plan | `journal/archive/` |
+
+  Commit **and push** the store in the same sitting (`git pull --rebase` first -
+  several sessions write there). **Findings still never go into the deliverable:**
+  work on one thing turns up true problems with another; neither deleting the
+  finding nor pasting it into the artifact is right - write it to the findings
+  file with what was checked and when. A harness anchor names that file as its
   `findings_sink`; outside the harness, the same rule applies by hand.
+  **This repo keeps** only what an agent or operator needs with just this checkout
+  in front of them: `CLAUDE.md`, `README.md`, `SECURITY.md`, `documentation/runbooks/`,
+  the status index `documentation/implementation-guide/README.md` and
+  `multi-agent-concurrency/` (every worktree must carry `MERGE-PROTOCOL.md`),
+  per-plane and per-module READMEs, and the agent-org / little-coder subproject docs.
+  **Evidence that CODE reads is not journal:** it lives next to the code that reads it
+  (e.g. `scripts/agent-harness/fixtures/`, `scripts/agent-harness/quadrant/evidence/`),
+  because CI runs on a checkout of this repo alone.
 - **Plans live in the plan store, not in this repo** (2026-08-29; restated
-  2026-09-18 after the rule drifted): design plans, build logs, task lists and
-  numbered plan sets go in the private sibling repo **`documentation-plans-ai-stack`**
-  (`https://github.com/devonpveller/documentation-plans-ai-stack.git`, cloned
-  beside this one as `../documentation-plans-ai-stack`), under
-  `implementation-guide/<feature>/`. This is the CODE repo and it is
-  public-surface; a plan names internal hostnames, ports, topology and file:line
-  anchors, none of which belongs in a public tree. Routing, both ways:
-  - **Plan store** — material read deliberately, ahead of or about the work:
-    `PLAN*.md`, `BUILD-LOG.md`, `TASKS.md`, `NN-*.md` plan sets, harness anchors.
-  - **This repo** — whatever an agent or operator needs with only this checkout
-    in front of them: `CLAUDE.md`, `documentation/runbooks/`, `MERGE-PROTOCOL.md`
-    (every worktree must carry it), per-plane and per-module READMEs, and
-    **findings/evidence in `documentation/notes/`** — the bullet above is
-    unchanged, a note is not a plan.
+  2026-09-18; widened to the journal 2026-09-25). This is the CODE repo and it is
+  public-surface; a plan or a note names internal hostnames, ports, topology and
+  file:line anchors, none of which belongs in a public tree.
   - **The seam** is `documentation/implementation-guide/README.md`: one status
     row per feature, wherever that feature's plan lives. The index spans both
     repos and is the thing that says which.
-  **Workflow when you start a plan:** write it in
-  `../documentation-plans-ai-stack/implementation-guide/<feature>/`, then commit
-  **and push** it there in the same sitting — that repo has sat a commit ahead of
-  `origin/main` with three uncommitted plan directories in it, which is the exact
-  unversioned state the plan store was created to end — then add the status row
-  here in the same work. Enforced at commit time by
-  `scripts/checks/check-doc-placement.ps1` (pre-commit 2b), which blocks a new
-  plan file or feature directory staged into this repo; `-All` audits the
-  untracked half no commit-time check can see. Deliberate exceptions:
-  `AI_STACK_PLAN_IN_CODE_REPO=1` with the reason in the commit message.
-  **Phase 2 ran 2026-09-18** (operator decision): all 31 remaining feature
-  directories moved to the store, and every pointer to them in compose files,
-  config, source, checks, plane READMEs and `.env.example` was rewritten to
-  `../documentation-plans-ai-stack/…`. `documentation/implementation-guide/` is
-  now the index plus exactly two kept directories, both for a MECHANICAL reason:
-  `multi-agent-concurrency/` (every worktree an agent provisions must carry
-  `MERGE-PROTOCOL.md`) and `dark-factory-unification/` (`scripts/checks/dfu-done.ps1`
-  and `verify-dfu-done.ps1` READ its `PLAN.md`/`DECISIONS.md`/`WALKTHROUGH.md`, and
-  CI runs them against a checkout of this repo alone — move those docs and the
-  check has no input). Anything else appearing there is drift.
-  **Do this, every planning session (short form of the above):**
+  **Enforced at commit time** by `scripts/checks/check-doc-placement.ps1`
+  (pre-commit 2b): it refuses a new plan file or feature directory under
+  `documentation/implementation-guide/`, any new file under `documentation/notes/`,
+  `documentation/evidence/` or `documentation/archive/`, and a new root-level
+  `PLAN*` / `TEST-PLAN*` / `*-FINDINGS*` / `CLEANUP-PLAN*` / `BUILD-LOG*` file -
+  and names the store path to use instead. `-All` audits the untracked half no
+  commit-time check can see. Deliberate exceptions: `AI_STACK_PLAN_IN_CODE_REPO=1`
+  with the reason in the commit message.
+  **History:** Phase 2 (2026-09-18) moved the 31 tracked feature directories to the
+  store; the journal move (2026-09-25, adoption-closeout `ac-journal-move`) moved
+  `documentation/notes|evidence|archive/`, `CLEANUP-PLAN.md`, the root `TEST-PLAN-*.md`
+  files and `dark-factory-unification/` (whose board, `dfu-done.ps1`, is archived in
+  `scripts/archive/dfu-done/` with its CI job). `documentation/implementation-guide/`
+  is now the index plus `multi-agent-concurrency/`; anything else appearing there is drift.
+  **Do this, every session that writes documentation (short form of the above):**
   1. At the start and again before you stop, run `scripts/checks/plan-store.ps1`.
-     It checks both repos: untracked plan files on either side, unpushed store
-     commits, and store features with no status row. Exit 0 means clean; fix
+     It checks both repos: untracked plan or journal files on either side, unpushed
+     store commits, and store features with no status row. Exit 0 means clean; fix
      anything it lists before you stop.
-  2. Write plans only under `../documentation-plans-ai-stack/implementation-guide/<feature>/`.
-     Commit and push there in the same sitting. Then add the one status row to
+  2. Write plans, notes, findings, evidence and test plans only under
+     `../documentation-plans-ai-stack/` (table above). Commit and push there in the
+     same sitting. For a new feature, add the one status row to
      `documentation/implementation-guide/README.md` in this repo.
   3. Harness anchors live beside their plan in the store, in
      `<feature>/anchors/<id>.json`; `queue.ps1 -Propose -Anchor` accepts that path
-     (it copies the file into the queue).
+     (it copies the file into the queue), and `-Submit -TestPlan` accepts a test
+     plan in `<feature>/test-plans/`.
   4. If a plan set already landed in this repo untracked, run
      `scripts/checks/plan-store.ps1 -Migrate <feature>`: it moves the folder to the
      store, rewrites its self-references, commits, pushes, and prints the index row.
@@ -328,10 +340,12 @@ snapshots + `manifest.csv` (file → OWUI id; skills included).
   `documentation/runbooks/` + `documentation/sysadmin-out-of-band-channel.md`
 - Per-feature status (shipped/draft), across BOTH repos →
   `documentation/implementation-guide/README.md`
-- Plans, build logs, plan sets → the private plan store
-  `../documentation-plans-ai-stack` (never write a new one into this repo)
+- Plans, build logs, plan sets, notes, findings, evidence, test plans → the private
+  plan store `../documentation-plans-ai-stack` (never write a new one into this repo);
+  the operator journal is its `journal/` (see `journal/README.md` there)
 - The 2026-08 restructure, CLOSED 2026-09-19 (history + its own file:line
-  evidence, not a worklist) → `CLEANUP-PLAN.md` (v3). What is still open and
+  evidence, not a worklist) → `../documentation-plans-ai-stack/journal/CLEANUP-PLAN.md`
+  (v3). What is still open and
   where it went is the "v3 CLOSED" section near the top; the successor plan is
   `../documentation-plans-ai-stack/implementation-guide/stack-layers/`
 - little-coder design + workflow → `../documentation-plans-ai-stack/implementation-guide/little-coder/`

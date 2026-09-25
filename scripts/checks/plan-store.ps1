@@ -107,11 +107,20 @@ function Invoke-Audit {
     try {
         $untracked = git ls-files --others --exclude-standard -- implementation-guide | ForEach-Object { ($_ -split '/')[1] } | Sort-Object -Unique
         if ($untracked) { Write-Host "  UNTRACKED plan directories (unversioned, one clean from gone):"; $untracked | ForEach-Object { Write-Host "    $_" }; $bad++ }
+        # THE JOURNAL (since 2026-09-25, ac-journal-move): notes, evidence, archive and test
+        # plans live under journal/ here, and are held to the same rule as plans - versioned
+        # and pushed. An EMPTY journal is a problem too, not a clean result: the move put
+        # hundreds of files there, so zero means this is the wrong checkout or they were lost.
+        $journalUntracked = @(git ls-files --others --exclude-standard -- journal)
+        if ($journalUntracked.Count -gt 0) { Write-Host ("  UNTRACKED journal files ({0}):" -f $journalUntracked.Count); $journalUntracked | ForEach-Object { Write-Host "    $_" }; $bad++ }
+        $journalTracked = @(git ls-files -- journal)
+        Write-Host ("  journal/: {0} tracked file(s)" -f $journalTracked.Count)
+        if ($journalTracked.Count -eq 0) { Write-Host "  journal/ tracks NO files - the journal is missing from this store checkout"; $bad++ }
         $ahead = 0
         try { $ahead = [int](git rev-list --count 'origin/main..main' 2>$null) } catch { $ahead = 0 }
         if ($ahead -gt 0) { Write-Host "  main is $ahead commit(s) ahead of origin/main - push it"; $bad++ }
-        $dirty = git status --porcelain -- implementation-guide
-        if ($dirty) { Write-Host "  modified but uncommitted plan files present"; $bad++ }
+        $dirty = git status --porcelain -- implementation-guide journal
+        if ($dirty) { Write-Host "  modified but uncommitted plan or journal files present"; $bad++ }
     } finally { Pop-Location }
 
     Write-Host "== seam: status rows in $IndexPath"
@@ -168,7 +177,7 @@ function Invoke-Migrate([string]$feature) {
 
     Write-Host ""
     Write-Host "NOW add or update the status row in $IndexPath (the seam), e.g.:"
-    Write-Host ('| `' + $feature + '/` -> lives in the `documentation-plans-ai-stack` private repo (' + (Get-Date -Format 'yyyy-MM-dd') + ') | <status glyph + one line> | <what it is; which notes in documentation/notes/ it grew from> |')
+    Write-Host ('| `' + $feature + '/` -> lives in the `documentation-plans-ai-stack` private repo (' + (Get-Date -Format 'yyyy-MM-dd') + ') | <status glyph + one line> | <what it is; which findings in its findings/ it grew from> |')
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Migrate') { Invoke-Migrate $Migrate } else { Invoke-Audit }

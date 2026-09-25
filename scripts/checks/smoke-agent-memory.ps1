@@ -1,6 +1,6 @@
 # smoke-agent-memory.ps1 - memory-plane Phase 1.3. Start the REAL server and call it.
 #
-# WHAT WAS UNPROVEN BEFORE THIS (documentation/notes/agent-memory-writeback-findings.md F2):
+# WHAT WAS UNPROVEN BEFORE THIS (../documentation-plans-ai-stack/journal/notes/agent-memory-writeback-findings.md F2):
 # the agent-memory tool's LOGIC is well covered - 42 unit tests over policy and SQL shape,
 # plus the offline harness executing the statements against the real schema. What nothing
 # covered was the DOORS. `POST /agent-memory/writeback` had never been called. Its auth

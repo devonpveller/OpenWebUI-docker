@@ -3,7 +3,7 @@
 The fixtures below are the SHAPE of two real payloads measured on 2026-09-11:
 the live gateway answering every one of 12 audited queries with bing only, and
 the same queries on the pinned newer image with four to five engines answering.
-See documentation/notes/research-trust-findings.md §1.2 and §2.
+See ../documentation-plans-ai-stack/journal/notes/research-trust-findings.md §1.2 and §2.
 
 Imports only gateway.engine_health, so it runs without redis/fastapi installed.
 """

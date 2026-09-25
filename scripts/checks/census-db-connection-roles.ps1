@@ -428,7 +428,7 @@ if ($unexplained.Count -gt 0) {
     Say ""
     Say "Each of these connects with rolsuper/rolbypassrls, so every RLS policy in"
     Say "init-agent-memory-rls.sql / init-graph-plane-rls.sql is inert for it."
-    Say "Fix: documentation/implementation-guide/dark-factory-unification/H1-APP-ROLE-PROMOTION.md"
+    Say "Fix: ../documentation-plans-ai-stack/implementation-guide/dark-factory-unification/H1-APP-ROLE-PROMOTION.md"
     exit 1
 }
 

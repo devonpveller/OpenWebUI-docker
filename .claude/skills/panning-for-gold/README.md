@@ -23,7 +23,7 @@ Panning for Gold turns messy source material into an evaluated inventory of idea
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use `search_thoughts` and `capture_thought` ([guide](../../../OB1/docs/01-getting-started.md))
 - An AI client that can load a reusable skill or prompt file
 - A project workspace where the skill can save inventory and synthesis files
 
@@ -52,7 +52,7 @@ When the skill is working correctly, it should:
 
 ## Full Recipe
 
-If you want the full walkthrough, setup framing, and usage examples, use the companion recipe: [../../recipes/panning-for-gold/](../../recipes/panning-for-gold/).
+If you want the full walkthrough, setup framing, and usage examples, use the companion recipe: [../../recipes/panning-for-gold/](../../../OB1/recipes/panning-for-gold/).
 
 ## Troubleshooting
 

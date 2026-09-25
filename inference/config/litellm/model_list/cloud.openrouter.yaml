@@ -26,7 +26,7 @@
 #    be able to run cloud-only, e.g. on a node with no GPU); whether the local
 #    gateway is ever the thing that carries a cloud lane is an operator
 #    decision that has not been taken. Shipped blank so nothing changes today.
-#    See documentation/notes/stack-layers-sl-inference-split-findings.md.
+#    See ../documentation-plans-ai-stack/journal/notes/stack-layers-sl-inference-split-findings.md.
 #
 # The model ids are PLACEHOLDERS (same pair agent-org picked at Pc.1) — replace
 # them with whatever the operator actually buys. `data_collection: deny` keeps

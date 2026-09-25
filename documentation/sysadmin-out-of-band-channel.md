@@ -14,9 +14,9 @@ channel** plus an autonomous **engine-restart watchdog**.
 > minutes while Docker stayed perfectly healthy. The watchdog detected it 8
 > times and alerted nowhere. Telegram now also carries the **catastrophe tier**
 > (Layer 4). Full account:
-> [`notes/tailnet-outage-alert-silence-2026-09-16.md`](notes/tailnet-outage-alert-silence-2026-09-16.md).
+> [`../documentation-plans-ai-stack/journal/notes/tailnet-outage-alert-silence-2026-09-16.md`](../../documentation-plans-ai-stack/journal/notes/tailnet-outage-alert-silence-2026-09-16.md).
 
-Related: [`backup-restore-runbook.md`](backup-restore-runbook.md) (data recovery),
+Related: [`runbooks/backup-restore-runbook.md`](runbooks/backup-restore-runbook.md) (data recovery),
 `scripts/recovery/emergency-recovery.ps1` (ordered restart), and the `litellm-proxy-status` /
 disk-bloat memories.
 

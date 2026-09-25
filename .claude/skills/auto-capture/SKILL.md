@@ -61,4 +61,4 @@ When this skill runs correctly, the session ends with:
 - Prefer specificity over vague summaries. "ACT NOW: switch webhook retries to queue-based backoff" is useful; "discussed API changes" is not.
 - If the capture tool fails, do not invent success. Tell the user the local wrap-up succeeded but the Open Brain capture did not.
 - Tool names vary by client and connector. Use the Open Brain search/capture tools available in the current environment rather than assuming a fixed prefix.
-- This skill is intentionally reusable. For the OB1-specific workflow and composition guidance, see [the Auto-Capture recipe](../../recipes/auto-capture/).
+- This skill is intentionally reusable. For the OB1-specific workflow and composition guidance, see [the Auto-Capture recipe](../../../OB1/recipes/auto-capture/).

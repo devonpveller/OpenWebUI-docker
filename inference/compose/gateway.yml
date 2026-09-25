@@ -42,7 +42,7 @@ services:
   # llama-cpp-embed aliases on llm-net, so every caller's
   # http://llama-cpp:8080 lands here and is forwarded by model name (cut-in
   # applied 2026-06-12; see
-  # documentation/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md).
+  # ../documentation-plans-ai-stack/journal/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md).
   # ENFORCING since J.1 (2026-08-21): master_key is set and each caller needs
   # its own sk- virtual key; the key's metadata.lane becomes the
   # x-ai-stack-caller header llm-queue attributes on (custom_callbacks.py).

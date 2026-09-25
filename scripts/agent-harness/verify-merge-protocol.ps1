@@ -366,7 +366,7 @@ Remove-Item $mledger -ErrorAction SilentlyContinue
 #
 # Shipping three red checks would teach whoever runs this drill that red is normal, which
 # costs more than the missing coverage. The gap is written up in
-# documentation/notes/commit-msg-hook-drill-gap.md with the working manual procedure.
+# ../documentation-plans-ai-stack/journal/notes/commit-msg-hook-drill-gap.md with the working manual procedure.
 
 # --- retirement must not leave a stale registry row -------------------------------------
 #
