@@ -28,7 +28,8 @@ Config via env (injected by bridge.py through the per-turn --mcp-config file):
   BRIDGE_ENV_FILE          .env holding AO_MATTERMOST_BOT_TOKEN
   BRIDGE_CHANNEL_ID        channel the session lives in
   BRIDGE_THREAD_ID         root post id of the session's thread   (required)
-  BRIDGE_OPERATORS         comma-separated usernames allowed to approve (default profnovice)
+  BRIDGE_OPERATORS         comma-separated usernames allowed to approve (env, else the .env
+                           files below; no default - empty means nobody)
   BRIDGE_APPROVAL_TIMEOUT  seconds to wait before denying          (default 1800)
   BRIDGE_APPROVALS_LOG     JSONL audit file for approval events    (optional)
   BRIDGE_ALLOW_SELF        "1" = accept verdicts from the bot user (smoke tests only)
@@ -72,7 +73,14 @@ import server as mmapi  # noqa: E402
 PROTOCOL_VERSION = "2024-11-05"
 THREAD_ID = os.environ.get("BRIDGE_THREAD_ID", "")
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "")
-OPERATORS = {u.strip().lower() for u in os.environ.get("BRIDGE_OPERATORS", "profnovice").split(",") if u.strip()}
+# Mattermost usernames allowed to approve. No shipped default (it named one
+# operator): BRIDGE_OPERATORS from the environment, else from the same .env files the
+# bot token is read from (mm_lib.default_env_files - the repo-root .env on this layout).
+# EMPTY MEANS NOBODY: every check is membership (`in OPERATORS` / `not in OPERATORS`).
+OPERATORS = {u.strip().lower() for u in (
+    os.environ.get("BRIDGE_OPERATORS")
+    or mm_lib.read_env_key("BRIDGE_OPERATORS", mm_lib.default_env_files(os.environ.get("BRIDGE_ENV_FILE", "")))
+).split(",") if u.strip()}
 APPROVAL_TIMEOUT = int(os.environ.get("BRIDGE_APPROVAL_TIMEOUT", "1800"))
 ALLOW_SELF = os.environ.get("BRIDGE_ALLOW_SELF") == "1"
 APPROVALS_LOG = os.environ.get("BRIDGE_APPROVALS_LOG", "")

@@ -42,13 +42,18 @@ set +e
 # cwd, and a test running it out of a git worktree must read that worktree's .env and
 # write that worktree's state rather than reaching into the operator's main checkout.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
-[ -z "$ROOT_DIR" ] && ROOT_DIR="d:/Open WebUI/ai-stack"
+# No hardcoded fallback: if the script cannot find its own directory there is
+# no .env to read either, and this script is best-effort by design.
+[ -z "$ROOT_DIR" ] && exit 0
 ENV_CLAUDE="$ROOT_DIR/.env"                                 # CLAUDE_MM_BOT_TOKEN → bot-claude
 CHANNEL="6z9khgkdd7df9q454be6fimw1h"                        # #claude-sessions
 API="http://localhost:8065/api/v4/posts"
 ALLOW="$ROOT_DIR/scripts/.mm-notify-sessions"               # one session_id per line (gitignored)
 THREADS="$ROOT_DIR/scripts/.mm-session-threads"             # "<session_id> <root_post_id>" (gitignored)
-MENTION="${MM_OPERATOR_MENTION:-@profnovice}"
+# Who gets @-mentioned: MM_OPERATOR_MENTION from the environment, else from the
+# .env below (read after the token, so an idle run pays no extra process). No
+# shipped default - it named one operator; blank posts without a mention.
+MENTION="${MM_OPERATOR_MENTION-}"
 # ONE BUDGET FOR THE WHOLE SCRIPT. This runs as a hook with a timeout - 15s on
 # Stop and 20s on Notification in the operator's settings - and threading turned
 # one curl call into as many as four. Measured in test, attempt 1: a black-holed
@@ -313,6 +318,7 @@ MSG="${1:-🤖 Claude Code finished a turn in ${PROJECT}${short:+ · session \`$
 # reader something untrue about what happens when the token goes missing.
 tok=$(grep -m1 '^CLAUDE_MM_BOT_TOKEN=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
 [ -z "$tok" ] && exit 0
+[ -z "$MENTION" ] && MENTION=$(grep -m1 '^MM_OPERATOR_MENTION=' "$ENV_CLAUDE" 2>/dev/null | cut -d= -f2- | tr -d '\r')
 
 # post <message> [root_id] → prints the created post id, or NOTHING on failure.
 #

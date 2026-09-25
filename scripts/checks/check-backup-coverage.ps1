@@ -59,14 +59,15 @@ try {
   Write-Host ("  agent-org named volumes: {0}" -f $agentOrgVolumes.Count) -ForegroundColor DarkGray
   Write-Host ""
 
-  # ----- Inventory: bind-mount data paths (under D:\ for the operator) -----
-  # These are *.NET-style host paths from the compose files. The check is
+  # ----- Inventory: bind-mount data paths (host dirs set per deployment) -----
+  # Spelled as the compose files spell them - the per-host ones are variables
+  # (OB1/docker/.env, inference/.env), not one operator's paths. The check is
   # syntactic (file path appears in compose); not a runtime probe.
   $hostBindMounts = @(
-    @{ Path = 'D:\Open WebUI\open-notebook\surreal_data'; Service = 'surrealdb';     Owner = 'open-notebook-backup' }
-    @{ Path = 'D:\Open WebUI\open-notebook\notebook_data'; Service = 'open_notebook'; Owner = 'open-notebook-backup' }
+    @{ Path = '${OPEN_NOTEBOOK_DIR}\surreal_data';        Service = 'surrealdb';     Owner = 'open-notebook-backup' }
+    @{ Path = '${OPEN_NOTEBOOK_DIR}\notebook_data';       Service = 'open_notebook'; Owner = 'open-notebook-backup' }
     @{ Path = '.\data\tailscale';                          Service = 'tailscale';    Owner = 'tailscale-backup' }
-    @{ Path = 'C:\Users\yamao\.lmstudio\models';           Service = 'llama-cpp-upstream'; Owner = 'lm-models-backup' }
+    @{ Path = '${LM_MODELS_DIR}';                          Service = 'llama-cpp-upstream'; Owner = 'lm-models-backup' }
   )
 
   # ----- Volumes intentionally NOT backed up -------------------------

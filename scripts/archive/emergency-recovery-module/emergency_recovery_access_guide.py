@@ -86,7 +86,7 @@ def show_setup_instructions():
     print("\n🔧 Option B: Direct Testing (Development)")
     print("   1. Open terminal in the ai-stack directory")
     print("   2. Run the test command:")
-    print("   3. cd \"d:\\Open WebUI\\ai-stack\"")  
+    print("   3. cd <your ai-stack checkout>")  
     print('   4. echo \'{"request_id": "user-test", "input": "restart ollama"}\' | python modules\\emergency-recovery\\service\\emergency_recovery.py')
     
     print("\n📋 Prerequisites:")

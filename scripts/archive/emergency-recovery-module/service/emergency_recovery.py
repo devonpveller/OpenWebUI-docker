@@ -1054,7 +1054,7 @@ class EmergencyRecoveryModule:
                     "status": "success" if serve_configured else "failed",
                     "output": serve_config.stdout if serve_configured else serve_config.stderr
                 },
-                "access_url": "https://openwebui-13.tail37f875.ts.net/lmstudio",
+                "access_url": "https://<tailnet-host>.ts.net/lmstudio",
                 "next_steps": [
                     "Test LM Studio access through Tailscale URL",
                     "Verify model loading works through proxy"

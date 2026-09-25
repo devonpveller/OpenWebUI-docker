@@ -37,7 +37,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # Verbatim shape of the real logs/nas-sync-2026-09-13.log (password-expired run).
 FAILED_LOG = """[2026-09-13T04:00:00-04:00] [INFO] === NAS sync start ===
-[2026-09-13T04:00:00-04:00] [INFO] destination   : \\\\PolyshDesignNAS\\backups\\ai-stack\\portal\\slot-B
+[2026-09-13T04:00:00-04:00] [INFO] destination   : \\\\nas-host\\backups\\ai-stack\\portal\\slot-B
 [2026-09-13T04:00:01-04:00] [INFO] vault loaded (user: backup-user)
 [2026-09-13T04:00:06-04:00] [INFO]   net use: The password of this user has expired.
 [2026-09-13T04:00:06-04:00] [INFO]   net use: System error 2242 has occurred.

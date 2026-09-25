@@ -7,7 +7,8 @@
   "ao_workers": ["ao-worker-1", "ao-worker-2"],
   "sysadmin_channel_id": "sysadmin",
   "_sysadmin_channel_comment": "Mattermost #sysadmin channel id; null falls back to #claude-code until the channel exists.",
-  "sysadmin_operators": "profnovice",
+  "sysadmin_operators": "",
+  "_sysadmin_operators_comment": "Mattermost usernames allowed to drive the sysadmin bridge. Blank = the bridge reads BRIDGE_OPERATORS from the repo-root .env; empty there too = nobody.",
   "alert_throttle_hours": 20,
   "thresholds": {
     "c_free_warn_gb": 60,

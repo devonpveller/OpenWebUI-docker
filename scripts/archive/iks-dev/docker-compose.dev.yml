@@ -34,19 +34,19 @@ services:
       POSTGRES_PASSWORD: iks_dev_only
     volumes:
       - iks-db-data:/var/lib/postgresql/data
-      - "D:/Open WebUI/ai-stack/OB1/docker/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-extensions.sql:/docker-entrypoint-initdb.d/20-init-extensions.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-sources.sql:/docker-entrypoint-initdb.d/30-init-sources.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-graph.sql:/docker-entrypoint-initdb.d/40-init-graph.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-grants.sql:/docker-entrypoint-initdb.d/50-init-grants.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-source-graph.sql:/docker-entrypoint-initdb.d/60-init-source-graph.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-threads.sql:/docker-entrypoint-initdb.d/70-init-threads.sql:ro"
       - "./seed.sql:/docker-entrypoint-initdb.d/80-seed.sql:ro"
       # Source retract + chunk index (passage-level retrieval). Mirror prod
       # ordering (retract 82 < chunks 86); chunks RPC depends on the retract
       # column. Populated by the iks-chunk-worker below.
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro"
-      - "D:/Open WebUI/ai-stack/OB1/docker/init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-source-retract.sql:/docker-entrypoint-initdb.d/82-init-source-retract.sql:ro"
+      - "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/docker/init-source-chunks.sql:/docker-entrypoint-initdb.d/86-init-source-chunks.sql:ro"
     ports:
       - "127.0.0.1:18432:5432"
     networks:
@@ -64,7 +64,7 @@ services:
   # embeddings/chat (read-only inference — acceptable, Task 0.2).
   iks-mcp:
     build:
-      context: "D:/Open WebUI/ai-stack/OB1/integrations/kubernetes-deployment"
+      context: "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/integrations/kubernetes-deployment"
       dockerfile: Dockerfile
     image: iks-mcp-server:local
     container_name: iks-mcp
@@ -112,7 +112,7 @@ services:
   # module; SURREAL_* keeps the operational state local.
   iks-notebook:
     build:
-      context: "D:/Open WebUI/open-notebook"
+      context: "${OPEN_NOTEBOOK_SRC:?set OPEN_NOTEBOOK_SRC to an open-notebook source checkout}"
       dockerfile: Dockerfile.single
     image: iks-notebook:local
     container_name: iks-notebook
@@ -172,7 +172,7 @@ services:
   # ── (Phase 5) Cross-thread suggestion worker ─────────────────────────
   iks-suggestion-worker:
     build:
-      context: "D:/Open WebUI/ai-stack/OB1/integrations/suggestion-worker"
+      context: "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/integrations/suggestion-worker"
       dockerfile: Dockerfile
     image: iks-suggestion-worker:local
     container_name: iks-suggestion-worker
@@ -202,7 +202,7 @@ services:
   # on an interval; also drainable via POST /chunks.
   iks-chunk-worker:
     build:
-      context: "D:/Open WebUI/ai-stack/OB1/integrations/chunk-embedding-worker"
+      context: "${AI_STACK_ROOT:?set AI_STACK_ROOT to the ai-stack checkout}/OB1/integrations/chunk-embedding-worker"
       dockerfile: Dockerfile
     image: iks-chunk-worker:local
     container_name: iks-chunk-worker

@@ -16,7 +16,7 @@
 # (writing under ./backups/) is included automatically.
 #
 # Parameters:
-#   -NasUncRoot    Required. e.g. \\192.168.1.50\backups\portal
+#   -NasUncRoot    Required. e.g. \\nas.example.lan\backups\portal
 #                  The script appends \slot-A or \slot-B based on the
 #                  ISO week.
 #   -NasVaultPath  Optional. Path to the DPAPI-encrypted NAS credentials
@@ -42,10 +42,10 @@
 #   3  - integrity verification of a .sha256 sentinel failed
 #
 # Run manually:
-#   .\scripts\backup\backup-to-nas.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
+#   .\scripts\backup\backup-to-nas.ps1 -NasUncRoot "\\nas.example.lan\backups\portal"
 #
 # Install as scheduled task:
-#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal"
+#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\nas.example.lan\backups\portal"
 
 [CmdletBinding()]
 param(
@@ -57,7 +57,7 @@ param(
 
   # Open the SMB session against the NAS's IP rather than its hostname. Windows
   # keys sessions by SERVER NAME, and permits only one credential set per name,
-  # so an operator with the NAS mapped (e.g. M: -> \\PolyshDesignNAS\PDNAS)
+  # so an operator with the NAS mapped (e.g. M: -> \\nas-host\share)
   # makes the backup's own `net use` fail with system error 1219. Connecting by
   # IP gives this script a separate session identity and the two coexist.
   # Resolution happens at run time, so a DHCP change is followed automatically.
@@ -369,7 +369,7 @@ Write-LogLine "SMB session established"
 
 # Run Robocopy. Use PowerShell's call operator (&) rather than Start-Process
 # because Start-Process -ArgumentList does NOT quote args containing spaces,
-# which trips on `D:\Open WebUI\...` paths (Robocopy parses them as two
+# which trips on any repo path holding a space (Robocopy parses it as two
 # separate paths and returns exit 16 "no files copied"). The call operator
 # passes each element of an array as a separate, properly-quoted argument
 # to the native exe.

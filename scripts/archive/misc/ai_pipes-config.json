@@ -2,9 +2,9 @@
   "ai_stack": {
     "name": "OpenWebUI AI Stack",
     "version": "1.0.0",
-    "workspace_root": "d:\\Open WebUI\\ai-stack",
+    "workspace_root": "/path/to/ai-stack",
     "container_scripts_path": "/host_scripts",
-    "host_scripts_path": "d:\\Open WebUI\\ai-stack\\scripts"
+    "host_scripts_path": "/path/to/ai-stack/scripts"
   },
   "recovery": {
     "quick_fixes_script": "scripts\\quick-fixes.bat",

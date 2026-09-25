@@ -267,7 +267,7 @@ def _committed_records(root: Path) -> Tuple[List[str], str]:
 
     THE ENCLOSING-REPOSITORY TRAP, found by this fix's own guard test on its first run and
     worth more than the test that found it. `git -C <dir> ls-files` does not fail outside a
-    repository - it SEARCHES UPWARDS, and on this machine `C:/Users/yamao` is itself a git
+    repository - it SEARCHES UPWARDS, and on the machine it was found on the user's home dir was a git
     repo, so a temporary directory under the home tree answered "exit 0, no tracked records"
     and read as a repository that banks no evidence. Worse than the wrong message: paths
     from `--full-name` are relative to whatever toplevel git found, so an enclosing repo

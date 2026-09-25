@@ -8,7 +8,7 @@
 # to register a system-level scheduled task.
 #
 # Parameters:
-#   -NasUncRoot       Required. e.g. \\192.168.1.50\backups\portal
+#   -NasUncRoot       Required. e.g. \\nas.example.lan\backups\portal
 #   -RunNow           Switch: run the task immediately after registering
 #                     (useful for the first install -- verifies the SMB
 #                     credential works, the slot folder gets created,
@@ -21,10 +21,10 @@
 #
 # Usage:
 #   # Step 1 - save the NAS credential (as the user who will run the task):
-#   cmdkey /add:192.168.1.50 /user:nasuser /pass:nas-password
+#   cmdkey /add:nas.example.lan /user:nasuser /pass:nas-password
 #
 #   # Step 2 - register the task (admin PowerShell):
-#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\192.168.1.50\backups\portal" -RunNow
+#   .\scripts\backup\install-nas-backup-task.ps1 -NasUncRoot "\\nas.example.lan\backups\portal" -RunNow
 
 [CmdletBinding()]
 param(
@@ -113,7 +113,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Settings $settings `
   -Principal $principal `
-  -Description "Weekly two-slot mirror of D:\Open WebUI\ai-stack\backups\ to the NAS. See scripts/backup/backup-to-nas.ps1." | Out-Null
+  -Description "Weekly two-slot mirror of $(Join-Path $projectRoot 'backups')\ to the NAS. See scripts/backup/backup-to-nas.ps1." | Out-Null
 
 Write-Host ""
 Write-Host "==> Registered. Verify with:" -ForegroundColor Green

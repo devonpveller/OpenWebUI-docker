@@ -43,7 +43,7 @@ class QueueNarrationPrincipal(unittest.TestCase):
     def test_auto_pass_and_human_release_are_not_the_same_sentence(self):
         # The defect, stated as an assertion: these two must never render identically.
         auto = _render(_item("auto", "auto:dark", "dark"))
-        human = _render(_item("human", "profnovice", "attended"))
+        human = _render(_item("human", "alice", "attended"))
         self.assertNotEqual(auto, human)
 
     def test_an_auto_pass_says_no_human_saw_it(self):
@@ -53,8 +53,8 @@ class QueueNarrationPrincipal(unittest.TestCase):
         self.assertIn("dark", out)
 
     def test_a_human_release_names_the_person(self):
-        out = _render(_item("human", "profnovice", "attended"))
-        self.assertIn("profnovice", out)
+        out = _render(_item("human", "alice", "attended"))
+        self.assertIn("alice", out)
         self.assertNotIn("No human saw this gate", out)
 
     def test_an_item_with_no_gate_record_says_so_rather_than_going_quiet(self):
