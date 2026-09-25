@@ -34,9 +34,10 @@ git config core.hooksPath .githooks       # pre-commit checks (.githooks/pre-com
 Copy-Item .env.example .env               # the anchor's own; nearly empty
 Copy-Item frontend/.env.example frontend/.env
 #   then set WEBUI_SECRET_KEY in frontend/.env - it is REQUIRED and encrypts
-#   values at rest in webui.db, so pin it once and never rotate casually
+#   values at rest in webui.db, so pin it once and never rotate casually. The
+#   shipped value is a placeholder: init, doctor and up refuse it by name
 python scripts/stack/stack.py init        # writes .stack/state.json: frontend, alone
-python scripts/stack/stack.py up          # the anchor's networks, then Open WebUI
+python scripts/stack/stack.py up          # creates any missing ai-stack_* network, then Open WebUI
 ```
 
 Open WebUI is then on **http://127.0.0.1:3000**. That is two containers:
@@ -50,11 +51,11 @@ Check on it:
 python scripts/stack/stack.py list        # planes, what is enabled, the products
 python scripts/stack/stack.py status      # docker compose ps per plane
 python scripts/stack/stack.py doctor      # docker, compose, env files, blank keys
-python scripts/stack/stack.py health      # 16 functional probes; exit code = failures
+python scripts/stack/stack.py health      # probes of the ENABLED planes; exit code = failures
 ```
 
-`init` refuses if a key a plane needs is missing or blank, and names the key
-and the file. Every verb takes `--dry-run` where it would change something, and
+`init` refuses if a key a plane needs is missing, blank or still the value its
+`.env.example` ships, and names the key and the file. Every verb takes `--dry-run` where it would change something, and
 prints the exact `docker compose` line it would run.
 
 `.\scripts\stack\stack.ps1 <verb>` is a thin shim over the same driver, kept
