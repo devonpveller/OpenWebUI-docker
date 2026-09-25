@@ -2,6 +2,7 @@
 # Every tracked file the stack or its docs EXECUTE DIRECTLY (by path, no interpreter).
 # Each must be mode 100755 in the index; pre-commit refuses the commit otherwise.
 # Format: <path><TAB><why>[; <why> ...]
+.githooks/commit-msg	docs .githooks/README.md (code block)
 backup/llm-gateway-backup.sh	compose inference/compose/backups.yml service llm-gateway-backup (bind mount)
 frontend/entrypoint.sh	dockerfile frontend/dockerfile.tailscale ENTRYPOINT/CMD runs /entrypoint.sh (the image chmods it)
 little-coder/docker/entrypoint-agent.sh	dockerfile little-coder/docker/Dockerfile.agent ENTRYPOINT/CMD runs /usr/local/bin/entrypoint-agent.sh (the image chmods it)
