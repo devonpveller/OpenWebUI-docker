@@ -19,7 +19,7 @@ Heavy File Ingestion stops agents from wasting expensive context on raw PDFs, sl
 - Python 3.10+
 - `uv` or `pip` for optional converter dependencies
 - AI client that can load a reusable skill file and run local commands
-- Working Open Brain setup if you want to pair this with Open Brain capture or retrieval flows ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want to pair this with Open Brain capture or retrieval flows ([guide](../../../OB1/docs/01-getting-started.md))
 
 ## Installation
 
@@ -44,9 +44,9 @@ uv run \
 
 If you want packaged client-specific downloads instead of the raw source folder, use:
 
-- Claude Code: [../../resources/heavy-file-ingestion-claude-code.zip](../../resources/heavy-file-ingestion-claude-code.zip)
-- Codex: [../../resources/heavy-file-ingestion-codex.zip](../../resources/heavy-file-ingestion-codex.zip)
-- Claude Desktop: [../../resources/heavy-file-ingestion-claude-desktop.skill](../../resources/heavy-file-ingestion-claude-desktop.skill)
+- Claude Code: [../../resources/heavy-file-ingestion-claude-code.zip](../../../OB1/resources/heavy-file-ingestion-claude-code.zip)
+- Codex: [../../resources/heavy-file-ingestion-codex.zip](../../../OB1/resources/heavy-file-ingestion-codex.zip)
+- Claude Desktop: [../../resources/heavy-file-ingestion-claude-desktop.skill](../../../OB1/resources/heavy-file-ingestion-claude-desktop.skill)
 
 The Claude Code and Codex downloads include the bundled `scripts/` and `references/` directories. The Claude Desktop `.skill` is intentionally lighter because Claude Desktop is better treated as a policy layer than a local conversion runtime.
 

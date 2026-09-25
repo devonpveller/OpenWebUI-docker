@@ -6,7 +6,7 @@
 
 This skill helps an AI client review a model like an investor or serious operator would. It checks whether assumptions are supported, whether the structure can be trusted, whether downside cases exist, and whether the model is actually decision-ready instead of merely well-formatted.
 
-For the full OB1 workflow that chains this into research synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the full OB1 workflow that chains this into research synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../../OB1/recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the full OB1 workflow that chains this into research synthesis, meeting note
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - A model artifact, spreadsheet export, or pasted assumption set
 

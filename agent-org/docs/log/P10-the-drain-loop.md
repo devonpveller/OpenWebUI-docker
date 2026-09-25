@@ -45,7 +45,7 @@ closed. `_drain_iterate` now dispatches directly unless it is inside delegate's 
    Scope context is now injected only from a genuine sub-scope (`depth > 0`); at a root there is no
    sibling to be bounded away from.
 **Owner:** any session. **Self-contained** — you need no prior conversation, but read
-[`ORCHESTRATION-DESIGN.md`](ORCHESTRATION-DESIGN.md) **§4, §5, §6.5** first; this plan implements them.
+[`ORCHESTRATION-DESIGN.md`](../ORCHESTRATION-DESIGN.md) **§4, §5, §6.5** first; this plan implements them.
 **Execution record / issue register:** [`P9-make-the-fixes-real.md`](P9-make-the-fixes-real.md).
 
 > **We are building the ORCHESTRATION, not the test project.** The todo CLI in the gym is a *probe*.

@@ -32,8 +32,8 @@ compound over time.
 
 ## Prerequisites
 
-- Optional but recommended: working Open Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../docs/01-getting-started.md))
-- Optional but recommended: the paired [World Model Diagnostic Activation recipe](../../recipes/world-model-diagnostic-activation/)
+- Optional but recommended: working Open Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../../OB1/docs/01-getting-started.md))
+- Optional but recommended: the paired [World Model Diagnostic Activation recipe](../../../OB1/recipes/world-model-diagnostic-activation/)
 - AI client that supports reusable skills/prompts, or a plain chat window for the direct-paste prompt
 
 ## Installation

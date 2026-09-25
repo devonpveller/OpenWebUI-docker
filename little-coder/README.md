@@ -5,9 +5,9 @@ that accumulates expertise from its own work. This directory holds the
 **control-plane wrapper**: journals, config, sanitization, git-proxy, the CLI
 operator surface, and the MCP edge.
 
-> **Source of truth:** [`../documentation/little-coder/Self-improving-little-coder-design.md`](../documentation/little-coder/Self-improving-little-coder-design.md).
-> Build sequencing: [`integration-plan.md`](../documentation/little-coder/integration-plan.md).
-> Status: [`integration-tasks.md`](../documentation/little-coder/integration-tasks.md).
+> **Source of truth:** [`../documentation/little-coder/Self-improving-little-coder-design.md`](../../documentation-plans-ai-stack/implementation-guide/little-coder/Self-improving-little-coder-design.md).
+> Build sequencing: [`integration-plan.md`](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-plan.md).
+> Status: [`integration-tasks.md`](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-tasks.md).
 
 ## Current chapter: 1 — Tool
 

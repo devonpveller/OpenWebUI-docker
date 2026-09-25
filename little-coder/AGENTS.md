@@ -2,7 +2,7 @@
 
 > Read this first if you're an agent (or a human collaborator) landing
 > in this codebase. The narrative authority is the design + plan +
-> tasks trio under [documentation/little-coder/](../documentation/little-coder/);
+> tasks trio under [documentation/little-coder/](../../documentation-plans-ai-stack/implementation-guide/little-coder/);
 > THIS file is the quick reference — what exists, what governs it,
 > how to add to it.
 >
@@ -30,7 +30,7 @@ Built in five chapters, gated on operator judgement:
 
 Current build state: **chapters 1–5 build-complete** apart from
 operator-gated items (Polyglot corpus import, judge dry-run, etc.).
-See [integration-tasks.md](../documentation/little-coder/integration-tasks.md)
+See [integration-tasks.md](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-tasks.md)
 "Active chapter" block for the live status.
 
 ## Core design principles (don't violate these without reading the design doc first)
@@ -54,15 +54,15 @@ See [integration-tasks.md](../documentation/little-coder/integration-tasks.md)
    (`agent-knowledge/`) is operator-authored and always loaded; the §7
    skill library (`little-coder-skill/`) is meta-learned and
    discovered on demand. Never let meta author founding knowledge.
-8. **Locked decisions live in [integration-tasks.md](../documentation/little-coder/integration-tasks.md)** §10. If something here implies a violation of a locked decision, the docs win.
+8. **Locked decisions live in [integration-tasks.md](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-tasks.md)** §10. If something here implies a violation of a locked decision, the docs win.
 
 ## Where to find what
 
 | Need | Path |
 |---|---|
-| Authoritative architecture + rationale | [documentation/little-coder/Self-improving-little-coder-design.md](../documentation/little-coder/Self-improving-little-coder-design.md) |
-| Build sequencing (chapter-by-chapter) | [documentation/little-coder/integration-plan.md](../documentation/little-coder/integration-plan.md) |
-| Live progress + decisions + open items | [documentation/little-coder/integration-tasks.md](../documentation/little-coder/integration-tasks.md) |
+| Authoritative architecture + rationale | [documentation/little-coder/Self-improving-little-coder-design.md](../../documentation-plans-ai-stack/implementation-guide/little-coder/Self-improving-little-coder-design.md) |
+| Build sequencing (chapter-by-chapter) | [documentation/little-coder/integration-plan.md](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-plan.md) |
+| Live progress + decisions + open items | [documentation/little-coder/integration-tasks.md](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-tasks.md) |
 | Founding knowledge (always loaded by agent) | [agent-knowledge/](agent-knowledge/) |
 | OWUI Pipe + install guide | [owui/](owui/) |
 | Compose + image definitions | [docker/](docker/) |
@@ -134,7 +134,7 @@ python -m pytest -q
    [src/littlecoder/llm.py](src/littlecoder/llm.py).
 4. Regenerate the module index: `lc admin docs sync`.
 5. Flip the relevant task to `[x]` in
-   [integration-tasks.md](../documentation/little-coder/integration-tasks.md)
+   [integration-tasks.md](../../documentation-plans-ai-stack/journal/archive/implementation-guide/little-coder/integration-tasks.md)
    with a code-reference note + the design section.
 6. Add a Decision Log row if the change introduced a non-obvious
    design choice (e.g. "boundary case treated as ineffective per

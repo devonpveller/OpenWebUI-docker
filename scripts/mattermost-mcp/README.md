@@ -8,7 +8,7 @@ POST updates to the self-hosted Mattermost with native tools — replacing ad-ho
 ## What it is
 
 - [`server.py`](server.py) — an MCP **stdio** server (JSON-RPC over stdin/stdout), **stdlib only**
-  (urllib/json — no pip install). Registered in the repo [`.mcp.json`](../../.mcp.json) as
+  (urllib/json — no pip install). Registered in the repo's `.mcp.json` (gitignored, per-host) as
   `mattermost`, so every Claude Code session in this repo gets the tools.
 - [`mm.py`](mm.py) — a tiny CLI over the same functions, for a shell (and for a session *before*
   the MCP server has loaded, since MCP servers register at session start).

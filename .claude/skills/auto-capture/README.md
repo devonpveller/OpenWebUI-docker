@@ -6,7 +6,7 @@
 
 This skill teaches your AI client to treat session close as a capture moment. When a work session, brainstorm, or Panning for Gold run is wrapping up, it stores the highest-value outputs in Open Brain instead of relying on you to remember later.
 
-If you want the OB1 workflow, composition guidance, and examples for using this skill with Panning for Gold, see the [Auto-Capture recipe](../../recipes/auto-capture/).
+If you want the OB1 workflow, composition guidance, and examples for using this skill with Panning for Gold, see the [Auto-Capture recipe](../../../OB1/recipes/auto-capture/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ If you want the OB1 workflow, composition guidance, and examples for using this 
 
 ## Prerequisites
 
-- Working Open Brain setup with a capture tool available ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup with a capture tool available ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Recommended: an Open Brain search tool is also available so the skill can avoid obvious duplicates
 

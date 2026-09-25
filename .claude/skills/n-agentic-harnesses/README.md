@@ -17,7 +17,7 @@ It is a routing skill, not a framework. It helps the client choose the right har
 
 ## Prerequisites
 
-- Working Open Brain setup if you want to capture resulting architecture notes or evaluation findings into memory ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want to capture resulting architecture notes or evaluation findings into memory ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skill files, project rules, or custom instructions
 - Ability to keep the bundled `references/` directory next to the installed skill file
 

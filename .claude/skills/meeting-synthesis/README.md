@@ -6,7 +6,7 @@
 
 This skill helps an AI client convert raw meeting material into a durable working document. It separates decisions from discussion, action items from loose ideas, and unresolved questions from false certainty, then produces a clean artifact you can use in follow-up or downstream decision work.
 
-For the OB1 workflow that chains meeting synthesis into research and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the OB1 workflow that chains meeting synthesis into research and memo drafting, use the [Research-to-Decision Workflow recipe](../../../OB1/recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the OB1 workflow that chains meeting synthesis into research and memo drafti
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Notes, transcript, or a trustworthy meeting summary
 
