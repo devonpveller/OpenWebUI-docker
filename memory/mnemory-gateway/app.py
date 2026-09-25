@@ -161,16 +161,36 @@ def _parse_body(raw: bytes):
     return json.loads(txt)
 
 
+# Request headers mnemory reads to decide WHO the caller is, or WHETHER it is
+# authenticated (mnemory/server.py, APIKeyMiddleware: dispatch, _extract_token,
+# _set_identity_from_headers). A client copy of any of them is dropped, compared
+# case-insensitively, and the gateway then sets its own values exactly once.
+# Header names are case-insensitive on the wire, so a client "x-user-id" next to
+# the gateway's "X-User-Id" is two values of ONE header, and the upstream reads
+# whichever arrives first.
+#   authorization           the API key / JWT (the gateway's key replaces it)
+#   x-api-key               the alternative API key header
+#   cookie                  mnemory_exchange_session / cognis_session carry an
+#                           authenticated identity of their own
+#   x-user-id               user identity when the key is not user-mapped
+#   x-openwebui-user-email  the fallback user identity
+#   x-agent-id              agent scope (the cloud door binds none)
+# host and content-length are transport headers httpx recomputes.
+_DROP_HEADERS = frozenset((
+    "host", "content-length",
+    "authorization", "x-api-key", "cookie",
+    "x-user-id", "x-openwebui-user-email", "x-agent-id",
+))
+
+
 def _upstream_headers(req):
     h = {}
     for k, v in req.headers.items():
-        lk = k.lower()
-        if lk in ("host", "content-length", "authorization"):
+        if k.lower() in _DROP_HEADERS:
             continue
         h[k] = v
     h["Authorization"] = f"Bearer {MNEMORY_KEY}"
     h["X-User-Id"] = BOUND_USER
-    h.pop("X-Agent-Id", None)
     return h
 
 
