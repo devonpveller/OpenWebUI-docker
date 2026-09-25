@@ -57,11 +57,12 @@
 #               network that is missing and leaves every existing one untouched.
 #   host      - what the machine itself must provide, in prose.
 #   host_paths - paths OUTSIDE this checkout the plane cannot build without,
-#               each an inline table { path, why, remedy }: `path` is
-#               repo-root-relative, `remedy` is the command that creates it,
-#               run from the repo root. Unlike `host` this IS checked: a
-#               missing path makes `doctor` FAIL and `enable`/`init` refuse,
-#               each naming `remedy`.
+#               each an inline table { path, contains, why, remedy }: `path`
+#               is repo-root-relative, `contains` names what must exist inside
+#               it (so an empty directory or a plain file does not pass),
+#               `remedy` is the command that creates it, run from the repo
+#               root. Unlike `host` this IS checked: an unusable path makes
+#               `doctor` FAIL and `enable`/`init` refuse, each naming `remedy`.
 #   keys      - variable names that must be present and non-blank in the plane's
 #               OWN env file (`<project dir>/.env`). A blank one makes `enable`
 #               refuse, naming the key and the file. A key is also refused while
@@ -294,7 +295,7 @@ host = [
 # The sibling checkout on this host tracks the fork's `dev` branch; the
 # upstream project is fpytloun/mnemory. test_stack.py holds this path to the compose file.
 host_paths = [
-  { path = "../mnemory", why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory" },
+  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory" },
 ]
 keys     = ["MCP_API_KEY"]
 

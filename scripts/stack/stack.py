@@ -463,20 +463,41 @@ def submodule_remedy(submodule: str) -> str:
     return f"`git submodule update --init {submodule}`"
 
 
-def missing_host_paths(manifest: Manifest, root: Path, plane: str) -> list[dict]:
-    """The plane's `host_paths` entries (repo-root-relative) that do not exist.
+def host_path_problem(root: Path, spec: dict) -> str | None:
+    """Why one `host_paths` entry is not usable, or None when it is.
+
+    Existing is not enough: an empty directory or a plain file at the path
+    would pass an .exists() test and still fail the build. The entry's
+    `contains` names what a real checkout holds there (memory: `.git` and the
+    Dockerfile its compose file builds with); each must be present.
+    """
+    path = root / Path(spec["path"])
+    if not path.exists():
+        return "is missing"
+    if not path.is_dir():
+        return "is not a directory"
+    absent = [name for name in spec.get("contains", []) if not (path / name).exists()]
+    if absent:
+        return "is not a checkout the plane can build from (no " + ", ".join(absent) + ")"
+    return None
+
+
+def missing_host_paths(manifest: Manifest, root: Path, plane: str) -> list[tuple[dict, str]]:
+    """(entry, reason) for each of the plane's `host_paths` that is not usable.
 
     A path OUTSIDE the checkout that the plane builds from - memory's sibling
     ../mnemory. Each entry carries the `remedy` command that creates it.
     """
-    return [
-        spec for spec in manifest.plane(plane).get("host_paths", [])
-        if not (root / Path(spec["path"])).exists()
-    ]
+    found = []
+    for spec in manifest.plane(plane).get("host_paths", []):
+        reason = host_path_problem(root, spec)
+        if reason:
+            found.append((spec, reason))
+    return found
 
 
-def host_path_line(spec: dict, plane: str) -> str:
-    return (f"{spec['path']} is missing (plane {plane}): {spec.get('why', 'the plane builds from it')} "
+def host_path_line(spec: dict, plane: str, reason: str = "is missing") -> str:
+    return (f"{spec['path']} {reason} (plane {plane}): {spec.get('why', 'the plane builds from it')} "
             f"- run `{spec['remedy']}` from the repo root")
 
 
@@ -1155,8 +1176,8 @@ def _key_problems(manifest, state, root, planes, subject, capture, profile_map=N
     """
     lines, files, submodules = [], [], []
     for plane in planes:
-        for spec in missing_host_paths(manifest, root, plane):
-            lines.append("  " + host_path_line(spec, plane))
+        for spec, reason in missing_host_paths(manifest, root, plane):
+            lines.append("  " + host_path_line(spec, plane, reason))
             command = f"`{spec['remedy']}`"
             if command not in submodules:
                 submodules.append(command)
@@ -1384,8 +1405,9 @@ def cmd_doctor(manifest, state, root, console, runner, capture=None) -> int:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
         for spec in manifest.plane(plane).get("host_paths", []):
-            if spec in missing_host_paths(manifest, root, plane):
-                console.line("    [FAIL] " + host_path_line(spec, plane))
+            reason = host_path_problem(root, spec)
+            if reason:
+                console.line("    [FAIL] " + host_path_line(spec, plane, reason))
                 problems += 1
             else:
                 console.line(f"    [OK]   host path {spec['path']}")

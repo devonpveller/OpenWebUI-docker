@@ -155,7 +155,8 @@ care about clean logs.
   cannot build `mnemory:local`; it can only run a pre-built image. (The gateway
   is different — `context: ./mnemory-gateway` is in-repo.) **This is a checked
   requirement:** `stack.manifest.toml` declares it as the memory plane's
-  `host_paths` entry, and while `../mnemory` is missing `stack.py doctor` FAILs
+  `host_paths` entry, and while `../mnemory` is missing, is not a directory, or
+  lacks `.git` or the `Dockerfile` the compose file builds with, `stack.py doctor` FAILs
   the plane and `stack.py enable memory` refuses, both naming the command that
   creates it, run from the ai-stack root:
   `git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory`.
