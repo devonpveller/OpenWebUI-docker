@@ -34,6 +34,10 @@
 #  12. PLANTED FAILURE: a healthcheck that always fails is added to
 #      openwebui-backup in the clone's compose file; `stack.py recover frontend`
 #      exits 1 with a refusal naming frontend, openwebui-backup and "unhealthy"
+#  13. PLANTED RESTART LOOP: openwebui-backup (no healthcheck) runs 8 s, exits 1,
+#      and is restarted by `unless-stopped`; `stack.py recover frontend` exits 1
+#      naming the settle window or the restart loop (RED at 19ae98f, where the
+#      gate passed it as "running after 3s")
 #   then tears the DinD down.
 #
 # Exit code: 0 when every check passed, 1 when any failed, 2 on a usage error.
@@ -292,6 +296,27 @@ check "the refusal names frontend, openwebui-backup and 'unhealthy'" \
   "$(echo "$OUT" | grep -q 'refused: recover stopped at frontend: openwebui-backup (openwebui-backup) unhealthy'; echo $?)"
 check "openwebui itself passed its gate before the failure" \
   "$(echo "$OUT" | grep -q '\[ok\] frontend/openwebui-stock (openwebui): healthy'; echo $?)"
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 13. the tester's restart loop (ac-ops-portable attempt 1, attack H)
+echo ""
+echo "== 13. PLANTED: openwebui-backup (no healthcheck) runs 8 s then exits 1; recover must not pass it"
+docker exec -i "$NAME" sh -c 'cat > /tmp/loop.awk' <<'AWK'
+{ print }
+/^    container_name: openwebui-backup$/ {
+  print "    entrypoint: [ \"/bin/sh\", \"-c\", \"echo crashing-in-8s; sleep 8; exit 1\" ]"
+}
+AWK
+dw sh -c 'awk -f /tmp/loop.awk frontend/docker-compose.yml > /tmp/c.yml && cp /tmp/c.yml frontend/docker-compose.yml'
+check "the loop is in the rendered compose" \
+  "$(dw docker compose -f frontend/docker-compose.yml config --format json | grep -q 'crashing-in-8s'; echo $?)"
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+check "recover with the 8 s crash exited non-zero (exit $RV)" "$([ "$RV" -ne 0 ]; echo $?)"
+check "the refusal names openwebui-backup and the settle window or the restart loop" \
+  "$(echo "$OUT" | grep 'refused: recover stopped at frontend: openwebui-backup (openwebui-backup)' | grep -qE 'settle window|restart loop'; echo $?)"
+check "recover did not claim every container passed" \
+  "$(echo "$OUT" | grep -q 'every container passed its gate'; [ $? -ne 0 ]; echo $?)"
 dw git checkout -q -- frontend/docker-compose.yml
 
 echo ""

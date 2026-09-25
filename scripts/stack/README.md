@@ -441,9 +441,14 @@ order, restart in dependency order, wait for health). Selection is the same as
    first `up`); then planes in `up`'s order, each plane's services level by
    level (`up -d --no-deps <services>`), and **every container is gated**:
    `healthy` passes, `unhealthy` fails at once, `exited` fails (unless something
-   waits on it with `service_completed_successfully` and it exited 0), and a
-   container with no health status passes once it is seen `running` on two
-   polls with the same `RestartCount` (a restart loop never passes). The budget
+   waits on it with `service_completed_successfully` and it exited 0),
+   `restarting` fails at once, and a container with **no health status must
+   settle**: once it is first seen `running` it has to stay `running`, with the
+   same `RestartCount` and `StartedAt`, for 15 s (or its declared
+   `deploy.restart_policy.delay` plus one poll, if longer). A restart or an exit
+   inside that window fails the gate with a named reason (`restart loop: ...`,
+   `exited with exit code N ... inside the settle window`). A container that
+   crashes only AFTER the window still passes - the gate cannot see that. The budget
    is the healthcheck's own worst case - `start_period + retries x (interval +
    timeout) + interval + 30 s` - or 300 s when the compose file declares none;
    `--timeout` sets one budget for all.
@@ -476,7 +481,13 @@ the fall-through to `nuclear`, the GPU check, the tailscale `ping 8.8.8.8`, and
 the `nuclear` / `gpu-reset` modes. **Differs from the .ps1 on purpose:** planes
 go in `up`'s order, so inference starts before the frontend; the .ps1's full
 `recover` path starts the frontend first, while its own minimal path and
-`nuclear` start inference first.
+`nuclear` start inference first. And **every gate is fatal**: the .ps1 throws
+only when openwebui misses its gate and logs a WARN for every other one, then
+starts the next plane anyway. `recover` stops at the first container that
+fails, because starting a plane on top of a dependency that is not healthy is
+how a partial outage becomes a silent one. It also has no fixed pauses (the
+.ps1 sleeps 15 s and 20 s between phases) - the gates are the waits - and it
+stops every container with `--timeout 30` (the .ps1 gives the frontend 45 s).
 
 ### `backup <plane>` [`--dest DIR`]
 
@@ -489,6 +500,15 @@ throwaway `alpine:3.21` helper (`--network none`, the volume mounted
 read-only) - no bind mount, so the same verb works on Windows, on Linux, in a
 DinD and over a docker context.
 
+- The dump sidecar is found from the render, not from `depends_on` alone: a
+  service in the same plane named `*backup*`/`*dump*` (or with such an image)
+  that depends_on the engine, names it as a host in its environment (`PGHOST`,
+  a URL, a DSN), or mounts the database volume.
+- A **live copy** (a volume a running container holds) is recorded in
+  `manifest.json` under `live_copy`, with the running containers and a warning,
+  not only on the console: a SQLite file such as `webui.db` may be mid-write.
+- A failed helper is removed by name (`docker rm -f`) before `backup` or
+  `restore` returns, and the output says whether it is gone.
 - A **database data directory whose engine is running** (postgres, pgvector,
   surrealdb) is **not tarred**: it is named, with the plane's dump sidecar, as
   "use the plane's dump for a consistent copy". With the engine stopped it is
@@ -508,6 +528,9 @@ volumes touched: a missing one is created with compose's own
 `com.docker.compose.project` / `.volume` labels (so the next `up` adopts it),
 and its contents are **replaced** by the archive's - extracted into a staging
 directory first, so a torn archive leaves the old contents as they were.
+That staging needs **free space for the old contents and the new at once**
+(about 10 GB extra for this host's Open WebUI volume); a restore that runs out
+fails in the extraction and leaves the old contents untouched.
 `--volume` takes the volume name or its compose key; `--from` a single
 `.tar.gz` implies it.
 
@@ -518,7 +541,8 @@ enabled plane, then - when the inference plane is enabled - the llm-queue
 `/observe/queue` board and the LiteLLM spend ledger (demand buckets, by caller,
 global totals), the same two sources `stack-stats.ps1` reads. With inference
 **not enabled** it says so instead of printing zeros; an unreachable ledger is
-named and exits 1. On Windows it still hands off to
+named and exits 1. A container that disappears between `compose ps` and `docker
+stats` costs only its own row, which is marked `(gone: ...)`. On Windows it still hands off to
 `scripts/stack/stack-stats.ps1`, unchanged.
 
 ### `inventory --write` | `--check`

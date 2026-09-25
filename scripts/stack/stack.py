@@ -2098,6 +2098,11 @@ HELPER_IMAGE = "alpine:3.21"
 # (a torn copy restores as a corrupt cluster); the plane's dump sidecar is named.
 DB_ENGINES = ("postgres", "pgvector", "surrealdb")
 GATE_POLL_SECONDS = 3
+# How long a container with NO healthcheck must stay running, unrestarted, before
+# its gate passes. A service that declares a longer restart delay
+# (deploy.restart_policy.delay) gets that plus a poll instead, so one crash-and-
+# restart always lands inside the window.
+SETTLE_SECONDS = 15
 # A container with no COMPOSE healthcheck may still have an IMAGE one; this is
 # the budget for that case, since the render cannot say what the image declares.
 DEFAULT_GATE_TIMEOUT = 300
@@ -2119,6 +2124,8 @@ class Service(NamedTuple):
     healthcheck: dict | None     # the compose healthcheck, None when absent or disabled
     image: str
     mounts: tuple                # ((type, source, target, read_only), ...)
+    environment: dict = {}       # the rendered environment (never printed)
+    restart_delay: float = 0.0   # deploy.restart_policy.delay, seconds
 
 
 class PlaneRender(NamedTuple):
@@ -2168,9 +2175,15 @@ def plane_render(manifest: Manifest, state: State, root: Path, plane: str, captu
             (m.get("type"), m.get("source"), m.get("target"), bool(m.get("read_only")))
             for m in (spec.get("volumes") or []) if isinstance(m, dict)
         )
+        env = spec.get("environment") or {}
+        if isinstance(env, list):
+            env = dict(item.split("=", 1) if "=" in item else (item, "") for item in env)
+        delay = ((spec.get("deploy") or {}).get("restart_policy") or {}).get("delay")
         services[key] = Service(key, spec.get("container_name"), depends,
                                 mode[len("service:"):] if mode.startswith("service:") else None,
-                                health, str(spec.get("image") or ""), mounts)
+                                health, str(spec.get("image") or ""), mounts,
+                                {str(k): str(v) for k, v in env.items() if v is not None},
+                                parse_duration(delay, 0.0))
     volumes = {}
     for key, spec in (data.get("volumes") or {}).items():
         spec = spec or {}
@@ -2277,6 +2290,13 @@ def check_netns(render: PlaneRender, levels) -> None:
                           f"start after it")
 
 
+def settle_seconds(service: Service) -> float:
+    """The settle window for a container with no healthcheck (see wait_gate)."""
+    if service.restart_delay:
+        return max(SETTLE_SECONDS, service.restart_delay + GATE_POLL_SECONDS)
+    return SETTLE_SECONDS
+
+
 def one_shot_services(render: PlaneRender) -> set[str]:
     """Services something waits on with `service_completed_successfully`: exit 0 is their success."""
     return {dep for svc in render.services.values()
@@ -2319,27 +2339,36 @@ def _last_health_output(state: dict) -> str:
     return text[:200]
 
 
-def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = False):
+def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = False,
+              settle: float = SETTLE_SECONDS):
     """(passed, what was seen). Polls `docker inspect` until a verdict or the timeout.
 
     healthy                          -> pass
     unhealthy                        -> fail at once (docker already gave up)
     exited / dead                    -> fail, unless a one-shot service exited 0
-    running with NO health status    -> pass once it is seen running on two polls
-                                        in a row with the same RestartCount, so a
-                                        container caught between two crashes of a
-                                        restart loop does not pass
-    anything else (starting, restarting, created, absent) -> keep waiting
+    restarting                       -> fail at once: docker is inside its restart
+                                        policy, i.e. the container already crashed
+    running with NO health status    -> a SETTLE WINDOW: it must stay `running`, with
+                                        the same RestartCount and the same StartedAt,
+                                        for `settle` seconds from the first poll that
+                                        saw it running. Any restart or exit inside the
+                                        window fails the gate with a named reason. A
+                                        container that crashes LATER than the window
+                                        still passes - that is the one thing this gate
+                                        cannot see (findings O4).
+    anything else (starting, created, absent) -> keep waiting
     """
     started = monotonic()
-    seen_restarts = None
+    window = None            # (monotonic at first running, RestartCount, StartedAt)
     last = "no container"
     while True:
         state = container_state(capture, root, docker, name)
-        elapsed = int(monotonic() - started)
+        now = monotonic()
+        elapsed = int(now - started)
         if state is not None:
             status = state.get("Status") or "?"
             health = (state.get("Health") or {}).get("Status")
+            restarts = state.get("RestartCount")
             last = f"{status}/{health}" if health else status
             if health == "healthy":
                 return True, f"healthy after {elapsed}s"
@@ -2350,14 +2379,21 @@ def wait_gate(capture, root, docker, name: str, timeout: int, one_shot: bool = F
                 code = state.get("ExitCode")
                 if one_shot and code == 0:
                     return True, "completed (exit 0)"
+                if window is not None:
+                    return False, (f"exited with exit code {code} {int(now - window[0])}s after it was first "
+                                   "seen running (a crash inside the settle window)")
                 return False, f"{status} with exit code {code}"
+            if status == "restarting":
+                return False, f"restart loop: docker reports it restarting (RestartCount {restarts})"
             if status == "running" and not health:
-                restarts = state.get("RestartCount")
-                if seen_restarts is not None and restarts == seen_restarts:
-                    return True, f"running after {elapsed}s (no healthcheck; RestartCount steady at {restarts})"
-                seen_restarts = restarts
-            else:
-                seen_restarts = None
+                if window is None:
+                    window = (now, restarts, state.get("StartedAt"))
+                elif restarts != window[1] or state.get("StartedAt") != window[2]:
+                    return False, (f"restart loop: it restarted {int(now - window[0])}s into the "
+                                   f"{int(settle)}s settle window (RestartCount {window[1]} -> {restarts})")
+                elif now - window[0] >= settle:
+                    return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
+                                  f"RestartCount {restarts}, not restarted)")
         if elapsed >= timeout:
             return False, f"no verdict within {timeout}s (last seen: {last})"
         sleep(GATE_POLL_SECONDS)
@@ -2373,7 +2409,8 @@ def _gate_note(render: PlaneRender, key: str, timeout: int) -> str:
     if svc.healthcheck:
         what = "healthy (compose healthcheck)"
     else:
-        what = "running and steady (no compose healthcheck; an image healthcheck is honoured if it has one)"
+        what = (f"running and not restarted for {int(settle_seconds(svc))}s (no compose healthcheck; "
+                "an image healthcheck is honoured if it has one)")
     return f"#   gate: {container_of(render, key)} {what}, up to {timeout}s"
 
 
@@ -2478,7 +2515,9 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
             if failure is None:
                 for key, limit in gates:
                     name = container_of(renders[p], key)
-                    passed, seen = wait_gate(capture, root, docker[p], name, limit, key in one_shots[p])
+                    svc = renders[p].services[key]
+                    passed, seen = wait_gate(capture, root, docker[p], name, limit, key in one_shots[p],
+                                             settle_seconds(svc))
                     console.line(f"  [{'ok' if passed else 'FAIL'}] {p}/{key} ({name}): {seen}")
                     if not passed:
                         failure = f"{key} ({name}) {seen}"
@@ -2537,6 +2576,44 @@ def utc_stamp() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+_SIDECAR_NAME = re.compile(r"backup|dump", re.IGNORECASE)
+
+
+def _names_host(value: str, host: str) -> bool:
+    """Does an env value point at `host`: `llm-gateway-db`, `openbrain-db:5432`, `http://surrealdb:8000`, `postgres://u:p@db/x`."""
+    return bool(re.search(rf"(^|[/@]){re.escape(host)}(:\d+)?(/|$)", value.strip()))
+
+
+def dump_sidecars(render: PlaneRender, engines, volume_key: str | None = None) -> list[str]:
+    """The plane's dump sidecars for these database engines, derived from the render.
+
+    A sidecar is a service of the SAME plane whose name marks it as a backup or
+    dump (`*backup*`, `*dump*`) AND that is tied to an engine by any one of:
+      * depends_on the engine service                (llm-gateway-backup, mattermost-db-backup)
+      * an environment value naming the engine as a HOST - PGHOST, a URL, a DSN
+        (openbrain-db-backup: PGHOST=openbrain-db, and no depends_on at all)
+      * a mount of the database volume itself
+    The first cut required depends_on alone and so told `backup ob1` that ob1 had
+    no dump sidecar, while openbrain-db-backup was running (attempt 1, attack K).
+    """
+    hosts = set()
+    for e in engines:
+        hosts.add(e)
+        if render.services[e].container:
+            hosts.add(render.services[e].container)
+    out = set()
+    for svc in render.services.values():
+        if svc.key in engines or not (_SIDECAR_NAME.search(svc.key) or _SIDECAR_NAME.search(svc.image)):
+            continue
+        tied = any(e in svc.depends for e in engines)
+        tied = tied or any(_names_host(v, h) for v in svc.environment.values() for h in hosts)
+        tied = tied or (volume_key is not None
+                        and any(k == "volume" and src == volume_key for k, src, _t, _ro in svc.mounts))
+        if tied:
+            out.add(svc.key)
+    return sorted(out)
+
+
 def plane_volumes(render: PlaneRender) -> list[dict]:
     """The named volumes the plane's RUNNING services mount, with who mounts them.
 
@@ -2557,8 +2634,7 @@ def plane_volumes(render: PlaneRender) -> list[dict]:
                         engines.append(svc.key)
         if not consumers:
             continue
-        sidecars = sorted({s.key for s in render.services.values()
-                           if "backup" in s.key and any(e in s.depends for e in engines)})
+        sidecars = dump_sidecars(render, engines, key)
         out.append({"key": key, "name": spec["name"], "external": spec["external"],
                     "consumers": sorted(set(consumers)), "engines": sorted(set(engines)), "sidecars": sidecars})
     return out
@@ -2575,6 +2651,28 @@ def running_users(capture, root, docker, volume: str):
     if found.code != 0:
         return None
     return sorted({line.strip() for line in (found.stdout or "").splitlines() if line.strip()})
+
+
+HELPER_LABEL = "ai-stack.stack-py.helper=1"
+LIVE_COPY_WARNING = ("taken while these containers ran; files an application holds open (a SQLite "
+                     "database such as webui.db) may be mid-write in this archive - stop the plane "
+                     "first (`stack.py down <plane>`) for a quiescent copy")
+
+
+def helper_name(verb: str) -> str:
+    return f"stack-py-{verb}-{os.getpid()}-{int(time.time() * 1000) % 100000000}"
+
+
+def remove_helper(console, capture, root, docker, name: str) -> None:
+    """After a failed helper run: the CLI can exit while the container lives on (seen in attempt 1:
+    a backup onto a full disk left its helper holding the volume, and the next restore was refused
+    because of it). Remove it by name and say whether it is gone."""
+    capture(docker + ["rm", "-f", name], root)
+    left = capture(docker + ["ps", "-a", "-q", "--filter", f"name=^{name}$"], root)
+    if left.code == 0 and not (left.stdout or "").strip():
+        console.line(f"  [ok]   helper {name} removed")
+    else:
+        console.line(f"  [FAIL] helper {name} may still exist - `docker rm -f {name}`")
 
 
 def cmd_backup(manifest, state, root, console, capture, pipe, plane: str, dest=None) -> int:
@@ -2639,24 +2737,34 @@ def cmd_backup(manifest, state, root, console, capture, pipe, plane: str, dest=N
                 continue
             note = f"cold copy: {', '.join(container_of(render, e) for e in vol['engines'])} stopped"
         users = running_users(capture, root, docker, name) or []
+        live = []
         if not note and users:
             note = f"live copy: {', '.join(users)} running"
+            live = users
         archive = f"{name}.tar.gz"
         partial = out / (archive + ".partial")
-        cmd = docker + ["run", "--rm", "--network", "none", "-v", f"{name}:/volume:ro", HELPER_IMAGE,
-                        "tar", "-czf", "-", "-C", "/volume", "."]
+        helper = helper_name("backup")
+        cmd = docker + ["run", "--rm", "--name", helper, "--label", HELPER_LABEL, "--network", "none",
+                        "-v", f"{name}:/volume:ro", HELPER_IMAGE, "tar", "-czf", "-", "-C", "/volume", "."]
         console.line(" ".join(cmd) + f" > {archive}")
         result = pipe(cmd, root, stdout_path=partial)
         if result.code != 0:
             failed += 1
             partial.unlink(missing_ok=True)
+            remove_helper(console, capture, root, docker, helper)
             why = (result.stderr or "no output").strip().splitlines()[-1:] or ["no output"]
             console.line(f"  [FAIL] {name}: the helper exited {result.code} ({why[0]}); no archive kept")
             continue
         partial.replace(out / archive)
         size = (out / archive).stat().st_size
         digest = sha256_of(out / archive)
-        archived.append({"volume": name, "key": vol["key"], "archive": archive, "bytes": size, "sha256": digest})
+        entry = {"volume": name, "key": vol["key"], "archive": archive, "bytes": size, "sha256": digest}
+        if live:
+            # Recorded, not only printed: after the fact an archive must not look like a
+            # clean one when it was read under a running application (a SQLite webui.db
+            # mid-write restores as whatever the pages on disk said at that instant).
+            entry["live_copy"] = {"running": live, "warning": LIVE_COPY_WARNING}
+        archived.append(entry)
         console.line(f"  [ok]   {name}: {archive}, {size} bytes, sha256 {digest}" + (f" ({note})" if note else ""))
 
     if binds:
@@ -2802,12 +2910,14 @@ def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, sourc
             if made.code != 0:
                 console.line(f"refused: creating {name} exited {made.code}: {(made.stderr or '').strip()}")
                 return EXIT_REFUSED
-        cmd = docker + ["run", "--rm", "-i", "--network", "none", "-v", f"{name}:/volume", HELPER_IMAGE,
-                        "sh", "-c", _RESTORE_SCRIPT]
+        helper = helper_name("restore")
+        cmd = docker + ["run", "--rm", "-i", "--name", helper, "--label", HELPER_LABEL, "--network", "none",
+                        "-v", f"{name}:/volume", HELPER_IMAGE, "sh", "-c", _RESTORE_SCRIPT]
         console.line(" ".join(cmd[:-1]) + " '<staged extract>'" + f" < {entry['archive']}")
         result = pipe(cmd, root, stdin_path=directory / entry["archive"])
         if result.code != 0:
             why = (result.stderr or "no output").strip().splitlines()[-1:] or ["no output"]
+            remove_helper(console, capture, root, docker, helper)
             console.line(f"refused: restoring {name} exited {result.code} ({why[0]})")
             return EXIT_REFUSED
         console.line(f"  [ok]   {name} <- {entry['archive']} ({entry.get('bytes')} bytes)")
@@ -2842,6 +2952,33 @@ def _int(text) -> int:
         return int(float(text))
     except (TypeError, ValueError):
         return 0
+
+
+def _stats_rows(capture, root, ids):
+    """(rows, ids that vanished). One `docker stats` for all; if that fails, one per container,
+    so a container removed mid-run costs its own row, not the table. rows is None only when
+    every container failed."""
+    def parse(text):
+        out = []
+        for line in (text or "").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+    result = capture(["docker", "stats", "--no-stream", "--format", "{{json .}}", *ids], root)
+    if result.code == 0:
+        return parse(result.stdout), []
+    rows, gone = [], []
+    for cid in ids:
+        one = capture(["docker", "stats", "--no-stream", "--format", "{{json .}}", cid], root)
+        if one.code == 0:
+            rows += parse(one.stdout)
+        else:
+            gone.append(cid)
+    if not rows:
+        return None, [(result.stderr or "").strip()[:200]]
+    return rows, gone
 
 
 def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, hours: int = 1,
@@ -2884,22 +3021,19 @@ def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, ho
     if not ids:
         console.line("  no running container in the enabled planes")
     else:
-        result = capture(["docker", "stats", "--no-stream", "--format", "{{json .}}", *ids], root)
-        if result.code != 0:
-            console.line(f"  [FAIL] docker stats exited {result.code}: {(result.stderr or '').strip()[:200]}")
+        rows, gone = _stats_rows(capture, root, ids)
+        if rows is None:
+            console.line(f"  [FAIL] docker stats failed for every container: {gone[0] if gone else 'no output'}")
             failed += 1
         else:
-            rows = []
-            for line in (result.stdout or "").splitlines():
-                try:
-                    rows.append(json.loads(line))
-                except ValueError:
-                    continue
             width = max([len(r.get("Name", "")) for r in rows] + [4])
             console.line(f"  {'NAME'.ljust(width)}  {'CPU %':>7}  {'MEM USAGE / LIMIT':<22}  {'MEM %':>6}  NET I/O")
             for r in sorted(rows, key=lambda r: r.get("Name", "")):
                 console.line(f"  {r.get('Name', '?').ljust(width)}  {r.get('CPUPerc', '?'):>7}  "
                              f"{r.get('MemUsage', '?'):<22}  {r.get('MemPerc', '?'):>6}  {r.get('NetIO', '?')}")
+            for cid in gone:
+                console.line(f"  {cid[:12].ljust(width)}  (gone: the container disappeared between "
+                             "`compose ps` and `docker stats`)")
 
     console.line("")
     if not state.is_enabled("inference"):

@@ -3066,6 +3066,9 @@ class OpsDaemon(FakeDaemon):
         self.ps_ids: dict = {}                 # compose file -> ids
         self.stats = []                        # docker stats rows
         self.execs: dict = {}                  # container -> CommandResult
+        self.removed: list[str] = []           # helper containers `rm -f`-ed
+        self.pipe_codes: list[int] = []        # scripted exit codes for pipe(), consumed in order
+        self.stats_gone: set = set()           # ids `docker stats` says no longer exist
 
     def _containers(self, compose_file, keys):
         services = self.plane_renders[compose_file]["services"]
@@ -3100,13 +3103,25 @@ class OpsDaemon(FakeDaemon):
             self.volumes[name] = b""
             self.volume_labels[name] = dict(a.split("=", 1) for a in args if a.startswith("com.docker"))
             return stack.CommandResult(0, name, "")
+        if args[:2] == ["rm", "-f"]:
+            self.commands.append(list(cmd))
+            self.removed.append(args[2])
+            return stack.CommandResult(0, args[2], "")
+        if args[:3] == ["ps", "-a", "-q"]:
+            self.commands.append(list(cmd))
+            name = args[-1].split("=", 1)[1].strip("^$")
+            return stack.CommandResult(0, "" if name in self.removed else "abc\n", "")
         if args[:2] == ["ps", "--filter"]:
             self.commands.append(list(cmd))
             volume = args[2].split("=", 1)[1]
             return stack.CommandResult(0, "".join(n + "\n" for n in self.users.get(volume, [])), "")
         if args[:1] == ["stats"]:
             self.commands.append(list(cmd))
-            return stack.CommandResult(0, "".join(json.dumps(r) + "\n" for r in self.stats), "")
+            ids = args[4:]
+            if any(i in self.stats_gone for i in ids):
+                return stack.CommandResult(1, "", f"Error response from daemon: No such container: {ids[0]}")
+            rows = [r for r in self.stats if r.get("ID") in ids] if len(ids) == 1 else self.stats
+            return stack.CommandResult(0, "".join(json.dumps(r) + "\n" for r in rows), "")
         if args[:1] == ["exec"]:
             self.commands.append(list(cmd))
             return self.execs.get(args[1], stack.CommandResult(1, "", "no such container"))
@@ -3133,6 +3148,12 @@ class OpsDaemon(FakeDaemon):
         self.piped.append(list(cmd))
         self.mutations.append(list(cmd)) if stdin_path else None
         volume = cmd[cmd.index("-v") + 1].split(":")[0]
+        if self.pipe_codes:
+            code = self.pipe_codes.pop(0)
+            if code:
+                if stdout_path:
+                    Path(stdout_path).write_bytes(b"partial")
+                return stack.CommandResult(code, "", "write /dev/stdout: no space left on device")
         if stdout_path:
             Path(stdout_path).write_bytes(b"TAR:" + self.volumes[volume])
             return stack.CommandResult(0, "", "")
@@ -3166,6 +3187,10 @@ RENDERS = {"frontend/docker-compose.yml": FRONTEND_GPU, "inference/docker-compos
 def _enable(root, planes="inference,frontend"):
     code, out, _ = run(root, "init", "--planes", planes, "--force")
     assert code == 0, out
+
+
+def _vol(cmd):
+    return cmd[cmd.index("-v") + 1]
 
 
 def _index(lines, needle):
@@ -3217,7 +3242,7 @@ def test_every_start_line_names_the_gate_and_its_budget(root):
     assert code == 0, out
     # 60 s start_period + 3 x (15 s interval + 15 s timeout) + one 15 s interval + 30 s margin
     assert "#   gate: openwebui healthy (compose healthcheck), up to 195s" in out
-    assert "#   gate: openwebui-backup running and steady (no compose healthcheck" in out
+    assert "#   gate: openwebui-backup running and not restarted for 15s (no compose healthcheck" in out
 
 
 def test_gate_timeout_is_the_healthchecks_own_worst_case_and_can_be_overridden():
@@ -3306,7 +3331,47 @@ def test_a_restart_loop_without_a_healthcheck_never_passes_as_running(root, fast
     daemon = OpsDaemon(RENDERS, states={"tailscale-backup": loop})
     code, out = ops(root, daemon, "recover", "frontend", "--timeout", "30")
     assert code == stack.EXIT_REFUSED
-    assert "tailscale-backup (tailscale-backup) no verdict within 30s" in out
+    assert "tailscale-backup (tailscale-backup) restart loop: it restarted 3s into the 15s settle window" in out
+
+
+def test_a_crash_8s_after_start_fails_the_settle_window_with_a_named_reason(root, fast_clock):
+    """Attempt 1, attack H: a no-healthcheck sidecar that runs 8 s then exits 1 PASSED the gate
+    ('running after 3s') and recover said every container passed. RED at 19ae98f."""
+    _enable(root, "frontend")
+    started = "2026-09-25T12:00:00Z"
+    run8 = [{"Status": "running", "RestartCount": 0, "StartedAt": started}] * 3
+    crash = [{"Status": "exited", "ExitCode": 1, "RestartCount": 0, "StartedAt": started}]
+    daemon = OpsDaemon(RENDERS, states={"openwebui-backup": run8 + crash})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED, out
+    assert ("refused: recover stopped at frontend: openwebui-backup (openwebui-backup) exited with exit code 1 "
+            "9s after it was first seen running (a crash inside the settle window).") in out
+    assert "every container passed its gate" not in out
+
+
+def test_a_restart_that_docker_already_performed_is_caught_by_startedat(root, fast_clock):
+    """unless-stopped restarts it before the next poll: Status is running again, but StartedAt moved."""
+    _enable(root, "frontend")
+    a = {"Status": "running", "RestartCount": 0, "StartedAt": "t0"}
+    b = {"Status": "running", "RestartCount": 0, "StartedAt": "t1"}
+    daemon = OpsDaemon(RENDERS, states={"openwebui-backup": [a, a, b]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "openwebui-backup (openwebui-backup) restart loop: it restarted 6s into the 15s settle window" in out
+
+
+def test_restarting_status_fails_the_gate_at_once(root, fast_clock):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, states={"openwebui-backup": [{"Status": "restarting", "RestartCount": 3}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "openwebui-backup (openwebui-backup) restart loop: docker reports it restarting (RestartCount 3)" in out
+
+
+def test_a_declared_restart_delay_widens_the_settle_window():
+    svc = stack.Service("x", "x", {}, None, None, "img", (), {}, 40.0)
+    assert stack.settle_seconds(svc) == 40.0 + stack.GATE_POLL_SECONDS
+    assert stack.settle_seconds(svc._replace(restart_delay=0.0)) == stack.SETTLE_SECONDS
 
 
 def test_an_exited_container_fails_its_gate_unless_it_is_a_one_shot_that_exited_0(root, fast_clock):
@@ -3399,8 +3464,9 @@ def test_backup_archives_each_named_volume_the_render_mounts_and_records_its_sha
     assert (out_dir / "SHA256SUMS").read_text(encoding="utf-8") == f"{digest}  frontend_openwebui-data.tar.gz\n"
     # a throwaway helper, read-only mount, no network
     [helper] = daemon.piped
-    assert helper[:6] == ["docker", "run", "--rm", "--network", "none", "-v"]
-    assert helper[6] == "frontend_openwebui-data:/volume:ro" and stack.HELPER_IMAGE in helper
+    assert helper[:3] == ["docker", "run", "--rm"]
+    assert helper[helper.index("--network") + 1] == "none" and "--name" in helper
+    assert _vol(helper) == "frontend_openwebui-data:/volume:ro" and stack.HELPER_IMAGE in helper
     assert not list(out_dir.glob("*.partial"))
 
 
@@ -3423,7 +3489,7 @@ def test_backup_names_a_running_database_and_its_dump_sidecar_instead_of_tarring
     assert code == 0, out
     assert ("[skip] inference_llm-gateway-db-data: a live database data directory (llm-gateway-db is running) "
             "- use the plane's dump for a consistent copy (llm-gateway-backup writes it)") in out
-    assert [c[6] for c in daemon.piped] == ["inference_llm-queue-data:/volume:ro"]
+    assert [_vol(c) for c in daemon.piped] == ["inference_llm-queue-data:/volume:ro"]
     record = json.loads(next((root / "backups" / "inference").glob("*/manifest.json")).read_text("utf-8"))
     assert [v["volume"] for v in record["volumes"]] == ["inference_llm-queue-data"]
     assert record["skipped"][0]["volume"] == "inference_llm-gateway-db-data"
@@ -3459,7 +3525,7 @@ def test_backup_follows_the_render_so_a_new_volume_needs_no_code_change(root, st
                        volumes={"frontend_openwebui-data": b"a", "frontend_extra": b"b", "frontend_unused": b"c"})
     code, out = ops(root, daemon, "backup", "frontend")
     assert code == 0, out
-    assert sorted(c[6].split(":")[0] for c in daemon.piped) == ["frontend_extra", "frontend_openwebui-data"]
+    assert sorted(_vol(c).split(":")[0] for c in daemon.piped) == ["frontend_extra", "frontend_openwebui-data"]
 
 
 def test_backup_of_the_anchor_is_refused(root):
@@ -3652,5 +3718,85 @@ def test_a_container_without_a_healthcheck_passes_once_it_is_steady(root, fast_c
     daemon = OpsDaemon(RENDERS, states={"tailscale-backup": steady, "openwebui-backup": steady})
     code, out = ops(root, daemon, "recover", "frontend")
     assert code == 0, out
-    assert "frontend/openwebui-backup (openwebui-backup): running after 3s (no healthcheck; RestartCount steady at 2)" in out
+    assert ("frontend/openwebui-backup (openwebui-backup): running and steady for 15s (no healthcheck; "
+            "RestartCount 2, not restarted)") in out
     assert fast_clock[0] < 60
+
+
+# --- attempt 2: what attempt 1's tester broke ---------------------------------
+
+
+OB1_RENDER = {"name": "open-brain", "services": {
+    "openbrain-db": _svc("pgvector/pgvector:pg16", "openbrain-db", health=True,
+                         volumes=[("openbrain-db-data", "/var/lib/postgresql/data", False)]),
+    "openbrain-db-backup": {**_svc("openbrain-db-backup:local", "openbrain-db-backup"),
+                            "environment": {"PGHOST": "openbrain-db", "PGPORT": "5432"}},
+    "openbrain-postgrest": {**_svc("postgrest/postgrest:v12", "openbrain-postgrest"),
+                            "environment": {"PGRST_DB_URI": "postgres://u:p@openbrain-db:5432/openbrain"}},
+}, "volumes": {"openbrain-db-data": {"name": "open-brain_openbrain-db-data"}}}
+
+
+def test_a_dump_sidecar_is_found_without_depends_on_through_its_host_variable():
+    """Attempt 1, attack K: openbrain-db-backup has no depends_on, only PGHOST=openbrain-db.
+    RED at 19ae98f (the sidecar list was empty and backup said 'no dump sidecar')."""
+    render = stack.PlaneRender("ob1", "open-brain", {}, {})
+    services = {}
+    for key, spec in OB1_RENDER["services"].items():
+        services[key] = stack.Service(
+            key, spec.get("container_name"), {k: v["condition"] for k, v in (spec.get("depends_on") or {}).items()},
+            None, spec.get("healthcheck"), spec["image"],
+            tuple(("volume", m["source"], m["target"], m["read_only"]) for m in spec.get("volumes", [])),
+            dict(spec.get("environment") or {}))
+    render = render._replace(services=services, volumes={"openbrain-db-data": {"name": "x", "external": False}})
+    [vol] = stack.plane_volumes(render)
+    assert vol["engines"] == ["openbrain-db"]
+    # postgrest names the db host too, but it is not a backup/dump service
+    assert vol["sidecars"] == ["openbrain-db-backup"]
+
+
+@pytest.mark.parametrize("value,host,hit", [
+    ("openbrain-db", "openbrain-db", True), ("openbrain-db:5432", "openbrain-db", True),
+    ("http://surrealdb:8000", "surrealdb", True), ("postgres://u:p@mattermost-db/mm", "mattermost-db", True),
+    ("openbrain-db-backup", "openbrain-db", False), ("my-openbrain-db", "openbrain-db", False)])
+def test_names_host_matches_a_host_not_a_substring(value, host, hit):
+    assert stack._names_host(value, host) is hit
+
+
+def test_a_live_copy_is_recorded_in_the_manifest_not_only_printed(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"db"},
+                       users={"frontend_openwebui-data": ["openwebui"]})
+    code, out = ops(root, daemon, "backup", "frontend")
+    assert code == 0, out
+    record = json.loads(next((root / "backups" / "frontend").glob("*/manifest.json")).read_text("utf-8"))
+    live = record["volumes"][0]["live_copy"]
+    assert live["running"] == ["openwebui"] and "SQLite" in live["warning"]
+
+
+def test_a_failed_helper_is_removed_by_name_before_backup_returns(root, stamped):
+    """Attempt 1, attack F: a backup onto a full disk left its helper alive, holding the volume."""
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"db"})
+    daemon.pipe_codes = [1]
+    code, out = ops(root, daemon, "backup", "frontend")
+    assert code == stack.EXIT_REFUSED
+    [helper] = daemon.piped
+    name = helper[helper.index("--name") + 1]
+    assert daemon.removed == [name]
+    assert f"[ok]   helper {name} removed" in out
+    assert not list((root / "backups").rglob("*.partial"))
+
+
+def test_stats_keeps_the_table_when_one_container_vanishes_mid_run(root, monkeypatch):
+    """Attempt 1, attack G: one removed container cost the whole table."""
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS)
+    daemon.ps_ids["frontend/docker-compose.yml"] = ["aaa", "bbb"]
+    daemon.stats = [{"ID": "aaa", "Name": "openwebui", "CPUPerc": "1.00%", "MemUsage": "1MiB / 2GiB",
+                     "MemPerc": "0.05%", "NetIO": "0B / 0B"}]
+    daemon.stats_gone = {"bbb"}
+    code, out = ops(root, daemon, "stats")
+    assert code == 0, out
+    assert re.search(r"openwebui\s+1\.00%", out)
+    assert "(gone: the container disappeared between `compose ps` and `docker stats`)" in out
