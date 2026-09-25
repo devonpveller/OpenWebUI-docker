@@ -1154,12 +1154,10 @@ def test_the_liveliness_probe_never_gets_litellms_bare_health(root):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(
-    not stack.WINDOWS,
-    reason="`stats` hands off to Windows PowerShell 5.1 and refuses elsewhere; the off-Windows "
-           "refusal is test_stats_refuses_off_windows_rather_than_printing_nothing (ac-ci X1)",
-)
-def test_stats_hands_off_to_the_powershell_report(root):
+def test_stats_on_windows_still_hands_off_to_the_powershell_report(root, monkeypatch):
+    """The operator's host keeps the report it has always run (ac-ops-portable: "on Windows it
+    may keep delegating"). Pinned to Windows, so a Linux runner answers the same."""
+    monkeypatch.setattr(stack, "WINDOWS", True)
     script = root / "scripts" / "stack" / "stack-stats.ps1"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text("# placeholder\n", encoding="utf-8")
@@ -1170,17 +1168,10 @@ def test_stats_hands_off_to_the_powershell_report(root):
     assert recorder.commands[0][-1].endswith("stack-stats.ps1")
 
 
-def test_stats_refuses_off_windows_rather_than_printing_nothing(root, monkeypatch):
-    """A verb that silently does nothing is the failure class this repo hunts."""
-    script = root / "scripts" / "stack" / "stack-stats.ps1"
-    script.parent.mkdir(parents=True, exist_ok=True)
-    script.write_text("# placeholder\n", encoding="utf-8")
-    monkeypatch.setattr(stack, "WINDOWS", False)
-    code, out, recorder = run(root, "stats")
-    assert code == stack.EXIT_REFUSED
-    assert out.startswith("refused:")
-    assert "stack-stats.ps1" in out
-    assert recorder.commands == []
+# (test_stats_refuses_off_windows_rather_than_printing_nothing was retired by
+# ac-ops-portable: `stats` no longer refuses off Windows, it reports. Its point -
+# never print nothing and exit 0 - is kept by the stats tests at the end of this
+# file, which pin real numbers and an explicit "NOT ENABLED" line.)
 
 
 # --------------------------------------------------------------------------
@@ -2985,3 +2976,664 @@ def test_every_backup_consumer_is_declared_and_every_declared_consumer_is_real()
     assert scanned >= 8, f"only {scanned} compose files read - the scan is not looking at the planes"
     assert found, "no plane references backup/ - the scan matched nothing"
     assert set(module["consumers"]) == found
+
+
+# --------------------------------------------------------------------------
+# ac-ops-portable: recover, backup, restore, stats - operating off Windows
+# --------------------------------------------------------------------------
+#
+# The renders below are written in the shape `docker compose config --format
+# json` emits (measured on compose v5.3.0, this repo's frontend and inference
+# planes, 2026-09-25): depends_on as {service: {condition, required}}, durations
+# as Go strings ("1m0s"), network_mode "service:X", volumes as long-form dicts.
+# They are trimmed copies of the real planes, so the orders pinned here are the
+# orders the real compose files produce - the DinD rehearsal
+# (scripts/stack/rehearse-ops.sh) checks the same against a real daemon.
+
+
+def _svc(image, container=None, depends=None, netns=None, health=False, volumes=()):
+    spec = {"image": image}
+    if container:
+        spec["container_name"] = container
+    if depends:
+        spec["depends_on"] = {k: {"condition": c, "required": True} for k, c in depends.items()}
+    if netns:
+        spec["network_mode"] = f"service:{netns}"
+    if health:
+        spec["healthcheck"] = {"test": ["CMD", "true"], "interval": "15s", "timeout": "15s",
+                               "retries": 3, "start_period": "1m0s"}
+    if volumes:
+        spec["volumes"] = [{"type": "volume", "source": s, "target": t, "read_only": ro} for s, t, ro in volumes]
+    return spec
+
+
+FRONTEND_GPU = {
+    "name": "frontend",
+    "services": {
+        "openwebui": _svc("openwebui:local", "openwebui", health=True,
+                          volumes=[("openwebui-data", "/app/backend/data", False)]),
+        "openwebui-backup": _svc("alpine:3.21", "openwebui-backup", depends={"openwebui": "service_healthy"},
+                                 volumes=[("openwebui-data", "/data", True)]),
+        "tailscale": _svc("tailscale:local", "tailscale", depends={"openwebui": "service_healthy"},
+                          netns="openwebui", health=True),
+        "tailscale-backup": _svc("alpine:3.21", "tailscale-backup"),
+    },
+    "volumes": {"openwebui-data": {"name": "frontend_openwebui-data"}},
+}
+
+INFERENCE_LOCAL = {
+    "name": "inference",
+    "services": {
+        "llama-cpp-upstream": _svc("ghcr.io/mostlygeek/llama-swap:cuda", "llama-cpp-upstream", health=True),
+        "llama-cpp-embed-upstream": _svc("ghcr.io/ggml-org/llama.cpp:server-cuda", "llama-cpp-embed-upstream",
+                                         health=True),
+        "llm-queue": _svc("llm-queue:local", "llm-queue", depends={"llama-cpp-upstream": "service_healthy"},
+                          health=True, volumes=[("llm-queue-data", "/data", False)]),
+        "llm-gateway-db": _svc("postgres:16-alpine", "llm-gateway-db", health=True,
+                               volumes=[("llm-gateway-db-data", "/var/lib/postgresql/data", False)]),
+        "llm-gateway": _svc("ghcr.io/berriai/litellm@sha256:abc", "llm-gateway", health=True,
+                            depends={"llama-cpp-upstream": "service_healthy",
+                                     "llama-cpp-embed-upstream": "service_healthy",
+                                     "llm-queue": "service_healthy", "llm-gateway-db": "service_healthy"}),
+        "llm-gateway-backup": _svc("postgres:16-alpine", "llm-gateway-backup",
+                                   depends={"llm-gateway-db": "service_healthy"}),
+    },
+    "volumes": {"llm-gateway-db-data": {"name": "inference_llm-gateway-db-data"},
+                "llm-queue-data": {"name": "inference_llm-queue-data"}},
+}
+
+EXISTING_NETWORKS = {spec["name"]: {"internal": bool(spec.get("internal"))} for spec in ANCHOR_NETWORKS.values()}
+HEALTHY = {"Status": "running", "Health": {"Status": "healthy"}, "RestartCount": 0}
+
+
+class OpsDaemon(FakeDaemon):
+    """FakeDaemon plus containers, volumes and the helper container.
+
+    `states` scripts `docker inspect` per container: a list consumed one poll at a
+    time, the last entry repeating. A container never scripted answers HEALTHY
+    once something has `up`-ed it and "no such container" before.
+    """
+
+    def __init__(self, renders, states=None, volumes=None, users=None, networks=None, **kw):
+        super().__init__(networks=EXISTING_NETWORKS if networks is None else networks,
+                         plane_renders=renders, **kw)
+        self.states = {k: list(v) for k, v in (states or {}).items()}
+        self.upped: set[str] = set()
+        self.volumes = dict(volumes or {})     # volume name -> bytes
+        self.volume_labels: dict = {}
+        self.users = users or {}               # volume name -> running container names
+        self.piped: list[list[str]] = []
+        self.ps_ids: dict = {}                 # compose file -> ids
+        self.stats = []                        # docker stats rows
+        self.execs: dict = {}                  # container -> CommandResult
+
+    def _containers(self, compose_file, keys):
+        services = self.plane_renders[compose_file]["services"]
+        return [services[k].get("container_name") or k for k in keys]
+
+    def _do(self, cmd):
+        args = list(cmd[1:])
+        if args[:1] == ["--context"]:
+            args = args[2:]
+        if args[:1] == ["inspect"]:
+            self.commands.append(list(cmd))
+            name = args[-1]
+            if name in self.states:
+                seq = self.states[name]
+                state = seq.pop(0) if len(seq) > 1 else seq[0]
+            elif name in self.upped:
+                state = HEALTHY
+            else:
+                return stack.CommandResult(1, "", f"Error: No such object: {name}")
+            return stack.CommandResult(0, json.dumps(state), "")
+        if args[:2] == ["volume", "inspect"]:
+            self.commands.append(list(cmd))
+            return stack.CommandResult(0 if args[2] in self.volumes else 1, "", "")
+        if args[:2] == ["volume", "create"]:
+            self.commands.append(list(cmd))
+            self.mutations.append(list(cmd))
+            name = args[-1]
+            self.volumes[name] = b""
+            self.volume_labels[name] = dict(a.split("=", 1) for a in args if a.startswith("com.docker"))
+            return stack.CommandResult(0, name, "")
+        if args[:2] == ["ps", "--filter"]:
+            self.commands.append(list(cmd))
+            volume = args[2].split("=", 1)[1]
+            return stack.CommandResult(0, "".join(n + "\n" for n in self.users.get(volume, [])), "")
+        if args[:1] == ["stats"]:
+            self.commands.append(list(cmd))
+            return stack.CommandResult(0, "".join(json.dumps(r) + "\n" for r in self.stats), "")
+        if args[:1] == ["exec"]:
+            self.commands.append(list(cmd))
+            return self.execs.get(args[1], stack.CommandResult(1, "", "no such container"))
+        if args[:2] == ["compose", "-f"]:
+            compose_file, rest = args[2], args[3:]
+            while rest[:1] == ["--profile"]:
+                rest = rest[2:]
+            if rest[:2] == ["ps", "-q"]:
+                self.commands.append(list(cmd))
+                return stack.CommandResult(0, "".join(i + "\n" for i in self.ps_ids.get(compose_file, [])), "")
+            if rest[:1] == ["stop"]:
+                self.commands.append(list(cmd))
+                self.upped.difference_update(self._containers(compose_file, rest[3:]))
+                return stack.CommandResult(0, "", "")
+            if rest[:1] == ["up"] and compose_file != "docker-compose.yml":
+                result = super()._do(cmd)
+                if result.code == 0:
+                    self.upped.update(self._containers(compose_file, rest[3:]))
+                return result
+        return super()._do(cmd)
+
+    def pipe(self, cmd, cwd, stdin_path=None, stdout_path=None):
+        self.commands.append(list(cmd))
+        self.piped.append(list(cmd))
+        self.mutations.append(list(cmd)) if stdin_path else None
+        volume = cmd[cmd.index("-v") + 1].split(":")[0]
+        if stdout_path:
+            Path(stdout_path).write_bytes(b"TAR:" + self.volumes[volume])
+            return stack.CommandResult(0, "", "")
+        data = Path(stdin_path).read_bytes()
+        self.volumes[volume] = data[4:] if data.startswith(b"TAR:") else data
+        return stack.CommandResult(0, "", "")
+
+
+@pytest.fixture
+def fast_clock(monkeypatch):
+    """The gate loop's clock and sleep: a four-minute timeout runs in no time."""
+    now = [0.0]
+    monkeypatch.setattr(stack, "monotonic", lambda: now[0])
+
+    def _sleep(seconds):
+        now[0] += seconds
+    monkeypatch.setattr(stack, "sleep", _sleep)
+    return now
+
+
+def ops(root, daemon, *args):
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), *args], runner=daemon.runner, stdout=out,
+                      capture=daemon.capture, pipe=daemon.pipe)
+    return code, out.getvalue()
+
+
+RENDERS = {"frontend/docker-compose.yml": FRONTEND_GPU, "inference/docker-compose.yml": INFERENCE_LOCAL}
+
+
+def _enable(root, planes="inference,frontend"):
+    code, out, _ = run(root, "init", "--planes", planes, "--force")
+    assert code == 0, out
+
+
+def _index(lines, needle):
+    return next(i for i, line in enumerate(lines) if needle in line)
+
+
+# --- the orders ----------------------------------------------------------------
+
+
+def test_recover_dry_run_is_up_order_for_planes_and_depends_on_order_for_containers(root):
+    _enable(root)
+    daemon = OpsDaemon(RENDERS)
+    code, out = ops(root, daemon, "recover", "--dry-run")
+    assert code == 0, out
+    lines = docker_lines(out)
+    # planes: stop in reverse of `up`, start in `up`'s order (anchor, inference, frontend)
+    assert "# recover: anchor, inference, frontend" in out
+    stop_fe = _index(lines, "frontend/docker-compose.yml stop")
+    stop_inf = _index(lines, "inference/docker-compose.yml stop")
+    up_inf = _index(lines, "inference/docker-compose.yml up")
+    up_fe = _index(lines, "frontend/docker-compose.yml up")
+    assert stop_fe < stop_inf < up_inf < up_fe
+    # the netns rule: tailscale stops BEFORE openwebui and starts AFTER it
+    assert lines[stop_fe].endswith("stop --timeout 30 openwebui-backup tailscale")
+    assert lines[stop_fe + 1].endswith("stop --timeout 30 openwebui tailscale-backup")
+    starts = [ln for ln in lines if "frontend/docker-compose.yml up" in ln]
+    assert starts == ["docker compose -f frontend/docker-compose.yml up -d --no-deps openwebui tailscale-backup",
+                      "docker compose -f frontend/docker-compose.yml up -d --no-deps openwebui-backup tailscale"]
+    # the inference rule: both upstreams (and the db) before llm-queue, llm-queue before the gateway
+    ups = [ln.split("--no-deps ")[1] for ln in lines if "inference/docker-compose.yml up" in ln]
+    assert ups == ["llama-cpp-embed-upstream llama-cpp-upstream llm-gateway-db",
+                   "llm-gateway-backup llm-queue", "llm-gateway"]
+
+
+def test_recover_dry_run_stops_starts_and_creates_nothing(root):
+    _enable(root)
+    daemon = OpsDaemon(RENDERS)
+    code, out = ops(root, daemon, "recover", "--dry-run")
+    assert code == 0, out
+    assert daemon.streamed == [] and daemon.created == [] and daemon.mutations == []
+    # the only docker calls were the two read-only plane renders
+    assert all(c[-3:] == ["config", "--format", "json"] for c in daemon.commands), daemon.commands
+    assert "nothing was stopped, started or created" in out
+
+
+def test_every_start_line_names_the_gate_and_its_budget(root):
+    _enable(root)
+    code, out = ops(root, OpsDaemon(RENDERS), "recover", "frontend", "--dry-run")
+    assert code == 0, out
+    # 60 s start_period + 3 x (15 s interval + 15 s timeout) + one 15 s interval + 30 s margin
+    assert "#   gate: openwebui healthy (compose healthcheck), up to 195s" in out
+    assert "#   gate: openwebui-backup running and steady (no compose healthcheck" in out
+
+
+def test_gate_timeout_is_the_healthchecks_own_worst_case_and_can_be_overridden():
+    svc = stack.Service("x", "x", {}, None, {"interval": "30s", "timeout": "10s", "retries": 3,
+                                            "start_period": "1m0s"}, "img", ())
+    assert stack.gate_timeout(svc) == 60 + 3 * 40 + 30 + stack.GATE_MARGIN_SECONDS
+    assert stack.gate_timeout(svc, 12) == 12
+    bare = svc._replace(healthcheck=None)
+    assert stack.gate_timeout(bare) == stack.DEFAULT_GATE_TIMEOUT
+
+
+@pytest.mark.parametrize("text,seconds", [("15s", 15), ("1m0s", 60), ("1m30s", 90), ("500ms", 0.5),
+                                          ("1h", 3600), (None, 7), ("", 7), (15_000_000_000, 15)])
+def test_parse_duration_reads_what_compose_renders(text, seconds):
+    assert stack.parse_duration(text, 7) == pytest.approx(seconds)
+
+
+def test_the_netns_rule_is_a_check_on_the_plan_not_only_a_consequence_of_depends_on():
+    """Even with NO depends_on, network_mode alone orders the tenant after its provider."""
+    render = stack.PlaneRender("frontend", "frontend", {
+        "openwebui": stack.Service("openwebui", "openwebui", {}, None, None, "i", ()),
+        "tailscale": stack.Service("tailscale", "tailscale", {}, "openwebui", None, "i", ()),
+    }, {})
+    assert stack.start_levels(render) == [["openwebui"], ["tailscale"]]
+    with pytest.raises(stack.Refusal, match="must start after it"):
+        stack.check_netns(render, [["openwebui", "tailscale"]])
+    with pytest.raises(stack.Refusal, match="never restart one alone"):
+        stack.check_netns(render, [["openwebui"]])
+
+
+def test_a_depends_on_cycle_is_refused_not_looped_on():
+    render = stack.PlaneRender("p", "p", {
+        "a": stack.Service("a", "a", {"b": "service_started"}, None, None, "i", ()),
+        "b": stack.Service("b", "b", {"a": "service_started"}, None, None, "i", ()),
+    }, {})
+    with pytest.raises(stack.Refusal, match="cycle"):
+        stack.start_levels(render)
+
+
+# --- a real recover --------------------------------------------------------------
+
+
+def test_recover_stops_everything_first_then_starts_and_gates_every_container(root, fast_clock):
+    _enable(root)
+    daemon = OpsDaemon(RENDERS)
+    code, out = ops(root, daemon, "recover")
+    assert code == 0, out
+    verbs = [c[c.index("--no-deps") - 2] if "--no-deps" in c else c[c.index("--timeout") - 1]
+             for c in daemon.streamed]
+    first_up = verbs.index("up")
+    assert set(verbs[:first_up]) == {"stop"} and set(verbs[first_up:]) == {"up"}
+    for name in ("openwebui", "tailscale", "llm-gateway", "llama-cpp-upstream", "tailscale-backup"):
+        assert re.search(rf"\[ok\] \w+/{re.escape(name)} \({re.escape(name)}\): (healthy|running)", out), name
+    assert "recovered: inference, frontend - every container passed its gate" in out
+
+
+def test_recover_stops_with_a_named_refusal_at_the_first_failed_gate(root, fast_clock):
+    """The acceptance's planted failure: an unhealthy container stops the run and is named."""
+    _enable(root)
+    unhealthy = {"Status": "running", "Health": {"Status": "unhealthy", "Log": [{"Output": "curl: (7) refused"}]}}
+    daemon = OpsDaemon(RENDERS, states={"llm-queue": [{"Status": "running", "Health": {"Status": "starting"}},
+                                                       unhealthy]})
+    code, out = ops(root, daemon, "recover")
+    assert code == stack.EXIT_REFUSED
+    assert ("refused: recover stopped at inference: llm-queue (llm-queue) unhealthy - last healthcheck "
+            "output: curl: (7) refused.") in out
+    assert "# stopped and not started: frontend" in out
+    # nothing after the failed level was started
+    assert not any("--no-deps" in c and "llm-gateway" in c for c in daemon.streamed)
+    assert not any("frontend/docker-compose.yml" in c and "up" in c for c in daemon.streamed)
+
+
+def test_a_container_that_never_reaches_a_verdict_times_out_with_its_last_state(root, fast_clock):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, states={"openwebui": [{"Status": "running", "Health": {"Status": "starting"}}]})
+    code, out = ops(root, daemon, "recover", "frontend", "--timeout", "40")
+    assert code == stack.EXIT_REFUSED
+    assert "openwebui (openwebui) no verdict within 40s (last seen: running/starting)" in out
+    assert fast_clock[0] >= 40
+
+
+def test_a_restart_loop_without_a_healthcheck_never_passes_as_running(root, fast_clock):
+    """Seen 'running' between two crashes must not pass: RestartCount has to hold still."""
+    _enable(root, "frontend")
+    loop = [{"Status": "running", "RestartCount": n} for n in range(1, 200)]
+    daemon = OpsDaemon(RENDERS, states={"tailscale-backup": loop})
+    code, out = ops(root, daemon, "recover", "frontend", "--timeout", "30")
+    assert code == stack.EXIT_REFUSED
+    assert "tailscale-backup (tailscale-backup) no verdict within 30s" in out
+
+
+def test_an_exited_container_fails_its_gate_unless_it_is_a_one_shot_that_exited_0(root, fast_clock):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, states={"tailscale-backup": [{"Status": "exited", "ExitCode": 3}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "tailscale-backup (tailscale-backup) exited with exit code 3" in out
+    render = json.loads(json.dumps(FRONTEND_GPU))
+    render["services"]["openwebui"]["depends_on"] = {
+        "tailscale-backup": {"condition": "service_completed_successfully", "required": True}}
+    daemon = OpsDaemon({"frontend/docker-compose.yml": render},
+                       states={"tailscale-backup": [{"Status": "exited", "ExitCode": 0}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert "frontend/tailscale-backup (tailscale-backup): completed (exit 0)" in out
+
+
+def test_recover_one_plane_ensures_the_anchor_networks_before_starting_it(root, fast_clock):
+    """F6 of ac-front-door: emergency-recovery.ps1's anchor step creates nothing; this one does."""
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, networks={})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert sorted(daemon.created) == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
+    first_up = next(i for i, c in enumerate(daemon.commands) if "--no-deps" in c)
+    first_create = next(i for i, c in enumerate(daemon.commands) if c[1:3] == ["network", "create"])
+    assert first_create < first_up
+
+
+def test_recover_renders_every_plane_before_it_stops_anything(root):
+    _enable(root)
+    daemon = OpsDaemon({"inference/docker-compose.yml": INFERENCE_LOCAL},
+                       exit_codes={("docker", "compose", "-f", "frontend/docker-compose.yml",
+                                    "config", "--format", "json"): 1})
+    code, out = ops(root, daemon, "recover")
+    assert code == stack.EXIT_REFUSED
+    assert "refused: could not render frontend/docker-compose.yml" in out
+    assert daemon.streamed == []
+
+
+def test_recover_one_plane_names_the_enabled_planes_that_depend_on_it(root):
+    code, out, _ = run(root, "init", "--planes", "inference,memory,frontend", "--force")
+    assert code == 0, out
+    code, out = ops(root, OpsDaemon(RENDERS), "recover", "inference", "--dry-run")
+    assert code == 0, out
+    assert "# note: memory require inference and are not restarted by this" in out
+    assert "frontend/docker-compose.yml" not in out
+
+
+def test_recover_refuses_the_manual_plane(root):
+    code, out = ops(root, OpsDaemon(RENDERS), "recover", "portal", "--dry-run")
+    assert code == stack.EXIT_REFUSED
+    assert "refused: portal is not driven by stack.py" in out
+
+
+def test_recover_warns_about_a_placeholder_where_up_refuses_it(root):
+    """A crashed host must be recoverable before key rotation (operator decision D1)."""
+    _enable(root, "frontend")
+    (root / "frontend" / ".env.example").write_text("WEBUI_SECRET_KEY=value-for-WEBUI_SECRET_KEY\n",
+                                                   encoding="utf-8")
+    code, out, _ = run(root, "up", "--dry-run")
+    assert code == stack.EXIT_REFUSED
+    code, out = ops(root, OpsDaemon(RENDERS), "recover", "--dry-run")
+    assert code == 0, out
+    assert "# WARNING (not a refusal for recover; `up` refuses it): frontend: WEBUI_SECRET_KEY" in out
+
+
+# --- backup --------------------------------------------------------------------
+
+
+@pytest.fixture
+def stamped(monkeypatch):
+    monkeypatch.setattr(stack, "utc_stamp", lambda: "20260925T120000Z")
+
+
+def test_backup_archives_each_named_volume_the_render_mounts_and_records_its_sha256(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"webui.db bytes"})
+    code, out = ops(root, daemon, "backup", "frontend")
+    assert code == 0, out
+    out_dir = root / "backups" / "frontend" / "manual-20260925T120000Z"
+    archive = out_dir / "frontend_openwebui-data.tar.gz"
+    record = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    digest = stack.hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert record["plane"] == "frontend" and record["format"] == 1
+    assert record["volumes"] == [{"volume": "frontend_openwebui-data", "key": "openwebui-data",
+                                  "archive": "frontend_openwebui-data.tar.gz",
+                                  "bytes": archive.stat().st_size, "sha256": digest}]
+    assert (out_dir / "SHA256SUMS").read_text(encoding="utf-8") == f"{digest}  frontend_openwebui-data.tar.gz\n"
+    # a throwaway helper, read-only mount, no network
+    [helper] = daemon.piped
+    assert helper[:6] == ["docker", "run", "--rm", "--network", "none", "-v"]
+    assert helper[6] == "frontend_openwebui-data:/volume:ro" and stack.HELPER_IMAGE in helper
+    assert not list(out_dir.glob("*.partial"))
+
+
+def test_backup_dest_writes_under_a_scratch_dir_and_leaves_backups_alone(root, stamped, tmp_path_factory):
+    _enable(root, "frontend")
+    scratch = tmp_path_factory.mktemp("scratch")
+    code, out = ops(root, OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"x"}),
+                    "backup", "frontend", "--dest", str(scratch))
+    assert code == 0, out
+    assert (scratch / "frontend" / "manual-20260925T120000Z" / "manifest.json").is_file()
+    assert not (root / "backups").exists()
+
+
+def test_backup_names_a_running_database_and_its_dump_sidecar_instead_of_tarring_it(root, stamped):
+    _enable(root, "inference")
+    daemon = OpsDaemon(RENDERS, volumes={"inference_llm-gateway-db-data": b"PGDATA",
+                                         "inference_llm-queue-data": b"queue"},
+                       states={"llm-gateway-db": [HEALTHY]})
+    code, out = ops(root, daemon, "backup", "inference")
+    assert code == 0, out
+    assert ("[skip] inference_llm-gateway-db-data: a live database data directory (llm-gateway-db is running) "
+            "- use the plane's dump for a consistent copy (llm-gateway-backup writes it)") in out
+    assert [c[6] for c in daemon.piped] == ["inference_llm-queue-data:/volume:ro"]
+    record = json.loads(next((root / "backups" / "inference").glob("*/manifest.json")).read_text("utf-8"))
+    assert [v["volume"] for v in record["volumes"]] == ["inference_llm-queue-data"]
+    assert record["skipped"][0]["volume"] == "inference_llm-gateway-db-data"
+
+
+def test_backup_archives_a_stopped_database_as_a_cold_copy(root, stamped):
+    _enable(root, "inference")
+    daemon = OpsDaemon(RENDERS, volumes={"inference_llm-gateway-db-data": b"PGDATA",
+                                         "inference_llm-queue-data": b"queue"},
+                       states={"llm-gateway-db": [{"Status": "exited", "ExitCode": 0}]})
+    code, out = ops(root, daemon, "backup", "inference")
+    assert code == 0, out
+    assert "inference_llm-gateway-db-data.tar.gz" in out and "(cold copy: llm-gateway-db stopped)" in out
+
+
+def test_backup_skips_an_absent_volume_and_refuses_when_nothing_was_archived(root, stamped):
+    _enable(root, "frontend")
+    code, out = ops(root, OpsDaemon(RENDERS), "backup", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "[skip] frontend_openwebui-data: absent on this daemon" in out
+    assert "refused: nothing was archived for frontend" in out
+    assert not (root / "backups" / "frontend" / "manual-20260925T120000Z").exists()
+
+
+def test_backup_follows_the_render_so_a_new_volume_needs_no_code_change(root, stamped):
+    render = json.loads(json.dumps(FRONTEND_GPU))
+    render["services"]["tailscale-backup"]["volumes"] = [
+        {"type": "volume", "source": "extra", "target": "/x", "read_only": False}]
+    render["volumes"]["extra"] = {"name": "frontend_extra"}
+    render["volumes"]["unused"] = {"name": "frontend_unused"}
+    _enable(root, "frontend")
+    daemon = OpsDaemon({"frontend/docker-compose.yml": render},
+                       volumes={"frontend_openwebui-data": b"a", "frontend_extra": b"b", "frontend_unused": b"c"})
+    code, out = ops(root, daemon, "backup", "frontend")
+    assert code == 0, out
+    assert sorted(c[6].split(":")[0] for c in daemon.piped) == ["frontend_extra", "frontend_openwebui-data"]
+
+
+def test_backup_of_the_anchor_is_refused(root):
+    code, out = ops(root, OpsDaemon(RENDERS), "backup", "anchor")
+    assert code == stack.EXIT_REFUSED
+    assert "has no volume to back up" in out
+
+
+# --- restore -------------------------------------------------------------------
+
+
+def _backed_up(root, daemon, plane="frontend"):
+    code, out = ops(root, daemon, "backup", plane)
+    assert code == 0, out
+    return next((root / "backups" / plane).glob("manual-*"))
+
+
+def test_restore_round_trip_puts_the_archived_contents_back(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"marker-1234"})
+    backup = _backed_up(root, daemon)
+    del daemon.volumes["frontend_openwebui-data"]          # the volume is destroyed
+    code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
+    assert code == 0, out
+    assert daemon.volumes["frontend_openwebui-data"] == b"marker-1234"
+    # recreated with the labels compose gives its own volumes, so a later `up` adopts it
+    assert daemon.volume_labels["frontend_openwebui-data"] == {
+        "com.docker.compose.project": "frontend", "com.docker.compose.volume": "openwebui-data"}
+    assert "restored. Start the plane: python3 scripts/stack/stack.py up frontend" in out
+
+
+def test_restore_verifies_the_sha256_first_and_a_tampered_archive_changes_nothing(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"good"})
+    backup = _backed_up(root, daemon)
+    archive = backup / "frontend_openwebui-data.tar.gz"
+    archive.write_bytes(archive.read_bytes() + b"tampered")
+    daemon.mutations.clear()
+    before = list(daemon.commands)
+    code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
+    assert code == stack.EXIT_REFUSED
+    assert "refused: archive verification failed - nothing was changed:" in out
+    assert "frontend_openwebui-data.tar.gz: sha256 " in out
+    assert daemon.mutations == [] and daemon.volumes["frontend_openwebui-data"] == b"good"
+    assert daemon.commands == before       # it did not even ask docker anything
+
+
+def test_restore_refuses_while_a_running_container_holds_the_volume(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"old"},
+                       users={"frontend_openwebui-data": ["openwebui", "openwebui-backup"]})
+    backup = _backed_up(root, daemon)
+    daemon.volumes["frontend_openwebui-data"] = b"changed since"
+    daemon.mutations.clear()
+    code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
+    assert code == stack.EXIT_REFUSED
+    assert "frontend_openwebui-data: in use by openwebui, openwebui-backup" in out
+    assert "python3 scripts/stack/stack.py down frontend" in out
+    assert daemon.mutations == [] and daemon.volumes["frontend_openwebui-data"] == b"changed since"
+
+
+def test_restore_touches_only_the_volume_it_was_asked_to(root, stamped):
+    _enable(root, "inference")
+    daemon = OpsDaemon(RENDERS, volumes={"inference_llm-gateway-db-data": b"pg", "inference_llm-queue-data": b"q"},
+                       states={"llm-gateway-db": [{"Status": "exited", "ExitCode": 0}]})
+    backup = _backed_up(root, daemon, "inference")
+    daemon.volumes = {"inference_llm-gateway-db-data": b"pg-now", "inference_llm-queue-data": b"q-now"}
+    daemon.piped.clear()
+    code, out = ops(root, daemon, "restore", "inference", "--from", str(backup), "--volume", "llm-queue-data")
+    assert code == 0, out
+    assert [c[c.index("-v") + 1] for c in daemon.piped] == ["inference_llm-queue-data:/volume"]
+    assert daemon.volumes == {"inference_llm-gateway-db-data": b"pg-now", "inference_llm-queue-data": b"q"}
+
+
+def test_restore_accepts_the_manifest_or_one_archive_as_from(root, stamped):
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"v1"})
+    backup = _backed_up(root, daemon)
+    for source in (backup / "manifest.json", backup / "frontend_openwebui-data.tar.gz"):
+        daemon.volumes["frontend_openwebui-data"] = b"other"
+        code, out = ops(root, daemon, "restore", "frontend", "--from", str(source))
+        assert code == 0, out
+        assert daemon.volumes["frontend_openwebui-data"] == b"v1"
+
+
+def test_restore_refuses_a_backup_of_another_plane_and_a_volume_the_plane_does_not_declare(root, stamped):
+    _enable(root, "inference,frontend")
+    daemon = OpsDaemon(RENDERS, volumes={"frontend_openwebui-data": b"v"})
+    backup = _backed_up(root, daemon)
+    code, out = ops(root, daemon, "restore", "inference", "--from", str(backup))
+    assert code == stack.EXIT_REFUSED and "is a backup of plane 'frontend', not 'inference'" in out
+    code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup), "--volume", "nope")
+    assert code == stack.EXIT_REFUSED and "nope is not in" in out
+    # a manifest edited to aim at a volume the render does not own (the sha still matches)
+    record = json.loads((backup / "manifest.json").read_text(encoding="utf-8"))
+    record["volumes"][0]["volume"] = "someone-elses-volume"
+    (backup / "manifest.json").write_text(json.dumps(record), encoding="utf-8")
+    daemon.mutations.clear()
+    code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
+    assert code == stack.EXIT_REFUSED
+    assert "someone-elses-volume is not a named volume frontend mounts" in out
+    assert daemon.mutations == []
+
+
+def test_restore_without_a_manifest_is_refused(root, tmp_path_factory):
+    empty = tmp_path_factory.mktemp("empty")
+    code, out = ops(root, OpsDaemon(RENDERS), "restore", "frontend", "--from", str(empty))
+    assert code == stack.EXIT_REFUSED
+    assert "will not restore an archive it cannot verify" in out
+
+
+def test_the_restore_script_extracts_into_staging_before_it_removes_anything():
+    script = stack._RESTORE_SCRIPT
+    assert script.index("tar -xzf - -C \"$S\"") < script.index("-exec rm -rf {}")
+    assert "! -name .stack-restore-staging" in script
+
+
+def test_the_real_pipe_seam_moves_bytes_through_a_command_both_ways(tmp_path):
+    src, dst = tmp_path / "in.bin", tmp_path / "out.bin"
+    src.write_bytes(bytes(range(256)) * 10)
+    result = stack.subprocess_pipe(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read()[::-1])"],
+        tmp_path, stdin_path=src, stdout_path=dst)
+    assert result.code == 0
+    assert dst.read_bytes() == src.read_bytes()[::-1]
+
+
+# --- stats off Windows -----------------------------------------------------------
+
+
+def test_stats_off_windows_prints_container_numbers_and_says_inference_is_not_enabled(root, monkeypatch):
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    _enable(root, "frontend")
+    daemon = OpsDaemon(RENDERS)
+    daemon.ps_ids["frontend/docker-compose.yml"] = ["abc123", "def456"]
+    daemon.stats = [{"Name": "openwebui", "CPUPerc": "1.25%", "MemUsage": "512MiB / 7.6GiB", "MemPerc": "6.58%",
+                     "NetIO": "1.2kB / 3.4kB"},
+                    {"Name": "openwebui-backup", "CPUPerc": "0.00%", "MemUsage": "1MiB / 7.6GiB", "MemPerc": "0.01%",
+                     "NetIO": "0B / 0B"}]
+    code, out = ops(root, daemon, "stats")
+    assert code == 0, out
+    assert re.search(r"openwebui\s+1\.25%\s+512MiB / 7\.6GiB\s+6\.58%\s+1\.2kB / 3\.4kB", out)
+    assert ["docker", "stats", "--no-stream", "--format", "{{json .}}", "abc123", "def456"] in daemon.commands
+    assert "== inference: NOT ENABLED on this machine" in out
+    assert not any(c[:2] == ["docker", "exec"] for c in daemon.commands)
+
+
+def test_stats_with_inference_enabled_reads_the_queue_board_and_the_ledger(root, monkeypatch):
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    _enable(root)
+    daemon = OpsDaemon(RENDERS)
+    board = {"models": {"qwen": {"running": [{"id": "r1", "key": "owui", "model": "qwen", "elapsed_s": 4.2}],
+                                 "waiting": [{"id": "w1", "key": "ob1"}], "permits_free": 0, "avg_T_s": 9.5}},
+             "held_total": 2, "max_total_connections": 64}
+    daemon.execs["llm-queue"] = stack.CommandResult(0, json.dumps(board), "")
+    daemon.execs["llm-gateway-db"] = stack.CommandResult(0, "12:10|7|3500|1\n", "")
+    code, out = ops(root, daemon, "stats")
+    assert code == 0, out
+    assert "qwen: running=1 waiting=1 permits_free=0 avg_T=9.5s" in out
+    assert "RUNNING  r1  key=owui  model=qwen  4s elapsed" in out
+    assert "12:10      7 req       3,500 tok    1 fail" in out
+    assert "connections held: 2/64" in out
+    sql = [c for c in daemon.commands if c[:3] == ["docker", "exec", "llm-gateway-db"]]
+    assert len(sql) == 3 and all(c[-2] == "-c" for c in sql)
+
+
+def test_stats_says_so_when_the_ledger_cannot_be_read_and_fails(root, monkeypatch):
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    _enable(root)
+    code, out = ops(root, OpsDaemon(RENDERS), "stats")
+    assert code == stack.EXIT_REFUSED
+    assert "(llm-queue unreachable" in out
+    assert "(llm-gateway-db unreachable - the spend ledger could not be read)" in out
+
+
+def test_stats_with_nothing_running_says_so_rather_than_printing_an_empty_table(root, monkeypatch):
+    monkeypatch.setattr(stack, "WINDOWS", False)
+    _enable(root, "frontend")
+    code, out = ops(root, OpsDaemon(RENDERS), "stats")
+    assert code == 0, out
+    assert "no running container in the enabled planes" in out
