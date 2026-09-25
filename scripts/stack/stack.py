@@ -2288,15 +2288,27 @@ def container_of(render: PlaneRender, key: str) -> str:
     return render.services[key].container or f"{render.project}-{key}-1"
 
 
+# `.State` plus the container's RestartCount, which docker keeps OUTSIDE .State
+# (a top-level field). The first cut read it from .State, found None every time,
+# and so no container without a healthcheck could ever pass its gate - the DinD
+# rehearsal caught it; the unit fake had modelled the same misreading.
+_STATE_FORMAT = "{{json .State}}|{{.RestartCount}}"
+
+
 def container_state(capture, root, docker, name) -> dict | None:
-    found = capture(docker + ["inspect", "--format", "{{json .State}}", name], root)
+    """The container's .State, with "RestartCount" added from the top level; None when absent."""
+    found = capture(docker + ["inspect", "--format", _STATE_FORMAT, name], root)
     if found.code != 0:
         return None
+    text, _sep, restarts = (found.stdout or "").strip().rpartition("|")
     try:
-        data = json.loads((found.stdout or "").strip() or "{}")
+        data = json.loads(text or "{}")
     except ValueError:
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    data["RestartCount"] = int(restarts) if restarts.strip().isdigit() else None
+    return data
 
 
 def _last_health_output(state: dict) -> str:

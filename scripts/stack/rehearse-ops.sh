@@ -174,7 +174,8 @@ BDIR="$(dw sh -c 'ls -d backups/frontend/manual-* 2>/dev/null | tail -n 1')"
 echo "   backup directory: ${BDIR:-none}"
 check "backup exited 0 (exit $BK)" "$BK"
 check "manifest.json lists $VOL" "$(dw grep -q "\"volume\": \"$VOL\"" "$BDIR/manifest.json"; echo $?)"
-check "sha256sum -c SHA256SUMS passes" "$(dw sh -c "cd '$BDIR' && sha256sum -c SHA256SUMS"; echo $?)"
+dw sh -c "cd '$BDIR' && sha256sum -c SHA256SUMS"; SUMS=$?
+check "sha256sum -c SHA256SUMS passes (exit $SUMS)" "$SUMS"
 
 # 5. restore while running
 echo ""

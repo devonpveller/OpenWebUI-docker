@@ -3085,7 +3085,11 @@ class OpsDaemon(FakeDaemon):
                 state = HEALTHY
             else:
                 return stack.CommandResult(1, "", f"Error: No such object: {name}")
-            return stack.CommandResult(0, json.dumps(state), "")
+            # docker keeps RestartCount OUTSIDE .State; answer the format the driver asks for
+            assert args[1:3] == ["--format", "{{json .State}}|{{.RestartCount}}"], args
+            state = dict(state)
+            restarts = state.pop("RestartCount", 0)
+            return stack.CommandResult(0, json.dumps(state) + "|" + str(restarts), "")
         if args[:2] == ["volume", "inspect"]:
             self.commands.append(list(cmd))
             return stack.CommandResult(0 if args[2] in self.volumes else 1, "", "")
@@ -3637,3 +3641,16 @@ def test_stats_with_nothing_running_says_so_rather_than_printing_an_empty_table(
     code, out = ops(root, OpsDaemon(RENDERS), "stats")
     assert code == 0, out
     assert "no running container in the enabled planes" in out
+
+
+def test_a_container_without_a_healthcheck_passes_once_it_is_steady(root, fast_clock):
+    """RED on the first cut: RestartCount lives OUTSIDE docker's .State, the gate read it from
+    .State, got None every poll, and a steady no-healthcheck container timed out (found by the
+    DinD rehearsal, 2026-09-25: openwebui-backup, 'no verdict within 300s (last seen: running)')."""
+    _enable(root, "frontend")
+    steady = [{"Status": "running", "RestartCount": 2}]
+    daemon = OpsDaemon(RENDERS, states={"tailscale-backup": steady, "openwebui-backup": steady})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert "frontend/openwebui-backup (openwebui-backup): running after 3s (no healthcheck; RestartCount steady at 2)" in out
+    assert fast_clock[0] < 60
