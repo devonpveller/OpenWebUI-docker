@@ -27,7 +27,8 @@ Config via env (all optional):
   BRIDGE_MM_URL            Mattermost base URL              (default http://localhost:8065)
   BRIDGE_ENV_FILE          .env with AO_MATTERMOST_BOT_TOKEN (default agent-org/docker/.env)
   BRIDGE_CHANNEL_ID        channel to watch                  (default #claude-sessions)
-  BRIDGE_OPERATORS         comma-separated usernames allowed to drive sessions (default profnovice)
+  BRIDGE_OPERATORS         comma-separated usernames allowed to drive sessions (env, else the .env
+                           files below; no default - empty means nobody)
   BRIDGE_REPO              working directory for sessions    (default this repo)
   BRIDGE_CLAUDE_BIN        path to claude CLI                (default: PATH, then newest VS Code ext)
   BRIDGE_MODEL             model for every turn              (default: opus — see MODEL below)
@@ -109,7 +110,14 @@ from inbox import Inbox  # noqa: E402
 
 # ── config ───────────────────────────────────────────────────────────────────
 CHANNEL_ID = os.environ.get("BRIDGE_CHANNEL_ID", "6z9khgkdd7df9q454be6fimw1h")  # #claude-sessions
-OPERATORS = {u.strip().lower() for u in os.environ.get("BRIDGE_OPERATORS", "profnovice").split(",") if u.strip()}
+# Mattermost usernames allowed to drive a session. No shipped default (it named one
+# operator): BRIDGE_OPERATORS from the environment, else from the same .env files the
+# bot token is read from (mm_lib.default_env_files - the repo-root .env on this layout).
+# EMPTY MEANS NOBODY: every check is membership (`in OPERATORS` / `not in OPERATORS`).
+OPERATORS = {u.strip().lower() for u in (
+    os.environ.get("BRIDGE_OPERATORS")
+    or mm_lib.read_env_key("BRIDGE_OPERATORS", mm_lib.default_env_files(os.environ.get("BRIDGE_ENV_FILE", "")))
+).split(",") if u.strip()}
 
 REPO = os.environ.get("BRIDGE_REPO", _REPO_ROOT)
 # Pinned, NOT "whatever the CLI would pick" (operator, 2026-08-28). Passing no --model let every

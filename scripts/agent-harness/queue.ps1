@@ -45,8 +45,8 @@
 # the leases used, applied to the thing that actually needs it: the work item.
 #
 #   .\queue.ps1 -Propose -Id mem-readme -Anchor <path> -Developer wt-mem-readme   # BEFORE any work
-#   .\queue.ps1 -ConfirmAnchor -Id mem-readme -By profnovice                       # THE ANCHOR GATE
-#   .\queue.ps1 -AmendAnchor -Id mem-readme -By profnovice -Anchor <path> -Reason "..."
+#   .\queue.ps1 -ConfirmAnchor -Id mem-readme -By alice                       # THE ANCHOR GATE
+#   .\queue.ps1 -AmendAnchor -Id mem-readme -By alice -Anchor <path> -Reason "..."
 #     (the world turned out different; sends the item BACK to the developer - see the handler)
 #   .\queue.ps1 -Submit -Id mem-readme -Branch work/mem-readme -Developer wt-mem-readme -TestPlan <path>
 #   .\queue.ps1 -List
@@ -67,10 +67,10 @@
 #      uses - so the way forward is the ordinary -Submit. The REVIEWER's -Requeue is the
 #      stale-pass rule and goes to 'ready-to-test'. Both bump `attempt`, and both take an
 #      optional -TestPlan.)
-#   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
+#   .\queue.ps1 -Approve -Id mem-readme -By alice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
-#   .\queue.ps1 -Deployed -Id mem-readme -By profnovice -Evidence <path> [-Surface image:openbrain-curator]
+#   .\queue.ps1 -Deployed -Id mem-readme -By alice -Evidence <path> [-Surface image:openbrain-curator]
 #     (closes the surfaces -Merged derived; -By is a person - the auto: namespace is refused)
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else

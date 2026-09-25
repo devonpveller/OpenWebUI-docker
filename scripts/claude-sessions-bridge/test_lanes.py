@@ -236,10 +236,15 @@ class ThumbsDownTests(unittest.TestCase):
     def setUp(self):
         self.b = bridge.Bridge.__new__(bridge.Bridge)
         self._orig = mmapi._api
-        mmapi._user_cache.update({"op1": "profnovice", "bot1": "bot-claude"})
+        # The operator set is configuration (BRIDGE_OPERATORS), not a shipped default,
+        # so the test names its own operator instead of inheriting one.
+        self._orig_ops = bridge.OPERATORS
+        bridge.OPERATORS = {"alice"}
+        mmapi._user_cache.update({"op1": "alice", "bot1": "bot-claude"})
 
     def tearDown(self):
         mmapi._api = self._orig
+        bridge.OPERATORS = self._orig_ops
 
     def _reactions(self, rs):
         mmapi._api = lambda method, path, body=None: rs

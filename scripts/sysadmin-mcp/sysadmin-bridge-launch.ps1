@@ -8,7 +8,7 @@
     BRIDGE_TOKEN_KEY    = SYSADMIN_MM_BOT_TOKEN  (bot-sysadmin token in agent-org/docker/.env)
     BRIDGE_LOCK_PORT    = 48292  (the #claude-sessions bridge owns 48291)
     BRIDGE_CHARTER_FILE = this dir's charter.md (appended to the bridge's REMOTE_NOTE)
-    BRIDGE_OPERATORS    = config.json sysadmin_operators (else bridge default: profnovice)
+    BRIDGE_OPERATORS    = config.json sysadmin_operators (else the bridge reads BRIDGE_OPERATORS from .env; none = nobody)
 
   The sysadmin MCP tools ride in automatically via repo .mcp.json (bridge uses --mcp-config without
   --strict-mcp-config). Prereqs: create the bot-sysadmin account + token, create #sysadmin, and set

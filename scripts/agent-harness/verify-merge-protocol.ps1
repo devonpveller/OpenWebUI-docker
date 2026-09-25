@@ -497,7 +497,7 @@ Check "plan_sha256 was recorded at submit and matches the queued plan" `
 Check "a reviewer cannot claim before the operator releases it" ($LASTEXITCODE -ne 0)
 & $queue -Approve -Id drill-a -By wt-drilla 2>&1 | Out-Null
 Check "the developer cannot release their OWN work (exit 4)" ($LASTEXITCODE -eq 4)
-foreach ($id in @("a", "b")) { & $queue -Approve -Id "drill-$id" -By profnovice | Out-Null }
+foreach ($id in @("a", "b")) { & $queue -Approve -Id "drill-$id" -By alice | Out-Null }
 Check "the operator released both for review" ((Get-QueueState "drill-a") -eq "ready-review" -and (Get-QueueState "drill-b") -eq "ready-review")
 
 Step 7 "the reviewer - neither developer - lands the first item"
@@ -574,7 +574,7 @@ $evidenceRetest = Write-DrillEvidence "drill-evidence-retest.md" @(
     "## Case 2 - exactly one owner   PASS",
     "    both intents present, one owner line")
 & $queue -Pass -Id drill-b -By wt-tester -Evidence $evidenceRetest -PlanAdequate | Out-Null
-& $queue -Approve -Id drill-b -By profnovice | Out-Null
+& $queue -Approve -Id drill-b -By alice | Out-Null
 Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
 
 Step 10 "the reviewer lands the adapted work"

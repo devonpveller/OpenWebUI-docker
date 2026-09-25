@@ -756,10 +756,10 @@ Check "attended: an unconfirmed anchor still refuses -Submit with exit 5" ($r.co
 $r = Invoke-Queue $fixE @("-ConfirmAnchor", "-Id", "dfe", "-By", "auto:dark")
 Check "a human -By may NOT claim the reserved auto namespace (exit 4)" ($r.code -eq 4) ("exit=" + $r.code)
 
-$r = Invoke-Queue $fixE @("-ConfirmAnchor", "-Id", "dfe", "-By", "profnovice")
+$r = Invoke-Queue $fixE @("-ConfirmAnchor", "-Id", "dfe", "-By", "alice")
 $it = Get-QueueItem $fixE "dfe"
 Check "attended: a human confirmation still works" ($r.code -eq 0 -and $it.state -eq "anchor-confirmed") ("exit=" + $r.code + " state=" + $it.state)
-Check "attended: the record says 'human' and names the person" (($it.gates.anchor.kind -eq "human") -and ($it.gates.anchor.by -eq "profnovice")) ("kind=" + $it.gates.anchor.kind + " by=" + $it.gates.anchor.by)
+Check "attended: the record says 'human' and names the person" (($it.gates.anchor.kind -eq "human") -and ($it.gates.anchor.by -eq "alice")) ("kind=" + $it.gates.anchor.kind + " by=" + $it.gates.anchor.by)
 $ledE = Get-Ledger $fixE
 Check "attended: the human pass is in the ledger too" ((@($ledE | Where-Object { $_.kind -eq "human" }).Count -eq 1)) ("human records=" + @($ledE | Where-Object { $_.kind -eq "human" }).Count)
 
