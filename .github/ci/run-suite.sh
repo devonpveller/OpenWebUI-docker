@@ -51,5 +51,6 @@ esac
 echo "== $suite: $("$venv/bin/python" --version), $("$venv/bin/python" -m pytest --version 2>&1 | head -1)"
 cd "$dir"
 # -p no:cacheprovider: the job must not leave a .pytest_cache in the checkout, and
-# a stale cache must never decide what runs.
-exec "$venv/bin/python" -m pytest -q -p no:cacheprovider
+# a stale cache must never decide what runs. --durations=15 only REPORTS the slowest
+# tests (agent-bridge's full run is about half an hour); it selects nothing.
+exec "$venv/bin/python" -m pytest -q -p no:cacheprovider --durations=15

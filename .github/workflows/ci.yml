@@ -184,7 +184,9 @@ jobs:
   suite-agent-bridge:
     name: "agent-bridge test suite"
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 881 tests took 30m22s in a fresh ubuntu:24.04 container on the operator's host
+    # (2026-09-25, at e9caf6b), mostly waiting rather than computing - see the findings.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
