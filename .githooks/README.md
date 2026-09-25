@@ -9,28 +9,38 @@ a fresh clone and drifts silently between machines. These are the real ones.
 git config core.hooksPath .githooks
 ```
 
-Verify:
+Verify, by EXECUTING a hook (a listing is not enough, see below):
 
 ```bash
-git config --get core.hooksPath   # -> .githooks
-ls -l .githooks/                   # pre-commit, commit-msg, pre-merge-commit: -rwxr-xr-x
+git config --get core.hooksPath                               # -> .githooks
+./.githooks/commit-msg /dev/null && echo "hooks can run"      # must print: hooks can run
 ```
 
-**The hooks must be executable, and git does not tell you loudly when they are not.** A
-hook without the `x` bit is skipped: `git commit` prints one `hint: The '.githooks/pre-commit'
-hook was ignored because it's not set as executable.`, no check runs, and the commit
-succeeds. The hooks are committed as mode `100755`, so a normal `git clone` gets it right.
-A copy that lost the bit (for example, one made through a filesystem that keeps no modes)
-needs it back:
+(`commit-msg` exits 0 at once when it is given no message file, so this runs the hook and
+checks nothing else.)
 
-```bash
-chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/pre-merge-commit
-```
+**If that does not print `hooks can run`, NO gate runs on your commits.** The same goes for
+any `hint: The '.githooks/pre-commit' hook was ignored because it's not set as executable.`
+line from `git commit`. git skips a hook it cannot execute, runs no check, and the commit
+succeeds. Two causes:
 
-`pre-commit` also refuses to commit a tree in which any hook file has lost `100755` in the
-index (`git update-index --chmod=+x <file>` fixes it, on Windows too). That catches the
-regression where it would be committed; the hook cannot report its own missing bit, since
-at that point it is not running.
+* **The files lost their `x` bit.** The hooks are committed as mode `100755`, so a normal
+  `git clone` gets it right. A copy made some other way (for example, through a filesystem
+  that keeps no modes) needs it back:
+
+  ```bash
+  chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/pre-merge-commit
+  ```
+
+* **The checkout is on a `noexec` mount.** There `ls -l` still shows `-rwxr-xr-x` and
+  `test -x` still says yes, but nothing on the mount can execute, and `chmod` does not help.
+  The verify line above fails with `Permission denied`. Clone somewhere that allows execution.
+
+`pre-commit` also refuses to commit a tree in which a file named as a git hook
+(`pre-commit`, `commit-msg`, ...) has lost `100755` in the index
+(`git update-index --chmod=+x <file>` fixes it, on Windows too). That catches the regression
+where it would be committed. The hook cannot report its own missing bit, and nothing in this
+repository can detect a `noexec` mount for you. Both are why the verify step executes a hook.
 
 ## Which host runs the gates
 
@@ -39,8 +49,8 @@ Every gate is a PowerShell script, and they run on Linux and macOS too. At the t
 
 | Mode | When | What runs |
 |------|------|-----------|
-| **Windows PowerShell** | `powershell.exe` is on `PATH` (Windows) | every gate, with the same command line the hook has always used |
-| **PowerShell 7** | no `powershell.exe`, `pwsh` is on `PATH` (any OS) | every gate, the same `.ps1` files |
+| **Windows PowerShell** | a native Windows git shell (`uname -s` is `MINGW*`/`MSYS*`/`CYGWIN*`, e.g. Git Bash) and `powershell.exe` is on `PATH`. **Not WSL**: WSL has `powershell.exe` on `PATH` through interop, but its Windows git cannot use the Linux checkout, so WSL takes the next row | every gate, with the same command line the hook has always used |
+| **PowerShell 7** | not a native Windows git shell (or no `powershell.exe`), and `pwsh` is on `PATH` (any OS) | every gate, the same `.ps1` files |
 | **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped, through their Python twins; every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
 
 The three never-skipped gates and their twins, both under `scripts/checks/`:
@@ -51,7 +61,11 @@ The three never-skipped gates and their twins, both under `scripts/checks/`:
 | line endings | `validate-lineendings.ps1` | `validate_lineendings.py` |
 | gateway routing | `check-llm-gateway-routing.ps1` | `check_llm_gateway_routing.py` |
 
-Each twin copies its `.ps1`'s rules and says in its header what it copies. **Change one
+Each twin copies its `.ps1`'s rules and says in its header what it copies. **All three FAIL CLOSED, in both
+languages:** if the gate's own `git` call fails (a wrong `GIT_DIR`, a repository git refuses
+as "dubious ownership"), or routing cannot list a directory or read a candidate file, the gate
+refuses the commit and names the failure. A query that failed is never read as "nothing
+staged". **Change one
 and you change both.** With no PowerShell and no Python 3 at all, the hook refuses the
 commit at the secret guard (`REFUSED secrets: ...`) rather than skip it.
 

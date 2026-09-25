@@ -7,7 +7,8 @@ PowerShell host exists and this file only where none does. Keep the two in step.
 What it mirrors: every file `git ls-files '*.sh'` lists (the pathspec matches at any
 depth), read from the WORKING TREE - not the index - and refused if it contains a CRLF
 pair. A lone CR is not flagged, by either twin. A path listed but absent on disk is
-skipped, as the .ps1's Test-Path skip does. A UTF-16 file is decoded by its BOM first,
+skipped, as the .ps1's Test-Path skip does. A tracked script that exists but cannot be read, or a `git ls-files` that fails,
+REFUSES (both twins) - a failed query is not "no tracked scripts". A UTF-16 file is decoded by its BOM first,
 as Get-Content does, so its CRLF is still seen.
 
 One stated difference: git is asked with -z, so a non-ASCII file name is checked. The
@@ -35,8 +36,16 @@ def has_crlf(raw: bytes) -> bool:
 def main() -> int:
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     print("Checking line endings (git-tracked *.sh)...")
-    out = subprocess.run(['git', 'ls-files', '-z', '*.sh'], cwd=root, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, check=False).stdout
+    proc = subprocess.run(['git', 'ls-files', '-z', '*.sh'], cwd=root, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, check=False)
+    # FAIL CLOSED (ac-hooks-portable2): a git that cannot read the repository returns
+    # nothing; that is not "no tracked shell scripts".
+    if proc.returncode != 0:
+        err = proc.stderr.decode('utf-8', 'replace').strip().splitlines()
+        print(f"FAILED: 'git ls-files' exited {proc.returncode} - cannot tell which shell scripts"
+              f" are tracked{': ' + err[0] if err else ''}")
+        return 1
+    out = proc.stdout
     tracked = [p.decode('utf-8', 'surrogateescape') for p in out.split(b'\0') if p]
     if not tracked:
         print("SUCCESS: No tracked shell scripts to check")
@@ -50,8 +59,10 @@ def main() -> int:
         try:
             with open(full, 'rb') as fh:
                 raw = fh.read()
-        except OSError:
-            continue
+        except OSError as e:
+            # A tracked script that exists but cannot be read was not checked: refuse.
+            print(f"FAILED: cannot read {rel} ({e})")
+            return 1
         if raw and has_crlf(raw):
             print(f"ERROR: Windows line endings found in: {rel}")
             bad = True

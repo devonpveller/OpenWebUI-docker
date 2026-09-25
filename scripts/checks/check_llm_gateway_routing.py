@@ -15,7 +15,8 @@ What it mirrors:
   * lines are split on CR, LF or CRLF (.NET ReadAllLines), comment lines (`#`, `//`
     after leading whitespace) are skipped, the llm-queue forward-target variables are
     sanctioned, and every other line matching the bypass pattern is a violation;
-  * zero files scanned is a FAIL, not a green.
+  * zero files scanned is a FAIL, not a green, and so is ANY directory it could not
+    list or candidate file it could not read (ac-hooks-portable2: fail closed).
 
 Standard library only. Exit 0 = clean, 1 = bypass(es) found or nothing scanned.
 """
@@ -100,19 +101,23 @@ def _is_link(path: str) -> bool:
     return bool(attrs & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0x400))
 
 
-def scan_files(root: str) -> list[str]:
+def scan_files(root: str, errors: list[str]) -> list[str]:
+    """Walk as the .ps1's Get-ScanFiles does. Every listing or stat failure is appended to
+    `errors` (the .ps1's $script:ScanErrors); main() refuses if there is any."""
     results = []
     stack = [root]
     while stack:
         d = stack.pop()
         try:
             entries = list(os.scandir(d))
-        except OSError:
+        except OSError as ex:
+            errors.append(f'list {d}: {ex}')
             continue
         for e in entries:
             try:
                 is_dir = e.is_dir()          # follows links, like EnumerateDirectories
-            except OSError:
+            except OSError as ex:
+                errors.append(f'list {e.path}: {ex}')
                 continue
             if not is_dir:
                 continue
@@ -122,21 +127,26 @@ def scan_files(root: str) -> list[str]:
                 continue
             stack.append(e.path)
         for e in entries:
+            # .NET EnumerateFiles lists every entry that is not a directory - including a
+            # DANGLING symlink, which then fails to read. Mirror that, so both twins see
+            # (and refuse on) the same unreadable candidates.
             try:
-                if not e.is_file():
+                if e.is_dir():
                     continue
-            except OSError:
+            except OSError as ex:
+                errors.append(f'list {e.path}: {ex}')
                 continue
             if any(rx.fullmatch(e.name) for rx in EXT_RX):
                 results.append(e.path)
     return results
 
 
-def read_lines(path: str) -> list[str] | None:
+def read_lines(path: str, errors: list[str]) -> list[str] | None:
     try:
         with open(path, 'rb') as fh:
             raw = fh.read()
-    except OSError:
+    except OSError as ex:
+        errors.append(f'read {path}: {ex}')
         return None
     # ReadAllLines: BOM-detected, else UTF-8 with replacement; split on CR, LF, CRLF.
     if raw.startswith(b'\xef\xbb\xbf'):
@@ -158,7 +168,8 @@ def main() -> int:
     root = args.root or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     root_prefix = root.rstrip('\\/')
 
-    files = [f for f in scan_files(root) if not allowed(root_prefix, f)]
+    errors: list[str] = []
+    files = [f for f in scan_files(root, errors) if not allowed(root_prefix, f)]
     scanned = len(files)
     tag = '[check-llm-gateway-routing]'
     if scanned == 0:
@@ -169,7 +180,7 @@ def main() -> int:
 
     violations = []
     for f in files:
-        lines = read_lines(f)
+        lines = read_lines(f, errors)
         if lines is None:
             continue
         for n, line in enumerate(lines, 1):
@@ -181,6 +192,15 @@ def main() -> int:
             if BAD.search(line):
                 rel = f[len(root):].lstrip('\\/')
                 violations.append((rel, n, line.strip(_NET_WS)))
+
+    if errors:
+        print(f'{tag} FAIL - {len(errors)} path(s) under {root} could not be listed or read,'
+              ' so they were not checked:')
+        for e in errors[:10]:
+            print(f'  {e}')
+        if violations:
+            print(f'  (and {len(violations)} bypass(es) were found in what could be read)')
+        return 1
 
     if not violations:
         print(f'{tag} OK - no LLM gateway bypasses found. {scanned} file(s) scanned under {root}.')

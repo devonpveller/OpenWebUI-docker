@@ -58,18 +58,40 @@ $ErrorActionPreference = 'Stop'
 # (measured at 3c3ff75, pwsh 7.4 in a Linux container). Off
 # Windows the names are therefore read NUL-separated (-z), which git never
 # quotes. On Windows the two git calls below are exactly the ones they were.
+#
+# EVERY git CALL HERE FAILS CLOSED (ac-hooks-portable2, review blocker 1). Under WSL
+# the hook used to pick Windows PowerShell, whose Windows git refused the Linux
+# checkout ("dubious ownership"); both queries below then returned nothing, and
+# this guard printed "nothing staged - skip" and exited 0 - it had not asked its
+# question at all. A query that FAILED is not an answer. The same holds for any
+# git that cannot read this repository (GIT_DIR wrong, safe.directory, a broken
+# index). The exit code of each call is checked, and a failure refuses the commit.
+function Stop-GitFailed([string]$What, [int]$Rc) {
+    Write-Host "  [secrets] FAIL - 'git $What' exited $Rc, so this guard cannot tell what is staged." -ForegroundColor Red
+    Write-Host "  A failed query is not 'nothing staged'. Fix git's access to this repository" -ForegroundColor Red
+    Write-Host "  (safe.directory, GIT_DIR, the index), then commit again." -ForegroundColor Red
+    exit 1
+}
 $zPaths = ($PSVersionTable.PSEdition -eq 'Core') -and ($IsWindows -ne $true)
 if ($zPaths) {
-    $gitlinks = @(((& git ls-files --stage -z) -join "`n").Split([char]0) |
+    $lsOut = & git ls-files --stage -z
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'ls-files --stage -z' $LASTEXITCODE }
+    $diffOut = & git diff --cached --name-only -z --diff-filter=ACMRT
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'diff --cached --name-only -z' $LASTEXITCODE }
+    $gitlinks = @((@($lsOut) -join "`n").Split([char]0) |
         Where-Object { $_ -match '^160000 ' } |
         ForEach-Object { ($_ -split '\t', 2)[1] })
-    $staged = @(((& git diff --cached --name-only -z --diff-filter=ACMRT) -join "`n").Split([char]0)) |
+    $staged = @((@($diffOut) -join "`n").Split([char]0)) |
         Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 } else {
-$gitlinks = @(& git ls-files --stage |
+$lsOut = & git ls-files --stage
+if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'ls-files --stage' $LASTEXITCODE }
+$diffOut = & git diff --cached --name-only --diff-filter=ACMRT
+if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'diff --cached --name-only' $LASTEXITCODE }
+$gitlinks = @(@($lsOut) |
     Where-Object { $_ -match '^160000 ' } |
     ForEach-Object { ($_ -split '\t', 2)[1] })
-$staged = @(& git diff --cached --name-only --diff-filter=ACMRT) |
+$staged = @($diffOut) |
     Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
 }
 
@@ -123,7 +145,9 @@ $patterns = @(
 foreach ($f in $staged) {
     # Read the STAGED blob, not the working file - they can differ.
     $content = & git show ":$f" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $content) { continue }
+    # A staged path whose blob cannot be read was NOT scanned: refuse, never skip it.
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed "show :$f" $LASTEXITCODE }
+    if (-not $content) { continue }
     $text = ($content -join "`n")
 
     # Skip obvious binaries.

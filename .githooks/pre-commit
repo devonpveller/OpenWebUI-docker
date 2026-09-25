@@ -27,9 +27,17 @@ echo "Running pre-commit validations..."
 # skipped them all with a `hint:` and committed anything - see step 0b.)
 #
 # THE ORDER, and the first match wins:
-#   1. powershell.exe - Windows. Every gate runs exactly as it always has: the
-#      command line is the one this hook has always used, and nothing else
-#      (not even a Python probe) happens on this path.
+#   1. powershell.exe - Windows, and ONLY in a native Windows git shell: `uname -s`
+#      is MINGW*/MSYS*/CYGWIN* (Git for Windows' bash says MINGW64_NT-...). Every
+#      gate then runs exactly as it always has: the command line is the one this
+#      hook has always used, and nothing else (not even a Python probe) happens on
+#      this path. WHY THE uname TEST (ac-hooks-portable2, review blocker 1): WSL puts
+#      Windows' powershell.exe on PATH through interop. Picking it there ran the
+#      gates in Windows PowerShell with WINDOWS git against a \\wsl.localhost path;
+#      that git refused the repo ("dubious ownership"), the secret guard read the
+#      refusal as "nothing staged - skip", and the summary listed it RAN (measured
+#      by the reviewer on this host's Ubuntu). On WSL, or any Linux with a
+#      powershell.exe on PATH, the hook now falls through to pwsh, then Python.
 #   2. pwsh           - PowerShell 7, any OS. The same .ps1 gates, the same flags.
 #   3. python3        - only the gates that have a Python twin under
 #      scripts/checks/ run: the secret guard, line endings and gateway routing.
@@ -45,7 +53,11 @@ echo "Running pre-commit validations..."
 # end names every gate RAN and SKIPPED, and the attestation (step 6) records the
 # skipped ones in a fifth column, so the ledger cannot claim a check that did
 # not run. On Windows nothing is skipped and the ledger line is unchanged.
-if command -v powershell.exe >/dev/null 2>&1; then
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) _native_windows=yes ;;
+    *) _native_windows= ;;
+esac
+if [ -n "$_native_windows" ] && command -v powershell.exe >/dev/null 2>&1; then
     PS_HOST=powershell.exe
 elif command -v pwsh >/dev/null 2>&1; then
     PS_HOST=pwsh
@@ -109,8 +121,24 @@ run_gate() {
 # A hook cannot report its OWN missing x bit - by then it is not running. What
 # it can do is refuse to commit a tree in which any hook has lost it, which is
 # how a Windows commit (the one place this hook always runs) would reintroduce
-# the problem. Silent when every hook is 100755. README.md is not a hook.
-_bad_modes=$(git ls-files -s -- .githooks | awk '$1 != "100755" { sub(/^[^\t]*\t/, ""); print }' | grep -v '\.md$')
+# the problem. Silent when every hook is 100755.
+#
+# ONLY A FILE NAMED AS A GIT HOOK is checked (ac-hooks-portable2, review carry):
+# a README, a NOTES.MD or a sourced helper such as lib.sh is never executed by
+# git and needs no x bit. A SYMLINK (120000) is skipped too: git runs its
+# target, whose mode this index entry does not hold. And the index query FAILS
+# CLOSED: if git cannot answer, this step refuses rather than finding nothing.
+_hook_names=' applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-receive update proc-receive post-receive post-update reference-transaction push-to-checkout pre-auto-gc post-rewrite sendemail-validate fsmonitor-watchman p4-changelist p4-prepare-changelist p4-post-changelist p4-pre-submit post-index-change '
+if ! _hook_index=$(git ls-files -s -- .githooks); then
+    echo "hook-modes: git ls-files failed - cannot tell whether the hooks are executable."
+    echo "Pre-commit validation failed (a hook is not executable in the index)!"
+    print_summary
+    exit 1
+fi
+_bad_modes=$(printf '%s\n' "$_hook_index" | awk -v names="$_hook_names" '
+    NF == 0 { next }
+    { mode = $1; path = $0; sub(/^[^\t]*\t/, "", path); leaf = path; sub(/^.*\//, "", leaf) }
+    mode != "100755" && mode != "120000" && index(names, " " leaf " ") { print path }')
 if [ -n "$_bad_modes" ]; then
     echo "Hook file(s) staged without the executable bit - git would SKIP them on Linux/macOS:"
     printf '    %s\n' $_bad_modes

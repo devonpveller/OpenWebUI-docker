@@ -59,9 +59,21 @@ PATTERNS = (
 COMPILED = tuple((name, re.compile(rx)) for name, rx in PATTERNS)
 
 
+class GitFailed(Exception):
+    pass
+
+
 def _git(*args: str) -> bytes:
-    return subprocess.run(('git',) + args, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, check=False).stdout
+    """Run git; a non-zero exit RAISES. A failed query is never an empty answer
+    (ac-hooks-portable2: under WSL a git that refused the repo made this guard
+    print "nothing staged - skip")."""
+    proc = subprocess.run(('git',) + args, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, check=False)
+    if proc.returncode != 0:
+        err = proc.stderr.decode('utf-8', 'replace').strip().splitlines()
+        raise GitFailed(f"'git {' '.join(args)}' exited {proc.returncode}"
+                        + (f": {err[0]}" if err else ''))
+    return proc.stdout
 
 
 def _z(out: bytes) -> list[str]:
@@ -107,6 +119,16 @@ def content_violations(path: str, blob: bytes) -> list[str]:
 
 
 def main() -> int:
+    try:
+        return _main()
+    except GitFailed as e:
+        print(f'  [secrets] FAIL - {e}, so this guard cannot tell what is staged.')
+        print("  A failed query is not 'nothing staged'. Fix git's access to this repository")
+        print('  (safe.directory, GIT_DIR, the index), then commit again.')
+        return 1
+
+
+def _main() -> int:
     gitlinks = set()
     for rec in _z(_git('ls-files', '--stage', '-z')):
         meta, _, p = rec.partition('\t')
@@ -125,11 +147,10 @@ def main() -> int:
             violations.append(f'ENV FILE STAGED: {f}  (env files hold live credentials - never commit)')
     for f in staged:
         # Read the STAGED blob, not the working file - they can differ.
-        proc = subprocess.run(['git', 'show', ':' + f], stdout=subprocess.PIPE,
-                              stderr=subprocess.DEVNULL, check=False)
-        if proc.returncode != 0 or not proc.stdout:
+        blob = _git('show', ':' + f)   # a staged blob that cannot be read was not scanned: raise
+        if not blob:
             continue
-        violations.extend(content_violations(f, proc.stdout))
+        violations.extend(content_violations(f, blob))
 
     if violations:
         print('')
