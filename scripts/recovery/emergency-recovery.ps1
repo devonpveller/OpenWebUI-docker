@@ -1,18 +1,30 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [ValidateSet("recover", "nuclear", "gpu-reset")]
     [string]$Action = "recover"
 )
 
-# Pin CWD to the repo root: every `docker compose` call below is relative
-# (moved to scripts/recovery/ 2026-08-21; previously this script silently
-# depended on being launched from the repo root).
+# Pin CWD to the repo root: every `-f <plane>\docker-compose.yml` below is
+# relative (moved to scripts/recovery/ 2026-08-21; previously this script
+# silently depended on being launched from the repo root).
+#
+# A `docker compose` WITHOUT -f addresses the project in the working directory,
+# which here is the ROOT ANCHOR - zero services since Part K.5b. So a bare
+# `docker compose ps|exec|stop|up <service>` answers `no such service` for
+# every container this script manages. Until ac-recovery-gates (2026-09-25)
+# every health gate and the tailscale connectivity probe were written that way
+# and could never pass. The rule now: a check on ONE container goes BY
+# CONTAINER NAME (`docker inspect` / `docker exec`, see Get-ContainerHealth),
+# and a compose verb names its plane file. The only bare compose verbs left are
+# the root anchor's own `up -d` / `down` (network create/drop) and
+# `docker compose version`; scripts\recovery\verify-recovery-gates.ps1 fails
+# if another appears.
 Set-Location (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
 
 $ErrorActionPreference = "Stop"
 
-# ──────────────────────────────────────────────────────────────────────────
-# Service inventory — every container the recovery stack maintains.
+# --------------------------------------------------------------------------
+# Service inventory -- every container the recovery stack maintains.
 #
 # The MAIN compose project (docker-compose.yml) holds several planes:
 #   (the Open Notebook trio joined the OB1 project in K.5b 2026-08-21 --
@@ -38,7 +50,7 @@ $ErrorActionPreference = "Stop"
 # PORTAL plane (caddy, authelia, cloudflared, portal-init, portal-alerter,
 # authelia-watcher, authelia-notif-bridge, integrity-tripwire, portal-cron,
 # tunnel-watcher, caddy-backup, authelia-backup) is PROFILE-GATED
-# (`profiles: [internet]`) — it does NOT start with a plain `docker compose up -d`
+# (`profiles: [internet]`) -- it does NOT start with a plain `docker compose up -d`
 # and is deliberately NOT managed here. It is driven by scripts/portal-on.ps1 /
 # portal-off.ps1. A nuclear `docker compose down` WILL stop a running portal; it
 # is not auto-restored (see Invoke-NuclearRecovery's detect-and-warn).
@@ -46,8 +58,8 @@ $ErrorActionPreference = "Stop"
 # Open Brain (OB1) is a SEPARATE compose project (OB1\docker\docker-compose.yml,
 # project name "open-brain"). Its containers attach to the main stack's
 # ai-stack_llm-net as an EXTERNAL network, so OB1 is shut down first and
-# brought up last — only after llama-cpp-upstream / llama-cpp-embed-upstream are healthy.
-# ──────────────────────────────────────────────────────────────────────────
+# brought up last -- only after llama-cpp-upstream / llama-cpp-embed-upstream are healthy.
+# --------------------------------------------------------------------------
 
 $Script:OB1Compose = "OB1\docker\docker-compose.yml"
 # ONE profile list for EVERY `docker compose -f $Script:OB1Compose ...` in this
@@ -106,7 +118,7 @@ $Script:OB1Project = "open-brain"
 # to the main stack's ai-stack_llm-net (external) for local inference, and it optionally
 # reaches OB1's openbrain-gateway (audit mirror). So it is shut down FIRST (before OB1)
 # and brought up LAST (after OB1). The `workers` + `cloud` profiles are gated
-# (profiles: [workers|cloud]) and — like the Portal plane — are NOT managed here; the
+# (profiles: [workers|cloud]) and -- like the Portal plane -- are NOT managed here; the
 # default plane (mattermost + agent-bridge + their DBs) is.
 $Script:AgentOrgCompose = "agent-org\docker\docker-compose.yml"
 
@@ -147,8 +159,8 @@ $Script:FrontendCompose = "frontend\docker-compose.yml"
 $Script:FrontendServices = @("openwebui", "tailscale", "openwebui-backup", "tailscale-backup")
 
 # Main compose services, low-level dependency first.
-# (Portal plane omitted on purpose — profile-gated; see the header note.)
-# The root ai-stack project owns NO services since K.5b (2026-08-21) — it is
+# (Portal plane omitted on purpose -- profile-gated; see the header note.)
+# The root ai-stack project owns NO services since K.5b (2026-08-21) -- it is
 # the pure network anchor. The former aux trio (surrealdb, open_notebook,
 # open-notebook-backup) lives in the OB1 project now.
 $Script:MainStackServices = @()
@@ -172,7 +184,7 @@ $Script:OB1Services = @(
     "openbrain-cron", "openbrain-gmail-pull", "openbrain-gmail-prune", "openbrain-digest",
     "openbrain-podcast",
     "openbrain-db-backup", "openbrain-wiki-backup",   # backup sidecars (moved from ai-stack 2026-08-21; output still lands in ai-stack/backups/)
-    "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b — ON is OB1-tethered; NOT retiring)
+    "surrealdb", "open_notebook", "open-notebook-backup",   # Open Notebook trio (moved from ai-stack 2026-08-21, K.5b -- ON is OB1-tethered; NOT retiring)
     "openbrain-idea-refinery"   # Idea Refinery drain (profile-gated 'idea-refinery'; started via the profile below)
 )
 
@@ -258,9 +270,18 @@ function Test-OB1Available {
 }
 
 function Test-NetworkConnectivity {
+    # BY CONTAINER NAME. This was `docker compose exec $Container ...` with no
+    # -f, i.e. against the root anchor, which has no services: it could never
+    # return $true, so Test-BasicConnectivity never passed (the minimal path was
+    # unreachable) and Phase 4 of the full recovery always threw. The same
+    # `docker exec tailscale ping -c 1 8.8.8.8` is what the watchdog runs
+    # (scripts\checks\stack-watchdog.ps1, Test-NetworkConnectivity).
+    # stderr is not redirected: under $ErrorActionPreference = "Stop" a
+    # REDIRECTED native stderr write is a terminating error in PS 5.1, which the
+    # catch would turn into a silent $false. The exit code is the signal.
     param([string]$Container)
     try {
-        docker compose exec $Container ping -c 1 -W 5 8.8.8.8 2>$null | Out-Null
+        docker exec $Container ping -c 1 -W 5 8.8.8.8 | Out-Null
         return $LASTEXITCODE -eq 0
     }
     catch {
@@ -270,10 +291,13 @@ function Test-NetworkConnectivity {
 
 function Stop-ServiceGroup {
     # Stop a set of related services in one call (best-effort, never throws).
-    param([string]$Label, [string[]]$Services)
+    # -ComposePath is MANDATORY: without it compose addresses the root anchor,
+    # which has no services (see the note at the top of this file). No caller
+    # today; kept so a future caller cannot reintroduce the bare form.
+    param([string]$Label, [Parameter(Mandatory)][string]$ComposePath, [string[]]$Services)
     Write-Log "INFO" "Stopping $Label ($($Services -join ', '))..."
     try {
-        docker compose stop @Services
+        docker compose -f $ComposePath stop @Services
     }
     catch {
         Write-Log "WARN" "${Label} stop had issues, continuing: $_"
@@ -283,10 +307,11 @@ function Stop-ServiceGroup {
 function Start-ServiceGroup {
     # Start a set of related services in one call. docker compose resolves
     # each service's depends_on, so listed services self-order.
-    param([string]$Label, [string[]]$Services)
+    # -ComposePath is MANDATORY for the same reason as Stop-ServiceGroup.
+    param([string]$Label, [Parameter(Mandatory)][string]$ComposePath, [string[]]$Services)
     Write-Log "INFO" "Starting $Label ($($Services -join ', '))..."
     try {
-        docker compose up -d @Services
+        docker compose -f $ComposePath up -d @Services
         Write-Log "SUCCESS" "$Label started"
     }
     catch {
@@ -556,16 +581,13 @@ function Test-BasicConnectivity {
     Write-Log "INFO" "Performing basic connectivity checks..."
 
     try {
-        $containers = docker compose ps --format json | ConvertFrom-Json
-
         # Snapshot every maintained service's state into a lookup table.
+        # (A bare `docker compose ps` of the root project used to seed this for
+        # $Script:MainStackServices; that list is empty since K.5b and the
+        # query read the anchor, so it is gone.) Every plane lives in its own
+        # project - look its containers up by NAME (container names are stable
+        # across projects).
         $states = @{}
-        foreach ($svc in $Script:MainStackServices) {
-            $s = ($containers | Where-Object { $_.Service -eq $svc }).State
-            $states[$svc] = if ($s) { $s } else { "absent" }
-        }
-        # Inference plane lives in its own project - look its containers up by
-        # NAME (container names are stable across projects).
         $running = @(docker ps --format "{{.Names}}")
         foreach ($svc in ($Script:InferenceServices + $Script:MemoryServices + $Script:SearchServices + $Script:CoderServices + $Script:FrontendServices)) {
             $states[$svc] = if ($running -contains $svc) { "running" } else { "absent" }
@@ -581,10 +603,10 @@ function Test-BasicConnectivity {
         Write-Log "INFO" ("Coder  - open-terminal: {0}, little-coder: {1}, lc-egress: {2}" -f `
             $states["open-terminal"], $states["little-coder"], $states["lc-egress"])
         # (aux trio + backup sidecars report inside their own projects since
-        # Part K — inference/memory/search/coder/frontend states above cover
+        # Part K -- inference/memory/search/coder/frontend states above cover
         # the backups by name; the ON trio counts under OB1.)
 
-        # Open Brain (OB1) — separate compose project, reported as a count.
+        # Open Brain (OB1) -- separate compose project, reported as a count.
         if (Test-OB1Available) {
             try {
                 $prof = $Script:OB1Profiles
@@ -605,7 +627,7 @@ function Test-BasicConnectivity {
             }
         }
 
-        # agent-org — separate compose project, reported as a count (default plane).
+        # agent-org -- separate compose project, reported as a count (default plane).
         if (Test-AgentOrgAvailable) {
             try {
                 $ao = docker compose -f $Script:AgentOrgCompose ps --format json | ConvertFrom-Json
@@ -686,10 +708,10 @@ function Invoke-MinimalRecovery {
         # service:openwebui`, so it lives INSIDE openwebui's network namespace.
         # Restarting openwebui recreates that namespace and orphans tailscale
         # (it stays "Up" but loses all connectivity / serve config). Therefore
-        # NEVER restart them in one `docker compose restart` call — that restarts
+        # NEVER restart them in one `docker compose restart` call -- that restarts
         # tailscale first (or without waiting), then openwebui pulls the netns out
-        # from under it. The order MUST be: inference (netns-independent) → restart
-        # openwebui → WAIT until it is healthy → only THEN restart tailscale so it
+        # from under it. The order MUST be: inference (netns-independent) -> restart
+        # openwebui -> WAIT until it is healthy -> only THEN restart tailscale so it
         # re-attaches to the new, stable namespace.
         docker compose -f $Script:InferenceCompose restart llama-cpp-upstream llama-cpp-embed-upstream
 
@@ -698,7 +720,7 @@ function Invoke-MinimalRecovery {
             Write-Log "WARN" "OpenWebUI not healthy after restart; restarting tailscale anyway so it is not left orphaned..."
         }
 
-        # Tailscale LAST — re-attaches to openwebui's (now stable) netns and
+        # Tailscale LAST -- re-attaches to openwebui's (now stable) netns and
         # re-applies its serve config via entrypoint.sh.
         docker compose -f $Script:FrontendCompose restart tailscale
         Wait-ForHealthy "tailscale" 90 | Out-Null
@@ -710,7 +732,7 @@ function Invoke-MinimalRecovery {
         # precede open_notebook; the search/coder planes self-order via their
         # own depends_on.
         # Inference admission plane first (llm-queue sits between the upstreams
-        # and LiteLLM; both must be up before callers — design B2). A
+        # and LiteLLM; both must be up before callers -- design B2). A
         # llama-cpp-upstream restart drops nothing here (httpx reconnects), but
         # nudge them so a cold dependent comes back.
         docker compose -f $Script:InferenceCompose up -d llm-queue llm-gateway
@@ -722,11 +744,11 @@ function Invoke-MinimalRecovery {
 
         # Backup cron sidecars touching only main/host resources (safe anytime).
 
-        # Open Brain (OB1) — separate compose project (includes its own
+        # Open Brain (OB1) -- separate compose project (includes its own
         # openbrain-db/wiki backup sidecars since 2026-08-21).
         Start-OB1Stack
 
-        # agent-org — separate compose project, brought up last (downstream of OB1).
+        # agent-org -- separate compose project, brought up last (downstream of OB1).
         Start-AgentOrgStack
 
         Write-Log "INFO" "Waiting for services to stabilize..."
@@ -759,17 +781,22 @@ function Test-GPUAvailability {
 }
 
 function Stop-ServiceGracefully {
-    param([string]$ServiceName, [int]$TimeoutSeconds = 30)
+    # No caller today. -ComposePath is MANDATORY (a bare compose verb addresses
+    # the root anchor - see the top of this file), and the wait reads the
+    # CONTAINER by name, so a service whose container_name differs from its
+    # service key must pass -ContainerName.
+    param([Parameter(Mandatory)][string]$ComposePath, [string]$ServiceName, [int]$TimeoutSeconds = 30, [string]$ContainerName = "")
+    if (-not $ContainerName) { $ContainerName = $ServiceName }
 
     Write-Log "INFO" "Stopping $ServiceName service..."
     try {
-        docker compose stop $ServiceName
+        docker compose -f $ComposePath stop $ServiceName
 
         # Wait for graceful shutdown
         $elapsed = 0
         while ($elapsed -lt $TimeoutSeconds) {
-            $status = docker compose ps $ServiceName --format json 2>$null | ConvertFrom-Json
-            if (-not $status -or $status.State -eq "exited") {
+            $h = Get-ContainerHealth $ContainerName
+            if (-not $h.Found -or $h.State -eq "exited") {
                 Write-Log "SUCCESS" "$ServiceName stopped gracefully"
                 return $true
             }
@@ -778,7 +805,7 @@ function Stop-ServiceGracefully {
         }
 
         Write-Log "WARN" "$ServiceName did not stop gracefully, forcing stop..."
-        docker compose kill $ServiceName
+        docker compose -f $ComposePath kill $ServiceName
         return $true
     }
     catch {
@@ -787,40 +814,88 @@ function Stop-ServiceGracefully {
     }
 }
 
+function Get-ContainerHealth {
+    # One read of ONE container's state, BY CONTAINER NAME. `docker inspect`
+    # does not care which compose project owns the container, so it cannot
+    # land on the root anchor the way a bare `docker compose ps` did (which
+    # answered `no such service` for every gate since Part K). It also needs no
+    # service key: search's gate container is `search-gateway`, whose service
+    # key is `gateway`, so even `compose -f search\docker-compose.yml ps
+    # search-gateway` answers `no such service` (measured 2026-09-25).
+    #
+    # Returns @{ Found; State; Health; Reason }. Health is "" when the image
+    # declares no healthcheck. Never throws; a docker failure is Found=$false
+    # with docker's own message in Reason.
+    param([string]$Name)
+    # Local to this function: stderr is captured (2>&1) to NAME a missing
+    # container, and under "Stop" a captured native stderr line is a
+    # terminating error in PS 5.1.
+    $ErrorActionPreference = "Continue"
+    $fmt = '{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{end}}'
+    try {
+        $out = @(docker inspect --format $fmt $Name 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+    }
+    catch {
+        return @{ Found = $false; State = ""; Health = ""; Reason = "docker inspect failed: $($_.Exception.Message)" }
+    }
+    $text = (($out | Where-Object { $_ }) -join ' ').Trim()
+    if ($code -ne 0) {
+        if (-not $text) { $text = "exit $code" }
+        return @{ Found = $false; State = ""; Health = ""; Reason = "no such container '$Name' ($text)" }
+    }
+    $parts = ([string]($out | Where-Object { $_ } | Select-Object -First 1)).Trim() -split '\|', 2
+    $state = $parts[0].Trim()
+    $health = if ($parts.Count -gt 1) { $parts[1].Trim() } else { "" }
+    $reason = if ($health) { "state=$state health=$health" } else { "state=$state (no healthcheck)" }
+    return @{ Found = $true; State = $state; Health = $health; Reason = $reason }
+}
+
 function Wait-ForHealthy {
-    param([string]$ServiceName, [int]$TimeoutSeconds = 120)
+    # Gate on ONE container, BY CONTAINER NAME (Get-ContainerHealth). Every
+    # caller passes a container_name. Passes on health=healthy, or on
+    # state=running when the image has no healthcheck; otherwise polls until
+    # $TimeoutSeconds and returns $false with the last state seen NAMED in the
+    # ERROR line. Checks at least once, so -TimeoutSeconds 0 is a single read.
+    #
+    # Before ac-recovery-gates (2026-09-25) this asked
+    # `docker compose ps $ServiceName` with no -f - the root anchor project,
+    # zero services since K.5b - so it spun to its timeout on every call.
+    param([string]$ServiceName, [int]$TimeoutSeconds = 120, [int]$PollSeconds = 5)
 
     Write-Log "INFO" "Waiting for $ServiceName to become healthy..."
     $elapsed = 0
+    $reason = "not checked"
 
-    while ($elapsed -lt $TimeoutSeconds) {
-        try {
-            $status = docker compose ps $ServiceName --format json 2>$null | ConvertFrom-Json
-            if ($status.Health -eq "healthy") {
-                Write-Log "SUCCESS" "$ServiceName is healthy"
-                return $true
-            }
-            elseif ($status.State -eq "running" -and -not $status.Health) {
-                # Some services don't have health checks
-                Write-Log "SUCCESS" "$ServiceName is running (no health check)"
-                return $true
-            }
-
-            $healthStatus = if ($status.Health) { $status.Health } else { $status.State }
-            Write-Log "INFO" "$ServiceName status: $healthStatus (${elapsed}s elapsed)"
-
-            Start-Sleep -Seconds 5
-            $elapsed += 5
+    while ($true) {
+        $h = Get-ContainerHealth $ServiceName
+        $reason = $h.Reason
+        if ($h.Found -and $h.Health -eq "healthy") {
+            Write-Log "SUCCESS" "$ServiceName is healthy"
+            return $true
         }
-        catch {
-            Write-Log "WARN" "Error checking $ServiceName status: $_"
-            Start-Sleep -Seconds 5
-            $elapsed += 5
+        if ($h.Found -and $h.State -eq "running" -and -not $h.Health) {
+            # Some services don't have health checks
+            Write-Log "SUCCESS" "$ServiceName is running (no health check)"
+            return $true
         }
+        Write-Log "INFO" "$ServiceName status: $reason (${elapsed}s elapsed)"
+        if ($elapsed -ge $TimeoutSeconds) { break }
+        Start-Sleep -Seconds $PollSeconds
+        $elapsed += $PollSeconds
     }
 
-    Write-Log "ERROR" "$ServiceName failed to become healthy within ${TimeoutSeconds}s"
+    Write-Log "ERROR" "$ServiceName failed to become healthy within ${TimeoutSeconds}s - last seen: $reason"
     return $false
+}
+
+function Test-PortalRunning {
+    # The internet portal is its OWN compose project (portal\docker-compose.yml,
+    # driven by scripts\portal\portal-on.ps1). This was a bare
+    # `docker compose ps caddy` - the root anchor - so it never saw the portal.
+    # By container name instead.
+    $h = Get-ContainerHealth "caddy"
+    return ($h.Found -and $h.State -eq "running")
 }
 
 function Invoke-EmergencyRecovery {
@@ -838,7 +913,9 @@ function Invoke-EmergencyRecovery {
 
     # Check current status
     Write-Log "INFO" "Current container status:"
-    docker compose ps
+    # All containers, not `docker compose ps`: bare, that lists the root
+    # anchor, which has no services.
+    docker ps -a --format "table {{.Names}}\t{{.Status}}"
 
     # CRITICAL: Perform diagnostics before destructive actions
     Write-Log "INFO" "Running pre-recovery diagnostics..."
@@ -851,14 +928,14 @@ function Invoke-EmergencyRecovery {
 
     Write-Log "INFO" "Minimal recovery failed or basic checks failed - proceeding with full recovery"
 
-    # ── Phase 1: Graceful shutdown in reverse dependency order ─────────────
+    # -- Phase 1: Graceful shutdown in reverse dependency order -------------
     Write-Log "INFO" "Phase 1: Graceful shutdown"
     Write-Log "WARN" "This restarts the full workspace: core, memory, search, coder planes + OB1"
 
     # agent-org first (downstream of OB1 + the main stack's llm-net).
     Stop-AgentOrgStack
 
-    # Open Brain (OB1) next — it attaches to the main stack's llm-net.
+    # Open Brain (OB1) next -- it attaches to the main stack's llm-net.
     Stop-OB1Stack
 
     # Coder project (its compose stop runs reverse dependency order).
@@ -871,19 +948,19 @@ function Invoke-EmergencyRecovery {
     # Memory project (its compose stop orders gateway before mnemory).
     Stop-PlaneStack "memory" $Script:MemoryCompose
 
-    # Inference project — stops after callers (compose handles its internal
+    # Inference project -- stops after callers (compose handles its internal
     # reverse order: gateway -> llm-queue -> upstreams).
     Stop-InferenceStack
 
-    # Frontend project last — openwebui provides the shared network namespace;
+    # Frontend project last -- openwebui provides the shared network namespace;
     # its compose stop runs tailscale (netns tenant) before openwebui.
     Stop-PlaneStack "frontend" $Script:FrontendCompose 45
 
-    # ── Phase 2: Clean up any orphaned network namespaces ──────────────────
+    # -- Phase 2: Clean up any orphaned network namespaces ------------------
     Write-Log "INFO" "Phase 2: Network namespace cleanup"
     Start-Sleep -Seconds 15
 
-    # ── Phase 3: Restart in correct dependency order ───────────────────────
+    # -- Phase 3: Restart in correct dependency order -----------------------
     Write-Log "INFO" "Phase 3: Service restart"
 
     # Root anchor first: creates the shared ai-stack_* networks every plane
@@ -917,7 +994,7 @@ function Invoke-EmergencyRecovery {
     Write-Log "INFO" "Allowing network namespace to stabilize..."
     Start-Sleep -Seconds 20
 
-    # Inference project — upstreams -> llm-queue -> gateway (+ backups/ui),
+    # Inference project -- upstreams -> llm-queue -> gateway (+ backups/ui),
     # ordered by its own depends_on. Own compose project since K.1.
     Start-InferenceStack
 
@@ -932,21 +1009,21 @@ function Invoke-EmergencyRecovery {
     # (surrealdb / open_notebook / open-notebook-backup start with the OB1
     # project since K.5b; every backup sidecar starts with its plane.)
 
-    # Search project — vpn -> redis -> searxng -> gateway (own project since K.3).
+    # Search project -- vpn -> redis -> searxng -> gateway (own project since K.3).
     Start-PlaneStack "search" $Script:SearchCompose "search-gateway" 150
 
-    # Coder project — open-terminal (executor) -> little-coder (control) ->
+    # Coder project -- open-terminal (executor) -> little-coder (control) ->
     # edges, ordered by its own depends_on (own project since K.4).
     Start-PlaneStack "coder" $Script:CoderCompose "little-coder" 120
 
-    # Open Brain (OB1) last — needs ai-stack_llm-net + llama-cpp-upstream healthy.
+    # Open Brain (OB1) last -- needs ai-stack_llm-net + llama-cpp-upstream healthy.
     # (Its own openbrain-db/wiki backup sidecars come up with it.)
     Start-OB1Stack
 
-    # agent-org — separate compose project, brought up last (downstream of OB1).
+    # agent-org -- separate compose project, brought up last (downstream of OB1).
     Start-AgentOrgStack
 
-    # ── Phase 4: Connectivity verification ─────────────────────────────────
+    # -- Phase 4: Connectivity verification ---------------------------------
     Write-Log "INFO" "Phase 4: Connectivity verification"
     Start-Sleep -Seconds 25
 
@@ -959,7 +1036,7 @@ function Invoke-EmergencyRecovery {
         throw "Network connectivity test failed"
     }
 
-    # ── Phase 5: Service verification ──────────────────────────────────────
+    # -- Phase 5: Service verification --------------------------------------
     Write-Log "INFO" "Phase 5: Service verification"
 
     try {
@@ -978,7 +1055,7 @@ function Invoke-EmergencyRecovery {
         docker exec open_notebook python3 -c "import urllib.request; print(urllib.request.urlopen('http://localhost:5055/api/config').read().decode())" 2>$null
 
         Write-Log "INFO" "Private Search Gateway status:"
-        docker compose exec gateway curl -s http://localhost:8080/healthz 2>$null
+        docker exec search-gateway curl -s http://localhost:8080/healthz 2>$null
 
         Write-Log "INFO" "open-terminal status:"
         docker exec open-terminal curl -s http://localhost:8000/health 2>$null
@@ -1036,17 +1113,16 @@ function Invoke-NuclearRecovery {
     Write-Log "WARN" "All diagnostics failed - proceeding with nuclear recovery..."
     Write-Log "WARN" "This will destroy and rebuild containers..."
 
-    # Detect whether the (profile-gated) internet portal is running. `docker
-    # compose down` will stop it, and recovery does NOT auto-restore it (bringing
-    # the internet front-end back up must stay a deliberate operator action).
+    # Detect whether the internet portal (its own compose project) is running.
+    # Recovery does not manage it: nothing below stops or starts it. But caddy
+    # holds an endpoint on the anchor's ai-stack_app-net (external in
+    # portal\docker-compose.yml), and docker will not remove a network that
+    # still has endpoints - so say so before the root `down` tries.
     $portalWasUp = $false
-    try {
-        $pc = docker compose ps caddy --format json 2>$null | ConvertFrom-Json
-        if ($pc -and $pc.State -eq "running") { $portalWasUp = $true }
-    }
+    try { $portalWasUp = Test-PortalRunning }
     catch {}
     if ($portalWasUp) {
-        Write-Log "WARN" "Internet portal (caddy/authelia/cloudflared) is running; 'compose down' will stop it. It will NOT be auto-restored."
+        Write-Log "WARN" "Internet portal (caddy) is running. Recovery does not stop or restart it, and while it runs it holds ai-stack_app-net, so the root 'docker compose down' below may report that network as in use."
     }
 
     # Bring OB1 down FIRST so the main `docker compose down` can drop the
@@ -1100,15 +1176,15 @@ function Invoke-NuclearRecovery {
     Write-Log "INFO" "Waiting for complete stack initialization..."
     Start-Sleep -Seconds 90
 
-    # Open Brain (OB1) last — main stack (and ai-stack_llm-net) is up now.
+    # Open Brain (OB1) last -- main stack (and ai-stack_llm-net) is up now.
     # (Its own openbrain-db/wiki backup sidecars come up with it.)
     Start-OB1Stack
 
-    # agent-org — separate compose project, downstream of OB1.
+    # agent-org -- separate compose project, downstream of OB1.
     Start-AgentOrgStack
 
     if ($portalWasUp) {
-        Write-Log "WARN" "Portal was running before recovery. Re-run scripts/portal-on.ps1 to restore the internet front-end (recovery does not auto-start it)."
+        Write-Log "WARN" "Portal was running before recovery and was left alone. Check it (scripts\portal\portal-status.ps1); scripts\portal\portal-on.ps1 brings it back if it went down (recovery never starts it)."
     }
 
     # Test connectivity
@@ -1193,7 +1269,7 @@ function Invoke-GPUReset {
         else {
             Write-Log "WARN" "llama-cpp-upstream startup slow but continuing..."
             # Start embedding service anyway
-            docker compose up -d llama-cpp-embed-upstream
+            docker compose -f $Script:InferenceCompose up -d llama-cpp-embed-upstream
         }
     }
     else {
