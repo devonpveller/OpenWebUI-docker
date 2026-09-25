@@ -681,7 +681,7 @@ SHELL_FENCES = {"text", "sh", "bash", "shell", "console", "shell-session", "zsh"
 def doc_line(idx: Index, found: Found, line: str, base_dir: str, why: str) -> None:
     """A documented command line. Only a file with a #! line can be run by path at all,
     so a path to anything else (a config in a directory-tree listing) is a mention."""
-    if re.search("[─-╿]", line):  # box-drawing: a directory-tree listing
+    if re.search(r"[\u2500-\u257f]", line):  # box-drawing: a directory-tree listing
         return
     s = re.sub(r"^\s*(?:#+|//|\*|>|\$|PS>|%)?\s*", "", line)
     for m in PATHISH.finditer(s):
@@ -707,15 +707,24 @@ def scan_docs(idx: Index, found: Found) -> None:
                 if fence in SHELL_FENCES:
                     doc_line(idx, found, ln, d, f"docs {p} (code block)")
         elif idx.has_shebang(p):
+            # A script's header documents how to run it in two shapes: a `Usage` block
+            # (every line until a blank comment line), and a line anywhere in the first 80
+            # LABELLED as a command - `#   * Manual:    scripts/x.sh "msg"`, `# Run: ./x.sh`
+            # (the label vocabulary is below). Prose such as `needs Python: x.py --check
+            # re-derives...` is a mention, which is why the labels are a closed list.
             usage = False
             for ln in idx.text(p).split("\n")[:80]:
                 body = re.sub(r"^\s*(#|//|\*)?", "", ln)
+                lab = re.match(r"(?i)\s*(?:[\u2022*-]\s*)?(?:manual|run|example|examples|e\.g\.|cli|"
+                               r"invoke|invocation|command|cmd|call|try)\b[^:]{0,20}:\s+(.*)$", body)
                 if not usage:
                     um = re.search(r"(?i)\busage\b[^:]*:(.*)$", ln)
                     if um:
                         usage = True
                         if um.group(1).strip():
                             doc_line(idx, found, um.group(1), d, f"docs {p} (header Usage)")
+                    elif lab and (ln.lstrip().startswith(("#", "//", "*")) or '"""' not in ln):
+                        doc_line(idx, found, lab.group(1), d, f"docs {p} (header, labelled command)")
                     continue
                 if not body.strip() or '"""' in ln:
                     usage = False
