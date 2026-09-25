@@ -117,7 +117,8 @@ class CustomToolsModule:
                     "Emergency recovery"
                 ],
                 "direct_execution": [
-                    "scripts\\quick-fixes.bat namespace",
+                    ".\\scripts\\recovery\\emergency-recovery.ps1 -Action recover   (host, repo root)",
+                    "python scripts\\recovery\\status_check.py   (host, repo root; read-only)",
                     "python modules/gpu-status/service/gpu_status.py"
                 ]
             }

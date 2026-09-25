@@ -54,7 +54,7 @@ class GPUStatusModule:
                 "torch_available": False,
                 "error": "PyTorch not available in container",
                 "suggestion": "Check if container was built with GPU support",
-                "recovery_action": "Rebuild container: docker compose build --no-cache openwebui"
+                "recovery_action": "Rebuild the image (host, repo root; deliberate - openwebui:local is pinned): docker compose -f frontend/docker-compose.yml build --no-cache openwebui"
             }
         
         return {
@@ -137,8 +137,8 @@ class GPUStatusModule:
                     ],
                     "recovery_suggestions": [
                         "Check host GPU status: nvidia-smi",
-                        "Verify container GPU access: docker compose exec openwebui nvidia-smi",
-                        "Run GPU recovery: scripts\\quick-fixes.bat gpu",
+                        "Verify container GPU access: docker exec openwebui nvidia-smi",
+                        "Run GPU recovery (host, repo root): .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset",
                         "Rebuild container with GPU support"
                     ]
                 })
@@ -150,7 +150,7 @@ class GPUStatusModule:
                 "status": "❌ GPU Status Check Failed",
                 "error": str(e),
                 "torch_available": TORCH_AVAILABLE,
-                "recovery_action": "scripts\\quick-fixes.bat gpu"
+                "recovery_action": "Check (host, repo root): python scripts\\recovery\\status_check.py"
             }
     
     def run_gpu_diagnostics(self, user_input: str) -> Dict[str, Any]:
@@ -184,13 +184,13 @@ class GPUStatusModule:
             result["recommendations"] = {
                 "status": "GPU issues detected",
                 "immediate_actions": [
-                    "Run: scripts\\quick-fixes.bat gpu",
-                    "Check: docker compose logs openwebui",
-                    "Verify: docker compose exec openwebui nvidia-smi"
+                    "Check (host, repo root): python scripts\\recovery\\status_check.py",
+                    "Check: docker logs --tail 100 openwebui",
+                    "Verify: docker exec openwebui nvidia-smi"
                 ],
                 "escalation_path": [
-                    "If basic recovery fails, run: scripts\\emergency-recovery.ps1 -Action gpu-reset",
-                    "Consider rebuilding container: docker compose build --no-cache openwebui"
+                    "If CUDA is still unavailable, run (host, repo root): .\\scripts\\recovery\\emergency-recovery.ps1 -Action gpu-reset - it rebuilds the openwebui image and restarts the GPU planes",
+                    "Or rebuild only the image, deliberately: docker compose -f frontend/docker-compose.yml build --no-cache openwebui"
                 ]
             }
         
@@ -1083,7 +1083,7 @@ class GPUStatusModule:
             "",
             "**Recovery Actions:**",
             "• Check container GPU access: `nvidia-smi`",
-            "• Rebuild OpenWebUI container: `docker compose build --no-cache openwebui`",
+            "• Rebuild the OpenWebUI image (host, repo root; deliberate): `docker compose -f frontend/docker-compose.yml build --no-cache openwebui`",
             "• Verify Docker GPU runtime configuration",
             "• Check NVIDIA drivers on host system"
         ])
