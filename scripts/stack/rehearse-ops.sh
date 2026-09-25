@@ -13,7 +13,8 @@
 #      a git bundle, writes frontend/.env with a generated WEBUI_SECRET_KEY
 #   2. `stack.py init` + a REAL `stack.py up` (the stock frontend), /health 200
 #   3. writes a random MARKER into the Open WebUI data volume
-#      (/app/backend/data/ops-marker.txt, i.e. frontend_openwebui-data)
+#      (/app/backend/data/ops-marker.txt, i.e. frontend_openwebui-data), and a
+#      directory + file owned 1000:1001 with modes 750/640
 #   4. `stack.py backup frontend`: exit 0, manifest.json lists the volume,
 #      `sha256sum -c SHA256SUMS` passes
 #   5. `stack.py restore` WHILE openwebui runs: refused, names the container,
@@ -22,7 +23,8 @@
 #   7. a restore from a TAMPERED copy of the backup (one byte appended to the
 #      archive): refused on sha256, and the volume is still absent afterwards
 #   8. `stack.py restore frontend --from <backup>`: exit 0, the volume exists
-#      again with compose's project/volume labels, and holds MARKER
+#      again with compose's project/volume labels, holds MARKER, and the
+#      1000:1001 directory and file kept their owner and modes
 #   9. `stack.py up`: /health 200 and openwebui itself reads MARKER back
 #  10. `stack.py stats`: real numbers for the frontend containers, and it says
 #      the inference plane is not enabled
@@ -165,6 +167,10 @@ check "GET /health returned 200 after up (got $CODE)" "$([ "$CODE" = "200" ]; ec
 MARKER="ops-marker-$(dx openssl rand -hex 16)"
 dx docker exec openwebui sh -c "printf '%s' '$MARKER' > /app/backend/data/ops-marker.txt"
 check "marker written into $VOL" "$(dx docker exec openwebui cat /app/backend/data/ops-marker.txt | grep -qx "$MARKER"; echo $?)"
+# ownership and modes that are NOT root/default, to see whether they survive the round trip
+dx docker exec openwebui sh -c 'mkdir -p /app/backend/data/ops-owned && printf x > /app/backend/data/ops-owned/f && chown -R 1000:1001 /app/backend/data/ops-owned && chmod 750 /app/backend/data/ops-owned && chmod 640 /app/backend/data/ops-owned/f'
+OWNED_BEFORE="$(dx docker exec openwebui stat -c '%u:%g %a' /app/backend/data/ops-owned /app/backend/data/ops-owned/f | tr '\n' ' ')"
+echo "   ownership before backup: $OWNED_BEFORE"
 
 # 4. backup
 echo ""
@@ -215,6 +221,9 @@ sp restore frontend --from "$BDIR"; RS=$?
 check "restore exited 0 (exit $RS)" "$RS"
 check "the volume exists again with compose's labels" \
   "$([ "$(dx docker volume inspect -f '{{index .Labels "com.docker.compose.project"}}/{{index .Labels "com.docker.compose.volume"}}' "$VOL" 2>/dev/null)" = "frontend/openwebui-data" ]; echo $?)"
+OWNED_AFTER="$(dx docker run --rm -v "$VOL:/v:ro" alpine:3.21 stat -c '%u:%g %a' /v/ops-owned /v/ops-owned/f | tr '\n' ' ')"
+check "ownership and modes survived the round trip (before: $OWNED_BEFORE after: $OWNED_AFTER)" \
+  "$([ -n "$OWNED_BEFORE" ] && [ "$OWNED_BEFORE" = "$OWNED_AFTER" ]; echo $?)"
 check "the restored volume holds the marker" \
   "$(dx docker run --rm -v "$VOL:/v:ro" alpine:3.21 cat /v/ops-marker.txt | grep -qx "$MARKER"; echo $?)"
 
