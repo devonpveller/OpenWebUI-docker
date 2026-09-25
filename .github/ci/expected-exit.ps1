@@ -86,7 +86,7 @@ $ErrorActionPreference = "Continue"
 # classifier refuses it by name rather than guessing a convention.
 #
 # EVERY GREEN AND NAG CODE BELOW WAS MEASURED, not inferred - see the H4 evidence table in
-# documentation/notes/u8h4-findings.md for the run, the elapsed time and the tree sha.
+# ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md for the run, the elapsed time and the tree sha.
 # =========================================================================================
 $script:Contract = [ordered]@{
 
@@ -169,7 +169,7 @@ $script:Contract = [ordered]@{
         Nag     = @{}
         Meaning = @{
             0 = "every green had a red beside it and both agreed"
-            1 = "a check failed, OR the run aborted. NOTE: this script has no cannot-check code - a docker failure lands in its catch and reports as 1. Recorded in documentation/notes/u8h4-findings.md."
+            1 = "a check failed, OR the run aborted. NOTE: this script has no cannot-check code - a docker failure lands in its catch and reports as 1. Recorded in ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md."
         }
         Doc     = "scripts/checks/prove-agent-memory-rls.ps1"
     }
@@ -209,7 +209,9 @@ $script:Contract = [ordered]@{
             1 = "usage or configuration error - NOTHING WAS JUDGED. This is a red build: the board did not run."
             7 = "the plan is NOT met, and the run says which clauses. EXPECTED TODAY."
         }
-        Doc     = "scripts/checks/dfu-done.ps1 header, 'Exit codes'; DFU PLAN.md C.8"
+        # No CI job runs this since 2026-09-25 (the board and its plan left CI's checkout, see
+        # ci.yml); the contract stays so a hand run through run-check.ps1 is still classified.
+        Doc     = "scripts/archive/dfu-done/dfu-done.ps1 header, 'Exit codes'; DFU PLAN.md C.8 (plan store)"
     }
 }
 

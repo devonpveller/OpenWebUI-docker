@@ -328,7 +328,7 @@ def _load_records(results_dir: Path) -> List[Dict[str, Any]]:
         # WHERE THIS RECORD WAS READ FROM, carried with it. `record.admit` resolves
         # `evidence.*` against it, so admission asks about the tree in hand instead of the
         # absolute path the producing worktree wrote - which is how every committed record
-        # under documentation/evidence/ came to be REFUSED from a clone once the worktree
+        # under the committed evidence root came to be REFUSED from a clone once the worktree
         # that made them was removed. Stamped here rather than threaded through render(),
         # summarize() and _rows() because the loader is the only place that knows it, and
         # it is a private key that is never written back to disk.

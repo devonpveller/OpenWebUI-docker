@@ -427,7 +427,7 @@ requires    = ["research"]
 # file; or COMPOSE_PROFILES=research,wiki,notebook,idea-refinery in OB1/docker/.env,
 # which raw compose honours AND `effective_profiles()` unions into whatever flags
 # the driver passes. Recorded in
-# documentation/notes/stack-layers-sl-ob1-gitlink-findings.md.
+# ../documentation-plans-ai-stack/journal/notes/stack-layers-sl-ob1-gitlink-findings.md.
 
 [planes.ob1.profiles.research]
 # OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which

@@ -2,7 +2,7 @@
 
 > Status: LIVE · rewritten 2026-08-20 (merges the retired Ollama-era
 > `UPDATE-QUICK-START.md` + `UPDATE-MANAGEMENT.md`, both archived under
-> `documentation/archive/`).
+> `../documentation-plans-ai-stack/journal/archive/`).
 
 How the stack takes updates. Everything is **manual and verified** — the only
 auto-updater is Watchtower, scoped to the `openwebui` image and pending
@@ -73,7 +73,7 @@ A bare `docker compose up -d` reuses whatever image is cached under the
 rows that ended in `error` in the last 24 h. Only research-curator and
 research-service carry the label today (2026-09-06); the other six
 integration Dockerfiles are a recorded follow-up
-(`documentation/notes/deploy-gate-2026-09-06.md`).
+(`../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md`).
 
 ## After any update
 

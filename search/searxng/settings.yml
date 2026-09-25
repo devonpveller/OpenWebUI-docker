@@ -52,7 +52,7 @@ outgoing:
 redis:
   url: redis://redis:6379/0
 
-# Engine policy (REMEASURED 2026-09-11 - documentation/notes/search-engine-alternatives-2026-09-11.md).
+# Engine policy (REMEASURED 2026-09-11 - ../documentation-plans-ai-stack/journal/notes/search-engine-alternatives-2026-09-11.md).
 #
 # The 2026-06-14 block below this line USED to say google/bing/mojeek work behind
 # Mullvad and ddg/brave/startpage CAPTCHA it. Re-measured on 2026-09-11 over the 12

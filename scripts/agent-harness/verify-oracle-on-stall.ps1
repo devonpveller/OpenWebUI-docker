@@ -19,7 +19,7 @@
 # rounds with the same failure signature over three real commits of the three different
 # implementations it wrote, and this drill's own -Fail path escalated on round 3:
 # little-coder/local-default -> claude-code/opus, hand back to little-coder. See
-# documentation/notes/u4close-findings.md. This file stays a mechanism test, because a
+# ../documentation-plans-ai-stack/journal/notes/u4close-findings.md. This file stays a mechanism test, because a
 # mechanism test that needs a live local model to run is not one.
 #
 # The unit tests (test_oracle_on_stall.py) cover the DEFINITION. This covers the
@@ -191,7 +191,7 @@ try {
         "    ""A progressing item produces none.""",
         "  ],",
         "  ""out_of_scope"": [ ""Anything outside this drill's scratch namespace."" ],",
-        "  ""findings_sink"": ""documentation/notes/u4oracle-findings.md""",
+        "  ""findings_sink"": ""../documentation-plans-ai-stack/journal/notes/u4oracle-findings.md""",
         "}")
     foreach ($pair in @(@($STALL_ID, $STALL_BRANCH), @($MOVE_ID, $MOVE_BRANCH), @($GONE_ID, $GONE_BRANCH))) {
         Invoke-DrillGit branch -f $pair[1] $c[0]
@@ -358,5 +358,5 @@ if ($failed.Count) {
 if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
 Write-Host "frontier-oracle-on-stall: constructed stall detected, escalation recorded, control silent." -ForegroundColor Green
 Write-Host "  This is a MECHANISM proof - the stall it detects is one this script built." -ForegroundColor Yellow
-Write-Host "  The firing on a REAL stall is separate evidence: documentation/notes/u4close-findings.md." -ForegroundColor Yellow
+Write-Host "  The firing on a REAL stall is separate evidence: ../documentation-plans-ai-stack/journal/notes/u4close-findings.md." -ForegroundColor Yellow
 exit 0

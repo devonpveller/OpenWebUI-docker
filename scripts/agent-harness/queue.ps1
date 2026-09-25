@@ -488,7 +488,7 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # [needs hand-off] was set at -Submit and never cleared, so 32 of the live board's 42 rows
 # wore it and 31 of those were TERMINAL (counted 2026-09-06 by this item's tester; the
 # reconciliation of three readings taken hours apart is the table in
-# documentation/notes/deploy-gate-2026-09-06.md, which is the figure of record). A flag
+# ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md, which is the figure of record). A flag
 # meaning "the reviewer cannot merge this", worn by 32 rows and TRUE of one, is a flag that
 # hides the row it is for.
 #
@@ -1201,7 +1201,7 @@ if ($List) {
         # written at -Submit and never cleared, so until 2026-09-06 every merged item wore it
         # forever: 32 of the 42 rows on the live board carried it and 31 of those were terminal,
         # so the one row where it was TRUE was one in thirty-two. (Figure of record and the
-        # reconciliation of three readings: documentation/notes/deploy-gate-2026-09-06.md.)
+        # reconciliation of three readings: ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md.)
         # A terminal item has nothing left to merge; the flag is for the rows still moving.
         if (($it.state -notin $TerminalStates) -and ($it.PSObject.Properties.Name -contains "line_mergeable") -and -not $it.line_mergeable) { $flag += " [needs hand-off]" }
         # The two states that are waiting on a PERSON are called out: an unread queue is

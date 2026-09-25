@@ -267,7 +267,7 @@ Set-Content -Path $anchorFile -Encoding ascii -Value @(
     '    "It contains exactly one line. Fail: it is empty or contradictory."',
     '  ],',
     '  "out_of_scope": ["Anything outside DELIVERABLE.md."],',
-    '  "findings_sink": "documentation/notes/u6dark-findings.md"',
+    '  "findings_sink": "../documentation-plans-ai-stack/journal/notes/u6dark-findings.md"',
     '}')
 $planFile = Join-Path $Root "plan.md"
 Set-Content -Path $planFile -Encoding ascii -Value @(

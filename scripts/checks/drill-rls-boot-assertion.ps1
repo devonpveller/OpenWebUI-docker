@@ -181,7 +181,7 @@ try {
     # reported and never asserted - the same "a check that passes while checking nothing"
     # this whole effort keeps re-finding, in the drill itself.
     #
-    # That is not hypothetical on this machine: documentation/notes/
+    # That is not hypothetical on this machine: ../documentation-plans-ai-stack/journal/notes/
     # clean-clone-maxpath-validation-trap.md records `git clone` EXITING 0 while leaving
     # 1,108 tracked files absent (MAX_PATH, core.longpaths unset). MEASURED here: hiding 5
     # of OB1/docker's 31 .sql took the staged chain from 28 to 23 with no error and no
@@ -194,7 +194,7 @@ try {
     if ($srcSqlCount -ge $chain.Count) {
         Pass "migrations source staged ($srcSqlCount .sql >= the $($chain.Count) compose mounts, including the revert-*.sql the scan must ignore)"
     } else {
-        Fail "migrations source has only $srcSqlCount .sql but compose mounts $($chain.Count) - this checkout is INCOMPLETE. A drill run against it proves nothing; see documentation/notes/clean-clone-maxpath-validation-trap.md."
+        Fail "migrations source has only $srcSqlCount .sql but compose mounts $($chain.Count) - this checkout is INCOMPLETE. A drill run against it proves nothing; see ../documentation-plans-ai-stack/journal/notes/clean-clone-maxpath-validation-trap.md."
         throw "incomplete checkout"
     }
 

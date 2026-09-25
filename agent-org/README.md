@@ -78,7 +78,7 @@ image reads `EGRESS_ALLOWLIST`, so the effective allowlist is the baked
 DENIED. `ao-git-egress` is unaffected — it overrides both the conf file and the
 command. Turning the cloud lane on therefore needs the allowlist wired the way
 `ao-git-egress` wires it, or the pattern added to the image. Recorded in
-[`../documentation/notes/stack-layers-sl-docs-posture-findings.md`](../documentation/notes/stack-layers-sl-docs-posture-findings.md).
+[`../../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md`](../../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md).
 
 **What is NOT in this plane.** `agent-bridge` reaches local inference through the
 `llama-cpp` alias on the main stack's `llm-gateway`, which sits on two
@@ -93,7 +93,7 @@ cannot settle:** `mattermost` is on `ao-net`, so it has a route out, and nothing
 here sets `MM_LOGSETTINGS_ENABLEDIAGNOSTICS`. Whether Team Edition phones home
 on its own defaults is upstream behaviour, not a fact in this tree — flagged
 rather than cleared, and recorded in
-[`../documentation/notes/stack-layers-sl-docs-posture-findings.md`](../documentation/notes/stack-layers-sl-docs-posture-findings.md).
+[`../../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md`](../../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md).
 
 ## Bring-up (operator)
 

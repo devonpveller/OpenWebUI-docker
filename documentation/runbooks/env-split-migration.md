@@ -297,8 +297,8 @@ written, so the grant is caught at its source.
 The check also used to grandfather grants already present in HEAD, which is how
 the two ao-worker ones survived it for weeks; that clause was removed with them.
 The history is in
-`documentation/notes/stack-layers-sl-env-split-findings.md` (section 14) and
-`documentation/notes/stack-layers-sl-ao-envfile-findings.md`.
+`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-env-split-findings.md` (section 14) and
+`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-ao-envfile-findings.md`.
 
 ### 5. Trim the root `.env`
 
@@ -363,13 +363,13 @@ config's. It reads the config now, so this one command covers all twelve.)
   host variable (e.g. `- BACKUP_INTERVAL=${MNEMORY_BACKUP_INTERVAL:-86400}`), so
   no compose file ever interpolated the bare names and setting them in an env
   file changed nothing. Identified by `sl-closeout`
-  (`documentation/notes/stack-layers-sl-closeout-findings.md` section 3).
+  (`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-closeout-findings.md` section 3).
 - **`OB1/docker/.env` or `agent-org/docker/.env`.** Both already worked this way
   and are out of scope. Note, though, that thirteen OB1 variables were
   *documented* in the root `.env.example` and are read only from
   `OB1/docker/.env` - and `OB1/docker/.env.example` does not carry them. That
   documentation gap is recorded in
-  `documentation/notes/stack-layers-sl-env-split-findings.md` and belongs to a
+  `../documentation-plans-ai-stack/journal/notes/stack-layers-sl-env-split-findings.md` and belongs to a
   follow-up item inside the submodule. **Your live `OB1/docker/.env` is
   unaffected; do not "fix" it from this runbook.**
 - **Where secrets live.** They are still gitignored dotenv files. The

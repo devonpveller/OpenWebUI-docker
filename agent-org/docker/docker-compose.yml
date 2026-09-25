@@ -297,7 +297,7 @@ services:
       #
       # The shared intent object lives in scripts/agent-harness/, and the bridge is the
       # reader U2 actually needs - the set_goal seam consuming anchors. The recorded finding
-      # (documentation/notes/anchor-schema-findings.md F1) said it was unreachable "at build
+      # (../documentation-plans-ai-stack/journal/notes/anchor-schema-findings.md F1) said it was unreachable "at build
       # time and at run time" because the build context is ../agent-bridge. The build-time
       # half is right. The RUN-TIME half is not: a bind mount is a HOST path resolved by the
       # daemon at container start and has nothing to do with the build context.

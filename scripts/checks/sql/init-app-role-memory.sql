@@ -16,7 +16,7 @@
 --
 -- THIS REUSES H1's SCHEME, it does not invent a second one: the role name, the membership
 -- in `service_role`, and the treatment of `ob_plane_personal` are H1's
--- (documentation/implementation-guide/dark-factory-unification/H1-APP-ROLE-PROMOTION.md).
+-- (../documentation-plans-ai-stack/implementation-guide/dark-factory-unification/H1-APP-ROLE-PROMOTION.md).
 -- H1's own OB1/docker/init-app-role.sql is NOT in this checkout and is on no reachable
 -- commit of either repository - see section 6 of the promotion plan. This file is that
 -- design re-materialised at the width clause 3 needs, in a repository a clean clone can

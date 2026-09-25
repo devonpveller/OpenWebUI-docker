@@ -36,7 +36,7 @@ VALID_B = {
     "audience": "Someone who has to OPERATE this plane, arriving with a task.",
     "acceptance": ["No section whose subject is disagreement between documents."],
     "out_of_scope": ["Rewriting the little-coder design doc."],
-    "findings_sink": "documentation/notes/coder-plane-findings.md",
+    "findings_sink": "../documentation-plans-ai-stack/journal/notes/coder-plane-findings.md",
 }
 
 VALID_A = {
@@ -255,7 +255,7 @@ def test_the_agreement_test_would_catch_real_drift(tmp_path):
 
 
 # ── THE THIRD READER: agent-bridge, in its container ─────────────────────────
-# The finding this closes (documentation/notes/anchor-schema-findings.md F1) is explicit
+# The finding this closes (../documentation-plans-ai-stack/journal/notes/anchor-schema-findings.md F1) is explicit
 # that whichever delivery mechanism won, "the cross-reader test is what keeps it honest — it
 # must be extended to ask the CONTAINERISED reader the same questions, or the copy will
 # drift silently".

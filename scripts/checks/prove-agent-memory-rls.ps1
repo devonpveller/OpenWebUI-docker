@@ -47,7 +47,7 @@
 #     because ob_plane_personal is a member of service_role - and it also lets ANY
 #     service_role session read a personal row by naming a tenant, since `ob.user_id` is an
 #     ordinary GUC any role may set. This section exists because the boundary had drifted
-#     exactly that way and nothing went red; see documentation/notes/u8h3-findings.md.
+#     exactly that way and nothing went red; see ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md.
 #
 # AND THE WRITE CONTRACT (DFU C.9 H3, operator 2026-08-31), which is a different property
 # from any of the above: the DATABASE must REFUSE a write whose exposure is ABSENT and one

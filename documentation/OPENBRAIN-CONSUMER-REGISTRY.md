@@ -50,7 +50,7 @@ reads) unless marked otherwise. Confirm a row before relying on it — services 
 | `open_notebook` | PostgREST (same net) | HTTP | RLS-bound | podcast audio renderer; SurrealDB is its own store |
 | agent-org Tier-2 advisor | `openbrain-research` | HTTP | — | research lane on llm-queue |
 | Harness recall (clause 8 seam) | `agent_memories` + recall traces | ops gateway | ops | |
-| `dfu-done.ps1` / drills | many tables (probes) | psql direct as postgres | superuser — **bypasses RLS by design**; probe rows must clean up | writes `DFU-DONE-*` fixture traces |
+| `dfu-done.ps1` / drills (the board archived 2026-09-25 to `scripts/archive/dfu-done/`, hand-run only) | many tables (probes) | psql direct as postgres | superuser — **bypasses RLS by design**; probe rows must clean up | writes `DFU-DONE-*` fixture traces |
 
 ## Hardening rules for further development (each one paid for by an incident here)
 

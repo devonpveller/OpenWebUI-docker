@@ -76,7 +76,7 @@
 # signal that distinguishes `exit 0` from falling off the end (measured - $LASTEXITCODE is
 # the stale 0 and $? is True in both). Every wired check today ends at an explicit `exit` on
 # every terminal branch, verified 2026-09-01 with the tails recorded in
-# documentation/notes/u8h4-findings.md. A refactor that removes one is the residual.
+# ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md. A refactor that removes one is the residual.
 #
 # Usage (this is the ONLY shape a wired step should use):
 #   ./.github/ci/run-check.ps1 -Check <contract-name> -Script <path> [-ScriptArgs a,b]

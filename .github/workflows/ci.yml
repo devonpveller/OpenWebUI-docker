@@ -6,7 +6,7 @@
 #
 # 2026-09-01 (dark-factory-unification PLAN.md C.9 H4): the verification machinery
 # — the boundary drill, the H1/H2 drills, the RLS proof, the corpus-exposure gate
-# and dfu-done.ps1's runnable clauses — is wired in below, so a later refactor
+# and (until 2026-09-25) dfu-done.ps1's runnable clauses — is wired in below, so a later refactor
 # cannot break one of them silently. Read the block above `dfu-static-checks`
 # before changing any of it: those jobs do NOT all pass on exit 0, and the
 # mapping from exit code to build outcome lives in `.github/ci/expected-exit.ps1`.
@@ -234,7 +234,7 @@ jobs:
   #     the operator dispositioned these 25 gaps", NOT "U5's recording half is met". Each
   #     gap prints its own GREEN DOES NOT COVER line; read them.
   #   * these jobs were measured on Windows PowerShell 5.1 against gitlink b604d55
-  #     (documentation/notes/u8h4-findings.md records every command, cwd, exit code and
+  #     (../documentation-plans-ai-stack/journal/notes/u8h4-findings.md records every command, cwd, exit code and
   #     elapsed time). Every wired invocation has ALSO been run on Linux — pwsh 7.4 in a
   #     container, 2026-09-01 — through run-check.ps1, which is how the dfu-done blocker in
   #     section 15 of that note was found. 8 of those 10 reached an exit code; the 2 that did
@@ -248,11 +248,20 @@ jobs:
   # Measured 2026-09-01 in mcr.microsoft.com/powershell:7.4-ubuntu-22.04: `Join-Path` on
   # Linux NORMALISES a backslash separator, so `Join-Path $repo 'OB1\docker'` resolves
   # correctly there. What does NOT survive is `cmd`, `2>nul`, and `-like` patterns built
-  # from backslashes - see documentation/notes/u8h4-findings.md for the sweep.
+  # from backslashes - see ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md for the sweep.
   # `TEMP` is set per job because these scripts stage throwaway fixtures under `$env:TEMP`,
   # and that variable does not exist on Linux. OB1 is checked out because the drills build
   # from the RECORDED GITLINK; it is a PUBLIC repo and the pinned commit is on its remote,
   # so `submodules: recursive` needs no extra credential.
+  #
+  # RETIRED 2026-09-25 (adoption-closeout ac-journal-move): the `dfu-done` job. The board
+  # audits the dark-factory-unification PLAN.md/DECISIONS.md/WALKTHROUGH.md and the notes
+  # beside them, and those moved with the operator journal to the private plan store, which
+  # a CI checkout of this repo does not have. Left wired it could only exit 1 ("nothing was
+  # judged") on every run, or - pointed at a frozen copy - audit a plan nobody edits any
+  # more. The script and its two drills are in scripts/archive/dfu-done/ with the reason;
+  # the gate below pins five jobs now, and removing the sixth was this deliberate edit.
+  # Mentions of dfu-done in the notes above are the H4 history, not live wiring.
   # =========================================================================================
 
   dfu-static-checks:
@@ -393,7 +402,7 @@ jobs:
       # runner it died inside its own trap without ever reaching an exit statement - and the
       # wiring reported the stale zero as "the drill RAN and every probe passed. PULL THIS
       # PIN". The drill is fixed and the wiring now refuses a run that produced no code of
-      # its own; both halves are in documentation/notes/u8h4-findings.md.
+      # its own; both halves are in ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md.
       - name: drill-app-role-not-superuser.ps1
         shell: pwsh
         run: |
@@ -429,111 +438,6 @@ jobs:
           if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (behaved as pinned) or 1 (did not), so this step reached no verdict and must not pass."; exit 1 }
           exit $rc
 
-  dfu-done:
-    name: "DFU H4 - the board (dfu-done.ps1 runnable clauses)"
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # SERIALISATION, per PROMOTION-RUNBOOK.md - see note 4 in the block above. Not because
-    # these two jobs share a machine here (they do not), but so the ordering survives a move
-    # to a runner that can see the live plane.
-    needs: [dfu-prove-rls]
-    env:
-      TEMP: ${{ runner.temp }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Clause 4 counts unmerged work branches and measures the work line against its
-          # remote, and clauses 1 and 5 run the walkthrough's commands inside a `--shared`
-          # clone of this checkout. Both want real history and a populated submodule.
-          fetch-depth: 0
-          submodules: recursive
-      # -SkipLive because clause 3 plants a personal-exposure fixture in openbrain-db by
-      # default and there is no live database in CI. Exit 7 (board FAILED) is the pinned,
-      # expected outcome today and MUST NOT read as a broken build; exit 1 (usage or
-      # configuration error - nothing was judged) must.
-      #
-      # AND THE EXIT CODE ALONE WOULD BE A THIN GATE, so this step also asserts the
-      # properties that make the board's own verdict trustworthy on ANY platform: the census
-      # balances, no clause landed in the `unrecognised` bucket, and the run did not move
-      # the tree it was auditing. Those are dfu-done's refusing conditions; a refactor that
-      # broke the script would show up in them long before it changed the exit code.
-      # Deliberately NOT pinned: the per-clause bucket map. Pinning a map nobody has observed
-      # on the runner would be the snapshot H4 exists to prevent. It was measured on BOTH
-      # platforms out of ONE clean clone on 2026-09-01 (pwsh 7.4 in a container vs Windows
-      # PowerShell 5.1) and the two DISAGREE: clause 4 is `unevaluated` on Windows and
-      # `unmet` on Linux, because in that container the bind-mounted checkout reads as dirty,
-      # `origin` is a path it cannot reach, and the andon board cannot run. A hosted runner
-      # has none of those three conditions and will differ again. So the map is
-      # environment-dependent as well as platform-dependent - a stronger reason not to pin it
-      # than the one this decision was originally made on. What IS asserted below - the
-      # census balances, nothing lands in `unrecognised`, the tree did not move - held on
-      # every run of both platforms. See documentation/notes/u8h4-findings.md section 15.4.
-      #
-      # THIS IS THE ONE STEP THAT MUST ASSERT SOMETHING BEFORE THE CONTRACT IS CONSULTED, so
-      # it uses run-check.ps1's -CodeFile form: run-check still proves the script RAN and
-      # reported a code of its own, writes that code out, and defers the classification. The
-      # census assertions run in between. A board that cannot account for itself never
-      # reaches expected-exit.ps1 at all.
-      - name: dfu-done.ps1 -SkipLive
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          trap { Write-Host "::error::H4 step: the wrapper itself terminated without reaching a verdict - $($_.Exception.Message). NOTHING WAS CHECKED, and that is not a pass."; exit 1 }
-          $log   = Join-Path $env:RUNNER_TEMP 'dfu-done.json'
-          $codef = Join-Path $env:RUNNER_TEMP 'dfu-done.code'
-          Remove-Item -LiteralPath $codef -Force -ErrorAction SilentlyContinue
-
-          $global:LASTEXITCODE = 199
-          & ./.github/ci/run-check.ps1 -Check dfu-done -Script './scripts/checks/dfu-done.ps1' -ScriptArgs '-SkipLive','-Json' -Stdout $log -CodeFile $codef -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
-          $rc = $LASTEXITCODE
-          if ($rc -ne 0 -and $rc -ne 1) { Write-Host "::error::H4 step: run-check.ps1 exited [$rc]. It reports only 0 (the check ran) or 1 (it did not), so this step reached no verdict and must not pass."; exit 1 }
-          if ($rc -ne 0) { exit 1 }
-          if (-not (Test-Path -LiteralPath $codef)) { Write-Host "::error::run-check.ps1 reported that dfu-done ran but wrote no exit code. Nothing was judged."; exit 1 }
-          $c = (Get-Content -LiteralPath $codef -Raw).Trim()
-          Write-Host "dfu-done.ps1 -SkipLive -Json exited $c"
-
-          $bad = 0
-          $o = $null
-          try {
-            $raw = Get-Content -LiteralPath $log -Raw
-            $i = $raw.IndexOf('{'); $j = $raw.LastIndexOf('}')
-            if ($i -lt 0 -or $j -le $i) { throw "no JSON object in the output" }
-            $o = $raw.Substring($i, $j - $i + 1) | ConvertFrom-Json
-          } catch {
-            Write-Host "::error::dfu-done.ps1 -Json produced nothing this job could parse: $($_.Exception.Message). NOTHING WAS JUDGED - that is not a pass."
-            $bad++
-          }
-          if ($o) {
-            Write-Host "board=$($o.board) done=$($o.done) balances=$($o.balances) total=$($o.census_total)"
-            Write-Host ("census: " + ($o.census | ConvertTo-Json -Compress))
-            Write-Host ("ids   : " + ($o.census_ids | ConvertTo-Json -Compress))
-            if ($env:GITHUB_STEP_SUMMARY) {
-              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ""
-              Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "**dfu-done board:** ``$($o.board)`` - census ``$($o.census | ConvertTo-Json -Compress)``"
-            }
-            if ($o.balances -ne $true) {
-              Write-Host "::error::dfu-done's census does not balance. A clause landed nowhere, which is the unaccounted bucket and refuses by construction."
-              $bad++
-            }
-            if ($o.census.unrecognised -ne 0) {
-              Write-Host "::error::dfu-done placed $($o.census.unrecognised) clause(s) in the 'unrecognised' bucket - a verdict the script does not enumerate. That is a defect in the machinery, not a report about the plan."
-              $bad++
-            }
-            if ($o.integrity.ok -ne $true) {
-              Write-Host "::error::dfu-done reports the audited tree MOVED during the run, so this run is not an authority on it (rule 8)."
-              $bad++
-            }
-          }
-          if ($bad -gt 0) {
-            Write-Host "::error::dfu-done ran, but $bad integrity assertion(s) about the RUN failed. The exit-code contract is not consulted: a board that cannot account for itself does not get to be 'as pinned'."
-            exit 1
-          }
-          $global:LASTEXITCODE = 199
-          & ./.github/ci/expected-exit.ps1 -Check dfu-done -Code $c -Command './scripts/checks/dfu-done.ps1 -SkipLive -Json'
-          $ec = $LASTEXITCODE
-          if ($ec -ne 0 -and $ec -ne 1) { Write-Host "::error::the exit-code contract exited [$ec]; it reports only 0 or 1, so this step reached no verdict."; exit 1 }
-          exit $ec
-
   dfu-h4-gate:
     name: "DFU H4 — gate: no job here may be skipped into looking green"
     runs-on: ubuntu-latest
@@ -548,7 +452,6 @@ jobs:
       - dfu-rls-boot-drill
       - dfu-app-role-drill
       - dfu-prove-rls
-      - dfu-done
     steps:
       - name: every gated job reached a verdict, and the gated set is the pinned one
         shell: pwsh
@@ -566,8 +469,7 @@ jobs:
             'dfu-boundary-drill',
             'dfu-rls-boot-drill',
             'dfu-app-role-drill',
-            'dfu-prove-rls',
-            'dfu-done'
+            'dfu-prove-rls'
           )
           $needs = $env:NEEDS_JSON | ConvertFrom-Json
           $actual = @($needs.PSObject.Properties.Name)

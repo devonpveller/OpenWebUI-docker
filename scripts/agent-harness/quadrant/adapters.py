@@ -14,7 +14,7 @@ task there, and copies back every file that changed. The mechanics, the measurem
 them and what the mirror costs live in `lc_docker.py`, which this file delegates to rather
 than re-implementing; `matrix.probe_little_coder` decides reachability BEFORE dispatch, so
 an unreachable or unfocused daemon is a `not_run` record with a reason and never an
-exception here. See `documentation/notes/u4quad-findings.md` F7 for the park this closed.
+exception here. See `../documentation-plans-ai-stack/journal/notes/u4quad-findings.md` F7 for the park this closed.
 """
 
 from __future__ import annotations

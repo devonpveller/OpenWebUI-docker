@@ -162,7 +162,7 @@ plane reaching `llama-cpp` through LiteLLM.
   the configuration's own top layer — no separate mechanism.
 
 The `little-coder` runner is wired, callable, and **has been dispatched to**. The
-four-quadrant comparison committed under `documentation/evidence/dfu-u4/quadrant/`
+four-quadrant comparison committed under `scripts/agent-harness/quadrant/evidence/dfu-u4/quadrant/`
 was produced by real tasks on it — the transcripts carry the daemon's own task ids
 (e.g. `01M1D1ZV0J9JYZ347T8QRDT7WX`) and two cells completed with acceptance 2/2.
 
@@ -232,7 +232,7 @@ only moment the line learns something new about whether an item is converging.
   oracle worked an item". The observation is a separate artifact and it now exists:
   `observe-oracle-on-stall.ps1` dispatched an unsatisfiable item to the live local
   runner three times, round 3 stalled, and the escalation is committed at
-  `documentation/evidence/dfu-u4/stall/` (ledger row `417aa274750da712`). It wrote to
+  `scripts/agent-harness/quadrant/evidence/dfu-u4/stall/` (ledger row `417aa274750da712`). It wrote to
   a SCRATCH state namespace on purpose, so this module's own ledger
   (`<git-common-dir>/agent-worktrees/oracle-escalations.jsonl`) is still ABSENT — an
   observation must not append to the ledger the deliverable is audited from. "The
