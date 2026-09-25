@@ -415,6 +415,7 @@ function Test-AnchorEnsure {
         @{ Name = "all three exist and match"; Drop = @(); Drift = $false; Render = "" },
         @{ Name = "only ai-stack_default missing"; Drop = @("ai-stack_default"); Drift = $false; Render = "" },
         @{ Name = "llm-net exists NOT internal (drift), default missing"; Drop = @("ai-stack_default"); Drift = $true; Render = "" },
+        @{ Name = "declared labels + driver_opts (order must be ordinal), default missing"; Drop = @("ai-stack_default"); Drift = $false; Render = '{"name":"ai-stack","networks":{"default":{"driver":"bridge","name":"ai-stack_default","labels":{"zz.owner":"ops","aa.tier":"core","com.docker.compose.zz":"q"},"driver_opts":{"com.docker.network.bridge.name":"br-x","m.opt":"3","a.opt":"1","z.opt":"4","c.opt":"2"}}}}' },
         @{ Name = "render declares an untranslated key (ipam)"; Drop = @("ai-stack_default"); Drift = $false; Render = '{"name":"ai-stack","networks":{"default":{"driver":"bridge","name":"ai-stack_default","ipam":{"config":[{"subnet":"10.9.0.0/16"}]}}}}' }
     )
     Install-Stub
