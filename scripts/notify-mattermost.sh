@@ -42,7 +42,9 @@ set +e
 # cwd, and a test running it out of a git worktree must read that worktree's .env and
 # write that worktree's state rather than reaching into the operator's main checkout.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)"
-[ -z "$ROOT_DIR" ] && ROOT_DIR="d:/Open WebUI/ai-stack"
+# No hardcoded fallback: if the script cannot find its own directory there is
+# no .env to read either, and this script is best-effort by design.
+[ -z "$ROOT_DIR" ] && exit 0
 ENV_CLAUDE="$ROOT_DIR/.env"                                 # CLAUDE_MM_BOT_TOKEN → bot-claude
 CHANNEL="6z9khgkdd7df9q454be6fimw1h"                        # #claude-sessions
 API="http://localhost:8065/api/v4/posts"

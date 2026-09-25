@@ -172,7 +172,7 @@
         "container": "llm-gateway-ui",
         "project": "inference",
         "critical": false,
-        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.devinveller.ai); serves no inference"
+        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.<PUBLIC_DOMAIN>); serves no inference"
       }
     ],
     "memory": [

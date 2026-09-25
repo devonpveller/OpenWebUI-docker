@@ -742,7 +742,7 @@ class FakeHost:
         # host is in when it is working.
         self.gguf_count = broken.get("gguf_count", "3")
         self.gguf_code = broken.get("gguf_code", 0)
-        self.models_bind = broken.get("models_bind", r"C:\Users\yamao\.lmstudio\models")
+        self.models_bind = broken.get("models_bind", r"C:\Users\someone\.lmstudio\models")
         self.llama_running = broken.get(
             "llama_running",
             '{"running":[{"model":"qwen36-27b","state":"ready"}]}',
@@ -839,12 +839,12 @@ def test_serving_depth_passes_and_names_the_resident_model(root):
 
 def test_serving_depth_fails_on_an_empty_models_mount_and_names_the_bind(root):
     """THE REGRESSION. A probe that passes here has not done its job."""
-    host = FakeHost(gguf_count="0", models_bind=r"D:\Open WebUI\data\models\gguf")
+    host = FakeHost(gguf_count="0", models_bind=r"D:\My Stack\data\models\gguf")
     code, out = sweep(host, root)
     state, label = depth_line(out)
     assert state == "FAIL"
     assert "NO .gguf files" in label
-    assert r"D:\Open WebUI\data\models\gguf" in label, "the label must name the bind to fix"
+    assert r"D:\My Stack\data\models\gguf" in label, "the label must name the bind to fix"
     assert "LM_MODELS_DIR" in label
     assert code == 1, "one failed probe, one exit code"
     # And it must NOT have gone on to spend a cold-load timeout on a store that

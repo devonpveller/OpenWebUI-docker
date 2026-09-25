@@ -46,7 +46,10 @@ FOCUS = STATE / "focus.json"
 CONFIG = Path(__file__).resolve().parent / "config.json"
 
 DEFAULTS = {
-    "repo": "devonpveller/OpenWebUI-docker",
+    # "owner/name" of the GitHub repo issues are read from. No shipped value:
+    # config.json sets it, else it is derived from this checkout's `origin`
+    # remote (origin_repo below), so a fork works on its own issues.
+    "repo": "",
     "target_branch": "development",
     "fallback_branch": "main",
     # A plan goes stale when the remote target tip moved more than this many
@@ -61,10 +64,23 @@ DEFAULTS = {
 }
 
 
+def origin_repo() -> str:
+    """"owner/name" from the checkout's `origin` URL (https or ssh form), or ""."""
+    r = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", cwd=ROOT, timeout=30)
+    m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", r.stdout.strip())
+    return m.group(1) if m else ""
+
+
 def cfg() -> dict:
     c = dict(DEFAULTS)
     if CONFIG.is_file():
         c.update(json.loads(CONFIG.read_text(encoding="utf-8")))
+    if not c["repo"]:
+        c["repo"] = origin_repo()
+    if not c["repo"]:
+        sys.exit("issue-ops: no GitHub repo - set \"repo\" in scripts/issue-ops/config.json "
+                 "or give this checkout a github.com `origin` remote")
     return c
 
 

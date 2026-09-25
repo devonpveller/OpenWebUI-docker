@@ -65,6 +65,32 @@ function Write-Log {
   Add-Content -Path $logFile -Value $line
 }
 
+# --- Host bind paths, read from the plane .env files ------------------
+# Two bind-tar targets are HOST directories chosen per deployment, so they are
+# read from the same plane .env compose reads, with the SAME fallback compose
+# uses when the key is unset or blank - the restore must write where the
+# service will look. A relative value resolves against the directory of the
+# compose file that holds the bind (compose's own rule for an included file).
+function Get-PlaneBindDir {
+  param([string]$EnvFile, [string]$Key, [string]$ComposeDir, [string]$Default)
+  $value = ''
+  $path = Join-Path $projectRoot $EnvFile
+  if (Test-Path $path) {
+    foreach ($line in (Get-Content $path)) {
+      if ($line -match "^\s*$Key\s*=(.*)$") { $value = $Matches[1].Trim().Trim('"').Trim("'") }
+    }
+  }
+  if (-not $value) { $value = $Default }
+  if (-not [System.IO.Path]::IsPathRooted($value)) {
+    $value = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $projectRoot $ComposeDir) $value))
+  }
+  return $value
+}
+# OB1/docker/docker-compose.yml: ${OPEN_NOTEBOOK_DIR:-../../../open-notebook}
+$openNotebookDir = Get-PlaneBindDir -EnvFile 'OB1\docker\.env' -Key 'OPEN_NOTEBOOK_DIR' -ComposeDir 'OB1\docker' -Default '..\..\..\open-notebook'
+# inference/compose/upstreams.yml + backups.yml: ${LM_MODELS_DIR:-../../data/models/gguf}
+$lmModelsDir = Get-PlaneBindDir -EnvFile 'inference\.env' -Key 'LM_MODELS_DIR' -ComposeDir 'inference\compose' -Default '..\..\data\models\gguf'
+
 # --- Service catalog ---------------------------------------------------
 # Each entry tells the script: what archives to look for, what containers
 # to stop/start, what the target volume or bind path is, and what restore
@@ -173,14 +199,14 @@ $catalog = [ordered]@{
   'open-notebook' = @{
     Archives = @(
       @{ Pattern = "surreal-*.surql.gz";     Target = 'open_notebook';                                  Type = 'surreal-import' }
-      @{ Pattern = "notebook-data-*.tar.gz"; Target = 'D:\Open WebUI\open-notebook\notebook_data';      Type = 'bind-tar' }
+      @{ Pattern = "notebook-data-*.tar.gz"; Target = (Join-Path $openNotebookDir 'notebook_data'); Type = 'bind-tar' }
     )
     Stop    = @('open_notebook')
     Start   = @('open_notebook')
     Compose = 'OB1\docker\docker-compose.yml'
   }
   'lm-models' = @{
-    Archives = @(@{ Pattern = "lm-models-*.tar.gz"; Target = 'C:\Users\yamao\.lmstudio\models'; Type = 'bind-tar' })
+    Archives = @(@{ Pattern = "lm-models-*.tar.gz"; Target = $lmModelsDir; Type = 'bind-tar' })
     Stop    = @('llama-cpp-upstream','llama-cpp-embed-upstream')
     Start   = @('llama-cpp-upstream','llama-cpp-embed-upstream')
     Compose = 'inference\docker-compose.yml'

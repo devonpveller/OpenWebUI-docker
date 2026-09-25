@@ -176,7 +176,7 @@ services:
     image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
     container_name: llm-gateway-ui
     # llm-net (reaches llm-gateway-db) + app-net (2026-08-22: the portal Caddy
-    # fronts /ui at litellm.devinveller.ai behind Authelia). NO aliases — must
+    # fronts /ui at litellm.<PUBLIC_DOMAIN> behind Authelia). NO aliases — must
     # never be an inference path. NOT on llm-backend-net (can't reach the
     # upstreams).
     networks:

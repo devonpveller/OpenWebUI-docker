@@ -92,10 +92,10 @@
 #      <container>:<port> (copy the litellm vhost as the template).
 #   3. Add a card to portal/config/caddy/site/index.html (the hub page).
 #   4. Cloudflare dashboard (operator): add the public hostname
-#      <app>.devinveller.ai -> this tunnel -> http://caddy:80.
+#      <app>.<PUBLIC_DOMAIN> -> this tunnel -> http://caddy:80.
 #   5. docker exec caddy caddy validate --config /etc/caddy/Caddyfile
 #      then    docker exec caddy caddy reload --config /etc/caddy/Caddyfile
-# Authelia's *.devinveller.ai rules cover new subdomains automatically
+# Authelia's *.<PUBLIC_DOMAIN> rules cover new subdomains automatically
 # (two_factor from the internet, one_factor on the LAN).
 (authelia_gate) {
     forward_auth authelia:9091 {
@@ -224,7 +224,7 @@ http://notebook.{$PUBLIC_DOMAIN} {
 
     # Intercept the Next.js runtime-config endpoint and return the public
     # apiUrl directly. Upstream's auto-detect would construct
-    # https://notebook.devinveller.ai:5055 (port 5055 isn't on Cloudflare,
+    # https://notebook.<PUBLIC_DOMAIN>:5055 (port 5055 isn't on Cloudflare,
     # would 404). Setting API_URL env on the container fixes public but
     # breaks tailnet -- where the auto-detect IS correct (entrypoint.sh
     # tailscale-serves the API on :5055). So override here, NOT in the
@@ -347,7 +347,7 @@ http://{$PUBLIC_DOMAIN} {
     # Legacy subpath routes: redirect to the proper subdomain so old
     # bookmarks still land somewhere useful. handle_path strips the
     # prefix before {uri} is evaluated, so /openwebui/foo becomes
-    # https://openwebui.devinveller.ai/foo (not /openwebui/foo).
+    # https://openwebui.<PUBLIC_DOMAIN>/foo (not /openwebui/foo).
     handle_path /openwebui/* {
         redir * https://openwebui.{$PUBLIC_DOMAIN}{uri} 308
     }

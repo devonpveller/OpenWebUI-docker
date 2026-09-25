@@ -27,7 +27,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 
 def project_dir_for(repo: str) -> str:
     """Claude Code encodes a project path into a directory name by replacing every char that
-    isn't [A-Za-z0-9-] with '-'  (d:\\Open WebUI\\ai-stack → d--Open-WebUI-ai-stack)."""
+    isn't [A-Za-z0-9-] with '-'  (d:\\My Stack\\ai-stack → d--My-Stack-ai-stack)."""
     name = re.sub(r"[^A-Za-z0-9-]", "-", os.path.normpath(repo))
     return os.path.join(os.path.expanduser("~"), ".claude", "projects", name)
 

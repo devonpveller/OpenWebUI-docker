@@ -51,7 +51,7 @@ tailscale --socket=/tmp/tailscaled.sock serve --https=443 --set-path=/lmstudio -
 echo ""
 echo "✅ LM Studio Tailscale setup complete!"
 echo ""
-echo "🔗 Access URL: https://openwebui-13.tail37f875.ts.net/lmstudio"
+echo "🔗 Access URL: https://<tailnet-host>.ts.net/lmstudio"
 echo ""
 echo "📊 Current serve status:"
 tailscale --socket=/tmp/tailscaled.sock serve status

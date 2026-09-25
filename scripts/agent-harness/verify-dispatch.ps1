@@ -410,8 +410,8 @@ function Invoke-RealProcessDispatch {
               "-AuditDir", $auditRoot, "-LeaseOwner", $DrillOwner)
     if ($AcceptanceCommand) { $argv += @("-AcceptanceCommand", $AcceptanceCommand) }
     # Start-Process joins -ArgumentList with spaces and quotes NOTHING, so any argument
-    # holding a space (this repo lives under "D:\Open WebUI") arrives split in two. Found
-    # by this drill failing with: Processing -File 'D:\Open' failed.
+    # holding a space (a checkout under e.g. "D:\My Stack") arrives split in two. Found
+    # by this drill failing with: Processing -File '<first word of the path>' failed.
     $argv = @($argv | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } })
 
     $prevCfg = $env:AI_STACK_HARNESS_CONFIG

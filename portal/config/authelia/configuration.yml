@@ -78,20 +78,23 @@ access_control:
   rules:
     # Authelia portal itself: bypass (it does its own auth).
     # MUST come before the wildcard rules below -- otherwise the wildcard
-    # captures auth.devinveller.ai first and creates a circular auth loop.
-    - domain: 'auth.devinveller.ai'
+    # captures auth.<PUBLIC_DOMAIN> first and creates a circular auth loop.
+    # Every domain below is PUBLIC_DOMAIN from portal/.env, rendered by
+    # Authelia's `template` config filter (X_AUTHELIA_CONFIG_FILTERS in
+    # portal/docker-compose.yml); mustEnv refuses to start on an unset value.
+    - domain: 'auth.{{ mustEnv "PUBLIC_DOMAIN" }}'
       policy: bypass
     # LAN: one factor is enough (apex + all app subdomains).
     - domain:
-        - 'devinveller.ai'
-        - '*.devinveller.ai'
+        - '{{ mustEnv "PUBLIC_DOMAIN" }}'
+        - '*.{{ mustEnv "PUBLIC_DOMAIN" }}'
       policy: one_factor
       networks: ['home_lan']
     # Internet: enforce 2FA on the apex AND every app subdomain
-    # (openwebui.devinveller.ai, notebook.devinveller.ai, ...).
+    # (openwebui.<PUBLIC_DOMAIN>, notebook.<PUBLIC_DOMAIN>, ...).
     - domain:
-        - 'devinveller.ai'
-        - '*.devinveller.ai'
+        - '{{ mustEnv "PUBLIC_DOMAIN" }}'
+        - '*.{{ mustEnv "PUBLIC_DOMAIN" }}'
       policy: two_factor
 
 session:
@@ -101,9 +104,9 @@ session:
   expiration: 8h
   remember_me: 1M
   cookies:
-    - domain: 'devinveller.ai'
-      authelia_url: 'https://auth.devinveller.ai'
-      default_redirection_url: 'https://devinveller.ai/'
+    - domain: '{{ mustEnv "PUBLIC_DOMAIN" }}'
+      authelia_url: 'https://auth.{{ mustEnv "PUBLIC_DOMAIN" }}'
+      default_redirection_url: 'https://{{ mustEnv "PUBLIC_DOMAIN" }}/'
 
 # Account-level lockout (per-username). Per-IP banning is v2 CrowdSec.
 regulation:
@@ -112,7 +115,13 @@ regulation:
   ban_time: 1h
 
 storage:
-  encryption_key: "{{ env \"AUTHELIA_STORAGE_ENCRYPTION_KEY\" }}"
+  # The key that takes effect is the AUTHELIA_STORAGE_ENCRYPTION_KEY env var
+  # portal/docker-compose.yml passes (Authelia's env beats this file). With
+  # the template filter on, env/mustEnv do not hand out secret-named variables,
+  # so this line renders as '' - harmless, the env var still wins. It is
+  # single-quoted because the old double-quoted spelling carried backslash
+  # escapes the template parser would have to read.
+  encryption_key: '{{ env "AUTHELIA_STORAGE_ENCRYPTION_KEY" }}'
   local:
     path: /data/db.sqlite3
 

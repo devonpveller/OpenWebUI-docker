@@ -162,17 +162,20 @@ try {
   }
 
   Write-Host ""
+  # PUBLIC_DOMAIN as the pre-flight read it from portal/.env (this process's
+  # own environment does not carry it - compose reads the file, not us).
+  $publicDomain = $portalValues['PUBLIC_DOMAIN']
   if ($Test) {
     Write-Host "==> Portal is up in TEST mode." -ForegroundColor Green
     Write-Host "    Browser: http://127.0.0.1:8443/  (will hit catch-all 421 unless you" -ForegroundColor Yellow
     Write-Host "             pass a matching Host header, or add to your Windows hosts:" -ForegroundColor Yellow
-    Write-Host "                 127.0.0.1 devinveller.ai auth.devinveller.ai" -ForegroundColor Yellow
-    Write-Host "             then visit http://devinveller.ai:8443/." -ForegroundColor Yellow
+    Write-Host "                 127.0.0.1 $publicDomain auth.$publicDomain" -ForegroundColor Yellow
+    Write-Host "             then visit http://${publicDomain}:8443/." -ForegroundColor Yellow
     Write-Host "    Cookies will NOT persist over HTTP -- this validates routing, not the" -ForegroundColor Yellow
     Write-Host "    full login UX. For UX testing, switch to production mode." -ForegroundColor Yellow
   } else {
     Write-Host "==> Portal is up in PRODUCTION mode." -ForegroundColor Green
-    Write-Host "    Public URL: https://${env:PUBLIC_DOMAIN}/"
+    Write-Host "    Public URL: https://$publicDomain/"
   }
   Write-Host ""
   Write-Host "==> Running status check..." -ForegroundColor Green

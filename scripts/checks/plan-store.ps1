@@ -88,7 +88,7 @@ if (-not $Store) {
     # plain clone would have put it.
     if (-not $Store) { $Store = Join-Path (Split-Path $Root -Parent) 'documentation-plans-ai-stack' }
 }
-if (-not (Test-Path (Join-Path $Store '.git'))) { throw "plan store not found at $Store (clone devonpveller/documentation-plans-ai-stack beside the code repo)" }
+if (-not (Test-Path (Join-Path $Store '.git'))) { throw "plan store not found at $Store (clone your plan-store repo, documentation-plans-ai-stack, beside the code repo)" }
 
 $IndexPath = Join-Path $Root 'documentation/implementation-guide/README.md'
 

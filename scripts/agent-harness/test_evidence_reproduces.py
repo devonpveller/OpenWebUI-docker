@@ -56,8 +56,8 @@ def make_set(tmp_path: Path, *, status: str = "completed", venue: bool = True,
         "evidence": {"workspace": str(ws), "transcript": str(run_dir / "transcript.txt")},
         "acceptance": [{
             "criterion": "the kept artifact is still there",
-            # QUOTED. `sys.executable` lives under "D:\Open WebUI\..." on this machine and
-            # the command is run through the shell: unquoted, cmd.exe answers "'D:\Open' is
+            # QUOTED. `sys.executable` can live under a path with a space ("D:\My Stack\...")
+            # and the command is run through the shell: unquoted, cmd.exe answers "'D:\My' is
             # not recognized" and the check reads that as a non-reproducing verdict. The
             # test would then have been measuring the quoting rather than the check.
             "check": f'"{sys.executable}" -c "import pathlib,sys; '

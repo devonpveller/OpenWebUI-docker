@@ -79,8 +79,8 @@ Write-Host ""
 Write-Host "LM Studio Recovery Complete!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Access URLs:" -ForegroundColor Cyan
-Write-Host "  - LM Studio API: https://openwebui-13.tail37f875.ts.net/lmstudio" -ForegroundColor White
-Write-Host "  - Test endpoint: https://openwebui-13.tail37f875.ts.net/lmstudio/v1/models" -ForegroundColor White
+Write-Host "  - LM Studio API: https://<tailnet-host>.ts.net/lmstudio" -ForegroundColor White
+Write-Host "  - Test endpoint: https://<tailnet-host>.ts.net/lmstudio/v1/models" -ForegroundColor White
 Write-Host ""
 Write-Host "To test from command line:" -ForegroundColor Yellow
-Write-Host "curl -k https://openwebui-13.tail37f875.ts.net/lmstudio/v1/models" -ForegroundColor Gray
+Write-Host "curl -k https://<tailnet-host>.ts.net/lmstudio/v1/models" -ForegroundColor Gray
