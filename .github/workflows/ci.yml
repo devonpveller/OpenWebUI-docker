@@ -262,13 +262,8 @@ jobs:
       # down and checks nothing it created is left. python3 is the runner's own (3.12 on
       # ubuntu-24.04; stack.py needs 3.11+), as it would be for a newcomer.
       #
-      # EXPECTED RED TODAY, ON ONE CHECK, AND THAT IS A REAL DEFECT - not this job's. The
-      # runner has pwsh, so `stack.py health` runs its PowerShell probe of frontend/owui/
-      # plugin drift, and on a fresh Open WebUI (no plugin ever pasted) that probe REFUSES
-      # ("returned no readable rows") and health exits 1 - measured 2026-09-25 in a DinD with
-      # pwsh 7.4.6 at this item's head. Init, the real up, /health 200, the networks and the
-      # teardown all pass. A Windows newcomer hits the same probe. Recorded in the plan
-      # store (adoption-closeout findings ac-ci F6); do not silence it here - fix `health`.
+      # The runner has pwsh, so `stack.py health` also runs the owui plugin-drift probe;
+      # on a fresh Open WebUI (nothing pasted yet) that probe SKIPS by design since ac-ci.
       - run: bash scripts/stack/rehearse-fresh-clone.sh --this-daemon --health-timeout 900
 
   # =========================================================================================
