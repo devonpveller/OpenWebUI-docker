@@ -131,8 +131,13 @@ def _apply_policy(msg: dict):
 
     if method == "tools/call":
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            return msg, _rpc_error(rpc_id, -32602, "params must be an object")
         name = params.get("name")
         args = params.get("arguments") or {}
+        if not isinstance(name, str) or not isinstance(args, dict):
+            return msg, _rpc_error(
+                rpc_id, -32602, "tools/call needs a string name and object arguments")
 
         if name not in ALLOWED_TOOLS:
             return msg, _rpc_error(
@@ -160,12 +165,42 @@ def _filter_tools_list(payload: dict) -> dict:
     return payload
 
 
+class _BodyRefused(ValueError):
+    """A request body the gateway cannot apply its policy to."""
+
+
+def _no_constant(name):
+    raise _BodyRefused(f"non-standard JSON constant {name}")
+
+
 def _parse_body(raw: bytes):
-    """MCP streamable-http body is a single JSON-RPC object (or batch)."""
-    txt = raw.decode("utf-8", "replace").strip()
-    if not txt:
-        return None
-    return json.loads(txt)
+    """Parse the MCP streamable-http body STRICTLY: one JSON-RPC object, or a
+    non-empty batch of objects, as plain UTF-8 JSON.
+
+    FAIL CLOSED. The upstream's own parser accepts more than this (a byte-order
+    mark, other encodings), so a body this function cannot parse is REFUSED,
+    never forwarded as received: the gateway only ever sends upstream what it
+    parsed here and re-serialised after policy. Raises _BodyRefused.
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        msg = json.loads(raw.decode("utf-8"), parse_constant=_no_constant)
+    except _BodyRefused:
+        raise
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
+        raise _BodyRefused(f"not a UTF-8 JSON document ({e.__class__.__name__})")
+    if isinstance(msg, dict):
+        return msg
+    if isinstance(msg, list) and msg and all(isinstance(m, dict) for m in msg):
+        return msg
+    raise _BodyRefused("not a JSON-RPC object or a non-empty batch of objects")
+
+
+def _refuse(reason: str):
+    return JSONResponse(
+        _rpc_error(None, -32700, f"Request refused by the gateway: {reason}."),
+        status_code=400)
 
 
 def _upstream_headers(req):
@@ -194,14 +229,16 @@ async def mcp(request):
     up_headers = _upstream_headers(request)
 
     short_circuit = None
-    out_body = body
+    out_body = None  # only bytes re-serialised below ever go upstream
     is_tools_list = False
 
-    if method == "POST" and body:
+    if body and method != "POST":
+        return _refuse(f"{method} with a body")
+    if method == "POST":
         try:
             msg = _parse_body(body)
-        except Exception:
-            msg = None
+        except _BodyRefused as e:
+            return _refuse(str(e))
         if isinstance(msg, list):  # JSON-RPC batch
             mutated, sc = [], None
             for m in msg:
@@ -230,7 +267,7 @@ async def mcp(request):
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.request(
             method, f"{OPENBRAIN_URL}/",
-            content=out_body if method in ("POST", "PUT", "PATCH") else None,
+            content=out_body,
             headers=up_headers,
             params=dict(request.query_params))
 
