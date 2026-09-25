@@ -860,7 +860,7 @@ def _preflight(manifest, root, planes, verb: str) -> None:
             lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
     if lines:
         raise Refusal(
-            f"refused: `{verb}` would start nothing until these are fixed:\n" + "\n".join(lines)
+            f"refused: fix these before `{verb}` starts anything:\n" + "\n".join(lines)
             + "\nNothing was started. Replace each placeholder with a value of your own (for a secret: "
             "`openssl rand -hex 32`), then re-run."
         )
