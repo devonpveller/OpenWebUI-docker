@@ -189,6 +189,9 @@ parallel set of volumes.
 `# portal is not driven by stack.py - start it with scripts/portal/portal-on.ps1
 / scripts/portal/portal-off.ps1`; `stack.py restart portal` refuses outright
 with the same pointer. That is the manifest's `manual` key doing its job.
+`stack.py recover portal` refuses the same way. `stack.py backup portal` /
+`restore portal --from <dir>` start and stop nothing, so they do work on its
+named volumes (restore refuses while a portal container holds one).
 
 **In an incident, reach for the killswitch, not `portal-off`.**
 [`breach-killswitch.ps1`](../scripts/portal/breach-killswitch.ps1) mails first

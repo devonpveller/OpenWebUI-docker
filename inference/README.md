@@ -233,6 +233,12 @@ directory; that mechanism was retired on 2026-09-19.
 After a crash or a wedged GPU, use the ordered path instead:
 `.\scripts\recovery\emergency-recovery.ps1 recover`, or `gpu-reset`.
 
+Portable (Linux, no PowerShell): `python3 scripts/stack/stack.py recover inference`
+(upstreams and `llm-queue` before `llm-gateway`, each gated; `gpu-reset` stays
+PowerShell); `backup inference` archives `llm-queue-data` (under `local`) and names
+`llm-gateway-db` for its `llm-gateway-backup` dump while it runs;
+`restore inference --from <dir>`; `stats` adds the queue board and the ledger.
+
 **Order inside the plane** is expressed with `depends_on: service_healthy`:
 `llm-gateway-db` and - under `local` - `llama-cpp-upstream`,
 `llama-cpp-embed-upstream` and `llm-queue` all gate `llm-gateway`, and

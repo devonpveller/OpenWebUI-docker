@@ -170,6 +170,12 @@ that order for whole-project operations; it cannot help a hand-typed
 single-service restart. After a crash or a netns break use
 `.\scripts\recovery\emergency-recovery.ps1 recover`.
 
+Portable (Linux, no PowerShell): `python3 scripts/stack/stack.py recover frontend`
+restarts the plane in that order, gating each container on its healthcheck;
+`backup frontend` / `restore frontend --from backups/frontend/manual-<UTC>`
+archive and restore `frontend_openwebui-data` (restore refuses while a container
+holds it); `stats` shows the plane's CPU/memory/net.
+
 **Rebuild deliberately, never as a side effect.** `openwebui:local` and
 `tailscale:local` are pinned tags; the CUDA Dockerfile reinstalls torch, and
 upgrades follow `documentation/runbooks/UPDATE-MANAGEMENT.md`. A plain `up -d`

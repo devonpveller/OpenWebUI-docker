@@ -158,6 +158,9 @@ Two things to know before editing `coder/.env`:
 
 Crash recovery - health gates, GPU repair, ordered restart across every
 project - is `scripts/recovery/emergency-recovery.ps1`, not this file.
+Portable (Linux, no PowerShell): `python3 scripts/stack/stack.py recover coder`
+(ordered, gated), `backup coder` / `restore coder --from backups/coder/manual-<UTC>`
+for the six `coder_little-coder-*` volumes, and `stats`.
 
 ## Where it sits in the dependency order
 
