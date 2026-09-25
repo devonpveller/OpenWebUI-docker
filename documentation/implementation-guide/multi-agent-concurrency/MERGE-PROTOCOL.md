@@ -60,7 +60,7 @@ Six fields, each earning its place:
 | `audience` | who reads or runs it - the field that would have prevented the coder README |
 | `acceptance` | objectively checkable criteria - **this is what the tester tests** |
 | `out_of_scope` | the tempting adjacent work this deliberately does not do |
-| `findings_sink` | where anything true but out of scope gets written down instead |
+| `findings_sink` | where anything true but out of scope gets written down instead - a path in the plan store, `../documentation-plans-ai-stack/implementation-guide/<feature>/findings/<id>.md` (or `journal/notes/` there) |
 
 The tool refuses vague anchors: a missing field, an empty list, or an acceptance criterion
 too short to check. Say what would count as FAILING each criterion, not only what passing
@@ -170,6 +170,16 @@ written there. This protocol used to say to call such disagreements out "explici
 no destination; agents reasonably read that as "in the artifact", and half of one README
 became a defect table. Neither losing the finding nor pasting it into the deliverable is
 right; the sink is the third option.
+
+**Where the paperwork lives: the plan store, not this repo** (since 2026-09-25). The anchor,
+the findings sink, the test plan and any evidence file you keep go in the private sibling
+repo `../documentation-plans-ai-stack/`: `implementation-guide/<feature>/anchors/<id>.json`,
+`.../findings/<id>.md`, `.../test-plans/<id>.md`, and `journal/evidence/<id>/` (`journal/notes/`
+when there is no feature). Commit and push it there before you `-Submit`, with
+`git pull --rebase` first - other items write to the same repo. This repo's pre-commit
+refuses new files under `documentation/notes|evidence|archive/` and new root-level
+`TEST-PLAN*` / `*-FINDINGS*` files. Evidence that CODE reads is the exception: a fixture a
+check or drill needs lives next to that code, because CI runs on this repo alone.
 
 **The sink is held to the artifact's standard.** A false claim in a findings file is not a
 smaller mistake than a false claim in the deliverable - it is a larger one, because the

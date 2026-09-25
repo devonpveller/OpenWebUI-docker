@@ -219,6 +219,14 @@ function Format-Anchor($anchor) {
     }
     if ($anchor.PSObject.Properties.Name -contains "findings_sink" -and $anchor.findings_sink) {
         $out += "FINDINGS  : anything true but out of scope goes to " + $anchor.findings_sink
+        # Since 2026-09-25 findings live in the plan store (CLAUDE.md, "Where documentation
+        # goes"); the code repo's pre-commit refuses new files in its old journal places. An
+        # advisory, not a refusal: anchors proposed before the move are still valid to finish.
+        if ("$($anchor.findings_sink)" -match '^\s*(\./)?documentation[/\\](notes|evidence|archive)[/\\]') {
+            $out += ("NOTE      : that sink is in the code repo's old journal directory, which pre-commit now " +
+                     "refuses - write it in ../documentation-plans-ai-stack/implementation-guide/<feature>/findings/ " +
+                     "or journal/notes/ instead")
+        }
     }
     return ($out -join "`n")
 }

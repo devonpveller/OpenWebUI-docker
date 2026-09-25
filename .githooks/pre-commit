@@ -39,6 +39,9 @@ fi
 # task lists and numbered plan sets belong in the private plan store,
 # documentation-plans-ai-stack; this repo carries the one-row status entry in
 # documentation/implementation-guide/README.md and nothing else of a plan.
+# Since 2026-09-25 the same goes for the operator journal: a new file under
+# documentation/notes|evidence|archive/, or a new root-level TEST-PLAN*/
+# *-FINDINGS*/PLAN* file, is refused with the store path to write it at.
 #
 # It is a PARTIAL guard and the script header says so plainly: the drift it is
 # named after (a 24-file plan set written into documentation/implementation-guide/
@@ -47,7 +50,7 @@ fi
 # -All to see the untracked half, which no commit-time check can reach.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File './scripts/checks/check-doc-placement.ps1'
 if [ $? -ne 0 ]; then
-    echo "Pre-commit validation failed (planning material staged into the code repo)!"
+    echo "Pre-commit validation failed (planning or journal material staged into the code repo)!"
     exit 1
 fi
 

@@ -44,6 +44,16 @@ project into per-plane projects; root `ai-stack` = the network anchor):
    never restart `openwebui` alone — tailscale shares its network namespace
    (restart order: openwebui → tailscale).
 
+6. **New documentation goes to the private plan store, not this repo**
+   (`../documentation-plans-ai-stack`, cloned beside this checkout). Plans:
+   `implementation-guide/<feature>/`; a work item's findings and test plan:
+   `implementation-guide/<feature>/findings/<id>.md` and `.../test-plans/<id>.md`;
+   notes, findings or evidence with no feature: `journal/notes/`,
+   `journal/evidence/<id>/`; retired docs: `journal/archive/`. Pre-commit refuses new
+   files under `documentation/notes|evidence|archive/` and new root-level `PLAN*`,
+   `TEST-PLAN*` or `*-FINDINGS*` files. CLAUDE.md, "Where documentation goes", has
+   the full table.
+
 ## Where things are
 
 `owui/` = canonical OWUI plugin/skill exports (paste-deployed; `manifest.csv`

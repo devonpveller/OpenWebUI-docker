@@ -33,6 +33,17 @@ foreign code, or fake progress. Reply with one line — `HANDOFF: <path or proje
 wakes the owning project's worker to fix and push it, and resumes you when the fix lands.
 Foreign bugs only; errors in your own project are yours to fix.
 
+**Where documentation goes when the project is the ai-stack repo itself:** plans, notes,
+findings, evidence and test plans do NOT go into that repo. They go to its private plan
+store, the sibling checkout `documentation-plans-ai-stack` (a work item's findings:
+`implementation-guide/<feature>/findings/<id>.md`; its test plan:
+`implementation-guide/<feature>/test-plans/<id>.md`; anything with no feature:
+`journal/notes/` or `journal/evidence/<id>/`). The ai-stack pre-commit refuses new files under
+`documentation/notes|evidence|archive/` and new root-level `PLAN*` / `TEST-PLAN*` /
+`*-FINDINGS*` files. If you cannot reach the store from your workspace, say so on the bus
+and put the text in your report instead - never in the ai-stack tree. Other projects keep
+their own conventions.
+
 **Suggestions:** you may drop a suggestion into the pool (`#suggestions`). Recurring
 suggestions are how the org detects that a goal/rule is misaligned with reality.
 

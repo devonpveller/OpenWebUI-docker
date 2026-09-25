@@ -12,7 +12,7 @@ product menu below, pick one more thing, and turn it on.
 
 > The previous 1,362-line README described the retired Ollama-era stack; it is
 > preserved at
-> [`documentation/archive/README-pre-2026-08.md`](documentation/archive/README-pre-2026-08.md).
+> [`../documentation-plans-ai-stack/journal/archive/README-pre-2026-08.md`](../documentation-plans-ai-stack/journal/archive/README-pre-2026-08.md).
 
 ## Quickstart
 
@@ -315,7 +315,7 @@ that image, so the effective allowlist is the baked `github.com` /
 `githubusercontent.com` pair and `openrouter.ai` would be denied. That fails
 closed, which is the safe direction, but it means the cloud lane does not work
 as shipped. Recorded in
-[`documentation/notes/stack-layers-sl-docs-posture-findings.md`](documentation/notes/stack-layers-sl-docs-posture-findings.md);
+[`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md`](../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md);
 fixing it is a compose or image change, not a documentation one.
 
 ### What a fresh clone actually does
@@ -455,10 +455,8 @@ telling the truth.
 | `OB1/` | Open Brain - a pinned git submodule since 2026-08-21 (bump via PR), including the Open Notebook trio |
 | `backup/` + `backups/` | Sidecar scripts and Dockerfiles, and the artifacts they produce |
 | `documentation/runbooks/` | Operational runbooks (incident response, backups, updates, the env-split migration) |
-| `documentation/notes/` | Findings and evidence - where a true problem found while working on something else goes |
-| `documentation/implementation-guide/` | The per-feature status INDEX (it spans two repos) plus the two plan sets that must stay here: `multi-agent-concurrency/` and `dark-factory-unification/`. Plans themselves live in the private `documentation-plans-ai-stack` repo. |
-| `documentation/archive/` | Retired docs, kept for history |
-| [`CLEANUP-PLAN.md`](CLEANUP-PLAN.md) | The 2026-08 restructure (v3), **CLOSED 2026-09-19** - history, not a worklist. Its "v3 CLOSED" section says where each open item went; the successor is `stack-layers/` in the plan store. |
+| `documentation/implementation-guide/` | The per-feature status INDEX (it spans two repos) plus `multi-agent-concurrency/`, the one plan set that must stay here. Plans themselves live in the private `documentation-plans-ai-stack` repo. |
+| `../documentation-plans-ai-stack/` (a separate, private checkout beside this one) | The plan store: plans, and since 2026-09-25 the operator journal under `journal/` - notes and findings, evidence, test plans, retired docs, and the closed 2026-08 restructure plan (`journal/CLEANUP-PLAN.md`). New material of those kinds goes there, not here; CLAUDE.md has the routing table. |
 
 ## Conventions
 

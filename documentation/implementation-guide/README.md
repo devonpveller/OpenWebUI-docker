@@ -2,8 +2,8 @@
 
 > Status: LIVE · created 2026-08-20 (docs truth pass). One row per feature.
 > Rule: when a plan ships or is superseded, update this table **and** banner
-> the old doc in the same PR. Completed plan/task checklists move to
-> `../archive/implementation-guide/`.
+> the old doc in the same PR. Completed plan/task checklists move to the plan
+> store's `journal/archive/implementation-guide/`.
 >
 > **This index spans two repos.** A row is the feature's status wherever its plan
 > lives. NEW plans, build logs and plan sets are written in the private plan store
@@ -11,12 +11,16 @@
 > pushed there, and get a row here naming that location - see CLAUDE.md, "Plans live
 > in the plan store". **Phase 2 ran 2026-09-18**: the feature directories that
 > were still here moved to the store, so every row below is marked **@ plan store**
-> except the two that stay here for a MECHANICAL reason - `multi-agent-concurrency/`
-> (MERGE-PROTOCOL.md must travel with every worktree) and `dark-factory-unification/`
-> (`scripts/checks/dfu-done.ps1` reads its PLAN/DECISIONS/WALKTHROUGH in CI). A third
+> except the one that stays here for a MECHANICAL reason - `multi-agent-concurrency/`
+> (MERGE-PROTOCOL.md must travel with every worktree). `dark-factory-unification/` was
+> the second until 2026-09-25, when it moved to the store and its board, `dfu-done.ps1`,
+> was archived with its CI job (`scripts/archive/README.md` says why). A second
 > directory appearing here is drift.
-> `scripts/checks/check-doc-placement.ps1` blocks a new plan staged into this repo
-> and, with `-All`, audits what is sitting here untracked.
+> **The journal moved on 2026-09-25 too** (adoption-closeout `ac-journal-move`): notes,
+> findings, evidence, test plans and retired docs are in the store under
+> `implementation-guide/<feature>/findings|test-plans/` or `journal/`, not in this repo.
+> `scripts/checks/check-doc-placement.ps1` blocks a new plan or journal file staged into
+> this repo and, with `-All`, audits what is sitting here untracked.
 
 | Folder | State | Notes |
 |---|---|---|
@@ -34,10 +38,10 @@
 | `open-notebook-integration-openbrain/` **@ plan store** | ✅ shipped (IKS) | Ledger + sync/pending plans kept. its `iks-dev` overlay was torn down + archived 2026-08-20 (idle since 08-01; volumes kept; tree at `scripts/archive/iks-dev/`). |
 | `little-coder/` **@ plan store** | ✅ shipped | Design + workflow guide + UPDATE-NOTES kept. |
 | `teams-chat-agent-orchestration/` **@ plan store** | ✅ built as `agent-org/` | Governing specs kept (SAFETY, COMMS-MODEL, PLAN, …); tasks/outline/analyses archived. |
-| `research-engine-for-OB/` **@ plan store** | ✅ deployed; `PLAN-research-trust-2026-09-11.md` **merged, awaiting deploy** | `GROUNDING-MODEL.md` is the governing spec; `REPO-SOURCES-WIRING.md` design not built. research-trust adds: a collapsed search is a search failure not an absent topic (`search-quality.ts`), KB-recall pages face the relevance gate, `no_relevant_sources` skips the curator, numeric grounding (`grounding.ts`), `needs answered X of N` in place of `coverage NN%`, a curator meta-claim filter, and a remeasured SearXNG engine policy on a pinned image. Evidence: `documentation/notes/research-audit-optiplex-100hz-2026-09-11.md`, `search-engine-alternatives-2026-09-11.md`, `research-trust-findings.md`; deploy + retraction steps in `documentation/evidence/research-trust/TEST-PLAN.md`. |
+| `research-engine-for-OB/` **@ plan store** | ✅ deployed; `PLAN-research-trust-2026-09-11.md` **merged, awaiting deploy** | `GROUNDING-MODEL.md` is the governing spec; `REPO-SOURCES-WIRING.md` design not built. research-trust adds: a collapsed search is a search failure not an absent topic (`search-quality.ts`), KB-recall pages face the relevance gate, `no_relevant_sources` skips the curator, numeric grounding (`grounding.ts`), `needs answered X of N` in place of `coverage NN%`, a curator meta-claim filter, and a remeasured SearXNG engine policy on a pinned image. Evidence: `../documentation-plans-ai-stack/journal/notes/research-audit-optiplex-100hz-2026-09-11.md`, `search-engine-alternatives-2026-09-11.md`, `research-trust-findings.md`; deploy + retraction steps in `../documentation-plans-ai-stack/journal/evidence/research-trust/TEST-PLAN.md`. |
 | `expand-OB1-research-inlet-service/` **@ plan store** | 🟡 built, not live | Activation reference. |
 | `autonomous-project-lifecycle/` **@ plan store** | 🟡 in build | D1/D4 human-gated merge live; D5 staging open. |
-| `agent-memory-plane/` **@ plan store** | 🟡 P0-P3 built, recall OFF | Phases 0-3 of the canonical plan (which lives in the `documentation-plans-ai-stack` private repo). Schema + 7 MCP tools + 3 REST twins live in `openbrain-mcp`; write paths on (`AO_MEMORY_WRITEBACK_ENABLED=true`); recall's live acceptance MET 2026-08-30 (`scripts/checks/smoke-agent-memory-live.ps1`) but `AO_MEMORY_RECALL_ENABLED` stays **off** until the similarity floor is calibrated against a corpus bigger than 4 rows (`documentation/notes/agent-memory-recall-threshold.md`). `PROMOTION-RUNBOOK.md` + the Phase-3 gate table moved to the plan store on 2026-09-18; the Phase-1 rows in that table are STALE and say so. The gate table was this repo's `PLAN.md` and is now `VALIDATION-RECORD.md` in the store - renamed on the move because the store already holds the canonical `PLAN.md` and that file's own first line says it is not a plan. P4 not started. |
+| `agent-memory-plane/` **@ plan store** | 🟡 P0-P3 built, recall OFF | Phases 0-3 of the canonical plan (which lives in the `documentation-plans-ai-stack` private repo). Schema + 7 MCP tools + 3 REST twins live in `openbrain-mcp`; write paths on (`AO_MEMORY_WRITEBACK_ENABLED=true`); recall's live acceptance MET 2026-08-30 (`scripts/checks/smoke-agent-memory-live.ps1`) but `AO_MEMORY_RECALL_ENABLED` stays **off** until the similarity floor is calibrated against a corpus bigger than 4 rows (`../documentation-plans-ai-stack/journal/notes/agent-memory-recall-threshold.md`). `PROMOTION-RUNBOOK.md` + the Phase-3 gate table moved to the plan store on 2026-09-18; the Phase-1 rows in that table are STALE and say so. The gate table was this repo's `PLAN.md` and is now `VALIDATION-RECORD.md` in the store - renamed on the move because the store already holds the canonical `PLAN.md` and that file's own first line says it is not a plan. P4 not started. |
 | `idea-refinery/` **@ plan store** | ✅ built (local) | OpenRouter cloud route PARKED → archived. |
 | `wiki-dynamic-index/` **@ plan store**| 🟡 P0-P4 shipped 2026-08-26; A-E planned | ContentIndex OFF, wiki_pages feeds search/nav/graph; new note 900s->29s. `PLAN.md` v2 = shipped work, `BUILD-LOG.md` = results + traps, `PLAN-NO-REBUILD.md` = remaining phases A-E (DB-rendered pages, live nav/graph, search UI), `PLAN-VIEWER-PERF.md` = 2026-08-28 plan (not built) for the 2-4s-per-click / unresponsive-on-mobile symptom: per-nav whole-vault explorer rebuild + nav-cache stall. |
 | `research-workbench/` **@ plan store** → lives in the `documentation-plans-ai-stack` private repo (written there 2026-09-18) | 📝 plan set v2 drafted 2026-09-18, awaiting operator review; nothing built, no anchor proposed | Panel workspace + live read path + typed retrieval contract + trust surfaces + branching sessions + export + Kokoro podcasts + ON retirement. `01-OPEN-ITEMS` (D1–D16) · `02-FRAMEWORKS` (verified) · `03-PLAN` v2 (P-1, P0, P1a/b/c, P2–P8) · `04-AUDIT` (32 findings; the "retire the builder" premise was REFUTED — the live renderer must be built to Quartz-chrome parity first) · `05-SWARM` + `anchors/` (19 drafts). Findings and the two libraries it grew from stay here: `notes/research-ux-borrow-library-2026-09-15.md`, `notes/research-panel-library-2026-09-18.md`, `notes/nodus-vs-openbrain-research-comparison-2026-09-14.md`. |
@@ -54,8 +58,9 @@
 | `autonomous-updates-with-security/` **@ plan store** | ⚠️ unverified | No completion markers; both real OWUI upgrades ran manually. Folded into Watchtower decision D-2. |
 | `portable-research-service/` **@ plan store** | 📦 evergreen | Deliberately workspace-agnostic extractions. |
 | `multi-agent-concurrency/` **stays here** | BUILT + LIVE 2026-08-28 | Worktree tooling, plane leases, the develop/test/review pipeline, the anchor gate. Kept in this repo because `MERGE-PROTOCOL.md` must travel with every worktree an agent provisions. |
-| `dark-factory-unification/` **stays here** | PLANNED 2026-08-29, partly executed | One org, pluggable substrates, one memory plane. Kept here because `scripts/checks/dfu-done.ps1` and `verify-dfu-done.ps1` READ its `PLAN.md`/`DECISIONS.md`/`WALKTHROUGH.md` and CI runs them against a checkout of this repo alone. `DECISIONS.md` is also the `source_of_record` in `scripts/checks/defect-classes.json`. |
-| `stack-layers/` **@ plan store** | PLAN 2026-09-19, wave 1 in progress | The stack as three layers (foundations / engines / surfaces) behind one `stack.manifest.toml` and one stdlib `stack.py` driver, so a fresh clone starts Open WebUI alone and `enable <product>` turns the rest on. Supersedes CLEANUP-PLAN v3 Part L (colocation, per-plane `.env`), D.1 x-anchors, D-12 (inventory generator) and I.4/J.6 (conventions page + port registry). Evidence: `documentation/notes/cleanup-branch-closeout-audit-2026-09-19.md`. |
+| `dark-factory-unification/` **@ plan store** | PLANNED 2026-08-29, partly executed; board archived 2026-09-25 | One org, pluggable substrates, one memory plane. Moved to the store 2026-09-25 with the journal; its board `dfu-done.ps1` and drills are in `scripts/archive/dfu-done/` and the CI job is retired, because the board's input is this plan and the notes beside it, which a CI checkout no longer has. `DECISIONS.md` is still the `source_of_record` named in `scripts/checks/defect-classes.json`. |
+| `adoption-closeout/` **@ plan store** | in progress 2026-09-25 | Make the stack adoptable by another developer on Linux, then close the branch: portable front door and hooks, personal values as parameters, the operator journal moved to the store (`ac-journal-move`), newcomer docs, CI, an identity gate and a Linux rehearsal. Integration branch `work/adoption-closeout`. |
+| `stack-layers/` **@ plan store** | PLAN 2026-09-19, wave 1 in progress | The stack as three layers (foundations / engines / surfaces) behind one `stack.manifest.toml` and one stdlib `stack.py` driver, so a fresh clone starts Open WebUI alone and `enable <product>` turns the rest on. Supersedes CLEANUP-PLAN v3 Part L (colocation, per-plane `.env`), D.1 x-anchors, D-12 (inventory generator) and I.4/J.6 (conventions page + port registry). Evidence: `../documentation-plans-ai-stack/journal/notes/cleanup-branch-closeout-audit-2026-09-19.md`. |
 | `cluster-transition/` **@ plan store** | PLAN 2026-09-17, not built | ai-stack onto three OptiPlex nodes; inference stays on the GPU box. Supersedes the placement half of the portal plan. |
 | `portal-authentik-traefik/` **@ plan store** | PLAN 2026-09-16, not built | Portal refactor Authelia+Caddy to Authentik+Traefik; as of 2026-09-17 it lands on cluster node 1, so only its Phase 3 and tailnet lane change. |
 | `validated-work-memory/` **@ plan store** | PLANNED 2026-09-11, nothing implemented | Receipt to lesson to skill, with re-validation. |
