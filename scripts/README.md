@@ -31,7 +31,12 @@ the parser (never runs a recovery), drives them against a stubbed `docker`, and 
 `-Live` reads real health with `docker inspect` only; `-Live -Negative` adds one
 throwaway `--network none` container that exits at once and is removed. It also
 fails if a bare `docker compose` (no `-f`, so the zero-service root anchor) other
-than the anchor's own `up -d` / `down` / `version` reappears in the script.
+than `docker compose version` reappears in the script. The anchor itself is never
+`up`-ed or `down`-ed (`up -d` on it exits "no service selected"; `down` would drop its
+networks): `Confirm-AnchorNetworks` ensures them the way `stack.py` `ensure_networks()`
+does, and the drill feeds both the same inputs and compares their `network create`
+commands. `-Live` runs that ensure behind a guard that lets only the render and
+`network inspect` reach docker, and checks the three network IDs are unchanged.
 The Python primitives above, `update-stack.bat` and `quick-fixes.bat` still issue bare
 `docker compose <service>` verbs and are NOT fixed by that item - see its findings.
 

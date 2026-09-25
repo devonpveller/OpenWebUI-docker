@@ -79,7 +79,17 @@ function Get-FunctionText {
     return ($text -join "`n`n")
 }
 
-$FnNames = @("Write-Log", "Get-ContainerHealth", "Wait-ForHealthy", "Test-NetworkConnectivity", "Test-PortalRunning")
+$FnNames = @("Write-Log", "Get-ContainerHealth", "Wait-ForHealthy", "Test-NetworkConnectivity", "Test-PortalRunning", "Confirm-AnchorNetworks")
+# The lifted functions read $Script:AnchorCompose; from a child scope of THIS
+# script that resolves HERE. Test-StaticShape checks the target file assigns
+# the same value.
+$Script:AnchorCompose = "docker-compose.yml"
+
+# The anchor's render, as `docker compose -f docker-compose.yml config
+# --no-interpolate --format json` printed it on this host 2026-09-25. -Live
+# checks that the real render still equals it.
+$Script:AnchorRenderFixture = '{"name":"ai-stack","networks":{"app-net":{"driver":"bridge","name":"ai-stack_app-net"},"default":{"driver":"bridge","name":"ai-stack_default"},"llm-net":{"internal":true,"name":"ai-stack_llm-net"}}}'
+
 
 function Invoke-Under {
     # Run $Body in a CHILD scope that holds the functions lifted from $Path.
@@ -112,6 +122,14 @@ function Reset-FakeHost {
     # Health is a SEQUENCE: the Nth inspect of a container sees element N (the
     # last one repeats), so a starting -> healthy transition can be modelled.
     $Script:Calls = New-Object System.Collections.ArrayList
+    $Script:AnchorRender = $Script:AnchorRenderFixture
+    # Anchor networks as `docker network inspect` describes them: the three
+    # that exist on this host, with compose's own labels.
+    $Script:FakeNets = @{}
+    foreach ($n in @(@("ai-stack_llm-net", "llm-net", $true), @("ai-stack_default", "default", $false), @("ai-stack_app-net", "app-net", $false))) {
+        $Script:FakeNets[$n[0]] = @{ Driver = "bridge"; Internal = $n[2]; Attachable = $false; Options = @{};
+            Labels = @{ "com.docker.compose.project" = "ai-stack"; "com.docker.compose.network" = $n[1]; "com.docker.compose.config-hash" = "x"; "com.docker.compose.version" = "2.39.2" } }
+    }
     $Script:Seen = @{}
     $Script:Fake = @(
         @{ Name = "openwebui";          Project = "frontend";  Service = "openwebui";          State = "running"; Health = @("healthy") },
@@ -143,6 +161,19 @@ function Install-Stub {
         $a = @($args | ForEach-Object { "$_" })
         [void]$Script:Calls.Add(($a -join ' '))
         $global:LASTEXITCODE = 0
+        if ($a[0] -eq "compose" -and $a[1] -eq "-f" -and $a[2] -eq "docker-compose.yml" -and $a -contains "config") {
+            return $Script:AnchorRender
+        }
+        if ($a[0] -eq "network" -and $a[1] -eq "inspect") {
+            $n = $Script:FakeNets[$a[2]]
+            if ($null -eq $n) { $global:LASTEXITCODE = 1; Write-Error "Error response from daemon: network $($a[2]) not found"; return }
+            return ("{0}|{1}|{2}|{3}|{4}" -f $n.Driver, "$($n.Internal)".ToLower(), "$($n.Attachable)".ToLower(), (ConvertTo-Json $n.Options -Compress), (ConvertTo-Json $n.Labels -Compress))
+        }
+        if ($a[0] -eq "network" -and $a[1] -eq "create") {
+            $Script:FakeNets[$a[$a.Count - 1]] = @{ Driver = "bridge"; Internal = ($a -contains "--internal"); Attachable = $false; Options = @{}; Labels = @{} }
+            return "fake-id"
+        }
+        if ($a[0] -eq "network") { return }
         if ($a[0] -eq "compose") {
             $file = ""; $i = 1
             while ($i -lt $a.Count -and $a[$i].StartsWith("-")) {
@@ -220,13 +251,16 @@ function Test-StaticShape {
     $nonAscii = @($bytes | Where-Object { $_ -gt 127 }).Count
     Check (-not $bom) "no UTF-8 BOM"
     Check ($nonAscii -eq 0) "ASCII only ($nonAscii bytes above 127)"
-    # The ONLY bare compose verbs allowed: the root anchor's own network
-    # create/drop, and the version probe. Anything else addresses a project with
-    # no services.
-    $allowed = @("up -d", "down", "version")
+    # The ONLY bare compose verb allowed is the version probe. Anything else
+    # addresses the zero-service root anchor from cwd: `ps|exec|stop <svc>` say
+    # `no such service`, `up -d` says `no service selected` and creates nothing,
+    # and `down` removes the anchor networks nothing still holds.
+    $allowed = @("version")
     $bare = Get-BareComposeCalls $Path
     $bad = @($bare | Where-Object { $allowed -notcontains (($_ -split ': ', 2)[1] -replace '\s*\|.*$', '' -replace '\s+Out-Null$', '').Trim() })
     foreach ($b in $bare) { Write-Host "         bare: $b" }
+    $assign = [regex]::Match([System.IO.File]::ReadAllText($Path), '(?m)^\$Script:AnchorCompose = "([^"]*)"')
+    Check ($assign.Success -and $assign.Groups[1].Value -eq $Script:AnchorCompose) "the script names the anchor file as the drill assumes ('$($assign.Groups[1].Value)')"
     Check ($bad.Count -eq 0) ("no bare ``docker compose`` outside {0} ({1} bare call(s) found, {2} not allowed{3})" -f ($allowed -join ' / '), $bare.Count, $bad.Count, $(if ($bad.Count) { ': ' + ($bad -join '; ') } else { '' }))
 }
 
@@ -316,6 +350,104 @@ function Test-BaseStub {
     foreach ($b in $bare) { Write-Host "         bare: $b" }
 }
 
+# ---------------------------------------------------------------- anchor ensure parity
+$Script:ParityPy = @'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+sys.path.insert(0, str(root / "scripts" / "stack"))
+import stack
+scen = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+class Quiet:
+    def line(self, text=""):
+        pass
+creates = []
+def capture(cmd, cwd):
+    if "config" in cmd:
+        return stack.CommandResult(0, scen["render"], "")
+    if cmd[1:3] == ["network", "inspect"]:
+        found = scen["existing"].get(cmd[3])
+        if found is None:
+            return stack.CommandResult(1, "", "Error: No such network: " + cmd[3])
+        return stack.CommandResult(0, json.dumps(found), "")
+    raise SystemExit("unexpected capture: " + " ".join(cmd))
+def runner(cmd, cwd):
+    creates.append(cmd[1:])
+    return 0
+manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
+state = stack.State({}, None, False)
+try:
+    code = stack.ensure_networks(manifest, state, root, Quiet(), runner, capture, "anchor", False)
+except stack.Refusal:
+    code = "refused"
+print(json.dumps({"code": code, "creates": [" ".join(c) for c in creates]}))
+'@
+
+function Invoke-StackPyEnsure {
+    # stack.py's OWN ensure_networks(), fed the same render and inspect answers
+    # as the PowerShell stub; returns @{ code; creates[] } from its runner.
+    param([string]$Render, [hashtable]$Existing)
+    $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("ac-rg-parity-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    try {
+        $ex = @{}
+        foreach ($k in $Existing.Keys) {
+            $n = $Existing[$k]
+            $ex[$k] = @{ Driver = $n.Driver; Internal = [bool]$n.Internal; Attachable = [bool]$n.Attachable; Options = $n.Options; Labels = $n.Labels }
+        }
+        $scen = @{ render = $Render; existing = $ex } | ConvertTo-Json -Depth 8
+        [System.IO.File]::WriteAllText((Join-Path $dir "scen.json"), $scen, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $dir "parity.py"), $Script:ParityPy, (New-Object System.Text.UTF8Encoding($false)))
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $out = @(& python (Join-Path $dir "parity.py") $RepoRoot (Join-Path $dir "scen.json") 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prev
+        if ($code -ne 0) { throw "python parity harness exited ${code}: $($out -join ' ')" }
+        return ($out[-1] | ConvertFrom-Json)
+    }
+    finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+}
+
+function Test-AnchorEnsure {
+    param([string]$Path)
+    Write-Host "[anchor ensure: stub docker vs stack.py's own ensure_networks] $Path"
+    $cases = @(
+        @{ Name = "all three missing"; Drop = @("ai-stack_llm-net", "ai-stack_default", "ai-stack_app-net"); Drift = $false; Render = "" },
+        @{ Name = "all three exist and match"; Drop = @(); Drift = $false; Render = "" },
+        @{ Name = "only ai-stack_default missing"; Drop = @("ai-stack_default"); Drift = $false; Render = "" },
+        @{ Name = "llm-net exists NOT internal (drift), default missing"; Drop = @("ai-stack_default"); Drift = $true; Render = "" },
+        @{ Name = "render declares an untranslated key (ipam)"; Drop = @("ai-stack_default"); Drift = $false; Render = '{"name":"ai-stack","networks":{"default":{"driver":"bridge","name":"ai-stack_default","ipam":{"config":[{"subnet":"10.9.0.0/16"}]}}}}' }
+    )
+    Install-Stub
+    try {
+        foreach ($c in $cases) {
+            Reset-FakeHost
+            if ($c.Render) { $Script:AnchorRender = $c.Render }
+            foreach ($d in $c.Drop) { $Script:FakeNets.Remove($d) }
+            if ($c.Drift) { $Script:FakeNets["ai-stack_llm-net"].Internal = $false }
+            $existing = @{}
+            foreach ($k in $Script:FakeNets.Keys) { $existing[$k] = $Script:FakeNets[$k] }
+            $py = Invoke-StackPyEnsure $Script:AnchorRender $existing
+            $r = Invoke-Under $Path { Confirm-AnchorNetworks }
+            $psCreates = @($Script:Calls | Where-Object { $_ -like "network create*" })
+            $psOther = @($Script:Calls | Where-Object { $_ -like "network *" -and $_ -notlike "network inspect*" -and $_ -notlike "network create*" })
+            $pyCreates = @($py.creates)
+            $same = (($psCreates -join "`n") -ceq ($pyCreates -join "`n"))
+            $psOk = ($r.Result[-1] -eq $true)
+            $pyOk = ("$($py.code)" -eq "0")
+            Check ($same -and ($psOk -eq $pyOk) -and $psOther.Count -eq 0) ("{0}: PS returned {1}, stack.py code {2}; {3} create(s) from PS, {4} from stack.py, identical={5}; other network verbs from PS: {6}" -f $c.Name, $psOk, $py.code, $psCreates.Count, $pyCreates.Count, $same, $psOther.Count)
+            foreach ($x in $psCreates) { Write-Host "         create: docker $x" }
+            if ($c.Drift) {
+                Check ((($r.Log -join "`n") -match 'DIFFERS\] ai-stack_llm-net: internal is false, declared true') -and $psCreates.Count -eq 0) "drift is named and NOTHING is created (not even the missing default)"
+            }
+        }
+        Reset-FakeHost
+        $r = Invoke-Under $Path { Confirm-AnchorNetworks }
+        $otherCompose = @($Script:Calls | Where-Object { $_ -like "compose*" -and $_ -ne "compose -f docker-compose.yml config --no-interpolate --format json" })
+        Check ($otherCompose.Count -eq 0) "the ensure's only compose call is the anchor render, named with -f"
+    }
+    finally { Remove-Stub }
+}
+
 # ---------------------------------------------------------------- live (read-only)
 function Test-Live {
     param([string]$Path, [string]$BasePath)
@@ -334,6 +466,32 @@ function Test-Live {
             $log = ($r.Log | Where-Object { $_ -match 'openwebui' }) -join ' | '
             Check (($r.Result[-1] -eq $false) -and ($log -match 'no such service')) "LIVE BASE RED from the repo root: Wait-ForHealthy openwebui -> $($r.Result[-1]); $log"
         }
+        # The anchor ensure against THIS host, behind a GUARD: `docker` is a
+        # function that passes only the anchor render and `network inspect` to
+        # docker.exe and throws on anything else, so this run is inspect-only by
+        # construction, not by hope. Network IDs before and after must match.
+        $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+        $real = ((& docker.exe compose -f docker-compose.yml config --no-interpolate --format json 2>$null) -join "`n") | ConvertFrom-Json
+        $ErrorActionPreference = $prev
+        $fixture = $Script:AnchorRenderFixture | ConvertFrom-Json
+        Check (($real | ConvertTo-Json -Depth 8 -Compress) -eq ($fixture | ConvertTo-Json -Depth 8 -Compress)) "LIVE anchor render equals the drill's fixture"
+        $nets = @("ai-stack_llm-net", "ai-stack_default", "ai-stack_app-net")
+        $before = @($nets | ForEach-Object { (& docker.exe network inspect $_ --format "{{.Id}}") })
+        $Script:Guarded = New-Object System.Collections.ArrayList
+        function Script:docker {
+            $a = @($args | ForEach-Object { "$_" })
+            $ok = (($a[0] -eq "network" -and $a[1] -eq "inspect") -or (($a[0..5] -join ' ') -eq "compose -f docker-compose.yml config --no-interpolate --format"))
+            if (-not $ok) { throw "GUARD: refused 'docker $($a -join ' ')' in a read-only run" }
+            [void]$Script:Guarded.Add(($a -join ' '))
+            & docker.exe @a
+        }
+        try {
+            $r = Invoke-Under $Path { Confirm-AnchorNetworks }
+        }
+        finally { Remove-Item function:\docker -ErrorAction SilentlyContinue }
+        $after = @($nets | ForEach-Object { (& docker.exe network inspect $_ --format "{{.Id}}") })
+        $exists = @($r.Log | Where-Object { $_ -match '\[exists\]' }).Count
+        Check (($r.Result[-1] -eq $true) -and $exists -eq 3 -and (($before -join ',') -eq ($after -join ',')) -and $before.Count -eq 3) ("LIVE ensure on this host: returned {0}, {1} [exists], IDs unchanged={2}, docker calls: {3}" -f $r.Result[-1], $exists, (($before -join ',') -eq ($after -join ',')), ($Script:Guarded -join ' ; '))
         if ($Negative) {
             $name = $NegativePrefix + ([guid]::NewGuid().ToString("N").Substring(0, 8))
             try {
@@ -375,6 +533,7 @@ try {
     else {
         Test-StaticShape $Script
         Test-HeadStub $Script
+        Test-AnchorEnsure $Script
         if ($basePath) { Test-BaseStub $basePath }
     }
 }
