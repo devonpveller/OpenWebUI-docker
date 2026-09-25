@@ -22,9 +22,6 @@ data/
 logs/
 data-backup/
 backups/
-# Tailscale runtime logs (keep tailscaled.log.conf, drop rotated logs)
-tailscale-state/*.txt
-tailscale-state/*.log*
 # Use glob form so the `!backup/<script>.sh` re-includes below work.
 # (Git won't re-include files inside an excluded *directory*, but it WILL
 # re-include files matched by an excluded *glob*.)
@@ -58,6 +55,8 @@ secrets/
 # Sidecar build contexts (compose builds ./backup with these) — must be tracked
 # or a fresh clone cannot build the postgres/surreal/generic backup sidecars.
 !backup/Dockerfile
+# The shared module's README (ac-planes-contained): which planes consume backup/.
+!backup/README.md
 
 # --- Portal-specific paths from plan §7.2 ---
 portal/config/authelia/users_database.yml

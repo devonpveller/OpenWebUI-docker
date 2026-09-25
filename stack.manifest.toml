@@ -56,6 +56,13 @@
 #               exits 1 on a project with no service - but creates each declared
 #               network that is missing and leaves every existing one untouched.
 #   host      - what the machine itself must provide, in prose.
+#   host_paths - paths OUTSIDE this checkout the plane cannot build without,
+#               each an inline table { path, contains, why, remedy }: `path`
+#               is repo-root-relative, `contains` names what must exist inside
+#               it (so an empty directory or a plain file does not pass),
+#               `remedy` is the command that creates it, run from the repo
+#               root. Unlike `host` this IS checked: an unusable path makes
+#               `doctor` FAIL and `enable`/`init` refuse, each naming `remedy`.
 #   keys      - variable names that must be present and non-blank in the plane's
 #               OWN env file (`<project dir>/.env`). A blank one makes `enable`
 #               refuse, naming the key and the file. A key is also refused while
@@ -280,7 +287,16 @@ compose  = "memory/docker-compose.yml"
 lease    = "memory"
 requires = ["anchor", "inference"]
 optional = []
-host     = []
+host = [
+  "the sibling mnemory checkout at ../mnemory (see host_paths): memory/docker-compose.yml builds mnemory:local from `context: ../../mnemory`, OUTSIDE this repository",
+]
+# The build context of `mnemory` (memory/docker-compose.yml, `context:
+# ../../mnemory`, relative to memory/) is ../mnemory relative to the repo root.
+# The sibling checkout on this host tracks the fork's `dev` branch; the
+# upstream project is fpytloun/mnemory. test_stack.py holds this path to the compose file.
+host_paths = [
+  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory" },
+]
 keys     = ["MCP_API_KEY"]
 
 [planes.memory.ports]
@@ -553,6 +569,30 @@ keys = [
 [planes.portal.profiles.internet]
 description = "cloudflared + the tunnel watcher; passed by scripts/portal/portal-on.ps1, never by the driver (this plane is `manual`)"
 opt_in      = true
+
+
+# ==========================================================================
+# SHARED MODULES - repo-root trees that are not one plane's internals, because
+# more than one plane consumes them. Read by nothing at runtime; declared so a
+# reader of one plane folder knows what it reaches outside it, and held to the
+# compose files by scripts/stack/test_stack.py (every `../backup` reference in
+# a plane compose file belongs to a plane listed here, and every plane listed
+# here has one).
+#   path      - repo-root-relative directory.
+#   consumers - plane -> how it consumes the module (bind mount / build context).
+# ==========================================================================
+
+[modules.backup]
+path        = "backup"
+description = "the backup sidecar scripts (<service>-backup.sh, generic-tar-backup.sh, pg-backup.sh), the two restore helpers, and the shared backup image's Dockerfile; each plane's backup sidecar bind-mounts its script read-only at /scripts/backup.sh"
+
+[modules.backup.consumers]
+frontend  = "bind mount: openwebui-backup.sh, generic-tar-backup.sh (tailscale-backup)"
+inference = "bind mount: llm-gateway-backup.sh, generic-tar-backup.sh (inference/compose/backups.yml)"
+memory    = "bind mount: mnemory-backup.sh"
+coder     = "bind mount: little-coder-backup.sh"
+portal    = "build context: ../backup (Dockerfile; the caddy-backup and authelia-backup images); bind mount: caddy-backup.sh, authelia-backup.sh"
+agent-org = "bind mount: pg-backup.sh, generic-tar-backup.sh"
 
 
 # ==========================================================================

@@ -121,7 +121,7 @@ OAuth files under `OB1/secrets/` that a clone does not have; (15)
 Telegram notifier AND listener (the listener POLLS, so it is an inbound control
 path), `scripts/claude-sessions-bridge/bridge.py` (runs the `claude` CLI with
 `BRIDGE_MODEL` defaulting to `opus` — the one frontier-provider call in the
-repo — and posts to Telegram), and the `owui/` plugins
+repo — and posts to Telegram), and the `frontend/owui/` plugins
 (`github_chat_mcp_tools.py` → `api.github.com`; `fileshed.py` permits
 `curl`/`wget`/network `git` inside the openwebui container). **THE MECHANISM,
 stated because it is the part that gets misread:** `llm-gateway` is attached to
@@ -155,8 +155,9 @@ alias (model-load thrash — use `/health/liveliness`); llama-swap uses
 `--no-mmap` (GGUF mmap over the Windows bind mount hangs).
 
 **Status pipe:** the OWUI "Server Status" pipe subsystem lives in
-`status-pipe/` (orchestrator, router, modules, schemas, serve pipe) — the
-ONLY code mount into the OWUI container. `owui/` holds the deploy-by-paste
+`frontend/status-pipe/` (orchestrator, router, modules, schemas, serve pipe) —
+the ONLY code mount into the OWUI container, beside the system prompts in
+`frontend/system-prompts/`. `frontend/owui/` holds the deploy-by-paste
 snapshots + `manifest.csv` (file → OWUI id; skills included).
 
 ## Conventions

@@ -22,8 +22,8 @@ the pattern to copy is
   routes (`scripts/checks/stack-watchdog.ps1` self-heals them).
 - Never smoke-test OWUI tools via `/api/chat/completions` (false regression);
   test through the UI or the tool-server path.
-- Re-verify the `owui/` plugin snapshots against `webui.db` after the upgrade
-  (see `owui/README.md` "Deployment sync status").
+- Re-verify the `frontend/owui/` plugin snapshots against `webui.db` after the upgrade
+  (see `frontend/owui/README.md` "Deployment sync status").
 
 ## Inference plane (llama.cpp / llama-swap / LiteLLM)
 

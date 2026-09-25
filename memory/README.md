@@ -47,8 +47,8 @@ Deliberately **not** exposed:
 
 - **`mnemory:8050`** (the API) — publishing it would hand any host-local process
   the unfiltered memory store. Trusted callers already reach it by DNS on
-  `llm-net` (`http://mnemory:8050` — see `owui/tools/mnemory.py` and
-  `owui/filters/mnemory_persistent_memory.py`). Cloud clients are *not* trusted
+  `llm-net` (`http://mnemory:8050` — see `frontend/owui/tools/mnemory.py` and
+  `frontend/owui/filters/mnemory_persistent_memory.py`). Cloud clients are *not* trusted
   with it; the gateway exists precisely so they cannot have it.
 - **`mnemory:8051`** (management/health) — an internal probe surface only. A
   2026-05 portal audit chased `mnemory:8051` as an address it could not reach;
@@ -153,7 +153,15 @@ care about clean logs.
   ../../mnemory` resolves to the *sibling* `mnemory` checkout next to
   `ai-stack/`, not to anything inside this repo. A clean clone of ai-stack alone
   cannot build `mnemory:local`; it can only run a pre-built image. (The gateway
-  is different — `context: ./mnemory-gateway` is in-repo.)
+  is different — `context: ./mnemory-gateway` is in-repo.) **This is a checked
+  requirement:** `stack.manifest.toml` declares it as the memory plane's
+  `host_paths` entry, and while `../mnemory` is missing, is not a directory, or
+  lacks `.git` or the `Dockerfile` the compose file builds with, `stack.py doctor` FAILs
+  the plane and `stack.py enable memory` refuses, both naming the command that
+  creates it, run from the ai-stack root:
+  `git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory`.
+  (In an agent-harness worktree `../mnemory` resolves beside the worktree, so
+  it is missing there by construction.)
 - **The compose healthcheck overrides the image's own.** The mnemory Dockerfile
   `HEALTHCHECK` hits `:8050/health`; compose replaces it with `:8051/health`
   (`MGMT_PORT`). Change `MGMT_PORT` and you must change the healthcheck with it,

@@ -958,13 +958,13 @@ Step "D12  deploy surfaces are DERIVED from the merge range at -Merged, never de
 # read `merged` - which everyone downstream reads as finished. The reviewer's merge message
 # said "must be after deploy"; nothing else did. The list of what a merge ships is now read
 # off `git diff --name-only <first parent>..<merge>` by the tool. A fixture repository with
-# an embedded OB1 clone, a :local plane service, a root-context service and an owui/ file
+# an embedded OB1 clone, a :local plane service, a root-context service and a frontend/owui/ file
 # exercises every rule, and a value PLANTED in the item before -Merged proves the author's
 # list is overwritten by git's.
 function New-DeployFixture([string]$name, [string]$badGitlink = "") {
     # base: OB1 gitlink at pinA, a :local plane service, a :local root-context service.
     # work/qd: OB1 -> pinB (touches integrations/curatorish which has a Dockerfile, and
-    # integrations/nodocker which has none), an owui/ file, the plane service's context, the
+    # integrations/nodocker which has none), a frontend/owui/ file, the plane service's context, the
     # root service's COPY source, a README line and a doc - the last two must derive nothing.
     $repo = Join-Path $Root $name
     New-Item -ItemType Directory -Force -Path $repo | Out-Null
@@ -1032,32 +1032,32 @@ function New-DeployFixture([string]$name, [string]$badGitlink = "") {
         Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v1"
         Set-Content -Path (Join-Path $repo "othersrc\o.txt") -Encoding ascii -Value "v1"
         Set-Content -Path (Join-Path $repo "rootsrc\a.txt") -Encoding ascii -Value "v1"
-        # owui/manifest.csv IS the authority on what gets pasted into OWUI. It lists
-        # tools/deep.py and NOT owui/README.md, so a merge touching both must derive one
+        # frontend/owui/manifest.csv IS the authority on what gets pasted into OWUI. It lists
+        # tools/deep.py and NOT frontend/owui/README.md, so a merge touching both must derive one
         # surface, not two. The column set is deliberately the shape the real manifest moved
         # to (`sha256`, not `bytes`), so the reader is exercised resolving `file` BY NAME.
-        New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui") | Out-Null
-        Set-Content -Path (Join-Path $repo "owui\manifest.csv") -Encoding ascii -Value @(
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "frontend\owui") | Out-Null
+        Set-Content -Path (Join-Path $repo "frontend\owui\manifest.csv") -Encoding ascii -Value @(
             "file,type,name,owui_id,sha256",
             "tools/deep.py,tool,Deep,deep,0000000000000000000000000000000000000000000000000000000000000000")
-        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted"
-        Invoke-Git add README.md plane rootplane Dockerfile.rooty thingsrc othersrc rootsrc owui | Out-Null
+        Set-Content -Path (Join-Path $repo "frontend\owui\README.md") -Encoding ascii -Value "how these are pasted"
+        Invoke-Git add README.md plane rootplane Dockerfile.rooty thingsrc othersrc rootsrc frontend | Out-Null
         Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,$pinA,OB1") | Out-Null
         Invoke-Git commit -q -m "scratch base with OB1 at pin A" | Out-Null
         Invoke-Git checkout -q -b work/qd | Out-Null
-        New-Item -ItemType Directory -Force -Path (Join-Path $repo "owui\tools") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $repo "frontend\owui\tools") | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $repo "documentation") | Out-Null
-        Set-Content -Path (Join-Path $repo "owui\tools\deep.py") -Encoding ascii -Value "# pasted into OWUI"
+        Set-Content -Path (Join-Path $repo "frontend\owui\tools\deep.py") -Encoding ascii -Value "# pasted into OWUI"
         # changed in the SAME merge and NOT in the manifest: documentation about pasting is
         # not itself pasted, and a surface derived for it could never be honestly closed.
-        Set-Content -Path (Join-Path $repo "owui\README.md") -Encoding ascii -Value "how these are pasted, revised"
+        Set-Content -Path (Join-Path $repo "frontend\owui\README.md") -Encoding ascii -Value "how these are pasted, revised"
         Set-Content -Path (Join-Path $repo "documentation\x.md") -Encoding ascii -Value "a doc"
         Set-Content -Path (Join-Path $repo "README.md") -Encoding ascii -Value "scratch, edited at the root"
         Set-Content -Path (Join-Path $repo "thingsrc\main.txt") -Encoding ascii -Value "v2"
         Set-Content -Path (Join-Path $repo "othersrc\o.txt") -Encoding ascii -Value "v2"
         Set-Content -Path (Join-Path $repo "rootsrc\a.txt") -Encoding ascii -Value "v2"
         Set-Content -Path (Join-Path $repo "WORK.md") -Encoding ascii -Value "the work"
-        Invoke-Git add README.md owui documentation thingsrc othersrc rootsrc WORK.md | Out-Null
+        Invoke-Git add README.md frontend documentation thingsrc othersrc rootsrc WORK.md | Out-Null
         $pin = if ($badGitlink) { $badGitlink } else { $pinB }
         Invoke-Git -GitArgs @("update-index", "--add", "--cacheinfo", "160000,$pin,OB1") | Out-Null
         Invoke-Git commit -q -m "the work: OB1 to pin B, a paste, a context, a root COPY source" | Out-Null
@@ -1091,21 +1091,21 @@ $r = Invoke-Q $f12 @("-Merged", "-Id", "qd12", "-By", "qrev", "-Sha", $merge12, 
 $it = Get-QItem $f12 "qd12"
 Check "D12: -Merged still records the merge (exit 0, merged)" (($r.code -eq 0) -and ($it.state -eq "merged")) ("exit=" + $r.code + " | " + (First-Line $r.out))
 $pending12 = @($it.deploy_pending)
-$expected12 = @("image:openbrain-curatorish", "image:rooty", "image:thing", "paste:owui/tools/deep.py")
+$expected12 = @("image:openbrain-curatorish", "image:rooty", "image:thing", "paste:frontend/owui/tools/deep.py")
 Check "D12: deploy_pending is EXACTLY the four surfaces git saw - OB1 integration image (by compose service name), root-context COPY source, :local context, owui paste" `
     (($pending12 -join ",") -eq ($expected12 -join ",")) ("pending=" + ($pending12 -join ","))
 Check "D12: the PLANTED author value is gone - the list came from the merge range, not the item" `
     ($pending12 -notcontains "image:typed-by-the-author")
 Check "D12: integrations/nodocker (no Dockerfile) and the non-:local 'other' service derive NOTHING" `
     (-not (($pending12 -join ",") -match "nodocker|other"))
-# THE MANIFEST DECIDES WHICH owui/ FILES ARE PASTED. Both owui/tools/deep.py and
-# owui/README.md changed in this merge; only the first is listed in owui/manifest.csv.
-Check "D12: an owui/ file the manifest does NOT list derives no paste surface" `
-    (-not (($pending12 -join ",") -match "owui/README\.md")) ("pending=" + ($pending12 -join ","))
+# THE MANIFEST DECIDES WHICH frontend/owui/ FILES ARE PASTED. Both frontend/owui/tools/deep.py and
+# frontend/owui/README.md changed in this merge; only the first is listed in frontend/owui/manifest.csv.
+Check "D12: a frontend/owui/ file the manifest does NOT list derives no paste surface" `
+    (-not (($pending12 -join ",") -match "frontend/owui/README\.md")) ("pending=" + ($pending12 -join ","))
 Check "D12: ... and -Merged says WHY, naming the file and the manifest" `
-    ($r.out -match "owui/README\.md changed but owui/manifest\.csv does not list it") (First-Line $r.out)
+    ($r.out -match "frontend/owui/README\.md changed but frontend/owui/manifest\.csv does not list it") (First-Line $r.out)
 Check "D12: the file the manifest DOES list still derives its paste surface" `
-    ($pending12 -contains "paste:owui/tools/deep.py")
+    ($pending12 -contains "paste:frontend/owui/tools/deep.py")
 Check "D12: deploy_derived records the line-before (a full sha) and the merge sha the list was read from" `
     (($it.deploy_derived.line_before -match "^[0-9a-f]{40}$") -and ($it.deploy_derived.merge -eq $merge12))
 Check "D12: deploy_surfaces (immutable record) equals deploy_pending at merge time, deployed[] is empty" `
@@ -1113,7 +1113,7 @@ Check "D12: deploy_surfaces (immutable record) equals deploy_pending at merge ti
 Check "D12: -Merged prints the surfaces and says NOT LIVE" (($r.out -match "NOT LIVE") -and ($r.out -match "image:openbrain-curatorish"))
 $r = Invoke-Q $f12 @("-List")
 Check "D12: -List flags the merged item [UNDEPLOYED: <the four>]" `
-    ($r.out -match "qd12\s+merged\s+.*\[UNDEPLOYED: image:openbrain-curatorish, image:rooty, image:thing, paste:owui/tools/deep\.py\]") (First-Line $r.out)
+    ($r.out -match "qd12\s+merged\s+.*\[UNDEPLOYED: image:openbrain-curatorish, image:rooty, image:thing, paste:frontend/owui/tools/deep\.py\]") (First-Line $r.out)
 $r = Invoke-Q $f12 @("-Show", "-Id", "qd12")
 Check "D12: -Show prints a DEPLOY block with each surface OPEN" (($r.out -match "--- DEPLOY ---") -and ($r.out -match "(?m)^\s+image:thing\s+OPEN"))
 # A ROOT-CONTEXT service (frontend builds from `..`) is not "every file in the repository":
@@ -1148,7 +1148,7 @@ Initialize-ToReview $f12b "qd12b" "qdev" $ev
 $merge12b = Merge-Work $f12b "qd12b"
 $r = Invoke-Q $f12b @("-Merged", "-Id", "qd12b", "-By", "qrev", "-Sha", $merge12b, "-FitsCodebase")
 $it = Get-QItem $f12b "qd12b"
-Check "D12: a merge that touches no image and no owui/ file derives an EMPTY list (field present, zero surfaces)" `
+Check "D12: a merge that touches no image and no frontend/owui/ file derives an EMPTY list (field present, zero surfaces)" `
     (($r.code -eq 0) -and ($it.PSObject.Properties.Name -contains "deploy_pending") -and (@($it.deploy_pending).Count -eq 0)) ("exit=" + $r.code)
 Check "D12: ... and -Merged says so" ($r.out -match "No deploy surface derived")
 $r = Invoke-Q $f12b @("-List")
@@ -1222,7 +1222,7 @@ Check "D13: the item stays 'merged' while three surfaces are open, and the evide
     (($it.state -eq "merged") -and (@($it.deploy_pending).Count -eq 3) -and (Test-Path (Get-QFile $f12 "qd12.deploy1.evidence.md")))
 $r = Invoke-Q $f12 @("-List")
 Check "D13: -List now flags only the three still open" `
-    (($r.out -match "\[UNDEPLOYED: image:rooty, image:thing, paste:owui/tools/deep\.py\]") -and -not ($r.out -match "UNDEPLOYED: image:openbrain-curatorish"))
+    (($r.out -match "\[UNDEPLOYED: image:rooty, image:thing, paste:frontend/owui/tools/deep\.py\]") -and -not ($r.out -match "UNDEPLOYED: image:openbrain-curatorish"))
 $r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Surface", "image:openbrain-curatorish", "-Evidence", $good)
 Check "D13: a SECOND -Deployed on the same surface is refused as already closed" `
     (($r.code -ne 0) -and ($r.out -match "already closed")) (First-Line $r.out)
@@ -1232,7 +1232,7 @@ $partial = Write-Ev "d13-partial.md" @(
     "rooty: image id " + ("c4" * 20) + ", State.Status=running")
 $r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Evidence", $partial)
 Check "D13: closing ALL open surfaces with evidence that names only two of three is refused, naming the third" `
-    (($r.code -ne 0) -and ($r.out -match "paste:owui/tools/deep\.py: no line of the evidence names it")) (First-Line $r.out)
+    (($r.code -ne 0) -and ($r.out -match "paste:frontend/owui/tools/deep\.py: no line of the evidence names it")) (First-Line $r.out)
 $rest = Write-Ev "d13-rest.md" @(
     "thing: image id sha256:" + ("ab" * 16) + ", State.Status=running",
     "rooty: image id " + ("c4" * 20) + ", State.Status=running",
@@ -1241,7 +1241,7 @@ $r = Invoke-Q $f12 @("-Deployed", "-Id", "qd12", "-By", "qoperator", "-Evidence"
 $it = Get-QItem $f12 "qd12"
 Check "D13: closing the remaining three at once moves the item to 'deployed' (terminal)" `
     (($r.code -eq 0) -and ($it.state -eq "deployed") -and (@($it.deploy_pending).Count -eq 0) -and (@($it.deployed).Count -eq 4)) ("exit=" + $r.code + " state=" + $it.state)
-Check "D13: a paste surface is matched by its file name (deep.py) and its sha256" (@($it.deployed | Where-Object { $_.surface -eq "paste:owui/tools/deep.py" }).Count -eq 1)
+Check "D13: a paste surface is matched by its file name (deep.py) and its sha256" (@($it.deployed | Where-Object { $_.surface -eq "paste:frontend/owui/tools/deep.py" }).Count -eq 1)
 $r = Invoke-Q $f12 @("-List")
 Check "D13: -List shows 'deployed' with no [UNDEPLOYED] and no [needs hand-off]" `
     (($r.out -match "qd12\s+deployed") -and -not ($r.out -match "UNDEPLOYED|needs hand-off"))

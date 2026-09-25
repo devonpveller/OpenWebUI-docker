@@ -9,7 +9,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - **Whole-repo mount into OWUI REMOVED.** `.:/host_project:ro` on the
   internet-facing frontend (which shipped `.env`, `secrets/`, tailscale
   certs, the GitHub App key into the container) is gone — replaced by three
-  narrow read-only mounts (`status-pipe/`, `system-prompts/`,
+  narrow read-only mounts (`frontend/status-pipe/`, `frontend/system-prompts/`,
   `data/tailscale/`). Verified in-container.
 - **Watchtower RETIRED.** The workspace now has **zero** `docker.sock`
   mounts anywhere (previously one, on watchtower, with an unpinned `:latest`

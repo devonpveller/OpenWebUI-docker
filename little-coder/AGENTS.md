@@ -146,7 +146,7 @@ Endpoints live in [src/littlecoder/daemon.py](src/littlecoder/daemon.py)'s
 `create_app(daemon)`. CLI commands live in
 [src/littlecoder/cli.py](src/littlecoder/cli.py) and call the daemon via
 `_request(method, path, **kwargs)`. The OWUI Pipe is centralized at
-[../owui/pipes/little_coder.py](../owui/pipes/little_coder.py) — re-paste it
+[../frontend/owui/pipes/little_coder.py](../frontend/owui/pipes/little_coder.py) — re-paste it
 into OWUI Admin → Functions → Little Coder when it changes.
 
 ### Add a new audit event type

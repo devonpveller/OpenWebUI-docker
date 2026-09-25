@@ -15,8 +15,10 @@ from __future__ import annotations
 import ast
 import io
 import json
+import re
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -50,9 +52,30 @@ class Recorder:
         return [" ".join(c) for c in self.commands]
 
 
+def _make_host_path(path: Path, spec: dict) -> None:
+    """A usable host path: the directory plus everything its `contains` names."""
+    path.mkdir(parents=True, exist_ok=True)
+    for name in spec.get("contains", []):
+        if name == ".git":
+            (path / name).mkdir(exist_ok=True)
+        else:
+            (path / name).write_text("# placeholder\n", encoding="utf-8")
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
-    """A throwaway repo root: the real manifest, placeholder compose + env files."""
+    """A throwaway repo root: the real manifest, placeholder compose + env files.
+
+    The root is a CHILD of tmp_path so the manifest's `host_paths` (memory's
+    sibling ../mnemory) land inside this test's own directory; each one is
+    created, and a test that wants it absent removes it.
+    """
+    repo = tmp_path / "ai-stack"
+    repo.mkdir()
+    for plane in stack.Manifest.load(REAL_MANIFEST).planes.values():
+        for spec in plane.get("host_paths", []):
+            _make_host_path(repo / Path(spec["path"]), spec)
+    tmp_path = repo
     shutil.copy(REAL_MANIFEST, tmp_path / stack.MANIFEST_NAME)
     manifest = stack.Manifest.load(tmp_path / stack.MANIFEST_NAME)
 
@@ -2760,3 +2783,129 @@ def test_health_does_not_probe_a_required_plane_nobody_enabled(root):
     assert not any(n.startswith("inference:") for n in names)
     assert any(n.startswith("coder:") for n in names) and any(n.startswith("memory:") for n in names)
     assert "probes not run: inference, frontend, search, ob1, agent-org" in out
+
+
+# --- ac-planes-contained: memory's sibling checkout, and the shared backup module ----
+
+
+MNEMORY_CLONE = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory"
+
+
+def _without_mnemory(root):
+    sibling = root.parent / "mnemory"
+    if sibling.is_dir():
+        shutil.rmtree(sibling)
+    elif sibling.exists():
+        sibling.unlink()
+
+
+def test_doctor_fails_memory_without_the_sibling_mnemory_and_names_the_clone(root):
+    run(root, "init", "--planes", "inference,frontend,memory", "--force")
+    _without_mnemory(root)
+    code, out, _ = run(root, "doctor")
+    assert code == stack.EXIT_REFUSED
+    assert "[FAIL] ../mnemory is missing (plane memory)" in out
+    assert f"run `{MNEMORY_CLONE}` from the repo root" in out
+
+
+def test_doctor_passes_the_sibling_mnemory_when_it_is_there(root):
+    run(root, "init", "--planes", "inference,frontend,memory", "--force")
+    code, out, _ = run(root, "doctor")
+    assert "[OK]   host path ../mnemory" in out
+    assert "../mnemory is missing" not in out
+
+
+def test_enable_memory_without_the_sibling_mnemory_refuses_with_the_clone(root):
+    run(root, "init", "--planes", "inference,frontend", "--force")
+    _without_mnemory(root)
+    code, out, _ = run(root, "enable", "memory")
+    assert code == stack.EXIT_REFUSED
+    assert "../mnemory is missing (plane memory)" in out
+    assert f"Run `{MNEMORY_CLONE}`." in out
+    assert "memory" not in state_of(root)["planes"]
+
+
+@pytest.mark.parametrize("shape", ["empty-dir", "plain-file", "no-dockerfile", "no-git"])
+def test_an_unusable_sibling_mnemory_is_refused_by_doctor_and_enable(root, shape):
+    """Existing is not enough: only a directory holding .git and the Dockerfile passes."""
+    sibling = root.parent / "mnemory"
+    _without_mnemory(root)
+    if shape == "plain-file":
+        sibling.write_text("not a checkout\n", encoding="utf-8")
+    else:
+        sibling.mkdir()
+        if shape == "no-dockerfile":
+            (sibling / ".git").mkdir()
+        if shape == "no-git":
+            (sibling / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    run(root, "init", "--planes", "inference,frontend", "--force")
+    code, out, _ = run(root, "enable", "memory")
+    assert code == stack.EXIT_REFUSED, out
+    assert f"Run `{MNEMORY_CLONE}`." in out
+    # init refuses memory here too, so write the state by hand: doctor must still catch it
+    (root / stack.STATE_REL).write_text(
+        json.dumps({"version": 1, "planes": {"inference": {}, "frontend": {}, "memory": {}}}), encoding="utf-8")
+    code, out, _ = run(root, "doctor")
+    assert code == stack.EXIT_REFUSED
+    assert "[FAIL] ../mnemory " in out and f"run `{MNEMORY_CLONE}`" in out
+    assert "[OK]   host path ../mnemory" not in out
+
+
+def test_the_mnemory_host_path_requires_the_dockerfile_the_compose_file_names():
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    (spec,) = manifest.plane("memory")["host_paths"]
+    text = (REPO_ROOT / manifest.plane("memory")["compose"]).read_text(encoding="utf-8")
+    block = text[text.index("context: ../../mnemory"):]
+    dockerfile = re.search(r"dockerfile:\s*(\S+)", block).group(1)
+    assert dockerfile in spec["contains"] and ".git" in spec["contains"]
+
+
+def test_enable_memory_with_the_sibling_mnemory_succeeds(root):
+    run(root, "init", "--planes", "inference,frontend", "--force")
+    code, out, _ = run(root, "enable", "memory")
+    assert code == 0, out
+    assert "memory" in state_of(root)["planes"]
+
+
+def test_the_memory_product_refuses_too(root):
+    run(root, "init", "--planes", "inference,frontend", "--force")
+    _without_mnemory(root)
+    code, out, _ = run(root, "enable", "--product", "memory")
+    assert code == stack.EXIT_REFUSED
+    assert f"Run `{MNEMORY_CLONE}`." in out
+
+
+def test_the_mnemory_host_path_is_the_memory_build_context():
+    """The manifest's ../mnemory must be where memory/docker-compose.yml builds from."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    declared = [(REPO_ROOT / Path(spec["path"])).resolve() for spec in manifest.plane("memory")["host_paths"]]
+    compose = REPO_ROOT / manifest.plane("memory")["compose"]
+    contexts = re.findall(r"^\s*context:\s*(\S+)\s*$", compose.read_text(encoding="utf-8"), re.MULTILINE)
+    outside = [(compose.parent / c).resolve() for c in contexts
+               if not (compose.parent / c).resolve().is_relative_to(REPO_ROOT.resolve())]
+    assert outside, "memory/docker-compose.yml no longer builds from outside the repo - drop host_paths"
+    assert declared == outside
+
+
+def test_every_backup_consumer_is_declared_and_every_declared_consumer_is_real():
+    """[modules.backup].consumers == the planes whose compose files reference ../backup."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    with (REPO_ROOT / "stack.manifest.toml").open("rb") as fh:
+        module = tomllib.load(fh)["modules"]["backup"]
+    backup_dir = (REPO_ROOT / module["path"]).resolve()
+    assert backup_dir.is_dir()
+    found = set()
+    scanned = 0
+    for name, plane in manifest.planes.items():
+        compose = REPO_ROOT / plane["compose"]
+        files = [compose] + sorted((compose.parent / "compose").glob("*.yml"))
+        for path in files:
+            if not path.is_file():
+                continue    # OB1 in a checkout without the submodule
+            scanned += 1
+            for ref in re.findall(r"(\.\.(?:/\.\.)*/backup)(?=[/\s])", path.read_text(encoding="utf-8")):
+                if (path.parent / ref).resolve() == backup_dir:
+                    found.add(name)
+    assert scanned >= 8, f"only {scanned} compose files read - the scan is not looking at the planes"
+    assert found, "no plane references backup/ - the scan matched nothing"
+    assert set(module["consumers"]) == found

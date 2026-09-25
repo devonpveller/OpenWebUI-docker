@@ -444,22 +444,22 @@ what it found:
 | What the merge range contains | The surface it derives |
 |---|---|
 | An `OB1` gitlink move whose OB1 diff touches `integrations/<dir>/`, and that directory has a `Dockerfile` at the new pin | `image:<the compose service in OB1/docker/docker-compose.yml that builds it>` |
-| A changed `owui/` file that **`owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
+| A changed `frontend/owui/` file that **`frontend/owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
 | A changed build context of a `:local`-tagged service in this repository's compose files (where the context IS the repository root, its Dockerfile and what that Dockerfile `COPY`s) | `image:<the service>` |
 
 Nothing else derives a surface, and a merge that ships none records an empty list - the
-normal case for docs, scripts and the harness itself. A change to `owui/manifest.csv` or
-`owui/README.md` derives nothing, because neither is pasted into anything: the rule was
+normal case for docs, scripts and the harness itself. A change to `frontend/owui/manifest.csv` or
+`frontend/owui/README.md` derives nothing, because neither is pasted into anything: the rule was
 `any owui/** path` until 2026-09-06, and the real `owuidrift` merge `e989265` derived
 `paste:owui/manifest.csv` and `paste:owui/README.md` - two surfaces nobody could ever close
-honestly. An `owui/` file the manifest does not list is reported as a NOTE, not silently
+honestly. A `frontend/owui/` file the manifest does not list is reported as a NOTE, not silently
 dropped. A merge whose OB1 pin exists in no
 clone this tool can reach is REFUSED rather than recorded: that pin is the zombie `-List`
 flags as `[UNRESOLVABLE]`, and pushing it to OB1's remote is the fix (CLAUDE.md: never bump
 the gitlink to a commit that is not there).
 
 While a surface is open, `-List` shows the item as
-`merged ... [UNDEPLOYED: image:openbrain-curator, paste:owui/tools/deep_research.py]`, and
+`merged ... [UNDEPLOYED: image:openbrain-curator, paste:frontend/owui/tools/deep_research.py]`, and
 `-Show` prints a DEPLOY block naming each surface OPEN or CLOSED. **The deploy itself is
 still the gated, human step it always was (§4) - this verb RECORDS one, it never performs
 one.** When the deploy has happened and the thing is running:
@@ -585,7 +585,7 @@ by force-push; `development` history is append-only.
 - **A merge is not a deploy, and the board now says which merges are not yet live.** Anything
   that must be proven through the real caddy/tailnet chain still happens after the merge,
   serially, by nature - what changed on 2026-09-06 is that `-Merged` derives from the merge
-  range what the item SHIPS (an OB1 integration image, a `:local` build context, an `owui/`
+  range what the item SHIPS (an OB1 integration image, a `:local` build context, a `frontend/owui/`
   file OWUI only sees by paste), `-List` shows that item as `[UNDEPLOYED: ...]` until each
   surface is closed, and `-Deployed` closes one with per-surface evidence naming the pin and
   the container's health state (step 6). Performing the deploy is still human and still

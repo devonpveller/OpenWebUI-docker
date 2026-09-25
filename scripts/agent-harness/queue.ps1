@@ -31,7 +31,7 @@
 #   ready-review   the operator released it for review
 #   reviewing      a reviewer holds it
 #   merged         landed by the reviewer. TERMINAL unless the merge derived deploy
-#                  surfaces (an OB1 integration image, a :local build context, an owui/ file
+#                  surfaces (an OB1 integration image, a :local build context, a frontend/owui/ file
 #                  OWUI only sees by paste) - then -List shows [UNDEPLOYED: ...] until each is
 #                  closed by -Deployed with health evidence. The list is DERIVED from the
 #                  merge range at -Merged, never typed by the author (deploystate, 2026-09-06).
@@ -495,7 +495,7 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # THE SURFACES ARE DERIVED FROM THE MERGE RANGE, NEVER DECLARED. `git diff --name-only
 # <first parent>..<merge>` is the only input: an OB1 gitlink move whose OB1 diff touches
 # integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
-# builds ../integrations/<dir>>; a changed owui/ file THAT owui/manifest.csv LISTS ->
+# builds ../integrations/<dir>>; a changed frontend/owui/ file THAT frontend/owui/manifest.csv LISTS ->
 # paste:<path>; a changed build context of a :local-tagged service in this repository's
 # compose files -> image:<service>. A list the author typed is the list the author
 # remembered; this one is what git saw.
@@ -504,8 +504,8 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # rule was `any owui/** path`, and owui/ also holds its own README and the manifest itself:
 # the real owuidrift merge e989265 derived paste:owui/manifest.csv and paste:owui/README.md,
 # two surfaces nobody can ever close honestly, because neither is pasted into anything.
-# owui/manifest.csv is the file -> OWUI id map, so it already answers the question exactly;
-# it is read from the MERGED tree, and an owui/ path it does not list derives nothing and
+# The manifest (frontend/owui/manifest.csv since 2026-09-25) is the file -> OWUI id map, so it already answers the question exactly;
+# it is read from the MERGED tree, and a path under it that it does not list derives nothing and
 # says so in a note.
 
 function Get-ArrayField($item, [string]$name) {
@@ -798,18 +798,22 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             }
         }
     }
-    # (2) the files OWUI only sees by paste - and owui/manifest.csv says which those are.
+    # (2) the files OWUI only sees by paste - and frontend/owui/manifest.csv says which those are.
     #     See the section header: `any owui/** path` derived surfaces for the manifest and the
     #     README, which are not pasted into anything. The manifest of the MERGED tree is read,
     #     never the working copy, and its `file` column is resolved BY HEADER NAME (the column
     #     set moved from `bytes` to `sha256` between 08c4ae1 and e989265; the position did not,
     #     but reading it by name means the next move costs nothing). Paths carry no commas, so
     #     a plain split is enough here - this is not a general CSV reader.
-    $owuiChanged = @($changed | Where-Object { $_ -match '^owui/' })
+    #     The directory is frontend/owui/ since ac-planes-contained (2026-09-25; it was
+    #     owui/ at the repo root). A merge range from before that move names owui/ paths
+    #     and so derives no paste surface under this rule.
+    $owuiDir = "frontend/owui"
+    $owuiChanged = @($changed | Where-Object { $_.StartsWith($owuiDir + "/") })
     if ($owuiChanged.Count -gt 0) {
-        $manifest = @(Invoke-GitCapture @("show", "$Sha`:owui/manifest.csv"))
+        $manifest = @(Invoke-GitCapture @("show", "$Sha`:$owuiDir/manifest.csv"))
         if ($LASTEXITCODE -ne 0) {
-            $notes += ("owui/ changed but the merged tree has no owui/manifest.csv, which is what says a file is pasted - no paste surface derived for: " + ($owuiChanged -join ", "))
+            $notes += ("$owuiDir/ changed but the merged tree has no $owuiDir/manifest.csv, which is what says a file is pasted - no paste surface derived for: " + ($owuiChanged -join ", "))
         } else {
             $pasteable = @{}
             $fileCol = -1
@@ -822,14 +826,14 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 }
                 if ($fileCol -ge $cells.Count) { continue }
                 $f = ([string]$cells[$fileCol]).Trim() -replace '\\', '/'
-                if ($f) { $pasteable["owui/" + $f.TrimStart('/')] = $true }
+                if ($f) { $pasteable[$owuiDir + "/" + $f.TrimStart('/')] = $true }
             }
             if ($fileCol -lt 0) {
-                $notes += ("owui/manifest.csv at {0} has no 'file' column - no paste surface derived for: {1}" -f $Sha.Substring(0, 7), ($owuiChanged -join ", "))
+                $notes += ("$owuiDir/manifest.csv at {0} has no 'file' column - no paste surface derived for: {1}" -f $Sha.Substring(0, 7), ($owuiChanged -join ", "))
             } else {
                 foreach ($p in $owuiChanged) {
                     if ($pasteable.ContainsKey($p)) { $pastes += ("paste:" + $p) }
-                    else { $notes += ("{0} changed but owui/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface" -f $p) }
+                    else { $notes += ("{0} changed but $owuiDir/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface" -f $p) }
                 }
             }
         }
@@ -2086,7 +2090,7 @@ if ($Merged) {
         foreach ($s in @($derived.surfaces)) { Write-Host ("    - " + $s) -ForegroundColor Yellow }
         Write-Host ("  Deploy stays human-gated. When it is done and healthy: queue.ps1 -Deployed -Id {0} -By <operator> -Evidence <path> [-Surface <one of them>]" -f $Id)
     } else {
-        Write-Host ("  No deploy surface derived from {0}..{1}: no OB1 integration image, no owui/ paste, no :local build context changed." -f $lb7, $Sha.Substring(0, 7))
+        Write-Host ("  No deploy surface derived from {0}..{1}: no OB1 integration image, no frontend/owui/ paste, no :local build context changed." -f $lb7, $Sha.Substring(0, 7))
     }
     foreach ($n in @($derived.notes)) { Write-Host ("  NOTE: " + $n) -ForegroundColor DarkGray }
     Write-Host ("  {0} can now retire the worktree (remove-worktree.ps1 -Id ...)." -f $item.developer)
@@ -2116,7 +2120,7 @@ if ($Deployed) {
     $pending = @(Get-DeployPending $item)
     if (-not ($item.PSObject.Properties.Name -contains "deploy_pending") -or ($all.Count -eq 0)) {
         Die (("'{0}' records no deploy surface: it merged before -Merged derived them (2026-09-06), or its " +
-              "merge range changed no OB1 integration image, no :local build context and no owui/ file. There " +
+              "merge range changed no OB1 integration image, no :local build context and no frontend/owui/ file. There " +
               "is nothing to close, so -Deployed is refused rather than recorded against nothing.") -f $Id)
     }
     if ($pending.Count -eq 0) { Die "'$Id' has no deploy surface left open - its record is inconsistent (state merged, nothing pending); -Show it" }

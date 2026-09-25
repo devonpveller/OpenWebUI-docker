@@ -533,7 +533,7 @@ Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
     (Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).fits_codebase -eq $true)
 # WHAT THE MERGE SHIPPED (deploystate, 2026-09-06). -Merged derives deploy_pending[] from
 # the merge range; the drill's branch changes one note at the root, which is no OB1 image,
-# no owui/ paste and no :local build context, so the derived list is EMPTY - present, and
+# no frontend/owui/ paste and no :local build context, so the derived list is EMPTY - present, and
 # empty. An item whose merge DID ship something reads [UNDEPLOYED: ...] in -List until
 # -Deployed closes it; that path is drilled hermetically in verify-queue-defects.ps1 (D12/D13).
 $aMerged = Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") -Encoding UTF8 | ConvertFrom-Json
