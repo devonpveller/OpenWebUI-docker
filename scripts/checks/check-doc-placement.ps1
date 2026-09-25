@@ -19,12 +19,12 @@
        documentation/archive/ - the three journal directories that moved to the store
        on 2026-09-25 (adoption-closeout ac-journal-move). The refusal names the store
        path to use instead.
-    2. a new ROOT-LEVEL plan or journal DOCUMENT: a name starting PLAN, TEST-PLAN
-       (TEST_PLAN, TESTPLAN), CLEANUP-PLAN or BUILD-LOG, or carrying -FINDINGS / _FINDINGS,
-       at a word boundary, with a document extension (.md .markdown .txt .rst .adoc) or
-       none; and TASKS.md / ROADMAP.md / bare TASKS / ROADMAP. Code and config files that
-       merely share a prefix (tasks.py, PLANNER.py, roadmap.png) are not journal.
-       Rules 1 and 2 admit NO exemption.
+    2. a new ROOT-LEVEL plan or journal DOCUMENT, or a root-level directory named like
+       one: names starting PLAN, TEST-PLAN (TEST_PLAN, TESTPLAN), CLEANUP-PLAN, BUILD-LOG or
+       FINDINGS, or carrying -FINDINGS / _FINDINGS - as a plain prefix for .md .markdown
+       .rst .adoc and extensionless names, at a word boundary for .txt, never for code or
+       config extensions; and TASKS.md / ROADMAP.md / bare TASKS / ROADMAP. See the
+       $RootDocExt block for the history. Rules 1 and 2 admit NO exemption.
     3. under documentation/implementation-guide/: a file in a NEW feature directory,
        or a plan-shaped file (plan / build log / task list / NN-name.md) anywhere.
 
@@ -87,33 +87,49 @@ $JournalDirs = [ordered]@{
     'documentation/archive/'  = 'journal/archive/'
 }
 
-# Root-level plan / journal files: DOCUMENT-shaped names only (a path with no slash is at the
-# root). History, because each version was wrong in a direction a tester measured:
+# Root-level plan / journal files. History, because each version was wrong in a direction a
+# tester measured:
 #   attempt 1 matched `.md` only - TEST-PLAN-foo.txt, TEST-PLAN-foo, PLAN-foo.txt walked
 #             through while every routing surface promised refusal (probe X1);
-#   attempt 2 took ANY extension and a bare prefix - so tasks.py, Tasks.json, PLANNER.py,
-#             planets.txt, plantuml.cfg, roadmap.png, build-logger.py and
-#             pre-findings-parser.py would all have been refused as journal (A2-2).
-# The rule now (orchestrator decision A2-2): the stem PLAN, TEST-PLAN (also TEST_PLAN and
-# TESTPLAN - the same intent spelled differently, A2-3), CLEANUP-PLAN or BUILD-LOG at the
-# START of the name, or FINDINGS after a `-` or `_`, each at a word boundary (followed by `-`,
-# `_`, `.` or the end), case-insensitive, and ONLY with a document extension or none. TASKS
-# and ROADMAP count only as the exact document names TASKS.md / ROADMAP.md or bare.
-$RootDocExt   = @('md', 'markdown', 'txt', 'rst', 'adoc')
-$RootDocStem  = '(?i)^((TEST[-_]?PLAN|CLEANUP-PLAN|BUILD-LOG|PLAN)([-_.].*)?|.*[-_]FINDINGS([-_.].*)?)$'
+#   attempt 2 took ANY extension and a bare prefix - tasks.py, Tasks.json, PLANNER.py,
+#             planets.txt, plantuml.cfg, roadmap.png ... would have been refused (A2-2);
+#   attempt 3 required a word boundary after the stem - PLANS.md, PLANNING.md, Test-Plans.md,
+#             BUILD-LOGS.md, 'PLAN v2.md', PLAN(1).md walked through (A3-1).
+# The rule now (orchestrator decision after A3-1), case-insensitive throughout:
+#   * DOCUMENT extension (.md .markdown .rst .adoc) or NO extension: the stem is a plain
+#     PREFIX - PLAN, TEST-PLAN, TEST_PLAN, TESTPLAN, CLEANUP-PLAN, BUILD-LOG, FINDINGS - or
+#     FINDINGS appears after `-` / `_`. So PLANNING.md and FINDINGS.md are refused.
+#   * .txt: the same stems but only at a word boundary (followed by `-`, `_`, `.` or the end),
+#     so planets.txt passes and PLAN-foo.txt does not.
+#   * any other extension (.py .json .cfg .yml .png ...): never. PLANNER.py passes ONLY
+#     because .py is not a document extension - PLANNER.md would be refused.
+#   * TASKS.md / ROADMAP.md / bare TASKS / ROADMAP, exactly.
+#   * a ROOT-LEVEL DIRECTORY whose name starts with one of the stems (TEST-PLAN-x/README.md):
+#     a plan set is a directory as often as a file. No tracked root directory matches
+#     (.claude .githooks .github .vscode agent-org backup coder documentation frontend
+#     inference little-coder memory openbrain-gateway owui portal scripts search smolcrawl
+#     status-pipe system-prompts tailscale-state, 2026-09-25).
+$RootDocExt   = @('md', 'markdown', 'rst', 'adoc')
+$RootStems    = '(TEST[-_]?PLAN|CLEANUP-PLAN|BUILD-LOG|PLAN|FINDINGS)'
+$RootPrefix   = '(?i)^(' + $RootStems + '|.*[-_]FINDINGS)'
+$RootWord     = '(?i)^(' + $RootStems + '|.*[-_]FINDINGS)([-_.].*)?$'
 $RootExactDoc = '(?i)^(TASKS?|ROADMAP)(\.md)?$'
 
-function Test-RootJournal([string]$name) {
-    if ($name -match '/') { return $false }
-    if ($name -match $RootExactDoc) { return $true }
-    $base = $name
-    $dot = $name.LastIndexOf('.')
-    if ($dot -gt 0) {
-        $ext = $name.Substring($dot + 1).ToLowerInvariant()
-        if ($RootDocExt -notcontains $ext) { return $false }
-        $base = $name.Substring(0, $dot)
+function Test-RootJournal([string]$p) {
+    $parts = $p -split '/'
+    if ($parts.Count -gt 1) {
+        # Root-level directory named like a plan set.
+        return ($parts[0] -match ('(?i)^' + $RootStems))
     }
-    return ($base -match $RootDocStem)
+    $name = $p
+    if ($name -match $RootExactDoc) { return $true }
+    $dot = $name.LastIndexOf('.')
+    if ($dot -le 0) { return ($name -match $RootPrefix) }
+    $ext = $name.Substring($dot + 1).ToLowerInvariant()
+    $base = $name.Substring(0, $dot)
+    if ($RootDocExt -contains $ext) { return ($base -match $RootPrefix) }
+    if ($ext -eq 'txt') { return ($base -match $RootWord) }
+    return $false
 }
 
 # Deliberately kept in the code repo (plan store README, "What stays in the code repo").
@@ -141,8 +157,9 @@ function Get-JournalTarget([string]$p) {
         }
     }
     if (Test-RootJournal $p) {
+        if ($p -match '/') { return ($StoreRel + '/implementation-guide/<feature>/  (a plan-set directory: ' + ($p -split '/')[0] + '/)') }
         if ($p -match '(?i)^TEST[-_]?PLAN') { return ($StoreRel + '/implementation-guide/<feature>/test-plans/' + $p + '  (or journal/test-plans/' + $p + ')') }
-        if ($p -match '(?i)[-_]FINDINGS') { return ($StoreRel + '/implementation-guide/<feature>/findings/' + $p + '  (or journal/notes/' + $p + ')') }
+        if ($p -match '(?i)(^|[-_])FINDINGS') { return ($StoreRel + '/implementation-guide/<feature>/findings/' + $p + '  (or journal/notes/' + $p + ')') }
         return ($StoreRel + '/implementation-guide/<feature>/' + $p)
     }
     return $null
