@@ -1,375 +1,129 @@
 # CLAUDE.md — ai-stack workspace
 
-Self-hosted AI stack: Open WebUI + local llama.cpp inference behind a LiteLLM
-gateway with an admission queue, a memory layer (mnemory + Open Brain), a
-private search gateway, a self-improving coding agent with a governed
-multi-agent org, and a gated internet portal.
+Self-hosted AI stack: Open WebUI + local llama.cpp inference behind a LiteLLM gateway
+with an admission queue, a memory layer (mnemory + Open Brain), a private search
+gateway, a coding agent with a governed multi-agent org, and a gated internet portal.
+Each plane is its own compose project around a root `docker-compose.yml` that declares
+only the shared `ai-stack_*` networks. [`README.md`](README.md) is the map; this file is
+the rules.
 
-## Stacks at a glance
+## Driving the stack
 
-**The inventory of record is [`stack.manifest.toml`](stack.manifest.toml)** —
-one committed file declaring, per plane, its compose file, what it REQUIRES to
-run, what SURFACES make it usable, its profiles, what the host must provide and
-which keys must be non-blank; plus the PRODUCTS that group planes into vertical
-slices. **The front door is the driver**, `python scripts/stack/stack.py`,
-which reads it (`scripts/stack/stack.ps1` is a shim). Per-host enablement lives
-in the gitignored `.stack/state.json` and the driver never writes the manifest.
-Every plane directory also carries its own README, which is the detailed one:
-[frontend](frontend/README.md) · [inference](inference/README.md) ·
-[memory](memory/README.md) · [search](search/README.md) ·
-[coder](coder/README.md) · [portal](portal/README.md).
+- **[`stack.manifest.toml`](stack.manifest.toml) is the inventory of record** (planes
+  and products). **The driver is the front door:** `python scripts/stack/stack.py <verb>`
+  ([`scripts/stack/README.md`](scripts/stack/README.md); `stack.ps1` is a shim). Per-host
+  enablement lives in the gitignored `.stack/state.json`; the driver never writes the
+  manifest. To turn something on: `stack.py enable <plane|product>`, then `up`
+  (`enable` merges into the state file; `init --force` replaces it).
+- **Each plane's README is the detailed one:** [frontend](frontend/README.md) ·
+  [inference](inference/README.md) · [memory](memory/README.md) · [search](search/README.md)
+  · [coder](coder/README.md) · [portal](portal/README.md). Topology: the `/stack-map` skill
+  or [its reference](.claude/skills/stack-map/references/workspace-stacks.md).
+- **Every plane owns its `.env`** (from `<plane>/.env.example`) and its own
+  `COMPOSE_PROFILES`. A variable lives in the file of the plane whose service reads
+  it; never pass `--env-file`.
+- Bring Open Brain up only after `llm-gateway` is healthy; tear it down before the
+  planes it depends on. The portal is started only by `scripts/portal/portal-on.ps1`.
+- Recovery after a crash or netns break: `scripts/recovery/emergency-recovery.ps1`.
 
-Run the `/stack-map` skill (or read
-[.claude/skills/stack-map/references/workspace-stacks.md](.claude/skills/stack-map/references/workspace-stacks.md))
-for the rendered topology — networks, ports, dependency order.
+## Rules that protect the live stack
 
-| Stack | Driven with | Contents |
-|-------|-------------|----------|
-| **Main** (`ai-stack`) | `docker compose -f docker-compose.yml ...` (the root file declares networks only — no `include:`, and no root-level `compose/` directory; `inference/compose/` belongs to that plane's project) | Part K (2026-08-21) dissolved this into per-plane projects; root is the **network anchor**. **PURE NETWORK ANCHOR since K.5b — 0 services.** Owns `llm-net` / `app-net` / `default` (the `ai-stack_*` names every project attaches to externally); `docker compose up -d` here just creates networks. |
-| **Inference** ([`inference/README.md`](inference/README.md), own project since 2026-08-21 K.1) | `docker compose -f inference/docker-compose.yml ...` (or `scripts/stack/stack.ps1`) | The LLM host: `llm-gateway` + `llm-gateway-db`/`-ui` — LiteLLM **front door**, holds the `llama-cpp`/`llama-cpp-embed` aliases on the anchor's `llm-net` (external); `llm-queue` — per-caller admission/priority; `llama-cpp-upstream`, `llama-cpp-embed-upstream` — real inference on its **native** `llm-backend-net`; `llm-gateway-backup`, `lm-models-backup`. **8 services**, of which 4 (both upstreams, `llm-queue`, `lm-models-backup`) sit behind the `local` profile since 2026-09-19 — `local` must be in `COMPOSE_PROFILES` in **`inference/.env`** (per-plane since sl-env-split) or a bare `up` brings the gateway up with no backends. Four included files under `inference/compose/`; one project still. |
-| **Memory** ([`memory/README.md`](memory/README.md), own project since 2026-08-21 K.2) | `docker compose -f memory/docker-compose.yml ...` | `mnemory` (unified memory layer, llm-net only), `mnemory-cloud-gateway` (the ONLY cloud door, host :8060), `mnemory-backup`. **3 services.** |
-| **Search** ([`search/README.md`](search/README.md), own project since 2026-08-21 K.3) | `docker compose -f search/docker-compose.yml ...` | Private Search Gateway: `vpn` (Mullvad — ALL egress; HTTP proxy :8888), `redis`, `searxng`, `gateway` (host :8085). Owns `search-net`; `vpn`+`gateway` stay on `ai-stack_default` externally so OB1/OWUI DNS holds. **4 services.** |
-| **Coder** ([`coder/README.md`](coder/README.md), own project since 2026-08-21 K.4) | `docker compose -f coder/docker-compose.yml ...` | little-coder control plane: `open-terminal` (executor — moved in from core), `little-coder` (daemon :8090; metrics host :9091), `lc-egress`, `little-coder-backup`. Owns `lc-net` + the 6 coder volumes. **4 services.** |
-| **Frontend** ([`frontend/README.md`](frontend/README.md), own project since 2026-08-21 K.5) | `docker compose -f frontend/docker-compose.yml ...` | `openwebui` (host :3000) + `tailscale` (netns companion — never restart openwebui alone; the project's depends_on encodes the order) + both backups. PROFILE-GATED (2026-09-19): `stock` = Open WebUI alone on the pinned upstream image (a fresh clone); `gpu` = the CUDA build + device reservation; `tailscale` = the netns node + its backup, and it needs `gpu`. This host sets `COMPOSE_PROFILES=gpu,tailscale` in **`frontend/.env`** — since sl-env-split (D17) each plane's own `.env` carries only its own profiles. Images pinned `openwebui:local`/`tailscale:local` — rebuild deliberately only. Build inputs are plane-internal since 2026-09-19 (`frontend/Dockerfile.openwebui-gpu`, `frontend/dockerfile.tailscale`, `frontend/entrypoint.sh`, `frontend/.dockerignore`; both `build.context` values are `.`) — the `..`-rooted bind mounts stay, those trees are not plane-internal. **4 services.** |
-| **Portal** ([`portal/README.md`](portal/README.md), own compose project since 2026-08-21) | `scripts/portal/portal-on.ps1` / `portal-off.ps1` (`portal/docker-compose.yml`) | 12 services (`caddy`, `authelia`, `cloudflared`, watchers/alerter/tripwire/cron + 2 backups). Internet-exposed auth front-end; attaches to `ai-stack_app-net` externally to reach openwebui/open_notebook — positioned to front more apps later. |
-| **Open Brain** (`open-brain`) | `docker compose -f OB1/docker/docker-compose.yml ...` | **30 containers**, PROFILE-GATED since the gitlink bumped 5005197 -> **fe3e045** (2026-09-20, `sl-ob1-gitlink`; the commit that added the profiles, reachable on `origin/feature/integrated-knowledge-system`). Measured at fe3e045: a bare render gives **20**, and all four profiles — `research` (+2), `wiki` (+4), `notebook` (+3), `idea-refinery` (+1) — give 30. So a bare `up` starts 20, not 30: **an operator keeping this deployment declares the four once**, either in the driver state (`stack.py enable research` — NOT `init --force`, which REPLACES the state file rather than merging into it; see `scripts/stack/README.md`) or as `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env` — both measured, and the driver unions the env's list into its own flags. Neither is set on this host yet, so `stack.py up ob1` passes only `idea-refinery`+`research` and starts **23** (20 + 1 + 2), seven short. The thirty are: the `openbrain-*` fleet + its two backup sidecars + the **Open Notebook trio** (`surrealdb`, `open_notebook`, `open-notebook-backup` — moved in K.5b 2026-08-21; ON stays live until the wiki workbench matures). Attaches to `ai-stack_llm-net`/`app-net` externally. Bring up **after** `llm-gateway` is healthy; tear down before the planes it depends on. |
-| **agent-org** | `docker compose -f agent-org/docker/docker-compose.yml ...` | Mattermost (+db) + `agent-bridge` (the governed org bus, 700+ tests) + profile-gated `workers`/`cloud` slices. |
-| **Driver** | `python scripts/stack/stack.py <verb>` (`scripts/stack/stack.ps1` is a thin shim over it since 2026-09-19) | **The front door.** Reads `stack.manifest.toml` + `.stack/state.json`. Verbs: `list`, `status`/`up`/`down` (a plane, `--all`, or the enabled set), `restart <plane>`, `enable`/`disable <plane\|product>` (`--headless` drops a product's surfaces), `doctor`, `health` (16 probes, exit code = failures), `stats`, `inventory --write\|--check` (generates `scripts/lib/stack-services.json`), `init` (writes the state file; a fresh clone defaults to `frontend` alone). `up`/`down`/`restart` take `--dry-run`. The shim forwards only `up down status restart health stats list doctor inventory` — `enable`, `disable` and `init` are `stack.py` only. Design: `scripts/stack/README.md`. |
-| **Recovery** | `scripts/recovery/emergency-recovery.ps1` | Ordered restart/repair across ALL projects — `recover` / `nuclear` / `gpu-reset`. Does **not** manage the Portal. (The `.bat` twin was archived 2026-08-21 — redundant next to this + `stack.ps1` + the Mattermost/sysadmin channel.) |
+- **Never route inference around LiteLLM.** Callers use `http://llama-cpp:8080` /
+  `http://llama-cpp-embed:8080` (aliases on `llm-gateway`); only health/GPU/recovery
+  probes may target `*-upstream` directly (`scripts/checks/check-llm-gateway-routing.ps1`
+  enforces it). Every new inference consumer needs its own LiteLLM virtual key.
+- **Never GET LiteLLM `/health` through the alias** (it loads every model); probe
+  `/health/liveliness`. Other gotchas: [inference/README.md](inference/README.md).
+- **Never restart `openwebui` alone** — `tailscale` shares its network namespace;
+  order is openwebui, wait healthy, then tailscale.
+- **Posture: private and local-first, cloud-capable, every cloud part shipped inert.**
+  What reaches the internet and how to re-derive it:
+  [README.md, "Posture"](README.md#posture-local-first-cloud-capable). Never give
+  `llm-gateway` an egress path as a side effect of anything.
+- **Container rule:** adding/removing/moving a container = the plane compose file +
+  `stack.manifest.toml` + recovery (`emergency-recovery.ps1` + `stack.ps1`) + the
+  stack-map reference doc, together; the full checklist (backups, watchdog, health
+  probe, inventory) is [SERVICE-LIFECYCLE.md](documentation/runbooks/SERVICE-LIFECYCLE.md).
+- **Verify against gitignored evidence** before declaring anything dead: `.env*`
+  values and `backup/models/` OWUI exports are where "zero references" verdicts
+  die (`grep --no-ignore`, the live `webui.db`).
+- **Archive, don't delete:** retired code goes to `scripts/archive/` (see its README
+  provenance table); retired docs go to `../documentation-plans-ai-stack/journal/archive/`.
+- **Secrets** live only in `.env` files and `secrets/` (gitignored); never stage one.
 
-Retired 2026-08-20 (CLEANUP-PLAN v3): `watchtower` (manual updates per
-`documentation/runbooks/UPDATE-MANAGEMENT.md`), `search-mcpo` and `lc-mcpo`
-(no consumers), Ollama and LM Studio remnants.
+## Git and parallel work
 
-**Environment (stack-layers L.2 / D10, 2026-09-19): EVERY PLANE OWNS ITS OWN
-`.env`.** `frontend/.env`, `inference/.env`, `memory/.env`, `search/.env`,
-`coder/.env`, `portal/.env` (plus `agent-org/docker/.env` and
-`OB1/docker/.env`, which always did). Compose loads `<plane>/.env` NATIVELY
-from the project directory, so **nothing passes `--env-file` any more** and
-cwd is irrelevant to it. A variable lives in the file of the plane whose
-service reads it; a value two planes read is declared in EACH. The root
-`.env` keeps only what the anchor, the driver, or a non-plane-scoped script
-reads (the NAS backup credentials and the T2 validation key). `COMPOSE_PROFILES`
-is per-plane too (D17) - `stock`/`gpu,tailscale` in `frontend/.env`, `local` in
-`inference/.env`, and deliberately NONE in `portal/.env`. Each plane ships a
-`<plane>/.env.example`; migrating an existing host is
-`documentation/runbooks/env-split-migration.md`, an operator step.
+- **Never commit or push on the user's behalf unless explicitly asked.** Hooks:
+  `git config core.hooksPath .githooks`; never `--no-verify`.
+- **Branches:** `main` is untouched (the known-good deliverable, promoted only by the
+  operator); `development` is the live-hosted line; work happens on branches cut from
+  `development` and merges back only with validation + testing evidence.
+- **Worktree-per-session.** Never several sessions committing in one checkout; the main
+  checkout is the operator's (reading there is fine). At your first *mutating* intent
+  (stage, commit, branch, gitlink bump) run `scripts/agent-harness/new-worktree.ps1 -Id
+  <short-id>` and work in the path it prints — never bare `git worktree add` or
+  `EnterWorktree name:`.
+- **Agree the goal first, then hand off:** `queue.ps1 -Propose -Anchor <json>` (the
+  operator confirms), then a test plan and `queue.ps1 -Submit`. **You do not test or
+  merge your own work.** Pipeline:
+  [MERGE-PROTOCOL.md](documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md);
+  tooling: [scripts/agent-harness/README.md](scripts/agent-harness/README.md) and
+  [MODULE.md](scripts/agent-harness/MODULE.md) (configuration, off switch).
+- **Testing:** hold the plane's lease (`lease.ps1 -Acquire -Name <plane>`) before a
+  test that mutates a plane or needs it stable. Test images tag `:wt-<id>`; prod
+  containers and `:local` tags are a gated deploy, not a test; never attach test
+  containers to the `ai-stack_*` networks.
+- **OB1 is a pinned submodule** (clone with `--recurse-submodules`, or `git submodule
+  update --init`). Push OB1 changes to OB1's remote FIRST, then bump the gitlink in a
+  commit saying what moved; never bump it to a commit not on that remote. OB1 runs the
+  `openbrain-gateway:local` image: `docker build -t openbrain-gateway:local ./openbrain-gateway`.
 
-**Posture (stack-layers D14, resolved 2026-09-20): PRIVATE and LOCAL-FIRST,
-cloud-CAPABLE, everything cloud shipped INERT.** No component sends a prompt, a
-document or a memory to a model provider by default; the cloud-capable parts
-stay in the tree, off, each behind a profile, a credential or a hand-run script.
-**That is NOT "nothing reaches the internet"** - three containers do from a
-fresh clone (see the end of this paragraph). The full table is `README.md`'s
-"Posture: local-first, cloud-capable" section. **Derive the set the way that
-section does, in TWO stages, if you ever re-check it:** render every plane
-(`docker compose config --format json`, every profile) and take every service
-joining a NON-internal network as a candidate — resolving `external:` names
-against the anchor, where `ai-stack_llm-net` is internal and `ai-stack_app-net`
-/ `ai-stack_default` are not — THEN read each candidate's source for an actual
-outbound call. A grep for provider names does stage 2 only and missed four
-unprofiled services the first time this was written. The set:
-(1) the LiteLLM CLOUD MODEL GROUP `cloud-large`/`cloud-small` in
-`inference/config/litellm/model_list/cloud.openrouter.yaml`, enabled by
-`OPENROUTER_API_KEY` in `inference/.env` — `assemble-config.py` drops any model
-whose `os.environ/VAR` is unset or empty, so blank means not registered;
-(2) the agent-org CLOUD PROFILE (`llm-gateway-cloud`, its db, `ao-egress`) with
-`agent-org/config/litellm-cloud.config.yaml`, enabled by `cloud` in
-`COMPOSE_PROFILES` + `OPENROUTER_API_KEY`/`AO_CLOUD_*`/`AO_CLOUD_ENABLED=true`
-in `agent-org/docker/.env`; (3) the agent-org `workers` profile's
-`ao-git-egress` (default-deny tinyproxy; allowlist written by agent-bridge onto
-the `ao-egress-config` volume — and only `ao-ot-1`/`-2` are PROXIED through it,
-`ao-worker-1`/`-2` carry no proxy and are confined by `ao-worker-net` instead);
-(4) `agent-bridge`'s GITHUB APP, off until `AO_GITHUB_APP_ID` plus a readable
-`agent-org/agent-bridge/secrets/github-app-key.pem`, reaching `api.github.com`
-straight off `ao-net`, NOT through `ao-egress`; (5) `lc-egress` in the coder
-plane — UNPROFILED, so it is up whenever coder is, with
-`github.com`/`githubusercontent.com` baked into the image from
-`little-coder/docker/egress-allowlist.txt`; (6) the search plane's Mullvad
-`vpn` — UNPROFILED and it dials out itself, which is the point: `searxng` is on
-an `internal: true` net and `search/searxng/settings.yml` routes it at
-`http://vpn:8888`; keyed by `MULLVAD_WG_PRIVATE_KEY`/`MULLVAD_WG_ADDRESSES` in
-`search/.env`; (7) the portal's `cloudflared` (`internet` profile, passed on the
-command line by `scripts/portal/portal-on.ps1`, `CLOUDFLARE_TUNNEL_TOKEN` in
-`portal/.env`) and `portal-alerter`, which mails Google from `notify-net` — one
-of the portal's FOUR non-internal networks, not its only way out; (8) the
-frontend's `tailscale` (`tailscale`+`gpu` in `frontend/.env`'s
-`COMPOSE_PROFILES`, `TAILSCALE_AUTH_KEY`); (9) `openwebui` ITSELF under either
-profile — both definitions sit on an internet-capable bridge, and
-`SEARXNG_QUERY_URL` bounds the search QUERY only, not what OWUI's own loaders
-fetch — together with `openwebui-backup`, which is UNPROFILED, renders under
-`stock`, and runs `apk add --no-cache pigz` at every start; (10) the INBOUND
-doors — `mnemory-cloud-gateway` (:8060) and `openbrain-gateway` (:8061, cloud
-clients, `share=cloud`) with its sibling `openbrain-ops-gateway` (:8062, HOST
-processes, `exposure=ops`, a DIFFERENT key) — all loopback-published and none
-dialling out ITSELF, **but the cloud door's default `WRITE_TOOLS` allowlist
-includes `ingest_url`/`ingest_urls`**, so a remote key-holder can drive (11);
-(11) `openbrain-mcp` — UNPROFILED, on `obnet`, and its ingest tools call a bare
-`fetch(url)` with `redirect: "follow"` on a CALLER-SUPPLIED url with no proxy
-client anywhere in that file: the broadest egress in the stack, gated by
-nothing; (12) `openbrain-grounding-backfiller` — UNPROFILED, `WIKI_BASE`
-defaults to `https://en.wikipedia.org`, and `REFETCH_ALLOW_DIRECT` defaults
-TRUE so its refetch falls back to an unproxied fetch when the tunnel is thin
-(it fails OPEN; `REFETCH_ALLOW_DIRECT=false` in `OB1/docker/.env` closes it);
-(13) `openbrain-wiki`'s `WIKI_GIT_REMOTE`, blank today, one SSH URL away from
-force-pushing the compiled vault to GitHub; (14) OB1's scheduled
-`openbrain-digest`/`-gmail-pull`/`-gmail-prune`/`-podcast`, gated on Google
-OAuth files under `OB1/secrets/` that a clone does not have; (15)
-`openbrain-research`, the ONE OB1 fetcher that is genuinely proxy-bound
-(`FETCH_PROXY_URL` → `http://vpn:8888`) — do not generalise it to (11) or (12).
-**HOST-SIDE, invisible to any compose render:** `scripts/sysadmin-mcp/`'s
-Telegram notifier AND listener (the listener POLLS, so it is an inbound control
-path), `scripts/claude-sessions-bridge/bridge.py` (runs the `claude` CLI with
-`BRIDGE_MODEL` defaulting to `opus` — the one frontier-provider call in the
-repo — and posts to Telegram), and the `frontend/owui/` plugins
-(`github_chat_mcp_tools.py` → `api.github.com`; `fileshed.py` permits
-`curl`/`wget`/network `git` inside the openwebui container). **THE MECHANISM,
-stated because it is the part that gets misread:** `llm-gateway` is attached to
-`llm-net` (the anchor declares it `internal: true`) and `llm-backend-net`
-(`internal: true` in `inference/docker-compose.yml`) and to nothing else, so
-setting `OPENROUTER_API_KEY` makes the cloud models LISTED, never REACHABLE — a
-call fails where LiteLLM tries to leave. Making it real needs an egress path for
-that container (an internet-capable network, or a dual-homed allowlisted proxy
-as `llm-gateway-cloud` uses `ao-egress`). **Do not add one as a side effect of
-anything**; agent-org deliberately put its cloud lane on a separate gateway
-instead. **The three that DO reach the internet from a fresh clone**, measured
-from the renders: search's `vpn` (dials Mullvad), frontend's `openwebui-backup`
-(the Alpine CDN, and it is in the quickstart), and coder's `lc-egress` (up with
-the plane; it initiates nothing itself but it is `open-terminal`'s route).
+## Where documentation goes — the plan store
 
-**Inference plane:** every service reaches inference through
-`http://llama-cpp:8080` / `http://llama-cpp-embed:8080` — **network aliases on
-`llm-gateway` (LiteLLM)**, which forwards through **`llm-queue`**
-(hold-and-dispatch, per-caller lanes) to the `*-upstream` servers. The whole
-plane is its own compose project since 2026-08-21 (K.1):
-`inference/docker-compose.yml`, which owns `llm-backend-net` and attaches to
-the anchor's `llm-net` externally — the alias contract is unchanged. **Never
-route inference around LiteLLM**; only health/GPU/recovery probes may target
-`*-upstream` directly. Enforced pre-commit by
-`scripts/checks/check-llm-gateway-routing.ps1`. Gotchas: LiteLLM enforces per-caller
-virtual keys since 2026-08-21 (J.1 — master_key + the x-ai-stack-caller
-pre-call hook; every new consumer needs a key, see
-`../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/J1-VIRTUAL-KEYS-CUTOVER.md`);
-`background_health_checks: false` and never GET LiteLLM `/health` via the
-alias (model-load thrash — use `/health/liveliness`); llama-swap uses
-`--no-mmap` (GGUF mmap over the Windows bind mount hangs).
+This CODE repo is public-surface; plans, notes, findings, evidence and test plans name
+internal hosts, ports and file:line anchors, so they go to the private plan store
+[`documentation-plans-ai-stack`](https://github.com/devonpveller/documentation-plans-ai-stack.git), cloned beside this one as `../documentation-plans-ai-stack`:
 
-**Status pipe:** the OWUI "Server Status" pipe subsystem lives in
-`frontend/status-pipe/` (orchestrator, router, modules, schemas, serve pipe) —
-the ONLY code mount into the OWUI container, beside the system prompts in
-`frontend/system-prompts/`. `frontend/owui/` holds the deploy-by-paste
-snapshots + `manifest.csv` (file → OWUI id; skills included).
+| What | Where (in the plan store) |
+|---|---|
+| a plan, build log, task list, `NN-*.md` plan set | `implementation-guide/<feature>/` |
+| a harness anchor | `implementation-guide/<feature>/anchors/<id>.json` |
+| a work item's findings (its `findings_sink`) | `implementation-guide/<feature>/findings/<id>.md` |
+| a work item's test plan | `implementation-guide/<feature>/test-plans/<id>.md` |
+| a note or finding with no feature | `journal/notes/<topic>-<yyyy-mm-dd>.md` |
+| evidence: logs, transcripts, measured output | `journal/evidence/<id>/` |
+| a retired doc or closed plan | `journal/archive/` |
+
+1. Run `scripts/checks/plan-store.ps1` at the start and before you stop; fix what it lists.
+2. Commit **and push** the store in the same sitting (`git pull --rebase` first); a new
+   feature also gets one status row in [the index](documentation/implementation-guide/README.md).
+3. **Findings never go into the deliverable** — write them to the findings file, with
+   what was checked and when.
+4. A plan set that landed here untracked: `scripts/checks/plan-store.ps1 -Migrate <feature>`.
+
+**This repo keeps** only what someone needs with just this checkout: `CLAUDE.md`,
+`README.md`, `SECURITY.md`, `documentation/runbooks/`, the status index and
+`multi-agent-concurrency/`, plane/module/subproject READMEs, and evidence that CODE reads
+(beside that code). Enforced by `scripts/checks/check-doc-placement.ps1`; a deliberate
+exception is `AI_STACK_PLAN_IN_CODE_REPO=1` with the reason in the commit message.
 
 ## Conventions
 
-- **Git:** never commit or push on the user's behalf unless explicitly asked.
-  Hooks live in `.githooks/` (`git config core.hooksPath .githooks`): secret
-  guard, LF check, gateway-routing check, compose/ps1 structural check.
-- **Worktree-per-session (operator policy, 2026-08-23; mechanized 2026-08-28):**
-  each session that MUTATES git state works in its own `git worktree` and
-  merges back deliberately — never several sessions committing in one checkout
-  (a shared tree let one session's broad `git add` sweep another's dirty OB1
-  gitlink into an unrelated commit). The main checkout is the operator's;
-  read-only work there is fine.
-  **The trigger is your first mutating intent** (stage, commit, branch, gitlink
-  bump), not session start — cheap reads stay cheap. At that moment, before
-  touching the index:
-  `scripts/agent-harness/new-worktree.ps1 -Id <short-id>` then `EnterWorktree path:`
-  the path it prints. Never bare `git worktree add` (it leaves you with no
-  `.env`, an empty `OB1/`, and the wrong base branch) and never bare
-  `EnterWorktree name:` for repo work (it branches from the origin default
-  branch, not your work line). Land it via
-  `documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md`
-  — **you do not test or merge your own work.** And **before building, agree
-  what the work is for**: `queue.ps1 -Propose -Anchor <json>` (goal, artifact,
-  audience, acceptance, out-of-scope, findings sink), which the operator confirms;
-  `-Submit` refuses without it. The anchor exists because a run that passed every
-  check still shipped the wrong artifact — tests validate correctness, the anchor
-  validates intent. Write the test plan, then `queue.ps1 -Submit`; a tester who did not write it executes the plan, and a
-  reviewer who did not write it rebases and merges (`--no-ff`, evidence in the
-  message). If the reviewer's rebase changes what was tested, the pass is stale
-  and the item returns to test. The work line defaults to whatever the main
-  checkout has loaded (override: `-Base` / `AI_STACK_WORK_LINE`), so agents
-  inherit the tooling on that branch; when it is the branch you have checked out,
-  the reviewer hands the merge back to you rather than touching your working copy.
-  There is no merge lock: a worktree isolates files and git refuses two worktrees
-  on one branch, so the coordination that matters is separation of duties. Conflicts: the LATER merger adapts; semantic clashes get negotiated
-  in the other agent's Mattermost thread (never `SendMessage` — it can be a
-  headless peer mid-turn); no convergence → ask the operator. **Testing runs
-  under plane leases, not cloned environments**: before a test that mutates a
-  plane or needs it stable, `lease.ps1 -Acquire -Name <plane>` (names in
-  `scripts/agent-harness/lease-names.conf`; read-only probes need none; multi-plane =
-  one call). Test images tag `:wt-<id>` — prod containers and `:local` tags are
-  a gated deploy, not a test; never attach test containers to the `ai-stack_*`
-  anchor networks. Tooling + gotchas: `scripts/agent-harness/README.md`.
-  **The harness is a MODULE** (`scripts/agent-harness/MODULE.md`): one config file
-  (`harness.config.json`) holds the role→model profiles, the TTLs and the paths, and
-  `enabled: false` / `AI_STACK_HARNESS_ENABLED=0` turns it off cleanly per surface.
-  Default profile is `all-cloud` (opus for worker, tester and reviewer); extension
-  sessions are locked to it, Mattermost threads switch with `profile: <name>`.
-- **Branch policy (operator, 2026-08-22):** `main` is UNTOUCHED — the
-  deliverable, representing the known-good ai-stack; `development` is the
-  LIVE-HOSTED deployment line; all work happens on feature/work branches cut
-  from `development` and merges back only with validation + testing evidence.
-  `main` is promoted from `development` deliberately by the operator, never
-  as a side effect.
-- **Container rule:** adding/removing/moving a container = the plane compose
-  file + recovery (`emergency-recovery.ps1` + `stack.ps1`) + the stack-map
-  reference doc **together** — and the rest of the lifecycle surfaces
-  (backups + restore catalog, watchdog, `stack.py health` probe,
-  stack-services.curated.json + `stack.py inventory --write`, registry).
-  The FULL checklist is
-  `documentation/runbooks/SERVICE-LIFECYCLE.md`; `/stack-map` checks drift.
-- **Archive, don't delete:** retired code goes to `scripts/archive/` (see its
-  README provenance table); retired docs go to the plan store,
-  `../documentation-plans-ai-stack/journal/archive/`.
-- **Where documentation goes - the default is the PLAN STORE** (operator, 2026-09-25;
-  replaces the 2026-08-28 "findings go to documentation/notes/" rule). The private
-  sibling repo **`documentation-plans-ai-stack`**
-  (`https://github.com/devonpveller/documentation-plans-ai-stack.git`, cloned beside
-  this one as `../documentation-plans-ai-stack`) holds everything that is read
-  deliberately rather than needed to run the stack. Write NEW material there:
-
-  | What | Where (in the plan store) |
-  |---|---|
-  | a plan, build log, task list, `NN-*.md` plan set | `implementation-guide/<feature>/` |
-  | a harness anchor | `implementation-guide/<feature>/anchors/<id>.json` |
-  | a work item's findings (its `findings_sink`) | `implementation-guide/<feature>/findings/<id>.md` |
-  | a work item's test plan | `implementation-guide/<feature>/test-plans/<id>.md` |
-  | a note or finding with no feature | `journal/notes/<topic>-<yyyy-mm-dd>.md` |
-  | evidence: logs, transcripts, measured output | `journal/evidence/<id>/` |
-  | a retired doc or closed plan | `journal/archive/` |
-
-  Commit **and push** the store in the same sitting (`git pull --rebase` first -
-  several sessions write there). **Findings still never go into the deliverable:**
-  work on one thing turns up true problems with another; neither deleting the
-  finding nor pasting it into the artifact is right - write it to the findings
-  file with what was checked and when. A harness anchor names that file as its
-  `findings_sink`; outside the harness, the same rule applies by hand.
-  **This repo keeps** only what an agent or operator needs with just this checkout
-  in front of them: `CLAUDE.md`, `README.md`, `SECURITY.md`, `documentation/runbooks/`,
-  the status index `documentation/implementation-guide/README.md` and
-  `multi-agent-concurrency/` (every worktree must carry `MERGE-PROTOCOL.md`),
-  per-plane and per-module READMEs, and the agent-org / little-coder subproject docs.
-  **Evidence that CODE reads is not journal:** it lives next to the code that reads it
-  (e.g. `scripts/agent-harness/fixtures/`, `scripts/agent-harness/quadrant/evidence/`),
-  because CI runs on a checkout of this repo alone.
-- **Plans live in the plan store, not in this repo** (2026-08-29; restated
-  2026-09-18; widened to the journal 2026-09-25). This is the CODE repo and it is
-  public-surface; a plan or a note names internal hostnames, ports, topology and
-  file:line anchors, none of which belongs in a public tree.
-  - **The seam** is `documentation/implementation-guide/README.md`: one status
-    row per feature, wherever that feature's plan lives. The index spans both
-    repos and is the thing that says which.
-  **Enforced at commit time** by `scripts/checks/check-doc-placement.ps1`
-  (pre-commit 2b): it refuses a new plan file or feature directory under
-  `documentation/implementation-guide/`, any new file under `documentation/notes/`,
-  `documentation/evidence/` or `documentation/archive/`, and a new root-level
-  `PLAN*` / `TEST-PLAN*` / `*-FINDINGS*` / `CLEANUP-PLAN*` / `BUILD-LOG*` file -
-  and names the store path to use instead. `-All` audits the untracked half no
-  commit-time check can see. Deliberate exceptions: `AI_STACK_PLAN_IN_CODE_REPO=1`
-  with the reason in the commit message.
-  **History:** Phase 2 (2026-09-18) moved the 31 tracked feature directories to the
-  store; the journal move (2026-09-25, adoption-closeout `ac-journal-move`) moved
-  `documentation/notes|evidence|archive/`, `CLEANUP-PLAN.md`, the root `TEST-PLAN-*.md`
-  files and `dark-factory-unification/` (whose board, `dfu-done.ps1`, is archived in
-  `scripts/archive/dfu-done/` with its CI job). `documentation/implementation-guide/`
-  is now the index plus `multi-agent-concurrency/`; anything else appearing there is drift.
-  **Do this, every session that writes documentation (short form of the above):**
-  1. At the start and again before you stop, run `scripts/checks/plan-store.ps1`.
-     It checks both repos: untracked plan or journal files on either side, unpushed
-     store commits, and store features with no status row. Exit 0 means clean; fix
-     anything it lists before you stop.
-  2. Write plans, notes, findings, evidence and test plans only under
-     `../documentation-plans-ai-stack/` (table above). Commit and push there in the
-     same sitting. For a new feature, add the one status row to
-     `documentation/implementation-guide/README.md` in this repo.
-  3. Harness anchors live beside their plan in the store, in
-     `<feature>/anchors/<id>.json`; `queue.ps1 -Propose -Anchor` accepts that path
-     (it copies the file into the queue), and `-Submit -TestPlan` accepts a test
-     plan in `<feature>/test-plans/`.
-  4. If a plan set already landed in this repo untracked, run
-     `scripts/checks/plan-store.ps1 -Migrate <feature>`: it moves the folder to the
-     store, rewrites its self-references, commits, pushes, and prints the index row.
-     It refuses tracked folders on purpose.
-- **Verify against gitignored evidence** before declaring anything dead:
-  `.env*` values and `backup/models/` OWUI exports are exactly where
-  "zero references" verdicts die (`grep --no-ignore`, live `webui.db`).
 - **Shell:** Windows + PowerShell 5.1 (ASCII no-BOM for scripts it parses);
-  recovery scripts assume Docker Desktop. Never restart `openwebui` alone —
-  `tailscale` shares its netns; order is openwebui → tailscale.
+  recovery scripts assume Docker Desktop.
 - **Lint:** `ruff check .` (F + E9 gate; subprojects carry their own configs).
-- **Use subagents — you have them, and this workspace is built for them**
-  (operator, 2026-08-29). A Claude Code session here can spawn agents via the
-  Agent tool (`general-purpose` for open-ended work, `Explore` for read-only
-  fan-out searches). Reach for one when:
-  - **you want different eyes.** The recurring failure here is not a missing
-    test, it is a check that passes while checking nothing — eight were found
-    in a single day. An agent briefed to *refute* a claim, not confirm it,
-    finds those; the author re-reading their own work does not. This is the
-    same "differently-goaled reviewer" idea agent-org already uses (§4.4),
-    available to any session.
-  - **the answer needs a broad sweep** (which files reference X, where does Y
-    get set) — delegate it and keep the conclusion, not the file dumps.
-  - **work is genuinely parallel.** Launch them in ONE message so they run
-    concurrently, and background them so the operator can still interject.
-  Brief an agent the way you would brief a tester: name the claim, name what
-  would DISPROVE it, and tell it to report only what it verified by reading
-  the file or running the command. "Report anything suspicious" gets you
-  invented findings; "here are three claims, try to break them, cite
-  file:line" gets you real ones. An agent's report is not evidence until you
-  have checked the part you are about to act on — the A9 rule (verify before
-  you relay) applies to a subagent's output exactly as it does to your own.
-  Do NOT use one to escape a gate you are subject to: an agent you spawned is
-  not an independent party for the harness's separation of duties, and using
-  it as one is gaming the check rather than passing it.
+- **Use subagents** for a review briefed to refute, a broad sweep, or parallel work (one
+  message, backgrounded). Name the claim and what would disprove it; ask only for what it
+  verified. Check the part of its report you act on before relaying it. A subagent you
+  spawned is not an independent party for the harness's separation of duties.
 
 ## Pointers
 
-- What a plane holds, needs, surfaces and how to bring it up → that plane's own
-  README (`frontend/`, `inference/`, `memory/`, `search/`, `coder/`, `portal/`)
-- What a plane is DECLARED to be, and which products group them →
-  `stack.manifest.toml`; the driver that reads it → `scripts/stack/README.md`
-- Turning something on for the first time on this host →
-  `python scripts/stack/stack.py enable <plane|product>`, then `up`.
-  The root `README.md` carries the product menu.
-- Moving a host to per-plane `.env` files →
-  `documentation/runbooks/env-split-migration.md`
-- Stack topology / "what runs here?" → `/stack-map` skill
-- Recovery after a crash or netns break → `scripts/recovery/emergency-recovery.ps1`
-- Runbooks (updates, backups, incident response, out-of-band channel) →
-  `documentation/runbooks/` + `documentation/sysadmin-out-of-band-channel.md`
-- Per-feature status (shipped/draft), across BOTH repos →
-  `documentation/implementation-guide/README.md`
-- Plans, build logs, plan sets, notes, findings, evidence, test plans → the private
-  plan store `../documentation-plans-ai-stack` (never write a new one into this repo);
-  the operator journal is its `journal/` (see `journal/README.md` there)
-- The 2026-08 restructure, CLOSED 2026-09-19 (history + its own file:line
-  evidence, not a worklist) → `../documentation-plans-ai-stack/journal/CLEANUP-PLAN.md`
-  (v3). What is still open and
-  where it went is the "v3 CLOSED" section near the top; the successor plan is
-  `../documentation-plans-ai-stack/implementation-guide/stack-layers/`
-- little-coder design + workflow → `../documentation-plans-ai-stack/implementation-guide/little-coder/`
-- Private search gateway → `search/gateway/README.md`
-
-## OB1 submodule (since 2026-08-21)
-
-OB1 is a **pinned git submodule** (`.gitmodules` → `devonpveller/OB1.git`,
-branch `feature/integrated-knowledge-system`), not a loose nested repo. The
-parent records exactly which OB1 commit is deployed.
-
-- **Clone:** `git clone --recurse-submodules …`, or `git submodule update
-  --init` in an existing checkout. Recovery scripts and `docker compose -f
-  OB1/docker/docker-compose.yml …` are unaffected — the on-disk layout is
-  identical.
-- **The gitlink is real code — bump it via PR.** After landing OB1 changes:
-  push them to OB1's remote FIRST (the pinned SHA must be reachable there, or
-  a fresh `--recurse-submodules` clone breaks), then in the parent
-  `git add OB1` + commit the new pointer with a message saying what moved.
-  Never bump the gitlink to a commit that isn't on the OB1 remote.
-- **openbrain-gateway** source lives HERE (`openbrain-gateway/`; its twin
-  `memory/mnemory-gateway/` — the directory that builds the
-  `mnemory-cloud-gateway` container — moved into the memory plane); OB1
-  consumes the prebuilt
-  `openbrain-gateway:local` image. Rebuild it from this repo:
-  `docker build -t openbrain-gateway:local ./openbrain-gateway`.
+- Product menu, quickstart, posture, health, backups, repo map → [`README.md`](README.md);
+  security → [`SECURITY.md`](SECURITY.md)
+- Runbooks (updates, backups, incidents, env migration) → [`documentation/runbooks/`](documentation/runbooks/)
+  and [`documentation/sysadmin-out-of-band-channel.md`](documentation/sysadmin-out-of-band-channel.md)
+- Server Status pipe → [`frontend/status-pipe/`](frontend/status-pipe/README.md); OWUI
+  plugins (deploy-by-paste, `manifest.csv`) → `frontend/owui/`; search gateway →
+  [`search/gateway/README.md`](search/gateway/README.md)
+- Plans, the operator journal and this file's retired history → `../documentation-plans-ai-stack/`
