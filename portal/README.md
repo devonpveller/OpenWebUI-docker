@@ -263,8 +263,9 @@ the surfaces this plane appears on today are:
   compose change is rendered with the tunnel services present
 - `scripts/backup/restore-from-snapshot.ps1` - the `caddy` and `authelia`
   catalog entries
-- `.claude/skills/stack-map/references/workspace-stacks.md` section 1, and the
-  plane table in [`../CLAUDE.md`](../CLAUDE.md)
+- `.claude/skills/stack-map/references/workspace-stacks.md` section 1, the
+  plane's entry in [`../stack.manifest.toml`](../stack.manifest.toml), and the layout table in
+  [`../README.md`](../README.md)
 - `documentation/CONTAINER-REGISTRY.md` and the backup / restore runbooks
 - `scripts/agent-harness/lease-names.conf` - the `portal` lease name
 

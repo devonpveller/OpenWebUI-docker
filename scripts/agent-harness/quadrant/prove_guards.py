@@ -1,7 +1,8 @@
 """Mutation drill: prove the comparison's guards BITE, not merely that they are green.
 
 The recurring failure in this workspace is not a missing test - it is a check that passes
-while checking nothing (eight found in a single day; CLAUDE.md records the pattern). A
+while checking nothing (eight found in a single day; the plan store's
+journal/archive/CLAUDE-pre-ac-claude-md.md records the pattern). A
 suite of greens is evidence that nothing currently breaks. It is NOT evidence that any
 particular guard would notice if it did. (Round 1 of this module wrote "a suite of 33
 greens" here and the suite printed 39 by round 2 - a count in a docstring is a claim with

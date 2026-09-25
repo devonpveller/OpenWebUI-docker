@@ -206,7 +206,7 @@ plane actually appears on today are:
   `python scripts/stack/stack.py inventory --write`:
   `scripts/lib/stack-services.json` is generated and `inventory --check` (in the
   pre-commit hook and in CI) refuses a hand edit
-- `.claude/skills/stack-map/references/workspace-stacks.md` §1c, and the plane table in `CLAUDE.md`
+- `.claude/skills/stack-map/references/workspace-stacks.md` §1c, the plane's entry in `stack.manifest.toml`, and the layout table in `README.md`
 - `documentation/CONTAINER-REGISTRY.md`,
   `documentation/runbooks/restore-from-snapshot.md`,
   `documentation/runbooks/backup-restore-runbook.md`
