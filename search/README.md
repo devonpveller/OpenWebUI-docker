@@ -84,8 +84,8 @@ python scripts/stack/stack.py disable --plane frontend
 ```
 
 (`python scripts/stack/stack.py enable --plane frontend` turns it back on
-later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
-that key is set.)
+later; it refuses, naming `WEBUI_SECRET_KEY` in `frontend/.env`, until that
+key is set.)
 
 ```bash
 cp search/.env.example search/.env

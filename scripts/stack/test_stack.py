@@ -1215,8 +1215,11 @@ def test_up_all_never_starts_the_manual_plane(root):
 def test_up_one_plane_starts_only_that_plane_and_names_what_it_assumes(root):
     code, out, _r = run(root, "up", "coder", "--dry-run")
     assert code == 0
-    assert docker_lines(out) == ["docker compose -f coder/docker-compose.yml up -d"]
-    assert "# note: coder requires anchor, inference; this starts only coder" in out
+    # ac-followups N9: the anchor's networks are ENSURED first (its render line is
+    # printed; under --dry-run nothing is rendered), and no other plane is started.
+    assert docker_lines(out) == ["docker compose -f docker-compose.yml config --no-interpolate --format json",
+                                 "docker compose -f coder/docker-compose.yml up -d"]
+    assert "# note: coder requires inference; this starts only coder" in out
 
 
 def test_a_plane_and_all_together_is_refused(root):
@@ -4665,9 +4668,19 @@ def _record_calls(monkeypatch):
     return seen
 
 
+def _anchor_without_networks(cmd, cwd):
+    """`up <plane>` ensures the anchor's networks first (ac-followups N9). Answer its
+    render with a project that declares none, so nothing is inspected or created;
+    every other read goes to the hermetic stub as before."""
+    if list(cmd[:4]) == ["docker", "compose", "-f", "docker-compose.yml"] and "config" in cmd:
+        return stack.CommandResult(0, '{"name": "ai-stack", "networks": {}}', "")
+    return stack.subprocess_capture(cmd, cwd)
+
+
 def _run_with_the_real_runner(root, *args):
     out = io.StringIO()
-    code = stack.main(["--root", str(root), *args], stdout=out)   # runner=None -> subprocess_runner
+    code = stack.main(["--root", str(root), *args], stdout=out,   # runner=None -> subprocess_runner
+                      capture=_anchor_without_networks)
     return code, out.getvalue()
 
 
@@ -4746,7 +4759,7 @@ def test_the_printed_command_is_unchanged(root):
     run(root, "enable", "--product", "inference")
     code, out, _ = run(root, "up", "inference", "--dry-run")
     assert code == 0
-    assert docker_lines(out) == ["docker compose -f inference/docker-compose.yml --profile local up -d"]
+    assert docker_lines(out)[-1:] == ["docker compose -f inference/docker-compose.yml --profile local up -d"]
 
 
 def test_the_shared_names_are_the_five_the_docs_name():
@@ -5316,3 +5329,115 @@ def test_headless_after_a_full_enable_does_not_claim_it_dropped_the_surface(root
     assert "frontend stay - an earlier `enable coding-agent` added them" in out
     assert state_of(root)["products"]["coding-agent"]["headless"] is False
     assert "product:coding-agent" in state_of(root)["planes"]["frontend"]["owners"]
+
+
+# --------------------------------------------------------------------------
+# ac-followups: N9 - `up <plane>` ensures the anchor's networks as a bare `up`
+# does; N10 - the shell `unset` step gets the same profiles as the env-file step
+# --------------------------------------------------------------------------
+
+
+def test_up_one_plane_on_an_empty_daemon_creates_the_anchor_networks_first(root):
+    """N9. RED at e30fe42: `up inference` never ensured them, so compose said
+    'network ai-stack_app-net declared as external, but could not be found'."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "--plane", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert sorted(daemon.created) == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
+    streamed = [" ".join(c) for c in daemon.streamed]
+    ups = [i for i, c in enumerate(streamed) if c == "docker compose -f inference/docker-compose.yml up -d"]
+    creates = [i for i, c in enumerate(streamed) if c.startswith("docker network create")]
+    assert ups and creates and max(creates) < ups[0], streamed
+    # the anchor is still never `up`-ed, and no OTHER plane is started
+    assert not any(c.startswith("docker compose -f docker-compose.yml up") for c in streamed)
+    assert not any("frontend/docker-compose.yml" in c for c in streamed)
+
+
+def test_the_gpu_refusal_s_rerun_step_works_on_a_fresh_daemon(root):
+    """N9 as the reader meets it: follow the printed steps of `up inference` literally."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED and daemon.created == [], out
+    steps = _remedy_commands(out)
+    assert steps[-1] == ["up", "inference"], out
+    for args in steps[:-1]:
+        assert run(root, *args)[0] == 0
+    code, out, _ = run(root, *steps[-1], runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert "declared as external" not in out
+
+
+def test_up_one_plane_leaves_existing_anchor_networks_alone(root):
+    daemon = FakeDaemon(networks={spec["name"]: {"internal": spec.get("internal", False)}
+                                  for spec in ANCHOR_NETWORKS.values()})
+    code, out, _ = run(root, "up", "frontend", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert daemon.created == [] and daemon.mutations == []
+    assert out.count("[exists]") == 3
+
+
+def test_up_one_plane_refuses_on_a_drifted_llm_net_before_starting_it(root):
+    daemon = FakeDaemon(networks={"ai-stack_llm-net": {"internal": False}})
+    code, out, _ = run(root, "up", "frontend", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "# up stopped: anchor" in out
+    assert not any("frontend/docker-compose.yml" in " ".join(c) for c in daemon.streamed)
+
+
+def test_up_the_anchor_by_name_still_only_ensures_its_networks(root):
+    daemon = FakeDaemon()
+    code, out, _ = run(root, "up", "anchor", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert sorted(daemon.created) == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
+    assert out.count("declares networks and no service") == 1
+
+
+FRONTEND_NO_PROFILE_LINE = "# no COMPOSE_PROFILES line\n"
+
+
+def _frontend_env_without_profiles(root):
+    env = _MANIFEST.env_path(root, "frontend")
+    env.write_text(re.sub(r"(?m)^COMPOSE_PROFILES=.*\n?", "", env.read_text(encoding="utf-8")), encoding="utf-8")
+    return env
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", "gpu"])
+def test_the_shell_unset_step_brings_in_the_stand_in_the_env_file_step_does(root, monkeypatch, shell):
+    """N10. RED at e30fe42: `unset` alone left a frontend/.env with no COMPOSE_PROFILES
+    line to decide, which starts openwebui-backup and no Open WebUI (X11)."""
+    run(root, "init", "--planes", "frontend", "--force")
+    env = _frontend_env_without_profiles(root)
+    assert stack.compose_profiles_env(_MANIFEST, root, "frontend") == []
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    renders = dict(GPU_RENDERS, **{"frontend/docker-compose.yml": FRONTEND_GPU_RENDER})
+    daemon = FakeDaemon(gpu=False, plane_renders=renders)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    numbered = [ln.strip() for ln in out.splitlines() if re.match(r"^\s+\d+\. ", ln)]
+    unset = [i for i, ln in enumerate(numbered) if "unset COMPOSE_PROFILES in this shell" in ln]
+    setting = [i for i, ln in enumerate(numbered) if "set `COMPOSE_PROFILES=stock` in frontend/.env" in ln]
+    assert unset and setting and unset[0] < setting[0], out
+    # follow them literally
+    monkeypatch.delenv("COMPOSE_PROFILES")
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=stock\n", encoding="utf-8")
+    assert stack.active_profiles(_MANIFEST, stack.State.load(root / stack.STATE_REL), root, "frontend") == {"stock"}
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0 and "has no NVIDIA GPU" not in out, out
+
+
+def test_the_shell_step_adds_nothing_when_the_env_file_already_runs_the_stand_in(root, monkeypatch):
+    """A fresh clone's frontend/.env says `stock`: `unset` alone is enough, no extra step."""
+    run(root, "init", "--planes", "frontend", "--force")
+    env = _frontend_env_without_profiles(root)
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=stock\n", encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", "gpu,tailscale")
+    renders = dict(GPU_RENDERS, **{"frontend/docker-compose.yml": FRONTEND_GPU_RENDER})
+    daemon = FakeDaemon(gpu=False, plane_renders=renders)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "unset COMPOSE_PROFILES in this shell" in out
+    assert "in frontend/.env" not in out

@@ -305,7 +305,7 @@ All three take the same selection:
 | Form | Acts on |
 |---|---|
 | *(nothing)* | the planes this machine **enables**. `up`/`down` add their `requires` closure; `status` does not - reporting on a plane nobody enabled is noise |
-| `<plane>` | exactly that plane. `up <plane>` prints a `#` note naming any requirement it is **not** starting |
+| `<plane>` | exactly that plane. `up <plane>` first ensures the anchor's networks, as a bare `up` does (it creates a missing one and starts nothing else), and prints a `#` note naming any other requirement it is **not** starting |
 | `--all` | every plane the manifest declares except the `manual` ones - what a bare `stack.ps1 up` meant |
 
 A plane name together with `--all` is refused.
@@ -364,7 +364,9 @@ and which code - the rest is not attempted.
   with every profile whose manifest `requires` reaches it**, and every profile
   that declares `stands_in_for` it added (frontend `gpu,tailscale` becomes
   `stock`, so Open WebUI still runs); `unset COMPOSE_PROFILES` when only the
-  shell turns it on; then the refused command **as typed** (`recover inference`,
+  shell turns it on, followed - when the plane's env file would not then run
+  the stand-in (no `COMPOSE_PROFILES` line, say) - by the env-file value that
+  does, so both paths end at the same profiles; then the refused command **as typed** (`recover inference`,
   `up --all`). `--plane` is never offered while a product owns the plane (it
   would be refused). Before this, a GPU-less host got compose's raw `could not
   select device driver "nvidia"` halfway through `up`, after the anchor and

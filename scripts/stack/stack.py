@@ -350,6 +350,19 @@ def order_planes(manifest: Manifest, names) -> list[str]:
 DIRECT = "plane"            # the owner a plane enabled by name (`enable --plane`, `init --planes`) carries
 
 
+def anchors_for(manifest: Manifest, plane: str) -> list[str]:
+    """The networks-only planes (the anchor) `plane` requires, transitively, in order.
+
+    Every plane attaches to the anchor's networks externally, so `up <plane>` and
+    `recover <plane>` ENSURE them first, exactly as a bare `up` does - otherwise a
+    daemon where no bare `up` ever ran fails at compose's "declared as external,
+    but could not be found" (ac-driver-products N9: the GPU refusal's printed
+    re-run step `up inference` did exactly that on a fresh daemon).
+    """
+    closure = dependency_closure(manifest, [plane]) - {plane}
+    return [p for p in order_planes(manifest, closure) if manifest.networks_only(p)]
+
+
 def profile_dependents(manifest, plane: str, removed) -> set:
     """Every profile of `plane` whose `requires` reaches one in `removed` (transitively)."""
     out, changed = set(), True
@@ -1191,7 +1204,7 @@ def _manual_notes(manifest, console, planes, what: str) -> None:
 
 def _requires_note(manifest, console, plane: str, driven) -> None:
     """`up coder` starts coder alone - say what it assumes is already running."""
-    unmet = [dep for dep in manifest.requires(plane) if dep not in driven]
+    unmet = [dep for dep in manifest.requires(plane) if dep not in driven and not manifest.networks_only(dep)]
     if unmet:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
@@ -1439,6 +1452,19 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
         shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
         if shell & named and not run_profiles(manifest, sim, plane):
             steps.append("unset COMPOSE_PROFILES in this shell (compose reads it when the driver passes no flag)")
+            # After the unset compose reads the plane's env file instead, so it must
+            # end up where the env-file step above would put it: the stand-in
+            # included (ac-driver-products N10 / X11: a frontend/.env with no
+            # COMPOSE_PROFILES line started openwebui-backup and no Open WebUI).
+            env_after = new if set(env_now) & named else env_now
+            dropped = profile_dependents(manifest, plane, named) | named
+            missing = [x for x in manifest.stand_ins(plane, dropped) if x not in env_after]
+            if missing:
+                target = manifest.profile_order(plane, {x for x in env_after if x not in dropped} | set(missing))
+                steps.append(f"set `COMPOSE_PROFILES={','.join(target)}` in {rel(root, env_path)} "
+                             f"(after the unset compose reads this file, which "
+                             + (f"sets `{','.join(env_after)}`" if env_after else "sets no profile")
+                             + f"; {', '.join(missing)} runs the plane without a GPU)")
     steps.append(f"`{cli} {verb}` again")
     return steps
 
@@ -1457,6 +1483,11 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
     if not ordered:
         console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
         return EXIT_OK
+    if mode == "one":
+        # The anchor's networks are ENSURED first even for one plane, as a bare `up`
+        # does (anchors_for). Only `up`: `down`/`status <plane>` must never reach the
+        # anchor, and the anchor itself is never `up`-ed, only ensured (_drive).
+        ordered = anchors_for(manifest, plane) + ordered
     driven = [p for p in ordered if not manifest.manual(p)]
     _preflight(manifest, state, root, driven, "up", capture or subprocess_capture)
     if not dry_run:
@@ -3072,7 +3103,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     # the first `up` with "declared as external, but could not be found".
     anchors = [p for p in driven if manifest.networks_only(p)]
     if mode == "one":
-        anchors = [d for d in manifest.requires(plane) if manifest.networks_only(d)] + anchors
+        anchors = anchors_for(manifest, plane) + anchors
     work = [p for p in driven if not manifest.networks_only(p)]
     # A missing submodule is fatal (the plane cannot even be rendered, see
     # plane_render). A key still at its shipped placeholder is NOT, unlike `up`:

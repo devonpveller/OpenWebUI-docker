@@ -98,9 +98,10 @@ Keys, in `inference/.env`:
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. `up` starts the planes in dependency order, inference before the
-frontend: so until `frontend/.env` holds a real `WEBUI_SECRET_KEY`, the `up`
-below starts inference's containers, then stops at the frontend with
+keeps it. `up` starts the planes in dependency order, ties broken by the order
+the manifest declares them, which puts inference before the frontend: so until
+`frontend/.env` holds a real `WEBUI_SECRET_KEY`, the `up` below starts
+inference's containers, then stops at the frontend with
 `# up stopped: frontend exited 1` and exits 1, leaving inference running.
 Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
@@ -113,8 +114,8 @@ python scripts/stack/stack.py disable --plane frontend
 ```
 
 (`python scripts/stack/stack.py enable --plane frontend` turns it back on
-later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
-that key is set.)
+later; it refuses, naming `WEBUI_SECRET_KEY` in `frontend/.env`, until that
+key is set.)
 
 Without a GPU (the gateway alone):
 
@@ -243,7 +244,7 @@ up with your own tools (`lm-models-backup` tars it weekly under `local`).
 | `refused: inference cannot be enabled yet:` naming `LITELLM_DB_PASSWORD` or `LITELLM_MASTER_KEY` | Set both in `inference/.env`; nothing was changed. |
 | `network ai-stack_llm-net declared as external, but could not be found` from a hand-typed `docker compose` | The anchor's networks do not exist yet. `python scripts/stack/stack.py up` creates them. |
 | `[DIFFERS] ai-stack_llm-net: internal is false, declared true` and `up` stops | A network of that name exists and is not internal. The driver never alters one: stop what is attached (`docker network inspect ai-stack_llm-net`), `docker network rm ai-stack_llm-net`, and run `up` again. |
-| `Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu]]` | `local` is on and there is no NVIDIA runtime. This leaves `llm-gateway` recreated but **not running**. Comment `COMPOSE_PROFILES=local` out again, remove the half-created `local` containers with `docker compose -f inference/docker-compose.yml --profile local rm -sf llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup`, and run `python scripts/stack/stack.py up`. |
+| `Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu]]` | `local` is on and the daemon cannot give the upstreams a GPU. On a daemon with no NVIDIA runtime `stack.py up` does not get this far: it refuses first (`refused: this Docker daemon has no NVIDIA GPU`), starts nothing, and prints the steps to follow. This raw error comes only from a daemon that reports an `nvidia` runtime but has no usable device, or from a hand-typed `docker compose`, and it leaves `llm-gateway` recreated but **not running**. Turn `local` off where it was turned on: in `inference/.env`, comment `COMPOSE_PROFILES=local` out; in the state file (`enable inference`, or a product such as `memory` that turns it on), run `python scripts/stack/stack.py disable <that product>` and then `python scripts/stack/stack.py enable --plane inference`. Remove the half-created `local` containers with `docker compose -f inference/docker-compose.yml --profile local rm -sf llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup`, and run `python scripts/stack/stack.py up`. |
 | Every caller gets 401 | Its key is not a virtual key this gateway issued - see [Issue a key for each caller](#issue-a-key-for-each-caller). A caller left on a default such as `mnemory` or `llama` is refused. |
 | A model is missing from `/v1/models` | `docker logs llm-gateway` shows the `[assemble-config]` decision for every fragment: `SKIP local.yaml - needs compose profile 'local'` or `DROP cloud-large ... env not set: OPENROUTER_API_KEY`. |
 | `stack.py health` fails `serving depth: llama-cpp-upstream's /models holds NO .gguf files` | `LM_MODELS_DIR` points at an empty or wrong directory. The line names the host path that was bound. |
