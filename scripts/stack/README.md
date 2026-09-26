@@ -16,11 +16,14 @@ AST check, and the whole suite is hermetic - the docker call is injected, so no
 test ever reaches a daemon.
 
 `stack.ps1` **is a shim over this driver** since 2026-09-19 (`sl-driver-parity`).
-`sl-ob1-profiles` had given that script's plane registry four OB1 profiles to keep
-the thirty running containers starting; the registry is gone, and the same set is
-expressed here instead - `idea-refinery` is `default` and `requires` `research`,
-so `up` passes both, which against the pinned gitlink renders exactly the same
-thirty services.
+`sl-ob1-profiles` had given that script's plane registry all four OB1 profiles to
+keep every running container starting; the registry is gone, and it is NOT
+expressed here as the same set - `idea-refinery` is `default` and `requires`
+`research`, so `up` passes both, which against the pinned gitlink renders
+<!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->, against
+<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
+come from `enable research` or `COMPOSE_PROFILES` in `OB1/docker/.env` (see
+`[declared, not rendered]` below).
 It forwards its arguments and exits with the driver's code; it holds no plane
 registry, no probe and no ordering of its own, so there is nothing in it left to
 drift. It survives because runbooks, plane READMEs and compose comments say
@@ -634,7 +637,7 @@ the gitlink will move to.
 That is how `research`, `wiki` and `notebook` were carried between 2026-09-19
 (sl-ob1-profiles put them in the manifest) and 2026-09-20 (sl-ob1-gitlink bumped
 the gitlink `5005197` -> `fe3e045`): `inventory --check` printed those three, and
-the nine container rows that named them, as `[ ~~ ] declared, not rendered` and
+the container rows that named them, as `[ ~~ ] declared, not rendered` and
 **passed**. **The bump has happened**, so the render carries all four and every
 row is verified for real - `unpinned_profiles` returns the empty set for every
 plane today. The submodule set is read from `.gitmodules`, so this is not an `ob1`
@@ -643,9 +646,11 @@ still drift, so the exemption cannot launder a typo.
 
 **The one thing the operator owes at that bump**, which `--check` said out loud on
 every run until it happened: declare the full profile set once, or `up` starts
-fewer containers than are running. Measured at `fe3e045`: the bare OB1 render is
-**20** services, all four profiles render **30**, and a driver with no ob1 entry in
-its state passes `idea-refinery` + `research` only, which RENDERS **23**. Either
+fewer containers than are running. At the pinned gitlink the bare OB1 render is
+<!-- stack:count:ob1:bare -->**20** services with no profile<!-- /stack:count:ob1:bare -->, all four profiles render
+<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
+entry in its state passes `idea-refinery` + `research` only, which RENDERS
+<!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->. Either
 `python scripts/stack/stack.py enable research`, which merges all four into
 `.stack/state.json` and leaves every other enabled plane alone, or
 `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`, which

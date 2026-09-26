@@ -4003,7 +4003,8 @@ DOCS_BLOCKS: dict[str, list[str]] = {
         "health-count", "profiled-planes",
         "count:ob1:bare", "count:ob1:all", "count:ob1:default", "count:ob1:research",
     ],
-    "scripts/stack/README.md": ["health-probes", "health-count"],
+    "scripts/stack/README.md": ["health-probes", "health-count",
+                                "count:ob1:bare", "count:ob1:all", "count:ob1:default"],
 }
 
 # Opening `<!-- stack:NAME -->`, closing `<!-- /stack:NAME -->`. The LOOSE form

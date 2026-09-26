@@ -283,8 +283,9 @@ the surfaces this plane appears on today are:
   `manifest.csv`, which `scripts/checks/check-owui-drift.ps1` compares with the
   live `webui.db`. `.dockerignore` keeps all three out of both build contexts
 - [`../stack.manifest.toml`](../stack.manifest.toml) - the `[planes.frontend]`
-  table, its three `profiles` sub-tables, and the `chat` product
-- `scripts/stack/stack.py` - the two frontend probes in `HealthSweep.run()`, the
+  table, its `profiles` sub-tables, and the `chat` product
+- `scripts/stack/stack.py` - the frontend probes in `HealthSweep.run()` (listed in
+  `scripts/stack/README.md`, generated), the
   `tailscale_deployed()` guard, and the labels pinned in `PS1_PROBES`
   (`scripts/stack/test_stack.py`). `scripts/stack/stack.ps1` is a shim over that
   driver since 2026-09-19 and holds no plane list of its own
