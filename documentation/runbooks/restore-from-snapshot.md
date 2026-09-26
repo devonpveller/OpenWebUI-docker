@@ -98,28 +98,40 @@ expected git history.
 
 ---
 
-## Before ANY wipe of a host bind mount: resolve the directory from two sources
+## Before ANY wipe of a host bind mount: one call, or nothing
 
-A host bind mount's directory comes from a variable in a plane's `.env` (`OPEN_NOTEBOOK_DIR`,
-`LM_MODELS_DIR`). Three ways to get it wrong, each of which makes the `Remove-Item` below delete
-the wrong directory: a RELATIVE value is resolved by compose against the compose file's own
-directory, not this shell's; a blank value falls back to a compose default; and a variable set in
-THIS SHELL outranks the plane's `.env` in compose's interpolation, so a stray `$env:LM_MODELS_DIR`
-silently redirects a render. So the directory is taken from the container's OWN mount
-(`docker inspect` - the running container, or the one step 1 stopped), compared with the compose
-render made after the shell variable is cleared, and the wipe is REFUSED unless both exist and
-agree. Paste this once per session:
+A host bind mount's directory comes from a plane's `.env` (`OPEN_NOTEBOOK_DIR`, `LM_MODELS_DIR`) or a
+fixed path in its compose file (`../data/tailscale`). Four ways to get it wrong, each of which makes a
+`Remove-Item` delete the wrong directory: a RELATIVE value is resolved by compose against the compose
+file's own directory, not this shell's; a blank value falls back to a compose default; a variable set
+in THIS SHELL outranks the plane's `.env` in compose's interpolation; and - when a runbook block is
+pasted line by line - a refused step does not stop the next line, which then runs with whatever an
+earlier paste left in `$nb` or `$models`.
+
+So every host-bind-mount wipe in this runbook is ONE call to `Invoke-BindRestore`, on one line. It
+takes the directory from the container's OWN mount (`docker inspect` - running, or stopped by step 1),
+compares it with the compose render made after the shell variable is removed, checks the archive's
+`.sha256`, and only then deletes, restores and starts the containers. Everything it uses is a
+parameter or assigned inside it (strict mode, so a name it did not assign is an error, never an older
+value from your session). Any failure THROWS, and the delete is never reached without a resolve that
+returned. There is no separate "resolve", "delete" or "restore" line to paste on its own.
+
+Paste both functions once per session (as one paste; if they are not defined, the call line fails with
+"not recognized" and nothing runs):
 
 ```powershell
 function Resolve-BindTarget {
-    param([string]$Container, [string]$Destination, [string]$ComposeFile,
-          [string]$ComposeProfile, [string]$Service, [string]$ShellVar)
+    param([Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Destination,
+          [Parameter(Mandatory)][string]$ComposeFile, [string[]]$ComposeProfile = @(),
+          [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '')
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
     # 1. A shell variable outranks the plane's .env for compose: remove it from this session.
-    Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue
+    if ($ShellVar) { Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue }
     # 2. What the container really mounts at $Destination (running, or stopped by step 1).
-    #    (JSON, filtered here: Windows PowerShell 5.1 strips the double quotes a Go template
-    #    comparison needs when it passes them to docker.)
-    $mounted = $null
+    #    JSON, filtered here: Windows PowerShell 5.1 strips the double quotes a Go template
+    #    comparison needs when it passes them to docker.
+    $mounted = $null; $mounts = $null; $list = $null
     $mounts = docker inspect $Container --format '{{json .Mounts}}'
     if ($LASTEXITCODE -eq 0 -and $mounts) {
         $list = $mounts | ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
@@ -127,21 +139,56 @@ function Resolve-BindTarget {
         if ($mounted.Count -ne 1) { $mounted = $null } else { $mounted = $mounted[0] }
     }
     # 3. What the compose render says, now from the plane's .env (or its default) only.
-    $cfg = docker compose -f $ComposeFile --profile $ComposeProfile config --format json | ConvertFrom-Json
-    $rendered = $null
-    if ($cfg) {
+    $profileArgs = @(); foreach ($pr in $ComposeProfile) { $profileArgs += @('--profile', $pr) }
+    $cfg = $null; $vols = $null; $rendered = $null
+    $cfg = docker compose -f $ComposeFile @profileArgs config --format json | ConvertFrom-Json
+    if ($cfg -and $cfg.services.PSObject.Properties[$Service]) {
         $vols = $cfg.services.$Service.volumes
         $rendered = @($vols | Where-Object { $_.target -eq $Destination } | ForEach-Object { $_.source })
         if ($rendered.Count -ne 1) { $rendered = $null } else { $rendered = $rendered[0] }
     }
     if (-not $mounted)  { throw "REFUSED: no container '$Container' with a mount at $Destination - nothing proves which directory it uses" }
     if (-not $rendered) { throw "REFUSED: the compose render has no bind source at $Destination for '$Service'" }
-    $norm = { param($p) $x = "$p".Trim().TrimEnd('\', '/').Replace('\', '/'); if ($env:OS -eq 'Windows_NT') { $x.ToLowerInvariant() } else { $x } }
-    if ((& $norm $mounted) -ne (& $norm $rendered)) {
+    # Windows paths compare case-insensitively (lower-cased here); everywhere else case is part of
+    # the name, so the comparison is -cne: /X and /x are different directories.
+    $onWindows = ($env:OS -eq 'Windows_NT')
+    $norm = { param($p) $x = "$p".Trim().TrimEnd('\', '/').Replace('\', '/'); if ($onWindows) { $x.ToLowerInvariant() } else { $x } }
+    if ((& $norm $mounted) -cne (& $norm $rendered)) {
         throw "REFUSED: the container mounts '$mounted' but the render says '$rendered' - find out why before wiping anything"
     }
     if (-not (Test-Path -LiteralPath $rendered -PathType Container)) { throw "REFUSED: '$rendered' is not an existing directory" }
     $rendered
+}
+
+function Invoke-BindRestore {
+    param([Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Destination,
+          [Parameter(Mandatory)][string]$ComposeFile, [string[]]$ComposeProfile = @(),
+          [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '',
+          [Parameter(Mandatory)][string]$BackupDir, [Parameter(Mandatory)][string]$Archive,
+          [Parameter(Mandatory)][string[]]$Start)
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $target = $null; $backup = $null
+    if ($Archive -notmatch '^[A-Za-z0-9._-]+\.tar\.gz$') { throw "REFUSED: '$Archive' is not an archive file name" }
+    $backup = (Resolve-Path -LiteralPath $BackupDir).Path
+    if (-not (Test-Path -LiteralPath (Join-Path $backup $Archive) -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
+    # 1. The directory - resolved, or this call ends here (a throw), before anything is touched.
+    $target = Resolve-BindTarget -Container $Container -Destination $Destination -ComposeFile $ComposeFile `
+        -ComposeProfile $ComposeProfile -Service $Service -ShellVar $ShellVar
+    if (-not $target) { throw 'REFUSED: no target was resolved' }
+    # 2. The archive matches its sentinel, or nothing is deleted.
+    docker run --rm -v "${backup}:/in:ro" alpine sh -c "cd /in && sha256sum -c '$Archive.sha256'"
+    if ($LASTEXITCODE -ne 0) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
+    Write-Host "Wiping and restoring: $target"
+    # 3. Wipe, restore, start - in this order, each checked.
+    Remove-Item -Recurse -Force -Path (Join-Path $target '*')
+    docker run --rm -v "${target}:/dest" -v "${backup}:/in:ro" alpine sh -c "cd /dest && tar xzf '/in/$Archive'"
+    if ($LASTEXITCODE -ne 0) { throw "RESTORE FAILED (exit $LASTEXITCODE): $target was wiped and is not restored - fix the cause and run this same line again" }
+    foreach ($c in $Start) {
+        docker start $c | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "restored, but 'docker start $c' failed (exit $LASTEXITCODE)" }
+    }
+    Write-Host "Restored $Archive into $target; started: $($Start -join ', ')"
 }
 ```
 
@@ -188,25 +235,9 @@ INFO FOR DB;
 # 1. Stop open_notebook.
 docker stop open_notebook
 
-# 2. Verify sentinel.
-docker run --rm -v "${PWD}\backups\open-notebook:/backups:ro" alpine sh -c "cd /backups && sha256sum -c notebook-data-*.sha256 | tail -1"
-
-# 3. Wipe + restore the host bind mount. OPEN_NOTEBOOK_DIR lives in OB1/docker/.env; blank
-#    means ../../../open-notebook, resolved against OB1/docker/ (beside the checkout).
-#    Resolve-BindTarget (above) clears a shell override, compares the stopped container's
-#    own mount with the render, and throws unless both exist and agree.
-$nb = Resolve-BindTarget -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml `
-        -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR
-$nb    # read it: it must be the notebook_data directory you mean to wipe
-$archive = 'notebook-data-20260530T011617Z.tar.gz'
-Remove-Item -Recurse -Force (Join-Path $nb '*')
-docker run --rm `
-  -v "${nb}:/dest" `
-  -v "${PWD}\backups\open-notebook:/in:ro" `
-  alpine sh -c "cd /dest && tar xzf /in/$archive"
-
-# 4. Restart open_notebook.
-docker start open_notebook
+# 2. Verify, wipe, restore and start - ONE line (see "Before ANY wipe"). OPEN_NOTEBOOK_DIR lives
+#    in OB1/docker/.env; blank means ../../../open-notebook, resolved against OB1/docker/.
+Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-20260530T011617Z.tar.gz' -Start open_notebook
 ```
 
 ---
@@ -317,24 +348,22 @@ docker run --rm `
 # 4. Restart via the same plane compose file (compose start, or `up -d`).
 ```
 
-**Tailscale**: the bind mount is `./data/tailscale`, not a named volume.
-Step 3 becomes:
+**Tailscale**: the bind mount is `../data/tailscale` from `frontend/` (i.e. `./data/tailscale`), not a
+named volume - a host bind-mount wipe, so it goes through `Invoke-BindRestore` like the others (see
+"Before ANY wipe"; there is no shell variable to clear). Steps 2-4 become ONE line; `-Start` lists
+openwebui before tailscale (the netns rule; starting a running container is a no-op):
 ```powershell
-Remove-Item -Recurse -Force '.\data\tailscale\*'
-docker run --rm -v "${PWD}\data\tailscale:/dest" -v "${PWD}\backups\tailscale:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+Invoke-BindRestore -Container tailscale -Destination /var/lib/tailscale -ComposeFile frontend/docker-compose.yml -ComposeProfile gpu,tailscale -Service tailscale -BackupDir .\backups\tailscale -Archive 'tailscale-<ts>.tar.gz' -Start openwebui,tailscale
 ```
 
 **LM Studio models**: the bind mount is `LM_MODELS_DIR` from `inference/.env`. A RELATIVE
 value (the `.env.example` default is `../../data/models/gguf`) is resolved by compose against
-`inference/compose/`, not against the repo root this runbook runs from - so never paste the
-variable into a delete - and a `$env:LM_MODELS_DIR` in your shell would outrank `inference/.env`.
-Use `Resolve-BindTarget` (see "Before ANY wipe" above; the container is the one step 1 stopped). Step 3:
+`inference/compose/`, not against the repo root this runbook runs from, and a `$env:LM_MODELS_DIR`
+in your shell would outrank `inference/.env` - so never paste the variable into a delete. Steps
+2-4 become ONE line through `Invoke-BindRestore` (see "Before ANY wipe"; the container is the one
+step 1 stopped):
 ```powershell
-$models = Resolve-BindTarget -Container llama-cpp-upstream -Destination /models -ComposeFile inference/docker-compose.yml `
-            -ComposeProfile local -Service llama-cpp-upstream -ShellVar LM_MODELS_DIR
-$models    # read it: it must be the model store you mean to wipe
-Remove-Item -Recurse -Force (Join-Path $models '*')
-docker run --rm -v "${models}:/dest" -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+Invoke-BindRestore -Container llama-cpp-upstream -Destination /models -ComposeFile inference/docker-compose.yml -ComposeProfile local -Service llama-cpp-upstream -ShellVar LM_MODELS_DIR -BackupDir .\backups\lm-models -Archive 'lm-models-<ts>.tar.gz' -Start llama-cpp-upstream,llama-cpp-embed-upstream
 ```
 **Time this carefully** — restoring 50+ GB over USB or slow disk will
 take a while.
