@@ -4545,6 +4545,23 @@ def test_submodule_mismatch_reads_the_staged_gitlink_head_and_tracked_dirt(tmp_p
     assert "but the staged gitlink pins" in stack.submodule_mismatch(parent, "OB1")
     _git_run(["add", "OB1"], parent)            # stage the moved gitlink
     assert stack.submodule_mismatch(parent, "OB1") is None
+    # INSIDE A HOOK git exports the PARENT's repository-local variables; the
+    # submodule calls must not inherit them (attempt 2's regression).
+    import os
+    saved = {k: os.environ.get(k) for k in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE")}
+    try:
+        os.environ["GIT_INDEX_FILE"] = str(parent / ".git" / "index")
+        os.environ["GIT_DIR"] = str(parent / ".git")
+        os.environ["GIT_WORK_TREE"] = str(parent)
+        assert stack.submodule_mismatch(parent, "OB1") is None
+        (parent / "OB1" / "a.yml").write_text("a: 3\n", encoding="utf-8")
+        assert "uncommitted tracked edits" in stack.submodule_mismatch(parent, "OB1")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     assert "cannot read the staged `NOPE` gitlink" in stack.submodule_mismatch(parent, "NOPE")
 
 
@@ -4576,3 +4593,23 @@ def test_a_stale_table_row_names_the_changed_cell_untruncated():
     assert "cell 3: committed '3', generated '4'" in diff and "row '**a**'" in diff
     diff = stack._first_difference("prose " + long + " 1", "prose " + long + " 2")
     assert long + " 1" in diff and long + " 2" in diff
+
+
+def test_a_plane_table_with_no_renderable_row_is_not_verified_not_partly(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+
+    def no_docker(cmd, cwd):
+        return stack.CommandResult(127, "", "docker: not found")
+
+    code, out, _h = docs(docs_root, "--check", host=no_docker)
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "NOT VERIFIED - DOC.md:5 `plane-table`: no row could be rendered" in out
+    assert "PARTLY VERIFIED -" not in out
+
+
+def test_the_host_path_guard_ignores_case(docs_root):
+    host = DocsHost()
+    host.render["search/docker-compose.yml"]["services"]["gateway"]["container_name"] = str(docs_root).upper()
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == stack.EXIT_REFUSED
+    assert "this checkout's absolute path" in out

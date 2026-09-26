@@ -325,6 +325,18 @@ run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
 #   anything else (a crash, a missing interpreter mid-run)  -> REFUSED
 # Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
 # drift half; with none, SKIPPED and recorded in the summary and the ledger.
+#
+# A MERGE COMMIT IS STRICT (MERGE_HEAD exists: pre-merge-commit execs this file,
+# and a conflicted merge concluded with `git commit` runs it too). A merge into a
+# line is exactly where a stale block must not slip through, so there the gate
+# always runs whatever is staged, and exit 3 (something could not be rendered -
+# OB1 not at the MERGED gitlink, no docker) or a missing Python 3.11 REFUSE the
+# merge instead of skipping it. A fast-forward runs no hook at all, which is why
+# MERGE-PROTOCOL.md requires `--no-ff` into a line.
+_docs_merge=
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    _docs_merge=yes
+fi
 _docs_py=
 for _cand in python3 python; do
     if command -v "$_cand" >/dev/null 2>&1 &&
@@ -339,7 +351,12 @@ if ! _docs_staged=$(git -c core.quotePath=false diff --cached --name-only); then
     print_summary
     exit 1
 fi
-if [ -z "$_docs_py" ]; then
+if [ -z "$_docs_py" ] && [ -n "$_docs_merge" ]; then
+    echo "docs-blocks: this is a MERGE commit and it must verify every generated doc block, but no Python 3.11+ is on PATH."
+    echo "Pre-commit validation failed (generated doc blocks: a merge cannot skip them)!"
+    print_summary
+    exit 1
+elif [ -z "$_docs_py" ]; then
     echo "SKIPPED docs-blocks: needs Python 3.11+ (a stale generated count in the docs would not be caught)"
     GATES_SKIPPED="$GATES_SKIPPED docs-blocks"
 else
@@ -368,6 +385,9 @@ else
                             p == "scripts/stack/stack.py" || (p in want) || ($1 == "S" && p == "OB1")) print $1 "\t" p }')
     _docs_trigger=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^S	//p')
     _docs_unstaged=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^D	//p')
+    if [ -n "$_docs_merge" ]; then
+        _docs_trigger="(merge commit)"
+    fi
     if [ -n "$_docs_trigger" ]; then
         if [ -n "$_docs_unstaged" ]; then
             echo "docs-blocks: these inputs of the generated doc blocks carry UNSTAGED edits, and the check reads the working tree:"
@@ -381,7 +401,15 @@ else
         _docs_rc=$?
         case "$_docs_rc" in
             0) GATES_RAN="$GATES_RAN docs-blocks" ;;
-            3) echo "SKIPPED docs-blocks: the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above were NOT compared on this machine and may be stale; everything else was current. CI's stack-driver job compares every block and refuses a stale one"
+            3) if [ -n "$_docs_merge" ]; then
+                   echo "docs-blocks: this is a MERGE commit, and the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above could not be compared."
+                   echo "  A merge into a line must compare every block: put OB1 at the MERGED gitlink (git submodule update OB1),"
+                   echo "  make docker available, then conclude the merge again (git commit)."
+                   echo "Pre-commit validation failed (generated doc blocks: a merge cannot skip them)!"
+                   print_summary
+                   exit 1
+               fi
+               echo "SKIPPED docs-blocks: the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above were NOT compared on this machine and may be stale; everything else was current. CI's stack-driver job compares every block and refuses a stale one"
                GATES_SKIPPED="$GATES_SKIPPED docs-blocks" ;;
             *) echo "  Regenerate with: python scripts/stack/stack.py docs --write   (then stage the result)"
                echo "Pre-commit validation failed (generated doc blocks: stale, missing or broken - exit $_docs_rc)!"

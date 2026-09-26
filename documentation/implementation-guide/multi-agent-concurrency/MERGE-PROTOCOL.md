@@ -422,6 +422,32 @@ and a bridge turn could be running in it - not that landing needs the operator's
 `new-worktree.ps1` warns about this at provisioning time so it is never a
 surprise at landing time.
 
+**The generated doc blocks must verify at the merge (ac-doc-generator).** A merge into a line
+is **always `--no-ff`**: a fast-forward creates no merge commit, so NO hook runs and nothing
+compares the docs' generated blocks. The merge commit runs `pre-merge-commit`, whose step 4b is
+STRICT on a merge: every block must be compared, so a block that cannot be rendered (OB1 not at
+the MERGED gitlink, a gitignored env file compose needs, no docker) REFUSES the merge rather than
+skipping it. A bare `git worktree add` has no OB1 and no `.env` files, so provision the merge
+worktree before merging, then check it by hand:
+
+```powershell
+$m = '<main-checkout>/.claude/worktrees/merge-line'
+git -C $m submodule update --init OB1                      # OB1 at the line's pin
+foreach ($d in '.', 'frontend', 'inference', 'memory', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
+    if (-not (Test-Path "$m/$d/.env")) { Copy-Item "$m/$d/.env.example" "$m/$d/.env" } }
+foreach ($r in 'daily-digest', 'email-history-import') {
+    if (-not (Test-Path "$m/OB1/recipes/$r/.env")) { New-Item -ItemType File "$m/OB1/recipes/$r/.env" | Out-Null } }
+# after `merge --no-ff ... --no-commit` (or before, on the line): OB1 at the MERGED pin
+git -C $m submodule update OB1
+python "$m/scripts/stack/stack.py" docs --check            # must exit 0 - 3 is NOT mergeable
+```
+
+`docs --check` must exit **0** with OB1 at the merged gitlink; exit 3 means something was not
+compared and is not a pass. Put the result in the merge message beside the attestation. (The hook
+that runs is the one `core.hooksPath` names - the main checkout's - so until a line carrying step
+4b reaches that checkout, this manual check is the gate.) CI also runs the full check on every
+push to `work/**` and on pull requests.
+
 `--no-ff` keeps the branch visible in history, and the merge message carries the evidence -
 the operator's branch policy made mechanical, and what makes a later bisect readable. If the
 merge bumps the `OB1` gitlink, verify the SHA is reachable on the OB1 remote **first**; an

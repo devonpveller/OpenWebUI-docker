@@ -4069,10 +4069,46 @@ class PartlyUnverifiable(Exception):
 _KEEP = "\x00KEEP:"
 
 
-def _git(args, cwd) -> CommandResult:
+# git's REPOSITORY-LOCAL variables (`git rev-parse --local-env-vars`, git 2.x). A
+# hook runs with several of them set for the PARENT repository - GIT_INDEX_FILE
+# above all - and a git call made inside a submodule inherits them, so it reads
+# the parent's index as the submodule's: attempt 2 of this item compared OB1
+# against the parent index and called every clean OB1 "uncommitted tracked
+# edits", which made 4b SKIP every ob1 block on every commit. Asked of git once,
+# with this list as the fallback when git cannot answer.
+_GIT_LOCAL_ENV_FALLBACK = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+_git_local_env_cache: list = []
+
+
+def git_local_env_vars() -> set:
+    if not _git_local_env_cache:
+        names = set(_GIT_LOCAL_ENV_FALLBACK)
+        try:
+            proc = subprocess.run(["git", "rev-parse", "--local-env-vars"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, universal_newlines=True, errors="replace")
+            if proc.returncode == 0:
+                names |= {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+        except OSError:
+            pass
+        _git_local_env_cache.append(names)
+    return _git_local_env_cache[0]
+
+
+def _git(args, cwd, isolate: bool = False) -> CommandResult:
+    """Run git. `isolate=True` for a call aimed at ANOTHER repository (a submodule):
+    the parent's repository-local variables are dropped (see git_local_env_vars)."""
+    env = None
+    if isolate:
+        drop = git_local_env_vars()
+        env = {k: v for k, v in os.environ.items() if k.upper() not in drop}
     try:
         proc = subprocess.run(["git", *args], cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              universal_newlines=True, errors="replace")
+                              universal_newlines=True, errors="replace", env=env)
     except OSError as exc:
         return CommandResult(127, "", str(exc))
     return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
@@ -4094,13 +4130,13 @@ def submodule_mismatch(root: Path, sub: str) -> str | None:
     if staged.code != 0 or len(fields) < 2 or fields[0] != "160000":
         return f"git cannot read the staged `{sub}` gitlink ({(staged.stderr or staged.stdout).strip()[:120]})"
     pinned = fields[1]
-    head = _git(["rev-parse", "HEAD"], root / sub)
+    head = _git(["rev-parse", "HEAD"], root / sub, isolate=True)
     if head.code != 0:
         return f"`{sub}` is not a readable git checkout ({head.stderr.strip()[:120]})"
     if head.stdout.strip() != pinned:
         return (f"the `{sub}` checkout is at {head.stdout.strip()[:7]}, but the staged gitlink pins {pinned[:7]} "
                 f"- `git submodule update {sub}` (or stage the gitlink you mean)")
-    dirty = _git(["status", "--porcelain", "--untracked-files=no"], root / sub)
+    dirty = _git(["status", "--porcelain", "--untracked-files=no"], root / sub, isolate=True)
     if dirty.code != 0:
         return f"git cannot read `{sub}`'s status ({dirty.stderr.strip()[:120]})"
     if dirty.stdout.strip():
@@ -4465,6 +4501,8 @@ class DocsGenerator:
                 f"| **{plane}** ({_code(project)}) | {_code(spec['compose'])} | {counts} | "
                 f"{', '.join(_code(p) for p in ports) or 'none'} | {started} |"
             )
+        if missing and len(missing) == len(self.manifest.order):
+            raise Unverifiable("no row could be rendered: " + "; ".join(missing))
         if missing:
             raise PartlyUnverifiable("\n".join(lines), missing)
         return "\n".join(lines)
@@ -4807,7 +4845,9 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
     bodies.update({name: part.body for name, part in partial.items()})
     for name, body in bodies.items():
         for label, where, value in leaks:
-            if value and value in body:
+            # Paths compare case-insensitively (Windows paths are); secrets exactly.
+            found = (value.lower() in body.lower()) if label.startswith("this ") else (value in body)
+            if value and found:
                 raise Refusal(f"refused: generated block `{name}` would contain {label}"
                               + (f" (from {where})" if where else "")
                               + ". Generated docs must be host-independent - render from .env.example only.")

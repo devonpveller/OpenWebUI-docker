@@ -27,7 +27,9 @@ on:
     # H4's "shown green on a CI run" therefore depends on that promotion; it is
     # not something a feature branch can arrange, and adding `development` to some
     # other trigger would not be that proof either.
-    branches: [main, development, "feature/**", "refactor/**", "update/**"]
+    # work/** since ac-doc-generator: a pushed work branch is compared (stack-driver
+    # docs --check with OB1) BEFORE it lands, not only after a push to development.
+    branches: [main, development, "feature/**", "refactor/**", "update/**", "work/**"]
   pull_request:
   # So the operator can run the H4 jobs on demand on any branch — including on
   # `development` the moment this file lands there.
