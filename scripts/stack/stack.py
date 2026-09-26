@@ -1302,7 +1302,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
     if not lines:
         return
     where = "this Docker daemon" if len(verdicts) == 1 else "the Docker daemon each runs on"
-    steps = gpu_remedy(manifest, state, root, gpu_profiles)
+    steps = gpu_remedy(manifest, state, root, gpu_profiles, verb)
     raise Refusal(
         f"refused: {where} has no NVIDIA GPU (no `nvidia` runtime and no nvidia.com/gpu device in `docker info`), "
         f"and `{verb}` would start:\n" + "\n".join(lines)
@@ -1312,7 +1312,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
     )
 
 
-def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict) -> list[str]:
+def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict, verb: str = "up") -> list[str]:
     """The steps that take the GPU-reserving profiles out, built from WHO turned them on.
 
     `gpu_profiles` is {plane: {profile, ...}} (a None entry = a service that is
@@ -1378,7 +1378,7 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict)
         shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
         if shell & named and not run_profiles(manifest, sim, plane):
             steps.append("unset COMPOSE_PROFILES in this shell (compose reads it when the driver passes no flag)")
-    steps.append(f"`{cli} up` again")
+    steps.append(f"`{cli} {verb}` again")
     return steps
 
 

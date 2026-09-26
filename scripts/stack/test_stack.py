@@ -5164,6 +5164,7 @@ def test_recover_runs_the_gpu_check_before_anything_starts(root):
     assert code == stack.EXIT_REFUSED, out
     assert "has no NVIDIA GPU" in out and "`recover` would start" in out
     assert daemon.streamed == []
+    assert _remedy_commands(out)[-1] == ["recover"]
 
 
 def test_a_requirement_kept_plane_survives_a_save_and_load_as_unowned(root):
