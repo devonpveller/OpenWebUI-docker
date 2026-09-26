@@ -328,10 +328,11 @@ and which code - the rest is not attempted.
 - **a GPU the daemon does not have** (`_gpu_preflight`, `up` only, not under
   `--dry-run`, which reads nothing from docker). The driver asks `docker info`
   once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI device
-  passes and nothing else is read. Otherwise it renders each selected plane and
-  refuses when a service active under the plane's profiles (flags, the plane's
-  env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve them)
-  reserves an NVIDIA device (`deploy.resources.reservations.devices` with
+  passes and nothing else is read. Otherwise it renders each selected plane -
+  interpolated, under exactly the profiles `up` will run (flags, the plane's
+  env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve them);
+  a plane it cannot render is refused, not skipped - and refuses when a service
+  in that render reserves an NVIDIA device (`deploy.resources.reservations.devices` with
   `driver: nvidia` or a `gpu` capability, `runtime: nvidia`, `gpus:`), naming
   each plane, profile and service. For inference the remedy it prints is the
   gateway alone: `disable inference`, then `enable --plane inference`, with

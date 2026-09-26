@@ -1259,14 +1259,24 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
         if verdicts[context] is not False:
             continue
         active = active_profiles(manifest, state, root, plane)
-        cmd = compose_command(manifest, plane, ["--profile", "*", "config", "--no-interpolate", "--format", "json"],
-                              context=context)
+        # The INTERPOLATED render, under exactly the profiles `up` will run: it
+        # lists only the services that would start. Not `--no-interpolate`: the
+        # inference plane's short volume syntax `${LM_MODELS_DIR:-...}:/models:ro`
+        # does not parse uninterpolated ("too many colons", compose v2.33.0), and a
+        # check that skipped an unrenderable plane would pass while checking nothing.
+        cmd = compose_command(manifest, plane, ["config", "--format", "json"], context=context,
+                              profiles=manifest.profile_order(plane, active) if active else ())
         result = capture(cmd, root)
-        if result.code != 0:
-            continue
-        try:
-            services = (json.loads(result.stdout or "{}") or {}).get("services") or {}
-        except ValueError:
+        services = None
+        if result.code == 0:
+            try:
+                services = (json.loads(result.stdout or "{}") or {}).get("services") or {}
+            except ValueError:
+                services = None
+        if services is None:
+            why = (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[:1]
+            lines.append(f"  {plane}: could not render {manifest.plane(plane)['compose']} to check it for GPU "
+                         f"reservations ({why[0] if why else 'not JSON'}) - refusing rather than guessing")
             continue
         by_profile: dict[str, list[str]] = {}
         for key, service in services.items():

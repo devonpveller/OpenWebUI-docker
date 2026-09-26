@@ -5032,7 +5032,7 @@ def test_a_gpu_host_is_not_rendered_for_the_check(root):
     daemon = FakeDaemon(gpu=True, plane_renders=GPU_RENDERS)
     code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
     assert code == 0, out
-    assert not [c for c in daemon.commands if "--profile" in c and "*" in c]
+    assert not [c for c in daemon.commands if "config" in c and "inference/docker-compose.yml" in c]
     assert "docker compose -f inference/docker-compose.yml --profile local up -d" in [
         " ".join(c) for c in daemon.streamed]
 
@@ -5055,3 +5055,26 @@ def test_reserves_nvidia_reads_every_spelling():
     assert stack.reserves_nvidia({"deploy": {"resources": {"reservations": {"devices": [
         {"capabilities": [["gpu"]]}]}}}})
     assert not stack.reserves_nvidia({"image": "x"})
+
+
+def test_the_gpu_check_renders_what_up_will_start_interpolated(root):
+    """Not --no-interpolate: inference's `${LM_MODELS_DIR:-...}:/models:ro` does not parse that way."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    renders = [" ".join(c) for c in daemon.commands if "config" in c and "inference/docker-compose.yml" in c]
+    assert renders == ["docker compose -f inference/docker-compose.yml --profile local config --format json"]
+
+
+def test_a_plane_the_gpu_check_cannot_render_is_refused_not_skipped(root):
+    """A check that skips what it cannot read passes while checking nothing (attempt-2 DinD finding)."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    failing = ("docker", "compose", "-f", "inference/docker-compose.yml", "--profile", "local",
+               "config", "--format", "json")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS, exit_codes={failing: 1})
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "could not render inference/docker-compose.yml to check it for GPU reservations" in out
+    assert daemon.streamed == []
