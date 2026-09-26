@@ -131,14 +131,14 @@ seen*.
 | `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (memory: `.git` and `Dockerfile`), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). Only memory declares one: `../mnemory`, its build context. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
-| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
+| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below; optionally `requires` (other profiles of the plane it needs) and `stands_in_for` (profiles it replaces when the GPU refusal takes them out - frontend's `stock` for `gpu`). |
 
 #### Every profile says whether a default `up` starts it
 
 | Flag | Means | Today |
 |---|---|---|
 | `default = true` | the driver passes `--profile <name>` on every invocation | `ob1`'s `idea-refinery` - parity with what `stack.ps1` always passed |
-| `opt_in = true` | something **other than the driver** turns it on, and the description says what | `inference`'s `local` (`COMPOSE_PROFILES` in the root `.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
+| `opt_in = true` | a **deliberate choice** turns it on - a product that declares it, or something outside the driver - and the description says what | `inference`'s `local` (`enable inference`, the product, or `COMPOSE_PROFILES=local` in `inference/.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
 | `pending = true` | declared here, **not yet in the compose file**; a later item adds it. Enabling one is a no-op and the driver says so | `frontend`'s `gpu`/`tailscale` |
 
 Declaring none of the three is **refused** by `inventory --check`. That gate
@@ -166,6 +166,37 @@ does exactly that union, and passing no flag at all stays safe because compose
 then reads `COMPOSE_PROFILES` itself. That is today's path for every plane except
 `ob1`.
 
+#### ...and `--profile` does not SET `COMPOSE_PROFILES` either
+
+The flags decide which services start; a service that interpolates
+`${COMPOSE_PROFILES}` still sees whatever the variable was. `llm-gateway` does
+(`inference/compose/gateway.yml`), and its config assembler registers the `local`
+model group only when `local` is in that variable. So enabling the inference product (which
+writes `local`) followed by `up` used to pass `--profile local`, start the
+upstreams, and hand the gateway `COMPOSE_PROFILES=""`: **zero** models registered.
+With `COMPOSE_PROFILES=local` in `inference/.env` the same gateway registers five.
+
+So whenever the driver passes any `--profile`, it also sets `COMPOSE_PROFILES`
+in that compose process's environment to **the same list** - `compose_command()`
+returns the argv with the override attached, and the two seams that execute a
+command (`subprocess_runner`, `subprocess_capture`, plus the backup/restore
+pipe) merge it over the inherited environment. The rules:
+
+- The value is `effective_profiles()`: the state file's profiles, the plane's
+  `default` ones, their `requires` closure, **unioned** with the plane's own
+  env-file `COMPOSE_PROFILES`. The variable therefore never says less than the
+  env file did, and never differs from the flags.
+- It **replaces** a `COMPOSE_PROFILES` exported in the shell, exactly as the
+  flags already did, so another plane's value (`gpu,tailscale`) cannot reach the
+  gateway.
+- With **no** flag nothing is set, and compose reads the variable itself (shell,
+  then the plane's env file) - unchanged.
+- It is environment, not argv: `--dry-run` prints the same line as before. Run
+  such a line by hand and the gateway gets the env file's value, not the flags.
+
+Every service that reads `COMPOSE_PROFILES` in any plane's render is that one
+gateway; the check is repeated in the item's findings.
+
 ### Product keys
 
 | Key | Meaning |
@@ -176,13 +207,15 @@ then reads `COMPOSE_PROFILES` itself. That is today's path for every plane excep
 | `surfaces` | `{ plane = ["profile", ...] }` - how a person reaches the engine. Dropped by `--headless`; a plane that appears **only** under `surfaces` is itself dropped by `--headless`. |
 
 Five names (`inference`, `memory`, `search`, `agent-org`, `portal`) are both a
-plane and a product. A bare name resolves to the **plane**, because that is the
-smaller action and the one whose refusal matters: `enable memory` must refuse
-while inference is off rather than quietly enabling inference too. Force the
-other reading with `--product <name>` (or `--plane <name>`). **Both `enable` and
-`disable`** print a `# note:` line whenever a name is ambiguous, saying which
-reading they took - `disable` is the destructive half of the pair, so it is the
-one where a silent reading would be worse.
+plane and a product. A bare name means the **product**: a newcomer copies
+`enable <name>` from the product menu and must get what the menu promises -
+`enable memory` brings inference, `enable inference` turns on `local`.
+`--plane <name>` acts on the plane alone (and `--product <name>` is still
+accepted). **Both `enable` and `disable`** print a `# note:` line whenever a
+shared name is used, saying which reading they took - `disable` is the
+destructive half of the pair, so it is the one where a silent reading would be
+worse - and `enable` then lists every plane it wrote with its profiles. The set
+is derived from the manifest; `test_stack.py` pins it to these five.
 
 ### Shared modules
 
@@ -221,11 +254,32 @@ so the two are never confused.
 {
   "version": 1,
   "planes": {
-    "frontend": { "profiles": [], "context": null },
-    "inference": { "profiles": [], "context": "optiplex-1" }
-  }
+    "frontend":  { "profiles": [], "context": null,
+                   "owners": { "plane": [], "product:coding-agent": [] } },
+    "inference": { "profiles": ["local"], "context": "optiplex-1",
+                   "owners": { "product:inference": ["local"] } }
+  },
+  "products": { "coding-agent": { "headless": false }, "inference": { "headless": false } }
 }
 ```
+
+`profiles` is what every verb reads - the union of what the plane's `owners`
+asked for. `owners` records WHO enabled the plane: `plane` for a direct enable
+(`enable --plane`, `init --planes`, the no-state default) and `product:<name>`
+for each product, each with the profiles it asked for. `products` lists the
+products enabled here. Both exist so `disable <product>` can take out only what
+that product added (see `disable`). **A file written before they existed** has
+neither key: every plane in it loads as enabled directly, owning its current
+profiles, and no product counts as enabled. Reading such a file never rewrites
+it; the first `enable`/`disable`/`init` saves it with the new keys. In a file
+that HAS `products`, an empty `owners` is real: a plane kept only because
+another enabled plane requires it. It loads as unowned (not as a direct enable)
+and goes when its last requirer goes.
+
+`enable` prints each plane's profiles and labels any it did not turn on itself:
+`local (already on: product memory)`, `(default)`, `(required by another
+profile)` - so `enable --plane inference` after `enable memory` does not read
+as though `--plane` turned `local` on.
 
 `context` is the Docker context the plane runs on; when set, the command becomes
 `docker --context optiplex-1 compose -f ...`. That is the data the
@@ -241,7 +295,8 @@ would start the wrong set.
 ### `list`
 
 Planes with `enabled` / `disabled`, the profiles and context of the enabled
-ones, the `up would start:` line, and the products. Read-only, no docker.
+ones, the `up would start:` line, and the products (`[enabled]` on each one the
+state file records). Read-only, no docker.
 
 ### `status` / `up` / `down` - which planes?
 
@@ -274,7 +329,47 @@ after the commands names the script that drives it.
 If a docker command exits non-zero the run stops there and reports which plane
 and which code - the rest is not attempted.
 
-**Refuses:** nothing. An empty enabled set just prints a `#` note.
+**Refuses**, before anything starts (an empty enabled set just prints a `#` note):
+
+- a pinned submodule that is not initialised, or a manifest `keys` entry that is
+  **blank, missing or still its shipped placeholder** (the same rule `enable`
+  applies), or another key a running service reads that is still its shipped
+  placeholder (`_preflight`; also under `--dry-run`);
+- **a plane compose cannot render** (`up` and `recover`, not under `--dry-run`),
+  checked on a GPU-less daemon because the GPU check below reads the render. It
+  is its own refusal, headed `refused: compose cannot render <file>`, carrying
+  compose's own error line, the command, and the plane's env file - never
+  reported as a GPU problem and with no GPU steps (a host with a GPU gets the same
+  error from compose's `up`). Fix what compose names and re-run;
+- **a GPU the daemon does not have** (`_gpu_preflight`, `up` and `recover`, not
+  under `--dry-run`, which reads nothing from docker). The driver asks `docker
+  info` once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI
+  device passes and nothing else is read. Otherwise it renders each selected
+  plane - interpolated, under exactly the profiles `up` will run (flags, the
+  plane's env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve
+  them) - and refuses when a service in that render reserves an NVIDIA device
+  (`deploy.resources.reservations.devices` with `driver: nvidia` or a `gpu`
+  capability, `runtime: nvidia`, `gpus:`), naming each plane, profile and
+  service, then numbered steps. The steps are **built from the state's owners and
+  applied to a copy of the state as they are chosen**, so carrying them out takes
+  the GPU profiles out and the refused command, re-run, gets past THIS refusal
+  (any other check it then meets - a key, a render - speaks for itself):
+  `disable <product>` for each product that asked for the profile (after `enable
+  memory`: `disable memory`); `disable --plane <plane>` only when nothing but a
+  direct enable holds it; an edit of `.stack/state.json` when a direct enable
+  carries it and something else still needs the plane (a pre-products state
+  file); `enable --plane <plane>` when the plane went with its owners (for
+  inference: the gateway without its local backends); for the plane's env-file
+  `COMPOSE_PROFILES`, the exact new value - the GPU profile dropped **together
+  with every profile whose manifest `requires` reaches it**, and every profile
+  that declares `stands_in_for` it added (frontend `gpu,tailscale` becomes
+  `stock`, so Open WebUI still runs); `unset COMPOSE_PROFILES` when only the
+  shell turns it on; then the refused command **as typed** (`recover inference`,
+  `up --all`). `--plane` is never offered while a product owns the plane (it
+  would be refused). Before this, a GPU-less host got compose's raw `could not
+  select device driver "nvidia"` halfway through `up`, after the anchor and
+  earlier planes had started. An unknown answer from `docker info` (docker not
+  reachable, unparsable output) is not a refusal - compose then says why.
 
 ### `restart <plane>` [`--dry-run`]
 
@@ -283,13 +378,17 @@ and which code - the rest is not attempted.
 **Refuses** a `manual` plane, naming its script. Restarting a plane that is
 not enabled prints a note and proceeds.
 
-### `enable <plane|product>` [`--headless`] [`--plane`|`--product`]
+### `enable <product|plane>` [`--headless`] [`--plane`|`--product`]
+
+A name that is both is the **product** (see *Product keys*); `--plane <name>`
+takes the plane.
 
 A **plane**: enables just that plane (plus its `default` profiles).
 
 - **Refuses** when a required plane is not enabled, naming it *and* the command
-  that would enable it:
-  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable inference)`
+  that would enable it - `--plane` when a product shares the name, since the
+  refusal asked for the plane and not for the product's profiles:
+  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable --plane inference)`
 - **Refuses** when one of the plane's `keys` is blank or missing in the env file
   that plane reads, naming the key, whether it is blank or missing, the file, and
   the remedy:
@@ -302,7 +401,10 @@ A **plane**: enables just that plane (plus its `default` profiles).
 
 
 A **product**: enables its planes, their `requires` closure, its `profiles`,
-and its `surfaces` unless `--headless`.
+and its `surfaces` unless `--headless`, marking each plane `product:<name>` in
+the state file's `owners` and the product in `products` (what `disable` reads).
+`memory` declares `inference = ["local"]`: mnemory's `LLM_MODEL` and
+`EMBED_MODEL` are registered at the gateway only under `local`.
 
 - A product does **not** refuse on its own members being off - expanding them is
   the point. It still **refuses** on any member plane's blank key, naming the
@@ -314,10 +416,26 @@ and its `surfaces` unless `--headless`.
 Enabling a `pending` profile is allowed and prints a note saying it changes
 nothing until the item that adds it to the compose file lands.
 
-### `disable <plane|product>`
+### `disable <product|plane>` [`--plane`|`--product`]
 
-**Refuses** while an enabled plane still requires the one being disabled,
-naming the dependents. Disabling something that is not enabled is a no-op note.
+A shared name is the product here too; `--plane <name>` disables the plane alone.
+
+A **product** takes out only what it added. Its `product:<name>` mark comes off
+every plane it enabled, and then a plane is removed only when **no owner is
+left** (no other enabled product, no direct enable) **and no remaining plane
+requires it**; a plane that stays loses only the profiles no remaining owner
+asked for. It prints the planes removed, the planes kept and why (`product
+coding-agent`, `enabled directly`, `required by memory`), and the profiles
+dropped. A product that is **not enabled here** - including every product on a
+state file written before products were tracked - is a no-op note, and nothing
+is written. Measured on the attempt this replaced: `disable portal` with only
+the frontend enabled removed the frontend (Open WebUI), because `portal`'s
+product lists `frontend`.
+
+A **plane** (`--plane`) is removed on its own. **Refuses** while a product
+enabled it (naming the product - disable that instead), and while an enabled
+plane still requires it (naming the dependents). Disabling a plane that is not
+enabled is a no-op note.
 
 ### `doctor`
 
@@ -464,6 +582,8 @@ recover` - its FULL path (`Invoke-EmergencyRecovery`: stop everything in reverse
 order, restart in dependency order, wait for health). Selection is the same as
 `up`: the enabled planes plus their `requires` closure, one plane, or `--all`.
 
+0. **The GPU check** `up` runs (see `up`), before anything stops or starts; not
+   under `--dry-run`.
 1. **Every plane is rendered first** (`docker compose -f <file> [--profile ...]
    config --format json`, with exactly the profiles `up` passes). A plane that
    cannot be rendered is a refusal while the stack is still running.
@@ -527,7 +647,8 @@ and a refusal would leave a crashed host down until the key is rotated. `up`,
 `enable` and `doctor` still refuse it.
 
 **Deliberately not ported:** the diagnostics that choose the "minimal" path,
-the fall-through to `nuclear`, the GPU check, the tailscale `ping 8.8.8.8`, and
+the fall-through to `nuclear`, the .ps1's GPU health check (`nvidia-smi`; the
+driver's own GPU-availability check does run, as step 0), the tailscale `ping 8.8.8.8`, and
 the `nuclear` / `gpu-reset` modes. **Differs from the .ps1 on purpose:** planes
 go in `up`'s order, so inference starts before the frontend; the .ps1's full
 `recover` path starts the frontend first, while its own minimal path and
