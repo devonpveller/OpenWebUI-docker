@@ -20,7 +20,7 @@ def test_lm_studio_connectivity():
     """Test if LM Studio is accessible on the host"""
     try:
         log("INFO", "Testing LM Studio host connectivity...")
-        response = requests.get("http://169.254.83.107:5506/v1/models", timeout=5)
+        response = requests.get("http://<lmstudio-host>:5506/v1/models", timeout=5)
         if response.status_code == 200:
             log("SUCCESS", "LM Studio is running")
             return True
@@ -44,7 +44,7 @@ def check_shared_network():
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)
-            result = sock.connect_ex(('169.254.83.107', 5506))
+            result = sock.connect_ex(('<lmstudio-host>', 5506))
             sock.close()
             if result == 0:
                 log("INFO", "Network connectivity to LM Studio host confirmed")
@@ -178,7 +178,7 @@ def start_socat_proxy():
     wrapper_script = "/tmp/start_socat.sh"
     script_content = """#!/bin/bash
 # Start socat in background with proper logging
-exec socat TCP-LISTEN:8234,fork,reuseaddr,keepalive TCP:169.254.83.107:5506 &
+exec socat TCP-LISTEN:8234,fork,reuseaddr,keepalive TCP:<lmstudio-host>:5506 &
 echo $! > /tmp/socat.pid
 """
     
@@ -428,7 +428,7 @@ def main():
     # Step 1: Test LM Studio connectivity first
     if not test_lm_studio_connectivity():
         log("ERROR", "Cannot proceed - LM Studio is not accessible on host")
-        log("INFO", "Make sure LM Studio is running and accessible on http://169.254.83.107:5506")
+        log("INFO", "Make sure LM Studio is running and accessible on http://<lmstudio-host>:5506")
         log("INFO", "Ensure 'Serve on network' is enabled in LM Studio settings")
         return False
     
@@ -461,7 +461,7 @@ def main():
     log("INFO", "=== SETUP SUMMARY ===")
     log("INFO", "✓ LM Studio connectivity verified")
     log("INFO", "✓ Socat proxy started on port 8234")
-    log("INFO", "✓ Proxy forwarding 127.0.0.1:8234 → 169.254.83.107:5506")
+    log("INFO", "✓ Proxy forwarding 127.0.0.1:8234 → <lmstudio-host>:5506")
     
     if tailscale_success:
         log("SUCCESS", "LM Studio Tailscale connectivity fix completed!")

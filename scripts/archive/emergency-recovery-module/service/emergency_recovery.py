@@ -1060,7 +1060,7 @@ class EmergencyRecoveryModule:
                     "Verify model loading works through proxy"
                 ] if proxy_working and serve_configured else [
                     "Check if LM Studio is running on host",
-                    "Verify LM Studio is accessible on 169.254.83.107:5506",
+                    "Verify LM Studio is accessible on <lmstudio-host>:5506",
                     "Check Tailscale configuration"
                 ]
             })

@@ -6,7 +6,7 @@ Item digest `42b3f17a5d67c8e1` - every record below was checked against it, so a
 
 **Venue: `gym` (kind `gym`) - DECLARED to satisfy a "Gym:" column.** This is what `quadrant/schema.json`'s `venue_kinds.gym` says the kind is worth; it is a configuration assertion, not a measurement.
 
-`D:\Open WebUI\ai-orchestration-gym` @ `main` (via config quadrant.venues.gym.repo) - repository identity `root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d`.
+`<host-root>\ai-orchestration-gym` @ `main` (via config quadrant.venues.gym.repo) - repository identity `root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d`.
 
 **CHECKED** by `quadrant/venue.py` before any cell ran:
 - the venue path is a git repository ROOT (git discovers upward, so a wrong path otherwise silently adopts whatever repository encloses it)

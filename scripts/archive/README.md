@@ -6,7 +6,7 @@ hooks, recovery scripts, or modules. Each subdirectory notes what retired it.
 
 | Set | Retired | Why / replaced by |
 |---|---|---|
-| `lmstudio/` | 2026-08-20 | LM Studio fully retired as an inference target. The 0.11.0 upgrade removed both OWUI connections (`update-owui-to-0-11-0/UPGRADE-PLAN.md`); all inference runs through the LiteLLM gateway → llama.cpp. The four `169.254.83.107` scripts had been dead since 2025; `lmstudio_fix_v2.py` lost its last caller with the retirement. |
+| `lmstudio/` | 2026-08-20 | LM Studio fully retired as an inference target. The 0.11.0 upgrade removed both OWUI connections (`update-owui-to-0-11-0/UPGRADE-PLAN.md`); all inference runs through the LiteLLM gateway → llama.cpp. The four `<lmstudio-host>` scripts had been dead since 2025; `lmstudio_fix_v2.py` lost its last caller with the retirement. The LM Studio host address these files named (a link-local address of one machine) is redacted to `<lmstudio-host>` since 2026-09-26, because this repository is public; set `LMSTUDIO_HOST` / `-LMStudioHost` if one is ever revived. |
 | `legacy-pipes/` | 2026-08-20 | The Sept-2025 per-capability OWUI pipes + template, superseded by the unified status pipe (`scripts/ai_pipes/unified_openwebui_pipe.py` → deployed as `owui/pipes/server_status.py`, `frontend/owui/` since 2026-09-25). Zero code references at retirement. |
 | `legacy-tests/` | 2026-08-20 | The old `test/` directory: 4 of 6 files had `sys.path` pointing at directories that never existed, one tested the retired ollama container; the root-level functional twin targeted the retired LM Studio path. Replaced by pytest smoke tests in the status-pipe consolidation. |
 | `templates/` | 2026-08-20 | CLI/library scaffolding boilerplate from the pipe era; docs-only references. |

@@ -144,11 +144,17 @@ docker stop open_notebook
 # 2. Verify sentinel.
 docker run --rm -v "${PWD}\backups\open-notebook:/backups:ro" alpine sh -c "cd /backups && sha256sum -c notebook-data-*.sha256 | tail -1"
 
-# 3. Wipe + restore the host bind mount.
+# 3. Wipe + restore the host bind mount. Ask COMPOSE where it is - OPEN_NOTEBOOK_DIR in
+#    OB1/docker/.env, or when blank the default ../../../open-notebook, which compose
+#    resolves against OB1/docker/ (i.e. beside the checkout), NOT against this shell's cwd.
+$ob = docker compose -f OB1/docker/docker-compose.yml --profile notebook config --format json | ConvertFrom-Json
+$nb = ($ob.services.open_notebook.volumes | Where-Object { $_.target -eq '/app/data' }).source
+if (-not $nb -or -not (Test-Path -LiteralPath $nb)) { throw "notebook_data bind source not resolved: '$nb'" }
+$nb    # read it: it must be the notebook_data directory you mean to wipe
 $archive = 'notebook-data-20260530T011617Z.tar.gz'
-Remove-Item -Recurse -Force (Join-Path $env:OPEN_NOTEBOOK_DIR 'notebook_data\*')
+Remove-Item -Recurse -Force (Join-Path $nb '*')
 docker run --rm `
-  -v "$env:OPEN_NOTEBOOK_DIR\notebook_data:/dest" `
+  -v "${nb}:/dest" `
   -v "${PWD}\backups\open-notebook:/in:ro" `
   alpine sh -c "cd /dest && tar xzf /in/$archive"
 
@@ -207,7 +213,7 @@ Part K (2026-08-21)** — the live volumes are:
 | mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway` |
 | little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
-| lm-models | bind `LM_MODELS_DIR` (from `inference/.env`) | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
+| lm-models | bind `LM_MODELS_DIR` (from `inference/.env`; relative = against `inference/compose/`) | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
 | ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
 
 **little-coder** is the one service whose backup is a SINGLE archive covering
@@ -271,11 +277,17 @@ Remove-Item -Recurse -Force '.\data\tailscale\*'
 docker run --rm -v "${PWD}\data\tailscale:/dest" -v "${PWD}\backups\tailscale:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
 ```
 
-**LM Studio models**: the bind mount is the host path in `LM_MODELS_DIR`
-(`inference/.env`; below, `$env:LM_MODELS_DIR` holds it). Step 3:
+**LM Studio models**: the bind mount is `LM_MODELS_DIR` from `inference/.env`. A RELATIVE
+value (the `.env.example` default is `../../data/models/gguf`) is resolved by compose against
+`inference/compose/`, not against the repo root this runbook runs from - so never paste the
+variable into a delete. Ask compose for the path it actually mounts. Step 3:
 ```powershell
-Remove-Item -Recurse -Force (Join-Path $env:LM_MODELS_DIR '*')
-docker run --rm -v "${env:LM_MODELS_DIR}:/dest" -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+$cfg = docker compose -f inference/docker-compose.yml --profile local config --format json | ConvertFrom-Json
+$models = ($cfg.services.'llama-cpp-upstream'.volumes | Where-Object { $_.target -eq '/models' }).source
+if (-not $models -or -not (Test-Path -LiteralPath $models)) { throw "model store not resolved: '$models'" }
+$models    # read it: it must be the model store you mean to wipe
+Remove-Item -Recurse -Force (Join-Path $models '*')
+docker run --rm -v "${models}:/dest" -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
 ```
 **Time this carefully** — restoring 50+ GB over USB or slow disk will
 take a while.

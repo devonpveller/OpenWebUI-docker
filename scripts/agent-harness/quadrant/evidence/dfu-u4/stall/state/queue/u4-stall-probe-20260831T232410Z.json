@@ -17,7 +17,7 @@
                                     ],
                    "findings_sink":  "documentation/notes/u4close-findings.md"
                },
-    "anchor_file":  "D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.anchor.json",
+    "anchor_file":  "<host-root>\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.anchor.json",
     "anchor_confirmed_by":  "observe-oracle-on-stall.ps1 (scratch namespace; PLAN C.1 - NOT an operator confirmation)",
     "anchor_confirmed_at":  1788218877,
     "gates":  {
@@ -34,7 +34,7 @@
                                      "profile":  ""
                                  }
               },
-    "test_plan":  "D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.plan.md",
+    "test_plan":  "<host-root>\\ai-stack\\.claude\\worktrees\\wt-u4close\\documentation\\evidence\\dfu-u4\\stall\\state\\queue\\u4-stall-probe-20260831T232410Z.plan.md",
     "thread":  "",
     "attempt":  3,
     "line_mergeable":  false,
@@ -47,7 +47,7 @@
                         "by":  "observer-tester",
                         "verdict":  "fail",
                         "sha":  "97894e7a394edbd0a65970b98c82a02b3d45258f",
-                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "evidence":  "\"<host-root>\\ai-stack\\.venv\\Scripts\\python.exe\" \"<host-root>\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
                         "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
                         "plan_adequate":  true
                     },
@@ -56,7 +56,7 @@
                         "by":  "observer-tester",
                         "verdict":  "fail",
                         "sha":  "f6753fb40b5a1844a21bec7d4b60b4c8d14a179d",
-                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "evidence":  "\"<host-root>\\ai-stack\\.venv\\Scripts\\python.exe\" \"<host-root>\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
                         "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
                         "plan_adequate":  true
                     },
@@ -65,7 +65,7 @@
                         "by":  "observer-tester",
                         "verdict":  "fail",
                         "sha":  "21a9c59a9e67db30bd71bd6c6d52e6b21a32c990",
-                        "evidence":  "\"d:\\Open WebUI\\ai-stack\\.venv\\Scripts\\python.exe\" \"D:\\Open WebUI\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
+                        "evidence":  "\"<host-root>\\ai-stack\\.venv\\Scripts\\python.exe\" \"<host-root>\\ai-stack\\.claude\\worktrees\\wt-u4close\\scripts\\agent-harness\\quadrant\\guards.py\" tests --item u4-stall\nexit 1\nFAIL stall-item/test_normalize.py::test_trims_and_preserves_case: AssertionError: \n2/3 pristine test(s) passed\n",
                         "reason":  "the item\u0027s PRISTINE tests pass against the workspace\u0027s implementation. They cannot all pass - the item is unsatisfiable by construction - so this criterion is what makes each round a REAL failing round rather than an asserted one.",
                         "plan_adequate":  true
                     }

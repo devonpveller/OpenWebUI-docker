@@ -6,7 +6,7 @@ echo "🔧 LM Studio Tailscale Recovery Script"
 echo "======================================"
 
 # Get environment variables
-LMSTUDIO_HOST=${LMSTUDIO_HOST:-169.254.83.107}
+LMSTUDIO_HOST=${LMSTUDIO_HOST:-<lmstudio-host>}
 LMSTUDIO_PORT=${LMSTUDIO_PORT:-5506}
 LMSTUDIO_LOCAL_PORT=8234
 
