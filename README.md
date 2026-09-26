@@ -19,8 +19,8 @@ Docker host.
 | Product | Disk for its images | RAM observed (reference deployment) | GPU |
 |---|---|---|---|
 | **chat** (the quickstart) | 5.1 GB | 1.0 GiB | none |
-| **inference** | 9.7 GB, plus 17-22 GB per chat model and 0.6 GB for the embedding model | 15.3 GiB | NVIDIA: a 24 GB card for the chat models, plus by default a second card for embeddings (below) |
-| **memory** | 2.1 GB | 3.3 GiB | none of its own |
+| **inference** | 9.7 GB, plus 17-22 GB per chat model and 0.6 GB for the embedding model | 13.9 GiB | NVIDIA: a 24 GB card for the chat models, plus by default a second card for embeddings (below) |
+| **memory** | 10.3 GB, plus inference's models: it turns on inference's `local` | 14.1 GiB, the local model servers included | as inference |
 | **search** | 0.6 GB | 0.4 GiB | none |
 | **open-brain** | 7.5 GB | 18.4 GiB | none of its own |
 | **research** | 15.0 GB | 19.3 GiB + chat | none of its own |
@@ -37,7 +37,9 @@ How the figures were measured, so you can re-derive them:
   --images` lists for the product's planes and profiles. `:local` images are
   built on your machine. Data volumes and backups come on top.
 - **RAM:** `docker stats --no-stream`, summed over the same containers on the
-  reference deployment - what it used, not what the product requires. Open Brain's wiki viewer (9.2 GiB) and database
+  reference deployment - what it used, not what the product requires. The
+  inference and memory rows are one sample (memory's is inference's plus
+  mnemory's three containers). Open Brain's wiki viewer (9.2 GiB) and database
   (4.0 GiB) dominate it and grow with your knowledge base. The chat figure is
   a fresh `stock` Open WebUI just after `/health` answered.
 - **CPU:** no service reserves CPU; a few portal and Open Brain sidecars are
@@ -265,10 +267,14 @@ git config core.hooksPath .githooks                           # the pre-commit g
 ```
 
 The hooks block staged secrets, CRLF in shell scripts, inference routed around
-LiteLLM, and stale generated docs, among others. The gates are PowerShell (Windows
-PowerShell or `pwsh`); with only Python, the secret, line-ending and routing
-gates run as Python twins and the rest print `SKIPPED`
-([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
+LiteLLM, and stale generated docs, among others. Most gates are PowerShell (Windows
+PowerShell or `pwsh`). With only Python and `sh`, seven still run: the secret,
+line-ending and routing gates as Python twins, the generated-docs gate
+(`docs-blocks`) and the exec-bit drift gate in Python, and the two file-mode
+gates in `sh`. The seven that need PowerShell (doc placement, corpus exposure,
+project configs, env-file scope and the three OB1 gates) each print `SKIPPED
+<gate>: needs PowerShell`, and the summary line names every gate that ran and
+every one skipped ([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
 
 Before you push, run the checks CI's `ruff` and `stack-driver` jobs run
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Besides the
