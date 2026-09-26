@@ -35,10 +35,12 @@ Backups land in repo-root `./backups/<service>/`, newest-per-service, with a
 | mnemory | volume tar | `mnemory-backup-*.tar.gz` | tar extract (see `backup/mnemory-restore.sh`) |
 | little-coder | volume tar (5 expertise vols) | `little-coder-backup-*.tar.gz` | tar extract |
 | openbrain-wiki | volume tar (git tree + assets) | `openbrain-wiki-*.tar.gz` | tar extract |
-| smolcrawl | volume tar | `smolcrawl-*.tar.gz` | tar extract |
 | tailscale | state-dir tar | `tailscale-*.tar.gz` | tar extract |
 | lm-models | llama.cpp model store tar (~120 GB) | `lm-models-*.tar.gz` | tar extract |
 | caddy / authelia | volume tar (portal) | `caddy-*` / `authelia-*.tar.gz` | tar extract |
+
+`smolcrawl` is retired and has no backup sidecar any more; an old `smolcrawl-*.tar.gz`
+archive has nothing to restore into (see `restore-from-snapshot.md`).
 
 ---
 
@@ -142,7 +144,7 @@ docker compose start open_notebook
 
 ---
 
-## 7. Volume tar restore (openwebui, mnemory, little-coder, wiki, smolcrawl, tailscale, lm-models, caddy, authelia)
+## 7. Volume tar restore (openwebui, mnemory, little-coder, wiki, tailscale, lm-models, caddy, authelia)
 
 General pattern: stop consumers, wipe the volume, extract the tar, restart.
 
@@ -273,3 +275,44 @@ over it. They are not the credentials and never were.
 - Verify container health: `docker ps` / the sysadmin `stack_health` tool.
 - Spot-check the restored data (row counts, a known record, the app UI).
 - Keep the pre-restore snapshot (§3) until you've confirmed the restore is good.
+
+---
+
+## 10. Backup intervals and the maintenance rotation
+
+(Moved here from the root README.)
+
+Every stateful store has exactly one backup sidecar **in its own plane
+project**, writing verified artifacts (plus sha256 sentinels) to
+`./backups/<service>/`, mirrored WEEKLY to the NAS (Sundays at 04:00 -
+`scripts/backup/install-nas-backup-task.ps1`, its `New-ScheduledTaskTrigger
+-Weekly -DaysOfWeek Sunday -At 4am`). Two scheduler idioms: **sleep-loop** for
+interval tars (once at container start, then every `BACKUP_INTERVAL` seconds)
+and **supercronic** for cron-timed DB dumps.
+
+**Changing a backup interval**: set the variable in that plane's `.env` and
+recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml up -d
+<sidecar>`). All intervals are seconds; the defaults live in the compose files:
+
+| Variable | Sidecar (plane) | Default |
+|---|---|---|
+| `MNEMORY_BACKUP_INTERVAL` | mnemory-backup (memory) | 86400 (daily) |
+| `OPENWEBUI_BACKUP_INTERVAL` | openwebui-backup (frontend) | 86400 |
+| `TAILSCALE_BACKUP_INTERVAL` | tailscale-backup (frontend) | 86400 |
+| `LITTLE_CODER_BACKUP_INTERVAL` | little-coder-backup (coder) | 86400 |
+| `LM_MODELS_BACKUP_INTERVAL` | lm-models-backup (inference) | 604800 (weekly; empty = disabled) |
+| `OPENBRAIN_WIKI_BACKUP_INTERVAL` | openbrain-wiki-backup (ob1; set in `OB1/docker/.env`) | 86400 |
+| *(not an interval)* | llm-gateway-backup (inference) sleeps 86400 s, hard-coded in its entrypoint; `caddy-backup` / `authelia-backup` (portal) are supercronic on `*_BACKUP_CRON`, default `0 3 * * *`; `openbrain-db-backup` and `open-notebook-backup` likewise, defaulting to 02:00 and 02:20 UTC | |
+
+**Disk rotation** is autonomous: the `AI-Stack Weekly Maintenance` scheduled
+task (Sundays 03:15) runs `scripts/maintenance/weekly-maintenance.ps1` - a safe
+docker reclaim (dangling images and build cache; **never** a volume prune),
+then the elevated vhdx compaction task, then a post to Mattermost `#sysadmin`.
+Re-register after edits with `weekly-maintenance.ps1 -Register`.
+
+Restore procedures: `documentation/runbooks/restore-from-snapshot.md` (per
+store) and `scripts/backup/restore-from-snapshot.ps1` (orchestrated DR).
+Adding or changing a service? Work through
+[`documentation/runbooks/SERVICE-LIFECYCLE.md`](SERVICE-LIFECYCLE.md)
+- it is what keeps backups, recovery, health probes and the sysadmin plane
+telling the truth.
