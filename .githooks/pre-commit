@@ -8,6 +8,7 @@
 #   0b. hook modes       - the hooks themselves must be 100755
 #   0c. exec bits        - a file the stack runs by path must be 100755
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
+#   1b. identity         - staged additions carry no personal identifier (Python)
 #   2. line endings      - repo convention
 #   2b. doc placement    - new plans belong in the documentation-plans repo
 #   3. gateway routing   - inference must go through the LiteLLM alias
@@ -247,6 +248,39 @@ fi
 run_gate secrets './scripts/checks/check-staged-secrets.ps1' \
     './scripts/checks/check_staged_secrets.py' yes \
     "Pre-commit validation failed (secret detected in staged files)!"
+
+# --- 1b. personal identifiers (Python, every host; ac-identity-gate, 2026-09-26) ---
+# The repository is public. scripts/checks/check_identity.py refuses a staged ADDITION
+# that carries a private/tailnet IP, a *.ts.net name, a C:\Users\<name> path, a path
+# into the checkout's own drive directory, a personal email, or - when this machine has
+# an operator denylist (see .identity-denylist.example; a clone needs none) - one of the
+# operator's own literals, named by entry number and never printed. It names file:line
+# and the class; scripts/checks/identity-allowlist.txt holds what stays, each with a
+# reason. It has no PowerShell twin, so like 0c's drift half it looks for Python 3.8+ on
+# EVERY host, Windows included; with none it is SKIPPED loudly and lands in the summary
+# and the ledger. CI runs `check_identity.py --all` (the generic layer) on every push.
+_id_py=$PY_HOST
+if [ -z "$_id_py" ]; then
+    for _cand in python3 python; do
+        if command -v "$_cand" >/dev/null 2>&1 &&
+           "$_cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+            _id_py=$_cand
+            break
+        fi
+    done
+fi
+if [ -n "$_id_py" ]; then
+    "$_id_py" scripts/checks/check_identity.py
+    if [ $? -ne 0 ]; then
+        echo "Pre-commit validation failed (personal identifier in staged additions)!"
+        print_summary
+        exit 1
+    fi
+    GATES_RAN="$GATES_RAN identity"
+else
+    echo "SKIPPED identity: needs Python 3.8+ (a staged personal identifier would not be caught here; CI's --all run still would)"
+    GATES_SKIPPED="$GATES_SKIPPED identity"
+fi
 
 # --- 2. line endings -------------------------------------------------------
 run_gate line-endings './scripts/checks/validate-lineendings.ps1' \

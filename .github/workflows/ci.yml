@@ -243,6 +243,14 @@ jobs:
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-llm-gateway-routing.ps1
       - name: line endings, the .ps1 under pwsh
         run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/checks/validate-lineendings.ps1
+      # The repository is public: no tracked file may carry a private/tailnet IP, a *.ts.net
+      # name, a user-profile or checkout-drive path, or a personal email outside
+      # scripts/checks/identity-allowlist.txt. A runner has no operator denylist, so this is
+      # the generic layer - the operator layer runs in each operator's own pre-commit.
+      - name: personal identifiers, the whole tracked tree (generic layer)
+        run: python3 scripts/checks/check_identity.py --all
+      - name: personal-identifier gate, its own tests
+        run: python3 scripts/checks/test_check_identity.py
 
   hooks-linux:
     name: "Linux clone commits through .githooks (pwsh, then Python-only)"

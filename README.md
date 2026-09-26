@@ -268,13 +268,14 @@ git config core.hooksPath .githooks                           # the pre-commit g
 
 The hooks block staged secrets, CRLF in shell scripts, inference routed around
 LiteLLM, and stale generated docs, among others. Most gates are PowerShell (Windows
-PowerShell or `pwsh`). With only Python and `sh`, seven still run: the secret,
+PowerShell or `pwsh`). With only Python and `sh`, eight still run: the secret,
 line-ending and routing gates as Python twins, the generated-docs gate
-(`docs-blocks`) and the exec-bit drift gate in Python, and the two file-mode
-gates in `sh`. The seven that need PowerShell (doc placement, corpus exposure,
+(`docs-blocks`), the exec-bit drift gate and the personal-identifier gate in Python,
+and the two file-mode gates in `sh`. The seven that need PowerShell (doc placement, corpus exposure,
 project configs, env-file scope and the three OB1 gates) each print `SKIPPED
 <gate>: needs PowerShell`, and the summary line names every gate that ran and
 every one skipped ([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
+The personal-identifier gate (`scripts/checks/check_identity.py`) refuses a private or tailnet IP, a `*.ts.net` name, a user-profile or checkout-drive path or a personal email; it needs no setup (the optional local denylist is described in `.identity-denylist.example`), and what may stay is in `scripts/checks/identity-allowlist.txt` with a reason.
 
 Before you push, run the checks CI's `ruff` and `stack-driver` jobs run
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Besides the

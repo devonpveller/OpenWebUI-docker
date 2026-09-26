@@ -17,6 +17,8 @@
 #   3. a file carrying a planted gateway key (`gw-` + 40 generated characters, made at
 #      run time so no key literal is ever in the tree) is REFUSED: the commit exits
 #      non-zero, the secret guard names the pattern, and HEAD does not move
+#   4. a file carrying a private LAN address (assembled at run time) is REFUSED by the
+#      identity gate, which names file:line and the class, and HEAD does not move
 #
 # A hook that lost its x bit makes git skip it silently, so step 3 would then COMMIT
 # the key - which is exactly the regression this job exists to catch, and it fails
@@ -111,6 +113,21 @@ check "the secret guard named the gateway-key pattern" \
   "$(echo "$out" | grep -qi 'gateway key'; echo $?)"
 check "HEAD did not move" "$([ "$(git rev-parse HEAD)" = "$before" ]; echo $?)"
 check "the key's text is not echoed in the hook output" "$(echo "$out" | grep -qF "$key"; [ $? -ne 0 ]; echo $?)"
+git rm -q --cached ci-planted-key.txt && rm -f ci-planted-key.txt
+
+echo ""
+echo "== 4. a planted personal identifier is refused (the identity gate, generic layer)"
+# A private LAN address assembled at run time, so no such literal is in the tree.
+before="$(git rev-parse HEAD)"
+ip="192.168.$(( $$ % 200 + 20 )).$(( $$ % 150 + 50 ))"
+printf 'upstream host is %s\n' "$ip" > ci-planted-identity.md
+git add ci-planted-identity.md
+out="$(git commit -m "ci: this commit must be refused too" 2>&1)"; rc=$?
+echo "$out" | sed 's/^/   | /'
+check "the commit carrying a LAN address exited non-zero (exit $rc)" "$([ "$rc" -ne 0 ]; echo $?)"
+check "the identity gate named file:line and the class" \
+  "$(echo "$out" | grep -q 'ci-planted-identity.md:1:[0-9]*: lan-ip'; echo $?)"
+check "HEAD did not move" "$([ "$(git rev-parse HEAD)" = "$before" ]; echo $?)"
 
 echo ""
 if [ "$fails" -eq 0 ]; then echo "RESULT: PASS"; exit 0; fi
