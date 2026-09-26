@@ -67,9 +67,12 @@ Keys, in `coder/.env`:
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. So the `up` below starts the frontend first, and until
-`frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
-`# up stopped: frontend exited 1` and never reaches this plane. Either give
+keeps it. `up` starts the planes in dependency order - inference, then the
+frontend, then this plane - so until `frontend/.env` holds a real
+`WEBUI_SECRET_KEY`, the `up` below starts the inference plane (the
+`llm-gateway*` containers), stops at the frontend with
+`# up stopped: frontend exited 1`, and leaves those running with none of this
+plane's containers started. Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
 [its README](../frontend/README.md#enable-and-start); skip its `init`, which
 refuses once `.stack/state.json` exists, and the frontend is enabled already -
@@ -79,7 +82,9 @@ or run this plane without it:
 python scripts/stack/stack.py disable --plane frontend
 ```
 
-(`python scripts/stack/stack.py enable --plane frontend` turns it back on later.)
+(`python scripts/stack/stack.py enable --plane frontend` turns it back on
+later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
+that key is set.)
 
 ```bash
 cp coder/.env.example coder/.env
@@ -126,7 +131,7 @@ Restart one service with the full `-f` form:
 docker compose -f coder/docker-compose.yml up -d open-terminal
 ```
 
-`../little-coder/config` is mounted read-only and read at boot: restart
+`little-coder/config` is mounted read-only and read at boot: restart
 `little-coder` after editing `little-coder.config.yaml` or `models.json`.
 
 **Backup and restore.** Six named volumes, `coder_little-coder-*`:
@@ -194,7 +199,7 @@ places this plane appears:
 
 - [`docker-compose.yml`](docker-compose.yml) and
   [`../little-coder/`](../little-coder) (the images and the config).
-- The agent's context window comes from `../little-coder/config/models.json`,
+- The agent's context window comes from `little-coder/config/models.json`,
   and `LITTLE_CODER_NO_CTX_PROBE=1` is deliberate: the gateway does not forward
   llama.cpp's `/props`. Keep the declared window under the model's per-request
   share of the llama.cpp context (`ctx-size / n_parallel`).

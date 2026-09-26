@@ -89,9 +89,12 @@ with `env_file:`); every other service names the variables it takes.
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. So the `up` below starts the frontend first, and until
-`frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
-`# up stopped: frontend exited 1` and never reaches this plane. Either give
+keeps it. `up` starts the planes in dependency order - inference, then the
+frontend, then this plane - so until `frontend/.env` holds a real
+`WEBUI_SECRET_KEY`, the `up` below starts the inference plane (the
+`llm-gateway*` containers), stops at the frontend with
+`# up stopped: frontend exited 1`, and leaves those running with none of this
+plane's containers started. Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
 [its README](../frontend/README.md#enable-and-start); skip its `init`, which
 refuses once `.stack/state.json` exists, and the frontend is enabled already -
@@ -101,7 +104,9 @@ or run this plane without it:
 python scripts/stack/stack.py disable --plane frontend
 ```
 
-(`python scripts/stack/stack.py enable --plane frontend` turns it back on later.)
+(`python scripts/stack/stack.py enable --plane frontend` turns it back on
+later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
+that key is set.)
 
 ```bash
 cp agent-org/docker/.env.example agent-org/docker/.env
@@ -252,7 +257,7 @@ plane holds four such parts, and a default `up` starts none of them:
 
 - **`ao-egress` would deny OpenRouter.** Its `AO_EGRESS_ALLOWLIST` (default
   `openrouter.ai`) is set in the compose file, but the image it runs
-  (`../../little-coder/docker/Dockerfile.egress`) reads its allowlist from a
+  (built from `little-coder/docker/Dockerfile.egress`) reads its allowlist from a
   file baked in at build time - `github.com` and `githubusercontent.com` - and
   nothing reads the variable. Turning the cloud lane on needs the allowlist
   wired the way `ao-git-egress` wires it, or the host added to the image.
