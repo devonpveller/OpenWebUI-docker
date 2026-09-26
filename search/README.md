@@ -78,7 +78,7 @@ account, and a printed value each for `GATEWAY_API_KEY` and
 `SEARXNG_SECRET_KEY`. Then:
 
 ```bash
-python scripts/stack/stack.py enable search
+python scripts/stack/stack.py enable --plane search
 python scripts/stack/stack.py up
 ```
 

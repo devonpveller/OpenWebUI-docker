@@ -105,11 +105,11 @@ Put one printed value in `LITELLM_DB_PASSWORD=` and another, prefixed `sk-`, in
 `LITELLM_MASTER_KEY=`. Then:
 
 ```bash
-python scripts/stack/stack.py enable inference
+python scripts/stack/stack.py enable --plane inference
 python scripts/stack/stack.py up
 ```
 
-`enable inference` refuses while either key is blank or still its shipped
+`enable --plane inference` refuses while either key is blank or still its shipped
 value, naming each one. `up` starts the anchor's networks, this plane, and
 anything else you have enabled. Four containers start. The gateway registers
 **no model** - `docker logs llm-gateway` ends its `[assemble-config]` lines with
@@ -123,11 +123,10 @@ With a GPU, also uncomment one line in `inference/.env`:
 COMPOSE_PROFILES=local
 ```
 
-and run `python scripts/stack/stack.py up` again. Set it in the file rather than
-passing `--profile local` (or enabling the `inference` *product*, which passes
-that flag): the gateway reads `COMPOSE_PROFILES` from `inference/.env` to decide
-which models to register, so with the flag alone the llama.cpp servers start and
-the gateway still registers none of their models.
+and run `python scripts/stack/stack.py up` again. Set it in the file: the gateway
+reads `COMPOSE_PROFILES` from `inference/.env` to decide which models to
+register, so a hand-typed `docker compose ... --profile local` starts the
+llama.cpp servers while the gateway still registers none of their models.
 
 ### Issue a key for each caller
 

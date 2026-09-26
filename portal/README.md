@@ -106,7 +106,7 @@ Keys, in `portal/.env`:
 
 | Key | What happens if it is wrong |
 |---|---|
-| `CLOUDFLARE_TUNNEL_TOKEN`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY` | Blank: `portal-on.ps1` refuses before starting anything, and `stack.py enable portal` / `doctor` refuse. |
+| `CLOUDFLARE_TUNNEL_TOKEN`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY` | Blank: `portal-on.ps1` refuses before starting anything, and `stack.py enable --plane portal` / `doctor` refuse. |
 | `AUTHELIA_JWT_SECRET` | Blank: as above, and the compose file itself refuses to render. Still the shipped `change-me-...`: `enable` and `doctor` refuse. |
 | `PUBLIC_DOMAIN`, `ACME_EMAIL` | Still the shipped `ai.example.com` / `you@example.com`: `enable` and `doctor` refuse. |
 | `DIGEST_TO`, `DIGEST_FROM` | Not checked by any script. The alerter crash-loops with `DIGEST_TO is required` while it is blank. |
@@ -161,7 +161,7 @@ The driver knows this plane and declines to drive it:
 |---|---|
 | `python scripts/stack/stack.py up portal` | starts nothing, and prints `# portal is not driven by stack.py - start it with scripts/portal/portal-on.ps1 / scripts/portal/portal-off.ps1` |
 | `python scripts/stack/stack.py restart portal`, `recover portal` | refuse with the same pointer |
-| `python scripts/stack/stack.py enable portal` | checks the keys above, then records the plane; `up` still skips it |
+| `python scripts/stack/stack.py enable --plane portal` | checks the keys above, then records the plane; `up` still skips it |
 | `python scripts/stack/stack.py backup portal` | archives the four named volumes (below) |
 
 `stack.py health` has no portal probe; `portal-status.ps1` is what watches this

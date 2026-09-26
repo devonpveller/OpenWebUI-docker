@@ -62,7 +62,7 @@ The charters are also delivered to workers as Agent Skills under
 ## Requirements
 
 - **Docker Engine with the compose plugin, and Python 3.11+** for the driver.
-- **The inference plane, enabled and serving.** `enable agent-org` refuses while
+- **The inference plane, enabled and serving.** `enable --plane agent-org` refuses while
   it is not enabled; every local model call goes through the `llama-cpp` alias.
 - **For `workers`:** the images `little-coder:local` and
   `little-coder-open-terminal:local`, which the coder plane builds
@@ -96,7 +96,7 @@ Put a printed value in each of `MM_DB_PASSWORD` and `AO_DB_PASSWORD`, and a
 virtual key in `AO_LOCAL_API_KEY` and `LC_LLAMA_API_KEY`. Then:
 
 ```bash
-python scripts/stack/stack.py enable agent-org
+python scripts/stack/stack.py enable --plane agent-org
 python scripts/stack/stack.py up
 ```
 
@@ -130,7 +130,7 @@ whenever `little-coder/config/` changes):
 python agent-org/scripts/gen-worker-configs.py
 ```
 
-`enable agent-org` (the plane) leaves the pool off. Start it by hand:
+`enable --plane agent-org` leaves the pool off. Start it by hand:
 
 ```bash
 docker compose -f agent-org/docker/docker-compose.yml --profile workers up -d
@@ -212,7 +212,7 @@ database `agent_bridge`.
 
 | Symptom | Cause and fix |
 |---|---|
-| `refused: agent-org requires inference, which is not enabled (python scripts/stack/stack.py enable inference)` | Enable the inference plane first. |
+| `refused: agent-org requires inference, which is not enabled` | Enable the inference plane first: `python scripts/stack/stack.py enable --plane inference`. |
 | `refused: agent-org cannot be enabled yet:` naming `MM_DB_PASSWORD` / `AO_DB_PASSWORD` | Set them in `agent-org/docker/.env`. |
 | `agent-bridge` restarting, `Illegal header value b'Bearer '` in its log | `AO_MATTERMOST_BOT_TOKEN` is blank. Create the bot (above). |
 | 401 from the gateway in `agent-bridge` or worker logs | `AO_LOCAL_API_KEY` or `LC_LLAMA_API_KEY` is not a virtual key the gateway issued. |

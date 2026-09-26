@@ -140,7 +140,7 @@ its script exits 0 when there is nothing to archive.
 
 | Symptom | Cause and fix |
 |---|---|
-| `refused: coder requires inference, which is not enabled (python scripts/stack/stack.py enable inference)` | Enable the inference plane first. |
+| `refused: coder requires inference, which is not enabled` | Enable the inference plane first: `python scripts/stack/stack.py enable --plane inference`. |
 | `refused: coder cannot be enabled yet:` naming `OPEN_TERMINAL_API_KEY` | Set it in `coder/.env`. |
 | 401 from the gateway in `docker logs little-coder` | `LC_LLAMA_API_KEY` is not a virtual key the gateway issued. |
 | `network ai-stack_llm-net declared as external, but could not be found` from a hand-typed `docker compose` | The anchor's networks are missing; `python scripts/stack/stack.py up` creates them. |
