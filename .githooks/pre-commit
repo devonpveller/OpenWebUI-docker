@@ -84,9 +84,17 @@ print_summary() {
     echo "Pre-commit gates (host: ${PS_HOST:-${PY_HOST:-none}}) - RAN:${GATES_RAN:- (none)} | SKIPPED:${GATES_SKIPPED:- (none)}"
 }
 
-# run_gate <gate> <ps1> <python twin, or ''> <never-skip: yes|no> <failure line>
+# run_gate <gate> <ps1> <python twin, or ''> <never-skip: yes|no> <failure line> [may-report-skip: yes]
+#
+# THE SIXTH ARGUMENT (ac-corpus-gate, 2026-09-26): a gate passed `yes` there may exit 78 to
+# say "nothing on this checkout for me to check" - it prints its own reason first - and the
+# hook records it SKIPPED, exactly like a gate with no host. Only such a gate: for every
+# other gate 78 is a failure like any non-zero code, and a never-skip gate is never given
+# the sixth argument (run_gate ignores it there). Today one gate uses it: corpus-exposure,
+# when the OB1 submodule is not initialised. 78 means nothing special anywhere else - CI
+# reads it as a failure.
 run_gate() {
-    _gate=$1; _ps1=$2; _py=$3; _never_skip=$4; _fail=$5
+    _gate=$1; _ps1=$2; _py=$3; _never_skip=$4; _fail=$5; _may_skip=${6:-no}
     if [ -n "$PS_HOST" ]; then
         "$PS_HOST" -NoProfile -ExecutionPolicy Bypass -File "$_ps1"
         _rc=$?
@@ -100,6 +108,11 @@ run_gate() {
         exit 1
     else
         echo "SKIPPED $_gate: needs PowerShell (install pwsh to run it)"
+        GATES_SKIPPED="$GATES_SKIPPED $_gate"
+        return 0
+    fi
+    if [ $_rc -eq 78 ] && [ "$_may_skip" = yes ] && [ "$_never_skip" != yes ]; then
+        echo "SKIPPED $_gate: the gate found nothing on this checkout it can check (its reason is above)"
         GATES_SKIPPED="$GATES_SKIPPED $_gate"
         return 0
     fi
@@ -283,8 +296,16 @@ run_gate gateway-routing './scripts/checks/check-llm-gateway-routing.ps1' \
 # shapes, its blind spots and the category of text that can clear a counted site on every run
 # (`-ShowShapes` prints them alone). Read those before treating a green here as protection.
 # Self-test: the script's -SelfTest switch.
+#
+# A CLONE WITHOUT OB1 (ac-corpus-gate, 2026-09-26). Every producer it recognises is in the
+# OB1 submodule, so in a clone made without --recurse-submodules the scan found zero sites
+# and the vacuity guard refused EVERY commit. The gate now exits 78 in exactly that case (the
+# index records the OB1 gitlink and OB1/.git is absent) when the rest of the tree is clean,
+# and the trailing `yes` below lets this line record it SKIPPED; the gate prints the
+# `git submodule update --init OB1` remedy. A violation outside OB1 still fails; with OB1
+# checked out nothing changed; CI checks OB1 out and reads 78 as a failure.
 run_gate corpus-exposure './scripts/checks/check-corpus-exposure-producers.ps1' '' no \
-    "Pre-commit validation failed (a corpus insert does not state its plane)!"
+    "Pre-commit validation failed (a corpus insert does not state its plane)!" yes
 
 # --- 4. project configs (staged-aware, K.8) ---------------------------------
 # Any staged yml => render all compose projects against .env.example;

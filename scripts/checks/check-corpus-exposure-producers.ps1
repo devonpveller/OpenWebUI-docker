@@ -171,6 +171,10 @@
   checks only that the producer STATES one, which is what the NOT NULL column asks for.
 
   Exit 0 = no violation in the recognised shapes, 1 = at least one, or the scan was vacuous.
+  Exit 78 = NOT CHECKED: this checkout declares the OB1 submodule but has not initialised it,
+  and the scan of the rest found no violation (see "OB1 NOT ON THIS MACHINE" near the exit).
+  .githooks/pre-commit records 78 as SKIPPED for this gate only; every other caller - CI's
+  run-check.ps1 included - reads it as a failure, because 78 is not 0.
 
 .PARAMETER SelfTest
   Write synthetic producers into a temp directory and require the scan to behave. SIX
@@ -863,9 +867,48 @@ async function ingest(row) {
     }
 }
 
+# --- OB1 NOT ON THIS MACHINE (ac-corpus-gate, 2026-09-26) ----------------------------------
+# Every corpus insert site this gate recognises lives in the OB1 submodule. A clone made
+# without --recurse-submodules has an EMPTY OB1/ directory, so the scan below finds zero
+# sites and the vacuity guard refused EVERY commit - a doc-only one included - whenever a
+# PowerShell host ran the hook. The guard was right that such a green is vacuous; it was wrong
+# to call it a failure of the commit. "OB1 is not here" is a different sentence from "OB1 is
+# here and the scan found nothing", and only the second is a defect.
+#
+# THE RULE. OB1 is MISSING when this repo's index records it as a gitlink (mode 160000) AND
+# OB1/.git does not exist. `git clone` without submodules and `git submodule deinit` both
+# leave the directory with no .git in it; a checkout at ANY commit has one, and is scanned
+# exactly as before. Anything the probe cannot establish - git absent, $Root not a git
+# checkout, no gitlink recorded (a scratch copy handed to -Root) - leaves $ob1Missing false,
+# which is today's behaviour: the vacuity guard FAILS. The skip has to be proven, not assumed.
+#
+# WHAT STILL RUNS WHEN IT IS MISSING. The scan of everything else is not skipped: a
+# violation found outside OB1 still FAILS the commit (exit 1, the normal report). Only the
+# no-violation outcome changes - it cannot be a green, because the half of the tree holding
+# the producers was not there, so it exits 78 and the hook records the gate as SKIPPED.
+# CI checks OB1 out (`submodules: recursive` on the job that runs this gate), so there it is
+# never missing, and 78 would fail the step anyway.
+$ob1Missing = $false
+try {
+    $ob1Index = @(& git -C $Root ls-files -s -- OB1 2>$null)
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($entry in $ob1Index) {
+            if ([string]$entry -match '^160000 [0-9a-f]{40,64} 0\tOB1$') {
+                if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $Root 'OB1') '.git'))) { $ob1Missing = $true }
+            }
+        }
+    }
+} catch { $ob1Missing = $false }
+
 $violations = @(Find-Violations -ScanRoot $Root)
 $sites = $script:InsertSites
 $scanned = $script:FilesScanned
+
+if ($ob1Missing -and $violations.Count -eq 0) {
+    Write-Host "[check-corpus-exposure-producers] SKIPPED - the OB1 submodule is not initialised in this checkout, and every recognised corpus producer lives in it. Run: git submodule update --init OB1 (CI checks it)." -ForegroundColor Yellow
+    Write-Host "  The rest of the tree was scanned: $scanned file(s), $sites recognised insert site(s), 0 violations. That is NOT a green for the corpus - OB1 was not scanned." -ForegroundColor DarkGray
+    exit 78
+}
 
 # THE GREEN IS NOT ALLOWED TO BE VACUOUS. This gate exists because a sweep's search term
 # defined its finding; a sweep that matched nothing at all would repeat that in the loudest
