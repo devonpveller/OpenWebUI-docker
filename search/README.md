@@ -103,6 +103,11 @@ containers **without recreating them** - a changed `.env` value or compose
 setting needs an `up -d`, not a restart. `health` takes no plane argument, runs
 every probe in the workspace, and exits with the number of failures.
 
+Portable (Linux, no PowerShell): `python3 scripts/stack/stack.py recover search`
+restarts vpn/redis, then searxng, then gateway, each gated on its healthcheck;
+`stats` shows the four containers. The plane owns no named volume, so `backup
+search` refuses and says so.
+
 By hand:
 
 ```powershell

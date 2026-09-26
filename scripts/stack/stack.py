@@ -12,14 +12,17 @@ Standard library only (Python >= 3.11, for tomllib), so a fresh host needs
 nothing but Python and Docker. That rule is enforced by a test in
 scripts/stack/test_stack.py and by the item's anchor.
 
-Verbs:  status  up  down  restart <plane>  enable  disable  list  doctor  init
-        health  stats  inventory --write|--check
-        status/up/down take an optional plane, or --all for every declared
-        plane (the `manual` ones excepted); with neither they act on the set
-        this machine ENABLES.
-        `--dry-run` on up/down/restart prints the exact docker command lines and
-        runs nothing. `status`, `health` and `inventory --check` are READ-ONLY:
-        no lease, nothing started, stopped or recreated.
+Verbs:  status  up  down  restart <plane>  recover  enable  disable  list
+        doctor  init  health  stats  backup <plane>  restore <plane>
+        inventory --write|--check
+        status/up/down/recover take an optional plane, or --all for every
+        declared plane (the `manual` ones excepted); with neither they act on
+        the set this machine ENABLES.
+        `--dry-run` on up/down/restart/recover prints the exact docker command
+        lines and runs nothing (recover still RENDERS each plane's compose file,
+        read-only, because its plan is built from the render). `status`,
+        `health`, `stats` and `inventory --check` are READ-ONLY: no lease,
+        nothing started, stopped or recreated.
 
 Everything - refusals included - is written to STDOUT, never stderr, and the
 exit code carries the failure. PowerShell 5.1 turns a native command's stderr
@@ -37,12 +40,15 @@ Design and every verb's refusal cases: scripts/stack/README.md.
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -1063,6 +1069,18 @@ def _requires_note(manifest, console, plane: str, driven) -> None:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
 
+def _placeholder_lines(manifest, state, root, planes, capture) -> list[str]:
+    lines = []
+    for plane in planes:
+        if missing_submodule(manifest, root, plane):
+            continue
+        found = placeholder_keys(manifest, root, plane) + shipped_placeholders(
+            manifest, state, root, plane, capture)
+        for key, why, env_path in found:
+            lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
+    return lines
+
+
 def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
     """Refuse BEFORE anything runs: a missing submodule, or a key still at its placeholder.
 
@@ -1074,7 +1092,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
     `enable`/`doctor` name those, and each plane's compose `:?` guards refuse
     them at render time.
     """
-    submodule_lines, placeholder_lines = [], []
+    submodule_lines = []
     for plane in planes:
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
@@ -1082,13 +1100,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
-    for plane in planes:
-        if missing_submodule(manifest, root, plane):
-            continue
-        found = placeholder_keys(manifest, root, plane) + shipped_placeholders(
-            manifest, state, root, plane, capture)
-        for key, why, env_path in found:
-            placeholder_lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
+    placeholder_lines = _placeholder_lines(manifest, state, root, planes, capture)
     if submodule_lines or placeholder_lines:
         steps = []
         if submodule_lines:
@@ -1135,8 +1147,9 @@ def cmd_down(manifest, state, root, console, runner, plane, every: bool, dry_run
 def cmd_restart(manifest, state, root, console, runner, plane: str, dry_run: bool) -> int:
     if plane == "all":
         raise Refusal(
-            "refused: `restart all` would restart every plane at once. Use `stack.py down` then "
-            "`stack.py up`, or scripts/recovery/emergency-recovery.ps1 for an ordered restart with health gates."
+            "refused: `restart all` would restart every plane at once. Use `stack.py recover` for an ordered "
+            "restart with health gates (scripts/recovery/emergency-recovery.ps1 is the Windows original), or "
+            "`stack.py down` then `stack.py up`."
         )
     manifest.plane(plane)
     manual = manifest.manual(plane)
@@ -2065,31 +2078,1185 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
 
 
 # --------------------------------------------------------------------------
-# stats
+# operate: the rendered plane (shared by recover, backup and restore)
+# --------------------------------------------------------------------------
+#
+# ac-ops-portable. Everything below is derived from compose's OWN render of a
+# plane (`docker compose -f <file> [--profile ...] config --format json`, with
+# the same --profile flags `up` passes), never from a hand list: which services
+# run, in what order (`depends_on`, plus `network_mode: service:X`), how long a
+# healthcheck may take, and which named volumes the plane owns. A hand list is
+# how scripts/recovery/emergency-recovery.ps1 ended up carrying eight service
+# arrays that each had to be edited whenever a container moved.
+
+# The throwaway container that reads and writes a volume for backup/restore.
+# The same image every backup sidecar in this repo already runs
+# (frontend/docker-compose.yml's `x-backup-sidecar`), so a host that has run
+# any plane has it; it is pulled otherwise.
+HELPER_IMAGE = "alpine:3.21"
+# Images whose data directory is a live database. A running one is never tarred
+# (a torn copy restores as a corrupt cluster); the plane's dump sidecar is named.
+DB_ENGINES = ("postgres", "pgvector", "surrealdb")
+GATE_POLL_SECONDS = 3
+# How long a container with NO healthcheck must stay running, unrestarted, before
+# its gate passes. A service that declares a longer restart delay
+# (deploy.restart_policy.delay) gets that plus a poll instead, so one crash-and-
+# restart always lands inside the window.
+SETTLE_SECONDS = 15
+# A container with no COMPOSE healthcheck may still have an IMAGE one; this is
+# the budget for that case, since the render cannot say what the image declares.
+DEFAULT_GATE_TIMEOUT = 300
+GATE_MARGIN_SECONDS = 30
+STOP_TIMEOUT_SECONDS = 30
+BACKUP_MANIFEST = "manifest.json"
+BACKUP_FORMAT = 1
+
+# Seams for the gate loop, so a test can run a four-minute timeout in no time.
+sleep = time.sleep
+monotonic = time.monotonic
+
+
+class Service(NamedTuple):
+    key: str
+    container: str | None       # container_name, when the render sets one
+    depends: dict                # service key -> depends_on condition
+    netns: str | None            # X in `network_mode: service:X`
+    healthcheck: dict | None     # the compose healthcheck, None when absent or disabled
+    image: str
+    mounts: tuple                # ((type, source, target, read_only), ...)
+    environment: dict = {}       # the rendered environment (never printed)
+    restart_delay: float = 0.0   # deploy.restart_policy.delay, seconds
+    restart: str = ""            # `restart:` (or deploy.restart_policy.condition), "" when unset
+    healthcheck_disabled: bool = False  # `healthcheck: disable: true` / test NONE (overrides the image's)
+
+
+class PlaneRender(NamedTuple):
+    plane: str
+    project: str
+    services: dict               # key -> Service
+    volumes: dict                # volume key -> {"name": ..., "external": bool}
+
+
+def plane_render(manifest: Manifest, state: State, root: Path, plane: str, capture) -> PlaneRender:
+    """The plane as compose renders it under the profiles `up` would pass.
+
+    Interpolated (unlike the anchor's render), because depends_on conditions and
+    healthcheck timings may come from variables. The output is parsed, never
+    printed: an interpolated render carries the plane's secrets.
+    """
+    compose_rel = manifest.plane(plane)["compose"]
+    submodule = missing_submodule(manifest, root, plane)
+    if submodule:
+        raise Refusal(f"refused: {compose_rel} is missing because the {submodule} submodule is not "
+                      f"initialised - run {submodule_remedy(submodule)}")
+    cmd = compose_command(manifest, plane, ["config", "--format", "json"], context=state.context_of(plane),
+                          profiles=effective_profiles(manifest, state, root, plane))
+    result = capture(cmd, root)
+    if result.code != 0:
+        why = (result.stderr or result.stdout or "no output").strip().splitlines()[:3]
+        raise Refusal(f"refused: could not render {compose_rel} (`{' '.join(cmd)}` exited {result.code}):\n  "
+                      + "\n  ".join(why))
+    try:
+        data = json.loads(result.stdout or "{}")
+    except ValueError as exc:
+        raise Refusal(f"refused: the render of {compose_rel} is not JSON ({exc})") from None
+    project = data.get("name") or ""
+    services = {}
+    for key, spec in (data.get("services") or {}).items():
+        spec = spec or {}
+        depends = spec.get("depends_on") or {}
+        if isinstance(depends, list):
+            depends = {name: "service_started" for name in depends}
+        else:
+            depends = {name: (cond or {}).get("condition", "service_started") for name, cond in depends.items()}
+        mode = spec.get("network_mode") or ""
+        health = spec.get("healthcheck") or None
+        disabled = False
+        if health and (health.get("disable") or list(health.get("test") or [])[:1] == ["NONE"]):
+            health, disabled = None, True
+        elif health and not health.get("test"):
+            # Timing fields only (`interval: 5s`, no `test`): compose MERGES them onto the
+            # image's healthcheck, so whether one exists is the image's answer. Counting it
+            # as a healthcheck let `service_healthy` onto an image without one pass
+            # (ac-ops-portable2 attempt 1, attack i).
+            health = None
+        mounts = tuple(
+            (m.get("type"), m.get("source"), m.get("target"), bool(m.get("read_only")))
+            for m in (spec.get("volumes") or []) if isinstance(m, dict)
+        )
+        env = spec.get("environment") or {}
+        if isinstance(env, list):
+            env = dict(item.split("=", 1) if "=" in item else (item, "") for item in env)
+        policy = (spec.get("deploy") or {}).get("restart_policy") or {}
+        delay = policy.get("delay")
+        restart = str(spec.get("restart") or "")
+        if not restart and policy.get("condition"):
+            restart = {"none": "no", "any": "always"}.get(str(policy["condition"]), str(policy["condition"]))
+        services[key] = Service(key, spec.get("container_name"), depends,
+                                mode[len("service:"):] if mode.startswith("service:") else None,
+                                health, str(spec.get("image") or ""), mounts,
+                                {str(k): str(v) for k, v in env.items() if v is not None},
+                                parse_duration(delay, 0.0), restart, disabled)
+    volumes = {}
+    for key, spec in (data.get("volumes") or {}).items():
+        spec = spec or {}
+        volumes[key] = {"name": spec.get("name") or f"{project}_{key}", "external": bool(spec.get("external"))}
+    return PlaneRender(plane, project, services, volumes)
+
+
+_DURATION = re.compile(r"(\d+(?:\.\d+)?)(h|ms|us|µs|ns|m|s)")
+_DURATION_SECONDS = {"h": 3600, "m": 60, "s": 1, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "ns": 1e-9}
+
+
+def parse_duration(value, default: float) -> float:
+    """Seconds from a compose duration: '15s', '1m0s', '1m30s', '500ms'.
+
+    compose renders durations as Go strings; a bare number is Go's nanoseconds.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, (int, float)):
+        return float(value) / 1e9
+    parts = _DURATION.findall(str(value))
+    if not parts:
+        return default
+    return sum(float(n) * _DURATION_SECONDS[unit] for n, unit in parts)
+
+
+def gate_timeout(service: Service, override: int | None = None) -> int:
+    """How long recover waits for one container.
+
+    The healthcheck's OWN worst case, not a guess per service: docker marks a
+    container unhealthy after `retries` consecutive failures once `start_period`
+    is over, so start_period + retries x (interval + timeout) + one interval is
+    the longest it can take to reach a verdict. A margin is added. Docker's
+    defaults (30s / 30s / 3 / 0s) fill any field the compose file leaves out.
+    """
+    if override:
+        return int(override)
+    hc = service.healthcheck
+    if not hc:
+        return DEFAULT_GATE_TIMEOUT
+    interval = parse_duration(hc.get("interval"), 30)
+    probe = parse_duration(hc.get("timeout"), 30)
+    retries = int(hc.get("retries") or 3)
+    start = parse_duration(hc.get("start_period"), 0)
+    return int(start + retries * (interval + probe) + interval + GATE_MARGIN_SECONDS)
+
+
+def start_levels(render: PlaneRender) -> list[list[str]]:
+    """The plane's services in dependency LEVELS: level n needs only levels < n.
+
+    Edges: every `depends_on` naming a rendered service (a `required: false`
+    dependency that its profile left out is simply absent), and `network_mode:
+    service:X`, which is a harder edge than any depends_on - the tenant lives
+    INSIDE X's network namespace. Ties inside a level are alphabetical, which is
+    also the order compose's JSON render lists services in.
+    """
+    services = render.services
+    deps = {}
+    for key, svc in services.items():
+        wanted = {d for d in svc.depends if d in services}
+        if svc.netns:
+            if svc.netns not in services:
+                raise Refusal(f"refused: {render.plane}/{key} shares the network namespace of '{svc.netns}', "
+                              "which this plane's render does not contain")
+            wanted.add(svc.netns)
+        deps[key] = wanted
+    levels, placed, remaining = [], set(), set(services)
+    while remaining:
+        ready = sorted(k for k in remaining if deps[k] <= placed)
+        if not ready:
+            raise Refusal(f"refused: the depends_on edges of {render.plane} contain a cycle involving "
+                          + ", ".join(sorted(remaining)))
+        levels.append(ready)
+        placed.update(ready)
+        remaining.difference_update(ready)
+    check_netns(render, levels)
+    return levels
+
+
+def check_netns(render: PlaneRender, levels) -> None:
+    """THE NETNS RULE, as a check on the plan rather than a comment beside it.
+
+    `tailscale` runs `network_mode: service:openwebui` (frontend/docker-compose.yml),
+    so it lives inside openwebui's network namespace. Restarting openwebui makes a
+    new namespace and orphans a tailscale that is not restarted AFTER it - "Up",
+    but with no connectivity and no serve config. So, for every provider X in the
+    plan: every tenant of X is in the plan too (X is never restarted alone), and
+    each tenant is started in a LATER level than X and stopped in an EARLIER one
+    (stop runs the levels in reverse). emergency-recovery.ps1 encodes the same
+    rule by hand in Invoke-MinimalRecovery (restart openwebui, Wait-ForHealthy,
+    then restart tailscale) and, for its full path, relies on the project's
+    depends_on.
+    """
+    level_of = {key: n for n, level in enumerate(levels) for key in level}
+    for key, svc in render.services.items():
+        provider = svc.netns
+        if not provider or (key not in level_of and provider not in level_of):
+            continue
+        if key not in level_of:
+            raise Refusal(f"refused: {render.plane}/{provider} would be restarted without {key}, which shares "
+                          "its network namespace; never restart one alone")
+        if provider not in level_of or level_of[provider] >= level_of[key]:
+            raise Refusal(f"refused: {render.plane}/{key} shares {provider}'s network namespace and must "
+                          f"start after it")
+
+
+def settle_seconds(service: Service) -> float:
+    """The settle window for a container with no healthcheck (see wait_gate)."""
+    if service.restart_delay:
+        return max(SETTLE_SECONDS, service.restart_delay + GATE_POLL_SECONDS)
+    return SETTLE_SECONDS
+
+
+GATE_COMPLETES = "completes"   # something waits on it with service_completed_successfully
+GATE_HEALTHY = "healthy"       # a compose healthcheck
+GATE_ONE_SHOT = "one-shot"     # restart "no" (or none): exit 0 is success, or it settles running
+GATE_SETTLE = "settle"         # a restart policy and no healthcheck: running, not restarted
+
+
+def image_has_healthcheck(capture, root, docker, image: str):
+    """True / False from `docker image inspect` (read-only), or None when the image is not here."""
+    found = capture(docker + ["image", "inspect", "--format", "{{json .Config.Healthcheck}}", image], root)
+    if found.code != 0:
+        return None
+    try:
+        data = json.loads((found.stdout or "").strip() or "null")
+    except ValueError:
+        return None
+    test = list((data or {}).get("Test") or [])
+    return bool(test) and test[:1] != ["NONE"]
+
+
+def check_depends_conditions(renders: dict, capture, root, dockers: dict) -> list[str]:
+    """Refuse, BEFORE anything is stopped, a depends_on condition compose itself would refuse.
+
+    recover starts each level with `up -d --no-deps`, which skips compose's own condition
+    checks, so they are made here (review of ac-ops-portable, 2026-09-25: a service_healthy
+    dependency on a target with no healthcheck waited out the settle window and printed
+    "recovered", where plain `docker compose up` refuses the configuration):
+      * `service_healthy` on a target with no healthcheck - none in the compose file (or
+        `disable: true`) and none in its image (`docker image inspect`, read-only);
+      * `service_completed_successfully` on a target with `restart: always` or
+        `unless-stopped` - docker restarts it after it exits, so it can never complete.
+    Returns warnings for what cannot be decided (an image not on this daemon); raises
+    Refusal for a definite violation, naming plane, service and target.
+    """
+    problems, warnings = [], []
+    for plane, render in renders.items():
+        for svc in render.services.values():
+            for target, condition in sorted(svc.depends.items()):
+                dep = render.services.get(target)
+                if dep is None:
+                    continue
+                if condition == "service_healthy" and not dep.healthcheck:
+                    if dep.healthcheck_disabled:
+                        problems.append(f"  {plane}/{svc.key} depends_on {target} with condition service_healthy, "
+                                        f"but {target} disables its healthcheck in the compose file")
+                        continue
+                    has = image_has_healthcheck(capture, root, dockers[plane], dep.image)
+                    if has is False:
+                        problems.append(f"  {plane}/{svc.key} depends_on {target} with condition service_healthy, "
+                                        f"but {target} has no healthcheck (none in the compose file, none in its "
+                                        f"image {dep.image})")
+                    elif has is None:
+                        warnings.append(f"# WARNING: {plane}/{svc.key} depends_on {target} with condition "
+                                        f"service_healthy; {target} has no compose healthcheck and its image "
+                                        f"{dep.image} is not on this daemon, so whether it has one is decided "
+                                        f"after the pull: {target}'s running container is checked before "
+                                        f"{svc.key} starts")
+                if condition == "service_completed_successfully" and dep.restart in ("always", "unless-stopped"):
+                    problems.append(f"  {plane}/{svc.key} depends_on {target} with condition "
+                                    f"service_completed_successfully, but {target} has restart: {dep.restart}, "
+                                    "so docker restarts it after it exits and it can never complete")
+    if problems:
+        raise Refusal("refused: a depends_on condition in these renders cannot be met - docker compose's own "
+                      "`up` refuses such a configuration, and recover's `up -d --no-deps` would not check it:\n"
+                      + "\n".join(problems)
+                      + "\nNothing was stopped. Fix the compose file (add the healthcheck, or change the "
+                        "condition), then re-run.")
+    return warnings
+
+
+def gate_kind(render: PlaneRender, key: str, completes=None) -> str:
+    """Which gate a service gets, derived from the render (attempt 3).
+
+    completes - another service depends_on it with `service_completed_successfully`:
+                its dependants may start only after it EXITS 0. Attempt 2 let such a
+                service pass the settle window while still running and started its
+                dependant 3.4 s before it finished (tester, R2).
+    healthy   - a compose healthcheck: wait for `healthy`.
+    one-shot  - `restart: "no"` or no restart policy at all: exiting is allowed, so exit 0
+                passes (attempt 2 refused an init job's exit 0 as "a crash", R1), a
+                non-zero exit fails, and a service that keeps running settles as below.
+    settle    - a restart policy and no healthcheck: running, unrestarted, for the window.
+    """
+    if completes is None:
+        completes = one_shot_services(render)
+    if key in completes:
+        return GATE_COMPLETES
+    svc = render.services[key]
+    if svc.healthcheck:
+        return GATE_HEALTHY
+    if svc.restart in ("", "no"):
+        return GATE_ONE_SHOT
+    return GATE_SETTLE
+
+
+def one_shot_services(render: PlaneRender) -> set[str]:
+    """Services something waits on with `service_completed_successfully`: exit 0 is their success."""
+    return {dep for svc in render.services.values()
+            for dep, cond in svc.depends.items() if cond == "service_completed_successfully"}
+
+
+def container_of(render: PlaneRender, key: str) -> str:
+    """The container name recover inspects. compose's own default when none is set."""
+    return render.services[key].container or f"{render.project}-{key}-1"
+
+
+# `.State` plus the container's RestartCount, which docker keeps OUTSIDE .State
+# (a top-level field). The first cut read it from .State, found None every time,
+# and so no container without a healthcheck could ever pass its gate - the DinD
+# rehearsal caught it; the unit fake had modelled the same misreading.
+_STATE_FORMAT = "{{json .State}}|{{.RestartCount}}"
+
+
+def container_state(capture, root, docker, name) -> dict | None:
+    """The container's .State, with "RestartCount" added from the top level; None when absent."""
+    found = capture(docker + ["inspect", "--format", _STATE_FORMAT, name], root)
+    if found.code != 0:
+        return None
+    text, _sep, restarts = (found.stdout or "").strip().rpartition("|")
+    try:
+        data = json.loads(text or "{}")
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["RestartCount"] = int(restarts) if restarts.strip().isdigit() else None
+    return data
+
+
+def _last_health_output(state: dict) -> str:
+    log = ((state or {}).get("Health") or {}).get("Log") or []
+    if not log:
+        return ""
+    text = " ".join(str((log[-1] or {}).get("Output") or "").split())
+    return text[:200]
+
+
+def wait_gate(capture, root, docker, name: str, timeout: int, kind: str = GATE_SETTLE,
+              settle: float = SETTLE_SECONDS):
+    """(passed, what was seen). Polls `docker inspect` until a verdict or the timeout.
+
+    healthy                          -> pass
+    unhealthy                        -> fail at once (docker already gave up)
+    exited / dead                    -> fail, unless a one-shot service exited 0
+    restarting                       -> fail at once: docker is inside its restart
+                                        policy, i.e. the container already crashed
+    running with NO health status    -> a SETTLE WINDOW: it must stay `running`, with
+                                        the same RestartCount and the same StartedAt,
+                                        for `settle` seconds from the first poll that
+                                        saw it running. Any restart or exit inside the
+                                        window fails the gate with a named reason. A
+                                        container that crashes LATER than the window
+                                        still passes - that is the one thing this gate
+                                        cannot see (findings O4).
+    anything else (starting, created, absent) -> keep waiting
+
+    kind=completes: only the EXIT counts - exit 0 passes, any other exit fails, and
+    running (or restarting under an on-failure policy) keeps waiting until the timeout.
+    kind=one-shot: as above for running containers, but an exit 0 at any point passes.
+    """
+    started = monotonic()
+    window = None            # (monotonic at first running, RestartCount, StartedAt)
+    last = "no container"
+    while True:
+        state = container_state(capture, root, docker, name)
+        now = monotonic()
+        elapsed = int(now - started)
+        if state is not None:
+            status = state.get("Status") or "?"
+            health = (state.get("Health") or {}).get("Status")
+            restarts = state.get("RestartCount")
+            last = f"{status}/{health}" if health else status
+            if kind == GATE_COMPLETES:
+                if status in ("exited", "dead"):
+                    code = state.get("ExitCode")
+                    if code == 0:
+                        return True, f"completed (exit 0) after {elapsed}s"
+                    return False, (f"exited with exit code {code} - a service others wait on with "
+                                   "service_completed_successfully must exit 0")
+                if elapsed >= timeout:
+                    return False, f"did not complete within {timeout}s (last seen: {last})"
+                sleep(GATE_POLL_SECONDS)
+                continue
+            if health == "healthy":
+                return True, f"healthy after {elapsed}s"
+            if health == "unhealthy":
+                output = _last_health_output(state)
+                return False, "unhealthy" + (f" - last healthcheck output: {output}" if output else "")
+            if status in ("exited", "dead"):
+                code = state.get("ExitCode")
+                if kind == GATE_ONE_SHOT and code == 0:
+                    return True, f"exited 0 after {elapsed}s (restart: \"no\" - a one-shot, exit 0 is its success)"
+                if window is not None:
+                    return False, (f"exited with exit code {code} {int(now - window[0])}s after it was first "
+                                   "seen running (a crash inside the settle window)")
+                return False, f"{status} with exit code {code}"
+            if status == "restarting":
+                return False, f"restart loop: docker reports it restarting (RestartCount {restarts})"
+            if status == "running" and not health:
+                if window is None:
+                    window = (now, restarts, state.get("StartedAt"))
+                elif restarts != window[1] or state.get("StartedAt") != window[2]:
+                    return False, (f"restart loop: it restarted {int(now - window[0])}s into the "
+                                   f"{int(settle)}s settle window (RestartCount {window[1]} -> {restarts})")
+                elif now - window[0] >= settle:
+                    return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
+                                  f"RestartCount {restarts}, not restarted)")
+        if elapsed >= timeout:
+            return False, f"no verdict within {timeout}s (last seen: {last})"
+        sleep(GATE_POLL_SECONDS)
+
+
+# --------------------------------------------------------------------------
+# recover - the portable equivalent of emergency-recovery.ps1's `recover`
 # --------------------------------------------------------------------------
 
 
-def cmd_stats(root: Path, console: Console, runner) -> int:
-    """Delegate to scripts/stack/stack-stats.ps1.
+def _gate_note(render: PlaneRender, key: str, timeout: int) -> str:
+    svc = render.services[key]
+    kind = gate_kind(render, key)
+    if kind == GATE_COMPLETES:
+        what = "exits 0 (another service waits on it with service_completed_successfully)"
+    elif kind == GATE_HEALTHY:
+        what = "healthy (compose healthcheck)"
+    elif kind == GATE_ONE_SHOT:
+        what = (f"exits 0, or runs unrestarted for {int(settle_seconds(svc))}s (restart: "
+                f"{svc.restart or 'unset'} - a one-shot may exit)")
+    else:
+        what = (f"running and not restarted for {int(settle_seconds(svc))}s (restart: {svc.restart}; no "
+                "compose healthcheck; an image healthcheck is honoured if it has one)")
+    return f"#   gate [{kind}]: {container_of(render, key)} {what}, up to {timeout}s"
 
-    That script reads the llm-queue /observe board and the LiteLLM spend ledger
-    through `docker exec ... psql`, and it is PowerShell-only today. Rather than
-    reimplement a hundred lines of report formatting for a host that cannot be
-    the one asking, this verb REFUSES off Windows and says what to run instead.
-    A verb that silently prints nothing and exits 0 is the failure class this
-    repo hunts; `stats` is not going to join it.
+
+def cmd_recover(manifest, state, root, console, runner, capture, plane, every: bool, dry_run: bool,
+                timeout: int | None = None) -> int:
+    """Stop the selected planes in reverse dependency order, then start them in order, gated.
+
+    The ordered, health-gated restart that emergency-recovery.ps1's `recover`
+    mode performs in its full path (Invoke-EmergencyRecovery: Phase 1 graceful
+    shutdown in reverse order, Phase 3 restart in dependency order with
+    Wait-ForHealthy), with every order derived instead of listed:
+
+      planes     - the manifest's `requires` graph, ties broken by declaration
+                   order: the same order `up` uses (order_planes).
+      containers - each plane's render, in depends_on levels (start_levels), so
+                   the netns rule (openwebui before tailscale, check_netns) and the
+                   inference rule (both llama.cpp upstreams and llm-queue before
+                   llm-gateway, inference/compose/gateway.yml's depends_on) come out
+                   of the compose files that define them.
+      gates      - EVERY container, not one per plane, each for its own
+                   healthcheck's worst case (gate_timeout).
+
+    Every plane is rendered BEFORE anything is stopped, so a plane that cannot be
+    rendered is a refusal with the stack still running, not a half-stopped stack.
+    The first failed gate STOPS the run with a line naming the plane, the service,
+    the container and what docker reported; the planes after it stay stopped and
+    are listed.
+
+    NOT ported, deliberately: the pre-flight diagnostics and "minimal" path, the
+    fall-through to `nuclear`, the GPU check and the tailscale ping - see
+    scripts/stack/README.md (`recover`).
     """
-    script = root / "scripts" / "stack" / "stack-stats.ps1"
-    if not script.is_file():
-        raise Refusal(f"refused: {rel(root, script)} is missing, so there is nothing to report")
-    if not WINDOWS:
-        raise Refusal(
-            "refused: `stats` reads the LiteLLM ledger through scripts/stack/stack-stats.ps1, which is "
-            "PowerShell 5.1 only and is not ported. Run it on the Windows host (powershell -NoProfile "
-            "-ExecutionPolicy Bypass -File scripts/stack/stack-stats.ps1), or read the queue board "
-            "directly at llm-queue's /observe/queue."
-        )
-    return runner(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], root)
+    if plane and manifest.manual(plane):
+        raise Refusal(f"refused: {plane} is not driven by stack.py - recover it with {manifest.manual(plane)}")
+    ordered, mode = select_planes(manifest, state, plane, every, "recover")
+    if not ordered:
+        console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `recover --all`)")
+        return EXIT_OK
+    manual = [p for p in ordered if manifest.manual(p)]
+    driven = [p for p in ordered if not manifest.manual(p)]
+    # The anchor's networks are ENSURED first even for one plane: every plane
+    # attaches to them externally, and a recovery on a daemon where they were
+    # lost (a Docker Desktop reset, a `network prune`) would otherwise fail at
+    # the first `up` with "declared as external, but could not be found".
+    anchors = [p for p in driven if manifest.networks_only(p)]
+    if mode == "one":
+        anchors = [d for d in manifest.requires(plane) if manifest.networks_only(d)] + anchors
+    work = [p for p in driven if not manifest.networks_only(p)]
+    # A missing submodule is fatal (the plane cannot even be rendered, see
+    # plane_render). A key still at its shipped placeholder is NOT, unlike `up`:
+    # recover brings back a deployment that is already running on those values,
+    # and refusing would leave a crashed host down until the key is rotated -
+    # which on this repo's own host is deferred by operator decision D1. It is
+    # printed first, loudly; `up`, `enable` and `doctor` still refuse it.
+    for line in _placeholder_lines(manifest, state, root, work, capture):
+        console.line("# WARNING (not a refusal for recover; `up` refuses it):" + line[1:])
+    renders = {p: plane_render(manifest, state, root, p, capture) for p in work}
+    levels = {p: start_levels(renders[p]) for p in work}
+    one_shots = {p: one_shot_services(renders[p]) for p in work}
+    # Compose's depends_on conditions, checked here because `up -d --no-deps` skips them.
+    # Before the plan is printed and before anything stops - dry run included.
+    condition_warnings = check_depends_conditions(
+        renders, capture, root,
+        {p: ["docker"] + (["--context", state.context_of(p)] if state.context_of(p) else []) for p in work})
+
+    for line in condition_warnings:
+        console.line(line)
+    console.line(f"# recover: {', '.join(anchors + work)} (dependency order from {MANIFEST_NAME}; containers "
+                 "in depends_on order from each plane's render)")
+    if mode == "one":
+        dependents = [p for p in manifest.order
+                      if state.is_enabled(p) and plane in dependency_closure(manifest, [p]) and p != plane]
+        if dependents:
+            console.line(f"# note: {', '.join(dependents)} require {plane} and are not restarted by this; "
+                         "they reconnect on their own or need `stack.py recover` (the whole enabled set)")
+    docker = {p: ["docker"] + (["--context", state.context_of(p)] if state.context_of(p) else []) for p in work}
+
+    console.line("== stop, reverse dependency order")
+    for p in reversed(work):
+        for level in reversed(levels[p]):
+            cmd = compose_command(manifest, p, ["stop", "--timeout", str(STOP_TIMEOUT_SECONDS), *level],
+                                  context=state.context_of(p),
+                                  profiles=effective_profiles(manifest, state, root, p))
+            console.line(" ".join(cmd))
+            if not dry_run:
+                code = runner(cmd, root)
+                if code != 0:
+                    console.line(f"# recover stopped: stopping {p} exited {code}; nothing was started")
+                    return EXIT_REFUSED
+
+    console.line("== start, dependency order, every container gated")
+    for a in anchors:
+        code = ensure_networks(manifest, state, root, console, runner, capture, a, dry_run)
+        if code != 0:
+            console.line(f"# recover stopped: {a} exited {code}; stopped and not started: {', '.join(work)}")
+            return EXIT_REFUSED
+    for index, p in enumerate(work):
+        for level in levels[p]:
+            cmd = compose_command(manifest, p, ["up", "-d", "--no-deps", *level], context=state.context_of(p),
+                                  profiles=effective_profiles(manifest, state, root, p))
+            console.line(" ".join(cmd))
+            gates = [(key, gate_timeout(renders[p].services[key], timeout)) for key in level]
+            for key, limit in gates:
+                console.line(_gate_note(renders[p], key, limit))
+            if dry_run:
+                continue
+            # service_healthy onto a target decided only at run time (its image was not local
+            # before the stop): the target's level is up and gated by now, so ask its
+            # container. No Health at all means no healthcheck after the pull - exactly where
+            # compose refuses with "has no healthcheck configured".
+            for key in level:
+                for target, condition in sorted(renders[p].services[key].depends.items()):
+                    if condition != "service_healthy" or target not in renders[p].services:
+                        continue
+                    tname = container_of(renders[p], target)
+                    tstate = container_state(capture, root, docker[p], tname)
+                    if tstate is not None and not tstate.get("Health"):
+                        console.line(f"refused: recover stopped at {p}: {key} depends_on {target} with condition "
+                                     f"service_healthy, but {target} ({tname}) has no healthcheck - decided "
+                                     "after its image was pulled; docker compose's own `up` refuses this too. "
+                                     f"{key} was not started.")
+                        later = work[index + 1:]
+                        if later:
+                            console.line(f"# stopped and not started: {', '.join(later)}")
+                        return EXIT_REFUSED
+            code = runner(cmd, root)
+            failure = f"`up` exited {code}" if code != 0 else None
+            if failure is None:
+                for key, limit in gates:
+                    name = container_of(renders[p], key)
+                    svc = renders[p].services[key]
+                    passed, seen = wait_gate(capture, root, docker[p], name, limit,
+                                             gate_kind(renders[p], key, one_shots[p]), settle_seconds(svc))
+                    console.line(f"  [{'ok' if passed else 'FAIL'}] {p}/{key} ({name}): {seen}")
+                    if not passed:
+                        failure = f"{key} ({name}) {seen}"
+                        break
+            if failure:
+                console.line(f"refused: recover stopped at {p}: {failure}.")
+                later = work[index + 1:]
+                if later:
+                    console.line(f"# stopped and not started: {', '.join(later)}")
+                console.line(f"# fix it (`docker logs {container_of(renders[p], level[0])}`), then re-run "
+                             "`stack.py recover` - it stops and restarts everything again in order")
+                return EXIT_REFUSED
+    if dry_run:
+        console.line("# (dry run: the renders above were read; nothing was stopped, started or created)")
+    else:
+        console.line(f"recovered: {', '.join(work) or 'nothing'} - every container passed its gate")
+    _manual_notes(manifest, console, manual, "recover")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# backup / restore - per-volume archives of a plane's named volumes
+# --------------------------------------------------------------------------
+
+
+def subprocess_pipe(cmd, cwd, stdin_path=None, stdout_path=None) -> CommandResult:
+    """Run a command with a FILE on stdin or stdout (binary), capturing stderr.
+
+    The fourth seam: backup streams a tar OUT of a helper container into a file,
+    restore streams one IN. Streaming, not a bind mount, so the same verb works
+    on a Windows host, a Linux host, a DinD and a remote docker context alike.
+    """
+    stdin = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
+    stdout = open(stdout_path, "wb") if stdout_path else subprocess.PIPE
+    try:
+        proc = subprocess.run(cmd, cwd=str(cwd), stdin=stdin, stdout=stdout, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    finally:
+        for handle in (stdin, stdout):
+            if hasattr(handle, "close"):
+                handle.close()
+    out = proc.stdout.decode("utf-8", "replace") if isinstance(proc.stdout, bytes) else ""
+    return CommandResult(proc.returncode, out, (proc.stderr or b"").decode("utf-8", "replace"))
+
+
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def utc_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+_SIDECAR_NAME = re.compile(r"backup|dump", re.IGNORECASE)
+
+
+def _names_host(value: str, host: str) -> bool:
+    """Does an env value point at `host`: `llm-gateway-db`, `openbrain-db:5432`, `http://surrealdb:8000`, `postgres://u:p@db/x`."""
+    return bool(re.search(rf"(^|[/@]){re.escape(host)}(:\d+)?(/|$)", value.strip()))
+
+
+def dump_sidecars(render: PlaneRender, engines, volume_key: str | None = None) -> list[str]:
+    """The plane's dump sidecars for these database engines, derived from the render.
+
+    A sidecar is a service of the SAME plane whose name marks it as a backup or
+    dump (`*backup*`, `*dump*`) AND that is tied to an engine by any one of:
+      * depends_on the engine service                (llm-gateway-backup, mattermost-db-backup)
+      * an environment value naming the engine as a HOST - PGHOST, a URL, a DSN
+        (openbrain-db-backup: PGHOST=openbrain-db, and no depends_on at all)
+      * a mount of the database volume itself
+    The first cut required depends_on alone and so told `backup ob1` that ob1 had
+    no dump sidecar, while openbrain-db-backup was running (attempt 1, attack K).
+    """
+    hosts = set()
+    for e in engines:
+        hosts.add(e)
+        if render.services[e].container:
+            hosts.add(render.services[e].container)
+    out = set()
+    for svc in render.services.values():
+        if svc.key in engines or not (_SIDECAR_NAME.search(svc.key) or _SIDECAR_NAME.search(svc.image)):
+            continue
+        tied = any(e in svc.depends for e in engines)
+        tied = tied or any(_names_host(v, h) for v in svc.environment.values() for h in hosts)
+        tied = tied or (volume_key is not None
+                        and any(k == "volume" and src == volume_key for k, src, _t, _ro in svc.mounts))
+        if tied:
+            out.add(svc.key)
+    return sorted(out)
+
+
+def plane_volumes(render: PlaneRender) -> list[dict]:
+    """The named volumes the plane's RUNNING services mount, with who mounts them.
+
+    From the render, never a hand list. Each entry: key, name, external,
+    consumers (service keys), engines (services that mount it read-write and
+    whose image is a database), sidecars (services that depend_on an engine and
+    are named *backup* - the plane's dump).
+    """
+    out = []
+    for key, spec in sorted(render.volumes.items()):
+        consumers, engines = [], []
+        for svc in render.services.values():
+            for kind, source, _target, read_only in svc.mounts:
+                if kind == "volume" and source == key:
+                    consumers.append(svc.key)
+                    repo = svc.image.split("@")[0].rsplit(":", 1)[0].split("/")[-1]
+                    if not read_only and repo in DB_ENGINES:
+                        engines.append(svc.key)
+        if not consumers:
+            continue
+        sidecars = dump_sidecars(render, engines, key)
+        out.append({"key": key, "name": spec["name"], "external": spec["external"],
+                    "consumers": sorted(set(consumers)), "engines": sorted(set(engines)), "sidecars": sidecars})
+    return out
+
+
+def running_users(capture, root, docker, volume: str):
+    """Names of the RUNNING containers (any project, compose or not) that mount the volume.
+
+    Asked of the daemon, not the render: a container from another project, or a
+    one-off `docker run`, holding the volume counts just the same. None when the
+    daemon could not be asked - a refusal, never an assumed "nobody".
+    """
+    found = capture(docker + ["ps", "--filter", f"volume={volume}", "--format", "{{.Names}}"], root)
+    if found.code != 0:
+        return None
+    return sorted({line.strip() for line in (found.stdout or "").splitlines() if line.strip()})
+
+
+HELPER_LABEL = "ai-stack.stack-py.helper=1"
+LIVE_COPY_WARNING = ("taken while these containers ran; files an application holds open (a SQLite "
+                     "database such as webui.db) may be mid-write in this archive - stop the plane "
+                     "first (`stack.py down <plane>`) for a quiescent copy")
+
+
+def helper_name(verb: str) -> str:
+    return f"stack-py-{verb}-{os.getpid()}-{int(time.time() * 1000) % 100000000}"
+
+
+def remove_helper(console, capture, root, docker, name: str) -> None:
+    """After a failed helper run: the CLI can exit while the container lives on (seen in attempt 1:
+    a backup onto a full disk left its helper holding the volume, and the next restore was refused
+    because of it). Remove it by name and say whether it is gone."""
+    capture(docker + ["rm", "-f", name], root)
+    left = capture(docker + ["ps", "-a", "-q", "--filter", f"name=^{name}$"], root)
+    if left.code == 0 and not (left.stdout or "").strip():
+        console.line(f"  [ok]   helper {name} removed")
+    else:
+        console.line(f"  [FAIL] helper {name} may still exist - `docker rm -f {name}`")
+
+
+def cmd_backup(manifest, state, root, console, capture, pipe, plane: str, dest=None) -> int:
+    """Archive each named volume of one plane into backups/<plane>/manual-<UTC stamp>/.
+
+    One `<volume>.tar.gz` per volume, written by a throwaway helper container
+    (HELPER_IMAGE, `--network none`, the volume mounted READ-ONLY) whose tar
+    stream is piped into the file; then `manifest.json` (volume, compose key,
+    archive, bytes, sha256) and a `SHA256SUMS` that `sha256sum -c` reads.
+
+    A database volume whose engine is RUNNING is not tarred: it is named, with
+    the plane's dump sidecar, as "use the plane's dump for a consistent copy".
+    With the engine stopped its data directory is at rest and is archived.
+    Host bind mounts are not archived by this verb and the output says how many
+    the plane has.
+    """
+    manifest.plane(plane)
+    if manifest.networks_only(plane):
+        raise Refusal(f"refused: {plane} declares networks and no service, so it has no volume to back up")
+    render = plane_render(manifest, state, root, plane, capture)
+    volumes = plane_volumes(render)
+    binds = sorted({(s.key, src) for s in render.services.values()
+                    for kind, src, _t, ro in s.mounts if kind == "bind" and not ro})
+    if not volumes:
+        raise Refusal(f"refused: {plane} mounts no named volume under the profiles it runs with "
+                      f"({len(binds)} writable host bind mount(s), which this verb does not archive)")
+    docker = ["docker"] + (["--context", state.context_of(plane)] if state.context_of(plane) else [])
+    base = Path(dest).resolve() if dest else root / "backups"
+    stamp = utc_stamp()
+    out = base / plane / f"manual-{stamp}"
+    suffix = 1
+    while out.exists():
+        suffix += 1
+        out = base / plane / f"manual-{stamp}-{suffix}"
+    out.mkdir(parents=True)
+    console.line(f"# backup {plane}: {len(volumes)} named volume(s) from the render of "
+                 f"{manifest.plane(plane)['compose']} -> {out}")
+
+    archived, skipped, failed = [], [], 0
+    for vol in volumes:
+        name = vol["name"]
+        if vol["external"]:
+            skipped.append({"volume": name, "why": "external volume - not owned by this plane"})
+            console.line(f"  [skip] {name}: external volume - not owned by this plane")
+            continue
+        if capture(docker + ["volume", "inspect", name], root).code != 0:
+            skipped.append({"volume": name, "why": "absent on this daemon"})
+            console.line(f"  [skip] {name}: absent on this daemon (the plane has not been up here)")
+            continue
+        note = ""
+        if vol["engines"]:
+            live = [container_of(render, e) for e in vol["engines"]
+                    if (container_state(capture, root, docker, container_of(render, e)) or {}).get("Status")
+                    in ("running", "restarting", "paused")]
+            if live:
+                dump = (f" ({', '.join(vol['sidecars'])} writes it)" if vol["sidecars"]
+                        else f" (this plane has no dump sidecar: stop {', '.join(live)} and re-run for a cold copy)")
+                why = (f"a live database data directory ({', '.join(live)} is running) - use the plane's dump "
+                       f"for a consistent copy{dump}")
+                skipped.append({"volume": name, "why": why})
+                console.line(f"  [skip] {name}: {why}")
+                continue
+            note = f"cold copy: {', '.join(container_of(render, e) for e in vol['engines'])} stopped"
+        users = running_users(capture, root, docker, name) or []
+        live = []
+        if not note and users:
+            note = f"live copy: {', '.join(users)} running"
+            live = users
+        archive = f"{name}.tar.gz"
+        partial = out / (archive + ".partial")
+        helper = helper_name("backup")
+        cmd = docker + ["run", "--rm", "--name", helper, "--label", HELPER_LABEL, "--network", "none",
+                        "-v", f"{name}:/volume:ro", HELPER_IMAGE, "tar", "-czf", "-", "-C", "/volume", "."]
+        console.line(" ".join(cmd) + f" > {archive}")
+        result = pipe(cmd, root, stdout_path=partial)
+        if result.code != 0:
+            failed += 1
+            partial.unlink(missing_ok=True)
+            remove_helper(console, capture, root, docker, helper)
+            why = (result.stderr or "no output").strip().splitlines()[-1:] or ["no output"]
+            console.line(f"  [FAIL] {name}: the helper exited {result.code} ({why[0]}); no archive kept")
+            continue
+        partial.replace(out / archive)
+        size = (out / archive).stat().st_size
+        digest = sha256_of(out / archive)
+        entry = {"volume": name, "key": vol["key"], "archive": archive, "bytes": size, "sha256": digest}
+        if live:
+            # Recorded, not only printed: after the fact an archive must not look like a
+            # clean one when it was read under a running application (a SQLite webui.db
+            # mid-write restores as whatever the pages on disk said at that instant).
+            entry["live_copy"] = {"running": live, "warning": LIVE_COPY_WARNING}
+        archived.append(entry)
+        console.line(f"  [ok]   {name}: {archive}, {size} bytes, sha256 {digest}" + (f" ({note})" if note else ""))
+
+    if binds:
+        console.line(f"# not archived: {len(binds)} writable host bind mount(s) in this plane "
+                     "(back those paths up with the host's own tools)")
+    if not archived:
+        shutil.rmtree(out, ignore_errors=True)
+        console.line(f"refused: nothing was archived for {plane}; {out} was removed")
+        return EXIT_REFUSED
+    record = {"format": BACKUP_FORMAT, "plane": plane, "project": render.project,
+              "compose": manifest.plane(plane)["compose"],
+              "profiles": effective_profiles(manifest, state, root, plane),
+              "created": stamp, "helper_image": HELPER_IMAGE, "volumes": archived, "skipped": skipped}
+    with (out / BACKUP_MANIFEST).open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(record, indent=2) + "\n")
+    with (out / "SHA256SUMS").open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write("".join(f"{a['sha256']}  {a['archive']}\n" for a in archived))
+    console.line(f"wrote {out / BACKUP_MANIFEST} ({len(archived)} archived, {len(skipped)} skipped"
+                 + (f", {failed} FAILED" if failed else "") + ")")
+    return EXIT_REFUSED if failed else EXIT_OK
+
+
+# Runs in the helper with the volume at /volume and the archive on stdin. It
+# extracts into a staging directory FIRST, so a torn or unreadable archive leaves
+# the volume's previous contents exactly as they were; only a complete
+# extraction replaces them. The volume root takes the archive root's mode/owner.
+_RESTORE_SCRIPT = (
+    'set -e; S=/volume/.stack-restore-staging; rm -rf "$S"; mkdir "$S"; '
+    'if ! tar -xzf - -C "$S"; then rm -rf "$S"; '
+    'echo "extraction failed; the previous contents are untouched" >&2; exit 1; fi; '
+    'chmod "$(stat -c %a "$S")" /volume; chown "$(stat -c %u:%g "$S")" /volume; '
+    'find /volume -mindepth 1 -maxdepth 1 ! -name .stack-restore-staging -exec rm -rf {} \\; ; '
+    'find "$S" -mindepth 1 -maxdepth 1 -exec mv {} /volume/ \\; ; rmdir "$S"'
+)
+
+
+def _load_backup(source: str, volume: str | None):
+    """(directory, parsed manifest.json, the volume a .tar.gz path implies or None)."""
+    path = Path(source).resolve()
+    implied = None
+    if path.is_dir():
+        directory = path
+    elif path.name == BACKUP_MANIFEST:
+        directory = path.parent
+    elif path.name.endswith(".tar.gz") and path.is_file():
+        directory, implied = path.parent, path.name
+    else:
+        raise Refusal(f"refused: --from {source} is neither a backup directory, its {BACKUP_MANIFEST}, "
+                      "nor one of its .tar.gz archives")
+    record_path = directory / BACKUP_MANIFEST
+    if not record_path.is_file():
+        raise Refusal(f"refused: {record_path} does not exist - restore reads the manifest `backup` wrote, "
+                      "and will not restore an archive it cannot verify")
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        raise Refusal(f"refused: {record_path} is not valid JSON ({exc})") from None
+    if record.get("format") != BACKUP_FORMAT:
+        raise Refusal(f"refused: {record_path} is format {record.get('format')!r}; this driver reads "
+                      f"{BACKUP_FORMAT}")
+    if implied:
+        match = [e for e in record.get("volumes") or [] if e.get("archive") == implied]
+        if not match:
+            raise Refusal(f"refused: {implied} is not listed in {record_path}")
+        implied = match[0]["volume"]
+        if volume and volume not in (implied, match[0].get("key")):
+            raise Refusal(f"refused: --from names the archive of {implied} but --volume says {volume}")
+    return directory, record, implied
+
+
+def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, source: str,
+                volume: str | None = None) -> int:
+    """Restore one plane's volumes (or the one --volume names) from a `backup` directory.
+
+    Every check runs BEFORE anything is changed, in this order, and any failure
+    is a refusal that changed nothing:
+      1. the manifest is `backup`'s and names THIS plane;
+      2. every selected archive's sha256 matches the manifest (a tampered or
+         truncated archive is refused by name);
+      3. every selected volume is one the plane's render declares;
+      4. no RUNNING container mounts any selected volume (asked of the daemon).
+    Only the selected volumes are touched: a missing one is created with the
+    labels compose itself would have given it, then its contents are replaced
+    by the archive's (staged, so a failed extraction leaves them as they were).
+    """
+    manifest.plane(plane)
+    directory, record, implied = _load_backup(source, volume)
+    if record.get("plane") != plane:
+        raise Refusal(f"refused: {directory / BACKUP_MANIFEST} is a backup of plane "
+                      f"'{record.get('plane')}', not '{plane}'")
+    entries = list(record.get("volumes") or [])
+    wanted = volume or implied
+    if wanted:
+        entries = [e for e in entries if wanted in (e.get("volume"), e.get("key"))]
+        if not entries:
+            listed = ", ".join(e.get("volume", "?") for e in record.get("volumes") or []) or "none"
+            raise Refusal(f"refused: {wanted} is not in {directory / BACKUP_MANIFEST} (it holds: {listed})")
+    if not entries:
+        raise Refusal(f"refused: {directory / BACKUP_MANIFEST} lists no archived volume")
+
+    bad = []
+    for entry in entries:
+        archive = directory / entry["archive"]
+        if not archive.is_file():
+            bad.append(f"  {entry['archive']}: missing")
+            continue
+        actual = sha256_of(archive)
+        if actual != entry.get("sha256"):
+            bad.append(f"  {entry['archive']}: sha256 {actual}, the manifest says {entry.get('sha256')}")
+    if bad:
+        raise Refusal("refused: archive verification failed - nothing was changed:\n" + "\n".join(bad))
+
+    render = plane_render(manifest, state, root, plane, capture)
+    declared = {v["name"]: v for v in plane_volumes(render)}
+    unknown = [e["volume"] for e in entries if e["volume"] not in declared]
+    if unknown:
+        raise Refusal(f"refused: {', '.join(unknown)} is not a named volume {plane} mounts under the profiles "
+                      f"it runs with ({', '.join(declared) or 'none'}) - nothing was changed")
+
+    docker = ["docker"] + (["--context", state.context_of(plane)] if state.context_of(plane) else [])
+    busy = []
+    for entry in entries:
+        users = running_users(capture, root, docker, entry["volume"])
+        if users is None:
+            raise Refusal(f"refused: could not ask the daemon which containers use {entry['volume']} "
+                          "- nothing was changed")
+        if users:
+            busy.append(f"  {entry['volume']}: in use by {', '.join(users)}")
+    if busy:
+        raise Refusal("refused: restore will not write a volume a running container holds - nothing was "
+                      "changed:\n" + "\n".join(busy)
+                      + f"\nStop them first (`python3 scripts/stack/stack.py down {plane}`), then re-run.")
+
+    console.line(f"# restore {plane}: {len(entries)} volume(s) from {directory} (sha256 verified)")
+    for entry in entries:
+        name = entry["volume"]
+        if capture(docker + ["volume", "inspect", name], root).code != 0:
+            create = docker + ["volume", "create",
+                               "--label", f"com.docker.compose.project={render.project}",
+                               "--label", f"com.docker.compose.volume={declared[name]['key']}", name]
+            console.line(" ".join(create))
+            made = capture(create, root)
+            if made.code != 0:
+                console.line(f"refused: creating {name} exited {made.code}: {(made.stderr or '').strip()}")
+                return EXIT_REFUSED
+        helper = helper_name("restore")
+        cmd = docker + ["run", "--rm", "-i", "--name", helper, "--label", HELPER_LABEL, "--network", "none",
+                        "-v", f"{name}:/volume", HELPER_IMAGE, "sh", "-c", _RESTORE_SCRIPT]
+        console.line(" ".join(cmd[:-1]) + " '<staged extract>'" + f" < {entry['archive']}")
+        result = pipe(cmd, root, stdin_path=directory / entry["archive"])
+        if result.code != 0:
+            why = (result.stderr or "no output").strip().splitlines()[-1:] or ["no output"]
+            remove_helper(console, capture, root, docker, helper)
+            console.line(f"refused: restoring {name} exited {result.code} ({why[0]})")
+            return EXIT_REFUSED
+        console.line(f"  [ok]   {name} <- {entry['archive']} ({entry.get('bytes')} bytes)")
+    console.line(f"restored. Start the plane: python3 scripts/stack/stack.py up {plane}")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# stats
+# --------------------------------------------------------------------------
+
+_QUEUE_BOARD = ("import urllib.request;print(urllib.request.urlopen("
+                "'http://localhost:8080/observe/queue',timeout=5).read().decode())")
+
+
+def _psql(capture, root, sql: str) -> list[list[str]] | None:
+    """Rows from the LiteLLM ledger, or None when llm-gateway-db did not answer.
+
+    `-c` with an argv, not stdin: a Python argument list reaches docker intact
+    on every OS. (stack-stats.ps1 pipes stdin because PowerShell 5.1 mangles the
+    double quotes PostgreSQL needs around LiteLLM's CamelCase identifiers.)
+    """
+    result = capture(["docker", "exec", "llm-gateway-db", "psql", "-U", "litellm", "-d", "litellm",
+                      "-tA", "-F", "|", "-c", sql], root)
+    if result.code != 0:
+        return None
+    return [line.split("|") for line in (result.stdout or "").splitlines() if line.strip()]
+
+
+def _int(text) -> int:
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stats_rows(capture, root, ids):
+    """(rows, ids that vanished). One `docker stats` for all; if that fails, one per container,
+    so a container removed mid-run costs its own row, not the table. rows is None only when
+    every container failed."""
+    def parse(text):
+        out = []
+        for line in (text or "").splitlines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+    result = capture(["docker", "stats", "--no-stream", "--format", "{{json .}}", *ids], root)
+    if result.code == 0:
+        return parse(result.stdout), []
+    rows, gone = [], []
+    for cid in ids:
+        one = capture(["docker", "stats", "--no-stream", "--format", "{{json .}}", cid], root)
+        if one.code == 0:
+            rows += parse(one.stdout)
+        else:
+            gone.append(cid)
+    if not rows:
+        return None, [(result.stderr or "").strip()[:200]]
+    return rows, gone
+
+
+def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, hours: int = 1,
+              bucket: int = 10) -> int:
+    """Container CPU/memory/net for the enabled planes, then the inference ledger.
+
+    On Windows this still hands off to scripts/stack/stack-stats.ps1, which the
+    operator's host has always run. Everywhere else it is this report: the same
+    two inference sources that script reads (llm-queue's /observe/queue board and
+    the LiteLLM_SpendLogs ledger in llm-gateway-db), preceded by `docker stats
+    --no-stream` for every running container of every enabled plane. When the
+    inference plane is not enabled it says so - a zero is not a measurement.
+    """
+    if WINDOWS:
+        script = root / "scripts" / "stack" / "stack-stats.ps1"
+        if not script.is_file():
+            raise Refusal(f"refused: {rel(root, script)} is missing, so there is nothing to report")
+        return runner(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)], root)
+
+    enabled = [p for p in manifest.order if state.is_enabled(p) and not manifest.networks_only(p)]
+    if not enabled:
+        console.line("# nothing enabled (`stack.py enable <plane|product>` or `stack.py init`)")
+        return EXIT_OK
+    ids, notes = [], []
+    for p in enabled:
+        if missing_submodule(manifest, root, p):
+            notes.append(f"{p}: compose file missing (submodule not initialised)")
+            continue
+        cmd = compose_command(manifest, p, ["ps", "-q"], context=state.context_of(p),
+                              profiles=effective_profiles(manifest, state, root, p))
+        found = capture(cmd, root)
+        if found.code != 0:
+            notes.append(f"{p}: `{' '.join(cmd)}` exited {found.code}")
+            continue
+        ids += [line.strip() for line in (found.stdout or "").splitlines() if line.strip()]
+    console.line(f"== containers: docker stats --no-stream (enabled planes: {', '.join(enabled)})")
+    for note in notes:
+        console.line(f"  [warn] {note}")
+    failed = 0
+    if not ids:
+        console.line("  no running container in the enabled planes")
+    else:
+        rows, gone = _stats_rows(capture, root, ids)
+        if rows is None:
+            console.line(f"  [FAIL] docker stats failed for every container: {gone[0] if gone else 'no output'}")
+            failed += 1
+        else:
+            width = max([len(r.get("Name", "")) for r in rows] + [4])
+            console.line(f"  {'NAME'.ljust(width)}  {'CPU %':>7}  {'MEM USAGE / LIMIT':<22}  {'MEM %':>6}  NET I/O")
+            for r in sorted(rows, key=lambda r: r.get("Name", "")):
+                console.line(f"  {r.get('Name', '?').ljust(width)}  {r.get('CPUPerc', '?'):>7}  "
+                             f"{r.get('MemUsage', '?'):<22}  {r.get('MemPerc', '?'):>6}  {r.get('NetIO', '?')}")
+            for cid in gone:
+                console.line(f"  {cid[:12].ljust(width)}  (gone: the container disappeared between "
+                             "`compose ps` and `docker stats`)")
+
+    console.line("")
+    if not state.is_enabled("inference"):
+        console.line("== inference: NOT ENABLED on this machine - no llm-queue board and no LiteLLM spend "
+                     "ledger to read (`python3 scripts/stack/stack.py enable inference` turns it on)")
+        return EXIT_REFUSED if failed else EXIT_OK
+
+    console.line("== llm-queue live board")
+    board = capture(["docker", "exec", "llm-queue", "python", "-c", _QUEUE_BOARD], root)
+    try:
+        queue = json.loads(board.stdout) if board.code == 0 else None
+    except ValueError:
+        queue = None
+    if not isinstance(queue, dict):
+        console.line("  (llm-queue unreachable - is the `local` profile on in inference/.env?)")
+    else:
+        for model, m in sorted((queue.get("models") or {}).items()):
+            m = m or {}
+            console.line(f"  {model}: running={len(m.get('running') or [])} waiting={len(m.get('waiting') or [])} "
+                         f"permits_free={m.get('permits_free')} avg_T={m.get('avg_T_s')}s")
+            for r in m.get("running") or []:
+                console.line(f"    RUNNING  {r.get('id')}  key={r.get('key')}  model={r.get('model')}  "
+                             f"{_int(r.get('elapsed_s'))}s elapsed")
+            waiting = m.get("waiting") or []
+            for n, w in enumerate(waiting[:5]):
+                console.line(f"    {'NEXT    ' if n == 0 else 'waiting '} {w.get('id')}  key={w.get('key')}")
+            if len(waiting) > 5:
+                console.line(f"    ... +{len(waiting) - 5} more")
+        console.line(f"  connections held: {queue.get('held_total')}/{queue.get('max_total_connections')}")
+
+    console.line("")
+    console.line(f"== demand: last {hours} h in {bucket}-min buckets (requests | tokens | failures)")
+    rows = _psql(capture, root, (
+        "select to_char(date_trunc('hour', \"startTime\") + (floor(extract(minute from \"startTime\")"
+        f"/{bucket})*{bucket}) * interval '1 minute', 'HH24:MI'), count(*), coalesce(sum(total_tokens),0), "
+        "count(*) filter (where status='failure') from \"LiteLLM_SpendLogs\" "
+        f"where \"startTime\" > now() - interval '{hours} hours' group by 1 order by 1"))
+    if rows is None:
+        console.line("  (llm-gateway-db unreachable - the spend ledger could not be read)")
+        return EXIT_REFUSED
+    if not rows:
+        console.line("  (no requests in the window)")
+    for f in rows:
+        if len(f) >= 4:
+            console.line(f"  {f[0]}  {_int(f[1]):>5} req  {_int(f[2]):>10,} tok  {_int(f[3]):>3} fail")
+
+    console.line("")
+    console.line(f"== by caller: last {hours} h")
+    rows = _psql(capture, root, (
+        "select coalesce(t.key_alias, s.api_key), count(*), coalesce(sum(s.total_tokens),0), "
+        "count(*) filter (where s.status='failure') from \"LiteLLM_SpendLogs\" s "
+        "left join \"LiteLLM_VerificationToken\" t on s.api_key = t.token "
+        f"where s.\"startTime\" > now() - interval '{hours} hours' group by 1 order by 2 desc limit 12")) or []
+    if not rows:
+        console.line("  (idle)")
+    for f in rows:
+        if len(f) >= 4:
+            console.line(f"  {f[0][:22]:<22} {_int(f[1]):>6} req  {_int(f[2]):>12,} tok  {_int(f[3]):>4} fail")
+
+    console.line("")
+    console.line("== global totals (the whole ledger)")
+    rows = _psql(capture, root, (
+        "select count(*), coalesce(sum(total_tokens),0), count(*) filter (where status='failure'), "
+        "min(\"startTime\")::date from \"LiteLLM_SpendLogs\"")) or []
+    for f in rows[:1]:
+        if len(f) >= 4:
+            console.line(f"  {_int(f[0]):,} requests | {_int(f[1]):,} tokens | {_int(f[2]):,} failures | "
+                         f"since {f[3] or '-'}")
+    return EXIT_REFUSED if failed else EXIT_OK
 
 
 # --------------------------------------------------------------------------
@@ -2785,6 +3952,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("plane")
     p.add_argument("--dry-run", action="store_true", help="print the docker command, run nothing")
 
+    p = sub.add_parser("recover", help="ordered, health-gated restart (emergency-recovery.ps1 `recover`)")
+    p.add_argument("plane", nargs="?", default=None, help="recover exactly this plane")
+    p.add_argument("--all", dest="every", action="store_true",
+                   help="every declared plane except the `manual` ones, instead of the enabled set")
+    p.add_argument("--dry-run", action="store_true",
+                   help="render the planes and print the plan; stop, start and create nothing")
+    p.add_argument("--timeout", type=int, default=None, metavar="SECONDS",
+                   help="one gate budget for every container (default: each healthcheck's own worst case)")
+
+    p = sub.add_parser("backup", help="archive a plane's named volumes into backups/<plane>/manual-<stamp>/")
+    p.add_argument("plane")
+    p.add_argument("--dest", default=None, metavar="DIR",
+                   help="write under DIR/<plane>/ instead of <root>/backups/<plane>/")
+
+    p = sub.add_parser("restore", help="restore a plane's volumes from a `backup` directory")
+    p.add_argument("plane")
+    p.add_argument("--from", dest="source", required=True, metavar="ARCHIVE",
+                   help="the manual-<stamp> directory, its manifest.json, or one of its .tar.gz archives")
+    p.add_argument("--volume", default=None, help="restore only this volume (its name or compose key)")
+
     for verb, helptext in (("enable", "enable a plane or a product on this machine"),
                            ("disable", "disable a plane or a product")):
         p = sub.add_parser(verb, help=helptext)
@@ -2800,7 +3987,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("doctor", help="docker, compose, env files and blank keys")
     sub.add_parser("health", help="the functional probe sweep (read-only; exit code = failed probes)")
-    sub.add_parser("stats", help="inference demand + queue statistics (delegates to stack-stats.ps1)")
+    p = sub.add_parser("stats", help="container CPU/memory/net + the inference queue and ledger (read-only)")
+    p.add_argument("--hours", type=int, default=1, help="ledger window in hours (default 1)")
+    p.add_argument("--bucket-minutes", type=int, default=10, help="demand bucket size (default 10)")
 
     p = sub.add_parser("inventory", help="generate or verify scripts/lib/stack-services.json")
     p.add_argument("--write", action="store_true",
@@ -2818,13 +4007,15 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
-    """Four seams, so every test is hermetic.
+def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None) -> int:
+    """Five seams, so every test is hermetic.
 
     `runner(cmd, cwd) -> int` STREAMS a command (docker compose up, the stats
     script); `capture(cmd, cwd) -> CommandResult` reads one back (the health
     probes, the compose renders); `http(url, timeout) -> HttpResult` is the
-    only network call; `stdout` is the single output stream.
+    only network call; `pipe(cmd, cwd, stdin_path=, stdout_path=)` moves a
+    file through a command (backup's tar out, restore's tar in); `stdout` is
+    the single output stream.
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -2832,6 +4023,7 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
     runner = runner or subprocess_runner
     capture = capture or subprocess_capture
     http = http or urllib_get
+    pipe = pipe or subprocess_pipe
 
     if not args.verb:
         parser.print_help(console.stream)
@@ -2868,7 +4060,15 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None) -> int:
         if args.verb == "health":
             return cmd_health(manifest, state, root, console, capture, http)
         if args.verb == "stats":
-            return cmd_stats(root, console, runner)
+            return cmd_stats(manifest, state, root, console, runner, capture, args.hours, args.bucket_minutes)
+        if args.verb == "recover":
+            return cmd_recover(manifest, state, root, console, runner, capture, args.plane, args.every,
+                               args.dry_run, args.timeout)
+        if args.verb == "backup":
+            return cmd_backup(manifest, state, root, console, capture, pipe, args.plane, args.dest)
+        if args.verb == "restore":
+            return cmd_restore(manifest, state, root, console, capture, pipe, args.plane, args.source,
+                               args.volume)
         if args.verb == "inventory":
             return cmd_inventory(manifest, root, console, capture, args.write, args.check)
     except Refusal as refusal:

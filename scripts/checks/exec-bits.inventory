@@ -13,3 +13,4 @@ portal/config/tunnel-watcher/tunnel-watch.sh	compose portal/docker-compose.yml s
 portal/config/watcher/authelia-watch.sh	compose portal/docker-compose.yml service authelia-watcher with its image's ENTRYPOINT+CMD (portal/config/watcher/Dockerfile) (bind mount)
 scripts/notify-mattermost.sh	docs scripts/notify-mattermost.sh (header, labelled command)
 scripts/stack/rehearse-fresh-clone.sh	docs scripts/stack/rehearse-fresh-clone.sh (header Usage)
+scripts/stack/rehearse-ops.sh	docs scripts/stack/rehearse-ops.sh (header Usage)

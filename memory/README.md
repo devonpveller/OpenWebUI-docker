@@ -118,6 +118,10 @@ After a crash or a netns break, use the ordered driver instead:
 `.\scripts\recovery\emergency-recovery.ps1 recover` — it starts this plane as a
 unit and waits up to 90 s for `mnemory` before moving on.
 
+Portable (Linux, no PowerShell): `python3 scripts/stack/stack.py recover memory`
+(ordered, every container gated), `backup memory` / `restore memory --from
+backups/memory/manual-<UTC>` for `memory_mnemory-data`, and `stats`.
+
 **Order inside the plane** is expressed with `depends_on: service_healthy`:
 `mnemory` → `mnemory-cloud-gateway`, and `mnemory-backup` also waits on
 `mnemory`. Let compose sequence it; `down` reverses it. Restarting `mnemory`

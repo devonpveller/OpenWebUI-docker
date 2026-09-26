@@ -49,12 +49,22 @@ python scripts/stack/stack.py up --all            # every declared plane (what s
 python scripts/stack/stack.py up coder            # exactly one plane
 python scripts/stack/stack.py doctor              # docker, env files, blank keys
 python scripts/stack/stack.py health              # the probes of the enabled planes (read-only)
-python scripts/stack/stack.py stats               # inference demand + queue board
+python scripts/stack/stack.py stats               # container CPU/mem/net + inference queue board and ledger
+python scripts/stack/stack.py recover --dry-run   # the ordered, gated restart plan; stops nothing
+python scripts/stack/stack.py recover             # stop in reverse order, start in order, gate every container
+python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC>/ : one tar.gz per named volume
+python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 ```
 
-`status`, `health`, `doctor` and `inventory --check` are **read-only**: they
-start, stop and recreate nothing, so they need no plane lease.
+`status`, `health`, `doctor`, `stats` and `inventory --check` are **read-only**:
+they start, stop and recreate nothing, so they need no plane lease. `recover`,
+`backup` and `restore` are not: hold the plane's lease
+(`scripts/agent-harness/lease.ps1`) before running them against a shared host.
+
+On Linux, spell it `python3`; every verb is standard-library Python and runs
+there. `stack.ps1` and `scripts/recovery/emergency-recovery.ps1` stay as the
+Windows extras they always were.
 
 With **no state file at all** the machine runs `frontend` and nothing else -
 that is what a fresh clone gets.
@@ -264,10 +274,10 @@ and which code - the rest is not attempted.
 
 ### `restart <plane>` [`--dry-run`]
 
-**Refuses** `restart all` (naming `down` + `up` and
-`scripts/recovery/emergency-recovery.ps1`, which layers health gates on the same
-order). **Refuses** a `manual` plane, naming its script. Restarting a plane that
-is not enabled prints a note and proceeds.
+**Refuses** `restart all` (naming `recover`, `down` + `up`, and
+`scripts/recovery/emergency-recovery.ps1`, the Windows original of `recover`).
+**Refuses** a `manual` plane, naming its script. Restarting a plane that is
+not enabled prints a note and proceeds.
 
 ### `enable <plane|product>` [`--headless`] [`--plane`|`--product`]
 
@@ -414,12 +424,143 @@ Rules the probes encode, each bought with an outage:
 The probe NAMES are pinned in `test_stack.py` (`PS1_PROBES`), so a probe that is
 dropped, merged into a neighbour or renamed fails the suite.
 
-### `stats`
+### `recover` [`<plane>`|`--all`] [`--dry-run`] [`--timeout SECONDS`]
 
-Hands off to `scripts/stack/stack-stats.ps1` (the llm-queue `/observe` board and
-the LiteLLM spend ledger, read-only). That script is PowerShell 5.1 only, so off
-Windows this verb **refuses** and names what to run instead - a verb that prints
-nothing and exits 0 is the failure class this repo hunts.
+The portable equivalent of `scripts/recovery/emergency-recovery.ps1 -Action
+recover` - its FULL path (`Invoke-EmergencyRecovery`: stop everything in reverse
+order, restart in dependency order, wait for health). Selection is the same as
+`up`: the enabled planes plus their `requires` closure, one plane, or `--all`.
+
+1. **Every plane is rendered first** (`docker compose -f <file> [--profile ...]
+   config --format json`, with exactly the profiles `up` passes). A plane that
+   cannot be rendered is a refusal while the stack is still running.
+   Then every `depends_on` condition is checked, because the `up -d --no-deps`
+   below skips compose's own checks: `service_healthy` on a service with no
+   healthcheck (none in the compose file and none in its image, asked with a
+   read-only `docker image inspect`) and `service_completed_successfully` on a
+   service with `restart: always` / `unless-stopped` are **refused, naming the
+   plane, the service and the target, before anything is stopped** - in
+   `--dry-run` too. A healthcheck block with timing fields and no `test` is not
+   a healthcheck of its own (compose merges it onto the image's), so the image is
+   asked. An image that is not on the daemon cannot be asked before the stop;
+   that is a `# WARNING` saying it is **decided after the pull**: once the
+   target's level is up, its container is read and, if it has no health status at
+   all, recover refuses by name before starting the dependant - where compose's
+   own `up` refuses too.
+2. **Stop**, planes in reverse of `up`'s order; inside a plane, its services in
+   reverse depends_on levels (`docker compose ... stop --timeout 30 <services>`).
+3. **Start**: the anchor's networks are ensured first (always, even for one
+   plane - a recovery on a daemon that lost them would otherwise fail at the
+   first `up`); then planes in `up`'s order, each plane's services level by
+   level (`up -d --no-deps <services>`), and **every container is gated**. The
+   gate's KIND is derived from the render and printed in `--dry-run` as
+   `gate [<kind>]`:
+
+   | kind | when | passes | fails |
+   |---|---|---|---|
+   | `completes` | another service depends_on it with `condition: service_completed_successfully` | it EXITS 0 - its dependants start only after that | any other exit code, or still not exited at the budget |
+   | `healthy` | a compose healthcheck | `healthy` | `unhealthy` (at once), `exited`, `restarting` |
+   | `one-shot` | `restart: "no"`, or no restart policy | exit 0 at any point; or running, unrestarted, for the settle window | a non-zero exit, a restart |
+   | `settle` | a restart policy and no healthcheck | running with the same `RestartCount` and `StartedAt` for 15 s (or the declared `deploy.restart_policy.delay` plus one poll) | a restart, an exit or `restarting` inside the window (`restart loop: ...`, `exited with exit code N ... inside the settle window`) |
+
+   A container that crashes only AFTER its window, or turns unhealthy after it
+   was healthy, still passes - the gates cannot see that. The gates of one
+   level run one after another, so each settle window adds its 15 s. The budget
+   is the healthcheck's own worst case - `start_period + retries x (interval +
+   timeout) + interval + 30 s` - or 300 s when the compose file declares none;
+   `--timeout` sets one budget for all.
+4. **The first failed gate stops the run**: `refused: recover stopped at
+   <plane>: <service> (<container>) <what docker said>`, with the last
+   healthcheck output and the planes left stopped. Exit 1.
+
+The orders are **derived, not listed**. Container levels come from each
+service's `depends_on` plus `network_mode: service:X`, so:
+
+- **the netns rule** - `tailscale` runs in `openwebui`'s network namespace
+  (`frontend/docker-compose.yml`): it stops before `openwebui` and starts after
+  it is healthy, and `check_netns()` refuses any plan that would restart a
+  namespace provider without its tenants after it. emergency-recovery.ps1
+  writes the same rule by hand in `Invoke-MinimalRecovery` and relies on the
+  project's depends_on in its full path;
+- **the inference rule** - both llama.cpp upstreams and `llm-queue` start
+  before `llm-gateway`, from `inference/compose/gateway.yml`'s depends_on.
+
+`--dry-run` prints the whole plan - every `stop` and `up` line and every gate
+with its budget - after reading the renders (read-only), and runs nothing else.
+
+A key still at its shipped placeholder is **printed as a WARNING, not
+refused**: recover brings back a deployment already running on those values,
+and a refusal would leave a crashed host down until the key is rotated. `up`,
+`enable` and `doctor` still refuse it.
+
+**Deliberately not ported:** the diagnostics that choose the "minimal" path,
+the fall-through to `nuclear`, the GPU check, the tailscale `ping 8.8.8.8`, and
+the `nuclear` / `gpu-reset` modes. **Differs from the .ps1 on purpose:** planes
+go in `up`'s order, so inference starts before the frontend; the .ps1's full
+`recover` path starts the frontend first, while its own minimal path and
+`nuclear` start inference first. And **every gate is fatal**: the .ps1 throws
+only when openwebui misses its gate and logs a WARN for every other one, then
+starts the next plane anyway. `recover` stops at the first container that
+fails, because starting a plane on top of a dependency that is not healthy is
+how a partial outage becomes a silent one. It also has no fixed pauses (the
+.ps1 sleeps 15 s and 20 s between phases) - the gates are the waits - and it
+stops every container with `--timeout 30` (the .ps1 gives the frontend 45 s).
+
+### `backup <plane>` [`--dest DIR`]
+
+One `<volume>.tar.gz` per **named volume the plane's services mount under the
+profiles it runs with**, read from the render - never a hand list. Written to
+`backups/<plane>/manual-<UTC stamp>/` (or `DIR/<plane>/manual-<stamp>/`), with
+`manifest.json` (volume, compose key, archive, bytes, sha256) and a
+`SHA256SUMS` that `sha256sum -c` reads. The archive is streamed out of a
+throwaway `alpine:3.21` helper (`--network none`, the volume mounted
+read-only) - no bind mount, so the same verb works on Windows, on Linux, in a
+DinD and over a docker context.
+
+- The dump sidecar is found from the render, not from `depends_on` alone: a
+  service in the same plane named `*backup*`/`*dump*` (or with such an image)
+  that depends_on the engine, names it as a host in its environment (`PGHOST`,
+  a URL, a DSN), or mounts the database volume.
+- A **live copy** (a volume a running container holds) is recorded in
+  `manifest.json` under `live_copy`, with the running containers and a warning,
+  not only on the console: a SQLite file such as `webui.db` may be mid-write.
+- A failed helper is removed by name (`docker rm -f`) before `backup` or
+  `restore` returns, and the output says whether it is gone.
+- A **database data directory whose engine is running** (postgres, pgvector,
+  surrealdb) is **not tarred**: it is named, with the plane's dump sidecar, as
+  "use the plane's dump for a consistent copy". With the engine stopped it is
+  archived as a cold copy.
+- A volume absent from the daemon is skipped by name; so is an external one.
+- **Host bind mounts are not archived**; the output counts the writable ones.
+- Nothing archived is a refusal (exit 1), and the empty directory is removed.
+
+### `restore <plane> --from <dir|manifest.json|archive>` [`--volume NAME`]
+
+Every check runs **before anything changes**, and each failure is a refusal
+that changed nothing: the manifest is `backup`'s and names this plane; every
+selected archive's **sha256 matches**; every selected volume is one the
+plane's render declares; and **no running container holds it** (asked of the
+daemon, so a container from any project counts). Only then are the selected
+volumes touched: a missing one is created with compose's own
+`com.docker.compose.project` / `.volume` labels (so the next `up` adopts it),
+and its contents are **replaced** by the archive's - extracted into a staging
+directory first, so a torn archive leaves the old contents as they were.
+That staging needs **free space for the old contents and the new at once**
+(about 10 GB extra for this host's Open WebUI volume); a restore that runs out
+fails in the extraction and leaves the old contents untouched.
+`--volume` takes the volume name or its compose key; `--from` a single
+`.tar.gz` implies it.
+
+### `stats` [`--hours N`] [`--bucket-minutes N`]
+
+Off Windows: `docker stats --no-stream` for every running container of every
+enabled plane, then - when the inference plane is enabled - the llm-queue
+`/observe/queue` board and the LiteLLM spend ledger (demand buckets, by caller,
+global totals), the same two sources `stack-stats.ps1` reads. With inference
+**not enabled** it says so instead of printing zeros; an unreachable ledger is
+named and exits 1. A container that disappears between `compose ps` and `docker
+stats` costs only its own row, which is marked `(gone: ...)`. On Windows it still hands off to
+`scripts/stack/stack-stats.ps1`, unchanged.
 
 ### `inventory --write` | `--check`
 
@@ -565,13 +706,25 @@ plane change cannot fail it; the shipping tree is covered by three `shipped`
 tests plus `inventory --check` itself, which the pre-commit hook and the
 `stack-driver` CI job both run for real.
 
+`recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
+daemon with containers, volumes and the helper container, so gate timeouts,
+restart loops, a tampered archive and a busy volume are all testable with no
+daemon. Their real-daemon proof is `scripts/stack/rehearse-ops.sh`: in an
+isolated Docker-in-Docker it brings up the stock frontend, backs up its data
+volume, destroys it, is refused on a tampered archive and on a running
+container, restores it, and checks the marker and `/health`; then `stats`,
+`recover frontend`, and a recover that meets a planted unhealthy container.
+(`rehearse-fresh-clone.sh` is its sibling for a fresh clone's first `up`.)
+
 `.github/workflows/ci.yml` runs `python -m pytest scripts/stack -q` and
 `python scripts/stack/stack.py inventory --check` on Python 3.12.
 
 ## Not in this item
 
-Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python; both still
-carry their own ordering and their own probes. Executing against remote docker
+Porting `stack-watchdog.ps1`, or `emergency-recovery.ps1`'s `nuclear` and
+`gpu-reset` modes (its `recover` mode is `stack.py recover` since
+`ac-ops-portable`); both scripts still carry their own ordering. Mirroring
+backups to a NAS (`backup-to-nas.ps1` stays the Windows path). Executing against remote docker
 contexts - the `--context` prefix is passed through and nothing more
 (`cluster-transition`). Archiving `stack.ps1`: it stays as the shim until every
 caller has moved. Adding compose profiles to a plane - both of the
