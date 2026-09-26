@@ -14,14 +14,14 @@ scripts/stack/test_stack.py and by the item's anchor.
 
 Verbs:  status  up  down  restart <plane>  recover  enable  disable  list
         doctor  init  health  stats  backup <plane>  restore <plane>
-        inventory --write|--check
+        inventory --write|--check  docs --write|--check [--allow-unverified]
         status/up/down/recover take an optional plane, or --all for every
         declared plane (the `manual` ones excepted); with neither they act on
         the set this machine ENABLES.
         `--dry-run` on up/down/restart/recover prints the exact docker command
         lines and runs nothing (recover still RENDERS each plane's compose file,
         read-only, because its plan is built from the render). `status`,
-        `health`, `stats` and `inventory --check` are READ-ONLY: no lease,
+        `health`, `stats`, `inventory --check` and `docs --check` are READ-ONLY: no lease,
         nothing started, stopped or recreated.
 
 Everything - refusals included - is written to STDOUT, never stderr, and the
@@ -30,7 +30,9 @@ into a terminating NativeCommandError under `$ErrorActionPreference = 'Stop'`
 (the trap that once ate nine probes out of stack.ps1's health sweep), and this
 driver is meant to be callable from a .ps1 without that dance.
 
-Exit codes: 0 fine, 1 refused / a docker command failed, 2 usage error.
+Exit codes: 0 fine, 1 refused / a docker command failed, 2 usage error,
+3 (`docs` only) a block could not be rendered on this machine, 4 (`docs` only) the
+same but a checked-out submodule is not at the staged gitlink or is dirty.
 `health` is the exception and says so out loud: its exit code is the NUMBER
 OF FAILED PROBES, exactly as scripts/stack/stack.ps1 health has always been.
 
@@ -42,6 +44,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import io
 import json
 import os
 import re
@@ -1247,6 +1250,36 @@ def _ambiguity_note(manifest, console, kind, target) -> None:
         )
 
 
+def product_plan(manifest: Manifest, name: str, headless: bool):
+    """What `enable <product>` resolves, before any key check or state write.
+
+    Returns (planes in `up` order, {plane: requested profiles}, dropped surface
+    planes, dropped surface profiles as `plane:profile`). ONE function because
+    two readers need the same answer: `cmd_enable`, and the product menu that
+    `docs --write` generates - a menu computed a second way would be a second
+    copy of this rule, which is the drift that verb exists to end.
+    """
+    product = manifest.product(name)
+    wanted = list(product.get("planes", []))
+    surfaces = product.get("surfaces", {}) or {}
+    profile_map = {p: list(v) for p, v in (product.get("profiles", {}) or {}).items()}
+    dropped_planes, dropped_profiles = [], []
+    for plane, plane_profiles in surfaces.items():
+        if headless:
+            if plane not in wanted:
+                dropped_planes.append(plane)
+            dropped_profiles.extend(f"{plane}:{p}" for p in plane_profiles)
+            continue
+        if plane not in wanted:
+            wanted.append(plane)
+        profile_map.setdefault(plane, [])
+        for profile in plane_profiles:
+            if profile not in profile_map[plane]:
+                profile_map[plane].append(profile)
+    full = order_planes(manifest, dependency_closure(manifest, wanted))
+    return full, profile_map, dropped_planes, dropped_profiles
+
+
 def cmd_enable(manifest, state, root, console, name, kind, headless: bool, capture=None) -> int:
     capture = capture or subprocess_capture
     kind, target = resolve_target(manifest, name, kind)
@@ -1276,25 +1309,7 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
         planes_touched = [target]
         profile_map = {target: profiles}
     else:
-        product = manifest.product(target)
-        wanted = list(product.get("planes", []))
-        surfaces = product.get("surfaces", {}) or {}
-        profile_map = {p: list(v) for p, v in (product.get("profiles", {}) or {}).items()}
-        dropped_planes, dropped_profiles = [], []
-        for plane, plane_profiles in surfaces.items():
-            if headless:
-                if plane not in wanted:
-                    dropped_planes.append(plane)
-                dropped_profiles.extend(f"{plane}:{p}" for p in plane_profiles)
-                continue
-            if plane not in wanted:
-                wanted.append(plane)
-            profile_map.setdefault(plane, [])
-            for profile in plane_profiles:
-                if profile not in profile_map[plane]:
-                    profile_map[plane].append(profile)
-
-        full = order_planes(manifest, dependency_closure(manifest, wanted))
+        full, profile_map, dropped_planes, dropped_profiles = product_plan(manifest, target, headless)
         problems, files, submodules = _key_problems(manifest, state, root, full, target, capture, profile_map)
         if problems:
             raise Refusal(
@@ -1681,6 +1696,11 @@ class HealthSweep:
     def http_ok(self, url: str) -> bool:
         return self.http(url, 8).status == 200
 
+    def shell(self):
+        """The interpreter for the .ps1 probes, or None. A method so the docs
+        catalogue (ProbeCatalogue) can ask the sweep both ways without a host."""
+        return powershell_command()
+
     # -- the sweep ---------------------------------------------------------
 
     def run(self) -> int:
@@ -1754,7 +1774,7 @@ class HealthSweep:
                 self.console.line(
                     "  [skip] frontend: 8 tailnet serve routes (no tailscale profile in this deployment)"
                 )
-            shell = powershell_command()
+            shell = self.shell()
             if shell is None:
                 # check-owui-drift.ps1 is PowerShell-only. Off Windows, with no
                 # `pwsh` on PATH, the probe cannot run - and saying so on a [skip]
@@ -3921,6 +3941,1030 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
 
 
 # --------------------------------------------------------------------------
+# docs - the documentation's generated facts (ac-doc-generator)
+# --------------------------------------------------------------------------
+#
+# WHY. The same counts - services per plane, the product menu, the probe count -
+# were restated by hand in README.md, CLAUDE.md, six plane READMEs, the stack-map
+# reference and SERVICE-LIFECYCLE.md, and they already disagreed (ob1 was "30
+# containers" in one file and "20/23" in another, each true under a DIFFERENT
+# profile set that neither sentence named). So a fact that can be computed is no
+# longer written: it sits between two HTML comments,
+#
+#     an opening comment `stack:<name>`  ...  a closing comment `/stack:<name>`
+#
+# and `docs --write` fills it from stack.manifest.toml and the compose renders.
+# `docs --check` refuses when any block differs from what it would write. Prose
+# stays prose - only the computable part moved.
+#
+# THREE THINGS MAKE IT A CHECK RATHER THAN A HOPE:
+#   * DOCS_BLOCKS is the registry of which file carries which block. A marker
+#     pair that is deleted, half-deleted or mangled is a FAILURE naming the file
+#     and the block - a block that silently stops being generated is exactly the
+#     "check that passes while checking nothing" this repo keeps finding.
+#   * Every count says what it was counted UNDER: the profiles passed, and that
+#     the render used the plane's `.env.example` with COMPOSE_PROFILES cleared.
+#     "30" and "20" are both true of ob1; the number without its condition is
+#     what made those two sentences look like a contradiction.
+#   * Renders are host-independent: the `.env.example` files (render_env_path),
+#     a scrubbed environment (render_capture) so neither this shell's
+#     COMPOSE_PROFILES nor any exported variable reaches compose, and a guard
+#     (host_value_leaks) that refuses a block carrying this checkout's path or a
+#     secret-shaped value from a real `.env`.
+#
+# A block whose plane cannot be rendered HERE (the OB1 submodule not checked
+# out, a gitignored env file compose stats, no docker) is NOT VERIFIED, named,
+# and its committed text is left alone. `--check` then exits EXIT_UNVERIFIED (3)
+# rather than 0, so nothing downstream can mistake "could not look" for "looked
+# and it matched"; CI, which has no OB1 checkout, opts in with --allow-unverified.
+
+EXIT_UNVERIFIED = 3
+# Like 3, but at least one gap is an INITIALISED submodule that is not at the staged
+# gitlink or carries tracked edits - a state the committer can fix, unlike "docker or
+# the submodule is not on this machine". The hook refuses a MERGE on 4 and warns on 3.
+EXIT_SUBMODULE_MISMATCH = 4
+
+# file -> the blocks it must carry. Adding a block to a doc means adding it here;
+# removing one from a doc without removing it here fails the check, by design.
+DOCS_BLOCKS: dict[str, list[str]] = {
+    "README.md": ["count:frontend:stock", "product-menu", "plane-table", "health-count"],
+    "frontend/README.md": ["plane-services:frontend", "profile-counts:frontend"],
+    "inference/README.md": ["plane-services:inference", "profile-counts:inference"],
+    "memory/README.md": ["plane-services:memory", "profile-counts:memory"],
+    "search/README.md": ["plane-services:search", "profile-counts:search"],
+    "coder/README.md": ["plane-services:coder", "profile-counts:coder"],
+    "portal/README.md": ["plane-services:portal", "profile-counts:portal"],
+    ".claude/skills/stack-map/references/workspace-stacks.md": [
+        "profiled-planes", "plane-table",
+        "plane-services:portal", "profile-counts:portal",
+        "profile-counts:frontend", "plane-services:frontend",
+        "plane-services:inference", "profile-counts:inference",
+        "plane-services:memory", "plane-services:search", "plane-services:coder",
+        "profile-counts:ob1", "count:ob1:default", "count:ob1:all", "count:ob1:research",
+        "plane-services:ob1",
+        "plane-services:agent-org", "profile-counts:agent-org",
+    ],
+    "documentation/runbooks/SERVICE-LIFECYCLE.md": [
+        "health-count", "profiled-planes",
+        "count:ob1:bare", "count:ob1:all", "count:ob1:default", "count:ob1:research",
+    ],
+    "scripts/stack/README.md": ["health-probes", "health-count",
+                                "count:ob1:bare", "count:ob1:all", "count:ob1:default"],
+}
+
+# Opening `<!-- stack:NAME -->`, closing `<!-- /stack:NAME -->`. The LOOSE form
+# finds anything that tries to be a marker, so a mangled one ("stack: x", a
+# missing slash) is reported instead of being read as ordinary text.
+_DOC_MARKER = re.compile(r"<!--\s*(/?)stack:([A-Za-z0-9:+_.-]+)\s*-->")
+_DOC_MARKER_LOOSE = re.compile(r"<!--\s*/?\s*stack\s*:", re.IGNORECASE)
+
+_INLINE_BLOCKS = ("count", "health-count", "profiled-planes")
+_MULTI_BLOCKS = ("plane-table", "product-menu", "health-probes", "plane-services", "profile-counts")
+
+_DOCS_GENERATED = "Generated by `python scripts/stack/stack.py docs --write`; do not edit between the markers."
+
+# The environment a docs render runs in: enough for the docker CLI to find
+# itself, its config and its context, and nothing that compose could
+# interpolate. COMPOSE_PROFILES is set EMPTY, not merely dropped: compose reads
+# it from the process first, then from --env-file (frontend/.env.example ships
+# `stock`), and an empty process value is what makes "no profile" mean none.
+_RENDER_ENV_KEEP = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR",
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "SYSTEMDRIVE", "APPDATA",
+    "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+}
+
+
+def render_capture(cmd, cwd) -> CommandResult:
+    """subprocess_capture with a SCRUBBED environment (see _RENDER_ENV_KEEP)."""
+    env = {k: v for k, v in os.environ.items()
+           if k.upper() in _RENDER_ENV_KEEP or k.upper().startswith("DOCKER_")}
+    env["COMPOSE_PROFILES"] = ""
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, errors="replace", env=env,
+        )
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+class Unverifiable(Exception):
+    """This machine cannot produce the input a block is generated from."""
+
+
+class SubmoduleMismatch(Unverifiable):
+    """The submodule IS checked out here, but not at the staged gitlink, or dirty."""
+
+
+class PartlyUnverifiable(Exception):
+    """A block some of whose ROWS could be rendered here and some not.
+
+    `body` is the block with each unrenderable row replaced by a KEEP sentinel
+    naming the row's leading text; cmd_docs splices the committed row back in
+    there, so every row that COULD be derived is still compared. Without this a
+    plane-table was all-or-nothing, and one plane missing on a machine (OB1 in CI)
+    let a hand edit of any other row through (ac-doc-generator attempt 1, X1).
+    """
+
+    def __init__(self, body: str, reasons: list):
+        super().__init__("; ".join(reasons))
+        self.body = body
+        self.reasons = reasons
+
+
+_KEEP = "\x00KEEP:"
+
+
+# git's REPOSITORY-LOCAL variables (`git rev-parse --local-env-vars`, git 2.x). A
+# hook runs with several of them set for the PARENT repository - GIT_INDEX_FILE
+# above all - and a git call made inside a submodule inherits them, so it reads
+# the parent's index as the submodule's: attempt 2 of this item compared OB1
+# against the parent index and called every clean OB1 "uncommitted tracked
+# edits", which made 4b SKIP every ob1 block on every commit. Asked of git once,
+# with this list as the fallback when git cannot answer.
+_GIT_LOCAL_ENV_FALLBACK = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+)
+_git_local_env_cache: list = []
+
+
+def git_local_env_vars() -> set:
+    if not _git_local_env_cache:
+        names = set(_GIT_LOCAL_ENV_FALLBACK)
+        try:
+            proc = subprocess.run(["git", "rev-parse", "--local-env-vars"], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, universal_newlines=True, errors="replace")
+            if proc.returncode == 0:
+                names |= {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+        except OSError:
+            pass
+        _git_local_env_cache.append(names)
+    return _git_local_env_cache[0]
+
+
+def _git(args, cwd, isolate: bool = False) -> CommandResult:
+    """Run git. `isolate=True` for a call aimed at ANOTHER repository (a submodule):
+    the parent's repository-local variables are dropped (see git_local_env_vars)."""
+    env = None
+    if isolate:
+        drop = git_local_env_vars()
+        env = {k: v for k, v in os.environ.items() if k.upper() not in drop}
+    try:
+        proc = subprocess.run(["git", *args], cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, errors="replace", env=env)
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+def submodule_mismatch(root: Path, sub: str) -> str | None:
+    """Why the submodule's working tree is NOT what the index pins, or None.
+
+    The docs render a submodule plane from the files on disk. If the checkout is
+    at another commit than the STAGED gitlink, or carries uncommitted tracked
+    edits, those files are not what a commit would record - comparing against
+    them and calling the result checked is how a stale block got through
+    (attempt 1, X2). Untracked files are ignored on purpose: a running host keeps
+    gitignored and generated files inside OB1. A git that cannot answer is a
+    reason too - the check fails closed, as NOT VERIFIED, never as matched.
+    """
+    staged = _git(["ls-files", "-s", "--", sub], root)
+    fields = staged.stdout.split()
+    if staged.code != 0 or len(fields) < 2 or fields[0] != "160000":
+        return f"git cannot read the staged `{sub}` gitlink ({(staged.stderr or staged.stdout).strip()[:120]})"
+    pinned = fields[1]
+    head = _git(["rev-parse", "HEAD"], root / sub, isolate=True)
+    if head.code != 0:
+        return f"`{sub}` is not a readable git checkout ({head.stderr.strip()[:120]})"
+    if head.stdout.strip() != pinned:
+        return (f"the `{sub}` checkout is at {head.stdout.strip()[:7]}, but the staged gitlink pins {pinned[:7]} "
+                f"- `git submodule update {sub}` (or stage the gitlink you mean)")
+    dirty = _git(["status", "--porcelain", "--untracked-files=no"], root / sub, isolate=True)
+    if dirty.code != 0:
+        return f"git cannot read `{sub}`'s status ({dirty.stderr.strip()[:120]})"
+    if dirty.stdout.strip():
+        return (f"the `{sub}` checkout has uncommitted tracked edits, which a commit here would not record "
+                f"- commit or stash them in {sub} first")
+    return None
+
+
+class Condition(NamedTuple):
+    """One render of a plane under one profile set."""
+
+    profiles: tuple       # the --profile flags passed, manifest order
+    tags: tuple           # ("default", "every")
+    services: dict | None  # None: compose refused to render this combination
+
+
+def _code(text) -> str:
+    return f"`{text}`"
+
+
+def _profiles_label(profiles, tags=()) -> str:
+    if not profiles:
+        label = "no profile"
+    elif "every" in tags and len(profiles) > 1:
+        label = "every profile (" + ", ".join(_code(p) for p in profiles) + ")"
+    else:
+        label = " + ".join(_code(p) for p in profiles)
+    if "default" in tags:
+        label += " (the driver's default)"
+    return label
+
+
+class DocRenders:
+    """The compose renders the docs blocks are built from, one per profile set."""
+
+    def __init__(self, manifest: Manifest, root: Path, capture):
+        self.manifest = manifest
+        self.root = root
+        self.capture = capture
+        self._renders: dict = {}
+        self._profiles: dict = {}
+        self._conditions: dict = {}
+        self._submodules: dict = {}
+        self.mismatch_seen = False   # a SubmoduleMismatch was raised (exit 4, not 3)
+
+    def _run(self, plane: str, args) -> CommandResult:
+        compose_rel = self.manifest.plane(plane)["compose"]
+        pinned = is_pinned_submodule(self.root, compose_rel)
+        if not (self.root / Path(compose_rel)).is_file():
+            hint = " (a pinned submodule - `git submodule update --init`)" if pinned else ""
+            raise Unverifiable(f"{compose_rel} is not on disk{hint}")
+        if pinned:
+            sub = compose_rel.replace("\\", "/").split("/")[0]
+            if sub not in self._submodules:
+                self._submodules[sub] = submodule_mismatch(self.root, sub)
+            if self._submodules[sub]:
+                self.mismatch_seen = True
+                raise SubmoduleMismatch(self._submodules[sub])
+        env_example = render_env_path(self.manifest, self.root, plane)
+        if not env_example.name.endswith(".example"):
+            # render_env_path falls back to the REAL env when no example exists; the
+            # inventory tolerates that, the docs must not - it would publish this host.
+            raise Refusal(f"refused: {rel(self.root, example_path(self.manifest.env_path(self.root, plane)))} "
+                          "does not exist, and the docs render only from committed .env.example files")
+        cmd = ["docker", "compose", "-f", compose_rel, "--env-file", rel(self.root, env_example), *args]
+        result = self.capture(cmd, self.root)
+        if result.code == 127:
+            raise Unverifiable(f"docker is not available here ({(result.stderr or '').strip()[:120]})")
+        if result.code != 0:
+            env_path = self.manifest.env_path(self.root, plane)
+            if not env_path.is_file():
+                raise Unverifiable(
+                    f"{rel(self.root, env_path)} is absent (gitignored), and {compose_rel} does not render "
+                    "without it - copy it from its .env.example"
+                )
+        return result
+
+    def profiles(self, plane: str) -> list:
+        if plane not in self._profiles:
+            result = self._run(plane, ["config", "--profiles"])
+            if result.code != 0:
+                raise Refusal(
+                    f"refused: `docker compose -f {self.manifest.plane(plane)['compose']} config --profiles` "
+                    f"exited {result.code}\n" + (result.stderr.strip() or result.stdout.strip())
+                )
+            found = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+            self._profiles[plane] = self.manifest.profile_order(plane, found)
+        return self._profiles[plane]
+
+    def render(self, plane: str, profiles) -> dict | None:
+        """{"name", "services"} for exactly these --profile flags, or None if compose refuses."""
+        key = (plane, tuple(profiles))
+        if key not in self._renders:
+            args = []
+            for profile in profiles:
+                args += ["--profile", profile]
+            result = self._run(plane, args + ["config", "--format", "json"])
+            self._renders[key] = self._parse(plane, result.stdout) if result.code == 0 else None
+        return self._renders[key]
+
+    def _parse(self, plane: str, payload: str) -> dict:
+        try:
+            data = json.loads(payload)
+        except ValueError as exc:
+            raise Refusal(f"refused: the render of {self.manifest.plane(plane)['compose']} is not JSON ({exc})") from None
+        networks = data.get("networks") or {}
+        services = {}
+        for key, spec in (data.get("services") or {}).items():
+            spec = spec or {}
+            nets = []
+            for net in (spec.get("networks") or {}):
+                top = networks.get(net) or {}
+                name = top.get("name") or net
+                tag = " (external)" if top.get("external") else (" (internal)" if top.get("internal") else "")
+                nets.append(_code(name) + tag)
+            if spec.get("network_mode"):
+                nets.append(_code("network_mode: " + str(spec["network_mode"])))
+            ports = []
+            for port in spec.get("ports") or []:
+                if not port.get("published"):
+                    continue
+                host = port.get("host_ip") or "0.0.0.0"
+                ports.append(f"{host}:{port['published']}->{port.get('target')}")
+            services[key] = {
+                "container": spec.get("container_name") or key,
+                "profiles": list(spec.get("profiles") or []),
+                "ports": sorted(ports),
+                "networks": sorted(nets),
+            }
+        return {"name": data.get("name") or "", "services": services}
+
+    def conditions(self, plane: str) -> list:
+        """no profile, the driver's default, each profile with its `requires`, and all of them."""
+        if plane in self._conditions:
+            return self._conditions[plane]
+        manifest = self.manifest
+        declared = self.profiles(plane)
+        combos: list = []
+
+        def add(profiles, tag=None):
+            profiles = tuple(profiles)
+            for i, (have, tags) in enumerate(combos):
+                if have == profiles:
+                    if tag and tag not in tags:
+                        combos[i] = (have, tags + (tag,))
+                    return
+            combos.append((profiles, (tag,) if tag else ()))
+
+        add(())
+        default = manifest.profile_order(plane, manifest.profile_closure(plane, set(manifest.default_profiles(plane))))
+        if default:
+            add(default, "default")
+        for profile in declared:
+            add(manifest.profile_order(plane, manifest.profile_closure(plane, {profile}) & set(declared)
+                                       | {profile}))
+        if len(declared) > 1:
+            add(declared, "every")
+
+        out = []
+        for profiles, tags in combos:
+            services = self.render(plane, profiles)
+            if services is None and "every" not in tags:
+                raise Refusal(
+                    f"refused: `docker compose -f {manifest.plane(plane)['compose']}"
+                    + "".join(f" --profile {p}" for p in profiles)
+                    + " config` fails. A render with no profile, with one profile and its `requires`, or with "
+                    "the driver's default must succeed; only the every-profile render may be refused "
+                    "(mutually exclusive profiles, such as the frontend's `stock` and `gpu`)."
+                )
+            out.append(Condition(profiles, tags, None if services is None else services["services"]))
+        self._conditions[plane] = out
+        return out
+
+    def union(self, plane: str) -> dict:
+        services: dict = {}
+        for condition in self.conditions(plane):
+            for key, spec in (condition.services or {}).items():
+                services.setdefault(key, spec)
+        return services
+
+    def project(self, plane: str) -> str:
+        bare = self.render(plane, ())
+        return bare["name"] if bare else ""
+
+
+class _CatalogueSweep(HealthSweep):
+    """HealthSweep, recording probe LABELS instead of running them.
+
+    Everything the sweep would ask of the host is answered here, so the catalogue
+    comes out of HealthSweep.run() itself - a probe added there appears in the
+    docs block with no second list to update. Three answers are switchable,
+    because they decide whether a probe RUNS at all, and each becomes a named
+    condition in the generated text.
+    """
+
+    def __init__(self, plane: str, tailscale=True, shell=True, plugins=True):
+        super().__init__(Console(io.StringIO()), Path("."), lambda _cmd, _cwd: CommandResult(0, "", ""),
+                         lambda _url, _timeout: HttpResult(200, "{}"), {plane})
+        self._tailscale, self._shell, self._plugins = tailscale, shell, plugins
+        self.labels: list[str] = []
+
+    def probe(self, name: str, ok) -> None:
+        self.labels.append(name.replace("(found: )", "(found: <names>)"))
+
+    def shell(self):
+        return ("pwsh",) if self._shell else None
+
+    def tailscale_deployed(self):
+        return self._tailscale, ""
+
+    def owui_plugin_count(self):
+        return 1 if self._plugins else 0
+
+    def owui_drift(self, shell=("powershell",)) -> str:
+        return "<count>"
+
+    def inference_serving_depth(self):
+        return "serving depth: <what it found>", True
+
+    def search_engines(self) -> str:
+        return "<verdict> - <n> engine(s) answering"
+
+
+# The switchable answers above, as the sentence the docs print for each.
+_PROBE_CONDITIONS = (
+    ("tailscale", "the frontend deploys the `tailscale` profile"),
+    ("shell", "PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere)"),
+    ("plugins", "Open WebUI has at least one plugin deployed"),
+)
+
+
+def probe_catalogue() -> list[tuple[str, str, list[str]]]:
+    """[(plane, label, [condition keys it needs])], in sweep order."""
+    out = []
+    for plane in HealthSweep.PROBED_PLANES:
+        full = _CatalogueSweep(plane)
+        full.run()
+        missing: dict = {}
+        for flag, _text in _PROBE_CONDITIONS:
+            reduced = _CatalogueSweep(plane, **{flag: False})
+            reduced.run()
+            for label in full.labels:
+                if label not in reduced.labels:
+                    missing.setdefault(label, []).append(flag)
+        for label in full.labels:
+            out.append((plane, label, missing.get(label, [])))
+    return out
+
+
+def _sentence_list(items) -> str:
+    items = list(items)
+    if len(items) <= 1:
+        return "".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+class DocsGenerator:
+    """Renders one named block. Raises Unverifiable when its input is not here."""
+
+    def __init__(self, manifest: Manifest, root: Path, capture):
+        self.manifest = manifest
+        self.root = root
+        self.renders = DocRenders(manifest, root, capture)
+        self._catalogue = None
+
+    # -- names -------------------------------------------------------------
+
+    def kind(self, name: str) -> tuple[str | None, str]:
+        """("inline" | "multi" | None, why-not). Validates arguments without rendering."""
+        head, _, rest = name.partition(":")
+        args = rest.split(":") if rest else []
+        if head in ("plane-table", "product-menu", "health-probes") and not args:
+            return "multi", ""
+        if head in ("health-count", "profiled-planes") and not args:
+            return "inline", ""
+        if head in ("plane-services", "profile-counts") and len(args) == 1:
+            if args[0] not in self.manifest.planes:
+                return None, f"`{args[0]}` is not a plane in {MANIFEST_NAME}"
+            return "multi", ""
+        if head == "count" and len(args) == 2:
+            if args[0] not in self.manifest.planes:
+                return None, f"`{args[0]}` is not a plane in {MANIFEST_NAME}"
+            return "inline", ""
+        return None, ("unknown block name; known: " + ", ".join(_MULTI_BLOCKS + _INLINE_BLOCKS)
+                      + " (plane-services/profile-counts take :<plane>, count takes :<plane>:<profiles>)")
+
+    def render(self, name: str) -> str:
+        head, _, rest = name.partition(":")
+        args = rest.split(":") if rest else []
+        if head == "plane-table":
+            return self.plane_table()
+        if head == "product-menu":
+            return self.product_menu()
+        if head == "health-probes":
+            return self.health_probes()
+        if head == "health-count":
+            return self.health_count()
+        if head == "profiled-planes":
+            return self.profiled_planes()
+        if head == "plane-services":
+            return self.plane_services(args[0])
+        if head == "profile-counts":
+            return self.profile_counts(args[0])
+        if head == "count":
+            return self.count(args[0], args[1])
+        raise Refusal(f"refused: no renderer for block `{name}`")
+
+    # -- helpers -----------------------------------------------------------
+
+    def _render_note(self, plane: str) -> str:
+        env = rel(self.root, render_env_path(self.manifest, self.root, plane))
+        return (f"_{_DOCS_GENERATED} Rendered from `{self.manifest.plane(plane)['compose']}` with "
+                f"`{env}` and `COMPOSE_PROFILES` cleared, so a service is listed under exactly the "
+                "profiles that select it._")
+
+    def _counts_phrase(self, plane: str) -> str:
+        parts, refused = [], []
+        for condition in self.renders.conditions(plane):
+            label = _profiles_label(condition.profiles, condition.tags)
+            if condition.services is None:
+                refused.append(label)
+            else:
+                parts.append(f"{len(condition.services)} with {label}")
+        text = "; ".join(parts)
+        if refused:
+            text += "; " + "; ".join(f"{label} does not render (compose refuses the combination)"
+                                     for label in refused)
+        return text
+
+    # -- blocks ------------------------------------------------------------
+
+    def plane_table(self) -> str:
+        lines = [
+            f"_{_DOCS_GENERATED} Service counts are `docker compose config` renders with each plane's "
+            "`.env.example` and `COMPOSE_PROFILES` cleared, under exactly the profiles named - "
+            "\"the driver's default\" is what `up` passes before any `enable`._",
+            "",
+            "| Plane (compose project) | Compose file | Services, by the profiles passed | Published host ports | Started by |",
+            "|---|---|---|---|---|",
+        ]
+        missing: list[str] = []
+        for plane in self.manifest.order:
+            spec = self.manifest.plane(plane)
+            try:
+                services = self.renders.union(plane)
+                project = self.renders.project(plane)
+            except Unverifiable as why:
+                lines.append(f"{_KEEP}| **{plane}** (")
+                missing.append(f"the {plane} row ({why})")
+                continue
+            if self.manifest.networks_only(plane) and not services:
+                counts = "0 - it declares networks only"
+            else:
+                counts = self._counts_phrase(plane)
+            ports = sorted({p.split("->")[0] for s in services.values() for p in s["ports"]},
+                           key=lambda p: int(p.rsplit(":", 1)[-1]))
+            if self.manifest.manual(plane):
+                started = "by hand: " + _code(self.manifest.manual(plane))
+            elif self.manifest.is_implicit(plane):
+                started = "`up`, always (implicit)"
+            else:
+                started = "`up`, once enabled"
+            lines.append(
+                f"| **{plane}** ({_code(project)}) | {_code(spec['compose'])} | {counts} | "
+                f"{', '.join(_code(p) for p in ports) or 'none'} | {started} |"
+            )
+        if missing and len(missing) == len(self.manifest.order):
+            raise Unverifiable("no row could be rendered: " + "; ".join(missing))
+        if missing:
+            raise PartlyUnverifiable("\n".join(lines), missing)
+        return "\n".join(lines)
+
+    def product_menu(self) -> str:
+        manifest = self.manifest
+        lines = [
+            f"_{_DOCS_GENERATED} Resolved from `{MANIFEST_NAME}` by the same function `enable` uses. "
+            "**Profiles** is what `enable <product>` writes per plane: the product's own, its surfaces', and "
+            "each plane's `default = true` ones, closed over `requires`. `--headless` removes the Surfaces "
+            "column. **Keys** are the manifest `keys` of every plane it starts; `enable` also refuses a value "
+            "still equal to its `.env.example` placeholder._",
+            "",
+            "| `enable <product>` | What it is | Starts (planes, in order) | Profiles it turns on | "
+            "Surfaces (`--headless` drops these) | Keys it will ask for |",
+            "|---|---|---|---|---|---|",
+        ]
+        for name, product in manifest.products.items():
+            full, profile_map, _dp, _dprof = product_plan(manifest, name, headless=False)
+            starts = ", ".join(p + (" *(manual)*" if manifest.manual(p) else "") for p in full)
+            profiles = []
+            for plane in full:
+                resolved = manifest.profile_order(
+                    plane, manifest.profile_closure(
+                        plane, set(profile_map.get(plane, [])) | set(manifest.default_profiles(plane))))
+                if resolved:
+                    profiles.append(f"{plane}: " + ", ".join(_code(p) for p in resolved))
+            surfaces = []
+            for plane, plane_profiles in (product.get("surfaces", {}) or {}).items():
+                surfaces.append(f"{plane}: " + ", ".join(_code(p) for p in plane_profiles) if plane_profiles
+                                else f"{_code(plane)} (the whole plane)")
+            keys: list[str] = []
+            for plane in full:
+                for key in manifest.keys(plane):
+                    if key not in keys:
+                        keys.append(key)
+            lines.append(
+                f"| **{name}** | {product.get('description', '')} | {starts} | "
+                f"{'; '.join(profiles) or '-'} | {'; '.join(surfaces) or '-'} | "
+                f"{', '.join(_code(k) for k in keys) or '-'} |"
+            )
+        return "\n".join(lines)
+
+    def plane_services(self, plane: str) -> str:
+        services = self.renders.union(plane)
+        declared = self.renders.profiles(plane)
+        order = {p: i for i, p in enumerate(declared)}
+
+        def sort_key(item):
+            key, spec = item
+            first = min((order.get(p, len(order)) for p in spec["profiles"]), default=-1)
+            return (first, key)
+
+        lines = [self._render_note(plane), ""]
+        if not services:
+            lines.append("No services: this compose file declares networks only.")
+            return "\n".join(lines)
+        lines += ["| Service | Container | Profiles | Host ports | Networks |", "|---|---|---|---|---|"]
+        for key, spec in sorted(services.items(), key=sort_key):
+            lines.append(
+                f"| {_code(key)} | {_code(spec['container'])} | "
+                f"{', '.join(_code(p) for p in spec['profiles']) or '*(none)*'} | "
+                f"{', '.join(_code(p) for p in spec['ports']) or '-'} | "
+                f"{', '.join(spec['networks']) or '-'} |"
+            )
+        return "\n".join(lines)
+
+    def profile_counts(self, plane: str) -> str:
+        conditions = self.renders.conditions(plane)
+        bare = set((conditions[0].services or {}))
+        lines = [self._render_note(plane), "",
+                 "| Profiles passed | Services | Added over no profile |", "|---|---|---|"]
+        for condition in conditions:
+            label = _profiles_label(condition.profiles, condition.tags)
+            if condition.services is None:
+                lines.append(f"| {label} | does not render - compose refuses the combination | - |")
+                continue
+            added = sorted(set(condition.services) - bare)
+            lines.append(f"| {label} | {len(condition.services)} | "
+                         f"{', '.join(_code(s) for s in added) or '-'} |")
+        return "\n".join(lines)
+
+    def count(self, plane: str, which: str) -> str:
+        manifest = self.manifest
+        declared = self.renders.profiles(plane)
+        if which == "bare":
+            profiles, tags = (), ()
+        elif which == "all":
+            profiles, tags = tuple(declared), ("every",)
+        elif which == "default":
+            profiles = tuple(manifest.profile_order(
+                plane, manifest.profile_closure(plane, set(manifest.default_profiles(plane)))))
+            tags = ("default",)
+        else:
+            wanted = [p for p in which.split("+") if p]
+            unknown = [p for p in wanted if p not in declared]
+            if unknown:
+                raise Refusal(f"refused: block `count:{plane}:{which}` names profile(s) {', '.join(unknown)} "
+                              f"that {manifest.plane(plane)['compose']} does not declare")
+            profiles, tags = tuple(manifest.profile_order(plane, set(wanted))), ()
+        render = self.renders.render(plane, profiles)
+        if render is None:
+            raise Refusal(f"refused: block `count:{plane}:{which}` - compose refuses to render "
+                          f"{_profiles_label(profiles)} together")
+        return f"**{len(render['services'])}** services with {_profiles_label(profiles, tags)}"
+
+    def catalogue(self):
+        if self._catalogue is None:
+            self._catalogue = probe_catalogue()
+        return self._catalogue
+
+    def _probe_totals(self) -> tuple[int, int]:
+        catalogue = self.catalogue()
+        return len(catalogue), sum(1 for _p, _l, needs in catalogue if not needs)
+
+    def health_count(self) -> str:
+        full, bare = self._probe_totals()
+        return (f"{full} probes with every plane enabled, when "
+                + _sentence_list(text for _f, text in _PROBE_CONDITIONS)
+                + f" ({bare} when none of those holds)")
+
+    def health_probes(self) -> str:
+        texts = dict(_PROBE_CONDITIONS)
+        lines = [
+            f"_{_DOCS_GENERATED} Read out of `HealthSweep.run()` itself, with every host answer stubbed; "
+            "`<...>` is what the live run fills in._",
+            "",
+            "| Plane | Probe | Runs when |",
+            "|---|---|---|",
+        ]
+        for plane, label, needs in self.catalogue():
+            when = "always (the anchor is implicit)" if plane == "anchor" else "the plane is enabled"
+            if needs:
+                when += ", and " + _sentence_list(texts[n] for n in needs)
+            lines.append(f"| {plane} | {_code(label)} | {when} |")
+        lines += ["", f"**{self.health_count()}.** Only the planes this machine enables are probed, plus the "
+                      "anchor; the exit code is the number of probes that failed."]
+        return "\n".join(lines)
+
+    def profiled_planes(self) -> str:
+        rows = []
+        for plane in self.manifest.order:
+            live = [p for p in self.manifest.profiles(plane) if p not in self.manifest.pending_profiles(plane)]
+            if live:
+                rows.append(f"`{plane}` (" + ", ".join(_code(p) for p in live) + ")")
+        return (f"{len(rows)} of the {len(self.manifest.order)} planes declare compose profiles in "
+                f"`{MANIFEST_NAME}`: " + "; ".join(rows))
+
+
+class DocBlock(NamedTuple):
+    name: str
+    inline: bool
+    start: int   # offset of the first character of the block's content
+    end: int     # offset one past its last character
+    line: int    # 1-based line of the opening marker
+
+
+def scan_doc_blocks(text: str) -> tuple[list, list]:
+    """(blocks, problems). A problem is any marker that does not pair up cleanly."""
+    problems: list[str] = []
+    blocks: list[DocBlock] = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        if len(_DOC_MARKER_LOOSE.findall(raw)) > len(_DOC_MARKER.findall(raw)):
+            problems.append(f"line {number}: a malformed `stack:` marker - write "
+                            "`<!-- stack:NAME -->` to open and `<!-- /stack:NAME -->` to close")
+    opened = None
+    for match in _DOC_MARKER.finditer(text):
+        closing, name = match.group(1) == "/", match.group(2)
+        line = text.count("\n", 0, match.start()) + 1
+        if not closing:
+            if opened is not None:
+                problems.append(f"line {opened[2]}: block `{opened[0]}` is never closed (the next marker, "
+                                f"line {line}, opens `{name}`)")
+            opened = (name, match, line)
+            continue
+        if opened is None:
+            problems.append(f"line {line}: `/stack:{name}` closes a block that was never opened")
+            continue
+        name_open, open_match, open_line = opened
+        opened = None
+        if name_open != name:
+            problems.append(f"line {open_line}: block `{name_open}` is closed by `/stack:{name}` (line {line})")
+            continue
+        between = text[open_match.end():match.start()]
+        if "\n" not in between:
+            blocks.append(DocBlock(name, True, open_match.end(), match.start(), open_line))
+            continue
+        line_start = text.rfind("\n", 0, open_match.start()) + 1
+        line_end = text.find("\n", open_match.end())
+        close_start = text.rfind("\n", 0, match.start()) + 1
+        close_end = text.find("\n", match.end())
+        close_end = len(text) if close_end == -1 else close_end
+        if (text[line_start:open_match.start()].strip() or text[open_match.end():line_end].strip()
+                or text[close_start:match.start()].strip() or text[match.end():close_end].strip()):
+            problems.append(f"line {open_line}: block `{name}` spans lines, so both of its markers must "
+                            "stand alone on their own lines (nothing before or after them)")
+            continue
+        blocks.append(DocBlock(name, False, line_end + 1, close_start, open_line))
+    if opened is not None:
+        problems.append(f"line {opened[2]}: block `{opened[0]}` is never closed")
+    return blocks, problems
+
+
+_SECRETISH = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASS|PAT)$")
+
+
+def path_spellings(path: Path) -> list[str]:
+    """Every way a shell on this host may print `path`: native, forward-slash,
+    Git Bash (`/d/Open WebUI/...`) and WSL (`/mnt/d/...`)."""
+    native = str(path)
+    out = {native, path.as_posix()}
+    drive = re.match(r"^([A-Za-z]):[\\/](.*)$", native)
+    if drive:
+        letter, rest = drive.group(1), drive.group(2).replace("\\", "/")
+        for spelled in (letter.lower(), letter.upper()):
+            out |= {f"/{spelled}/{rest}", f"/mnt/{spelled}/{rest}"}
+    return sorted(s for s in out if len(s.strip("/")) > 3)
+
+
+def tracked_markdown(root: Path) -> list[str]:
+    """Repo-relative paths of every tracked (or staged) *.md; a walk when root is not a git tree."""
+    top = _git(["rev-parse", "--show-toplevel"], root)
+    is_root = top.code == 0 and Path(top.stdout.strip()).resolve() == root.resolve()
+    listed = _git(["ls-files", "-z", "--", "*.md"], root) if is_root else CommandResult(1, "", "")
+    if listed.code == 0:
+        return sorted(p for p in listed.stdout.split("\0") if p)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", ".venv")]
+        for name in filenames:
+            if name.endswith(".md"):
+                out.append((Path(dirpath) / name).relative_to(root).as_posix())
+    return sorted(out)
+
+
+def host_values(manifest: Manifest, root: Path) -> list[tuple[str, str, str]]:
+    """(label, where, value) of every string no generated block may contain.
+
+    This checkout's absolute path, and every secret-shaped value in a REAL env
+    file that differs from what its .env.example ships. The label never
+    contains the value, so a refusal can name the leak without repeating it.
+    """
+    out = [("this checkout's absolute path", "", s) for s in path_spellings(root)]
+    out += [("this host's home directory", "", s) for s in path_spellings(Path.home())]
+    keys = {k for plane in manifest.order for k in manifest.keys(plane)}
+    env_paths = {root / ".env"} | {manifest.env_path(root, plane) for plane in manifest.order}
+    for path in sorted(env_paths):
+        shipped = read_env_file(example_path(path))
+        for key, value in read_env_file(path).items():
+            if len(value) < 8 or value == shipped.get(key):
+                continue
+            if key in keys or _SECRETISH.search(key.upper()):
+                out.append((f"the value of {key}", rel(root, path), value))
+    return out
+
+
+def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_unverified: bool,
+             list_files: bool = False) -> int:
+    if list_files:
+        # The pre-commit hook's trigger list: it asks rather than keeping a copy.
+        for rel_path in DOCS_BLOCKS:
+            console.line(rel_path)
+        return EXIT_OK
+    if write == check:
+        raise Refusal("refused: `docs` needs exactly one of --write (regenerate the marked blocks) "
+                      "or --check (fail on a stale or broken block, change nothing)")
+    generator = DocsGenerator(manifest, root, capture)
+
+    problems: list[str] = []
+    files: dict = {}
+    for rel_path, expected in DOCS_BLOCKS.items():
+        path = root / Path(rel_path)
+        if not path.is_file():
+            problems.append(f"{rel_path}: the file is gone, and DOCS_BLOCKS in stack.py says it carries "
+                            + ", ".join(f"`{b}`" for b in expected))
+            continue
+        text = path.read_bytes().decode("utf-8")
+        blocks, found_problems = scan_doc_blocks(text)
+        problems += [f"{rel_path}: {p}" for p in found_problems]
+        names = [b.name for b in blocks]
+        for name in expected:
+            if name not in names:
+                problems.append(
+                    f"{rel_path}: block `{name}` is MISSING - its marker pair was deleted or broken, so "
+                    "nothing would regenerate it. Restore `<!-- stack:" + name + " -->` ... `<!-- /stack:"
+                    + name + " -->`, or drop it from DOCS_BLOCKS in scripts/stack/stack.py on purpose"
+                )
+        for block in blocks:
+            if block.name not in expected:
+                problems.append(f"{rel_path}:{block.line}: block `{block.name}` is not registered for this "
+                                "file in DOCS_BLOCKS (scripts/stack/stack.py) - register it or remove it")
+                continue
+            kind, why = generator.kind(block.name)
+            if kind is None:
+                problems.append(f"{rel_path}:{block.line}: block `{block.name}`: {why}")
+            elif (kind == "inline") != block.inline:
+                shape = "on ONE line (open, text, close)" if kind == "inline" else "on lines of their own"
+                problems.append(f"{rel_path}:{block.line}: block `{block.name}` is {kind}: its markers go {shape}")
+        files[rel_path] = (path, text, blocks)
+    # A marker pair in a file the registry does not name is never generated and
+    # never compared - a hand-written number inside it would read as generated
+    # (attempt 1, X3: CLAUDE.md with `**99**` passed). Every tracked *.md is scanned.
+    for rel_path in tracked_markdown(root):
+        if rel_path in DOCS_BLOCKS:
+            continue
+        try:
+            text = (root / Path(rel_path)).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for number, raw in enumerate(text.splitlines(), 1):
+            if _DOC_MARKER_LOOSE.search(raw):
+                problems.append(f"{rel_path}:{number}: a `stack:` marker in a file DOCS_BLOCKS does not register "
+                                "- nothing generates or checks it. Register the file and its blocks in "
+                                "scripts/stack/stack.py, or remove the marker")
+                break
+    if problems:
+        for problem in problems:
+            console.line(f"  [FAIL] {problem}")
+        console.line("")
+        console.line(f"{len(problems)} marker problem(s); nothing was {'written' if write else 'compared'}. "
+                     "A block the check cannot find is a block that silently stopped being generated.")
+        return EXIT_REFUSED
+
+    rendered: dict = {}
+    unverified: dict = {}
+    partial: dict = {}
+    for rel_path, (_path, _text, blocks) in files.items():
+        for block in blocks:
+            if block.name in rendered or block.name in unverified or block.name in partial:
+                continue
+            try:
+                rendered[block.name] = generator.render(block.name)
+            except PartlyUnverifiable as part:
+                partial[block.name] = part
+            except Unverifiable as why:
+                unverified[block.name] = str(why)
+
+    leaks = host_values(manifest, root)
+    bodies = dict(rendered)
+    bodies.update({name: part.body for name, part in partial.items()})
+    for name, body in bodies.items():
+        for label, where, value in leaks:
+            # Paths compare case-insensitively (Windows paths are); secrets exactly.
+            found = (value.lower() in body.lower()) if label.startswith("this ") else (value in body)
+            if value and found:
+                raise Refusal(f"refused: generated block `{name}` would contain {label}"
+                              + (f" (from {where})" if where else "")
+                              + ". Generated docs must be host-independent - render from .env.example only.")
+
+    stale: list[str] = []
+    wrote: list[str] = []
+    checked = skipped = partly = 0   # block OCCURRENCES; checked includes the partly verified
+    for rel_path, (path, text, blocks) in files.items():
+        newline = "\r\n" if "\r\n" in text else "\n"
+        pieces, cursor = [], 0
+        for block in sorted(blocks, key=lambda b: b.start):
+            current = text[block.start:block.end]
+            body = rendered.get(block.name)
+            not_here = unverified.get(block.name)
+            if block.name in partial:
+                body = _splice_kept(partial[block.name].body, current)
+                if body is None:
+                    not_here = (partial[block.name].reasons[0]
+                                + " - and the committed block has no such row to keep")
+                else:
+                    partly += 1
+                    console.line(f"  [ -- ] PARTLY VERIFIED - {rel_path}:{block.line} `{block.name}`: every row "
+                                 "compared except " + "; ".join(partial[block.name].reasons))
+            if not_here:
+                console.line(f"  [ -- ] NOT VERIFIED - {rel_path}:{block.line} `{block.name}`: {not_here}")
+                wanted = current
+                skipped += 1
+            else:
+                wanted = body if block.inline else ("\n" + body + "\n\n").replace("\n", newline)
+                checked += 1
+                if wanted != current:
+                    stale.append(f"{rel_path}:{block.line}: block `{block.name}` is STALE"
+                                  + _first_difference(current, wanted))
+            pieces.append(text[cursor:block.start])
+            pieces.append(wanted)
+            cursor = block.end
+        pieces.append(text[cursor:])
+        updated = "".join(pieces)
+        if write and updated != text:
+            path.write_bytes(updated.encode("utf-8"))
+            wrote.append(rel_path)
+
+    if check and stale:
+        for line in stale:
+            console.line(f"  [FAIL] {line}")
+        console.line("")
+        console.line(f"{len(stale)} stale block(s). Regenerate with `python scripts/stack/stack.py docs --write` "
+                     "and commit the result; edit the prose AROUND a block, never inside it.")
+        return EXIT_REFUSED
+    for rel_path in wrote:
+        console.line(f"wrote {rel_path}")
+    verb = "written" if write else "match"
+    console.line(f"  [OK]   {checked} block(s) in {len(files)} file(s) {verb}"
+                 + (" what the manifest and the renders say" if check else "")
+                 + (f" ({partly} of them only in the rows that could be rendered)" if partly else ""))
+    if skipped or partly:
+        console.line(
+            f"  [ -- ] {skipped} block(s) NOT VERIFIED and {partly} PARTLY VERIFIED on this machine (named above): "
+            "what could not be rendered here was NOT compared and may be stale. CI's stack-driver job "
+            "(OB1 checked out, docker present) compares every block and fails on a stale one"
+            + ("; --allow-unverified: not a failure here" if allow_unverified else f"; exit {EXIT_UNVERIFIED}"))
+        if allow_unverified:
+            return EXIT_OK
+        if generator.renders.mismatch_seen:
+            console.line(f"  [ -- ] exit {EXIT_SUBMODULE_MISMATCH}: a checked-out submodule is not what the index "
+                         "pins (named above) - fix that and re-run; a merge commit is refused on it")
+            return EXIT_SUBMODULE_MISMATCH
+        return EXIT_UNVERIFIED
+    return EXIT_OK
+
+
+def _splice_kept(body: str, current: str) -> str | None:
+    """Put the committed row back wherever `body` holds a KEEP sentinel; None if there is none."""
+    have = current.splitlines()
+    out = []
+    for line in body.split("\n"):
+        if line.startswith(_KEEP):
+            prefix = line[len(_KEEP):]
+            kept = next((h for h in have if h.startswith(prefix)), None)
+            if kept is None:
+                return None
+            out.append(kept)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _first_difference(current: str, wanted: str) -> str:
+    """The first differing line - for a table row, every differing CELL, untruncated."""
+    have, want = current.splitlines(), wanted.splitlines()
+    for i in range(max(len(have), len(want))):
+        a = have[i] if i < len(have) else "<nothing>"
+        b = want[i] if i < len(want) else "<nothing>"
+        if a == b:
+            continue
+        a_cells = [c.strip() for c in a.strip().strip("|").split("|")] if a.lstrip().startswith("|") else None
+        b_cells = [c.strip() for c in b.strip().strip("|").split("|")] if b.lstrip().startswith("|") else None
+        if a_cells and b_cells and len(a_cells) == len(b_cells):
+            cells = [f"cell {n + 1}: committed {x!r}, generated {y!r}"
+                     for n, (x, y) in enumerate(zip(a_cells, b_cells)) if x != y]
+            return f" (row {a_cells[0]!r}, content line {i + 1}: " + "; ".join(cells) + ")"
+        return f" (content line {i + 1}: committed {a.strip()!r}, generated {b.strip()!r})"
+    return ""
+
+
+# --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
 
@@ -3997,6 +5041,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--check", action="store_true",
                    help="fail on any drift and name the rows; writes nothing")
 
+    p = sub.add_parser("docs", help="generate or verify the marked blocks in the documentation")
+    p.add_argument("--write", action="store_true",
+                   help="regenerate every marked block from the manifest and the compose renders")
+    p.add_argument("--check", action="store_true",
+                   help="fail on a stale, missing or broken block and name it; writes nothing")
+    p.add_argument("--allow-unverified", action="store_true",
+                   help=f"exit 0 instead of {EXIT_UNVERIFIED} when a block cannot be rendered on this machine")
+    p.add_argument("--list", dest="list_files", action="store_true",
+                   help="print the files that carry generated blocks, one per line, and exit")
+
     p = sub.add_parser("init", help="write a state file for this machine")
     p.add_argument("--planes", default=None, help="comma-separated plane names")
     p.add_argument("--product", default=None, help="a product name")
@@ -4021,6 +5075,7 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
     args = parser.parse_args(argv)
     console = Console(stdout)
     runner = runner or subprocess_runner
+    injected_capture = capture is not None
     capture = capture or subprocess_capture
     http = http or urllib_get
     pipe = pipe or subprocess_pipe
@@ -4071,6 +5126,11 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
                                args.volume)
         if args.verb == "inventory":
             return cmd_inventory(manifest, root, console, capture, args.write, args.check)
+        if args.verb == "docs":
+            # An injected capture (the tests) is used as-is; otherwise renders run
+            # in the scrubbed environment render_capture builds.
+            return cmd_docs(manifest, root, console, capture if injected_capture else render_capture,
+                            args.write, args.check, args.allow_unverified, args.list_files)
     except Refusal as refusal:
         console.line(str(refusal))
         return EXIT_REFUSED

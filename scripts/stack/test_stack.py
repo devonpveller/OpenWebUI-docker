@@ -4020,3 +4020,598 @@ def test_the_runtime_check_passes_a_target_whose_pulled_image_has_a_healthcheck(
     assert code == 0, out
     assert any("--no-deps" in c and "tailscale-backup" in c for c in daemon.streamed)
 
+
+# --- docs: the generated blocks (ac-doc-generator) ---------------------------
+#
+# Every block renderer and the marker scanner, against MINI_MANIFEST and a
+# scripted render that honours --profile the way compose does: a service with
+# no profiles is always in, a profiled one only when one of its profiles is
+# passed, and two selected services sharing a container_name make the render
+# fail - which is what "mutually exclusive" looks like to the generator.
+
+DOCS_RENDER = {
+    "docker-compose.yml": {"name": "ai-stack", "services": {}},
+    "inference/docker-compose.yml": {"name": "inference", "services": {
+        "llm-gateway": {"container_name": "llm-gateway", "networks": {"llm-net": None}},
+        "llama-cpp-upstream": {"container_name": "llama-cpp-upstream", "profiles": ["local"],
+                               "ports": [{"host_ip": "127.0.0.1", "published": "8081", "target": 8080}]},
+    }, "networks": {"llm-net": {"name": "ai-stack_llm-net", "external": True}}},
+    "frontend/docker-compose.yml": {"name": "frontend", "services": {
+        "openwebui": {"container_name": "openwebui",
+                      "ports": [{"host_ip": "127.0.0.1", "published": "3000", "target": 8080}]},
+    }},
+    "memory/docker-compose.yml": {"name": "memory", "services": {
+        "mnemory-cloud-gateway": {"container_name": "mnemory-cloud-gateway",
+                                  "ports": [{"host_ip": "127.0.0.1", "published": "8060", "target": 8060}]},
+    }},
+    "search/docker-compose.yml": {"name": "search", "services": {
+        "gateway": {"container_name": "search-gateway", "networks": {"search-net": None},
+                    "ports": [{"host_ip": "127.0.0.1", "published": "8085", "target": 8080}]},
+    }, "networks": {"search-net": {"name": "search_search-net", "internal": True}}},
+    "coder/docker-compose.yml": {"name": "coder", "services": {
+        "little-coder": {"container_name": "little-coder",
+                         "ports": [{"host_ip": "127.0.0.1", "published": "9091", "target": 9090}]},
+    }},
+    "OB1/docker/docker-compose.yml": {"name": "open-brain", "services": {
+        "openbrain-db": {"container_name": "openbrain-db"},
+        "openbrain-idea-refinery": {"container_name": "openbrain-idea-refinery", "profiles": ["idea-refinery"]},
+    }},
+    "agent-org/docker/docker-compose.yml": {"name": "agent-org", "services": {
+        "mattermost": {"container_name": "mattermost",
+                       "ports": [{"host_ip": "127.0.0.1", "published": "8065", "target": 8065}]},
+        "agent-bridge": {"container_name": "agent-bridge",
+                         "ports": [{"host_ip": "127.0.0.1", "published": "8830", "target": 8000}]},
+        "ao-worker-1": {"container_name": "ao-worker-1", "profiles": ["workers"]},
+        "ao-egress": {"container_name": "ao-egress", "profiles": ["cloud"]},
+    }},
+    "portal/docker-compose.yml": {"name": "portal", "services": {
+        "caddy": {"container_name": "caddy"},
+        "cloudflared": {"container_name": "cloudflared", "profiles": ["internet"]},
+    }},
+}
+
+
+class DocsHost:
+    """`docker compose config` for the docs generator, honouring --profile."""
+
+    def __init__(self, render=None):
+        self.render = json.loads(json.dumps(render if render is not None else DOCS_RENDER))
+        self.calls: list[list[str]] = []
+
+    def __call__(self, cmd, cwd):
+        self.calls.append(list(cmd))
+        spec = self.render[cmd[cmd.index("-f") + 1]]
+        if "--profiles" in cmd:
+            found = sorted({p for s in spec["services"].values() for p in s.get("profiles", [])})
+            return stack.CommandResult(0, "\n".join(found), "")
+        passed = {cmd[i + 1] for i, part in enumerate(cmd) if part == "--profile"}
+        chosen, names = {}, set()
+        for key, service in spec["services"].items():
+            profiles = service.get("profiles") or []
+            if profiles and not (set(profiles) & passed):
+                continue
+            if service["container_name"] in names:
+                return stack.CommandResult(1, "", f'container name "{service["container_name"]}" is already in use')
+            names.add(service["container_name"])
+            chosen[key] = service
+        return stack.CommandResult(0, json.dumps({"name": spec["name"], "services": chosen,
+                                                  "networks": spec.get("networks", {})}), "")
+
+
+DOC_TEXT = """# a doc
+
+Prose before. OWUI alone is <!-- stack:count:frontend:bare --><!-- /stack:count:frontend:bare -->.
+
+<!-- stack:plane-table -->
+<!-- /stack:plane-table -->
+
+<!-- stack:profile-counts:agent-org -->
+<!-- /stack:profile-counts:agent-org -->
+
+<!-- stack:plane-services:search -->
+<!-- /stack:plane-services:search -->
+
+Workers make it <!-- stack:count:agent-org:workers --><!-- /stack:count:agent-org:workers -->.
+Profiles: <!-- stack:profiled-planes --><!-- /stack:profiled-planes -->.
+
+Prose after.
+"""
+
+DOC_BLOCKS = ["count:frontend:bare", "plane-table", "profile-counts:agent-org", "plane-services:search",
+              "count:agent-org:workers", "profiled-planes"]
+
+
+@pytest.fixture
+def docs_root(mini_root: Path, monkeypatch) -> Path:
+    (mini_root / "DOC.md").write_text(DOC_TEXT, encoding="utf-8")
+    manifest = stack.Manifest.load(mini_root / stack.MANIFEST_NAME)
+    for plane in manifest.order:   # the docs render ONLY from committed examples
+        stack.example_path(manifest.env_path(mini_root, plane)).write_text("", encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": list(DOC_BLOCKS)})
+    return mini_root
+
+
+def docs(root: Path, *args, host=None):
+    out = io.StringIO()
+    host = host or DocsHost()
+    code = stack.main(["--root", str(root), "docs", *args], stdout=out, capture=host)
+    return code, out.getvalue(), host
+
+
+def doc(root: Path) -> str:
+    return (root / "DOC.md").read_text(encoding="utf-8")
+
+
+def test_docs_write_fills_every_block_and_check_then_passes(docs_root):
+    code, out, _h = docs(docs_root, "--write")
+    assert code == 0, out
+    text = doc(docs_root)
+    assert "OWUI alone is <!-- stack:count:frontend:bare -->**1** services with no profile<!--" in text
+    assert "Workers make it <!-- stack:count:agent-org:workers -->**3** services with `workers`<!--" in text
+    # every count in the plane table carries its condition
+    assert ("| **agent-org** (`agent-org`) | `agent-org/docker/docker-compose.yml` | 2 with no profile; "
+            "3 with `workers`; 3 with `cloud`; 4 with every profile (`workers`, `cloud`) |") in text
+    assert "| **anchor** (`ai-stack`) | `docker-compose.yml` | 0 with no profile | none |" in text
+    assert "by hand: `scripts/portal/portal-on.ps1`" in text
+    assert "| `workers` | 3 | `ao-worker-1` |" in text
+    assert ("| `gateway` | `search-gateway` | *(none)* | `127.0.0.1:8085->8080` | `search_search-net` (internal) |"
+            in text)
+    assert "`.env.example` and `COMPOSE_PROFILES` cleared" in text
+    assert text.startswith("# a doc\n\nProse before.") and text.endswith("\nProse after.\n")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == 0, out
+    assert "6 block(s) in 1 file(s) match" in out
+
+
+def test_docs_check_names_each_stale_block_after_a_service_is_added(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+    before = doc(docs_root)
+    host = DocsHost()
+    host.render["agent-org/docker/docker-compose.yml"]["services"]["ao-worker-2"] = {
+        "container_name": "ao-worker-2", "profiles": ["workers"]}
+    code, out, _h = docs(docs_root, "--check", host=host)
+    assert code == stack.EXIT_REFUSED, out
+    for name in ("plane-table", "profile-counts:agent-org", "count:agent-org:workers"):
+        assert f"block `{name}` is STALE" in out, out
+    assert "block `plane-services:search` is STALE" not in out
+    assert doc(docs_root) == before, "--check wrote to the file"
+    assert docs(docs_root, "--write", host=host)[0] == 0
+    code, out, _h = docs(docs_root, "--check", host=host)
+    assert code == 0, out
+    assert "**4** services with `workers`" in doc(docs_root)
+
+
+def test_a_hand_edit_inside_a_block_is_stale(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+    text = doc(docs_root).replace("**1** services with no profile", "**2** services with no profile")
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "block `count:frontend:bare` is STALE" in out
+
+
+@pytest.mark.parametrize("breakage, expected", [
+    # both markers deleted: nothing would regenerate it
+    (lambda t: t.replace("<!-- stack:plane-table -->\n<!-- /stack:plane-table -->\n", ""),
+     "block `plane-table` is MISSING"),
+    # the closing marker deleted
+    (lambda t: t.replace("<!-- /stack:plane-table -->\n", ""), "block `plane-table` is never closed"),
+    # the opening marker deleted: an orphan close
+    (lambda t: t.replace("<!-- stack:plane-table -->\n", ""), "closes a block that was never opened"),
+    # a mangled marker is not ordinary text
+    (lambda t: t.replace("<!-- stack:plane-table -->", "<!-- stack: plane-table -->"), "a malformed `stack:` marker"),
+    # a close for a different block
+    (lambda t: t.replace("<!-- /stack:plane-table -->", "<!-- /stack:product-menu -->"),
+     "block `plane-table` is closed by `/stack:product-menu`"),
+    # a multi-line block's marker shares its line with prose
+    (lambda t: t.replace("<!-- stack:plane-table -->", "Table: <!-- stack:plane-table -->"),
+     "both of its markers must stand alone"),
+])
+def test_a_broken_or_missing_marker_pair_fails_loudly_in_both_modes(docs_root, breakage, expected):
+    (docs_root / "DOC.md").write_text(breakage(DOC_TEXT), encoding="utf-8")
+    for mode in ("--check", "--write"):
+        code, out, _h = docs(docs_root, mode)
+        assert code == stack.EXIT_REFUSED, out
+        assert expected in out, out
+    assert doc(docs_root) == breakage(DOC_TEXT), "a refused --write changed the file"
+
+
+def test_an_unregistered_block_is_refused(docs_root):
+    text = DOC_TEXT + "\n<!-- stack:product-menu -->\n<!-- /stack:product-menu -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "block `product-menu` is not registered for this file in DOCS_BLOCKS" in out
+
+
+def test_a_block_naming_an_unknown_plane_or_the_wrong_shape_is_refused(docs_root, monkeypatch):
+    text = (DOC_TEXT + "\n<!-- stack:plane-services:nope -->\n<!-- /stack:plane-services:nope -->\n"
+            "One line: <!-- stack:plane-services:coder --><!-- /stack:plane-services:coder -->\n")
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["plane-services:nope",
+                                                                     "plane-services:coder"]})
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "`nope` is not a plane" in out
+    assert "block `plane-services:coder` is multi: its markers go on lines of their own" in out
+
+
+def test_a_registered_file_that_is_gone_fails(docs_root, monkeypatch):
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS, "GONE.md": ["plane-table"]})
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "GONE.md: the file is gone" in out
+
+
+def test_a_plane_that_cannot_be_rendered_here_is_not_verified_and_left_alone(docs_root, monkeypatch):
+    text = DOC_TEXT + "\n<!-- stack:profile-counts:ob1 -->\nkept as committed\n<!-- /stack:profile-counts:ob1 -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["profile-counts:ob1"]})
+    (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    code, out, _h = docs(docs_root, "--write")
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "NOT VERIFIED - DOC.md" in out and "OB1/docker/docker-compose.yml is not on disk" in out
+    assert "kept as committed" in doc(docs_root)
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_UNVERIFIED, out
+    # never written, so there is no committed ob1 row to keep: the table is not verified at all
+    assert ("`plane-table`: the ob1 row (OB1/docker/docker-compose.yml is not on disk) - and the committed "
+            "block has no such row to keep") in out
+    code, out, _h = docs(docs_root, "--check", "--allow-unverified")
+    assert code == 0, out
+    assert "not a failure" in out
+
+
+def test_a_missing_gitignored_env_is_unverified_only_where_the_render_needs_it(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+    (docs_root / "agent-org" / "docker" / ".env").unlink()
+    host = DocsHost()
+
+    def env_file_stat(cmd, cwd):   # compose stats a service-level `env_file: .env`
+        if "agent-org/docker/docker-compose.yml" in cmd:
+            return stack.CommandResult(1, "", "env file agent-org/docker/.env not found")
+        return host(cmd, cwd)
+
+    code, out, _h = docs(docs_root, "--check", host=env_file_stat)
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "agent-org/docker/.env is absent (gitignored)" in out
+    unverified = [line for line in out.splitlines() if "NOT VERIFIED" in line]
+    assert any("`profile-counts:agent-org`" in line for line in unverified)
+    # the search block needs no agent-org render and is still compared
+    assert not any("`plane-services:search`" in line for line in unverified)
+    # plane-table is compared row by row: every row but agent-org's
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the agent-org row" in out
+    assert "4 block(s) in 1 file(s) match" in out
+
+
+def test_a_plane_with_no_env_example_is_refused_not_rendered_from_the_host_env(docs_root):
+    stack.example_path(docs_root / "search" / ".env").unlink()
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "search/.env.example does not exist" in out
+
+
+def test_the_render_uses_the_example_env_and_passes_no_unasked_profile(docs_root):
+    _code, _out, host = docs(docs_root, "--write")
+    renders = [c for c in host.calls if "--format" in c]
+    assert renders, "no render was issued"
+    for cmd in renders:
+        assert cmd[cmd.index("--env-file") + 1].endswith(".env.example"), cmd
+    bare = [c for c in renders if "agent-org/docker/docker-compose.yml" in c and "--profile" not in c]
+    assert bare, "the no-profile render was never issued"
+
+
+def test_mutually_exclusive_profiles_render_as_a_named_refusal_row(docs_root, monkeypatch):
+    manifest = MINI_MANIFEST.replace(
+        '[planes.frontend.profiles.gpu]\ndescription = "the CUDA image and the device reservation"\npending     = true',
+        '[planes.frontend.profiles.gpu]\ndescription = "the CUDA image"\nopt_in = true\n'
+        '[planes.frontend.profiles.stock]\ndescription = "the upstream image"\nopt_in = true')
+    assert manifest != MINI_MANIFEST
+    (docs_root / stack.MANIFEST_NAME).write_text(manifest, encoding="utf-8")
+    host = DocsHost()
+    host.render["frontend/docker-compose.yml"]["services"] = {
+        "openwebui": {"container_name": "openwebui", "profiles": ["gpu"]},
+        "openwebui-stock": {"container_name": "openwebui", "profiles": ["stock"]},
+        "openwebui-backup": {"container_name": "openwebui-backup"},
+    }
+    text = DOC_TEXT + "\n<!-- stack:profile-counts:frontend -->\n<!-- /stack:profile-counts:frontend -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["profile-counts:frontend"]})
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == 0, out
+    written = doc(docs_root)
+    assert "| `gpu` | 2 | `openwebui` |" in written
+    assert "| `stock` | 2 | `openwebui-stock` |" in written
+    assert "| every profile (`gpu`, `stock`) | does not render - compose refuses the combination | - |" in written
+    assert "**1** services with no profile" in written
+
+
+def test_a_count_naming_an_unknown_profile_is_refused(docs_root, monkeypatch):
+    text = DOC_TEXT + "\nX <!-- stack:count:agent-org:nope --><!-- /stack:count:agent-org:nope -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["count:agent-org:nope"]})
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "names profile(s) nope" in out
+
+
+def test_a_block_carrying_a_host_secret_or_the_checkout_path_is_refused(docs_root):
+    (docs_root / "agent-org" / "docker" / ".env").write_text("AO_DB_PASSWORD=hunter2hunter2\n", encoding="utf-8")
+    host = DocsHost()
+    host.render["search/docker-compose.yml"]["services"]["gateway"]["container_name"] = "hunter2hunter2"
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == stack.EXIT_REFUSED
+    assert "would contain the value of AO_DB_PASSWORD (from agent-org/docker/.env)" in out
+    assert "hunter2hunter2" not in out.split("refused:", 1)[1]
+    assert "hunter2hunter2" not in doc(docs_root)
+    host = DocsHost()
+    host.render["search/docker-compose.yml"]["services"]["gateway"]["container_name"] = str(docs_root)
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == stack.EXIT_REFUSED
+    assert "this checkout's absolute path" in out
+
+
+def test_a_value_the_example_ships_is_not_a_host_leak(docs_root):
+    env = docs_root / "agent-org" / "docker" / ".env"
+    env.write_text("AO_DB_PASSWORD=shipped-placeholder\n", encoding="utf-8")
+    env.with_name(".env.example").write_text("AO_DB_PASSWORD=shipped-placeholder\n", encoding="utf-8")
+    host = DocsHost()
+    host.render["search/docker-compose.yml"]["services"]["gateway"]["container_name"] = "shipped-placeholder"
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == 0, out
+
+
+def test_docs_needs_exactly_one_of_write_and_check(docs_root):
+    for args in ((), ("--write", "--check")):
+        code, out, _h = docs(docs_root, *args)
+        assert code == stack.EXIT_REFUSED
+        assert "exactly one of --write" in out
+
+
+def test_render_capture_scrubs_the_environment(monkeypatch):
+    seen = {}
+
+    class Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(cmd, **kwargs):
+        seen.update(kwargs["env"])
+        return Done()
+
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    monkeypatch.setenv("COMPOSE_PROFILES", "gpu,tailscale")
+    monkeypatch.setenv("WEBUI_SECRET_KEY", "a-host-value")
+    monkeypatch.setenv("DOCKER_CONTEXT", "default")
+    stack.render_capture(["docker", "compose", "config"], ".")
+    assert seen["COMPOSE_PROFILES"] == ""
+    assert "WEBUI_SECRET_KEY" not in seen
+    assert seen["DOCKER_CONTEXT"] == "default"
+    assert any(k.upper() == "PATH" for k in seen)
+
+
+def test_the_product_menu_is_what_enable_resolves(tmp_path):
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    menu = stack.DocsGenerator(manifest, tmp_path, DocsHost()).product_menu()
+    rows = {line.split("|")[1].strip(): line for line in menu.splitlines() if line.startswith("| **")}
+    assert set(rows) == {f"**{name}**" for name in manifest.products}
+    # open-brain enables its `default = true` idea-refinery AND that profile's `requires`
+    assert "ob1: `idea-refinery`, `research`, `wiki`" in rows["**open-brain**"]
+    assert "anchor, frontend, portal *(manual)*" in rows["**portal**"]
+    # keys are the union over every plane started, not only the product's own
+    assert "`LITELLM_MASTER_KEY`" in rows["**memory**"] and "`MCP_API_KEY`" in rows["**memory**"]
+    for name in manifest.products:
+        full, _profiles, _dp, _dprof = stack.product_plan(manifest, name, headless=False)
+        assert rows[f"**{name}**"].split("|")[3].strip().replace(" *(manual)*", "") == ", ".join(full)
+
+
+def test_enable_still_writes_what_the_menu_says(root):
+    """product_plan() was factored out of cmd_enable; the state it writes is the menu's row."""
+    code, out, _r = run(root, "enable", "open-brain")
+    assert code == 0, out
+    state = json.loads((root / ".stack" / "state.json").read_text(encoding="utf-8"))
+    assert state["planes"]["ob1"]["profiles"] == ["idea-refinery", "research", "wiki"]
+
+
+def test_the_probe_catalogue_is_the_sweep_itself():
+    catalogue = stack.probe_catalogue()
+    assert len(catalogue) == len(PS1_PROBES)
+    order = list(stack.HealthSweep.PROBED_PLANES)
+    planes = [plane for plane, _label, _needs in catalogue]
+    assert planes == sorted(planes, key=order.index)
+    conditional = {label: needs for _p, label, needs in catalogue if needs}
+    assert conditional == {
+        "frontend: 8 tailnet serve routes": ["tailscale"],
+        "frontend: owui/ manifest rows drifted from live webui.db: <count>": ["shell", "plugins"],
+    }
+    count = stack.DocsGenerator(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT, DocsHost()).health_count()
+    assert count.startswith(f"{len(PS1_PROBES)} probes with every plane enabled")
+    assert f"({len(PS1_PROBES) - 2} when none of those holds)" in count
+
+
+def test_the_shipped_docs_carry_every_registered_block_with_clean_markers():
+    """No docker needed: every registered file exists, carries exactly the blocks
+    the registry names, and no marker is broken."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    generator = stack.DocsGenerator(manifest, REPO_ROOT, DocsHost())
+    for rel_path, expected in stack.DOCS_BLOCKS.items():
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        blocks, problems = stack.scan_doc_blocks(text)
+        assert problems == [], (rel_path, problems)
+        assert sorted({b.name for b in blocks}) == sorted(set(expected)), rel_path
+        for block in blocks:
+            kind, why = generator.kind(block.name)
+            assert kind == ("inline" if block.inline else "multi"), (rel_path, block.name, why)
+
+
+def test_the_shipped_manifest_only_blocks_match_without_docker():
+    """product-menu, profiled-planes and the probe blocks need no render, so the
+    suite holds them to the committed text even where OB1 and docker are absent."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    generator = stack.DocsGenerator(manifest, REPO_ROOT, DocsHost())
+    seen = 0
+    for rel_path in stack.DOCS_BLOCKS:
+        text = (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+        blocks, _problems = stack.scan_doc_blocks(text)
+        for block in blocks:
+            if block.name.split(":")[0] not in ("product-menu", "profiled-planes", "health-probes", "health-count"):
+                continue
+            body = generator.render(block.name)
+            wanted = body if block.inline else "\n" + body + "\n\n"
+            assert text[block.start:block.end] == wanted, (rel_path, block.name)
+            seen += 1
+    assert seen >= 4
+
+
+# --- attempt 2: enforcement that does not leak (X1-X3) ----------------------
+
+
+def test_a_hand_edit_of_a_derivable_row_is_stale_even_when_another_row_cannot_be_rendered(docs_root):
+    """X1: plane-table was all-or-nothing, so without ob1 a hand edit of the MEMORY row passed."""
+    assert docs(docs_root, "--write")[0] == 0
+    (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    text = doc(docs_root)
+    memory_row = next(line for line in text.splitlines() if line.startswith("| **memory**"))
+    (docs_root / "DOC.md").write_text(text.replace(memory_row, memory_row.replace("1 with no profile",
+                                                                                  "5 with no profile")),
+                                      encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check", "--allow-unverified")
+    assert code == stack.EXIT_REFUSED, out
+    assert "block `plane-table` is STALE (row '**memory** (`memory`)'" in out
+    assert "cell 3: committed '5 with no profile', generated '1 with no profile'" in out
+
+
+def test_the_row_that_cannot_be_rendered_is_named_and_kept_not_passed(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+    (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    text = doc(docs_root)
+    ob1_row = next(line for line in text.splitlines() if line.startswith("| **ob1**"))
+    edited = text.replace(ob1_row, ob1_row.replace("1 with no profile", "99 with no profile", 1))
+    (docs_root / "DOC.md").write_text(edited, encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the ob1 row" in out
+    assert "was NOT compared and may be stale" in out and "CI's stack-driver job" in out
+    assert "none was stale" not in out
+    assert docs(docs_root, "--write")[0] == stack.EXIT_UNVERIFIED
+    assert doc(docs_root) == edited, "--write replaced a row it could not render"
+
+
+def _pin_ob1(root: Path) -> None:
+    (root / ".gitmodules").write_text('[submodule "OB1"]\n\tpath = OB1\n\turl = x\n', encoding="utf-8")
+
+
+def test_a_submodule_checkout_that_is_not_the_staged_gitlink_is_not_verified(docs_root, monkeypatch):
+    """X2: a dirty or mismatched OB1 tree was rendered and the gate recorded RAN."""
+    assert docs(docs_root, "--write")[0] == 0
+    _pin_ob1(docs_root)
+    seen = []
+    monkeypatch.setattr(stack, "submodule_mismatch",
+                        lambda root, sub: seen.append(sub) or "the `OB1` checkout has uncommitted tracked edits")
+    text = doc(docs_root) + "\n<!-- stack:profile-counts:ob1 -->\nkept\n<!-- /stack:profile-counts:ob1 -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["profile-counts:ob1"]})
+    code, out, host = docs(docs_root, "--check")
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the ob1 row" in out
+    # a checked-out but mismatched submodule is exit 4 (the hook refuses a MERGE on it), not 3
+    assert code == stack.EXIT_SUBMODULE_MISMATCH, out
+    assert "a merge commit is refused on it" in out
+    assert "`profile-counts:ob1`: the `OB1` checkout has uncommitted tracked edits" in out
+    assert seen == ["OB1"], "asked once, cached"
+    assert not any("OB1/docker/docker-compose.yml" in c for c in host.calls), "rendered the mismatched tree"
+
+
+def _git_run(args, cwd):
+    import subprocess
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always",
+                    *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_submodule_mismatch_reads_the_staged_gitlink_head_and_tracked_dirt(tmp_path):
+    sub_src = tmp_path / "src"
+    sub_src.mkdir()
+    _git_run(["init", "-q"], sub_src)
+    (sub_src / "a.yml").write_text("a: 1\n", encoding="utf-8")
+    _git_run(["add", "a.yml"], sub_src)
+    _git_run(["commit", "-q", "-m", "one"], sub_src)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    _git_run(["init", "-q"], parent)
+    _git_run(["submodule", "-q", "add", str(sub_src), "OB1"], parent)
+    assert stack.submodule_mismatch(parent, "OB1") is None
+    (parent / "OB1" / "untracked.env").write_text("x", encoding="utf-8")
+    assert stack.submodule_mismatch(parent, "OB1") is None, "untracked files are not a mismatch"
+    (parent / "OB1" / "a.yml").write_text("a: 2\n", encoding="utf-8")
+    assert "uncommitted tracked edits" in stack.submodule_mismatch(parent, "OB1")
+    _git_run(["commit", "-q", "-am", "two"], parent / "OB1")
+    assert "but the staged gitlink pins" in stack.submodule_mismatch(parent, "OB1")
+    _git_run(["add", "OB1"], parent)            # stage the moved gitlink
+    assert stack.submodule_mismatch(parent, "OB1") is None
+    # INSIDE A HOOK git exports the PARENT's repository-local variables; the
+    # submodule calls must not inherit them (attempt 2's regression).
+    import os
+    saved = {k: os.environ.get(k) for k in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE")}
+    try:
+        os.environ["GIT_INDEX_FILE"] = str(parent / ".git" / "index")
+        os.environ["GIT_DIR"] = str(parent / ".git")
+        os.environ["GIT_WORK_TREE"] = str(parent)
+        assert stack.submodule_mismatch(parent, "OB1") is None
+        (parent / "OB1" / "a.yml").write_text("a: 3\n", encoding="utf-8")
+        assert "uncommitted tracked edits" in stack.submodule_mismatch(parent, "OB1")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    assert "cannot read the staged `NOPE` gitlink" in stack.submodule_mismatch(parent, "NOPE")
+
+
+def test_a_marker_in_an_unregistered_file_is_refused(docs_root):
+    """X3: CLAUDE.md with a hand-written `**99**` between markers passed."""
+    (docs_root / "CLAUDE.md").write_text(
+        "rules\nOB1 is <!-- stack:count:ob1:all -->**99** services<!-- /stack:count:ob1:all -->\n",
+        encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "CLAUDE.md:2: a `stack:` marker in a file DOCS_BLOCKS does not register" in out
+
+
+def test_the_host_path_guard_knows_every_spelling():
+    spelled = stack.path_spellings(Path("D:\\Open WebUI\\ai-stack") if stack.WINDOWS
+                                   else Path("/home/x/ai-stack"))
+    if stack.WINDOWS:
+        assert {"D:\\Open WebUI\\ai-stack", "D:/Open WebUI/ai-stack", "/d/Open WebUI/ai-stack",
+                "/mnt/d/Open WebUI/ai-stack"} <= set(spelled)
+    else:
+        assert "/home/x/ai-stack" in spelled
+    labels = {label for label, _w, _v in stack.host_values(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT)}
+    assert "this host's home directory" in labels
+
+
+def test_a_stale_table_row_names_the_changed_cell_untruncated():
+    long = "x" * 200
+    diff = stack._first_difference(f"| **a** | {long} | 3 |\n", f"| **a** | {long} | 4 |\n")
+    assert "cell 3: committed '3', generated '4'" in diff and "row '**a**'" in diff
+    diff = stack._first_difference("prose " + long + " 1", "prose " + long + " 2")
+    assert long + " 1" in diff and long + " 2" in diff
+
+
+def test_a_plane_table_with_no_renderable_row_is_not_verified_not_partly(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+
+    def no_docker(cmd, cwd):
+        return stack.CommandResult(127, "", "docker: not found")
+
+    code, out, _h = docs(docs_root, "--check", host=no_docker)
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "NOT VERIFIED - DOC.md:5 `plane-table`: no row could be rendered" in out
+    assert "PARTLY VERIFIED -" not in out
+
+
+def test_the_host_path_guard_ignores_case(docs_root):
+    host = DocsHost()
+    host.render["search/docker-compose.yml"]["services"]["gateway"]["container_name"] = str(docs_root).upper()
+    code, out, _h = docs(docs_root, "--write", host=host)
+    assert code == stack.EXIT_REFUSED
+    assert "this checkout's absolute path" in out

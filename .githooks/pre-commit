@@ -13,6 +13,7 @@
 #   3. gateway routing   - inference must go through the LiteLLM alias
 #   3b. corpus exposure  - a direct corpus INSERT must state its plane
 #   4. project configs   - compose renders + ps1 tokenize
+#   4b. doc blocks       - the docs' generated counts still match the renders
 #   5. env_file scope    - a service names the variables it needs
 #   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
 #   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
@@ -312,6 +313,134 @@ run_gate corpus-exposure './scripts/checks/check-corpus-exposure-producers.ps1' 
 # any staged ps1 => PSParser tokenize. Skips itself when neither is staged.
 run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
     "Pre-commit validation failed (compose/ps1 structural check)!"
+
+# --- 4b. generated doc blocks (inline sh + Python, ac-doc-generator, 2026-09-26)
+# The service counts, profile sets, ports, plane table, product menu and probe
+# list in the READMEs, the stack-map reference and SERVICE-LIFECYCLE.md are
+# GENERATED between `stack:` markers by `python scripts/stack/stack.py docs
+# --write`. This refuses a commit where one no longer matches the manifest and
+# the compose renders, naming the block and the file - and where a registered
+# block's markers are missing or broken, because a block that silently stops
+# being generated is the failure this exists for.
+#
+# TRIGGER: a staged compose file (any *.yml / *.yaml), an .env.example, the
+# manifest, stack.py, the OB1 gitlink, or one of the docs stack.py registers
+# (`docs --list` - asked, not copied, so the trigger cannot drift from the
+# registry). Anything else skips it without a render, so an ordinary commit
+# costs nothing. The check reads the WORKING TREE, so once it triggers, ANY of
+# those inputs carrying unstaged edits is refused outright - staged or not: an
+# unstaged compose edit can make a stale staged block look current, and then
+# what was checked is not what would be committed. (Not the OB1 gitlink here: a
+# submodule reads as dirty for untracked files inside it. `docs --check` itself
+# compares the OB1 checkout with the STAGED gitlink and its tracked edits, and
+# reports every ob1 block NOT VERIFIED - never matched - when they differ.)
+#
+# EXIT CODES of `docs --check`, and what the hook does with each - FAIL-CLOSED:
+#   0  every block matched                                  -> RAN
+#   3  nothing it COMPARED was stale, but some blocks or rows -> SKIPPED, loudly
+#      could not be rendered here (OB1 not checked out, a gitignored env compose
+#      stats, no docker). Those were NOT compared; the check names each one, and
+#      CI's stack-driver job (OB1 + docker, no --allow-unverified) compares them
+#   4  as 3, but OB1 IS checked out and is not at the staged -> SKIPPED on a commit,
+#      gitlink or has tracked edits                            REFUSED on a MERGE
+#   1  a stale, missing or broken block                     -> REFUSED
+#   anything else (a crash, a missing interpreter mid-run)  -> REFUSED
+# Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
+# drift half; with none, SKIPPED and recorded in the summary and the ledger.
+#
+# ON A MERGE COMMIT the gate always runs, whatever is staged. pre-merge-commit (a
+# clean merge) execs this file with AI_STACK_HOOK_MERGE=1, because git writes
+# MERGE_HEAD only after that hook; a conflicted merge concluded with `git commit`
+# runs this file with MERGE_HEAD set. On a merge it REFUSES what the merger can fix
+# here: a stale block it could compare (exit 1) and an OB1 that is checked out but
+# not at the MERGED gitlink or dirty (exit 4). It WARNS and skips - never refuses -
+# what this machine simply does not have: docker, an OB1 checkout at all, Python
+# 3.11 (exit 3). Refusing those blocked every `git pull` on a newcomer's clone and
+# invited --no-verify (orchestrator decision, 2026-09-26); CI's stack-driver job is
+# the gate for them. A fast-forward runs no hook at all - MERGE-PROTOCOL.md
+# requires `--no-ff` into a line.
+_docs_merge=
+if [ "${AI_STACK_HOOK_MERGE:-}" = 1 ] || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    _docs_merge=yes
+fi
+_docs_py=
+for _cand in python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1 &&
+       "$_cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        _docs_py=$_cand
+        break
+    fi
+done
+if ! _docs_staged=$(git -c core.quotePath=false diff --cached --name-only); then
+    echo "docs-blocks: git could not list the staged files - cannot tell whether a generated block went stale."
+    echo "Pre-commit validation failed (generated doc blocks)!"
+    print_summary
+    exit 1
+fi
+if [ -z "$_docs_py" ]; then
+    echo "SKIPPED docs-blocks: needs Python 3.11+ (a stale generated count in the docs would not be caught)"
+    GATES_SKIPPED="$GATES_SKIPPED docs-blocks"
+else
+    if ! _docs_registered=$("$_docs_py" scripts/stack/stack.py docs --list); then
+        echo "docs-blocks: \`stack.py docs --list\` failed - cannot tell which docs carry generated blocks."
+        echo "Pre-commit validation failed (generated doc blocks)!"
+        print_summary
+        exit 1
+    fi
+    if ! _docs_dirty=$(git -c core.quotePath=false diff --name-only); then
+        echo "docs-blocks: git could not list the unstaged changes - cannot tell what the check would read."
+        echo "Pre-commit validation failed (generated doc blocks)!"
+        print_summary
+        exit 1
+    fi
+    # Tagged streams, not `awk -v` or process substitution: this is /bin/sh (dash
+    # on Linux), and a path may contain spaces. Prints `S<tab>path` for a staged
+    # input and `D<tab>path` for an unstaged one.
+    _docs_inputs=$( { printf '%s\n' "$_docs_registered" | sed 's/^/R	/'
+                      printf '%s\n' "$_docs_staged" | sed 's/^/S	/'
+                      printf '%s\n' "$_docs_dirty" | sed 's/^/D	/'; } |
+        awk -F'\t' '$1 == "R" { if ($2 != "") want[$2] = 1; next }
+                    $2 != "" {
+                        p = $2
+                        if (p ~ /\.(yml|yaml)$/ || p ~ /(^|\/)\.env\.example$/ || p == "stack.manifest.toml" ||
+                            p == "scripts/stack/stack.py" || (p in want) || ($1 == "S" && p == "OB1")) print $1 "\t" p }')
+    _docs_trigger=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^S	//p')
+    _docs_unstaged=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^D	//p')
+    if [ -n "$_docs_merge" ]; then
+        _docs_trigger="(merge commit)"
+    fi
+    if [ -n "$_docs_trigger" ]; then
+        if [ -n "$_docs_unstaged" ]; then
+            echo "docs-blocks: these inputs of the generated doc blocks carry UNSTAGED edits, and the check reads the working tree:"
+            printf '%s\n' "$_docs_unstaged" | sed 's/^/    /'
+            echo "  Stage them, or stash them (git stash push --keep-index), then commit again."
+            echo "Pre-commit validation failed (generated doc blocks)!"
+            print_summary
+            exit 1
+        fi
+        "$_docs_py" scripts/stack/stack.py docs --check
+        _docs_rc=$?
+        case "$_docs_rc" in
+            0) GATES_RAN="$GATES_RAN docs-blocks" ;;
+            3|4) if [ "$_docs_rc" = 4 ] && [ -n "$_docs_merge" ]; then
+                   echo "docs-blocks: this is a MERGE commit and OB1 is checked out but not at the MERGED gitlink, or has tracked edits (named above)."
+                   echo "  Put it there (git submodule update OB1, or commit/stash inside OB1), then conclude the merge (git commit)."
+                   echo "Pre-commit validation failed (generated doc blocks: OB1 does not match the merge)!"
+                   print_summary
+                   exit 1
+               fi
+               [ -n "$_docs_merge" ] && echo "WARNING docs-blocks: this MERGE was not fully checked - this machine lacks what the blocks named above need (docker, or an OB1 checkout). CI's stack-driver job compares them."
+               echo "SKIPPED docs-blocks: the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above were NOT compared on this machine and may be stale; everything else was current. CI's stack-driver job compares every block and refuses a stale one"
+               GATES_SKIPPED="$GATES_SKIPPED docs-blocks" ;;
+            *) echo "  Regenerate with: python scripts/stack/stack.py docs --write   (then stage the result)"
+               echo "Pre-commit validation failed (generated doc blocks: stale, missing or broken - exit $_docs_rc)!"
+               print_summary
+               exit 1 ;;
+        esac
+    else
+        GATES_RAN="$GATES_RAN docs-blocks"
+    fi
+fi
 
 # --- 5. env_file scope (staged-aware) --------------------------------------
 # Fail if this commit ADDS a service that grants itself a shared .env. Pre-existing

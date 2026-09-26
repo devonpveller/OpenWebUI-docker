@@ -24,4 +24,11 @@
 # special-casing.
 #
 # Activate in a fresh clone with:  git config core.hooksPath .githooks
+# AI_STACK_HOOK_MERGE tells pre-commit it is gating a MERGE, where step 4b (the docs'
+# generated blocks) is strict. Measured (ac-doc-generator): during a CLEAN merge git has
+# not written MERGE_HEAD yet when it runs this hook, so pre-commit cannot find out itself.
+# (Assigned and exported on its own line: an assignment prefixed to the `exec`
+# special builtin is not guaranteed to reach the new programs environment.)
+AI_STACK_HOOK_MERGE=1
+export AI_STACK_HOOK_MERGE
 exec "$(dirname "$0")/pre-commit"
