@@ -306,9 +306,12 @@ run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
 # manifest, stack.py, the OB1 gitlink, or one of the docs stack.py registers
 # (`docs --list` - asked, not copied, so the trigger cannot drift from the
 # registry). Anything else skips it without a render, so an ordinary commit
-# costs nothing. The check reads the WORKING TREE, so a triggering file that is
-# staged AND has unstaged edits on top is refused outright: what would be
-# checked is not what would be committed.
+# costs nothing. The check reads the WORKING TREE, so once it triggers, ANY of
+# those inputs carrying unstaged edits is refused outright - staged or not: an
+# unstaged compose edit can make a stale staged block look current, and then
+# what was checked is not what would be committed. (Not the OB1 gitlink: a
+# submodule reads as dirty for untracked files inside it, which would refuse
+# every commit on a host that runs it.)
 #
 # EXIT CODES of `docs --check`, and what the hook does with each - FAIL-CLOSED:
 #   0  every block matched                                  -> RAN
@@ -343,29 +346,30 @@ else
         print_summary
         exit 1
     fi
+    if ! _docs_dirty=$(git -c core.quotePath=false diff --name-only); then
+        echo "docs-blocks: git could not list the unstaged changes - cannot tell what the check would read."
+        echo "Pre-commit validation failed (generated doc blocks)!"
+        print_summary
+        exit 1
+    fi
     # Tagged streams, not `awk -v` or process substitution: this is /bin/sh (dash
-    # on Linux), and a path may contain spaces.
-    _docs_trigger=$( { printf '%s\n' "$_docs_registered" | sed 's/^/R	/'
-                       printf '%s\n' "$_docs_staged" | sed 's/^/S	/'; } |
+    # on Linux), and a path may contain spaces. Prints `S<tab>path` for a staged
+    # input and `D<tab>path` for an unstaged one.
+    _docs_inputs=$( { printf '%s\n' "$_docs_registered" | sed 's/^/R	/'
+                      printf '%s\n' "$_docs_staged" | sed 's/^/S	/'
+                      printf '%s\n' "$_docs_dirty" | sed 's/^/D	/'; } |
         awk -F'\t' '$1 == "R" { if ($2 != "") want[$2] = 1; next }
-                    $1 == "S" && $2 != "" {
+                    $2 != "" {
                         p = $2
                         if (p ~ /\.(yml|yaml)$/ || p ~ /(^|\/)\.env\.example$/ || p == "stack.manifest.toml" ||
-                            p == "scripts/stack/stack.py" || p == "OB1" || (p in want)) print p }')
+                            p == "scripts/stack/stack.py" || (p in want) || ($1 == "S" && p == "OB1")) print $1 "\t" p }')
+    _docs_trigger=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^S	//p')
+    _docs_unstaged=$(printf '%s\n' "$_docs_inputs" | sed -n 's/^D	//p')
     if [ -n "$_docs_trigger" ]; then
-        if ! _docs_dirty=$(git -c core.quotePath=false diff --name-only); then
-            echo "docs-blocks: git could not list the unstaged changes."
-            echo "Pre-commit validation failed (generated doc blocks)!"
-            print_summary
-            exit 1
-        fi
-        _docs_both=$( { printf '%s\n' "$_docs_dirty" | sed 's/^/D	/'
-                        printf '%s\n' "$_docs_trigger" | sed 's/^/T	/'; } |
-            awk -F'\t' '$1 == "D" { d[$2] = 1; next } $1 == "T" && ($2 in d) { print $2 }')
-        if [ -n "$_docs_both" ]; then
-            echo "docs-blocks: these are staged AND carry unstaged edits, and the check reads the working tree:"
-            printf '%s\n' "$_docs_both" | sed 's/^/    /'
-            echo "  Stage them fully (or stash the rest), then commit again."
+        if [ -n "$_docs_unstaged" ]; then
+            echo "docs-blocks: these inputs of the generated doc blocks carry UNSTAGED edits, and the check reads the working tree:"
+            printf '%s\n' "$_docs_unstaged" | sed 's/^/    /'
+            echo "  Stage them, or stash them (git stash push --keep-index), then commit again."
             echo "Pre-commit validation failed (generated doc blocks)!"
             print_summary
             exit 1
