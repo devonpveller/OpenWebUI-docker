@@ -342,6 +342,123 @@ class DenylistMustBeReadable(ScratchRepo):
             os.chmod(f, 0o600)
 
 
+class Attempt4(ScratchRepo):
+    """Tester evidence, attempt 3: F3-3..F3-6, and pins for the mutations that survived."""
+
+    def test_a_colon_prefixed_name_has_its_content_judged(self):
+        if os.name == 'nt':
+            self.skipTest('":" cannot occur in a Windows file name')
+        for name in (':zz.md', ':(top)q.md'):
+            with self.subTest(name=name):
+                self.stage(name, 'host ' + LAN_IP + '\n')
+                rc, out = self.run_gate()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(name + ':1:', out)
+                git(self.dir, 'rm', '-q', '--cached', '--', ':(literal)' + name)
+
+    def test_an_email_in_a_md_file_name_is_refused(self):
+        self.stage('notes-' + EMAIL + '.md', 'clean\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn(':0:', out)
+        self.assertIn(': email (', out)
+
+    def test_a_bom_first_entry_still_matches(self):
+        common = git(self.dir, 'rev-parse', '--git-common-dir').stdout.decode().strip()
+        with open(os.path.join(self.dir, common, 'identity-denylist'), 'w', encoding='utf-8-sig') as fh:
+            fh.write(OPERATOR_LITERAL + '\n')
+        self.stage('n.md', 'by ' + OPERATOR_LITERAL + '\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('denylist entry 1', out)
+
+    def test_a_tab_before_the_label_still_matches(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\t# user\n')
+        self.stage('n.md', 'by ' + OPERATOR_LITERAL + '\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('denylist entry 1 [user]', out)
+
+    def test_an_empty_or_comment_only_denylist_is_exit_2(self):
+        for text in ('', '# nothing yet\n\n'):
+            with self.subTest(text=text):
+                self.denylist_in_git_dir(text)
+                rc, out = self.run_gate()
+                self.assertEqual(rc, 2, out)
+                self.assertIn('no entries', out)
+
+    def test_the_denylist_path_is_printed_once_not_on_the_verdict(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 0, out)
+        common = git(self.dir, 'rev-parse', '--git-common-dir').stdout.decode().strip()
+        verdict = [ln for ln in out.splitlines() if ' - scanned ' in ln]
+        self.assertEqual(len(verdict), 1, out)
+        self.assertNotIn('identity-denylist', verdict[0])
+        self.assertEqual(out.count('identity-denylist'), 1, out)
+
+    # --- pins for mutations that survived attempt 3 (behaviour was right, untested) ---------
+    def test_an_uppercase_denylist_entry_matches(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL.upper() + '\n')
+        self.stage('n.md', 'by ' + OPERATOR_LITERAL + '\n')
+        rc, _ = self.run_gate()
+        self.assertEqual(rc, 1)
+
+    def test_more_generic_shapes(self):
+        cases = [
+            ('user-profile-path', 'C:' + BS + 'Documents and Settings' + BS + 'zqxuser' + BS + 'x'),
+            ('lan-ip', 'ula ' + 'fc00:' + '1234:5678::' + '9'),
+            ('lan-ip', 'router ' + '192.' + '168.' + '40.1'),            # a host ending .1 is still a host
+        ]
+        for cls, line in cases:
+            with self.subTest(cls=cls, line=line):
+                self.stage('docs/d.md', 'x\n' + line + '\n')
+                rc, out = self.run_gate()
+                self.assertEqual(rc, 1, out)
+                self.assertIn(': ' + cls + ' (', out)
+                git(self.dir, 'reset', '-q', '--', 'docs/d.md')
+
+    def test_utf16_big_endian_is_decoded(self):
+        self.write('ps/be.ps1', ('x\r\n$h = "' + LAN_IP + '"\r\n').encode('utf-16-be'), mode='wb')
+        with open(os.path.join(self.dir, 'ps/be.ps1'), 'r+b') as fh:
+            body = fh.read()
+            fh.seek(0)
+            fh.write(b'\xfe\xff' + body)
+        git(self.dir, 'add', 'ps/be.ps1')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('ps/be.ps1:2:', out)
+
+    def test_staged_mode_does_not_exempt_scripts_checks(self):
+        self.stage('scripts/checks/probe.py', 'HOST = "' + LAN_IP + '"\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+
+    def test_no_part_of_a_generic_match_is_echoed(self):
+        self.stage('a.txt', 'mail ' + EMAIL + '\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1)
+        self.assertNotIn(EMAIL[:6], out)
+        self.assertNotIn(EMAIL[-8:], out)
+
+    def test_all_judges_a_symlink_target(self):
+        sha = subprocess.run(['git', 'hash-object', '-w', '--stdin'], cwd=self.dir, input=WIN_USER_PATH.encode(),
+                             stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+        git(self.dir, 'update-index', '--add', '--cacheinfo', '120000,' + sha + ',link.md')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'link')
+        rc, out = self.run_gate('--all')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('link.md:1:', out)
+
+    def test_all_judges_a_committed_denylisted_name(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
+        self.stage('x-' + OPERATOR_LITERAL + '.md', 'clean\n')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'named')
+        rc, out = self.run_gate('--all')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('x-<entry 1>.md:0:', out)
+
+
 class StagedModeJudgesAdditionsOnly(ScratchRepo):
     def test_an_old_line_you_did_not_touch_does_not_block(self):
         self.stage('cfg.txt', 'a ' + LAN_IP + '\n')

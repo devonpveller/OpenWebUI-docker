@@ -235,8 +235,13 @@ def _email_class(m: re.Match) -> str | None:
         return None
     # file names such as `foo@2x.png` and package pins such as `pkg@1.2.3` are not email:
     # their "domain" ends in a file extension or a version
-    if re.search(r'(?i)\.(?:png|jpe?g|gif|svg|webp|js|mjs|ts|css|json|md|txt|py|sh)$', dom):
-        return None
+    ext = re.search(r'(?i)\.(?:png|jpe?g|gif|svg|webp|js|mjs|ts|css|json|md|txt|py|sh)$', dom)
+    if ext:
+        base = dom[:ext.start()]
+        # `foo@2x.png` has no domain left; `<user>@<host>.io.md` (a file NAME) still has one
+        if not re.search(r'(?i)\.[a-z]{2,}$', base) or _GENERIC_EMAIL_DOMAINS.match(base):
+            return None
+        dom = base
     if _GENERIC_EMAIL_LOCAL.match(local) and dom.lower().endswith(('.example', '.invalid')):
         return None
     return 'email'
@@ -344,17 +349,26 @@ def load_allowlist(text: str, source: str) -> list[AllowEntry]:
 def load_denylist(text: str, source: str) -> list[tuple[int, str, str]]:
     """[(entry number, lowercased literal, label)]. Numbers count entries, not lines."""
     out = []
+    if text.startswith('\ufeff'):
+        text = text[1:]          # a UTF-8 BOM (PS 5.1's Set-Content/Out-File -Encoding utf8 writes one)
     for n, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith('#'):
             continue
-        lit, sep, label = line.partition(' #')
+        # the label follows WHITESPACE (space or tab) and '#'
+        m = re.match(r'(.*?)\s+#(.*)$', line)
+        lit, label = (m.group(1), m.group(2)) if m else (line, '')
         lit = lit.strip()
+        if '\t' in lit:
+            raise ConfigError(f'{source}:{n}: an entry contains a TAB - one literal per line, a label after `#`')
         if len(lit) < MIN_LITERAL:
             # do not echo the entry: it may be the start of a real value
             raise ConfigError(f'{source}:{n}: an entry shorter than {MIN_LITERAL} characters would match '
                               f'inside ordinary words - lengthen it or remove it')
         out.append((len(out) + 1, lit.lower(), label.strip()))
+    if not out:
+        raise ConfigError(f'{source}: the denylist has no entries - add your literals (see '
+                          f'.identity-denylist.example) or delete the file; an empty one is not "no denylist"')
     return out
 
 
@@ -459,7 +473,7 @@ def _blob(spec: str) -> bytes | None:
     proc = subprocess.run(('git', 'cat-file', '-e', spec), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         return None
-    return _git('show', spec)
+    return _git('cat-file', 'blob', spec)
 
 
 _HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
@@ -499,11 +513,11 @@ def staged_findings(deny) -> tuple[list[Finding], int, int]:
             found.extend(scan_line(f, 0, f, deny))
     for f in files:
         diff = _git('-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--no-color', '--no-ext-diff',
-                    '--no-textconv', '--no-renames', '--', f).decode('utf-8', 'surrogateescape')
+                    '--no-textconv', '--no-renames', '--', ':(literal)' + f).decode('utf-8', 'surrogateescape')
         added = added_lines(diff)
         if added is None:
             # git calls it binary; a UTF-16 text file is judged by diffing its decoded lines
-            new = decode_text(_git('show', ':' + f))
+            new = decode_text(_git('cat-file', 'blob', ':0:' + f))
             if new is None:
                 skipped += 1
                 continue
@@ -599,8 +613,10 @@ def _main(a) -> int:
                 raise ConfigError(f'denylist {deny_src} unreadable: {e.strerror}')
             except UnicodeDecodeError:
                 raise ConfigError(f'denylist {deny_src} is not UTF-8 text')
-    layer = (f'generic + operator ({len(deny)} denylist entries from {deny_src})' if deny
+    layer = (f'generic + operator ({len(deny)} denylist entries)' if deny
              else 'generic only (no operator denylist on this machine - see .identity-denylist.example)')
+    if deny:
+        print(f'  [identity] operator denylist: {deny_src}')
 
     if a.all:
         found, scanned, binary = all_findings(deny)
