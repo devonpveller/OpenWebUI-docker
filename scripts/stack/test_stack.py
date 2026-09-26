@@ -302,11 +302,17 @@ def test_context_flag_rejects_a_malformed_pair(root):
 # --------------------------------------------------------------------------
 
 
-def test_enable_memory_refuses_and_names_inference_and_the_remedy(root):
-    code, out, _ = run(root, "enable", "memory")
+def test_enable_the_memory_plane_refuses_and_names_inference_and_the_remedy(root):
+    """The PLANE refuses on an unmet requires; the remedy enables the inference PLANE.
+
+    `--plane` since ac-driver-products: a bare `memory` is the product now. The
+    remedy says `--plane inference` because a bare `inference` would be the
+    product, whose `local` profile is more than this refusal asked for.
+    """
+    code, out, _ = run(root, "enable", "--plane", "memory")
     assert code == stack.EXIT_REFUSED
     assert "inference" in out
-    assert "stack.py enable inference" in out
+    assert "stack.py enable --plane inference" in out
     assert not (root / stack.STATE_REL).exists()
 
 
@@ -455,20 +461,22 @@ def test_disable_says_so_when_a_name_is_ambiguous_too(root):
     run(root, "init", "--planes", "inference,memory")
     code, out, _ = run(root, "disable", "memory")
     assert code == 0
-    assert "names both a plane and a product" in out
+    assert "names both a plane and a product; acting on the PRODUCT" in out
+    assert "--plane memory" in out
     assert set(state_of(root)["planes"]) == {"inference"}
 
 
-def test_a_plane_name_wins_over_a_product_of_the_same_name(root):
-    """`enable memory` must be the PLANE, which is what makes it refuse."""
+def test_a_product_name_wins_over_a_plane_of_the_same_name(root):
+    """`enable memory` is the PRODUCT (orchestrator decision, ac-driver-products): it brings inference."""
     code, out, _ = run(root, "enable", "memory")
-    assert code == stack.EXIT_REFUSED
-    assert "names both a plane and a product" in out
-    code, _, _ = run(root, "enable", "--product", "memory")
-    assert code == 0
+    assert code == 0, out
+    assert "names both a plane and a product; acting on the PRODUCT" in out
     # frontend is there because the absent state file defaults to it, not because
     # the product asked for it.
     assert set(state_of(root)["planes"]) == {"memory", "inference", "frontend"}
+    code, out, _ = run(root, "enable", "--plane", "memory")
+    assert code == 0
+    assert "acting on the PLANE alone" in out
 
 
 def test_enable_a_product_refuses_on_any_member_planes_blank_key(root):
@@ -4615,3 +4623,179 @@ def test_the_host_path_guard_ignores_case(docs_root):
     code, out, _h = docs(docs_root, "--write", host=host)
     assert code == stack.EXIT_REFUSED
     assert "this checkout's absolute path" in out
+
+
+# --------------------------------------------------------------------------
+# ac-driver-products: the driver's profiles reach the containers, and a name
+# that is both a plane and a product means the product
+# --------------------------------------------------------------------------
+
+# Captured at import, before the autouse fixture swaps it for a hermetic stub:
+# the tests below exercise the REAL execute seams with subprocess itself faked.
+_REAL_SUBPROCESS_CAPTURE = stack.subprocess_capture
+_REAL_SUBPROCESS_RUNNER = stack.subprocess_runner
+
+_MANIFEST = stack.Manifest.load(REAL_MANIFEST)
+SHARED_NAMES = sorted(set(_MANIFEST.planes) & set(_MANIFEST.products))
+
+
+def _record_calls(monkeypatch):
+    """Fake subprocess.call/run: record (argv, env kwarg), never execute."""
+    seen = []
+
+    def fake_call(cmd, cwd=None, env=None, **_kw):
+        seen.append((list(cmd), env))
+        return 0
+
+    def fake_run(cmd, cwd=None, env=None, **_kw):
+        seen.append((list(cmd), env))
+        return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(stack.subprocess, "call", fake_call)
+    monkeypatch.setattr(stack.subprocess, "run", fake_run)
+    return seen
+
+
+def _run_with_the_real_runner(root, *args):
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), *args], stdout=out)   # runner=None -> subprocess_runner
+    return code, out.getvalue()
+
+
+def test_up_hands_the_compose_process_the_profiles_it_passes(root, monkeypatch):
+    """The bug: `--profile local` alone left llm-gateway's COMPOSE_PROFILES empty -> 0 models."""
+    assert run(root, "enable", "--product", "inference")[0] == 0
+    seen = _record_calls(monkeypatch)
+    code, out = _run_with_the_real_runner(root, "up", "inference")
+    assert code == 0, out
+    ((cmd, env),) = seen
+    assert cmd == ["docker", "compose", "-f", "inference/docker-compose.yml", "--profile", "local", "up", "-d"]
+    assert env is not None, "the compose process inherited an environment with no COMPOSE_PROFILES"
+    assert env["COMPOSE_PROFILES"] == "local"
+
+
+def test_the_variable_is_the_union_the_flags_are(root, monkeypatch):
+    """Env-file COMPOSE_PROFILES + state + defaults: the variable carries exactly the --profile set."""
+    run(root, "init", "--planes", "ob1", "--force")
+    state = json.loads((root / stack.STATE_REL).read_text(encoding="utf-8"))
+    state["planes"]["ob1"]["profiles"] = ["research"]
+    (root / stack.STATE_REL).write_text(json.dumps(state), encoding="utf-8")
+    env_path = _MANIFEST.env_path(root, "ob1")
+    env_path.write_text(env_path.read_text(encoding="utf-8") + "COMPOSE_PROFILES=wiki\n", encoding="utf-8")
+    seen = _record_calls(monkeypatch)
+    code, out = _run_with_the_real_runner(root, "up", "ob1")
+    assert code == 0, out
+    ((cmd, env),) = seen
+    flags = [cmd[i + 1] for i, word in enumerate(cmd) if word == "--profile"]
+    assert set(flags) == {"idea-refinery", "research", "wiki"}
+    assert env["COMPOSE_PROFILES"] == ",".join(flags)
+
+
+def test_a_shell_compose_profiles_does_not_leak_past_the_flags(root, monkeypatch):
+    """Another plane's value exported in the shell must not reach the gateway."""
+    monkeypatch.setenv("COMPOSE_PROFILES", "gpu,tailscale")
+    run(root, "enable", "--product", "inference")
+    seen = _record_calls(monkeypatch)
+    code, out = _run_with_the_real_runner(root, "up", "inference")
+    assert code == 0, out
+    assert seen[0][1]["COMPOSE_PROFILES"] == "local"
+
+
+def test_no_flag_means_no_override(root, monkeypatch):
+    """With no --profile, compose keeps reading COMPOSE_PROFILES itself (shell, then the plane env)."""
+    run(root, "enable", "--plane", "inference")
+    seen = _record_calls(monkeypatch)
+    code, out = _run_with_the_real_runner(root, "up", "inference")
+    assert code == 0, out
+    ((cmd, env),) = seen
+    assert "--profile" not in cmd
+    assert env is None
+
+
+def test_the_other_verbs_carry_the_variable_too(root, monkeypatch):
+    """down, restart and status run through the same runner; each must see the same set."""
+    run(root, "enable", "--product", "inference")
+    seen = _record_calls(monkeypatch)
+    for verb in (["down", "inference"], ["restart", "inference"], ["status", "inference"]):
+        _run_with_the_real_runner(root, *verb)
+    assert [env and env["COMPOSE_PROFILES"] for _cmd, env in seen] == ["local", "local", "local"]
+
+
+def test_the_capture_seam_carries_the_variable_too(root, monkeypatch):
+    """recover and stats render/list through capture; their compose must see the same set."""
+    seen = _record_calls(monkeypatch)
+    cmd = stack.compose_command(_MANIFEST, "inference", ["config", "--format", "json"], profiles=["local"])
+    _REAL_SUBPROCESS_CAPTURE(cmd, root)
+    _REAL_SUBPROCESS_RUNNER(cmd, root)
+    assert [env and env.get("COMPOSE_PROFILES") for _cmd, env in seen] == ["local", "local"]
+    assert seen[0][0] == ["docker", "compose", "-f", "inference/docker-compose.yml", "--profile", "local",
+                          "config", "--format", "json"]
+
+
+def test_the_printed_command_is_unchanged(root):
+    """The override is environment, not argv: --dry-run prints what it always printed."""
+    run(root, "enable", "--product", "inference")
+    code, out, _ = run(root, "up", "inference", "--dry-run")
+    assert code == 0
+    assert docker_lines(out) == ["docker compose -f inference/docker-compose.yml --profile local up -d"]
+
+
+def test_the_shared_names_are_the_five_the_docs_name():
+    assert SHARED_NAMES == ["agent-org", "inference", "memory", "portal", "search"]
+
+
+@pytest.mark.parametrize("name", SHARED_NAMES)
+def test_a_bare_shared_name_enables_the_product(root, name):
+    code, out, _ = run(root, "enable", name)
+    assert code == 0, out
+    assert f"enabled product {name}:" in out
+    assert f"acting on the PRODUCT (use `--plane {name}` for the plane alone)" in out
+    bare = state_of(root)
+    (root / stack.STATE_REL).unlink()
+    code, _, _ = run(root, "enable", "--product", name)
+    assert code == 0
+    assert state_of(root) == bare
+    # it printed every plane it wrote (frontend is in the state by default, not by the product)
+    listed = [line.split()[0] for line in out.splitlines() if line.startswith("  ")]
+    wrote = [p for p in bare["planes"] if p != "frontend" or p in listed]
+    assert sorted(listed) == sorted(wrote)
+
+
+@pytest.mark.parametrize("name", SHARED_NAMES)
+def test_dash_dash_plane_enables_the_plane_alone(root, name):
+    deps = [p for p in stack.order_planes(_MANIFEST, stack.dependency_closure(_MANIFEST, [name]))
+            if p != name and not _MANIFEST.is_implicit(p)]
+    for dep in deps:
+        assert run(root, "enable", "--plane", dep)[0] == 0
+    code, out, _ = run(root, "enable", "--plane", name)
+    assert code == 0, out
+    assert f"enabled plane {name}:" in out
+    assert "acting on the PLANE alone" in out
+    assert state_of(root)["planes"][name]["profiles"] == _MANIFEST.default_profiles(name)
+
+
+def test_enable_inference_turns_on_local_and_prints_it(root):
+    code, out, _ = run(root, "enable", "inference")
+    assert code == 0, out
+    assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
+    assert "enabled product inference:" in out
+    assert "  inference  profiles: local" in out
+
+
+def test_enable_memory_brings_inference_and_lists_both(root):
+    code, out, _ = run(root, "enable", "memory")
+    assert code == 0, out
+    assert {"memory", "inference"} <= set(state_of(root)["planes"])
+    assert "enabled product memory:" in out
+    assert "\n  inference" in out and "\n  memory" in out
+
+
+def test_disable_dash_dash_plane_is_the_plane_alone(root):
+    run(root, "init", "--planes", "inference,memory")
+    code, out, _ = run(root, "disable", "--plane", "inference")
+    assert code == stack.EXIT_REFUSED
+    assert "memory" in out
+    code, out, _ = run(root, "disable", "--plane", "memory")
+    assert code == 0
+    assert "acting on the PLANE alone" in out
+    assert set(state_of(root)["planes"]) == {"inference"}

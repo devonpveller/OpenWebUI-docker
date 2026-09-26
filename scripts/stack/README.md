@@ -138,7 +138,7 @@ seen*.
 | Flag | Means | Today |
 |---|---|---|
 | `default = true` | the driver passes `--profile <name>` on every invocation | `ob1`'s `idea-refinery` - parity with what `stack.ps1` always passed |
-| `opt_in = true` | something **other than the driver** turns it on, and the description says what | `inference`'s `local` (`COMPOSE_PROFILES` in the root `.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
+| `opt_in = true` | a **deliberate choice** turns it on - a product that declares it, or something outside the driver - and the description says what | `inference`'s `local` (`enable inference`, the product, or `COMPOSE_PROFILES=local` in `inference/.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
 | `pending = true` | declared here, **not yet in the compose file**; a later item adds it. Enabling one is a no-op and the driver says so | `frontend`'s `gpu`/`tailscale` |
 
 Declaring none of the three is **refused** by `inventory --check`. That gate
@@ -166,6 +166,37 @@ does exactly that union, and passing no flag at all stays safe because compose
 then reads `COMPOSE_PROFILES` itself. That is today's path for every plane except
 `ob1`.
 
+#### ...and `--profile` does not SET `COMPOSE_PROFILES` either
+
+The flags decide which services start; a service that interpolates
+`${COMPOSE_PROFILES}` still sees whatever the variable was. `llm-gateway` does
+(`inference/compose/gateway.yml`), and its config assembler registers the `local`
+model group only when `local` is in that variable. So enabling the inference product (which
+writes `local`) followed by `up` used to pass `--profile local`, start the
+upstreams, and hand the gateway `COMPOSE_PROFILES=""`: **zero** models registered.
+With `COMPOSE_PROFILES=local` in `inference/.env` the same gateway registers five.
+
+So whenever the driver passes any `--profile`, it also sets `COMPOSE_PROFILES`
+in that compose process's environment to **the same list** - `compose_command()`
+returns the argv with the override attached, and the two seams that execute a
+command (`subprocess_runner`, `subprocess_capture`, plus the backup/restore
+pipe) merge it over the inherited environment. The rules:
+
+- The value is `effective_profiles()`: the state file's profiles, the plane's
+  `default` ones, their `requires` closure, **unioned** with the plane's own
+  env-file `COMPOSE_PROFILES`. The variable therefore never says less than the
+  env file did, and never differs from the flags.
+- It **replaces** a `COMPOSE_PROFILES` exported in the shell, exactly as the
+  flags already did, so another plane's value (`gpu,tailscale`) cannot reach the
+  gateway.
+- With **no** flag nothing is set, and compose reads the variable itself (shell,
+  then the plane's env file) - unchanged.
+- It is environment, not argv: `--dry-run` prints the same line as before. Run
+  such a line by hand and the gateway gets the env file's value, not the flags.
+
+Every service that reads `COMPOSE_PROFILES` in any plane's render is that one
+gateway; the check is repeated in the item's findings.
+
 ### Product keys
 
 | Key | Meaning |
@@ -176,13 +207,15 @@ then reads `COMPOSE_PROFILES` itself. That is today's path for every plane excep
 | `surfaces` | `{ plane = ["profile", ...] }` - how a person reaches the engine. Dropped by `--headless`; a plane that appears **only** under `surfaces` is itself dropped by `--headless`. |
 
 Five names (`inference`, `memory`, `search`, `agent-org`, `portal`) are both a
-plane and a product. A bare name resolves to the **plane**, because that is the
-smaller action and the one whose refusal matters: `enable memory` must refuse
-while inference is off rather than quietly enabling inference too. Force the
-other reading with `--product <name>` (or `--plane <name>`). **Both `enable` and
-`disable`** print a `# note:` line whenever a name is ambiguous, saying which
-reading they took - `disable` is the destructive half of the pair, so it is the
-one where a silent reading would be worse.
+plane and a product. A bare name means the **product**: a newcomer copies
+`enable <name>` from the product menu and must get what the menu promises -
+`enable memory` brings inference, `enable inference` turns on `local`.
+`--plane <name>` acts on the plane alone (and `--product <name>` is still
+accepted). **Both `enable` and `disable`** print a `# note:` line whenever a
+shared name is used, saying which reading they took - `disable` is the
+destructive half of the pair, so it is the one where a silent reading would be
+worse - and `enable` then lists every plane it wrote with its profiles. The set
+is derived from the manifest; `test_stack.py` pins it to these five.
 
 ### Shared modules
 
@@ -283,13 +316,17 @@ and which code - the rest is not attempted.
 **Refuses** a `manual` plane, naming its script. Restarting a plane that is
 not enabled prints a note and proceeds.
 
-### `enable <plane|product>` [`--headless`] [`--plane`|`--product`]
+### `enable <product|plane>` [`--headless`] [`--plane`|`--product`]
+
+A name that is both is the **product** (see *Product keys*); `--plane <name>`
+takes the plane.
 
 A **plane**: enables just that plane (plus its `default` profiles).
 
 - **Refuses** when a required plane is not enabled, naming it *and* the command
-  that would enable it:
-  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable inference)`
+  that would enable it - `--plane` when a product shares the name, since the
+  refusal asked for the plane and not for the product's profiles:
+  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable --plane inference)`
 - **Refuses** when one of the plane's `keys` is blank or missing in the env file
   that plane reads, naming the key, whether it is blank or missing, the file, and
   the remedy:
@@ -314,7 +351,10 @@ and its `surfaces` unless `--headless`.
 Enabling a `pending` profile is allowed and prints a note saying it changes
 nothing until the item that adds it to the compose file lands.
 
-### `disable <plane|product>`
+### `disable <product|plane>` [`--plane`|`--product`]
+
+A shared name is the product here too (its `planes` and `surfaces`);
+`--plane <name>` disables the plane alone.
 
 **Refuses** while an enabled plane still requires the one being disabled,
 naming the dependents. Disabling something that is not enabled is a no-op note.

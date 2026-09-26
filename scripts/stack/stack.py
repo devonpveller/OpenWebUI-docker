@@ -639,7 +639,49 @@ def rel(root: Path, path: Path) -> str:
 # --------------------------------------------------------------------------
 
 
+class ComposeCommand(list):
+    """A docker command line plus the environment overrides it must run with.
+
+    Still a plain list to everything that prints, joins or records it - the
+    printed line (and so every `--dry-run`) is unchanged - but the two seams
+    that EXECUTE a command (subprocess_runner, subprocess_capture) merge `env`
+    over the process environment. See compose_command for the one override
+    there is.
+    """
+
+    def __init__(self, items=(), env=None):
+        super().__init__(items)
+        self.env = dict(env or {})
+
+
+def command_env(cmd) -> dict | None:
+    """The process environment `cmd` runs in: os.environ plus its overrides, or None (inherit)."""
+    overrides = getattr(cmd, "env", None)
+    if not overrides:
+        return None
+    env = dict(os.environ)
+    env.update(overrides)
+    return env
+
+
 def compose_command(manifest: Manifest, plane: str, args, context=None, profiles=()) -> list[str]:
+    """`docker compose` for one plane, with `--profile` per profile.
+
+    WHEN ANY PROFILE IS PASSED, COMPOSE_PROFILES IS SET TO THE SAME LIST in the
+    command's environment (ComposeCommand.env). The flags decide which services
+    start; the VARIABLE is what a service interpolating ${COMPOSE_PROFILES} sees,
+    and compose does not derive one from the other. The consumer today is
+    llm-gateway (inference/compose/gateway.yml -> assemble-config.py), which
+    registers the `local` model group only when `local` is in the variable.
+    Measured before this: `stack.py enable --product inference` + `up` passed `--profile
+    local`, the gateway got COMPOSE_PROFILES="" and registered 0 models while the
+    upstreams started. `profiles` here is always effective_profiles(), i.e.
+    already the union of the state file, the `default` profiles and the plane's
+    own env-file COMPOSE_PROFILES, so the variable carries exactly what compose
+    was told - never less than the env file said. With NO profile nothing is set
+    and compose reads COMPOSE_PROFILES itself (shell, then the plane's env file),
+    as before.
+    """
     cmd = ["docker"]
     if context:
         cmd += ["--context", context]
@@ -647,10 +689,11 @@ def compose_command(manifest: Manifest, plane: str, args, context=None, profiles
     env_file = manifest.env_file(plane)
     if env_file:
         cmd += ["--env-file", env_file]
+    profiles = list(profiles)
     for profile in profiles:
         cmd += ["--profile", profile]
     cmd += list(args)
-    return cmd
+    return ComposeCommand(cmd, {"COMPOSE_PROFILES": ",".join(profiles)} if profiles else None)
 
 
 def enable_plane_profiles(manifest: Manifest, state: State, plane: str, profiles, context=None) -> list[str]:
@@ -727,7 +770,7 @@ def effective_profiles(manifest: Manifest, state: State, root: Path, plane: str)
 
 
 def subprocess_runner(cmd, cwd) -> int:
-    return subprocess.call(cmd, cwd=str(cwd))
+    return subprocess.call(list(cmd), cwd=str(cwd), env=command_env(cmd))
 
 
 # --------------------------------------------------------------------------
@@ -931,10 +974,16 @@ def ensure_networks(manifest, state, root, console, runner, capture, plane, dry_
 def resolve_target(manifest: Manifest, name: str, kind: str = "auto") -> tuple[str, str]:
     """('plane'|'product', name).
 
-    Plane wins a name collision (five names are both, e.g. `memory`), because the
-    plane is the smaller, more surprising-if-wrong action: `enable memory` must
-    refuse when inference is off rather than quietly enabling inference too.
-    Force the other reading with --product / --plane.
+    PRODUCT wins a name collision (five names are both: inference, memory,
+    search, agent-org, portal - planes & products in the manifest). A newcomer
+    types `enable <name>` from the product menu and must get the product: its
+    requires closure and its profiles (`enable inference` writes `local`,
+    `enable memory` brings inference). The plane used to win, which made the
+    menu's own commands do something else - `enable memory` refused and
+    `enable inference` enabled a gateway with no local models (ac-driver-products,
+    orchestrator decision). `--plane <name>` acts on the plane alone;
+    `--product <name>` stays accepted. cmd_enable prints every plane and profile
+    it wrote, and _ambiguity_note says which reading a shared name got.
     """
     if kind == "plane":
         manifest.plane(name)
@@ -942,10 +991,10 @@ def resolve_target(manifest: Manifest, name: str, kind: str = "auto") -> tuple[s
     if kind == "product":
         manifest.product(name)
         return "product", name
-    if name in manifest.planes:
-        return "plane", name
     if name in manifest.products:
         return "product", name
+    if name in manifest.planes:
+        return "plane", name
     raise Refusal(
         f"refused: unknown plane or product '{name}'.\n"
         f"  planes:   {', '.join(manifest.order)}\n"
@@ -1237,17 +1286,31 @@ def _key_remedy(files, submodules) -> str:
     )
 
 
-def _ambiguity_note(manifest, console, kind, target) -> None:
-    """A name that is both a plane and a product resolves to the PLANE - say so.
+def _ambiguity_note(manifest, console, kind, target, explicit: bool = False) -> None:
+    """A name that is both a plane and a product - say which reading was taken.
 
     Both `enable` and `disable` print this: `disable` is the destructive half of
-    the pair, so it is the one where a silent reading is worse.
+    the pair, so it is the one where a silent reading is worse. A bare name is
+    the PRODUCT (resolve_target); `--plane` is the plane alone.
     """
-    if kind == "plane" and target in manifest.products:
+    if not (target in manifest.products and target in manifest.planes):
+        return
+    if kind == "product" and not explicit:
         console.line(
-            f"# note: '{target}' names both a plane and a product; acting on the PLANE "
-            f"(use `--product {target}` for the product)"
+            f"# note: '{target}' names both a plane and a product; acting on the PRODUCT "
+            f"(use `--plane {target}` for the plane alone)"
         )
+    elif kind == "plane":
+        console.line(
+            f"# note: '{target}' names both a plane and a product; acting on the PLANE alone "
+            f"(--plane; without it `{target}` is the product)"
+        )
+
+
+def enable_remedy(manifest: Manifest, plane: str) -> str:
+    """The command that enables exactly `plane` - `--plane` when a product shares the name."""
+    flag = "--plane " if plane in manifest.products else ""
+    return f"python scripts/stack/stack.py enable {flag}{plane}"
 
 
 def product_plan(manifest: Manifest, name: str, headless: bool):
@@ -1282,8 +1345,9 @@ def product_plan(manifest: Manifest, name: str, headless: bool):
 
 def cmd_enable(manifest, state, root, console, name, kind, headless: bool, capture=None) -> int:
     capture = capture or subprocess_capture
+    explicit = kind != "auto"
     kind, target = resolve_target(manifest, name, kind)
-    _ambiguity_note(manifest, console, kind, target)
+    _ambiguity_note(manifest, console, kind, target, explicit)
 
     if kind == "plane":
         missing = [
@@ -1291,7 +1355,7 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
             if not manifest.is_implicit(dep) and not state.is_enabled(dep)
         ]
         if missing:
-            remedies = "; ".join(f"python scripts/stack/stack.py enable {d}" for d in missing)
+            remedies = "; ".join(enable_remedy(manifest, d) for d in missing)
             raise Refusal(
                 f"refused: {target} requires "
                 + ", ".join(missing)
@@ -1357,8 +1421,9 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
 
 
 def cmd_disable(manifest, state, root, console, name, kind) -> int:
+    explicit = kind != "auto"
     kind, target = resolve_target(manifest, name, kind)
-    _ambiguity_note(manifest, console, kind, target)
+    _ambiguity_note(manifest, console, kind, target, explicit)
     planes = [target] if kind == "plane" else list(manifest.product(target).get("planes", [])) + list(
         (manifest.product(target).get("surfaces", {}) or {})
     )
@@ -1571,8 +1636,8 @@ def subprocess_capture(cmd, cwd) -> CommandResult:
     """Run a command and CAPTURE it. The runner seam streams; this one reads."""
     try:
         proc = subprocess.run(
-            cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            universal_newlines=True, errors="replace",
+            list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            universal_newlines=True, errors="replace", env=command_env(cmd),
         )
     except OSError as exc:
         return CommandResult(127, "", str(exc))
@@ -2727,7 +2792,8 @@ def subprocess_pipe(cmd, cwd, stdin_path=None, stdout_path=None) -> CommandResul
     stdin = open(stdin_path, "rb") if stdin_path else subprocess.DEVNULL
     stdout = open(stdout_path, "wb") if stdout_path else subprocess.PIPE
     try:
-        proc = subprocess.run(cmd, cwd=str(cwd), stdin=stdin, stdout=stdout, stderr=subprocess.PIPE)
+        proc = subprocess.run(list(cmd), cwd=str(cwd), stdin=stdin, stdout=stdout, stderr=subprocess.PIPE,
+                              env=command_env(cmd))
     except OSError as exc:
         return CommandResult(127, "", str(exc))
     finally:
@@ -5016,14 +5082,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the manual-<stamp> directory, its manifest.json, or one of its .tar.gz archives")
     p.add_argument("--volume", default=None, help="restore only this volume (its name or compose key)")
 
-    for verb, helptext in (("enable", "enable a plane or a product on this machine"),
-                           ("disable", "disable a plane or a product")):
-        p = sub.add_parser(verb, help=helptext)
+    for verb, helptext in (("enable", "enable a product (or a plane) on this machine"),
+                           ("disable", "disable a product (or a plane)")):
+        p = sub.add_parser(
+            verb, help=helptext,
+            description=f"{verb.capitalize()} a product or a plane (`stack.py list` shows both). A name "
+                        f"that is both means the PRODUCT: its planes, their requires closure and its "
+                        f"profiles. `--plane <name>` {verb}s the plane alone.",
+        )
         p.add_argument("name")
         p.add_argument("--plane", dest="kind", action="store_const", const="plane",
-                       help="resolve the name as a plane")
+                       help="the plane alone, even when a product has the same name")
         p.add_argument("--product", dest="kind", action="store_const", const="product",
-                       help="resolve the name as a product")
+                       help="the product (already the reading of a bare name that is both)")
         if verb == "enable":
             p.add_argument("--headless", action="store_true",
                            help="do not pull in the product's surfaces")
