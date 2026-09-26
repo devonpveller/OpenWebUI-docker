@@ -723,8 +723,11 @@ submodule, has docker, and runs `docs --check` WITHOUT `--allow-unverified`, so 
 compose file, the manifest, an `.env.example`, `stack.py` or the OB1 gitlink is
 staged; it refuses a 1 and records a 3 as a SKIPPED gate, saying what was not
 compared and that CI compares it - a contributor without docker or OB1 is not
-blocked, and not falsely told the blocks were checked. On a **merge** commit the hook is strict: exit 3
-refuses the merge (OB1 must be at the merged gitlink, docker present), and
+blocked, and not falsely told the blocks were checked. `docs --check` exits **4** instead of 3 when a gap
+is an OB1 that IS checked out but not at the staged gitlink, or dirty. On a
+**merge** commit the hook always runs and refuses a 1 or a 4 - both fixable by the
+merger - but only warns on a 3 (no docker, no OB1 checkout, and likewise no
+Python 3.11), so a newcomer's `git pull` is not blocked; CI compares those.
 MERGE-PROTOCOL.md step 5 requires `--no-ff` and a `docs --check` exit 0. Git calls
 aimed at the submodule drop git's repository-local variables
 (`git rev-parse --local-env-vars`), which a hook sets for the PARENT repository.

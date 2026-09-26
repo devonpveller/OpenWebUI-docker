@@ -31,7 +31,8 @@ into a terminating NativeCommandError under `$ErrorActionPreference = 'Stop'`
 driver is meant to be callable from a .ps1 without that dance.
 
 Exit codes: 0 fine, 1 refused / a docker command failed, 2 usage error,
-3 (`docs` only) a block could not be rendered on this machine.
+3 (`docs` only) a block could not be rendered on this machine, 4 (`docs` only) the
+same but a checked-out submodule is not at the staged gitlink or is dirty.
 `health` is the exception and says so out loud: its exit code is the NUMBER
 OF FAILED PROBES, exactly as scripts/stack/stack.ps1 health has always been.
 
@@ -3978,6 +3979,10 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
 # and it matched"; CI, which has no OB1 checkout, opts in with --allow-unverified.
 
 EXIT_UNVERIFIED = 3
+# Like 3, but at least one gap is an INITIALISED submodule that is not at the staged
+# gitlink or carries tracked edits - a state the committer can fix, unlike "docker or
+# the submodule is not on this machine". The hook refuses a MERGE on 4 and warns on 3.
+EXIT_SUBMODULE_MISMATCH = 4
 
 # file -> the blocks it must carry. Adding a block to a doc means adding it here;
 # removing one from a doc without removing it here fails the check, by design.
@@ -4048,6 +4053,10 @@ def render_capture(cmd, cwd) -> CommandResult:
 
 class Unverifiable(Exception):
     """This machine cannot produce the input a block is generated from."""
+
+
+class SubmoduleMismatch(Unverifiable):
+    """The submodule IS checked out here, but not at the staged gitlink, or dirty."""
 
 
 class PartlyUnverifiable(Exception):
@@ -4180,6 +4189,7 @@ class DocRenders:
         self._profiles: dict = {}
         self._conditions: dict = {}
         self._submodules: dict = {}
+        self.mismatch_seen = False   # a SubmoduleMismatch was raised (exit 4, not 3)
 
     def _run(self, plane: str, args) -> CommandResult:
         compose_rel = self.manifest.plane(plane)["compose"]
@@ -4192,7 +4202,8 @@ class DocRenders:
             if sub not in self._submodules:
                 self._submodules[sub] = submodule_mismatch(self.root, sub)
             if self._submodules[sub]:
-                raise Unverifiable(self._submodules[sub])
+                self.mismatch_seen = True
+                raise SubmoduleMismatch(self._submodules[sub])
         env_example = render_env_path(self.manifest, self.root, plane)
         if not env_example.name.endswith(".example"):
             # render_env_path falls back to the REAL env when no example exists; the
@@ -4909,7 +4920,13 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
             "what could not be rendered here was NOT compared and may be stale. CI's stack-driver job "
             "(OB1 checked out, docker present) compares every block and fails on a stale one"
             + ("; --allow-unverified: not a failure here" if allow_unverified else f"; exit {EXIT_UNVERIFIED}"))
-        return EXIT_OK if allow_unverified else EXIT_UNVERIFIED
+        if allow_unverified:
+            return EXIT_OK
+        if generator.renders.mismatch_seen:
+            console.line(f"  [ -- ] exit {EXIT_SUBMODULE_MISMATCH}: a checked-out submodule is not what the index "
+                         "pins (named above) - fix that and re-run; a merge commit is refused on it")
+            return EXIT_SUBMODULE_MISMATCH
+        return EXIT_UNVERIFIED
     return EXIT_OK
 
 

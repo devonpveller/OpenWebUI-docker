@@ -4512,7 +4512,9 @@ def test_a_submodule_checkout_that_is_not_the_staged_gitlink_is_not_verified(doc
     monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["profile-counts:ob1"]})
     code, out, host = docs(docs_root, "--check")
     assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the ob1 row" in out
-    assert code == stack.EXIT_UNVERIFIED, out
+    # a checked-out but mismatched submodule is exit 4 (the hook refuses a MERGE on it), not 3
+    assert code == stack.EXIT_SUBMODULE_MISMATCH, out
+    assert "a merge commit is refused on it" in out
     assert "`profile-counts:ob1`: the `OB1` checkout has uncommitted tracked edits" in out
     assert seen == ["OB1"], "asked once, cached"
     assert not any("OB1/docker/docker-compose.yml" in c for c in host.calls), "rendered the mismatched tree"

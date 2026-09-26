@@ -317,23 +317,27 @@ run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
 # EXIT CODES of `docs --check`, and what the hook does with each - FAIL-CLOSED:
 #   0  every block matched                                  -> RAN
 #   3  nothing it COMPARED was stale, but some blocks or rows -> SKIPPED, loudly
-#      could not be rendered here (OB1 absent or not at the staged gitlink, a
-#      gitignored env compose stats, no docker). Those were NOT compared; the
-#      check names each one, and CI's stack-driver job (OB1 + docker, no
-#      --allow-unverified) is the gate that compares them
+#      could not be rendered here (OB1 not checked out, a gitignored env compose
+#      stats, no docker). Those were NOT compared; the check names each one, and
+#      CI's stack-driver job (OB1 + docker, no --allow-unverified) compares them
+#   4  as 3, but OB1 IS checked out and is not at the staged -> SKIPPED on a commit,
+#      gitlink or has tracked edits                            REFUSED on a MERGE
 #   1  a stale, missing or broken block                     -> REFUSED
 #   anything else (a crash, a missing interpreter mid-run)  -> REFUSED
 # Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
 # drift half; with none, SKIPPED and recorded in the summary and the ledger.
 #
-# A MERGE COMMIT IS STRICT: pre-merge-commit (a clean merge) execs this file with
-# AI_STACK_HOOK_MERGE=1, because git writes MERGE_HEAD only after that hook; a
-# conflicted merge concluded with `git commit` runs this file with MERGE_HEAD set. A merge into a
-# line is exactly where a stale block must not slip through, so there the gate
-# always runs whatever is staged, and exit 3 (something could not be rendered -
-# OB1 not at the MERGED gitlink, no docker) or a missing Python 3.11 REFUSE the
-# merge instead of skipping it. A fast-forward runs no hook at all, which is why
-# MERGE-PROTOCOL.md requires `--no-ff` into a line.
+# ON A MERGE COMMIT the gate always runs, whatever is staged. pre-merge-commit (a
+# clean merge) execs this file with AI_STACK_HOOK_MERGE=1, because git writes
+# MERGE_HEAD only after that hook; a conflicted merge concluded with `git commit`
+# runs this file with MERGE_HEAD set. On a merge it REFUSES what the merger can fix
+# here: a stale block it could compare (exit 1) and an OB1 that is checked out but
+# not at the MERGED gitlink or dirty (exit 4). It WARNS and skips - never refuses -
+# what this machine simply does not have: docker, an OB1 checkout at all, Python
+# 3.11 (exit 3). Refusing those blocked every `git pull` on a newcomer's clone and
+# invited --no-verify (orchestrator decision, 2026-09-26); CI's stack-driver job is
+# the gate for them. A fast-forward runs no hook at all - MERGE-PROTOCOL.md
+# requires `--no-ff` into a line.
 _docs_merge=
 if [ "${AI_STACK_HOOK_MERGE:-}" = 1 ] || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     _docs_merge=yes
@@ -352,12 +356,7 @@ if ! _docs_staged=$(git -c core.quotePath=false diff --cached --name-only); then
     print_summary
     exit 1
 fi
-if [ -z "$_docs_py" ] && [ -n "$_docs_merge" ]; then
-    echo "docs-blocks: this is a MERGE commit and it must verify every generated doc block, but no Python 3.11+ is on PATH."
-    echo "Pre-commit validation failed (generated doc blocks: a merge cannot skip them)!"
-    print_summary
-    exit 1
-elif [ -z "$_docs_py" ]; then
+if [ -z "$_docs_py" ]; then
     echo "SKIPPED docs-blocks: needs Python 3.11+ (a stale generated count in the docs would not be caught)"
     GATES_SKIPPED="$GATES_SKIPPED docs-blocks"
 else
@@ -402,14 +401,14 @@ else
         _docs_rc=$?
         case "$_docs_rc" in
             0) GATES_RAN="$GATES_RAN docs-blocks" ;;
-            3) if [ -n "$_docs_merge" ]; then
-                   echo "docs-blocks: this is a MERGE commit, and the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above could not be compared."
-                   echo "  A merge into a line must compare every block: put OB1 at the MERGED gitlink (git submodule update OB1),"
-                   echo "  make docker available, then conclude the merge again (git commit)."
-                   echo "Pre-commit validation failed (generated doc blocks: a merge cannot skip them)!"
+            3|4) if [ "$_docs_rc" = 4 ] && [ -n "$_docs_merge" ]; then
+                   echo "docs-blocks: this is a MERGE commit and OB1 is checked out but not at the MERGED gitlink, or has tracked edits (named above)."
+                   echo "  Put it there (git submodule update OB1, or commit/stash inside OB1), then conclude the merge (git commit)."
+                   echo "Pre-commit validation failed (generated doc blocks: OB1 does not match the merge)!"
                    print_summary
                    exit 1
                fi
+               [ -n "$_docs_merge" ] && echo "WARNING docs-blocks: this MERGE was not fully checked - this machine lacks what the blocks named above need (docker, or an OB1 checkout). CI's stack-driver job compares them."
                echo "SKIPPED docs-blocks: the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above were NOT compared on this machine and may be stale; everything else was current. CI's stack-driver job compares every block and refuses a stale one"
                GATES_SKIPPED="$GATES_SKIPPED docs-blocks" ;;
             *) echo "  Regenerate with: python scripts/stack/stack.py docs --write   (then stage the result)"
