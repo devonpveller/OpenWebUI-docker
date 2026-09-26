@@ -2246,6 +2246,8 @@ class HealthSweep:
         # Whether inference runs its `local` profile, as `up` would pass it; None = not known
         # (the probe then runs, as it always did). See inference_serving_depth.
         self.inference_local = inference_local
+        # What upstream_exists() last saw: "exists", "absent" or "unknown" (docker ps failed).
+        self.upstream_seen = None
         self.failed = 0
         self.results: list[tuple[str, bool]] = []
 
@@ -2448,7 +2450,35 @@ class HealthSweep:
         An unreadable answer counts as "exists": a health check must fail, not pass.
         """
         found = self.docker("ps", "-a", "--filter", "name=^llama-cpp-upstream$", "--format", "{{.Names}}")
-        return found.code != 0 or bool(found.stdout.strip())
+        if found.code != 0:
+            self.upstream_seen = "unknown"
+        else:
+            self.upstream_seen = "exists" if found.stdout.strip() else "absent"
+        return self.upstream_seen != "absent"
+
+    # The fixed teardown inference/README.md gives for the `local` containers.
+    LOCAL_RM = ("docker compose -f inference/docker-compose.yml --profile local rm -sf "
+                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup")
+
+    def _upstream_hint(self, upstream: str) -> str:
+        """What the reader should do when the upstream cannot be read - TRUE for why it ran.
+
+        ac-followups X3: the probe also runs on a LEFTOVER container with `local` off
+        everywhere, and telling that reader "`up` starts it" was false - `up` never
+        will, and health would fail on it forever. The wording follows the reason.
+        """
+        if self.inference_local is False and self.upstream_seen == "unknown":
+            return (f"`local` is off for inference, but `docker ps -a` could not be read, so health cannot "
+                    f"tell whether a {upstream} container is left over; fix docker access and re-run health")
+        if self.inference_local is False:
+            return (f"`local` is off for inference, so {upstream} is a LEFTOVER container that `up` will never "
+                    f"start. Either remove it: `{self.LOCAL_RM}` (a container not made by compose: "
+                    f"`docker rm -f {upstream}`), or turn `local` on (`{CLI} enable inference`, or "
+                    f"`COMPOSE_PROFILES=local` in inference/.env) and run `{CLI} up`")
+        if self.inference_local:
+            return (f"is the upstream running? `local` is on for inference, so `up` starts it; "
+                    f"`docker ps -a --filter name={upstream}` shows its state")
+        return f"is the upstream running? `docker ps -a --filter name={upstream}` shows its state"
 
     # -- the probes whose LABEL carries the measurement --------------------
 
@@ -2501,8 +2531,7 @@ class HealthSweep:
         if listing.code != 0:
             why = (listing.stderr or listing.stdout or "no output").strip().splitlines()
             return (f"serving depth: cannot read {upstream}'s /models "
-                    f"({why[0] if why else 'no output'}) - is the upstream running? `local` is on for "
-                    f"inference, so `up` starts it; `docker ps -a --filter name={upstream}` shows its state"), False
+                    f"({why[0] if why else 'no output'}) - " + self._upstream_hint(upstream)), False
         try:
             found = int((listing.stdout or "0").strip().splitlines()[-1])
         except (ValueError, IndexError):

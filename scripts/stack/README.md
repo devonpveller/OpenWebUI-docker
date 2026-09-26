@@ -518,7 +518,11 @@ another plane (frontend's `gpu,tailscale`) cannot switch it off. Only when none
 of those holds is there no upstream by design - the gateway alone is the
 documented GPU-less deployment, and the GPU refusal's steps lead there - and the
 line reads ``serving depth: not applicable - inference runs without `local` ...``
-and passes. It stays one line either way, so the probe count above holds.
+and passes. It stays one line either way, so the probe count above holds. When the probe
+runs and cannot read the upstream, its hint follows WHY it ran: `local` on (`up`
+starts the upstream), a leftover container with `local` off (remove it with the
+`rm -sf` line from `inference/README.md`, or turn `local` on), or an unreadable
+`docker ps -a` (fix docker access).
 
 What it checks, in the cheapest order that cannot be fooled:
 

@@ -5746,3 +5746,58 @@ def test_no_printed_string_hard_codes_an_interpreter():
     hits = [(line, text) for line, text in _non_docstring_strings(tree)
             if re.search(r"\bpython[0-9.]*\s+scripts/stack/stack\.py", text) and text != stack._DOCS_GENERATED]
     assert hits == [], hits
+
+
+# --------------------------------------------------------------------------
+# ac-followups X3 (attempt-2 tester): the failure line TELLS the reader something;
+# it must be true for the reason the probe ran
+# --------------------------------------------------------------------------
+
+
+def test_a_leftover_upstream_with_local_off_says_so_and_names_both_ways_out(root, monkeypatch):
+    """X3. RED at 3fc5979: it said "`local` is on for inference, so `up` starts it"."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and code >= 1, out
+    assert "`local` is on" not in label and "`up` starts it" not in label
+    assert "`local` is off for inference, so llama-cpp-upstream is a LEFTOVER container" in label
+    assert "`" + stack.HealthSweep.LOCAL_RM + "`" in label
+    assert "docker rm -f llama-cpp-upstream" in label
+    assert f"`{stack.CLI} enable inference`" in label and f"`{stack.CLI} up`" in label
+
+
+def test_the_leftover_remedy_is_the_one_inference_readme_gives():
+    text = (REPO_ROOT / "inference" / "README.md").read_text(encoding="utf-8")
+    assert stack.HealthSweep.LOCAL_RM in text
+
+
+def test_local_on_keeps_the_up_starts_it_wording(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    _inference_local(root)
+    code, out = sweep(FakeHost(gguf_code=1, gguf_count=""), root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL", out
+    assert "`local` is on for inference, so `up` starts it" in label
+    assert "LEFTOVER" not in label
+
+
+def test_an_unreadable_container_list_with_local_off_says_it_cannot_tell(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="")
+    real = host.capture
+
+    def capture(cmd, cwd):
+        if "name=^llama-cpp-upstream$" in cmd:
+            return stack.CommandResult(1, "", "Cannot connect to the Docker daemon")
+        return real(cmd, cwd)
+    host.capture = capture
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and code >= 1, out
+    assert "`docker ps -a` could not be read" in label
+    assert "`up` starts it" not in label and "LEFTOVER" not in label
