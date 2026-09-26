@@ -451,7 +451,7 @@ telling the truth.
 | `frontend/owui/` | Canonical deploy-by-paste Open WebUI artifacts: tools, pipes, filters, actions, skills + `manifest.csv` |
 | `frontend/status-pipe/`, `frontend/system-prompts/` | The Server Status pipe subsystem and the system prompts - the only code mounts into the Open WebUI container |
 | `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, the bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/`, `agent-harness/`, `archive/` |
-| `openbrain-gateway/`, `smolcrawl/`, `little-coder/` | Service source trees that are not plane-internal (the search gateway is `search/gateway/`, mnemory's cloud gateway is `memory/mnemory-gateway/`, and the queue is `inference/llm-queue/`) |
+| `openbrain-gateway/`, `little-coder/` | Service source trees that are not plane-internal (the search gateway is `search/gateway/`, mnemory's cloud gateway is `memory/mnemory-gateway/`, and the queue is `inference/llm-queue/`) |
 | `agent-org/` | The governed multi-agent org (bus, charters, floor, 700+ tests) |
 | `OB1/` | Open Brain - a pinned git submodule since 2026-08-21 (bump via PR), including the Open Notebook trio |
 | `backup/` + `backups/` | Sidecar scripts and Dockerfiles, and the artifacts they produce. `backup/` is a SHARED module, declared as `[modules.backup]` in the manifest with the planes that consume it |
