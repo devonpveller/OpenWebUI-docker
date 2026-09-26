@@ -5,6 +5,8 @@
 #   git config core.hooksPath .githooks
 #
 # Checks, in order of how cheap they are:
+#   0b. hook modes       - the hooks themselves must be 100755
+#   0c. exec bits        - a file the stack runs by path must be 100755
 #   1. secret guard      - staged-only scan; blocks env files + provider tokens
 #   2. line endings      - repo convention
 #   2b. doc placement    - new plans belong in the documentation-plans repo
@@ -31,7 +33,8 @@ echo "Running pre-commit validations..."
 #      is MINGW*/MSYS*/CYGWIN* (Git for Windows' bash says MINGW64_NT-...). Every
 #      gate then runs exactly as it always has: the command line is the one this
 #      hook has always used, and nothing else (not even a Python probe) happens on
-#      this path. WHY THE uname TEST (ac-hooks-portable2, review blocker 1): WSL puts
+#      this path - except step 0c's drift half, which has no PowerShell twin and
+#      looks for Python on every host (see 0c). WHY THE uname TEST (ac-hooks-portable2, review blocker 1): WSL puts
 #      Windows' powershell.exe on PATH through interop. Picking it there ran the
 #      gates in Windows PowerShell with WINDOWS git against a \\wsl.localhost path;
 #      that git refused the repo ("dubious ownership"), the secret guard read the
@@ -148,6 +151,78 @@ if [ -n "$_bad_modes" ]; then
     exit 1
 fi
 GATES_RAN="$GATES_RAN hook-modes"
+
+# --- 0c. exec bits (inline sh + Python, ac-exec-bits, 2026-09-25) ------------
+# A file the stack RUNS BY PATH - a sidecar's `/scripts/backup.sh`, an image's CMD
+# on a bind-mounted script, a documented `scripts/x.sh` - runs on Linux/macOS only
+# if git recorded it 100755; otherwise the container says "Permission denied" (and
+# a backup sleep-loop swallows that and stays "running"). This host cannot see the
+# difference (core.fileMode=false; Docker Desktop shows every bind mount
+# -rwxrwxrwx), so the rule is checked against the INDEX, here.
+#
+# TWO HALVES, and they fail differently on purpose:
+#   exec-bits-modes  plain sh, needs no host, NEVER skipped: every path listed in
+#                    scripts/checks/exec-bits.inventory must be 100755 in the index.
+#                    FAILS CLOSED: if git cannot answer, or the inventory is missing
+#                    from the index, the commit is refused, not waved through.
+#   exec-bits-drift  scripts/checks/check_exec_bits.py --check re-derives the set from
+#                    the staged compose files, Dockerfiles, crontabs, docs and CI, and
+#                    refuses a commit whose inventory no longer matches (a NEW
+#                    directly-executed script) or whose derived files lack the bit.
+#                    It has no PowerShell twin, so it needs Python 3.8+ on EVERY host,
+#                    Windows included, and is found independently of PS_HOST/PY_HOST
+#                    (step 0 probes Python only when there is no PowerShell). With no
+#                    Python it is SKIPPED, loudly, and lands in the summary and the
+#                    ledger's skipped= column like any other skipped gate.
+_xb_inv=scripts/checks/exec-bits.inventory
+if ! git cat-file -e ":$_xb_inv" 2>/dev/null; then
+    echo "exec-bits: $_xb_inv is not in the index - the list of directly-executed files is gone."
+    echo "  Fix: python3 scripts/checks/check_exec_bits.py --write, then git add it."
+    echo "Pre-commit validation failed (a directly-executed file lost its executable bit)!"
+    print_summary
+    exit 1
+fi
+if ! _xb_list=$(git show ":$_xb_inv") || ! _xb_index=$(git -c core.quotePath=false ls-files -s); then
+    echo "exec-bits: git could not read the inventory or the index - cannot tell which files are executable."
+    echo "Pre-commit validation failed (a directly-executed file lost its executable bit)!"
+    print_summary
+    exit 1
+fi
+_xb_bad=$( { printf '%s\n' "$_xb_list" | awk -F'\t' '!/^#/ && NF { print "L\t" $1 }'
+             printf '%s\n' "$_xb_index" | awk '{ m = $1; p = $0; sub(/^[^\t]*\t/, "", p); print "I\t" p "\t" m }'; } |
+    awk -F'\t' '$1 == "I" { mode[$2] = $3; next } $1 == "L" { want[++n] = $2 }
+                END { for (i = 1; i <= n; i++) if (mode[want[i]] != "100755") print (mode[want[i]] == "" ? "untracked" : mode[want[i]]) " " want[i] }')
+if [ -n "$_xb_bad" ]; then
+    echo "Executed directly but not 100755 in the index - Linux/macOS would say 'Permission denied':"
+    printf '%s\n' "$_xb_bad" | sed 's/^/    /'
+    echo "  Fix: git update-index --chmod=+x <file>   (works on Windows too, where chmod does not)"
+    echo "Pre-commit validation failed (a directly-executed file lost its executable bit)!"
+    print_summary
+    exit 1
+fi
+GATES_RAN="$GATES_RAN exec-bits-modes"
+_xb_py=$PY_HOST
+if [ -z "$_xb_py" ]; then
+    for _cand in python3 python; do
+        if command -v "$_cand" >/dev/null 2>&1 &&
+           "$_cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+            _xb_py=$_cand
+            break
+        fi
+    done
+fi
+if [ -n "$_xb_py" ]; then
+    "$_xb_py" scripts/checks/check_exec_bits.py --check
+    if [ $? -ne 0 ]; then
+        echo "Pre-commit validation failed (exec bits: inventory drift or a missing executable bit)!"
+        print_summary
+        exit 1
+    fi
+    GATES_RAN="$GATES_RAN exec-bits-drift"
+else
+    echo "SKIPPED exec-bits-drift: needs Python 3.8+ (a NEW directly-executed script would not be caught; the listed ones were checked above)"
+    GATES_SKIPPED="$GATES_SKIPPED exec-bits-drift"
+fi
 
 # --- 1. secrets (staged content only, so it stays fast) --------------------
 # Added 2026-08-20 after two .env.bak-* files reached a commit and were only
