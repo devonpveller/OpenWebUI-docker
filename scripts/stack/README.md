@@ -254,11 +254,24 @@ so the two are never confused.
 {
   "version": 1,
   "planes": {
-    "frontend": { "profiles": [], "context": null },
-    "inference": { "profiles": [], "context": "optiplex-1" }
-  }
+    "frontend":  { "profiles": [], "context": null,
+                   "owners": { "plane": [], "product:coding-agent": [] } },
+    "inference": { "profiles": ["local"], "context": "optiplex-1",
+                   "owners": { "product:inference": ["local"] } }
+  },
+  "products": { "coding-agent": { "headless": false }, "inference": { "headless": false } }
 }
 ```
+
+`profiles` is what every verb reads - the union of what the plane's `owners`
+asked for. `owners` records WHO enabled the plane: `plane` for a direct enable
+(`enable --plane`, `init --planes`, the no-state default) and `product:<name>`
+for each product, each with the profiles it asked for. `products` lists the
+products enabled here. Both exist so `disable <product>` can take out only what
+that product added (see `disable`). **A file written before they existed** has
+neither key: every plane in it loads as enabled directly, owning its current
+profiles, and no product counts as enabled. Reading such a file never rewrites
+it; the first `enable`/`disable`/`init` saves it with the new keys.
 
 `context` is the Docker context the plane runs on; when set, the command becomes
 `docker --context optiplex-1 compose -f ...`. That is the data the
@@ -274,7 +287,8 @@ would start the wrong set.
 ### `list`
 
 Planes with `enabled` / `disabled`, the profiles and context of the enabled
-ones, the `up would start:` line, and the products. Read-only, no docker.
+ones, the `up would start:` line, and the products (`[enabled]` on each one the
+state file records). Read-only, no docker.
 
 ### `status` / `up` / `down` - which planes?
 
@@ -307,7 +321,24 @@ after the commands names the script that drives it.
 If a docker command exits non-zero the run stops there and reports which plane
 and which code - the rest is not attempted.
 
-**Refuses:** nothing. An empty enabled set just prints a `#` note.
+**Refuses**, before anything starts (an empty enabled set just prints a `#` note):
+
+- a key still at its shipped placeholder, or a pinned submodule that is not
+  initialised (`_preflight`; also under `--dry-run`);
+- **a GPU the daemon does not have** (`_gpu_preflight`, `up` only, not under
+  `--dry-run`, which reads nothing from docker). The driver asks `docker info`
+  once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI device
+  passes and nothing else is read. Otherwise it renders each selected plane and
+  refuses when a service active under the plane's profiles (flags, the plane's
+  env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve them)
+  reserves an NVIDIA device (`deploy.resources.reservations.devices` with
+  `driver: nvidia` or a `gpu` capability, `runtime: nvidia`, `gpus:`), naming
+  each plane, profile and service. For inference the remedy it prints is the
+  gateway alone: `disable inference`, then `enable --plane inference`, with
+  `local` kept out of `inference/.env`. Before this, a GPU-less host got
+  compose's raw `could not select device driver "nvidia"` halfway through `up`,
+  after the anchor and earlier planes had started. An unknown answer (docker not
+  reachable, unparsable output) is not a refusal - compose then says why.
 
 ### `restart <plane>` [`--dry-run`]
 
@@ -339,7 +370,10 @@ A **plane**: enables just that plane (plus its `default` profiles).
 
 
 A **product**: enables its planes, their `requires` closure, its `profiles`,
-and its `surfaces` unless `--headless`.
+and its `surfaces` unless `--headless`, marking each plane `product:<name>` in
+the state file's `owners` and the product in `products` (what `disable` reads).
+`memory` declares `inference = ["local"]`: mnemory's `LLM_MODEL` and
+`EMBED_MODEL` are registered at the gateway only under `local`.
 
 - A product does **not** refuse on its own members being off - expanding them is
   the point. It still **refuses** on any member plane's blank key, naming the
@@ -353,11 +387,24 @@ nothing until the item that adds it to the compose file lands.
 
 ### `disable <product|plane>` [`--plane`|`--product`]
 
-A shared name is the product here too (its `planes` and `surfaces`);
-`--plane <name>` disables the plane alone.
+A shared name is the product here too; `--plane <name>` disables the plane alone.
 
-**Refuses** while an enabled plane still requires the one being disabled,
-naming the dependents. Disabling something that is not enabled is a no-op note.
+A **product** takes out only what it added. Its `product:<name>` mark comes off
+every plane it enabled, and then a plane is removed only when **no owner is
+left** (no other enabled product, no direct enable) **and no remaining plane
+requires it**; a plane that stays loses only the profiles no remaining owner
+asked for. It prints the planes removed, the planes kept and why (`product
+coding-agent`, `enabled directly`, `required by memory`), and the profiles
+dropped. A product that is **not enabled here** - including every product on a
+state file written before products were tracked - is a no-op note, and nothing
+is written. Measured on the attempt this replaced: `disable portal` with only
+the frontend enabled removed the frontend (Open WebUI), because `portal`'s
+product lists `frontend`.
+
+A **plane** (`--plane`) is removed on its own. **Refuses** while a product
+enabled it (naming the product - disable that instead), and while an enabled
+plane still requires it (naming the dependents). Disabling a plane that is not
+enabled is a no-op note.
 
 ### `doctor`
 

@@ -373,12 +373,13 @@ def test_restart_one_plane_restarts_only_that_plane(root):
 
 
 def test_disable_refuses_while_something_still_requires_the_plane(root):
+    # `--plane`: a bare `inference` is the product now, and the product was never enabled here
     run(root, "init", "--planes", "inference,frontend,memory")
-    code, out, _ = run(root, "disable", "inference")
+    code, out, _ = run(root, "disable", "--plane", "inference")
     assert code == stack.EXIT_REFUSED
     assert "memory" in out
-    run(root, "disable", "memory")
-    code, _, _ = run(root, "disable", "inference")
+    run(root, "disable", "--plane", "memory")
+    code, _, _ = run(root, "disable", "--plane", "inference")
     assert code == 0
 
 
@@ -458,12 +459,13 @@ def test_the_anchor_is_implicit_never_written_to_state_but_always_started(root):
 
 def test_disable_says_so_when_a_name_is_ambiguous_too(root):
     """The note is worth most on the destructive half of the pair."""
-    run(root, "init", "--planes", "inference,memory")
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "memory")
     code, out, _ = run(root, "disable", "memory")
     assert code == 0
     assert "names both a plane and a product; acting on the PRODUCT" in out
     assert "--plane memory" in out
-    assert set(state_of(root)["planes"]) == {"inference"}
+    assert set(state_of(root)["planes"]) == {"frontend"}
 
 
 def test_a_product_name_wins_over_a_plane_of_the_same_name(root):
@@ -2258,13 +2260,15 @@ class FakeDaemon:
     Any docker call it has not been taught is an AssertionError, never a silent 0.
     """
 
-    def __init__(self, networks=None, exit_codes=None, render=None, plane_renders=None):
+    def __init__(self, networks=None, exit_codes=None, render=None, plane_renders=None, gpu=True):
         self.networks = {k: {"driver": "bridge", "attachable": False, "options": {}, "labels": {}, **v}
                          for k, v in (networks or {}).items()}
         self.exit_codes = exit_codes or {}
         self.render = render if render is not None else {"name": "ai-stack", "networks": ANCHOR_NETWORKS}
         # compose file -> its `config --no-interpolate` render (the shipped-placeholder check)
         self.plane_renders = plane_renders or {}
+        # `docker info`: an `nvidia` runtime (gpu=True, a GPU host) or runc only (a GPU-less DinD)
+        self.gpu = gpu
         self.commands: list[list[str]] = []   # everything, in order
         self.streamed: list[list[str]] = []   # what went through the runner
         self.created: list[str] = []
@@ -2286,6 +2290,11 @@ class FakeDaemon:
             args = args[2:]
         if args == ["compose", "version"]:
             return stack.CommandResult(0, "Docker Compose version v5.3.0", "")
+        if args[:1] == ["info"]:
+            runtimes = {"runc": {}, "io.containerd.runc.v2": {}}
+            if self.gpu:
+                runtimes["nvidia"] = {"path": "nvidia-container-runtime"}
+            return stack.CommandResult(0, json.dumps({"Runtimes": runtimes, "DiscoveredDevices": None}), "")
         if args[:2] == ["compose", "-f"]:
             compose_file, rest = args[2], args[3:]
             while rest[:1] == ["--profile"]:
@@ -4799,3 +4808,250 @@ def test_disable_dash_dash_plane_is_the_plane_alone(root):
     assert code == 0
     assert "acting on the PLANE alone" in out
     assert set(state_of(root)["planes"]) == {"inference"}
+
+
+# --------------------------------------------------------------------------
+# ac-driver-products attempt 2: disable removes only what the product added,
+# the memory product brings `local`, and a GPU-less daemon is refused up front
+# --------------------------------------------------------------------------
+
+
+def _raw_state(root):
+    return (root / stack.STATE_REL).read_text(encoding="utf-8")
+
+
+def test_disabling_a_product_that_was_never_enabled_changes_nothing(root):
+    """attempt 1: `disable portal` with state [frontend] removed Open WebUI."""
+    run(root, "init", "--planes", "frontend", "--force")
+    before = _raw_state(root)
+    code, out, _ = run(root, "disable", "portal")
+    assert code == 0, out
+    assert "product portal is not enabled on this machine; nothing to do" in out
+    assert _raw_state(root) == before
+
+
+def test_disabling_one_product_keeps_every_plane_another_product_needs(root):
+    """portal and coding-agent share frontend; disabling either keeps it."""
+    run(root, "init", "--planes", "inference", "--force")
+    assert run(root, "enable", "coding-agent")[0] == 0
+    assert run(root, "enable", "portal")[0] == 0
+    code, out, _ = run(root, "disable", "portal")
+    assert code == 0, out
+    planes = state_of(root)["planes"]
+    assert "portal" not in planes
+    assert {"frontend", "coder", "inference"} <= set(planes)
+    assert "frontend (product coding-agent)" in out
+    assert "removed planes: portal" in out
+    # and the other way round
+    assert run(root, "enable", "portal")[0] == 0
+    code, out, _ = run(root, "disable", "coding-agent")
+    assert code == 0, out
+    planes = state_of(root)["planes"]
+    assert "coder" not in planes and "frontend" in planes and "portal" in planes
+    assert "inference" in planes          # enabled directly by init
+
+
+def test_a_directly_enabled_plane_survives_disabling_a_product_that_lists_it(root):
+    run(root, "init", "--planes", "frontend,inference", "--force")
+    assert run(root, "enable", "memory")[0] == 0
+    assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0, out
+    planes = state_of(root)["planes"]
+    assert "memory" not in planes
+    assert set(planes) == {"frontend", "inference"}
+    # the product added `local`, so the product takes it back out; the plane stays
+    assert planes["inference"]["profiles"] == []
+    assert "dropped profiles: inference:local" in out
+    assert "inference (enabled directly)" in out
+
+
+def test_a_product_keeps_its_profile_while_another_product_asks_for_it(root):
+    assert run(root, "enable", "memory")[0] == 0
+    assert run(root, "enable", "inference")[0] == 0
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0, out
+    planes = state_of(root)["planes"]
+    assert "memory" not in planes
+    assert planes["inference"]["profiles"] == ["local"]
+
+
+def test_disabling_the_only_product_removes_what_it_added(root):
+    code, _, _ = run(root, "enable", "memory")
+    assert code == 0
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0, out
+    # frontend was the no-state default, enabled directly; memory's closure goes
+    assert set(state_of(root)["planes"]) == {"frontend"}
+    assert state_of(root)["products"] == {}
+
+
+def test_a_plane_still_required_is_kept_when_its_product_goes(root):
+    run(root, "init", "--planes", "frontend", "--force")
+    assert run(root, "enable", "inference")[0] == 0
+    run(root, "enable", "--plane", "memory")
+    code, out, _ = run(root, "disable", "inference")
+    assert code == 0, out
+    planes = state_of(root)["planes"]
+    assert "inference" in planes and planes["inference"]["profiles"] == []
+    assert "required by memory" in out
+
+
+def test_disable_plane_is_refused_while_a_product_owns_it(root):
+    run(root, "init", "--planes", "inference", "--force")
+    run(root, "enable", "coding-agent")
+    code, out, _ = run(root, "disable", "--plane", "frontend")
+    assert code == stack.EXIT_REFUSED
+    assert "coding-agent" in out
+    assert "frontend" in state_of(root)["planes"]
+
+
+def test_enabled_products_are_recorded_in_the_state_file(root):
+    run(root, "enable", "memory")
+    data = state_of(root)
+    assert set(data["products"]) == {"memory"}
+    assert "product:memory" in data["planes"]["memory"]["owners"]
+    assert "product:memory" in data["planes"]["inference"]["owners"]
+    _, out, _ = run(root, "list")
+    assert "[enabled]" in [ln for ln in out.splitlines() if ln.strip().startswith("memory ")][-1]
+
+
+HOST_STYLE_STATE = {
+    "planes": {
+        "anchor": {"context": None, "profiles": []},
+        "coder": {"context": None, "profiles": []},
+        "frontend": {"context": None, "profiles": []},
+        "inference": {"context": None, "profiles": []},
+        "memory": {"context": None, "profiles": []},
+        "ob1": {"context": None, "profiles": ["idea-refinery", "research", "wiki", "notebook"]},
+        "search": {"context": None, "profiles": []},
+    },
+    "version": 1,
+}
+
+
+def test_a_state_file_from_before_products_were_tracked_keeps_working(root):
+    """The migration: no `products`, no `owners` - every plane counts as enabled directly."""
+    path = root / stack.STATE_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(HOST_STYLE_STATE, indent=2), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    code, out, _ = run(root, "up", "--dry-run", capture=_no_capture)
+    assert code == 0, out
+    assert "--profile idea-refinery --profile research --profile wiki --profile notebook up -d" in out
+    assert run(root, "list")[0] == 0
+    assert path.read_text(encoding="utf-8") == before          # reading never rewrites it
+    code, out, _ = run(root, "disable", "research")
+    assert code == 0 and "nothing to do" in out and "disable --plane" in out
+    assert path.read_text(encoding="utf-8") == before
+    code, out, _ = run(root, "disable", "--plane", "ob1")
+    assert code == 0, out
+    assert "ob1" not in state_of(root)["planes"]
+    assert set(state_of(root)["planes"]) == set(HOST_STYLE_STATE["planes"]) - {"ob1"}
+
+
+def test_disable_help_says_exactly_what_it_removes():
+    parser = stack.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, stack.argparse._SubParsersAction))
+    text = sub.choices["disable"].format_help()
+    flat = " ".join(text.split())
+    assert "removes only the planes and profiles that product added" in flat
+    assert "no-op" in flat
+    assert "requires closure and its profiles" not in flat
+
+
+def test_the_memory_product_turns_on_local():
+    """mnemory's two models exist only in the gateway's `local` group."""
+    assert _MANIFEST.product("memory")["profiles"] == {"inference": ["local"]}
+    compose = (REPO_ROOT / "memory" / "docker-compose.yml").read_text(encoding="utf-8")
+    local = (REPO_ROOT / "inference" / "config" / "litellm" / "model_list" / "local.yaml").read_text(encoding="utf-8")
+    for var in ("LLM_MODEL", "EMBED_MODEL"):
+        model = re.search(rf"{var}=(\S+)", compose).group(1)
+        assert f"model_name: {model}" in local, (var, model)
+
+
+def test_enable_memory_writes_local(root):
+    code, out, _ = run(root, "enable", "memory")
+    assert code == 0, out
+    assert state_of(root)["planes"]["inference"]["profiles"] == ["local"]
+    assert "inference  profiles: local" in out
+
+
+INFERENCE_GPU_RENDER = {
+    "name": "inference",
+    "services": {
+        "llm-gateway": {"image": "litellm"},
+        "llama-cpp-upstream": {
+            "profiles": ["local"],
+            "deploy": {"resources": {"reservations": {"devices": [
+                {"driver": "nvidia", "device_ids": ["0"], "capabilities": [["gpu"]]}]}}},
+        },
+        "llama-cpp-embed-upstream": {
+            "profiles": ["local"],
+            "deploy": {"resources": {"reservations": {"devices": [
+                {"driver": "nvidia", "device_ids": ["1"], "capabilities": [["gpu"]]}]}}},
+        },
+        "llm-queue": {"profiles": ["local"]},
+    },
+}
+
+
+GPU_RENDERS = {
+    "inference/docker-compose.yml": INFERENCE_GPU_RENDER,
+    "frontend/docker-compose.yml": {"name": "frontend", "services": {"openwebui-stock": {"profiles": ["stock"]}}},
+}
+
+
+def test_a_gpu_less_daemon_refuses_local_before_anything_starts(root):
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert daemon.streamed == [] and daemon.created == []       # not even the anchor's networks
+    assert "has no NVIDIA GPU" in out
+    assert "inference: profile local starts llama-cpp-embed-upstream, llama-cpp-upstream" in out
+    assert "stack.py enable --plane inference" in out
+    assert "Nothing was started." in out
+    assert "could not select device driver" not in out
+
+
+def test_a_gpu_less_daemon_runs_the_gateway_alone_under_dash_dash_plane(root):
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "--plane", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert "docker compose -f inference/docker-compose.yml up -d" in [" ".join(c) for c in daemon.streamed]
+
+
+def test_a_gpu_host_is_not_rendered_for_the_check(root):
+    """One `docker info` and nothing else when the daemon has the runtime."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=True, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert not [c for c in daemon.commands if "--profile" in c and "*" in c]
+    assert "docker compose -f inference/docker-compose.yml --profile local up -d" in [
+        " ".join(c) for c in daemon.streamed]
+
+
+def test_the_env_file_profile_is_checked_too(root):
+    """`local` from inference/.env (no flag) reserves the GPU just the same."""
+    run(root, "init", "--planes", "frontend,inference", "--force")
+    env = _MANIFEST.env_path(root, "inference")
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local\n", encoding="utf-8")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "COMPOSE_PROFILES in inference/.env" in out
+    assert daemon.streamed == []
+
+
+def test_reserves_nvidia_reads_every_spelling():
+    assert stack.reserves_nvidia({"runtime": "nvidia"})
+    assert stack.reserves_nvidia({"gpus": "all"})
+    assert stack.reserves_nvidia({"deploy": {"resources": {"reservations": {"devices": [
+        {"capabilities": [["gpu"]]}]}}}})
+    assert not stack.reserves_nvidia({"image": "x"})

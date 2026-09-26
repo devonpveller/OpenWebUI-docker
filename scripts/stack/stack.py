@@ -336,15 +336,41 @@ def order_planes(manifest: Manifest, names) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+DIRECT = "plane"            # the owner a plane enabled by name (`enable --plane`, `init --planes`) carries
+
+
+def product_owner(name: str) -> str:
+    return f"product:{name}"
+
+
 class State:
-    def __init__(self, planes: dict | None = None, path: Path | None = None, exists: bool = False):
+    """The per-host record: which planes run, with which profiles, and WHO asked for each.
+
+    Every plane entry carries `owners`: {owner: [profiles]}, where an owner is
+    DIRECT ("plane" - enabled by name) or "product:<name>". `profiles` stays the
+    effective list every driver path reads (run_profiles), so a file's `profiles`
+    mean exactly what they meant before owners existed. `products` lists the
+    products enabled here. Both exist so `disable <product>` can remove only what
+    that product added and nothing another product or a direct enable still needs
+    (ac-driver-products attempt 1: `disable portal` removed Open WebUI).
+
+    MIGRATION: a file written before owners existed has neither key. Every plane
+    in it loads as DIRECT, owning its current profiles, and no product is
+    enabled - so nothing a product-disable does can remove it, and the file is
+    only rewritten (with the new keys) when a verb that writes state runs.
+    """
+
+    def __init__(self, planes: dict | None = None, path: Path | None = None, exists: bool = False,
+                 products: dict | None = None):
         self.planes: dict = planes if planes is not None else {}
+        self.products: dict = products if products is not None else {}
         self.path = path
         self.exists = exists
 
     @classmethod
     def default(cls, path: Path | None = None) -> "State":
-        return cls({name: {"profiles": [], "context": None} for name in DEFAULT_ENABLED}, path, False)
+        return cls({name: {"profiles": [], "context": None, "owners": {DIRECT: []}} for name in DEFAULT_ENABLED},
+                   path, False)
 
     @classmethod
     def load(cls, path: Path) -> "State":
@@ -357,28 +383,40 @@ class State:
         planes = {}
         for name, entry in (data.get("planes") or {}).items():
             entry = entry or {}
+            profiles = list(entry.get("profiles", []))
+            owners = entry.get("owners")
+            if not isinstance(owners, dict) or not owners:
+                owners = {DIRECT: list(profiles)}          # a pre-owners file: everything is direct
             planes[name] = {
-                "profiles": list(entry.get("profiles", [])),
+                "profiles": profiles,
                 "context": entry.get("context"),
+                "owners": {str(k): list(v or []) for k, v in owners.items()},
             }
-        return cls(planes, path, True)
+        products = {str(k): dict(v or {}) for k, v in (data.get("products") or {}).items()}
+        return cls(planes, path, True, products)
 
     def save(self) -> None:
         assert self.path is not None
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"version": STATE_VERSION, "planes": self.planes}
+        payload = {"version": STATE_VERSION, "planes": self.planes, "products": self.products}
         self.path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def is_enabled(self, name: str) -> bool:
         return name in self.planes
 
-    def enable(self, name: str, profiles=(), context=None) -> None:
-        entry = self.planes.setdefault(name, {"profiles": [], "context": None})
+    def enable(self, name: str, profiles=(), context=None, owner: str = DIRECT) -> None:
+        entry = self.planes.setdefault(name, {"profiles": [], "context": None, "owners": {}})
+        owned = entry.setdefault("owners", {}).setdefault(owner, [])
         for profile in profiles:
             if profile not in entry["profiles"]:
                 entry["profiles"].append(profile)
+            if profile not in owned:
+                owned.append(profile)
         if context is not None:
             entry["context"] = context
+
+    def owners_of(self, name: str) -> dict:
+        return dict(self.planes.get(name, {}).get("owners") or {})
 
     def profiles_of(self, name: str) -> list[str]:
         return list(self.planes.get(name, {}).get("profiles", []))
@@ -696,7 +734,8 @@ def compose_command(manifest: Manifest, plane: str, args, context=None, profiles
     return ComposeCommand(cmd, {"COMPOSE_PROFILES": ",".join(profiles)} if profiles else None)
 
 
-def enable_plane_profiles(manifest: Manifest, state: State, plane: str, profiles, context=None) -> list[str]:
+def enable_plane_profiles(manifest: Manifest, state: State, plane: str, profiles, context=None,
+                          owner: str = DIRECT) -> list[str]:
     """THE ONLY WAY a plane's profiles are written into the state file.
 
     Resolves `profiles` the same way `run_profiles` does at drive time - closed over
@@ -712,7 +751,7 @@ def enable_plane_profiles(manifest: Manifest, state: State, plane: str, profiles
     directly with a profile list.
     """
     resolved = manifest.profile_order(plane, manifest.profile_closure(plane, set(profiles)))
-    state.enable(plane, resolved, context=context)
+    state.enable(plane, resolved, context=context, owner=owner)
     return resolved
 
 
@@ -1044,7 +1083,8 @@ def cmd_list(manifest: Manifest, state: State, root: Path, console: Console) -> 
     console.line("products:")
     pwidth = max(len(p) for p in manifest.products) if manifest.products else 1
     for name, product in manifest.products.items():
-        console.line(f"  {name.ljust(pwidth)}  {product.get('description', '')}")
+        mark = "  [enabled]" if name in state.products else ""
+        console.line(f"  {name.ljust(pwidth)}  {product.get('description', '')}{mark}")
     return EXIT_OK
 
 
@@ -1167,6 +1207,96 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
         )
 
 
+def reserves_nvidia(service: dict) -> bool:
+    """Whether a rendered compose service asks the daemon for an NVIDIA device."""
+    service = service or {}
+    if str(service.get("runtime") or "") == "nvidia" or service.get("gpus"):
+        return True
+    devices = ((((service.get("deploy") or {}).get("resources") or {}).get("reservations") or {})
+               .get("devices") or [])
+    for device in devices:
+        caps = device.get("capabilities") or []
+        flat = [c for group in caps for c in (group if isinstance(group, list) else [group])]
+        if str(device.get("driver") or "") == "nvidia" or "gpu" in flat:
+            return True
+    return False
+
+
+def daemon_has_nvidia(capture, root, context=None):
+    """True/False from `docker info` (an `nvidia` runtime or an nvidia.com/gpu CDI device); None = unknown."""
+    cmd = ["docker"] + (["--context", context] if context else []) + ["info", "--format", "{{json .}}"]
+    result = capture(cmd, root)
+    if result.code != 0:
+        return None
+    try:
+        data = json.loads(result.stdout or "{}")
+    except ValueError:
+        return None
+    if "nvidia" in (data.get("Runtimes") or {}):
+        return True
+    for device in data.get("DiscoveredDevices") or []:
+        if str((device or {}).get("ID", "")).startswith("nvidia.com/gpu"):
+            return True
+    return False
+
+
+def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
+    """Refuse BEFORE anything starts when an active profile needs a GPU the daemon does not have.
+
+    Without it a GPU-less host got compose's raw `could not select device driver
+    "nvidia"` halfway through `up`, after the anchor and earlier planes had
+    started, and every later plane was skipped (ac-driver-products F3). The daemon
+    is asked first, once per docker context; only when it has NO nvidia runtime
+    and no nvidia CDI device are the planes rendered to find the reserving
+    services - so a GPU host pays one `docker info` and nothing else. An unknown
+    answer (docker unreachable, unparsable) is not a refusal: compose will say why.
+    """
+    verdicts, lines, inference_hit = {}, [], False
+    for plane in planes:
+        context = state.context_of(plane)
+        if context not in verdicts:
+            verdicts[context] = daemon_has_nvidia(capture, root, context)
+        if verdicts[context] is not False:
+            continue
+        active = active_profiles(manifest, state, root, plane)
+        cmd = compose_command(manifest, plane, ["--profile", "*", "config", "--no-interpolate", "--format", "json"],
+                              context=context)
+        result = capture(cmd, root)
+        if result.code != 0:
+            continue
+        try:
+            services = (json.loads(result.stdout or "{}") or {}).get("services") or {}
+        except ValueError:
+            continue
+        by_profile: dict[str, list[str]] = {}
+        for key, service in services.items():
+            gated = (service or {}).get("profiles") or []
+            if gated and not set(gated) & active:
+                continue
+            if reserves_nvidia(service):
+                label = ", ".join(sorted(set(gated) & active)) if gated else "(no profile - always on)"
+                by_profile.setdefault(label, []).append(key)
+        for label, keys in by_profile.items():
+            lines.append(f"  {plane}: profile {label} starts {', '.join(sorted(keys))}, which reserve an NVIDIA GPU")
+            inference_hit = inference_hit or plane == "inference"
+    if not lines:
+        return
+    where = "this Docker daemon" if len(verdicts) == 1 else "the Docker daemon each runs on"
+    remedy = []
+    if inference_hit:
+        remedy.append(
+            "for the gateway without its local backends: `python scripts/stack/stack.py disable inference` "
+            "(or `disable --plane inference`), then `python scripts/stack/stack.py enable --plane inference`, "
+            "and keep `local` out of COMPOSE_PROFILES in inference/.env"
+        )
+    remedy.append("otherwise turn the named profile off for that plane, or run it on a docker context with a GPU")
+    raise Refusal(
+        f"refused: {where} has no NVIDIA GPU (no `nvidia` runtime and no nvidia.com/gpu device in `docker info`), "
+        f"and `{verb}` would start:\n" + "\n".join(lines)
+        + "\nNothing was started. " + _sentence("; ".join(remedy)) + "."
+    )
+
+
 def _sentence(text: str) -> str:
     return text[:1].upper() + text[1:]
 
@@ -1178,6 +1308,11 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
         return EXIT_OK
     driven = [p for p in ordered if not manifest.manual(p)]
     _preflight(manifest, state, root, driven, "up", capture or subprocess_capture)
+    if not dry_run:
+        # Not under --dry-run: a dry run reads nothing from docker (see the anchor's
+        # ensure_networks), and `docker info` is a daemon read.
+        _gpu_preflight(manifest, state, root, [p for p in driven if not manifest.networks_only(p)], "up",
+                       capture or subprocess_capture)
     if mode == "one":
         _requires_note(manifest, console, plane, driven)
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
@@ -1387,7 +1522,9 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
         planes_touched = [p for p in full if not manifest.is_implicit(p)]
         for plane in planes_touched:
             profiles = profile_map.get(plane, []) + manifest.default_profiles(plane)
-            profile_map[plane] = enable_plane_profiles(manifest, state, plane, profiles)
+            profile_map[plane] = enable_plane_profiles(manifest, state, plane, profiles,
+                                                       owner=product_owner(target))
+        state.products[target] = {"headless": bool(headless)}
         if headless:
             note = []
             if dropped_planes:
@@ -1420,33 +1557,109 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
     return EXIT_OK
 
 
+def _owner_label(owner: str) -> str:
+    return "enabled directly" if owner == DIRECT else f"product {owner.split(':', 1)[1]}"
+
+
+def _collect_orphans(manifest: Manifest, state: State) -> list[str]:
+    """Remove every plane nobody owns any more and no owned plane requires; return them.
+
+    A plane stays while an owned plane's `requires` closure reaches it (memory
+    keeps inference), whoever enabled it - so a product-disable never strands a
+    plane something still running depends on.
+    """
+    owned = [p for p in state.planes if state.owners_of(p)]
+    needed = dependency_closure(manifest, owned) if owned else set()
+    removed = [p for p in manifest.order if p in state.planes and not state.owners_of(p) and p not in needed]
+    for plane in removed:
+        del state.planes[plane]
+    return removed
+
+
+def _recompute_profiles(manifest: Manifest, state: State, plane: str) -> list[str]:
+    """A plane's profiles = the union of what its remaining owners asked for; returns what was dropped."""
+    entry = state.planes[plane]
+    wanted = set()
+    for profiles in (entry.get("owners") or {}).values():
+        wanted |= set(profiles)
+    keep = set(manifest.profile_closure(plane, wanted)) if wanted else set()
+    dropped = [p for p in entry["profiles"] if p not in keep]
+    entry["profiles"] = [p for p in entry["profiles"] if p in keep]
+    return dropped
+
+
 def cmd_disable(manifest, state, root, console, name, kind) -> int:
+    """Take a product, or one plane, back out - and never more than that.
+
+    A PRODUCT removes its owner mark from the planes it enabled; a plane then goes
+    only when no other product and no direct enable owns it AND no remaining plane
+    requires it, and its profiles shrink to what its remaining owners asked for.
+    A product that is not enabled here is a no-op. A PLANE (`--plane`) is refused
+    while a product owns it or an enabled plane requires it.
+    """
     explicit = kind != "auto"
     kind, target = resolve_target(manifest, name, kind)
     _ambiguity_note(manifest, console, kind, target, explicit)
-    planes = [target] if kind == "plane" else list(manifest.product(target).get("planes", [])) + list(
-        (manifest.product(target).get("surfaces", {}) or {})
-    )
-    removed = []
-    for plane in planes:
-        if not state.is_enabled(plane):
-            continue
-        dependents = [
-            other for other in manifest.order
-            if other not in planes and state.is_enabled(other) and plane in manifest.requires(other)
-        ]
-        if dependents:
-            raise Refusal(
-                f"refused: {plane} is required by " + ", ".join(dependents)
-                + f" (disable {' '.join(dependents)} first, or leave {plane} enabled)"
-            )
-        del state.planes[plane]
-        removed.append(plane)
-    if not removed:
+    if kind == "product":
+        return _disable_product(manifest, state, root, console, target)
+    if not state.is_enabled(target):
         console.line(f"# {target} was not enabled; nothing to do")
         return EXIT_OK
+    products = [o for o in state.owners_of(target) if o != DIRECT]
+    if products:
+        names = [o.split(":", 1)[1] for o in products]
+        raise Refusal(
+            f"refused: {target} was enabled by product " + ", ".join(names)
+            + f" (disable {' / '.join(names)} to take it out with only what nothing else needs; "
+            "`disable --plane` removes a plane nothing else asked for)"
+        )
+    dependents = [
+        other for other in manifest.order
+        if other != target and state.is_enabled(other) and target in manifest.requires(other)
+    ]
+    if dependents:
+        raise Refusal(
+            f"refused: {target} is required by " + ", ".join(dependents)
+            + f" (disable {' '.join(dependents)} first, or leave {target} enabled)"
+        )
+    del state.planes[target]
+    removed = [target] + _collect_orphans(manifest, state)
     state.save()
     console.line("disabled: " + ", ".join(removed))
+    console.line(f"state: {rel(root, state.path)}")
+    return EXIT_OK
+
+
+def _disable_product(manifest, state, root, console, target) -> int:
+    owner = product_owner(target)
+    if target not in state.products:
+        console.line(f"# product {target} is not enabled on this machine; nothing to do")
+        if not state.products:
+            console.line("#   (this state file records no enabled product - planes enabled before products were "
+                         "tracked count as enabled directly; `disable --plane <name>` removes one)")
+        return EXIT_OK
+    touched = [p for p in manifest.order if owner in state.owners_of(p)]
+    for plane in touched:
+        del state.planes[plane]["owners"][owner]
+    del state.products[target]
+    removed = _collect_orphans(manifest, state)
+    dropped, kept = [], []
+    for plane in touched:
+        if plane in removed:
+            continue
+        dropped += [f"{plane}:{p}" for p in _recompute_profiles(manifest, state, plane)]
+        why = [_owner_label(o) for o in state.owners_of(plane)]
+        if not why:
+            why = ["required by " + ", ".join(
+                other for other in state.planes if plane in dependency_closure(manifest, [other]) and other != plane)]
+        kept.append(f"{plane} ({'; '.join(why)})")
+    state.save()
+    console.line(f"disabled product {target}:")
+    console.line("  removed planes: " + (", ".join(removed) if removed else "(none)"))
+    if kept:
+        console.line("  kept: " + ", ".join(kept))
+    if dropped:
+        console.line("  dropped profiles: " + ", ".join(dropped))
     console.line(f"state: {rel(root, state.path)}")
     return EXIT_OK
 
@@ -5082,14 +5295,19 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the manual-<stamp> directory, its manifest.json, or one of its .tar.gz archives")
     p.add_argument("--volume", default=None, help="restore only this volume (its name or compose key)")
 
+    descriptions = {
+        "enable": "Enable a product or a plane (`stack.py list` shows both). A name that is both means the "
+                  "PRODUCT: its planes, their requires closure and its profiles, each recorded as added by "
+                  "that product. `--plane <name>` enables the plane alone.",
+        "disable": "Disable a product or a plane. A name that is both means the PRODUCT: it removes only the "
+                   "planes and profiles that product added and that no other enabled product, no directly "
+                   "enabled plane and no remaining plane's requires still need; a product that is not "
+                   "enabled is a no-op. `--plane <name>` removes the plane alone, refused while a product "
+                   "enabled it or an enabled plane requires it.",
+    }
     for verb, helptext in (("enable", "enable a product (or a plane) on this machine"),
                            ("disable", "disable a product (or a plane)")):
-        p = sub.add_parser(
-            verb, help=helptext,
-            description=f"{verb.capitalize()} a product or a plane (`stack.py list` shows both). A name "
-                        f"that is both means the PRODUCT: its planes, their requires closure and its "
-                        f"profiles. `--plane <name>` {verb}s the plane alone.",
-        )
+        p = sub.add_parser(verb, help=helptext, description=descriptions[verb])
         p.add_argument("name")
         p.add_argument("--plane", dest="kind", action="store_const", const="plane",
                        help="the plane alone, even when a product has the same name")
