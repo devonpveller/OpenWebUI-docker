@@ -5046,7 +5046,7 @@ def test_the_env_file_profile_is_checked_too(root):
     daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
     code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
     assert code == stack.EXIT_REFUSED, out
-    assert "COMPOSE_PROFILES in inference/.env" in out
+    assert "set `COMPOSE_PROFILES=` in inference/.env (was `local`)" in out
     assert daemon.streamed == []
 
 
@@ -5077,7 +5077,9 @@ def test_a_plane_the_gpu_check_cannot_render_is_refused_not_skipped(root):
     daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS, exit_codes={failing: 1})
     code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
     assert code == stack.EXIT_REFUSED, out
-    assert "could not render inference/docker-compose.yml to check it for GPU reservations" in out
+    assert "refused: compose cannot render inference/docker-compose.yml" in out
+    assert "this is not about the GPU" in out
+    assert "has no NVIDIA GPU" not in out and "To run without them" not in out
     assert daemon.streamed == []
 
 
@@ -5164,7 +5166,7 @@ def test_recover_runs_the_gpu_check_before_anything_starts(root):
     assert code == stack.EXIT_REFUSED, out
     assert "has no NVIDIA GPU" in out and "`recover` would start" in out
     assert daemon.streamed == []
-    assert _remedy_commands(out)[-1] == ["recover"]
+    assert _remedy_commands(out)[-1] == ["recover", "inference"]     # N6: as invoked
 
 
 def test_a_requirement_kept_plane_survives_a_save_and_load_as_unowned(root):
@@ -5200,3 +5202,117 @@ def test_enable_plane_labels_a_profile_a_product_added(root):
     assert "inference  profiles: local (already on: product memory)" in out
     code, out, _ = run(root, "enable", "inference")
     assert "inference  profiles: local\n" in out                 # the product's own profile, unlabelled
+
+
+# --------------------------------------------------------------------------
+# ac-driver-products attempt 4: a render failure is not a GPU refusal; the
+# frontend step respects `requires` and brings in the stand-in
+# --------------------------------------------------------------------------
+
+
+def _blank(root, plane, key):
+    env = _MANIFEST.env_path(root, plane)
+    env.write_text(re.sub(rf"(?m)^{key}=.*$", f"{key}=", env.read_text(encoding="utf-8")), encoding="utf-8")
+
+
+def test_up_refuses_a_blank_required_key_before_any_render(root):
+    """T12e's trigger: `enable` refused a blank key, `up` did not."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    _blank(root, "inference", "LITELLM_DB_PASSWORD")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "inference: LITELLM_DB_PASSWORD in inference/.env is blank" in out
+    assert "has no NVIDIA GPU" not in out
+    assert daemon.streamed == [] and not [c for c in daemon.commands if c[1:2] == ["info"]]
+
+
+@pytest.mark.parametrize("enable", [["enable", "inference"], ["enable", "--plane", "inference"]])
+def test_a_render_failure_on_a_gpu_less_daemon_names_compose_s_error_not_the_gpu(root, enable):
+    """T12e: it headlined "no NVIDIA GPU" and its one step (`up` again) looped."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, *enable)
+    profiles = ["--profile", "local"] if "--plane" not in enable else []
+    failing = ("docker", "compose", "-f", "inference/docker-compose.yml", *profiles, "config", "--format", "json")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS, exit_codes={failing: 1})
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "refused: compose cannot render inference/docker-compose.yml" in out
+    assert "scripted failure" in out                        # compose's own words, passed through
+    assert "inference/.env" in out
+    assert "has no NVIDIA GPU" not in out and _remedy_commands(out) == []
+    assert daemon.streamed == []
+
+
+def test_the_shell_step_is_printed_when_only_the_shell_turns_the_profile_on(root, monkeypatch):
+    """The mutation that survived attempt 3 (M10): nothing pinned the `unset` step."""
+    run(root, "init", "--planes", "frontend,inference", "--force")
+    monkeypatch.setenv("COMPOSE_PROFILES", "local")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "unset COMPOSE_PROFILES in this shell" in out
+    monkeypatch.delenv("COMPOSE_PROFILES")                   # follow it
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0 and "has no NVIDIA GPU" not in out, out
+
+
+FRONTEND_GPU_RENDER = {
+    "name": "frontend",
+    "services": {
+        "openwebui-stock": {"profiles": ["stock"], "container_name": "openwebui"},
+        "openwebui": {"profiles": ["gpu"], "container_name": "openwebui", "deploy": {"resources": {
+            "reservations": {"devices": [{"driver": "nvidia", "capabilities": [["gpu"]]}]}}}},
+        "tailscale": {"profiles": ["tailscale"]},
+        "openwebui-backup": {},
+    },
+}
+
+
+@pytest.mark.parametrize("env_value,expected", [
+    ("gpu,tailscale", "stock"),     # X8a: tailscale requires gpu; left alone it does not render
+    ("gpu", "stock"),               # X8b: without the stand-in no Open WebUI starts
+    ("tailscale,gpu", "stock"),
+])
+def test_the_frontend_gpu_step_drops_what_requires_gpu_and_brings_in_stock(root, env_value, expected):
+    run(root, "init", "--planes", "frontend", "--force")
+    env = _MANIFEST.env_path(root, "frontend")
+    env.write_text(env.read_text(encoding="utf-8") + f"COMPOSE_PROFILES={env_value}\n", encoding="utf-8")
+    renders = dict(GPU_RENDERS, **{"frontend/docker-compose.yml": FRONTEND_GPU_RENDER})
+    daemon = FakeDaemon(gpu=False, plane_renders=renders)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert f"set `COMPOSE_PROFILES={expected}` in frontend/.env" in out
+    # follow it
+    text = re.sub(r"(?m)^COMPOSE_PROFILES=.*$", f"COMPOSE_PROFILES={expected}", env.read_text(encoding="utf-8"))
+    env.write_text(text, encoding="utf-8")
+    assert stack.compose_profiles_env(_MANIFEST, root, "frontend") == ["stock"]
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0 and "has no NVIDIA GPU" not in out, out
+
+
+def test_stands_in_for_names_a_declared_profile():
+    assert _MANIFEST.stand_ins("frontend", {"gpu"}) == ["stock"]
+    assert stack.profile_dependents(_MANIFEST, "frontend", {"gpu"}) == {"tailscale"}
+
+
+def test_the_up_rerun_step_repeats_the_plane_argument(root):
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    _, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert _remedy_commands(out)[-1] == ["up", "inference"]
+    assert "init --context" not in out                      # N5: a hint that wiped the state is gone
+
+
+def test_headless_after_a_full_enable_does_not_claim_it_dropped_the_surface(root):
+    """N4."""
+    run(root, "init", "--planes", "inference", "--force")
+    run(root, "enable", "coding-agent")
+    code, out, _ = run(root, "enable", "coding-agent", "--headless")
+    assert code == 0
+    assert "dropped surface planes frontend" not in out
+    assert "frontend stay - an earlier `enable coding-agent` added them" in out
+    assert state_of(root)["products"]["coding-agent"]["headless"] is False
+    assert "product:coding-agent" in state_of(root)["planes"]["frontend"]["owners"]

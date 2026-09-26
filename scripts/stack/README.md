@@ -131,7 +131,7 @@ seen*.
 | `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (memory: `.git` and `Dockerfile`), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). Only memory declares one: `../mnemory`, its build context. |
 | `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
-| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
+| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below; optionally `requires` (other profiles of the plane it needs) and `stands_in_for` (profiles it replaces when the GPU refusal takes them out - frontend's `stock` for `gpu`). |
 
 #### Every profile says whether a default `up` starts it
 
@@ -331,32 +331,44 @@ and which code - the rest is not attempted.
 
 **Refuses**, before anything starts (an empty enabled set just prints a `#` note):
 
-- a key still at its shipped placeholder, or a pinned submodule that is not
-  initialised (`_preflight`; also under `--dry-run`);
-- **a GPU the daemon does not have** (`_gpu_preflight`, `up` only, not under
-  `--dry-run`, which reads nothing from docker). The driver asks `docker info`
-  once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI device
-  passes and nothing else is read. Otherwise it renders each selected plane -
-  interpolated, under exactly the profiles `up` will run (flags, the plane's
-  env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve them);
-  a plane it cannot render is refused, not skipped - and refuses when a service
-  in that render reserves an NVIDIA device (`deploy.resources.reservations.devices` with
-  `driver: nvidia` or a `gpu` capability, `runtime: nvidia`, `gpus:`), naming
-  each plane, profile and service, then numbered steps that remove those
-  profiles. The steps are **built from the state's owners and applied to a copy
-  of the state as they are chosen**, so following them gets the next `up` past
-  this refusal: `disable <product>` for each product that asked for the
-  profile (after `enable memory`: `disable memory`), `disable --plane <plane>`
-  only when nothing but a direct enable holds it, an edit of
-  `.stack/state.json` when a direct enable carries it and something else still
-  needs the plane (a pre-products state file), `enable --plane <plane>` when the
-  plane went with its owners (for inference: the gateway without its local
-  backends), the plane's env-file `COMPOSE_PROFILES` when it lists the profile,
-  then `up`. `--plane` is never offered while a product owns the plane (it would
-  be refused). `recover` runs the same check before it stops or starts anything.
-  Before this, a GPU-less host got
-  compose's raw `could not select device driver "nvidia"` halfway through `up`,
-  after the anchor and earlier planes had started. An unknown answer (docker not
+- a pinned submodule that is not initialised, or a manifest `keys` entry that is
+  **blank, missing or still its shipped placeholder** (the same rule `enable`
+  applies), or another key a running service reads that is still its shipped
+  placeholder (`_preflight`; also under `--dry-run`);
+- **a plane compose cannot render** (`up` and `recover`, not under `--dry-run`),
+  checked on a GPU-less daemon because the GPU check below reads the render. It
+  is its own refusal, headed `refused: compose cannot render <file>`, carrying
+  compose's own error line, the command, and the plane's env file - never
+  reported as a GPU problem and with no GPU steps (a host with a GPU gets the same
+  error from compose's `up`). Fix what compose names and re-run;
+- **a GPU the daemon does not have** (`_gpu_preflight`, `up` and `recover`, not
+  under `--dry-run`, which reads nothing from docker). The driver asks `docker
+  info` once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI
+  device passes and nothing else is read. Otherwise it renders each selected
+  plane - interpolated, under exactly the profiles `up` will run (flags, the
+  plane's env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve
+  them) - and refuses when a service in that render reserves an NVIDIA device
+  (`deploy.resources.reservations.devices` with `driver: nvidia` or a `gpu`
+  capability, `runtime: nvidia`, `gpus:`), naming each plane, profile and
+  service, then numbered steps. The steps are **built from the state's owners and
+  applied to a copy of the state as they are chosen**, so carrying them out takes
+  the GPU profiles out and the refused command, re-run, gets past THIS refusal
+  (any other check it then meets - a key, a render - speaks for itself):
+  `disable <product>` for each product that asked for the profile (after `enable
+  memory`: `disable memory`); `disable --plane <plane>` only when nothing but a
+  direct enable holds it; an edit of `.stack/state.json` when a direct enable
+  carries it and something else still needs the plane (a pre-products state
+  file); `enable --plane <plane>` when the plane went with its owners (for
+  inference: the gateway without its local backends); for the plane's env-file
+  `COMPOSE_PROFILES`, the exact new value - the GPU profile dropped **together
+  with every profile whose manifest `requires` reaches it**, and every profile
+  that declares `stands_in_for` it added (frontend `gpu,tailscale` becomes
+  `stock`, so Open WebUI still runs); `unset COMPOSE_PROFILES` when only the
+  shell turns it on; then the refused command **as typed** (`recover inference`,
+  `up --all`). `--plane` is never offered while a product owns the plane (it
+  would be refused). Before this, a GPU-less host got compose's raw `could not
+  select device driver "nvidia"` halfway through `up`, after the anchor and
+  earlier planes had started. An unknown answer from `docker info` (docker not
   reachable, unparsable output) is not a refusal - compose then says why.
 
 ### `restart <plane>` [`--dry-run`]
@@ -635,7 +647,8 @@ and a refusal would leave a crashed host down until the key is rotated. `up`,
 `enable` and `doctor` still refuse it.
 
 **Deliberately not ported:** the diagnostics that choose the "minimal" path,
-the fall-through to `nuclear`, the GPU check, the tailscale `ping 8.8.8.8`, and
+the fall-through to `nuclear`, the .ps1's GPU health check (`nvidia-smi`; the
+driver's own GPU-availability check does run, as step 0), the tailscale `ping 8.8.8.8`, and
 the `nuclear` / `gpu-reset` modes. **Differs from the .ps1 on purpose:** planes
 go in `up`'s order, so inference starts before the frontend; the .ps1's full
 `recover` path starts the frontend first, while its own minimal path and

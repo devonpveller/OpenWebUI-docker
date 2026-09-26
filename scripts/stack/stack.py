@@ -129,6 +129,12 @@ class Manifest:
                         )
             declared_profiles = plane.get("profiles", {})
             for profile, spec in declared_profiles.items():
+                for dep in _spec(spec).get("stands_in_for", []):
+                    if dep not in declared_profiles:
+                        raise Refusal(
+                            f"refused: profile '{name}.{profile}' stands in for unknown profile "
+                            f"'{dep}' in {self.path.name}"
+                        )
                 for dep in _spec(spec).get("requires", []):
                     if dep not in declared_profiles:
                         raise Refusal(
@@ -180,6 +186,11 @@ class Manifest:
         known = [p for p in declared if p in wanted]
         extra = [p for p in wanted if p not in declared]
         return known + sorted(extra)
+
+    def stand_ins(self, name: str, dropped) -> list[str]:
+        """Profiles that declare `stands_in_for` one of `dropped` (frontend's `stock` for `gpu`)."""
+        return [p for p, spec in self.profiles(name).items()
+                if set(_spec(spec).get("stands_in_for", [])) & set(dropped)]
 
     def profile_requires(self, name: str, profile: str) -> list[str]:
         return list(_spec(self.profiles(name).get(profile, {})).get("requires", []))
@@ -337,6 +348,20 @@ def order_planes(manifest: Manifest, names) -> list[str]:
 
 
 DIRECT = "plane"            # the owner a plane enabled by name (`enable --plane`, `init --planes`) carries
+
+
+def profile_dependents(manifest, plane: str, removed) -> set:
+    """Every profile of `plane` whose `requires` reaches one in `removed` (transitively)."""
+    out, changed = set(), True
+    while changed:
+        changed = False
+        for profile in manifest.profiles(plane):
+            if profile in out or profile in removed:
+                continue
+            if set(manifest.profile_requires(plane, profile)) & (set(removed) | out):
+                out.add(profile)
+                changed = True
+    return out
 
 
 def product_owner(name: str) -> str:
@@ -1171,28 +1196,30 @@ def _requires_note(manifest, console, plane: str, driven) -> None:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
 
-def _placeholder_lines(manifest, state, root, planes, capture) -> list[str]:
+def _placeholder_lines(manifest, state, root, planes, capture, blank: bool = False) -> list[str]:
+    """`plane: KEY in file is <why>` lines; `blank` adds blank/missing manifest keys (up), not only placeholders."""
     lines = []
     for plane in planes:
         if missing_submodule(manifest, root, plane):
             continue
-        found = placeholder_keys(manifest, root, plane) + shipped_placeholders(
-            manifest, state, root, plane, capture)
+        keyed = blank_keys(manifest, root, plane) if blank else placeholder_keys(manifest, root, plane)
+        found = keyed + shipped_placeholders(manifest, state, root, plane, capture)
         for key, why, env_path in found:
             lines.append(f"  {plane}: {key} in {rel(root, env_path)} is {why}")
     return lines
 
 
 def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
-    """Refuse BEFORE anything runs: a missing submodule, or a key still at its placeholder.
+    """Refuse BEFORE anything runs: a missing submodule, or a required key that is unusable.
 
     Both are checked for every plane first, so a refusal never lands halfway
     through a bring-up with the anchor's networks made and nothing else.
-    Placeholders are the manifest `keys` rule AND the shipped-placeholder rule
-    (shipped_placeholders: any key a running service reads whose value is still
-    the .env.example placeholder). Blank and missing keys are NOT refused here:
-    `enable`/`doctor` name those, and each plane's compose `:?` guards refuse
-    them at render time.
+    Keys: the manifest `keys` rule - blank, missing, or still the shipped
+    placeholder, exactly what `enable` refuses (blank_keys) - AND the
+    shipped-placeholder rule (shipped_placeholders: any key a running service
+    reads whose value is still the .env.example placeholder). Blank and missing
+    used to be left to each compose file's `:?` guard, which on a GPU-less host
+    surfaced inside the GPU check's render (ac-driver-products attempt 3, T12e).
     """
     submodule_lines = []
     for plane in planes:
@@ -1202,14 +1229,16 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
-    placeholder_lines = _placeholder_lines(manifest, state, root, planes, capture)
+    placeholder_lines = _placeholder_lines(manifest, state, root, planes, capture, blank=True)
     if submodule_lines or placeholder_lines:
         steps = []
         if submodule_lines:
             steps.append("initialise the submodule with the command named above")
         if placeholder_lines:
-            steps.append("replace each placeholder with a value of your own (for a secret: "
-                         "`openssl rand -hex 32`)")
+            unset = any(line.endswith((" is blank", " is missing")) for line in placeholder_lines)
+            steps.append(("give each key named above a value of your own" if unset
+                          else "replace each placeholder with a value of your own")
+                         + " (for a secret: `openssl rand -hex 32`)")
         raise Refusal(
             f"refused: fix these before `{verb}` starts anything:\n"
             + "\n".join(submodule_lines + placeholder_lines)
@@ -1250,7 +1279,7 @@ def daemon_has_nvidia(capture, root, context=None):
     return False
 
 
-def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
+def _gpu_preflight(manifest, state, root, planes, verb: str, capture, rerun: str | None = None) -> None:
     """Refuse BEFORE anything starts when an active profile needs a GPU the daemon does not have.
 
     Without it a GPU-less host got compose's raw `could not select device driver
@@ -1261,7 +1290,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
     services - so a GPU host pays one `docker info` and nothing else. An unknown
     answer (docker unreachable, unparsable) is not a refusal: compose will say why.
     """
-    verdicts, lines, gpu_profiles = {}, [], {}
+    verdicts, lines, gpu_profiles, unrenderable = {}, [], {}, []
     for plane in planes:
         context = state.context_of(plane)
         if context not in verdicts:
@@ -1285,8 +1314,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 services = None
         if services is None:
             why = (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[:1]
-            lines.append(f"  {plane}: could not render {manifest.plane(plane)['compose']} to check it for GPU "
-                         f"reservations ({why[0] if why else 'not JSON'}) - refusing rather than guessing")
+            unrenderable.append((plane, " ".join(cmd), why[0] if why else "the output is not JSON"))
             continue
         by_profile: dict[str, list[str]] = {}
         for key, service in services.items():
@@ -1299,16 +1327,31 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 gpu_profiles.setdefault(plane, set()).update(set(gated) & active if gated else {None})
         for label, keys in by_profile.items():
             lines.append(f"  {plane}: profile {label} starts {', '.join(sorted(keys))}, which reserve an NVIDIA GPU")
+    if unrenderable:
+        # NOT a GPU problem, and not reported as one (attempt 3, T12e: a blank
+        # LITELLM_DB_PASSWORD came out as "no NVIDIA GPU ... 1. `up` again", which
+        # loops). compose's own error is the cause - the same one a GPU host gets
+        # from `up` - so it is named, with the plane's env file, and no GPU steps.
+        raise Refusal(
+            "refused: compose cannot render "
+            + ", ".join(manifest.plane(p)["compose"] for p, _c, _w in unrenderable)
+            + f", so `{verb}` would fail there (this is not about the GPU; a host with one gets the same "
+            "error from compose):\n"
+            + "\n".join(f"  {p}: {w}\n    (`{c}`; the plane's variables live in "
+                         f"{rel(root, manifest.env_path(root, p))})" for p, c, w in unrenderable)
+            + "\nNothing was started. Fix what compose names above, then re-run "
+            + f"`python scripts/stack/stack.py {rerun or verb}`."
+        )
     if not lines:
         return
     where = "this Docker daemon" if len(verdicts) == 1 else "the Docker daemon each runs on"
-    steps = gpu_remedy(manifest, state, root, gpu_profiles, verb)
+    steps = gpu_remedy(manifest, state, root, gpu_profiles, rerun or verb)
     raise Refusal(
         f"refused: {where} has no NVIDIA GPU (no `nvidia` runtime and no nvidia.com/gpu device in `docker info`), "
         f"and `{verb}` would start:\n" + "\n".join(lines)
         + "\nNothing was started. To run without them on this machine, in order:\n"
         + "\n".join(f"  {i}. {step}" for i, step in enumerate(steps, 1))
-        + "\nOr run the plane on a docker context that has a GPU (`init --context <plane>=<name>`)."
+        + "\nOr run that plane on a machine with an NVIDIA GPU."
     )
 
 
@@ -1350,6 +1393,7 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
             products_left = [o.split(":", 1)[1] for o in sim.owners_of(plane) if o != DIRECT]
             dependents = [o for o in manifest.order if o != plane and sim.is_enabled(o)
                           and plane in manifest.requires(o)]
+            direct |= profile_dependents(manifest, plane, direct) & set(sim.owners_of(plane).get(DIRECT, []))
             if products_left or dependents:
                 steps.append(f"remove `{', '.join(sorted(direct))}` from planes.{plane}.profiles and from "
                              f"planes.{plane}.owners.plane in {rel(root, state.path) if state.path else STATE_REL.as_posix()} "
@@ -1370,16 +1414,38 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
             extra = " - the gateway without its local backends" if plane == "inference" else ""
             steps.append(f"`{cli} enable --plane {plane}`{extra}")
             enable_plane_profiles(manifest, sim, plane, manifest.default_profiles(plane))
-        # 4. what the state file does not hold
+        # 4. what the state file does not hold: the plane's env-file COMPOSE_PROFILES.
+        # Drop the GPU profiles AND every profile that requires one (the manifest's
+        # `requires`: frontend's `tailscale` needs `gpu`, and left alone it does not
+        # render), then add each declared `stands_in_for` profile (frontend's `stock`)
+        # so the plane still runs its service without the GPU (attempt 3, X8a/X8b:
+        # `gpu,tailscale` -> `tailscale` looped; `gpu` -> empty started no Open WebUI).
         env_path = manifest.env_path(root, plane)
-        in_env = sorted(set(compose_profiles_env(manifest, root, plane)) & named)
-        if in_env:
-            steps.append(f"remove `{', '.join(in_env)}` from COMPOSE_PROFILES in {rel(root, env_path)}")
+        env_now = compose_profiles_env(manifest, root, plane)
+        if set(env_now) & named:
+            dropped = profile_dependents(manifest, plane, named) | named
+            keep = [x for x in env_now if x not in dropped]
+            added = [x for x in manifest.stand_ins(plane, dropped) if x not in keep]
+            new = manifest.profile_order(plane, set(keep) | set(added))
+            gone = [x for x in env_now if x in dropped]
+            why = []
+            extra_gone = [x for x in gone if x not in named]
+            if extra_gone:
+                why.append(f"{', '.join(extra_gone)} requires {', '.join(sorted(named))}")
+            if added:
+                why.append(f"{', '.join(added)} runs the plane without a GPU")
+            steps.append(f"set `COMPOSE_PROFILES={','.join(new)}` in {rel(root, env_path)} "
+                         f"(was `{','.join(env_now)}`" + ("; " + "; ".join(why) if why else "") + ")")
         shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
         if shell & named and not run_profiles(manifest, sim, plane):
             steps.append("unset COMPOSE_PROFILES in this shell (compose reads it when the driver passes no flag)")
     steps.append(f"`{cli} {verb}` again")
     return steps
+
+
+def _invocation(verb: str, plane=None, every: bool = False) -> str:
+    """The verb as the reader typed it, for a "run it again" step (attempt-3 N6)."""
+    return " ".join([verb] + ([plane] if plane else []) + (["--all"] if every else []))
 
 
 def _sentence(text: str) -> str:
@@ -1397,7 +1463,7 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
         # Not under --dry-run: a dry run reads nothing from docker (see the anchor's
         # ensure_networks), and `docker info` is a daemon read.
         _gpu_preflight(manifest, state, root, [p for p in driven if not manifest.networks_only(p)], "up",
-                       capture or subprocess_capture)
+                       capture or subprocess_capture, rerun=_invocation("up", plane, every))
     if mode == "one":
         _requires_note(manifest, console, plane, driven)
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
@@ -1626,15 +1692,28 @@ def cmd_enable(manifest, state, root, console, name, kind, headless: bool, captu
             profiles = profile_map.get(plane, []) + manifest.default_profiles(plane)
             profile_map[plane] = enable_plane_profiles(manifest, state, plane, profiles,
                                                        owner=product_owner(target))
-        state.products[target] = {"headless": bool(headless)}
+        previous = state.products.get(target)
+        # `headless` is true only while no enable of this product pulled its surfaces in
+        state.products[target] = {"headless": bool(headless) and (previous is None or bool(previous.get("headless")))}
         if headless:
+            # A surface this product ALREADY added (an earlier non-headless enable)
+            # stays: --headless means "do not pull the surface in", not "take it out".
+            # Say so rather than claiming it was dropped (attempt-3 N4).
+            owner = product_owner(target)
+            kept_planes = [p for p in dropped_planes if owner in state.owners_of(p)]
+            kept_profiles = [x for x in dropped_profiles
+                             if x.split(":", 1)[1] in state.owners_of(x.split(":", 1)[0]).get(owner, [])]
             note = []
-            if dropped_planes:
-                note.append("planes " + ", ".join(dropped_planes))
-            if dropped_profiles:
-                note.append("profiles " + ", ".join(dropped_profiles))
+            if [p for p in dropped_planes if p not in kept_planes]:
+                note.append("planes " + ", ".join(p for p in dropped_planes if p not in kept_planes))
+            if [x for x in dropped_profiles if x not in kept_profiles]:
+                note.append("profiles " + ", ".join(x for x in dropped_profiles if x not in kept_profiles))
             if note:
                 console.line("# --headless: dropped surface " + "; ".join(note))
+            if kept_planes or kept_profiles:
+                console.line(f"# --headless: {', '.join(kept_planes + kept_profiles)} stay - an earlier "
+                             f"`enable {target}` added them; `disable {target}` then `enable {target} --headless` "
+                             "drops them")
 
     state.save()
     console.line(f"enabled {kind} {target}:")
@@ -2975,7 +3054,8 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     are listed.
 
     NOT ported, deliberately: the pre-flight diagnostics and "minimal" path, the
-    fall-through to `nuclear`, the GPU check and the tailscale ping - see
+    fall-through to `nuclear`, the .ps1's GPU health check (nvidia-smi) and the
+    tailscale ping - see
     scripts/stack/README.md (`recover`).
     """
     if plane and manifest.manual(plane):
@@ -3006,7 +3086,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
         # Before anything stops or starts, as `up` does (attempt-2 F12: recover on a
         # GPU-less daemon started the db, created the upstreams and printed the raw
         # nvidia error). Not under --dry-run, which reads nothing it does not need.
-        _gpu_preflight(manifest, state, root, work, "recover", capture)
+        _gpu_preflight(manifest, state, root, work, "recover", capture, rerun=_invocation("recover", plane, every))
     renders = {p: plane_render(manifest, state, root, p, capture) for p in work}
     levels = {p: start_levels(renders[p]) for p in work}
     one_shots = {p: one_shot_services(renders[p]) for p in work}

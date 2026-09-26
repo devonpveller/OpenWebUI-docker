@@ -254,7 +254,11 @@ keys = ["WEBUI_SECRET_KEY"]
 # a default here would hand a `stock` host `gpu`. `opt_in` is the flag for
 # exactly that - something other than the driver's defaults turns it on, and
 # here it is the COMPOSE_PROFILES line in .env.
+# `stands_in_for`: the GPU-free stand-in. When stack.py's GPU refusal takes `gpu`
+# out of this plane's COMPOSE_PROFILES it puts `stock` in, so Open WebUI still
+# runs (without it only openwebui-backup starts). stack.py validates the name.
 opt_in      = true
+stands_in_for = ["gpu"]
 description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-193). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
