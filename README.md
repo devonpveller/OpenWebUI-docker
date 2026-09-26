@@ -263,12 +263,12 @@ gates run as Python twins and the rest print `SKIPPED`
 Before you push, run the checks CI's `ruff` and `stack-driver` jobs run
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). They need docker, the
 OB1 submodule at its pinned commit, and an `.env` in every plane directory -
-CI copies the examples first, and so should you (`-n` never overwrites a real
-one; the checks render from the examples, the files only have to exist):
+CI copies the examples first, and so should you (the loop never overwrites a
+real one; the checks render from the examples, the files only have to exist):
 
 ```sh
 python3 -m pip install ruff pytest
-for p in . frontend inference memory search coder portal agent-org/docker OB1/docker; do cp -n "$p/.env.example" "$p/.env"; done
+for p in . frontend inference memory search coder portal agent-org/docker OB1/docker; do [ -e "$p/.env" ] || cp "$p/.env.example" "$p/.env"; done
 touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
 ruff check .
 python3 -m pytest scripts/stack -q
