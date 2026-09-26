@@ -64,7 +64,11 @@ How the figures were measured, so you can re-derive them:
 the portal work fully. The inference plane is then a LiteLLM gateway with no
 local model, so the products that call a model start but have nothing to
 answer them; the gateway's optional cloud models do not change that as
-shipped ([POSTURE.md](POSTURE.md) says why).
+shipped ([POSTURE.md](POSTURE.md) says why). The `inference` and `memory`
+products turn on `local`, so on a daemon with no NVIDIA runtime `up` refuses
+them before anything starts, names the plane, profile and service, and prints
+numbered steps that take the GPU profile back out (for inference: `disable
+inference`, then `enable --plane inference` for the gateway alone).
 
 ## Quickstart
 
@@ -141,7 +145,7 @@ What each one gives you, and what it needs besides Docker:
 |---|---|---|
 | **chat** | Open WebUI on `127.0.0.1:3000` | nothing |
 | **inference** | the model endpoints every other plane calls, with the local llama.cpp models registered ([README](inference/README.md)) | the GPU; the chat GGUFs at the paths `inference/.env` names, under `data/models/gguf/` or its `LM_MODELS_DIR`; `bge-m3-f16.gguf` in `data/models/embeddings/`. Without a GPU, use `enable --plane inference` (the gateway alone) |
-| **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo; `stack.py doctor` prints the command |
+| **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo (`stack.py doctor` prints the command), and inference's GPU: mnemory's models are the local ones |
 | **search** | private web search on `127.0.0.1:8085`, every query leaving through Mullvad ([README](search/README.md)) | a Mullvad WireGuard key and `/dev/net/tun` |
 | **open-brain** | the knowledge base: capture, retrieval, a compiled wiki on `127.0.0.1:8812` | the OB1 submodule (the clone above fetched it) |
 | **research** | open-brain plus the research engine, read in Open WebUI, the wiki and Open Notebook (`127.0.0.1:8503`) | as open-brain |
@@ -155,17 +159,21 @@ Turning one on:
 ```sh
 python3 scripts/stack/stack.py enable research    # a product: prints the planes and profiles it enabled
 python3 scripts/stack/stack.py up                 # starts what is enabled, in dependency order
-python3 scripts/stack/stack.py disable research   # takes it back out
+python3 scripts/stack/stack.py disable research   # takes out only what research added
 ```
 
 `enable <name>` always means the product of that name, including the five that
 are also plane names (`inference`, `memory`, `search`, `agent-org`, `portal`);
 `enable --plane <name>` acts on the plane alone. A product brings the planes
-it requires (`memory` brings inference) and turns on its profiles - enabling
-`inference` registers the local models, with no `.env` edit. `enable` refuses
-before it writes anything if a key is blank or still its `.env.example`
-placeholder, naming the key and the file, so the loop is: `enable`, copy that
-plane's `.env.example` to `.env`, fill in what it named, `enable` again, `up`.
+it requires (`memory` brings inference, with `local`) and turns on its
+profiles - enabling `inference` registers the local models, with no `.env`
+edit. `enable` refuses before it writes anything if a key is blank or still its
+`.env.example` placeholder, naming the key and the file, so the loop is:
+`enable`, copy that plane's `.env.example` to `.env`, fill in what it named,
+`enable` again, `up`. `up` applies the same key check before it starts
+anything, so a key blanked after `enable` is caught there too. `disable
+<product>` removes a plane only when no other enabled product, direct
+enable or requiring plane still holds it, and says which it kept and why.
 `--headless` leaves out the reading surfaces and keeps the engines.
 
 ## How it is laid out
