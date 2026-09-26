@@ -642,7 +642,7 @@ profiles    = { ob1 = ["research"] }
 surfaces    = { ob1 = ["wiki", "notebook"] }
 
 [products.coding-agent]
-description = "little-coder; its surface is Open WebUI (PLAN section 1)"
+description = "little-coder, the coding agent; its surface is Open WebUI"
 planes      = ["coder"]
 surfaces    = { frontend = [] }
 

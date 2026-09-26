@@ -1,76 +1,120 @@
 # ai-stack
 
-A self-hosted AI stack on Docker: **Open WebUI** chat, local **llama.cpp**
-inference behind a **LiteLLM** gateway with an admission queue, a memory layer
-(**mnemory** + **Open Brain**), a private **search gateway** (SearXNG over
-Mullvad), a self-improving coding agent (**little-coder**) with a governed
-multi-agent org (**agent-org**), and an internet-facing **portal**
-(Caddy + Authelia + Cloudflare Tunnel) that is off by default.
+A self-hosted AI stack on Docker. **Open WebUI** is the chat front end; behind
+it sit local **llama.cpp** inference behind a **LiteLLM** gateway with an
+admission queue, a memory layer (**mnemory** and **Open Brain**), a private
+**search gateway** (SearXNG over a Mullvad WireGuard tunnel), a coding agent
+(**little-coder**) with a governed multi-agent org (**agent-org**), and an
+internet-facing **portal** (Caddy, Authelia, Cloudflare Tunnel). Each part is
+its own Docker Compose project, and a small Python driver starts only the parts
+you turn on. **A fresh clone runs Open WebUI and nothing else**; you add the
+rest from the product menu.
 
-**A fresh clone gives you Open WebUI and nothing else.** Then you read the
-product menu below, pick one more thing, and turn it on.
+## Hardware
 
-> The previous 1,362-line README described the retired Ollama-era stack; it is
-> preserved at
-> [`../documentation-plans-ai-stack/journal/archive/README-pre-2026-08.md`](../documentation-plans-ai-stack/journal/archive/README-pre-2026-08.md).
+What each product needs, as measured. Everything runs on one Docker host.
+
+| Product | Disk for its images | RAM in use | GPU |
+|---|---|---|---|
+| **chat** (the quickstart) | 5.1 GB | {{CHAT_RAM}} | none |
+| **inference** | 9.7 GB, plus 17-22 GB per chat model and 0.6 GB for the embedding model | 15.3 GiB | NVIDIA, 24 GB VRAM for the shipped models (below) |
+| **memory** | 2.1 GB | 3.3 GiB | none of its own |
+| **search** | 0.6 GB | 0.4 GiB | none |
+| **open-brain** | 7.5 GB | 18.4 GiB | none of its own |
+| **research** | 15.0 GB | 19.3 GiB + chat | none of its own |
+| **coding-agent** | 7.7 GB | 3.2 GiB + chat | none of its own |
+| **agent-org** | 3.9 GB | 4.2 GiB | none of its own |
+| **digest** | 7.9 GB | 9.4 GiB | none of its own |
+| **portal** | 5.6 GB | 0.2 GiB + chat | none |
+| every plane, every profile | 27.8 GB, plus the models | about 36 GiB | as inference |
+
+How the figures were measured, so you can re-derive them:
+
+- **Disk:** `docker image inspect --format '{{.Size}}'` (uncompressed, on an
+  overlay2 store), summed once per image over what `docker compose config
+  --images` lists for the product's planes and profiles. `:local` images are
+  built on your machine. Data volumes and backups come on top.
+- **RAM:** `docker stats --no-stream`, summed over the same containers on a
+  long-running deployment. Open Brain's wiki viewer (9.2 GiB) and database
+  (4.0 GiB) dominate it and grow with your knowledge base. The chat figure is
+  a fresh `stock` Open WebUI just after `/health` answered.
+- **CPU:** no service reserves CPU; a few portal and Open Brain sidecars are
+  capped at 0.1-1.5 CPUs. Every image is `linux/amd64`; nothing else is tested.
+- **GPU:** only two profiles reserve one, as a compose `driver: nvidia` device
+  reservation, and both need the NVIDIA Container Toolkit. Inference's `local`
+  profile puts the chat server on GPU `GPU_LLAMA_CPP_DEVICE_ID` (default 0) and
+  the embedding server on `GPU_LLAMA_CPP_EMBED_DEVICE_ID` (default 1)
+  ([`inference/compose/upstreams.yml`](inference/compose/upstreams.yml)); the
+  frontend's `gpu` profile, a local CUDA build of Open WebUI, uses
+  `GPU_AISTACK_DEVICE_ID` (default 1)
+  ([`frontend/docker-compose.yml`](frontend/docker-compose.yml)). Give two ids
+  the same index to share one card.
+- **VRAM:** the chat server loads every layer onto the GPU (`--n-gpu-layers
+  99`, `--no-mmap`) with a 262,144-token context and a `q4_0` KV cache
+  ([`inference/config/llama-swap.config.yaml`](inference/config/llama-swap.config.yaml),
+  `inference/.env.example`). Its two models, `Qwen3.6-27B-Q4_K_M.gguf` and
+  `Qwen3.6-35B-A3B-Q4_K_M.gguf`, are 16.5 GB and 21.2 GB - the sizes Hugging
+  Face lists under `lmstudio-community/Qwen3.6-27B-GGUF` and `-35B-A3B-GGUF`.
+  Weights plus cache make **24 GB the floor for the shipped settings**; on a
+  smaller card, use a smaller GGUF or lower `*_CTX_SIZE` in `inference/.env`.
+  The embedding model, `bge-m3-f16.gguf`, is 0.63 GB.
+
+**Without a GPU** everything but those two profiles runs, and chat, search and
+the portal work fully. The inference plane is then a LiteLLM gateway with no
+local model, so the products that call a model start but have nothing to
+answer them; the gateway's optional cloud models do not change that as
+shipped ([POSTURE.md](POSTURE.md) says why).
 
 ## Quickstart
 
-You need **Docker** and **Python 3.11 or newer** (the driver is standard-library
-only, so a fresh host needs nothing else).
+You need Docker Engine with the Compose plugin (`docker compose version`
+works without `sudo`), git, and **Python 3.11 or newer** (`python3 --version`;
+the driver uses only the standard library). No GPU.
 
-**The commands here are written for PowerShell**, because this stack is
-developed on Windows + Docker Desktop. The driver itself is Python
-(`scripts/stack/stack.py`, standard library only) and runs anywhere Docker and
-Python do; what is PowerShell-only is the **lifecycle, recovery and check
-scripts** these READMEs point at - `portal-on.ps1`, `emergency-recovery.ps1`,
-`stack-watchdog.ps1` and the rest, which are `.ps1` and assume PowerShell 5.1.
-In the block below only the two `Copy-Item` lines are shell-specific - `cp`
-does the same job - because the two `python` lines are written with forward
-slashes, which both shells accept on Windows.
+**Linux:**
+
+```sh
+git clone --recurse-submodules https://github.com/devonpveller/OpenWebUI-docker.git ai-stack
+cd ai-stack
+cp frontend/.env.example frontend/.env
+KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+sed -i.bak "s/^WEBUI_SECRET_KEY=.*/WEBUI_SECRET_KEY=$KEY/" frontend/.env && rm frontend/.env.bak
+python3 scripts/stack/stack.py init
+python3 scripts/stack/stack.py up
+until curl -sf http://127.0.0.1:3000/health; do sleep 5; done; echo
+```
+
+**Windows** (PowerShell, Docker Desktop):
 
 ```powershell
-git config core.hooksPath .githooks       # pre-commit checks (.githooks/pre-commit)
-Copy-Item .env.example .env               # the anchor's own; nearly empty
+git clone --recurse-submodules https://github.com/devonpveller/OpenWebUI-docker.git ai-stack
+cd ai-stack
 Copy-Item frontend/.env.example frontend/.env
-#   then set WEBUI_SECRET_KEY in frontend/.env - it is REQUIRED and encrypts
-#   values at rest in webui.db, so pin it once and never rotate casually. The
-#   shipped value is a placeholder: init, doctor and up refuse it by name
-python scripts/stack/stack.py init        # writes .stack/state.json: frontend, alone
-python scripts/stack/stack.py up          # creates any missing ai-stack_* network, then Open WebUI
+$KEY = python -c "import secrets; print(secrets.token_hex(32))"
+(Get-Content frontend/.env) -replace '^WEBUI_SECRET_KEY=.*', "WEBUI_SECRET_KEY=$KEY" | Set-Content -Encoding ascii frontend/.env
+python scripts/stack/stack.py init
+python scripts/stack/stack.py up
+while ((curl.exe -s -o NUL -w '%{http_code}' http://127.0.0.1:3000/health) -ne '200') { Start-Sleep 5 }
 ```
 
-Open WebUI is then on **http://127.0.0.1:3000**. That is <!-- stack:count:frontend:stock -->**2** services with `stock`<!-- /stack:count:frontend:stock -->:
-`openwebui` on the pinned upstream image and its backup sidecar. No GPU, no
-local build, no other plane - `frontend/.env.example` ships
-`COMPOSE_PROFILES=stock` for exactly this.
+The last line waits until Open WebUI answers `{"status":true}`; the first
+start pulls a 5 GB image and can take several minutes. Then open
+**http://127.0.0.1:3000** and create the first account, which becomes the
+admin.
 
-Check on it:
-
-```powershell
-python scripts/stack/stack.py list        # planes, what is enabled, the products
-python scripts/stack/stack.py status      # docker compose ps per plane
-python scripts/stack/stack.py doctor      # docker, compose, env files, blank keys
-python scripts/stack/stack.py health      # probes of the ENABLED planes; exit code = failures
-```
-
-`init` refuses if a key a plane needs is missing, blank or still the value its
-`.env.example` ships, and names the key and the file. Every verb takes `--dry-run` where it would change something, and
-prints the exact `docker compose` line it would run.
-
-`.\scripts\stack\stack.ps1 <verb>` is a thin shim over the same driver, kept
-because runbooks and muscle memory say it. It forwards `up down status restart
-health stats list doctor inventory`; `enable`, `disable` and `init` are
-`stack.py` only.
+What those steps did: `WEBUI_SECRET_KEY` encrypts values Open WebUI stores, so
+keep it once it is set - the driver refuses the shipped placeholder by name.
+`init` wrote `.stack/state.json` (gitignored), which records that your machine
+runs the `frontend` plane alone. `up` created the shared `ai-stack_*` Docker
+networks and started <!-- stack:count:frontend:stock -->**2** services with `stock`<!-- /stack:count:frontend:stock -->:
+Open WebUI on its pinned upstream image and its backup sidecar.
 
 ## The product menu
 
-A **product** is a vertical slice: the planes it needs to run, the compose
-profiles it turns on, and the surfaces a person reads it through. All of it is
-declared in [`stack.manifest.toml`](stack.manifest.toml), which is the file of
-record - the table below is GENERATED from it (`stack.py docs --write`; the
-pre-commit hook refuses a stale copy), and `python scripts/stack/stack.py list`
-prints the same set.
+A **product** is a slice of the stack you can turn on: the planes it needs, the
+compose profiles it enables, and the surfaces you use it through. They are
+declared in [`stack.manifest.toml`](stack.manifest.toml); the table is
+generated from it, and `python3 scripts/stack/stack.py list` prints the same.
 
 <!-- stack:product-menu -->
 
@@ -84,78 +128,48 @@ _Generated by `python scripts/stack/stack.py docs --write`; do not edit between 
 | **search** | the private search gateway (SearXNG behind Mullvad) | anchor, search | - | - | `MULLVAD_WG_PRIVATE_KEY`, `MULLVAD_WG_ADDRESSES` |
 | **open-brain** | the Open Brain knowledge core | anchor, inference, search, ob1 | ob1: `idea-refinery`, `research`, `wiki` | ob1: `wiki` | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `MULLVAD_WG_PRIVATE_KEY`, `MULLVAD_WG_ADDRESSES`, `MCP_ACCESS_KEY`, `POSTGRES_PASSWORD`, `OPS_GATEWAY_KEY`, `OPENBRAIN_GATEWAY_KEY` |
 | **research** | the research engine: OB1 + inference + search, read through OWUI, the wiki and Open Notebook | anchor, inference, frontend, search, ob1 | ob1: `idea-refinery`, `research`, `wiki`, `notebook` | ob1: `wiki`, `notebook` | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `WEBUI_SECRET_KEY`, `MULLVAD_WG_PRIVATE_KEY`, `MULLVAD_WG_ADDRESSES`, `MCP_ACCESS_KEY`, `POSTGRES_PASSWORD`, `OPS_GATEWAY_KEY`, `OPENBRAIN_GATEWAY_KEY` |
-| **coding-agent** | little-coder; its surface is Open WebUI (PLAN section 1) | anchor, inference, frontend, coder | - | `frontend` (the whole plane) | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `WEBUI_SECRET_KEY`, `OPEN_TERMINAL_API_KEY` |
+| **coding-agent** | little-coder, the coding agent; its surface is Open WebUI | anchor, inference, frontend, coder | - | `frontend` (the whole plane) | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `WEBUI_SECRET_KEY`, `OPEN_TERMINAL_API_KEY` |
 | **agent-org** | the governed multi-agent org; Mattermost is its INTERNAL surface, so --headless drops nothing | anchor, inference, agent-org | agent-org: `workers` | - | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `MM_DB_PASSWORD`, `AO_DB_PASSWORD` |
 | **digest** | the scheduled digest chain inside OB1 (gmail pull -> research -> podcast -> digest) | anchor, inference, search, ob1 | ob1: `idea-refinery`, `research`, `notebook` | - | `LITELLM_DB_PASSWORD`, `LITELLM_MASTER_KEY`, `MULLVAD_WG_PRIVATE_KEY`, `MULLVAD_WG_ADDRESSES`, `MCP_ACCESS_KEY`, `POSTGRES_PASSWORD`, `OPS_GATEWAY_KEY`, `OPENBRAIN_GATEWAY_KEY` |
 | **portal** | the internet front-end (started by hand: portal-on.ps1) | anchor, frontend, portal *(manual)* | portal: `internet` | - | `WEBUI_SECRET_KEY`, `CLOUDFLARE_TUNNEL_TOKEN`, `AUTHELIA_JWT_SECRET`, `AUTHELIA_SESSION_SECRET`, `AUTHELIA_STORAGE_ENCRYPTION_KEY`, `PUBLIC_DOMAIN` |
 
 <!-- /stack:product-menu -->
 
-What the host must provide beyond Docker, per product (prose - the manifest's
-`host` entries, summarised):
+What each one gives you, and what it needs besides Docker:
 
-| Product | What the host must provide |
-|---|---|
-| **chat** | nothing beyond Docker |
-| **inference** | an NVIDIA GPU + the NVIDIA Container Toolkit, chat GGUFs under `${LM_MODELS_DIR}`, and `bge-m3-f16.gguf` - **all three for the `local` profile only** |
-| **memory** | inference's, plus the sibling `../mnemory` checkout its image builds from |
-| **search** | `/dev/net/tun` and `NET_ADMIN` for the WireGuard kill-switch, and a Mullvad WireGuard account |
-| **open-brain** | the OB1 submodule checked out; Google OAuth under `OB1/secrets/google/` for the scheduled digest chain; optionally a speech-to-text server on the HOST at `:8000` |
-| **research** | open-brain's + the frontend's |
-| **coding-agent** | nothing of its own |
-| **agent-org** | the `little-coder:local` and `little-coder-open-terminal:local` images (the coder plane builds them); an OpenRouter key for the `cloud` profile |
-| **digest** | open-brain's |
-| **portal** | a Cloudflare tunnel token and a public domain. **The portal is `manual`: the driver never starts it** - `scripts/portal/portal-on.ps1` does |
+| Product | Gives you | Also needs |
+|---|---|---|
+| **chat** | Open WebUI on `127.0.0.1:3000` | nothing |
+| **inference** | the model endpoints every other plane calls ([README](inference/README.md)) | the GPU; the chat GGUFs at the paths `inference/.env` names, under `data/models/gguf/` or its `LM_MODELS_DIR`; `bge-m3-f16.gguf` in `data/models/embeddings/`; `COMPOSE_PROFILES=local` uncommented in `inference/.env`, or the gateway does not register the local models |
+| **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo; `stack.py doctor` prints the command |
+| **search** | private web search on `127.0.0.1:8085`, every query leaving through Mullvad ([README](search/README.md)) | a Mullvad WireGuard key and `/dev/net/tun` |
+| **open-brain** | the knowledge base: capture, retrieval, a compiled wiki on `127.0.0.1:8812` | the OB1 submodule (the clone above fetched it) |
+| **research** | open-brain plus the research engine, read in Open WebUI, the wiki and Open Notebook (`127.0.0.1:8503`) | as open-brain |
+| **coding-agent** | little-coder, driven from Open WebUI ([README](coder/README.md)) | nothing more |
+| **agent-org** | a governed team of agents, coordinated in Mattermost on `127.0.0.1:8065` ([README](agent-org/README.md)) | nothing more |
+| **digest** | the scheduled mail-and-calendar digest and podcast chain | Google OAuth files under `OB1/secrets/google/` |
+| **portal** | Open WebUI on the internet through a Cloudflare tunnel, behind Authelia ([README](portal/README.md)) | a tunnel token and a domain; started only by `scripts/portal/portal-on.ps1` (PowerShell), never by the driver |
 
-**Reading the keys column.** A product's key set is the union of the `keys` of
-every plane in its "Starts" cell, so it is cumulative: a product that starts
-inference asks for inference's keys too. `stack.py enable <product>` refuses
-with the whole list, each key beside the file it belongs in.
+Turning one on:
 
-Two more things that table is saying quietly and are worth saying out loud:
-
-- **A product pulls what its planes REQUIRE**, which is why `memory` starts
-  inference and `open-brain` starts search. It does **not** pull their optional
-  edges. In particular `research` enables the inference *plane* but not its
-  `local` profile, so on a GPU-less host it is a cloud-model gateway feeding the
-  research engine.
-- **`--headless` drops surfaces, never engines.** `enable open-brain
-  --headless` leaves the knowledge core without the wiki viewer; `enable
-  coding-agent --headless` leaves little-coder without Open WebUI in front of
-  it. A profile marked `default` in the manifest survives `--headless`, which is
-  why a surface must never be marked default.
-
-## Add one thing, after the first run
-
-```powershell
-python scripts/stack/stack.py enable search       # a plane, or
-python scripts/stack/stack.py enable research     # a product
-python scripts/stack/stack.py enable open-brain --headless   # engines, no reading surface
-python scripts/stack/stack.py up                  # start what is now enabled, in order
-python scripts/stack/stack.py disable search      # take it back out
+```sh
+python3 scripts/stack/stack.py enable search      # a plane or a product
+python3 scripts/stack/stack.py up                 # starts what is enabled, in dependency order
+python3 scripts/stack/stack.py disable search     # takes it back out
 ```
 
-Before it writes anything, `enable` refuses in two ways, and both name the
-remedy:
+`enable` refuses before it writes anything if a key is blank or still its
+`.env.example` placeholder, naming the key and the file. So the loop is:
+`enable`, copy that plane's `.env.example` to `.env`, fill in what it named,
+`enable` again, `up`. A product brings the planes it requires (`memory` brings
+inference), so its key list is cumulative; `--headless` leaves out the reading
+surfaces and keeps the engines.
 
-- **a required plane is off** - `refused: memory requires inference, which is
-  not enabled (python scripts/stack/stack.py enable inference)`;
-- **a key is blank or missing** - it names each key, the file it belongs in, and
-  which plane reads it.
+## How it is laid out
 
-So the loop is: `enable` it, read the refusal, copy that plane's
-`.env.example`, fill in what it named, `enable` again, `up`. A name that is
-both a plane and a product resolves to the PLANE, and the driver says so;
-`--product` / `--plane` disambiguate.
-
-`enable` writes `.stack/state.json` - gitignored, per-host, and the only place
-"what does THIS machine run" lives. The manifest is never written by the
-driver.
-
-## The layout: compose projects around a network anchor
-
-Since the 2026-08-21 Part K restructure the workspace is **one compose project
-per plane**, around a root project that owns only the shared networks.
+One Docker Compose project per plane, around a root
+[`docker-compose.yml`](docker-compose.yml) that declares only the shared
+networks. The counts are rendered from each plane's `.env.example`:
 
 <!-- stack:plane-table -->
 
@@ -175,341 +189,110 @@ _Generated by `python scripts/stack/stack.py docs --write`; do not edit between 
 
 <!-- /stack:plane-table -->
 
-| Plane | What it holds |
-|---|---|
-| **anchor** | Owns `ai-stack_llm-net`, `ai-stack_app-net` and `ai-stack_default`, which every other project attaches to externally. `up` here creates networks and starts nothing. |
-| **frontend** ([README](frontend/README.md)) | `openwebui` + the `tailscale` netns companion + both backups. |
-| **inference** ([README](inference/README.md)) | `llm-gateway` (LiteLLM, holds the aliases) + its DB and Admin UI + `llm-queue` + the two `*-upstream` llama.cpp servers + their backups. Owns `llm-backend-net`. |
-| **memory** ([README](memory/README.md)) | `mnemory` + `mnemory-cloud-gateway` + backup. |
-| **search** ([README](search/README.md)) | `vpn` (Mullvad, all egress) + `redis` + `searxng` + `gateway`. Owns `search-net`. |
-| **coder** ([README](coder/README.md)) | `open-terminal` + `little-coder` + `lc-egress` + backup. Owns `lc-net`. |
-| **portal** ([README](portal/README.md)) | `caddy`, `authelia`, `cloudflared`, the watchers, the alerter, the tripwire, the cron and their backups. All ingress arrives through the tunnel; `manual`. |
-| **ob1** | The `openbrain-*` fleet, its backups and the Open Notebook trio. A **pinned git submodule**. |
-| **agent-org** | Mattermost (+db) + `agent-bridge`, the governed org bus, + profile-gated `workers` / `cloud` slices. |
-
-Each plane directory holds its own compose file, its own `.env.example` and its
-own README; the per-plane README is the detailed one, and this file is the map.
-
-**Every plane owns its environment.** Compose loads `<plane>/.env` NATIVELY
-from the project directory, so **nothing passes `--env-file`** and your working
-directory is irrelevant to it. A variable lives in the file of the plane whose
-service reads it; a value two planes read is declared in each. The root `.env`
-keeps only what the anchor, the driver or a non-plane-scoped script reads.
-`COMPOSE_PROFILES` is per-plane too. Every plane but the anchor REFUSES to
-render when its own file is absent rather than silently blanking - the six
-in-repo planes on a `${VAR:?}` guard, `agent-org/docker/` on a service-level
-`env_file: .env`, `OB1/docker/` on its own `${OPS_GATEWAY_KEY:?}` (all measured
-2026-09-19). Migrating a host that still has one big root `.env`:
-[`documentation/runbooks/env-split-migration.md`](documentation/runbooks/env-split-migration.md).
-
-Drive one plane by hand with `docker compose -f <plane>/docker-compose.yml ...`
-from this directory.
-
-### The one inference rule
-
-Every service reaches inference through `http://llama-cpp:8080` /
-`http://llama-cpp-embed:8080` - network **aliases on `llm-gateway` (LiteLLM)**,
-which forwards through **`llm-queue`** (per-caller admission and priority) to
-the real llama.cpp servers. **Never route inference around LiteLLM**; only
-health, GPU and recovery probes may target `*-upstream` directly. Enforced at
-commit time by `scripts/checks/check-llm-gateway-routing.ps1`, and by the
-topology: the upstreams live on a network native to the inference project.
-
-And never GET LiteLLM `/health` through the alias - it loads every model the
-gateway advertises. `/health/liveliness` is the one to probe.
-
-## Posture: local-first, cloud-capable
-
-**No component in this stack sends a prompt, a document or a memory to a model
-provider by default.** Every model call goes to llama.cpp on this host through
-the LiteLLM gateway, and that gateway is attached to two networks that are both
-`internal: true` - `llm-net`, declared that way by the anchor
-[`docker-compose.yml`](docker-compose.yml), and `llm-backend-net`, declared that
-way by [`inference/docker-compose.yml`](inference/docker-compose.yml). The
-cloud-capable parts are present in the tree and inert: each is gated behind a
-compose profile, a credential, or a script the operator runs by hand. That is
-stack-layers decision **D14** - keep the components, ship them off, and write
-down what turns each one on.
-
-That is not the same as "nothing reaches the internet". Three containers do,
-from a fresh clone, and they are named at the end of this section.
-
-**How this list was built, so it can be rebuilt and disagreed with.** Two
-stages, because either alone gets it wrong:
-
-1. **Render, then classify by network.** `docker compose config --format json`
-   for every plane, every profile; a service is a *candidate* if any network it
-   joins is non-internal. An `external: true` reference carries no internal
-   flag in a plane's own render, so resolve those against the anchor:
-   `ai-stack_llm-net` is `internal: true`, `ai-stack_app-net` and
-   `ai-stack_default` are ordinary bridges.
-2. **Read the candidate's source for an outbound call.** Being on a bridge is a
-   *route*, not traffic. `llm-gateway-ui`, the search `gateway`, `openbrain-ext`
-   and the portal's watchers are all on bridges and all make no call off this
-   host; they are listed under "network-capable, no outbound call" below rather
-   than in the table.
-
-A grep for provider names finds stage 2 and misses stage 1 entirely - which is
-how the first version of this section missed four services, every one of them
-unprofiled. Where a sentence here and a compose file disagree, the compose file
-wins.
-
-### The table
-
-| Cloud-capable component | Where it is defined | What it does when off | What turns it on | Where it egresses |
-|---|---|---|---|---|
-| LiteLLM cloud model group (`cloud-large`, `cloud-small`) | `inference/config/litellm/model_list/cloud.openrouter.yaml` | `config/litellm/assemble-config.py` drops every model entry whose `os.environ/VAR` reference is unset or empty, and logs the drop with its reason. The two models are not registered, so `/v1/models` does not list them and nothing else about the gateway changes. | `OPENROUTER_API_KEY` in `inference/.env`. It is blank in `inference/.env.example`. | **Nowhere.** See "The D14 mechanism" below: the key makes these models LISTED, not reachable. |
-| agent-org cloud lane: `llm-gateway-cloud`, `llm-gateway-cloud-db`, `ao-egress` | `agent-org/docker/docker-compose.yml`, `agent-org/config/litellm-cloud.config.yaml` | All three carry `profiles: ["cloud"]`, and `agent-org/docker/.env.example` sets no `COMPOSE_PROFILES` at all, so none of them renders. `AO_CLOUD_ENABLED=false` separately keeps `agent-bridge` on the local lane. | `cloud` in `COMPOSE_PROFILES` (or `--profile cloud`), plus `OPENROUTER_API_KEY`, `AO_CLOUD_DB_PASSWORD`, `AO_CLOUD_MASTER_KEY` and `AO_CLOUD_ENABLED=true` in `agent-org/docker/.env`. | `llm-gateway-cloud` has no internet leg of its own: it sits on `ao-net` and `ao-cloud-egress-net` (`internal: true`) with `HTTP_PROXY`/`HTTPS_PROXY` pointed at `ao-egress`, the one dual-homed container. Read the allowlist note under the table before turning this on. |
-| `ao-git-egress`, and the worker pool behind it | `agent-org/docker/docker-compose.yml` | `profiles: ["workers"]`, so with no `COMPOSE_PROFILES` neither the proxy nor the pool renders. | The `workers` profile. | A default-deny tinyproxy on `ao-worker-net` (`internal: true`) + the project bridge. **The mechanism, since it is not uniform:** only `ao-ot-1`/`ao-ot-2` carry `HTTP_PROXY`; `ao-worker-1`/`-2` carry none and are confined by `ao-worker-net` having no route out at all. The filter file lives on the shared `ao-egress-config` volume - `agent-org/docker/egress/egress-reload.sh` seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it as projects and hosts are onboarded from Mattermost. |
-| `agent-bridge`'s GitHub App (the capability plane) | `agent-org/agent-bridge/app/config.py`, `agent-org/docker/docker-compose.yml` | `Settings.github_app_enabled` is false unless `github_app_id` is set **and** the private-key file exists, so the plane stays offline and the bridge runs normally without it. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `agent-org/docker/.env` (absent from the example - this plane leaves `${VAR:-}` names out on purpose), and a readable key at `agent-org/agent-bridge/secrets/github-app-key.pem`. | `https://api.github.com`, directly from `ao-net`, which is a plain bridge. This one does **not** go through `ao-egress`. |
-| `lc-egress`, and the `open-terminal` proxied through it | `coder/docker-compose.yml`, `little-coder/docker/Dockerfile.egress` | Nothing: it is unprofiled and **starts whenever the coder plane starts**. What is "off" is the destination set - tinyproxy runs `FilterDefaultDeny Yes`, so any host not matching the allowlist is refused, and the proxy initiates nothing on its own. | No variable. The allowlist is baked into the image from `little-coder/docker/egress-allowlist.txt`, which ships `github.com` and `githubusercontent.com`; widening it is an edit plus a rebuild. | `CONNECT` to 443 and 22 on allowlisted hosts, out of the coder project's own `default` bridge. `open-terminal` has no other route: it is on `lc-net` (`internal: true`) and `llm-net` (also internal). |
-| `vpn` (Mullvad WireGuard, gluetun) | `search/docker-compose.yml` | **This is an egress that is meant to be on.** It is unprofiled, so it renders and starts with the search plane and dials Mullvad itself. From the examples it cannot connect: `search/.env.example` ships `MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`, a placeholder rather than a blank because the `${...:?}` guard rejects empty. | Real values for `MULLVAD_WG_PRIVATE_KEY` and `MULLVAD_WG_ADDRESSES` in `search/.env`. | Mullvad, over WireGuard. It exists so search does **not** leak: `searxng` sits on `search-net` (`internal: true`) and `search/searxng/settings.yml` points `outgoing.proxies` at `http://vpn:8888`, so engine queries and page fetches have no other way out and HTTPS `CONNECT` resolves DNS at the far end of the tunnel. |
-| `cloudflared` | `portal/docker-compose.yml` | `profiles: [internet]`, and `portal/.env.example` deliberately carries no `COMPOSE_PROFILES` line. The whole plane is `manual` in `stack.manifest.toml`, so the driver never starts it either. | `scripts/portal/portal-on.ps1`, which passes `--profile internet` on the command line, plus `CLOUDFLARE_TUNNEL_TOKEN` in `portal/.env` (blank in the example). | Cloudflare's edge, from `edge-net`. It is the portal's only ingress - `caddy` publishes no host port. |
-| `portal-alerter` | `portal/docker-compose.yml` | Unprofiled, but it can only start when the portal does, which is by hand. | The portal being up, plus Google OAuth files at `secrets/google/portal-alerter/credentials.json` and `token.json`. | `oauth2.googleapis.com` and `gmail.googleapis.com`, on `notify-net`. **Do not read `auth-net`'s `internal: true` as "the portal has one way out":** the render has FOUR non-internal networks - `edge-net`, `notify-net`, the external `app-net`, and an implicit `default` that both backup sidecars join - and `caddy` itself is on `app-net` and `edge-net`. `notify-net` is the alerter's egress leg, not the plane's only one. |
-| `tailscale` | `frontend/docker-compose.yml` | `profiles: [tailscale]`, and `frontend/.env.example` ships `COMPOSE_PROFILES=stock`, so a fresh clone renders neither it nor its backup. | `tailscale` in `COMPOSE_PROFILES` in `frontend/.env` - necessarily together with `gpu`, because `network_mode: service:openwebui` names the `gpu` definition - plus `TAILSCALE_AUTH_KEY`, which the example leaves as `putyourtskeyhere`. | Tailscale's coordination servers and DERP relays, from inside `openwebui`'s network namespace. |
-| `openwebui` (either profile) | `frontend/docker-compose.yml` | Nothing - one of the two definitions is what this plane exists to run. The `stock` one is on the project-local `owui-net`; the `gpu` one additionally joins `ai-stack_default`, `app-net` and `llm-net`. | Whichever profile is active. | Both sit on an internet-capable bridge. Its web SEARCH does not use that - `SEARXNG_QUERY_URL` points at the search plane's gateway - but that setting covers the query only; what Open WebUI's own loaders fetch at runtime is upstream behaviour this repo does not pin (no `HF_HUB_OFFLINE` is set beside `HF_HOME`). Treat it as network-capable and unbounded rather than as bounded by `SEARXNG_QUERY_URL`. |
-| `openwebui-backup` | `frontend/docker-compose.yml` | Nothing. It is **unprofiled and renders under `stock`**, i.e. in the quickstart deployment, and its `command:` begins `apk add --no-cache pigz` on every container start. | Nothing - this is on by default. | The Alpine package CDN, over `owui-net`. The compose comment beside the network list says so in as many words. It is the only runtime package install in any compose file here; the other backup sidecars run their script and nothing else. |
-| `mnemory-cloud-gateway` | `memory/docker-compose.yml` | Nothing - it starts with the memory plane. The gateway PROCESS dials only `mnemory`; its one upstream is `MNEMORY_URL`. | It is on whenever `memory` is. `MNEMORY_GATEWAY_KEY` is the key a cloud client presents; that client never holds `MCP_API_KEY`, which the gateway injects upstream. | It makes no outbound call of its own, and publishes on `127.0.0.1:8060` only. |
-| `openbrain-gateway` (cloud door) and `openbrain-ops-gateway` | `OB1/docker/docker-compose.yml`; the image is built from `openbrain-gateway/` in this repo | Two instances of one image. The cloud door force-filters reads to `share == "cloud"` and blocks the aggregate tools; the OPS door (`GATEWAY_PROFILE: ops`, for host processes such as the claude-sessions bridge) filters on `exposure == "ops"` and allowlists only the agent-memory tools. | `OPENBRAIN_GATEWAY_KEY` / `OPS_GATEWAY_KEY` in `OB1/docker/.env` - and they must differ; the ops door's `${OPS_GATEWAY_KEY:?…never the cloud one}` guard says so. | The gateway process makes no outbound call, and both publish on loopback (`:8061`, `:8062`). **It is not simply "a door in", though:** `openbrain-gateway/app.py`'s default `WRITE_TOOLS` allowlist includes `ingest_url` and `ingest_urls`, so a remote client holding the cloud key can make `openbrain-mcp` fetch a URL of its choosing - see the next row. |
-| `openbrain-mcp` | `OB1/docker/docker-compose.yml`, source `OB1/integrations/kubernetes-deployment/index.ts` | **Nothing gates it.** It carries no profile, sits on `obnet` (a bridge) and is the core of the OB1 plane. The `ingest_url` / `ingest_urls` tools call a bare `fetch(url)` with `redirect: "follow"` on a caller-supplied URL; that file configures no proxy client at all, unlike `openbrain-research`. | Nothing. It is live whenever Open Brain is. | Any host the caller names, unproxied and following redirects. This is the broadest egress in the stack and it is reachable both locally and, for those two tools, through the cloud door above. |
-| `openbrain-grounding-backfiller` | `OB1/docker/docker-compose.yml`, source `OB1/integrations/grounding-backfiller/index.ts` | **Nothing gates it** - unprofiled, on `obnet` + `llm-net` + `ai-stack_default`. `WIKI_BASE` defaults to `https://en.wikipedia.org`. | Nothing. | Wikipedia, and the source URLs it re-fetches. It tries `FETCH_PROXY_URL` (default `http://vpn:8888`) first, but `REFETCH_ALLOW_DIRECT` **defaults to `true`** and the refetch path falls back to a DIRECT, unproxied fetch when the proxied one comes back thin. This one fails OPEN; set `REFETCH_ALLOW_DIRECT=false` in `OB1/docker/.env` if that is not what you want. |
-| `openbrain-wiki`'s `WIKI_GIT_REMOTE` | `OB1/docker/docker-compose.yml` | Set to `""`, which the compiler reads as local-commits-only: vault history is kept, nothing is pulled or pushed. The SSH URL sits beside it, commented out. | Restoring that URL (and a passphrase-less deploy key at `WIKI_GIT_SSH_KEY`). | `github.com` over SSH - the compiled wiki is force-pushed to a private repo. The present-but-inert shape this whole section is about. |
-| OB1's scheduled chain: `openbrain-digest`, `openbrain-gmail-pull`, `openbrain-gmail-prune`, `openbrain-podcast` | `OB1/docker/docker-compose.scheduled.yml` | Unprofiled, but each mounts a Google OAuth client secret and token from `OB1/secrets/`, which is gitignored and absent from a fresh clone. (A fresh clone cannot render this plane at all until two empty `OB1/recipes/*/.env` files exist.) | Putting those OAuth files in place - and the `open-brain` product being enabled at all. | Google's APIs (Gmail read and send, Calendar read), plus `wttr.in` for the digest's weather brief, out of `obnet`. |
-| `openbrain-research` | `OB1/docker/docker-compose.yml` | `profiles: ["research"]`. | The `research` profile, which `enable research` writes. | Page fetches go through `FETCH_PROXY_URL`, defaulting to `http://vpn:8888` - the search plane's Mullvad tunnel - and searches to `http://gateway:8080`. **This one** connects TO the privacy boundary rather than around it; the backfiller two rows up is the same shape with the fallback left open, and `openbrain-mcp` has no proxy at all. Do not generalise "OB1 fetches through the tunnel" from this row. |
-
-### Network-capable, no outbound call
-
-These are on ordinary bridges and so pass stage 1, but their source makes no
-call off this host. They are listed so the criterion is visible and so a reader
-who disagrees has something to argue with:
-
-- **`llm-gateway-ui`** - on `app-net` so the portal's Caddy can front `/ui`. Its
-  `litellm.ui.config.yaml` declares no `model_list`, sets `telemetry: false`,
-  and the service sets `LITELLM_LOCAL_MODEL_COST_MAP=True`, so there is a route
-  and no call. It carries no alias and serves no inference.
-- **the search `gateway`** - on `ai-stack_default` for cross-project DNS; its
-  only HTTP client targets `searxng`.
-- **`openbrain-ext`** - its one outbound `fetch` is `WIKI_RECOMPILE_URL`,
-  internal.
-- **the portal's `caddy`, watchers, tripwire and `portal-cron`** - internal
-  targets only. Caddy attempts no ACME: every site address in the `Caddyfile` is
-  `http://` or a bare port, which disables auto-HTTPS (the `https://` strings in
-  that file are redirect TARGETS and comments). `authelia`'s notifier is `filesystem`
-  and it is on `auth-net` (`internal: true`).
-- **`frontend/status-pipe/`** - every request target is an internal `host:port`.
-- **the backup sidecars other than `openwebui-backup`** - on a project bridge,
-  but each only runs its own script; the NAS sync (`scripts/backup/backup-to-nas.ps1`)
-  is SMB to a LAN address, not the internet.
-- **`mattermost`** - FLAGGED rather than cleared: it is on `ao-net`, a plain
-  bridge, and nothing in this repo sets `MM_LOGSETTINGS_ENABLEDIAGNOSTICS`.
-  Whether Team Edition phones home on its defaults is an upstream fact this
-  repo cannot settle.
-
-### Host-side, not compose
-
-Three things that egress are **not containers**, so a compose render cannot see
-them. They run on the host, from this repo:
-
-- **The sysadmin Telegram channel** - `scripts/sysadmin-mcp/telegram_notify.py`
-  POSTs to `api.telegram.org`, and `scripts/sysadmin-mcp/telegram_listener.py`
-  POLLS it for operator commands. The listener is an **inbound control path**
-  that no firewall rule sees, because it is the host reaching out. Off without
-  the bot token and chat id.
-- **The claude-sessions bridge** (`scripts/claude-sessions-bridge/bridge.py`) -
-  runs the `claude` CLI headless with `BRIDGE_MODEL` defaulting to `opus`, so
-  every bridge turn is a call to Anthropic from the host, and it also posts to
-  Telegram. This is the one place the stack talks to a frontier provider at all.
-  It is a scheduled host process, not part of any plane; it is off unless the
-  operator runs it.
-- **The Open WebUI plugins in `frontend/owui/`** - deploy-by-paste, tracked in
-  `frontend/owui/manifest.csv`. `frontend/owui/tools/github_chat_mcp_tools.py` targets
-  `https://api.github.com`, and `frontend/owui/tools/fileshed.py` permits `curl`, `wget`
-  and network `git` subcommands from inside the `openwebui` container, behind
-  its own valves. They live in the OWUI database, not in a compose file.
-
-### The D14 mechanism, exactly
-
-Setting `OPENROUTER_API_KEY` in `inference/.env` makes `assemble-config.py` keep
-the two cloud entries, so `llm-gateway` registers them and `/v1/models` lists
-them. It does **not** make them work. `llm-gateway` is attached to `llm-net` and
-`llm-backend-net` and to nothing else, and both are internal-only, so the
-container has no route off this host and a request for `cloud-large` fails where
-LiteLLM tries to reach openrouter.ai. Making it real would mean giving that
-container an egress path - attaching it to an internet-capable network, or
-pointing it at a dual-homed allowlisted proxy the way `llm-gateway-cloud` points
-at `ao-egress`. **Neither is done here, and neither is a casual change**:
-keeping the gateway off every internet-capable bridge is the supply-chain
-posture that also explains `LITELLM_LOCAL_MODEL_COST_MAP=True` (no cost-map
-fetch at boot) and the digest-pinned image. agent-org took the other route
-deliberately - its cloud lane is a *separate* LiteLLM behind its own egress
-proxy, and `agent-org/config/litellm-cloud.config.yaml` says in as many words
-not to add OpenRouter to the local gateway.
-
-**Before you enable the agent-org cloud lane, read its allowlist.** `ao-egress`
-builds from `little-coder/docker/Dockerfile.egress`, whose `CMD` runs tinyproxy
-against the allowlist COPYd into the image at build time. The `EGRESS_ALLOWLIST`
-environment variable the compose file sets on that service is read by nothing in
-that image, so the effective allowlist is the baked `github.com` /
-`githubusercontent.com` pair and `openrouter.ai` would be denied. That fails
-closed, which is the safe direction, but it means the cloud lane does not work
-as shipped. Recorded in
-[`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md`](../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md);
-fixing it is a compose or image change, not a documentation one.
-
-### What a fresh clone actually does
-
-Copy each plane's `.env.example` and:
-
-- Every **provider** credential is blank (`OPENROUTER_API_KEY`,
-  `CLOUDFLARE_TUNNEL_TOKEN`, `AO_CLOUD_API_KEY`, `LC_DEPLOY_TOKEN`,
-  `LC_SELF_REMOTE_PAT`) or an unmistakable placeholder
-  (`TAILSCALE_AUTH_KEY=putyourtskeyhere`,
-  `MULLVAD_WG_PRIVATE_KEY=change-me-real-wg-private-key`). The cloud lane's own
-  local secrets are placeholders too (`AO_CLOUD_DB_PASSWORD=change-me-cloud-db`,
-  `AO_CLOUD_MASTER_KEY=change-me-cloud-master`) - they are not provider
-  credentials, and the lane is profile-gated anyway.
-- The only **active** `COMPOSE_PROFILES` assignment in any example is
-  `frontend/.env.example`'s `COMPOSE_PROFILES=stock`. `inference`'s is commented
-  out, and so is a `gpu,tailscale` line a few lines above the active one; the
-  other planes have no such line at all. **No active assignment names `cloud`,
-  `internet`, `workers` or `tailscale`,** so no profile-gated component renders.
-- **Three containers still reach the internet**, and none of them is a model
-  provider. Measured from the renders above, not reasoned about:
-
-| Container | Why | Plane |
-|---|---|---|
-| `vpn` | dials Mullvad itself at start; the whole point of the plane. Cannot connect on the example's placeholder key. | search |
-| `openwebui-backup` | `apk add --no-cache pigz` on every start, against the Alpine CDN. **Renders under `stock`, so it is in the quickstart.** | frontend |
-| `lc-egress` | up with the plane and dual-homed; it initiates nothing itself, but it is the route `open-terminal` uses, and the allowlist is the control. | coder |
-
-The quickstart enables `frontend` alone: Open WebUI on `owui-net` plus that
-backup sidecar. Bring up `coder` or `search` and the other two join it.
-
-## Health and recovery
-
-```powershell
-python scripts/stack/stack.py status              # per-plane container states
-python scripts/stack/stack.py health              # the functional probes of the enabled planes
-python scripts/stack/stack.py up|down [plane]     # dependency-ordered; --all for every plane
-python scripts/stack/stack.py restart <plane>     # one plane in place
-python scripts/stack/stack.py stats               # inference demand + queue statistics (WINDOWS ONLY)
-```
-
-`health` is read-only and its exit code is the NUMBER of failed probes. A
-failing probe never stops the sweep. It runs
-<!-- stack:health-count -->16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds)<!-- /stack:health-count -->;
-the list is in [`scripts/stack/README.md`](scripts/stack/README.md#health).
-
-**`stats` is the driver's one Windows-gated verb.** It delegates to
-`scripts/stack/stack-stats.ps1`, which reads the llm-queue `/observe` board and
-the LiteLLM spend ledger through `docker exec ... psql` and is PowerShell 5.1
-only. Off Windows it does not degrade - it REFUSES, and names the two ways out:
-
-> refused: `stats` reads the LiteLLM ledger through scripts/stack/stack-stats.ps1,
-> which is PowerShell 5.1 only and is not ported. Run it on the Windows host
-> (`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stack/stack-stats.ps1`),
-> or read the queue board directly at llm-queue's `/observe/queue`.
-
-Every other verb is platform-neutral. A verb that silently printed nothing and
-exited 0 is the failure class this repo hunts, which is why this one is loud.
-
-Manual recovery, escalating:
-
-```powershell
-# One service misbehaving - restart it inside its own plane:
-docker compose -f <plane>/docker-compose.yml restart <service>
-
-# NETNS RULE: never restart openwebui alone - tailscale shares its network
-# namespace. Order is openwebui, wait healthy, then tailscale. The frontend
-# project's depends_on encodes that for whole-project operations.
-
-# Crashed or wedged - the ordered repair paths:
-.\scripts\recovery\emergency-recovery.ps1 recover     # health-gated restart sweep
-.\scripts\recovery\emergency-recovery.ps1 nuclear     # full teardown + rebuild, all projects
-.\scripts\recovery\emergency-recovery.ps1 gpu-reset   # GPU/CUDA path rebuild
-
-# Internet exposure is ALWAYS deliberate, and never the driver's:
-.\scripts\portal\portal-on.ps1   /   portal-off.ps1   /   portal-status.ps1
-
-# Restore from backups (documentation/runbooks/restore-from-snapshot.md):
-.\scripts\backup\restore-from-snapshot.ps1 -SnapshotRoot .\backups `
-  -Date <yyyy-MM-dd> [-Services <name|all>] [-Apply]
-# -SnapshotRoot and -Date are MANDATORY; without -Apply it only plans.
-```
-
-Watching the watchers: `scripts/checks/stack-watchdog.ps1` runs on a 60-second
-loop as the `StackWatchdog` scheduled task (tailnet serve repair, backup
-recency, Docker-engine restart recovery); the sysadmin scheduled tasks post to
-Mattermost `#sysadmin`.
-
-## Backups and the maintenance rotation
-
-Every stateful store has exactly one backup sidecar **in its own plane
-project**, writing verified artifacts (plus sha256 sentinels) to
-`./backups/<service>/`, mirrored WEEKLY to the NAS (Sundays at 04:00 -
-`scripts/backup/install-nas-backup-task.ps1`, its `New-ScheduledTaskTrigger
--Weekly -DaysOfWeek Sunday -At 4am`). Two scheduler idioms: **sleep-loop** for
-interval tars (once at container start, then every `BACKUP_INTERVAL` seconds)
-and **supercronic** for cron-timed DB dumps.
-
-**Changing a backup interval**: set the variable in that plane's `.env` and
-recreate that one sidecar (`docker compose -f <plane>/docker-compose.yml up -d
-<sidecar>`). All intervals are seconds; the defaults live in the compose files:
-
-| Variable | Sidecar (plane) | Default |
-|---|---|---|
-| `MNEMORY_BACKUP_INTERVAL` | mnemory-backup (memory) | 86400 (daily) |
-| `OPENWEBUI_BACKUP_INTERVAL` | openwebui-backup (frontend) | 86400 |
-| `TAILSCALE_BACKUP_INTERVAL` | tailscale-backup (frontend) | 86400 |
-| `LITTLE_CODER_BACKUP_INTERVAL` | little-coder-backup (coder) | 86400 |
-| `LM_MODELS_BACKUP_INTERVAL` | lm-models-backup (inference) | 604800 (weekly; empty = disabled) |
-| `OPENBRAIN_WIKI_BACKUP_INTERVAL` | openbrain-wiki-backup (ob1; set in `OB1/docker/.env`) | 86400 |
-| *(not an interval)* | llm-gateway-backup (inference) sleeps 86400 s, hard-coded in its entrypoint; `caddy-backup` / `authelia-backup` (portal) are supercronic on `*_BACKUP_CRON`, default `0 3 * * *`; `openbrain-db-backup` and `open-notebook-backup` likewise, defaulting to 02:00 and 02:20 UTC | |
-
-**Disk rotation** is autonomous: the `AI-Stack Weekly Maintenance` scheduled
-task (Sundays 03:15) runs `scripts/maintenance/weekly-maintenance.ps1` - a safe
-docker reclaim (dangling images and build cache; **never** a volume prune),
-then the elevated vhdx compaction task, then a post to Mattermost `#sysadmin`.
-Re-register after edits with `weekly-maintenance.ps1 -Register`.
-
-Restore procedures: `documentation/runbooks/restore-from-snapshot.md` (per
-store) and `scripts/backup/restore-from-snapshot.ps1` (orchestrated DR).
-Adding or changing a service? Work through
-[`documentation/runbooks/SERVICE-LIFECYCLE.md`](documentation/runbooks/SERVICE-LIFECYCLE.md)
-- it is what keeps backups, recovery, health probes and the sysadmin plane
-telling the truth.
-
-## Repo map
+- **Every plane owns its environment.** Compose reads `<plane>/.env` from the
+  plane's own directory, so nothing passes `--env-file` and your working
+  directory does not matter. Each ships a `<plane>/.env.example`; a plane
+  refuses to render while its `.env` is missing. The root `.env` is only for
+  host-wide scripts (the NAS mirror, for one); the quickstart does not need it.
+- **Inference has one rule.** Every service reaches a model through
+  `http://llama-cpp:8080` / `http://llama-cpp-embed:8080`, network aliases on
+  the LiteLLM gateway, which forwards through `llm-queue` to the llama.cpp
+  servers. Never route around LiteLLM; a pre-commit check enforces it.
 
 | Path | What it is |
 |---|---|
-| [`stack.manifest.toml`](stack.manifest.toml) | **The inventory of record**: every plane's compose file, requires, optional edges, profiles, host needs, keys and ports, and every product. Committed; the driver never writes it. |
-| [`scripts/stack/`](scripts/stack/README.md) | The driver (`stack.py`, standard library only) and its design doc. `stack.ps1` is a shim. |
-| `docker-compose.yml` | The platform ANCHOR - shared networks only |
-| `frontend/` `inference/` `memory/` `search/` `coder/` `portal/` | The plane projects: compose file, `.env.example`, README, and (since 2026-09-19) their own source, config and build inputs |
-| `frontend/owui/` | Canonical deploy-by-paste Open WebUI artifacts: tools, pipes, filters, actions, skills + `manifest.csv` |
-| `frontend/status-pipe/`, `frontend/system-prompts/` | The Server Status pipe subsystem and the system prompts - the only code mounts into the Open WebUI container |
-| `scripts/` | Ops plane: recovery, checks, portal lifecycle, backups, maintenance rotation, the bridges (`claude-sessions-bridge/`, `sysadmin-mcp/`, `mattermost-mcp/`), `issue-ops/`, `agent-harness/`, `archive/` |
-| `openbrain-gateway/`, `little-coder/` | Service source trees that are not plane-internal (the search gateway is `search/gateway/`, mnemory's cloud gateway is `memory/mnemory-gateway/`, and the queue is `inference/llm-queue/`) |
-| `agent-org/` | The governed multi-agent org (bus, charters, floor, 700+ tests) |
-| `OB1/` | Open Brain - a pinned git submodule since 2026-08-21 (bump via PR), including the Open Notebook trio |
-| `backup/` + `backups/` | Sidecar scripts and Dockerfiles, and the artifacts they produce. `backup/` is a SHARED module, declared as `[modules.backup]` in the manifest with the planes that consume it |
-| `documentation/runbooks/` | Operational runbooks (incident response, backups, updates, the env-split migration) |
-| `documentation/implementation-guide/` | The per-feature status INDEX (it spans two repos) plus `multi-agent-concurrency/`, the one plan set that must stay here. Plans themselves live in the private `documentation-plans-ai-stack` repo. |
-| `../documentation-plans-ai-stack/` (a separate, private checkout beside this one) | The plan store: plans, and since 2026-09-25 the operator journal under `journal/` - notes and findings, evidence, test plans, retired docs, and the closed 2026-08 restructure plan (`journal/CLEANUP-PLAN.md`). New material of those kinds goes there, not here; CLAUDE.md has the routing table. |
+| [`stack.manifest.toml`](stack.manifest.toml) | The inventory: every plane's compose file, requirements, profiles, host needs and keys, and every product |
+| [`scripts/stack/`](scripts/stack/README.md) | The driver, `stack.py`, and its full reference |
+| `frontend/` `inference/` `memory/` `search/` `coder/` `portal/` | The planes: compose file, `.env.example`, README, and their own source and config |
+| `OB1/` | Open Brain, a git submodule pinned to a commit |
+| `agent-org/` | The multi-agent org: Mattermost, the `agent-bridge` bus, workers |
+| `openbrain-gateway/`, `little-coder/` | Source that more than one plane builds from |
+| `backup/`, `backups/` | The backup sidecars' scripts, and the archives they write |
+| `scripts/` | Recovery, checks, backups, maintenance and the git-hook gates |
+| [`documentation/runbooks/`](documentation/runbooks/) | Operating procedures: backups and restore, updates, incidents |
 
-## Conventions
+## Operating it
 
-- **Git:** never commit or push on the operator's behalf unless asked.
-- **Container rule:** adding, removing or moving a container means the plane
-  compose file + `stack.manifest.toml` + recovery + the stack-map doc **in one
-  change**. The full checklist is
-  [`SERVICE-LIFECYCLE.md`](documentation/runbooks/SERVICE-LIFECYCLE.md); the
-  `/stack-map` skill checks for drift.
-- **Secrets** live only in `.env` files and `secrets/` (both gitignored). The
-  pre-commit guard blocks staged env files and known token formats. `docker
-  compose config` renders them interpolated in plaintext - grep the section you
-  need rather than printing the whole thing.
-- Security posture: [SECURITY.md](SECURITY.md). Stack topology on demand: the
-  `/stack-map` skill, or
-  [its reference](.claude/skills/stack-map/references/workspace-stacks.md).
+Every verb below is standard-library Python and runs on Linux, macOS and
+Windows (spell it `python` on Windows). The full list, with every refusal, is in
+[`scripts/stack/README.md`](scripts/stack/README.md).
+
+```sh
+python3 scripts/stack/stack.py list               # planes, products, what is enabled
+python3 scripts/stack/stack.py status             # docker compose ps for each enabled plane
+python3 scripts/stack/stack.py doctor             # docker, env files, blank or placeholder keys
+python3 scripts/stack/stack.py health             # functional probes; exit code = number failed
+python3 scripts/stack/stack.py up --dry-run       # print the docker commands, run nothing
+python3 scripts/stack/stack.py restart frontend   # one plane in place
+python3 scripts/stack/stack.py recover            # stop in reverse order, start in order, gate every container
+python3 scripts/stack/stack.py backup frontend    # one verified tar.gz per volume, under backups/frontend/
+python3 scripts/stack/stack.py restore frontend --from backups/frontend/manual-<stamp>
+python3 scripts/stack/stack.py stats              # container CPU and memory, plus the inference queue
+python3 scripts/stack/stack.py down               # stop what is enabled, in reverse order
+```
+
+`health` probes only the planes you enabled, plus the shared networks; the
+full set is <!-- stack:health-count -->16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds)<!-- /stack:health-count -->.
+`restore` checks every archive's sha256 and refuses while a container holds
+the volume. Besides these manual backups, each stateful store has a backup
+sidecar in its own plane writing to `backups/<service>/` on a schedule;
+intervals, restore steps and the NAS mirror are in
+[`documentation/runbooks/backup-restore-runbook.md`](documentation/runbooks/backup-restore-runbook.md).
+
+Two rules protect a running stack: **never restart `openwebui` alone** under
+the `tailscale` profile (tailscale shares its network namespace; restart
+openwebui, wait until healthy, then tailscale - `recover` does), and **never
+GET LiteLLM's bare `/health` through the alias** (it loads every model; probe
+`/health/liveliness`). Windows-only, in PowerShell:
+`scripts/recovery/emergency-recovery.ps1` (adds `nuclear` and `gpu-reset`), the
+portal scripts, and the scheduled watchdog, NAS mirror and maintenance tasks.
+
+## Contributing
+
+```sh
+git config core.hooksPath .githooks                           # the pre-commit gates
+./.githooks/commit-msg /dev/null && echo "hooks can run"      # must print: hooks can run
+```
+
+The hooks block staged secrets, CRLF in shell scripts, inference routed around
+LiteLLM, and stale generated docs, among others. The gates are PowerShell (Windows
+PowerShell or `pwsh`); with only Python, the secret, line-ending and routing
+gates run as Python twins and the rest print `SKIPPED`
+([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
+
+Before you push, run what CI runs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+
+```sh
+python3 -m pip install ruff pytest
+ruff check .
+python3 -m pytest scripts/stack -q
+python3 scripts/stack/stack.py inventory --check
+python3 scripts/stack/stack.py docs --check
+python3 scripts/checks/check-md-links.py
+```
+
+Tables between `stack:` comment markers are generated: change the manifest or
+a compose file, run `stack.py docs --write`, and never edit inside a block. A
+container added, removed or moved touches the manifest, recovery, backups and
+health probes too - follow
+[`SERVICE-LIFECYCLE.md`](documentation/runbooks/SERVICE-LIFECYCLE.md). CI also
+runs this quickstart on a clean daemon (`scripts/stack/rehearse-fresh-clone.sh`).
+
+<a id="posture-local-first-cloud-capable"></a>
+
+## Security and posture
+
+Secrets live only in `.env` files and `secrets/` directories, both gitignored.
+Every published port binds to `127.0.0.1`; the only ways in from outside are
+the portal and the frontend's optional `tailscale` profile, and only once you
+turn them on. `docker compose config` prints secrets in plain text, so grep
+the part you need. Details: [SECURITY.md](SECURITY.md).
+
+The stack is **local-first and cloud-capable**. No component sends a prompt, a
+document or a memory to a model provider by default: model calls go to
+llama.cpp on your machine through a LiteLLM gateway that sits only on internal
+Docker networks, and the parts that can use the cloud ship switched off. That
+is not "nothing reaches the internet" - a few containers do, starting with Open
+WebUI's backup sidecar in the quickstart, and some services fetch URLs when you
+use them. The full egress inventory, what turns each part on, and how to
+re-derive it: [POSTURE.md](POSTURE.md).
