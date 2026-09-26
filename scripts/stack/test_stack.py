@@ -5152,7 +5152,10 @@ def test_a_plane_the_gpu_check_cannot_render_is_refused_not_skipped(root):
 # ac-driver-products attempt 3: a refusal's remedy is FOLLOWED, not read
 # --------------------------------------------------------------------------
 
-_STEP = re.compile(r"^\s+\d+\. `" + re.escape(stack.CLI) + r" ([^`]+)`")
+# getattr: this file must COLLECT against a driver that predates CLI, so the base
+# reproduction fails on behaviour, not on import (the _powershell_present convention).
+_STEP = re.compile(r"^\s+\d+\. `" + re.escape(getattr(stack, "CLI", "python scripts/stack/stack.py"))
+                   + r" ([^`]+)`")
 
 
 def _remedy_commands(out: str) -> list[list[str]]:
