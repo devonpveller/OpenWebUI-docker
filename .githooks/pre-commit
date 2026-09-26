@@ -326,15 +326,16 @@ run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
 # Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
 # drift half; with none, SKIPPED and recorded in the summary and the ledger.
 #
-# A MERGE COMMIT IS STRICT (MERGE_HEAD exists: pre-merge-commit execs this file,
-# and a conflicted merge concluded with `git commit` runs it too). A merge into a
+# A MERGE COMMIT IS STRICT: pre-merge-commit (a clean merge) execs this file with
+# AI_STACK_HOOK_MERGE=1, because git writes MERGE_HEAD only after that hook; a
+# conflicted merge concluded with `git commit` runs this file with MERGE_HEAD set. A merge into a
 # line is exactly where a stale block must not slip through, so there the gate
 # always runs whatever is staged, and exit 3 (something could not be rendered -
 # OB1 not at the MERGED gitlink, no docker) or a missing Python 3.11 REFUSE the
 # merge instead of skipping it. A fast-forward runs no hook at all, which is why
 # MERGE-PROTOCOL.md requires `--no-ff` into a line.
 _docs_merge=
-if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+if [ "${AI_STACK_HOOK_MERGE:-}" = 1 ] || git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     _docs_merge=yes
 fi
 _docs_py=
