@@ -73,13 +73,17 @@ Keys, in `search/.env`:
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
 keeps it. So the `up` below starts the frontend first, and until
 `frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
-`# up stopped: frontend exited 1` and never reaches this plane. Either set up
-the frontend as [its README](../frontend/README.md#enable-and-start) says, or run
-this plane without it:
+`# up stopped: frontend exited 1` and never reaches this plane. Either give
+the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
+[its README](../frontend/README.md#enable-and-start); skip its `init`, which
+refuses once `.stack/state.json` exists, and the frontend is enabled already -
+or run this plane without it:
 
 ```bash
 python scripts/stack/stack.py disable --plane frontend
 ```
+
+(`python scripts/stack/stack.py enable --plane frontend` turns it back on later.)
 
 ```bash
 cp search/.env.example search/.env
