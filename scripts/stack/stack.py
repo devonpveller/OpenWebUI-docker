@@ -4689,7 +4689,7 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
 
     stale: list[str] = []
     wrote: list[str] = []
-    checked = 0
+    checked = skipped = 0   # block OCCURRENCES, so the two numbers add up to the whole
     for rel_path, (path, text, blocks) in files.items():
         newline = "\r\n" if "\r\n" in text else "\n"
         pieces, cursor = [], 0
@@ -4699,6 +4699,7 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
                 console.line(f"  [ -- ] NOT VERIFIED - {rel_path}:{block.line} `{block.name}`: "
                              f"{unverified[block.name]}")
                 wanted = current
+                skipped += 1
             else:
                 body = rendered[block.name]
                 wanted = body if block.inline else ("\n" + body + "\n\n").replace("\n", newline)
@@ -4728,7 +4729,7 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
     console.line(f"  [OK]   {checked} block(s) in {len(files)} file(s) {verb}"
                  + (" what the manifest and the renders say" if check else ""))
     if unverified:
-        console.line(f"  [ -- ] {len(unverified)} block(s) NOT VERIFIED on this machine (named above)"
+        console.line(f"  [ -- ] {skipped} block(s) NOT VERIFIED on this machine (named above)"
                      + ("; --allow-unverified: not a failure" if allow_unverified else
                         f"; exit {EXIT_UNVERIFIED} - pass --allow-unverified where that gap is expected"))
         return EXIT_OK if allow_unverified else EXIT_UNVERIFIED
