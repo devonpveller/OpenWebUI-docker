@@ -98,6 +98,53 @@ expected git history.
 
 ---
 
+## Before ANY wipe of a host bind mount: resolve the directory from two sources
+
+A host bind mount's directory comes from a variable in a plane's `.env` (`OPEN_NOTEBOOK_DIR`,
+`LM_MODELS_DIR`). Three ways to get it wrong, each of which makes the `Remove-Item` below delete
+the wrong directory: a RELATIVE value is resolved by compose against the compose file's own
+directory, not this shell's; a blank value falls back to a compose default; and a variable set in
+THIS SHELL outranks the plane's `.env` in compose's interpolation, so a stray `$env:LM_MODELS_DIR`
+silently redirects a render. So the directory is taken from the container's OWN mount
+(`docker inspect` - the running container, or the one step 1 stopped), compared with the compose
+render made after the shell variable is cleared, and the wipe is REFUSED unless both exist and
+agree. Paste this once per session:
+
+```powershell
+function Resolve-BindTarget {
+    param([string]$Container, [string]$Destination, [string]$ComposeFile,
+          [string]$ComposeProfile, [string]$Service, [string]$ShellVar)
+    # 1. A shell variable outranks the plane's .env for compose: remove it from this session.
+    Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue
+    # 2. What the container really mounts at $Destination (running, or stopped by step 1).
+    #    (JSON, filtered here: Windows PowerShell 5.1 strips the double quotes a Go template
+    #    comparison needs when it passes them to docker.)
+    $mounted = $null
+    $mounts = docker inspect $Container --format '{{json .Mounts}}'
+    if ($LASTEXITCODE -eq 0 -and $mounts) {
+        $list = $mounts | ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
+        $mounted = @($list | Where-Object { $_.Destination -eq $Destination } | ForEach-Object { $_.Source })
+        if ($mounted.Count -ne 1) { $mounted = $null } else { $mounted = $mounted[0] }
+    }
+    # 3. What the compose render says, now from the plane's .env (or its default) only.
+    $cfg = docker compose -f $ComposeFile --profile $ComposeProfile config --format json | ConvertFrom-Json
+    $rendered = $null
+    if ($cfg) {
+        $vols = $cfg.services.$Service.volumes
+        $rendered = @($vols | Where-Object { $_.target -eq $Destination } | ForEach-Object { $_.source })
+        if ($rendered.Count -ne 1) { $rendered = $null } else { $rendered = $rendered[0] }
+    }
+    if (-not $mounted)  { throw "REFUSED: no container '$Container' with a mount at $Destination - nothing proves which directory it uses" }
+    if (-not $rendered) { throw "REFUSED: the compose render has no bind source at $Destination for '$Service'" }
+    $norm = { param($p) $x = "$p".Trim().TrimEnd('\', '/').Replace('\', '/'); if ($env:OS -eq 'Windows_NT') { $x.ToLowerInvariant() } else { $x } }
+    if ((& $norm $mounted) -ne (& $norm $rendered)) {
+        throw "REFUSED: the container mounts '$mounted' but the render says '$rendered' - find out why before wiping anything"
+    }
+    if (-not (Test-Path -LiteralPath $rendered -PathType Container)) { throw "REFUSED: '$rendered' is not an existing directory" }
+    $rendered
+}
+```
+
 ## open-notebook (SurrealDB + notebook_data)
 
 **Two-phase**. Restore SurrealDB FIRST, then the bind mount.
@@ -144,12 +191,12 @@ docker stop open_notebook
 # 2. Verify sentinel.
 docker run --rm -v "${PWD}\backups\open-notebook:/backups:ro" alpine sh -c "cd /backups && sha256sum -c notebook-data-*.sha256 | tail -1"
 
-# 3. Wipe + restore the host bind mount. Ask COMPOSE where it is - OPEN_NOTEBOOK_DIR in
-#    OB1/docker/.env, or when blank the default ../../../open-notebook, which compose
-#    resolves against OB1/docker/ (i.e. beside the checkout), NOT against this shell's cwd.
-$ob = docker compose -f OB1/docker/docker-compose.yml --profile notebook config --format json | ConvertFrom-Json
-$nb = ($ob.services.open_notebook.volumes | Where-Object { $_.target -eq '/app/data' }).source
-if (-not $nb -or -not (Test-Path -LiteralPath $nb)) { throw "notebook_data bind source not resolved: '$nb'" }
+# 3. Wipe + restore the host bind mount. OPEN_NOTEBOOK_DIR lives in OB1/docker/.env; blank
+#    means ../../../open-notebook, resolved against OB1/docker/ (beside the checkout).
+#    Resolve-BindTarget (above) clears a shell override, compares the stopped container's
+#    own mount with the render, and throws unless both exist and agree.
+$nb = Resolve-BindTarget -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml `
+        -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR
 $nb    # read it: it must be the notebook_data directory you mean to wipe
 $archive = 'notebook-data-20260530T011617Z.tar.gz'
 Remove-Item -Recurse -Force (Join-Path $nb '*')
@@ -280,11 +327,11 @@ docker run --rm -v "${PWD}\data\tailscale:/dest" -v "${PWD}\backups\tailscale:/i
 **LM Studio models**: the bind mount is `LM_MODELS_DIR` from `inference/.env`. A RELATIVE
 value (the `.env.example` default is `../../data/models/gguf`) is resolved by compose against
 `inference/compose/`, not against the repo root this runbook runs from - so never paste the
-variable into a delete. Ask compose for the path it actually mounts. Step 3:
+variable into a delete - and a `$env:LM_MODELS_DIR` in your shell would outrank `inference/.env`.
+Use `Resolve-BindTarget` (see "Before ANY wipe" above; the container is the one step 1 stopped). Step 3:
 ```powershell
-$cfg = docker compose -f inference/docker-compose.yml --profile local config --format json | ConvertFrom-Json
-$models = ($cfg.services.'llama-cpp-upstream'.volumes | Where-Object { $_.target -eq '/models' }).source
-if (-not $models -or -not (Test-Path -LiteralPath $models)) { throw "model store not resolved: '$models'" }
+$models = Resolve-BindTarget -Container llama-cpp-upstream -Destination /models -ComposeFile inference/docker-compose.yml `
+            -ComposeProfile local -Service llama-cpp-upstream -ShellVar LM_MODELS_DIR
 $models    # read it: it must be the model store you mean to wipe
 Remove-Item -Recurse -Force (Join-Path $models '*')
 docker run --rm -v "${models}:/dest" -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
