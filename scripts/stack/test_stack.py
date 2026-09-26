@@ -795,6 +795,10 @@ class FakeHost:
             '{"running":[{"model":"qwen36-27b","state":"ready"}]}',
         )
         self.landing = broken.get("landing", "")
+        # ac-ci: the owui-drift probe first counts deployed tool/function/skill rows.
+        # Default = this host: plugins ARE deployed, so the drift check is real.
+        self.plugin_count = broken.get("plugin_count", "16")
+        self.plugin_census_code = broken.get("plugin_census_code", 0)
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -830,6 +834,8 @@ class FakeHost:
             # here would let exec_codes stop breaking it.
             if cmd[-1] == stack._LANDING_COMPLETION:
                 return stack.CommandResult(0, self.landing, "")
+            if cmd[-1] == stack._OWUI_PLUGIN_CENSUS:
+                return stack.CommandResult(self.plugin_census_code, self.plugin_count, "")
             return stack.CommandResult(self.exec_codes.get(container, 0), "", "")
         raise AssertionError(f"unscripted docker call: {cmd}")
 
@@ -1023,6 +1029,71 @@ def test_a_drift_count_above_zero_fails_and_the_number_is_in_the_label(root):
     assert ("FAIL", "frontend: owui/ manifest rows drifted from live webui.db: 7") in probe_lines(out)
 
 
+def _drift_script_ran(host: FakeHost) -> bool:
+    return any(call[0] in ("powershell", "pwsh") for call in host.calls)
+
+
+ZERO_PLUGINS_WARNING = (
+    "  [warn] frontend: owui/ manifest drift NOT CHECKED - 0 plugins deployed in this Open WebUI: "
+    "a fresh install, or this host's plugins were wiped; paste them per frontend/owui/README.md "
+    "(\"Redeploy mechanism\")"
+)
+
+
+def test_zero_deployed_plugins_is_a_visible_warning_not_a_fail_and_not_a_silent_skip(root):
+    """ac-ci F6/X3: on a fresh Open WebUI the drift check REFUSED on empty tables and
+    `health` failed on a clean quickstart wherever PowerShell exists. Zero rows cannot be
+    told apart from a wiped host, so it is a [warn] naming both readings - never [skip],
+    never [OK] - health does not fail on it, and the drift script is not asked."""
+    host = FakeHost(plugin_count="0", drift_stdout="REFUSED",
+                    drift_stderr="REFUSED: the query ... returned no readable rows.")
+    code, out = sweep(host, root, planes="frontend")
+    assert code == 0
+    assert ZERO_PLUGINS_WARNING in out.splitlines()
+    assert "[skip] frontend: owui/ manifest drift" not in out
+    assert not any("owui/ manifest" in name for _s, name in probe_lines(out))
+    assert not _drift_script_ran(host)
+
+
+def test_a_deployed_host_whose_plugins_were_wiped_gets_the_same_warning(root):
+    """The residual ambiguity, pinned: a host that HAD plugins and now counts zero reads
+    exactly like a fresh install. The warning says so in words; it does not fail."""
+    host = FakeHost(plugin_count="0")        # every other default is this (deployed) host
+    code, out = sweep(host, root, planes="frontend")
+    assert "or this host's plugins were wiped" in out
+    assert code == 0
+
+
+def test_with_plugins_deployed_a_drifted_row_still_fails(root):
+    """The skip must not weaken the check where plugins ARE deployed (this host)."""
+    host = FakeHost(plugin_count="5", drift_stdout="2")
+    code, out = sweep(host, root, planes="frontend")
+    assert code == 1
+    assert ("FAIL", "frontend: owui/ manifest rows drifted from live webui.db: 2") in probe_lines(out)
+    assert _drift_script_ran(host)
+
+
+def test_a_partial_deployment_that_refuses_still_fails(root):
+    """One row deployed is not a fresh install: a refusal stays a FAIL."""
+    host = FakeHost(plugin_count="1", drift_stdout="REFUSED",
+                    drift_stderr="REFUSED: the manifest names an owui_id with no row.")
+    code, out = sweep(host, root, planes="frontend")
+    assert code == 1
+    assert ("FAIL", "frontend: owui/ manifest rows drifted from live webui.db: "
+            "REFUSED - the manifest names an owui_id with no row.") in probe_lines(out)
+
+
+@pytest.mark.parametrize("census_code, census_out", [(1, ""), (0, ""), (0, "no such table: tool")])
+def test_a_census_that_cannot_be_read_is_not_zero_and_the_real_check_runs(root, census_code, census_out):
+    """An unreadable count must never turn into a skip: the drift check runs and decides."""
+    host = FakeHost(plugin_count=census_out, plugin_census_code=census_code, drift_stdout="REFUSED",
+                    drift_stderr="REFUSED: container 'openwebui' was not found by docker inspect.")
+    code, out = sweep(host, root, planes="frontend")
+    assert code == 1
+    assert "  [skip] frontend: owui/ manifest drift" not in out
+    assert _drift_script_ran(host)
+
+
 def test_healthz_alone_cannot_pass_search(root):
     """/healthz said 200 through the whole 2026-09-11 outage. Hence two probes."""
     degraded = json.dumps(
@@ -1083,6 +1154,11 @@ def test_the_liveliness_probe_never_gets_litellms_bare_health(root):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not stack.WINDOWS,
+    reason="`stats` hands off to Windows PowerShell 5.1 and refuses elsewhere; the off-Windows "
+           "refusal is test_stats_refuses_off_windows_rather_than_printing_nothing (ac-ci X1)",
+)
 def test_stats_hands_off_to_the_powershell_report(root):
     script = root / "scripts" / "stack" / "stack-stats.ps1"
     script.parent.mkdir(parents=True, exist_ok=True)

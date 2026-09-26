@@ -1576,6 +1576,13 @@ def urllib_get(url: str, timeout: int = 8) -> HttpResult:
 #
 # The 600 s read timeout is the cold-load budget: 257 s measured 2026-09-21 for
 # qwen36-27b on this host, and a bigger model or a cold page cache is worse.
+# The owui-drift probe's fresh-install test (ac-ci): the three tables
+# check-owui-drift.ps1 compares, the same database path, opened read-only; counts only.
+_OWUI_PLUGIN_CENSUS = (
+    "import sqlite3;c=sqlite3.connect('file:/app/backend/data/webui.db?mode=ro',uri=True);"
+    "print(sum(c.execute('select count(*) from '+t).fetchone()[0] for t in ('tool','function','skill')))"
+)
+
 _LANDING_COMPLETION = r"""
 import json, os, time, urllib.error, urllib.request
 KEY = os.environ.get("LITELLM_MASTER_KEY", "")
@@ -1742,6 +1749,20 @@ class HealthSweep:
                 self.console.line(
                     "  [skip] frontend: owui/ manifest drift (scripts/checks/check-owui-drift.ps1 needs "
                     "PowerShell; neither Windows nor `pwsh` on PATH)"
+                )
+            elif self.owui_plugin_count() == 0:
+                # ZERO DEPLOYED ROWS (ac-ci, 2026-09-25). check-owui-drift.ps1 REFUSES on
+                # empty tables ("returned no readable rows"), which made the first `health`
+                # after a clean quickstart FAIL wherever PowerShell exists. But a count of
+                # zero has TWO readings and nothing here can tell them apart: a fresh install,
+                # or a host whose plugins were wiped (a reset, an empty restore, the wrong
+                # volume). So it neither fails nor passes silently: a [warn] line naming both,
+                # and no probe counted. Only a counted zero lands here - a census that could
+                # not be read (None) runs the real check, and so does one deployed row.
+                self.console.line(
+                    "  [warn] frontend: owui/ manifest drift NOT CHECKED - 0 plugins deployed in this "
+                    "Open WebUI: a fresh install, or this host's plugins were wiped; paste them per "
+                    "frontend/owui/README.md (\"Redeploy mechanism\")"
                 )
             else:
                 drift = self.owui_drift(shell)
@@ -1955,6 +1976,21 @@ class HealthSweep:
                           "separately). If frontend/.env is absent this host has not been "
                           "migrated - documentation/runbooks/env-split-migration.md")
         return False, ""
+
+    def owui_plugin_count(self):
+        """How many tool/function/skill rows the live webui.db holds, or None if unknown.
+
+        Read-only (SQLite `mode=ro`), inside the container, counts only. None - the
+        container, python3, the file or a table missing, or anything unparseable -
+        is NOT zero: the caller then runs the real drift check, which says why.
+        """
+        result = self.capture(
+            ["docker", "exec", "openwebui", "python3", "-c", _OWUI_PLUGIN_CENSUS], self.root
+        )
+        text = result.stdout.strip()
+        if result.code != 0 or not text.isdigit():
+            return None
+        return int(text)
 
     def owui_drift(self, shell=("powershell",)) -> str:
         """'0', a drifted count, or 'REFUSED - <why>'. Never raises.

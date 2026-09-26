@@ -141,6 +141,10 @@ jobs:
             cp "$p/.env.example" "$p/.env"
           done
       - run: cp agent-org/docker/.env.example agent-org/docker/.env
+      # setup-python's interpreter has pip and nothing else. Until ac-ci (X1) no step
+      # installed pytest, so this job could only fail with "No module named pytest" -
+      # never observed, because the workflow file itself was invalid until then (F1).
+      - run: python -m pip install pytest
       # Hermetic: no daemon is touched, the docker call is injected.
       - run: python -m pytest scripts/stack -q
         # ubuntu-latest ships docker + compose v2, which is all `config` needs.
@@ -160,6 +164,111 @@ jobs:
       # stdlib-only by design (they run on the bare Windows host too)
       - run: python scripts/claude-sessions-bridge/test_follows.py
       - run: python scripts/claude-sessions-bridge/test_lanes.py
+
+  # =========================================================================================
+  # adoption-closeout ac-ci (2026-09-25) - WHAT AN ADOPTER DEPENDS ON, PROVEN ON EVERY PUSH
+  # =========================================================================================
+  # Five jobs, each a thin call into a script under .github/ci/ (or, for the fresh clone,
+  # scripts/stack/rehearse-fresh-clone.sh), so what runs here is byte-for-byte what was run
+  # by hand in a fresh ubuntu container before it was wired in, and what a tester re-runs.
+  #   suite-agent-bridge / suite-little-coder  the two subprojects' pytest suites, in a venv
+  #                                            the way they run on a developer machine
+  #   gates-linux    the never-skipped pre-commit gates that read the tree: the Python
+  #                  twins (no PowerShell), then the .ps1 originals under pwsh
+  #   hooks-linux    a fresh clone with core.hooksPath commits cleanly and REFUSES a
+  #                  planted gateway key - under pwsh, and again in a container with no
+  #                  PowerShell (Python-twin mode)
+  #   fresh-clone-up a fresh clone, `stack.py init`, a REAL `stack.py up` of the stock
+  #                  frontend on the runner's own Docker, GET /health 200, teardown
+  # The stack.py pytest suite was already here (`stack-driver`). All six are pinned in the
+  # gate at the end of this file. None needs a GPU or a secret; the fresh-clone job needs
+  # image pulls (Open WebUI is about 5 GB) and the backup sidecar's `apk add` at start.
+  # Every job name below is what the gate's pinned list and the local proofs refer to.
+
+  suite-agent-bridge:
+    name: "agent-bridge test suite"
+    runs-on: ubuntu-latest
+    # 881 tests took 30m22s, and 43m26s with other containers running beside it, in a
+    # fresh ubuntu:24.04 container on the operator's host (2026-09-25) - mostly waiting
+    # rather than computing; the slowest single tests take 15-48 s. See the findings.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # requirements.txt + the [test] extra: the extra alone lacks PyJWT, cryptography and
+      # websockets, and 80 test modules fail to import - see the header of run-suite.sh.
+      - run: bash .github/ci/run-suite.sh agent-bridge
+
+  suite-little-coder:
+    name: "little-coder test suite"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: bash .github/ci/run-suite.sh little-coder
+
+  gates-linux:
+    name: "never-skipped gates on Linux (Python twins and .ps1 originals)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: gateway routing + line endings, Python twins (no PowerShell)
+        run: bash .github/ci/gates-python.sh
+      # One gate per step, invoked with -File from bash, so each step's exit code IS the
+      # gate's: a `shell: pwsh` step running two scripts keeps only the last one's code.
+      - name: gateway routing, the .ps1 under pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/checks/check-llm-gateway-routing.ps1
+      - name: line endings, the .ps1 under pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/checks/validate-lineendings.ps1
+
+  hooks-linux:
+    name: "Linux clone commits through .githooks (pwsh, then Python-only)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The README clones with --recurse-submodules, and the job's clone has to be that
+          # clone: under pwsh the corpus-exposure gate scans OB1, and without it every
+          # commit is refused as vacuous. linux-hooks.sh takes OB1 from this checkout.
+          submodules: recursive
+      # ubuntu-latest has pwsh, so the hook picks it and runs every gate.
+      - name: pwsh host - a clean commit passes, a planted gateway key is refused
+        run: bash .github/ci/linux-hooks.sh pwsh
+      # The Python-only mode needs a host with NO PowerShell; the runner cannot hide its
+      # own, so this step runs the same script in python:3.12-slim (git added, nothing
+      # else). The checkout is mounted read-only and the script clones out of it.
+      - name: python3 host (no PowerShell) - the same two commits
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/src:ro" python:3.12-slim sh -c '
+            apt-get update -qq >/dev/null &&
+            apt-get install -y -qq --no-install-recommends git >/dev/null &&
+            bash /src/.github/ci/linux-hooks.sh python3'
+
+  fresh-clone-up:
+    name: "fresh clone - stack.py init, a real up, /health 200, teardown"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # --this-daemon: the runner's own Docker, no DinD. The script refuses to start if the
+      # daemon holds any container, clones this commit to a temp dir, copies
+      # frontend/.env.example and generates WEBUI_SECRET_KEY (the only secret involved,
+      # made here and thrown away), runs `stack.py init` and a REAL `stack.py up`, waits
+      # for GET /health 200 on :3000, checks only the frontend project started and the
+      # anchor networks exist with llm-net internal, runs `stack.py health`, then tears
+      # down and checks nothing it created is left. python3 is the runner's own (3.12 on
+      # ubuntu-24.04; stack.py needs 3.11+), as it would be for a newcomer.
+      #
+      # The runner has pwsh, so `stack.py health` also runs the owui plugin-drift probe;
+      # on a fresh Open WebUI (nothing pasted yet) that probe SKIPS by design since ac-ci.
+      - run: bash scripts/stack/rehearse-fresh-clone.sh --this-daemon --health-timeout 900
 
   # =========================================================================================
   # dark-factory-unification C.9 H4 — THE VERIFICATION MACHINERY IS RE-PROVEN, NOT SNAPSHOTTED
@@ -250,7 +359,13 @@ jobs:
   # correctly there. What does NOT survive is `cmd`, `2>nul`, and `-like` patterns built
   # from backslashes - see ../documentation-plans-ai-stack/journal/notes/u8h4-findings.md for the sweep.
   # `TEMP` is set per job because these scripts stage throwaway fixtures under `$env:TEMP`,
-  # and that variable does not exist on Linux. OB1 is checked out because the drills build
+  # and that variable does not exist on Linux. It is set by each job's FIRST STEP, from
+  # $RUNNER_TEMP into $GITHUB_ENV. Until ac-ci (2026-09-25) it was a job-level `env:` reading
+  # `runner.temp`, and the `runner` context is not available there (GitHub's context-
+  # availability table): actionlint reports it five times, and the VS Code Actions extension
+  # reports "Unrecognized named-value: 'runner'", which GitHub raises as an invalid workflow
+  # file. No real run of that version has been observed, so "no job could have run" is the
+  # expected consequence, not a measured one. OB1 is checked out because the drills build
   # from the RECORDED GITLINK; it is a PUBLIC repo and the pinned commit is on its remote,
   # so `submodules: recursive` needs no extra credential.
   #
@@ -268,9 +383,10 @@ jobs:
     name: "DFU H4 - static gates and the machinery's own self-tests"
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      TEMP: ${{ runner.temp }}
     steps:
+      # TEMP for the scripts below (see the note above the first of these jobs). Set
+      # through GITHUB_ENV because the `runner` context does not exist in jobs.<id>.env.
+      - run: echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the corpus gate scans OB1's recipes
@@ -338,9 +454,10 @@ jobs:
     name: "DFU H4 - personal-plane exclusion drill (U5)"
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      TEMP: ${{ runner.temp }}
     steps:
+      # TEMP for the scripts below (see the note above the first of these jobs). Set
+      # through GITHUB_ENV because the `runner` context does not exist in jobs.<id>.env.
+      - run: echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           # The drill FAILS BEFORE IT STARTS unless the OB1 working copy is clean and
@@ -363,9 +480,10 @@ jobs:
     name: "DFU H4 - RLS boot assertion drill (H2)"
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      TEMP: ${{ runner.temp }}
     steps:
+      # TEMP for the scripts below (see the note above the first of these jobs). Set
+      # through GITHUB_ENV because the `runner` context does not exist in jobs.<id>.env.
+      - run: echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the drill derives its governed set from OB1's migrations
@@ -384,9 +502,10 @@ jobs:
     name: "DFU H4 - app role is not a superuser (H1)"
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      TEMP: ${{ runner.temp }}
     steps:
+      # TEMP for the scripts below (see the note above the first of these jobs). Set
+      # through GITHUB_ENV because the `runner` context does not exist in jobs.<id>.env.
+      - run: echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -418,9 +537,10 @@ jobs:
     name: "DFU H4 - the exposure boundary, proved in the database"
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
-      TEMP: ${{ runner.temp }}
     steps:
+      # TEMP for the scripts below (see the note above the first of these jobs). Set
+      # through GITHUB_ENV because the `runner` context does not exist in jobs.<id>.env.
+      - run: echo "TEMP=$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           submodules: recursive # the RED/GREEN databases are built from OB1's initdb chain
@@ -446,12 +566,22 @@ jobs:
     # SKIPPED. Without it GitHub skips this job too, and a skipped gate is exactly the
     # silent green this effort keeps finding.
     if: ${{ always() }}
+    # Since ac-ci (2026-09-25) this gate also pins the adopter jobs above and the stack.py
+    # suite (`stack-driver`): the same rule - skipped is not passed, and a job dropped from
+    # `needs` turns the gate red - now covers what a newcomer's clone depends on. The job id
+    # and name are unchanged so nothing that already refers to this check breaks.
     needs:
       - dfu-static-checks
       - dfu-boundary-drill
       - dfu-rls-boot-drill
       - dfu-app-role-drill
       - dfu-prove-rls
+      - stack-driver
+      - suite-agent-bridge
+      - suite-little-coder
+      - gates-linux
+      - hooks-linux
+      - fresh-clone-up
     steps:
       - name: every gated job reached a verdict, and the gated set is the pinned one
         shell: pwsh
@@ -469,7 +599,13 @@ jobs:
             'dfu-boundary-drill',
             'dfu-rls-boot-drill',
             'dfu-app-role-drill',
-            'dfu-prove-rls'
+            'dfu-prove-rls',
+            'stack-driver',
+            'suite-agent-bridge',
+            'suite-little-coder',
+            'gates-linux',
+            'hooks-linux',
+            'fresh-clone-up'
           )
           $needs = $env:NEEDS_JSON | ConvertFrom-Json
           $actual = @($needs.PSObject.Properties.Name)
