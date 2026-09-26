@@ -11,10 +11,13 @@ TWO LAYERS, and the second is the reason this file is shaped the way it is:
 
   GENERIC (tracked, in this file). Patterns that recognise personal data WITHOUT naming
   anyone: private IPv4 (RFC 1918), CGNAT/tailnet IPv4 (100.64.0.0/10) and Tailscale's
-  IPv6 prefix, `*.ts.net` tailnet host names, Windows/macOS user-profile paths
-  (C:\\Users\\<name>, /c/Users/<name>, /Users/<name>), drive-rooted paths into this
-  stack's checkout directory, and email addresses. Each has a small set of forms that are
-  generic on purpose (example.com, noreply, <name>, 10.0.0.0/8 ...), written below.
+  IPv6 prefix, link-local IPv4 (169.254.0.0/16), `*.ts.net` tailnet host names,
+  Windows/macOS user-profile paths (C:\\Users\\<name>, /c/Users/<name>, /Users/<name>),
+  paths into this stack's checkout directory in every spelling (X:\\, /x/, /mnt/x/), and
+  email addresses - including a personal GitHub noreply address, which names the account.
+  Each has a small set of forms that are generic on purpose (example.com, <name>, a
+  network address such as 10.0.0.0/8 ...), written below. UTF-16 text (with a BOM) is
+  decoded and scanned, not skipped as binary.
 
   OPERATOR (not tracked, anywhere). A domain, an email, a GitHub or git user name, a
   tailnet or machine name matches no generic shape - "acme-corp" is a word. The only way
@@ -44,7 +47,9 @@ ALLOWLIST - scripts/checks/identity-allowlist.txt, tracked. One entry per line:
 `**` in the glob crosses directories, `*` does not. A reason is required. With a context
 regex, a finding is allowed only if it lies INSIDE a match of that regex on its line, so
 an entry can allow "the owner segment of a github.com URL to this project's own repos"
-without allowing the same value anywhere else on the line - and without spelling it. The
+without allowing the same value anywhere else on the line - and without spelling it. If
+the regex has a named group `allow`, the finding must be EXACTLY that group's span: one
+token, so two guarded values glued into one owner segment are still refused. The
 allowlist is itself a tracked file this gate scans, so an entry that spelled a guarded
 value would be refused like any other line. Entries that match nothing are listed under
 --all as STALE (a warning, not a failure: with no denylist, as in CI, an `operator` entry
@@ -83,13 +88,17 @@ OPERATOR = 'operator'
 # Each class: a compiled regex plus a predicate that says whether a match is one of the
 # deliberately generic forms. Group 'v' (if present) is the part judged and reported.
 
-_IPV4 = re.compile(r'(?<![\w.])(?P<v>(?:\d{1,3}\.){3}\d{1,3})(?P<cidr>/\d{1,2})?(?![\w]|\.\d)')
+# Boundaries are letters/digits/dots only: `backup_<ip>.log` and `<ip>_x` are still read.
+_IPV4 = re.compile(r'(?<![0-9A-Za-z.])(?P<v>(?:\d{1,3}\.){3}\d{1,3})(?P<cidr>/\d{1,2})?(?![0-9A-Za-z]|\.\d)')
 
 # Addresses that appear in docs and config as ARCHITECTURE, not as anyone's host: the
-# network address of a range, a CIDR block, and Docker's own default bridge/gateway.
+# network address of a range (a CIDR only when its host bits are zero - `x/32` or a host
+# `/24` is a HOST address and is judged), and Docker's own default bridge/gateway.
 _GENERIC_IPV4 = {'172.17.0.1', '172.18.0.1', '10.0.0.1', '192.168.0.1', '192.168.1.1',
                  '100.100.100.100'}      # Tailscale's MagicDNS resolver, the same everywhere
 _CGNAT = ipaddress.ip_network('100.64.0.0/10')
+_LINKLOCAL = ipaddress.ip_network('169.254.0.0/16')
+_GENERIC_LINKLOCAL = {'169.254.169.254', '169.254.170.2'}   # cloud metadata / ECS endpoints
 _RFC1918 = (ipaddress.ip_network('10.0.0.0/8'), ipaddress.ip_network('172.16.0.0/12'),
             ipaddress.ip_network('192.168.0.0/16'))
 
@@ -100,8 +109,17 @@ def _ipv4_class(m: re.Match) -> str | None:
         ip = ipaddress.ip_address(m.group('v'))
     except ValueError:
         return None
-    if m.group('cidr') or str(ip) in _GENERIC_IPV4 or str(ip).endswith('.0') or str(ip).endswith('.255'):
+    if m.group('cidr'):
+        try:
+            net = ipaddress.ip_network(m.group('v') + m.group('cidr'), strict=True)
+            if net.prefixlen < 31:
+                return None      # host bits zero: a network, i.e. architecture (/31, /32 are hosts)
+        except ValueError:
+            pass                 # host bits set: a host address written with a prefix
+    elif str(ip) in _GENERIC_IPV4 or str(ip).endswith('.0') or str(ip).endswith('.255'):
         return None
+    if ip in _LINKLOCAL:
+        return None if str(ip) in _GENERIC_LINKLOCAL else 'link-local-ip'
     if ip in _CGNAT:
         return 'tailnet-ip'
     if any(ip in n for n in _RFC1918):
@@ -160,7 +178,9 @@ def _userpath_class(m: re.Match) -> str | None:
 # A drive-rooted path into THIS stack's checkout directory. The checkout's location is the
 # operator's filesystem layout, not the project's: a newcomer clones it anywhere. Written
 # as the directory's name only, the pattern names no person.
-_DRIVEPATH = re.compile(r'(?i)(?<![\w])(?P<v>[a-z]:[\\/]{1,2}open[ _-]?webui)(?=[\\/"\'`\s)\]]|$)')
+# Spellings: X:\\ and X:/ (Windows), /x/ (Git Bash, MSYS), /mnt/x/ (WSL).
+_DRIVEPATH = re.compile(r'(?i)(?P<v>(?:(?<![\w])[a-z]:[\\/]{1,2}|(?<![\w.~/-])/(?:mnt/)?[a-z]/)open[ _-]?webui)'
+                        r'(?=[\\/"\'`\s)\]]|$)')
 
 
 def _drivepath_class(m: re.Match) -> str | None:
@@ -170,7 +190,7 @@ def _drivepath_class(m: re.Match) -> str | None:
 _EMAIL = re.compile(r'(?i)(?<![\w.%+-])(?P<v>[a-z0-9][a-z0-9._%+-]*@(?P<dom>[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}))\b')
 _GENERIC_EMAIL_DOMAINS = re.compile(
     r'(?i)^(?:(?:[\w-]+\.)*(?:example\.(?:com|org|net)|example|invalid|test|localhost|local|'
-    r'internal|lan|home\.arpa|localdomain)|(?:users\.)?noreply\.github\.com|'
+    r'internal|lan|home\.arpa|localdomain)|noreply\.github\.com|'
     r'anthropic\.com|github\.com|gitlab\.com)$')
 _GENERIC_EMAIL_LOCAL = re.compile(r'(?i)^(?:no-?reply|git|you|user|me|someone|example|admin|root|'
                                   r'postmaster|security|abuse|support|hello|info|noone|nobody)$')
@@ -178,6 +198,9 @@ _GENERIC_EMAIL_LOCAL = re.compile(r'(?i)^(?:no-?reply|git|you|user|me|someone|ex
 
 def _email_class(m: re.Match) -> str | None:
     local, dom = m.group('v').rsplit('@', 1)
+    if dom.lower() == 'users.noreply.github.com':
+        # `<id>+<user>@users.noreply.github.com` names a GitHub account; only bots are generic
+        return None if local.lower().endswith('[bot]') else 'email'
     if _GENERIC_EMAIL_DOMAINS.match(dom):
         return None
     # file names such as `foo@2x.png` and package pins such as `pkg@1.2.3` are not email:
@@ -197,7 +220,7 @@ GENERIC = (
     ('drive-host-path', _DRIVEPATH, _drivepath_class),
     ('email', _EMAIL, _email_class),
 )
-CLASSES = ('lan-ip', 'tailnet-ip', 'tailnet-host', 'user-profile-path', 'drive-host-path',
+CLASSES = ('lan-ip', 'tailnet-ip', 'link-local-ip', 'tailnet-host', 'user-profile-path', 'drive-host-path',
            'email', OPERATOR)
 
 
@@ -258,8 +281,10 @@ class AllowEntry:
             return False
         if self.text_rx is None:
             return True
-        end = f.col - 1 + len(f.text)
-        return any(m.start() <= f.col - 1 and end <= m.end() for m in self.text_rx.finditer(f.context))
+        start, end = f.col - 1, f.col - 1 + len(f.text)
+        if 'allow' in self.text_rx.groupindex:
+            return any(m.span('allow') == (start, end) for m in self.text_rx.finditer(f.context))
+        return any(m.start() <= start and end <= m.end() for m in self.text_rx.finditer(f.context))
 
 
 def load_allowlist(text: str, source: str) -> list[AllowEntry]:
@@ -337,12 +362,19 @@ def scan_line(path: str, lineno: int, line: str, deny) -> list[Finding]:
                 found.append(Finding(path, lineno, m.start('v') + 1, cls, v, context=line))
     if deny:
         low = line.lower()
+        hits = []
         for num, lit, label in deny:
             start = low.find(lit)
             while start != -1:
-                found.append(Finding(path, lineno, start + 1, OPERATOR, line[start:start + len(lit)],
-                                     f'denylist entry {num}' + (f' [{label}]' if label else ''), line))
+                hits.append((start, start + len(lit), num, label))
                 start = low.find(lit, start + 1)
+        # one hit per value: an entry found INSIDE a longer entry's hit (a user name inside the
+        # email that contains it) is the same value, not a second one
+        for a in hits:
+            if any(b is not a and b[0] <= a[0] and a[1] <= b[1] and (b[1] - b[0]) > (a[1] - a[0]) for b in hits):
+                continue
+            found.append(Finding(path, lineno, a[0] + 1, OPERATOR, line[a[0]:a[1]],
+                                 f'denylist entry {a[2]}' + (f' [{a[3]}]' if a[3] else ''), line))
     return found
 
 
@@ -361,6 +393,27 @@ def scan_text(path: str, text: str, deny, only_lines: set[int] | None = None) ->
             continue
         found.extend(scan_line(path, i, line.rstrip('\r'), deny))
     return found
+
+
+def decode_text(blob: bytes) -> str | None:
+    """Text of a blob, or None for a binary. UTF-16 with a BOM (Windows PowerShell 5.1's
+    default for `>` and Out-File) is decoded, not skipped as binary."""
+    if blob[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        try:
+            return blob.decode('utf-16')
+        except UnicodeDecodeError:
+            return None
+    if b'\0' in blob:
+        return None
+    return blob.decode('utf-8', 'surrogateescape')
+
+
+def _blob(spec: str) -> bytes | None:
+    """`git show <spec>` bytes, or None if the object does not exist (a new file's HEAD side)."""
+    proc = subprocess.run(('git', 'cat-file', '-e', spec), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        return None
+    return _git('show', spec)
 
 
 _HUNK = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
@@ -398,8 +451,16 @@ def staged_findings(deny) -> tuple[list[Finding], int, int]:
                     '--no-textconv', '--no-renames', '--', f).decode('utf-8', 'surrogateescape')
         added = added_lines(diff)
         if added is None:
-            skipped += 1
-            continue
+            # git calls it binary; a UTF-16 text file is judged by diffing its decoded lines
+            new = decode_text(_git('show', ':' + f))
+            if new is None:
+                skipped += 1
+                continue
+            old_blob = _blob('HEAD:' + f)
+            old = decode_text(old_blob) if old_blob is not None else ''
+            old_lines = set((old or '').replace('\r\n', '\n').split('\n'))
+            added = [(i, ln.rstrip('\r')) for i, ln in enumerate(new.replace('\r\n', '\n').split('\n'), 1)
+                     if ln not in old_lines]
         for n, text in added:
             found.extend(scan_line(f, n, text, deny))
     return found, len(files), skipped
@@ -425,10 +486,11 @@ def all_findings(deny) -> tuple[list[Finding], int, int]:
         size = int(header[2])
         blob = out[nl + 1:nl + 1 + size]
         pos = nl + 1 + size + 1
-        if b'\0' in blob:
+        text = decode_text(blob)
+        if text is None:
             skipped += 1
             continue
-        found.extend(scan_text(path, blob.decode('utf-8', 'surrogateescape'), deny))
+        found.extend(scan_text(path, text, deny))
     return found, len(recs), skipped
 
 

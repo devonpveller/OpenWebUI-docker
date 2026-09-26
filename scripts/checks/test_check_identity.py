@@ -47,6 +47,23 @@ GENERIC_OK = [
     'serve at https://openwebui.<tailnet>.ts.net and *.ts.net',
     'image logo@2x.png and pkg@1.2.3',
     'section 10.3.1 of the design',
+    'subnets 10.44.0.0/16 and ' + '192.' + '168.40.0/24 (host bits zero)',
+    'cloud metadata at 169.' + '254.169.254',
+    'bot 41898282+github-actions[bot]@users.noreply.github.com',
+    'a checkout at /d/<dir>/ai-stack or /mnt/d/<dir>',
+]
+
+# attempt-2 boundaries (tester evidence, attempt 1): each of these PASSED the first gate
+BOUNDARY_REFUSED = [
+    ('link-local-ip', 'LMSTUDIO_HOST=' + '169.' + '254.' + '83.9'),
+    ('lan-ip', 'Address = ' + LAN_IP_10 + '/32'),
+    ('lan-ip', 'host ' + LAN_IP + '/24'),
+    ('lan-ip', 'backup_' + LAN_IP + '.log'),
+    ('lan-ip', LAN_IP + '_snapshot'),
+    ('drive-host-path', 'cd "/d/' + 'Open ' + 'WebUI/ai-stack"'),
+    ('drive-host-path', 'cd /mnt/e/' + 'open-' + 'webui/ai-stack'),
+    ('email', 'author 1234567+' + 'zqxperson' + '@users.noreply.github.com'),
+    ('email', 'author ' + 'zqxperson' + '@users.noreply.github.com'),
 ]
 
 
@@ -139,6 +156,48 @@ class GenericLayerRefuses(ScratchRepo):
         rc, out = self.run_gate()
         self.assertEqual(rc, 1, out)
         self.assertIn('w.ps1:2:', out)
+
+
+class Attempt2Boundaries(ScratchRepo):
+    def test_each_boundary_shape_is_refused(self):
+        for cls, line in BOUNDARY_REFUSED:
+            with self.subTest(cls=cls, line=line):
+                self.stage('docs/b.md', 'x\n' + line + '\n')
+                rc, out = self.run_gate()
+                self.assertEqual(rc, 1, out)
+                self.assertIn('docs/b.md:2:', out)
+                self.assertIn(': ' + cls + ' (', out)
+                git(self.dir, 'reset', '-q', '--', 'docs/b.md')
+
+    def test_utf16_text_is_scanned_staged_and_all(self):
+        body = ('first\r\n$h = "' + LAN_IP + '"\r\n').encode('utf-16')     # BOM + UTF-16LE
+        self.write('ps/out.ps1', body, mode='wb')
+        git(self.dir, 'add', 'ps/out.ps1')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('ps/out.ps1:2:', out)
+        self.assertIn('0 binary skipped', out)
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'utf16')
+        rc, out = self.run_gate('--all')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('ps/out.ps1:2:', out)
+
+    def test_utf16_edit_judges_only_new_lines(self):
+        old = ('keep ' + LAN_IP + '\r\n').encode('utf-16')
+        self.write('ps/o.ps1', old, mode='wb')
+        git(self.dir, 'add', 'ps/o.ps1')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'legacy utf16')
+        self.write('ps/o.ps1', ('keep ' + LAN_IP + '\r\nclean line\r\n').encode('utf-16'), mode='wb')
+        git(self.dir, 'add', 'ps/o.ps1')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_a_nul_binary_is_still_skipped(self):
+        self.write('b.dat', b'\x00\x00' + LAN_IP.encode(), mode='wb')
+        git(self.dir, 'add', 'b.dat')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 0, out)
+        self.assertIn('1 binary skipped', out)
 
 
 class StagedModeJudgesAdditionsOnly(ScratchRepo):
@@ -249,6 +308,27 @@ class Allowlist(ScratchRepo):
         rc, out = self.run_gate(allowlist=a)
         self.assertEqual(rc, 1, out)
         self.assertIn('README.md:1:', out)
+
+    def test_an_allow_group_must_equal_the_finding(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n' + 'zzdomainq' + 'ux' + '\n')
+        a = self.allow(r'README.md | operator~https://github\.com/(?P<allow>[A-Za-z0-9][A-Za-z0-9-]{0,38})/thing\.git'
+                       ' | test: one owner token' + '\n')
+        self.stage('README.md', 'git clone ' + OPERATOR_IN_URL + '\n')
+        rc, out = self.run_gate(allowlist=a)
+        self.assertEqual(rc, 0, out)
+        glued = 'https://github.com/' + OPERATOR_LITERAL + '-' + 'zzdomainq' + 'ux' + '/thing.git'
+        self.stage('README.md', 'git clone ' + glued + '\n')
+        rc, out = self.run_gate(allowlist=a)
+        self.assertEqual(rc, 1, out)
+        self.assertNotIn(OPERATOR_LITERAL, out.lower())
+
+    def test_a_literal_inside_a_longer_literal_is_one_finding(self):
+        short = OPERATOR_LITERAL[:6]
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n' + short + '\n')
+        self.stage('n.md', 'by ' + OPERATOR_LITERAL + ' and ' + short + 'x\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(out.count('n.md:1:'), 2, out)      # the long one, and the short one alone
 
     def test_malformed_entries_are_config_errors(self):
         for bad in ('x.md | lan-ip\n', 'x.md | nosuchclass | a long enough reason\n', 'x.md | lan-ip | short\n',
