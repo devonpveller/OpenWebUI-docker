@@ -1,0 +1,37 @@
+# identity-allowlist.txt - what scripts/checks/check_identity.py lets stay, and why.
+#
+# One entry per line:   <path glob> | <class>[~<context regex>] | <reason>
+#   path glob   repo-relative, `/` separators; `**` crosses directories, `*` does not
+#   class       lan-ip, tailnet-ip, tailnet-host, user-profile-path, drive-host-path,
+#               email, operator (a literal from the LOCAL denylist - never named here)
+#   ~regex      optional. The finding is allowed only if it lies INSIDE a match of this
+#               regex on its line - so an entry can allow "the owner segment of a URL to
+#               this project's own repository" without allowing the same value anywhere
+#               else on that line, and without spelling it.
+#   reason      required: why it must stay rather than be parameterised or generalised.
+#
+# THIS FILE IS SCANNED LIKE ANY OTHER. An entry that spelled a guarded value would itself
+# be a finding, so write shapes, never values. Prefer fixing over listing: a variable in
+# the owning plane's .env (generic value in its .env.example), or generic prose (<user>,
+# example.com, 192.0.2.10). `check_identity.py --all` prints entries that match nothing
+# as STALE; remove them.
+
+# --- the project's own GitHub namespace: where the code is hosted is public by definition,
+# --- and a clone/submodule URL cannot be written without it. Only the URL is allowed.
+.gitmodules | operator~https://github\.com/[^/\s]+/OB1\.git | the OB1 submodule's remote; a --recurse-submodules clone resolves the pinned commit from it
+README.md | operator~https://github\.com/[^/\s]+/OpenWebUI-docker\.git | the repository's own clone URL in the quickstart
+CLAUDE.md | operator~https://github\.com/[^/\s]+/documentation-plans-ai-stack\.git | the plan store's clone URL, which agents working in this repo must be able to clone beside it
+memory/README.md | operator~https://github\.com/[^/\s]+/mnemory\.git | the mnemory fork the memory plane builds mnemory:local from; the clone command must name it
+stack.manifest.toml | operator~https://github\.com/[^/\s]+/mnemory\.git | the same mnemory clone command, as the manifest's remedy for a missing sibling checkout
+scripts/stack/test_stack.py | operator~https://github\.com/[^/\s]+/mnemory\.git | the test pins that manifest remedy text byte for byte
+.claude/skills/stack-map/metadata.json | operator~"github": "[^"]+" | skill authorship metadata: the same public account every commit in this repository is authored by
+little-coder/tests/test_sanitize.py | operator~github\.com/[^/\s]+/monogame-engine\.git | a repo-URL fixture in a file that also holds synthetic credential fixtures, so the secret guard refuses any commit touching it; replacing the owner needs that file handled first (see the item's findings)
+
+# --- committed evidence: rewriting it would falsify it ---------------------------------
+scripts/agent-harness/quadrant/evidence/** | drive-host-path | committed run records; check_quadrant_evidence_reproduces.py re-derives each verdict from the workspace paths the record retained, so the paths are the evidence
+scripts/agent-harness/quadrant/evidence/** | user-profile-path | the same committed run records: two transcripts quote the harness's home-directory paths verbatim
+scripts/agent-harness/quadrant/evidence/** | operator | the same two transcripts: the operator literal is the user-name segment of those quoted home-directory paths
+
+# --- third-party content, not the operator's ---------------------------------------------
+frontend/owui/tools/fileshed.py | email~alice@ex\.com | a synthetic address in a usage example of a vendored third-party Open WebUI tool
+scripts/archive/smolcrawl/pyproject.toml | email~^\s*\{ name="[^"]+", email="[^"]+" \},?$ | the upstream package author's published metadata in an archived third-party project
