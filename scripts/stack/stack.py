@@ -4861,7 +4861,8 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
         console.line(f"wrote {rel_path}")
     verb = "written" if write else "match"
     console.line(f"  [OK]   {checked} block(s) in {len(files)} file(s) {verb}"
-                 + (" what the manifest and the renders say" if check else ""))
+                 + (" what the manifest and the renders say" if check else "")
+                 + (f" ({partly} of them only in the rows that could be rendered)" if partly else ""))
     if skipped or partly:
         console.line(
             f"  [ -- ] {skipped} block(s) NOT VERIFIED and {partly} PARTLY VERIFIED on this machine (named above): "
