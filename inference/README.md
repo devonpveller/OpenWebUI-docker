@@ -82,6 +82,8 @@ which can serve cloud models only if you give it both a key and a route out
   `bge-m3-f16.gguf` in `data/models/embeddings`. `GPU_LLAMA_CPP_DEVICE_ID` and
   `GPU_LLAMA_CPP_EMBED_DEVICE_ID` pick the devices.
 - **No other plane.** It needs only the anchor's networks, which `up` creates.
+  (A fresh clone does enable the frontend by default - see
+  [Enable and start](#enable-and-start).)
 
 Keys, in `inference/.env`:
 
@@ -93,6 +95,18 @@ Keys, in `inference/.env`:
 | `OPENROUTER_API_KEY` | Blank by design. See [Security notes](#security-notes). |
 
 ## Enable and start
+
+**On a fresh clone the frontend is already enabled.** With no
+`.stack/state.json`, the driver treats the frontend as enabled, and `enable`
+keeps it. So the `up` below starts the frontend first, and until
+`frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
+`# up stopped: frontend exited 1` and never reaches this plane. Either set up
+the frontend as [its README](../frontend/README.md#enable-and-start) says, or run
+this plane without it:
+
+```bash
+python scripts/stack/stack.py disable --plane frontend
+```
 
 Without a GPU (the gateway alone):
 
@@ -189,7 +203,7 @@ ls -l backups/llm-gateway/
 
 **Check a dump before you restore it.** The sidecar's first dump is taken the
 moment the plane first starts, before LiteLLM has created its tables: a few
-hundred bytes (370 in a fresh clone), no tables, no keys. On a fresh plane it is
+hundred bytes, no tables, no keys. On a fresh plane it is
 the only dump for the first 24 h, and restoring it wipes every virtual key you
 have issued since. Count the tables and the keys in a dump:
 

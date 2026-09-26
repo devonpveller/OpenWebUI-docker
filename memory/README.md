@@ -78,6 +78,18 @@ Keys, in `memory/.env`:
 
 ## Enable and start
 
+**On a fresh clone the frontend is already enabled.** With no
+`.stack/state.json`, the driver treats the frontend as enabled, and `enable`
+keeps it. So the `up` below starts the frontend first, and until
+`frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
+`# up stopped: frontend exited 1` and never reaches this plane. Either set up
+the frontend as [its README](../frontend/README.md#enable-and-start) says, or run
+this plane without it:
+
+```bash
+python scripts/stack/stack.py disable --plane frontend
+```
+
 ```bash
 cp memory/.env.example memory/.env
 python -c "import secrets; print(secrets.token_hex(32))"

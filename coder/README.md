@@ -65,6 +65,18 @@ Keys, in `coder/.env`:
 
 ## Enable and start
 
+**On a fresh clone the frontend is already enabled.** With no
+`.stack/state.json`, the driver treats the frontend as enabled, and `enable`
+keeps it. So the `up` below starts the frontend first, and until
+`frontend/.env` holds a real `WEBUI_SECRET_KEY` it stops there with
+`# up stopped: frontend exited 1` and never reaches this plane. Either set up
+the frontend as [its README](../frontend/README.md#enable-and-start) says, or run
+this plane without it:
+
+```bash
+python scripts/stack/stack.py disable --plane frontend
+```
+
 ```bash
 cp coder/.env.example coder/.env
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -145,7 +157,7 @@ its script exits 0 when there is nothing to archive.
 | 401 from the gateway in `docker logs little-coder` | `LC_LLAMA_API_KEY` is not a virtual key the gateway issued. |
 | `network ai-stack_llm-net declared as external, but could not be found` from a hand-typed `docker compose` | The anchor's networks are missing; `python scripts/stack/stack.py up` creates them. |
 | `[DIFFERS] ai-stack_llm-net: internal is false, declared true` and `up` stops | An existing network does not match the anchor. Stop what is attached, `docker network rm ai-stack_llm-net`, run `up` again. |
-| A clone from a forge other than GitHub hangs or fails like a network flake | `lc-egress` allows only `github.com` and `githubusercontent.com`. Add the host to `../little-coder/docker/egress-allowlist.txt` and rebuild `lc-egress` (`docker compose -f coder/docker-compose.yml build lc-egress`, then `up -d lc-egress`); the list is baked into the image, so a restart does not pick it up. |
+| A clone from a forge other than GitHub hangs or fails like a network flake | `lc-egress` allows only `github.com` and `githubusercontent.com`. Add the host to `little-coder/docker/egress-allowlist.txt` and rebuild `lc-egress` (`docker compose -f coder/docker-compose.yml build lc-egress`, then `up -d lc-egress`); the list is baked into the image, so a restart does not pick it up. |
 | `docker compose up -d open-terminal` at the repository root prints `no such service: open-terminal` | The root project declares networks only. Use `-f coder/docker-compose.yml`. |
 | `ConvertFrom-Json` fails with `DuplicateKeysInJsonString` on this plane's render | Windows PowerShell 5.1 reads JSON keys case-insensitively and the plane sets both `HTTP_PROXY` and `http_proxy`. Read the render as YAML. |
 
