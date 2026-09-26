@@ -137,8 +137,8 @@ value, naming each one. `up` starts the anchor's networks, this plane, and
 anything else you have enabled. Four containers start. The gateway registers
 **no model** - `docker logs llm-gateway` ends its `[assemble-config]` lines with
 `wrote /app/config.yaml with 0 model(s)` - so callers get errors, and
-`stack.py health` fails its serving-depth probe (below). That is the correct
-state for a machine with no GPU and no cloud route.
+`stack.py health` reports its serving-depth probe as not applicable (below).
+That is the correct state for a machine with no GPU and no cloud route.
 
 With a GPU, also uncomment one line in `inference/.env`:
 
@@ -186,7 +186,9 @@ python scripts/stack/stack.py down inference
 answer: it counts the `.gguf` files the upstream sees, then reads llama-swap's
 list of loaded models, and only if none is loaded sends one three-token
 completion through the gateway (a cold load can take minutes). Without `local`
-there is no upstream, and the probe fails with `cannot read llama-cpp-upstream's
+there is no upstream by design, and the line reads ``serving depth: not
+applicable - inference runs without `local` `` and passes. With `local` on and
+the upstream not running, it fails with `cannot read llama-cpp-upstream's
 /models ... is the upstream running?`.
 
 `stats` adds the queue's live board (under `local`) and the ledger's demand, by

@@ -48,6 +48,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,29 @@ EXIT_USAGE = 2
 # to be able to ask "what would this do on a Linux node?" without monkeypatching
 # the os module out from under pathlib.
 WINDOWS = os.name == "nt"
+
+
+def interpreter_name(executable: str | None = None, windows: bool | None = None) -> str:
+    """The interpreter as the reader would TYPE it: the basename of the one running this.
+
+    Every printed "run this next" step names it (CLI below). A hard-coded `python`
+    was false on Debian 12, where only `python3` is on PATH (ac-readme attempt 2, F3):
+    a reader who followed a refusal literally got `command not found`. Invoked as
+    `python3 scripts/stack/stack.py`, sys.executable is .../python3 and so is the
+    step; a Windows `python.exe` prints `python`. With no executable to read
+    (embedded, frozen) it falls back to what that platform ships.
+    """
+    executable = sys.executable if executable is None else executable
+    windows = WINDOWS if windows is None else windows
+    name = re.split(r"[\\/]", executable or "")[-1]
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name or ("python" if windows else "python3")
+
+
+# The command every printed step names. NOT used in generated docs text, which
+# must render the same on every machine (_DOCS_GENERATED).
+CLI = f"{interpreter_name()} scripts/stack/stack.py"
 
 
 class Refusal(Exception):
@@ -620,7 +644,9 @@ def host_path_line(spec: dict, plane: str, reason: str = "is missing") -> str:
 # WHICH ONES COUNT: only a key a service THIS DEPLOYMENT RUNS actually reads.
 # That is decided from compose's own render (`config --no-interpolate`, which
 # keeps `${VAR}` references visible and lists every service with its
-# `profiles`), filtered to the profiles this plane runs with. So frontend's
+# `profiles`; when compose cannot parse that render, an interpolated one with a
+# sentinel per candidate - see referenced_vars), filtered to the profiles this
+# plane runs with. So frontend's
 # TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`, and
 # agent-org's AO_CLOUD_* only under `cloud`. A bulk `env_file:` is NOT a read:
 # agent-bridge loads its whole .env that way, and counting it would make every
@@ -664,24 +690,58 @@ def _strings(node):
         yield str(node)
 
 
-def referenced_vars(manifest, root, plane, capture, profiles, context=None):
-    """({VAR, ...} the active services interpolate, None) or (None, why the render failed)."""
-    cmd = compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"], context=context)
-    result = capture(cmd, root)
-    if result.code != 0:
-        return None, (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[0:1]
-    try:
-        services = (json.loads(result.stdout) or {}).get("services") or {}
-    except ValueError:
-        return None, ["the render is not JSON"]
-    refs = set()
+def _active_strings(services: dict, profiles):
+    """Every string of every service the profiles run, `env_file` left out (a bulk load is not a read)."""
     for service in services.values():
         gated = (service or {}).get("profiles") or []
         if gated and not set(gated) & set(profiles):
             continue
-        for text in _strings({k: v for k, v in (service or {}).items() if k != "env_file"}):
+        yield from _strings({k: v for k, v in (service or {}).items() if k != "env_file"})
+
+
+def _render_services(capture, root, cmd):
+    """(services, None) or (None, [the first line of why the render failed])."""
+    result = capture(cmd, root)
+    if result.code != 0:
+        return None, (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[0:1]
+    try:
+        return (json.loads(result.stdout) or {}).get("services") or {}, None
+    except ValueError:
+        return None, ["the render is not JSON"]
+
+
+def referenced_vars(manifest, root, plane, capture, profiles, context=None, candidates=()):
+    """({VAR, ...} the active services interpolate, None) or (None, why the render failed).
+
+    First `config --no-interpolate`, which keeps every `${VAR}` visible. Compose
+    cannot parse that render for a SHORT-syntax volume whose source interpolates
+    a default with a path in it - OB1's `${OPEN_NOTEBOOK_DIR:-../../../open-notebook}/notebook_data:/app/data`
+    is "too many colons" uninterpolated (compose v2.33.0, measured; `--no-normalize`
+    and `--no-consistency` do not help) - so on a fresh clone every `up ob1` was
+    refused with that artifact instead of an answer (ac-readme attempt 2). Then,
+    for the `candidates` only: an INTERPOLATED render with each candidate set to a
+    unique sentinel in the process environment (which compose prefers to the env
+    file), and a candidate counts when its sentinel appears in an active service.
+    If that render fails too, its error is the one reported: it is the render
+    `up` itself makes, so its complaint is the real cause.
+    """
+    cmd = compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"], context=context)
+    services, failed = _render_services(capture, root, cmd)
+    if services is not None:
+        refs = set()
+        for text in _active_strings(services, profiles):
             refs.update(_VAR_REF.findall(text))
-    return refs, None
+        return refs, None
+    if not candidates:
+        return None, failed
+    sentinels = {key: f"ai-stack-ref-{index}-{key}" for index, key in enumerate(sorted(candidates))}
+    plain = compose_command(manifest, plane, ["config", "--format", "json"], context=context)
+    cmd = ComposeCommand(plain, {**getattr(plain, "env", {}), **sentinels})
+    services, failed = _render_services(capture, root, cmd)
+    if services is None:
+        return None, failed
+    texts = list(_active_strings(services, profiles))
+    return {key for key, mark in sentinels.items() if any(mark in text for text in texts)}, None
 
 
 def shipped_placeholders(manifest, state, root, plane, capture, extra_profiles=()):
@@ -705,7 +765,7 @@ def shipped_placeholders(manifest, state, root, plane, capture, extra_profiles=(
         return []
     why = placeholder_reason(root, env_path)
     profiles = active_profiles(manifest, state, root, plane, extra_profiles)
-    refs, failed = referenced_vars(manifest, root, plane, capture, profiles, state.context_of(plane))
+    refs, failed = referenced_vars(manifest, root, plane, capture, profiles, state.context_of(plane), candidates)
     if refs is None:
         note = f" (could not render {manifest.plane(plane)['compose']} to tell whether it is read: " \
                f"{failed[0] if failed else 'no output'})"
@@ -748,6 +808,20 @@ def command_env(cmd) -> dict | None:
     env = dict(os.environ)
     env.update(overrides)
     return env
+
+
+def printable(cmd) -> str:
+    """The command line as printed: its environment overrides as a POSIX `VAR=value` prefix.
+
+    The line is what a reader copies (ac-readme attempt 2, F6): `up --dry-run`
+    printed `docker compose -f inference/docker-compose.yml --profile local up -d`
+    and not the COMPOSE_PROFILES the driver runs it with, so the copy started
+    llama.cpp with a gateway that registered no local model. The prefix is shell
+    syntax for sh/bash; in PowerShell set `$env:COMPOSE_PROFILES` first.
+    """
+    overrides = getattr(cmd, "env", None) or {}
+    prefix = " ".join(f"{key}={shlex.quote(str(value))}" for key, value in sorted(overrides.items()))
+    return (prefix + " " if prefix else "") + " ".join(cmd)
 
 
 def compose_command(manifest: Manifest, plane: str, args, context=None, profiles=()) -> list[str]:
@@ -1152,7 +1226,7 @@ def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, l
             context=state.context_of(plane),
             profiles=effective_profiles(manifest, state, root, plane),
         )
-        console.line(" ".join(cmd))
+        console.line(printable(cmd))
         if dry_run:
             continue
         code = runner(cmd, root)
@@ -1353,7 +1427,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture, rerun: str
             + "\n".join(f"  {p}: {w}\n    (`{c}`; the plane's variables live in "
                          f"{rel(root, manifest.env_path(root, p))})" for p, c, w in unrenderable)
             + "\nNothing was started. Fix what compose names above, then re-run "
-            + f"`python scripts/stack/stack.py {rerun or verb}`."
+            + f"`{CLI} {rerun or verb}`."
         )
     if not lines:
         return
@@ -1383,7 +1457,7 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
     sim = copy.deepcopy(state)
     sim.path = None
     steps = []
-    cli = "python scripts/stack/stack.py"
+    cli = CLI
     for plane, profiles in gpu_profiles.items():
         named = {p for p in profiles if p}
         if None in profiles:
@@ -1541,7 +1615,7 @@ def cmd_status(manifest, state, root, console, runner, plane=None, every: bool =
             profiles=effective_profiles(manifest, state, root, plane),
         )
         console.line(f"== {plane}")
-        console.line(" ".join(cmd))
+        console.line(printable(cmd))
         if runner(cmd, root) != 0:
             failures += 1
         console.line("")
@@ -1595,11 +1669,11 @@ def _key_remedy(files, submodules) -> str:
     """
     first = "".join(f"Run {command}. " for command in submodules)
     if submodules and not files:
-        return first + "Then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+        return first + f"Then re-run (`{CLI} doctor` lists every blank key on this machine)."
     where = " and ".join(files) if files else "the plane's env file"
     return (
         f"{first}Set them in {where} (a value still equal to the .env.example placeholder counts as unset), "
-        "then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+        f"then re-run (`{CLI} doctor` lists every blank key on this machine)."
     )
 
 
@@ -1627,7 +1701,7 @@ def _ambiguity_note(manifest, console, kind, target, explicit: bool = False) -> 
 def enable_remedy(manifest: Manifest, plane: str) -> str:
     """The command that enables exactly `plane` - `--plane` when a product shares the name."""
     flag = "--plane " if plane in manifest.products else ""
-    return f"python scripts/stack/stack.py enable {flag}{plane}"
+    return f"{CLI} enable {flag}{plane}"
 
 
 def _profile_source(manifest: Manifest, state: State, plane: str, profile: str, mine: str) -> str:
@@ -2163,12 +2237,15 @@ class HealthSweep:
     # it is in `planes` (None = every one, the pre-scoping behaviour).
     PROBED_PLANES = ("anchor", "inference", "frontend", "memory", "search", "coder", "ob1", "agent-org")
 
-    def __init__(self, console: Console, root: Path, capture, http, planes=None):
+    def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None):
         self.console = console
         self.root = root
         self.capture = capture
         self.http = http
         self.planes = None if planes is None else set(planes)
+        # Whether inference runs its `local` profile, as `up` would pass it; None = not known
+        # (the probe then runs, as it always did). See inference_serving_depth.
+        self.inference_local = inference_local
         self.failed = 0
         self.results: list[tuple[str, bool]] = []
 
@@ -2241,8 +2318,17 @@ class HealthSweep:
                     "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
                 ).code == 0,
             )
-            depth, depth_ok = self.inference_serving_depth()
-            self.probe(f"inference: {depth}", depth_ok)
+            if self.inference_local is False:
+                # No local upstream is MEANT to exist: the gateway alone is the documented
+                # GPU-less deployment (inference/README.md), and the GPU refusal's own steps
+                # lead there. Probing llama-cpp-upstream would FAIL a host for following
+                # them (ac-readme attempt 2, F4). Named, not dropped, so the line count and
+                # the docs' probe catalogue stay what they say.
+                self.probe("inference: serving depth: not applicable - inference runs without `local`, "
+                           "so there is no local upstream to serve from (by design)", True)
+            else:
+                depth, depth_ok = self.inference_serving_depth()
+                self.probe(f"inference: {depth}", depth_ok)
         if self.on("frontend"):
             self.probe(
                 "frontend: OWUI http://127.0.0.1:3000/health",
@@ -2404,8 +2490,8 @@ class HealthSweep:
         if listing.code != 0:
             why = (listing.stderr or listing.stdout or "no output").strip().splitlines()
             return (f"serving depth: cannot read {upstream}'s /models "
-                    f"({why[0] if why else 'no output'}) - is the upstream running? "
-                    f"(the `local` profile lives in inference/.env)"), False
+                    f"({why[0] if why else 'no output'}) - is the upstream running? `local` is on for "
+                    f"inference, so `up` starts it; `docker ps -a --filter name={upstream}` shows its state"), False
         try:
             found = int((listing.stdout or "0").strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -2591,7 +2677,10 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
     scoping removes.
     """
     planes = {p for p in manifest.order if state.is_enabled(p) or manifest.is_implicit(p)}
-    return HealthSweep(console, root, capture, http, planes).run()
+    local = None
+    if "inference" in planes:
+        local = "local" in active_profiles(manifest, state, root, "inference")
+    return HealthSweep(console, root, capture, http, planes, inference_local=local).run()
 
 
 # --------------------------------------------------------------------------
@@ -3145,7 +3234,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
             cmd = compose_command(manifest, p, ["stop", "--timeout", str(STOP_TIMEOUT_SECONDS), *level],
                                   context=state.context_of(p),
                                   profiles=effective_profiles(manifest, state, root, p))
-            console.line(" ".join(cmd))
+            console.line(printable(cmd))
             if not dry_run:
                 code = runner(cmd, root)
                 if code != 0:
@@ -3162,7 +3251,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
         for level in levels[p]:
             cmd = compose_command(manifest, p, ["up", "-d", "--no-deps", *level], context=state.context_of(p),
                                   profiles=effective_profiles(manifest, state, root, p))
-            console.line(" ".join(cmd))
+            console.line(printable(cmd))
             gates = [(key, gate_timeout(renders[p].services[key], timeout)) for key in level]
             for key, limit in gates:
                 console.line(_gate_note(renders[p], key, limit))
@@ -4394,7 +4483,7 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
     if inventory.declared_not_rendered:
         console.line(
             "  [ ~~ ] ^ those resolve themselves when the submodule gitlink bumps. AT THAT BUMP the "
-            "profiles start gating real services, so run `python scripts/stack/stack.py init --product "
+            f"profiles start gating real services, so run `{CLI} init --product "
             "research --force` (or `enable research`) once, or a bare `up` will start fewer containers "
             "than it does today."
         )
@@ -5409,7 +5498,7 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
         for line in stale:
             console.line(f"  [FAIL] {line}")
         console.line("")
-        console.line(f"{len(stale)} stale block(s). Regenerate with `python scripts/stack/stack.py docs --write` "
+        console.line(f"{len(stale)} stale block(s). Regenerate with `{CLI} docs --write` "
                      "and commit the result; edit the prose AROUND a block, never inside it.")
         return EXIT_REFUSED
     for rel_path in wrote:
