@@ -118,7 +118,9 @@ Open WebUI on its pinned upstream image and its backup sidecar.
 A **product** is a slice of the stack you can turn on: the planes it needs, the
 compose profiles it enables, and the surfaces you use it through. They are
 declared in [`stack.manifest.toml`](stack.manifest.toml); the table is
-generated from it, and `python3 scripts/stack/stack.py list` prints the same.
+generated from it. `python3 scripts/stack/stack.py list` prints a short form:
+which planes are enabled on your machine, then each product's name and
+description.
 
 <!-- stack:product-menu -->
 
@@ -145,7 +147,7 @@ What each one gives you, and what it needs besides Docker:
 |---|---|---|
 | **chat** | Open WebUI on `127.0.0.1:3000` | nothing |
 | **inference** | the model endpoints every other plane calls, with the local llama.cpp models registered ([README](inference/README.md)) | the GPU; the chat GGUFs at the paths `inference/.env` names, under `data/models/gguf/` or its `LM_MODELS_DIR`; `bge-m3-f16.gguf` in `data/models/embeddings/`. Without a GPU, use `enable --plane inference` (the gateway alone) |
-| **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo (`stack.py doctor` prints the command), and inference's GPU: mnemory's models are the local ones |
+| **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo (`enable memory` refuses without it and prints the `git clone` command), and inference's GPU: mnemory's models are the local ones |
 | **search** | private web search on `127.0.0.1:8085`, every query leaving through Mullvad ([README](search/README.md)) | a Mullvad WireGuard key and `/dev/net/tun` |
 | **open-brain** | the knowledge base: capture, retrieval, a compiled wiki on `127.0.0.1:8812` | the OB1 submodule (the clone above fetched it) |
 | **research** | open-brain plus the research engine, read in Open WebUI, the wiki and Open Notebook (`127.0.0.1:8503`) | as open-brain |
@@ -269,13 +271,18 @@ gates run as Python twins and the rest print `SKIPPED`
 ([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
 
 Before you push, run the checks CI's `ruff` and `stack-driver` jobs run
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). They need docker, the
-OB1 submodule at its pinned commit, and an `.env` in every plane directory -
-CI copies the examples first, and so should you (the loop never overwrites a
-real one; the checks render from the examples, the files only have to exist):
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Besides the
+quickstart's prerequisites they need Python's `venv` module (Debian and Ubuntu:
+`sudo apt install python3-venv`); the block installs `ruff` and `pytest` into a
+virtual environment outside the checkout, so it works where the system Python
+refuses `pip install` (PEP 668). They also need the OB1 submodule at its pinned
+commit and an `.env` in every plane directory - CI copies the examples first,
+and so should you (the loop never overwrites a real one; the checks render from
+the examples, the files only have to exist):
 
 ```sh
-python3 -m pip install ruff pytest
+python3 -m venv ~/.venvs/ai-stack && . ~/.venvs/ai-stack/bin/activate
+pip install ruff pytest
 for p in . frontend inference memory search coder portal agent-org/docker OB1/docker; do [ -e "$p/.env" ] || cp "$p/.env.example" "$p/.env"; done
 touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
 ruff check .

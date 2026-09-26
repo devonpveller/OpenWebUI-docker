@@ -5,15 +5,15 @@ turns each part on, and how to re-derive the list yourself. The [README](README.
 here; nothing in this file is needed to run the quickstart.
 
 **No component in this stack sends a prompt, a document or a memory to a model
-provider by default.** Every model call goes to llama.cpp on this host through
+provider by default.** Every model call goes to llama.cpp on your own machine through
 the LiteLLM gateway, and that gateway is attached to two networks that are both
 `internal: true` - `llm-net`, declared that way by the anchor
 [`docker-compose.yml`](docker-compose.yml), and `llm-backend-net`, declared that
 way by [`inference/docker-compose.yml`](inference/docker-compose.yml). The
 cloud-capable parts are present in the tree and inert: each is gated behind a
-compose profile, a credential, or a script the operator runs by hand. That is
-stack-layers decision **D14** - keep the components, ship them off, and write
-down what turns each one on.
+compose profile, a credential, or a script you run by hand. That is the
+posture: keep the components, ship them off, and write down what turns each
+one on.
 
 That is not the same as "nothing reaches the internet". Three containers do,
 from a fresh clone, and they are named at the end of this section.
@@ -42,7 +42,7 @@ wins.
 
 | Cloud-capable component | Where it is defined | What it does when off | What turns it on | Where it egresses |
 |---|---|---|---|---|
-| LiteLLM cloud model group (`cloud-large`, `cloud-small`) | `inference/config/litellm/model_list/cloud.openrouter.yaml` | `config/litellm/assemble-config.py` drops every model entry whose `os.environ/VAR` reference is unset or empty, and logs the drop with its reason. The two models are not registered, so `/v1/models` does not list them and nothing else about the gateway changes. | `OPENROUTER_API_KEY` in `inference/.env`. It is blank in `inference/.env.example`. | **Nowhere.** See "The D14 mechanism" below: the key makes these models LISTED, not reachable. |
+| LiteLLM cloud model group (`cloud-large`, `cloud-small`) | `inference/config/litellm/model_list/cloud.openrouter.yaml` | `config/litellm/assemble-config.py` drops every model entry whose `os.environ/VAR` reference is unset or empty, and logs the drop with its reason. The two models are not registered, so `/v1/models` does not list them and nothing else about the gateway changes. | `OPENROUTER_API_KEY` in `inference/.env`. It is blank in `inference/.env.example`. | **Nowhere.** See "Why a cloud key does not open a route" below: the key makes these models LISTED, not reachable. |
 | agent-org cloud lane: `llm-gateway-cloud`, `llm-gateway-cloud-db`, `ao-egress` | `agent-org/docker/docker-compose.yml`, `agent-org/config/litellm-cloud.config.yaml` | All three carry `profiles: ["cloud"]`, and `agent-org/docker/.env.example` sets no `COMPOSE_PROFILES` at all, so none of them renders. `AO_CLOUD_ENABLED=false` separately keeps `agent-bridge` on the local lane. | `cloud` in `COMPOSE_PROFILES` (or `--profile cloud`), plus `OPENROUTER_API_KEY`, `AO_CLOUD_DB_PASSWORD`, `AO_CLOUD_MASTER_KEY` and `AO_CLOUD_ENABLED=true` in `agent-org/docker/.env`. | `llm-gateway-cloud` has no internet leg of its own: it sits on `ao-net` and `ao-cloud-egress-net` (`internal: true`) with `HTTP_PROXY`/`HTTPS_PROXY` pointed at `ao-egress`, the one dual-homed container. Read the allowlist note under the table before turning this on. |
 | `ao-git-egress`, and the worker pool behind it | `agent-org/docker/docker-compose.yml` | `profiles: ["workers"]`, so with no `COMPOSE_PROFILES` neither the proxy nor the pool renders. | The `workers` profile. | A default-deny tinyproxy on `ao-worker-net` (`internal: true`) + the project bridge. **The mechanism, since it is not uniform:** only `ao-ot-1`/`ao-ot-2` carry `HTTP_PROXY`; `ao-worker-1`/`-2` carry none and are confined by `ao-worker-net` having no route out at all. The filter file lives on the shared `ao-egress-config` volume - `agent-org/docker/egress/egress-reload.sh` seeds it with `github.com` + `githubusercontent.com` and SIGHUPs tinyproxy whenever `agent-bridge` rewrites it as projects and hosts are onboarded from Mattermost. |
 | `agent-bridge`'s GitHub App (the capability plane) | `agent-org/agent-bridge/app/config.py`, `agent-org/docker/docker-compose.yml` | `Settings.github_app_enabled` is false unless `github_app_id` is set **and** the private-key file exists, so the plane stays offline and the bridge runs normally without it. | `AO_GITHUB_APP_ID` + `AO_GITHUB_APP_OWNER` in `agent-org/docker/.env` (absent from the example - this plane leaves `${VAR:-}` names out on purpose), and a readable key at `agent-org/agent-bridge/secrets/github-app-key.pem`. | `https://api.github.com`, directly from `ao-net`, which is a plain bridge. This one does **not** go through `ao-egress`. |
@@ -59,12 +59,12 @@ wins.
 | `openbrain-grounding-backfiller` | `OB1/docker/docker-compose.yml`, source `OB1/integrations/grounding-backfiller/index.ts` | **Nothing gates it** - unprofiled, on `obnet` + `llm-net` + `ai-stack_default`. `WIKI_BASE` defaults to `https://en.wikipedia.org`. | Nothing. | Wikipedia, and the source URLs it re-fetches. It tries `FETCH_PROXY_URL` (default `http://vpn:8888`) first, but `REFETCH_ALLOW_DIRECT` **defaults to `true`** and the refetch path falls back to a DIRECT, unproxied fetch when the proxied one comes back thin. This one fails OPEN; set `REFETCH_ALLOW_DIRECT=false` in `OB1/docker/.env` if that is not what you want. |
 | `openbrain-wiki`'s `WIKI_GIT_REMOTE` | `OB1/docker/docker-compose.yml` | Set to `""`, which the compiler reads as local-commits-only: vault history is kept, nothing is pulled or pushed. The SSH URL sits beside it, commented out. | Restoring that URL (and a passphrase-less deploy key at `WIKI_GIT_SSH_KEY`). | `github.com` over SSH - the compiled wiki is force-pushed to a private repo. The present-but-inert shape this whole section is about. |
 | OB1's scheduled chain: `openbrain-digest`, `openbrain-gmail-pull`, `openbrain-gmail-prune`, `openbrain-podcast` | `OB1/docker/docker-compose.scheduled.yml` | Unprofiled, but each mounts a Google OAuth client secret and token from `OB1/secrets/`, which is gitignored and absent from a fresh clone. (A fresh clone cannot render this plane at all until two empty `OB1/recipes/*/.env` files exist.) | Putting those OAuth files in place - and the `open-brain` product being enabled at all. | Google's APIs (Gmail read and send, Calendar read), plus `wttr.in` for the digest's weather brief, out of `obnet`. |
-| `openbrain-research` | `OB1/docker/docker-compose.yml` | `profiles: ["research"]`. | The `research` profile, which `enable research` writes. | Page fetches go through `FETCH_PROXY_URL`, defaulting to `http://vpn:8888` - the search plane's Mullvad tunnel - and searches to `http://gateway:8080`. **This one** connects TO the privacy boundary rather than around it; the backfiller two rows up is the same shape with the fallback left open, and `openbrain-mcp` has no proxy at all. Do not generalise "OB1 fetches through the tunnel" from this row. |
+| `openbrain-research` | `OB1/docker/docker-compose.yml` | `profiles: ["research"]`. | Any driver start of the ob1 plane: `idea-refinery` is a `default` profile of ob1 and `requires` `research`, so `stack.py up` passes `--profile research` whenever ob1 is enabled - by the `open-brain`, `research` or `digest` product or by `enable --plane ob1`. Outside the driver, `research` in `OB1/docker/.env`'s `COMPOSE_PROFILES` or `--profile research` on the command line. | Page fetches go through `FETCH_PROXY_URL`, defaulting to `http://vpn:8888` - the search plane's Mullvad tunnel - and searches to `http://gateway:8080`. **This one** connects TO the privacy boundary rather than around it; the backfiller two rows up is the same shape with the fallback left open, and `openbrain-mcp` has no proxy at all. Do not generalise "OB1 fetches through the tunnel" from this row. |
 
 ## Network-capable, no outbound call
 
 These are on ordinary bridges and so pass stage 1, but their source makes no
-call off this host. They are listed so the criterion is visible and so a reader
+outbound call. They are listed so the criterion is visible and so a reader
 who disagrees has something to argue with:
 
 - **`llm-gateway-ui`** - on `app-net` so the portal's Caddy can front `/ui`. Its
@@ -103,21 +103,21 @@ them. They run on the host, from this repo:
   runs the `claude` CLI headless with `BRIDGE_MODEL` defaulting to `opus`, so
   every bridge turn is a call to Anthropic from the host, and it also posts to
   Telegram. This is the one place the stack talks to a frontier provider at all.
-  It is a scheduled host process, not part of any plane; it is off unless the
-  operator runs it.
+  It is a scheduled host process, not part of any plane; it is off unless you
+  run it.
 - **The Open WebUI plugins in `frontend/owui/`** - deploy-by-paste, tracked in
   `frontend/owui/manifest.csv`. `frontend/owui/tools/github_chat_mcp_tools.py` targets
   `https://api.github.com`, and `frontend/owui/tools/fileshed.py` permits `curl`, `wget`
   and network `git` subcommands from inside the `openwebui` container, behind
   its own valves. They live in the OWUI database, not in a compose file.
 
-## The D14 mechanism, exactly
+## Why a cloud key does not open a route
 
 Setting `OPENROUTER_API_KEY` in `inference/.env` makes `assemble-config.py` keep
 the two cloud entries, so `llm-gateway` registers them and `/v1/models` lists
 them. It does **not** make them work. `llm-gateway` is attached to `llm-net` and
 `llm-backend-net` and to nothing else, and both are internal-only, so the
-container has no route off this host and a request for `cloud-large` fails where
+container has no route out of Docker's internal networks and a request for `cloud-large` fails where
 LiteLLM tries to reach openrouter.ai. Making it real would mean giving that
 container an egress path - attaching it to an internet-capable network, or
 pointing it at a dual-homed allowlisted proxy the way `llm-gateway-cloud` points
@@ -136,9 +136,7 @@ environment variable the compose file sets on that service is read by nothing in
 that image, so the effective allowlist is the baked `github.com` /
 `githubusercontent.com` pair and `openrouter.ai` would be denied. That fails
 closed, which is the safe direction, but it means the cloud lane does not work
-as shipped. Recorded in
-[`../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md`](../documentation-plans-ai-stack/journal/notes/stack-layers-sl-docs-posture-findings.md);
-fixing it is a compose or image change, not a documentation one.
+as shipped. Fixing it is a compose or image change, not a documentation one.
 
 ## What a fresh clone actually does
 
@@ -154,8 +152,10 @@ Copy each plane's `.env.example` and:
   credentials, and the lane is profile-gated anyway.
 - The only **active** `COMPOSE_PROFILES` assignment in any example is
   `frontend/.env.example`'s `COMPOSE_PROFILES=stock`. `inference`'s is commented
-  out, and so is a `gpu,tailscale` line a few lines above the active one; the
-  other planes have no such line at all. **No active assignment names `cloud`,
+  out, and so is a `gpu,tailscale` line a few lines above the active one;
+  `OB1/docker/.env.example` carries a commented
+  `#COMPOSE_PROFILES=research,wiki,notebook,idea-refinery`; the other planes
+  have no such line at all. **No active assignment names `cloud`,
   `internet`, `workers` or `tailscale`,** so no profile-gated component renders.
 - **Three containers still reach the internet**, and none of them is a model
   provider. Measured from the renders above, not reasoned about:
