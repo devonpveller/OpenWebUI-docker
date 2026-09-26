@@ -180,6 +180,7 @@ $script:Contract = [ordered]@{
         Meaning = @{
             0 = "every RECOGNISED corpus insert site states its plane"
             1 = "a recognised insert site does not state its plane"
+            78 = "NOT CHECKED: the OB1 submodule is not initialised, so the corpus producers were not scanned. The job must check out with submodules: recursive; the pre-commit hook records this as SKIPPED, CI never does"
         }
         Doc     = "scripts/checks/check-corpus-exposure-producers.ps1"
     }

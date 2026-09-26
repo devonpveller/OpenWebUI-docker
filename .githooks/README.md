@@ -82,6 +82,16 @@ Install `pwsh` to run every gate. `commit-msg` needs no PowerShell in any mode: 
 POSIX `sh` with `git`, `grep`, `awk` and `sort`. `pre-merge-commit` runs `pre-commit`,
 so it picks its host the same way.
 
+**One gate can skip itself on a PowerShell host** (ac-corpus-gate, 2026-09-26): gate 3b,
+corpus exposure, when the clone was made without `--recurse-submodules`. Every producer it
+recognises lives in the OB1 submodule, so with `OB1/` empty its scan is vacuous. When the
+index records the OB1 gitlink and `OB1/.git` is absent (a plain clone, or after
+`git submodule deinit`), and the rest of the tree is clean, the gate prints
+`SKIPPED - the OB1 submodule is not initialised ... Run: git submodule update --init OB1 (CI checks it).`
+and exits 78; the hook records it SKIPPED (its `run_gate` line passes a sixth argument,
+`yes`, and no other gate does). A violation outside OB1 still fails the commit, a checkout
+of OB1 at any commit is scanned exactly as before, and CI checks OB1 out and reads 78 as a failure.
+
 ## What `pre-commit` enforces
 
 | # | Check | Script | Blocks on |
