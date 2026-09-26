@@ -818,6 +818,8 @@ class FakeHost:
         # Default = this host: plugins ARE deployed, so the drift check is real.
         self.plugin_count = broken.get("plugin_count", "16")
         self.plugin_census_code = broken.get("plugin_census_code", 0)
+        # ac-followups X1: does a llama-cpp-upstream container exist (any state)?
+        self.upstream_exists = broken.get("upstream_exists", False)
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -828,6 +830,8 @@ class FakeHost:
             return stack.CommandResult(0 if self.frontend_services else 1,
                                        "\n".join(self.frontend_services), "")
         if cmd[:2] == ["docker", "ps"]:
+            if "name=^llama-cpp-upstream$" in cmd:
+                return stack.CommandResult(0, "llama-cpp-upstream" if self.upstream_exists else "", "")
             if "name=tailscale" in cmd:
                 return stack.CommandResult(0, "\n".join(self.running), "")
             return stack.CommandResult(0, "\n".join(self.unhealthy), "")
@@ -3612,7 +3616,7 @@ def test_restore_round_trip_puts_the_archived_contents_back(root, stamped):
     # recreated with the labels compose gives its own volumes, so a later `up` adopts it
     assert daemon.volume_labels["frontend_openwebui-data"] == {
         "com.docker.compose.project": "frontend", "com.docker.compose.volume": "openwebui-data"}
-    assert "restored. Start the plane: python3 scripts/stack/stack.py up frontend" in out
+    assert f"restored. Start the plane: {stack.CLI} up frontend" in out
 
 
 def test_restore_verifies_the_sha256_first_and_a_tampered_archive_changes_nothing(root, stamped):
@@ -3641,7 +3645,7 @@ def test_restore_refuses_while_a_running_container_holds_the_volume(root, stampe
     code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
     assert code == stack.EXIT_REFUSED
     assert "frontend_openwebui-data: in use by openwebui, openwebui-backup" in out
-    assert "python3 scripts/stack/stack.py down frontend" in out
+    assert f"{stack.CLI} down frontend" in out
     assert daemon.mutations == [] and daemon.volumes["frontend_openwebui-data"] == b"changed since"
 
 
@@ -5537,16 +5541,17 @@ def test_a_refusal_run_under_python3_prints_python3_steps(root, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_health_without_local_does_not_probe_an_upstream_that_is_not_meant_to_exist(root):
+def test_health_without_local_does_not_probe_an_upstream_that_is_not_meant_to_exist(root, monkeypatch):
     """F4. RED at e30fe42: `enable --plane inference` + `up` (the documented GPU-less
     gateway) and then `health` exited 1 on 'cannot read llama-cpp-upstream's /models'."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
     run(root, "init", "--planes", "inference", "--force")
     host = FakeHost(gguf_code=1, gguf_count="")        # no upstream container at all
     code, out = sweep(host, root, planes=None)
     state, label = depth_line(out)
     assert state == "OK", out
     assert "not applicable - inference runs without `local`" in label
-    assert not any("llama-cpp-upstream" in " ".join(c) for c in host.calls)
+    assert not any(c[:3] == ["docker", "exec", "llama-cpp-upstream"] for c in host.calls)
     assert code == 0, out
 
 
@@ -5622,3 +5627,122 @@ def test_when_both_renders_fail_the_real_cause_is_reported(root):
     assert {k for k, _w, _p in found} == {"GATEWAY_API_KEY", "SEARXNG_SECRET_KEY"}   # still fails closed
     assert all("env file /w/OB1/recipes/x/.env not found" in why for _k, why, _p in found)
     assert not any("too many colons" in why for _k, why, _p in found)
+
+
+# --------------------------------------------------------------------------
+# ac-followups X1 (attempt-1 tester): the "not applicable" decision must not come
+# from a shell COMPOSE_PROFILES meant for another plane, nor hide an upstream
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", "gpu", "stock", ""])
+def test_a_shell_export_does_not_hide_inference_env_file_local(root, monkeypatch, shell):
+    """X1. RED at the attempt-1 tip: `COMPOSE_PROFILES=gpu,tailscale stack.py health` with
+    `local` in inference/.env and a dead upstream printed [OK] not applicable, all passed."""
+    run(root, "init", "--planes", "inference", "--force")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local" + chr(10), encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+    assert code >= 1
+
+
+def test_local_only_in_the_shell_still_runs_the_probe(root, monkeypatch):
+    run(root, "init", "--planes", "inference", "--force")
+    monkeypatch.setenv("COMPOSE_PROFILES", "local")
+    code, out = sweep(FakeHost(gguf_code=1, gguf_count=""), root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+
+
+def test_a_stopped_upstream_is_probed_even_with_local_off_everywhere(root, monkeypatch):
+    """No source turns `local` on, but a llama-cpp-upstream container exists: 'there is no
+    upstream' would be false, so the probe runs and fails on the stopped container."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "cannot read llama-cpp-upstream" in label, out
+    assert code >= 1
+
+
+def test_not_applicable_needs_local_off_everywhere_and_no_container(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=False)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "OK" and "not applicable" in label, out
+    assert ["docker", "ps", "-a", "--filter", "name=^llama-cpp-upstream$", "--format", "{{.Names}}"] in host.calls
+
+
+def test_an_unreadable_container_list_is_not_a_pass(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="")
+    real = host.capture
+
+    def capture(cmd, cwd):
+        if "name=^llama-cpp-upstream$" in cmd:
+            host.calls.append(list(cmd))
+            return stack.CommandResult(1, "", "Cannot connect to the Docker daemon")
+        return real(cmd, cwd)
+    host.capture = capture
+    code, out = sweep(host, root, planes=None)
+    state, _label = depth_line(out)
+    assert state == "FAIL", out
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", ""])
+def test_local_in_the_env_file_with_no_upstream_container_is_a_failure(root, monkeypatch, shell):
+    """`local` is on for inference, so its upstream is MEANT to exist; a missing container is a
+    FAIL, never 'not applicable' - whatever another plane's value the shell exports."""
+    run(root, "init", "--planes", "inference", "--force")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local" + chr(10), encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=False)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+    assert code >= 1
+
+
+# --------------------------------------------------------------------------
+# ac-followups X2 (attempt-1 tester): CLI is tied to the running interpreter, and
+# no printed string hard-codes one (the F3 test monkeypatched CLI, so a literal
+# `python3 scripts/stack/stack.py` elsewhere survived it)
+# --------------------------------------------------------------------------
+
+
+def test_cli_is_the_interpreter_running_this_test():
+    assert stack.CLI == stack.interpreter_name(sys.executable) + " scripts/stack/stack.py"
+    name = Path(sys.executable).name
+    assert stack.CLI.split()[0] == (name[:-4] if name.lower().endswith(".exe") else name)
+
+
+def _non_docstring_strings(tree):
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", [])
+            if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            yield node.lineno, node.value
+
+
+def test_no_printed_string_hard_codes_an_interpreter():
+    """X2. RED at the attempt-1 tip: restore's refusal and success line and the stats hint
+    said `python3 scripts/stack/stack.py`. Every runtime step must use CLI. The one allowed
+    literal is _DOCS_GENERATED, which must render the same on every machine."""
+    source = Path(stack.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    hits = [(line, text) for line, text in _non_docstring_strings(tree)
+            if re.search(r"\bpython[0-9.]*\s+scripts/stack/stack\.py", text) and text != stack._DOCS_GENERATED]
+    assert hits == [], hits

@@ -510,12 +510,15 @@ The container was healthy, the anchor network existed, LiteLLM's
 `/health/liveliness` answered 200, and llama-swap's `/health` answers **without
 loading a model**. Nothing asked whether inference could actually serve.
 
-It runs only when inference runs the `local` profile, as `up` would pass it
-(the state file, or `COMPOSE_PROFILES=local` in `inference/.env`). Without
-`local` there is no upstream by design - the gateway alone is the documented
-GPU-less deployment, and the GPU refusal's steps lead there - so the line reads
-``serving depth: not applicable - inference runs without `local` ...`` and
-passes. It stays one line either way, so the probe count above holds.
+It runs whenever `local` is on for inference from ANY source - the state file,
+`COMPOSE_PROFILES=local` in `inference/.env`, or the shell - or a
+`llama-cpp-upstream` container exists at all (running or not; an unreadable
+container list counts as existing). A shell `COMPOSE_PROFILES` exported for
+another plane (frontend's `gpu,tailscale`) cannot switch it off. Only when none
+of those holds is there no upstream by design - the gateway alone is the
+documented GPU-less deployment, and the GPU refusal's steps lead there - and the
+line reads ``serving depth: not applicable - inference runs without `local` ...``
+and passes. It stays one line either way, so the probe count above holds.
 
 What it checks, in the cheapest order that cannot be fooled:
 

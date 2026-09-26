@@ -2318,7 +2318,7 @@ class HealthSweep:
                     "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
                 ).code == 0,
             )
-            if self.inference_local is False:
+            if self.inference_local is False and not self.upstream_exists():
                 # No local upstream is MEANT to exist: the gateway alone is the documented
                 # GPU-less deployment (inference/README.md), and the GPU refusal's own steps
                 # lead there. Probing llama-cpp-upstream would FAIL a host for following
@@ -2438,6 +2438,17 @@ class HealthSweep:
         else:
             self.console.line(f"{self.failed} probe(s) FAILED")
         return self.failed
+
+    def upstream_exists(self) -> bool:
+        """Whether a llama-cpp-upstream container exists at all (running or not).
+
+        The "not applicable" line is a claim that there is NO upstream. A container
+        that exists - stopped, crashed, left over - contradicts it whatever the
+        profiles say, so the probe runs and reports what it finds (ac-followups X1).
+        An unreadable answer counts as "exists": a health check must fail, not pass.
+        """
+        found = self.docker("ps", "-a", "--filter", "name=^llama-cpp-upstream$", "--format", "{{.Names}}")
+        return found.code != 0 or bool(found.stdout.strip())
 
     # -- the probes whose LABEL carries the measurement --------------------
 
@@ -2679,7 +2690,15 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
     planes = {p for p in manifest.order if state.is_enabled(p) or manifest.is_implicit(p)}
     local = None
     if "inference" in planes:
-        local = "local" in active_profiles(manifest, state, root, "inference")
+        # `local` from ANY source turns the probe on: the state file (with the
+        # plane's defaults), inference's OWN env file, or the shell. Not
+        # active_profiles(), which lets a shell COMPOSE_PROFILES exported for another
+        # plane (frontend's `gpu,tailscale`) HIDE inference/.env's `local` and turned
+        # a dead upstream into "not applicable" (ac-followups X1).
+        shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
+        sources = (set(run_profiles(manifest, state, "inference"))
+                   | set(compose_profiles_env(manifest, root, "inference")) | shell)
+        local = "local" in sources
     return HealthSweep(console, root, capture, http, planes, inference_local=local).run()
 
 
@@ -3663,7 +3682,7 @@ def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, sourc
     if busy:
         raise Refusal("refused: restore will not write a volume a running container holds - nothing was "
                       "changed:\n" + "\n".join(busy)
-                      + f"\nStop them first (`python3 scripts/stack/stack.py down {plane}`), then re-run.")
+                      + f"\nStop them first (`{CLI} down {plane}`), then re-run.")
 
     console.line(f"# restore {plane}: {len(entries)} volume(s) from {directory} (sha256 verified)")
     for entry in entries:
@@ -3688,7 +3707,7 @@ def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, sourc
             console.line(f"refused: restoring {name} exited {result.code} ({why[0]})")
             return EXIT_REFUSED
         console.line(f"  [ok]   {name} <- {entry['archive']} ({entry.get('bytes')} bytes)")
-    console.line(f"restored. Start the plane: python3 scripts/stack/stack.py up {plane}")
+    console.line(f"restored. Start the plane: {CLI} up {plane}")
     return EXIT_OK
 
 
@@ -3805,7 +3824,7 @@ def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, ho
     console.line("")
     if not state.is_enabled("inference"):
         console.line("== inference: NOT ENABLED on this machine - no llm-queue board and no LiteLLM spend "
-                     "ledger to read (`python3 scripts/stack/stack.py enable inference` turns it on)")
+                     f"ledger to read (`{CLI} enable inference` turns it on)")
         return EXIT_REFUSED if failed else EXIT_OK
 
     console.line("== llm-queue live board")

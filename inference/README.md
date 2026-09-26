@@ -185,9 +185,11 @@ python scripts/stack/stack.py down inference
 `/health/liveliness`. **Serving depth** asks whether a model can actually
 answer: it counts the `.gguf` files the upstream sees, then reads llama-swap's
 list of loaded models, and only if none is loaded sends one three-token
-completion through the gateway (a cold load can take minutes). Without `local`
-there is no upstream by design, and the line reads ``serving depth: not
-applicable - inference runs without `local` `` and passes. With `local` on and
+completion through the gateway (a cold load can take minutes). Without `local`,
+and with no `llama-cpp-upstream` container, there is no upstream by design,
+and the line reads ``serving depth: not applicable - inference runs without
+`local` `` and passes. A shell `COMPOSE_PROFILES` set for another plane does not
+turn `local` off here. With `local` on and
 the upstream not running, it fails with `cannot read llama-cpp-upstream's
 /models ... is the upstream running?`.
 
