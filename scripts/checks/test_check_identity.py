@@ -392,7 +392,6 @@ class Attempt4(ScratchRepo):
         self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
         rc, out = self.run_gate()
         self.assertEqual(rc, 0, out)
-        common = git(self.dir, 'rev-parse', '--git-common-dir').stdout.decode().strip()
         verdict = [ln for ln in out.splitlines() if ' - scanned ' in ln]
         self.assertEqual(len(verdict), 1, out)
         self.assertNotIn('identity-denylist', verdict[0])
