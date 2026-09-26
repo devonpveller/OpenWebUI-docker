@@ -154,6 +154,14 @@ jobs:
         # carries that project's recorded rows through UNVERIFIED rather than
         # passing quietly - the remaining seven projects are verified for real.
       - run: python scripts/stack/stack.py inventory --check
+        # The docs' generated blocks (ac-doc-generator): every registered block is
+        # present with clean markers and matches the renders. --allow-unverified for
+        # the same reason as above - without the OB1 submodule the blocks that span
+        # ob1 cannot be rendered here, and the check names each one NOT VERIFIED
+        # instead of passing it; the pre-commit hook verifies them on a host that has
+        # the submodule. Everything else is compared for real, and a stale, missing or
+        # broken block fails this step.
+      - run: python scripts/stack/stack.py docs --check --allow-unverified
 
   bridge-stdlib-tests:
     runs-on: ubuntu-latest

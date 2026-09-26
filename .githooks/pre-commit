@@ -13,6 +13,7 @@
 #   3. gateway routing   - inference must go through the LiteLLM alias
 #   3b. corpus exposure  - a direct corpus INSERT must state its plane
 #   4. project configs   - compose renders + ps1 tokenize
+#   4b. doc blocks       - the docs' generated counts still match the renders
 #   5. env_file scope    - a service names the variables it needs
 #   5b. OB1 recipe tests - a staged OB1 gitlink bump must pass its unit tests
 #   5c. OB1 deno recipes - and must type-check the Deno recipe 5b cannot see
@@ -291,6 +292,99 @@ run_gate corpus-exposure './scripts/checks/check-corpus-exposure-producers.ps1' 
 # any staged ps1 => PSParser tokenize. Skips itself when neither is staged.
 run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
     "Pre-commit validation failed (compose/ps1 structural check)!"
+
+# --- 4b. generated doc blocks (inline sh + Python, ac-doc-generator, 2026-09-26)
+# The service counts, profile sets, ports, plane table, product menu and probe
+# list in the READMEs, the stack-map reference and SERVICE-LIFECYCLE.md are
+# GENERATED between `stack:` markers by `python scripts/stack/stack.py docs
+# --write`. This refuses a commit where one no longer matches the manifest and
+# the compose renders, naming the block and the file - and where a registered
+# block's markers are missing or broken, because a block that silently stops
+# being generated is the failure this exists for.
+#
+# TRIGGER: a staged compose file (any *.yml / *.yaml), an .env.example, the
+# manifest, stack.py, the OB1 gitlink, or one of the docs stack.py registers
+# (`docs --list` - asked, not copied, so the trigger cannot drift from the
+# registry). Anything else skips it without a render, so an ordinary commit
+# costs nothing. The check reads the WORKING TREE, so a triggering file that is
+# staged AND has unstaged edits on top is refused outright: what would be
+# checked is not what would be committed.
+#
+# EXIT CODES of `docs --check`, and what the hook does with each - FAIL-CLOSED:
+#   0  every block matched                                  -> RAN
+#   3  no block is stale, but some could not be rendered    -> SKIPPED, loudly
+#      here (the OB1 submodule not checked out, a gitignored env compose stats,
+#      no docker); the check names each one
+#   1  a stale, missing or broken block                     -> REFUSED
+#   anything else (a crash, a missing interpreter mid-run)  -> REFUSED
+# Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
+# drift half; with none, SKIPPED and recorded in the summary and the ledger.
+_docs_py=
+for _cand in python3 python; do
+    if command -v "$_cand" >/dev/null 2>&1 &&
+       "$_cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        _docs_py=$_cand
+        break
+    fi
+done
+if ! _docs_staged=$(git -c core.quotePath=false diff --cached --name-only); then
+    echo "docs-blocks: git could not list the staged files - cannot tell whether a generated block went stale."
+    echo "Pre-commit validation failed (generated doc blocks)!"
+    print_summary
+    exit 1
+fi
+if [ -z "$_docs_py" ]; then
+    echo "SKIPPED docs-blocks: needs Python 3.11+ (a stale generated count in the docs would not be caught)"
+    GATES_SKIPPED="$GATES_SKIPPED docs-blocks"
+else
+    if ! _docs_registered=$("$_docs_py" scripts/stack/stack.py docs --list); then
+        echo "docs-blocks: \`stack.py docs --list\` failed - cannot tell which docs carry generated blocks."
+        echo "Pre-commit validation failed (generated doc blocks)!"
+        print_summary
+        exit 1
+    fi
+    # Tagged streams, not `awk -v` or process substitution: this is /bin/sh (dash
+    # on Linux), and a path may contain spaces.
+    _docs_trigger=$( { printf '%s\n' "$_docs_registered" | sed 's/^/R	/'
+                       printf '%s\n' "$_docs_staged" | sed 's/^/S	/'; } |
+        awk -F'\t' '$1 == "R" { if ($2 != "") want[$2] = 1; next }
+                    $1 == "S" && $2 != "" {
+                        p = $2
+                        if (p ~ /\.(yml|yaml)$/ || p ~ /(^|\/)\.env\.example$/ || p == "stack.manifest.toml" ||
+                            p == "scripts/stack/stack.py" || p == "OB1" || (p in want)) print p }')
+    if [ -n "$_docs_trigger" ]; then
+        if ! _docs_dirty=$(git -c core.quotePath=false diff --name-only); then
+            echo "docs-blocks: git could not list the unstaged changes."
+            echo "Pre-commit validation failed (generated doc blocks)!"
+            print_summary
+            exit 1
+        fi
+        _docs_both=$( { printf '%s\n' "$_docs_dirty" | sed 's/^/D	/'
+                        printf '%s\n' "$_docs_trigger" | sed 's/^/T	/'; } |
+            awk -F'\t' '$1 == "D" { d[$2] = 1; next } $1 == "T" && ($2 in d) { print $2 }')
+        if [ -n "$_docs_both" ]; then
+            echo "docs-blocks: these are staged AND carry unstaged edits, and the check reads the working tree:"
+            printf '%s\n' "$_docs_both" | sed 's/^/    /'
+            echo "  Stage them fully (or stash the rest), then commit again."
+            echo "Pre-commit validation failed (generated doc blocks)!"
+            print_summary
+            exit 1
+        fi
+        "$_docs_py" scripts/stack/stack.py docs --check
+        _docs_rc=$?
+        case "$_docs_rc" in
+            0) GATES_RAN="$GATES_RAN docs-blocks" ;;
+            3) echo "SKIPPED docs-blocks: some generated blocks could not be rendered on this machine (named above); none was stale"
+               GATES_SKIPPED="$GATES_SKIPPED docs-blocks" ;;
+            *) echo "  Regenerate with: python scripts/stack/stack.py docs --write   (then stage the result)"
+               echo "Pre-commit validation failed (generated doc blocks: stale, missing or broken - exit $_docs_rc)!"
+               print_summary
+               exit 1 ;;
+        esac
+    else
+        GATES_RAN="$GATES_RAN docs-blocks"
+    fi
+fi
 
 # --- 5. env_file scope (staged-aware) --------------------------------------
 # Fail if this commit ADDS a service that grants itself a shared .env. Pre-existing
