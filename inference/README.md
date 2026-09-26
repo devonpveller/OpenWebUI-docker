@@ -98,11 +98,12 @@ Keys, in `inference/.env`:
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. `up` starts the planes in dependency order, inference before the
-frontend: so until `frontend/.env` holds a real `WEBUI_SECRET_KEY`, the `up`
-below starts inference's containers, then stops at the frontend with
-`# up stopped: frontend exited 1` and exits 1, leaving inference running.
-Either give
+keeps it. `up` checks the keys of every plane it will start before it starts
+any of them (and then starts them in dependency order, ties broken by the order
+the manifest declares them). So until `frontend/.env` holds a real
+`WEBUI_SECRET_KEY`, the `up` below starts nothing: it prints
+``refused: fix these before `up` starts anything:``, names `WEBUI_SECRET_KEY`
+in `frontend/.env`, and exits 1. Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
 [its README](../frontend/README.md#enable-and-start); skip its `init`, which
 refuses once `.stack/state.json` exists, and the frontend is enabled already -
@@ -113,8 +114,8 @@ python scripts/stack/stack.py disable --plane frontend
 ```
 
 (`python scripts/stack/stack.py enable --plane frontend` turns it back on
-later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
-that key is set.)
+later; it refuses, naming `WEBUI_SECRET_KEY` in `frontend/.env`, until that
+key is set.)
 
 Without a GPU (the gateway alone):
 
@@ -136,8 +137,8 @@ value, naming each one. `up` starts the anchor's networks, this plane, and
 anything else you have enabled. Four containers start. The gateway registers
 **no model** - `docker logs llm-gateway` ends its `[assemble-config]` lines with
 `wrote /app/config.yaml with 0 model(s)` - so callers get errors, and
-`stack.py health` fails its serving-depth probe (below). That is the correct
-state for a machine with no GPU and no cloud route.
+`stack.py health` reports its serving-depth probe as not applicable (below).
+That is the correct state for a machine with no GPU and no cloud route.
 
 With a GPU, also uncomment one line in `inference/.env`:
 
@@ -184,9 +185,16 @@ python scripts/stack/stack.py down inference
 `/health/liveliness`. **Serving depth** asks whether a model can actually
 answer: it counts the `.gguf` files the upstream sees, then reads llama-swap's
 list of loaded models, and only if none is loaded sends one three-token
-completion through the gateway (a cold load can take minutes). Without `local`
-there is no upstream, and the probe fails with `cannot read llama-cpp-upstream's
-/models ... is the upstream running?`.
+completion through the gateway (a cold load can take minutes). Without `local`,
+and with no `llama-cpp-upstream` container, there is no upstream by design,
+and the line reads ``serving depth: not applicable - inference runs without
+`local` `` and passes. A shell `COMPOSE_PROFILES` set for another plane does not
+turn `local` off here. With `local` on and the upstream not running, it fails
+with `cannot read llama-cpp-upstream's /models ... is the upstream running?`.
+With `local` off but a `llama-cpp-upstream` container still present (left over
+from an earlier `local` run), it fails too and calls the container a leftover
+that `up` will never start: remove it with the `rm -sf` line in
+[Troubleshooting](#troubleshooting), or turn `local` on.
 
 `stats` adds the queue's live board (under `local`) and the ledger's demand, by
 caller and in total.
@@ -243,7 +251,7 @@ up with your own tools (`lm-models-backup` tars it weekly under `local`).
 | `refused: inference cannot be enabled yet:` naming `LITELLM_DB_PASSWORD` or `LITELLM_MASTER_KEY` | Set both in `inference/.env`; nothing was changed. |
 | `network ai-stack_llm-net declared as external, but could not be found` from a hand-typed `docker compose` | The anchor's networks do not exist yet. `python scripts/stack/stack.py up` creates them. |
 | `[DIFFERS] ai-stack_llm-net: internal is false, declared true` and `up` stops | A network of that name exists and is not internal. The driver never alters one: stop what is attached (`docker network inspect ai-stack_llm-net`), `docker network rm ai-stack_llm-net`, and run `up` again. |
-| `Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu]]` | `local` is on and there is no NVIDIA runtime. This leaves `llm-gateway` recreated but **not running**. Comment `COMPOSE_PROFILES=local` out again, remove the half-created `local` containers with `docker compose -f inference/docker-compose.yml --profile local rm -sf llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup`, and run `python scripts/stack/stack.py up`. |
+| `Error response from daemon: could not select device driver "nvidia" with capabilities: [[gpu]]` | `local` is on and the daemon cannot give the upstreams a GPU. On a daemon with no NVIDIA runtime `stack.py up` does not get this far: it refuses first (`refused: this Docker daemon has no NVIDIA GPU`), starts nothing, and prints the steps to follow. This raw error comes only from a daemon that reports an `nvidia` runtime but has no usable device, or from a hand-typed `docker compose`, and it leaves `llm-gateway` recreated but **not running**. Turn `local` off where it was turned on: in `inference/.env`, comment `COMPOSE_PROFILES=local` out; in the state file (`enable inference`, or a product such as `memory` that turns it on), run `python scripts/stack/stack.py disable <that product>` and then `python scripts/stack/stack.py enable --plane inference`. Remove the half-created `local` containers with `docker compose -f inference/docker-compose.yml --profile local rm -sf llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup` - until they are gone, `stack.py health` fails its serving-depth line on the leftover `llama-cpp-upstream` and prints this same command - and run `python scripts/stack/stack.py up`. |
 | Every caller gets 401 | Its key is not a virtual key this gateway issued - see [Issue a key for each caller](#issue-a-key-for-each-caller). A caller left on a default such as `mnemory` or `llama` is refused. |
 | A model is missing from `/v1/models` | `docker logs llm-gateway` shows the `[assemble-config]` decision for every fragment: `SKIP local.yaml - needs compose profile 'local'` or `DROP cloud-large ... env not set: OPENROUTER_API_KEY`. |
 | `stack.py health` fails `serving depth: llama-cpp-upstream's /models holds NO .gguf files` | `LM_MODELS_DIR` points at an empty or wrong directory. The line names the host path that was bound. |

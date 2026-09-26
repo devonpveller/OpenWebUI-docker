@@ -191,8 +191,11 @@ pipe) merge it over the inherited environment. The rules:
   gateway.
 - With **no** flag nothing is set, and compose reads the variable itself (shell,
   then the plane's env file) - unchanged.
-- It is environment, not argv: `--dry-run` prints the same line as before. Run
-  such a line by hand and the gateway gets the env file's value, not the flags.
+- It is environment, not argv, so every printed line (`--dry-run` included)
+  shows it as a prefix: `COMPOSE_PROFILES=local docker compose -f
+  inference/docker-compose.yml --profile local up -d`. That is sh/bash syntax;
+  in PowerShell set `$env:COMPOSE_PROFILES` first. Copy a line WITHOUT its
+  prefix and the gateway gets the env file's value, not the flags.
 
 Every service that reads `COMPOSE_PROFILES` in any plane's render is that one
 gateway; the check is repeated in the item's findings.
@@ -305,7 +308,7 @@ All three take the same selection:
 | Form | Acts on |
 |---|---|
 | *(nothing)* | the planes this machine **enables**. `up`/`down` add their `requires` closure; `status` does not - reporting on a plane nobody enabled is noise |
-| `<plane>` | exactly that plane. `up <plane>` prints a `#` note naming any requirement it is **not** starting |
+| `<plane>` | exactly that plane. `up <plane>` first ensures the anchor's networks, as a bare `up` does (it creates a missing one and starts nothing else), and prints a `#` note naming any other requirement it is **not** starting |
 | `--all` | every plane the manifest declares except the `manual` ones - what a bare `stack.ps1 up` meant |
 
 A plane name together with `--all` is refused.
@@ -320,8 +323,8 @@ exits non-zero.
 
 `up` starts the selected planes in dependency order; `down` stops them in
 reverse. `--dry-run` prints the exact
-`docker [--context X] compose -f <file> [--profile p]... <verb>`
-lines and runs **nothing**.
+`[COMPOSE_PROFILES=p,...] docker [--context X] compose -f <file> [--profile p]... <verb>`
+lines (the prefix whenever a profile is passed; see above) and runs **nothing**.
 
 A `manual` plane (the portal) is never started or stopped; a `#` comment line
 after the commands names the script that drives it.
@@ -364,8 +367,12 @@ and which code - the rest is not attempted.
   with every profile whose manifest `requires` reaches it**, and every profile
   that declares `stands_in_for` it added (frontend `gpu,tailscale` becomes
   `stock`, so Open WebUI still runs); `unset COMPOSE_PROFILES` when only the
-  shell turns it on; then the refused command **as typed** (`recover inference`,
-  `up --all`). `--plane` is never offered while a product owns the plane (it
+  shell turns it on, followed - when the plane's env file would not then run
+  the stand-in (no `COMPOSE_PROFILES` line, say) - by the env-file value that
+  does, so both paths end at the same profiles; then the refused command **as typed** (`recover inference`,
+  `up --all`). Each step names the interpreter that is running the driver
+  (`python3 scripts/stack/stack.py ...` when it was started as `python3`), so a
+  host with no `python` on PATH can follow it. `--plane` is never offered while a product owns the plane (it
   would be refused). Before this, a GPU-less host got compose's raw `could not
   select device driver "nvidia"` halfway through `up`, after the anchor and
   earlier planes had started. An unknown answer from `docker info` (docker not
@@ -502,6 +509,20 @@ bound its default `../../data/models/gguf` - an empty directory - at `/models`.
 The container was healthy, the anchor network existed, LiteLLM's
 `/health/liveliness` answered 200, and llama-swap's `/health` answers **without
 loading a model**. Nothing asked whether inference could actually serve.
+
+It runs whenever `local` is on for inference from ANY source - the state file,
+`COMPOSE_PROFILES=local` in `inference/.env`, or the shell - or a
+`llama-cpp-upstream` container exists at all (running or not; an unreadable
+container list counts as existing). A shell `COMPOSE_PROFILES` exported for
+another plane (frontend's `gpu,tailscale`) cannot switch it off. Only when none
+of those holds is there no upstream by design - the gateway alone is the
+documented GPU-less deployment, and the GPU refusal's steps lead there - and the
+line reads ``serving depth: not applicable - inference runs without `local` ...``
+and passes. It stays one line either way, so the probe count above holds. When the probe
+runs and cannot read the upstream, its hint follows WHY it ran: `local` on (`up`
+starts the upstream), a leftover container with `local` off (remove it with the
+`rm -sf` line from `inference/README.md`, or turn `local` on), or an unreadable
+`docker ps -a` (fix docker access).
 
 What it checks, in the cheapest order that cannot be fooled:
 

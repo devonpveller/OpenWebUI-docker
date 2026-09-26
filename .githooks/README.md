@@ -52,7 +52,7 @@ Every gate is a PowerShell script, and they run on Linux and macOS too. At the t
 |------|------|-----------|
 | **Windows PowerShell** | a native Windows git shell (`uname -s` is `MINGW*`/`MSYS*`/`CYGWIN*`, e.g. Git Bash) and `powershell.exe` is on `PATH`. **Not WSL**: WSL has `powershell.exe` on `PATH` through interop, but its Windows git cannot use the Linux checkout, so WSL takes the next row | every gate, with the same command line the hook has always used |
 | **PowerShell 7** | not a native Windows git shell (or no `powershell.exe`), and `pwsh` is on `PATH` (any OS) | every gate, the same `.ps1` files |
-| **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped, through their Python twins; every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
+| **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped, through their Python twins, and the four that never needed PowerShell: `hook-modes` and `exec-bits-modes` (plain `sh`), `exec-bits-drift` (Python 3.8+) and `docs-blocks` (Python 3.11+). Every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
 
 The three never-skipped gates and their twins, both under `scripts/checks/`:
 
@@ -74,7 +74,7 @@ A skip is never silent. The hook prints each `SKIPPED` line as it happens, ends 
 summary such as
 
 ```text
-Pre-commit gates (host: python3) - RAN: hook-modes secrets line-endings gateway-routing | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
+Pre-commit gates (host: python3) - RAN: hook-modes exec-bits-modes exec-bits-drift secrets line-endings gateway-routing docs-blocks | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
 ```
 
 and adds a fifth column to the attestation line (below), `skipped=<gate>,<gate>,...`.

@@ -80,12 +80,12 @@ Keys, in `memory/.env`:
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. `up` starts the planes in dependency order - inference, then the
-frontend, then this plane - so until `frontend/.env` holds a real
-`WEBUI_SECRET_KEY`, the `up` below starts the inference plane (the
-`llm-gateway*` containers), stops at the frontend with
-`# up stopped: frontend exited 1`, and leaves those running with none of this
-plane's containers started. Either give
+keeps it. `up` checks the keys of every plane it will start before it starts
+any of them (and then starts them in dependency order, ties broken by the order
+the manifest declares them). So until `frontend/.env` holds a real
+`WEBUI_SECRET_KEY`, the `up` below starts nothing: it prints
+``refused: fix these before `up` starts anything:``, names `WEBUI_SECRET_KEY`
+in `frontend/.env`, and exits 1. Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
 [its README](../frontend/README.md#enable-and-start); skip its `init`, which
 refuses once `.stack/state.json` exists, and the frontend is enabled already -
@@ -96,8 +96,8 @@ python scripts/stack/stack.py disable --plane frontend
 ```
 
 (`python scripts/stack/stack.py enable --plane frontend` turns it back on
-later; it refuses with `WEBUI_SECRET_KEY is missing in frontend/.env` until
-that key is set.)
+later; it refuses, naming `WEBUI_SECRET_KEY` in `frontend/.env`, until that
+key is set.)
 
 ```bash
 cp memory/.env.example memory/.env
@@ -115,8 +115,10 @@ python scripts/stack/stack.py up
 The first `up` builds `mnemory:local` from `../mnemory` and
 `mnemory-cloud-gateway` from this directory.
 
-**A fresh build does not start today.** Built from the current `dev` branch of
-`../mnemory`, `mnemory` crash-loops and `up` stops with
+**A fresh build does not start while `../mnemory` resolves `mcp` 2.x, or while
+its fastembed loader asks Hugging Face for a model before it serves.** Built
+from a `../mnemory` checkout where either holds, `mnemory` crash-loops and
+`up` stops with
 `dependency failed to start: container mnemory is unhealthy`. `docker logs
 mnemory` shows two failures, one after the other:
 
@@ -134,8 +136,9 @@ mnemory` shows two failures, one after the other:
    `ai-stack_llm-net`, is internal. It restarts and fails the same way each
    time.
 
-The second one has no fix in this repository yet, so the plane cannot be brought
-up from a fresh clone. **While memory is enabled, every plain `up` stops at it**
+The second one cannot be fixed in this repository - the loader is mnemory's -
+so while it holds the plane cannot be brought up from a fresh clone. **While
+memory is enabled, every plain `up` stops at it**
 (`# up stopped: memory exited 1`), and the planes after it in the start order -
 search, coder, Open Brain, agent-org - are never started. Take it back out and
 stop the crash-looping container:

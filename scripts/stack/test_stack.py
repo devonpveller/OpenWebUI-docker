@@ -124,9 +124,18 @@ def run(root: Path, *args, runner=None, capture=None):
     return code, out.getvalue(), recorder
 
 
+_ENV_PREFIX = re.compile(r"^(?:[A-Z_]+=\S* )+(?=docker )")
+
+
 def docker_lines(text: str) -> list[str]:
-    """Just the command lines: comments and headers are not commands."""
-    return [ln for ln in text.splitlines() if ln.startswith("docker ")]
+    """Just the command lines (their argv): comments and headers are not commands.
+
+    A printed line carries its environment as a `VAR=value` prefix (ac-followups
+    F6); that is stripped here, so the argv assertions read as before. The prefix
+    has its own tests (test_the_printed_line_carries_the_environment_it_runs_with).
+    """
+    lines = [_ENV_PREFIX.sub("", ln) for ln in text.splitlines()]
+    return [ln for ln in lines if ln.startswith("docker ")]
 
 
 def state_of(root: Path) -> dict:
@@ -809,6 +818,8 @@ class FakeHost:
         # Default = this host: plugins ARE deployed, so the drift check is real.
         self.plugin_count = broken.get("plugin_count", "16")
         self.plugin_census_code = broken.get("plugin_census_code", 0)
+        # ac-followups X1: does a llama-cpp-upstream container exist (any state)?
+        self.upstream_exists = broken.get("upstream_exists", False)
         self.calls: list[list[str]] = []
 
     def capture(self, cmd, cwd):
@@ -819,6 +830,8 @@ class FakeHost:
             return stack.CommandResult(0 if self.frontend_services else 1,
                                        "\n".join(self.frontend_services), "")
         if cmd[:2] == ["docker", "ps"]:
+            if "name=^llama-cpp-upstream$" in cmd:
+                return stack.CommandResult(0, "llama-cpp-upstream" if self.upstream_exists else "", "")
             if "name=tailscale" in cmd:
                 return stack.CommandResult(0, "\n".join(self.running), "")
             return stack.CommandResult(0, "\n".join(self.unhealthy), "")
@@ -855,6 +868,18 @@ class FakeHost:
         return stack.HttpResult(status, body)
 
 
+def _inference_local(root: Path) -> None:
+    """Give the state's inference plane `local`, as this host runs it.
+
+    The serving-depth probe runs only then (ac-followups F4): without `local` there
+    is no upstream to probe, and the line says so instead.
+    """
+    manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
+    state = stack.State.load(root / stack.STATE_REL)
+    stack.enable_plane_profiles(manifest, state, "inference", ["local"])
+    state.save()
+
+
 def sweep(host: FakeHost, root: Path, planes: str | None = ALL_PLANES_BUT_ANCHOR):
     """One `health` run. `planes` is written as the state first (None = leave the state alone).
 
@@ -864,6 +889,8 @@ def sweep(host: FakeHost, root: Path, planes: str | None = ALL_PLANES_BUT_ANCHOR
     """
     if planes is not None:
         run(root, "init", "--planes", planes, "--force")
+        if "inference" in planes.split(","):
+            _inference_local(root)
     out = io.StringIO()
     code = stack.main(["--root", str(root), "health"], stdout=out, capture=host.capture, http=host.http)
     return code, out.getvalue()
@@ -963,6 +990,7 @@ def test_serving_depth_refuses_without_a_caller_key_rather_than_guessing(root):
     """An unmigrated host gets a sentence naming the file, not a 401 to decode."""
     # The state first: `init` itself refuses once the key is gone.
     run(root, "init", "--planes", ALL_PLANES_BUT_ANCHOR, "--force")
+    _inference_local(root)
     env = root / "inference" / ".env"
     env.write_text(
         "\n".join(line for line in env.read_text(encoding="utf-8").splitlines()
@@ -1215,8 +1243,11 @@ def test_up_all_never_starts_the_manual_plane(root):
 def test_up_one_plane_starts_only_that_plane_and_names_what_it_assumes(root):
     code, out, _r = run(root, "up", "coder", "--dry-run")
     assert code == 0
-    assert docker_lines(out) == ["docker compose -f coder/docker-compose.yml up -d"]
-    assert "# note: coder requires anchor, inference; this starts only coder" in out
+    # ac-followups N9: the anchor's networks are ENSURED first (its render line is
+    # printed; under --dry-run nothing is rendered), and no other plane is started.
+    assert docker_lines(out) == ["docker compose -f docker-compose.yml config --no-interpolate --format json",
+                                 "docker compose -f coder/docker-compose.yml up -d"]
+    assert "# note: coder requires inference; this starts only coder" in out
 
 
 def test_a_plane_and_all_together_is_refused(root):
@@ -2819,7 +2850,9 @@ def test_an_unrenderable_plane_fails_closed_and_says_why(root):
     env, text = _real_example_into(root, "search")
     env.write_text(text, encoding="utf-8")
     broken = ("docker", "compose", "-f", "search/docker-compose.yml", "config", "--no-interpolate", "--format", "json")
-    daemon = FakeDaemon(exit_codes={broken: 1})
+    # both renders: the uninterpolated one, and the interpolated fallback (ac-followups)
+    also = ("docker", "compose", "-f", "search/docker-compose.yml", "config", "--format", "json")
+    daemon = FakeDaemon(exit_codes={broken: 1, also: 1})
     manifest = stack.Manifest.load(REAL_MANIFEST)
     state = stack.State({"search": {"profiles": [], "context": None}}, None, True)
     found = stack.shipped_placeholders(manifest, state, root, "search", daemon.capture)
@@ -3583,7 +3616,7 @@ def test_restore_round_trip_puts_the_archived_contents_back(root, stamped):
     # recreated with the labels compose gives its own volumes, so a later `up` adopts it
     assert daemon.volume_labels["frontend_openwebui-data"] == {
         "com.docker.compose.project": "frontend", "com.docker.compose.volume": "openwebui-data"}
-    assert "restored. Start the plane: python3 scripts/stack/stack.py up frontend" in out
+    assert f"restored. Start the plane: {stack.CLI} up frontend" in out
 
 
 def test_restore_verifies_the_sha256_first_and_a_tampered_archive_changes_nothing(root, stamped):
@@ -3612,7 +3645,7 @@ def test_restore_refuses_while_a_running_container_holds_the_volume(root, stampe
     code, out = ops(root, daemon, "restore", "frontend", "--from", str(backup))
     assert code == stack.EXIT_REFUSED
     assert "frontend_openwebui-data: in use by openwebui, openwebui-backup" in out
-    assert "python3 scripts/stack/stack.py down frontend" in out
+    assert f"{stack.CLI} down frontend" in out
     assert daemon.mutations == [] and daemon.volumes["frontend_openwebui-data"] == b"changed since"
 
 
@@ -4665,9 +4698,19 @@ def _record_calls(monkeypatch):
     return seen
 
 
+def _anchor_without_networks(cmd, cwd):
+    """`up <plane>` ensures the anchor's networks first (ac-followups N9). Answer its
+    render with a project that declares none, so nothing is inspected or created;
+    every other read goes to the hermetic stub as before."""
+    if list(cmd[:4]) == ["docker", "compose", "-f", "docker-compose.yml"] and "config" in cmd:
+        return stack.CommandResult(0, '{"name": "ai-stack", "networks": {}}', "")
+    return stack.subprocess_capture(cmd, cwd)
+
+
 def _run_with_the_real_runner(root, *args):
     out = io.StringIO()
-    code = stack.main(["--root", str(root), *args], stdout=out)   # runner=None -> subprocess_runner
+    code = stack.main(["--root", str(root), *args], stdout=out,   # runner=None -> subprocess_runner
+                      capture=_anchor_without_networks)
     return code, out.getvalue()
 
 
@@ -4741,12 +4784,38 @@ def test_the_capture_seam_carries_the_variable_too(root, monkeypatch):
                           "config", "--format", "json"]
 
 
-def test_the_printed_command_is_unchanged(root):
-    """The override is environment, not argv: --dry-run prints what it always printed."""
+def test_the_printed_line_carries_the_environment_it_runs_with(root):
+    """F6 (ac-readme attempt 2). RED at e30fe42: the dry-run line had no COMPOSE_PROFILES,
+    so a hand copy of it started llama.cpp behind a gateway that registered no local model."""
     run(root, "enable", "--product", "inference")
     code, out, _ = run(root, "up", "inference", "--dry-run")
     assert code == 0
-    assert docker_lines(out) == ["docker compose -f inference/docker-compose.yml --profile local up -d"]
+    assert out.splitlines()[-1] == ("COMPOSE_PROFILES=local docker compose -f inference/docker-compose.yml "
+                                    "--profile local up -d")
+    # the argv itself is unchanged
+    assert docker_lines(out)[-1:] == ["docker compose -f inference/docker-compose.yml --profile local up -d"]
+
+
+def test_the_printed_prefix_is_exactly_the_environment_the_runner_gets(root, monkeypatch):
+    run(root, "init", "--planes", "ob1", "--force")
+    seen = _record_calls(monkeypatch)
+    code, out = _run_with_the_real_runner(root, "up", "ob1")
+    assert code == 0, out
+    ((cmd, env),) = seen
+    printed = [ln for ln in out.splitlines() if ln.endswith(" ".join(cmd))]
+    assert printed == [f"COMPOSE_PROFILES={env['COMPOSE_PROFILES']} " + " ".join(cmd)], out
+
+
+def test_a_command_with_no_override_prints_no_prefix(root):
+    run(root, "enable", "--plane", "inference")
+    _code, out, _ = run(root, "up", "inference", "--dry-run")
+    assert out.splitlines()[-1] == "docker compose -f inference/docker-compose.yml up -d"
+
+
+def test_printable_quotes_a_value_a_shell_would_split():
+    cmd = stack.ComposeCommand(["docker", "compose", "ps"], {"COMPOSE_PROFILES": "a b"})
+    assert stack.printable(cmd) == "COMPOSE_PROFILES='a b' docker compose ps"
+    assert stack.printable(["docker", "ps"]) == "docker ps"
 
 
 def test_the_shared_names_are_the_five_the_docs_name():
@@ -5087,7 +5156,10 @@ def test_a_plane_the_gpu_check_cannot_render_is_refused_not_skipped(root):
 # ac-driver-products attempt 3: a refusal's remedy is FOLLOWED, not read
 # --------------------------------------------------------------------------
 
-_STEP = re.compile(r"^\s+\d+\. `python scripts/stack/stack\.py ([^`]+)`")
+# getattr: this file must COLLECT against a driver that predates CLI, so the base
+# reproduction fails on behaviour, not on import (the _powershell_present convention).
+_STEP = re.compile(r"^\s+\d+\. `" + re.escape(getattr(stack, "CLI", "python scripts/stack/stack.py"))
+                   + r" ([^`]+)`")
 
 
 def _remedy_commands(out: str) -> list[list[str]]:
@@ -5316,3 +5388,416 @@ def test_headless_after_a_full_enable_does_not_claim_it_dropped_the_surface(root
     assert "frontend stay - an earlier `enable coding-agent` added them" in out
     assert state_of(root)["products"]["coding-agent"]["headless"] is False
     assert "product:coding-agent" in state_of(root)["planes"]["frontend"]["owners"]
+
+
+# --------------------------------------------------------------------------
+# ac-followups: N9 - `up <plane>` ensures the anchor's networks as a bare `up`
+# does; N10 - the shell `unset` step gets the same profiles as the env-file step
+# --------------------------------------------------------------------------
+
+
+def test_up_one_plane_on_an_empty_daemon_creates_the_anchor_networks_first(root):
+    """N9. RED at e30fe42: `up inference` never ensured them, so compose said
+    'network ai-stack_app-net declared as external, but could not be found'."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "--plane", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert sorted(daemon.created) == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
+    streamed = [" ".join(c) for c in daemon.streamed]
+    ups = [i for i, c in enumerate(streamed) if c == "docker compose -f inference/docker-compose.yml up -d"]
+    creates = [i for i, c in enumerate(streamed) if c.startswith("docker network create")]
+    assert ups and creates and max(creates) < ups[0], streamed
+    # the anchor is still never `up`-ed, and no OTHER plane is started
+    assert not any(c.startswith("docker compose -f docker-compose.yml up") for c in streamed)
+    assert not any("frontend/docker-compose.yml" in c for c in streamed)
+
+
+def test_the_gpu_refusal_s_rerun_step_works_on_a_fresh_daemon(root):
+    """N9 as the reader meets it: follow the printed steps of `up inference` literally."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED and daemon.created == [], out
+    steps = _remedy_commands(out)
+    assert steps[-1] == ["up", "inference"], out
+    for args in steps[:-1]:
+        assert run(root, *args)[0] == 0
+    code, out, _ = run(root, *steps[-1], runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert "declared as external" not in out
+
+
+def test_up_one_plane_leaves_existing_anchor_networks_alone(root):
+    daemon = FakeDaemon(networks={spec["name"]: {"internal": spec.get("internal", False)}
+                                  for spec in ANCHOR_NETWORKS.values()})
+    code, out, _ = run(root, "up", "frontend", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert daemon.created == [] and daemon.mutations == []
+    assert out.count("[exists]") == 3
+
+
+def test_up_one_plane_refuses_on_a_drifted_llm_net_before_starting_it(root):
+    daemon = FakeDaemon(networks={"ai-stack_llm-net": {"internal": False}})
+    code, out, _ = run(root, "up", "frontend", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "# up stopped: anchor" in out
+    assert not any("frontend/docker-compose.yml" in " ".join(c) for c in daemon.streamed)
+
+
+def test_up_the_anchor_by_name_still_only_ensures_its_networks(root):
+    daemon = FakeDaemon()
+    code, out, _ = run(root, "up", "anchor", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0, out
+    assert sorted(daemon.created) == ["ai-stack_app-net", "ai-stack_default", "ai-stack_llm-net"]
+    assert out.count("declares networks and no service") == 1
+
+
+FRONTEND_NO_PROFILE_LINE = "# no COMPOSE_PROFILES line\n"
+
+
+def _frontend_env_without_profiles(root):
+    env = _MANIFEST.env_path(root, "frontend")
+    env.write_text(re.sub(r"(?m)^COMPOSE_PROFILES=.*\n?", "", env.read_text(encoding="utf-8")), encoding="utf-8")
+    return env
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", "gpu"])
+def test_the_shell_unset_step_brings_in_the_stand_in_the_env_file_step_does(root, monkeypatch, shell):
+    """N10. RED at e30fe42: `unset` alone left a frontend/.env with no COMPOSE_PROFILES
+    line to decide, which starts openwebui-backup and no Open WebUI (X11)."""
+    run(root, "init", "--planes", "frontend", "--force")
+    env = _frontend_env_without_profiles(root)
+    assert stack.compose_profiles_env(_MANIFEST, root, "frontend") == []
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    renders = dict(GPU_RENDERS, **{"frontend/docker-compose.yml": FRONTEND_GPU_RENDER})
+    daemon = FakeDaemon(gpu=False, plane_renders=renders)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    numbered = [ln.strip() for ln in out.splitlines() if re.match(r"^\s+\d+\. ", ln)]
+    unset = [i for i, ln in enumerate(numbered) if "unset COMPOSE_PROFILES in this shell" in ln]
+    setting = [i for i, ln in enumerate(numbered) if "set `COMPOSE_PROFILES=stock` in frontend/.env" in ln]
+    assert unset and setting and unset[0] < setting[0], out
+    # follow them literally
+    monkeypatch.delenv("COMPOSE_PROFILES")
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=stock\n", encoding="utf-8")
+    assert stack.active_profiles(_MANIFEST, stack.State.load(root / stack.STATE_REL), root, "frontend") == {"stock"}
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == 0 and "has no NVIDIA GPU" not in out, out
+
+
+def test_the_shell_step_adds_nothing_when_the_env_file_already_runs_the_stand_in(root, monkeypatch):
+    """A fresh clone's frontend/.env says `stock`: `unset` alone is enough, no extra step."""
+    run(root, "init", "--planes", "frontend", "--force")
+    env = _frontend_env_without_profiles(root)
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=stock\n", encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", "gpu,tailscale")
+    renders = dict(GPU_RENDERS, **{"frontend/docker-compose.yml": FRONTEND_GPU_RENDER})
+    daemon = FakeDaemon(gpu=False, plane_renders=renders)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "unset COMPOSE_PROFILES in this shell" in out
+    assert "in frontend/.env" not in out
+
+
+# --------------------------------------------------------------------------
+# ac-followups F3 (ac-readme attempt 2): a printed step names the interpreter
+# that is running, not a `python` Debian 12 does not have
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("executable, windows, expected", [
+    ("/usr/bin/python3", False, "python3"),
+    ("/usr/bin/python3.11", False, "python3.11"),
+    ("/home/u/.venv/bin/python", False, "python"),
+    (r"C:\Python313\python.exe", True, "python"),
+    (r"C:\Python313\PYTHON.EXE", True, "PYTHON"),
+    ("", False, "python3"),
+    ("", True, "python"),
+])
+def test_the_printed_interpreter_is_the_one_running(executable, windows, expected):
+    assert stack.interpreter_name(executable, windows) == expected
+
+
+def test_a_refusal_run_under_python3_prints_python3_steps(root, monkeypatch):
+    """F3. RED at e30fe42: the steps said `python scripts/stack/stack.py`, which is
+    `command not found` on a Debian 12 host that has only python3."""
+    monkeypatch.setattr(stack, "CLI", stack.interpreter_name("/usr/bin/python3", False) + " scripts/stack/stack.py")
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    steps = [ln.strip() for ln in out.splitlines() if re.match(r"^\s+\d+\. `", ln)]
+    assert steps and all(s.split("`")[1].startswith("python3 scripts/stack/stack.py ") for s in steps), out
+    assert "`python scripts/stack/stack.py" not in out
+
+
+# --------------------------------------------------------------------------
+# ac-followups F4 (ac-readme attempt 2): the GPU-less steps lead to a gateway
+# without `local`; health must not FAIL a host for following them
+# --------------------------------------------------------------------------
+
+
+def test_health_without_local_does_not_probe_an_upstream_that_is_not_meant_to_exist(root, monkeypatch):
+    """F4. RED at e30fe42: `enable --plane inference` + `up` (the documented GPU-less
+    gateway) and then `health` exited 1 on 'cannot read llama-cpp-upstream's /models'."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="")        # no upstream container at all
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "OK", out
+    assert "not applicable - inference runs without `local`" in label
+    assert not any(c[:3] == ["docker", "exec", "llama-cpp-upstream"] for c in host.calls)
+    assert code == 0, out
+
+
+def test_health_with_local_from_the_env_file_still_probes(root):
+    run(root, "init", "--planes", "inference", "--force")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local\n", encoding="utf-8")
+    host = FakeHost(gguf_code=1, gguf_count="")
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "cannot read llama-cpp-upstream's /models" in label, out
+    # the hint names what is true now, not "the `local` profile lives in inference/.env"
+    assert "lives in inference/.env" not in label
+    assert "`local` is on for inference" in label
+    assert code == 1
+
+
+def test_the_probe_catalogue_is_unchanged_by_the_local_answer():
+    """The docs' probe list and count are read from HealthSweep.run(); F4 keeps one line."""
+    labels = [label for plane, label, _needs in stack.probe_catalogue() if plane == "inference"]
+    assert labels == ["inference: llm-gateway liveliness", "inference: serving depth: <what it found>"]
+
+
+# --------------------------------------------------------------------------
+# ac-followups (ac-readme attempt 2, sec. 12): OB1's short volume syntax does not
+# parse uninterpolated, so the placeholder check falls back to a sentinel render
+# --------------------------------------------------------------------------
+
+_COLONS = ("invalid spec: ${OPEN_NOTEBOOK_DIR:-../../../open-notebook}/notebook_data:/notebook-data:ro: "
+           "too many colons")
+
+
+def _sentinel_capture(render, interpolated_error=None):
+    """compose as measured: `--no-interpolate` fails on the short syntax; the interpolated
+    render substitutes the process environment (the sentinels) into every `${VAR...}`."""
+    seen = []
+
+    def capture(cmd, _cwd):
+        seen.append((list(cmd), dict(getattr(cmd, "env", {}) or {})))
+        if "--no-interpolate" in cmd:
+            return stack.CommandResult(1, "", _COLONS)
+        if interpolated_error:
+            return stack.CommandResult(1, "", interpolated_error)
+        env = getattr(cmd, "env", {}) or {}
+        text = re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}", lambda m: env.get(m.group(1), ""), json.dumps(render))
+        return stack.CommandResult(0, text, "")
+    return capture, seen
+
+
+def test_an_uninterpolatable_short_volume_no_longer_hides_which_keys_are_read(root):
+    """RED at e30fe42: both candidates came back 'could not render ... too many colons'."""
+    env, text = _real_example_into(root, "search")
+    env.write_text(text, encoding="utf-8")
+    render = {"services": {"gateway": {"environment": {"GATEWAY_API_KEY": "${GATEWAY_API_KEY}"},
+                                       "volumes": ["${DATA:-../x}/d:/d:ro"]}}}
+    capture, seen = _sentinel_capture(render)
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    state = stack.State({"search": {"profiles": [], "context": None}}, None, True)
+    found = stack.shipped_placeholders(manifest, state, root, "search", capture)
+    assert {k for k, _w, _p in found} == {"GATEWAY_API_KEY"}       # SEARXNG_SECRET_KEY is not read here
+    assert not any("could not render" in why or "too many colons" in why for _k, why, _p in found)
+    fallback = [env for cmd, env in seen if "--no-interpolate" not in cmd]
+    assert fallback and set(fallback[0]) >= {"GATEWAY_API_KEY", "SEARXNG_SECRET_KEY"}
+
+
+def test_when_both_renders_fail_the_real_cause_is_reported(root):
+    env, text = _real_example_into(root, "search")
+    env.write_text(text, encoding="utf-8")
+    capture, _seen = _sentinel_capture({}, interpolated_error="env file /w/OB1/recipes/x/.env not found: stat")
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    state = stack.State({"search": {"profiles": [], "context": None}}, None, True)
+    found = stack.shipped_placeholders(manifest, state, root, "search", capture)
+    assert {k for k, _w, _p in found} == {"GATEWAY_API_KEY", "SEARXNG_SECRET_KEY"}   # still fails closed
+    assert all("env file /w/OB1/recipes/x/.env not found" in why for _k, why, _p in found)
+    assert not any("too many colons" in why for _k, why, _p in found)
+
+
+# --------------------------------------------------------------------------
+# ac-followups X1 (attempt-1 tester): the "not applicable" decision must not come
+# from a shell COMPOSE_PROFILES meant for another plane, nor hide an upstream
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", "gpu", "stock", ""])
+def test_a_shell_export_does_not_hide_inference_env_file_local(root, monkeypatch, shell):
+    """X1. RED at the attempt-1 tip: `COMPOSE_PROFILES=gpu,tailscale stack.py health` with
+    `local` in inference/.env and a dead upstream printed [OK] not applicable, all passed."""
+    run(root, "init", "--planes", "inference", "--force")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local" + chr(10), encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+    assert code >= 1
+
+
+def test_local_only_in_the_shell_still_runs_the_probe(root, monkeypatch):
+    run(root, "init", "--planes", "inference", "--force")
+    monkeypatch.setenv("COMPOSE_PROFILES", "local")
+    code, out = sweep(FakeHost(gguf_code=1, gguf_count=""), root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+
+
+def test_a_stopped_upstream_is_probed_even_with_local_off_everywhere(root, monkeypatch):
+    """No source turns `local` on, but a llama-cpp-upstream container exists: 'there is no
+    upstream' would be false, so the probe runs and fails on the stopped container."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "cannot read llama-cpp-upstream" in label, out
+    assert code >= 1
+
+
+def test_not_applicable_needs_local_off_everywhere_and_no_container(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=False)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "OK" and "not applicable" in label, out
+    assert ["docker", "ps", "-a", "--filter", "name=^llama-cpp-upstream$", "--format", "{{.Names}}"] in host.calls
+
+
+def test_an_unreadable_container_list_is_not_a_pass(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="")
+    real = host.capture
+
+    def capture(cmd, cwd):
+        if "name=^llama-cpp-upstream$" in cmd:
+            host.calls.append(list(cmd))
+            return stack.CommandResult(1, "", "Cannot connect to the Docker daemon")
+        return real(cmd, cwd)
+    host.capture = capture
+    code, out = sweep(host, root, planes=None)
+    state, _label = depth_line(out)
+    assert state == "FAIL", out
+
+
+@pytest.mark.parametrize("shell", ["gpu,tailscale", ""])
+def test_local_in_the_env_file_with_no_upstream_container_is_a_failure(root, monkeypatch, shell):
+    """`local` is on for inference, so its upstream is MEANT to exist; a missing container is a
+    FAIL, never 'not applicable' - whatever another plane's value the shell exports."""
+    run(root, "init", "--planes", "inference", "--force")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local" + chr(10), encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_PROFILES", shell)
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=False)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and "not applicable" not in label, out
+    assert code >= 1
+
+
+# --------------------------------------------------------------------------
+# ac-followups X2 (attempt-1 tester): CLI is tied to the running interpreter, and
+# no printed string hard-codes one (the F3 test monkeypatched CLI, so a literal
+# `python3 scripts/stack/stack.py` elsewhere survived it)
+# --------------------------------------------------------------------------
+
+
+def test_cli_is_the_interpreter_running_this_test():
+    assert stack.CLI == stack.interpreter_name(sys.executable) + " scripts/stack/stack.py"
+    name = Path(sys.executable).name
+    assert stack.CLI.split()[0] == (name[:-4] if name.lower().endswith(".exe") else name)
+
+
+def _non_docstring_strings(tree):
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            body = getattr(node, "body", [])
+            if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+                docstrings.add(id(body[0].value))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+            yield node.lineno, node.value
+
+
+def test_no_printed_string_hard_codes_an_interpreter():
+    """X2. RED at the attempt-1 tip: restore's refusal and success line and the stats hint
+    said `python3 scripts/stack/stack.py`. Every runtime step must use CLI. The one allowed
+    literal is _DOCS_GENERATED, which must render the same on every machine."""
+    source = Path(stack.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    hits = [(line, text) for line, text in _non_docstring_strings(tree)
+            if re.search(r"\bpython[0-9.]*\s+scripts/stack/stack\.py", text) and text != stack._DOCS_GENERATED]
+    assert hits == [], hits
+
+
+# --------------------------------------------------------------------------
+# ac-followups X3 (attempt-2 tester): the failure line TELLS the reader something;
+# it must be true for the reason the probe ran
+# --------------------------------------------------------------------------
+
+
+def test_a_leftover_upstream_with_local_off_says_so_and_names_both_ways_out(root, monkeypatch):
+    """X3. RED at 3fc5979: it said "`local` is on for inference, so `up` starts it"."""
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="", upstream_exists=True)
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and code >= 1, out
+    assert "`local` is on" not in label and "`up` starts it" not in label
+    assert "`local` is off for inference, so llama-cpp-upstream is a LEFTOVER container" in label
+    assert "`" + stack.HealthSweep.LOCAL_RM + "`" in label
+    assert "docker rm -f llama-cpp-upstream" in label
+    assert f"`{stack.CLI} enable inference`" in label and f"`{stack.CLI} up`" in label
+
+
+def test_the_leftover_remedy_is_the_one_inference_readme_gives():
+    text = (REPO_ROOT / "inference" / "README.md").read_text(encoding="utf-8")
+    assert stack.HealthSweep.LOCAL_RM in text
+
+
+def test_local_on_keeps_the_up_starts_it_wording(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    _inference_local(root)
+    code, out = sweep(FakeHost(gguf_code=1, gguf_count=""), root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL", out
+    assert "`local` is on for inference, so `up` starts it" in label
+    assert "LEFTOVER" not in label
+
+
+def test_an_unreadable_container_list_with_local_off_says_it_cannot_tell(root, monkeypatch):
+    monkeypatch.delenv("COMPOSE_PROFILES", raising=False)
+    run(root, "init", "--planes", "inference", "--force")
+    host = FakeHost(gguf_code=1, gguf_count="")
+    real = host.capture
+
+    def capture(cmd, cwd):
+        if "name=^llama-cpp-upstream$" in cmd:
+            return stack.CommandResult(1, "", "Cannot connect to the Docker daemon")
+        return real(cmd, cwd)
+    host.capture = capture
+    code, out = sweep(host, root, planes=None)
+    state, label = depth_line(out)
+    assert state == "FAIL" and code >= 1, out
+    assert "`docker ps -a` could not be read" in label
+    assert "`up` starts it" not in label and "LEFTOVER" not in label

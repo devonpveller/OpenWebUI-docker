@@ -43,10 +43,12 @@ echo "Running pre-commit validations..."
 #      by the reviewer on this host's Ubuntu). On WSL, or any Linux with a
 #      powershell.exe on PATH, the hook now falls through to pwsh, then Python.
 #   2. pwsh           - PowerShell 7, any OS. The same .ps1 gates, the same flags.
-#   3. python3        - only the gates that have a Python twin under
-#      scripts/checks/ run: the secret guard, line endings and gateway routing.
-#      Each twin mirrors its .ps1 rule for rule; its header says what it copies.
-#      Every other gate prints `SKIPPED <gate>: ...` and does not fail the commit.
+#   3. python3        - the gates that have a Python twin under scripts/checks/
+#      run: the secret guard, line endings and gateway routing. Each twin mirrors
+#      its .ps1 rule for rule; its header says what it copies. The gates that
+#      never needed PowerShell run too (hook-modes, exec-bits-modes: sh;
+#      exec-bits-drift, docs-blocks: Python). Every other gate prints
+#      `SKIPPED <gate>: ...` and does not fail the commit.
 #
 # THE THREE THAT ARE NEVER SKIPPED. The secret guard, line endings and gateway
 # routing have a twin precisely so that no host can leave them out. If neither a

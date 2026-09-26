@@ -48,6 +48,7 @@ import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,29 @@ EXIT_USAGE = 2
 # to be able to ask "what would this do on a Linux node?" without monkeypatching
 # the os module out from under pathlib.
 WINDOWS = os.name == "nt"
+
+
+def interpreter_name(executable: str | None = None, windows: bool | None = None) -> str:
+    """The interpreter as the reader would TYPE it: the basename of the one running this.
+
+    Every printed "run this next" step names it (CLI below). A hard-coded `python`
+    was false on Debian 12, where only `python3` is on PATH (ac-readme attempt 2, F3):
+    a reader who followed a refusal literally got `command not found`. Invoked as
+    `python3 scripts/stack/stack.py`, sys.executable is .../python3 and so is the
+    step; a Windows `python.exe` prints `python`. With no executable to read
+    (embedded, frozen) it falls back to what that platform ships.
+    """
+    executable = sys.executable if executable is None else executable
+    windows = WINDOWS if windows is None else windows
+    name = re.split(r"[\\/]", executable or "")[-1]
+    if name.lower().endswith(".exe"):
+        name = name[:-4]
+    return name or ("python" if windows else "python3")
+
+
+# The command every printed step names. NOT used in generated docs text, which
+# must render the same on every machine (_DOCS_GENERATED).
+CLI = f"{interpreter_name()} scripts/stack/stack.py"
 
 
 class Refusal(Exception):
@@ -350,6 +374,19 @@ def order_planes(manifest: Manifest, names) -> list[str]:
 DIRECT = "plane"            # the owner a plane enabled by name (`enable --plane`, `init --planes`) carries
 
 
+def anchors_for(manifest: Manifest, plane: str) -> list[str]:
+    """The networks-only planes (the anchor) `plane` requires, transitively, in order.
+
+    Every plane attaches to the anchor's networks externally, so `up <plane>` and
+    `recover <plane>` ENSURE them first, exactly as a bare `up` does - otherwise a
+    daemon where no bare `up` ever ran fails at compose's "declared as external,
+    but could not be found" (ac-driver-products N9: the GPU refusal's printed
+    re-run step `up inference` did exactly that on a fresh daemon).
+    """
+    closure = dependency_closure(manifest, [plane]) - {plane}
+    return [p for p in order_planes(manifest, closure) if manifest.networks_only(p)]
+
+
 def profile_dependents(manifest, plane: str, removed) -> set:
     """Every profile of `plane` whose `requires` reaches one in `removed` (transitively)."""
     out, changed = set(), True
@@ -607,7 +644,9 @@ def host_path_line(spec: dict, plane: str, reason: str = "is missing") -> str:
 # WHICH ONES COUNT: only a key a service THIS DEPLOYMENT RUNS actually reads.
 # That is decided from compose's own render (`config --no-interpolate`, which
 # keeps `${VAR}` references visible and lists every service with its
-# `profiles`), filtered to the profiles this plane runs with. So frontend's
+# `profiles`; when compose cannot parse that render, an interpolated one with a
+# sentinel per candidate - see referenced_vars), filtered to the profiles this
+# plane runs with. So frontend's
 # TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`, and
 # agent-org's AO_CLOUD_* only under `cloud`. A bulk `env_file:` is NOT a read:
 # agent-bridge loads its whole .env that way, and counting it would make every
@@ -651,24 +690,58 @@ def _strings(node):
         yield str(node)
 
 
-def referenced_vars(manifest, root, plane, capture, profiles, context=None):
-    """({VAR, ...} the active services interpolate, None) or (None, why the render failed)."""
-    cmd = compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"], context=context)
-    result = capture(cmd, root)
-    if result.code != 0:
-        return None, (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[0:1]
-    try:
-        services = (json.loads(result.stdout) or {}).get("services") or {}
-    except ValueError:
-        return None, ["the render is not JSON"]
-    refs = set()
+def _active_strings(services: dict, profiles):
+    """Every string of every service the profiles run, `env_file` left out (a bulk load is not a read)."""
     for service in services.values():
         gated = (service or {}).get("profiles") or []
         if gated and not set(gated) & set(profiles):
             continue
-        for text in _strings({k: v for k, v in (service or {}).items() if k != "env_file"}):
+        yield from _strings({k: v for k, v in (service or {}).items() if k != "env_file"})
+
+
+def _render_services(capture, root, cmd):
+    """(services, None) or (None, [the first line of why the render failed])."""
+    result = capture(cmd, root)
+    if result.code != 0:
+        return None, (result.stderr or result.stdout or f"exit {result.code}").strip().splitlines()[0:1]
+    try:
+        return (json.loads(result.stdout) or {}).get("services") or {}, None
+    except ValueError:
+        return None, ["the render is not JSON"]
+
+
+def referenced_vars(manifest, root, plane, capture, profiles, context=None, candidates=()):
+    """({VAR, ...} the active services interpolate, None) or (None, why the render failed).
+
+    First `config --no-interpolate`, which keeps every `${VAR}` visible. Compose
+    cannot parse that render for a SHORT-syntax volume whose source interpolates
+    a default with a path in it - OB1's `${OPEN_NOTEBOOK_DIR:-../../../open-notebook}/notebook_data:/app/data`
+    is "too many colons" uninterpolated (compose v2.33.0, measured; `--no-normalize`
+    and `--no-consistency` do not help) - so on a fresh clone every `up ob1` was
+    refused with that artifact instead of an answer (ac-readme attempt 2). Then,
+    for the `candidates` only: an INTERPOLATED render with each candidate set to a
+    unique sentinel in the process environment (which compose prefers to the env
+    file), and a candidate counts when its sentinel appears in an active service.
+    If that render fails too, its error is the one reported: it is the render
+    `up` itself makes, so its complaint is the real cause.
+    """
+    cmd = compose_command(manifest, plane, ["config", "--no-interpolate", "--format", "json"], context=context)
+    services, failed = _render_services(capture, root, cmd)
+    if services is not None:
+        refs = set()
+        for text in _active_strings(services, profiles):
             refs.update(_VAR_REF.findall(text))
-    return refs, None
+        return refs, None
+    if not candidates:
+        return None, failed
+    sentinels = {key: f"ai-stack-ref-{index}-{key}" for index, key in enumerate(sorted(candidates))}
+    plain = compose_command(manifest, plane, ["config", "--format", "json"], context=context)
+    cmd = ComposeCommand(plain, {**getattr(plain, "env", {}), **sentinels})
+    services, failed = _render_services(capture, root, cmd)
+    if services is None:
+        return None, failed
+    texts = list(_active_strings(services, profiles))
+    return {key for key, mark in sentinels.items() if any(mark in text for text in texts)}, None
 
 
 def shipped_placeholders(manifest, state, root, plane, capture, extra_profiles=()):
@@ -692,7 +765,7 @@ def shipped_placeholders(manifest, state, root, plane, capture, extra_profiles=(
         return []
     why = placeholder_reason(root, env_path)
     profiles = active_profiles(manifest, state, root, plane, extra_profiles)
-    refs, failed = referenced_vars(manifest, root, plane, capture, profiles, state.context_of(plane))
+    refs, failed = referenced_vars(manifest, root, plane, capture, profiles, state.context_of(plane), candidates)
     if refs is None:
         note = f" (could not render {manifest.plane(plane)['compose']} to tell whether it is read: " \
                f"{failed[0] if failed else 'no output'})"
@@ -735,6 +808,20 @@ def command_env(cmd) -> dict | None:
     env = dict(os.environ)
     env.update(overrides)
     return env
+
+
+def printable(cmd) -> str:
+    """The command line as printed: its environment overrides as a POSIX `VAR=value` prefix.
+
+    The line is what a reader copies (ac-readme attempt 2, F6): `up --dry-run`
+    printed `docker compose -f inference/docker-compose.yml --profile local up -d`
+    and not the COMPOSE_PROFILES the driver runs it with, so the copy started
+    llama.cpp with a gateway that registered no local model. The prefix is shell
+    syntax for sh/bash; in PowerShell set `$env:COMPOSE_PROFILES` first.
+    """
+    overrides = getattr(cmd, "env", None) or {}
+    prefix = " ".join(f"{key}={shlex.quote(str(value))}" for key, value in sorted(overrides.items()))
+    return (prefix + " " if prefix else "") + " ".join(cmd)
 
 
 def compose_command(manifest: Manifest, plane: str, args, context=None, profiles=()) -> list[str]:
@@ -1139,7 +1226,7 @@ def _drive(manifest, state, root, console, runner, verb_args, planes, dry_run, l
             context=state.context_of(plane),
             profiles=effective_profiles(manifest, state, root, plane),
         )
-        console.line(" ".join(cmd))
+        console.line(printable(cmd))
         if dry_run:
             continue
         code = runner(cmd, root)
@@ -1191,7 +1278,7 @@ def _manual_notes(manifest, console, planes, what: str) -> None:
 
 def _requires_note(manifest, console, plane: str, driven) -> None:
     """`up coder` starts coder alone - say what it assumes is already running."""
-    unmet = [dep for dep in manifest.requires(plane) if dep not in driven]
+    unmet = [dep for dep in manifest.requires(plane) if dep not in driven and not manifest.networks_only(dep)]
     if unmet:
         console.line(f"# note: {plane} requires {', '.join(unmet)}; this starts only {plane}")
 
@@ -1340,7 +1427,7 @@ def _gpu_preflight(manifest, state, root, planes, verb: str, capture, rerun: str
             + "\n".join(f"  {p}: {w}\n    (`{c}`; the plane's variables live in "
                          f"{rel(root, manifest.env_path(root, p))})" for p, c, w in unrenderable)
             + "\nNothing was started. Fix what compose names above, then re-run "
-            + f"`python scripts/stack/stack.py {rerun or verb}`."
+            + f"`{CLI} {rerun or verb}`."
         )
     if not lines:
         return
@@ -1370,7 +1457,7 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
     sim = copy.deepcopy(state)
     sim.path = None
     steps = []
-    cli = "python scripts/stack/stack.py"
+    cli = CLI
     for plane, profiles in gpu_profiles.items():
         named = {p for p in profiles if p}
         if None in profiles:
@@ -1439,6 +1526,19 @@ def gpu_remedy(manifest: Manifest, state: State, root: Path, gpu_profiles: dict,
         shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
         if shell & named and not run_profiles(manifest, sim, plane):
             steps.append("unset COMPOSE_PROFILES in this shell (compose reads it when the driver passes no flag)")
+            # After the unset compose reads the plane's env file instead, so it must
+            # end up where the env-file step above would put it: the stand-in
+            # included (ac-driver-products N10 / X11: a frontend/.env with no
+            # COMPOSE_PROFILES line started openwebui-backup and no Open WebUI).
+            env_after = new if set(env_now) & named else env_now
+            dropped = profile_dependents(manifest, plane, named) | named
+            missing = [x for x in manifest.stand_ins(plane, dropped) if x not in env_after]
+            if missing:
+                target = manifest.profile_order(plane, {x for x in env_after if x not in dropped} | set(missing))
+                steps.append(f"set `COMPOSE_PROFILES={','.join(target)}` in {rel(root, env_path)} "
+                             f"(after the unset compose reads this file, which "
+                             + (f"sets `{','.join(env_after)}`" if env_after else "sets no profile")
+                             + f"; {', '.join(missing)} runs the plane without a GPU)")
     steps.append(f"`{cli} {verb}` again")
     return steps
 
@@ -1457,6 +1557,11 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
     if not ordered:
         console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
         return EXIT_OK
+    if mode == "one":
+        # The anchor's networks are ENSURED first even for one plane, as a bare `up`
+        # does (anchors_for). Only `up`: `down`/`status <plane>` must never reach the
+        # anchor, and the anchor itself is never `up`-ed, only ensured (_drive).
+        ordered = anchors_for(manifest, plane) + ordered
     driven = [p for p in ordered if not manifest.manual(p)]
     _preflight(manifest, state, root, driven, "up", capture or subprocess_capture)
     if not dry_run:
@@ -1510,7 +1615,7 @@ def cmd_status(manifest, state, root, console, runner, plane=None, every: bool =
             profiles=effective_profiles(manifest, state, root, plane),
         )
         console.line(f"== {plane}")
-        console.line(" ".join(cmd))
+        console.line(printable(cmd))
         if runner(cmd, root) != 0:
             failures += 1
         console.line("")
@@ -1564,11 +1669,11 @@ def _key_remedy(files, submodules) -> str:
     """
     first = "".join(f"Run {command}. " for command in submodules)
     if submodules and not files:
-        return first + "Then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+        return first + f"Then re-run (`{CLI} doctor` lists every blank key on this machine)."
     where = " and ".join(files) if files else "the plane's env file"
     return (
         f"{first}Set them in {where} (a value still equal to the .env.example placeholder counts as unset), "
-        "then re-run (`python scripts/stack/stack.py doctor` lists every blank key on this machine)."
+        f"then re-run (`{CLI} doctor` lists every blank key on this machine)."
     )
 
 
@@ -1596,7 +1701,7 @@ def _ambiguity_note(manifest, console, kind, target, explicit: bool = False) -> 
 def enable_remedy(manifest: Manifest, plane: str) -> str:
     """The command that enables exactly `plane` - `--plane` when a product shares the name."""
     flag = "--plane " if plane in manifest.products else ""
-    return f"python scripts/stack/stack.py enable {flag}{plane}"
+    return f"{CLI} enable {flag}{plane}"
 
 
 def _profile_source(manifest: Manifest, state: State, plane: str, profile: str, mine: str) -> str:
@@ -2132,12 +2237,17 @@ class HealthSweep:
     # it is in `planes` (None = every one, the pre-scoping behaviour).
     PROBED_PLANES = ("anchor", "inference", "frontend", "memory", "search", "coder", "ob1", "agent-org")
 
-    def __init__(self, console: Console, root: Path, capture, http, planes=None):
+    def __init__(self, console: Console, root: Path, capture, http, planes=None, inference_local=None):
         self.console = console
         self.root = root
         self.capture = capture
         self.http = http
         self.planes = None if planes is None else set(planes)
+        # Whether inference runs its `local` profile, as `up` would pass it; None = not known
+        # (the probe then runs, as it always did). See inference_serving_depth.
+        self.inference_local = inference_local
+        # What upstream_exists() last saw: "exists", "absent" or "unknown" (docker ps failed).
+        self.upstream_seen = None
         self.failed = 0
         self.results: list[tuple[str, bool]] = []
 
@@ -2210,8 +2320,17 @@ class HealthSweep:
                     "'http://localhost:8080/health/liveliness', timeout=8).status==200 else 1)",
                 ).code == 0,
             )
-            depth, depth_ok = self.inference_serving_depth()
-            self.probe(f"inference: {depth}", depth_ok)
+            if self.inference_local is False and not self.upstream_exists():
+                # No local upstream is MEANT to exist: the gateway alone is the documented
+                # GPU-less deployment (inference/README.md), and the GPU refusal's own steps
+                # lead there. Probing llama-cpp-upstream would FAIL a host for following
+                # them (ac-readme attempt 2, F4). Named, not dropped, so the line count and
+                # the docs' probe catalogue stay what they say.
+                self.probe("inference: serving depth: not applicable - inference runs without `local`, "
+                           "so there is no local upstream to serve from (by design)", True)
+            else:
+                depth, depth_ok = self.inference_serving_depth()
+                self.probe(f"inference: {depth}", depth_ok)
         if self.on("frontend"):
             self.probe(
                 "frontend: OWUI http://127.0.0.1:3000/health",
@@ -2322,6 +2441,45 @@ class HealthSweep:
             self.console.line(f"{self.failed} probe(s) FAILED")
         return self.failed
 
+    def upstream_exists(self) -> bool:
+        """Whether a llama-cpp-upstream container exists at all (running or not).
+
+        The "not applicable" line is a claim that there is NO upstream. A container
+        that exists - stopped, crashed, left over - contradicts it whatever the
+        profiles say, so the probe runs and reports what it finds (ac-followups X1).
+        An unreadable answer counts as "exists": a health check must fail, not pass.
+        """
+        found = self.docker("ps", "-a", "--filter", "name=^llama-cpp-upstream$", "--format", "{{.Names}}")
+        if found.code != 0:
+            self.upstream_seen = "unknown"
+        else:
+            self.upstream_seen = "exists" if found.stdout.strip() else "absent"
+        return self.upstream_seen != "absent"
+
+    # The fixed teardown inference/README.md gives for the `local` containers.
+    LOCAL_RM = ("docker compose -f inference/docker-compose.yml --profile local rm -sf "
+                "llama-cpp-upstream llama-cpp-embed-upstream llm-queue lm-models-backup")
+
+    def _upstream_hint(self, upstream: str) -> str:
+        """What the reader should do when the upstream cannot be read - TRUE for why it ran.
+
+        ac-followups X3: the probe also runs on a LEFTOVER container with `local` off
+        everywhere, and telling that reader "`up` starts it" was false - `up` never
+        will, and health would fail on it forever. The wording follows the reason.
+        """
+        if self.inference_local is False and self.upstream_seen == "unknown":
+            return (f"`local` is off for inference, but `docker ps -a` could not be read, so health cannot "
+                    f"tell whether a {upstream} container is left over; fix docker access and re-run health")
+        if self.inference_local is False:
+            return (f"`local` is off for inference, so {upstream} is a LEFTOVER container that `up` will never "
+                    f"start. Either remove it: `{self.LOCAL_RM}` (a container not made by compose: "
+                    f"`docker rm -f {upstream}`), or turn `local` on (`{CLI} enable inference`, or "
+                    f"`COMPOSE_PROFILES=local` in inference/.env) and run `{CLI} up`")
+        if self.inference_local:
+            return (f"is the upstream running? `local` is on for inference, so `up` starts it; "
+                    f"`docker ps -a --filter name={upstream}` shows its state")
+        return f"is the upstream running? `docker ps -a --filter name={upstream}` shows its state"
+
     # -- the probes whose LABEL carries the measurement --------------------
 
     def inference_serving_depth(self):
@@ -2373,8 +2531,7 @@ class HealthSweep:
         if listing.code != 0:
             why = (listing.stderr or listing.stdout or "no output").strip().splitlines()
             return (f"serving depth: cannot read {upstream}'s /models "
-                    f"({why[0] if why else 'no output'}) - is the upstream running? "
-                    f"(the `local` profile lives in inference/.env)"), False
+                    f"({why[0] if why else 'no output'}) - " + self._upstream_hint(upstream)), False
         try:
             found = int((listing.stdout or "0").strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -2560,7 +2717,18 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
     scoping removes.
     """
     planes = {p for p in manifest.order if state.is_enabled(p) or manifest.is_implicit(p)}
-    return HealthSweep(console, root, capture, http, planes).run()
+    local = None
+    if "inference" in planes:
+        # `local` from ANY source turns the probe on: the state file (with the
+        # plane's defaults), inference's OWN env file, or the shell. Not
+        # active_profiles(), which lets a shell COMPOSE_PROFILES exported for another
+        # plane (frontend's `gpu,tailscale`) HIDE inference/.env's `local` and turned
+        # a dead upstream into "not applicable" (ac-followups X1).
+        shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
+        sources = (set(run_profiles(manifest, state, "inference"))
+                   | set(compose_profiles_env(manifest, root, "inference")) | shell)
+        local = "local" in sources
+    return HealthSweep(console, root, capture, http, planes, inference_local=local).run()
 
 
 # --------------------------------------------------------------------------
@@ -3072,7 +3240,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     # the first `up` with "declared as external, but could not be found".
     anchors = [p for p in driven if manifest.networks_only(p)]
     if mode == "one":
-        anchors = [d for d in manifest.requires(plane) if manifest.networks_only(d)] + anchors
+        anchors = anchors_for(manifest, plane) + anchors
     work = [p for p in driven if not manifest.networks_only(p)]
     # A missing submodule is fatal (the plane cannot even be rendered, see
     # plane_render). A key still at its shipped placeholder is NOT, unlike `up`:
@@ -3114,7 +3282,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
             cmd = compose_command(manifest, p, ["stop", "--timeout", str(STOP_TIMEOUT_SECONDS), *level],
                                   context=state.context_of(p),
                                   profiles=effective_profiles(manifest, state, root, p))
-            console.line(" ".join(cmd))
+            console.line(printable(cmd))
             if not dry_run:
                 code = runner(cmd, root)
                 if code != 0:
@@ -3131,7 +3299,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
         for level in levels[p]:
             cmd = compose_command(manifest, p, ["up", "-d", "--no-deps", *level], context=state.context_of(p),
                                   profiles=effective_profiles(manifest, state, root, p))
-            console.line(" ".join(cmd))
+            console.line(printable(cmd))
             gates = [(key, gate_timeout(renders[p].services[key], timeout)) for key in level]
             for key, limit in gates:
                 console.line(_gate_note(renders[p], key, limit))
@@ -3543,7 +3711,7 @@ def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, sourc
     if busy:
         raise Refusal("refused: restore will not write a volume a running container holds - nothing was "
                       "changed:\n" + "\n".join(busy)
-                      + f"\nStop them first (`python3 scripts/stack/stack.py down {plane}`), then re-run.")
+                      + f"\nStop them first (`{CLI} down {plane}`), then re-run.")
 
     console.line(f"# restore {plane}: {len(entries)} volume(s) from {directory} (sha256 verified)")
     for entry in entries:
@@ -3568,7 +3736,7 @@ def cmd_restore(manifest, state, root, console, capture, pipe, plane: str, sourc
             console.line(f"refused: restoring {name} exited {result.code} ({why[0]})")
             return EXIT_REFUSED
         console.line(f"  [ok]   {name} <- {entry['archive']} ({entry.get('bytes')} bytes)")
-    console.line(f"restored. Start the plane: python3 scripts/stack/stack.py up {plane}")
+    console.line(f"restored. Start the plane: {CLI} up {plane}")
     return EXIT_OK
 
 
@@ -3685,7 +3853,7 @@ def cmd_stats(manifest, state, root: Path, console: Console, runner, capture, ho
     console.line("")
     if not state.is_enabled("inference"):
         console.line("== inference: NOT ENABLED on this machine - no llm-queue board and no LiteLLM spend "
-                     "ledger to read (`python3 scripts/stack/stack.py enable inference` turns it on)")
+                     f"ledger to read (`{CLI} enable inference` turns it on)")
         return EXIT_REFUSED if failed else EXIT_OK
 
     console.line("== llm-queue live board")
@@ -4363,7 +4531,7 @@ def cmd_inventory(manifest, root, console, capture, write: bool, check: bool) ->
     if inventory.declared_not_rendered:
         console.line(
             "  [ ~~ ] ^ those resolve themselves when the submodule gitlink bumps. AT THAT BUMP the "
-            "profiles start gating real services, so run `python scripts/stack/stack.py init --product "
+            f"profiles start gating real services, so run `{CLI} init --product "
             "research --force` (or `enable research`) once, or a bare `up` will start fewer containers "
             "than it does today."
         )
@@ -5378,7 +5546,7 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
         for line in stale:
             console.line(f"  [FAIL] {line}")
         console.line("")
-        console.line(f"{len(stale)} stale block(s). Regenerate with `python scripts/stack/stack.py docs --write` "
+        console.line(f"{len(stale)} stale block(s). Regenerate with `{CLI} docs --write` "
                      "and commit the result; edit the prose AROUND a block, never inside it.")
         return EXIT_REFUSED
     for rel_path in wrote:
