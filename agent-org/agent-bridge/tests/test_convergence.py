@@ -40,7 +40,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -55,7 +55,7 @@ def _stack_remote(bumped: dict):
     vendoring murder, and the Git Data API for the gitlink bump (recorded into `bumped`)."""
     gitmodules = base64.b64encode(
         b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
-        b'\turl = https://github.com/devonpveller/murder\n').decode()
+        b'\turl = https://github.com/demoowner/murder\n').decode()
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -102,7 +102,7 @@ def _stack_remote(bumped: dict):
 async def test_error_report_goal_gets_verification_and_attempt_history(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         # a PRIOR attempt at the same error, with a delivered (unmerged) branch on the remote
         prior, chan0, _r0 = await orch.router.open_effort("fix-murder-build-errors",
@@ -129,8 +129,8 @@ async def test_error_report_goal_gets_verification_and_attempt_history(db_url, t
 async def test_intake_delivery_on_vendored_project_auto_wires_host(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("fix-sig", project="murder")
@@ -148,8 +148,8 @@ async def test_intake_delivery_on_vendored_project_auto_wires_host(db_url, tmp_p
 async def test_plan_owned_effort_is_not_double_wired(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("plan-owned", project="murder")
@@ -171,7 +171,7 @@ async def test_partial_error_verdicts_close_partly_done_and_stay_open(db_url, tm
     close as PARTIAL (needs-attention, lifecycle stays open) — never an unqualified done+merge."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("partial-fix", project="engine")
@@ -198,7 +198,7 @@ async def test_partial_error_verdicts_close_partly_done_and_stay_open(db_url, tm
 async def test_landed_closure_includes_local_apply_steps(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("engine", "dotnet build vendor/murder/Murder.sln")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
@@ -216,7 +216,7 @@ async def test_landed_closure_includes_local_apply_steps(db_url, tmp_path):
 async def test_reopening_closed_effort_posts_channel_pointer(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("old-thread", project="engine")
         await orch.gate.set_lifecycle(eid, "done")
         await orch.router.open_effort("old-thread", project="engine")   # the re-report reuse
@@ -231,9 +231,9 @@ async def test_reopening_closed_effort_posts_channel_pointer(db_url, tmp_path):
 async def test_composition_check_pass_reported_in_closure(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("sig-fix", project="murder")
@@ -262,9 +262,9 @@ async def test_composition_check_pass_reported_in_closure(db_url, tmp_path):
 async def test_composition_check_red_blocks_done_and_stays_open(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("bad-fix", project="murder")
@@ -293,9 +293,9 @@ async def test_composition_check_red_blocks_done_and_stays_open(db_url, tmp_path
 async def test_goal_carries_machine_check_forewarning(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         from app.schemas import ReadinessVerdict
         orch.models._client.queue_structured(
@@ -320,7 +320,7 @@ def _iterating_remote(bumped: dict):
     import base64 as _b64
     gitmodules = _b64.b64encode(
         b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
-        b'\turl = https://github.com/devonpveller/murder\n').decode()
+        b'\turl = https://github.com/demoowner/murder\n').decode()
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -371,9 +371,9 @@ async def _drain_bg(orch):
 async def test_red_composition_check_auto_iterates_to_green(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _iterating_remote({})
         eid, chan, root = await orch.router.open_effort("iterate-me", project="murder")
         await orch.charters.set_goal(eid, "fix the ambiguity errors", created_by="po")
@@ -402,9 +402,9 @@ async def test_red_composition_check_auto_iterates_to_green(db_url, tmp_path):
 async def test_auto_iteration_is_bounded(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _iterating_remote({})
         eid, chan, root = await orch.router.open_effort("hopeless", project="murder")
         await orch.charters.set_goal(eid, "fix it", created_by="po")
@@ -446,9 +446,9 @@ def test_build_segment_strips_git_setup():
 async def test_no_changes_on_fix_request_without_build_proof_auto_iterates(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("cop-out", project="murder")
         await orch.charters.set_goal(
@@ -472,9 +472,9 @@ async def test_no_changes_on_fix_request_without_build_proof_auto_iterates(db_ur
 async def test_no_changes_with_build_proof_is_accepted(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("legit-noop", project="murder")
         await orch.charters.set_goal(
@@ -495,7 +495,7 @@ async def test_no_changes_with_build_proof_is_accepted(db_url, tmp_path):
 async def test_no_changes_on_pure_investigation_still_accepted(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("investigate", project="murder")
         # a read-only goal (no REQUIRED VERIFICATION, no project check) → NO CHANGES is fine

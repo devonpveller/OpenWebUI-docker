@@ -32,7 +32,7 @@ async def _orch(db_url, tmp_path=None, **over):
     if tmp_path is not None:   # enable the GitHub App plane (for merge-trigger tests)
         key = tmp_path / "app.pem"
         key.write_text("dummy")
-        kw.update(github_app_id="1", github_app_owner="devonpveller",
+        kw.update(github_app_id="1", github_app_owner="demoowner",
                   github_app_private_key_path=str(key))
     kw.update(over)
     settings = Settings(**kw)
@@ -66,12 +66,12 @@ async def test_repo_sync_hits_engine_for_repo_and_upstream(db_url):
     try:
         calls: list = []
         orch._research_transport = _engine(calls)
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder",
+        await orch.projects.add("murder", "https://github.com/demoowner/murder",
                                 upstream_url="https://github.com/isadorasophia/murder")
         mgmt = await orch.mgmt_channel_id()
         await orch._repo_sync("murder", announce_channel=mgmt, announce_thread="t")
         urls = [c["repo_url"] for c in calls]
-        assert "https://github.com/devonpveller/murder" in urls          # the fork
+        assert "https://github.com/demoowner/murder" in urls          # the fork
         assert "https://github.com/isadorasophia/murder" in urls         # AND the upstream (§4)
         msgs = " ".join(p["message"] for p in chat.posted)
         assert "Knowledge sync" in msgs and "10" in msgs                 # transparent result
@@ -86,7 +86,7 @@ async def test_project_add_triggers_sync(db_url):
         orch._research_transport = _engine(calls)
         mgmt = await orch.mgmt_channel_id()
         await orch.handle_event({"id": "a1", "channel_id": mgmt, "is_bot": False, "ts": 1,
-                                 "message": "/project add game https://github.com/devonpveller/Docker-Game"})
+                                 "message": "/project add game https://github.com/demoowner/Docker-Game"})
         await _drain(orch)
         assert any(c["repo_url"].endswith("/Docker-Game") for c in calls)   # onboard → sync fired
     finally:
@@ -98,7 +98,7 @@ async def test_nl_sync_docs_triggers_sync(db_url):
     try:
         calls: list = []
         orch._research_transport = _engine(calls)
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         mgmt = await orch.mgmt_channel_id()
         await orch.nl_intake("sync murder docs", mgmt, thread_id="t")    # plain language, no model
         await _drain(orch)
@@ -116,7 +116,7 @@ async def test_engine_down_is_reported_not_fatal(db_url):
         def down(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("down", request=request)
         orch._research_transport = httpx.MockTransport(down)
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         mgmt = await orch.mgmt_channel_id()
         await orch._repo_sync("murder", announce_channel=mgmt)           # must not raise
         msgs = " ".join(p["message"] for p in chat.posted)
@@ -130,7 +130,7 @@ async def test_sync_disabled_is_a_noop(db_url):
     try:
         calls: list = []
         orch._research_transport = _engine(calls)
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch._repo_sync("murder", announce_channel=await orch.mgmt_channel_id())
         assert not calls                                                 # kill-switch honored
     finally:

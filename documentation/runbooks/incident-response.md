@@ -46,7 +46,7 @@ All signals arrive via Gmail to the `DIGEST_TO` inbox. The watchers (`authelia-w
 
 1. From the host (or a Tailscale-reachable RDP session):
    ```powershell
-   cd "D:\Open WebUI\ai-stack"
+   cd <your ai-stack checkout>
    .\scripts\portal\breach-killswitch.ps1
    ```
    The script:

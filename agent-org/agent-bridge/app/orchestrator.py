@@ -3196,7 +3196,7 @@ class Orchestrator:
     async def _project_token(self, effort_id: str) -> str | None:
         """The deploy token for this effort's clone/push (multi-PAT). Resolution, in order:
           1. the project's EXPLICIT `token_env` (from `/project add … TOKEN_ENV`), if set;
-          2. the per-OWNER convention `LC_<OWNER>_TOKEN` (e.g. PolyshDesign → LC_POLYSHDESIGN_TOKEN),
+          2. the per-OWNER convention `LC_<OWNER>_TOKEN` (e.g. PixelDesign → LC_PIXELDESIGN_TOKEN),
              used only if that env var is actually set — so any repo under an org auto-picks its PAT;
           3. else None ⇒ the pool's ambient `LC_DEPLOY_TOKEN` (little-coder's fallback = your own repos).
         Secrets live in env only; the DB stores the var NAME, never the token."""

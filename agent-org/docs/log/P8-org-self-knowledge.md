@@ -46,7 +46,7 @@ order — **#1 alone would have caught every failure of that day, at the moment 
 | Deploy | `cd agent-org/docker && docker compose build agent-bridge && docker compose up -d agent-bridge` |
 | Health | `docker exec agent-bridge python -c "import urllib.request;print(urllib.request.urlopen('http://localhost:8000/health').status)"` |
 | Audit for one effort | `GET http://localhost:8000/audit?effort_id=<id>` (inside the container) |
-| Gym arena (validation) | `d:\Open WebUI\ai-orchestration-gym` — `python runner/gym_runner.py --auth app run scenario-004-python-todo-product --yes-provision` |
+| Gym arena (validation) | `..\ai-orchestration-gym` (beside the ai-stack checkout) — `python runner/gym_runner.py --auth app run scenario-004-python-todo-product --yes-provision` |
 
 **House rules (non-negotiable):**
 - Never commit or push on the user's behalf unless explicitly asked.
@@ -218,7 +218,7 @@ across efforts.
 Ship a change → `pytest tests -q` (513 green baseline) → deploy → fire a gym round:
 
 ```
-cd "d:\Open WebUI\ai-orchestration-gym"
+cd ../ai-orchestration-gym
 python runner/gym_runner.py --auth app preflight scenario-004-python-todo-product
 python runner/gym_runner.py --auth app run scenario-004-python-todo-product --yes-provision --commit
 ```

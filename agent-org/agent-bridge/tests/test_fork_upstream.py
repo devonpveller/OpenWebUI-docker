@@ -20,7 +20,7 @@ from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]
 
-FORK = "https://github.com/profnovice/MonoGame.git"
+FORK = "https://github.com/probeuser/MonoGame.git"
 PARENT = "https://github.com/MonoGame/MonoGame.git"
 
 
@@ -92,7 +92,7 @@ async def test_project_add_upstream_flag_anywhere_in_args(db_url):
              "message": f"/project add --upstream={PARENT} mono {FORK}",
              "is_bot": False, "ts": 1})
         p = await orch.projects.resolve("mono")
-        assert p["repo_url"].endswith("profnovice/MonoGame.git") and p["upstream_url"] == PARENT
+        assert p["repo_url"].endswith("probeuser/MonoGame.git") and p["upstream_url"] == PARENT
     finally:
         await db.dispose()
 

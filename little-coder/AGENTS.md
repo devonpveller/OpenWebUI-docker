@@ -171,7 +171,7 @@ if you forget.
 ### Deploy a code change
 
 ```powershell
-cd "d:/Open WebUI/ai-stack"
+cd <your ai-stack checkout>
 docker compose build little-coder
 docker compose up -d little-coder
 ```

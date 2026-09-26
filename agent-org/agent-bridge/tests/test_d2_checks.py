@@ -30,7 +30,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -51,7 +51,7 @@ def _remote(state: dict):
             return httpx.Response(200, json={"ahead_by": 1, "commits": [],
                 "files": [{"filename": "src/x.py", "additions": 1, "deletions": 0}]})
         if p.endswith("/pulls") and request.method == "POST":
-            return httpx.Response(201, json={"number": 5, "html_url": "https://github.com/devonpveller/Docker-Game/pull/5"})
+            return httpx.Response(201, json={"number": 5, "html_url": "https://github.com/demoowner/Docker-Game/pull/5"})
         if "/merge" in p and request.method == "PUT":
             state["merged"] = True
             return httpx.Response(200, json={"merged": True})
@@ -62,7 +62,7 @@ def _remote(state: dict):
 
 
 async def _game(orch, check_cmd=""):
-    await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+    await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
     if check_cmd:
         assert await orch.projects.set_check("game", check_cmd)
     return await orch.router.open_effort("wire", project="game")
@@ -110,7 +110,7 @@ async def test_org_build_check_fast_fails_on_unreachable_gitlink(db_url, tmp_pat
             orch, "git submodule update --init --recursive && dotnet build vendor/x/X.sln")
 
         async def _broken(effort_id, repo):     # stand in for read_broken_gitlinks (unit-tested apart)
-            return [{"path": "vendor/x", "sha": "deadbeefcafe0000", "submodule_repo": "devonpveller/x"}]
+            return [{"path": "vendor/x", "sha": "deadbeefcafe0000", "submodule_repo": "demoowner/x"}]
         orch._broken_gitlinks = _broken
         harness.check_queue = [(0, "Build succeeded.\n0 Error(s)", False)]   # must NOT be consumed
         verdict, out, _n = await orch._org_build_check(eid)
@@ -249,7 +249,7 @@ async def test_d6_handoff_on_merge(db_url, tmp_path):
 async def test_project_check_command_sets_and_lists(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         mgmt = await orch.mgmt_channel_id()
         await orch.handle_event({"id": "c1", "channel_id": mgmt, "is_bot": False, "ts": 1,
                                  "message": '/project check game "dotnet build Build.sln"'})

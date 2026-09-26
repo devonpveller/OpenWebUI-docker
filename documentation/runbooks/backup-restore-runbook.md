@@ -22,7 +22,7 @@ faithful; every archive integrity-checked).
 Backups land in repo-root `./backups/<service>/`, newest-per-service, with a
 `.sha256` sentinel next to each artifact. A weekly two-slot NAS mirror
 (`scripts/backup/backup-to-nas.ps1`) copies all of `./backups/` to
-`\\PolyshDesignNAS\backups\...\slot-A|B`.
+`\\<nas>\backups\...\slot-A|B`.
 
 | Service | Type | Artifact | Restore tool |
 |---|---|---|---|
@@ -47,7 +47,7 @@ archive has nothing to restore into (see `restore-from-snapshot.md`).
 ## 2. Step 0 — pick and verify the backup (ALWAYS FIRST)
 
 ```bash
-cd "D:/Open WebUI/ai-stack"
+cd <your ai-stack checkout>
 SVC=agent-bridge-db                       # the service to restore
 F=$(ls -1t backups/$SVC/*.dump backups/$SVC/*.tar.gz backups/$SVC/*.sql.gz 2>/dev/null | head -1)
 echo "restoring from: $F"
@@ -74,7 +74,7 @@ DBs; for the biggest volumes (lm-models ~120 GB) weigh the disk cost.
 docker exec ${SVC}-backup sh -c 'sh /scripts/backup.sh'     # writes a fresh dated dump
 
 # Volume services: tar the current volume out-of-band
-docker run --rm -v <volume>:/data:ro -v "D:/Open WebUI/ai-stack/backups/pre-restore":/out alpine \
+docker run --rm -v <volume>:/data:ro -v "$PWD/backups/pre-restore":/out alpine \
   sh -c 'tar czf /out/'"$SVC"'-prerestore-$(date -u +%Y%m%dT%H%M%SZ).tar.gz -C /data .'
 ```
 
@@ -152,7 +152,7 @@ General pattern: stop consumers, wipe the volume, extract the tar, restart.
 SVC=mnemory ; VOL=mnemory-data ; CONSUMER=mnemory
 F=$(ls -1t backups/$SVC/*.tar.gz | head -1)
 docker compose stop $CONSUMER
-docker run --rm -v $VOL:/data -v "D:/Open WebUI/ai-stack/backups/$SVC":/b:ro alpine \
+docker run --rm -v $VOL:/data -v "$PWD/backups/$SVC":/b:ro alpine \
   sh -c 'rm -rf /data/* /data/..?* /data/.[!.]* 2>/dev/null; tar xzf /b/'"$(basename "$F")"' -C /data'
 docker compose start $CONSUMER
 ```
@@ -161,7 +161,7 @@ docker compose start $CONSUMER
 - **openwebui** — never restart `openwebui` alone; it shares a network namespace
   with `tailscale`. Order: bring OWUI up, then tailscale (see the
   `openwebui-tailscale-netns-restart` note). Volume: `openwebui-data`.
-- **lm-models** — the tar is the `C:\Users\yamao\.lmstudio\models` bind mount, not
+- **lm-models** — the tar is the `LM_MODELS_DIR` bind mount (set in `inference/.env`), not
   a named volume; extract back to that host path. ~120 GB — ensure free space.
 - **openbrain-wiki** — tar is a git working tree; `wiki-assets` (uploaded
   binaries) is a *separate* volume captured in the same run.
@@ -173,7 +173,7 @@ docker compose start $CONSUMER
 ## 8. If local `./backups/` is gone — pull from the NAS
 
 The weekly mirror keeps two slots (`slot-A` even ISO weeks, `slot-B` odd) on
-`\\PolyshDesignNAS\backups\...`. Copy the needed artifact + its `.sha256` back
+`\\<nas>\backups\...`. Copy the needed artifact + its `.sha256` back
 into `./backups/<service>/`, re-verify integrity (§2), then follow the matching
 procedure. Prefer the newer slot unless it is the corrupted set.
 
@@ -206,7 +206,7 @@ net use: System error 2242 has occurred.
 3. Keep the DPAPI fallback in step:
    `powershell -File scripts/backup/set-nas-credential.ps1 -FromEnv`
 4. Re-run it now rather than waiting a week:
-   `powershell -File scripts/backup/backup-to-nas.ps1 -NasUncRoot "\\PolyshDesignNAS\backups\ai-stack\portal"`
+   `powershell -File scripts/backup/backup-to-nas.ps1 -NasUncRoot "\\<nas>\backups\ai-stack\portal"`
 
 **There is no hardcoded password to hunt for.** Before 2026-09-13 the only copy
 lived DPAPI-encrypted in `secrets/nas-backup-vault.dat` — unfindable by grep,

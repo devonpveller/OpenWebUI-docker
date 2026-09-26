@@ -36,7 +36,7 @@ async def _orch(db_url, tmp_path=None, *, github=False):
     if github:
         key = tmp_path / "app.pem"
         key.write_text("dummy")
-        kw = {"github_app_id": "1", "github_app_owner": "devonpveller",
+        kw = {"github_app_id": "1", "github_app_owner": "demoowner",
               "github_app_private_key_path": str(key)}
     settings = Settings(
         _env_file=None, chat_adapter="fake",
@@ -53,7 +53,7 @@ async def _orch(db_url, tmp_path=None, *, github=False):
 
 
 def _remote(*, parent: str | None = None):
-    """MockTransport for `devonpveller/Engine`: repo meta (with an optional fork `parent`),
+    """MockTransport for `demoowner/Engine`: repo meta (with an optional fork `parent`),
     branch + compare so the delivery path verifies landed."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -76,7 +76,7 @@ def _remote(*, parent: str | None = None):
 async def test_nl_remove_upstream_clears_registry(db_url):
     orch, chat, harness, db = await _orch(db_url)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine",
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine",
                                 upstream_url="https://github.com/isadorasophia/murder.git")
         orch.models._client.queue_structured(OperatorIntent(
             kind="chitchat", reply="Clearing it.", project="engine", remove_upstream=True))
@@ -96,7 +96,7 @@ async def test_upstream_heal_clears_when_repo_is_not_a_fork(db_url, tmp_path):
     PROVES the repo is not a fork ⇒ the bridge clears the bogus upstream itself."""
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine",
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine",
                                 upstream_url="https://github.com/isadorasophia/murder.git")
         orch._gh_transport = _remote(parent=None)               # NOT a fork
         harness.upstream_fails = True                            # the bake fails on focus
@@ -113,7 +113,7 @@ async def test_upstream_heal_clears_when_repo_is_not_a_fork(db_url, tmp_path):
 async def test_upstream_heal_corrects_to_actual_parent(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine",
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine",
                                 upstream_url="https://github.com/wrong/parent")
         orch._gh_transport = _remote(parent="realowner/RealParent")   # a fork of someone ELSE
         harness.upstream_fails = True
@@ -131,7 +131,7 @@ async def test_upstream_warning_kept_when_config_is_right(db_url, tmp_path):
     private/unreachable — the honest warning must survive, the registry must not change."""
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine",
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine",
                                 upstream_url="https://github.com/realowner/RealParent")
         orch._gh_transport = _remote(parent="realowner/RealParent")
         harness.upstream_fails = True
@@ -162,7 +162,7 @@ async def test_state_holds_closes_undelivered_effort_as_noop_done(db_url, tmp_pa
     already holds, the org closes the effort itself, with evidence."""
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("noop", project="engine")
         await orch.charters.set_goal(eid, "ensure build props reference the vendored engine",
                                      created_by="po")
@@ -190,7 +190,7 @@ async def test_state_missing_still_escalates(db_url, tmp_path):
     ladder — never a false done."""
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("broken", project="engine")
         await orch.charters.set_goal(eid, "wire the vendored engine", created_by="po")
         orch._gh_transport = _never_lands()
@@ -213,9 +213,9 @@ def _engine_hosts_murder():
     import base64
     gitmodules = base64.b64encode(
         b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
-        b'\turl = https://github.com/devonpveller/murder\n'
+        b'\turl = https://github.com/demoowner/murder\n'
         b'[submodule "vendor/MonoGame"]\n\tpath = vendor/MonoGame\n'
-        b'\turl = https://github.com/devonpveller/MonoGame\n').decode()
+        b'\turl = https://github.com/demoowner/MonoGame\n').decode()
     state: dict = {}   # was referenced but never defined — a latent NameError every /branches/
                        # read used to swallow inside _verify_delivery's broad except
 
@@ -254,8 +254,8 @@ async def test_direct_intake_on_vendored_project_carries_composition_context(db_
     path does."""
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _engine_hosts_murder()
         from app.schemas import ReadinessVerdict
         orch.models._client.queue_structured(
@@ -282,7 +282,7 @@ async def test_direct_intake_on_vendored_project_carries_composition_context(db_
 async def test_standalone_project_gets_no_composition_noise(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path, github=True)
     try:
-        await orch.projects.add("solo", "https://github.com/devonpveller/Solo")
+        await orch.projects.add("solo", "https://github.com/demoowner/Solo")
         orch._gh_transport = _engine_hosts_murder()   # nothing vendors "Solo"
         eid, chan, root = await orch.router.open_effort("task", project="solo")
         await orch._intake_or_dispatch(eid, chan, root, "do the thing",
@@ -300,7 +300,7 @@ async def test_set_check_bounds_a_pasted_wall(db_url):
     raised to 1000 (2026-07-09) because a real runtime smoke check is legitimately long."""
     orch, chat, harness, db = await _orch(db_url)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         wall = "dotnet build X.sln\n" + ("'Point' is an ambiguous reference\n" * 40)
         assert await orch.projects.set_check("engine", wall)
         p = await orch.projects.get("engine")
@@ -324,7 +324,7 @@ async def test_nl_check_set_and_clear(db_url):
     git-shaped vocabulary required of the operator."""
     orch, chat, harness, db = await _orch(db_url)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         orch.models._client.queue_structured(OperatorIntent(
             kind="chitchat", reply="Setting the check.", project="engine",
             check_cmd="dotnet build vendor/murder/Murder.sln"))

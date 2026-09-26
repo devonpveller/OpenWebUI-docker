@@ -29,7 +29,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -51,7 +51,7 @@ async def test_cross_effort_code_effort_auto_rehearses_no_command(db_url, tmp_pa
     of dead-ending on `/dry-run pass`."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch.projects.set_check("murder", "dotnet build Murder.sln")
         eid, chan, root = await orch.router.open_effort("port", project="murder")
         await orch.charters.set_goal(eid, "port the whole thing", created_by="po")
@@ -73,7 +73,7 @@ async def test_irreversible_still_holds_for_a_human(db_url, tmp_path):
     """An `irreversible` classification is NOT auto-rehearsed — a human should look first."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch.projects.set_check("murder", "dotnet build Murder.sln")
         eid, chan, root = await orch.router.open_effort("danger", project="murder")
         await orch.charters.set_goal(eid, "delete everything", created_by="po")
@@ -91,7 +91,7 @@ async def test_no_build_check_falls_back_to_human_gate(db_url, tmp_path):
     """cross_effort but NO runnable build → nothing to rehearse with → keep the human gate."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")   # no check_cmd
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")   # no check_cmd
         eid, chan, root = await orch.router.open_effort("nocheck", project="murder")
         await orch.charters.set_goal(eid, "broad change", created_by="po")
         await orch.exec_gate.set_risk(eid, "cross_effort")
@@ -109,7 +109,7 @@ async def test_nl_proceed_releases_the_hold_and_dispatches(db_url, tmp_path):
     no `/dry-run` command."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, chan, root = await orch.router.open_effort("await-go", project="murder")
         await orch.charters.set_goal(eid, "the risky thing", created_by="po")
         await orch.exec_gate.set_risk(eid, "irreversible")          # held for a human

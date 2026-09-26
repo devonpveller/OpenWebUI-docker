@@ -310,7 +310,7 @@ Deliberately not closed in this iteration — recorded so the next session does 
 
 ## Validation
 
-Run a gym round (`d:\Open WebUI\ai-orchestration-gym`,
+Run a gym round (`..\ai-orchestration-gym`, beside the ai-stack checkout,
 `python runner/gym_runner.py --auth app run <scenario> --yes-provision`). **The org's self-report never
 scores** — verify against the GitHub remote and the audit. Success looks like:
 - more than 2 QA rounds when work remains (the old cap is gone),

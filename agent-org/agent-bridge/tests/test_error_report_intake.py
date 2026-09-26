@@ -64,9 +64,9 @@ async def _orch(db_url):
 
 
 async def _add_live_projects(orch):
-    await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-    await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-    await orch.projects.add("monogame", "https://github.com/devonpveller/MonoGame")
+    await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+    await orch.projects.add("murder", "https://github.com/demoowner/murder")
+    await orch.projects.add("monogame", "https://github.com/demoowner/MonoGame")
 
 
 async def _drain(orch):

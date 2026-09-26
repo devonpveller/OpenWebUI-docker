@@ -1,6 +1,6 @@
 # Open Notebook source surface inventory (Task 4.1)
 
-Every read/write of **source** data in the fork (`d:\Open WebUI\open-notebook`),
+Every read/write of **source** data in the fork (`../open-notebook`, beside the ai-stack checkout),
 so the storage can be repointed to OB1 Postgres with minimal UI change.
 Operational state (notes, chat, jobs, transformations, model config) **stays
 on SurrealDB**.

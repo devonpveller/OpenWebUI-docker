@@ -146,9 +146,9 @@ docker run --rm -v "${PWD}\backups\open-notebook:/backups:ro" alpine sh -c "cd /
 
 # 3. Wipe + restore the host bind mount.
 $archive = 'notebook-data-20260530T011617Z.tar.gz'
-Remove-Item -Recurse -Force 'D:\Open WebUI\open-notebook\notebook_data\*'
+Remove-Item -Recurse -Force (Join-Path $env:OPEN_NOTEBOOK_DIR 'notebook_data\*')
 docker run --rm `
-  -v 'D:\Open WebUI\open-notebook\notebook_data:/dest' `
+  -v "$env:OPEN_NOTEBOOK_DIR\notebook_data:/dest" `
   -v "${PWD}\backups\open-notebook:/in:ro" `
   alpine sh -c "cd /dest && tar xzf /in/$archive"
 
@@ -207,7 +207,7 @@ Part K (2026-08-21)** — the live volumes are:
 | mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway` |
 | little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
-| lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
+| lm-models | bind `LM_MODELS_DIR` (from `inference/.env`) | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
 | ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
 
 **little-coder** is the one service whose backup is a SINGLE archive covering
@@ -271,11 +271,11 @@ Remove-Item -Recurse -Force '.\data\tailscale\*'
 docker run --rm -v "${PWD}\data\tailscale:/dest" -v "${PWD}\backups\tailscale:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
 ```
 
-**LM Studio models**: the bind mount is your Windows path
-`C:\Users\yamao\.lmstudio\models`. Step 3:
+**LM Studio models**: the bind mount is the host path in `LM_MODELS_DIR`
+(`inference/.env`; below, `$env:LM_MODELS_DIR` holds it). Step 3:
 ```powershell
-Remove-Item -Recurse -Force 'C:\Users\yamao\.lmstudio\models\*'
-docker run --rm -v 'C:\Users\yamao\.lmstudio\models:/dest' -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+Remove-Item -Recurse -Force (Join-Path $env:LM_MODELS_DIR '*')
+docker run --rm -v "${env:LM_MODELS_DIR}:/dest" -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
 ```
 **Time this carefully** — restoring 50+ GB over USB or slow disk will
 take a while.

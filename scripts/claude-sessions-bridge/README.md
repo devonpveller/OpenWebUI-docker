@@ -79,7 +79,7 @@ Manual foreground run (debugging): `& .venv\Scripts\python.exe scripts\claude-se
 
 ## Governance (DESIGN.md §7 — defense in depth, fail-closed)
 
-1. **Operator allow-list** — only posts from `BRIDGE_OPERATORS` (default `profnovice`) are
+1. **Operator allow-list** — only posts from `BRIDGE_OPERATORS` (no default: blank = nobody) are
    processed; everything else is logged and dropped. Bridge/bot posts are tagged
    (`props.from_bridge`) and never re-ingested.
 2. **Approval level** — default **`auto`** (operator choice 2026-07-13): the classifier-backed

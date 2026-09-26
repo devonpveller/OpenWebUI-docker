@@ -273,7 +273,7 @@ def test_add_submodule_uses_real_git_adds_commits_pushes():
     real git, `submodule add` + commit + push, at the given path."""
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
-    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    ws.add_submodule("https://github.com/demoowner/murder", "murder")
     cmd, cwd = ot.calls[0]
     assert "/usr/bin/git" in cmd                        # real git, not the proxy
     assert "submodule add" in cmd and "murder" in cmd
@@ -284,7 +284,7 @@ def test_add_submodule_uses_real_git_adds_commits_pushes():
 def test_add_submodule_public_fork_leaves_url_clean():
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
-    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    ws.add_submodule("https://github.com/demoowner/murder", "murder")
     cmd, _ = ot.calls[0]
     assert "x-access-token" not in cmd                  # public submodule → no token at rest in .gitmodules
 
@@ -302,7 +302,7 @@ def test_add_submodule_is_idempotent():
     'already exists' — so re-running a plan adds only what's missing."""
     ot = _FakeOT()
     ws = WorkspaceManager(ot, workspace_path="/workspace")
-    ws.add_submodule("https://github.com/devonpveller/murder", "murder")
+    ws.add_submodule("https://github.com/demoowner/murder", "murder")
     cmd, _ = ot.calls[0]
     assert "submodule status" in cmd and "already present" in cmd   # guarded skip
     assert "submodule add" in cmd                                    # still adds when absent
