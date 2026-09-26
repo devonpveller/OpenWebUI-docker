@@ -1033,18 +1033,35 @@ def _drift_script_ran(host: FakeHost) -> bool:
     return any(call[0] in ("powershell", "pwsh") for call in host.calls)
 
 
-def test_a_fresh_install_with_no_plugin_deployed_skips_the_drift_probe(root):
-    """ac-ci F6: on a fresh Open WebUI the drift check REFUSED on empty tables and
-    `health` failed on a clean quickstart wherever PowerShell exists. A counted zero is
-    a SKIP with a pointer - and the drift script is never asked."""
+ZERO_PLUGINS_WARNING = (
+    "  [warn] frontend: owui/ manifest drift NOT CHECKED - 0 plugins deployed in this Open WebUI: "
+    "a fresh install, or this host's plugins were wiped; paste them per frontend/owui/README.md "
+    "(\"Redeploy mechanism\")"
+)
+
+
+def test_zero_deployed_plugins_is_a_visible_warning_not_a_fail_and_not_a_silent_skip(root):
+    """ac-ci F6/X3: on a fresh Open WebUI the drift check REFUSED on empty tables and
+    `health` failed on a clean quickstart wherever PowerShell exists. Zero rows cannot be
+    told apart from a wiped host, so it is a [warn] naming both readings - never [skip],
+    never [OK] - health does not fail on it, and the drift script is not asked."""
     host = FakeHost(plugin_count="0", drift_stdout="REFUSED",
                     drift_stderr="REFUSED: the query ... returned no readable rows.")
     code, out = sweep(host, root, planes="frontend")
     assert code == 0
-    assert ("  [skip] frontend: owui/ manifest drift (no tool, function or skill is deployed "
-            "in this Open WebUI yet; to add them see frontend/owui/README.md, \"Redeploy mechanism\")") in out
-    assert not any("owui/ manifest rows drifted" in name for _s, name in probe_lines(out))
+    assert ZERO_PLUGINS_WARNING in out.splitlines()
+    assert "[skip] frontend: owui/ manifest drift" not in out
+    assert not any("owui/ manifest" in name for _s, name in probe_lines(out))
     assert not _drift_script_ran(host)
+
+
+def test_a_deployed_host_whose_plugins_were_wiped_gets_the_same_warning(root):
+    """The residual ambiguity, pinned: a host that HAD plugins and now counts zero reads
+    exactly like a fresh install. The warning says so in words; it does not fail."""
+    host = FakeHost(plugin_count="0")        # every other default is this (deployed) host
+    code, out = sweep(host, root, planes="frontend")
+    assert "or this host's plugins were wiped" in out
+    assert code == 0
 
 
 def test_with_plugins_deployed_a_drifted_row_still_fails(root):
@@ -1137,6 +1154,11 @@ def test_the_liveliness_probe_never_gets_litellms_bare_health(root):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    not stack.WINDOWS,
+    reason="`stats` hands off to Windows PowerShell 5.1 and refuses elsewhere; the off-Windows "
+           "refusal is test_stats_refuses_off_windows_rather_than_printing_nothing (ac-ci X1)",
+)
 def test_stats_hands_off_to_the_powershell_report(root):
     script = root / "scripts" / "stack" / "stack-stats.ps1"
     script.parent.mkdir(parents=True, exist_ok=True)

@@ -11,9 +11,11 @@
 #   agent-bridge  agent-org/README.md "Tests" says `pip install -e .[test] && pytest -q`,
 #                 and the operator's log (agent-org/docs/log/P8-org-self-knowledge.md)
 #                 runs it from a host venv. That extra ALONE CANNOT COLLECT THE SUITE:
-#                 app/github_app.py imports `jwt` (PyJWT), which is in requirements.txt
-#                 but not in the [test] extra, so 80 test modules fail to import
-#                 (measured at e9caf6b in ubuntu:24.04). The venv therefore also takes
+#                 three runtime modules are in requirements.txt and not in the [test]
+#                 extra, and 80 test modules fail to import: 78 on `jwt` (PyJWT,
+#                 imported by app/github_app.py), 1 on `cryptography`, 1 on
+#                 `websockets` (measured at e9caf6b in ubuntu:24.04; the breakdown is
+#                 the ac-ci tester's). The venv therefore also takes
 #                 requirements.txt - the pins the service image installs - which is the
 #                 environment the code actually runs in. Nothing is skipped or deselected.
 #   little-coder  little-coder/AGENTS.md "Run the full test suite": `python -m pytest -q`

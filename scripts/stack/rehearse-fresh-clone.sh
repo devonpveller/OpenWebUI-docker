@@ -30,8 +30,9 @@
 # --this-daemon runs the same clone, init, REAL up, /health and checks against the
 # daemon `docker` already talks to, with no DinD - for a CI runner, whose daemon is
 # itself disposable (the `fresh-clone-up` job in .github/workflows/ci.yml). It
-# REFUSES to start when that daemon holds any container at all, so pointed at a
-# host that runs a stack it stops before touching anything. The clone goes in a
+# REFUSES to start unless that daemon is EMPTY - no container, no volume, no
+# network but bridge/host/none - and names what it found, so pointed at a host that
+# runs a stack, or holds a stopped one's data, it stops before touching anything. The clone goes in a
 # temp directory; step 9 then tears down what the run created (`stack.py down`,
 # then every container, and each volume and network that did not exist before
 # the run) and checks that nothing is left. --preload-image does not apply.
@@ -109,12 +110,28 @@ SHA="$(git -C "$REPO" rev-parse --verify "${REF}^{commit}" 2>/dev/null)" || {
 if [ "$THIS_DAEMON" -eq 1 ]; then
   [ -n "$PRELOAD" ] && { echo "--preload-image has no meaning with --this-daemon (there is no second daemon to load into)"; exit 2; }
   # THE GUARD THIS MODE STANDS ON. Every plane uses fixed container names, so on a
-  # daemon that runs a stack, `stack.py up` here would drive THAT stack. A daemon
-  # that answers and holds zero containers cannot be running one.
-  EXISTING="$(docker ps -aq 2>/dev/null)" || { echo "refused: --this-daemon, but 'docker ps -a' failed - no daemon to drive"; exit 2; }
-  if [ -n "$EXISTING" ]; then
-    echo "refused: --this-daemon drives the daemon docker talks to, and it already holds $(echo "$EXISTING" | wc -l | tr -d ' ') container(s)."
-    echo "  This mode is for a disposable daemon with nothing on it (a CI runner). Run without --this-daemon to rehearse inside a DinD."
+  # daemon that runs a stack, `stack.py up` here would drive THAT stack. And a STOPPED
+  # stack is no safer: `down` keeps its volumes, and the stock Open WebUI started here
+  # would mount `frontend_openwebui-data` and run its migrations, with a new secret key,
+  # against that host's real webui.db (ac-ci X2: measured, it wrote webui.db into a
+  # pre-existing volume and PASSED). So the daemon must be EMPTY: no container, no
+  # volume, and no network beyond the three every daemon has (bridge, host, none).
+  # Every item found is named. A CI runner's daemon has none of them.
+  # Each listing FAILS CLOSED: a daemon that cannot be listed is not an empty one.
+  EXISTING_C="$(docker ps -a --format '{{.Names}}' 2>/dev/null)" \
+    || { echo "refused: --this-daemon, but 'docker ps -a' failed - no daemon to drive"; exit 2; }
+  EXISTING_V="$(docker volume ls -q 2>/dev/null)" \
+    || { echo "refused: --this-daemon, but 'docker volume ls' failed"; exit 2; }
+  ALL_N="$(docker network ls --format '{{.Name}}' 2>/dev/null)" \
+    || { echo "refused: --this-daemon, but 'docker network ls' failed"; exit 2; }
+  EXISTING_N="$(printf '%s\n' "$ALL_N" | grep -vxE 'bridge|host|none|')"
+  if [ -n "$EXISTING_C$EXISTING_V$EXISTING_N" ]; then
+    echo "refused: --this-daemon drives the daemon docker talks to, and it is not empty:"
+    [ -n "$EXISTING_C" ] && echo "  containers: $(echo "$EXISTING_C" | tr '\n' ' ')"
+    [ -n "$EXISTING_V" ] && echo "  volumes:    $(echo "$EXISTING_V" | tr '\n' ' ')"
+    [ -n "$EXISTING_N" ] && echo "  networks:   $(echo "$EXISTING_N" | tr '\n' ' ')"
+    echo "  This mode is for a disposable daemon with nothing on it (a CI runner): a stopped stack's"
+    echo "  volumes are its data. Run without --this-daemon to rehearse inside a DinD."
     exit 2
   fi
   VOLS_BEFORE="$(docker volume ls -q | sort)"

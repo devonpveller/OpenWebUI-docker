@@ -1751,15 +1751,18 @@ class HealthSweep:
                     "PowerShell; neither Windows nor `pwsh` on PATH)"
                 )
             elif self.owui_plugin_count() == 0:
-                # A FRESH INSTALL, not drift (ac-ci, 2026-09-25): nothing has ever been
-                # pasted, so there is nothing to compare, and check-owui-drift.ps1 would
-                # REFUSE on the empty tables ("returned no readable rows") - which made the
-                # first `health` after a clean quickstart FAIL wherever PowerShell exists.
-                # ONLY a counted zero skips: a census that could not be read (None) falls
-                # through to the real check, and one deployed row makes it a real check.
+                # ZERO DEPLOYED ROWS (ac-ci, 2026-09-25). check-owui-drift.ps1 REFUSES on
+                # empty tables ("returned no readable rows"), which made the first `health`
+                # after a clean quickstart FAIL wherever PowerShell exists. But a count of
+                # zero has TWO readings and nothing here can tell them apart: a fresh install,
+                # or a host whose plugins were wiped (a reset, an empty restore, the wrong
+                # volume). So it neither fails nor passes silently: a [warn] line naming both,
+                # and no probe counted. Only a counted zero lands here - a census that could
+                # not be read (None) runs the real check, and so does one deployed row.
                 self.console.line(
-                    "  [skip] frontend: owui/ manifest drift (no tool, function or skill is deployed "
-                    "in this Open WebUI yet; to add them see frontend/owui/README.md, \"Redeploy mechanism\")"
+                    "  [warn] frontend: owui/ manifest drift NOT CHECKED - 0 plugins deployed in this "
+                    "Open WebUI: a fresh install, or this host's plugins were wiped; paste them per "
+                    "frontend/owui/README.md (\"Redeploy mechanism\")"
                 )
             else:
                 drift = self.owui_drift(shell)
