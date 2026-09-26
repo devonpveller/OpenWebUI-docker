@@ -4,7 +4,6 @@ This is the egress inventory for the whole stack: what can reach the internet, w
 turns each part on, and how to re-derive the list yourself. The [README](README.md) links
 here; nothing in this file is needed to run the quickstart.
 
-
 **No component in this stack sends a prompt, a document or a memory to a model
 provider by default.** Every model call goes to llama.cpp on this host through
 the LiteLLM gateway, and that gateway is attached to two networks that are both
