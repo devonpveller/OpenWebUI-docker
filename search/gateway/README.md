@@ -52,8 +52,10 @@ model the stack already uses for `mnemory`.
   patch. The Tavily shim remains for *external* Tavily clients. **Re-verify
   on every OWUI version bump** that the searxng engine contract still matches
   `routes/searxng_compat.py`.
-- **One wiring point.** Setting OWUI's web-search engine also feeds
-  `smolcrawl` deep-research, which calls OWUI's `search_web()`.
+- **One wiring point.** Setting OWUI's web-search engine is the whole
+  OWUI-side wiring. (It used to feed `smolcrawl` deep-research too, which
+  called OWUI's `search_web()`; that service was retired 2026-08-21 and its
+  source is in `scripts/archive/smolcrawl/`.)
 
 ## Privacy enforcement (spec §8)
 
@@ -66,8 +68,10 @@ model the stack already uses for `mnemory`.
 | Default-deny Tor-hostile engines | `../searxng/settings.yml` disables Google/Bing/Yandex. |
 | Privacy infra not silently swapped | All search services `watchtower.enable=false`; images pinnable via `.env`. |
 
-**Scope caveat:** the gateway privatises the **search query** step. `smolcrawl`
-then fetches result *pages* directly (not via Tor). "Private search" ≠
+**Scope caveat:** the gateway privatises the **search query** step. Whatever
+fetches the result *pages* afterwards does so on its own route unless it is
+pointed at the `vpn` proxy itself (`openbrain-research` is, via
+`FETCH_PROXY_URL`; the retired `smolcrawl` fetched them directly). "Private search" ≠
 end-to-end private browsing.
 
 ## Operational notes

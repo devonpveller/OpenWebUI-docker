@@ -148,7 +148,7 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - Scheduled traffic digest: `portal-cron` fires `POST /run` on the alerter daily 07:00 UTC by default
 
 ### Backup state
-- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), smolcrawl, tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC)
+- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC). (smolcrawl was in this set until its service and backup were retired 2026-08-21.)
 - Every backup writes a `.sha256` sentinel beside the archive; restore tooling verifies before touching anything
 - Convention for new services: [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
 - Restore workflow: per-service in [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`
