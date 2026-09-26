@@ -12,12 +12,14 @@ rest from the product menu.
 
 ## Hardware
 
-What each product needs, as measured. Everything runs on one Docker host.
+Disk is what each product's images take. RAM is **usage observed on one
+long-running reference deployment, not a minimum**. Everything runs on one
+Docker host.
 
-| Product | Disk for its images | RAM in use | GPU |
+| Product | Disk for its images | RAM observed (reference deployment) | GPU |
 |---|---|---|---|
 | **chat** (the quickstart) | 5.1 GB | 1.0 GiB | none |
-| **inference** | 9.7 GB, plus 17-22 GB per chat model and 0.6 GB for the embedding model | 15.3 GiB | NVIDIA, 24 GB VRAM for the shipped models (below) |
+| **inference** | 9.7 GB, plus 17-22 GB per chat model and 0.6 GB for the embedding model | 15.3 GiB | NVIDIA: a 24 GB card for the chat models, plus by default a second card for embeddings (below) |
 | **memory** | 2.1 GB | 3.3 GiB | none of its own |
 | **search** | 0.6 GB | 0.4 GiB | none |
 | **open-brain** | 7.5 GB | 18.4 GiB | none of its own |
@@ -34,8 +36,8 @@ How the figures were measured, so you can re-derive them:
   overlay2 store), summed once per image over what `docker compose config
   --images` lists for the product's planes and profiles. `:local` images are
   built on your machine. Data volumes and backups come on top.
-- **RAM:** `docker stats --no-stream`, summed over the same containers on a
-  long-running deployment. Open Brain's wiki viewer (9.2 GiB) and database
+- **RAM:** `docker stats --no-stream`, summed over the same containers on the
+  reference deployment - what it used, not what the product requires. Open Brain's wiki viewer (9.2 GiB) and database
   (4.0 GiB) dominate it and grow with your knowledge base. The chat figure is
   a fresh `stock` Open WebUI just after `/health` answered.
 - **CPU:** no service reserves CPU; a few portal and Open Brain sidecars are
@@ -138,7 +140,7 @@ What each one gives you, and what it needs besides Docker:
 | Product | Gives you | Also needs |
 |---|---|---|
 | **chat** | Open WebUI on `127.0.0.1:3000` | nothing |
-| **inference** | the model endpoints every other plane calls ([README](inference/README.md)) | the GPU; the chat GGUFs at the paths `inference/.env` names, under `data/models/gguf/` or its `LM_MODELS_DIR`; `bge-m3-f16.gguf` in `data/models/embeddings/`; `COMPOSE_PROFILES=local` uncommented in `inference/.env`, or the gateway does not register the local models |
+| **inference** | the model endpoints every other plane calls, with the local llama.cpp models registered ([README](inference/README.md)) | the GPU; the chat GGUFs at the paths `inference/.env` names, under `data/models/gguf/` or its `LM_MODELS_DIR`; `bge-m3-f16.gguf` in `data/models/embeddings/`. Without a GPU, use `enable --plane inference` (the gateway alone) |
 | **memory** | long-term memory for chats and agents, with a keyed door on `127.0.0.1:8060` ([README](memory/README.md)) | a mnemory clone beside this repo; `stack.py doctor` prints the command |
 | **search** | private web search on `127.0.0.1:8085`, every query leaving through Mullvad ([README](search/README.md)) | a Mullvad WireGuard key and `/dev/net/tun` |
 | **open-brain** | the knowledge base: capture, retrieval, a compiled wiki on `127.0.0.1:8812` | the OB1 submodule (the clone above fetched it) |
@@ -151,17 +153,20 @@ What each one gives you, and what it needs besides Docker:
 Turning one on:
 
 ```sh
-python3 scripts/stack/stack.py enable search      # a plane or a product
+python3 scripts/stack/stack.py enable research    # a product: prints the planes and profiles it enabled
 python3 scripts/stack/stack.py up                 # starts what is enabled, in dependency order
-python3 scripts/stack/stack.py disable search     # takes it back out
+python3 scripts/stack/stack.py disable research   # takes it back out
 ```
 
-`enable` refuses before it writes anything if a key is blank or still its
-`.env.example` placeholder, naming the key and the file. So the loop is:
-`enable`, copy that plane's `.env.example` to `.env`, fill in what it named,
-`enable` again, `up`. A product brings the planes it requires (`memory` brings
-inference), so its key list is cumulative; `--headless` leaves out the reading
-surfaces and keeps the engines.
+`enable <name>` always means the product of that name, including the five that
+are also plane names (`inference`, `memory`, `search`, `agent-org`, `portal`);
+`enable --plane <name>` acts on the plane alone. A product brings the planes
+it requires (`memory` brings inference) and turns on its profiles - enabling
+`inference` registers the local models, with no `.env` edit. `enable` refuses
+before it writes anything if a key is blank or still its `.env.example`
+placeholder, naming the key and the file, so the loop is: `enable`, copy that
+plane's `.env.example` to `.env`, fill in what it named, `enable` again, `up`.
+`--headless` leaves out the reading surfaces and keeps the engines.
 
 ## How it is laid out
 
@@ -255,16 +260,29 @@ PowerShell or `pwsh`); with only Python, the secret, line-ending and routing
 gates run as Python twins and the rest print `SKIPPED`
 ([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
 
-Before you push, run what CI runs ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)):
+Before you push, run the checks CI's `ruff` and `stack-driver` jobs run
+([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). They need docker, the
+OB1 submodule at its pinned commit, and an `.env` in every plane directory -
+CI copies the examples first, and so should you (`-n` never overwrites a real
+one; the checks render from the examples, the files only have to exist):
 
 ```sh
 python3 -m pip install ruff pytest
+for p in . frontend inference memory search coder portal agent-org/docker OB1/docker; do cp -n "$p/.env.example" "$p/.env"; done
+touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
 ruff check .
 python3 -m pytest scripts/stack -q
 python3 scripts/stack/stack.py inventory --check
 python3 scripts/stack/stack.py docs --check
-python3 scripts/checks/check-md-links.py
 ```
+
+`docs --check` exits 0 when every generated block matches, 1 when one is stale,
+3 when a block could not be compared at all (no docker, a missing `.env`, OB1
+not checked out) and 4 when OB1 is checked out but not at its pinned commit or
+has edits; 3 and 4 are not a pass. Without the `.env` files, `inventory --check`
+fails and tells you to `--write` - don't; create them and re-run. One more
+check runs locally only, not in CI: `python3 scripts/checks/check-md-links.py`,
+the relative-link sweep.
 
 Tables between `stack:` comment markers are generated: change the manifest or
 a compose file, run `stack.py docs --write`, and never edit inside a block. A
