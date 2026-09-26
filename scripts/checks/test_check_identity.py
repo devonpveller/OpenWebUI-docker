@@ -350,7 +350,8 @@ class Attempt4(ScratchRepo):
             self.skipTest('":" cannot occur in a Windows file name')
         for name in (':zz.md', ':(top)q.md'):
             with self.subTest(name=name):
-                self.stage(name, 'host ' + LAN_IP + '\n')
+                self.write(name, 'host ' + LAN_IP + '\n')
+                git(self.dir, 'add', '--', ':(literal)' + name)     # the test's own add must not be magic
                 rc, out = self.run_gate()
                 self.assertEqual(rc, 1, out)
                 self.assertIn(name + ':1:', out)
