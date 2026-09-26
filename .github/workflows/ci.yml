@@ -125,7 +125,12 @@ jobs:
   stack-driver:
     runs-on: ubuntu-latest
     steps:
+      # WITH the OB1 submodule (ac-doc-generator attempt 2): this job is the gate
+      # for the docs' generated blocks that NEVER skips, so it must be able to
+      # render every plane, ob1 included. Public submodule, no credential needed.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       # Same .env stubs as compose-validate, for the same reason: `config` stats
@@ -141,6 +146,11 @@ jobs:
             cp "$p/.env.example" "$p/.env"
           done
       - run: cp agent-org/docker/.env.example agent-org/docker/.env
+      # OB1 renders only with its own .env and the two recipe env files its compose
+      # names as env_file - all gitignored, so a checkout has none of them.
+      - run: |
+          cp OB1/docker/.env.example OB1/docker/.env
+          touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
       # setup-python's interpreter has pip and nothing else. Until ac-ci (X1) no step
       # installed pytest, so this job could only fail with "No module named pytest" -
       # never observed, because the workflow file itself was invalid until then (F1).
@@ -149,19 +159,16 @@ jobs:
       - run: python -m pytest scripts/stack -q
         # ubuntu-latest ships docker + compose v2, which is all `config` needs.
         #
-        # OB1 is a SUBMODULE and is not checked out here, so the open-brain
-        # project cannot be rendered. `inventory --check` says so by name and
-        # carries that project's recorded rows through UNVERIFIED rather than
-        # passing quietly - the remaining seven projects are verified for real.
+        #
+        # OB1 is checked out (above), so the open-brain project is rendered and
+        # verified like the other projects.
       - run: python scripts/stack/stack.py inventory --check
         # The docs' generated blocks (ac-doc-generator): every registered block is
-        # present with clean markers and matches the renders. --allow-unverified for
-        # the same reason as above - without the OB1 submodule the blocks that span
-        # ob1 cannot be rendered here, and the check names each one NOT VERIFIED
-        # instead of passing it; the pre-commit hook verifies them on a host that has
-        # the submodule. Everything else is compared for real, and a stale, missing or
-        # broken block fails this step.
-      - run: python scripts/stack/stack.py docs --check --allow-unverified
+        # present with clean markers, no unregistered file carries a marker, and every
+        # block matches the renders. NO --allow-unverified, deliberately: a contributor
+        # without docker or OB1 gets a SKIPPED hook, and this step is what compares
+        # what that hook could not. Exit 3 (something could not be rendered) FAILS it.
+      - run: python scripts/stack/stack.py docs --check
 
   bridge-stdlib-tests:
     runs-on: ubuntu-latest

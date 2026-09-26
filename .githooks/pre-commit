@@ -309,15 +309,18 @@ run_gate project-configs './scripts/checks/check-project-configs.ps1' '' no \
 # costs nothing. The check reads the WORKING TREE, so once it triggers, ANY of
 # those inputs carrying unstaged edits is refused outright - staged or not: an
 # unstaged compose edit can make a stale staged block look current, and then
-# what was checked is not what would be committed. (Not the OB1 gitlink: a
-# submodule reads as dirty for untracked files inside it, which would refuse
-# every commit on a host that runs it.)
+# what was checked is not what would be committed. (Not the OB1 gitlink here: a
+# submodule reads as dirty for untracked files inside it. `docs --check` itself
+# compares the OB1 checkout with the STAGED gitlink and its tracked edits, and
+# reports every ob1 block NOT VERIFIED - never matched - when they differ.)
 #
 # EXIT CODES of `docs --check`, and what the hook does with each - FAIL-CLOSED:
 #   0  every block matched                                  -> RAN
-#   3  no block is stale, but some could not be rendered    -> SKIPPED, loudly
-#      here (the OB1 submodule not checked out, a gitignored env compose stats,
-#      no docker); the check names each one
+#   3  nothing it COMPARED was stale, but some blocks or rows -> SKIPPED, loudly
+#      could not be rendered here (OB1 absent or not at the staged gitlink, a
+#      gitignored env compose stats, no docker). Those were NOT compared; the
+#      check names each one, and CI's stack-driver job (OB1 + docker, no
+#      --allow-unverified) is the gate that compares them
 #   1  a stale, missing or broken block                     -> REFUSED
 #   anything else (a crash, a missing interpreter mid-run)  -> REFUSED
 # Needs Python 3.11+ (tomllib), found independently of PS_HOST/PY_HOST like 0c's
@@ -378,7 +381,7 @@ else
         _docs_rc=$?
         case "$_docs_rc" in
             0) GATES_RAN="$GATES_RAN docs-blocks" ;;
-            3) echo "SKIPPED docs-blocks: some generated blocks could not be rendered on this machine (named above); none was stale"
+            3) echo "SKIPPED docs-blocks: the blocks and rows named NOT VERIFIED / PARTLY VERIFIED above were NOT compared on this machine and may be stale; everything else was current. CI's stack-driver job compares every block and refuses a stale one"
                GATES_SKIPPED="$GATES_SKIPPED docs-blocks" ;;
             *) echo "  Regenerate with: python scripts/stack/stack.py docs --write   (then stage the result)"
                echo "Pre-commit validation failed (generated doc blocks: stale, missing or broken - exit $_docs_rc)!"

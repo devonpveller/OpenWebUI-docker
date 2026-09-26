@@ -704,12 +704,26 @@ that does not pair, an unregistered block, and a one-line block written across
 lines are all failures, named by file and line - a block that silently stops
 being generated is the failure this check exists for.
 
+A `stack:` marker in a tracked `*.md` the registry does NOT name is refused
+too: nothing would generate or compare it, so a hand-written number inside it
+would read as generated.
+
 A block whose input is not on this machine - the OB1 submodule not checked out,
-a gitignored env file compose stats, no docker - is `NOT VERIFIED`, named, and
-left as committed. `--check` then exits **3**, not 0; CI, which has no OB1
-checkout, passes `--allow-unverified`. The pre-commit hook runs it (step 4b)
-whenever a registered doc, a compose file, the manifest, an `.env.example` or
-`stack.py` is staged, records a 3 as a SKIPPED gate, and refuses a 1.
+**an OB1 checkout that is not at the STAGED gitlink or carries tracked edits**
+(untracked files inside it are ignored), a gitignored env file compose stats, no
+docker - is `NOT VERIFIED`, named, and left as committed; the text says it was NOT
+compared. A `plane-table` is compared ROW BY ROW: only the rows of the planes that
+cannot be rendered are kept as committed (`PARTLY VERIFIED`), so a hand edit of
+any other row is still STALE. `--check` then exits **3**, never 0, unless
+`--allow-unverified`.
+
+**CI's `stack-driver` job is the gate that never skips**: it checks out the OB1
+submodule, has docker, and runs `docs --check` WITHOUT `--allow-unverified`, so a
+3 fails it. The pre-commit hook runs it (step 4b) whenever a registered doc, a
+compose file, the manifest, an `.env.example`, `stack.py` or the OB1 gitlink is
+staged; it refuses a 1 and records a 3 as a SKIPPED gate, saying what was not
+compared and that CI compares it - a contributor without docker or OB1 is not
+blocked, and not falsely told the blocks were checked.
 
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 
@@ -795,7 +809,8 @@ container, restores it, and checks the marker and `/health`; then `stats`,
 
 `.github/workflows/ci.yml` runs `python -m pytest scripts/stack -q`,
 `python scripts/stack/stack.py inventory --check` and
-`python scripts/stack/stack.py docs --check --allow-unverified` on Python 3.12.
+`python scripts/stack/stack.py docs --check` on Python 3.12, with the OB1 submodule
+checked out.
 The docs generator's block renderers and marker scanner are tested against
 `MINI_MANIFEST` with a scripted render (`DocsHost`).
 

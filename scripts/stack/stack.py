@@ -4050,6 +4050,65 @@ class Unverifiable(Exception):
     """This machine cannot produce the input a block is generated from."""
 
 
+class PartlyUnverifiable(Exception):
+    """A block some of whose ROWS could be rendered here and some not.
+
+    `body` is the block with each unrenderable row replaced by a KEEP sentinel
+    naming the row's leading text; cmd_docs splices the committed row back in
+    there, so every row that COULD be derived is still compared. Without this a
+    plane-table was all-or-nothing, and one plane missing on a machine (OB1 in CI)
+    let a hand edit of any other row through (ac-doc-generator attempt 1, X1).
+    """
+
+    def __init__(self, body: str, reasons: list):
+        super().__init__("; ".join(reasons))
+        self.body = body
+        self.reasons = reasons
+
+
+_KEEP = "\x00KEEP:"
+
+
+def _git(args, cwd) -> CommandResult:
+    try:
+        proc = subprocess.run(["git", *args], cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True, errors="replace")
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+
+
+def submodule_mismatch(root: Path, sub: str) -> str | None:
+    """Why the submodule's working tree is NOT what the index pins, or None.
+
+    The docs render a submodule plane from the files on disk. If the checkout is
+    at another commit than the STAGED gitlink, or carries uncommitted tracked
+    edits, those files are not what a commit would record - comparing against
+    them and calling the result checked is how a stale block got through
+    (attempt 1, X2). Untracked files are ignored on purpose: a running host keeps
+    gitignored and generated files inside OB1. A git that cannot answer is a
+    reason too - the check fails closed, as NOT VERIFIED, never as matched.
+    """
+    staged = _git(["ls-files", "-s", "--", sub], root)
+    fields = staged.stdout.split()
+    if staged.code != 0 or len(fields) < 2 or fields[0] != "160000":
+        return f"git cannot read the staged `{sub}` gitlink ({(staged.stderr or staged.stdout).strip()[:120]})"
+    pinned = fields[1]
+    head = _git(["rev-parse", "HEAD"], root / sub)
+    if head.code != 0:
+        return f"`{sub}` is not a readable git checkout ({head.stderr.strip()[:120]})"
+    if head.stdout.strip() != pinned:
+        return (f"the `{sub}` checkout is at {head.stdout.strip()[:7]}, but the staged gitlink pins {pinned[:7]} "
+                f"- `git submodule update {sub}` (or stage the gitlink you mean)")
+    dirty = _git(["status", "--porcelain", "--untracked-files=no"], root / sub)
+    if dirty.code != 0:
+        return f"git cannot read `{sub}`'s status ({dirty.stderr.strip()[:120]})"
+    if dirty.stdout.strip():
+        return (f"the `{sub}` checkout has uncommitted tracked edits, which a commit here would not record "
+                f"- commit or stash them in {sub} first")
+    return None
+
+
 class Condition(NamedTuple):
     """One render of a plane under one profile set."""
 
@@ -4084,13 +4143,20 @@ class DocRenders:
         self._renders: dict = {}
         self._profiles: dict = {}
         self._conditions: dict = {}
+        self._submodules: dict = {}
 
     def _run(self, plane: str, args) -> CommandResult:
         compose_rel = self.manifest.plane(plane)["compose"]
+        pinned = is_pinned_submodule(self.root, compose_rel)
         if not (self.root / Path(compose_rel)).is_file():
-            hint = (" (a pinned submodule - `git submodule update --init`)"
-                    if is_pinned_submodule(self.root, compose_rel) else "")
+            hint = " (a pinned submodule - `git submodule update --init`)" if pinned else ""
             raise Unverifiable(f"{compose_rel} is not on disk{hint}")
+        if pinned:
+            sub = compose_rel.replace("\\", "/").split("/")[0]
+            if sub not in self._submodules:
+                self._submodules[sub] = submodule_mismatch(self.root, sub)
+            if self._submodules[sub]:
+                raise Unverifiable(self._submodules[sub])
         env_example = render_env_path(self.manifest, self.root, plane)
         if not env_example.name.endswith(".example"):
             # render_env_path falls back to the REAL env when no example exists; the
@@ -4373,9 +4439,16 @@ class DocsGenerator:
             "| Plane (compose project) | Compose file | Services, by the profiles passed | Published host ports | Started by |",
             "|---|---|---|---|---|",
         ]
+        missing: list[str] = []
         for plane in self.manifest.order:
             spec = self.manifest.plane(plane)
-            services = self.renders.union(plane)
+            try:
+                services = self.renders.union(plane)
+                project = self.renders.project(plane)
+            except Unverifiable as why:
+                lines.append(f"{_KEEP}| **{plane}** (")
+                missing.append(f"the {plane} row ({why})")
+                continue
             if self.manifest.networks_only(plane) and not services:
                 counts = "0 - it declares networks only"
             else:
@@ -4389,9 +4462,11 @@ class DocsGenerator:
             else:
                 started = "`up`, once enabled"
             lines.append(
-                f"| **{plane}** ({_code(self.renders.project(plane))}) | {_code(spec['compose'])} | {counts} | "
+                f"| **{plane}** ({_code(project)}) | {_code(spec['compose'])} | {counts} | "
                 f"{', '.join(_code(p) for p in ports) or 'none'} | {started} |"
             )
+        if missing:
+            raise PartlyUnverifiable("\n".join(lines), missing)
         return "\n".join(lines)
 
     def product_menu(self) -> str:
@@ -4596,6 +4671,35 @@ def scan_doc_blocks(text: str) -> tuple[list, list]:
 _SECRETISH = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASS|PAT)$")
 
 
+def path_spellings(path: Path) -> list[str]:
+    """Every way a shell on this host may print `path`: native, forward-slash,
+    Git Bash (`/d/Open WebUI/...`) and WSL (`/mnt/d/...`)."""
+    native = str(path)
+    out = {native, path.as_posix()}
+    drive = re.match(r"^([A-Za-z]):[\\/](.*)$", native)
+    if drive:
+        letter, rest = drive.group(1), drive.group(2).replace("\\", "/")
+        for spelled in (letter.lower(), letter.upper()):
+            out |= {f"/{spelled}/{rest}", f"/mnt/{spelled}/{rest}"}
+    return sorted(s for s in out if len(s.strip("/")) > 3)
+
+
+def tracked_markdown(root: Path) -> list[str]:
+    """Repo-relative paths of every tracked (or staged) *.md; a walk when root is not a git tree."""
+    top = _git(["rev-parse", "--show-toplevel"], root)
+    is_root = top.code == 0 and Path(top.stdout.strip()).resolve() == root.resolve()
+    listed = _git(["ls-files", "-z", "--", "*.md"], root) if is_root else CommandResult(1, "", "")
+    if listed.code == 0:
+        return sorted(p for p in listed.stdout.split("\0") if p)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".git", "node_modules", ".venv")]
+        for name in filenames:
+            if name.endswith(".md"):
+                out.append((Path(dirpath) / name).relative_to(root).as_posix())
+    return sorted(out)
+
+
 def host_values(manifest: Manifest, root: Path) -> list[tuple[str, str, str]]:
     """(label, where, value) of every string no generated block may contain.
 
@@ -4603,8 +4707,8 @@ def host_values(manifest: Manifest, root: Path) -> list[tuple[str, str, str]]:
     file that differs from what its .env.example ships. The label never
     contains the value, so a refusal can name the leak without repeating it.
     """
-    out = [("this checkout's absolute path", "", str(root)),
-           ("this checkout's absolute path", "", root.as_posix())]
+    out = [("this checkout's absolute path", "", s) for s in path_spellings(root)]
+    out += [("this host's home directory", "", s) for s in path_spellings(Path.home())]
     keys = {k for plane in manifest.order for k in manifest.keys(plane)}
     env_paths = {root / ".env"} | {manifest.env_path(root, plane) for plane in manifest.order}
     for path in sorted(env_paths):
@@ -4660,6 +4764,22 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
                 shape = "on ONE line (open, text, close)" if kind == "inline" else "on lines of their own"
                 problems.append(f"{rel_path}:{block.line}: block `{block.name}` is {kind}: its markers go {shape}")
         files[rel_path] = (path, text, blocks)
+    # A marker pair in a file the registry does not name is never generated and
+    # never compared - a hand-written number inside it would read as generated
+    # (attempt 1, X3: CLAUDE.md with `**99**` passed). Every tracked *.md is scanned.
+    for rel_path in tracked_markdown(root):
+        if rel_path in DOCS_BLOCKS:
+            continue
+        try:
+            text = (root / Path(rel_path)).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for number, raw in enumerate(text.splitlines(), 1):
+            if _DOC_MARKER_LOOSE.search(raw):
+                problems.append(f"{rel_path}:{number}: a `stack:` marker in a file DOCS_BLOCKS does not register "
+                                "- nothing generates or checks it. Register the file and its blocks in "
+                                "scripts/stack/stack.py, or remove the marker")
+                break
     if problems:
         for problem in problems:
             console.line(f"  [FAIL] {problem}")
@@ -4670,17 +4790,22 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
 
     rendered: dict = {}
     unverified: dict = {}
+    partial: dict = {}
     for rel_path, (_path, _text, blocks) in files.items():
         for block in blocks:
-            if block.name in rendered or block.name in unverified:
+            if block.name in rendered or block.name in unverified or block.name in partial:
                 continue
             try:
                 rendered[block.name] = generator.render(block.name)
+            except PartlyUnverifiable as part:
+                partial[block.name] = part
             except Unverifiable as why:
                 unverified[block.name] = str(why)
 
     leaks = host_values(manifest, root)
-    for name, body in rendered.items():
+    bodies = dict(rendered)
+    bodies.update({name: part.body for name, part in partial.items()})
+    for name, body in bodies.items():
         for label, where, value in leaks:
             if value and value in body:
                 raise Refusal(f"refused: generated block `{name}` would contain {label}"
@@ -4689,19 +4814,28 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
 
     stale: list[str] = []
     wrote: list[str] = []
-    checked = skipped = 0   # block OCCURRENCES, so the two numbers add up to the whole
+    checked = skipped = partly = 0   # block OCCURRENCES; checked includes the partly verified
     for rel_path, (path, text, blocks) in files.items():
         newline = "\r\n" if "\r\n" in text else "\n"
         pieces, cursor = [], 0
         for block in sorted(blocks, key=lambda b: b.start):
             current = text[block.start:block.end]
-            if block.name in unverified:
-                console.line(f"  [ -- ] NOT VERIFIED - {rel_path}:{block.line} `{block.name}`: "
-                             f"{unverified[block.name]}")
+            body = rendered.get(block.name)
+            not_here = unverified.get(block.name)
+            if block.name in partial:
+                body = _splice_kept(partial[block.name].body, current)
+                if body is None:
+                    not_here = (partial[block.name].reasons[0]
+                                + " - and the committed block has no such row to keep")
+                else:
+                    partly += 1
+                    console.line(f"  [ -- ] PARTLY VERIFIED - {rel_path}:{block.line} `{block.name}`: every row "
+                                 "compared except " + "; ".join(partial[block.name].reasons))
+            if not_here:
+                console.line(f"  [ -- ] NOT VERIFIED - {rel_path}:{block.line} `{block.name}`: {not_here}")
                 wanted = current
                 skipped += 1
             else:
-                body = rendered[block.name]
                 wanted = body if block.inline else ("\n" + body + "\n\n").replace("\n", newline)
                 checked += 1
                 if wanted != current:
@@ -4728,21 +4862,47 @@ def cmd_docs(manifest, root, console, capture, write: bool, check: bool, allow_u
     verb = "written" if write else "match"
     console.line(f"  [OK]   {checked} block(s) in {len(files)} file(s) {verb}"
                  + (" what the manifest and the renders say" if check else ""))
-    if unverified:
-        console.line(f"  [ -- ] {skipped} block(s) NOT VERIFIED on this machine (named above)"
-                     + ("; --allow-unverified: not a failure" if allow_unverified else
-                        f"; exit {EXIT_UNVERIFIED} - pass --allow-unverified where that gap is expected"))
+    if skipped or partly:
+        console.line(
+            f"  [ -- ] {skipped} block(s) NOT VERIFIED and {partly} PARTLY VERIFIED on this machine (named above): "
+            "what could not be rendered here was NOT compared and may be stale. CI's stack-driver job "
+            "(OB1 checked out, docker present) compares every block and fails on a stale one"
+            + ("; --allow-unverified: not a failure here" if allow_unverified else f"; exit {EXIT_UNVERIFIED}"))
         return EXIT_OK if allow_unverified else EXIT_UNVERIFIED
     return EXIT_OK
 
 
+def _splice_kept(body: str, current: str) -> str | None:
+    """Put the committed row back wherever `body` holds a KEEP sentinel; None if there is none."""
+    have = current.splitlines()
+    out = []
+    for line in body.split("\n"):
+        if line.startswith(_KEEP):
+            prefix = line[len(_KEEP):]
+            kept = next((h for h in have if h.startswith(prefix)), None)
+            if kept is None:
+                return None
+            out.append(kept)
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _first_difference(current: str, wanted: str) -> str:
+    """The first differing line - for a table row, every differing CELL, untruncated."""
     have, want = current.splitlines(), wanted.splitlines()
     for i in range(max(len(have), len(want))):
         a = have[i] if i < len(have) else "<nothing>"
         b = want[i] if i < len(want) else "<nothing>"
-        if a != b:
-            return f" (content line {i + 1}: committed {a.strip()[:90]!r}, generated {b.strip()[:90]!r})"
+        if a == b:
+            continue
+        a_cells = [c.strip() for c in a.strip().strip("|").split("|")] if a.lstrip().startswith("|") else None
+        b_cells = [c.strip() for c in b.strip().strip("|").split("|")] if b.lstrip().startswith("|") else None
+        if a_cells and b_cells and len(a_cells) == len(b_cells):
+            cells = [f"cell {n + 1}: committed {x!r}, generated {y!r}"
+                     for n, (x, y) in enumerate(zip(a_cells, b_cells)) if x != y]
+            return f" (row {a_cells[0]!r}, content line {i + 1}: " + "; ".join(cells) + ")"
+        return f" (content line {i + 1}: committed {a.strip()!r}, generated {b.strip()!r})"
     return ""
 
 

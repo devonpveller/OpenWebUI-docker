@@ -4254,8 +4254,9 @@ def test_a_plane_that_cannot_be_rendered_here_is_not_verified_and_left_alone(doc
     assert "kept as committed" in doc(docs_root)
     code, out, _h = docs(docs_root, "--check")
     assert code == stack.EXIT_UNVERIFIED, out
-    # plane-table spans every plane, so it cannot be verified without ob1 either
-    assert "`plane-table`: OB1/docker/docker-compose.yml is not on disk" in out
+    # never written, so there is no committed ob1 row to keep: the table is not verified at all
+    assert ("`plane-table`: the ob1 row (OB1/docker/docker-compose.yml is not on disk) - and the committed "
+            "block has no such row to keep") in out
     code, out, _h = docs(docs_root, "--check", "--allow-unverified")
     assert code == 0, out
     assert "not a failure" in out
@@ -4278,7 +4279,9 @@ def test_a_missing_gitignored_env_is_unverified_only_where_the_render_needs_it(d
     assert any("`profile-counts:agent-org`" in line for line in unverified)
     # the search block needs no agent-org render and is still compared
     assert not any("`plane-services:search`" in line for line in unverified)
-    assert "5 block(s)" not in out and "3 block(s) in 1 file(s) match" in out
+    # plane-table is compared row by row: every row but agent-org's
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the agent-org row" in out
+    assert "4 block(s) in 1 file(s) match" in out
 
 
 def test_a_plane_with_no_env_example_is_refused_not_rendered_from_the_host_env(docs_root):
@@ -4457,3 +4460,119 @@ def test_the_shipped_manifest_only_blocks_match_without_docker():
             assert text[block.start:block.end] == wanted, (rel_path, block.name)
             seen += 1
     assert seen >= 4
+
+
+# --- attempt 2: enforcement that does not leak (X1-X3) ----------------------
+
+
+def test_a_hand_edit_of_a_derivable_row_is_stale_even_when_another_row_cannot_be_rendered(docs_root):
+    """X1: plane-table was all-or-nothing, so without ob1 a hand edit of the MEMORY row passed."""
+    assert docs(docs_root, "--write")[0] == 0
+    (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    text = doc(docs_root)
+    memory_row = next(line for line in text.splitlines() if line.startswith("| **memory**"))
+    (docs_root / "DOC.md").write_text(text.replace(memory_row, memory_row.replace("1 with no profile",
+                                                                                  "5 with no profile")),
+                                      encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check", "--allow-unverified")
+    assert code == stack.EXIT_REFUSED, out
+    assert "block `plane-table` is STALE (row '**memory** (`memory`)'" in out
+    assert "cell 3: committed '5 with no profile', generated '1 with no profile'" in out
+
+
+def test_the_row_that_cannot_be_rendered_is_named_and_kept_not_passed(docs_root):
+    assert docs(docs_root, "--write")[0] == 0
+    (docs_root / "OB1" / "docker" / "docker-compose.yml").unlink()
+    text = doc(docs_root)
+    ob1_row = next(line for line in text.splitlines() if line.startswith("| **ob1**"))
+    edited = text.replace(ob1_row, ob1_row.replace("1 with no profile", "99 with no profile", 1))
+    (docs_root / "DOC.md").write_text(edited, encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the ob1 row" in out
+    assert "was NOT compared and may be stale" in out and "CI's stack-driver job" in out
+    assert "none was stale" not in out
+    assert docs(docs_root, "--write")[0] == stack.EXIT_UNVERIFIED
+    assert doc(docs_root) == edited, "--write replaced a row it could not render"
+
+
+def _pin_ob1(root: Path) -> None:
+    (root / ".gitmodules").write_text('[submodule "OB1"]\n\tpath = OB1\n\turl = x\n', encoding="utf-8")
+
+
+def test_a_submodule_checkout_that_is_not_the_staged_gitlink_is_not_verified(docs_root, monkeypatch):
+    """X2: a dirty or mismatched OB1 tree was rendered and the gate recorded RAN."""
+    assert docs(docs_root, "--write")[0] == 0
+    _pin_ob1(docs_root)
+    seen = []
+    monkeypatch.setattr(stack, "submodule_mismatch",
+                        lambda root, sub: seen.append(sub) or "the `OB1` checkout has uncommitted tracked edits")
+    text = doc(docs_root) + "\n<!-- stack:profile-counts:ob1 -->\nkept\n<!-- /stack:profile-counts:ob1 -->\n"
+    (docs_root / "DOC.md").write_text(text, encoding="utf-8")
+    monkeypatch.setattr(stack, "DOCS_BLOCKS", {"DOC.md": DOC_BLOCKS + ["profile-counts:ob1"]})
+    code, out, host = docs(docs_root, "--check")
+    assert "PARTLY VERIFIED - DOC.md:5 `plane-table`: every row compared except the ob1 row" in out
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert "`profile-counts:ob1`: the `OB1` checkout has uncommitted tracked edits" in out
+    assert seen == ["OB1"], "asked once, cached"
+    assert not any("OB1/docker/docker-compose.yml" in c for c in host.calls), "rendered the mismatched tree"
+
+
+def _git_run(args, cwd):
+    import subprocess
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.allow=always",
+                    *args], cwd=str(cwd), check=True, capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_submodule_mismatch_reads_the_staged_gitlink_head_and_tracked_dirt(tmp_path):
+    sub_src = tmp_path / "src"
+    sub_src.mkdir()
+    _git_run(["init", "-q"], sub_src)
+    (sub_src / "a.yml").write_text("a: 1\n", encoding="utf-8")
+    _git_run(["add", "a.yml"], sub_src)
+    _git_run(["commit", "-q", "-m", "one"], sub_src)
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    _git_run(["init", "-q"], parent)
+    _git_run(["submodule", "-q", "add", str(sub_src), "OB1"], parent)
+    assert stack.submodule_mismatch(parent, "OB1") is None
+    (parent / "OB1" / "untracked.env").write_text("x", encoding="utf-8")
+    assert stack.submodule_mismatch(parent, "OB1") is None, "untracked files are not a mismatch"
+    (parent / "OB1" / "a.yml").write_text("a: 2\n", encoding="utf-8")
+    assert "uncommitted tracked edits" in stack.submodule_mismatch(parent, "OB1")
+    _git_run(["commit", "-q", "-am", "two"], parent / "OB1")
+    assert "but the staged gitlink pins" in stack.submodule_mismatch(parent, "OB1")
+    _git_run(["add", "OB1"], parent)            # stage the moved gitlink
+    assert stack.submodule_mismatch(parent, "OB1") is None
+    assert "cannot read the staged `NOPE` gitlink" in stack.submodule_mismatch(parent, "NOPE")
+
+
+def test_a_marker_in_an_unregistered_file_is_refused(docs_root):
+    """X3: CLAUDE.md with a hand-written `**99**` between markers passed."""
+    (docs_root / "CLAUDE.md").write_text(
+        "rules\nOB1 is <!-- stack:count:ob1:all -->**99** services<!-- /stack:count:ob1:all -->\n",
+        encoding="utf-8")
+    code, out, _h = docs(docs_root, "--check")
+    assert code == stack.EXIT_REFUSED
+    assert "CLAUDE.md:2: a `stack:` marker in a file DOCS_BLOCKS does not register" in out
+
+
+def test_the_host_path_guard_knows_every_spelling():
+    spelled = stack.path_spellings(Path("D:\\Open WebUI\\ai-stack") if stack.WINDOWS
+                                   else Path("/home/x/ai-stack"))
+    if stack.WINDOWS:
+        assert {"D:\\Open WebUI\\ai-stack", "D:/Open WebUI/ai-stack", "/d/Open WebUI/ai-stack",
+                "/mnt/d/Open WebUI/ai-stack"} <= set(spelled)
+    else:
+        assert "/home/x/ai-stack" in spelled
+    labels = {label for label, _w, _v in stack.host_values(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT)}
+    assert "this host's home directory" in labels
+
+
+def test_a_stale_table_row_names_the_changed_cell_untruncated():
+    long = "x" * 200
+    diff = stack._first_difference(f"| **a** | {long} | 3 |\n", f"| **a** | {long} | 4 |\n")
+    assert "cell 3: committed '3', generated '4'" in diff and "row '**a**'" in diff
+    diff = stack._first_difference("prose " + long + " 1", "prose " + long + " 2")
+    assert long + " 1" in diff and long + " 2" in diff
