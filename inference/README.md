@@ -98,12 +98,12 @@ Keys, in `inference/.env`:
 
 **On a fresh clone the frontend is already enabled.** With no
 `.stack/state.json`, the driver treats the frontend as enabled, and `enable`
-keeps it. `up` starts the planes in dependency order, ties broken by the order
-the manifest declares them, which puts inference before the frontend: so until
-`frontend/.env` holds a real `WEBUI_SECRET_KEY`, the `up` below starts
-inference's containers, then stops at the frontend with
-`# up stopped: frontend exited 1` and exits 1, leaving inference running.
-Either give
+keeps it. `up` checks the keys of every plane it will start before it starts
+any of them (and then starts them in dependency order, ties broken by the order
+the manifest declares them). So until `frontend/.env` holds a real
+`WEBUI_SECRET_KEY`, the `up` below starts nothing: it prints
+``refused: fix these before `up` starts anything:``, names `WEBUI_SECRET_KEY`
+in `frontend/.env`, and exits 1. Either give
 the frontend its key - the `cp` and `WEBUI_SECRET_KEY` steps of
 [its README](../frontend/README.md#enable-and-start); skip its `init`, which
 refuses once `.stack/state.json` exists, and the frontend is enabled already -
