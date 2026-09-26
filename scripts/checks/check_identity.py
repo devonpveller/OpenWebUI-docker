@@ -11,7 +11,8 @@ TWO LAYERS, and the second is the reason this file is shaped the way it is:
 
   GENERIC (tracked, in this file). Patterns that recognise personal data WITHOUT naming
   anyone: private IPv4 (RFC 1918), CGNAT/tailnet IPv4 (100.64.0.0/10) and Tailscale's
-  IPv6 prefix, link-local IPv4 (169.254.0.0/16), `*.ts.net` tailnet host names,
+  IPv6 prefix, link-local IPv4 (169.254.0.0/16) and IPv6 (fe80::/10), IPv6 ULA (fc00::/7),
+  `*.ts.net` tailnet host names,
   Windows/macOS user-profile paths (C:\\Users\\<name>, /c/Users/<name>, /Users/<name>),
   paths into this stack's checkout directory in every spelling (X:\\, /x/, /mnt/x/), and
   email addresses - including a personal GitHub noreply address, which names the account.
@@ -59,6 +60,8 @@ MODES
   (default)   staged: only lines the index ADDS relative to HEAD are judged - an old line
               you did not touch never blocks your commit. Renames are read as additions
               (--no-renames), so moving a file into a non-allowlisted path re-judges it.
+  Both modes also judge FILE NAMES: a new path in staged mode, every tracked path in --all
+  (reported as line 0).
   --all       every tracked blob in the index (gitlinks - the OB1 submodule - excluded;
               run it inside OB1 with --no-allowlist to audit that repository).
   --summary   with --all: counts by class and by path instead of one line per finding.
@@ -105,13 +108,14 @@ _RFC1918 = (ipaddress.ip_network('10.0.0.0/8'), ipaddress.ip_network('172.16.0.0
 
 def _ipv4_class(m: re.Match) -> str | None:
     """'lan-ip' / 'tailnet-ip' for a personal-looking address, else None."""
-    try:
-        ip = ipaddress.ip_address(m.group('v'))
-    except ValueError:
+    octets = m.group('v').split('.')
+    if any(int(o) > 255 for o in octets):
         return None
+    canon = '.'.join(str(int(o)) for o in octets)     # leading zeros: the address they spell
+    ip = ipaddress.ip_address(canon)
     if m.group('cidr'):
         try:
-            net = ipaddress.ip_network(m.group('v') + m.group('cidr'), strict=True)
+            net = ipaddress.ip_network(canon + m.group('cidr'), strict=True)
             if net.prefixlen < 31:
                 return None      # host bits zero: a network, i.e. architecture (/31, /32 are hosts)
         except ValueError:
@@ -135,6 +139,32 @@ def _ts_ipv6_class(m: re.Match) -> str | None:
     v = m.group('v').lower().rstrip(':')
     # the bare prefix (docs describing the range) is generic; a node address is not
     return None if v in ('fd7a:115c:a1e0', 'fd7a:115c:a1e0:') else 'tailnet-ip'
+
+
+_IPV6 = re.compile(r'(?i)(?<![0-9a-z:.])(?P<v>f[cde][0-9a-f]{2}:[0-9a-f:]*[0-9a-f])(?:%[\w.]+)?(?P<cidr>/\d{1,3})?'
+                   r'(?![0-9a-z:])')
+
+
+def _ipv6_class(m: re.Match) -> str | None:
+    try:
+        ip = ipaddress.ip_address(m.group('v'))
+    except ValueError:
+        return None
+    if ip in ipaddress.ip_network('fd7a:115c:a1e0::/48'):
+        return None                          # the tailnet-ipv6 class judges these
+    if m.group('cidr'):
+        try:
+            if ipaddress.ip_network(m.group('v') + m.group('cidr'), strict=True).prefixlen < 127:
+                return None                  # a network (host bits zero): architecture
+        except ValueError:
+            pass
+    elif int(ip) & 0xFFFFFFFFFFFFFFFF == 0:
+        return None                          # a bare /64 prefix written as an address (fd00::)
+    if ip in ipaddress.ip_network('fe80::/10'):
+        return 'link-local-ip'
+    if ip in ipaddress.ip_network('fc00::/7'):
+        return 'lan-ip'
+    return None
 
 
 _TSNET = re.compile(r'(?i)(?P<v>(?:[a-z0-9<>{}$_*-]+\.)+ts\.net)\b')
@@ -215,6 +245,7 @@ def _email_class(m: re.Match) -> str | None:
 GENERIC = (
     ('ipv4', _IPV4, _ipv4_class),
     ('tailnet-ipv6', _TS_IPV6, _ts_ipv6_class),
+    ('ipv6', _IPV6, _ipv6_class),
     ('tailnet-host', _TSNET, _tsnet_class),
     ('user-profile-path', _USERPATH, _userpath_class),
     ('drive-host-path', _DRIVEPATH, _drivepath_class),
@@ -336,7 +367,9 @@ def find_denylist(explicit: str | None, top: str, common: str) -> str | None:
     cands.append(os.path.join(top, '.identity-denylist'))
     cands.append(os.path.join(common, 'identity-denylist'))
     for c in cands:
-        if os.path.isfile(c):
+        # EXISTS, not isfile: a directory (or anything else) at a default location is a
+        # misconfiguration to report, never a reason to fall back to generic-only silently
+        if os.path.lexists(c):
             return c
     return None
 
@@ -376,6 +409,19 @@ def scan_line(path: str, lineno: int, line: str, deny) -> list[Finding]:
             found.append(Finding(path, lineno, a[0] + 1, OPERATOR, line[a[0]:a[1]],
                                  f'denylist entry {a[2]}' + (f' [{a[3]}]' if a[3] else ''), line))
     return found
+
+
+def show_path(path: str, deny) -> str:
+    """A path as printed: any denylisted literal in it becomes `<entry N>`, so a file NAME
+    carrying the operator's value is reported without echoing it."""
+    low, out, i = path.lower(), [], 0
+    spans = sorted((low.find(lit, 0), len(lit), num) for num, lit, _l in deny if lit in low)
+    for start, ln, num in spans:
+        if start < i:
+            continue
+        out.append(path[i:start] + f'<entry {num}>')
+        i = start + ln
+    return ''.join(out) + path[i:]
 
 
 def mask(f: Finding) -> str:
@@ -446,6 +492,11 @@ def staged_findings(deny) -> tuple[list[Finding], int, int]:
     files = [p for p in _z(_git('diff', '--cached', '--name-only', '-z', '--no-renames', '--diff-filter=ACMRT'))
              if p not in gitlinks]
     found, skipped = [], 0
+    # a NEW path (added, or the destination of a rename/copy - --no-renames lists those as
+    # added) is judged by its name too; its findings carry line 0
+    for f in _z(_git('diff', '--cached', '--name-only', '-z', '--no-renames', '--diff-filter=A')):
+        if f not in gitlinks:
+            found.extend(scan_line(f, 0, f, deny))
     for f in files:
         diff = _git('-c', 'core.quotePath=false', 'diff', '--cached', '-U0', '--no-color', '--no-ext-diff',
                     '--no-textconv', '--no-renames', '--', f).decode('utf-8', 'surrogateescape')
@@ -474,10 +525,13 @@ def all_findings(deny) -> tuple[list[Finding], int, int]:
         if mode == '160000':
             continue
         recs.append((p, sha))
+    found = []
+    for p, _sha in recs:
+        found.extend(scan_line(p, 0, p, deny))      # the tracked path itself (line 0)
     if not recs:
-        return [], 0, 0
+        return found, 0, 0
     out = _git('cat-file', '--batch', inp=''.join(sha + '\n' for _, sha in recs).encode())
-    found, skipped, pos = [], 0, 0
+    skipped, pos = 0, 0
     for path, _sha in recs:
         nl = out.index(b'\n', pos)
         header = out[pos:nl].split()
@@ -535,11 +589,16 @@ def _main(a) -> int:
     if not a.no_denylist:
         deny_src = find_denylist(a.denylist, top, common)
         if deny_src:
+            if not os.path.isfile(deny_src):
+                raise ConfigError(f'denylist {deny_src} exists but is not a regular file - fix or remove it '
+                                  f'(the operator layer would otherwise be silently off)')
             try:
                 with open(deny_src, encoding='utf-8') as fh:
                     deny = load_denylist(fh.read(), deny_src)
             except OSError as e:
                 raise ConfigError(f'denylist {deny_src} unreadable: {e.strerror}')
+            except UnicodeDecodeError:
+                raise ConfigError(f'denylist {deny_src} is not UTF-8 text')
     layer = (f'generic + operator ({len(deny)} denylist entries from {deny_src})' if deny
              else 'generic only (no operator denylist on this machine - see .identity-denylist.example)')
 
@@ -569,14 +628,14 @@ def _main(a) -> int:
             if by_cls[c]:
                 print(f'    {c:18} {by_cls[c]}')
         for p in sorted(by_path):
-            print(f'    {p}: ' + ', '.join(f'{c} {n}' for c, n in sorted(by_path[p].items())))
+            print(f'    {show_path(p, deny)}: ' + ', '.join(f'{c} {n}' for c, n in sorted(by_path[p].items())))
     elif kept:
         print('')
         print('=========================================================')
         print(' COMMIT BLOCKED - personal identifier in ' + ('the tracked tree' if a.all else 'staged additions'))
         print('=========================================================')
         for f in sorted(kept, key=lambda f: (f.path, f.line, f.col)):
-            print(f'  {f.path}:{f.line}:{f.col}: {f.cls} ({mask(f)})')
+            print(f'  {show_path(f.path, deny)}:{f.line}:{f.col}: {f.cls} ({mask(f)})')
         print('')
         print(' Fix: parameterise it (a variable in the owning plane\'s .env, a generic value in its')
         print(' .env.example), write the prose generically (<user>, example.com, 192.0.2.10), or - if')

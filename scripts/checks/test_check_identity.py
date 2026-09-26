@@ -66,6 +66,25 @@ BOUNDARY_REFUSED = [
     ('email', 'author ' + 'zqxperson' + '@users.noreply.github.com'),
 ]
 
+# attempt-3 (tester evidence, attempt 2): shapes whose behaviour was right but unpinned (F-E),
+# plus the optional IPv6 / leading-zero classes
+ATTEMPT3_REFUSED = [
+    ('email', 'mail ' + 'zqx.person' + '@' + 'gmail' + '.com'),
+    ('email', 'mail ' + 'zqx.person' + '@' + 'outlook' + '.com'),
+    ('email', 'mail ' + 'zqx.person' + '@' + 'proton' + '.me'),
+    ('email', 'contact ' + 'admin' + '@' + 'mailhost' + '.io'),     # generic LOCAL part, real domain
+    ('email', 'contact ' + 'info' + '@' + 'zqxshop' + '.net'),
+    ('user-profile-path', 'cd /mnt/d/' + 'Users/' + 'zqx' + 'user/src'),
+    ('lan-ip', 'host ' + '192.' + '168.' + '001.' + '023'),           # leading zeros
+    ('link-local-ip', 'iface ' + 'fe80::' + '1a2b:3c4d:5e6f:7a8b%eth0'),
+    ('lan-ip', 'ula ' + 'fd12:' + '3456:789a:1::' + '42'),
+]
+ATTEMPT3_OK = [
+    'ranges fe80::/10 and fd00::/8 and ' + 'fd12:' + '3456:789a::/48',
+    'docker ipv6 subnet ' + 'fd00:' + 'dead:beef::/64',
+    'meta 169.254.169.254',
+]
+
 
 def git(cwd, *args, check=True):
     return subprocess.run(('git',) + args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -198,6 +217,129 @@ class Attempt2Boundaries(ScratchRepo):
         rc, out = self.run_gate()
         self.assertEqual(rc, 0, out)
         self.assertIn('1 binary skipped', out)
+
+
+class Attempt3(ScratchRepo):
+    def test_pinned_shapes_are_refused(self):
+        for cls, line in ATTEMPT3_REFUSED:
+            with self.subTest(cls=cls, line=line):
+                self.stage('docs/c.md', 'x\n' + line + '\n')
+                rc, out = self.run_gate()
+                self.assertEqual(rc, 1, out)
+                self.assertIn('docs/c.md:2:', out)
+                self.assertIn(': ' + cls + ' (', out)
+                git(self.dir, 'reset', '-q', '--', 'docs/c.md')
+
+    def test_generic_ipv6_ranges_pass(self):
+        self.stage('docs/ok6.md', '\n'.join(ATTEMPT3_OK) + '\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 0, out)
+
+    def test_scripts_checks_is_not_exempt_from_all(self):
+        self.stage('scripts/checks/probe.py', 'HOST = "' + LAN_IP + '"\n')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'in scripts/checks')
+        rc, out = self.run_gate('--all')
+        self.assertEqual(rc, 1, out)
+        self.assertIn('scripts/checks/probe.py:1:', out)
+
+
+class FileNames(ScratchRepo):
+    """F-B: a path is content too - staged new/renamed paths and every tracked path in --all."""
+
+    def test_a_new_file_named_after_a_lan_address_is_refused(self):
+        self.stage('logs/' + LAN_IP + '.txt', 'clean\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn('logs/', out)
+        self.assertIn(':0:', out)
+        self.assertIn(': lan-ip (', out)
+
+    def test_a_denylisted_literal_in_a_file_name_is_refused_and_not_printed(self):
+        self.denylist_in_git_dir(OPERATOR_LITERAL + '\n')
+        name = 'notes-' + OPERATOR_LITERAL.upper() + '.md'
+        self.stage(name, 'clean\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn(':0:', out)
+        self.assertIn('operator (denylist entry 1)', out)
+        # the path is printed with the literal replaced by `<entry N>` - never echoed
+        self.assertNotIn(OPERATOR_LITERAL, out.lower())
+        self.assertIn('notes-<entry 1>.md:0:', out)
+
+    def test_a_rename_to_a_bad_name_is_refused(self):
+        self.stage('clean.md', 'clean\n')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'clean')
+        git(self.dir, 'mv', 'clean.md', 'host-' + LAN_IP + '.md')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 1, out)
+        self.assertIn(':0:', out)
+
+    def test_all_judges_tracked_paths(self):
+        self.stage('dump-' + LAN_IP + '.log', 'clean\n')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'named')
+        rc, out = self.run_gate('--all')
+        self.assertEqual(rc, 1, out)
+        self.assertIn(':0:', out)
+
+    def test_an_edit_of_an_existing_badly_named_file_is_not_re_judged_by_name(self):
+        self.stage('old-' + LAN_IP + '.log', 'a\n')
+        git(self.dir, 'commit', '-q', '--no-verify', '-m', 'legacy name')
+        self.stage('old-' + LAN_IP + '.log', 'a\nb\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 0, out)
+
+
+class DenylistMustBeReadable(ScratchRepo):
+    """F-D: a denylist that exists but cannot be used is a loud error (exit 2), never a silent
+    fall-back to the generic layer."""
+
+    def _common(self):
+        return os.path.join(self.dir, git(self.dir, 'rev-parse', '--git-common-dir').stdout.decode().strip())
+
+    def test_a_directory_at_the_default_location_is_exit_2(self):
+        os.mkdir(os.path.join(self._common(), 'identity-denylist'))
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 2, out)
+        self.assertIn('not a regular file', out)
+
+    def test_a_directory_at_the_worktree_root_is_exit_2(self):
+        os.mkdir(os.path.join(self.dir, '.identity-denylist'))
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 2, out)
+
+    def test_a_directory_named_by_the_environment_is_exit_2(self):
+        d = tempfile.mkdtemp(prefix='idgate-denydir-')
+        try:
+            self.env[ci.DENYLIST_ENV] = d
+            rc, out = self.run_gate()
+            self.assertEqual(rc, 2, out)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_missing_file_named_by_the_environment_is_exit_2(self):
+        self.env[ci.DENYLIST_ENV] = os.path.join(self.dir, 'no-such-denylist')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 2, out)
+
+    def test_a_non_utf8_denylist_is_exit_2(self):
+        with open(os.path.join(self._common(), 'identity-denylist'), 'wb') as fh:
+            fh.write(b'\xff\xfe\xfa not text\n')
+        rc, out = self.run_gate()
+        self.assertEqual(rc, 2, out)
+
+    @unittest.skipIf(os.name == 'nt' or (hasattr(os, 'geteuid') and os.geteuid() == 0),
+                     'file modes do not deny a read here (Windows, or root)')
+    def test_an_unreadable_denylist_is_exit_2(self):
+        f = os.path.join(self._common(), 'identity-denylist')
+        with open(f, 'w', encoding='utf-8') as fh:
+            fh.write(OPERATOR_LITERAL + '\n')
+        os.chmod(f, 0)
+        try:
+            rc, out = self.run_gate()
+            self.assertEqual(rc, 2, out)
+            self.assertIn('unreadable', out)
+        finally:
+            os.chmod(f, 0o600)
 
 
 class StagedModeJudgesAdditionsOnly(ScratchRepo):

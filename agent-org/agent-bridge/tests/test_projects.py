@@ -193,7 +193,7 @@ async def test_per_project_deploy_token_threaded_to_clone(db_url, monkeypatch):
 async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
     """A repo's org auto-selects its token (LC_<OWNER>_TOKEN) with no per-project config; a repo
     whose owner has no such env var falls back to the pool LC_DEPLOY_TOKEN default."""
-    monkeypatch.setenv("LC_PIXELDESIGN_TOKEN", "ghp_org_polysh")
+    monkeypatch.setenv("LC_PIXELDESIGN_TOKEN", "ghp_org_pixel")
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
@@ -207,7 +207,7 @@ async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
         # PixelDesign org repo → LC_PIXELDESIGN_TOKEN by convention (no explicit token_env)
         await orch.projects.add("psd-foo", "https://github.com/PixelDesign/foo.git")
         eid, _, _ = await orch.router.open_effort("a", project="psd-foo")
-        assert await orch._project_token(eid) == "ghp_org_polysh"
+        assert await orch._project_token(eid) == "ghp_org_pixel"
         # a personal repo (owner has no LC_<owner>_TOKEN set) → None → pool LC_DEPLOY_TOKEN default
         await orch.projects.add("mine", "https://github.com/probeuser/bar.git")
         eid2, _, _ = await orch.router.open_effort("b", project="mine")
