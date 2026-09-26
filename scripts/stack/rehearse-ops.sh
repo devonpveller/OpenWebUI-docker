@@ -49,6 +49,13 @@
 #      - which has no healthcheck - with service_healthy. `recover` and
 #      `recover --dry-run` refuse it by name, say nothing was stopped, and every
 #      container keeps its ID and StartedAt (RED at c2e5560: "recovered")
+#  17. PLANTED (attack i): openwebui-backup gets a timing-only healthcheck
+#      (`interval: 5s`, no test) on alpine:3.21, which has none; after-backup
+#      waits service_healthy. recover refuses before stopping (RED at 7f886cf)
+#  18. PLANTED (attack h): the target's image busybox:1.36.1 is NOT on the
+#      daemon; the dry run warns it is decided after the pull; recover pulls,
+#      starts the target, then refuses before starting the waiter (RED at
+#      7f886cf: "recovered")
 #   then tears the DinD down.
 #
 # Exit code: 0 when every check passed, 1 when any failed, 2 on a usage error.
@@ -412,6 +419,71 @@ check "the refusal names frontend/after-backup, openwebui-backup and service_hea
 check "it says nothing was stopped, and it did not say recovered" \
   "$(echo "$OUT" | grep -q 'Nothing was stopped.' && ! echo "$OUT" | grep -q '^recovered'; echo $?)"
 check "container IDs and start times are unchanged" "$([ "$BEFORE" = "$AFTER" ] && [ -n "$BEFORE" ]; echo $?)"
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 17. attack i (ac-ops-portable2 attempt 1): a TIMING-ONLY compose healthcheck on an image with none
+echo ""
+echo "== 17. PLANTED: openwebui-backup gets healthcheck {interval: 5s} (no test); after-backup waits service_healthy"
+docker exec -i "$NAME" sh -c 'cat > /tmp/timing.awk' <<'AWK'
+{ print }
+/^services:$/ {
+  print "  after-backup:"
+  print "    image: alpine:3.21"
+  print "    restart: unless-stopped"
+  print "    command: [ \"sleep\", \"infinity\" ]"
+  print "    depends_on:"
+  print "      openwebui-backup:"
+  print "        condition: service_healthy"
+}
+/^    container_name: openwebui-backup$/ {
+  print "    healthcheck:"
+  print "      interval: 5s"
+}
+AWK
+dw sh -c 'awk -f /tmp/timing.awk frontend/docker-compose.yml > /tmp/c.yml && cp /tmp/c.yml frontend/docker-compose.yml'
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+check "recover with a timing-only healthcheck refused (exit $RV)" "$([ "$RV" -ne 0 ]; echo $?)"
+check "the refusal says openwebui-backup has no healthcheck, none in its image alpine:3.21" \
+  "$(echo "$OUT" | grep -q 'but openwebui-backup has no healthcheck (none in the compose file, none in its image alpine:3.21)'; echo $?)"
+check "it did not say recovered" "$(echo "$OUT" | grep -q '^recovered'; [ $? -ne 0 ]; echo $?)"
+dw git checkout -q -- frontend/docker-compose.yml
+
+# 18. attack h (ac-ops-portable2 attempt 1): the target's image is NOT on the daemon before the stop
+echo ""
+echo "== 18. PLANTED: tgt (busybox:1.36.1, not pulled, no healthcheck); waiter depends_on tgt service_healthy"
+dx docker image rm busybox:1.36.1 >/dev/null 2>&1
+docker exec -i "$NAME" sh -c 'cat > /tmp/pull.awk' <<'AWK'
+{ print }
+/^services:$/ {
+  print "  tgt:"
+  print "    image: busybox:1.36.1"
+  print "    restart: unless-stopped"
+  print "    command: [ \"sleep\", \"infinity\" ]"
+  print "  waiter:"
+  print "    image: alpine:3.21"
+  print "    restart: unless-stopped"
+  print "    command: [ \"sleep\", \"infinity\" ]"
+  print "    depends_on:"
+  print "      tgt:"
+  print "        condition: service_healthy"
+}
+AWK
+dw sh -c 'awk -f /tmp/pull.awk frontend/docker-compose.yml > /tmp/c.yml && cp /tmp/c.yml frontend/docker-compose.yml'
+check "busybox:1.36.1 is not on the DinD daemon before recover" \
+  "$(dx docker image inspect busybox:1.36.1 >/dev/null 2>&1; [ $? -ne 0 ]; echo $?)"
+DRY="$(sp recover frontend --dry-run)"; RD=$?
+echo "$DRY" | grep -i 'warning' || true
+OUT="$(sp recover frontend)"; RV=$?
+echo "$OUT"
+check "the dry run warns that it is decided after the pull (exit $RD)" \
+  "$(echo "$DRY" | grep -q 'is decided after the pull'; echo $?)"
+check "recover refused after the pull (exit $RV)" "$([ "$RV" -ne 0 ]; echo $?)"
+check "the refusal names waiter, tgt and 'decided after its image was pulled'" \
+  "$(echo "$OUT" | grep -q 'refused: recover stopped at frontend: waiter depends_on tgt with condition service_healthy, but tgt (frontend-tgt-1) has no healthcheck - decided after its image was pulled'; echo $?)"
+check "waiter was never started and recover did not say recovered" \
+  "$(dx docker inspect frontend-waiter-1 >/dev/null 2>&1; A=$?; echo "$OUT" | grep -q '^recovered'; B=$?; [ "$A" -ne 0 ] && [ "$B" -ne 0 ]; echo $?)"
+dx docker rm -f frontend-tgt-1 frontend-waiter-1 >/dev/null 2>&1
 dw git checkout -q -- frontend/docker-compose.yml
 
 echo ""

@@ -3976,3 +3976,47 @@ def test_service_completed_successfully_on_a_restarting_target_is_refused(root, 
             f"but init-once has restart: {policy}") in out
     assert daemon.streamed == []
 
+
+def test_a_timing_only_healthcheck_asks_the_image_and_is_refused_when_it_has_none(root):
+    """ac-ops-portable2 attempt 1, attack i: `healthcheck: {interval: 5s}` with no `test` was
+    counted as a healthcheck. RED at 7f886cf."""
+    render = _healthy_on_the_backup()
+    render["frontend/docker-compose.yml"]["services"]["openwebui-backup"]["healthcheck"] = {"interval": "5s"}
+    _enable(root, "frontend")
+    daemon = OpsDaemon(render)
+    daemon.images["alpine:3.21"] = None
+    code, out = ops(root, daemon, "recover", "frontend", "--dry-run")
+    assert code == stack.EXIT_REFUSED, out
+    assert "but openwebui-backup has no healthcheck (none in the compose file, none in its image alpine:3.21)" in out
+    # and on an image WITH a healthcheck the same timing-only block is fine (compose merges it)
+    daemon = OpsDaemon(render)
+    daemon.images["alpine:3.21"] = {"Test": ["CMD-SHELL", "true"]}
+    code, out = ops(root, daemon, "recover", "frontend", "--dry-run")
+    assert code == 0, out
+
+
+def test_an_image_pulled_during_recover_is_checked_before_its_service_healthy_dependant_starts(root, fast_clock):
+    """ac-ops-portable2 attempt 1, attack h: the image was not local, recover warned, stopped the
+    plane, pulled, and printed 'recovered' - compose pulls and then refuses. RED at 7f886cf."""
+    _enable(root, "frontend")
+    # alpine:3.21 is not "on this daemon"; after the pull its container has no Health at all
+    daemon = OpsDaemon(_healthy_on_the_backup(),
+                       states={"openwebui-backup": [{"Status": "running", "RestartCount": 0, "StartedAt": "t0"}]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED, out
+    assert "is decided after the pull" in out
+    assert ("refused: recover stopped at frontend: tailscale-backup depends_on openwebui-backup with condition "
+            "service_healthy, but openwebui-backup (openwebui-backup) has no healthcheck - decided after its image "
+            "was pulled") in out
+    assert "recovered" not in out
+    assert not any("--no-deps" in c and "tailscale-backup" in c for c in daemon.streamed)
+
+
+def test_the_runtime_check_passes_a_target_whose_pulled_image_has_a_healthcheck(root, fast_clock):
+    _enable(root, "frontend")
+    healthy = {"Status": "running", "Health": {"Status": "healthy"}, "RestartCount": 0}
+    daemon = OpsDaemon(_healthy_on_the_backup(), states={"openwebui-backup": [healthy]})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    assert any("--no-deps" in c and "tailscale-backup" in c for c in daemon.streamed)
+

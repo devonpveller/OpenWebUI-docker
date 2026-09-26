@@ -2174,6 +2174,12 @@ def plane_render(manifest: Manifest, state: State, root: Path, plane: str, captu
         disabled = False
         if health and (health.get("disable") or list(health.get("test") or [])[:1] == ["NONE"]):
             health, disabled = None, True
+        elif health and not health.get("test"):
+            # Timing fields only (`interval: 5s`, no `test`): compose MERGES them onto the
+            # image's healthcheck, so whether one exists is the image's answer. Counting it
+            # as a healthcheck let `service_healthy` onto an image without one pass
+            # (ac-ops-portable2 attempt 1, attack i).
+            health = None
         mounts = tuple(
             (m.get("type"), m.get("source"), m.get("target"), bool(m.get("read_only")))
             for m in (spec.get("volumes") or []) if isinstance(m, dict)
@@ -2357,7 +2363,9 @@ def check_depends_conditions(renders: dict, capture, root, dockers: dict) -> lis
                     elif has is None:
                         warnings.append(f"# WARNING: {plane}/{svc.key} depends_on {target} with condition "
                                         f"service_healthy; {target} has no compose healthcheck and its image "
-                                        f"{dep.image} is not on this daemon, so whether it has one is unknown")
+                                        f"{dep.image} is not on this daemon, so whether it has one is decided "
+                                        f"after the pull: {target}'s running container is checked before "
+                                        f"{svc.key} starts")
                 if condition == "service_completed_successfully" and dep.restart in ("always", "unless-stopped"):
                     problems.append(f"  {plane}/{svc.key} depends_on {target} with condition "
                                     f"service_completed_successfully, but {target} has restart: {dep.restart}, "
@@ -2637,6 +2645,25 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
                 console.line(_gate_note(renders[p], key, limit))
             if dry_run:
                 continue
+            # service_healthy onto a target decided only at run time (its image was not local
+            # before the stop): the target's level is up and gated by now, so ask its
+            # container. No Health at all means no healthcheck after the pull - exactly where
+            # compose refuses with "has no healthcheck configured".
+            for key in level:
+                for target, condition in sorted(renders[p].services[key].depends.items()):
+                    if condition != "service_healthy" or target not in renders[p].services:
+                        continue
+                    tname = container_of(renders[p], target)
+                    tstate = container_state(capture, root, docker[p], tname)
+                    if tstate is not None and not tstate.get("Health"):
+                        console.line(f"refused: recover stopped at {p}: {key} depends_on {target} with condition "
+                                     f"service_healthy, but {target} ({tname}) has no healthcheck - decided "
+                                     "after its image was pulled; docker compose's own `up` refuses this too. "
+                                     f"{key} was not started.")
+                        later = work[index + 1:]
+                        if later:
+                            console.line(f"# stopped and not started: {', '.join(later)}")
+                        return EXIT_REFUSED
             code = runner(cmd, root)
             failure = f"`up` exited {code}" if code != 0 else None
             if failure is None:

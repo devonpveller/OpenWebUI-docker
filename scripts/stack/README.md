@@ -440,8 +440,13 @@ order, restart in dependency order, wait for health). Selection is the same as
    read-only `docker image inspect`) and `service_completed_successfully` on a
    service with `restart: always` / `unless-stopped` are **refused, naming the
    plane, the service and the target, before anything is stopped** - in
-   `--dry-run` too. An image that is not on the daemon cannot be asked; that is
-   a `# WARNING`, not a refusal.
+   `--dry-run` too. A healthcheck block with timing fields and no `test` is not
+   a healthcheck of its own (compose merges it onto the image's), so the image is
+   asked. An image that is not on the daemon cannot be asked before the stop;
+   that is a `# WARNING` saying it is **decided after the pull**: once the
+   target's level is up, its container is read and, if it has no health status at
+   all, recover refuses by name before starting the dependant - where compose's
+   own `up` refuses too.
 2. **Stop**, planes in reverse of `up`'s order; inside a plane, its services in
    reverse depends_on levels (`docker compose ... stop --timeout 30 <services>`).
 3. **Start**: the anchor's networks are ensured first (always, even for one
