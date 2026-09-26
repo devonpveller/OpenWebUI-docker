@@ -4999,6 +4999,7 @@ INFERENCE_GPU_RENDER = {
 GPU_RENDERS = {
     "inference/docker-compose.yml": INFERENCE_GPU_RENDER,
     "frontend/docker-compose.yml": {"name": "frontend", "services": {"openwebui-stock": {"profiles": ["stock"]}}},
+    "memory/docker-compose.yml": {"name": "memory", "services": {"mnemory": {"image": "mnemory"}}},
 }
 
 
@@ -5078,3 +5079,123 @@ def test_a_plane_the_gpu_check_cannot_render_is_refused_not_skipped(root):
     assert code == stack.EXIT_REFUSED, out
     assert "could not render inference/docker-compose.yml to check it for GPU reservations" in out
     assert daemon.streamed == []
+
+
+# --------------------------------------------------------------------------
+# ac-driver-products attempt 3: a refusal's remedy is FOLLOWED, not read
+# --------------------------------------------------------------------------
+
+_STEP = re.compile(r"^\s+\d+\. `python scripts/stack/stack\.py ([^`]+)`")
+
+
+def _remedy_commands(out: str) -> list[list[str]]:
+    """The numbered `python scripts/stack/stack.py ...` steps a GPU refusal printed, in order."""
+    return [m.group(1).split() for m in map(_STEP.match, out.splitlines()) if m]
+
+
+def _follow_gpu_remedy(root, out):
+    """Run every printed step; the last is `up`. Returns (exit code, output) of that `up`."""
+    steps = _remedy_commands(out)
+    assert steps and steps[-1] == ["up"], out
+    numbered = [ln for ln in out.splitlines() if re.match(r"^\s+\d+\. ", ln)]
+    assert len(numbered) == len(steps), f"a step is not a command:\n{out}"
+    for args in steps[:-1]:
+        code, step_out, _ = run(root, *args)
+        assert code == 0, f"remedy step `{' '.join(args)}` failed:\n{step_out}"
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, up_out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    return code, up_out, daemon
+
+
+@pytest.mark.parametrize("setup", [
+    ("frontend", ["enable", "memory"]),                 # T12b: the memory product owns inference + local
+    ("frontend", ["enable", "inference"]),              # the inference product path
+    ("frontend,inference", ["enable", "memory"]),       # inference ALSO enabled directly
+])
+def test_following_the_gpu_remedy_gets_a_gpu_less_up_through(root, setup):
+    planes, enable = setup
+    run(root, "init", "--planes", planes, "--force")
+    assert run(root, *enable)[0] == 0
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED and "has no NVIDIA GPU" in out, out
+    assert "disable --plane inference" not in out          # refused while a product owns the plane
+    code, up_out, daemon = _follow_gpu_remedy(root, out)
+    assert "has no NVIDIA GPU" not in up_out
+    assert code == 0, up_out
+    assert "docker compose -f inference/docker-compose.yml up -d" in [" ".join(c) for c in daemon.streamed]
+
+
+def test_the_memory_remedy_names_the_memory_product(root):
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "memory")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    _, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert _remedy_commands(out) == [["disable", "memory"], ["enable", "--plane", "inference"], ["up"]]
+
+
+def test_a_direct_local_on_a_pre_owners_file_is_not_offered_a_refused_command(root):
+    """Pre-owners state with local on a directly-enabled inference that memory requires."""
+    path = root / stack.STATE_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": 1, "planes": {
+        "frontend": {"context": None, "profiles": []},
+        "inference": {"context": None, "profiles": ["local"]},
+        "memory": {"context": None, "profiles": []}}}), encoding="utf-8")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "disable --plane inference" not in out
+    assert "remove `local` from planes.inference.profiles" in out
+    # follow it: the edit, then up
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["planes"]["inference"]["profiles"] = []
+    path.write_text(json.dumps(data), encoding="utf-8")
+    code, up_out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert "has no NVIDIA GPU" not in up_out and code == 0, up_out
+
+
+def test_recover_runs_the_gpu_check_before_anything_starts(root):
+    """F12: recover on a GPU-less daemon started containers and printed the raw nvidia error."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    daemon = FakeDaemon(gpu=False, plane_renders=GPU_RENDERS)
+    code, out, _ = run(root, "recover", "inference", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "has no NVIDIA GPU" in out and "`recover` would start" in out
+    assert daemon.streamed == []
+
+
+def test_a_requirement_kept_plane_survives_a_save_and_load_as_unowned(root):
+    """N1: `owners: {}` must not come back as "enabled directly"."""
+    run(root, "init", "--planes", "frontend", "--force")
+    run(root, "enable", "inference")
+    run(root, "enable", "--plane", "memory")
+    code, out, _ = run(root, "disable", "inference")
+    assert "required by memory" in out
+    assert state_of(root)["planes"]["inference"]["owners"] == {}
+    loaded = stack.State.load(root / stack.STATE_REL)
+    assert loaded.owners_of("inference") == {}                 # NOT {"plane": []}
+    code, out, _ = run(root, "disable", "--plane", "memory")
+    assert code == 0, out
+    assert set(state_of(root)["planes"]) == {"frontend"}      # its last requirer went, so it went
+    assert "disabled: memory, inference" in out
+
+
+def test_the_pre_owners_hint_is_only_for_a_pre_owners_file(root):
+    """N2: a tracked file whose last product was disabled is not a pre-owners file."""
+    run(root, "enable", "memory")
+    run(root, "disable", "memory")
+    code, out, _ = run(root, "disable", "memory")
+    assert code == 0 and "nothing to do" in out
+    assert "before products were tracked" not in out and "disable --plane" not in out
+
+
+def test_enable_plane_labels_a_profile_a_product_added(root):
+    """N3: `--plane` did not turn `local` on; say who did."""
+    run(root, "enable", "memory")
+    code, out, _ = run(root, "enable", "--plane", "inference")
+    assert code == 0
+    assert "inference  profiles: local (already on: product memory)" in out
+    code, out, _ = run(root, "enable", "inference")
+    assert "inference  profiles: local\n" in out                 # the product's own profile, unlabelled

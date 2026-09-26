@@ -271,7 +271,15 @@ products enabled here. Both exist so `disable <product>` can take out only what
 that product added (see `disable`). **A file written before they existed** has
 neither key: every plane in it loads as enabled directly, owning its current
 profiles, and no product counts as enabled. Reading such a file never rewrites
-it; the first `enable`/`disable`/`init` saves it with the new keys.
+it; the first `enable`/`disable`/`init` saves it with the new keys. In a file
+that HAS `products`, an empty `owners` is real: a plane kept only because
+another enabled plane requires it. It loads as unowned (not as a direct enable)
+and goes when its last requirer goes.
+
+`enable` prints each plane's profiles and labels any it did not turn on itself:
+`local (already on: product memory)`, `(default)`, `(required by another
+profile)` - so `enable --plane inference` after `enable memory` does not read
+as though `--plane` turned `local` on.
 
 `context` is the Docker context the plane runs on; when set, the command becomes
 `docker --context optiplex-1 compose -f ...`. That is the data the
@@ -334,9 +342,19 @@ and which code - the rest is not attempted.
   a plane it cannot render is refused, not skipped - and refuses when a service
   in that render reserves an NVIDIA device (`deploy.resources.reservations.devices` with
   `driver: nvidia` or a `gpu` capability, `runtime: nvidia`, `gpus:`), naming
-  each plane, profile and service. For inference the remedy it prints is the
-  gateway alone: `disable inference`, then `enable --plane inference`, with
-  `local` kept out of `inference/.env`. Before this, a GPU-less host got
+  each plane, profile and service, then numbered steps that remove those
+  profiles. The steps are **built from the state's owners and applied to a copy
+  of the state as they are chosen**, so following them gets the next `up` past
+  this refusal: `disable <product>` for each product that asked for the
+  profile (after `enable memory`: `disable memory`), `disable --plane <plane>`
+  only when nothing but a direct enable holds it, an edit of
+  `.stack/state.json` when a direct enable carries it and something else still
+  needs the plane (a pre-products state file), `enable --plane <plane>` when the
+  plane went with its owners (for inference: the gateway without its local
+  backends), the plane's env-file `COMPOSE_PROFILES` when it lists the profile,
+  then `up`. `--plane` is never offered while a product owns the plane (it would
+  be refused). `recover` runs the same check before it stops or starts anything.
+  Before this, a GPU-less host got
   compose's raw `could not select device driver "nvidia"` halfway through `up`,
   after the anchor and earlier planes had started. An unknown answer (docker not
   reachable, unparsable output) is not a refusal - compose then says why.
@@ -552,6 +570,8 @@ recover` - its FULL path (`Invoke-EmergencyRecovery`: stop everything in reverse
 order, restart in dependency order, wait for health). Selection is the same as
 `up`: the enabled planes plus their `requires` closure, one plane, or `--all`.
 
+0. **The GPU check** `up` runs (see `up`), before anything stops or starts; not
+   under `--dry-run`.
 1. **Every plane is rendered first** (`docker compose -f <file> [--profile ...]
    config --format json`, with exactly the profiles `up` passes). A plane that
    cannot be rendered is a refusal while the stack is still running.
