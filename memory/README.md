@@ -97,22 +97,36 @@ The first `up` builds `mnemory:local` from `../mnemory` and
 **A fresh build does not start today.** Built from the current `dev` branch of
 `../mnemory`, `mnemory` crash-loops and `up` stops with
 `dependency failed to start: container mnemory is unhealthy`. `docker logs
-mnemory` shows one of two causes:
+mnemory` shows two failures, one after the other:
 
-- `ModuleNotFoundError: No module named 'mcp.server.fastmcp'. This is mcp 2.x`
-  - the mnemory source declares `mcp>=1.6.0` with no upper bound, and the build
-  resolves `mcp` 2.x. Pinning `mcp<2` in `../mnemory/pyproject.toml` and running
-  `docker compose -f memory/docker-compose.yml build mnemory` clears this one.
-- `Could not load model Qdrant/bm25`, after a `Temporary failure in name
-  resolution` - mnemory tries to fetch its BM25 model from Hugging Face at
-  startup, and `mnemory` has no route to the internet (`ai-stack_llm-net` is
-  internal).
+1. `ModuleNotFoundError: No module named 'mcp.server.fastmcp'. This is mcp 2.x`
+   - the mnemory source declares `mcp>=1.6.0` with no upper bound, and the build
+   resolves `mcp` 2.x. Changing it to `mcp>=1.6.0,<2` in
+   `../mnemory/pyproject.toml` and running
+   `docker compose -f memory/docker-compose.yml build mnemory` clears this one.
+2. Then, on every start, a traceback through fastembed's
+   `download_files_from_huggingface` ending in
+   `httpx.ConnectError: [Errno -3] Temporary failure in name resolution`,
+   `ERROR:    Application startup failed. Exiting.` and `SystemExit: 3`. On its
+   first start mnemory asks Hugging Face for its BM25 sparse-embedding model,
+   and `mnemory` cannot reach the internet: its only network,
+   `ai-stack_llm-net`, is internal. It restarts and fails the same way each
+   time.
 
-Both are in the sibling repository, not in this plane; fix them there, then
-`docker compose -f memory/docker-compose.yml build mnemory` and
-`python scripts/stack/stack.py up`. A machine that already has a working
-`mnemory:local` image runs the plane as documented here: the compose file never
-pulls it (`pull_policy: never`), and a plain `up` does not rebuild it.
+The second one has no fix in this repository yet, so the plane cannot be brought
+up from a fresh clone. **While memory is enabled, every plain `up` stops at it**
+(`# up stopped: memory exited 1`), and the planes after it in the start order -
+search, coder, Open Brain, agent-org - are never started. Take it back out and
+stop the crash-looping container:
+
+```bash
+python scripts/stack/stack.py disable --plane memory
+python scripts/stack/stack.py down memory
+```
+
+A machine that already has a working `mnemory:local` image runs the plane as
+documented here: the compose file never pulls it (`pull_policy: never`), and a
+plain `up` does not rebuild it.
 
 ## Operate
 
@@ -148,7 +162,7 @@ every checksum first and refuses while a container holds the volume.
 | `refused: memory requires inference, which is not enabled` | Enable the inference plane first: `python scripts/stack/stack.py enable --plane inference`. |
 | `../mnemory is missing (plane memory)` from `enable` or `doctor` | Run the `git clone` it names, from the repository root. |
 | `unable to prepare context: path ".../mnemory" not found` from `up memory` | `up <plane>` does not check the sibling checkout; `enable` and `doctor` do. Clone it. |
-| `dependency failed to start: container mnemory is unhealthy` | See [the fresh-build note](#enable-and-start); read `docker logs mnemory`. |
+| `dependency failed to start: container mnemory is unhealthy`, and later planes never start | See [the fresh-build note](#enable-and-start); read `docker logs mnemory`. `python scripts/stack/stack.py disable --plane memory` lets `up` reach the rest. |
 | 401 in `docker logs mnemory` when it summarises or embeds | `MNEMORY_LLM_API_KEY` is not a virtual key the gateway issued. |
 | `network ai-stack_llm-net declared as external, but could not be found` from a hand-typed `docker compose` | The anchor's networks are missing; `python scripts/stack/stack.py up` creates them. |
 | `[DIFFERS] ai-stack_llm-net: internal is false, declared true` and `up` stops | An existing network does not match the anchor. Stop what is attached, `docker network rm ai-stack_llm-net`, run `up` again. |

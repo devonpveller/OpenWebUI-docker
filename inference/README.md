@@ -177,8 +177,29 @@ container that fails its gate.
 `python scripts/stack/stack.py backup inference` does not tar it: it names
 `llm-gateway-backup` as the plane's dump sidecar, archives `llm-queue-data`
 under `local`, and without `local` refuses with `nothing was archived`. The dumps
-are in `backups/llm-gateway/llm-gateway-<stamp>.sql.gz`. To restore one into an
-empty ledger:
+are in `backups/llm-gateway/llm-gateway-<stamp>.sql.gz`.
+
+The sidecar dumps once when it starts and then every 24 h, so restarting it is
+how you take a dump now:
+
+```bash
+docker restart llm-gateway-backup
+ls -l backups/llm-gateway/
+```
+
+**Check a dump before you restore it.** The sidecar's first dump is taken the
+moment the plane first starts, before LiteLLM has created its tables: a few
+hundred bytes (370 in a fresh clone), no tables, no keys. On a fresh plane it is
+the only dump for the first 24 h, and restoring it wipes every virtual key you
+have issued since. Count the tables and the keys in a dump:
+
+```bash
+gunzip -c backups/llm-gateway/llm-gateway-<stamp>.sql.gz | grep -c '^CREATE TABLE'
+gunzip -c backups/llm-gateway/llm-gateway-<stamp>.sql.gz | awk '/^COPY public."LiteLLM_VerificationToken"/ {f=1; next} f && length($0) < 3 {f=0} f' | wc -l
+```
+
+A usable dump has dozens of tables (65 with the pinned LiteLLM) and as many keys
+as you have issued. To restore one into an empty ledger:
 
 ```bash
 python scripts/stack/stack.py down inference
@@ -188,8 +209,9 @@ gunzip -c backups/llm-gateway/llm-gateway-<stamp>.sql.gz | docker exec -i llm-ga
 python scripts/stack/stack.py up
 ```
 
-The first line after `down` deletes the current ledger - take a dump or a copy
-of it first if you may want it back. The GGUF store is a host directory; back it
+The `docker volume rm` line deletes the current ledger: take a dump first (the
+`docker restart llm-gateway-backup` line above, before `down`) if you may want it
+back. The GGUF store is a host directory; back it
 up with your own tools (`lm-models-backup` tars it weekly under `local`).
 
 ## Troubleshooting
