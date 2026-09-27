@@ -111,7 +111,10 @@ earlier paste left in `$nb` or `$models`.
 So every host-bind-mount wipe in this runbook is ONE call to `Invoke-BindRestore`, on one line. It
 takes the directory from the container's OWN mount (`docker inspect` - running, or stopped by step 1),
 compares it with the compose render made after the shell variable is removed, checks the archive's
-`.sha256`, and only then deletes, restores and starts the containers. Everything it uses is a
+`.sha256` (hash and file name, whatever directory the sidecar recorded), refuses a target that is a
+filesystem root or holds the current directory, the checkout or your home, and only then deletes
+(literal paths, the module-qualified cmdlet; `docker` is the executable on PATH, never a session
+alias or function), restores and starts the containers. Everything it uses is a
 parameter or assigned inside it (strict mode, so a name it did not assign is an error, never an older
 value from your session). Any failure THROWS, and the delete is never reached without a resolve that
 returned. There is no separate "resolve", "delete" or "restore" line to paste on its own.
@@ -126,13 +129,18 @@ function Resolve-BindTarget {
           [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '')
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
+    # docker is called as the APPLICATION on PATH, so a session alias or function named docker
+    # cannot answer in its place.
+    $dockerExe = @(Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
+    $dockerExe = $dockerExe[0].Source
     # 1. A shell variable outranks the plane's .env for compose: remove it from this session.
-    if ($ShellVar) { Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue }
+    if ($ShellVar) { Microsoft.PowerShell.Management\Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue }
     # 2. What the container really mounts at $Destination (running, or stopped by step 1).
     #    JSON, filtered here: Windows PowerShell 5.1 strips the double quotes a Go template
     #    comparison needs when it passes them to docker.
     $mounted = $null; $mounts = $null; $list = $null
-    $mounts = docker inspect $Container --format '{{json .Mounts}}'
+    $mounts = & $dockerExe inspect $Container --format '{{json .Mounts}}'
     if ($LASTEXITCODE -eq 0 -and $mounts) {
         $list = $mounts | ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
         $mounted = @($list | Where-Object { $_.Destination -eq $Destination } | ForEach-Object { $_.Source })
@@ -141,7 +149,7 @@ function Resolve-BindTarget {
     # 3. What the compose render says, now from the plane's .env (or its default) only.
     $profileArgs = @(); foreach ($pr in $ComposeProfile) { $profileArgs += @('--profile', $pr) }
     $cfg = $null; $vols = $null; $rendered = $null
-    $cfg = docker compose -f $ComposeFile @profileArgs config --format json | ConvertFrom-Json
+    $cfg = & $dockerExe compose -f $ComposeFile @profileArgs config --format json | ConvertFrom-Json
     if ($cfg -and $cfg.services.PSObject.Properties[$Service]) {
         $vols = $cfg.services.$Service.volumes
         $rendered = @($vols | Where-Object { $_.target -eq $Destination } | ForEach-Object { $_.source })
@@ -168,24 +176,55 @@ function Invoke-BindRestore {
           [Parameter(Mandatory)][string[]]$Start)
     Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
-    $target = $null; $backup = $null
-    if ($Archive -notmatch '^[A-Za-z0-9._-]+\.tar\.gz$') { throw "REFUSED: '$Archive' is not an archive file name" }
+    $target = $null; $backup = $null; $archivePath = $null; $sentinel = $null; $fields = $null
+    $want = $null; $got = $null; $full = $null; $guarded = $null; $home0 = $null; $top = $null; $gitExe = $null; $g = $null; $cmp = $null
+    $dockerExe = @(Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
+    $dockerExe = $dockerExe[0].Source
+    if ($Archive -notmatch '^[A-Za-z0-9._-]+\.tar\.gz$') { throw "REFUSED: '$Archive' is not an archive file name (replace <ts> with the timestamp of YOUR archive)" }
     $backup = (Resolve-Path -LiteralPath $BackupDir).Path
-    if (-not (Test-Path -LiteralPath (Join-Path $backup $Archive) -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
+    $archivePath = Join-Path $backup $Archive
+    if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
     # 1. The directory - resolved, or this call ends here (a throw), before anything is touched.
     $target = Resolve-BindTarget -Container $Container -Destination $Destination -ComposeFile $ComposeFile `
         -ComposeProfile $ComposeProfile -Service $Service -ShellVar $ShellVar
     if (-not $target) { throw 'REFUSED: no target was resolved' }
-    # 2. The archive matches its sentinel, or nothing is deleted.
-    docker run --rm -v "${backup}:/in:ro" alpine sh -c "cd /in && sha256sum -c '$Archive.sha256'"
-    if ($LASTEXITCODE -ne 0) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
+    # 2. Never a directory whose wipe would take more than a data store with it: a filesystem or
+    #    drive root, or the current directory, this checkout, your home - or any directory that
+    #    CONTAINS one of them.
+    $full = [IO.Path]::GetFullPath($target).TrimEnd('\', '/')
+    if ($full -eq '' -or [IO.Path]::GetPathRoot($target).TrimEnd('\', '/') -eq $full) { throw "REFUSED: '$target' is a filesystem root" }
+    $home0 = [Environment]::GetFolderPath('UserProfile')
+    $gitExe = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)
+    if ($gitExe.Count) { $top = (& $gitExe[0].Source rev-parse --show-toplevel 2>$null) }
+    foreach ($guarded in @((Get-Location).ProviderPath, $home0, $top)) {
+        if (-not $guarded) { continue }
+        $g = [IO.Path]::GetFullPath($guarded).TrimEnd('\', '/')
+        $cmp = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        if ([string]::Equals($g, $full, $cmp) -or $g.StartsWith($full + [IO.Path]::DirectorySeparatorChar, $cmp) -or $g.StartsWith($full + '/', $cmp)) {
+            throw "REFUSED: '$target' is, or contains, the current directory / this checkout / your home"
+        }
+    }
+    # 3. The archive matches its sentinel. Checked HERE, not by `sha256sum -c` in a container: the
+    #    backup sidecars write the sentinel with the path THEY saw (/backups/<archive>), so only the
+    #    hash and the file name are compared, whatever directory it was recorded under.
+    $sentinel = "$archivePath.sha256"
+    if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) { throw "REFUSED: $Archive has no .sha256 sentinel - nothing was deleted" }
+    $fields = ((Get-Content -LiteralPath $sentinel -TotalCount 1) -split '\s+', 2)
+    if ($fields.Count -ne 2 -or $fields[0] -notmatch '^[0-9a-fA-F]{64}$' -or (($fields[1].TrimStart('*') -split '[\\/]')[-1]) -ne $Archive) {
+        throw "REFUSED: $Archive.sha256 does not name $Archive with a SHA-256 - nothing was deleted"
+    }
+    $want = $fields[0].ToLowerInvariant()
+    $got = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($got -ne $want) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
     Write-Host "Wiping and restoring: $target"
-    # 3. Wipe, restore, start - in this order, each checked.
-    Remove-Item -Recurse -Force -Path (Join-Path $target '*')
-    docker run --rm -v "${target}:/dest" -v "${backup}:/in:ro" alpine sh -c "cd /dest && tar xzf '/in/$Archive'"
+    # 4. Wipe (literal paths, the module-qualified cmdlet), restore, start - each checked.
+    Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force |
+        ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    & $dockerExe run --rm -v "${target}:/dest" -v "${backup}:/backups:ro" alpine sh -c "cd /dest && tar xzf '/backups/$Archive'"
     if ($LASTEXITCODE -ne 0) { throw "RESTORE FAILED (exit $LASTEXITCODE): $target was wiped and is not restored - fix the cause and run this same line again" }
     foreach ($c in $Start) {
-        docker start $c | Out-Null
+        & $dockerExe start $c | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "restored, but 'docker start $c' failed (exit $LASTEXITCODE)" }
     }
     Write-Host "Restored $Archive into $target; started: $($Start -join ', ')"
@@ -237,7 +276,8 @@ docker stop open_notebook
 
 # 2. Verify, wipe, restore and start - ONE line (see "Before ANY wipe"). OPEN_NOTEBOOK_DIR lives
 #    in OB1/docker/.env; blank means ../../../open-notebook, resolved against OB1/docker/.
-Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-20260530T011617Z.tar.gz' -Start open_notebook
+#    Replace <ts> with the timestamp of YOUR archive (ls .\backups\open-notebook).
+Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-<ts>.tar.gz' -Start open_notebook
 ```
 
 ---
@@ -350,8 +390,9 @@ docker run --rm `
 
 **Tailscale**: the bind mount is `../data/tailscale` from `frontend/` (i.e. `./data/tailscale`), not a
 named volume - a host bind-mount wipe, so it goes through `Invoke-BindRestore` like the others (see
-"Before ANY wipe"; there is no shell variable to clear). Steps 2-4 become ONE line; `-Start` lists
-openwebui before tailscale (the netns rule; starting a running container is a no-op):
+"Before ANY wipe"; there is no shell variable to clear). Step 1 stops **tailscale and openwebui**
+(the openwebui row above: tailscale first). Steps 2-4 become ONE line; `-Start` lists openwebui before
+tailscale (the netns rule; starting a running container is a no-op). Replace `<ts>` with YOUR archive's:
 ```powershell
 Invoke-BindRestore -Container tailscale -Destination /var/lib/tailscale -ComposeFile frontend/docker-compose.yml -ComposeProfile gpu,tailscale -Service tailscale -BackupDir .\backups\tailscale -Archive 'tailscale-<ts>.tar.gz' -Start openwebui,tailscale
 ```
