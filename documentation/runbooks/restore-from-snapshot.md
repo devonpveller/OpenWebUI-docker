@@ -113,8 +113,12 @@ takes the directory from the container's OWN mount (`docker inspect` - running, 
 compares it with the compose render made after the shell variable is removed, checks the archive's
 `.sha256` (hash and file name, whatever directory the sidecar recorded), refuses a target that is a
 filesystem root or holds the current directory, the checkout or your home, and only then deletes
-(literal paths, the module-qualified cmdlet; `docker` is the executable on PATH, never a session
-alias or function), restores and starts the containers. Everything it uses is a
+(literal paths; EVERY cmdlet both functions call is module-qualified, e.g.
+`Microsoft.PowerShell.Management\Remove-Item`, the archive is hashed with .NET SHA-256 rather than a
+cmdlet, and `docker` is the executable on PATH - no session alias or function can stand in for any of
+them), restores and
+starts the containers. The backup directory is guarded too (a target equal to it, containing it or
+inside it is refused), and a run from outside any git work tree simply has no checkout to guard. Everything it uses is a
 parameter or assigned inside it (strict mode, so a name it did not assign is an error, never an older
 value from your session). Any failure THROWS, and the delete is never reached without a resolve that
 returned. There is no separate "resolve", "delete" or "restore" line to paste on its own.
@@ -127,11 +131,11 @@ function Resolve-BindTarget {
     param([Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Destination,
           [Parameter(Mandatory)][string]$ComposeFile, [string[]]$ComposeProfile = @(),
           [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '')
-    Set-StrictMode -Version Latest
+    Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
     # docker is called as the APPLICATION on PATH, so a session alias or function named docker
     # cannot answer in its place.
-    $dockerExe = @(Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    $dockerExe = @(Microsoft.PowerShell.Core\Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
     if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
     $dockerExe = $dockerExe[0].Source
     # 1. A shell variable outranks the plane's .env for compose: remove it from this session.
@@ -142,17 +146,17 @@ function Resolve-BindTarget {
     $mounted = $null; $mounts = $null; $list = $null
     $mounts = & $dockerExe inspect $Container --format '{{json .Mounts}}'
     if ($LASTEXITCODE -eq 0 -and $mounts) {
-        $list = $mounts | ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
-        $mounted = @($list | Where-Object { $_.Destination -eq $Destination } | ForEach-Object { $_.Source })
+        $list = $mounts | Microsoft.PowerShell.Utility\ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
+        $mounted = @($list | Microsoft.PowerShell.Core\Where-Object { $_.Destination -eq $Destination } | Microsoft.PowerShell.Core\ForEach-Object { $_.Source })
         if ($mounted.Count -ne 1) { $mounted = $null } else { $mounted = $mounted[0] }
     }
     # 3. What the compose render says, now from the plane's .env (or its default) only.
     $profileArgs = @(); foreach ($pr in $ComposeProfile) { $profileArgs += @('--profile', $pr) }
     $cfg = $null; $vols = $null; $rendered = $null
-    $cfg = & $dockerExe compose -f $ComposeFile @profileArgs config --format json | ConvertFrom-Json
+    $cfg = & $dockerExe compose -f $ComposeFile @profileArgs config --format json | Microsoft.PowerShell.Utility\ConvertFrom-Json
     if ($cfg -and $cfg.services.PSObject.Properties[$Service]) {
         $vols = $cfg.services.$Service.volumes
-        $rendered = @($vols | Where-Object { $_.target -eq $Destination } | ForEach-Object { $_.source })
+        $rendered = @($vols | Microsoft.PowerShell.Core\Where-Object { $_.target -eq $Destination } | Microsoft.PowerShell.Core\ForEach-Object { $_.source })
         if ($rendered.Count -ne 1) { $rendered = $null } else { $rendered = $rendered[0] }
     }
     if (-not $mounted)  { throw "REFUSED: no container '$Container' with a mount at $Destination - nothing proves which directory it uses" }
@@ -164,7 +168,7 @@ function Resolve-BindTarget {
     if ((& $norm $mounted) -cne (& $norm $rendered)) {
         throw "REFUSED: the container mounts '$mounted' but the render says '$rendered' - find out why before wiping anything"
     }
-    if (-not (Test-Path -LiteralPath $rendered -PathType Container)) { throw "REFUSED: '$rendered' is not an existing directory" }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $rendered -PathType Container)) { throw "REFUSED: '$rendered' is not an existing directory" }
     $rendered
 }
 
@@ -174,17 +178,17 @@ function Invoke-BindRestore {
           [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '',
           [Parameter(Mandatory)][string]$BackupDir, [Parameter(Mandatory)][string]$Archive,
           [Parameter(Mandatory)][string[]]$Start)
-    Set-StrictMode -Version Latest
+    Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
     $target = $null; $backup = $null; $archivePath = $null; $sentinel = $null; $fields = $null
-    $want = $null; $got = $null; $full = $null; $guarded = $null; $home0 = $null; $top = $null; $gitExe = $null; $g = $null; $cmp = $null
-    $dockerExe = @(Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    $want = $null; $got = $null; $full = $null; $guarded = $null; $home0 = $null; $top = $null; $gitExe = $null; $g = $null; $cmp = $null; $eap = $null; $bk = $null; $stream = $null
+    $dockerExe = @(Microsoft.PowerShell.Core\Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
     if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
     $dockerExe = $dockerExe[0].Source
     if ($Archive -notmatch '^[A-Za-z0-9._-]+\.tar\.gz$') { throw "REFUSED: '$Archive' is not an archive file name (replace <ts> with the timestamp of YOUR archive)" }
-    $backup = (Resolve-Path -LiteralPath $BackupDir).Path
-    $archivePath = Join-Path $backup $Archive
-    if (-not (Test-Path -LiteralPath $archivePath -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
+    $backup = (Microsoft.PowerShell.Management\Resolve-Path -LiteralPath $BackupDir).Path
+    $archivePath = Microsoft.PowerShell.Management\Join-Path $backup $Archive
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $archivePath -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
     # 1. The directory - resolved, or this call ends here (a throw), before anything is touched.
     $target = Resolve-BindTarget -Container $Container -Destination $Destination -ComposeFile $ComposeFile `
         -ComposeProfile $ComposeProfile -Service $Service -ShellVar $ShellVar
@@ -195,9 +199,23 @@ function Invoke-BindRestore {
     $full = [IO.Path]::GetFullPath($target).TrimEnd('\', '/')
     if ($full -eq '' -or [IO.Path]::GetPathRoot($target).TrimEnd('\', '/') -eq $full) { throw "REFUSED: '$target' is a filesystem root" }
     $home0 = [Environment]::GetFolderPath('UserProfile')
-    $gitExe = @(Get-Command git -CommandType Application -ErrorAction SilentlyContinue)
-    if ($gitExe.Count) { $top = (& $gitExe[0].Source rev-parse --show-toplevel 2>$null) }
-    foreach ($guarded in @((Get-Location).ProviderPath, $home0, $top)) {
+    $gitExe = @(Microsoft.PowerShell.Core\Get-Command git -CommandType Application -ErrorAction SilentlyContinue)
+    if ($gitExe.Count) {
+        # Windows PowerShell 5.1 turns a native command's stderr into a TERMINATING error under
+        # Stop, even with 2>$null; outside a work tree git prints "fatal: not a git repository".
+        # So Continue is scoped to this one call, and a non-zero exit means "no checkout to guard".
+        $eap = $ErrorActionPreference
+        try { $ErrorActionPreference = 'Continue'; $top = & $gitExe[0].Source rev-parse --show-toplevel 2>$null }
+        finally { $ErrorActionPreference = $eap }
+        if ($LASTEXITCODE -ne 0 -or -not $top) { $top = $null }
+    }
+    $bk = [IO.Path]::GetFullPath($backup).TrimEnd('\', '/')
+    $cmp = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if ([string]::Equals($bk, $full, $cmp) -or $bk.StartsWith($full + [IO.Path]::DirectorySeparatorChar, $cmp) -or $bk.StartsWith($full + '/', $cmp) -or
+        $full.StartsWith($bk + [IO.Path]::DirectorySeparatorChar, $cmp) -or $full.StartsWith($bk + '/', $cmp)) {
+        throw "REFUSED: '$target' is, contains, or is inside the backup directory $backup - the wipe would destroy the archive before the restore reads it"
+    }
+    foreach ($guarded in @((Microsoft.PowerShell.Management\Get-Location).ProviderPath, $home0, $top)) {
         if (-not $guarded) { continue }
         $g = [IO.Path]::GetFullPath($guarded).TrimEnd('\', '/')
         $cmp = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
@@ -209,25 +227,29 @@ function Invoke-BindRestore {
     #    backup sidecars write the sentinel with the path THEY saw (/backups/<archive>), so only the
     #    hash and the file name are compared, whatever directory it was recorded under.
     $sentinel = "$archivePath.sha256"
-    if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) { throw "REFUSED: $Archive has no .sha256 sentinel - nothing was deleted" }
-    $fields = ((Get-Content -LiteralPath $sentinel -TotalCount 1) -split '\s+', 2)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $sentinel -PathType Leaf)) { throw "REFUSED: $Archive has no .sha256 sentinel - nothing was deleted" }
+    $fields = ((Microsoft.PowerShell.Management\Get-Content -LiteralPath $sentinel -TotalCount 1) -split '\s+', 2)
     if ($fields.Count -ne 2 -or $fields[0] -notmatch '^[0-9a-fA-F]{64}$' -or (($fields[1].TrimStart('*') -split '[\\/]')[-1]) -ne $Archive) {
         throw "REFUSED: $Archive.sha256 does not name $Archive with a SHA-256 - nothing was deleted"
     }
     $want = $fields[0].ToLowerInvariant()
-    $got = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    # .NET, not Get-FileHash: in Windows PowerShell 5.1 Get-FileHash is a SCRIPT function whose
+    # module-qualified name does not resolve in every runspace, and .NET cannot be shadowed at all.
+    $stream = [IO.File]::OpenRead($archivePath)
+    try { $got = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose() }
     if ($got -ne $want) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
-    Write-Host "Wiping and restoring: $target"
+    Microsoft.PowerShell.Utility\Write-Host "Wiping and restoring: $target"
     # 4. Wipe (literal paths, the module-qualified cmdlet), restore, start - each checked.
     Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force |
-        ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+        Microsoft.PowerShell.Core\ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
     & $dockerExe run --rm -v "${target}:/dest" -v "${backup}:/backups:ro" alpine sh -c "cd /dest && tar xzf '/backups/$Archive'"
     if ($LASTEXITCODE -ne 0) { throw "RESTORE FAILED (exit $LASTEXITCODE): $target was wiped and is not restored - fix the cause and run this same line again" }
     foreach ($c in $Start) {
-        & $dockerExe start $c | Out-Null
+        & $dockerExe start $c | Microsoft.PowerShell.Core\Out-Null
         if ($LASTEXITCODE -ne 0) { throw "restored, but 'docker start $c' failed (exit $LASTEXITCODE)" }
     }
-    Write-Host "Restored $Archive into $target; started: $($Start -join ', ')"
+    Microsoft.PowerShell.Utility\Write-Host "Restored $Archive into $target; started: $($Start -join ', ')"
 }
 ```
 
