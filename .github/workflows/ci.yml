@@ -295,6 +295,30 @@ jobs:
       # on a fresh Open WebUI (nothing pasted yet) that probe SKIPS by design since ac-ci.
       - run: bash scripts/stack/rehearse-fresh-clone.sh --this-daemon --health-timeout 900
 
+  linux-rehearsal:
+    name: "Linux rehearsal - README's quickstart, two products and Contributing, as a stranger (DinD)"
+    # PUSHES and manual runs only (work/**, development, ...), not pull requests: the run takes
+    # about as long as the agent-bridge suite and its outcome depends on the network (image
+    # pulls, OB1 from GitHub, pip, and the stub Mullvad tunnel's dial-out, which is EXPECTED to
+    # fail). Deliberately NOT in the H4 gate's needs below: it is the close-out's acceptance
+    # test, re-run so README drift shows up, and a network hiccup here should not read as a
+    # broken gate. Pinning it is the operator's call (ac-linux-rehearsal findings).
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the script bundles HEAD through a throwaway bare repository; a shallow clone
+          # cannot push into it
+          fetch-depth: 0
+      # Outer mode: one privileged docker:27-dind on the runner, labelled, removed at the end.
+      # Inside it: README's Linux quickstart block (extracted by its marker, run verbatim but
+      # for the clone URL), `enable inference` on the GPU-less path, `enable search` with stub
+      # keys, the Contributing blocks, doc/Python commits and planted refusals, the journal and
+      # identity checks. Prints CRITERION 1-5 PASS/FAIL; exit 0 only when all five pass.
+      - run: sh scripts/ci/linux-rehearsal.sh --owner ci-linux-rehearsal --name ci-linux-rehearsal
+
   # =========================================================================================
   # dark-factory-unification C.9 H4 — THE VERIFICATION MACHINERY IS RE-PROVEN, NOT SNAPSHOTTED
   # =========================================================================================

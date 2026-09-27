@@ -4312,6 +4312,28 @@ def test_a_plane_that_cannot_be_rendered_here_is_not_verified_and_left_alone(doc
     assert "not a failure" in out
 
 
+def test_a_missing_service_env_file_is_could_not_compare_naming_it_not_stale(docs_root):
+    # ac-linux-rehearsal F2: the plane's own .env EXISTS, but a service-level env_file
+    # elsewhere (OB1's recipe .env files) is absent. compose then refuses the render; that
+    # is "could not compare" (exit 3, the file named), never "stale - run docs --write".
+    assert docs(docs_root, "--write")[0] == 0
+    host = DocsHost()
+    missing = "OB1/recipes/email-history-import/.env"
+
+    def recipe_env_missing(cmd, cwd):
+        if "OB1/docker/docker-compose.yml" in cmd and "--profiles" not in cmd:
+            return stack.CommandResult(
+                1, "", f"env file {docs_root / missing} not found: stat {docs_root / missing}: "
+                       "no such file or directory")
+        return host(cmd, cwd)
+
+    code, out, _h = docs(docs_root, "--check", host=recipe_env_missing)
+    assert code == stack.EXIT_UNVERIFIED, out
+    assert f"could not compare: {missing} is absent" in out
+    assert "--write" not in out.split("NOT VERIFIED", 1)[-1].split("\n", 1)[0]
+    assert "refused:" not in out
+
+
 def test_a_missing_gitignored_env_is_unverified_only_where_the_render_needs_it(docs_root):
     assert docs(docs_root, "--write")[0] == 0
     (docs_root / "agent-org" / "docker" / ".env").unlink()
