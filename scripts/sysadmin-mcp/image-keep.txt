@@ -1,0 +1,26 @@
+# image-keep.txt - image tags the sysadmin reclaim must NEVER remove (docker_reclaim.py).
+#
+# One glob pattern per line, then `#` and the reason. A pattern is matched (case-sensitive,
+# Python fnmatch; `*` also crosses `/`) against the image's normalised `repo:tag` - the form
+# `docker images` prints, with `docker.io/` and `docker.io/library/` dropped and `:latest`
+# added when no tag is given. Blank lines and lines starting with `#` are ignored.
+#
+# A tag that matches protects its whole IMAGE ID: no other tag of the same id is removed
+# either (removing a sibling tag would free nothing and would leave the id one step from
+# deletion). If this file is missing or unreadable, reclaim removes NO tagged image at all.
+#
+# Seeded 2026-09-27 (ac-sysadmin-reclaim) from `docker images` on the ai-stack host; the
+# tags each line protected on that day are listed in the item's dev-run evidence.
+
+*:local                         # the deployed-pin convention: every image a plane BUILDS is tagged :local; kept even with no container, as the rebuild-free way back up
+*prepatch*                      # pre-patch rollback snapshots (open_notebook:iks-prepatch-*)
+*-prev-*                        # previous-deploy rollback tags (*:local-prev-<date>)
+*pre-ondemand*                  # open_notebook rollback from before on-demand podcast audio
+*podcastpatch*                  # open_notebook podcast-patch build, the pin the live :iks tag was cut from
+*:pre-*                         # named pre-change rollback tags (openbrain-curator:pre-..., openbrain-mcp-server:pre-..., openbrain-research:pre-...)
+*:backup-*                      # named backup tags (openbrain-mcp-server:backup-...)
+docker:27-dind                  # the harness's disposable Docker-in-Docker (DinD proofs, ac-linux-rehearsal); re-pulled on every run if removed
+docker:27-cli                   # the driver image of the sysadmin DinD tests (launch_dind.sh)
+mcr.microsoft.com/powershell:7.4-*  # the container the PowerShell pure-logic tests run in (test-compact-lib.ps1)
+python:3.12-slim                # the container every sysadmin-mcp test runs in (the container-only test rule)
+little-coder-open-terminal:*    # agent-org env templates: AO_OT1_IMAGE/AO_OT2_IMAGE swap between these tags WITHOUT a rebuild (little-coder/docker/envs/)

@@ -2,7 +2,8 @@
 """Tests for the Telegram listener's recovery reply. Stdlib only. No Telegram call,
 no docker call, no recovery run.
 
-Run:  python scripts/sysadmin-mcp/test_telegram_listener.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_telegram_listener.py
 
 What it proves (ac-legacy-recovery, from the ac-recovery-gates review R6):
   * a recovery run whose only ERROR is EARLY and whose exit code is 0 produces a
@@ -26,6 +27,9 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import telegram_listener as tl  # noqa: E402
+import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_telegram_listener")
 
 _passed = 0
 _failed = 0

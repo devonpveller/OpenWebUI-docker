@@ -5,15 +5,22 @@ Split from the read-only probes (sysadmin.py) on purpose: everything here can ch
 so every entry point is built to be safe by construction:
 
   • PLAN / EXECUTE split — `reclaim_plan()` is read-only (frictionless investigation); `reclaim_
-    execute()` is the only thing that mutates and it REQUIRES a plan-bound `confirm_token`. Calling
-    execute with a stale/absent token is refused (fail-closed) and just returns the fresh plan.
+    execute()` is the only thing that mutates and it REQUIRES a plan-bound `confirm_token`. The
+    token is a hash of the plan's LISTED SET (which workers, which logs, which image tags, which
+    anonymous volumes, the build-cache filter); the plan is stored under it in state/reclaim-plans/.
+    Execute removes only that set, re-validating every item first: anything that became in use or
+    changed since the plan is SKIPPED with the current reason, never removed. An unknown or expired
+    token is refused (fail-closed) and just returns the fresh plan.
   • Idle-gated — an ao-worker's /tmp is cleared ONLY when the worker shows no active build/agent
     process AND no lc-*.jsonl was written in the last few minutes. If idleness can't be verified,
     the worker is treated as BUSY and skipped (fail-safe).
   • Scoped deletes — only `/tmp/lc-pi-*.jsonl` and `/tmp/lc-ot-*.jsonl` (the known little-coder
     session-log bloat), never a blanket `rm`. Logs are truncated (data-preserving) not deleted.
-  • NEVER touches volumes — there is deliberately no `docker volume` operation in this file; a test
-    asserts the source contains no volume-mutating verbs.
+  • Docker images / build cache / ANONYMOUS volumes are docker_reclaim.py's job (the operator's
+    2026-09-27 rules are stated there in full). NAMED volumes are never removed by anything here;
+    there is no `docker volume` operation in THIS file, and every docker mutation docker_reclaim
+    makes passes one chokepoint (docker_reclaim._mutate) that admits only three removal shapes
+    and refuses every prune verb except the build-cache one.
   • Elevation stays out — vhdx compaction is not done here; it is triggered as a pre-registered
     RunLevel-Highest Scheduled Task by compaction.py, behind the same gate.
 
@@ -25,12 +32,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sysadmin as sa  # noqa: E402
+import docker_reclaim as dr  # noqa: E402
 
 _STATE = os.path.join(_HERE, "state")
 _AUDIT = os.path.join(_STATE, "sysadmin-audit.jsonl")
@@ -113,74 +122,151 @@ def worker_state(w: str) -> dict:
 
 # ── plan ───────────────────────────────────────────────────────────────────────
 def _plan_token(actions: dict) -> str:
-    """A short, deterministic token bound to the ACTION SET (not exact byte sizes, so it stays
-    valid across small growth between plan and execute). Changes if a worker becomes busy, a log
-    crosses the threshold, or the prune flags flip."""
+    """A short, deterministic token bound to the LISTED SET (not exact byte sizes, so it stays
+    valid across small growth between plan and execute).
+
+    INTEGRITY ONLY, NOT AUTHENTICATION: this is an unkeyed hash, so anyone who can write
+    state/reclaim-plans/ can forge a plan with a matching token. Nothing may therefore trust the
+    stored plan's CONTENT: every item is re-validated at execute against the live system (images
+    and volumes by docker_reclaim.execute, workers by worker_state, log paths by _fresh_logs) and the
+    thresholds are the stricter of plan and config."""
     canon = json.dumps(actions, sort_keys=True)
-    return hashlib.sha1(canon.encode()).hexdigest()[:8]  # noqa: S324 - non-crypto gate token
+    return hashlib.sha256(canon.encode()).hexdigest()[:8]
 
 
-def reclaim_plan() -> dict:
-    """Read-only: what a safe reclaim WOULD do + estimated bytes freed + a confirm_token."""
+def _plans_dir() -> str:
+    return os.path.join(_STATE, "reclaim-plans")
+
+
+def _ttl_s() -> float:
+    return float(sa.load_config()["thresholds"].get("reclaim_plan_ttl_hours", 24)) * 3600
+
+
+def _save_plan(token: str, plan: dict) -> None:
+    """Store the plan under its token. Best-effort: a plan that cannot be stored cannot be
+    executed (execute will refuse its token), which is the fail-closed side."""
+    try:
+        d = _plans_dir()
+        os.makedirs(d, exist_ok=True)
+        now = time.time()
+        for fn in os.listdir(d):  # drop expired plans
+            fp = os.path.join(d, fn)
+            try:
+                if now - os.path.getmtime(fp) > _ttl_s():
+                    os.remove(fp)
+            except OSError:
+                pass
+        with open(os.path.join(d, f"{token}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"issued": now, "plan": plan}, fh)
+    except OSError:
+        pass
+
+
+def _load_plan(token: str | None) -> dict | None:
+    """The stored plan for `token`, or None when unknown, expired, or not matching its token."""
+    if not token or len(token) != 8 or not all(c in "0123456789abcdef" for c in token):
+        return None
+    try:
+        with open(os.path.join(_plans_dir(), f"{token}.json"), "r", encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if time.time() - float(rec.get("issued", 0)) > _ttl_s():
+        return None
+    plan = rec.get("plan") or {}
+    if _plan_token(plan.get("actions") or {}) != token:
+        return None  # edited on disk: the token no longer covers what the file lists
+    return plan
+
+
+def reclaim_plan(scope: str = "all", **overrides) -> dict:
+    """Read-only: what a safe reclaim WOULD do + estimated bytes freed + a confirm_token.
+
+    scope="all" (the MCP tool): idle ao-worker /tmp, oversized logs, and the docker categories.
+    scope="docker" (auto_reclaim.py, the low-disk path): the docker categories only.
+    overrides: image_min_age_days / anon_volume_min_age_days / builder_keep_hours (tests and
+    drills; the MCP tool passes none, so config.json decides)."""
     cfg = sa.load_config()
     th = cfg["thresholds"]
     log_gb = max(0.1, th.get("container_log_warn_gb", 2))
 
-    workers = [worker_state(w) for w in cfg["ao_workers"]]
+    if scope == "all":
+        workers = [worker_state(w) for w in cfg["ao_workers"]]
+        logs = [lg for lg in sa._big_logs(log_gb) if "log_gb" in lg]
+    else:
+        workers, logs = [], []
     clear_workers = sorted(w["worker"] for w in workers if w.get("clearable"))
     tmp_est_gb = round(sum(w.get("tmp_gb", 0) for w in workers if w.get("clearable")), 2)
-
-    logs = [lg for lg in sa._big_logs(log_gb) if "log_gb" in lg]
     logs_est_gb = round(sum(lg["log_gb"] for lg in logs), 2)
 
-    df = sa._system_df()
-    img_recl = df.get("Images", {}).get("reclaimable_gb", 0) if isinstance(df, dict) else 0
-    cache_recl = df.get("Build Cache", {}).get("reclaimable_gb", 0) if isinstance(df, dict) else 0
-    prune_images = True   # `docker image prune -f` — dangling only, always safe
-    prune_builder = True  # `docker builder prune -f` — unreferenced cache only, always safe
-
+    dk = dr.plan(**overrides)
     actions = {
+        "scope": scope,
         "clear_workers": clear_workers,
-        "truncate_logs_over_gb": log_gb if logs else 0,
-        "prune_images": prune_images,
-        "prune_builder": prune_builder,
+        "truncate_logs": sorted(lg["path"] for lg in logs),
+        "docker": dk["listed"],
+        "settings": {k: dk["settings"][k] for k in
+                     ("image_min_age_days", "anon_volume_min_age_days", "builder_keep_hours")},
     }
     token = _plan_token(actions)
-    return {
+    plan = {
+        "scope": scope,
         "workers": workers,
         "clear_workers": clear_workers,
-        "logs_to_truncate": [{"container": lg["container"], "log_gb": lg["log_gb"]} for lg in logs],
-        "prune_images": prune_images,
-        "prune_builder": prune_builder,
+        "logs_to_truncate": [{"container": lg["container"], "log_gb": lg["log_gb"],
+                              "path": lg["path"]} for lg in logs],
+        "docker": dk,
         "estimate_gb": {
             "ao_worker_tmp": tmp_est_gb,
             "logs": logs_est_gb,
-            "images_dangling": img_recl,   # actual varies; dangling-only is a subset of reclaimable
-            "build_cache": cache_recl,
+            "images": dr._gb(dk["images"]["bytes"]),
+            "build_cache": dr._gb(dk["build_cache"]["bytes"]),
+            "anon_volumes": dr._gb(dk["volumes"]["bytes"]),
         },
+        "actions": actions,
         "confirm_token": token,
-        "note": ("Read-only plan. Call reclaim_execute(confirm_token) to run. Busy/not-running "
-                 "workers are skipped. No volumes are touched; logs are truncated, not deleted."),
+        "note": ("Read-only plan. reclaim_execute(confirm_token) removes ONLY the listed set, "
+                 "re-checking each item first (anything now in use or changed is skipped). "
+                 "Busy/not-running workers are skipped. Named volumes are never removed; logs are "
+                 "truncated, not deleted. Space freed inside Docker returns to C: only at the next "
+                 "vhdx compaction."),
     }
+    _save_plan(token, plan)
+    return plan
+
+
+def _fresh_logs() -> set:
+    """Container json logs that are oversized RIGHT NOW (a fresh _big_logs scan) AND have the exact
+    shape <mount>/data/docker/containers/<64-hex>/<64-hex>-json.log - the only files reclaim may
+    truncate, whatever a stored plan lists."""
+    cfg = sa.load_config()
+    mount = cfg["docker_desktop_mount"].rstrip("/")
+    shape = re.compile(re.escape(mount) + r"/data/docker/containers/([0-9a-f]{64})/\1-json\.log")
+    log_gb = max(0.1, cfg["thresholds"].get("container_log_warn_gb", 2))
+    return {lg["path"] for lg in sa._big_logs(log_gb)
+            if "log_gb" in lg and shape.fullmatch(lg.get("path", ""))}
 
 
 # ── execute (the only mutating entry point) ────────────────────────────────────
-def reclaim_execute(confirm_token: str | None = None) -> dict:
-    """Perform the safe reclaim. Refuses unless confirm_token matches the CURRENT plan (fail-closed)."""
-    plan = reclaim_plan()
-    if not confirm_token or confirm_token != plan["confirm_token"]:
-        _audit("reclaim_refused", {"given": confirm_token, "expected": plan["confirm_token"]})
+def reclaim_execute(confirm_token: str | None = None, notify: bool = True) -> dict:
+    """Perform the reclaim a plan listed. Refuses unless confirm_token names a current stored plan
+    (fail-closed); then removes only that plan's listed set, each item re-validated now."""
+    plan = _load_plan(confirm_token)
+    if plan is None:
+        fresh = reclaim_plan()
+        _audit("reclaim_refused", {"given": confirm_token, "fresh": fresh["confirm_token"]})
         return {"refused": True,
-                "reason": "missing or stale confirm_token — the situation changed; review the fresh plan and retry",
-                "current_token": plan["confirm_token"], "plan": plan}
+                "reason": ("missing, unknown or expired confirm_token - review the fresh plan and "
+                           "retry with its token"),
+                "current_token": fresh["confirm_token"], "plan": fresh}
 
-    cfg = sa.load_config()
+    act = plan["actions"]
     results = {"cleared_workers": [], "skipped_workers": [], "truncated_logs": [],
-               "pruned": {}, "freed_gb": {}}
+               "freed_gb": {}, "token": confirm_token}
 
-    # 1) idle ao-worker /tmp session logs (re-verify idleness at execute time)
+    # 1) idle ao-worker /tmp session logs - only the listed workers, idleness re-verified now
     freed_tmp = 0.0
-    for w in cfg["ao_workers"]:
+    for w in act.get("clear_workers", []):
         st = worker_state(w)
         if not st.get("clearable"):
             results["skipped_workers"].append({"worker": w, "reason": st.get("reason")})
@@ -196,42 +282,54 @@ def reclaim_execute(confirm_token: str | None = None) -> dict:
             results["skipped_workers"].append({"worker": w, "reason": f"rm failed: {rm['err'].strip()}"})
     results["freed_gb"]["ao_worker_tmp"] = round(freed_tmp, 2)
 
-    # 2) truncate oversized container json logs (data-preserving reset, not delete)
-    th = cfg["thresholds"]
-    log_bytes = int(max(0.1, th.get("container_log_warn_gb", 2)) * GB)
-    mount = cfg["docker_desktop_mount"]
-    before_logs = [lg for lg in sa._big_logs(max(0.1, th.get("container_log_warn_gb", 2))) if "log_gb" in lg]
-    freed_logs = round(sum(lg["log_gb"] for lg in before_logs), 2)
-    tr = sa._wsl_dd(["find", f"{mount}/data/docker/containers", "-name", "*-json.log",
-                     "-size", f"+{log_bytes}c", "-exec", "truncate", "-s", "0", "{}", ";"], timeout=120)
-    if tr["rc"] == 0:
-        results["truncated_logs"] = [{"container": lg["container"], "was_gb": lg["log_gb"]} for lg in before_logs]
-        results["freed_gb"]["logs"] = freed_logs
-        _audit("reclaim_truncated_logs", {"count": len(before_logs), "freed_gb": freed_logs})
-    else:
-        results["truncated_logs"] = [{"error": tr["err"].strip() or "truncate failed"}]
-        results["freed_gb"]["logs"] = 0
+    # 2) truncate the LISTED oversized container json logs (data-preserving reset, not delete) -
+    #    but ONLY those a fresh scan returns right now in the container-log shape; a path the stored
+    #    plan lists and the live scan does not is SKIPPED (the token cannot vouch for it)
+    listed = act.get("truncate_logs", [])
+    fresh = _fresh_logs()
+    paths = [p for p in listed if p in fresh]
+    results["skipped_logs"] = [{"path": p, "reason": "not an oversized container json log in a fresh scan"}
+                               for p in listed if p not in fresh]
+    if results["skipped_logs"]:
+        _audit("reclaim_logs_skipped", {"paths": [x["path"] for x in results["skipped_logs"]]})
+    results["freed_gb"]["logs"] = 0
+    if paths:
+        was = {lg["path"]: lg for lg in plan.get("logs_to_truncate", [])}
+        tr = sa._wsl_dd(["truncate", "-s", "0"] + paths, timeout=120)
+        if tr["rc"] == 0:
+            results["truncated_logs"] = [{"container": was.get(p, {}).get("container", p),
+                                          "was_gb": was.get(p, {}).get("log_gb")} for p in paths]
+            results["freed_gb"]["logs"] = round(sum(was.get(p, {}).get("log_gb") or 0 for p in paths), 2)
+            _audit("reclaim_truncated_logs", {"count": len(paths), "freed_gb": results["freed_gb"]["logs"]})
+        else:
+            results["truncated_logs"] = [{"error": tr["err"].strip() or "truncate failed"}]
 
-    # 3) dangling images + unreferenced build cache (both safe)
-    img = sa._docker(["image", "prune", "-f"], timeout=180)
-    bld = sa._docker(["builder", "prune", "-f"], timeout=180)
-    results["pruned"]["images"] = "ok" if img["rc"] == 0 else img["err"].strip()
-    results["pruned"]["build_cache"] = "ok" if bld["rc"] == 0 else bld["err"].strip()
-    _audit("reclaim_pruned", {"images_rc": img["rc"], "builder_rc": bld["rc"]})
+    # 3) docker: listed image tags, listed anonymous volumes, build cache older than the filter
+    s = dr.stricter(act.get("settings", {}))  # a hand-edited plan cannot lower a threshold
+    dk = dr.execute(act.get("docker", {}), s, audit=_audit)
+    results["docker"] = dk
+    fb = dk["freed_bytes"]
+    for key, out_key in (("images", "images"), ("build_cache", "build_cache"), ("volumes", "anon_volumes")):
+        results["freed_gb"][out_key] = None if fb.get(key) is None else dr._gb(fb[key])
+    results["summary"] = dr.summary_line(fb, dk)
 
-    total = round(results["freed_gb"].get("ao_worker_tmp", 0) + results["freed_gb"].get("logs", 0), 2)
+    total = round(results["freed_gb"].get("ao_worker_tmp", 0) + results["freed_gb"].get("logs", 0)
+                  + sum(max(0.0, results["freed_gb"].get(k) or 0.0)
+                        for k in ("images", "build_cache", "anon_volumes")), 2)
     results["freed_gb"]["total_approx"] = total
     results["ok"] = True
     _audit("reclaim_done", {"freed_gb": results["freed_gb"],
                             "cleared": [c["worker"] for c in results["cleared_workers"]]})
-    try:  # completion summary to #sysadmin (best-effort)
-        import mm_post
-        cleared = ", ".join(c["worker"] for c in results["cleared_workers"]) or "none"
-        mm_post.post(f"\U0001f9f9 **Safe reclaim** — freed ~{total} GB "
-                     f"(cleared: {cleared}; {len(results.get('truncated_logs', []))} log(s) truncated; "
-                     f"dangling images/cache pruned).")
-    except Exception:  # noqa: BLE001
-        pass
+    if notify:
+        try:  # completion summary to #sysadmin (best-effort)
+            import mm_post
+            cleared = ", ".join(c["worker"] for c in results["cleared_workers"]) or "none"
+            mm_post.post(f"\U0001f9f9 **Safe reclaim** - freed ~{total} GB inside Docker "
+                         f"(cleared: {cleared}; {len(results.get('truncated_logs', []))} log(s) "
+                         f"truncated; {results['summary']}). Space freed inside the Docker vhdx "
+                         f"returns to C: only at the next compaction.")
+        except Exception:  # noqa: BLE001
+            pass
     return results
 
 

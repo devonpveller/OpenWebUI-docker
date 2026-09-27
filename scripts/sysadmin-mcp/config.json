@@ -21,7 +21,11 @@
     "vhdx_compact_min_gb": 20,
     "volume_orphan_cold_days": 14,
     "volume_reclaimable_warn_gb": 25,
-    "image_reclaimable_warn_gb": 25
+    "image_reclaimable_warn_gb": 25,
+    "image_min_age_days": 14,
+    "anon_volume_min_age_days": 7,
+    "builder_keep_hours": 168,
+    "reclaim_plan_ttl_hours": 24
   },
   "protected_volume_substrings": [
     "openwebui", "open-webui", "mnemory", "tailscale", "openbrain",
