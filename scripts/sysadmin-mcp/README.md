@@ -10,7 +10,10 @@ persona** operate this stack through semantic, safety-gated tools. Capability #1
 |------|------|
 | `server.py` | MCP stdio server (registered as `sysadmin` in repo `.mcp.json`) — 10 tools |
 | `sysadmin.py` | read-only probes (disk_report, container/stack/logs/volume) |
-| `executor.py` | gated safe reclaim (`reclaim_plan`/`reclaim_execute`) — idle+recency guarded, no volume ops |
+| `executor.py` | gated reclaim (`reclaim_plan`/`reclaim_execute`): plan stored under its `confirm_token`, execute removes only that listed set with every item re-checked; idle+recency-guarded ao-worker `/tmp`, log truncation |
+| `docker_reclaim.py` | the docker categories of that reclaim - unused image tags, build cache, orphaned ANONYMOUS volumes - under the rules in [Reclaim rules](#reclaim-rules-operator-decision-2026-09-27); every docker mutation passes one chokepoint (`_mutate`) |
+| `image-keep.txt` | the keep-list: glob patterns (each with a reason) for image tags reclaim never removes |
+| `auto_reclaim.py` | the AUTOMATIC docker reclaim: plan + execute in one run, one summary line out; called hourly by `scripts/maintenance/disk-guard.ps1` when C: is low |
 | `compaction.py` | gated vhdx compaction (`compact_plan`/`compact_execute`/`compact_status`) |
 | `compact-vhdx.ps1` | the elevated compaction body (runs as a RunLevel-Highest task) |
 | `compact-lib.ps1` | pure decision helpers for the above (`Get-ReclaimVerdict`) — no elevation, no Docker, so the judgement is testable without 15 min of downtime |
@@ -20,7 +23,7 @@ persona** operate this stack through semantic, safety-gated tools. Capability #1
 | `charter.md` | the @sysadmin persona charter (appended to the bridge's system prompt) |
 | `sysadmin-bridge-launch.ps1` / `register-sysadmin-bridge.ps1` | run/register the persona (2nd bridge instance) |
 | `config.json` | thresholds + machine facts + channel/operators |
-| `test_*.py` | 102 tests (unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards) — 36 + 42 + 24, run each file directly |
+| `test_*.py` | unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards, run each file directly; `test_docker_reclaim.py` drives the reclaim against an in-memory fake docker (no daemon) |
 
 ## Tools (surface)
 Read-only: `disk_report`, `container_status`, `stack_health`, `container_logs`, `volume_report`,
@@ -30,13 +33,17 @@ Gated/mutating: `reclaim_execute(confirm_token)`, `compact_execute(confirm_token
 ## Gating (belt + suspenders)
 1. **Belt (human):** in a bridge session, mutating `mcp__sysadmin__*` tools fall through the
    existing fail-closed approval relay (`--permission-prompt-tool`) → operator approve/deny.
-2. **Suspenders (deterministic, in-code):** plan-bound `confirm_token`, idle+recency worker checks,
-   never-touch-volumes (source-guarded by tests), compaction requires warranted + registered task.
+2. **Suspenders (deterministic, in-code):** plan-bound `confirm_token` covering exactly the listed
+   set, per-item re-validation at execute, idle+recency worker checks, a mutation chokepoint that
+   admits only `image rm <tag|id>`, `volume rm <64-hex id>` and `builder prune -af --filter
+   until=<N>h` (named volumes never; source-guarded by tests), compaction requires warranted +
+   registered task.
 
 ## Run the tests
 ```
 python scripts/sysadmin-mcp/test_sysadmin.py     # read-only + stdio
 python scripts/sysadmin-mcp/test_executor.py     # safe-reclaim gate (+ --live-exec for a real run)
+python scripts/sysadmin-mcp/test_docker_reclaim.py  # reclaim rules against a fake docker (no daemon)
 python scripts/sysadmin-mcp/test_compaction.py   # compaction gate (non-destructive)
 ```
 
@@ -70,15 +77,49 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
   mentions compaction; `vhdx_compact_min_gb` (20) decides when `compact_execute` will run. They
   were the same key until 47.8 GB trapped left the stack simultaneously "HEALTHY" and refused.
 
+## Reclaim rules (operator decision 2026-09-27)
+`reclaim_plan` lists, and `reclaim_execute` removes, ONLY:
+- **Image tags** where ALL hold: no container, running or stopped, uses the image id; no plane's
+  compose render names the `repo:tag` (every plane in `stack.manifest.toml` - OB1 and agent-org
+  included - rendered with `--profile *`; a `repo@sha256:` reference protects the image carrying
+  that digest); the image was created 14 days ago or more (`thresholds.image_min_age_days`); the
+  tag matches no pattern in `image-keep.txt`. An image id with a protected tag (compose or
+  keep-list) is never removed through another tag. Untagged images no container uses are removed
+  by id. Removal is `docker image rm <repo:tag>`, never with `-f`, never `image prune -a`.
+- **Build cache** older than 168h: `docker builder prune -af --filter until=168h`
+  (`thresholds.builder_keep_hours`), so the last week of cache stays for rebuilds.
+- **Anonymous volumes** where ALL hold: the name is 64 lowercase hex; no container, running or
+  stopped, references it - checked per volume with `docker ps -a --filter volume=<id>` on top of
+  every container's mounts; CreatedAt is 7 days ago or more (`thresholds.anon_volume_min_age_days`).
+  Removal is `docker volume rm <id>`, one id at a time. **Named volumes are never removed** - they
+  are listed as skipped, report-only.
+
+The plan shows each category's count, estimated bytes and largest entries, and every skip with its
+reason (in use / compose-named / too new / keep-list / shares id with a protected tag / named
+volume). Its `confirm_token` is a hash of the listed set; the plan is stored under it in
+`state/reclaim-plans/` for `thresholds.reclaim_plan_ttl_hours` (24). Execute re-checks every
+listed item with the plan's thresholds and SKIPS anything now in use, re-pointed or gone; items
+that became eligible after the plan are not touched. Freed bytes are reported per category from
+`docker system df` before/after. If the container list, the keep-list or ANY compose render cannot
+be read, the affected category removes nothing and the plan says why.
+
+Space freed this way is freed inside the Docker vhdx: C: gets it back only at the next compaction.
+
+The same docker reclaim runs **automatically** from the hourly `AI-Stack Disk Guard` task
+(`scripts/maintenance/disk-guard.ps1` -> `auto_reclaim.py`) when C: free is under its warn line;
+its #sysadmin alert carries the per-category freed bytes. `python auto_reclaim.py --plan` prints
+the listed set without removing anything.
+
 ## Safety notes
-- Never `docker volume prune`; `volume_report` is report-only and flags protected data volumes.
+- Never `docker volume prune`, `docker image prune -a` or `docker system prune`; never a named
+  volume. `volume_report` is report-only and flags protected data volumes.
 - **A protected name is not proof of life.** `volume_report` splits `DO_NOT_PRUNE` (protected and
   recently written, or of unknown age) from `dangling_protected_cold` (protected name, no
   container references it, nothing written for `volume_orphan_cold_days`+). Cold entries are
   orphan *candidates*: verify contents against the live volume and back up before removing. If
   the age probe fails, nothing is classified cold — the conservative side.
 - Reclaim clears only IDLE ao-worker `/tmp/lc-*.jsonl` (busy workers skipped); logs are truncated,
-  not deleted; images/build-cache prune is dangling-only.
+  not deleted; images, build cache and anonymous volumes follow [Reclaim rules](#reclaim-rules-operator-decision-2026-09-27).
 - Compaction takes the whole stack down ~10–15 min; it pauses/re-arms the health watchdog and
   verifies the stack returns. Only run in a quiet window (no active ao-worker effort).
-- Runtime state (audit log, compaction result, alert throttle) lives in `state/` (gitignored).
+- Runtime state (audit log, stored reclaim plans, compaction result, alert throttle) lives in `state/` (gitignored).
