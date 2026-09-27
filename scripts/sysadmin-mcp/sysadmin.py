@@ -140,7 +140,7 @@ def docker_refusal(args: list[str]) -> str | None:
         return None if sub == "df" else "docker system: only df"
     if verb == "builder":
         m = (sub == "prune" and len(tail) == 3 and tail[:2] == ["-af", "--filter"]
-             and re.fullmatch(r"until=(\d+)h", tail[2]))
+             and re.fullmatch(r"until=([0-9]+)h", tail[2]))
         return None if (m and int(m.group(1)) >= 24) else "docker builder: only `prune -af --filter until=<N>h`, N>=24"
     return f"docker {verb}: not a shape sysadmin code uses"
 
@@ -148,7 +148,10 @@ def docker_refusal(args: list[str]) -> str | None:
 def _run(cmd: list[str], timeout: int = 30) -> dict:
     """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises.
     docker commands pass docker_refusal() first; a refused one never starts (rc 126)."""
-    if cmd and os.path.basename(str(cmd[0])).lower() in ("docker", "docker.exe"):
+    name = re.split(r"[\\/]", str(cmd[0]))[-1].lower() if cmd else ""
+    if name in ("docker-compose", "docker-compose.exe", "com.docker.cli", "com.docker.cli.exe"):
+        return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {name} is not used by sysadmin code"}
+    if name in ("docker", "docker.exe"):
         why = docker_refusal(list(cmd[1:]))
         if why:
             return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:8]}"}

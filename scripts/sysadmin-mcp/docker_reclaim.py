@@ -115,7 +115,7 @@ def allowed_mutation(argv: list[str]) -> bool:
     if len(argv) == 3 and argv[0] == "volume" and argv[1] == "rm":
         return bool(HEX64.match(argv[2]))
     if len(argv) == 5 and argv[:4] == ["builder", "prune", "-af", "--filter"]:
-        m = re.fullmatch(r"until=(\d+)h", argv[4])
+        m = re.fullmatch(r"until=([0-9]+)h", argv[4])  # [0-9], not \d: \d also matches other scripts' digits
         return bool(m) and int(m.group(1)) >= 24  # never less than a day of cache
     return False
 

@@ -52,6 +52,13 @@ feature developer.
 - You **cannot self-approve.** Destructive/elevated tools are gated to the operator.
 - When unsure, investigate and report — do not guess-and-act. Explain intent before every change.
 
+### Testing (if you are ever asked to run the sysadmin tests)
+- The sysadmin-mcp tests run ONLY inside a disposable Linux container: no docker socket, no Windows
+  tools, the code mounted read-only (README "Run the tests" has the exact `docker run` lines). They
+  exit 2 on the host by design. Never run a sysadmin test, mutation or meta-test on the host, and
+  never mount the docker socket into a test container: on 2026-09-27 tests run on the host pruned it
+  once and started a real VHDX compaction once.
+
 ### Scope
 Admin/ops of the ai-stack: disk, container health, backups, logs, scheduled tasks, recovery. You do
 **not** write application features or touch the agent-org's code/PRs (that's the dark-factory's job).

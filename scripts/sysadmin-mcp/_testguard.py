@@ -23,19 +23,15 @@ WHAT install() DOES (every test module calls it at import):
      `_testsite/` (holding a sitecustomize.py that installs this guard at interpreter start) is
      put first on PYTHONPATH. server.py also installs it at import when ACSR_TESTGUARD is set.
      The mode never weakens: a process that already runs the "fake" guard keeps it.
-  3. PATH RECORDER for NON-Python children: docker.exe / wsl.exe / schtasks.exe shims (compiled
-     from _testshim.cs with the .NET Framework csc.exe) go first on PATH. They log the attempt to
-     the call log as kind "shim" and exit 99. The guard itself rewrites an ALLOWED call to the
-     real executable's absolute path, so a shim entry always means a process the guard never saw.
-     The shim is a recorder for non-Python children ONLY. It is NOT what stops wsl / schtasks /
-     powershell / cmd: Windows CreateProcess searches System32 BEFORE PATH, so a bare-name start
-     skips the shim. Those are stopped by the guard itself, which judges every start whose tool is
-     one of those names OR any program found in System32 / SysWOW64 / the Windows directory, by
-     name or by path, refuses `shell=True`, and replaces os.system / os.spawn* / os.exec* /
-     os.startfile with refusals. (2026-09-27 15:19 UTC: an unguarded child ran the real
-     `schtasks /run` for the compaction task through exactly that gap.)
+  3. WINDOWS PROGRAMS: the guard judges every start whose tool is one of the names above OR any
+     program found in System32 / SysWOW64 / the Windows directory (%SystemRoot%), by name or by
+     path, and via `executable=`; refuses `shell=True`; and replaces os.system / os.spawn* /
+     os.exec* / os.startfile with refusals. (2026-09-27 15:19 UTC: an unguarded child ran the real
+     `schtasks /run` for the compaction task because Windows searches System32 before PATH.) In
+     the Linux test container the Windows directories do not exist; t26 points SystemRoot at a
+     scratch tree to exercise that rule there.
   4. CALL LOG: ACSR_CALL_LOG (default: a temp file, path printed) gets one JSON line per guarded
-     start - {"kind": "guard"|"shim", "verdict": "allowed"|"refused", "pid", "label", "argv"}.
+     start - {"kind": "guard", "verdict": "allowed"|"refused", "pid", "label", "argv"}.
      Children append to the same file. At exit the top-level module prints the counts.
   5. mode "fake" also replaces sysadmin._run with a stub that raises (RealDockerCall).
 
@@ -50,8 +46,10 @@ THE READ-ONLY ALLOWLIST (allowed_readonly), and why each entry is there:
   schtasks  `/query /tn <name> [/fo LIST]` only.
   powershell  `-NoProfile -ExecutionPolicy Bypass -File <a .ps1 under the system temp dir>`
           (test_telegram_listener's stub) - nothing else.
-These READ the host when a readonly suite runs (disk_report's `wsl df/find`, compact_plan's
-`schtasks /query`): deliberate, documented, and listed in the call log as "allowed".
+In the test container wsl, schtasks and powershell do not exist, so an allowed shape fails with
+"not found" and the code's fail-soft path runs; the allowlist matters when docker is a DinD.
+(The .NET PATH recorder of attempt 3 was removed: it only ever ran on Windows, where tests no
+longer run at all.)
 """
 from __future__ import annotations
 
@@ -237,36 +235,6 @@ def install_process_guard(mode: str, label: str) -> None:
             setattr(os, name, _refuse(name))
 
 
-# ---------------------------------------------------------------- the PATH shim
-def _build_shims() -> str | None:
-    src = os.path.join(HERE, "_testshim.cs")
-    csc = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe")
-    if os.name != "nt" or not os.path.isfile(csc) or not os.path.isfile(src):
-        return None
-    import hashlib
-    tag = hashlib.sha256(open(src, "rb").read()).hexdigest()[:12]
-    d = os.path.join(tempfile.gettempdir(), f"acsr-shim-{tag}")
-    exe = os.path.join(d, "docker.exe")
-    if not os.path.isfile(exe):
-        os.makedirs(d, exist_ok=True)
-        r = _REAL_EXEC_RUN([csc, "/nologo", "/out:" + exe, src])
-        if r != 0 or not os.path.isfile(exe):
-            return None
-    for name in ("wsl.exe", "schtasks.exe", "docker-compose.exe"):
-        if not os.path.isfile(os.path.join(d, name)):
-            shutil.copyfile(exe, os.path.join(d, name))
-    return d
-
-
-def _REAL_EXEC_RUN(argv) -> int:
-    saved = subprocess.Popen._execute_child
-    subprocess.Popen._execute_child = _REAL_EXEC
-    try:
-        return subprocess.run(argv, capture_output=True, timeout=120).returncode
-    finally:
-        subprocess.Popen._execute_child = saved
-
-
 # ---------------------------------------------------------------- entry points
 def target(label: str) -> str:
     if not os.environ.get("DOCKER_HOST"):
@@ -285,10 +253,9 @@ def _summary(log: str, label: str) -> None:
         rows = []
     allowed = sum(1 for r in rows if r.get("verdict") == "allowed")
     refused = sum(1 for r in rows if r.get("verdict") == "refused")
-    shim = sum(1 for r in rows if r.get("kind") == "shim")
     pids = len({r.get("pid") for r in rows if r.get("pid")})
     print(f"[{label}] call log {log}: {allowed} allowed (read-only), {refused} refused, "
-          f"{shim} reached the PATH shim, from {pids} process(es)")
+          f"from {pids} process(es)")
 
 
 def in_container() -> bool:
@@ -317,19 +284,15 @@ def install(sa, mode: str, label: str) -> None:
     target(label)
     top = not os.environ.get("ACSR_TESTGUARD")
     if top:
-        for t in ("docker", "wsl", "schtasks"):  # the REAL tools, resolved before the shim goes on PATH
+        for t in ("docker", "wsl", "schtasks"):  # an allowed start runs the tool by absolute path
             w = shutil.which(t)
-            if w and "acsr-shim-" not in w:
+            if w:
                 os.environ.setdefault(f"ACSR_REAL_{t.upper()}", w)
         if not os.environ.get("ACSR_CALL_LOG"):
             fd, p = tempfile.mkstemp(prefix=f"acsr-calls-{label}-", suffix=".jsonl")
             os.close(fd)
             os.environ["ACSR_CALL_LOG"] = p
-        shim = _build_shims()
-        if shim:
-            os.environ["PATH"] = shim + os.pathsep + os.environ.get("PATH", "")
-        print(f"[{label}] process guard: mode={mode}; PATH shim: {shim or 'UNAVAILABLE (no csc.exe)'}; "
-              f"call log: {os.environ['ACSR_CALL_LOG']}")
+        print(f"[{label}] process guard: mode={mode}; call log: {os.environ['ACSR_CALL_LOG']}")
         atexit.register(_summary, os.environ["ACSR_CALL_LOG"], label)
     inherited = os.environ.get("ACSR_TESTGUARD")
     eff = "fake" if "fake" in (mode, inherited) else "readonly"

@@ -78,6 +78,8 @@ class FakeDocker:
         self.hide_inspect_mounts = False    # bulk mount read misses every volume
         self.ps_volume_filter_blind = False  # `ps -a --filter volume=` finds nothing
         self.inspect_drops_one = False       # `docker inspect` of containers returns one row fewer
+        self.wsl_logs = []                   # [(kB, path)] the docker-desktop log scan finds
+        self.truncated = []                  # paths `wsl ... truncate -s 0` was given
 
     # builders
     def image(self, tag_or_tags, days, size=1e9, digests=()):
@@ -113,7 +115,13 @@ class FakeDocker:
             if tuple(cmd[:len(pre)]) == pre:
                 return {"rc": 1, "out": "", "err": "injected failure"}
         if cmd[0] == "wsl":
-            return {"rc": 1, "out": "", "err": "no wsl in the fake"}
+            a = cmd[4:] if cmd[1:4] == ["-d", "docker-desktop", "-e"] else []
+            if a[:1] == ["find"] and len(a) > 1 and a[1].endswith("/data/docker/containers"):
+                return self._ok("".join(f"{kb} {path}\n" for kb, path in self.wsl_logs))
+            if a[:3] == ["truncate", "-s", "0"]:
+                self.truncated += a[3:]
+                return self._ok()
+            return {"rc": 1, "out": "", "err": "fake wsl: unhandled"}
         if cmd[0] != "docker":
             return {"rc": 127, "out": "", "err": "not found"}
         a = cmd[1:]
@@ -562,6 +570,13 @@ def t05_forbidden_shapes():
         for argv in need:
             real_run(["docker"] + argv)
         check(f"deny-list passes the {len(need)} shapes the code needs", len(started) == len(need), str(started))
+        started.clear()
+        for argv in (["docker-compose", "down", "-v"], ["com.docker.cli", "system", "prune", "-af"],
+                     ["C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe", "system", "prune", "-af"],
+                     ["C:\\x\\docker-compose.exe", "down"]):
+            r = real_run(argv)
+            check(f"lowest guard refuses {argv[0][-30:]} {argv[1]}", r["rc"] == 126, str(r))
+        check("... and none of those started a process", started == [], str(started))
     finally:
         sa.subprocess.run = saved
     # source grep: code lines (not comments/docstrings) in every file that runs docker for the sysadmin
@@ -752,7 +767,9 @@ def t12_host_keep_list_seed():
     for ref in ("openwebui:local", "open_notebook:iks-prepatch-20260829", "openbrain-wiki:local-prev-20260829",
                 "open_notebook:iks-pre-ondemand-audio", "open_notebook:iks-podcastpatch-20260829"):
         check(f"keep-list protects {ref}", dr.keep_match(ref, keep) is not None)
-    for ref in ("openbrain-mcp-server:wt-u6recall", "python:3.12-slim"):
+    for ref in ("docker:27-dind", "docker:27-cli", "mcr.microsoft.com/powershell:7.4-ubuntu-22.04", "python:3.12-slim"):
+        check(f"keep-list protects the test-harness image {ref}", dr.keep_match(ref, keep) is not None)
+    for ref in ("openbrain-mcp-server:wt-u6recall", "python:3.12", "docker:28-dind"):
         check(f"keep-list does NOT protect {ref}", dr.keep_match(ref, keep) is None)
 
 
@@ -966,8 +983,6 @@ def t19_meta_non_reclaim_gate():
               bool(runs) and all(r.get("pid") != child.pid and str(r.get("label", "")).endswith("server.py")
                                  for r in runs),
               f"child pid {child.pid}: " + str([(r.get('pid'), r.get('label')) for r in runs]))
-        shim = [r for r in rows if r.get("kind") == "shim"]
-        check("meta2: nothing reached the PATH shim", shim == [], str(shim[:3]))
         leaked = [r for r in rows if r.get("verdict") == "allowed" and not _testguard.allowed_readonly(r["argv"])]
         unlabelled = [r for r in rows if r.get("kind") == "guard" and not r.get("label")]
         check("meta2: every guarded start came from a labelled (guarded) process", unlabelled == [], str(unlabelled[:3]))
@@ -1014,30 +1029,6 @@ def t20_fail_closed_branches():
               "stale:1" in tags(f) and v in f.volumes, str(r)[:200])
         check("... and both categories report re-validation failed",
               json.dumps(r.get("docker", {})).count("re-validation failed") >= 2)
-
-
-def t21_path_shim_catches_non_python():
-    """a NON-Python child (PowerShell) that calls docker by name lands in the PATH shim, not docker"""
-    shim = [d for d in os.environ.get("PATH", "").split(os.pathsep) if "acsr-shim-" in d]
-    if os.name != "nt":
-        print("  (Windows-only: the shim is a .NET exe)")
-        return
-    check("the PATH shim directory is first on PATH", bool(shim) and os.environ["PATH"].startswith(shim[0]), str(shim))
-    if not shim or os.environ.get("DOCKER_HOST") != _testguard.DEAD:
-        check("shim probe needs the shim AND the dead endpoint (not run)", False, str((shim, os.environ.get("DOCKER_HOST"))))
-        return
-    log = os.path.join(tempfile.mkdtemp(prefix="acsr-shim-t-"), "calls.jsonl")
-    ps = os.environ.get("ACSR_REAL_POWERSHELL") or shutil.which("powershell") or "powershell"
-    saved = subprocess.Popen._execute_child
-    subprocess.Popen._execute_child = _testguard._REAL_EXEC  # this test starts PowerShell on purpose
-    try:
-        r = subprocess.run([ps, "-NoProfile", "-Command", "docker info; exit $LASTEXITCODE"],
-                           env=dict(os.environ, ACSR_CALL_LOG=log), capture_output=True, text=True, timeout=120)
-    finally:
-        subprocess.Popen._execute_child = saved
-    rows = [json.loads(x) for x in open(log, encoding="utf-8")] if os.path.exists(log) else []
-    check("PowerShell's `docker info` reached the SHIM (exit 99), not docker", r.returncode == 99, f"rc {r.returncode} {r.stderr[-200:]}")
-    check("... and the shim logged it", any(x.get("kind") == "shim" and "info" in " ".join(x.get("argv", [])) for x in rows), str(rows))
 
 
 def t22_system_programs_refused_by_name_or_path():
@@ -1096,6 +1087,106 @@ def t23_refuses_to_run_outside_the_container():
     check("the rule itself: in_container() is False on Windows by construction",
           "os.name == \"posix\"" in open(os.path.join(_HERE, "_testguard.py"), encoding="utf-8").read())
 
+def t24_install_alone_guards_an_arbitrary_child():
+    """after install(), a PLAIN python child (inherited env, no helper) is guarded from its first line"""
+    if os.environ.get("ACSR_META_CHILD"):
+        print("  (skipped inside the meta child)")
+        return
+    log = os.environ.get("ACSR_CALL_LOG")
+    check("the call log is set", bool(log))
+    code = ("import subprocess\n"
+            "try:\n    subprocess.run(['schtasks', '/run', '/tn', 'ACSR-T24-DOES-NOT-EXIST'], capture_output=True)\n"
+            "except Exception:\n    pass\n")
+    child = subprocess.Popen([sys.executable, "-c", code])  # NO env= : exactly what install() left behind
+    child.wait(timeout=120)
+    rows = [json.loads(x) for x in open(log, encoding="utf-8")] if log and os.path.exists(log) else []
+    mine = [r for r in rows if r.get("pid") == child.pid]
+    check("the child's schtasks attempt is in the call log under ITS pid, REFUSED, with a child: label",
+          any(r.get("verdict") == "refused" and str(r.get("label", "")).startswith("child:") for r in mine),
+          f"child pid {child.pid}: {mine}")
+
+
+def t25_canary_detects_an_unguarded_child():
+    """canary_ok says NO for an unguarded environment and YES for a guarded one"""
+    tmp = tempfile.mkdtemp(prefix="acsr-canary-")
+    log = os.path.join(tmp, "calls.jsonl")
+    open(log, "w").close()
+    bare = {k: v for k, v in os.environ.items() if k not in ("ACSR_TESTGUARD", "ACSR_TESTGUARD_DIR")}
+    bare["PYTHONPATH"] = os.pathsep.join(x for x in bare.get("PYTHONPATH", "").split(os.pathsep)
+                                         if x and "_testsite" not in x)
+    bare["ACSR_CALL_LOG"] = log
+    ok, why = _testguard.canary_ok(bare, log)
+    check("canary_ok on an UNGUARDED env reports failure", ok is False, why)
+    open(log, "w").close()
+    ok, why = _testguard.canary_ok(_guarded_child_env("fake", log), log)
+    check("canary_ok on a guarded env reports success", ok is True, why)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t26_windows_directory_rule_in_a_scratch_tree():
+    """the System32 / SysWOW64 / SystemRoot rule, exercised with SystemRoot pointed at a scratch tree"""
+    root = tempfile.mkdtemp(prefix="acsr-winroot-")
+    for sub, name in (("System32", "acsrprobe.exe"), ("SysWOW64", "acsrwow.com"), ("", "acsrroot.exe")):
+        dd = os.path.join(root, sub) if sub else root
+        os.makedirs(dd, exist_ok=True)
+        open(os.path.join(dd, name), "w").close()
+    saved = {k: os.environ.get(k) for k in ("SystemRoot", "WINDIR")}
+    os.environ["SystemRoot"] = root
+    try:
+        for argv in (["acsrprobe"], ["ACSRPROBE.EXE", "/x"], ["acsrwow"], ["acsrroot.exe"],
+                     [os.path.join(root, "System32", "anything-at-all"), "/run"]):
+            check(f"Windows-directory program judged: {argv[0][-40:]}", _testguard.is_guarded(argv))
+        check("executable= in a Windows directory is judged",
+              _testguard.is_guarded(["innocent"], executable=os.path.join(root, "System32", "acsrprobe.exe")))
+        check("a program NOT in the Windows directories is not", not _testguard.is_guarded(["acsr-not-anywhere"]))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def t27_forged_plan_cannot_truncate_arbitrary_files():
+    """execute truncates ONLY logs a fresh scan returns, in the container-log shape (N1)"""
+    with Env() as env:
+        f = env.fake
+        h = hexid("ctr-log")
+        legit = f"/mnt/x/data/docker/containers/{h}/{h}-json.log"
+        odd = f"/mnt/x/data/docker/containers/{h}/{hexid('mismatch')}-json.log"  # the scan finds it; wrong shape
+        f.wsl_logs = [(3_000_000, legit), (3_000_000, odd)]
+        p = ex.reclaim_plan()
+        check("the plan lists the oversized container log", legit in p["actions"]["truncate_logs"],
+              str(p["actions"]["truncate_logs"]))
+        forged = ["/mnt/x/data/docker/volumes/frontend_openwebui-data/_data/webui.db",
+                  f"/mnt/x/data/docker/containers/{h}/../../volumes/v/_data/webui.db",
+                  f"/mnt/x/data/docker/containers/{h}/{hexid('other')}-json.log",
+                  "/etc/passwd", odd]
+        act = json.loads(json.dumps(p["actions"]))
+        act["truncate_logs"] = sorted(set(act["truncate_logs"] + forged))
+        tok = ex._plan_token(act)
+        ex._save_plan(tok, dict(p, actions=act, confirm_token=tok))
+        r = ex.reclaim_execute(tok)
+        check("forged plan accepted as well-formed (the token is integrity-only)", not r.get("refused"), str(r)[:160])
+        check("ONLY the live oversized container log was truncated", f.truncated == [legit], str(f.truncated))
+        check("every forged path, and the scan's off-shape log, reported skipped",
+              sorted(x["path"] for x in r.get("skipped_logs", [])) == sorted(set(forged)), str(r.get("skipped_logs")))
+        f.truncated = []
+        p = ex.reclaim_plan()
+        f.wsl_logs = []  # the log was rotated / shrank before execute
+        ex.reclaim_execute(p["confirm_token"])
+        check("a listed log that is no longer oversized is not truncated", f.truncated == [], str(f.truncated))
+
+
+def t28_shipped_thresholds_pinned():
+    """config.json ships the operator's 2026-09-27 values (a deliberate change must update this test)"""
+    cfg = json.load(open(os.path.join(_HERE, "config.json"), encoding="utf-8"))["thresholds"]
+    for k, v in (("image_min_age_days", 14), ("anon_volume_min_age_days", 7), ("builder_keep_hours", 168),
+                 ("reclaim_plan_ttl_hours", 24)):
+        check(f"config.json {k} == {v}", cfg.get(k) == v, str(cfg.get(k)))
+
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1107,8 +1198,10 @@ if __name__ == "__main__":
                  t11_docs_match, t12_host_keep_list_seed, t13_untagged_on_cli29, t14_empty_keep_list,
                  t15_forged_plan_thresholds, t16_per_volume_check_isolated, t17_compose_declared_hex_volume,
                  t18_meta_guards_mutated_open, t19_meta_non_reclaim_gate, t20_fail_closed_branches,
-                 t21_path_shim_catches_non_python, t22_system_programs_refused_by_name_or_path,
-                 t23_refuses_to_run_outside_the_container):
+                 t22_system_programs_refused_by_name_or_path,
+                 t23_refuses_to_run_outside_the_container, t24_install_alone_guards_an_arbitrary_child,
+                 t25_canary_detects_an_unguarded_child, t26_windows_directory_rule_in_a_scratch_tree,
+                 t27_forged_plan_cannot_truncate_arbitrary_files, t28_shipped_thresholds_pinned):
         run_case(case)
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

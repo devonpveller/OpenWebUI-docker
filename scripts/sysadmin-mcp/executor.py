@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -122,7 +123,13 @@ def worker_state(w: str) -> dict:
 # ── plan ───────────────────────────────────────────────────────────────────────
 def _plan_token(actions: dict) -> str:
     """A short, deterministic token bound to the LISTED SET (not exact byte sizes, so it stays
-    valid across small growth between plan and execute)."""
+    valid across small growth between plan and execute).
+
+    INTEGRITY ONLY, NOT AUTHENTICATION: this is an unkeyed hash, so anyone who can write
+    state/reclaim-plans/ can forge a plan with a matching token. Nothing may therefore trust the
+    stored plan's CONTENT: every item is re-validated at execute against the live system (images
+    and volumes by docker_reclaim.execute, workers by worker_state, log paths by _fresh_logs) and the
+    thresholds are the stricter of plan and config."""
     canon = json.dumps(actions, sort_keys=True)
     return hashlib.sha256(canon.encode()).hexdigest()[:8]
 
@@ -228,6 +235,18 @@ def reclaim_plan(scope: str = "all", **overrides) -> dict:
     return plan
 
 
+def _fresh_logs() -> set:
+    """Container json logs that are oversized RIGHT NOW (a fresh _big_logs scan) AND have the exact
+    shape <mount>/data/docker/containers/<64-hex>/<64-hex>-json.log - the only files reclaim may
+    truncate, whatever a stored plan lists."""
+    cfg = sa.load_config()
+    mount = cfg["docker_desktop_mount"].rstrip("/")
+    shape = re.compile(re.escape(mount) + r"/data/docker/containers/([0-9a-f]{64})/\1-json\.log")
+    log_gb = max(0.1, cfg["thresholds"].get("container_log_warn_gb", 2))
+    return {lg["path"] for lg in sa._big_logs(log_gb)
+            if "log_gb" in lg and shape.fullmatch(lg.get("path", ""))}
+
+
 # ── execute (the only mutating entry point) ────────────────────────────────────
 def reclaim_execute(confirm_token: str | None = None, notify: bool = True) -> dict:
     """Perform the reclaim a plan listed. Refuses unless confirm_token names a current stored plan
@@ -263,8 +282,16 @@ def reclaim_execute(confirm_token: str | None = None, notify: bool = True) -> di
             results["skipped_workers"].append({"worker": w, "reason": f"rm failed: {rm['err'].strip()}"})
     results["freed_gb"]["ao_worker_tmp"] = round(freed_tmp, 2)
 
-    # 2) truncate the LISTED oversized container json logs (data-preserving reset, not delete)
-    paths = act.get("truncate_logs", [])
+    # 2) truncate the LISTED oversized container json logs (data-preserving reset, not delete) -
+    #    but ONLY those a fresh scan returns right now in the container-log shape; a path the stored
+    #    plan lists and the live scan does not is SKIPPED (the token cannot vouch for it)
+    listed = act.get("truncate_logs", [])
+    fresh = _fresh_logs()
+    paths = [p for p in listed if p in fresh]
+    results["skipped_logs"] = [{"path": p, "reason": "not an oversized container json log in a fresh scan"}
+                               for p in listed if p not in fresh]
+    if results["skipped_logs"]:
+        _audit("reclaim_logs_skipped", {"paths": [x["path"] for x in results["skipped_logs"]]})
     results["freed_gb"]["logs"] = 0
     if paths:
         was = {lg["path"]: lg for lg in plan.get("logs_to_truncate", [])}

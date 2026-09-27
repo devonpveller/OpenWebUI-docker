@@ -23,7 +23,8 @@ persona** operate this stack through semantic, safety-gated tools. Capability #1
 | `charter.md` | the @sysadmin persona charter (appended to the bridge's system prompt) |
 | `sysadmin-bridge-launch.ps1` / `register-sysadmin-bridge.ps1` | run/register the persona (2nd bridge instance) |
 | `config.json` | thresholds + machine facts + channel/operators |
-| `test_*.py` | unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards, run each file directly; `test_docker_reclaim.py` drives the reclaim against an in-memory fake docker (no daemon) |
+| `test_*.py` | unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards; `test_docker_reclaim.py` drives the reclaim against an in-memory fake docker (no daemon). Run ONLY in a container - see [Run the tests](#run-the-tests---in-a-disposable-container-only) |
+| `_testguard.py` / `_testsite/sitecustomize.py` | test-only: the container check (exit 2 on a host) and the process-wide guard every test process and its Python children run |
 
 ## Tools (surface)
 Read-only: `disk_report`, `container_status`, `stack_health`, `container_logs`, `volume_report`,
@@ -39,21 +40,61 @@ Gated/mutating: `reclaim_execute(confirm_token)`, `compact_execute(confirm_token
    until=<N>h` (named volumes never; source-guarded by tests), compaction requires warranted +
    registered task.
 
-## Run the tests
+## Run the tests - in a disposable container ONLY
+
+**Rule (2026-09-27, after two incidents in which a sysadmin test reached the real host while the code
+under test was broken: a host prune at 13:00, and a real VHDX compaction at 15:19):** every
+sysadmin-mcp test, mutation and meta-test runs inside a disposable Linux container. The container has
+no docker socket, no Windows tools and the code mounted read-only. There, `schtasks`, `wsl`,
+`powershell.exe` and the host daemon do not exist, so a broken guard fails harmlessly. **The test
+modules exit 2 on any host by design**: `_testguard.install()` requires POSIX, `/.dockerenv` and
+`ACSR_IN_CONTAINER=1`.
+
+From the repo root in Git Bash (`MSYS_NO_PATHCONV=1`; `<repo>` = this checkout's Windows path):
+
+```sh
+# every Python suite: no network, no socket, code read-only (copied to /tmp inside so state/ is writable)
+docker run --rm --network none -e ACSR_IN_CONTAINER=1 -e DOCKER_HOST=tcp://127.0.0.1:1 \
+  -e PYTHONDONTWRITEBYTECODE=1 -v "<repo>:/w:ro" python:3.12-slim sh -c '
+  mkdir -p /tmp/w && cp -r /w/scripts /w/stack.manifest.toml /tmp/w/ && cd /tmp/w/scripts/sysadmin-mcp &&
+  for t in test_docker_reclaim.py test_sysadmin.py test_executor.py test_compaction.py \
+           test_check_backups.py test_telegram_listener.py; do python $t || exit 1; done'
+
+# the PowerShell pure-logic tests
+docker run --rm --network none -v "<repo>:/w:ro" mcr.microsoft.com/powershell:7.4-ubuntu-22.04 \
+  pwsh -NoProfile -File /w/scripts/sysadmin-mcp/test-compact-lib.ps1
 ```
-python scripts/sysadmin-mcp/test_sysadmin.py     # read-only + stdio
-python scripts/sysadmin-mcp/test_executor.py     # safe-reclaim gate (+ --live-exec for a real run)
-python scripts/sysadmin-mcp/test_docker_reclaim.py  # reclaim rules against a fake docker (no daemon)
-python scripts/sysadmin-mcp/test_compaction.py   # compaction gate (non-destructive)
+
+**LIVE sections against a real daemon** - only a disposable DinD, driven from a container that shares
+a private network with it and has NO docker socket (never `-v /var/run/docker.sock`):
+
+```sh
+docker network create acsr-net
+docker run -d --rm --privileged --name acsr-dind --network acsr-net --network-alias dind \
+  -e DOCKER_TLS_CERTDIR= docker:27-dind
+docker run --rm --network acsr-net -e DOCKER_HOST=tcp://dind:2375 -e ACSR_IN_CONTAINER=1 \
+  -v "<repo>:/w:ro" docker:27-cli sh -c '
+  apk add --no-cache python3 >/dev/null && until docker info >/dev/null 2>&1; do sleep 2; done &&
+  mkdir -p /tmp/w && cp -r /w/scripts /w/stack.manifest.toml /tmp/w/ && cd /tmp/w/scripts/sysadmin-mcp &&
+  python3 test_sysadmin.py'
+docker stop acsr-dind && docker network rm acsr-net
 ```
-Every test module installs `_testguard.py` at import, and every Python child it starts inherits it
-(`_testsite/sitecustomize.py`; `server.py` also honours `ACSR_TESTGUARD`). `DOCKER_HOST` defaults
-to the dead endpoint `tcp://127.0.0.1:1` and is printed first; set it to a disposable DinD to run
-the LIVE sections. Every docker / wsl / schtasks / PowerShell start is checked against an EXACT
-read-only allowlist (hermetic suites allow none), recorded with its pid in `ACSR_CALL_LOG`, and a
-recorder shim for non-Python children goes first on `PATH`. The read-only suites DO read the host
-through that allowlist: `wsl -d docker-desktop` `df`/`find` (disk_report) and `schtasks /query`
-(compact_plan). The module docstring lists every allowed shape.
+
+**Defence in depth: the in-code guard.** Every test module also installs `_testguard.py` at import,
+and every Python child inherits it (`_testsite/sitecustomize.py`; `server.py` honours
+`ACSR_TESTGUARD`). What it does:
+- `DOCKER_HOST` defaults to the dead endpoint `tcp://127.0.0.1:1` and is printed first.
+- Every docker / wsl / schtasks / PowerShell / Windows-directory program start is checked against an
+  EXACT read-only allowlist (hermetic suites allow none) and recorded with its pid in
+  `ACSR_CALL_LOG`.
+- Meta-tests run a canary child first and abort if that child is not guarded.
+
+The module docstring lists every allowed shape.
+
+Checks that need real Windows are skipped or faked in the container:
+- test_telegram_listener's real PowerShell child test (SKIP);
+- test_sysadmin's `C:` free-space probe (asserts the probe fails soft instead);
+- `disk-guard.ps1` itself (its call to `auto_reclaim.py` is checked from source).
 
 ## Activate the weekly detector + arm compaction (one elevated run)
 ```
