@@ -19,6 +19,7 @@ docker CLI, `wsl -d docker-desktop`, and Windows tools directly.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -56,8 +57,45 @@ def load_config() -> dict:
 
 
 # ── subprocess helpers ─────────────────────────────────────────────────────────
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def docker_refusal(args: list[str]) -> str | None:
+    """The LOWEST-level deny-list for docker argv (everything after `docker`). Independent of
+    docker_reclaim's allow-list on purpose: a mutated or buggy caller must not reach the daemon with
+    these shapes (2026-09-27: a test mutation that made the upper guard permissive ran
+    `system prune -af --volumes` against the host). Returns a reason, or None when allowed."""
+    a = [str(x) for x in args]
+    if not a:
+        return "empty docker argv"
+    if a[0].startswith("-"):
+        return "global docker options are not used by sysadmin code (could redirect the daemon)"
+    if a[0] == "system" and a[1:2] != ["df"]:
+        return "docker system <anything but df>"
+    if a[0] == "rmi":
+        return "docker rmi"
+    if "prune" in a[:3]:
+        m = (len(a) == 5 and a[:4] == ["builder", "prune", "-af", "--filter"]
+             and re.fullmatch(r"until=(\d+)h", a[4]))
+        if not (m and int(m.group(1)) >= 24):
+            return "prune other than `builder prune -af --filter until=<N>h`, N>=24"
+    if a[0] == "volume" and a[1:2] in (["rm"], ["remove"]):
+        if len(a) < 3 or not all(_HEX64.match(x) for x in a[2:]):
+            return "volume rm of anything but 64-hex anonymous-volume names (no flags)"
+    if a[0] == "image" and a[1:2] in (["rm"], ["remove"]) and any(x.startswith("-") for x in a[2:]):
+        return "image rm with flags (-f/--force)"
+    if a[0] == "compose" and "config" not in a:
+        return "docker compose other than `config`"
+    return None
+
+
 def _run(cmd: list[str], timeout: int = 30) -> dict:
-    """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises."""
+    """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises.
+    docker commands pass docker_refusal() first; a refused one never starts (rc 126)."""
+    if cmd and os.path.basename(str(cmd[0])).lower() in ("docker", "docker.exe"):
+        why = docker_refusal(list(cmd[1:]))
+        if why:
+            return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:6]}"}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return {"rc": p.returncode, "out": p.stdout or "", "err": p.stderr or ""}

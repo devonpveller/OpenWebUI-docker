@@ -278,7 +278,7 @@ def reclaim_execute(confirm_token: str | None = None, notify: bool = True) -> di
             results["truncated_logs"] = [{"error": tr["err"].strip() or "truncate failed"}]
 
     # 3) docker: listed image tags, listed anonymous volumes, build cache older than the filter
-    s = dr.settings(**act.get("settings", {}))
+    s = dr.stricter(act.get("settings", {}))  # a hand-edited plan cannot lower a threshold
     dk = dr.execute(act.get("docker", {}), s, audit=_audit)
     results["docker"] = dk
     fb = dk["freed_bytes"]

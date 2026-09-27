@@ -20,6 +20,8 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_sysadmin")
 
 _passed = 0
 _failed = 0
@@ -124,7 +126,10 @@ def test_stdio() -> None:
         txt = ""
         if call and call.get("result"):
             txt = call["result"]["content"][0]["text"]
-        check("tools/call stack_health returns text", "Stack:" in txt, txt[:200])
+        if _testguard.require_daemon("test_sysadmin", allowed=True):
+            check("tools/call stack_health returns text", "Stack:" in txt, txt[:200])
+        else:  # dead endpoint: the tool must still answer, with the connection error as text
+            check("tools/call stack_health answers (daemon unreachable -> error text)", "error" in txt.lower(), txt[:200])
         # both gated mutating tools must be fail-closed through the MCP boundary
         bad = _rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                           "params": {"name": "reclaim_execute", "arguments": {"confirm_token": "deadbeef"}}})
@@ -229,7 +234,8 @@ if __name__ == "__main__":
     test_unit()
     test_volume_age()
     if not only_unit:
-        test_live()
+        if _testguard.require_daemon("test_sysadmin", allowed=False):
+            test_live()
         test_stdio()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

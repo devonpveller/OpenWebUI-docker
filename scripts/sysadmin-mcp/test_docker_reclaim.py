@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -29,6 +30,9 @@ _REPO = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 import sysadmin as sa  # noqa: E402
 import executor as ex  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, fake call stub
+_testguard.install(sa, "fake", "test_docker_reclaim")
+_testguard_real_sa_run = _testguard.UNGUARDED_RUN
 
 _passed = 0
 _failed = 0
@@ -65,8 +69,14 @@ class FakeDocker:
         self.volumes = {}     # name -> {created, size}
         self.cache = []       # df -v BuildCache rows + "_age_h"
         self.compose = {}     # abs compose path -> [image refs]
+        self.compose_volumes = {}  # abs compose path -> {key: {"name": ...}}
         self.calls = []
         self.fail = set()     # command prefixes (tuples) to fail
+        # docker CLI 29.x: `docker images` HIDES untagged images unless -a or --filter dangling=true.
+        # False = the older behaviour (shows them), to prove the union does not double-count.
+        self.cli29 = True
+        self.hide_inspect_mounts = False    # bulk mount read misses every volume
+        self.ps_volume_filter_blind = False  # `ps -a --filter volume=` finds nothing
 
     # builders
     def image(self, tag_or_tags, days, size=1e9, digests=()):
@@ -127,7 +137,7 @@ class FakeDocker:
             for f in flt:
                 k, v = f.split("=", 1)
                 if k == "volume":
-                    rows = [(cid, c) for cid, c in rows if v in c["volumes"]]
+                    rows = [] if self.ps_volume_filter_blind else [(cid, c) for cid, c in rows if v in c["volumes"]]
             if "-q" in a:
                 return self._ok("".join(cid + "\n" for cid, _ in rows))
             fmt = a[a.index("--format") + 1]
@@ -137,10 +147,18 @@ class FakeDocker:
             out = []
             for cid in a[3:]:
                 c = self.containers[cid]
-                out.append(f"{cid}|/{c['name']}|{c['image']}|{c['state']}|" + "".join(v + "," for v in c["volumes"]))
+                vols = [] if self.hide_inspect_mounts else c["volumes"]
+                out.append(f"{cid}|/{c['name']}|{c['image']}|{c['state']}|" + "".join(v + "," for v in vols))
             return self._ok("\n".join(out) + "\n")
         if a[0] == "images":
-            return self._ok("".join(i + "\n" for i in self.images))
+            flt = [a[i + 1] for i, x in enumerate(a) if x == "--filter"]
+            if "dangling=true" in flt:
+                ids = [i for i, im in self.images.items() if not im["tags"]]
+            elif "-a" in a or not self.cli29:
+                ids = list(self.images)
+            else:
+                ids = [i for i, im in self.images.items() if im["tags"]]
+            return self._ok("".join(i + "\n" for i in ids))
         if a[:2] == ["image", "inspect"]:
             out = []
             for iid in a[4:]:
@@ -226,6 +244,8 @@ class FakeDocker:
             path = a[a.index("-f") + 1]
             if path not in self.compose:
                 return {"rc": 1, "out": "", "err": f"open {path}: no such file"}
+            if "--format" in a and a[a.index("--format") + 1] == "json":
+                return self._ok(json.dumps({"services": {}, "volumes": self.compose_volumes.get(path, {})}))
             return self._ok("".join(r + "\n" for r in self.compose[path]))
         if a[0] == "exec":
             return {"rc": 1, "out": "", "err": "container not running"}
@@ -467,23 +487,62 @@ def t04_token():
 
 
 def t05_forbidden_shapes():
-    """no code path can run volume prune / image prune -a / system prune (chokepoint + source grep)"""
+    """no code path can run volume prune / image prune -a / system prune (two guards + source grep)"""
     import docker_reclaim as dr
     bad = [["volume", "prune"], ["volume", "prune", "-f"], ["image", "prune", "-a"], ["image", "prune", "-af"],
            ["image", "prune", "-f"], ["system", "prune", "-af", "--volumes"], ["rmi", "-f", "x"],
            ["image", "rm", "-f", "x"], ["volume", "rm", "frontend_openwebui-data"],
            ["volume", "rm", "-f", hexid("x")], ["builder", "prune", "-af"],
-           ["builder", "prune", "-af", "--filter", "until=0"], ["container", "prune"]]
-    for argv in bad:
-        check(f"refused shape {' '.join(argv)[:40]}", not dr.allowed_mutation(argv))
-        try:
-            dr._mutate(argv)
-            check(f"_mutate raises on {' '.join(argv)[:40]}", False)
-        except ValueError:
-            check(f"_mutate raises on {' '.join(argv)[:40]}", True)
+           ["builder", "prune", "-af", "--filter", "until=0"], ["container", "prune"],
+           ["volume", "rm", hexid("nl") + "\n"], ["builder", "prune", "-af", "--filter", "until=0h"],
+           ["builder", "prune", "-af", "--filter", "until=23h"]]
+    # (1) the upper guard, driven INSIDE Env: even if it were broken, the calls land in the fake
+    with Env() as env:
+        for argv in bad:
+            check(f"refused shape {' '.join(argv)[:40]!r}", not dr.allowed_mutation(argv))
+            try:
+                dr._mutate(argv)
+                check(f"_mutate raises on {' '.join(argv)[:40]!r}", False)
+            except ValueError:
+                check(f"_mutate raises on {' '.join(argv)[:40]!r}", True)
+        check("the fake daemon received NO command from any forbidden shape", env.fake.calls == [],
+              str(env.fake.calls[:3]))
     for argv in (["image", "rm", "x:1"], ["volume", "rm", hexid("y")],
                  ["builder", "prune", "-af", "--filter", "until=168h"]):
         check(f"allowed shape {' '.join(argv)[:40]}", dr.allowed_mutation(argv))
+    # (2) outside Env, sysadmin._run is the test guard's stub: a leak raises, never runs
+    saved_log = os.environ.pop("ACSR_CALL_LOG", None)  # a deliberate probe, not an escape
+    try:
+        sa._run(["docker", "ps"])
+        check("outside Env, sysadmin._run raises (no real docker)", False)
+    except _testguard.RealDockerCall:
+        check("outside Env, sysadmin._run raises (no real docker)", True)
+    finally:
+        if saved_log:
+            os.environ["ACSR_CALL_LOG"] = saved_log
+    # (3) the LOWEST-level deny-list inside sysadmin._run, with subprocess.run replaced by a recorder so
+    #     a broken deny-list would record a call instead of running one
+    real_run = _testguard_real_sa_run
+    started = []
+
+    class _P:
+        returncode, stdout, stderr = 0, "", ""
+
+    saved = sa.subprocess.run
+    sa.subprocess.run = lambda cmd, *a, **k: started.append(list(cmd)) or _P()
+    try:
+        deny = bad + [["compose", "-f", "x.yml", "down", "-v"], ["-H", "tcp://elsewhere", "ps"],
+                      ["system", "info"], ["volume", "remove", hexid("z"), "frontend_openwebui-data"]]
+        for argv in deny:
+            r = real_run(["docker"] + argv)
+            check(f"deny-list refuses docker {' '.join(argv)[:40]!r}", r["rc"] == 126 and "deny-list" in r["err"], str(r))
+        check("deny-list: none of those started a process", started == [], str(started[:3]))
+        for argv in (["ps", "-a"], ["system", "df"], ["builder", "prune", "-af", "--filter", "until=168h"],
+                     ["volume", "rm", hexid("y")], ["image", "rm", "x:1"], ["compose", "-f", "x.yml", "config", "--images"]):
+            real_run(["docker"] + argv)
+        check("deny-list passes the six shapes the code needs", len(started) == 6, str(started))
+    finally:
+        sa.subprocess.run = saved
     # source grep: code lines (not comments/docstrings) in every file that runs docker for the sysadmin
     files = [os.path.join(_HERE, n) for n in sorted(os.listdir(_HERE))
              if n.endswith((".py", ".ps1")) and not n.startswith("test")]
@@ -493,7 +552,7 @@ def t05_forbidden_shapes():
     # shape is adjacent quoted tokens. .ps1: the docker CLI line itself.
     py_pats = [re.compile(r"['\"](volume|system|container)['\"]\s*,\s*['\"]prune['\"]"),
                re.compile(r"['\"]image['\"]\s*,\s*['\"]prune['\"]\s*,\s*['\"](-a|--all|-af|-fa)"),
-               re.compile(r"['\"]rmi['\"]")]
+               re.compile(r"[\[,]\s*['\"]rmi['\"]")]  # rmi as an argv element, not `a[0] == "rmi"`
     ps_pats = [re.compile(r"docker\s+(volume|system|container)\s+prune", re.I),
                re.compile(r"docker\s+image\s+prune\s+(-a|--all|-af|-fa)", re.I),
                re.compile(r"docker\s+rmi\b", re.I)]
@@ -508,7 +567,7 @@ def t05_forbidden_shapes():
                 hits.append(f"{os.path.basename(fp)}:{i}: {s[:90]}")
     # the grep must be able to see a violation: plant one per pattern family and expect it found
     planted = ['    sa._docker(["volume", "prune", "-f"])', '    _run(["docker", "image", "prune", "-a"])',
-               '    sa._docker(["system", "prune"])']
+               '    sa._docker(["system", "prune"])', '    sa._docker(["rmi", "-f", ref])']
     blind = [x for x in planted if not any(p.search(x.strip()) for p in py_pats)]
     blind += [x for x in ("docker volume prune -f", "docker image prune -a", "docker system prune -af")
               if not any(p.search(x) for p in ps_pats)]
@@ -544,7 +603,10 @@ def t07_fail_closed():
         check("compose failure -> images category disabled with reason",
               "compose" in str(p["docker"]["images"].get("disabled_reason")), str(p["docker"]["images"].get("disabled_reason")))
         check("compose failure -> no image listed", listed_refs(p) == [])
-        check("compose failure -> volumes still listed", listed_vols(p) == [vol])
+        check("compose failure -> volumes disabled too (declared names unknown)",
+              listed_vols(p) == [] and "compose" in str(p["docker"]["volumes"].get("disabled_reason")),
+              str(p["docker"]["volumes"].get("disabled_reason")))
+        check("compose failure -> the orphan volume is still there", vol in f.volumes)
     with Env() as env:
         env.fake.image("stale:1", 30)
         os.remove(env.keep)
@@ -583,9 +645,15 @@ def t08_thresholds_configurable():
         check("config 24 h: build-cache command", p["docker"]["build_cache"]["command"].endswith("until=24h"))
         sa._CONFIG_CACHE["thresholds"].clear()
         p = ex.reclaim_plan(image_min_age_days=0, anon_volume_min_age_days=0)
-        check("override 0: both listed", listed_refs(p) == ["ten-days:1"] and listed_vols(p) == [vol])
+        check("override 0: both listed in the plan", listed_refs(p) == ["ten-days:1"] and listed_vols(p) == [vol])
         r = ex.reclaim_execute(p["confirm_token"])
-        check("execute honours the plan's thresholds", tags(f) == [] and vol not in f.volumes, str(r)[:200])
+        check("execute uses the STRICTER config (14 d / 7 d): nothing removed",
+              tags(f) == ["ten-days:1"] and vol in f.volumes, str(r)[:200])
+        check("... and says too new", "too new" in json.dumps(r.get("docker", {})))
+        sa._CONFIG_CACHE["thresholds"].update({"image_min_age_days": 7, "anon_volume_min_age_days": 3})
+        p = ex.reclaim_plan()
+        ex.reclaim_execute(p["confirm_token"])
+        check("config-lowered thresholds apply at execute", tags(f) == [] and vol not in f.volumes)
 
 
 def t09_auto_path():
@@ -650,6 +718,9 @@ def t11_docs_match():
         check(f"{name}: no old 'never touches volumes' claim", "never touches volumes" not in low)
         check(f"{name}: no old dangling-only claim", "dangling-only" not in low and "dangling images/build cache" not in low)
     check("charter keeps `docker volume prune` forbidden", "volume prune" in charter)
+    for tool in ("reclaim_plan", "reclaim_execute"):
+        d = server.TOOLS[tool]["description"].lower()
+        check(f"{tool} description: untagged images removed by id", "untagged" in d and "by id" in d, d[:200])
 
 
 def t12_host_keep_list_seed():
@@ -664,6 +735,153 @@ def t12_host_keep_list_seed():
         check(f"keep-list does NOT protect {ref}", dr.keep_match(ref, keep) is None)
 
 
+def t13_untagged_on_cli29():
+    """CLI 29 hides untagged images from `docker images`: they are still found, and digest pins protect them"""
+    with Env() as env:
+        f = env.fake
+        pin = "ghcr.io/x/alerter@sha256:" + "a" * 64
+        f.compose[env.compose_file] = ["ghcr.io/x/alerter@sha256:" + "a" * 64]
+        dang = f.image([], 30, size=4e8)                       # rebuild leftover, unused
+        dused = f.image([], 31)                                # untagged, only a STOPPED container uses it
+        f.container("c-stopped-untagged", dused, "exited")
+        pinned = f.image([], 32, digests=[pin])                # pulled by digest only, compose pins it, no container
+        loose = f.image([], 33, digests=["ghcr.io/x/other@sha256:" + "b" * 64])  # pulled by digest, named nowhere
+        f.image("tagged:1", 30)
+        p = ex.reclaim_plan()
+        check("plain `docker images` really hides them in this fake (CLI 29)",
+              all(i not in f.run(["docker", "images", "--no-trunc", "--format", "{{.ID}}"])["out"]
+                  for i in (dang, dused, pinned, loose)))
+        check("plan lists the unused dangling image and the unnamed digest-pulled one (by id) + the tag",
+              listed_refs(p) == sorted([dang, loose, "tagged:1"]), str(listed_refs(p)))
+        check("untagged image of a stopped container: skipped in use",
+              (skipped_reason(p, "images", "ref", dused) or "").startswith("in use"), str(skipped_reason(p, "images", "ref", dused)))
+        check("digest-pinned untagged image with NO container: skipped compose-named by digest",
+              (skipped_reason(p, "images", "ref", pinned) or "").startswith("compose-named by digest"),
+              str(skipped_reason(p, "images", "ref", pinned)))
+        ex.reclaim_execute(p["confirm_token"])
+        check("execute: dangling + unnamed digest image gone; stopped-used + pinned kept",
+              dang not in f.images and loose not in f.images and dused in f.images and pinned in f.images)
+        muts = f.mutating_calls()
+        check("untagged removals were by explicit id", ["image", "rm", dang] in muts and ["image", "rm", loose] in muts, str(muts))
+    with Env() as env:
+        env.fake.cli29 = False  # an older CLI that lists untagged images in the plain listing too
+        dang = env.fake.image([], 30)
+        p = ex.reclaim_plan()
+        check("older CLI: the union lists the dangling image once", listed_refs(p) == [dang], str(listed_refs(p)))
+
+
+def t14_empty_keep_list():
+    """a READABLE keep-list with no pattern fails closed (removes no image), not 'protect nothing'"""
+    with Env() as env:
+        env.fake.image("pin:local", 30)
+        env.fake.image("stale:1", 30)
+        open(env.keep, "w").write("# only comments\n\n   \n")
+        p = ex.reclaim_plan()
+        check("empty keep-list -> images category OFF", "no patterns" in str(p["docker"]["images"].get("disabled_reason")),
+              str(p["docker"]["images"].get("disabled_reason")))
+        check("empty keep-list -> nothing listed", listed_refs(p) == [])
+        open(env.keep, "w").write("")
+        check("0-byte keep-list -> OFF too", listed_refs(ex.reclaim_plan()) == [])
+
+
+def t15_forged_plan_thresholds():
+    """a stored plan re-hashed with lowered thresholds cannot remove a too-new image or volume"""
+    with Env() as env:
+        f = env.fake
+        f.image("two-days:1", 2)
+        vol = f.volume(hexid("young"), 1)
+        p = ex.reclaim_plan()
+        act = json.loads(json.dumps(p["actions"]))
+        act["docker"]["images"] = [["two-days:1", next(iter(f.images))]]
+        act["docker"]["volumes"] = [vol]
+        act["settings"] = {"image_min_age_days": 0, "anon_volume_min_age_days": 0, "builder_keep_hours": 24}
+        tok = ex._plan_token(act)
+        plan = dict(p, actions=act, confirm_token=tok)
+        ex._save_plan(tok, plan)
+        r = ex.reclaim_execute(tok)
+        check("forged plan accepted as a token (it is well-formed)", not r.get("refused"), str(r)[:160])
+        check("forged low thresholds: the 2-day image survives", "two-days:1" in tags(f))
+        check("forged low thresholds: the 1-day volume survives", vol in f.volumes)
+        check("builder prune ran at the config's 168h, not the forged 24h",
+              ["builder", "prune", "-af", "--filter", "until=168h"] in f.mutating_calls(), str(f.mutating_calls()))
+
+
+def t16_per_volume_check_isolated():
+    """the per-volume `ps -a --filter volume=` check and the bulk mount read each protect on their own"""
+    with Env() as env:
+        f = env.fake
+        img = f.image("x:local", 30)
+        v = f.volume(hexid("used"), 30)
+        f.container("c-user", img, "exited", volumes=[v])
+        f.hide_inspect_mounts = True       # only the per-volume filter can see the reference
+        p = ex.reclaim_plan()
+        check("bulk read blind: per-volume check still skips it (in use)",
+              listed_vols(p) == [] and (skipped_reason(p, "volumes", "name", v) or "").startswith("in use"),
+              str(skipped_reason(p, "volumes", "name", v)))
+        calls = [c for c in f.calls if c[:3] == ["docker", "ps", "-a"] and f"volume={v}" in c]
+        check("the per-volume filter call was made for it", len(calls) >= 1)
+        f.hide_inspect_mounts = False
+        f.ps_volume_filter_blind = True    # only the bulk read can see it
+        p = ex.reclaim_plan()
+        check("per-volume filter blind: bulk read still skips it (in use)",
+              listed_vols(p) == [] and (skipped_reason(p, "volumes", "name", v) or "").startswith("in use"))
+
+
+def t17_compose_declared_hex_volume():
+    """a 64-hex volume NAME that a compose file declares is a named volume: never removed"""
+    with Env() as env:
+        f = env.fake
+        hexdecl = f.volume(hexid("declared"), 30)
+        orphan = f.volume(hexid("orphan2"), 30)
+        f.compose_volumes[env.compose_file] = {"data": {"name": hexdecl}}
+        p = ex.reclaim_plan()
+        check("declared 64-hex name skipped as named", (skipped_reason(p, "volumes", "name", hexdecl) or "").startswith("named volume"),
+              str(skipped_reason(p, "volumes", "name", hexdecl)))
+        check("the real orphan is still listed", listed_vols(p) == [orphan], str(listed_vols(p)))
+        vcalls = [c for c in f.calls if c[1:2] == ["compose"] and "json" in c]
+        check("volume render uses --no-consistency (frontend's alternative profiles fail without it)",
+              vcalls and all("--no-consistency" in c for c in vcalls), str(vcalls[:1]))
+        ex.reclaim_execute(p["confirm_token"])
+        check("declared volume survives execute", hexdecl in f.volumes and orphan not in f.volumes)
+
+
+def t18_meta_guards_mutated_open():
+    """with BOTH production guards mutated to allow everything, the suite FAILS and nothing reaches docker"""
+    if os.environ.get("ACSR_META_CHILD"):
+        print("  (skipped inside the meta child)")
+        return
+    tmp = tempfile.mkdtemp(prefix="acsr-meta-")
+    try:
+        dst = os.path.join(tmp, "scripts", "sysadmin-mcp")
+        shutil.copytree(_HERE, dst, ignore=shutil.ignore_patterns("state", "__pycache__"))
+        shutil.copytree(os.path.join(_REPO, "scripts", "maintenance"), os.path.join(tmp, "scripts", "maintenance"))
+        for rel, old, new in (
+                ("docker_reclaim.py", "    \"\"\"True only for the three removal shapes the operator approved.\"\"\"\n",
+                 "    \"\"\"True only for the three removal shapes the operator approved.\"\"\"\n    return True  # META MUTATION\n"),
+                ("sysadmin.py", "    a = [str(x) for x in args]\n", "    return None  # META MUTATION\n    a = [str(x) for x in args]\n")):
+            fp = os.path.join(dst, rel)
+            src = open(fp, encoding="utf-8").read()
+            check(f"meta: mutation applied to {rel}", old in src)
+            open(fp, "w", encoding="utf-8", newline="\n").write(src.replace(old, new, 1))
+        log = os.path.join(tmp, "calls.jsonl")
+        env = dict(os.environ, DOCKER_HOST="tcp://127.0.0.1:1", ACSR_CALL_LOG=log, ACSR_META_CHILD="1",
+                   PYTHONDONTWRITEBYTECODE="1")
+        env.pop("DOCKER_CONTEXT", None)
+        r = subprocess.run([sys.executable, os.path.join(dst, "test_docker_reclaim.py")], env=env,
+                           capture_output=True, text=True, timeout=600)
+        first = (r.stdout.splitlines() or [""])[0]
+        check("meta: child printed its docker target first, the dead endpoint",
+              "DOCKER_HOST=tcp://127.0.0.1:1" in first, first)
+        check("meta: the suite FAILS with the guards mutated open", r.returncode != 0, r.stdout[-300:])
+        check("meta: the failures are the guard checks",
+              "FAIL  _mutate raises on" in r.stdout and "FAIL  deny-list refuses" in r.stdout, r.stdout[-400:])
+        attempts = open(log, encoding="utf-8").read().splitlines() if os.path.exists(log) else []
+        check("meta: ZERO calls escaped the fakes (call log empty: nothing reached sysadmin._run or subprocess)",
+              attempts == [], "; ".join(attempts[:5]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -672,7 +890,9 @@ if __name__ == "__main__":
     for case in (t01_base_red_scenario, t02_every_category, t03_revalidation, t04_token,
                  t05_forbidden_shapes, t06_plan_is_read_only_and_mutations_are_approved_shapes,
                  t07_fail_closed, t08_thresholds_configurable, t09_auto_path, t10_render,
-                 t11_docs_match, t12_host_keep_list_seed):
+                 t11_docs_match, t12_host_keep_list_seed, t13_untagged_on_cli29, t14_empty_keep_list,
+                 t15_forged_plan_thresholds, t16_per_volume_check_isolated, t17_compose_declared_hex_volume,
+                 t18_meta_guards_mutated_open):
         run_case(case)
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

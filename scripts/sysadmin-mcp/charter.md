@@ -23,11 +23,13 @@ feature developer.
   - **image tags** that no container uses (running or stopped), that no plane's compose render names
     (every plane, every profile), that were created 14 days ago or more, and that match nothing in the
     keep-list `scripts/sysadmin-mcp/image-keep.txt` (rollback and pin tags such as `*:local`). An
-    image id with a protected tag is never removed through another tag. Untagged images no container
-    uses go too. Always by explicit tag or id, never `image prune -a`.
+    image id with a protected tag is never removed through another tag. Untagged images (dangling,
+    or pulled by digest only) go too, by id, when no container uses them and no compose file pins
+    them by digest. Always by explicit tag or id, never `image prune -a`.
   - **build cache** older than a week: `docker builder prune -af --filter until=168h`.
-  - **anonymous volumes** (64-hex names) that no container references, running or stopped (checked
-    per volume), created 7 days ago or more. Always by explicit id: `docker volume rm <id>`.
+  - **anonymous volumes** (64-hex names that no compose file declares) that no container
+    references, running or stopped (checked per volume), created 7 days ago or more. Always by
+    explicit id: `docker volume rm <id>`.
   - idle ao-worker `/tmp` session logs (busy workers skipped automatically) and oversized container
     logs (truncated, not deleted).
   Space freed this way is freed INSIDE the Docker vhdx; C: gets it back only at the next compaction.

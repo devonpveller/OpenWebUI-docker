@@ -18,15 +18,19 @@ IMAGES - a TAG is removed only when ALL hold:
   * the tag matches no pattern in image-keep.txt;
   * no OTHER tag of the same image id is protected by compose or the keep-list (an image id with a
     protected tag is never removed through another tag).
-  Untagged (dangling) images are removed by id when no container uses them - what the old
-  `image prune -f` removed, now listed and re-checked like everything else.
+  UNTAGGED images (dangling leftovers, and images pulled by digest only) are removed BY ID when no
+  container, running or stopped, uses them AND no compose render pins them by digest - what the old
+  `image prune -f` removed, now listed and re-checked like everything else. Docker CLI 29 hides
+  untagged images from a plain `docker images`, so the inventory is the union of that listing and
+  `docker images --filter dangling=true`.
   Removal is `docker image rm <repo:tag>` (or `<id>` for an untagged image), never with -f.
 
 BUILD CACHE - `docker builder prune -af --filter until=<builder_keep_hours>h` (default 168h): all
   unused cache older than a week; the last week stays for rebuilds.
 
 ANONYMOUS VOLUMES - a volume is removed only when ALL hold:
-  * its name is exactly 64 lowercase hex characters (docker's anonymous-volume naming);
+  * its name is exactly 64 lowercase hex characters (docker's anonymous-volume naming), and no
+    compose file declares a volume by that name (such a volume is NAMED, whatever it looks like);
   * no container, running or stopped, references it - checked PER VOLUME with
     `docker ps -a --filter volume=<name>`, on top of a bulk read of every container's mounts;
   * its CreatedAt is `anon_volume_min_age_days` (default 7) or more days ago.
@@ -37,9 +41,10 @@ NEVER: `docker volume prune`, `docker image prune` (with or without -a), `docker
 `docker rmi -f`. Every mutating docker call goes through _mutate(), which refuses any argv that is
 not one of the three shapes above (test_docker_reclaim.py drives it with the forbidden ones).
 
-FAIL-CLOSED: if the container list, the image inventory, the keep-list or ANY plane's compose
-render cannot be read, the affected category removes nothing and says why. An age that cannot be
-parsed counts as too new.
+FAIL-CLOSED: if the container list, the image inventory, the keep-list (missing, unreadable, or
+with no pattern in it) or ANY plane's compose render cannot be read, the affected category removes
+nothing and says why. An age that cannot be parsed counts as too new. At execute, every threshold
+is the STRICTER of the stored plan's and config.json's, so editing a stored plan cannot lower one.
 """
 
 from __future__ import annotations
@@ -57,7 +62,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sysadmin as sa  # noqa: E402
 
-HEX64 = re.compile(r"^[0-9a-f]{64}$")
+HEX64 = re.compile(r"[0-9a-f]{64}\Z")  # use with .match: \Z, not $, so "<hex>\n" fails
 DAY = 86400.0
 _TOP = 10  # largest entries shown per category
 
@@ -89,6 +94,16 @@ def settings(**overrides) -> dict:
     return s
 
 
+def stricter(plan_settings: dict) -> dict:
+    """Execute-time settings: each threshold is the STRICTER (larger) of the plan's and the current
+    config's, so a plan file edited by hand cannot lower one. Paths always come from config."""
+    cur = settings()
+    for k in ("image_min_age_days", "anon_volume_min_age_days", "builder_keep_hours"):
+        if plan_settings.get(k) is not None:
+            cur[k] = max(cur[k], type(cur[k])(plan_settings[k]))
+    return cur
+
+
 # -- the ONLY mutating door -----------------------------------------------------
 def allowed_mutation(argv: list[str]) -> bool:
     """True only for the three removal shapes the operator approved."""
@@ -97,7 +112,8 @@ def allowed_mutation(argv: list[str]) -> bool:
     if len(argv) == 3 and argv[0] == "volume" and argv[1] == "rm":
         return bool(HEX64.match(argv[2]))
     if len(argv) == 5 and argv[:4] == ["builder", "prune", "-af", "--filter"]:
-        return bool(re.fullmatch(r"until=\d+h", argv[4]))
+        m = re.fullmatch(r"until=(\d+)h", argv[4])
+        return bool(m) and int(m.group(1)) >= 24  # never less than a day of cache
     return False
 
 
@@ -167,6 +183,8 @@ def load_keep(path: str) -> list[tuple[str, str]]:
         pat = pat.strip()
         if pat:
             out.append((pat, reason.strip() or "(no reason given)"))
+    if not out:
+        raise InventoryError(f"keep-list has no patterns ({path}) - refusing to treat that as 'protect nothing'")
     return out
 
 
@@ -222,10 +240,15 @@ def containers() -> list[dict]:
 
 def images() -> list[dict]:
     """Every top-level image (tagged or dangling): id, tags, digests, created epoch."""
-    ls = sa._docker(["images", "--no-trunc", "--format", "{{.ID}}"], timeout=60)
-    if ls["rc"] != 0:
-        raise InventoryError(f"docker images failed: {ls['err'].strip()}")
-    ids = sorted({x.strip() for x in ls["out"].splitlines() if x.strip()})
+    ids = set()
+    # CLI 29 hides untagged images from the plain listing; older CLIs show them. Take both, so the
+    # untagged ones are seen whatever the version.
+    for extra in ([], ["--filter", "dangling=true"]):
+        ls = sa._docker(["images", "--no-trunc"] + extra + ["--format", "{{.ID}}"], timeout=60)
+        if ls["rc"] != 0:
+            raise InventoryError(f"docker images {' '.join(extra)} failed: {ls['err'].strip()}")
+        ids |= {x.strip() for x in ls["out"].splitlines() if x.strip().startswith("sha256:")}
+    ids = sorted(ids)
     fmt = "{{.Id}}|{{.Created}}|{{json .RepoTags}}|{{json .RepoDigests}}"
     out = []
     for chunk in _chunks(ids):
@@ -277,6 +300,40 @@ def volume_users(name: str) -> list[str] | None:
     if r["rc"] != 0:
         return None
     return [x.strip() for x in r["out"].splitlines() if x.strip()]
+
+
+def compose_volume_names(manifest_path: str) -> tuple[set, list]:
+    """(volume names every plane's compose render declares, all profiles; errors)."""
+    import tomllib
+    names, errors = set(), []
+    try:
+        with open(manifest_path, "rb") as fh:
+            planes = tomllib.load(fh).get("planes", {})
+    except (OSError, ValueError) as e:
+        return names, [f"manifest unreadable ({manifest_path}): {e}"]
+    root = os.path.dirname(os.path.abspath(manifest_path))
+    for plane, spec in sorted(planes.items()):
+        rel = (spec or {}).get("compose")
+        path = os.path.join(root, rel) if rel else ""
+        if not rel or not os.path.isfile(path):
+            errors.append(f"{plane}: compose file missing")
+            continue
+        # --no-consistency: with every profile on, a plane whose profiles are ALTERNATIVES (frontend's
+        # stock/gpu share a container_name) fails the consistency check; the volume map is still right
+        r = sa._docker(["compose", "-f", path, "--profile", "*", "config", "--no-consistency",
+                        "--format", "json"], timeout=120)
+        try:
+            vols = (json.loads(r["out"]) or {}).get("volumes") or {} if r["rc"] == 0 else None
+        except ValueError:
+            vols = None
+        if vols is None:
+            errors.append(f"{plane}: compose config (volumes) failed: {(r['err'] or '').strip()[:200]}")
+            continue
+        for key, spec in vols.items():
+            names.add(key)
+            if isinstance(spec, dict) and spec.get("name"):
+                names.add(spec["name"])
+    return names, errors
 
 
 def compose_refs(manifest_path: str) -> tuple[set, set, list]:
@@ -370,14 +427,17 @@ def classify_images(imgs: list[dict], ctrs: list[dict], compose_names: set, comp
         age = None if im.get("created") is None else (now - im["created"]) / DAY
         base = {"id": iid, "age_days": None if age is None else round(age, 1),
                 "size_bytes": sizes.get(iid, 0.0)}
-        if not im["tags"]:  # dangling: what `image prune -f` used to take, now by explicit id
+        digest_hit = sorted(d for d in im.get("digests", []) if d in compose_digests)
+        if not im["tags"]:  # untagged: removed by explicit id, same in-use and digest protections
             if iid in users:
                 skipped.append({**base, "ref": iid, "kind": "in use",
                                 "reason": f"in use by {_who(users[iid], by_cid)}"})
+            elif digest_hit:
+                skipped.append({**base, "ref": iid, "kind": "compose-named",
+                                "reason": f"compose-named by digest {digest_hit[0]}"})
             else:
                 remove.append({**base, "ref": iid, "untagged": True})
             continue
-        digest_hit = sorted(d for d in im.get("digests", []) if d in compose_digests)
         protected_by = {}
         for t in im["tags"]:
             if t in compose_names:
@@ -411,14 +471,16 @@ def classify_images(imgs: list[dict], ctrs: list[dict], compose_names: set, comp
 
 
 def classify_volumes(vols: list[dict], ctrs: list[dict], min_age_days: float, now: float,
-                     users_of=volume_users, sizes: dict | None = None, workers: int = 8) -> dict:
+                     users_of=volume_users, sizes: dict | None = None, workers: int = 8,
+                     declared: set | None = None) -> dict:
     sizes = sizes or {}
+    declared = declared or set()
     by_cid = {c["id"]: c for c in ctrs}
     bulk: dict = {}
     for c in ctrs:
         for v in c["volumes"]:
             bulk.setdefault(v, []).append(c["id"])
-    anon = [v for v in vols if HEX64.match(v["name"])]
+    anon = [v for v in vols if HEX64.match(v["name"]) and v["name"] not in declared]
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         per = dict(zip([v["name"] for v in anon], pool.map(users_of, [v["name"] for v in anon])))
     remove, skipped = [], []
@@ -430,6 +492,10 @@ def classify_volumes(vols: list[dict], ctrs: list[dict], min_age_days: float, no
         if not HEX64.match(n):
             skipped.append({**row, "kind": "named volume",
                             "reason": "named volume (report-only, never removed)"})
+            continue
+        if n in declared:
+            skipped.append({**row, "kind": "named volume",
+                            "reason": "named volume: a compose file declares this name (report-only, never removed)"})
             continue
         cids = per.get(n)
         if cids is None:
@@ -523,8 +589,11 @@ def plan(**overrides) -> dict:
     try:
         if ctr_err:
             raise InventoryError(ctr_err)
+        declared, verrs = compose_volume_names(s["manifest"])
+        if verrs:
+            raise InventoryError("compose render incomplete - " + "; ".join(verrs))
         vol.update(classify_volumes(volumes(), ctrs, s["anon_volume_min_age_days"], now,
-                                    sizes=sizes.get("volumes")))
+                                    sizes=sizes.get("volumes"), declared=declared))
         vol["enabled"] = True
     except InventoryError as e:
         vol["disabled_reason"] = str(e)
@@ -614,7 +683,11 @@ def execute(listed: dict, s: dict, audit=None) -> dict:
             if ctr_err:
                 raise InventoryError(ctr_err)
             present = volumes(wantv)
-            fresh = classify_volumes(present, ctrs, s["anon_volume_min_age_days"], now)
+            declared, verrs = compose_volume_names(s["manifest"])
+            if verrs:
+                raise InventoryError("compose render incomplete - " + "; ".join(verrs))
+            fresh = classify_volumes(present, ctrs, s["anon_volume_min_age_days"], now,
+                                     declared=declared)
             ok = {r["name"] for r in fresh["remove"]}
             why = {r["name"]: r["reason"] for r in fresh["skipped"]}
             for n in wantv:
@@ -632,6 +705,7 @@ def execute(listed: dict, s: dict, audit=None) -> dict:
 
     h = listed.get("builder_until_hours")
     if h:
+        h = max(int(h), int(s["builder_keep_hours"]))
         r = _mutate(["builder", "prune", "-af", "--filter", f"until={int(h)}h"])
         out["build_cache"] = {"ran": f"docker builder prune -af --filter until={int(h)}h",
                               "rc": r["rc"], "err": r["err"].strip()[:160]}

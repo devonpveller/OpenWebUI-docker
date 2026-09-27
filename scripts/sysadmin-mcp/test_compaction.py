@@ -21,6 +21,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import compaction as cp  # noqa: E402
 import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_compaction")
 
 _passed = 0
 _failed = 0

@@ -84,11 +84,15 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
   included - rendered with `--profile *`; a `repo@sha256:` reference protects the image carrying
   that digest); the image was created 14 days ago or more (`thresholds.image_min_age_days`); the
   tag matches no pattern in `image-keep.txt`. An image id with a protected tag (compose or
-  keep-list) is never removed through another tag. Untagged images no container uses are removed
-  by id. Removal is `docker image rm <repo:tag>`, never with `-f`, never `image prune -a`.
+  keep-list) is never removed through another tag. Untagged images (dangling, or pulled by digest
+  only) are removed by id when no container uses them and no compose render pins them by digest;
+  docker CLI 29 hides them from a plain `docker images`, so the inventory adds `docker images
+  --filter dangling=true`. Removal is `docker image rm <repo:tag>` (or `<id>`), never with `-f`,
+  never `image prune -a`.
 - **Build cache** older than 168h: `docker builder prune -af --filter until=168h`
   (`thresholds.builder_keep_hours`), so the last week of cache stays for rebuilds.
-- **Anonymous volumes** where ALL hold: the name is 64 lowercase hex; no container, running or
+- **Anonymous volumes** where ALL hold: the name is 64 lowercase hex and no compose render
+  declares a volume by that name; no container, running or
   stopped, references it - checked per volume with `docker ps -a --filter volume=<id>` on top of
   every container's mounts; CreatedAt is 7 days ago or more (`thresholds.anon_volume_min_age_days`).
   Removal is `docker volume rm <id>`, one id at a time. **Named volumes are never removed** - they
@@ -100,8 +104,10 @@ volume). Its `confirm_token` is a hash of the listed set; the plan is stored und
 `state/reclaim-plans/` for `thresholds.reclaim_plan_ttl_hours` (24). Execute re-checks every
 listed item with the plan's thresholds and SKIPS anything now in use, re-pointed or gone; items
 that became eligible after the plan are not touched. Freed bytes are reported per category from
-`docker system df` before/after. If the container list, the keep-list or ANY compose render cannot
-be read, the affected category removes nothing and the plan says why.
+`docker system df` before/after. If the container list, the keep-list (missing, unreadable or
+without a single pattern) or ANY compose render cannot be read, the affected category removes
+nothing and the plan says why. At execute every threshold is the stricter of the stored plan's and
+`config.json`'s, so a hand-edited plan file cannot lower one.
 
 Space freed this way is freed inside the Docker vhdx: C: gets it back only at the next compaction.
 
