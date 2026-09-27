@@ -655,6 +655,38 @@ def t05_forbidden_shapes():
         why = getattr(sa, "run_refusal", lambda c: None)(wsl + ["sh", "-c", "rm -rf /"]) or ""
         check("the wsl PROGRAM allowlist itself refuses `sh` (not only the argument validator)",
               why.startswith("wsl call outside"), why)
+        # attempt-6 tester constructs, each exercising the three helpers DIRECTLY (one per rule)
+        clp = getattr(sa, "container_log_path", lambda p: True)
+        war = getattr(sa, "wsl_args_refusal", lambda *a: None)
+        str_ = getattr(sa, "schtasks_refusal", lambda a: None)
+        hx, hy = hexid("t05-log-a"), hexid("t05-log-b")
+        good = f"{m}/data/docker/containers/{hx}/{hx}-json.log"
+        check("container_log_path accepts Docker's own log path", clp(good))
+        for why_bad, path in (("short id", f"{m}/data/docker/containers/abc123/abc123-json.log"),
+                              ("63-hex id", f"{m}/data/docker/containers/{hx[:63]}/{hx[:63]}-json.log"),
+                              ("mismatched dir / file id", f"{m}/data/docker/containers/{hx}/{hy}-json.log"),
+                              ("suffix <LOG>.1", good + ".1"),
+                              ("<LOG>/../.. into a volume", good + "/../../volumes/v/_data/webui.db"),
+                              ("a log inside a volume", f"{m}/data/docker/volumes/v/_data/containers/{hx}/{hx}-json.log"),
+                              ("another mount", f"/mnt/other/data/docker/containers/{hx}/{hx}-json.log")):
+            check(f"container_log_path refuses: {why_bad}", not clp(path), path)
+            check(f"wsl truncate refuses: {why_bad}", war("truncate", ["-s", "0", path]) is not None, path)
+        root = f"{m}/data/docker/containers"
+        for why_bad, fargs in (("-fprint0 F", [root, "-fprint0", "/etc/x"]),
+                               ("-delete -delete", [root, "-delete", "-delete"]),
+                               ("-delete -print", [root, "-delete", "-print"]),
+                               ("-exec gzip -k {} ;", [root, "-name", "*-json.log", "-exec", "gzip", "-k", "{}", ";"]),
+                               ("-exec rm -f {} +", [root, "-exec", "rm", "-f", "{}", "+"])):
+            check(f"wsl find refuses: {why_bad}", war("find", fargs) is not None, str(fargs))
+        for why_bad, targs in (("/query /tn T /delete /f", ["/query", "/tn", "T", "/delete", "/f"]),
+                               ("/query /delete T", ["/query", "/delete", "T"]),
+                               ("/query /tn T /fo csv", ["/query", "/tn", "T", "/fo", "csv"]),
+                               ("/query /tn /run (a switch as the name)", ["/query", "/tn", "/run"]),
+                               ("/query /tn /delete /fo list", ["/query", "/tn", "/delete", "/fo", "list"]),
+                               ('/query /tn with a quote', ["/query", "/tn", 'a" /delete /f "b']),
+                               ('/run /tn with a quote', ["/run", "/tn", 'AI-Stack Sysadmin Compact VHDX"'])):
+            check(f"schtasks refuses: {why_bad}", str_(targs) is not None, str(targs))
+        check("schtasks accepts /query /tn <name> /fo LIST", str_(["/query", "/tn", "AI-Stack Sysadmin Compact VHDX", "/fo", "LIST"]) is None)
         check("the argument validator also refuses a program it does not know",
               getattr(sa, "wsl_args_refusal", lambda *a: None)("sh", ["-c", "x"]) is not None)
     finally:
@@ -966,8 +998,11 @@ def t17_compose_declared_hex_volume():
 
 def _guarded_child_env(mode: str, log: str) -> dict:
     """The environment every meta-test child runs under: the guard mode is SET (never removed), and
-    the startup hook + guard come from THIS checkout, so the child and every Python process it
-    starts are guarded from their first line whatever the code under test contains."""
+    the startup hook + guard come from THIS checkout, so the child - and the Python processes it
+    starts the ordinary way - are guarded from their first line whatever the code under test
+    contains. NOT covered: a process started with -I / -E / -S (which skip PYTHONPATH or site) or
+    given a scrubbed env= without ACSR_TESTGUARD and PYTHONPATH - that is why these tests run only in
+    a disposable container, which is the barrier; the guard is defence in depth."""
     env = dict(os.environ)
     env.update(DOCKER_HOST=_testguard.DEAD, ACSR_CALL_LOG=log, ACSR_META_CHILD="1",
                PYTHONDONTWRITEBYTECODE="1", ACSR_TESTGUARD=mode, ACSR_TESTGUARD_DIR=_testguard.HERE)

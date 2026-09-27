@@ -234,8 +234,11 @@ def wsl_args_refusal(prog: str, args: list[str]) -> str | None:
 
 def schtasks_refusal(args: list[str]) -> str | None:
     """Only `/query /tn <name> [/fo LIST]` and `/run /tn "AI-Stack Sysadmin Compact VHDX"` (the gated
-    compaction). /delete, /create, /change, /end and everything else are refused."""
+    compaction). /delete, /create, /change, /end and everything else are refused, and so is a /tn
+    value that starts with `/` (a switch in the name's slot) or contains `"`."""
     low = [x.lower() for x in args]
+    if len(args) >= 3 and (args[2].startswith("/") or '"' in args[2]):
+        return "the /tn value must be a task name: not a switch (/...) and no quote character"
     if len(args) in (3, 5) and low[:2] == ["/query", "/tn"] and (len(args) == 3 or low[3:] == ["/fo", "list"]):
         return None
     if args == ["/run", "/tn", COMPACT_TASK]:
