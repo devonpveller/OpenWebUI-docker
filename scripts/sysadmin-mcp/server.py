@@ -31,6 +31,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if os.environ.get("ACSR_TESTGUARD"):  # started by a test: guard this process too (see _testguard.py)
+    import _testguard  # noqa: E402
+    _testguard.install_process_guard(os.environ["ACSR_TESTGUARD"], "server.py")
 import sysadmin as sa  # noqa: E402
 import executor as ex  # noqa: E402
 import compaction as cp  # noqa: E402

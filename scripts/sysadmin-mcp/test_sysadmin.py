@@ -64,9 +64,13 @@ def test_live() -> None:
     dr = sa.disk_report()
     check("disk_report has drives", "drives" in dr and "system" in dr["drives"])
     check("disk_report has verdict", "verdict" in dr and "severity" in dr["verdict"])
-    check("disk_report system free_gb numeric",
-          isinstance(dr["drives"]["system"].get("free_gb"), (int, float)),
-          str(dr["drives"]["system"]))
+    if os.name == "nt":
+        check("disk_report system free_gb numeric",
+              isinstance(dr["drives"]["system"].get("free_gb"), (int, float)),
+              str(dr["drives"]["system"]))
+    else:  # the test container has no C: - WINDOWS-ONLY check; here the probe must fail SOFT
+        check("disk_report system drive probe fails soft off Windows (error field, no crash)",
+              "error" in dr["drives"]["system"], str(dr["drives"]["system"]))
     check("verdict severity valid",
           dr["verdict"]["severity"] in ("healthy", "attention", "critical"),
           dr["verdict"].get("severity"))

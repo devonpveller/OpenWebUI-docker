@@ -77,6 +77,7 @@ class FakeDocker:
         self.cli29 = True
         self.hide_inspect_mounts = False    # bulk mount read misses every volume
         self.ps_volume_filter_blind = False  # `ps -a --filter volume=` finds nothing
+        self.inspect_drops_one = False       # `docker inspect` of containers returns one row fewer
 
     # builders
     def image(self, tag_or_tags, days, size=1e9, digests=()):
@@ -145,7 +146,7 @@ class FakeDocker:
                                     + "\n" for cid, c in rows))
         if a[0] == "inspect":
             out = []
-            for cid in a[3:]:
+            for cid in (a[4:] if self.inspect_drops_one else a[3:]):
                 c = self.containers[cid]
                 vols = [] if self.hide_inspect_mounts else c["volumes"]
                 out.append(f"{cid}|/{c['name']}|{c['image']}|{c['state']}|" + "".join(v + "," for v in vols))
@@ -532,15 +533,35 @@ def t05_forbidden_shapes():
     sa.subprocess.run = lambda cmd, *a, **k: started.append(list(cmd)) or _P()
     try:
         deny = bad + [["compose", "-f", "x.yml", "down", "-v"], ["-H", "tcp://elsewhere", "ps"],
-                      ["system", "info"], ["volume", "remove", hexid("z"), "frontend_openwebui-data"]]
+                      ["system", "info"], ["volume", "remove", hexid("z"), "frontend_openwebui-data"],
+                      # attempt-2 tester D1: a VALUE named `config` must not make compose pass
+                      ["compose", "--profile", "config", "down", "-v"], ["compose", "-f", "config", "down"],
+                      ["compose", "-p", "config", "down", "-v", "--rmi", "all"],
+                      ["compose", "-f", "x.yml", "down", "-v", "config"],
+                      ["compose", "--file=config", "down"], ["compose", "--project-name=config", "rm", "-f"],
+                      ["compose", "--env-file", "config", "up", "-d"], ["compose", "-f"],
+                      ["compose", "--unknown-opt", "config", "--images"],
+                      ["compose", "-f", "x.yml", "config", "--images", "-o", "/tmp/x"],
+                      ["compose", "-f", "x.yml", "config"], ["compose", "config", "--images", "down"],
+                      ["compose", "--profile", "*", "--dry-run", "down"],
+                      # other verbs the attempt-2 deny-list let through
+                      ["rm", "-fv", "x"], ["container", "rm", "-v", "x"], ["stop", "x"], ["kill", "x"],
+                      ["network", "rm", "x"], ["run", "-v", "/:/host", "alpine"], ["exec", "openwebui", "sh"],
+                      ["exec", "-u", "root", "ao-worker-1", "sh"], ["image", "rm", "a", "b"],
+                      ["image", "--help", "rm", "x"], ["volume", "--help", "rm", "x"],
+                      ["volume", "rm", hexid("z"), "-f"], ["builder", "prune", "-af", "--filter", "until=24h", "--all"],
+                      ["system", "--help", "prune"], ["buildx", "prune", "-af"], ["desktop", "stop"]]
         for argv in deny:
             r = real_run(["docker"] + argv)
             check(f"deny-list refuses docker {' '.join(argv)[:40]!r}", r["rc"] == 126 and "deny-list" in r["err"], str(r))
         check("deny-list: none of those started a process", started == [], str(started[:3]))
-        for argv in (["ps", "-a"], ["system", "df"], ["builder", "prune", "-af", "--filter", "until=168h"],
-                     ["volume", "rm", hexid("y")], ["image", "rm", "x:1"], ["compose", "-f", "x.yml", "config", "--images"]):
+        need = [["ps", "-a"], ["system", "df"], ["builder", "prune", "-af", "--filter", "until=168h"],
+                ["volume", "rm", hexid("y")], ["image", "rm", "x:1"], ["compose", "-f", "x.yml", "config", "--images"],
+                ["compose", "-f", "x.yml", "--profile", "*", "config", "--no-consistency", "--format", "json"],
+                ["exec", "ao-worker-1", "sh", "-c", "ls"], ["inspect", "--format", "{{.Id}}", "x"]]
+        for argv in need:
             real_run(["docker"] + argv)
-        check("deny-list passes the six shapes the code needs", len(started) == 6, str(started))
+        check(f"deny-list passes the {len(need)} shapes the code needs", len(started) == len(need), str(started))
     finally:
         sa.subprocess.run = saved
     # source grep: code lines (not comments/docstrings) in every file that runs docker for the sysadmin
@@ -795,6 +816,7 @@ def t15_forged_plan_thresholds():
         act["docker"]["images"] = [["two-days:1", next(iter(f.images))]]
         act["docker"]["volumes"] = [vol]
         act["settings"] = {"image_min_age_days": 0, "anon_volume_min_age_days": 0, "builder_keep_hours": 24}
+        act["docker"]["builder_until_hours"] = 24  # the LISTED value, not only the settings
         tok = ex._plan_token(act)
         plan = dict(p, actions=act, confirm_token=tok)
         ex._save_plan(tok, plan)
@@ -802,7 +824,7 @@ def t15_forged_plan_thresholds():
         check("forged plan accepted as a token (it is well-formed)", not r.get("refused"), str(r)[:160])
         check("forged low thresholds: the 2-day image survives", "two-days:1" in tags(f))
         check("forged low thresholds: the 1-day volume survives", vol in f.volumes)
-        check("builder prune ran at the config's 168h, not the forged 24h",
+        check("builder prune ran at the config's 168h, not the forged LISTED 24h",
               ["builder", "prune", "-af", "--filter", "until=168h"] in f.mutating_calls(), str(f.mutating_calls()))
 
 
@@ -845,6 +867,19 @@ def t17_compose_declared_hex_volume():
         check("declared volume survives execute", hexdecl in f.volumes and orphan not in f.volumes)
 
 
+def _guarded_child_env(mode: str, log: str) -> dict:
+    """The environment every meta-test child runs under: the guard mode is SET (never removed), and
+    the startup hook + guard come from THIS checkout, so the child and every Python process it
+    starts are guarded from their first line whatever the code under test contains."""
+    env = dict(os.environ)
+    env.update(DOCKER_HOST=_testguard.DEAD, ACSR_CALL_LOG=log, ACSR_META_CHILD="1",
+               PYTHONDONTWRITEBYTECODE="1", ACSR_TESTGUARD=mode, ACSR_TESTGUARD_DIR=_testguard.HERE)
+    pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = _testguard.SITE_DIR + (os.pathsep + pp if pp else "")
+    env.pop("DOCKER_CONTEXT", None)
+    return env
+
+
 def t18_meta_guards_mutated_open():
     """with BOTH production guards mutated to allow everything, the suite FAILS and nothing reaches docker"""
     if os.environ.get("ACSR_META_CHILD"):
@@ -864,9 +899,12 @@ def t18_meta_guards_mutated_open():
             check(f"meta: mutation applied to {rel}", old in src)
             open(fp, "w", encoding="utf-8", newline="\n").write(src.replace(old, new, 1))
         log = os.path.join(tmp, "calls.jsonl")
-        env = dict(os.environ, DOCKER_HOST="tcp://127.0.0.1:1", ACSR_CALL_LOG=log, ACSR_META_CHILD="1",
-                   PYTHONDONTWRITEBYTECODE="1")
-        env.pop("DOCKER_CONTEXT", None)
+        env = _guarded_child_env("fake", log)
+        ok, why = _testguard.canary_ok(env, log)
+        check("meta: CANARY - a child under this env is guarded (else abort)", ok, why)
+        if not ok:
+            return
+        open(log, "w").close()  # the canary's own refusal is not part of the child's record
         r = subprocess.run([sys.executable, os.path.join(dst, "test_docker_reclaim.py")], env=env,
                            capture_output=True, text=True, timeout=600)
         first = (r.stdout.splitlines() or [""])[0]
@@ -882,6 +920,182 @@ def t18_meta_guards_mutated_open():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def t19_meta_non_reclaim_gate():
+    """compaction's gates mutated open: the suite FAILS and schtasks /run is refused in a GRANDCHILD"""
+    if os.environ.get("ACSR_META_CHILD"):
+        print("  (skipped inside the meta child)")
+        return
+    tmp = tempfile.mkdtemp(prefix="acsr-meta2-")
+    try:
+        dst = os.path.join(tmp, "scripts", "sysadmin-mcp")
+        shutil.copytree(_HERE, dst, ignore=shutil.ignore_patterns("state", "__pycache__"))
+        for d in ("maintenance", "lib"):
+            shutil.copytree(os.path.join(_REPO, "scripts", d), os.path.join(tmp, "scripts", d))
+        fp = os.path.join(dst, "compaction.py")
+        src = open(fp, encoding="utf-8").read()
+        muts = ('    if not confirm_token or confirm_token != plan["confirm_token"]:\n',
+                '    if not plan["task_registered"]:\n', '    if not plan["warranted"]:\n')
+        for m in muts:
+            check(f"meta2: gate present to mutate: {m.strip()[:50]}", m in src)
+            src = src.replace(m, "    if False:  # META MUTATION\n", 1)
+        open(fp, "w", encoding="utf-8", newline="\n").write(src)
+        log = os.path.join(tmp, "calls.jsonl")
+        # NEVER run a copy without the inherited guard (2026-09-27 15:19 UTC: this test, run with the
+        # guard variable REMOVED against a copy whose own code had no guard, let the real
+        # `schtasks /run` start a compaction). The mode is SET to readonly, so the readonly allowlist
+        # is what stands between the child's children and schtasks, and the canary proves it first.
+        check("meta2: the copy carries the guard (_testguard.py + _testsite)",
+              os.path.isfile(os.path.join(dst, "_testguard.py"))
+              and os.path.isfile(os.path.join(dst, "_testsite", "sitecustomize.py")))
+        env = _guarded_child_env("readonly", log)
+        ok, why = _testguard.canary_ok(env, log)
+        check("meta2: CANARY - a child under this env is guarded (else abort)", ok, why)
+        if not ok:
+            return
+        open(log, "w").close()
+        child = subprocess.Popen([sys.executable, os.path.join(dst, "test_sysadmin.py")], env=env,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = child.communicate(timeout=900)
+        rows = [json.loads(x) for x in open(log, encoding="utf-8")] if os.path.exists(log) else []
+        runs = [r for r in rows if r.get("argv", [""])[0].lower().endswith(("schtasks", "schtasks.exe"))
+                and "/run" in [x.lower() for x in r.get("argv", [])]]
+        check("meta2: the suite FAILS with compaction's gates mutated open", child.returncode != 0, out[-300:])
+        check("meta2: `schtasks /run` was attempted and REFUSED by the guard",
+              bool(runs) and all(r.get("verdict") == "refused" for r in runs), str(runs)[:300])
+        check("meta2: ...in a GRANDCHILD (server.py), not in the child suite itself",
+              bool(runs) and all(r.get("pid") != child.pid and str(r.get("label", "")).endswith("server.py")
+                                 for r in runs),
+              f"child pid {child.pid}: " + str([(r.get('pid'), r.get('label')) for r in runs]))
+        shim = [r for r in rows if r.get("kind") == "shim"]
+        check("meta2: nothing reached the PATH shim", shim == [], str(shim[:3]))
+        leaked = [r for r in rows if r.get("verdict") == "allowed" and not _testguard.allowed_readonly(r["argv"])]
+        unlabelled = [r for r in rows if r.get("kind") == "guard" and not r.get("label")]
+        check("meta2: every guarded start came from a labelled (guarded) process", unlabelled == [], str(unlabelled[:3]))
+        check("meta2: every ALLOWED start in the log is an exact read-only shape", leaked == [], str(leaked[:3]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def t20_fail_closed_branches():
+    """the fail-closed branches the attempt-2 tester's mutations showed untested"""
+    with Env() as env:  # n: unreadable image age counts as too new
+        iid = env.fake.image("garbled:1", 30)
+        env.fake.images[iid]["created"] = "not-a-date"
+        p = ex.reclaim_plan()
+        check("unreadable Created -> not listed, skipped as too new",
+              listed_refs(p) == [] and (skipped_reason(p, "images", "ref", "garbled:1") or "").startswith("age unknown"),
+              str(skipped_reason(p, "images", "ref", "garbled:1")))
+    with Env() as env:  # p: a FAILED per-volume check is not "unused"
+        v = env.fake.volume(hexid("pcheck"), 30)
+        env.fake.fail.add(("docker", "ps", "-a", "-q", "--no-trunc", "--filter"))
+        p = ex.reclaim_plan()
+        check("per-volume check failed -> volume skipped, not listed",
+              listed_vols(p) == [] and (skipped_reason(p, "volumes", "name", v) or "").startswith("usage check failed"),
+              str(skipped_reason(p, "volumes", "name", v)))
+    with Env() as env:  # r: one container missing from the inspect -> both categories off
+        f = env.fake
+        img = f.image("stale:1", 30)
+        f.container("c1", f.image("other:local", 30), "exited")
+        f.container("c2", img, "exited")
+        f.volume(hexid("rr"), 30)
+        f.inspect_drops_one = True
+        p = ex.reclaim_plan()
+        check("container count mismatch -> nothing listed, reason says so",
+              listed_refs(p) == [] and listed_vols(p) == []
+              and "inspected" in str(p["docker"]["images"].get("disabled_reason")), str(p["docker"]["images"].get("disabled_reason")))
+    with Env() as env:  # w: container listing fails at EXECUTE
+        f = env.fake
+        f.image("stale:1", 30)
+        v = f.volume(hexid("ww"), 30)
+        p = ex.reclaim_plan()
+        f.fail.add(("docker", "ps", "-a", "-q", "--no-trunc"))
+        r = ex.reclaim_execute(p["confirm_token"])
+        check("container listing fails at execute -> nothing removed",
+              "stale:1" in tags(f) and v in f.volumes, str(r)[:200])
+        check("... and both categories report re-validation failed",
+              json.dumps(r.get("docker", {})).count("re-validation failed") >= 2)
+
+
+def t21_path_shim_catches_non_python():
+    """a NON-Python child (PowerShell) that calls docker by name lands in the PATH shim, not docker"""
+    shim = [d for d in os.environ.get("PATH", "").split(os.pathsep) if "acsr-shim-" in d]
+    if os.name != "nt":
+        print("  (Windows-only: the shim is a .NET exe)")
+        return
+    check("the PATH shim directory is first on PATH", bool(shim) and os.environ["PATH"].startswith(shim[0]), str(shim))
+    if not shim or os.environ.get("DOCKER_HOST") != _testguard.DEAD:
+        check("shim probe needs the shim AND the dead endpoint (not run)", False, str((shim, os.environ.get("DOCKER_HOST"))))
+        return
+    log = os.path.join(tempfile.mkdtemp(prefix="acsr-shim-t-"), "calls.jsonl")
+    ps = os.environ.get("ACSR_REAL_POWERSHELL") or shutil.which("powershell") or "powershell"
+    saved = subprocess.Popen._execute_child
+    subprocess.Popen._execute_child = _testguard._REAL_EXEC  # this test starts PowerShell on purpose
+    try:
+        r = subprocess.run([ps, "-NoProfile", "-Command", "docker info; exit $LASTEXITCODE"],
+                           env=dict(os.environ, ACSR_CALL_LOG=log), capture_output=True, text=True, timeout=120)
+    finally:
+        subprocess.Popen._execute_child = saved
+    rows = [json.loads(x) for x in open(log, encoding="utf-8")] if os.path.exists(log) else []
+    check("PowerShell's `docker info` reached the SHIM (exit 99), not docker", r.returncode == 99, f"rc {r.returncode} {r.stderr[-200:]}")
+    check("... and the shim logged it", any(x.get("kind") == "shim" and "info" in " ".join(x.get("argv", [])) for x in rows), str(rows))
+
+
+def t22_system_programs_refused_by_name_or_path():
+    """wsl / schtasks / powershell / cmd and any other Windows program are judged whatever their path"""
+    if os.environ.get("ACSR_META_CHILD"):  # its deliberate refusals would pollute a meta-test's call log
+        print("  (skipped inside the meta child)")
+        return
+    win = os.environ.get("SystemRoot", r"C:\\Windows")
+    probes = [["schtasks", "/run", "/tn", "ACSR-X"], [os.path.join(win, "System32", "schtasks.exe"), "/run", "/tn", "ACSR-X"],
+              ["SCHTASKS.EXE", "/delete", "/tn", "ACSR-X", "/f"], ["wsl", "--shutdown"], ["wsl.exe", "-t", "docker-desktop"],
+              [os.path.join(win, "System32", "wsl.exe"), "--unregister", "docker-desktop"],
+              ["powershell", "-Command", "Stop-Service x"], ["cmd", "/c", "docker system prune -af"],
+              ["cmd.exe", "/c", "echo"], ["taskkill", "/im", "com.docker.backend.exe", "/f"],
+              ["sc", "stop", "com.docker.service"], [os.path.join(win, "System32", "shutdown.exe"), "/r"],
+              ["schtasks", "/change", "/tn", "ACSR-X", "/disable"], ["schtasks", "/end", "/tn", "ACSR-X"]]
+    for argv in probes:
+        check(f"judged by name or path: {os.path.basename(argv[0])} {argv[1]}", _testguard.is_guarded(argv))
+        check(f"not on the read-only allowlist: {os.path.basename(argv[0])} {' '.join(argv[1:3])}",
+              not _testguard.allowed_readonly(argv))
+    check("allowlisted: schtasks /query /tn X", _testguard.allowed_readonly(["schtasks", "/query", "/tn", "X"]))
+    check("is_guarded sees an innocent-looking argv[0] with a System32 executable=",
+          _testguard.is_guarded(["innocent"], executable=os.path.join(win, "System32", "schtasks.exe")))
+    for name in ("system", "startfile", "spawnv", "execv"):
+        if hasattr(os, name):
+            try:
+                # harmless arguments even if the guard were missing: an echo, a file that does not
+                # exist, a program that does not exist
+                if name == "system":
+                    os.system("echo acsr-guard-probe")
+                elif name == "startfile":
+                    os.startfile(os.path.join(tempfile.gettempdir(), "acsr-does-not-exist.txt"))
+                else:
+                    getattr(os, name)("acsr-no-such-program.exe", ["acsr-no-such-program.exe"])
+                check(f"os.{name} refused in a test run", False)
+            except _testguard.RealDockerCall:
+                check(f"os.{name} refused in a test run", True)
+            except Exception as e:  # noqa: BLE001
+                check(f"os.{name} refused in a test run", False, repr(e))
+    try:
+        subprocess.run("echo hi", shell=True, capture_output=True)
+        check("shell=True refused in a test run", False)
+    except _testguard.RealDockerCall:
+        check("shell=True refused in a test run", True)
+
+
+def t23_refuses_to_run_outside_the_container():
+    """no sysadmin test can run on a host: a module started without the container marker exits 2 at once"""
+    env = dict(os.environ)
+    env.pop("ACSR_IN_CONTAINER", None)  # ONLY the container marker: the inherited guard stays SET, so
+    # even a module whose code lacks the container check runs guarded (never remove the guard)
+    for mod in ("test_docker_reclaim.py", "test_sysadmin.py", "test_executor.py", "test_compaction.py",
+                "test_check_backups.py", "test_telegram_listener.py"):
+        r = subprocess.run([sys.executable, os.path.join(_HERE, mod)], env=env, capture_output=True, text=True, timeout=120)
+        check(f"{mod} without the container marker: exit 2, REFUSED, nothing ran",
+              r.returncode == 2 and "REFUSED" in r.stdout and "PASS" not in r.stdout, f"rc {r.returncode} {r.stdout[:160]}")
+    check("the rule itself: in_container() is False on Windows by construction",
+          "os.name == \"posix\"" in open(os.path.join(_HERE, "_testguard.py"), encoding="utf-8").read())
+
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -892,7 +1106,9 @@ if __name__ == "__main__":
                  t07_fail_closed, t08_thresholds_configurable, t09_auto_path, t10_render,
                  t11_docs_match, t12_host_keep_list_seed, t13_untagged_on_cli29, t14_empty_keep_list,
                  t15_forged_plan_thresholds, t16_per_volume_check_isolated, t17_compose_declared_hex_volume,
-                 t18_meta_guards_mutated_open):
+                 t18_meta_guards_mutated_open, t19_meta_non_reclaim_gate, t20_fail_closed_branches,
+                 t21_path_shim_catches_non_python, t22_system_programs_refused_by_name_or_path,
+                 t23_refuses_to_run_outside_the_container):
         run_case(case)
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

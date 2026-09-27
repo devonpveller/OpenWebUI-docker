@@ -27,7 +27,8 @@ feature developer.
     or pulled by digest only) go too, by id, when no container uses them and no compose file pins
     them by digest. Always by explicit tag or id, never `image prune -a`.
   - **build cache** older than a week: `docker builder prune -af --filter until=168h`.
-  - **anonymous volumes** (64-hex names that no compose file declares) that no container
+  - **anonymous volumes** (64-hex names that no plane's compose render names - a render keeps a
+    top-level volume only when a service uses it) that no container
     references, running or stopped (checked per volume), created 7 days ago or more. Always by
     explicit id: `docker volume rm <id>`.
   - idle ao-worker `/tmp` session logs (busy workers skipped automatically) and oversized container

@@ -30,7 +30,10 @@ BUILD CACHE - `docker builder prune -af --filter until=<builder_keep_hours>h` (d
 
 ANONYMOUS VOLUMES - a volume is removed only when ALL hold:
   * its name is exactly 64 lowercase hex characters (docker's anonymous-volume naming), and no
-    compose file declares a volume by that name (such a volume is NAMED, whatever it looks like);
+    plane's compose RENDER names a volume by that name (such a volume is NAMED, whatever it looks
+    like). A render keeps a top-level volume only when a service uses it, so a declared but
+    unreferenced 64-hex name is not seen - and neither is a hand-made `docker volume create <64-hex>`;
+    both count as anonymous;
   * no container, running or stopped, references it - checked PER VOLUME with
     `docker ps -a --filter volume=<name>`, on top of a bulk read of every container's mounts;
   * its CreatedAt is `anon_volume_min_age_days` (default 7) or more days ago.

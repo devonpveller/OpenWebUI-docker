@@ -59,34 +59,90 @@ def load_config() -> dict:
 # ── subprocess helpers ─────────────────────────────────────────────────────────
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
+# `docker compose` global options that take a VALUE, and those that do not. Anything else before
+# the subcommand makes the argv unparseable, and an unparseable compose argv is refused.
+_COMPOSE_GLOBAL_VALUE = {"-f", "--file", "-p", "--project-name", "--profile", "--env-file",
+                         "--project-directory", "--ansi", "--parallel", "--progress"}
+_COMPOSE_GLOBAL_FLAG = {"--compatibility", "--dry-run", "--all-resources"}
+# the ONLY `compose config` options sysadmin code passes
+_COMPOSE_CONFIG_OPTS = [["--images"], ["--no-consistency", "--format", "json"]]
+
+
+def compose_subcommand(a: list[str]) -> tuple[str | None, list[str]]:
+    """(subcommand, its args) for the argv after `compose`, skipping global options and their
+    values; (None, []) when the argv cannot be parsed."""
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x in _COMPOSE_GLOBAL_FLAG:
+            i += 1
+        elif x in _COMPOSE_GLOBAL_VALUE:
+            if i + 1 >= len(a):
+                return None, []
+            i += 2
+        elif "=" in x and x.split("=", 1)[0] in _COMPOSE_GLOBAL_VALUE and x.startswith("--"):
+            i += 1
+        elif x.startswith("-"):
+            return None, []  # an option we do not know: we cannot know whether it takes a value
+        else:
+            return x, a[i + 1:]
+    return None, []
+
 
 def docker_refusal(args: list[str]) -> str | None:
-    """The LOWEST-level deny-list for docker argv (everything after `docker`). Independent of
-    docker_reclaim's allow-list on purpose: a mutated or buggy caller must not reach the daemon with
-    these shapes (2026-09-27: a test mutation that made the upper guard permissive ran
-    `system prune -af --volumes` against the host). Returns a reason, or None when allowed."""
+    """The LOWEST-level guard for docker argv (everything after `docker`): an ALLOWLIST of the exact
+    shapes sysadmin code uses, with each verb's SUBCOMMAND read at its position (a word appearing
+    elsewhere in the argv, e.g. a profile or project NAMED `config`, proves nothing). Independent
+    of docker_reclaim's allow-list on purpose: a mutated or buggy caller must not reach the daemon
+    with anything else (2026-09-27: a test mutation that opened the upper guard ran
+    `system prune -af --volumes` against the host; attempt 2's word test let
+    `compose --profile config down -v` through). Returns a reason, or None when allowed."""
     a = [str(x) for x in args]
     if not a:
         return "empty docker argv"
-    if a[0].startswith("-"):
-        return "global docker options are not used by sysadmin code (could redirect the daemon)"
-    if a[0] == "system" and a[1:2] != ["df"]:
-        return "docker system <anything but df>"
-    if a[0] == "rmi":
-        return "docker rmi"
-    if "prune" in a[:3]:
-        m = (len(a) == 5 and a[:4] == ["builder", "prune", "-af", "--filter"]
-             and re.fullmatch(r"until=(\d+)h", a[4]))
-        if not (m and int(m.group(1)) >= 24):
-            return "prune other than `builder prune -af --filter until=<N>h`, N>=24"
-    if a[0] == "volume" and a[1:2] in (["rm"], ["remove"]):
-        if len(a) < 3 or not all(_HEX64.match(x) for x in a[2:]):
-            return "volume rm of anything but 64-hex anonymous-volume names (no flags)"
-    if a[0] == "image" and a[1:2] in (["rm"], ["remove"]) and any(x.startswith("-") for x in a[2:]):
-        return "image rm with flags (-f/--force)"
-    if a[0] == "compose" and "config" not in a:
-        return "docker compose other than `config`"
-    return None
+    verb, rest = a[0], a[1:]
+    if verb.startswith("-"):
+        return "global docker options are not used by sysadmin code (they could redirect the daemon)"
+    if verb in ("ps", "inspect", "images", "logs", "info", "version"):
+        return None  # read-only in every form
+    if verb == "exec":
+        # the /tmp sweep and idleness probes: only into the configured ao-workers, no exec options
+        workers = set(load_config().get("ao_workers", []))
+        if rest and rest[0] in workers:
+            return None
+        return "docker exec outside the configured ao-workers (or with exec options)"
+    if verb == "compose":  # its globals come before the subcommand, so parse past them
+        subc, cargs = compose_subcommand(rest)
+        if subc is None:
+            return "docker compose argv could not be parsed (unknown global option) - refused"
+        if subc != "config":
+            return f"docker compose subcommand {subc!r}: only `config`"
+        if cargs not in _COMPOSE_CONFIG_OPTS:
+            return f"docker compose config {cargs}: only --images, or --no-consistency --format json"
+        return None
+    sub = rest[0] if rest else ""
+    if sub.startswith("-") or not sub:
+        return f"docker {verb}: no subcommand at position 2"
+    tail = rest[1:]
+    if verb == "image":
+        if sub in ("inspect", "ls"):
+            return None
+        if sub == "rm" and len(tail) == 1 and tail[0] and not tail[0].startswith("-"):
+            return None
+        return "docker image: only inspect/ls, or rm of ONE ref with no flags"
+    if verb == "volume":
+        if sub in ("ls", "inspect"):
+            return None
+        if sub == "rm" and tail and all(_HEX64.match(x) for x in tail):
+            return None
+        return "docker volume: only ls/inspect, or rm of 64-hex anonymous-volume names (no flags)"
+    if verb == "system":
+        return None if sub == "df" else "docker system: only df"
+    if verb == "builder":
+        m = (sub == "prune" and len(tail) == 3 and tail[:2] == ["-af", "--filter"]
+             and re.fullmatch(r"until=(\d+)h", tail[2]))
+        return None if (m and int(m.group(1)) >= 24) else "docker builder: only `prune -af --filter until=<N>h`, N>=24"
+    return f"docker {verb}: not a shape sysadmin code uses"
 
 
 def _run(cmd: list[str], timeout: int = 30) -> dict:
@@ -95,7 +151,7 @@ def _run(cmd: list[str], timeout: int = 30) -> dict:
     if cmd and os.path.basename(str(cmd[0])).lower() in ("docker", "docker.exe"):
         why = docker_refusal(list(cmd[1:]))
         if why:
-            return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:6]}"}
+            return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:8]}"}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return {"rc": p.returncode, "out": p.stdout or "", "err": p.stderr or ""}

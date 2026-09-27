@@ -46,6 +46,14 @@ python scripts/sysadmin-mcp/test_executor.py     # safe-reclaim gate (+ --live-e
 python scripts/sysadmin-mcp/test_docker_reclaim.py  # reclaim rules against a fake docker (no daemon)
 python scripts/sysadmin-mcp/test_compaction.py   # compaction gate (non-destructive)
 ```
+Every test module installs `_testguard.py` at import, and every Python child it starts inherits it
+(`_testsite/sitecustomize.py`; `server.py` also honours `ACSR_TESTGUARD`). `DOCKER_HOST` defaults
+to the dead endpoint `tcp://127.0.0.1:1` and is printed first; set it to a disposable DinD to run
+the LIVE sections. Every docker / wsl / schtasks / PowerShell start is checked against an EXACT
+read-only allowlist (hermetic suites allow none), recorded with its pid in `ACSR_CALL_LOG`, and a
+recorder shim for non-Python children goes first on `PATH`. The read-only suites DO read the host
+through that allowlist: `wsl -d docker-desktop` `df`/`find` (disk_report) and `schtasks /query`
+(compact_plan). The module docstring lists every allowed shape.
 
 ## Activate the weekly detector + arm compaction (one elevated run)
 ```
@@ -92,8 +100,9 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
 - **Build cache** older than 168h: `docker builder prune -af --filter until=168h`
   (`thresholds.builder_keep_hours`), so the last week of cache stays for rebuilds.
 - **Anonymous volumes** where ALL hold: the name is 64 lowercase hex and no compose render
-  declares a volume by that name; no container, running or
-  stopped, references it - checked per volume with `docker ps -a --filter volume=<id>` on top of
+  names a volume by that name (a render keeps a top-level volume only when a service uses it, so
+  a declared-but-unused 64-hex name, or one made by hand with `docker volume create`, counts as
+  anonymous); no container, running or stopped, references it - checked per volume with `docker ps -a --filter volume=<id>` on top of
   every container's mounts; CreatedAt is 7 days ago or more (`thresholds.anon_volume_min_age_days`).
   Removal is `docker volume rm <id>`, one id at a time. **Named volumes are never removed** - they
   are listed as skipped, report-only.
@@ -102,7 +111,7 @@ The plan shows each category's count, estimated bytes and largest entries, and e
 reason (in use / compose-named / too new / keep-list / shares id with a protected tag / named
 volume). Its `confirm_token` is a hash of the listed set; the plan is stored under it in
 `state/reclaim-plans/` for `thresholds.reclaim_plan_ttl_hours` (24). Execute re-checks every
-listed item with the plan's thresholds and SKIPS anything now in use, re-pointed or gone; items
+listed item and SKIPS anything now in use, re-pointed or gone; items
 that became eligible after the plan are not touched. Freed bytes are reported per category from
 `docker system df` before/after. If the container list, the keep-list (missing, unreadable or
 without a single pattern) or ANY compose render cannot be read, the affected category removes
