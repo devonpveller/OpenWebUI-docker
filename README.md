@@ -80,6 +80,7 @@ works without `sudo`), git, curl, and **Python 3.11 or newer** (`python3
 
 **Linux:**
 
+<!-- rehearsal:linux-quickstart - scripts/ci/linux-rehearsal.sh runs the next block as written -->
 ```sh
 git clone --recurse-submodules https://github.com/devonpveller/OpenWebUI-docker.git ai-stack
 cd ai-stack
@@ -261,6 +262,7 @@ portal scripts, and the scheduled watchdog, NAS mirror and maintenance tasks.
 
 ## Contributing
 
+<!-- rehearsal:contributing-hooks - scripts/ci/linux-rehearsal.sh runs the next block as written -->
 ```sh
 git config core.hooksPath .githooks                           # the pre-commit gates
 ./.githooks/commit-msg /dev/null && echo "hooks can run"      # must print: hooks can run
@@ -268,10 +270,10 @@ git config core.hooksPath .githooks                           # the pre-commit g
 
 The hooks block staged secrets, CRLF in shell scripts, inference routed around
 LiteLLM, and stale generated docs, among others. Most gates are PowerShell (Windows
-PowerShell or `pwsh`). With only Python and `sh`, eight still run: the secret,
-line-ending and routing gates as Python twins, the generated-docs gate
+PowerShell or `pwsh`). With only Python and `sh`, nine still run: the secret,
+line-ending, routing and doc-placement gates as Python twins, the generated-docs gate
 (`docs-blocks`), the exec-bit drift gate and the personal-identifier gate in Python,
-and the two file-mode gates in `sh`. The seven that need PowerShell (doc placement, corpus exposure,
+and the two file-mode gates in `sh`. The six that need PowerShell (corpus exposure,
 project configs, env-file scope and the three OB1 gates) each print `SKIPPED
 <gate>: needs PowerShell`, and the summary line names every gate that ran and
 every one skipped ([`.githooks/README.md`](.githooks/README.md)). Never use `--no-verify`.
@@ -287,6 +289,7 @@ commit and an `.env` in every plane directory - CI copies the examples first,
 and so should you (the loop never overwrites a real one; the checks render from
 the examples, the files only have to exist):
 
+<!-- rehearsal:contributing-checks - scripts/ci/linux-rehearsal.sh runs the next block as written -->
 ```sh
 python3 -m venv ~/.venvs/ai-stack && . ~/.venvs/ai-stack/bin/activate
 pip install ruff pytest
