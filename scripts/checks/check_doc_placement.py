@@ -26,7 +26,7 @@ What it mirrors, rule for rule (the .ps1's header has the history of each rule):
   3. a staged ADDITION (A only) under documentation/implementation-guide/ that is not
      exempt (the index README and multi-agent-concurrency/) is refused when it opens a
      feature directory HEAD does not have, or when its path is plan-shaped;
-  AI_STACK_PLAN_IN_CODE_REPO=1 (or `true`) warns and passes; the verdict names how many
+  AI_STACK_PLAN_IN_CODE_REPO=1 (or `true`, any case) warns and passes; the verdict names how many
   staged paths it examined.
 
 One stated difference: a failing `git diff --cached` REFUSES here (exit 1, naming the
@@ -168,7 +168,8 @@ def main() -> int:
               f" ({examined} staged addition(s)/rename(s) examined)")
         return 0
 
-    if os.environ.get('AI_STACK_PLAN_IN_CODE_REPO') in ('1', 'true'):
+    # case-insensitive, as the .ps1's `-eq 'true'` is: TRUE and True pass there too
+    if (os.environ.get('AI_STACK_PLAN_IN_CODE_REPO') or '').lower() in ('1', 'true'):
         print("WARNING: planning or journal material staged into the code repo, allowed by"
               " AI_STACK_PLAN_IN_CODE_REPO:")
         for path, why, _ in violations:

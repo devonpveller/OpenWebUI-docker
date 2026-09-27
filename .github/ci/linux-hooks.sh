@@ -39,6 +39,9 @@ fails=0
 check() {  # check <description> <0|nonzero>
   if [ "$2" -eq 0 ]; then echo "  [OK]   $1"; else echo "  [FAIL] $1"; fails=$((fails + 1)); fi
 }
+# holds <command...>: 0 when the command succeeds, else 1 - the command's own status, not
+# a `$?` read after a test (shellcheck SC2319)
+holds() { if "$@"; then echo 0; else echo 1; fi; }
 
 # READING THE SOURCE CHECKOUT. It may belong to another uid (the python3 step mounts the
 # runner's checkout read-only into a container running as root), and git then refuses
@@ -129,7 +132,7 @@ echo "$out" | sed 's/^/   | /'
 check "the commit carrying a LAN address exited non-zero (exit $rc)" "$([ "$rc" -ne 0 ]; echo $?)"
 check "the identity gate named file:line and the class" \
   "$(echo "$out" | grep -q 'ci-planted-identity.md:1:[0-9]*: lan-ip'; echo $?)"
-check "HEAD did not move" "$([ "$(git rev-parse HEAD)" = "$before" ]; echo $?)"
+check "HEAD did not move" "$(holds [ "$(git rev-parse HEAD)" = "$before" ])"
 git rm -q --cached ci-planted-identity.md && rm -f ci-planted-identity.md
 
 echo ""
@@ -140,10 +143,10 @@ printf '# a note that belongs in the plan store\n' > documentation/notes/ci-plan
 git add documentation/notes/ci-planted-note.md
 out="$(git commit -m "ci: a journal file must be refused" 2>&1)"; rc=$?
 echo "$out" | sed 's/^/   | /'
-check "the commit adding documentation/notes/ci-planted-note.md exited non-zero (exit $rc)" "$([ "$rc" -ne 0 ]; echo $?)"
+check "the commit adding documentation/notes/ci-planted-note.md exited non-zero (exit $rc)" "$(holds [ "$rc" -ne 0 ])"
 check "the doc-placement gate named the store path" \
-  "$(echo "$out" | grep -q 'documentation-plans-ai-stack/journal/notes/ci-planted-note.md'; echo $?)"
-check "HEAD did not move" "$([ "$(git rev-parse HEAD)" = "$before" ]; echo $?)"
+  "$(holds grep -q 'documentation-plans-ai-stack/journal/notes/ci-planted-note.md' <<< "$out")"
+check "HEAD did not move" "$(holds [ "$(git rev-parse HEAD)" = "$before" ])"
 git rm -q --cached documentation/notes/ci-planted-note.md && rm -f documentation/notes/ci-planted-note.md
 
 echo ""

@@ -60,6 +60,7 @@ CASES = [
     ('root planets.txt (no word boundary)', ['planets.txt'], [], 0),
     ('root plan directory is not refused', ['planner/__init__.py'], [], 0),
     ('new feature dir under implementation-guide', ['documentation/implementation-guide/newfeat/a.md'], [], 1),
+    ('guide prefix, other case (new feature dir)', ['Documentation/Implementation-Guide/newfeat2/a.md'], [], 1),
     ('plan-shaped file in a legacy feature dir', ['documentation/implementation-guide/legacy/PLAN-2.md'], [], 1),
     ('numbered file in a legacy feature dir', ['documentation/implementation-guide/legacy/03-step.md'], [], 1),
     ('plain file in a legacy feature dir', ['documentation/implementation-guide/legacy/notes-on-it.md'], [], 0),
@@ -77,6 +78,9 @@ class Twin(unittest.TestCase):
         git(self.repo, 'config', 'user.email', 'test@example.invalid')
         git(self.repo, 'config', 'user.name', 'test')
         git(self.repo, 'config', 'core.autocrlf', 'false')
+        # keep a path's case as staged, so the case-insensitive prefix rules are exercised
+        # even on a case-insensitive filesystem (Windows, macOS)
+        git(self.repo, 'config', 'core.ignorecase', 'false')
         for rel in ('documentation/implementation-guide/README.md',
                     'documentation/implementation-guide/legacy/PLAN.md',
                     'documentation/implementation-guide/multi-agent-concurrency/MERGE-PROTOCOL.md',
@@ -140,11 +144,15 @@ class Twin(unittest.TestCase):
 
     def test_escape_hatch_warns_and_passes(self):
         self.stage(['documentation/notes/x.md'], [])
-        (rc, out), ps = self.both({'AI_STACK_PLAN_IN_CODE_REPO': '1'})
-        self.assertEqual(rc, 0)
-        self.assertIn('WARNING', out)
-        if ps is not None:
-            self.assertEqual(ps[0], 0)
+        # the .ps1 compares with -eq, which ignores case: every spelling must agree
+        for value, want in (('1', 0), ('true', 0), ('TRUE', 0), ('True', 0), ('yes', 1), ('0', 1)):
+            with self.subTest(value=value):
+                (rc, out), ps = self.both({'AI_STACK_PLAN_IN_CODE_REPO': value})
+                self.assertEqual(rc, want, out)
+                if want == 0:
+                    self.assertIn('WARNING', out)
+                if ps is not None:
+                    self.assertEqual(ps[0], rc, f'the .ps1 and the twin disagree on {value!r}: {ps[1]}')
 
     def test_success_says_what_it_examined(self):
         self.stage(['documentation/runbooks/a.md', 'b.md'], [])
