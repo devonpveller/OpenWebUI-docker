@@ -113,10 +113,12 @@ takes the directory from the container's OWN mount (`docker inspect` - running, 
 compares it with the compose render made after the shell variable is removed, checks the archive's
 `.sha256` (hash and file name, whatever directory the sidecar recorded), refuses a target that is a
 filesystem root or holds the current directory, the checkout or your home, and only then deletes
-(literal paths; EVERY cmdlet both functions call is module-qualified, e.g.
+(literal paths; every cmdlet both functions call is called by its module-qualified name, e.g.
 `Microsoft.PowerShell.Management\Remove-Item`, the archive is hashed with .NET SHA-256 rather than a
-cmdlet, and `docker` is the executable on PATH - no session alias or function can stand in for any of
-them), restores and
+cmdlet, and `docker`/`git` are called by the full path of the resolved executable - so a leftover alias
+or function under the PLAIN command name, such as `Remove-Item` or `docker`, is ignored. An alias or
+function deliberately defined under the module-qualified name or the executable's full path DOES run
+instead; that is someone inside your own session, which this runbook does not defend against), restores and
 starts the containers. The backup directory is guarded too (a target equal to it, containing it or
 inside it is refused), and a run from outside any git work tree simply has no checkout to guard. Everything it uses is a
 parameter or assigned inside it (strict mode, so a name it did not assign is an error, never an older
@@ -133,8 +135,10 @@ function Resolve-BindTarget {
           [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '')
     Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
     $ErrorActionPreference = 'Stop'
-    # docker is called as the APPLICATION on PATH, so a session alias or function named docker
-    # cannot answer in its place.
+    # docker (and git) are called by the full path of the resolved APPLICATION and cmdlets by their
+    # module-qualified names, so a leftover alias or function under the plain name (docker,
+    # Remove-Item, ...) is ignored. One deliberately defined under the qualified name or the full
+    # path does run instead - not defended against (an adversary inside your own session).
     $dockerExe = @(Microsoft.PowerShell.Core\Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
     if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
     $dockerExe = $dockerExe[0].Source
