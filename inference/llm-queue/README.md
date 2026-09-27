@@ -51,6 +51,13 @@ LLM_QUEUE_MAX_IN_FLIGHT (N)  <=  P + 1                 # headroom discipline
 llama-swap concurrencyLimit  ==  0                     # the queue is the sole gate
 ```
 
+**Pending (2026-09-25, not built):** this coupling is why the queue cannot see a
+different backend. `P` is one hand-set number for one local upstream; a cloud model
+group behind LiteLLM, or a second engine, is invisible to the lanes. The change and
+its reasoning are in the plan store:
+`../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`
+§10.4 "Per-backend capacity" (raised by the research-workbench effort, D16).
+
 ## Development & iteration
 
 ```pwsh
