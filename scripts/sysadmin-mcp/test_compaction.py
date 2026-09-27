@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the elevated compaction capability. Stdlib only. NON-DESTRUCTIVE by design.
 
-Run:  python scripts/sysadmin-mcp/test_compaction.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_compaction.py
 
 Proves (without ever compacting or triggering the task):
   • compaction.py contains no volume/destructive verbs; the elevated .ps1 never prunes volumes.

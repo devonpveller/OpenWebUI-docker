@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for sysadmin-mcp. Stdlib only (no pytest), matching the house style.
 
-Run:  python scripts/sysadmin-mcp/test_sysadmin.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_sysadmin.py
        python scripts/sysadmin-mcp/test_sysadmin.py --unit   # skip live-stack/stdio tests
 
 Sections:

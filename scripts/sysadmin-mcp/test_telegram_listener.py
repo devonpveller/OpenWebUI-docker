@@ -2,7 +2,8 @@
 """Tests for the Telegram listener's recovery reply. Stdlib only. No Telegram call,
 no docker call, no recovery run.
 
-Run:  python scripts/sysadmin-mcp/test_telegram_listener.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_telegram_listener.py
 
 What it proves (ac-legacy-recovery, from the ac-recovery-gates review R6):
   * a recovery run whose only ERROR is EARLY and whose exit code is 0 produces a

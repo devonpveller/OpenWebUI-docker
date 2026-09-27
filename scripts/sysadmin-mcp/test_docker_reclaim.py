@@ -3,7 +3,8 @@
 every subprocess call the sysadmin code makes goes to FakeDocker, an in-memory daemon that answers
 the CLI forms the code uses and records every call. Nothing here can touch a real daemon.
 
-Run:  python scripts/sysadmin-mcp/test_docker_reclaim.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_docker_reclaim.py
 
 The tests drive executor.reclaim_plan()/reclaim_execute() - the MCP tools' own entry points - so
 they measure BEHAVIOUR, and they were written to fail against the code before this change
@@ -117,7 +118,12 @@ class FakeDocker:
         if cmd[0] == "wsl":
             a = cmd[4:] if cmd[1:4] == ["-d", "docker-desktop", "-e"] else []
             if a[:1] == ["find"] and len(a) > 1 and a[1].endswith("/data/docker/containers"):
-                return self._ok("".join(f"{kb} {path}\n" for kb, path in self.wsl_logs))
+                floor = 0
+                if "-size" in a:
+                    floor = int(a[a.index("-size") + 1].lstrip("+").rstrip("c"))
+                return self._ok("".join(f"{kb} {path}\n" for kb, path in self.wsl_logs if kb * 1024 > floor))
+            if a[:1] == ["find"] or a[:1] == ["df"]:
+                return {"rc": 1, "out": "", "err": "fake wsl: not modelled"}
             if a[:3] == ["truncate", "-s", "0"]:
                 self.truncated += a[3:]
                 return self._ok()
@@ -504,7 +510,9 @@ def t05_forbidden_shapes():
            ["volume", "rm", "-f", hexid("x")], ["builder", "prune", "-af"],
            ["builder", "prune", "-af", "--filter", "until=0"], ["container", "prune"],
            ["volume", "rm", hexid("nl") + "\n"], ["builder", "prune", "-af", "--filter", "until=0h"],
-           ["builder", "prune", "-af", "--filter", "until=23h"]]
+           ["builder", "prune", "-af", "--filter", "until=23h"],
+           ["builder", "prune", "-af", "--filter", "until=\uff11\uff16\uff18h"],   # fullwidth 168
+           ["builder", "prune", "-af", "--filter", "until=\u0661\u0666\u0668h"]]   # Arabic-Indic 168
     # (1) the upper guard, driven INSIDE Env: even if it were broken, the calls land in the fake
     with Env() as env:
         for argv in bad:
@@ -573,10 +581,24 @@ def t05_forbidden_shapes():
         started.clear()
         for argv in (["docker-compose", "down", "-v"], ["com.docker.cli", "system", "prune", "-af"],
                      ["C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe", "system", "prune", "-af"],
-                     ["C:\\x\\docker-compose.exe", "down"]):
+                     ["C:\\x\\docker-compose.exe", "down"],
+                     # attempt-4 tester N-b: names Win32 normalises, 8.3 names, look-alikes, wrappers
+                     ["docker.exe.", "system", "prune", "-af"], ["docker ", "system", "prune", "-af"],
+                     ["C:\\PROGRA~1\\Docker\\Docker\\RESOUR~1\\bin\\DOCKER~1.EXE", "down", "-v"],
+                     ["docker-buildx", "prune", "-af"], ["docker\x00", "system", "prune"],
+                     ["wsl", "-d", "docker-desktop", "-e", "docker", "system", "prune", "-af"],
+                     ["wsl", "-e", "sh", "-c", "docker system prune -af"], ["cmd", "/c", "docker system prune -af"],
+                     ["env", "docker", "system", "prune", "-af"], ["sh", "-c", "docker volume prune -f"],
+                     ["powershell", "-Command", "docker system prune -af"]):
             r = real_run(argv)
-            check(f"lowest guard refuses {argv[0][-30:]} {argv[1]}", r["rc"] == 126, str(r))
+            check(f"lowest guard refuses {argv[0][-30:]!r} {argv[1]}", r["rc"] == 126, str(r))
         check("... and none of those started a process", started == [], str(started))
+        for argv in (["wsl", "-d", "docker-desktop", "-e", "find", "/mnt/x", "-name", "x"],
+                     ["wsl", "-d", "docker-desktop", "-e", "truncate", "-s", "0", "/mnt/x/y"],
+                     ["schtasks", "/query", "/tn", "X"], ["docker.exe", "ps"]):
+            real_run(argv)
+        check("the production wsl / schtasks / docker.exe shapes still pass the lowest guard", len(started) == 4,
+              str(started))
     finally:
         sa.subprocess.run = saved
     # source grep: code lines (not comments/docstrings) in every file that runs docker for the sysadmin
@@ -1120,6 +1142,15 @@ def t25_canary_detects_an_unguarded_child():
     open(log, "w").close()
     ok, why = _testguard.canary_ok(_guarded_child_env("fake", log), log)
     check("canary_ok on a guarded env reports success", ok is True, why)
+    good = {"pid": 4242, "verdict": "refused", "label": "child:-c"}
+    for name, rows in (("a refused child: row from ANOTHER pid", [dict(good, pid=1)]),
+                       ("a refused row from the pid under a NON-child label", [dict(good, label="server.py")]),
+                       ("an ALLOWED child: row from the pid", [dict(good, verdict="allowed")]),
+                       ("no rows at all", [])):
+        v, why = _testguard.canary_verdict(rows, 4242)
+        check(f"canary_verdict says NO for {name}", v is False, why)
+    v, why = _testguard.canary_verdict([dict(good, pid=1), good], 4242)
+    check("canary_verdict says YES for a refused child: row from the pid", v is True, why)
     shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -1174,9 +1205,27 @@ def t27_forged_plan_cannot_truncate_arbitrary_files():
               sorted(x["path"] for x in r.get("skipped_logs", [])) == sorted(set(forged)), str(r.get("skipped_logs")))
         f.truncated = []
         p = ex.reclaim_plan()
-        f.wsl_logs = []  # the log was rotated / shrank before execute
+        f.wsl_logs = []  # the log was rotated away before execute
         ex.reclaim_execute(p["confirm_token"])
-        check("a listed log that is no longer oversized is not truncated", f.truncated == [], str(f.truncated))
+        check("a listed log that is gone from the scan is not truncated", f.truncated == [], str(f.truncated))
+        f.truncated = []
+        f.wsl_logs = [(3_000_000, legit)]
+        p = ex.reclaim_plan()
+        f.wsl_logs = [(1_000, legit)]  # STILL there, but shrank below container_log_warn_gb before execute
+        ex.reclaim_execute(p["confirm_token"])
+        check("a listed log that shrank below the threshold (still on disk) is not truncated",
+              f.truncated == [], str(f.truncated))
+        f.truncated = []
+        suffixed = legit + ".1"          # right prefix, wrong end: only fullmatch refuses it
+        nested = legit + "/x-json.log"   # a DIRECTORY named like the log
+        f.wsl_logs = [(3_000_000, legit), (3_000_000, suffixed), (3_000_000, nested)]
+        p = ex.reclaim_plan()
+        act = json.loads(json.dumps(p["actions"]))
+        act["truncate_logs"] = sorted(set(act["truncate_logs"]) | {suffixed, nested})
+        tok = ex._plan_token(act)
+        ex._save_plan(tok, dict(p, actions=act, confirm_token=tok))
+        ex.reclaim_execute(tok)
+        check("suffix / partial-path look-alikes are not truncated (fullmatch)", f.truncated == [legit], str(f.truncated))
 
 
 def t28_shipped_thresholds_pinned():
@@ -1185,6 +1234,30 @@ def t28_shipped_thresholds_pinned():
     for k, v in (("image_min_age_days", 14), ("anon_volume_min_age_days", 7), ("builder_keep_hours", 168),
                  ("reclaim_plan_ttl_hours", 24)):
         check(f"config.json {k} == {v}", cfg.get(k) == v, str(cfg.get(k)))
+
+
+def t29_compose_volume_render_fail_closed():
+    """the two compose-volume fail-closed branches: a render error at EXECUTE, a plane whose file is missing"""
+    with Env() as env:  # k4: the volume render fails only at execute
+        f = env.fake
+        v = f.volume(hexid("k4"), 30)
+        p = ex.reclaim_plan()
+        check("k4: the orphan volume is listed", listed_vols(p) == [v], str(listed_vols(p)))
+        f.fail.add(("docker", "compose", "-f", env.compose_file, "--profile", "*", "config", "--no-consistency"))
+        r = ex.reclaim_execute(p["confirm_token"])
+        check("k4: volume render fails at execute -> the listed volume is NOT removed", v in f.volumes, str(r)[:200])
+        check("k4: ... reported re-validation failed",
+              "re-validation failed" in json.dumps(r.get("docker", {}).get("volumes", {})))
+    with Env() as env:  # k5: a plane whose compose file is missing
+        f = env.fake
+        f.volume(hexid("k5"), 30)
+        open(env.manifest, "a").write('[planes.gone]\ncompose = "no-such-plane.yml"\n')
+        p = ex.reclaim_plan()
+        check("k5: a plane with a missing compose file -> volume category OFF",
+              listed_vols(p) == [] and "missing" in str(p["docker"]["volumes"].get("disabled_reason")),
+              str(p["docker"]["volumes"].get("disabled_reason")))
+        check("k5: ... and the image category OFF too",
+              "not found" in str(p["docker"]["images"].get("disabled_reason")), str(p["docker"]["images"].get("disabled_reason")))
 
 
 if __name__ == "__main__":
@@ -1201,7 +1274,8 @@ if __name__ == "__main__":
                  t22_system_programs_refused_by_name_or_path,
                  t23_refuses_to_run_outside_the_container, t24_install_alone_guards_an_arbitrary_child,
                  t25_canary_detects_an_unguarded_child, t26_windows_directory_rule_in_a_scratch_tree,
-                 t27_forged_plan_cannot_truncate_arbitrary_files, t28_shipped_thresholds_pinned):
+                 t27_forged_plan_cannot_truncate_arbitrary_files, t28_shipped_thresholds_pinned,
+                 t29_compose_volume_render_fail_closed):
         run_case(case)
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

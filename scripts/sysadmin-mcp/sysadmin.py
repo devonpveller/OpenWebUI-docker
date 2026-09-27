@@ -145,12 +145,47 @@ def docker_refusal(args: list[str]) -> str | None:
     return f"docker {verb}: not a shape sysadmin code uses"
 
 
+def program_name(arg0) -> str:
+    """argv[0]'s program name as Windows would resolve it: the last path component across \\ and /,
+    lower-cased, with the trailing dots and spaces Win32 strips removed (`docker.exe.`, `"docker "`)."""
+    return re.split(r"[\\/]", str(arg0))[-1].lower().rstrip(". ")
+
+
+_RUN_PROGRAMS = {"docker", "docker.exe", "wsl", "wsl.exe", "schtasks", "schtasks.exe"}
+_WSL_PROGRAMS = {"find", "df", "truncate"}  # what sysadmin code runs inside docker-desktop
+
+
+def run_refusal(cmd) -> str | None:
+    """argv[0] ALLOWLIST for sysadmin._run: exactly docker / wsl / schtasks by their plain names.
+    Refuses 8.3 short names (`DOCKER~1.EXE` may be docker-compose), NUL bytes, look-alikes
+    (docker-compose, docker-buildx, com.docker.cli) and wrappers (cmd /c, env, sh, powershell), and a
+    wsl call whose -e program is not one sysadmin uses (so `wsl -e docker ...` cannot smuggle docker
+    past docker_refusal)."""
+    if not cmd:
+        return "empty argv"
+    raw = str(cmd[0])
+    if "\x00" in raw or any("\x00" in str(c) for c in cmd):
+        return "NUL byte in argv"
+    name = program_name(raw)
+    if "~" in name:
+        return f"8.3 short name {name!r}: the real program cannot be known"
+    if name not in _RUN_PROGRAMS:
+        return f"program {name!r}: sysadmin code runs only docker, wsl and schtasks"
+    if name.startswith("wsl"):
+        a = [str(x) for x in cmd[1:]]
+        if a[:3] != ["-d", "docker-desktop", "-e"] or len(a) < 4 or a[3] not in _WSL_PROGRAMS:
+            return f"wsl call outside `-d docker-desktop -e {sorted(_WSL_PROGRAMS)}`"
+    return None
+
+
 def _run(cmd: list[str], timeout: int = 30) -> dict:
     """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises.
-    docker commands pass docker_refusal() first; a refused one never starts (rc 126)."""
-    name = re.split(r"[\\/]", str(cmd[0]))[-1].lower() if cmd else ""
-    if name in ("docker-compose", "docker-compose.exe", "com.docker.cli", "com.docker.cli.exe"):
-        return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {name} is not used by sysadmin code"}
+    argv[0] must be one of the three programs sysadmin code runs (run_refusal); docker argv then
+    passes docker_refusal(). A refused command never starts (rc 126)."""
+    why = run_refusal(cmd)
+    if why:
+        return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {[str(c) for c in cmd[:6]]}"}
+    name = program_name(cmd[0])
     if name in ("docker", "docker.exe"):
         why = docker_refusal(list(cmd[1:]))
         if why:

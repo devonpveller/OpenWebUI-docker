@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the GATED executor. Stdlib only.
 
-Run:  python scripts/sysadmin-mcp/test_executor.py              # safe: plan + gating + source guard
-      python scripts/sysadmin-mcp/test_executor.py --live-exec  # ALSO performs a real safe reclaim
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests' (on a host it
+      exits 2 by design); there: python test_executor.py  # plan + gating + source guard
+      --live-exec ALSO performs a real reclaim: only in the DinD driver recipe, against the DinD
 
 The default run performs NO mutation. It proves:
   • the source contains no volume-mutating verbs or blanket rm (safety by construction),

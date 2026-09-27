@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the backup-freshness monitor, off-site layer especially. Stdlib only.
 
-Run:  python scripts/sysadmin-mcp/test_check_backups.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_check_backups.py
 
 The regression these exist for (2026-09-13): the weekly NAS sync failed on 09-06 and
 09-13 because the backup-user password had expired, and this script exited 0 both

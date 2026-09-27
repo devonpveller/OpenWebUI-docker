@@ -32,7 +32,8 @@ feature developer.
     references, running or stopped (checked per volume), created 7 days ago or more. Always by
     explicit id: `docker volume rm <id>`.
   - idle ao-worker `/tmp` session logs (busy workers skipped automatically) and oversized container
-    logs (truncated, not deleted).
+    logs (truncated, not deleted) - only a log a fresh scan still finds oversized, at Docker's own
+    container-log path; nothing else a plan lists is truncated.
   Space freed this way is freed INSIDE the Docker vhdx; C: gets it back only at the next compaction.
   The hourly low-disk sentinel (`scripts/maintenance/disk-guard.ps1`) runs the same docker reclaim
   automatically (`auto_reclaim.py`) and reports the freed bytes per category.

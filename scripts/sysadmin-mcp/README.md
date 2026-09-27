@@ -83,8 +83,9 @@ docker stop acsr-dind && docker network rm acsr-net
 ```
 
 **Defence in depth: the in-code guard.** Every test module also installs `_testguard.py` at import,
-and every Python child inherits it (`_testsite/sitecustomize.py`; `server.py` honours
-`ACSR_TESTGUARD`). What it does:
+and Python children started the ordinary way inherit it (`_testsite/sitecustomize.py`; `server.py`
+honours `ACSR_TESTGUARD`). A child started with `-I` / `-E` / `-S`, or with a scrubbed `env=`, is NOT
+covered; that is why the container is the barrier and the guard only defence in depth. What it does:
 - `DOCKER_HOST` defaults to the dead endpoint `tcp://127.0.0.1:1` and is printed first.
 - Every docker / wsl / schtasks / PowerShell / Windows-directory program start is checked against an
   EXACT read-only allowlist (hermetic suites allow none) and recorded with its pid in
@@ -160,6 +161,11 @@ that became eligible after the plan are not touched. Freed bytes are reported pe
 without a single pattern) or ANY compose render cannot be read, the affected category removes
 nothing and the plan says why. At execute every threshold is the stricter of the stored plan's and
 `config.json`'s, so a hand-edited plan file cannot lower one.
+
+**Container logs** are truncated only when a FRESH scan at execute still finds them oversized AND
+their path is exactly `<mount>/data/docker/containers/<id>/<id>-json.log`; any other path a stored
+plan lists is reported in `skipped_logs`, never touched. The confirm token is an unkeyed hash:
+integrity only, not authentication, so no stored-plan content is trusted without re-checking.
 
 Space freed this way is freed inside the Docker vhdx: C: gets it back only at the next compaction.
 

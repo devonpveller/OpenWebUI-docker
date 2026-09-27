@@ -14,7 +14,10 @@ install() exits 2 anywhere else (container_only). Everything below is defence in
 WHAT install() DOES (every test module calls it at import):
   1. DOCKER TARGET: DOCKER_HOST defaults to the dead endpoint tcp://127.0.0.1:1 and is printed first.
      Live sections run only when DOCKER_HOST names a daemon on purpose (a disposable DinD).
-  2. PROCESS GUARD, in this process AND INHERITED by every Python child: the lowest Python hook,
+  2. PROCESS GUARD, in this process AND inherited by Python children started the ordinary way
+     (NOT by a child started with -I / -E / -S, which skip PYTHONPATH or site, nor by one given a
+     scrubbed env= without ACSR_TESTGUARD and PYTHONPATH - that is why the CONTAINER is the barrier
+     and this guard only defence in depth): the lowest Python hook,
      subprocess.Popen._execute_child, is wrapped. Every start of docker / wsl / schtasks /
      powershell / cmd / sh / bash is checked and written to the call log with its pid:
        mode "fake"     - all of those are REFUSED (hermetic suites: fakes serve every call);
@@ -328,9 +331,15 @@ def canary_ok(env: dict, log: str) -> tuple[bool, str]:
         rows = [json.loads(x) for x in open(log, encoding="utf-8")]
     except (OSError, ValueError):
         rows = []
-    hits = [r for r in rows if r.get("pid") == p.pid and r.get("verdict") == "refused"
+    return canary_verdict(rows, p.pid)
+
+
+def canary_verdict(rows: list, pid: int) -> tuple[bool, str]:
+    """The canary passes only on a row from THAT pid, with verdict `refused`, under a `child:` label
+    (a row from another process, another label or an `allowed` verdict proves nothing about it)."""
+    hits = [r for r in rows if r.get("pid") == pid and r.get("verdict") == "refused"
             and str(r.get("label", "")).startswith("child:")]
-    return bool(hits), f"canary pid {p.pid}: {len(hits)} refused entr(y/ies) under a child: label"
+    return bool(hits), f"canary pid {pid}: {len(hits)} refused entr(y/ies) under a child: label"
 
 
 def require_daemon(label: str, allowed: bool) -> bool:
