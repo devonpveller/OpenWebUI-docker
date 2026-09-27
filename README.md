@@ -181,6 +181,13 @@ anything, so a key blanked after `enable` is caught there too. `disable
 enable or requiring plane still holds it, and says which it kept and why.
 `--headless` leaves out the reading surfaces and keeps the engines.
 
+`up` starts the planes in order and stops at the first one that fails, so a
+product that cannot come up blocks every plane after it, even an unrelated
+one - search without a working Mullvad key, for example. Take it out before
+you enable the next product: `python3 scripts/stack/stack.py disable search`,
+then `python3 scripts/stack/stack.py down search` to remove the containers
+the failed attempt left (an unhealthy leftover also fails `health`).
+
 ## How it is laid out
 
 One Docker Compose project per plane, around a root

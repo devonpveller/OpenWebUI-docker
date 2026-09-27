@@ -4862,6 +4862,20 @@ class DocRenders:
                     f"{rel(self.root, env_path)} is absent (gitignored), and {compose_rel} does not render "
                     "without it - copy it from its .env.example"
                 )
+            # A SERVICE-level env_file elsewhere (OB1's recipe .env files) is absent: the
+            # render cannot run, which is "could not compare", not drift - `--write` would
+            # refuse the same way (ac-linux-rehearsal F2). Named, so the reader can create it.
+            missing = re.search(r"env file (.+?) not found", result.stderr or "")
+            if missing:
+                raw = missing.group(1).strip()
+                try:
+                    shown = Path(raw).resolve().relative_to(self.root.resolve()).as_posix()
+                except (ValueError, OSError):
+                    shown = raw
+                raise Unverifiable(
+                    f"could not compare: {shown} is absent (gitignored), and {compose_rel} does not "
+                    "render without it - create it (README's Contributing loop copies or touches every one)"
+                )
         return result
 
     def profiles(self, plane: str) -> list:

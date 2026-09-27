@@ -11,7 +11,9 @@
 #      keys are supplied, `up` refuses the GPU profile and prints numbered steps, the
 #      steps are run AS PRINTED, and `up` then starts the planes in dependency order with
 #      inference serving; `enable search` with stub Mullvad keys starts the plane and
-#      fails only for the reason search/README.md documents (the tunnel cannot come up)
+#      fails only for the reason search/README.md documents (the tunnel cannot come up);
+#      then README's advice for a product that cannot come up (`disable search`,
+#      `down search`) is followed and `enable coding-agent` + `up` starts coder, healthy
 #   3  committing from Linux with git + python3 only - README's Contributing blocks run
 #      verbatim; a doc-only and a Python commit succeed and print which gates ran and
 #      which were skipped; a planted secret, CRLF shell script and personal identifier
@@ -357,6 +359,9 @@ order_ok() {
   python3 - "$1" <<'PY'
 import sys, tomllib
 order = sys.argv[1].split()
+if not order:
+    print('order: EMPTY - `up` ran no plane, so there is no order to check')
+    sys.exit(1)
 m = tomllib.load(open('stack.manifest.toml', 'rb'))
 planes = m.get('planes', {})
 compose_to_plane = {}
@@ -372,6 +377,13 @@ for i, pl in enumerate(seq):
 print('order: ' + ' -> '.join(seq) + ('  VIOLATIONS: ' + '; '.join(bad) if bad else '  (every requirement comes first)'))
 sys.exit(1 if bad else 0)
 PY
+}
+# health_ran <log> <exit>: `health` reached its verdict - its last line is the summary and
+# its exit code equals the [FAIL] lines it printed. A crash (a traceback, no summary) is NOT
+# "zero failures". Returns 0 when it ran.
+health_ran() {
+  _fails=$(grep -c '\[FAIL\]' "$1")
+  tail -n 1 "$1" | grep -qE '^(ALL HEALTH PROBES PASSED|[0-9]+ probe\(s\) FAILED)$' && [ "$_fails" = "$2" ]
 }
 wait_health() {  # wait_health <seconds>: poll `stack.py health` until it exits 0
   _end=$(( $(now) + $1 ))
@@ -410,14 +422,19 @@ while IFS= read -r step; do
 done < "$WORK/steps.txt"
 quiet < "$LOGS/steps.log" | sed 's/^/   | /'
 cp "$LOGS/steps.log" "$LOGS/up-inference.log"
-ck 2 "every printed step exited 0 (the last one is the 'up')" "$STEP_FAIL"
+LAST_STEP=$(sed -n '$p' "$WORK/steps.txt")
+# zero steps is not "every step passed"; and the last printed step must be the `up`
+ck 2 "every printed step exited 0: $NSTEPS step(s), $STEP_FAIL failed, the last one an 'up' ($LAST_STEP)" \
+  "$(t sh -c "[ $NSTEPS -ge 1 ] && [ $STEP_FAIL -eq 0 ] && printf '%s' \"\$1\" | grep -qE 'stack\\.py up\$'" _ "$LAST_STEP")"
 ORDER=$(up_order "$LOGS/up-inference.log")
-say "   up ran, in order: anchor (networks) then $ORDER"
+say "   up ran, in order: anchor (networks) then ${ORDER:-NOTHING}"
 OMSG=$(order_ok "$ORDER"); ORC=$?; say "   $OMSG"
-ck 2 "'up' started the enabled planes in dependency order ($ORDER)" "$ORC"
+ck 2 "'up' started the enabled planes in dependency order (${ORDER:-none}; an empty order fails)" "$ORC"
 ck 2 "inference containers exist after 'up'" "$(t sh -c "docker ps -a --format '{{.Label \"com.docker.compose.project\"}}' | grep -qx inference")"
 wait_health 300; say "   \$ python3 scripts/stack/stack.py health   (exit $HEALTH_RC)"; sed 's/^/   | /' "$LOGS/health.log"
-ck 2 "inference serves: health passes, 'llm-gateway liveliness' OK (exit $HEALTH_RC)" \
+HR=1; health_ran "$LOGS/health.log" "$HEALTH_RC" && HR=0
+ck 2 "health ran to its verdict (summary line, exit = its [FAIL] count)" "$HR"
+ck 2 "inference serves: health passed, 'llm-gateway liveliness' OK (exit $HEALTH_RC)" \
   "$(t sh -c "[ $HEALTH_RC -eq 0 ] && grep -q 'OK.*inference: llm-gateway liveliness' '$LOGS/health.log'")"
 
 hr "2b. enable search, with stub Mullvad keys"
@@ -429,24 +446,73 @@ python3 scripts/stack/stack.py up > "$LOGS/up-search.log" 2>&1; UP_RC=$?
 say "   \$ python3 scripts/stack/stack.py up   (exit $UP_RC)"; quiet < "$LOGS/up-search.log" | sed 's/^/   | /'
 ORDER=$(up_order "$LOGS/up-search.log")
 OMSG=$(order_ok "$ORDER"); ORC=$?; say "   $OMSG"
-ck 2 "'up' ran the planes in dependency order ($ORDER)" "$ORC"
+ck 2 "'up' ran the planes in dependency order (${ORDER:-none}; an empty order fails)" "$ORC"
 ck 2 "search containers were created" "$(t sh -c "docker ps -a --format '{{.Label \"com.docker.compose.project\"}}' | grep -qx search")"
+python3 scripts/stack/stack.py health > "$LOGS/health-search.log" 2>&1; HEALTH_RC=$?
+say "   \$ python3 scripts/stack/stack.py health   (exit $HEALTH_RC)"; sed 's/^/   | /' "$LOGS/health-search.log"
+HR=1; health_ran "$LOGS/health-search.log" "$HEALTH_RC" && HR=0
+ck 2 "health ran to its verdict (summary line, exit = its [FAIL] count)" "$HR"
 DOC_REASON='dependency failed to start: container search-vpn is unhealthy'
 if [ "$UP_RC" -eq 0 ]; then
-  info "search 'up' exited 0 with a stub key (the tunnel came up?) - checking health instead"
-  ck 2 "search came up (not expected with a stub key, but not a failure)" 0
+  # not expected with a stub key; then search must actually serve, not be waved through
+  info "search 'up' exited 0 with a stub key - search's own probes decide"
+  ck 2 "search came up: its gateway probe passes" "$(t grep -q 'OK.*search: gateway' "$LOGS/health-search.log")"
 else
-  ck 2 "'up' failed for the documented reason only: '$DOC_REASON'" \
+  ck 2 "'up' names the documented reason '$DOC_REASON', which search/README.md carries" \
     "$(t sh -c "grep -qF '$DOC_REASON' '$LOGS/up-search.log' && grep -qF '$DOC_REASON' search/README.md")"
+  # ONLY that reason: every error-shaped line of the up log is accounted for. Build steps
+  # (#N lines) are compose's own; the registry refusing the locally built gateway image is
+  # compose trying a pull before it builds, allowed only when that image then says Built.
+  UNEXPLAINED=$(grep -iE 'error|fail|denied|refused|cannot|unable|exited' "$LOGS/up-search.log" \
+    | grep -vE '^#[0-9]+ ' \
+    | grep -vF "$DOC_REASON" \
+    | grep -vE '^# up stopped: search exited 1$' \
+    | grep -vE '^ *Container search-vpn +Error *$' \
+    | grep -vE 'Warning pull access denied for private-search-gateway')
+  if grep -q 'Warning pull access denied for private-search-gateway' "$LOGS/up-search.log" \
+     && ! grep -qE 'gateway +Built' "$LOGS/up-search.log"; then
+    UNEXPLAINED="$UNEXPLAINED
+the gateway image was refused by the registry and never Built"
+  fi
+  printf '%s\n' "$UNEXPLAINED" | grep -v '^$' | sed 's/^/   | unexplained: /'
+  ck 2 "'up' failed for that reason ONLY: no other error line in its output" \
+    "$(t [ -z "$(printf '%s' "$UNEXPLAINED" | tr -d '[:space:]')" ])"
   docker logs search-vpn > "$LOGS/search-vpn.log" 2>&1
   tail -5 "$LOGS/search-vpn.log" | sed 's/^/   | vpn: /'
   ck 2 "the vpn log says what search/README.md says a well-formed but unknown key gives" \
     "$(t sh -c "grep -q 'failed to pass the healthcheck' '$LOGS/search-vpn.log' && grep -q 'failed to pass the healthcheck' search/README.md")"
+  OTHER_BAD=$(docker ps -a --format '{{.Label "com.docker.compose.project"}} {{.Names}} {{.Status}}' | grep -v '^search ' | grep -v ' Up ')
+  ck 2 "every container outside search is Up (${OTHER_BAD:-all Up})" "$(t [ -z "$OTHER_BAD" ])"
 fi
-python3 scripts/stack/stack.py health > "$LOGS/health-search.log" 2>&1; HEALTH_RC=$?
-say "   \$ python3 scripts/stack/stack.py health   (exit $HEALTH_RC)"; sed 's/^/   | /' "$LOGS/health-search.log"
 OTHER_FAIL=$(grep '\[FAIL\]' "$LOGS/health-search.log" | grep -c -v -E '\[FAIL\] search:|unhealthy containers \(found: search-[a-z-]*\)')
-ck 2 "every other plane still passes its probes; only search's fail ($OTHER_FAIL other failure(s))" "$(t [ "$OTHER_FAIL" = 0 ])"
+ck 2 "every other plane's probes pass: inference and frontend print OK, no [FAIL] outside search ($OTHER_FAIL)" \
+  "$(t sh -c "[ $HR -eq 0 ] && [ $OTHER_FAIL -eq 0 ] && grep -q 'OK.*inference: llm-gateway liveliness' '$LOGS/health-search.log' && grep -q 'OK.*frontend: OWUI' '$LOGS/health-search.log'")"
+
+hr "2c. README: a product that cannot come up blocks the planes after it - take it out first"
+# The two commands must be in README.md's sentence as written; they are then run.
+H1_DISABLE='python3 scripts/stack/stack.py disable search'
+H1_DOWN='python3 scripts/stack/stack.py down search'
+ck 2 "README.md says a failing product blocks the planes after it, and names '$H1_DISABLE' and '$H1_DOWN'" \
+  "$(t sh -c "grep -qF '$H1_DISABLE' README.md && grep -qF '$H1_DOWN' README.md && grep -qi 'blocks every plane after it' README.md")"
+for c in "$H1_DISABLE" "$H1_DOWN"; do
+  say "   \$ $c"; sh -c "$c" > "$LOGS/h1.log" 2>&1; rc=$?; quiet < "$LOGS/h1.log" | sed 's/^/   | /'
+  ck 2 "'$c' exited 0 (exit $rc)" "$rc"
+done
+LEFT=$(docker ps -a --format '{{.Label "com.docker.compose.project"}}' | grep -cx search)
+ck 2 "no search container is left ($LEFT)" "$(t [ "$LEFT" = 0 ])"
+enable_loop coding-agent
+ck 2 "'enable coding-agent' succeeded once the named keys were supplied (exit $ENABLE_RC)" "$ENABLE_RC"
+python3 scripts/stack/stack.py up > "$LOGS/up-coder.log" 2>&1; UP_RC=$?
+say "   \$ python3 scripts/stack/stack.py up   (exit $UP_RC)"; quiet < "$LOGS/up-coder.log" | tail -40 | sed 's/^/   | /'
+ck 2 "'up' exited 0 with search taken out (exit $UP_RC)" "$UP_RC"
+ORDER=$(up_order "$LOGS/up-coder.log")
+OMSG=$(order_ok "$ORDER"); ORC=$?; say "   $OMSG"
+ck 2 "'up' ran the planes in dependency order, coder included (${ORDER:-none})" \
+  "$(t sh -c "[ $ORC -eq 0 ] && printf '%s' '$ORDER' | grep -qw coder")"
+wait_health 600; say "   \$ python3 scripts/stack/stack.py health   (exit $HEALTH_RC)"; sed 's/^/   | /' "$LOGS/health.log"
+HR=1; health_ran "$LOGS/health.log" "$HEALTH_RC" && HR=0
+ck 2 "health ran to its verdict and passed, the coder daemon's probe OK (exit $HEALTH_RC)" \
+  "$(t sh -c "[ $HR -eq 0 ] && [ $HEALTH_RC -eq 0 ] && grep -q 'OK.*coder: little-coder daemon' '$LOGS/health.log'")"
 
 hr "G19 probe, before the Contributing loop (INFO; Open Brain from a fresh clone is out of scope)"
 G19A=$(python3 scripts/stack/stack.py enable open-brain 2>&1); G19A_RC=$?
@@ -455,10 +521,14 @@ info "G19 before the Contributing loop: enable open-brain exit $G19A_RC: $(print
 
 # ---- 4. code repo contents (on the commit as cloned, before any rehearsal commit) ----
 hr "4. code repo contents at $CLONE_HEAD"
-JOURNAL=$(git ls-tree -r --name-only "$CLONE_HEAD" | grep -E '^documentation/(notes|evidence|archive)/|^(PLAN[^/]*|TEST-PLAN[^/]*|TEST_PLAN[^/]*|CLEANUP-PLAN\.md)$')
-NTRACK=$(git ls-tree -r --name-only "$CLONE_HEAD" | wc -l | tr -d ' ')
-say "   $NTRACK tracked paths; journal-shaped: ${JOURNAL:-none}"
-ck 4 "no operator journal tracked (documentation/notes|evidence|archive, root PLAN*/TEST-PLAN*/CLEANUP-PLAN.md)" "$(t [ -z "$JOURNAL" ])"
+# The listing FAILS CLOSED: a failed or empty `git ls-tree` is not "no journal".
+TRACKED=$(git ls-tree -r --name-only "$CLONE_HEAD"); LS_RC=$?
+NTRACK=$(printf '%s\n' "$TRACKED" | grep -c .)
+JOURNAL=$(printf '%s\n' "$TRACKED" | grep -E '^documentation/(notes|evidence|archive)/|^(PLAN[^/]*|TEST-PLAN[^/]*|TEST_PLAN[^/]*|CLEANUP-PLAN\.md)$')
+say "   git ls-tree exit $LS_RC, $NTRACK tracked paths; journal-shaped: ${JOURNAL:-none}"
+ck 4 "the tracked-file listing worked and is not empty (exit $LS_RC, $NTRACK paths)" "$(t sh -c "[ $LS_RC -eq 0 ] && [ $NTRACK -gt 0 ]")"
+ck 4 "no operator journal tracked (documentation/notes|evidence|archive, root PLAN*/TEST-PLAN*/CLEANUP-PLAN.md)" \
+  "$(t sh -c "[ $LS_RC -eq 0 ] && [ $NTRACK -gt 0 ] && [ -z \"\$1\" ]" _ "$JOURNAL")"
 DENY=""
 [ -e .identity-denylist ] && DENY=.identity-denylist
 [ -e "$(git rev-parse --git-common-dir)/identity-denylist" ] && DENY="$DENY git-common-dir/identity-denylist"
@@ -472,9 +542,19 @@ ck 4 "check_identity.py --all exited 0 (exit $ID_RC)" "$ID_RC"
 hr "5. agent routing: CLAUDE.md's plan-store section, quoted"
 awk '/^## Where documentation goes/ { on = 1 } on && /^## / && !/^## Where documentation goes/ { exit } on' CLAUDE.md > "$WORK/claude-routing.md"
 grep -n -E 'plan store|plans, notes|findings|evidence|journal/notes|test plan' "$WORK/claude-routing.md" | sed 's/^/   > /'
-for word in plan note finding evidence documentation-plans-ai-stack; do
-  ck 5 "CLAUDE.md's plan-store section names '$word'" "$(t grep -qi "$word" "$WORK/claude-routing.md")"
+# Each kind of material must have its own ROW routing it into the store - a word in the
+# section's heading does not count, so the heading line is left out.
+sed 1d "$WORK/claude-routing.md" > "$WORK/claude-routing.body"
+# the backticks are literal markdown, not expansions:
+# shellcheck disable=SC2016
+for row in 'plan:^[|] a plan.*`implementation-guide/<feature>/`' \
+           'finding:^[|] a work item.s findings.*`implementation-guide/<feature>/findings/' \
+           'note:^[|] a note or finding with no feature.*`journal/notes/' \
+           'evidence:^[|] evidence.*`journal/evidence/' \
+           'test plan:^[|] a work item.s test plan.*`implementation-guide/<feature>/test-plans/' ; do
+  ck 5 "CLAUDE.md routes a ${row%%:*} into the plan store (its table row)" "$(t grep -qE "${row#*:}" "$WORK/claude-routing.body")"
 done
+ck 5 "the section names the store repository (documentation-plans-ai-stack)" "$(t grep -q 'documentation-plans-ai-stack' "$WORK/claude-routing.body")"
 ck 5 "the section says they GO to the plan store ('go to the private plan store')" "$(t grep -qi 'go to the private plan store' "$WORK/claude-routing.md")"
 
 # ---- 3. committing from Linux --------------------------------------------------------
@@ -513,6 +593,21 @@ TREE=$(git rev-parse 'HEAD^{tree}')
 ck 3 "the attestation ledger has a line for that tree, with a skipped= column" "$(t sh -c "grep '^$TREE ' '$LEDGER' | grep -q 'skipped='")"
 case "$SUMMARY" in *"SKIPPED:"*docs-blocks*) info "docs-blocks SKIPPED on the doc-only commit made before the Contributing .env loop (known carry: its OB1/docker/.env is absent)";; esac
 
+# F2: OB1/docker/.env present (as `enable open-brain`'s loop makes it) but OB1's recipe .env
+# files absent. The render cannot run; the commit must NOT be refused as "stale", and the
+# output must name the missing file.
+F2_MADE=0
+if [ ! -e OB1/docker/.env ]; then cp OB1/docker/.env.example OB1/docker/.env && F2_MADE=1; fi
+printf '\nA third line added by the Linux rehearsal.\n' >> frontend/README.md
+git add frontend/README.md
+try_commit doc-half-ob1-env "docs: a doc-only commit with OB1/docker/.env but no recipe .env files"
+grep -E 'could not compare|NOT VERIFIED' "$LOGS/commit-doc-half-ob1-env.log" | head -3 | sed 's/^/   | /'
+ck 3 "with OB1/docker/.env but no recipe .env files, a doc-only commit still succeeds (exit $COMMIT_RC)" \
+  "$(t sh -c "[ $COMMIT_RC = 0 ] && [ $COMMIT_MOVED = 0 ]")"
+ck 3 "... docs-blocks says it could not compare and names the missing recipe .env, with no 'docs --write' advice" \
+  "$(t sh -c "grep -qE 'could not compare: OB1/recipes/[a-z-]+/\\.env is absent' '$LOGS/commit-doc-half-ob1-env.log' && ! grep -q 'Regenerate with' '$LOGS/commit-doc-half-ob1-env.log'")"
+[ "$F2_MADE" = 1 ] && rm -f OB1/docker/.env   # back to the README's path: the loop below makes it
+
 extract_block rehearsal:contributing-checks README.md "$WORK/checks.sh"; X=$?
 ck 3 "README.md has exactly one '<!-- rehearsal:contributing-checks' block (extract exit $X)" "$X"
 sed 's/^/   | /' "$WORK/checks.sh"
@@ -527,6 +622,18 @@ git add frontend/README.md
 try_commit doc-after-loop "docs: a second doc-only commit, after the .env loop"
 ck 3 "a doc-only commit after the Contributing loop succeeds (exit $COMMIT_RC)" "$(t sh -c "[ $COMMIT_RC = 0 ] && [ $COMMIT_MOVED = 0 ]")"
 case "$SUMMARY" in *"RAN:"*docs-blocks*"| SKIPPED"*) info "docs-blocks RAN on the doc-only commit after the .env loop";; *) info "docs-blocks did not run on the doc-only commit after the .env loop: $SUMMARY";; esac
+# README's hooks paragraph states how many gates run and how many need PowerShell on this
+# host; the counts are read from README (number words) and compared with this summary.
+NRAN=$(printf '%s\n' "$SUMMARY" | sed -e 's/.*RAN://' -e 's/|.*//' | wc -w | tr -d ' ')
+NSKIP=$(printf '%s\n' "$SUMMARY" | sed -e 's/.*SKIPPED://' | wc -w | tr -d ' ')
+num() { case "$1" in one) echo 1;; two) echo 2;; three) echo 3;; four) echo 4;; five) echo 5;; six) echo 6;;
+  seven) echo 7;; eight) echo 8;; nine) echo 9;; ten) echo 10;; eleven) echo 11;; twelve) echo 12;; *) echo x;; esac; }
+# the backticks are literal markdown, not expansions:
+# shellcheck disable=SC2016
+README_RAN=$(num "$(tr '\n' ' ' < README.md | grep -oE 'With only Python and `sh`, [a-z]+ still run' | awk '{print $6}')")
+README_SKIP=$(num "$(tr '\n' ' ' < README.md | grep -oE 'The [a-z]+ that need PowerShell' | awk '{print $2}')")
+ck 3 "the hooks ran $NRAN gates and skipped $NSKIP; README says $README_RAN run and $README_SKIP need PowerShell" \
+  "$(t sh -c "[ '$NRAN' = '$README_RAN' ] && [ '$NSKIP' = '$README_SKIP' ]")"
 
 printf '\n# A comment added by the Linux rehearsal.\n' >> scripts/stack/stack.py
 git add scripts/stack/stack.py
