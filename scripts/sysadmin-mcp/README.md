@@ -67,6 +67,7 @@ docker run --rm --network none -v "<repo>:/w:ro" mcr.microsoft.com/powershell:7.
 
 **LIVE sections against a real daemon** - only a disposable DinD, driven from a container that shares
 a private network with it and has NO docker socket (never `-v /var/run/docker.sock`):
+(the LIVE section expects at least one running container; the recipe starts a throwaway one)
 
 ```sh
 docker network create acsr-net
@@ -75,6 +76,7 @@ docker run -d --rm --privileged --name acsr-dind --network acsr-net --network-al
 docker run --rm --network acsr-net -e DOCKER_HOST=tcp://dind:2375 -e ACSR_IN_CONTAINER=1 \
   -v "<repo>:/w:ro" docker:27-cli sh -c '
   apk add --no-cache python3 >/dev/null && until docker info >/dev/null 2>&1; do sleep 2; done &&
+  docker run -d --name llm-gateway alpine:3.21 sleep 3600 >/dev/null &&
   mkdir -p /tmp/w && cp -r /w/scripts /w/stack.manifest.toml /tmp/w/ && cd /tmp/w/scripts/sysadmin-mcp &&
   python3 test_sysadmin.py'
 docker stop acsr-dind && docker network rm acsr-net
