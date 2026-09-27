@@ -171,11 +171,76 @@ def run_refusal(cmd) -> str | None:
         return f"8.3 short name {name!r}: the real program cannot be known"
     if name not in _RUN_PROGRAMS:
         return f"program {name!r}: sysadmin code runs only docker, wsl and schtasks"
+    a = [str(x) for x in cmd[1:]]
     if name.startswith("wsl"):
-        a = [str(x) for x in cmd[1:]]
         if a[:3] != ["-d", "docker-desktop", "-e"] or len(a) < 4 or a[3] not in _WSL_PROGRAMS:
             return f"wsl call outside `-d docker-desktop -e {sorted(_WSL_PROGRAMS)}`"
+        why = wsl_args_refusal(a[3], a[4:])
+        if why:
+            return f"wsl {a[3]}: {why}"
+    if name.startswith("schtasks"):
+        why = schtasks_refusal(a)
+        if why:
+            return f"schtasks: {why}"
     return None
+
+
+# -- ARGUMENT validation for the non-docker programs (docker has docker_refusal) --------------
+COMPACT_TASK = "AI-Stack Sysadmin Compact VHDX"  # == compaction.TASK_NAME (a test pins the equality)
+_FIND_VALUE_PREDICATES = {"-name", "-size", "-maxdepth", "-type"}
+# the ONLY -exec forms allowed, each exactly as the code writes it and each read-only
+_FIND_EXEC_TAILS = (["-exec", "du", "-k", "{}", ";"], ["-exec", "stat", "-c", "%Y %n", "{}", "+"])
+
+
+def _mount() -> str:
+    return load_config()["docker_desktop_mount"].rstrip("/")
+
+
+def container_log_path(p: str) -> bool:
+    """<mount>/data/docker/containers/<64-hex id>/<same id>-json.log - Docker's own log file."""
+    return bool(re.fullmatch(re.escape(_mount()) + r"/data/docker/containers/([0-9a-f]{64})/\1-json\.log", str(p)))
+
+
+def wsl_args_refusal(prog: str, args: list[str]) -> str | None:
+    """find: a scan root the code uses, only read-only predicates (-name/-size/-maxdepth/-type) and at
+    most ONE of the two exact read-only -exec tails (`du -k {} ;`, `stat -c "%Y %n" {} +`) - no
+    -delete, other -exec, -execdir, -ok, -fprint*, -fls. df: exactly `-k <mount>`. truncate: exactly
+    `-s 0 <paths>`, every path a container log (container_log_path)."""
+    m = _mount()
+    if prog == "df":
+        return None if args == ["-k", m] else f"df only as `-k {m}`"
+    if prog == "truncate":
+        if len(args) < 3 or args[:2] != ["-s", "0"]:
+            return "truncate only as `-s 0 <container-log paths>`"
+        bad = [p for p in args[2:] if not container_log_path(p)]
+        return f"not container-log paths: {bad[:3]}" if bad else None
+    if prog == "find":
+        if not args or args[0] not in (f"{m}/data/docker/containers", f"{m}/data/docker/volumes"):
+            return "find root must be the containers or volumes dir of the docker-desktop disk"
+        rest = args[1:]
+        for tail in _FIND_EXEC_TAILS:
+            if rest[-len(tail):] == tail:
+                rest = rest[:-len(tail)]
+                break
+        i = 0
+        while i < len(rest):
+            if rest[i] in _FIND_VALUE_PREDICATES and i + 1 < len(rest):
+                i += 2
+                continue
+            return f"find predicate {rest[i]!r} is not an allowed read-only predicate"
+        return None
+    return f"program {prog!r} not allowed"
+
+
+def schtasks_refusal(args: list[str]) -> str | None:
+    """Only `/query /tn <name> [/fo LIST]` and `/run /tn "AI-Stack Sysadmin Compact VHDX"` (the gated
+    compaction). /delete, /create, /change, /end and everything else are refused."""
+    low = [x.lower() for x in args]
+    if len(args) in (3, 5) and low[:2] == ["/query", "/tn"] and (len(args) == 3 or low[3:] == ["/fo", "list"]):
+        return None
+    if args == ["/run", "/tn", COMPACT_TASK]:
+        return None
+    return "only `/query /tn <name> [/fo LIST]` or `/run /tn` the compaction task"
 
 
 def _run(cmd: list[str], timeout: int = 30) -> dict:

@@ -24,7 +24,7 @@ persona** operate this stack through semantic, safety-gated tools. Capability #1
 | `sysadmin-bridge-launch.ps1` / `register-sysadmin-bridge.ps1` | run/register the persona (2nd bridge instance) |
 | `config.json` | thresholds + machine facts + channel/operators |
 | `test_*.py` | unit parsers + volume-age classification + live probes + stdio round-trip + fail-closed gates + source/ordering guards; `test_docker_reclaim.py` drives the reclaim against an in-memory fake docker (no daemon). Run ONLY in a container - see [Run the tests](#run-the-tests---in-a-disposable-container-only) |
-| `_testguard.py` / `_testsite/sitecustomize.py` | test-only: the container check (exit 2 on a host) and the process-wide guard every test process and its Python children run |
+| `_testguard.py` / `_testsite/sitecustomize.py` | test-only: the container check (exit 2 on a host) and the process guard every test process runs, inherited by Python children started the ordinary way (NOT by `-I` / `-E` / `-S` or a scrubbed `env=` - the container is the barrier) |
 
 ## Tools (surface)
 Read-only: `disk_report`, `container_status`, `stack_health`, `container_logs`, `volume_report`,

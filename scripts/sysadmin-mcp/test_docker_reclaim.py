@@ -593,12 +593,70 @@ def t05_forbidden_shapes():
             r = real_run(argv)
             check(f"lowest guard refuses {argv[0][-30:]!r} {argv[1]}", r["rc"] == 126, str(r))
         check("... and none of those started a process", started == [], str(started))
-        for argv in (["wsl", "-d", "docker-desktop", "-e", "find", "/mnt/x", "-name", "x"],
-                     ["wsl", "-d", "docker-desktop", "-e", "truncate", "-s", "0", "/mnt/x/y"],
-                     ["schtasks", "/query", "/tn", "X"], ["docker.exe", "ps"]):
+        m = sa.load_config()["docker_desktop_mount"].rstrip("/")
+        h = hexid("prod-log")
+        log = f"{m}/data/docker/containers/{h}/{h}-json.log"
+        wsl = ["wsl", "-d", "docker-desktop", "-e"]
+        production = [
+            wsl + ["find", f"{m}/data/docker/containers", "-name", "*-json.log", "-size", "+2000000000c",
+                   "-exec", "du", "-k", "{}", ";"],
+            wsl + ["find", f"{m}/data/docker/volumes", "-maxdepth", "3", "-exec", "stat", "-c", "%Y %n", "{}", "+"],
+            wsl + ["df", "-k", sa.load_config()["docker_desktop_mount"]],
+            wsl + ["truncate", "-s", "0", log],
+            ["schtasks", "/query", "/tn", "AI-Stack Sysadmin Compact VHDX"],
+            ["schtasks", "/query", "/tn", "AI-Stack Sysadmin Compact VHDX", "/fo", "LIST"],
+            ["schtasks", "/run", "/tn", "AI-Stack Sysadmin Compact VHDX"],
+            ["docker.exe", "ps"]]
+        for argv in production:
             real_run(argv)
-        check("the production wsl / schtasks / docker.exe shapes still pass the lowest guard", len(started) == 4,
-              str(started))
+        check(f"the {len(production)} production wsl / schtasks / docker shapes pass the lowest guard",
+              len(started) == len(production), str([x[:6] for x in started]))
+        import compaction as _cp
+        check("sysadmin.COMPACT_TASK == compaction.TASK_NAME", getattr(sa, "COMPACT_TASK", None) == _cp.TASK_NAME)
+        started.clear()
+        refused = [
+            # R6: wsl spellings that are not `-d docker-desktop -e <allowed>`
+            ["wsl.exe", "--unregister", "docker-desktop"], ["WSL.EXE", "--shutdown"],
+            ["C:\\Windows\\System32\\wsl.exe", "--unregister", "docker-desktop"],
+            ["wsl.exe.", "--unregister", "docker-desktop"], ["wsl", "-t", "docker-desktop"],
+            # R7: a shell inside the distro
+            wsl + ["sh", "-c", "rm -rf /"], ["WSL.EXE", "-d", "docker-desktop", "-e", "sh", "-c", "x"],
+            # R9: another distro
+            ["wsl", "-d", "Ubuntu", "-e", "find", "/", "-delete"],
+            ["wsl.exe", "-d", "docker-desktop-data", "-e", "truncate", "-s", "0", log],
+            # find: destructive or writing predicates, other -exec, other roots
+            wsl + ["find", f"{m}/data/docker/containers", "-name", "*-json.log", "-delete"],
+            wsl + ["find", f"{m}/data/docker/containers", "-exec", "rm", "-f", "{}", ";"],
+            wsl + ["find", f"{m}/data/docker/containers", "-execdir", "rm", "{}", ";"],
+            wsl + ["find", f"{m}/data/docker/containers", "-ok", "rm", "{}", ";"],
+            wsl + ["find", f"{m}/data/docker/containers", "-fprint", "/etc/x"],
+            wsl + ["find", f"{m}/data/docker/containers", "-fprintf", "/etc/x", "%p"],
+            wsl + ["find", f"{m}/data/docker/containers", "-fls", "/etc/x"],
+            wsl + ["find", f"{m}/data/docker/containers", "-delete", "-exec", "du", "-k", "{}", ";"],
+            wsl + ["find", f"{m}/data/docker/containers", "-exec", "du", "-k", "{}", ";", "-delete"],
+            wsl + ["find", "/", "-name", "x"], wsl + ["find", f"{m}", "-name", "x"],
+            # df / truncate argument shapes
+            wsl + ["df", "-h", m], wsl + ["df", "-k", "/"], wsl + ["df"],
+            wsl + ["truncate", "-s", "0", f"{m}/data/docker/volumes/frontend_openwebui-data/_data/webui.db"],
+            wsl + ["truncate", "-s", "0", log, "/etc/passwd"], wsl + ["truncate", "-s", "10", log],
+            wsl + ["truncate", log], wsl + ["truncate", "-s", "0"],
+            # schtasks
+            ["schtasks", "/delete", "/tn", "AI-Stack Sysadmin Compact VHDX", "/f"],
+            ["schtasks", "/create", "/tn", "X", "/tr", "cmd"], ["schtasks", "/change", "/tn", "X", "/disable"],
+            ["schtasks", "/end", "/tn", "AI-Stack Sysadmin Compact VHDX"],
+            ["SCHTASKS.EXE", "/run", "/tn", "AI-Stack Disk Guard"], ["schtasks", "/run", "/tn", "X"],
+            ["schtasks", "/query"], ["schtasks"]]
+        for argv in refused:
+            r = real_run(argv)
+            check(f"lowest guard refuses {' '.join(str(x) for x in argv)[-60:]!r}", r["rc"] == 126, str(r)[:160])
+        check("... and none of those started a process", started == [], str([x[:6] for x in started]))
+        # each layer on its own: the program allowlist (run_refusal's first wsl check) refuses a
+        # shell BEFORE the argument validator is consulted, so neither layer depends on the other
+        why = getattr(sa, "run_refusal", lambda c: None)(wsl + ["sh", "-c", "rm -rf /"]) or ""
+        check("the wsl PROGRAM allowlist itself refuses `sh` (not only the argument validator)",
+              why.startswith("wsl call outside"), why)
+        check("the argument validator also refuses a program it does not know",
+              getattr(sa, "wsl_args_refusal", lambda *a: None)("sh", ["-c", "x"]) is not None)
     finally:
         sa.subprocess.run = saved
     # source grep: code lines (not comments/docstrings) in every file that runs docker for the sysadmin
@@ -1215,6 +1273,26 @@ def t27_forged_plan_cannot_truncate_arbitrary_files():
         ex.reclaim_execute(p["confirm_token"])
         check("a listed log that shrank below the threshold (still on disk) is not truncated",
               f.truncated == [], str(f.truncated))
+        f.truncated = []
+        f.wsl_logs = [(3_000_000, legit)]
+        p = ex.reclaim_plan()
+        f.wsl_logs = [(1_000_000, legit)]  # ~1.02 GB: under the 2 GB threshold, over 0.2 GB and 0.1 GB
+        ex.reclaim_execute(p["confirm_token"])
+        check("a listed log at 1 GB (under container_log_warn_gb=2, over a tenth of it and over 0.1 GB) is not truncated",
+              f.truncated == [], str(f.truncated))
+        f.truncated = []
+        short = "/mnt/x/data/docker/containers/abc123/abc123-json.log"                 # N1j: id not 64 hex
+        elsewhere = f"/mnt/x/elsewhere/containers/{h}/{h}-json.log"                     # N1k: wrong prefix
+        nested2 = f"/mnt/x/data/docker/containers/{h}/sub/containers/{h}/{h}-json.log"   # N1k: nested
+        f.wsl_logs = [(3_000_000, legit), (3_000_000, short), (3_000_000, elsewhere), (3_000_000, nested2)]
+        p = ex.reclaim_plan()
+        act = json.loads(json.dumps(p["actions"]))
+        act["truncate_logs"] = sorted(set(act["truncate_logs"]) | {short, elsewhere, nested2})
+        tok = ex._plan_token(act)
+        ex._save_plan(tok, dict(p, actions=act, confirm_token=tok))
+        ex.reclaim_execute(tok)
+        check("short-id / wrong-prefix / nested container-log look-alikes are not truncated",
+              f.truncated == [legit], str(f.truncated))
         f.truncated = []
         suffixed = legit + ".1"          # right prefix, wrong end: only fullmatch refuses it
         nested = legit + "/x-json.log"   # a DIRECTORY named like the log
