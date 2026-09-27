@@ -33,11 +33,11 @@ def test_host_of_parses_all_git_url_forms():
 
 def test_owner_and_token_env_convention():
     # owner parsing + the per-owner deploy-token env-var convention (LC_<OWNER>_TOKEN)
-    assert owner_of("https://github.com/PolyshDesign/foo.git") == "PolyshDesign"
-    assert owner_of("git@github.com:PolyshDesign/foo.git") == "PolyshDesign"
+    assert owner_of("https://github.com/PixelDesign/foo.git") == "PixelDesign"
+    assert owner_of("git@github.com:PixelDesign/foo.git") == "PixelDesign"
     assert owner_of("https://github.com/me") == ""                            # no owner/repo pair
-    assert owner_token_env("https://github.com/PolyshDesign/foo") == "LC_POLYSHDESIGN_TOKEN"
-    assert owner_token_env("git@github.com:profnovice/bar.git") == "LC_PROFNOVICE_TOKEN"
+    assert owner_token_env("https://github.com/PixelDesign/foo") == "LC_PIXELDESIGN_TOKEN"
+    assert owner_token_env("git@github.com:probeuser/bar.git") == "LC_PROBEUSER_TOKEN"
     assert owner_token_env("") == ""
 
 
@@ -193,7 +193,7 @@ async def test_per_project_deploy_token_threaded_to_clone(db_url, monkeypatch):
 async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
     """A repo's org auto-selects its token (LC_<OWNER>_TOKEN) with no per-project config; a repo
     whose owner has no such env var falls back to the pool LC_DEPLOY_TOKEN default."""
-    monkeypatch.setenv("LC_POLYSHDESIGN_TOKEN", "ghp_org_polysh")
+    monkeypatch.setenv("LC_PIXELDESIGN_TOKEN", "ghp_org_pixel")
     settings = Settings(
         _env_file=None, chat_adapter="fake",
         profiles_dir=str(ROOT / "profiles"), charters_dir=str(ROOT / "charters"),
@@ -204,17 +204,17 @@ async def test_token_resolves_by_owner_convention(db_url, monkeypatch):
                         model_client=FakeModelClient(), harness=FakeHarness())
     await orch.setup()
     try:
-        # PolyshDesign org repo → LC_POLYSHDESIGN_TOKEN by convention (no explicit token_env)
-        await orch.projects.add("psd-foo", "https://github.com/PolyshDesign/foo.git")
+        # PixelDesign org repo → LC_PIXELDESIGN_TOKEN by convention (no explicit token_env)
+        await orch.projects.add("psd-foo", "https://github.com/PixelDesign/foo.git")
         eid, _, _ = await orch.router.open_effort("a", project="psd-foo")
-        assert await orch._project_token(eid) == "ghp_org_polysh"
+        assert await orch._project_token(eid) == "ghp_org_pixel"
         # a personal repo (owner has no LC_<owner>_TOKEN set) → None → pool LC_DEPLOY_TOKEN default
-        await orch.projects.add("mine", "https://github.com/profnovice/bar.git")
+        await orch.projects.add("mine", "https://github.com/probeuser/bar.git")
         eid2, _, _ = await orch.router.open_effort("b", project="mine")
         assert await orch._project_token(eid2) is None
         # explicit token_env still overrides the convention
         monkeypatch.setenv("AO_TOKEN_SPECIAL", "ghp_explicit")
-        await orch.projects.add("psd-bar", "https://github.com/PolyshDesign/bar.git",
+        await orch.projects.add("psd-bar", "https://github.com/PixelDesign/bar.git",
                                 token_env="AO_TOKEN_SPECIAL")
         eid3, _, _ = await orch.router.open_effort("c", project="psd-bar")
         assert await orch._project_token(eid3) == "ghp_explicit"
@@ -229,11 +229,11 @@ async def test_nl_onboards_new_project_from_url(db_url):
     try:
         mgmt = await orch.mgmt_channel_id()
         orch.models._client.queue_structured(OperatorIntent(
-            kind="chitchat", repo_url="https://github.com/PolyshDesign/cool-app.git",
+            kind="chitchat", repo_url="https://github.com/PixelDesign/cool-app.git",
             reply="Setting that up."))
         await orch.handle_event(
             {"id": "n1", "channel_id": mgmt,
-             "message": "start a new project on https://github.com/PolyshDesign/cool-app.git",
+             "message": "start a new project on https://github.com/PixelDesign/cool-app.git",
              "is_bot": False, "ts": 1})
         assert (await orch.projects.resolve("cool-app")) is not None       # registered
         assert "proj-cool-app" in chat.channels                            # its own channel, not sandbox
@@ -249,7 +249,7 @@ async def test_nl_new_project_with_work_opens_effort_in_it(db_url):
         mgmt = await orch.mgmt_channel_id()
         orch.models._client.queue_structured(OperatorIntent(
             kind="request", effort_name="add-readme",
-            repo_url="https://github.com/PolyshDesign/cool-app.git", reply="On it."))
+            repo_url="https://github.com/PixelDesign/cool-app.git", reply="On it."))
         orch.models._client.queue_structured(ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
         await orch.handle_event(
             {"id": "n2", "channel_id": mgmt,

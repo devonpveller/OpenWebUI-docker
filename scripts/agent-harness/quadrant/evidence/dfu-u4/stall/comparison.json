@@ -4,7 +4,7 @@
   "venue": {
     "name": "gym",
     "kind": "gym",
-    "repo": "D:\\Open WebUI\\ai-orchestration-gym",
+    "repo": "<host-root>\\ai-orchestration-gym",
     "ref": "main",
     "source": "config quadrant.venues.gym.repo",
     "identity": "root:f12ba2ecd0ed02c30ce3fa32e1dbe4b8ae7bf31d"

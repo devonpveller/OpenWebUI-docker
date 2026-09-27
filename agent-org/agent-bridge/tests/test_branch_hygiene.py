@@ -30,7 +30,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -89,7 +89,7 @@ _BRANCHES = {
 async def test_report_lists_branches_by_merge_state_without_deleting(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         state: dict = {}
         orch._gh_transport = _repo_transport(state, branches=_BRANCHES, open_heads=["agent/live"])
         mgmt = await orch.mgmt_channel_id()
@@ -107,7 +107,7 @@ async def test_report_lists_branches_by_merge_state_without_deleting(db_url, tmp
 async def test_cleanup_deletes_only_the_merged_branches(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         state: dict = {}
         orch._gh_transport = _repo_transport(state, branches=_BRANCHES, open_heads=["agent/live"])
         mgmt = await orch.mgmt_channel_id()
@@ -163,7 +163,7 @@ async def test_merge_auto_deletes_its_own_branch(db_url, tmp_path):
 
         orch._gh_transport = httpx.MockTransport(handler)
         orch._pending_merge["merge-x"] = {
-            "repo": "https://github.com/devonpveller/murder", "pr_number": 7,
+            "repo": "https://github.com/demoowner/murder", "pr_number": 7,
             "effort_id": "effort-x", "branch": "agent/effort-x"}
         posted: list[str] = []
 
@@ -183,7 +183,7 @@ async def test_tidy_up_closes_completed_efforts_and_cleans_their_branches(db_url
     and deletes that branch — but keeps efforts whose work ISN'T merged yet (never loses work)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("app", "https://github.com/devonpveller/app")
+        await orch.projects.add("app", "https://github.com/demoowner/app")
         state: dict = {}
         # effort-done's branch is merged; effort-wip's branch is 2 commits ahead (not merged)
         orch._gh_transport = _repo_transport(
@@ -216,7 +216,7 @@ async def test_branch_reaper_reaps_stale_superseded_and_closes_prs_keeps_current
     branch (parallel live work)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         import datetime as _dt
         now = _dt.datetime.now(_dt.timezone.utc)
 
@@ -279,7 +279,7 @@ async def test_reaper_consolidates_efforts_behind_reaped_branches(db_url, tmp_pa
     branch's effort → done; a superseded one's → aborted; the newest (kept) stays open."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         from app.models import Effort
         async with orch.db.session_factory() as s:
             s.add(Effort(id="effort-old", name="old", channel_id="c",

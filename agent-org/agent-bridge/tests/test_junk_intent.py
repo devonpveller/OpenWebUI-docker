@@ -47,7 +47,7 @@ async def test_scoped_message_with_junk_intent_is_repaired_to_request(db_url):
     The guard must force the request on the named project instead of dropping the work."""
     orch, chat, db = await _orch(db_url)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch.models._client.queue_structured(OperatorIntent(kind="chitchat", reply="…"))
         orch.models._client.queue_structured(ReadinessVerdict(clear_and_safe=True, blast_radius="routine"))
         mgmt = await orch.mgmt_channel_id()

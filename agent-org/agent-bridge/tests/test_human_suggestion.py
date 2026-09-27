@@ -28,7 +28,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -65,7 +65,7 @@ async def test_shader_blocker_suggests_the_human_builds_it(db_url, tmp_path):
     PROPOSE the operator do it on their host, not just say 'tell me how to proceed'."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, _c, _r = await orch.router.open_effort("shaders", project="murder")
         await orch.charters.set_goal(eid, "fix the shader crash", created_by="po")
         await orch._elevate_blocker(eid, {
@@ -84,7 +84,7 @@ async def test_shader_blocker_suggests_the_human_builds_it(db_url, tmp_path):
 async def test_plain_code_blocker_does_not_suggest_human(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, _c, _r = await orch.router.open_effort("code", project="murder")
         await orch.charters.set_goal(eid, "fix it", created_by="po")
         await orch._elevate_blocker(eid, {

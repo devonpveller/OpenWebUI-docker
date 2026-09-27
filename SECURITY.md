@@ -102,7 +102,7 @@ If this trust model changes (e.g., adding tailnet users you don't fully trust), 
 
 **Decision (2026-05-28):** accepted in exchange for: DDoS absorption, bot filtering, free TLS at the edge, IP hiding (no home-IP exposure), no router port-forwarding.
 
-**Additional layer (added by operator 2026-05-29):** Cloudflare Access policy on top of the tunnel, restricting access to email `Yamaoka01@gmail.com` via one-time PIN before any request reaches Authelia.
+**Additional layer (added by operator 2026-05-29):** Cloudflare Access policy on top of the tunnel, restricting access to the operator's own email address via one-time PIN before any request reaches Authelia.
 
 If the data-exposure trade-off becomes unacceptable, the alternatives are: tailnet-only (kill the portal) or self-hosted edge (port-forward with all the IP-exposure and DDoS costs).
 
@@ -141,7 +141,7 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - `tunnel-watcher` polls `cloudflared:2000/ready` every 30s and alerts HIGH after 3 consecutive failures (~90s default); INFO on recovery; hourly heartbeat to docker logs
 
 ### Real-time alerting (Gmail via portal-alerter)
-- All operator alerts land in **`Yamaoka01@gmail.com`** via the `portal-alerter` Deno sidecar
+- All operator alerts land in the operator's own mailbox (the Google account the alerter's OAuth token belongs to) via the `portal-alerter` Deno sidecar
 - OAuth client: **dedicated** GCP OAuth 2.0 client (`portal-alerter`), separate from OB1's `open-brain-email` client. Revoking either side at https://myaccount.google.com/permissions does NOT affect the other.
 - Refresh token: `secrets/google/portal-alerter/token.json` (gitignored)
 - Alert triggers (from `authelia-watcher` + `integrity-tripwire`): regulation bans, new-IP login successes, repeated 1FA failures from same IP, WebAuthn/TOTP credential changes, config-file drift

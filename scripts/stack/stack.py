@@ -5363,7 +5363,7 @@ _SECRETISH = re.compile(r"(KEY|SECRET|TOKEN|PASSWORD|PASS|PAT)$")
 
 def path_spellings(path: Path) -> list[str]:
     """Every way a shell on this host may print `path`: native, forward-slash,
-    Git Bash (`/d/Open WebUI/...`) and WSL (`/mnt/d/...`)."""
+    Git Bash (`/d/<dir>/...`) and WSL (`/mnt/d/...`)."""
     native = str(path)
     out = {native, path.as_posix()}
     drive = re.match(r"^([A-Za-z]):[\\/](.*)$", native)

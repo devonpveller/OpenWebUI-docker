@@ -49,7 +49,7 @@ async def _orch(db_url, tmp_path=None, *, github=False, **overrides):
     if github and tmp_path is not None:
         key = tmp_path / "app.pem"
         key.write_text("dummy")
-        kwargs.update(github_app_id="1", github_app_owner="devonpveller",
+        kwargs.update(github_app_id="1", github_app_owner="demoowner",
                       github_app_private_key_path=str(key))
     kwargs.update(overrides)
     settings = Settings(**kwargs)
@@ -159,7 +159,7 @@ async def test_repeated_incomplete_sweeps_escalate(db_url, tmp_path):
     """Two consecutive incomplete sweeps (cap=2) escalate to the human instead of churning forever."""
     orch, db = await _orch(db_url, tmp_path, github=True, incomplete_sweep_cap=2, goal_lens_retries=1)
     try:
-        await orch.projects.add("gym", "https://github.com/devonpveller/gym")
+        await orch.projects.add("gym", "https://github.com/demoowner/gym")
         eid, _c, _r = await orch.router.open_effort("todo-product", project="gym")
         await orch.charters.set_goal(eid, GOAL, created_by="po")
         orch._gh_transport = _remote()

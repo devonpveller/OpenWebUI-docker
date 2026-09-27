@@ -5,7 +5,7 @@ mirrored  : 2 file(s) into little-coder:/workspace
 task      : 01M1D277H24ZHX97DXJ3Y3FXBE
 status    : done (outcome=unverified signal=None)
 changed   : 1 file(s) changed, 0 deleted
-copied    : 1 path(s) back to D:\Open WebUI\ai-stack\.claude\worktrees\wt-u4close\documentation\evidence\dfu-u4\stall\20260831T232411Z-little-coder-project\workspace
+copied    : 1 path(s) back to <host-root>\ai-stack\.claude\worktrees\wt-u4close\documentation\evidence\dfu-u4\stall\20260831T232411Z-little-coder-project\workspace
 restore   : re-focused on https://github.com/anthropics/skills
 
 --- the runner's answer ---

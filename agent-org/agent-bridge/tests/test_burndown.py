@@ -52,7 +52,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -68,7 +68,7 @@ def _stack_remote(state: dict, *, static_head=True, sub_landed=True):
     base (compare: 1 commit, 1 file), i.e. it carries a PRIOR delivery."""
     gitmodules = base64.b64encode(
         b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
-        b'\turl = https://github.com/devonpveller/murder\n').decode()
+        b'\turl = https://github.com/demoowner/murder\n').decode()
     state.setdefault("pulls", [])
     state.setdefault("merges", [])
 
@@ -128,10 +128,10 @@ async def _drain(orch, rounds=30):
 
 
 async def _setup_stack(orch):
-    await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+    await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
     await orch.projects.set_check(
         "monogame-engine", "git submodule update --init --recursive && dotnet build Engine.sln")
-    await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+    await orch.projects.add("murder", "https://github.com/demoowner/murder")
 
 
 async def _orch_grounded(db_url, tmp_path):
@@ -144,7 +144,7 @@ async def _orch_grounded(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off", grounding_enabled=True,
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -276,7 +276,7 @@ async def test_prior_delivery_is_org_verified_not_nothing_new(db_url, tmp_path):
         async with orch.db.session_factory() as s:
             e = await s.get(Effort, eid)
         assert e.lifecycle == "done"
-        assert "devonpveller/murder" in state["pulls"]      # the delivery PR opened (green)
+        assert "demoowner/murder" in state["pulls"]      # the delivery PR opened (green)
     finally:
         await db.dispose()
 

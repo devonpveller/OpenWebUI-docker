@@ -74,7 +74,7 @@ any more, so it is simply redundant.
 ### 0. Snapshot, so this is reversible
 
 ```powershell
-cd "D:\Open WebUI\ai-stack"
+cd <your ai-stack checkout>
 Copy-Item .env ".env.pre-env-split-$(Get-Date -Format yyyyMMdd-HHmmss).bak"
 ```
 

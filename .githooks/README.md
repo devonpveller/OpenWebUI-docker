@@ -97,6 +97,7 @@ of OB1 at any commit is scanned exactly as before, and CI checks OB1 out and rea
 | # | Check | Script | Blocks on |
 |---|-------|--------|-----------|
 | 1 | **Secret guard** | [`scripts/checks/check-staged-secrets.ps1`](../scripts/checks/check-staged-secrets.ps1) | any staged env-shaped file, or a staged blob containing a recognizable provider token / private-key block |
+| 1b | Personal identifiers | [`scripts/checks/check_identity.py`](../scripts/checks/check_identity.py) (Python 3.8+ on every host; no PowerShell twin, SKIPPED loudly without Python; CI runs `--all`) | a staged ADDED line carrying a private/tailnet IP, a `*.ts.net` name, a user-profile or checkout-drive path, a personal email, or a literal from this machine's optional operator denylist (never printed; see `.identity-denylist.example`) - named by file:line and class, unless `scripts/checks/identity-allowlist.txt` lists it with a reason |
 | 2 | Line endings | `scripts/checks/validate-lineendings.ps1` | repo line-ending convention |
 | 3 | Gateway-only LLM routing | `scripts/checks/check-llm-gateway-routing.ps1` | an inference/serve endpoint pointing at a `*-upstream` server instead of the LiteLLM alias |
 | 3b | Corpus exposure plane | `scripts/checks/check-corpus-exposure-producers.ps1` | a recognized direct corpus INSERT that does not state its exposure plane (best-effort text scan; the DB's NOT NULL + CHECK is the real enforcement — read the check's own output for what it cannot see) |

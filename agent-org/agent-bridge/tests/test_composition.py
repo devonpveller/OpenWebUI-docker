@@ -32,7 +32,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -47,14 +47,14 @@ async def test_augment_adds_bump_and_engine_layout(db_url, tmp_path):
     `submodule_bump` (wiring-back) + inject the engine LAYOUT (relative path to the sibling submodule)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame", "https://github.com/devonpveller/MonoGame")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame", "https://github.com/demoowner/MonoGame")
         states = {"monogame-engine": RepoState(
             readable=True, default_branch="main",
             submodule_paths=["vendor/murder", "vendor/MonoGame"],
-            submodule_urls=["https://github.com/devonpveller/murder",
-                            "https://github.com/devonpveller/MonoGame"])}
+            submodule_urls=["https://github.com/demoowner/murder",
+                            "https://github.com/demoowner/MonoGame"])}
         steps = [LifecycleStep(kind="worker_task", target="murder", task="wire the build", summary="w")]
         steps2, note = await orch._augment_composition(
             "in monogame-engine, wire murder to build against the vendored monogame submodule",
@@ -77,14 +77,14 @@ async def test_augment_repairs_model_authored_bump_with_blank_source(db_url, tmp
     'dispatched worker' instead of 'composition')."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame", "https://github.com/devonpveller/MonoGame")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame", "https://github.com/demoowner/MonoGame")
         states = {"monogame-engine": RepoState(
             readable=True, default_branch="main",
             submodule_paths=["vendor/murder", "vendor/MonoGame"],
-            submodule_urls=["https://github.com/devonpveller/murder",
-                            "https://github.com/devonpveller/MonoGame"])}
+            submodule_urls=["https://github.com/demoowner/murder",
+                            "https://github.com/demoowner/MonoGame"])}
         steps = [
             LifecycleStep(kind="worker_task", target="murder", task="wire the build", summary="w"),
             # the model's own bump — right target/path, BLANK source (as happened live)
@@ -106,8 +106,8 @@ async def test_executor_pairs_lone_bump_with_lone_worker_task(db_url, tmp_path):
     one worker task + one wire-back is unambiguous — pair them (composition path, not plain dispatch)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         plan = LifecyclePlan(goal="wire", steps=[
             LifecycleStep(kind="worker_task", target="murder", task="wire the build", summary="w"),
             LifecycleStep(kind="submodule_bump", target="monogame-engine",
@@ -119,7 +119,7 @@ async def test_executor_pairs_lone_bump_with_lone_worker_task(db_url, tmp_path):
         # but the point is the COMPOSITION path was taken (halt message), not plain dispatch.
         def handler(request: httpx.Request) -> httpx.Response:
             p = request.url.path
-            if p == "/repos/devonpveller/murder":
+            if p == "/repos/demoowner/murder":
                 return httpx.Response(200, json={"default_branch": "main"})
             return httpx.Response(404)
         orch._gh_transport = httpx.MockTransport(handler)
@@ -140,11 +140,11 @@ async def test_augment_noop_when_engine_not_named(db_url, tmp_path):
     """No engine named in the intent → no composition inferred (don't over-augment a plain sub-repo edit)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         states = {"monogame-engine": RepoState(
             readable=True, submodule_paths=["vendor/murder"],
-            submodule_urls=["https://github.com/devonpveller/murder"])}
+            submodule_urls=["https://github.com/demoowner/murder"])}
         steps = [LifecycleStep(kind="worker_task", target="murder", task="fix a bug", summary="w")]
         steps2, note = await orch._augment_composition("fix a bug in murder", steps, states)
         assert not [s for s in steps2 if s.kind == "submodule_bump"] and not note
@@ -157,21 +157,21 @@ async def test_run_composition_edits_then_bumps_engine(db_url, tmp_path):
     submodule is bumped to that exact commit on the paired branch — so `monogame-engine` reflects it."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         bumped: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             p = request.url.path
             # --- murder branch verification (the worker's code edit) ---
-            if p == "/repos/devonpveller/murder":
+            if p == "/repos/demoowner/murder":
                 return httpx.Response(200, json={"default_branch": "main"})
-            if "/repos/devonpveller/murder/branches/" in p:
+            if "/repos/demoowner/murder/branches/" in p:
                 return httpx.Response(200, json={"commit": {"sha": "murder_sha_0123456789abcdef0000"}})
-            if "/repos/devonpveller/murder/compare/" in p:
+            if "/repos/demoowner/murder/compare/" in p:
                 return httpx.Response(200, json={"ahead_by": 1})
             # --- engine submodule bump (Git Data API) ---
-            if p == "/repos/devonpveller/MonoGame-Engine":
+            if p == "/repos/demoowner/MonoGame-Engine":
                 return httpx.Response(200, json={"default_branch": "main"})
             if p.endswith("/git/ref/heads/main"):
                 return httpx.Response(200, json={"object": {"sha": "eng_base"}})
@@ -208,15 +208,15 @@ async def test_run_composition_halts_if_edit_didnt_land(db_url, tmp_path):
     """If the submodule edit didn't land a verified commit, the engine is NOT bumped (no false wiring)."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         bumped: dict = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             p = request.url.path
-            if p == "/repos/devonpveller/murder":
+            if p == "/repos/demoowner/murder":
                 return httpx.Response(200, json={"default_branch": "main"})
-            if "/repos/devonpveller/murder/branches/" in p:
+            if "/repos/demoowner/murder/branches/" in p:
                 return httpx.Response(404, json={"message": "Not Found"})   # branch never landed
             if "/git/trees" in p and request.method == "POST":
                 bumped["hit"] = True

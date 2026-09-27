@@ -31,7 +31,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -63,7 +63,7 @@ def _remote_with_files(files: list[dict]):
 async def test_deleted_file_on_a_fix_goal_is_disclosed_and_flagged(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote_with_files([
             {"filename": "src/Murder.Editor/Core/Cursor/MouseCursor.Sdl.cs", "status": "removed",
              "additions": 0, "deletions": 181, "patch": "-public partial class MouseCursor {"},
@@ -84,7 +84,7 @@ async def test_deleted_file_on_a_fix_goal_is_disclosed_and_flagged(db_url, tmp_p
 async def test_removal_on_a_cleanup_goal_is_disclosed_but_not_flagged(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote_with_files([
             {"filename": "src/Dead.cs", "status": "removed", "additions": 0, "deletions": 90,
              "patch": "-x"},
@@ -101,7 +101,7 @@ async def test_removal_on_a_cleanup_goal_is_disclosed_but_not_flagged(db_url, tm
 async def test_pure_additions_no_removal_note(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote_with_files([
             {"filename": "src/New.cs", "status": "added", "additions": 120, "deletions": 0,
              "patch": "+lots"},
@@ -116,7 +116,7 @@ async def test_pure_additions_no_removal_note(db_url, tmp_path):
 async def test_gutted_method_body_flags_even_without_a_deleted_file(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote_with_files([
             {"filename": "src/Feature.cs", "status": "modified", "additions": 2, "deletions": 40,
              "patch": "-    void DoTheThing() {\n-      ...40 lines...\n+    void DoTheThing() {}"},
@@ -134,7 +134,7 @@ def test_removal_summary_parses_compare(db_url=None, tmp_path=None):
     import asyncio as _a
 
     class _G:
-        owner = "devonpveller"
+        owner = "demoowner"
         async def installation_token(self): return "t"
     files = [
         {"filename": "a/Gone.cs", "status": "removed", "additions": 0, "deletions": 50,
@@ -143,7 +143,7 @@ def test_removal_summary_parses_compare(db_url=None, tmp_path=None):
          "patch": "+added\n-  private void Helper() {"},
     ]
     tr = _remote_with_files(files)
-    out = _a.run(read_removal_summary(_G(), "https://github.com/devonpveller/murder",
+    out = _a.run(read_removal_summary(_G(), "https://github.com/demoowner/murder",
                                       "agent/x", transport=tr))
     assert out["deleted_files"] == ["a/Gone.cs"]
     assert out["deletions"] == 53 and out["insertions"] == 10

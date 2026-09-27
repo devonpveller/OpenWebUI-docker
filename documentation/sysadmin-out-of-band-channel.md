@@ -138,7 +138,7 @@ Two structural fixes shipped with it, both of which had been masking faults:
    automatically (the host bridges reconnect within one poll).
 
 > Hands-on host access (RDP/SSH over Tailscale) is **not enabled yet** (host is on the tailnet at
-> `shuya8873desktop01-1.tail37f875.ts.net`, but RDP is off and no SSH server is installed). Until it
+> `<machine>.<tailnet>.ts.net`, but RDP is off and no SSH server is installed). Until it
 > is, the Telegram commands above are the remote levers. Tailscale-SSH server is not available on a
 > Windows host; enabling tailnet-scoped RDP is the planned fallback.
 

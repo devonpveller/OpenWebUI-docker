@@ -32,7 +32,7 @@ async def _orch(db_url, tmp_path, review_mode="risky"):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode=review_mode, plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -51,7 +51,7 @@ def _flag(lens="correctness"):
 async def test_review_flag_is_advisory_when_build_verified(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch.projects.set_check("murder", "dotnet build Murder.sln")
         eid, _c, _r = await orch.router.open_effort("verified", project="murder")
         await orch.charters.set_goal(eid, "port it", created_by="po")
@@ -82,7 +82,7 @@ async def test_review_flag_is_advisory_when_build_verified(db_url, tmp_path):
 async def test_review_flag_still_freezes_without_a_build_check(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("plain", "https://github.com/devonpveller/plain")  # no check_cmd
+        await orch.projects.add("plain", "https://github.com/demoowner/plain")  # no check_cmd
         eid, _c, _r = await orch.router.open_effort("unverified", project="plain")
         await orch.charters.set_goal(eid, "do it", created_by="po")
         cp_id = f"{eid}:cp1"
@@ -107,7 +107,7 @@ async def test_approving_a_concern_auto_resumes_the_work(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
         from app.schemas import Decision
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, _c, _r = await orch.router.open_effort("frozen", project="murder")
         await orch.charters.set_goal(eid, "the work", created_by="po")
         # freeze it (a concern), then approve → should re-dispatch
@@ -132,7 +132,7 @@ async def test_abort_does_not_resume(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
         from app.schemas import Decision
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, _c, _r = await orch.router.open_effort("gone", project="murder")
         await orch.charters.set_goal(eid, "the work", created_by="po")
         from app.schemas import Concern, Trigger

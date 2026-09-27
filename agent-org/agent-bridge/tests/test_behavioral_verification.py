@@ -38,7 +38,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -81,7 +81,7 @@ _REPRO_OUTPUT = (
 async def test_behavioral_goal_with_repro_and_org_green_is_verified(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("app", "https://github.com/devonpveller/app")
+        await orch.projects.add("app", "https://github.com/demoowner/app")
         orch._gh_transport = _clean_remote()
         eid, _c, _r = await orch.router.open_effort("editor-atlas", project="app")
         await orch.charters.set_goal(
@@ -115,7 +115,7 @@ async def test_behavioral_goal_with_repro_but_org_did_not_run_before_after_is_no
     a repro — we do NOT burn worker cycles re-iterating; we ask the operator to confirm."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("app", "https://github.com/devonpveller/app")
+        await orch.projects.add("app", "https://github.com/demoowner/app")
         orch._gh_transport = _clean_remote()
         eid, _c, _r = await orch.router.open_effort("editor-atlas-fc", project="app")
         await orch.charters.set_goal(
@@ -143,7 +143,7 @@ async def test_behavioral_goal_with_repro_but_org_did_not_run_before_after_is_no
 async def test_behavioral_goal_build_only_is_not_verified_and_stays_open(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("app", "https://github.com/devonpveller/app")
+        await orch.projects.add("app", "https://github.com/demoowner/app")
         orch._gh_transport = _clean_remote()
         eid, _c, _r = await orch.router.open_effort("editor-atlas2", project="app")
         await orch.charters.set_goal(

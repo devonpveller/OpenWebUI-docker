@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [string]$LMStudioHost = "169.254.83.107",
+    [string]$LMStudioHost = "<lmstudio-host>",
     [string]$LMStudioPort = "5506"
 )
 
@@ -17,7 +17,7 @@ $containers = docker compose ps --format json | ConvertFrom-Json
 $tailscaleRunning = $containers | Where-Object { $_.Service -eq "tailscale" -and $_.State -eq "running" }
 
 if (-not $tailscaleRunning) {
-    Write-Host "❌ Tailscale container not running - starting it..." -ForegroundColor Red
+    Write-Host "[X] Tailscale container not running - starting it..." -ForegroundColor Red
     docker compose up -d tailscale
     Start-Sleep 15
 }
@@ -26,9 +26,9 @@ if (-not $tailscaleRunning) {
 Write-Host "Testing LM Studio connectivity from host..." -ForegroundColor Yellow
 try {
     $response = Invoke-RestMethod -Uri "http://${LMStudioHost}:${LMStudioPort}/v1/models" -TimeoutSec 5
-    Write-Host "✅ LM Studio is accessible from host" -ForegroundColor Green
+    Write-Host "[OK] LM Studio is accessible from host" -ForegroundColor Green
 } catch {
-    Write-Host "❌ LM Studio not accessible from host at ${LMStudioHost}:${LMStudioPort}" -ForegroundColor Red
+    Write-Host "[X] LM Studio not accessible from host at ${LMStudioHost}:${LMStudioPort}" -ForegroundColor Red
     Write-Host "   Make sure LM Studio is running with server enabled" -ForegroundColor Yellow
     exit 1
 }

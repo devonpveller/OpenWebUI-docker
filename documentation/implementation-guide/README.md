@@ -52,7 +52,7 @@
 | `vllm-inference-exploration/` **@ plan store** | 📝 draft, nothing built | |
 | `quartz-production-build-migration/` **@ plan store** | 📝 plan, not started | Genuinely outstanding (viewer still dev-serve). |
 | `deploy-gate-and-curator-recovery/` **@ plan store** | 📝 draft 2026-09-06 | Incident plan (openbrain-curator crash loop, gate 5d); Phase A/B in flight via harness items `gate5d`, `curatorimg`, `passplan`. |
-| `wsl-resource-governance/` **@ plan store** | 📝 drafted, not applied | Pairs with `C:\Users\yamao\.wslconfig` header. |
+| `wsl-resource-governance/` **@ plan store** | 📝 drafted, not applied | Pairs with `%USERPROFILE%\.wslconfig` header. |
 | `reaching-level-4-autonomy/` **@ plan store** | 💡 ideas only | Not committed scope. |
 | `Jupyter/` **@ plan store** | 💡 captured, not built | |
 | `autonomous-updates-with-security/` **@ plan store** | ⚠️ unverified | No completion markers; both real OWUI upgrades ran manually. Folded into Watchtower decision D-2. |

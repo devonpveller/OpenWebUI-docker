@@ -29,7 +29,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -61,7 +61,7 @@ async def _lifecycle(orch, eid):
 async def test_no_changes_on_first_publish_finishes_done_without_reengage(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, chan, root = await orch.router.open_effort("investigate", project="murder")
         orch._gh_transport = _no_branch_remote()
         # step output, then the publish wake replies NO CHANGES (the worker's protocol reply)
@@ -83,7 +83,7 @@ async def test_no_changes_on_firm_reengage_finishes_done_not_escalated(db_url, t
     re-engage → worker replies `NO CHANGES:` → must finish DONE, not escalate 'did not land'."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, chan, root = await orch.router.open_effort("investigate", project="murder")
         orch._gh_transport = _no_branch_remote()
         harness.output_queue = ["the answer …", "skipped git steps per instruction",
@@ -103,7 +103,7 @@ async def test_long_answers_are_chunked_not_chopped(db_url, tmp_path):
     arrive whole, split across thread replies."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, chan, root = await orch.router.open_effort("investigate", project="murder")
         orch._gh_transport = _no_branch_remote()
         harness.answer_text = ("HEAD-" + "x" * 5000 + "-TAIL")   # ~5KB answer

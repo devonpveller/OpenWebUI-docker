@@ -4628,11 +4628,11 @@ def test_a_marker_in_an_unregistered_file_is_refused(docs_root):
 
 
 def test_the_host_path_guard_knows_every_spelling():
-    spelled = stack.path_spellings(Path("D:\\Open WebUI\\ai-stack") if stack.WINDOWS
+    spelled = stack.path_spellings(Path("D:\\Stack Home\\ai-stack") if stack.WINDOWS
                                    else Path("/home/x/ai-stack"))
     if stack.WINDOWS:
-        assert {"D:\\Open WebUI\\ai-stack", "D:/Open WebUI/ai-stack", "/d/Open WebUI/ai-stack",
-                "/mnt/d/Open WebUI/ai-stack"} <= set(spelled)
+        assert {"D:\\Stack Home\\ai-stack", "D:/Stack Home/ai-stack", "/d/Stack Home/ai-stack",
+                "/mnt/d/Stack Home/ai-stack"} <= set(spelled)
     else:
         assert "/home/x/ai-stack" in spelled
     labels = {label for label, _w, _v in stack.host_values(stack.Manifest.load(REAL_MANIFEST), REPO_ROOT)}

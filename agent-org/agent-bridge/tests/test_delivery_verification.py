@@ -49,8 +49,8 @@ def _remote(*, branch_status=200, ahead=1, default_branch="main"):
 
 async def test_read_branch_delivery_landed():
     d = await read_branch_delivery(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Docker-Game", "agent/effort-wire",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Docker-Game", "agent/effort-wire",
         transport=_remote(branch_status=200, ahead=3))
     assert d.verifiable and d.exists and d.ahead == 3 and d.landed
     assert d.head_sha == "prehead0000000000"   # FULL sha of the FIRST read (moving-head mock)
@@ -58,8 +58,8 @@ async def test_read_branch_delivery_landed():
 
 async def test_read_branch_delivery_missing_branch():
     d = await read_branch_delivery(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Docker-Game", "agent/effort-wire",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Docker-Game", "agent/effort-wire",
         transport=_remote(branch_status=404))
     assert d.verifiable and not d.exists and not d.landed      # verifiably absent
 
@@ -67,8 +67,8 @@ async def test_read_branch_delivery_missing_branch():
 async def test_read_branch_delivery_empty_branch_is_not_landed():
     # branch exists but 0 commits over base — the worker committed NOTHING; not a real delivery.
     d = await read_branch_delivery(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Docker-Game", "agent/effort-wire",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Docker-Game", "agent/effort-wire",
         transport=_remote(branch_status=200, ahead=0))
     assert d.verifiable and d.exists and d.ahead == 0 and not d.landed
 
@@ -91,7 +91,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -111,7 +111,7 @@ async def _lifecycle(orch, effort_id):
 async def test_verified_landed_reports_done_with_branch(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         orch._gh_transport = _remote(branch_status=200, ahead=2)
         await orch.delegate(eid, chan, root, "wire the build", plan_steps=["do the work"])
@@ -128,7 +128,7 @@ async def test_verified_landed_reports_done_with_branch(db_url, tmp_path):
 async def test_nondelivery_reengages_once_then_escalates(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         orch._gh_transport = _remote(branch_status=404)          # branch NEVER lands
         await orch.delegate(eid, chan, root, "wire the build", plan_steps=["do the work"])
@@ -149,7 +149,7 @@ async def test_nondelivery_reengages_once_then_escalates(db_url, tmp_path):
 async def test_nondelivery_then_reengage_lands_finishes_done(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         # branch missing on the FIRST verify, present on the re-check (the re-engage worked).
         state = {"n": 0}
@@ -204,14 +204,14 @@ async def test_publish_reauths_origin_with_current_token(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
         # repo under the App's account → _project_token returns the App installation token
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         orch._gh_transport = _remote(branch_status=200, ahead=1)
         await orch.delegate(eid, chan, root, "wire the build", plan_steps=["do the work"])
         # set_project ran at least twice: the initial focus AND the publish re-auth — both w/ a token
         assert len(harness.focus_calls) >= 2
         publish_focus = harness.focus_calls[-1]
-        assert publish_focus["repo"] == "https://github.com/devonpveller/Docker-Game"
+        assert publish_focus["repo"] == "https://github.com/demoowner/Docker-Game"
         assert publish_focus["token"] == "ghs_faketoken"     # a CURRENT App token, not none
     finally:
         await db.dispose()
@@ -221,8 +221,8 @@ async def test_publish_reauths_origin_with_current_token(db_url, tmp_path):
 async def test_intent_named_projects_excludes_own_target(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         # names both, effort targets murder → only monogame-engine is "named but not targeted"
         named = await orch._intent_named_projects("in monogame-engine, wire murder to build", "murder")
         assert named == ["monogame-engine"]                      # longest-first; own target excluded
@@ -238,7 +238,7 @@ async def test_scope_mismatch_flags_partly_done_not_done(db_url, tmp_path):
     a clean 'done' that hides the untouched stated target."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         eid, chan, root = await orch.router.open_effort("wire", project="murder")
         orch._gh_transport = _remote(branch_status=200, ahead=2)      # the murder branch DID land
         orch._effort_intent_scope[eid] = ["monogame-engine"]          # operator named the engine too

@@ -23,7 +23,7 @@ from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = "https://github.com/devonpveller/gym"
+REPO = "https://github.com/demoowner/gym"
 
 
 async def _orch(db_url, tmp_path, *, invariant=True, github=True, **overrides):
@@ -37,7 +37,7 @@ async def _orch(db_url, tmp_path, *, invariant=True, github=True, **overrides):
     if github:
         key = tmp_path / "app.pem"
         key.write_text("dummy")
-        kwargs.update(github_app_id="1", github_app_owner="devonpveller",
+        kwargs.update(github_app_id="1", github_app_owner="demoowner",
                       github_app_private_key_path=str(key))
     kwargs.update(overrides)
     settings = Settings(**kwargs)

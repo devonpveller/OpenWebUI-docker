@@ -17,6 +17,9 @@
 .env.bak*
 .env.*.bak
 .env-bak*
+# The operator denylist of scripts/checks/check_identity.py: personal literals that must
+# never be published (format: .identity-denylist.example, which stays tracked).
+.identity-denylist
 *.env.bak*
 data/
 logs/
