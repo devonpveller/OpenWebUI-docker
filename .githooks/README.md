@@ -52,17 +52,18 @@ Every gate is a PowerShell script, and they run on Linux and macOS too. At the t
 |------|------|-----------|
 | **Windows PowerShell** | a native Windows git shell (`uname -s` is `MINGW*`/`MSYS*`/`CYGWIN*`, e.g. Git Bash) and `powershell.exe` is on `PATH`. **Not WSL**: WSL has `powershell.exe` on `PATH` through interop, but its Windows git cannot use the Linux checkout, so WSL takes the next row | every gate, with the same command line the hook has always used |
 | **PowerShell 7** | not a native Windows git shell (or no `powershell.exe`), and `pwsh` is on `PATH` (any OS) | every gate, the same `.ps1` files |
-| **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped, through their Python twins, and the four that never needed PowerShell: `hook-modes` and `exec-bits-modes` (plain `sh`), `exec-bits-drift` (Python 3.8+) and `docs-blocks` (Python 3.11+). Every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
+| **Python only** | neither, `python3` (3.8+) is on `PATH` | the three gates that are never skipped and the doc-placement gate, through their Python twins, and the four that never needed PowerShell: `hook-modes` and `exec-bits-modes` (plain `sh`), `exec-bits-drift` (Python 3.8+) and `docs-blocks` (Python 3.11+). Every other gate prints `SKIPPED <gate>: needs PowerShell (install pwsh to run it)` and does not fail the commit |
 
-The three never-skipped gates and their twins, both under `scripts/checks/`:
+The gates with a Python twin, both under `scripts/checks/` (the first three are the never-skipped ones):
 
 | Gate | PowerShell | Python twin |
 |------|-----------|-------------|
 | secret guard | `check-staged-secrets.ps1` | `check_staged_secrets.py` |
 | line endings | `validate-lineendings.ps1` | `validate_lineendings.py` |
 | gateway routing | `check-llm-gateway-routing.ps1` | `check_llm_gateway_routing.py` |
+| doc placement (staged mode; not never-skipped, so with neither host it prints `SKIPPED`) | `check-doc-placement.ps1` | `check_doc_placement.py` |
 
-Each twin copies its `.ps1`'s rules and says in its header what it copies. **All three FAIL CLOSED, in both
+Each twin copies its `.ps1`'s rules and says in its header what it copies. **The never-skipped three FAIL CLOSED, in both
 languages:** if the gate's own `git` call fails (a wrong `GIT_DIR`, a repository git refuses
 as "dubious ownership"), or routing cannot list a directory or read a candidate file, the gate
 refuses the commit and names the failure. A query that failed is never read as "nothing
@@ -74,7 +75,7 @@ A skip is never silent. The hook prints each `SKIPPED` line as it happens, ends 
 summary such as
 
 ```text
-Pre-commit gates (host: python3) - RAN: hook-modes exec-bits-modes exec-bits-drift secrets line-endings gateway-routing docs-blocks | SKIPPED: doc-placement corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
+Pre-commit gates (host: python3) - RAN: hook-modes exec-bits-modes exec-bits-drift secrets identity line-endings doc-placement gateway-routing docs-blocks | SKIPPED: corpus-exposure project-configs env-file-scope ob1-recipe-tests ob1-deno-recipes ob1-integration-images
 ```
 
 and adds a fifth column to the attestation line (below), `skipped=<gate>,<gate>,...`.

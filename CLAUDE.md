@@ -106,7 +106,8 @@ internal hosts, ports and file:line anchors, so they go to the private plan stor
 `README.md`, `SECURITY.md`, `documentation/runbooks/`, the status index and
 `multi-agent-concurrency/`, per-plane and per-module READMEs, the agent-org / little-coder
 subproject docs (live ones stay here), and evidence that CODE reads (beside
-that code). Enforced by `scripts/checks/check-doc-placement.ps1`; a deliberate exception
+that code). Enforced by `scripts/checks/check-doc-placement.ps1` (its Python twin
+`check_doc_placement.py` where there is no PowerShell); a deliberate exception
 is `AI_STACK_PLAN_IN_CODE_REPO=1` with the reason in the commit message.
 
 ## Conventions
