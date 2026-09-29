@@ -148,14 +148,31 @@ def state_of(root: Path) -> dict:
 
 
 def test_driver_imports_only_the_standard_library():
-    """The OptiPlex gets Python and Docker and nothing else (anchor criterion)."""
-    tree = ast.parse((Path(stack.__file__)).read_text(encoding="utf-8"))
-    modules = {
-        (node.names[0].name if isinstance(node, ast.Import) else node.module).split(".")[0]
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-    }
-    assert not [m for m in modules if m not in sys.stdlib_module_names]
+    """The OptiPlex gets Python and Docker and nothing else (anchor criterion).
+
+    A sibling module in scripts/stack/ (model_labels.py, model-roles 2026-09-28) is
+    allowed ONLY because the same rule is applied to it: every module the driver
+    reaches, transitively, imports nothing outside the standard library.
+    """
+    here = Path(stack.__file__).parent
+    siblings = {p.stem for p in here.glob("*.py")}
+    seen, todo, outside = set(), ["stack"], []
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        tree = ast.parse((here / f"{name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            module = (node.names[0].name if isinstance(node, ast.Import) else node.module).split(".")[0]
+            if module in siblings and module not in sys.stdlib_module_names:
+                todo.append(module)
+            elif module not in sys.stdlib_module_names:
+                outside.append(f"{name}.py imports {module}")
+    assert not outside
+    assert "model_labels" in seen, "the walk must reach the sibling module the driver imports"
 
 
 def test_real_manifest_parses_and_every_edge_names_a_real_plane():
@@ -5823,3 +5840,208 @@ def test_an_unreadable_container_list_with_local_off_says_it_cannot_tell(root, m
     assert state == "FAIL" and code >= 1, out
     assert "`docker ps -a` could not be read" in label
     assert "`up` starts it" not in label and "LEFTOVER" not in label
+
+
+# --------------------------------------------------------------------------
+# model roles (model-roles item mr-gateway, 2026-09-28): the landing probe asks for
+# a ROLE, and `up` / `recover` / `labels` set Open WebUI's role names from the file
+# --------------------------------------------------------------------------
+
+import model_labels  # noqa: E402
+from test_model_labels import ADMIN_KEY, FakeOwui  # noqa: E402
+
+
+class _Resp:
+    def __init__(self, payload):
+        self.status = 200
+        self._body = json.dumps(payload).encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _run_landing(monkeypatch, capsys, ids):
+    """Execute the in-container landing script against a fake gateway; (printed line, models asked for)."""
+    import urllib.request as ur
+    asked = []
+
+    def urlopen(req, timeout=None):
+        if req.full_url.endswith("/v1/models"):
+            return _Resp({"data": [{"id": i} for i in ids]})
+        asked.append(json.loads(req.data.decode())["model"])
+        return _Resp({"choices": [{"message": {"content": "pong"}}]})
+
+    monkeypatch.setattr(ur, "urlopen", urlopen)
+    try:
+        exec(compile(stack._LANDING_COMPLETION, "<landing>", "exec"), {"__name__": "__main__"})
+    except SystemExit:
+        pass
+    return capsys.readouterr().out.strip(), asked
+
+
+def test_the_landing_probe_asks_for_the_local_role_even_with_a_cloud_model_listed_first(monkeypatch, capsys):
+    """BASE RED at 0fb1c0c: the probe took the first non-embed id - cloud-large, which has no egress."""
+    ids = ["cloud-large", "cloud-small", "qwen36-27b", "qwen36-27b:nothink", "bge-m3",
+           "local-large", "local-large:nothink", "local-small", "local-small:nothink", "local-embed"]
+    line, asked = _run_landing(monkeypatch, capsys, ids)
+    assert asked == ["local-small"], line
+    assert line.startswith("OK ") and "(local-small loaded)" in line
+
+
+def test_the_landing_probe_fails_naming_the_role_when_the_gateway_lacks_it(monkeypatch, capsys):
+    line, asked = _run_landing(monkeypatch, capsys, ["qwen36-27b", "qwen36-27b:nothink", "bge-m3"])
+    assert asked == []
+    assert line.startswith("FAIL the gateway does not advertise the local-small role")
+
+
+def test_the_probe_role_is_a_registered_role():
+    assert stack.PROBE_ROLE in {r.name for r in model_labels.roles(REPO_ROOT)}
+    assert f'ROLE = "{stack.PROBE_ROLE}"' in stack._LANDING_COMPLETION
+
+
+def _roles_root(root: Path, env_extra: str = "COMPOSE_PROFILES=local\n", key: str | None = ADMIN_KEY,
+                model_path: str = "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf") -> Path:
+    """The real inference config in the throwaway root, a scratch model store, the admin key."""
+    for rel in (model_labels.MODEL_LIST_REL, model_labels.LLAMA_SWAP_REL, model_labels.UPSTREAMS_REL):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO_ROOT / rel, root / rel)
+    store = root.parent / "models"
+    (store / "unsloth" / "Qwen3.8-27B-GGUF").mkdir(parents=True, exist_ok=True)
+    (store / "unsloth" / "Qwen3.8-27B-GGUF" / "Qwen3.8-27B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    (root / "data" / "models" / "embeddings").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "models" / "embeddings" / "bge-m3-f16.gguf").write_bytes(b"GGUF")
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + env_extra
+                   + f"LM_MODELS_DIR={store}\nLLAMA_SWAP_QWEN36_27B_MODEL_PATH={model_path}\n", encoding="utf-8")
+    if key is not None:
+        dot = root / ".env"
+        dot.write_text((dot.read_text(encoding="utf-8") if dot.exists() else "")
+                       + f"OWUI_ADMIN_API_KEY={key}\n", encoding="utf-8")
+    return root
+
+
+@pytest.fixture
+def no_owui_env(monkeypatch):
+    for var in ("OWUI_ADMIN_API_KEY", "OWUI_BASE_URL", "COMPOSE_PROFILES", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH",
+                "LM_MODELS_DIR"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _main(root, *args, daemon=None, owui=None):
+    out = io.StringIO()
+    kw = {"runner": daemon.runner, "capture": daemon.capture, "pipe": daemon.pipe} if daemon else {}
+    code = stack.main(["--root", str(root), *args], stdout=out, labels_request=owui, **kw)
+    return code, out.getvalue()
+
+
+def _old_row():
+    return {"qwen36-27b": {"id": "qwen36-27b", "user_id": "a", "base_model_id": None, "name": "Qwen 3.6 27B",
+                           "meta": {}, "params": {}, "is_active": True, "created_at": 1, "updated_at": 1}}
+
+
+def test_up_sets_the_role_names_then_a_second_up_changes_nothing(root, no_owui_env):
+    _enable(root)
+    _roles_root(root)
+    owui = FakeOwui(_old_row())
+    code, out = _main(root, "up", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert "# labels: local-large: created as 'Qwen3.8-27B Q4_K_M (thinking)'" in out
+    assert "# labels: local-small: created as 'Qwen3.8-27B Q4_K_M (no thinking)'" in out
+    assert "# labels: local-embed: created as 'bge-m3 f16 (embeddings)'" in out
+    assert "# labels: 5 row(s) changed, 0 already right, at http://127.0.0.1:3000" in out
+    assert owui.rows["qwen36-27b"]["name"] == "Qwen 3.6 27B", "an old-name row was touched"
+    writes = len(owui.writes)
+    code, out = _main(root, "up", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0 and "# labels: 0 row(s) changed, 5 already right" in out, out
+    assert len(owui.writes) == writes
+
+
+def test_up_runs_no_sync_without_local_or_without_the_frontend(root, no_owui_env):
+    _enable(root)
+    _roles_root(root, env_extra="")   # inference without `local`: no role is registered
+    owui = FakeOwui()
+    code, out = _main(root, "up", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert owui.calls == [] and "# labels" not in out
+    # `local` on, but only inference enabled and started: nothing to label
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local\n", encoding="utf-8")
+    _enable(root, "inference")
+    code, out = _main(root, "up", "inference", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert owui.calls == [] and "# labels" not in out
+
+
+def test_an_injected_runner_without_a_labels_seam_never_reaches_open_webui(root, no_owui_env, monkeypatch):
+    _enable(root)
+    _roles_root(root)
+
+    def forbidden(*a, **k):
+        raise AssertionError("the real Open WebUI call ran inside a test")
+    monkeypatch.setattr(model_labels, "urllib_request", forbidden)
+    daemon = OpsDaemon(RENDERS)
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), "up"], runner=daemon.runner, capture=daemon.capture, stdout=out)
+    assert code == 0 and "# labels" not in out.getvalue(), out.getvalue()
+
+
+def test_a_label_failure_after_up_is_loud_and_leaves_the_exit_code_alone(root, no_owui_env):
+    _enable(root)
+    _roles_root(root, model_path="/models/unsloth/Gone-GGUF/Gone-27B-Q4_K_M.gguf")
+    owui = FakeOwui()
+    code, out = _main(root, "up", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert "# labels: FAILED - role local-large:" in out and "Nothing was written to Open WebUI." in out
+    assert "# labels: WARNING - Open WebUI's role names were NOT synced" in out
+    assert owui.calls == []
+
+
+def test_up_dry_run_names_the_sync_and_calls_nothing(root, no_owui_env):
+    _enable(root)
+    _roles_root(root)
+    owui = FakeOwui()
+    code, out = _main(root, "up", "--dry-run", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert "labels` would set Open WebUI's role names" in out
+    assert owui.calls == []
+
+
+def test_recover_sets_the_role_names_after_every_gate_passed(root, no_owui_env, fast_clock):
+    _enable(root)
+    _roles_root(root)
+    owui = FakeOwui()
+    code, out = _main(root, "recover", daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert out.index("recovered: inference, frontend") < out.index("# labels: local-large: created")
+    assert owui.rows["local-embed"]["name"] == "bge-m3 f16 (embeddings)"
+
+
+def test_the_labels_verb_syncs_on_demand_and_dry_runs(root, no_owui_env):
+    _roles_root(root)
+    owui = FakeOwui()
+    code, out = _main(root, "labels", "--dry-run", owui=owui)
+    assert code == 0, out
+    assert "labels: local-large: would-create as 'Qwen3.8-27B Q4_K_M (thinking)'" in out
+    assert "labels: dry run: 5 row(s) would change" in out and owui.writes == []
+    code, out = _main(root, "labels", owui=owui)
+    assert code == 0 and "labels: 5 row(s) changed" in out, out
+    code, out = _main(root, "labels", owui=owui)
+    assert code == 0 and "labels: 0 row(s) changed, 5 already right" in out, out
+
+
+def test_the_labels_verb_refuses_without_local_and_without_a_key(root, no_owui_env):
+    _roles_root(root, env_extra="", key="")
+    owui = FakeOwui()
+    code, out = _main(root, "labels", owui=owui)
+    assert code == stack.EXIT_REFUSED and "does not run its `local` profile" in out, out
+    env = root / "inference" / ".env"
+    env.write_text(env.read_text(encoding="utf-8") + "COMPOSE_PROFILES=local\n", encoding="utf-8")
+    code, out = _main(root, "labels", owui=owui)
+    assert code == stack.EXIT_REFUSED and "OWUI_ADMIN_API_KEY is not set" in out, out
+    assert owui.calls == []

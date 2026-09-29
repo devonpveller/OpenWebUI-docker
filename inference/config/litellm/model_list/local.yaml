@@ -75,4 +75,47 @@ model_list:
       api_base: http://llm-queue:8080/v1
       api_key: dummy
 
+  # ─── ROLES (model-roles, operator decisions R1-R5, 2026-09-28) ───
+  # Callers name a ROLE; LiteLLM forwards `litellm_params.model` - the concrete
+  # id - so llm-queue's registry and llama-swap's `setParamsByID` `:nothink`
+  # thinking switch see exactly what they saw before. The five names above stay
+  # registered until every consumer has moved and a soak shows no traffic on
+  # them (R5, item mr-retire).
+  #   local-large          the resident 27B, thinking               (R1)
+  #   local-large:nothink  the same, thinking off                   (R2)
+  #   local-small          the same 27B without thinking - one GPU, one resident
+  #                        model, so no second model and no swap thrash (R1)
+  #   local-small:nothink  identical to local-small today           (R2)
+  #   local-embed          bge-m3, 1024-dim. A role does not make an embedding
+  #                        swap free: a new model means re-embedding (R3)
+  # The label Open WebUI shows for each role is DERIVED from the model file the
+  # upstream loads (scripts/stack/model_labels.py; `stack.py labels`), never typed
+  # here. Point a role at another concrete id and the label follows.
+  - model_name: local-large
+    litellm_params:
+      model: openai/qwen36-27b
+      api_base: http://llm-queue:8080/v1
+      api_key: dummy
+  - model_name: local-large:nothink
+    litellm_params:
+      model: openai/qwen36-27b:nothink
+      api_base: http://llm-queue:8080/v1
+      api_key: dummy
+  - model_name: local-small
+    litellm_params:
+      model: openai/qwen36-27b:nothink
+      api_base: http://llm-queue:8080/v1
+      api_key: dummy
+  - model_name: local-small:nothink
+    litellm_params:
+      model: openai/qwen36-27b:nothink
+      api_base: http://llm-queue:8080/v1
+      api_key: dummy
+  - model_name: local-embed
+    litellm_params:
+      # hosted_vllm, as for the bge-m3 names above (the openai provider rejects `dimensions`).
+      model: hosted_vllm/bge-m3
+      api_base: http://llm-queue:8080/v1
+      api_key: dummy
+
 x-requires-profile: local

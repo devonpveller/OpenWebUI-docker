@@ -59,6 +59,8 @@ python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC
 python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 python scripts/stack/stack.py docs --check        # are the generated blocks in the docs still true?
+python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names would change
+python scripts/stack/stack.py labels              # set them from the model files (idempotent)
 ```
 
 `status`, `health`, `doctor`, `stats`, `inventory --check` and `docs --check` are **read-only**:
@@ -535,7 +537,12 @@ What it checks, in the cheapest order that cannot be fooled:
 3. **One completion**, only when nothing is resident: `max_tokens` 3, THROUGH the
    gateway (never around it), 600 s timeout because a cold load is minutes -
    257 s measured on this host. 200 with a choice PASSES; anything else FAILS
-   with the gateway's own sentence.
+   with the gateway's own sentence. It asks for the **role** `local-small`
+   (`PROBE_ROLE`; model-roles, 2026-09-28), never "the first id that is not an
+   embedding": the assembler loads `cloud.openrouter.yaml` before `local.yaml`,
+   so with a cloud key set that rule picked `cloud-large` - which has no egress -
+   and said nothing about the local backend. A gateway that does not list
+   `local-small` FAILS naming it.
 
 **What fails it:** an empty or missing `/models`; a completion that does not
 return 200; `llama-cpp-upstream` not running; or `LITELLM_MASTER_KEY` missing
@@ -874,6 +881,58 @@ MERGE-PROTOCOL.md step 5 requires `--no-ff` and a `docs --check` exit 0. Git cal
 aimed at the submodule drop git's repository-local variables
 (`git rev-parse --local-env-vars`), which a hook sets for the PARENT repository.
 
+### `labels` [`--dry-run`]
+
+Sets the name Open WebUI shows for each local model **role** (`local-large`,
+`local-large:nothink`, `local-small`, `local-small:nothink`, `local-embed` - the
+`model_name`s in `inference/config/litellm/model_list/local.yaml`) to a label
+**derived from the model file** the inference plane loads, so a model swap
+relabels itself and no name is typed by hand (model-roles, operator decision
+R4). The derivation is `scripts/stack/model_labels.py`:
+
+- the role's `litellm_params.model` is the concrete id; a llama-swap id resolves
+  through that entry's `--model` in `inference/config/llama-swap.config.yaml`
+  (usually `${env.LLAMA_SWAP_..._MODEL_PATH}`), a `bge*` id through the embed
+  upstream's `LLAMA_ARG_MODEL`;
+- the variable is interpolated as compose does it - the shell, then
+  `inference/.env`, then the `${VAR:-default}` in `inference/compose/upstreams.yml`
+  - and the file is checked to exist under the service's `/models` bind;
+- the label is the file stem with its quant split off, plus the mode:
+  `Qwen3.8-27B-Q4_K_M.gguf` -> `Qwen3.8-27B Q4_K_M (thinking)` for `local-large`,
+  `Qwen3.8-27B Q4_K_M (no thinking)` for the `:nothink` and `local-small` roles,
+  `bge-m3 f16 (embeddings)` for `local-embed`.
+
+`python scripts/stack/model_labels.py [--env-file F] [--skip-file-check]` prints
+the labels and writes nothing.
+
+The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
+`POST /api/v1/models/create` for a role with no row, or
+`POST /api/v1/models/model/update` for one whose name differs) - the path its
+admin UI takes to rename a base model. It reads every row first, writes only a
+name that differs, sends a renamed row's meta, params, access grants and active
+flag back exactly as it read them (Open WebUI 0.11.0 replaces a row's grants with
+the list an update carries, and fails an update that carries none), and never
+touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,
+not rewritten. Each change is printed (`created as`, `renamed 'old' -> 'new'`,
+`unchanged`).
+
+It needs **`OWUI_ADMIN_API_KEY`** - an Open WebUI ADMIN user's API key (Settings >
+Account > API keys; API keys must be enabled in Admin Settings > General) - from
+the shell or the root `.env`. `OWUI_BASE_URL` defaults to `http://127.0.0.1:3000`.
+
+**`up` and `recover` run it** after a successful run that started inference or the
+frontend, when both are on (started by this run or enabled) and inference runs
+`local` (from any source, as `health` decides it). There it never changes the
+exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
+`labels`. Under `--dry-run` they print that they would run it and call nothing.
+`stack.ps1` does not forward `labels`; run it with `stack.py`.
+
+**Refuses** (exit 1): inference without `local` (no role is registered); a label
+that cannot be derived (a variable with no value, a path outside `/models`, a
+missing file, a role forwarding an id no upstream serves) - then nothing is
+written; no `OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within
+180 s; a key Open WebUI refuses (401/403); a preset on a role id.
+
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 
 Writes `.stack/state.json`. Non-interactive by design - it has to behave
@@ -945,6 +1004,11 @@ own (`MINI_MANIFEST`) with a scripted `docker compose config`, so an unrelated
 plane change cannot fail it; the shipping tree is covered by three `shipped`
 tests plus `inventory --check` itself, which the pre-commit hook and the
 `stack-driver` CI job both run for real.
+
+`labels` and the model-role label generator (`test_model_labels.py`) run
+against a scratch copy of the real inference config and a `FakeOwui` that
+answers the four Open WebUI admin-API calls as 0.11.0 does; their real proof is
+the disposable Open WebUI in item `mr-gateway`'s test plan.
 
 `recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
 daemon with containers, volumes and the helper container, so gate timeouts,

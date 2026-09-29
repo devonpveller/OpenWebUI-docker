@@ -4,9 +4,16 @@
 #
 # Adding a new model:
 #   1. Add an env block in docker-compose.yml (or .env) for its path / tunables.
-#   2. Copy one of the model entries below and update: id, name, aliases,
-#      and the four ${env.*} references. Everything else is inherited from
-#      the `common-args` macro.
+#   2. Copy one of the model entries below and update: id, aliases, and
+#      the ${env.*} references. Everything else is inherited from the
+#      `common-args` macro.
+#
+# NO `name:` FIELDS (model-roles, 2026-09-28). llama-swap's `name:` was
+# hand-typed and drifted: the qwen36-27b entry said "Qwen 3.6 27B (ThinkingCap)"
+# while it served Qwen3.8-27B. A model's display name is now DERIVED from the
+# GGUF the entry loads (scripts/stack/model_labels.py, `stack.py labels`, which
+# writes it to Open WebUI), so nothing here can drift from the file. Do not add
+# `name:` back; llama-swap then lists each model by its id.
 #
 # A single GPU is shared by all models defined here. Only one model is
 # resident at a time; llama-swap unloads the previous server when a request
@@ -31,7 +38,6 @@ macros:
 
 models:
   qwen36-35b-a3b:
-    name: Qwen 3.6 35B-A3B
     cmd: |
       llama-server ${common-args}
       --model        ${env.LLAMA_SWAP_QWEN36_35B_MODEL_PATH}
@@ -58,7 +64,6 @@ models:
   # service plane; only direct diagnostic probes hit it. Values mirror the
   # qwen36-27b .env values at swap time. Remove once the experiment settles.
   qwen36-27b-baseline:
-    name: Qwen 3.6 27B (pre-ThinkingCap baseline)
     cmd: |
       llama-server ${common-args}
       --model        /models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf
@@ -80,9 +85,9 @@ models:
             enable_thinking: false
 
   qwen36-27b:
-    # 2026-07-09: id kept as `qwen36-27b` (many services pin it) but the GGUF
-    # underneath is now the ThinkingCap fine-tune — see .env MODEL_PATH.
-    name: Qwen 3.6 27B (ThinkingCap)
+    # 2026-07-09: id kept as `qwen36-27b` (many services pin it); the GGUF
+    # underneath is whatever LLAMA_SWAP_QWEN36_27B_MODEL_PATH names in
+    # inference/.env - the derived label says which (`stack.py labels`).
     # B2 LANDED (2026-06-14): concurrencyLimit 0 = UNLIMITED here. The admission
     # decision now belongs ENTIRELY to the `llm-queue` controller in front of this
     # server (LiteLLM api_base → llm-queue → here). llama-swap must NOT also cap,
