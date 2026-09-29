@@ -3552,29 +3552,45 @@ def test_watching_a_level_together_gives_each_container_the_verdict_it_gets_alon
     # without the failing two, every gate is answered exactly as alone. `never` is LAST: one after
     # another it was first watched once the four before it had verdicts - `steady` sits out its whole
     # 15 s window (allowed one 3 s poll late: 18 s), the other three report events (at 12, 3 and 6 s)
-    # that are already there by then - so its 30 s budget runs from 18 s: it times out at 48 s
+    # that are already there by then - so its 30 s budget runs from 18 s, and the timeout is declared one
+    # round (3 s) past it, where one after another's last poll could still have seen a pass: 51 s
     keep = [n for n in names if solo[n][0][0] or n == "never"]
     now[0] = CLOCK0
     together = stack.wait_gates(_Inspect(_GATE_SCRIPTS), None, ["docker"],
                                 [(n, 30, _GATE_KINDS.get(n, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
                                  for n in keep])
     assert together == [solo[n][0] for n in keep]
-    assert now[0] - CLOCK0 == stack.SETTLE_SECONDS + stack.GATE_POLL_SECONDS + 30 == 48
+    assert now[0] - CLOCK0 == stack.SETTLE_SECONDS + stack.GATE_POLL_SECONDS + 30 + stack.GATE_POLL_SECONDS == 51
 
 
 class _Timed:
     """`docker inspect` as a function of time since CLOCK0: {name: t -> state}. Each inspect costs
     `cost` seconds of clock, as a real one does - which is what puts one-after-another's polls on a
-    different grid from a whole level's."""
+    different grid from a whole level's. `cost` may be a function (`_jitter`): a new cost each inspect."""
 
     def __init__(self, clock, scripts, cost=0.0):
         self.clock, self.scripts, self.cost = clock, scripts, cost
 
     def __call__(self, cmd, cwd):
         state = dict(self.scripts[cmd[-1]](self.clock[0] - CLOCK0))
-        self.clock[0] += self.cost
+        self.clock[0] += self.cost() if callable(self.cost) else self.cost
         restarts = state.pop("RestartCount", 0)
         return stack.CommandResult(0, json.dumps(state) + "|" + str(restarts), "")
+
+
+def _jitter(seed, hi):
+    """A jittered inspect cost: the FIRST inspect costs `hi`, then uniform in [0, hi] (seeded). The rule's
+    stated condition is that no inspect one after another met was slower than the slowest the level
+    measured; the first inspect being the slowest possible is what makes a level measure it."""
+    rng = random.Random(seed)
+    first = [True]
+
+    def cost():
+        if first[0]:
+            first[0] = False
+            return hi
+        return rng.uniform(0, hi)
+    return cost
 
 
 def _exits_at(t_exit, code=1):
@@ -3671,20 +3687,21 @@ def test_a_late_gate_in_a_big_level_gets_at_least_the_time_it_had_one_after_anot
 
 
 def test_the_credit_is_what_earlier_gates_took_so_a_first_gate_and_a_hopeless_gate_still_time_out(fast_clock):
-    # first in its level: no credit - its own 90 s budget, exactly as before
+    # first in its level: no credit - its own 90 s budget, declared one round (3 s) late because the level's
+    # polls are sparser than a lone gate's: 93 s
     inspect = _Timed(fast_clock, {"first": lambda t: _CREATED, "s": lambda t: dict(_STEADY)})
     out = stack.wait_gates(inspect, None, ["docker"], [("first", 90, stack.GATE_HEALTHY, 15),
                                                      ("s", 300, stack.GATE_SETTLE, 15)])
     assert out[0] == (False, "no verdict within 90s (last seen: created)")
-    assert fast_clock[0] - CLOCK0 == 90
-    # behind one gate that sat out its 15 s window (allowed one poll late, 18 s): 18 + 60 = 78 s -
-    # not 60, and not unbounded
+    assert fast_clock[0] - CLOCK0 == 93
+    # behind one gate that sat out its 15 s window (allowed one poll late, 18 s): 18 + 60 + the 3 s
+    # grace = 81 s - not 60, and not unbounded
     fast_clock[0] = CLOCK0
     inspect = _Timed(fast_clock, {"s": lambda t: dict(_STEADY), "never": lambda t: _CREATED})
     out = stack.wait_gates(inspect, None, ["docker"], [("s", 300, stack.GATE_SETTLE, 15),
                                                      ("never", 60, stack.GATE_SETTLE, 15)])
     assert out == [(True, _STEADY_MSG), (False, "no verdict within 60s (last seen: created)")]
-    assert fast_clock[0] - CLOCK0 == 78
+    assert fast_clock[0] - CLOCK0 == 81
     # not charged while an earlier gate is still open: 'then' is healthy at 180 s on a 90 s budget,
     # behind 'slow' (healthy at 150 s) - one after another it had 150 + 90 s, and it still does
     fast_clock[0] = CLOCK0
@@ -3707,8 +3724,9 @@ def test_a_completes_gate_late_in_a_level_gets_the_time_it_had_one_after_another
 def test_a_completes_gate_is_not_given_more_time_than_one_after_another(fast_clock):
     """cf-recover attempt 2, verdict flip: two healthchecks healthy at 150 s, then a job (90 s budget)
     that exits 0 at 280 s. One after another the job was watched from 150 s and FAILED at 240 s; the
-    attempt-2 credit summed both 150 s and passed it. It must fail - not before 240 s, and within a
-    poll of it (the healthy at 150 s may have been seen one 3 s poll late: 243 s)."""
+    attempt-2 credit summed both 150 s and passed it. It must fail - not before 240 s, and within two
+    polls of it (the healthy at 150 s may have been seen one 3 s poll late, and the timeout is declared one
+    round past the budget: 246 s)."""
     scripts = {"h1": _healthy_at(150), "h2": _healthy_at(150),
                "job": lambda t: dict(_STEADY) if t < 280 else {"Status": "exited", "ExitCode": 0}}
     gates = [("h1", 200, stack.GATE_HEALTHY, 15), ("h2", 200, stack.GATE_HEALTHY, 15),
@@ -3716,7 +3734,7 @@ def test_a_completes_gate_is_not_given_more_time_than_one_after_another(fast_clo
     out = stack.wait_gates(_Timed(fast_clock, scripts), None, ["docker"], gates)
     assert out == [(True, "healthy after 150s"), (True, "healthy after 150s"),
                    (False, "did not complete within 90s (last seen: running)")]
-    assert fast_clock[0] - CLOCK0 == 243
+    assert fast_clock[0] - CLOCK0 == 246
 
 
 # OB1's start levels as `recover ob1 --dry-run` printed them on 2026-09-29 (order, gate kind, budget):
@@ -3730,6 +3748,9 @@ OB1_LEVELS = {
     "L4": [(_S, 300), (_S, 300), (_H, 185)],
     # not an OB1 level: the kind the OB1 shapes lack, so the bound is checked on jobs too
     "jobs": [(_H, 120), (_C, 90), (_S, 300), (_C, 60), (_H, 150)],
+    # not an OB1 level: budgets a settle window can close near the end of (tester, attempt 3: a FIRST gate
+    # whose window closed in the last round of its budget was timed out by the sparser level polls)
+    "tight": [(_S, 30), (_S, 30), (_H, 60), (_S, 30), (_C, 60), (_S, 30)],
 }
 
 
@@ -3739,10 +3760,11 @@ def _one_after_another(clock, scripts, gates, cost=0.0, starts=None):
     `starts`, when given, is filled with when each gate began to be watched."""
     clock[0] = CLOCK0
     out = []
+    cost_fn = cost() if callable(cost) else cost      # one stream for the whole sequential run
     for name, budget, kind, settle in gates:
         if starts is not None:
             starts.append(clock[0] - CLOCK0)
-        verdict = stack.wait_gate(_Timed(clock, scripts, cost), None, ["docker"], name, budget, kind, settle)
+        verdict = stack.wait_gate(_Timed(clock, scripts, cost_fn), None, ["docker"], name, budget, kind, settle)
         out.append(verdict)
         if not verdict[0]:
             break
@@ -3750,8 +3772,9 @@ def _one_after_another(clock, scripts, gates, cost=0.0, starts=None):
 
 
 def _together(clock, scripts, gates, cost=0.0):
+    """`cost`: seconds per inspect, or a zero-argument factory of a jitter function (`lambda: _jitter(...)`)."""
     clock[0] = CLOCK0
-    out = stack.wait_gates(_Timed(clock, scripts, cost), None, ["docker"], gates)
+    out = stack.wait_gates(_Timed(clock, scripts, cost() if callable(cost) else cost), None, ["docker"], gates)
     return out, clock[0] - CLOCK0
 
 
@@ -3775,7 +3798,8 @@ def _random_level(rng, shape):
     return gates, scripts
 
 
-@pytest.mark.parametrize("cost", [0.0, 0.3], ids=["inspect-free", "inspect-0.3s"])
+@pytest.mark.parametrize("cost", ["0.0", "0.3", "0.74", "jitter-1s"], ids=["inspect-free", "inspect-0.3s",
+                                                                          "inspect-0.74s", "inspect-jitter-1s"])
 @pytest.mark.parametrize("shape", sorted(OB1_LEVELS))
 def test_watching_together_never_times_out_sooner_nor_waits_longer_than_one_after_another(fast_clock, shape, cost):
     """cf-recover attempts 2-3, both bounds, on OB1's real level shapes, against the same containers
@@ -3790,13 +3814,17 @@ def test_watching_together_never_times_out_sooner_nor_waits_longer_than_one_afte
     rng = random.Random(f"cf-recover-{shape}-{cost}")
     shape_ = OB1_LEVELS[shape]
     n = len(shape_)
-    tip_round = stack.GATE_POLL_SECONDS + n * cost
+    jitter = cost.startswith("jitter")
+    cmax = 1.0 if jitter else float(cost)
+    tip_round = stack.GATE_POLL_SECONDS + n * cmax
     worst = sum(b for _k, b in shape_) + n * stack.SETTLE_SECONDS
     for case in range(40):
         gates, scripts = _random_level(rng, shape_)
+        run_cost = (lambda k=case: _jitter(f"base-{shape}-{k}", cmax)) if jitter else cmax
+        tip_cost = (lambda k=case: _jitter(f"tip-{shape}-{k}", cmax)) if jitter else cmax
         starts = []
-        base, base_end = _one_after_another(fast_clock, scripts, gates, cost, starts)
-        tip, tip_end = _together(fast_clock, scripts, gates, cost)
+        base, base_end = _one_after_another(fast_clock, scripts, gates, run_cost, starts)
+        tip, tip_end = _together(fast_clock, scripts, gates, tip_cost)
         where = f"{shape} cost {cost} case {case}: base {base} at {base_end:.1f}s, tip {tip} at {tip_end:.1f}s"
         base_failed = next((i for i, v in enumerate(base) if not v[0]), None)
         tip_failed = next((i for i, v in enumerate(tip) if v is not None and not v[0]), None)
@@ -3814,7 +3842,9 @@ def test_watching_together_never_times_out_sooner_nor_waits_longer_than_one_afte
             # one after another, counted from when one after another started watching it
             assert tip_end >= starts[tip_failed] + gates[tip_failed][1] - 1e-6, where
             if tip_failed == base_failed:
-                assert tip_end <= base_end + 3 * n * (stack.GATE_POLL_SECONDS + cost) + tip_round, where
+                # declared no sooner than one after another declared it, and later only by a few rounds
+                assert tip_end >= base_end - 1e-6, where
+                assert tip_end <= base_end + 4 * n * (stack.GATE_POLL_SECONDS + 2 * cmax) + tip_round, where
         assert tip_end <= worst, where
 
 
@@ -3879,8 +3909,10 @@ def _credited_start(monkeypatch, clock, scripts, gates, cost, k):
 
 def _level_before_a_stuck_gate(rng):
     """1-5 gates (healthchecks, jobs, settle containers - some running from the start), then a gate that
-    never starts, then 0-6 steady ones; a random inspect cost. The stuck gate is at index n."""
-    cost = rng.choice([0.0, 0.05, 0.1, 0.2, 0.3, 0.6, 1.0])
+    never starts, then 0-6 steady ones; a random inspect cost - drawn from the whole of [0, 1] s, not a
+    handful of values (tester, attempt 3: a fixed set skipped the 0.6-0.75 s band where a mutant hid).
+    The stuck gate is at index n."""
+    cost = rng.choice([0.0, rng.uniform(0, 1.0), rng.uniform(0.6, 0.76)])
     n = rng.randint(1, 5)
     pad = rng.choice([0, 2, 6])
     gates, scripts = [], {}
@@ -3905,22 +3937,25 @@ def _level_before_a_stuck_gate(rng):
     return cost, n, gates, scripts
 
 
-def test_the_credited_start_is_never_before_one_after_another_really_started_the_gate(fast_clock, monkeypatch):
+@pytest.mark.parametrize("jitter", [False, True], ids=["fixed-cost", "jittered-cost"])
+def test_the_credited_start_is_never_before_one_after_another_really_started_the_gate(fast_clock, monkeypatch, jitter):
     """THE guarantee, checked where it lives rather than through a timeout's poll grid (which hides a
     shortfall of under a round): for a gate that never starts, the start it is credited with is never
     earlier than when one after another began watching it, on the same containers. 600 seeded levels.
     Mutants of the estimate that credit a start too early by 0.3-2.4 s (the first-look shortcut judged on
     the upper estimate, a window opened at our first sighting, the inspect cost left unmeasured) fail here
     - some of them passed every timeout-based test."""
-    rng = random.Random(41)
+    rng = random.Random(41 + jitter)
     checked = 0
     for case in range(600):
         cost, n, gates, scripts = _level_before_a_stuck_gate(rng)
+        base_cost = (lambda k=case, c=cost: _jitter(f"b{k}", c)) if jitter else cost
+        tip_cost = (lambda k=case, c=cost: _jitter(f"t{k}", c)) if jitter else cost
         starts = []
-        _one_after_another(fast_clock, scripts, gates, cost, starts)
+        _one_after_another(fast_clock, scripts, gates, base_cost, starts)
         if len(starts) <= n:
             continue            # one after another stopped before reaching it (a timeout earlier)
-        credited = _credited_start(monkeypatch, fast_clock, scripts, gates, cost, n)
+        credited = _credited_start(monkeypatch, fast_clock, scripts, gates, tip_cost, n)
         if credited is None:
             continue            # the tip stopped before crediting it (a failure earlier in the level)
         checked += 1
@@ -3940,10 +3975,84 @@ def test_a_found_level_where_leaving_the_inspect_cost_out_of_the_round_credits_t
     credited = _credited_start(monkeypatch, fast_clock, scripts, gates, cost, 2)
     assert credited >= starts[2] - 1e-9, (credited, starts[2])
 
+
+def test_the_a3_level_one_inspect_short_on_closing_a_window_would_time_out_sooner(fast_clock, monkeypatch):
+    """Tester's attempt-3 mutant A3 (the window-close allowance without the inspect) survived every test:
+    at a fixed 0.74 s inspect, five one-after-another rounds exceed 18 s. Replayed from the tester's
+    a3_replay.py: one after another started `stuck` at 118.9 s and declared it at 209.4 s; A3 credited
+    118.0 s and declared it at 208.34 s."""
+    gates = ([("j0", 300, _C, 15), ("w1", 300, _S, 15), ("w2", 300, _S, 15), ("w3", 300, _S, 15),
+              ("stuck", 90, _S, 15)] + [(f"p{i}", 300, _S, 15) for i in range(6)])
+    scripts = {"j0": lambda t: dict(_STEADY) if t < 9.74742385389173 else {"Status": "exited", "ExitCode": 0},
+               "w1": lambda t: _CREATED if t < 57.87454900020866 else dict(_STEADY),
+               "w2": lambda t: _CREATED if t < 30.500312320795516 else dict(_STEADY),
+               "w3": lambda t: dict(_STEADY), "stuck": lambda t: _CREATED}
+    scripts.update({f"p{i}": (lambda t: dict(_STEADY)) for i in range(6)})
+    starts = []
+    base, base_end = _one_after_another(fast_clock, scripts, gates, 0.74, starts)
+    assert base[4] == (False, "no verdict within 90s (last seen: created)")
+    assert credited_ok(_credited_start(monkeypatch, fast_clock, scripts, gates, 0.74, 4), starts[4])
+    out, end = _together(fast_clock, scripts, gates, 0.74)
+    assert out[4] == (False, "no verdict within 90s (last seen: created)")
+    assert end >= base_end, (end, base_end)
+
+
+def credited_ok(credited, real):
+    return credited is not None and credited >= real - 1e-9
+
+
+def _uniform_cost(seed, hi):
+    """Independent jitter, as a real daemon has: every inspect costs uniform [0, hi] s (seeded)."""
+    rng = random.Random(seed)
+    return lambda: rng.uniform(0, hi)
+
+
+@pytest.mark.parametrize("seed,fingerprint", [
+    # found by a search (18 000 jittered levels): the credited start EARLY under a mutant, never under the rule
+    (1158, (0.717364, ["e0", "w1", "e2", "e3", "stuck", "p0", "p1"])),    # cost = the LAST inspect (A2): early
+    (5279, (0.663036, ["w0", "j1", "e2", "j3", "stuck", "p0", "p1"])),    # the same, 0.7 s early
+    (6574, (0.63957, ["e0", "stuck", "p0", "p1"])),                      # lag of ONE inspect (G1): 0.05 s early
+], ids=["last-inspect-A2", "last-inspect-A2-b", "one-inspect-lag-G1"])
+def test_found_jittered_levels_are_never_credited_early(fast_clock, monkeypatch, seed, fingerprint):
+    """With a new inspect cost every call, one after another can see a change 3 s + TWO inspects late, and
+    the slowest inspect is what bounds it - not the last one. Rebuilt from the credited-start generator
+    (seeded); the fingerprint fails loudly if that generator changes and the level is no longer this one."""
+    rng = random.Random(f"jit-{seed}")
+    cost, n, gates, scripts = _level_before_a_stuck_gate(rng)
+    assert (round(cost, 6), [g[0] for g in gates]) == fingerprint
+    starts = []
+    _one_after_another(fast_clock, scripts, gates, (lambda: _uniform_cost(f"b{seed}", cost)), starts)
+    assert len(starts) > n
+    credited = _credited_start(monkeypatch, fast_clock, scripts, gates, (lambda: _uniform_cost(f"t{seed}", cost)), n)
+    assert credited_ok(credited, starts[n]), (credited, starts[n])
+
+def test_a_first_gate_whose_window_closes_in_its_last_round_passes_as_it_did_alone(fast_clock):
+    """Tester's attempt-3 seeds 11/23: a FIRST gate (no credit) whose settle window closes in the last
+    round of its budget. Alone, its poll at 31.x s saw the window close and passed (the pass is checked
+    before the timeout on a poll); in a level of 7 the polls are sparser and one landed past 30 s with
+    the window still open - timed out, 'sooner' than alone. Found by a search (0.1 s inspect, running
+    from 14.8 s): 89 such levels failed at b0d1148, none now - the timeout is declared a round late."""
+    gates = [("g0", 30, _S, 15)] + [(f"p{i}", 300, _S, 15) for i in range(6)]
+    scripts = {"g0": lambda t: _CREATED if t < 14.8 else dict(_STEADY)}
+    scripts.update({f"p{i}": (lambda t: dict(_STEADY)) for i in range(6)})
+    alone, _ = _one_after_another(fast_clock, scripts, gates[:1], 0.1)
+    assert alone[0][0], alone
+    out, _end = _together(fast_clock, scripts, gates, 0.1)
+    assert out[0][0], out[0]
+
+
+def test_a_gate_alone_in_its_level_gets_no_grace(fast_clock):
+    """The one-round grace exists because a level's polls are sparser than a lone gate's; a lone gate
+    polls exactly as before, so its timeout is declared exactly as before."""
+    out, end = _together(fast_clock, {"x": lambda t: _CREATED}, [("x", 90, _S, 15)])
+    assert out == [(False, "no verdict within 90s (last seen: created)")]
+    assert end == 90
+
 def test_ob1_level_3_with_openbrain_rest_stuck_waits_what_it_did_one_after_another(fast_clock):
     """The tester's measured case: five healthchecks healthy at 60 s, openbrain-rest never created.
-    One after another: 60 s + its 300 s = 360 s. Attempt 2: 600 s. Now 363 s: never sooner than
-    360, and later only by the one poll the healthy at 60 s may have been seen late."""
+    One after another: 60 s + its 300 s = 360 s. Attempt 2: 600 s. Now 366 s: never sooner than
+    360, and later only by the one poll the healthy at 60 s may have been seen late plus the one-round
+    grace on declaring a timeout."""
     shape = OB1_LEVELS["L3"]
     gates = [(f"g{i}", b, k, 15) for i, (k, b) in enumerate(shape)]
     scripts = {f"g{i}": _healthy_at(60) for i in range(5)}
@@ -3951,7 +4060,7 @@ def test_ob1_level_3_with_openbrain_rest_stuck_waits_what_it_did_one_after_anoth
     out, end = _together(fast_clock, scripts, gates)
     assert out[5] == (False, "no verdict within 300s (last seen: created)")
     base, base_end = _one_after_another(fast_clock, scripts, gates)
-    assert base_end == 360 and end == 363
+    assert base_end == 360 and end == 366
 
 
 def test_an_adversarial_level_waits_no_longer_than_the_sum_of_its_budgets(fast_clock):

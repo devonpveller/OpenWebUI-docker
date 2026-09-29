@@ -648,11 +648,17 @@ order, restart in dependency order, wait for health). Selection is the same as
    when the compose file declares none; `--timeout` sets one budget for all.
    Each gate's budget runs from when the gates-one-after-another recover would
    have STARTED watching it, rebuilt from what the poll saw and never taken as
-   earlier than that (it allows for those polls seeing a change up to one poll
-   round - 3 s plus one `docker inspect` - late). A gate cannot time out while
-   one before it in the level is still open. So **no gate times out sooner than
-   it did one after another**. The price is on the other side and is bounded: a
-   timeout can come a few poll rounds per earlier gate later, and a level never
+   earlier than that: it allows for those polls seeing a change up to 3 s plus
+   two `docker inspect`s late, and closing a settle window a round (3 s plus
+   one inspect) late, using the slowest inspect this level measured. A timeout
+   is declared one round past the budget, because a level's polls come less
+   often than a lone gate's did (a gate alone in its level gets no such grace).
+   A gate cannot time out while one before it in the level is still open. So
+   **no gate times out sooner than it did one after another**, provided no
+   inspect back then was slower than the slowest this level met - the one
+   cost the rule can know. The price is on the other side and is bounded: a
+   timeout can come a few poll rounds per earlier gate later (a container
+   ready in those seconds passes where it timed out before), and a level never
    waits past the sum of its budgets plus a 15 s settle window per gate (one
    after another, the worst case was the sum of the budgets plus its polls). A
    pass, or a failure docker reports, is seen at the next poll either way.
