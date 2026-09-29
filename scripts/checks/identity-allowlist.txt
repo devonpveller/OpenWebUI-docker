@@ -12,6 +12,8 @@
 #               the finding must be EXACTLY that group's span - one token - so two
 #               guarded values glued into one owner segment are still refused.
 #   reason      required: why it must stay rather than be parameterised or generalised.
+#   The glob ends at the FIRST ` | ` and the reason starts after the LAST one, so a regex
+#   may contain ` | ` (a spaced alternation) and a reason may not.
 #
 # THIS FILE IS SCANNED LIKE ANY OTHER. An entry that spelled a guarded value would itself
 # be a finding, so write shapes, never values. Prefer fixing over listing: a variable in

@@ -54,7 +54,8 @@ the rules.
 ## Git and parallel work
 
 - **Never commit or push on the user's behalf unless explicitly asked.** Hooks:
-  `git config core.hooksPath .githooks`; never `--no-verify`.
+  `git config core.hooksPath .githooks`; never `--no-verify`. What each hook runs:
+  [.githooks/README.md](.githooks/README.md).
 - **Branches:** `main` is untouched (the known-good deliverable, promoted only by the
   operator); `development` is the live-hosted line; work happens on branches cut from
   `development` and merges back only with validation + testing evidence.
@@ -73,6 +74,8 @@ the rules.
   test that mutates a plane or needs it stable. Test images tag `:wt-<id>`; prod
   containers and `:local` tags are a gated deploy, not a test; never attach test
   containers to the `ai-stack_*` networks.
+- **Never rebuild a `:local` image as a side effect** of other work: a rebuild is a
+  deliberate deploy of that image, done on its own.
 - **OB1 is a pinned submodule** (clone with `--recurse-submodules`, or `git submodule
   update --init`). Push OB1 changes to OB1's remote FIRST, then bump the gitlink in a
   commit saying what moved; never bump it to a commit not on that remote. OB1 runs the

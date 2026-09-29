@@ -39,6 +39,13 @@ Gated/mutating: `reclaim_execute(confirm_token)`, `compact_execute(confirm_token
    admits only `image rm <tag|id>`, `volume rm <64-hex id>` and `builder prune -af --filter
    until=<N>h` (named volumes never; source-guarded by tests), compaction requires warranted +
    registered task.
+3. **The lowest guard (allowlists, in `sysadmin.py`):** every program `sysadmin._run` starts passes
+   `run_refusal` (only `docker`, `wsl`, `schtasks` by their plain names), then its ARGUMENTS pass
+   `docker_refusal`, `wsl_args_refusal` or `schtasks_refusal` - each an allowlist of the exact
+   shapes sysadmin code uses. Anything else returns rc 126, `refused by sysadmin allowlist: ...`,
+   and never starts. **Adding a tool that runs a new command shape means adding that exact shape
+   there**, with a test beside the existing ones in `test_docker_reclaim.py` (t05) - the upper
+   gates above do not replace it, and a new call that is not listed fails closed.
 
 ## Run the tests - in a disposable container ONLY
 
@@ -125,6 +132,12 @@ Registers `AI-Stack Sysadmin Compact VHDX` (on-demand, RunLevel Highest) and
   when the return misses proportionally (`-MinReclaimFraction`, default 0.5) *and* by more than
   `-ShortfallGraceGb` (default 5). Both conditions are required so a small target missed by a
   small amount is not an incident.
+- **The target excludes filesystem metadata.** "Trapped" is vhdx length minus `df` Used, so it
+  includes the ext4 inode tables, journal and bitmaps `df` never counts (18.4 GB on this host,
+  2026-09-27), which no trim or compaction returns. The script measures that overhead per run
+  (block-device size minus `df` Size, `fs_overhead_gb` in the result) and the verdict judges
+  against trapped minus it, so a run whose shortfall is only that metadata is not reported as a
+  failure. If the probe fails, the field is null and the target is trapped, as before.
 - **WARN and ACT are different numbers.** `vhdx_trapped_warn_gb` (60) decides when `disk_report`
   mentions compaction; `vhdx_compact_min_gb` (20) decides when `compact_execute` will run. They
   were the same key until 47.8 GB trapped left the stack simultaneously "HEALTHY" and refused.

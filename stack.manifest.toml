@@ -56,13 +56,19 @@
 #               exits 1 on a project with no service - but creates each declared
 #               network that is missing and leaves every existing one untouched.
 #   host      - what the machine itself must provide, in prose.
-#   host_paths - paths OUTSIDE this checkout the plane cannot build without,
-#               each an inline table { path, contains, why, remedy }: `path`
+#   host_paths - paths the plane cannot build or run without that a clone does
+#               not carry (OUTSIDE this checkout, or generated and gitignored
+#               inside it), each an inline table { path, contains, why, remedy
+#               [, profile] }: `path`
 #               is repo-root-relative, `contains` names what must exist inside
-#               it (so an empty directory or a plain file does not pass),
+#               it (so an empty directory or a plain file does not pass) - a
+#               plain name must be a FILE, a name ending in `/` a directory,
+#               and `.git` either (a clone or a worktree's gitfile),
 #               `remedy` is the command that creates it, run from the repo
 #               root. Unlike `host` this IS checked: an unusable path makes
-#               `doctor` FAIL and `enable`/`init` refuse, each naming `remedy`.
+#               `doctor` FAIL and `enable`/`init`/`up` refuse, each naming
+#               `remedy`. With `profile`, the entry is checked only while
+#               that profile is active for the plane.
 #   keys      - variable names that must be present and non-blank in the plane's
 #               OWN env file (`<project dir>/.env`). A blank one makes `enable`
 #               refuse, naming the key and the file. A key is also refused while
@@ -516,6 +522,14 @@ optional = []
 host = [
   "Images little-coder:local and little-coder-open-terminal:local must exist for the `workers` profile (built by the coder plane)",
   "An OpenRouter key for the `cloud` profile (OPENROUTER_API_KEY in agent-org/docker/.env)",
+]
+# The worker pool (profile `workers`) mounts one generated little-coder config per
+# worker (agent-org/docker/docker-compose.yml: ../agent-bridge/worker-configs/worker-N
+# at /app/config). The directory is gitignored (agent-org/.gitignore), so a clone
+# has none until the generator runs, and a worker then restarts with `config file
+# not found`. Checked only while `workers` is active (cf-small-fixes G18).
+host_paths = [
+  { path = "agent-org/agent-bridge/worker-configs", contains = ["worker-1/little-coder.config.yaml", "worker-2/little-coder.config.yaml"], why = "the worker pool mounts one generated little-coder config per worker", remedy = "python agent-org/scripts/gen-worker-configs.py", profile = "workers" },
 ]
 keys = ["MM_DB_PASSWORD", "AO_DB_PASSWORD"]
 

@@ -69,6 +69,10 @@ def test_source_guard() -> None:
     check("ps records the trim outcome for the operator", "fstrim_ok" in ps)
     # the shortfall judgement must be reachable from the script, not just defined in the lib
     check("ps consults the reclaim verdict", "get-reclaimverdict" in ps)
+    # cf-small-fixes: the verdict judges against trapped LESS the measured ext4 metadata df never
+    # counts; the script must measure it and pass it, or the lib's parameter changes nothing.
+    check("ps measures the filesystem overhead", "get-fsoverheadgb -devicebytes" in ps)
+    check("ps passes the measured overhead to the verdict", "-fsoverheadgb $result.fs_overhead_gb" in ps)
     check("ps records trapped as a field", "trapped_before_gb" in ps)
     # The lib is dot-sourced into an ELEVATED script, so it must not act. Checked against call
     # forms only -- its reason strings legitimately mention Optimize-VHD, fstrim and Docker.

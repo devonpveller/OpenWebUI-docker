@@ -77,6 +77,18 @@ def test_pure() -> None:
     tail_only = tl._recovery_report("recover", 0, "\n".join([f"[t] [INFO] s{i}" for i in range(10)] + [ERR]))
     check("an ERROR already in the tail is not repeated", tail_only.count(ERR) == 1)
 
+    # cf-small-fixes G12: 30 early WARNs, THEN the ERROR. In run order the ERROR is the 31st
+    # issue line and fell past the 25-line cap; ERROR lines are now listed first.
+    warns = [f"[2026-09-25 03:00:00] [WARN] slow step {i}" for i in range(30)]
+    warn_first = "\n".join(warns + [ERR] + [f"[t] [INFO] s{i}" for i in range(40)])
+    check("fixture: the ERROR comes after more WARNs than the cap",
+          warn_first.splitlines().index(ERR) >= tl._MAX_ISSUE_LINES)
+    t3 = tl._recovery_report("recover", 0, warn_first)
+    check("an ERROR after 30 WARNs is still SHOWN (ERROR lines lead the list)", ERR in t3, t3[:400])
+    check("... and it is listed before the first WARN", ERR in t3 and warns[0] in t3 and t3.index(ERR) < t3.index(warns[0]), t3[:400])
+    check("... and the WARNs past the cap are counted, not lost", "(+6 more ERROR/WARN line(s) not shown)" in t3, t3[-600:])
+    check("... WARNs keep their run order", t3.index(warns[0]) < t3.index(warns[1]))
+
     empty = tl._recovery_report("recover", 124, "")
     check("empty output still reports the exit code", "(exit 124)" in empty and "(no output)" in empty)
 

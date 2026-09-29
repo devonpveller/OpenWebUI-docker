@@ -537,8 +537,8 @@ def t05_forbidden_shapes():
     finally:
         if saved_log:
             os.environ["ACSR_CALL_LOG"] = saved_log
-    # (3) the LOWEST-level deny-list inside sysadmin._run, with subprocess.run replaced by a recorder so
-    #     a broken deny-list would record a call instead of running one
+    # (3) the LOWEST-level allowlist inside sysadmin._run, with subprocess.run replaced by a recorder so
+    #     a broken allowlist would record a call instead of running one
     real_run = _testguard_real_sa_run
     started = []
 
@@ -560,7 +560,7 @@ def t05_forbidden_shapes():
                       ["compose", "-f", "x.yml", "config", "--images", "-o", "/tmp/x"],
                       ["compose", "-f", "x.yml", "config"], ["compose", "config", "--images", "down"],
                       ["compose", "--profile", "*", "--dry-run", "down"],
-                      # other verbs the attempt-2 deny-list let through
+                      # other verbs the attempt-2 lower guard let through
                       ["rm", "-fv", "x"], ["container", "rm", "-v", "x"], ["stop", "x"], ["kill", "x"],
                       ["network", "rm", "x"], ["run", "-v", "/:/host", "alpine"], ["exec", "openwebui", "sh"],
                       ["exec", "-u", "root", "ao-worker-1", "sh"], ["image", "rm", "a", "b"],
@@ -569,15 +569,16 @@ def t05_forbidden_shapes():
                       ["system", "--help", "prune"], ["buildx", "prune", "-af"], ["desktop", "stop"]]
         for argv in deny:
             r = real_run(["docker"] + argv)
-            check(f"deny-list refuses docker {' '.join(argv)[:40]!r}", r["rc"] == 126 and "deny-list" in r["err"], str(r))
-        check("deny-list: none of those started a process", started == [], str(started[:3]))
+            check(f"lower allowlist refuses docker {' '.join(argv)[:40]!r}",
+                  r["rc"] == 126 and "refused by sysadmin allowlist" in r["err"] and "deny-list" not in r["err"], str(r))
+        check("lower allowlist: none of those started a process", started == [], str(started[:3]))
         need = [["ps", "-a"], ["system", "df"], ["builder", "prune", "-af", "--filter", "until=168h"],
                 ["volume", "rm", hexid("y")], ["image", "rm", "x:1"], ["compose", "-f", "x.yml", "config", "--images"],
                 ["compose", "-f", "x.yml", "--profile", "*", "config", "--no-consistency", "--format", "json"],
                 ["exec", "ao-worker-1", "sh", "-c", "ls"], ["inspect", "--format", "{{.Id}}", "x"]]
         for argv in need:
             real_run(["docker"] + argv)
-        check(f"deny-list passes the {len(need)} shapes the code needs", len(started) == len(need), str(started))
+        check(f"lower allowlist passes the {len(need)} shapes the code needs", len(started) == len(need), str(started))
         started.clear()
         for argv in (["docker-compose", "down", "-v"], ["com.docker.cli", "system", "prune", "-af"],
                      ["C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe", "system", "prune", "-af"],
@@ -1044,7 +1045,7 @@ def t18_meta_guards_mutated_open():
               "DOCKER_HOST=tcp://127.0.0.1:1" in first, first)
         check("meta: the suite FAILS with the guards mutated open", r.returncode != 0, r.stdout[-300:])
         check("meta: the failures are the guard checks",
-              "FAIL  _mutate raises on" in r.stdout and "FAIL  deny-list refuses" in r.stdout, r.stdout[-400:])
+              "FAIL  _mutate raises on" in r.stdout and "FAIL  lower allowlist refuses" in r.stdout, r.stdout[-400:])
         attempts = open(log, encoding="utf-8").read().splitlines() if os.path.exists(log) else []
         check("meta: ZERO calls escaped the fakes (call log empty: nothing reached sysadmin._run or subprocess)",
               attempts == [], "; ".join(attempts[:5]))

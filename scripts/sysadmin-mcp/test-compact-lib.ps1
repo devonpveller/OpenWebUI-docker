@@ -85,6 +85,35 @@ Check 'a 10% floor passes what a 50% floor failed' ($v.ok) "ok=$($v.ok) floor=$(
 $v = Get-ReclaimVerdict -TrappedGb 6.0 -ReclaimedGb 2.0 -ShortfallGraceGb 1.0
 Check 'a 1 GB grace fails what a 5 GB grace passed' (-not $v.ok) "ok=$($v.ok)"
 
+# CASE 10 -- FILESYSTEM METADATA IS NOT A SHORTFALL (cf-small-fixes, from ac-sysadmin-reclaim F1).
+# "trapped" = vhdx length - df Used, so it includes the ext4 metadata df never counts: 18.41 GB on
+# this host (device 2,147,483,648 x 512 bytes; df Size 263,940,717 x 4 KiB). A run whose whole
+# shortfall is that metadata did its job.
+$o = Get-FsOverheadGb -DeviceBytes (2147483648 * 512) -DfSizeKb (263940717 * 4)
+Check 'measured overhead from the 09-27 device and df figures is 18.4 GB' ($o -eq 18.4) "got $o"
+Check 'overhead: a missing number gives no overhead' ($null -eq (Get-FsOverheadGb -DeviceBytes $null -DfSizeKb 5)) ''
+Check 'overhead: a df Size larger than the device (wrong device) gives no overhead' `
+  ($null -eq (Get-FsOverheadGb -DeviceBytes 1000 -DfSizeKb 5)) ''
+# 30 trapped, 11.6 returned: the 18.4 GB shortfall IS the metadata. Without the overhead this is
+# ok=false (floor 15, shortfall 18.4 > 5 grace); with it, the run returned all it could.
+$v = Get-ReclaimVerdict -TrappedGb 30.0 -ReclaimedGb 11.6 -FstrimOk $true
+Check 'without an overhead, a metadata-sized shortfall is still reported NOT ok (the old behaviour)' (-not $v.ok) "ok=$($v.ok)"
+$v = Get-ReclaimVerdict -TrappedGb 30.0 -ReclaimedGb 11.6 -FstrimOk $true -FsOverheadGb 18.4
+Check 'with the measured overhead, a shortfall that IS the metadata is ok' ($v.ok) "ok=$($v.ok) reason=$($v.reason)"
+Check '  ... the target is trapped less the overhead (11.6)' ($v.target_gb -eq 11.6) "got $($v.target_gb)"
+Check '  ... and the reason names the metadata' ($v.reason -match 'filesystem metadata') $v.reason
+# The overhead does not excuse a real miss: 94.4 trapped, 18.4 metadata -> 76.0 returnable; 20
+# returned is far under the 38.0 floor.
+$v = Get-ReclaimVerdict -TrappedGb 94.4 -ReclaimedGb 20.0 -FstrimOk $true -FsOverheadGb 18.4
+Check 'a real miss beyond the metadata is still NOT ok (20 of 76.0 returnable)' (-not $v.ok) "ok=$($v.ok) reason=$($v.reason)"
+Check '  ... floor 38.0, shortfall 56.0' (($v.floor_gb -eq 38.0) -and ($v.shortfall_gb -eq 56.0)) "floor=$($v.floor_gb) shortfall=$($v.shortfall_gb)"
+# Trapped entirely metadata: nothing a compaction could return, so nothing to fail.
+$v = Get-ReclaimVerdict -TrappedGb 15.0 -ReclaimedGb 0.0 -FsOverheadGb 18.4
+Check 'trapped smaller than the metadata -> ok, nothing returnable' ($v.ok -and $v.reason -match 'filesystem metadata') $v.reason
+# The regression stays red WITH the overhead: 54.4 - 18.4 = 36.0 returnable, 9.9 returned.
+$v = Get-ReclaimVerdict -TrappedGb 54.4 -ReclaimedGb 9.9 -FstrimOk $null -FsOverheadGb 18.4
+Check '2026-09-13 regression is still NOT ok with the overhead applied' (-not $v.ok) "ok=$($v.ok)"
+
 Write-Host ''
 Write-Host "passed $script:pass, failed $script:fail"
 if ($script:fail -gt 0) { exit 1 }

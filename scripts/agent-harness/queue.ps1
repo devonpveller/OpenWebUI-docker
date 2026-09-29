@@ -507,6 +507,17 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # The manifest (frontend/owui/manifest.csv since 2026-09-25) is the file -> OWUI id map, so it already answers the question exactly;
 # it is read from the MERGED tree, and a path under it that it does not list derives nothing and
 # says so in a note.
+#
+# A BUILD CONTEXT IS WHAT ITS .dockerignore LETS THROUGH (cf-small-fixes, 2026-09-28). The
+# context rule counted every path under the context, so a README-only change under frontend/
+# (whose .dockerignore is `*` then `!entrypoint.sh`) derived image:openwebui and image:tailscale -
+# two surfaces closable only by rebuilding images nothing changed. Docker's matcher is not
+# reimplemented here: Get-DockerignoreKeep recognises ONE exact shape - a first pattern `*`,
+# then only `!<literal path>` re-includes (no wildcard, no `..`) - and for it watches the
+# Dockerfile, the .dockerignore itself and the re-included paths. Any other .dockerignore, or a
+# `<Dockerfile>.dockerignore` beside the Dockerfile (Docker prefers it), falls back to counting
+# every path under the context: a wrong exclusion would be a SILENT missed rebuild, a fallback
+# only an unneeded one.
 
 function Get-ArrayField($item, [string]$name) {
     # An array field read back from JSON: `[]` comes back as an empty array, an absent field
@@ -744,6 +755,32 @@ function Find-Ob1CloneHolding($item, [string[]]$Needed) {
     return ""
 }
 
+function Get-DockerignoreKeep([string]$Sha, [string]$Ctx, [string]$DfPath) {
+    # See the section comment. $null = the context sends every path it holds (as far as this
+    # tool can say exactly); otherwise @{ keep = <repo-relative paths the build can see> }.
+    # Existence is asked with ls-tree first: `git show` of an absent path writes `fatal:` to stderr.
+    if ($DfPath) {
+        $alt = @(Invoke-GitCapture @("ls-tree", "--name-only", $Sha, "$DfPath.dockerignore") | Where-Object { ([string]$_).Trim() })
+        if ($alt.Count -gt 0) { return $null }
+    }
+    $ignPath = "$Ctx/.dockerignore"
+    $hit = @(Invoke-GitCapture @("ls-tree", "--name-only", $Sha, $ignPath) | Where-Object { ([string]$_).Trim() })
+    if ($hit.Count -eq 0) { return $null }
+    $lines = @(Invoke-GitCapture @("show", "$Sha`:$ignPath"))
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $pats = @($lines | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -and -not $_.StartsWith("#") })
+    if ($pats.Count -lt 1 -or $pats[0] -ne "*") { return $null }
+    $keep = @($ignPath)
+    if ($DfPath) { $keep += $DfPath }
+    foreach ($p in @($pats | Select-Object -Skip 1)) {
+        if ($p -notmatch '^!/?([A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*)/?$') { return $null }
+        $rel = $matches[1]
+        if (@($rel -split '/' | Where-Object { $_ -eq "." -or $_ -eq ".." }).Count -gt 0) { return $null }
+        $keep += ("$Ctx/$rel")
+    }
+    return @{ keep = $keep }
+}
+
 function Get-DeploySurfaces($item, [string]$Sha) {
     # See the section comment. Returns @{ surfaces; notes; skipped; line_before }. `notes` is
     # printed at -Merged; `skipped` names the services the rule cannot reach (a build context
@@ -872,7 +909,10 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                         }
                     }
                 } else { $notes += ("{0} service {1}: Dockerfile {2} not found at {3} - only the Dockerfile path is watched" -f $cf, $s.name, $dfPath, $Sha.Substring(0, 7)) }
-            } else { $roots += $ctx }
+            } else {
+                $ign = Get-DockerignoreKeep $Sha $ctx $dfPath
+                if ($null -ne $ign) { $roots += @($ign.keep) } else { $roots += $ctx }
+            }
             $hit = $false
             foreach ($p in $changed) {
                 foreach ($r in $roots) {
