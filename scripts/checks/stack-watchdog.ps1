@@ -1800,11 +1800,20 @@ $SlowLoopThreshold = 6
 # one is sent, the container's ClearedAt is set and only restarts AFTER it
 # count toward the window, and the paging state (cooldown and throttle
 # sentinels) is reset so a relapse pages at once (attempt-3 W-6).
-# An hour, not ten minutes, so a slow loop is not called fixed between two
-# crashes a pass or two apart. A loop whose gaps sometimes exceed an hour can
-# still be called fixed and then paged again once 6 NEW restarts arrive: the
-# operator hears about it again, and the all-clear in between was premature.
+# ADAPTIVE (attempt 5, finding F9): up for at least
+#   max($LoopSettledMinutes,
+#       min($SlowLoopWindowHours, $LoopSettleGapFactor x MaxGap))
+# where MaxGap is the largest gap between two passes that saw restarts, over
+# the loop's whole life since its last all-clear (gaps longer than the window
+# are not part of a loop and are ignored). A FIXED FAST loop has gaps of one
+# pass, so it clears after the 60-minute floor. A SLOW loop's own gaps set its
+# bar, so it is not "resolved" between two of its own crashes - a flat hour did
+# that about 2.5 times per loop-day in the attempt-4 tester's 40 simulated
+# loops. The cap keeps a genuinely fixed slow loop's all-clear within about
+# 6h of its last restart. Factor 3 and the whole-life maximum were chosen by
+# measurement on that loop set (findings F10).
 $LoopSettledMinutes = 60
+$LoopSettleGapFactor = 3
 # Test seam only: a scriptblock returning the current UTC [datetime] for the
 # restart-loop rules. $null = the real clock.
 $WatchdogClock = $null
@@ -1901,7 +1910,12 @@ public static class AiStackWatchdogJob {
 }
 "@
         }
-        return [AiStackWatchdogJob]::Create()
+        $j = [AiStackWatchdogJob]::Create()
+        if ($j -eq [IntPtr]::Zero) {
+            $script:WatchdogJobUnavailable = $true
+            Write-LogEntry "CreateJobObject failed - bounded calls fall back to taskkill /T for the rest of this run" "WARN"
+        }
+        return $j
     } catch {
         $script:WatchdogJobUnavailable = $true
         Write-LogEntry "job object unavailable ($($_.Exception.Message)) - bounded calls fall back to taskkill /T for the rest of this run" "WARN"
@@ -1956,7 +1970,10 @@ function Invoke-BoundedProcess {
         [void]$proc.Start()
         if ($job -ne [IntPtr]::Zero) {
             $assigned = (-not $WatchdogFailJobAssign) -and [AiStackWatchdogJob]::Assign($job, $proc.Handle)
-            if (-not $assigned) { [AiStackWatchdogJob]::Close($job); $job = [IntPtr]::Zero }
+            if (-not $assigned) {
+                [AiStackWatchdogJob]::Close($job); $job = [IntPtr]::Zero
+                Write-LogEntry "bounded process '$FilePath' could not be put in a job object - taskkill /T fallback for this call" "DEBUG"
+            }
         }
         # Both streams asynchronously BEFORE waiting: reading one to the end
         # while the child fills the other is the classic deadlock.
@@ -2086,7 +2103,12 @@ function Get-ContainerRuntimeFacts {
                 $f = ConvertTo-ContainerFact -Record $row
                 if ($f) { $out += $f }
             }
-            Resolve-LoopAlert -Key 'docker-unreadable' -Message "docker can describe every container again." | Out-Null
+            # NOT Resolve-LoopAlert: this key clears on ONE readable pass, so
+            # resetting its throttle and cooldown turned an intermittently
+            # wedged daemon into an ALERT+RESOLVED pair every other pass
+            # (attempt-4 tester X1). Resolve-Catastrophe keeps the 1h throttle
+            # and the 6h cooldown stands - the 2026-09-16 anti-flap rule.
+            Resolve-Catastrophe -Key 'docker-unreadable' -Message "docker can describe every container again."
             return $out
         }
 
@@ -2260,6 +2282,8 @@ function Test-ContainerRestartLoops {
         $delta = 0
         $hist = @()
         $cleared = [int64]0
+        $lastObs = [int64]0
+        $maxGapMin = 0.0
         # Parse the state defensively: one hand-edited or truncated value must
         # cost one quiet pass, not throw out of the whole health pass.
         $p = $prev[$key]
@@ -2276,8 +2300,18 @@ function Test-ContainerRestartLoops {
                     $he -ge ($nowEpoch - [int64]($SlowLoopWindowHours * 3600)) -and $he -le ($nowEpoch + 300)) { $hist += "${he}:${hn}" }
             }
             # When the last all-clear was SENT; restarts at or before it do not
-            # count toward the window. A value in the future is ignored.
-            if (-not [int64]::TryParse([string]$p.ClearedAt, [ref]$cleared) -or $cleared -gt ($nowEpoch + 300)) { $cleared = 0 }
+            # count toward the window. A value more than 5 min in the future (a
+            # backward clock step, a hand edit) is CLAMPED to now, so it can
+            # neither hide later restarts nor bring back the old ones. An
+            # unreadable value is 0: every restart in the window counts, which
+            # errs toward an extra page.
+            if (-not [int64]::TryParse([string]$p.ClearedAt, [ref]$cleared)) { $cleared = 0 }
+            elseif ($cleared -gt ($nowEpoch + 300)) { $cleared = $nowEpoch }
+            # The settle bar's inputs: when a pass last saw restarts, and the
+            # largest gap between two such passes (minutes).
+            if (-not [int64]::TryParse([string]$p.LastObs, [ref]$lastObs) -or $lastObs -gt ($nowEpoch + 300)) { $lastObs = 0 }
+            if (-not [double]::TryParse([string]$p.MaxGap, [Globalization.NumberStyles]::Float, [cultureinfo]::InvariantCulture, [ref]$maxGapMin) -or
+                $maxGapMin -lt 0) { $maxGapMin = 0.0 }
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
             [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
@@ -2288,6 +2322,11 @@ function Test-ContainerRestartLoops {
                     $streak = $prevStreak + 1
                     $accum = $prevAccum + $delta
                     $hist += "${nowEpoch}:${delta}"
+                    if ($lastObs -gt 0) {
+                        $gap = ($nowEpoch - $lastObs) / 60.0
+                        if ($gap -gt $maxGapMin -and $gap -le ($SlowLoopWindowHours * 60)) { $maxGapMin = $gap }
+                    }
+                    $lastObs = $nowEpoch
                 } elseif ($f.Status -eq 'restarting') {
                     # No new restart since the last pass, but Docker is sitting
                     # in its restart backoff (up to a minute): the loop has NOT
@@ -2299,8 +2338,11 @@ function Test-ContainerRestartLoops {
             }
         }
         $started = ConvertTo-UtcInstant $f.StartedAt
+        # The settle bar (see $LoopSettleGapFactor).
+        $settleMin = [Math]::Max([double]$LoopSettledMinutes,
+            [Math]::Min($SlowLoopWindowHours * 60.0, $LoopSettleGapFactor * $maxGapMin))
         $settled = ($delta -le 0) -and ($f.Status -ne 'restarting') -and
-            ($f.Status -ne 'running' -or ($started -and ($nowUtc - $started).TotalMinutes -ge $LoopSettledMinutes))
+            ($f.Status -ne 'running' -or ($started -and ($nowUtc - $started).TotalMinutes -ge $settleMin))
         # The window: restarts inside $SlowLoopWindowHours AND after the last
         # all-clear. History is never wiped by settling (W-7).
         $inWindow = 0
@@ -2313,7 +2355,7 @@ function Test-ContainerRestartLoops {
             $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = 0 }
         } elseif ($settled) {
             # Settled is judged BEFORE the window: a container with no new
-            # restart that has been up an hour (or is stopped) is not looping
+            # restart that has been up past its bar (or is stopped) is not looping
             # this pass, however many restarts its window still holds. The
             # all-clear, only for a container that was paged; sending it moves
             # ClearedAt, so the restarts before it never page again. The window
@@ -2321,6 +2363,8 @@ function Test-ContainerRestartLoops {
             # count and is judged on its next restart.
             if (Resolve-LoopAlert -Key ("crashloop-" + $key) -Message "container '$key' is no longer restarting.") {
                 $cleared = $nowEpoch
+                $maxGapMin = 0.0   # a relapse starts a new loop with its own gaps
+                $lastObs = 0
                 $quiet += $key
             }
         } elseif ($inWindow -ge $SlowLoopThreshold) {
@@ -2328,7 +2372,8 @@ function Test-ContainerRestartLoops {
             # the restarts keep adding up over the window.
             $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = $inWindow }
         }
-        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist); ClearedAt = $cleared }
+        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist); ClearedAt = $cleared
+                         LastObs = $lastObs; MaxGap = [Math]::Round($maxGapMin, 2) }
     }
 
     # Carry forward a baseline this pass simply did not see (the facts can be
@@ -2346,6 +2391,8 @@ function Test-ContainerRestartLoops {
             Accum  = $prev[$k].Accum
             Hist   = @($prev[$k].Hist)
             ClearedAt = $prev[$k].ClearedAt
+            LastObs = $prev[$k].LastObs
+            MaxGap = $prev[$k].MaxGap
             Missed = $missed + 1
         }
     }
@@ -2438,7 +2485,15 @@ function Test-NetnsJoinedContainers {
             $ok = $false
         } else {
             Write-LogEntry "$($f.Name) netns owner $($owner.Name) intact" "DEBUG"
-            Resolve-LoopAlert -Key ("netns-" + $f.Name) -Message "container '$($f.Name)' shares a live network namespace again." | Out-Null
+            # The all-clear (which resets the paging state, so a relapse pages
+            # at once) only once the pair has SETTLED: both up
+            # $LoopSettledMinutes. A pair whose owner keeps restarting and whose
+            # joiner keeps following it would otherwise alternate orphaned and
+            # intact and page every other pass.
+            $nowNs = Get-LoopNowUtc
+            if ((($nowNs - $joinerStart).TotalMinutes -ge $LoopSettledMinutes) -and (($nowNs - $ownerStart).TotalMinutes -ge $LoopSettledMinutes)) {
+                Resolve-LoopAlert -Key ("netns-" + $f.Name) -Message "container '$($f.Name)' shares a live network namespace again." | Out-Null
+            }
         }
     }
     return $ok

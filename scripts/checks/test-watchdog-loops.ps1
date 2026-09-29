@@ -41,9 +41,12 @@
 
 [CmdletBinding()]
 param(
-    # 'firstcall' is internal: P20 runs it in a FRESH process (see there).
-    [ValidateSet('pure', 'dind', 'all', 'firstcall')][string]$Part = 'all',
+    # 'firstcall' and 'jobfail' are internal: P20 and P28 run them in a FRESH process.
+    [ValidateSet('pure', 'dind', 'all', 'firstcall', 'jobfail')][string]$Part = 'all',
     [string]$Stub = '',
+    # Skips P29 (the ~4-minute 42-loop simulation). For the mutant helper's
+    # runs of mutants that do not target P29 only; a plan run never sets it.
+    [switch]$SkipSim,
     [string]$Script = '',
     [string]$Owner = 'cf-watchdog-test',
     [string]$AlpineImage = 'alpine:3.20',
@@ -141,6 +144,60 @@ $script:Loader = {
         "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level] $Message" | Out-File -FilePath $LOG_FILE -Append -Encoding UTF8 }
 }
 
+# Stub processes are counted by the PID each stub writes, at start, into
+# $env:CFWD_PIDDIR - never by name: a host-wide count of `docker-hang` after a
+# fixed sleep made P20 fail about 1 run in 5 on an unmodified tip (attempt-4
+# tester X2). Get-StubAlive polls until none of THIS case's stubs is alive or
+# the deadline passes, so a slow exit is not a leak and a real leak (the
+# sleepers live 60s) still is.
+function Reset-StubPids {
+    param([string]$Dir)
+    if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+    $env:CFWD_PIDDIR = $Dir
+}
+function Get-StubAlive {
+    param([string]$Dir, [int]$DeadlineMs = 3000)
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $alive = @(Get-ChildItem $Dir -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $p = Get-Process -Id ([int]$_.Name) -ErrorAction SilentlyContinue
+            if ($p -and $p.ProcessName -eq 'docker-hang') { $p.Id } })
+        if ($alive.Count -eq 0) { return 0 }
+        Start-Sleep -Milliseconds 100
+    } while ($sw.ElapsedMilliseconds -lt $DeadlineMs)
+    return $alive.Count
+}
+function Stop-StubPids {
+    param([string]$Dir)
+    Get-ChildItem $Dir -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $p = Get-Process -Id ([int]$_.Name) -ErrorAction SilentlyContinue
+        if ($p -and $p.ProcessName -eq 'docker-hang') { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
+}
+
+# P28's child: a FRESH process in which the job type cannot be compiled (a
+# function named Add-Type that throws shadows the cmdlet). Four calls: the
+# failure must be tried and logged ONCE, and every call still answered.
+function Invoke-JobFail {
+    $env:DOCKER_HOST = 'tcp://127.0.0.1:1'
+    $sbx = New-Sandbox
+    try {
+        . $script:Loader $sbx
+        $WatchdogDockerExe = $Stub
+        $script:AddTypeCalls = 0
+        function Add-Type { $script:AddTypeCalls++; throw 'simulated compile failure' }
+        $ok = 0
+        for ($i = 0; $i -lt 4; $i++) {
+            $r = Invoke-BoundedDocker -DockerArgs @('ps') -TimeoutSeconds 3
+            if ($r -and ($r -join '') -match 'cfwd-hang') { $ok++ }
+        }
+        $warns = @(Select-String -Path $LOG_FILE -Pattern 'job object unavailable' -ErrorAction SilentlyContinue).Count
+        Write-Host "JOBFAIL attempts=$($script:AddTypeCalls) warns=$warns answered=$ok"
+    } finally {
+        Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # P20's child: a FRESH process, so its first bounded call is the one that pays
 # for the job type's Add-Type compile. One call to a stub that starts a
 # descendant at once and exits; prints how many stub processes survive it.
@@ -150,13 +207,15 @@ function Invoke-FirstCall {
     try {
         . $script:Loader $sbx
         $WatchdogDockerExe = $Stub
+        $pids = Join-Path $sbx 'stubs\pids-firstcall'
+        Reset-StubPids $pids
         $compiledBefore = [bool]('AiStackWatchdogJob' -as [type])
         $r = Invoke-BoundedDocker -DockerArgs @('logs', 'x') -TimeoutSeconds 3
-        Start-Sleep -Milliseconds 800
-        $left = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
-        Write-Host "FIRSTCALL compiledBefore=$compiledBefore returned=$($null -ne $r) left=$left"
+        $started = @(Get-ChildItem $pids -File).Count
+        $left = Get-StubAlive $pids 3000
+        Write-Host "FIRSTCALL compiledBefore=$compiledBefore returned=$($null -ne $r) stubs=$started left=$left"
     } finally {
-        Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        if ($pids) { Stop-StubPids $pids }
         Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -169,7 +228,7 @@ function Invoke-PurePart {
     try { Invoke-PureCases -sbx $sbx }
     catch { Write-Case 'P0' 'pure part ran to the end' $false "harness error: $($_.Exception.Message)" }
     finally {
-        Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Stop-StubPids (Join-Path $sbx 'stubs\pids')
         Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -185,7 +244,7 @@ function Invoke-PureCases {
     $missing = @($need | Where-Object { -not (Get-Command $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
         foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15',
-                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21') {
+                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21', 'P22', 'P23', 'P24', 'P25', 'P26', 'P27', 'P28', 'P29') {
             Write-Case $id 'container-loop detection' $false ("the watchdog under test defines none of: " + ($missing -join ', '))
         }
         return
@@ -509,6 +568,225 @@ function Invoke-PureCases {
     Write-Case 'P18' 'slow loops with irregular gaps (20/70, 40/70, random mean 40) page exactly when 6-in-6h (or the fast rule) first holds' `
         $p18ok ($p18lines -join "`n")
 
+    # Age one key's cooldown/throttle sentinels, standing in for time passing.
+    $ageKey = { param([string]$like, [double]$min)
+        Get-ChildItem (Join-Path $sbx 'logs') -Force -File | Where-Object { $_.Name -like "*$like" } |
+            ForEach-Object { $_.LastWriteTime = $_.LastWriteTime.AddMinutes(-$min) } }
+
+    # P22 (attempt-4 X1): docker-unreadable FLAPPING - the batched and the
+    # per-container inspect time out on alternate passes, 12 passes 10 min
+    # apart. Its all-clear keeps the 1h throttle and the 6h cooldown, so this
+    # is ONE alert and at most one all-clear, not a pair every other pass.
+    $u1 = @{ Name = '/u1'; Id = 'u1'; RestartCount = 0; State = @{ Status = 'running'; StartedAt = (& $iso 300) }
+             HostConfig = @{ NetworkMode = 'bridge'; RestartPolicy = @{ Name = 'no'; MaximumRetryCount = 0 } } } | ConvertTo-Json -Compress -Depth 5
+    $DockerProbeTimeoutSeconds = 8
+    & {
+        function Invoke-BoundedDocker { param([string[]]$DockerArgs, [int]$TimeoutSeconds = 0)
+            $script:BoundedFailureReason = ''; $script:BoundedFailureLines = @()
+            if ($DockerArgs[0] -eq 'ps') { return , @('u1') }
+            if ($script:P22Fail) { $script:BoundedFailureReason = 'did not answer within 8s'; return $null }
+            return , @($u1)
+        }
+        for ($i = 1; $i -le 12; $i++) {
+            $script:P22Fail = ($i % 2 -eq 1)
+            $null = Get-ContainerRuntimeFacts
+            & $ageKey 'docker-unreadable' 10
+        }
+    }
+    $tt = Get-Transport $sbx
+    $p22a = Measure-Alerts $tt 'docker cannot describe 1 container\(s\) within 8s'
+    $p22r = @($tt.Telegram | Where-Object { $_ -match 'RESOLVED ai-stack: docker can describe' }).Count
+    Write-Case 'P22' 'docker-unreadable flapping every other pass for 2h: one alert, at most one all-clear' `
+        (($p22a -eq 'tg=1 mm=1') -and ($p22r -le 1)) "12 passes, alternate inspect timeouts: alerts $p22a; RESOLVED $p22r"
+    # Leave the key clean for P6.
+    Get-ChildItem (Join-Path $sbx 'logs') -Force -File | Where-Object { $_.Name -like '*docker-unreadable' } | Remove-Item -Force
+
+    # P23: a netns pair that FLAPS - the owner restarts each odd pass and the
+    # joiner follows it on the even pass (intact, but only just). One alert,
+    # no all-clear: the pair has not been up $LoopSettledMinutes.
+    for ($i = 1; $i -le 12; $i++) {
+        if ($i % 2 -eq 1) { $o = (& $iso 0.5); $j = (& $iso 30) } else { $o = (& $iso 0.5); $j = (& $iso 0.2) }
+        Test-NetnsJoinedContainers -Facts @((& $fact 'cfwd-owner-ok' 'p23-owner' 'p23o' 0 'running' $o ''),
+                                            (& $fact 'cfwd-joiner-ok' 'p23-joiner' 'p23j' 0 'running' $j 'container:p23o')) | Out-Null
+        & $ageKey 'netns-p23-joiner' 10
+    }
+    $tt = Get-Transport $sbx
+    $p23a = Measure-Alerts $tt "container 'p23-joiner' is ORPHANED"
+    $p23r = @($tt.Telegram | Where-Object { $_ -match "RESOLVED ai-stack: container 'p23-joiner'" }).Count
+    Write-Case 'P23' 'a netns pair flapping orphaned/intact every other pass for 2h: one alert, no all-clear' `
+        (($p23a -eq 'tg=1 mm=1') -and ($p23r -eq 0)) "alerts $p23a; RESOLVED $p23r"
+
+    # P24: a netns RELAPSE - orphaned (paged), then intact and settled
+    # (all-clear, paging state reset), then the owner restarts again: paged
+    # again at once.
+    $nsPass = { param($o, $j) Test-NetnsJoinedContainers -Facts @((& $fact 'cfwd-owner-ok' 'p24-owner' 'p24o' 0 'running' $o ''),
+                                                                 (& $fact 'cfwd-joiner-ok' 'p24-joiner' 'p24j' 0 'running' $j 'container:p24o')) | Out-Null }
+    & $nsPass (& $iso 90) (& $iso 100)
+    & $nsPass (& $iso 90) (& $iso 61)
+    $p24r = & $said "RESOLVED ai-stack: container 'p24-joiner'"
+    & $nsPass (& $iso 0.5) (& $iso 61)
+    $tt = Get-Transport $sbx
+    $p24a = Measure-Alerts $tt "container 'p24-joiner' is ORPHANED"
+    Write-Case 'P24' 'a netns relapse after its all-clear is paged again at once' (($p24r -eq 1) -and ($p24a -eq 'tg=2 mm=2')) `
+        "orphaned, then intact + settled: RESOLVED $p24r; owner restarts again: alerts $p24a (expected tg=2 mm=2)"
+
+    # P25: ClearedAt survives a pass that did not see the container: paged,
+    # all-clear, a pass without it, then ONE new restart - no page.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p25-carry' 'p25' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p25-carry' 'p25' 7 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p25-carry' 'p25' 7 'running' (& $iso 61) '') | Out-Null
+    $p25r = & $said "RESOLVED ai-stack: container 'p25-carry'"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p25-other' 'p25x' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p25-carry' 'p25' 8 'running' (& $iso 1) '') | Out-Null
+    $p25a = & $said "ALERT ai-stack: container 'p25-carry' is CRASH-LOOPING"
+    Write-Case 'P25' 'the all-clear time is carried across a pass that missed the container' (($p25r -eq 1) -and ($p25a -eq 1)) `
+        "paged, RESOLVED $p25r, a pass without it, one new restart: ALERT total $p25a (expected 1)"
+
+    # P26: a ClearedAt in the FUTURE (a backward clock step) is clamped to now:
+    # later restarts still count and page. And the boundary: restarts recorded
+    # at the very second of the all-clear do not count.
+    $t0 = [datetime]::SpecifyKind([datetime]'2031-01-01T00:00:00', 'Utc')
+    $t0e = [int64]([datetimeoffset]$t0).ToUnixTimeSeconds()
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $st | Add-Member -NotePropertyName 'p26-future' -NotePropertyValue ([pscustomobject]@{
+        Count = 0; Id = 'p26'; Streak = 0; Accum = 0; Missed = 0; Hist = @(); ClearedAt = ($t0e + 365 * 86400) }) -Force
+    $e = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 600
+    $st | Add-Member -NotePropertyName 'p26-edge' -NotePropertyValue ([pscustomobject]@{
+        Count = 6; Id = 'p26e'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${e}:1" }); ClearedAt = $e }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p26-edge' 'p26e' 6 'running' (& $iso 5) '') | Out-Null
+    $p26e = & $said "container 'p26-edge'"
+    $cnt = 0; $firstAt = -1
+    for ($i = 0; $i -le 14; $i++) {
+        if ($i -gt 0 -and $i % 2 -eq 0) { $cnt++ }
+        $script:SimNow = $t0.AddMinutes(10 * $i)
+        $WatchdogClock = { $script:SimNow }
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p26-future' 'p26' $cnt 'running' ($t0.AddMinutes(10 * $i - 5).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')) '') | Out-Null
+        if ($firstAt -lt 0 -and (& $said "container 'p26-future' is CRASH-LOOPING") -gt 0) { $firstAt = $i }
+    }
+    $WatchdogClock = $null
+    Write-Case 'P26' 'a ClearedAt a year ahead is clamped (later restarts page); restarts at the all-clear second do not count' `
+        (($firstAt -eq 12) -and ($p26e -eq 0)) "future ClearedAt: first page at pass $firstAt (expected 12, the 6th restart); 6 restarts at the ClearedAt second: messages $p26e"
+
+    # P27: the adaptive settle bar. A loop with 70-minute gaps (paged on the
+    # 6-in-6h rule) must NOT be cleared at 100 minutes up - its bar is 3 x 70 -
+    # and that holds across a pass that missed it; it IS cleared once past the
+    # bar. A relapse then starts a new loop: a fast relapse that stops clears
+    # after the 60-minute floor again, not after the old loop's bar.
+    $t0 = [datetime]::SpecifyKind([datetime]'2033-01-01T00:00:00', 'Utc')
+    $iso0 = { param([double]$m) $t0.AddMinutes($m).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ') }
+    $p27r = @(7, 77, 147, 217, 287, 357)
+    $p27page = -1; $p27early = -1; $p27clear = -1; $p27re = -1; $p27clear2 = -1
+    for ($T = 5; $T -le 655; $T += 10) {
+        $script:SimNow = $t0.AddMinutes($T); $WatchdogClock = { $script:SimNow }
+        if ($T -eq 375) {   # a pass that does not see the container
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p27-other' 'p27x' 0 'running' (& $iso0 0) '') | Out-Null
+            continue
+        }
+        $done = @($p27r | Where-Object { $_ -le $T }); $cnt = $done.Count; $last = $done[-1]
+        if ($T -ge 585) { $cnt += 7; $last = 584 }   # the fast relapse
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p27-gaps' 'p27' $cnt 'running' (& $iso0 $last) '') | Out-Null
+        $na = & $said "ALERT ai-stack: container 'p27-gaps' is CRASH-LOOPING"
+        $nr = & $said "RESOLVED ai-stack: container 'p27-gaps'"
+        if ($p27page -lt 0 -and $na -ge 1) { $p27page = $T }
+        if ($nr -ge 1 -and $p27clear -lt 0) { $p27clear = $T; if (($T - 357) -lt 210) { $p27early = $T } }
+        if ($p27re -lt 0 -and $na -ge 2) { $p27re = $T }
+        if ($p27clear2 -lt 0 -and $nr -ge 2) { $p27clear2 = $T }
+    }
+    $WatchdogClock = $null
+    Write-Case 'P27' 'a 70-min-gap loop is not cleared inside 3 x 70 min (across a missed pass), is cleared after; a fast relapse then clears after 60 min' `
+        (($p27page -eq 365) -and ($p27early -lt 0) -and ($p27clear -ge 575) -and ($p27clear -le 595) -and ($p27re -eq 585) -and ($p27clear2 -eq 645)) `
+        ("paged at $p27page (expected 365); first all-clear at $p27clear, $(if ($p27clear -ge 0) { $p27clear - 357 } else { '-' }) min up (bar 210; " +
+         "expected 575-595); relapse paged at $p27re (expected 585); relapse cleared at $p27clear2 (expected 645, 61 min up)")
+
+    # P29 (attempt-4 F9): the premature all-clear, measured. 42 continuous slow
+    # loops on a simulated clock (fixed 20/70 and 40/70; exponential gaps with
+    # means 20-60 min, seeds 1-8, as the attempt-4 tester built them), 24h live,
+    # then stopped for 8h. Every RESOLVED while a loop is live is FALSE; after it
+    # stops each paged loop must get its all-clear.
+    $t0 = [datetime]::SpecifyKind([datetime]'2032-01-01T00:00:00', 'Utc')
+    $loops = [ordered]@{}
+    foreach ($pair in @(@(20, 70), @(40, 70))) {
+        $r = @(); $x = 7; $g = 0; while ($x -lt 24 * 60) { $r += $x; $x += $pair[$g % 2]; $g++ }
+        $loops[("p29-fix-{0}-{1}" -f $pair[0], $pair[1])] = $r
+    }
+    foreach ($m in 20, 30, 40, 50, 60) {
+        for ($seed = 1; $seed -le 8; $seed++) {
+            $rng = New-Object System.Random ($seed * 7919)
+            $r = @(); $x = 0.0
+            while ($true) { $x += -$m * [Math]::Log(1.0 - $rng.NextDouble()); if ($x -ge 24 * 60) { break }; $r += $x }
+            $loops[("p29-exp{0}-s{1}" -f $m, $seed)] = $r
+        }
+    }
+    $false29 = 0; $paged29 = 0; $cleared29 = 0; $late29 = @(); $lines29 = @(); $lastWordR = 0; $liveMin = 0
+    if ($SkipSim) { $loops = [ordered]@{} }
+    $tgPath = Join-Path $sbx 'transport-telegram.log'
+    $logsDir = Join-Path $sbx 'logs'
+    # The fault line is not under test here, and each one is a docker call
+    # (to the dead endpoint) on every looping pass: stubbed for P29 only,
+    # restored after it.
+    $origFaultLine = ${function:Get-ContainerFaultLine}
+    ${function:Get-ContainerFaultLine} = { param([string]$Name) 'stub fault line' }
+    foreach ($name in $loops.Keys) {
+        $r = $loops[$name]; $lastR = $r[-1]
+        $pagedAt = -1; $resLive = 0; $resAfter = -1
+        # Speed: a fresh restart-state file per loop (the earlier cases are
+        # done with it), and the transport is re-read only when it has grown.
+        [IO.File]::WriteAllText($statePath, '{}')
+        $tgLen = -1; $nRes = 0; $nAlert = 0; $word = ''
+        $ri = 0; $cnt = 0; $last = -600
+        for ($T = 5; $T -le 32 * 60; $T += 10) {
+            $script:SimNow = $t0.AddMinutes($T)
+            $WatchdogClock = { $script:SimNow }
+            while ($ri -lt $r.Count -and $r[$ri] -le $T) { $last = $r[$ri]; $ri++; $cnt++ }
+            # A small record of the same shape as `docker inspect`, through the
+            # real parser (cloning the full recorded document each pass made
+            # this case take half an hour).
+            $rec = [pscustomobject]@{ Name = "/$name"; Id = $name; RestartCount = $cnt
+                State = [pscustomobject]@{ Status = 'running'; StartedAt = $t0.AddMinutes($last).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ') }
+                HostConfig = [pscustomobject]@{ NetworkMode = 'bridge'; RestartPolicy = [pscustomobject]@{ Name = 'always'; MaximumRetryCount = 0 } } }
+            Test-ContainerRestartLoops -Facts @(ConvertTo-ContainerFact -Record $rec) | Out-Null
+            $len = if (Test-Path $tgPath) { (Get-Item $tgPath).Length } else { 0 }
+            if ($len -ne $tgLen) {
+                $tgLen = $len
+                $lines = @(Get-Content $tgPath)
+                $nRes2 = @($lines | Where-Object { $_ -match "RESOLVED ai-stack: container '$name'" }).Count
+                $nAlert2 = @($lines | Where-Object { $_ -match "ALERT ai-stack: container '$name' is CRASH-LOOPING" }).Count
+                if ($nAlert2 -gt $nAlert) { $word = 'A' }
+                if ($nRes2 -gt $nRes) { $word = 'R' }
+                $nRes = $nRes2; $nAlert = $nAlert2
+            }
+            if ($T -le $lastR) { $liveMin += 10; if ($word -eq 'R') { $lastWordR += 10 } }
+            if ($pagedAt -lt 0 -and $nAlert -gt 0) { $pagedAt = $T }
+            if ($T -le $lastR + 10) { $resLive = $nRes } elseif ($resAfter -lt 0 -and $nRes -gt $resLive) { $resAfter = $T }
+            foreach ($s in @(".loop-alert-crashloop-$name", ".tg-alert-crashloop-$name")) {
+                $sp = Join-Path $logsDir $s
+                if (Test-Path $sp) { $fi = Get-Item $sp -Force; $fi.LastWriteTime = $fi.LastWriteTime.AddMinutes(-10) }
+            }
+        }
+        $WatchdogClock = $null
+        $false29 += $resLive
+        if ($pagedAt -ge 0) { $paged29++; if ($resAfter -ge 0) { $cleared29++; $late29 += [int]($resAfter - $lastR) } }
+        if ($resLive -gt 0 -or ($pagedAt -ge 0 -and $resAfter -lt 0)) { $lines29 += "${name}: first page $pagedAt, false RESOLVED $resLive, last restart $([int]$lastR), all-clear at $resAfter" }
+    }
+    ${function:Get-ContainerFaultLine} = $origFaultLine
+    $maxLate = if ($late29) { ($late29 | Measure-Object -Maximum).Maximum } else { -1 }
+    if ($SkipSim) {
+        Write-Host "## P29 - SKIPPED (-SkipSim; the mutant helper only)"
+    } else {
+        # The bound is 4, not 0, and the four are ONE event at four scales
+        # (seed 6 at means 30-60): a burst of restarts that pages on the fast
+        # rule, then the loop's FIRST long gap, before any long gap has been
+        # seen. No gap-based bar can tell that from a fixed fast loop inside
+        # the 60-minute floor, and the floor is what lets a fixed fast loop
+        # clear within the hour. Findings F10.
+        Write-Case 'P29' 'across 42 slow loops at most 4 false all-clears while live (attempt 4: 99); every paged loop cleared after it stops (within 7h)' `
+            (($false29 -le 4) -and ($paged29 -eq $loops.Count) -and ($cleared29 -eq $paged29) -and ($maxLate -le 420)) `
+            ("loops $($loops.Count); paged $paged29; false RESOLVED while live $false29 (attempt 4: 99 on this set); " +
+             "loop-minutes with RESOLVED as the latest message $lastWordR of $liveMin; genuine all-clears $cleared29, " +
+             "latest $maxLate min after the last restart" + $(if ($lines29) { "`n" + ($lines29 -join "`n") } else { '' }))
+    }
+
     # P6: every docker call the section makes is bounded - a stub docker that
     # answers `ps` and never returns from anything else. Before hanging it
     # starts a child that starts a sleeper and EXITS, so the sleeper's parent is
@@ -517,6 +795,9 @@ function Invoke-PureCases {
 public static class CfwdHang__SFX__ { public static int Main(string[] a) {
   string me = System.Reflection.Assembly.GetExecutingAssembly().Location;
   string mode = a.Length > 0 ? a[0] : "";
+  string pidDir = System.Environment.GetEnvironmentVariable("CFWD_PIDDIR");
+  if (!string.IsNullOrEmpty(pidDir)) { try { System.IO.File.WriteAllText(System.IO.Path.Combine(pidDir,
+      System.Diagnostics.Process.GetCurrentProcess().Id.ToString()), ""); } catch { } }
   if (mode == "ps") { System.Console.WriteLine("cfwd-hang"); return 0; }
   if (mode == "gc") { System.Threading.Thread.Sleep(60000); return 0; }
   // Children inherit this process's stdout/stderr (UseShellExecute=false).
@@ -532,6 +813,8 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     Add-Type -TypeDefinition $hangSrc -OutputAssembly $hangExe -OutputType ConsoleApplication
     # Plain assignments: the loaded settings live in THIS function's scope.
     $WatchdogDockerExe = $hangExe
+    $pids = Join-Path $sbx 'stubs\pids'
+    Reset-StubPids $pids
     $DockerCallTimeoutSeconds = 2; $DockerProbeTimeoutSeconds = 2; $DockerLogsTimeoutSeconds = 2
     $FallbackBudgetSeconds = 5; $NetnsConfirmBudgetSeconds = 5
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -542,10 +825,10 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
                                           RestartPolicy = 'no'; MaxRetries = 0; NetworkMode = 'container:ownerid' }
     $sw.Restart(); $nn = [bool](@(Test-NetnsJoinedContainers -Facts @($orphanOwnerless)) | Select-Object -Last 1); $tNet = $sw.Elapsed.TotalSeconds
     $sw.Stop()
-    $left = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
+    $stubs6 = @(Get-ChildItem $pids -File).Count
+    $left = Get-StubAlive $pids 3000
     $tt = Get-Transport $sbx
-    $unread = Measure-Alerts $tt 'docker cannot describe 1 container'
-    Start-Sleep -Milliseconds 500
+    $unread = Measure-Alerts $tt 'docker cannot describe 1 container\(s\) within 2s'
     $ok = ($null -eq $raw) -and ($why -eq 'did not answer within 2s') -and ($tRaw -lt 6) -and
           ($facts.Count -eq 0) -and ($tFacts -lt 12) -and ($fl -eq 'did not answer within 2s') -and ($tLog -lt 6) -and
           ($nn -eq $true) -and ($tNet -lt 6) -and ($left -eq 0) -and ($unread -eq 'tg=1 mm=1')
@@ -554,31 +837,32 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
          "Get-ContainerRuntimeFacts: $($facts.Count) fact(s) in $([math]::Round($tFacts,1))s (batch + per-container probe both timed out); unreadable alert $unread`n" +
          "a second hanging inspect: '$fl' in $([math]::Round($tLog,1))s`n" +
          "Test-NetnsJoinedContainers (owner probe hangs): ok=$nn in $([math]::Round($tNet,1))s`n" +
-         "stub processes left running (incl. a great-grandchild whose parent exited): $left")
+         "stub processes started $stubs6, left running (incl. great-grandchildren whose parent exited): $left")
+    Stop-StubPids $pids
 
     # P11: a docker that EXITS at once but leaves a descendant holding its
     # stdout - two levels down, with the middle process already gone (the
     # attempt-1 tester's A14 and attempt-2 W-4). The call must return inside
     # the bound, and the descendant must be killed.
+    Reset-StubPids $pids
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $fl = Get-ContainerFaultLine -Name 'cfwd-hang'; $tGc = $sw.Elapsed.TotalSeconds; $sw.Stop()
-    Start-Sleep -Milliseconds 500
-    $leftGc = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
+    $leftGc = Get-StubAlive $pids 3000
     Write-Case 'P11' 'a grandchild holding the output open cannot stretch the bound, and is killed' `
         (($tGc -lt 4) -and ($fl -match 'kept its output open') -and ($leftGc -eq 0)) `
-        "Get-ContainerFaultLine returned in $([math]::Round($tGc,1))s: '$fl'; stub processes left: $leftGc"
-    Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        "Get-ContainerFaultLine returned in $([math]::Round($tGc,1))s: '$fl'; stub processes started $(@(Get-ChildItem $pids -File).Count), left: $leftGc"
+    Stop-StubPids $pids
 
     # P15: the fallback when no job object can be made - a hung child whose
     # own child is alive: taskkill /T must take both.
     $WatchdogUseJobObject = $false
+    Reset-StubPids $pids
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $r15 = Invoke-BoundedDocker -DockerArgs @('events'); $t15 = $sw.Elapsed.TotalSeconds; $sw.Stop()
-    Start-Sleep -Milliseconds 800
-    $left15 = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
+    $left15 = Get-StubAlive $pids 3000
     Write-Case 'P15' 'without a job object, a hung child and its live child are both killed (taskkill /T)' `
-        (($null -eq $r15) -and ($t15 -lt 6) -and ($left15 -eq 0)) "returned null=$($null -eq $r15) in $([math]::Round($t15,1))s; stub processes left: $left15"
-    Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        (($null -eq $r15) -and ($t15 -lt 6) -and ($left15 -eq 0)) "returned null=$($null -eq $r15) in $([math]::Round($t15,1))s; stub processes started $(@(Get-ChildItem $pids -File).Count), left: $left15"
+    Stop-StubPids $pids
     $WatchdogUseJobObject = $true
 
     # P19: when the job cannot take the child (assignment fails), its handle is
@@ -592,8 +876,10 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
     $h1 = (Get-Process -Id $PID).HandleCount
     $WatchdogFailJobAssign = $false
-    Write-Case 'P19' 'a job the child could not be assigned to is closed, not leaked' (($ok19 -eq 40) -and (($h1 - $h0) -lt 20)) `
-        "40 calls with assignment failing: $ok19 answered; process handle count $h0 -> $h1 (a leak adds one per call)"
+    $logged19 = @(Select-String -Path (Join-Path $sbx 'logs\tailscale-health.log') -Pattern 'could not be put in a job object').Count
+    Write-Case 'P19' 'a job the child could not be assigned to is closed (not leaked) and the fallback is logged' `
+        (($ok19 -eq 40) -and (($h1 - $h0) -lt 20) -and ($logged19 -ge 40)) `
+        "40 calls with assignment failing: $ok19 answered; process handle count $h0 -> $h1 (a leak adds one per call); fallback logged $logged19 time(s)"
 
     # P20 (W-8): the job - and so the Add-Type compile - exists BEFORE the
     # child starts. Run in a FRESH process, where the first bounded call pays
@@ -604,10 +890,17 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     if (-not $harness) { $harness = $script:HarnessPath }
     $fc = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $script:HarnessPath -Part firstcall -Script $Script -Stub $hangExe 2>&1 |
         ForEach-Object { "$_" } | Where-Object { $_ -match '^FIRSTCALL' })
-    Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Write-Case 'P20' "the first call of a fresh process: the job exists before the child starts, so an immediate descendant dies" `
-        (($fc.Count -eq 1) -and ($fc[0] -match 'compiledBefore=False') -and ($fc[0] -match 'left=0$')) `
-        "child process said: $(if ($fc) { $fc[0] } else { '(nothing)' })"
+        (($fc.Count -eq 1) -and ($fc[0] -match 'compiledBefore=False') -and ($fc[0] -match 'stubs=3 left=0$')) `
+        "child process said: $(if ($fc) { $fc[0] } else { '(nothing)' }) (stubs = the stub, its child and the sleeper, by PID)"
+
+    # P28 (W-9): a job type that cannot be compiled is tried ONCE per run and
+    # logged once; every call still answers (taskkill /T fallback).
+    $jf = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $script:HarnessPath -Part jobfail -Script $Script -Stub $hangExe 2>&1 |
+        ForEach-Object { "$_" } | Where-Object { $_ -match '^JOBFAIL' })
+    Write-Case 'P28' 'a job type that cannot be compiled is tried and logged once per run, and every call still answers' `
+        (($jf.Count -eq 1) -and ($jf[0] -match 'attempts=1 warns=1 answered=4$')) `
+        "child process said: $(if ($jf) { $jf[0] } else { '(nothing)' })"
     $WatchdogDockerExe = 'docker'
 }
 
@@ -799,6 +1092,7 @@ function Invoke-DindPart {
 }
 
 if ($Part -eq 'firstcall') { Invoke-FirstCall; exit 0 }
+if ($Part -eq 'jobfail') { Invoke-JobFail; exit 0 }
 if ($Part -in 'pure', 'all') { Invoke-PurePart }
 if ($Part -in 'dind', 'all') { Invoke-DindPart }
 Write-Host ""
