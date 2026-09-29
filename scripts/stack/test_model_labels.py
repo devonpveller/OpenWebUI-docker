@@ -20,7 +20,6 @@ import copy
 import io
 import json
 import os
-import posixpath
 import re
 import shutil
 import sys
@@ -241,7 +240,7 @@ def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
 @pytest.mark.parametrize("check", [True, False])
 def test_a_backslash_in_the_container_path_is_refused(world, path, check):
     # through llama-swap the lexer rule (a backslash) refuses first; either refusal is right
-    with pytest.raises(ml.LabelError, match="character Windows treats specially|a backslash"):
+    with pytest.raises(ml.LabelError, match="character Windows treats specially|a backslash|allowlist"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
@@ -319,6 +318,8 @@ ENV_SHAPES = [
     ("form-feed", "A=foo\fX={p}\n"),
     ("lone-cr", "A=1\rX={p}\r"),
     ("EXPORT", "EXPORT X={p}\n"),
+    ("dollar", "X=/models/A$$B-Q8_0.gguf\n"),
+    ("dollar-brace", "X=/models/X-$${{PORT}}-Q8_0.gguf\n"),
 ]
 
 
@@ -353,9 +354,16 @@ def test_the_label_is_whatever_compose_renders_for_any_env_shape(tmp_path, name,
         assert "exited" in str(exc) or "exit" in str(exc)
         return   # compose refused the file: no label - and never the default's
     rendered = render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"]
+    # compose's JSON writes a literal `$` as `$$`: the container gets the UN-escaped value, which is what
+    # the label must name - and since attempt 9 any `$` at all is refused by the allowlist
+    unescaped = rendered.replace("$$", "$")
+    if "$" in unescaped:
+        with pytest.raises(ml.LabelError, match="allowlist"):
+            ml.derive_labels(render, check_files=False)
+        return
     labels = by_role(ml.derive_labels(render, check_files=False))
-    assert labels["local-large"].container_path == posixpath.normpath(rendered)
-    assert labels["local-large"].label == ml.label_for(rendered, "thinking")
+    assert labels["local-large"].container_path == unescaped
+    assert labels["local-large"].label == ml.label_for(unescaped, "thinking")
 
 
 # --- symlinks: followed as the container follows them; the label is the file reached ----
@@ -447,8 +455,10 @@ def test_the_cli_survives_a_stream_that_cannot_encode_the_label(world, tmp_path)
     saved.write_text(json.dumps(make_render(world, chat=f"/models/cjk/{name}")), encoding="utf-8")
     raw = io.BytesIO()
     stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
-    assert ml.main(["--root", str(world.root), "--render", str(saved)], out=stream) == 0
-    assert "?-7B Q4_0 (thinking)" in raw.getvalue().decode("cp1252")
+    # a non-ASCII name is outside the allowlist since attempt 9: the REFUSAL naming it must still print
+    assert ml.main(["--root", str(world.root), "--render", str(saved)], out=stream) == 1
+    text = raw.getvalue().decode("cp1252")
+    assert text.startswith("labels: FAILED - ") and "allowlist" in text and "??-7B-Q4_0.gguf" in text
 
 
 def test_the_env_example_gives_the_documented_default():
@@ -932,7 +942,7 @@ def test_a_path_the_host_and_the_container_could_read_differently_is_refused(wor
         (world.store / rel).parent.mkdir(parents=True, exist_ok=True)
         (world.store / rel).write_bytes(b"GGUF")
     # through llama-swap's cmd a whitespace refusal comes first (llama-swap splits on it)
-    with pytest.raises(ml.LabelError, match=re.escape(why) + "|contains whitespace"):
+    with pytest.raises(ml.LabelError, match=re.escape(why) + "|contains whitespace|allowlist"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
     embed_path = path.replace("/models/", "/models/", 1)
     with pytest.raises(ml.LabelError):
@@ -1100,7 +1110,7 @@ def test_a_value_with_whitespace_substituted_into_llama_swaps_cmd_is_refused(wor
     (`..._CTX_SIZE=4096 --model /models/B` loads B - measured in the pinned llama-swap image)."""
     render = make_render(world)
     render["services"]["llama-cpp-upstream"]["environment"][var] = value
-    with pytest.raises(ml.LabelError, match="contains whitespace"):
+    with pytest.raises(ml.LabelError, match="contains whitespace|allowlist"):
         ml.derive_labels(render)
 
 
@@ -1140,7 +1150,7 @@ def test_a_remote_model_env_on_llama_swaps_service_is_refused(world):
 
 def test_a_llama_swap_entry_with_its_own_env_is_refused(world):
     _swap_cmd(world, "    concurrencyLimit: 0\n", "    concurrencyLimit: 0\n    env:\n      - LLAMA_ARG_MODEL=/models/x.gguf\n")
-    with pytest.raises(ml.LabelError, match="has env - not interpreted"):
+    with pytest.raises(ml.LabelError, match="has env - not interpreted|entry key 'env'"):
         ml.derive_labels(make_render(world))
 
 
@@ -1311,7 +1321,7 @@ def test_a_value_the_shell_lexer_would_reinterpret_is_refused_anywhere_in_the_co
 def test_a_literal_cmd_word_the_lexer_would_reinterpret_is_refused(world, old, new, why):
     """Quotes, a backslash, `--` and a `#` comment word in the cmd itself - kills X5 (the `#` word)."""
     _swap_cmd(world, old, new)
-    with pytest.raises(ml.LabelError, match=re.escape(why)):
+    with pytest.raises(ml.LabelError, match=re.escape(why) + "|allowlist"):
         ml.derive_labels(make_render(world))
 
 
@@ -1348,3 +1358,131 @@ def test_env_references_in_yaml_comments_are_not_config(world):
     refs = ml.swap_env_refs("# ${env.IN_A_COMMENT}\nmodels:\n  m:\n    cmd: |\n      x ${env.REAL}\n"
                             "      # ${env.IN_THE_BLOCK}\n    proxy: http://${env.PROXY} # ${env.TRAILING}\n")
     assert refs == {"REAL", "IN_THE_BLOCK", "PROXY"}
+
+
+# --------------------------------------------------------------------------
+# attempt 9 (tester attempt 8): an ALLOWLIST for every value and word, and a recognised YAML
+# SUBSET for the llama-swap config - every row of tester attempt 8's evidence
+# --------------------------------------------------------------------------
+
+_NBSP, _IDEO, _THIN, _OGHAM = chr(0xA0), chr(0x3000), chr(0x2009), chr(0x1680)
+_LS, _NEL, _VT, _FS, _C1 = chr(0x2028), chr(0x85), chr(0x0B), chr(0x1C), chr(0x81)
+
+ALLOWLIST_VALUE_ROWS = [
+    # (row, variable, value AS COMPOSE RENDERS IT)
+    ("e09-C1", "LLAMA_SWAP_QWEN36_35B_CTX_SIZE", f"1{_C1}2"),
+    ("e10-FFFE", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"40{chr(0xFFFE)}96"),
+    ("Y3-control", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"40{chr(1)}96"),
+    ("Y11-DEL", "LLAMA_SWAP_QWEN36_35B_BATCH", f"10{chr(0x7F)}24"),
+    ("q03-NEL", "LLAMA_SWAP_QWEN36_27B_BATCH", f"10{_NEL}24"),
+    ("e05-escaped-env-ref", "LLAMA_SWAP_QWEN36_35B_CTX_SIZE", "$${env.UNSETX}"),
+    ("e01-escaped-macro", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "$${common-args}"),
+    ("e02-escaped-port", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "$${PORT}"),
+    ("e03-other-entry-var", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH", "/models/$${env.LLAMA_SWAP_QWEN36_35B_MODEL_PATH}.gguf"),
+    ("e04-port-in-path", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH", "/models/X-$${PORT}-Q8_0.gguf"),
+    ("e06-model-id-in-path", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH", "/models/$${MODEL_ID}-Q8_0.gguf"),
+    ("e08-literal-dollar", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH", "/models/A$$B-7B-Q8_0.gguf"),
+    ("unescaped-dollar", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "4$096"),
+    ("nbsp", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"4096{_NBSP}--model"),
+    ("ideographic-space", "LLAMA_SWAP_QWEN36_35B_CTX_SIZE", f"4096{_IDEO}x"),
+    ("thin-space", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"4096{_THIN}x"),
+    ("ogham-space", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"4096{_OGHAM}x"),
+    ("n17-huge", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "9" * 200000),
+    ("brace", "LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "{4096}"),
+]
+
+
+@pytest.mark.parametrize("row,var,value", ALLOWLIST_VALUE_ROWS, ids=[r[0] for r in ALLOWLIST_VALUE_ROWS])
+def test_every_substituted_value_must_match_the_allowlist(world, row, var, value):
+    """A value compose renders with `$$` (a literal `$` - llama-swap then RE-EXPANDS `${...}` in it),
+    a C0/C1 control, DEL, U+FFFE, any non-ASCII whitespace, a brace or a 200 000-character value:
+    refused by the allowlist [A-Za-z0-9_./:,+=@-], whichever entry of the config it belongs to."""
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"][var] = value
+    with pytest.raises(ml.LabelError, match="allowlist"):
+        ml.derive_labels(render)
+
+
+@pytest.mark.parametrize("value", ["/models/A$$B-7B-Q8_0.gguf", f"/models/x{_NBSP}y-Q8_0.gguf",
+                                   "/models/x y-Q8_0.gguf"])
+def test_the_embed_model_path_must_match_the_allowlist_too(world, value):
+    """compose renders a literal `$` as `$$`: the embed path is refused rather than read escaped."""
+    render = make_render(world)
+    render["services"]["llama-cpp-embed-upstream"]["environment"]["LLAMA_ARG_MODEL"] = value
+    with pytest.raises(ml.LabelError, match="allowlist"):
+        ml.derive_labels(render, check_files=False)
+
+
+@pytest.mark.parametrize("sep", [_NBSP, _IDEO, _THIN, _OGHAM, _LS, _NEL, _VT, _FS, _C1],
+                         ids=["k01-NBSP", "n14c-U3000", "n14e-U2009", "n14f-U1680", "n14b-U2028",
+                              "n14d-NEL", "n14g-VT", "n14h-U001C", "q09-C1"])
+def test_a_literal_cmd_word_outside_the_allowlist_is_refused(world, sep):
+    """k01: `--alias x<NBSP>--model<NBSP>/models/B` - Python's split() separated it (a label for B)
+    while llama-swap's lexer kept one word (loads A). Any such character is now refused."""
+    (world.store / "B-13B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    _swap_cmd(world, "--reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}",
+              f"--reasoning-budget ${{env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}} --alias x{sep}--model{sep}"
+              f"/models/B-13B-Q4_K_M.gguf")
+    with pytest.raises(ml.LabelError, match="allowlist|not in the YAML subset"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_huge_literal_word_is_refused(world):
+    _swap_cmd(world, "--reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}",
+              "--reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET} --alias " + "a" * 200000)
+    with pytest.raises(ml.LabelError, match="allowlist"):
+        ml.derive_labels(make_render(world))
+
+
+def _config_with(world, old, new):
+    _swap_cmd(world, old, new)
+    return make_render(world)
+
+
+SUBSET_ROWS = [
+    ("n06-multiline-plain-cmd", "    cmd: |\n      llama-server ${common-args}\n      --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "    cmd: llama-server ${common-args} --model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}\n"
+     "      --model /models/B-13B-Q4_K_M.gguf\n      --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "multi-line plain scalar"),
+    ("n08-multiline-plain-macro", "  common-args: >-\n", "  common-args: --host 0.0.0.0\n    --model /models/B-13B-Q4_K_M.gguf\n  other: >-\n",
+     "multi-line plain scalar"),
+    ("n09-anchor", "  common-args: >-", "  common-args: &x >-", "macro value"),
+    ("n09b-tag", "  common-args: >-", "  common-args: !!str >-", "macro value"),
+    ("n09c-keep", "  common-args: >-", "  common-args: >+", "macro value"),
+    ("n09d-indent-indicator", "  common-args: >-", "  common-args: >2-", "macro value"),
+    ("n10b-keep-block", "  qwen36-35b-a3b:\n    cmd: |", "  qwen36-35b-a3b:\n    cmd: |+", "cmd value"),
+    ("n10c-indent-block", "  qwen36-35b-a3b:\n    cmd: |", "  qwen36-35b-a3b:\n    cmd: |2", "cmd value"),
+    ("n12-duplicate-cmd", "    concurrencyLimit: 0\n", "    concurrencyLimit: 0\n    cmd: llama-server --model /models/B.gguf\n",
+     "duplicate key"),
+    ("n12b-duplicate-entry", "\nmodels:\n", "\nmodels:\n  qwen36-27b:\n    cmd: llama-server --model /models/B.gguf\n",
+     "duplicate key"),
+    ("n13-tab", "listen: 0.0.0.0:8080", "listen:\t0.0.0.0:8080", "a tab"),
+    ("n13b-unclosed-quote", "logToStdout: both", 'logToStdout: "both', "top-level key"),
+    ("n19-escaped-quote", "logToStdout: both", 'logToStdout: "a \\" #${env.U}"', "top-level key"),
+    ("flow-map", "logToStdout: both", "logToStdout: {a: b}", "top-level key"),
+    ("flow-seq", "logToStdout: both", "logToStdout: [a, b]", "top-level key"),
+    ("alias", "logToStdout: both", "logToStdout: *x", "top-level key"),
+    ("sequence", "      setParamsByID:\n", "      setParamsByID:\n        - x\n", "sequence"),
+    ("unknown-top-key", "logToStdout: both", "logToStdout: both\nhooks: x", "top-level key"),
+    ("per-entry-env", "    concurrencyLimit: 0\n", "    concurrencyLimit: 0\n    env:\n      - A=1\n", "entry key 'env'"),
+    ("non-ascii-in-block", "    --no-mmap", f"    --no-mmap{_NBSP}", "non-ASCII"),
+]
+
+
+@pytest.mark.parametrize("row,old,new,why", SUBSET_ROWS, ids=[r[0] for r in SUBSET_ROWS])
+def test_a_llama_swap_config_outside_the_recognised_subset_is_refused(world, row, old, new, why):
+    """Every YAML shape of tester attempt 8 that the line reader did not parse the way llama-swap does:
+    refused, with the line named - never a label read from a misparsed config."""
+    with pytest.raises(ml.LabelError, match=re.escape(why)):
+        ml.derive_labels(_config_with(world, old, new))
+
+
+def test_the_live_shaped_config_is_in_the_subset():
+    """The repo's own llama-swap config (the one landing deploys) is recognised."""
+    ml.check_swap_config_subset((REPO_ROOT / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8"))
+
+
+def test_a_quoted_filters_key_with_a_colon_is_read_as_one_key():
+    ml.check_swap_config_subset('models:\n  m:\n    cmd: llama-server --model /models/a.gguf\n'
+                                '    filters:\n      setParamsByID:\n        "${MODEL_ID}:nothink":\n'
+                                '          chat_template_kwargs:\n            enable_thinking: false\n')

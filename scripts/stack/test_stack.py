@@ -6167,9 +6167,11 @@ def test_labels_survives_a_stream_that_cannot_encode_the_model_name(root, no_owu
                       capture=_rdaemon(root).capture)
     stream.flush()
     out = raw.getvalue().decode("cp1252")
-    assert code == 0, out
-    assert "5 row(s) changed" in out
-    assert owui.rows["local-large"]["name"] == "\u6a21\u578b-7B Q4_0 (thinking)"   # the TRUE label
+    # since attempt 9 a non-ASCII model name is outside the allowlist: refused - and the refusal, which
+    # names the path, still prints on a cp1252 stream without a traceback
+    assert code == stack.EXIT_REFUSED, out
+    assert "labels: FAILED - " in out and "allowlist" in out and "??-7B-Q4_0.gguf" in out
+    assert owui.writes == []
 
 
 def test_the_driver_env_reader_drops_a_bom(tmp_path):
@@ -6305,8 +6307,12 @@ def test_a_non_ascii_model_path_survives_the_real_compose_render(tmp_path, monke
     result = _REAL_UTF8_CAPTURE(ml.render_command(REPO_ROOT, env_file), REPO_ROOT)
     assert result.code == 0, result.stderr
     render = ml.parse_render(result.stdout, "render")
-    labels = {x.role: x for x in ml.derive_labels(render, check_files=False)}
-    assert labels["local-large"].label == "\u0141\xf3d\u017a-\u9f99-7B Q4_K_M (thinking)"
+    # read back EXACTLY (no mojibake) ...
+    assert render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"] == \
+        f"/models/v/{name}"
+    # ... and then refused by the allowlist (attempt 9): never a label for a non-ASCII name
+    with pytest.raises(ml.LabelError, match="allowlist"):
+        ml.derive_labels(render, check_files=False)
 
 
 def test_the_writing_path_refuses_a_failed_render_even_with_output(root, no_owui_env):

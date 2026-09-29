@@ -21,13 +21,14 @@ defaults are read by compose itself and never re-implemented here:
               `-config` - required, absolute - through that path's bind): the entry
               whose id is the concrete id (`:nothink` is llama-swap's thinking
               switch, not an entry); its cmd is expanded (macros, `${env.*}` from the
-              service's RENDERED environment). llama-swap splits it with a POSIX-shell
-              lexer (quotes group, backslash escapes), which is not emulated: any
-              `${env.*}` in the WHOLE config that is unset, empty, or has whitespace,
-              a quote, a backslash or a control character, any literal cmd word with
-              a quote, backslash or control character, a `--` or `#...` word, and a
-              macro referencing a later one are refused; what is left is read with
-              the llama.cpp flag rules below; its last `-m`/`--model` is the path
+              service's RENDERED environment). llama-swap lexes it like a POSIX
+              shell and parses the config as YAML; neither is emulated. BY ALLOWLIST:
+              every `${env.*}` in the WHOLE config and every literal cmd word must
+              match [A-Za-z0-9_./:,+=@-] (no `$`, quote, backslash, whitespace,
+              control or non-ASCII character; at most 4096 long), a macro may use
+              only earlier macros, and the config must be in a recognised YAML
+              subset (check_swap_config_subset). What is left is read with the
+              llama.cpp flag rules below; its last `-m`/`--model` is the path
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
               (llama.cpp takes the flag over the env), else its rendered
               `LLAMA_ARG_MODEL`; a model from a URL / repo / directory / preset /
@@ -581,20 +582,20 @@ def _embed_model(spec: dict) -> tuple[str, str]:
 
 _SWAP_BUILTINS = {"PORT", "MODEL_ID"}
 _REF = re.compile(r"\$\{([^}]*)\}")
-# llama-swap (v236, the pinned image) splits a cmd with a POSIX-shell lexer: quotes group words and
-# are removed, a backslash escapes, and a newline in a substituted value breaks the config (tester
-# attempt 7). This module does not emulate that lexer: any character that makes the lexer do
-# more than split on whitespace is refused, so what is left splits exactly like str.split().
-_LEXER_CHARS = set("'\"\\") | {chr(c) for c in range(32)} | {chr(127)}
+# ALLOWLIST, NOT DENYLIST (tester attempts 1-8). Every value llama-swap substitutes into a command,
+# and every literal word of the role's command, must be made ONLY of these printable ASCII
+# characters - no `$` (llama-swap re-expands `${...}` inside substituted values, and compose's JSON
+# writes a literal `$` as `$$`), no quote, no backslash, no whitespace of any kind, no control
+# character, nothing outside ASCII. Then llama-swap's POSIX-shell lexer has nothing to do but split
+# on the ASCII spaces and newlines between words, which is exactly what this module does.
+SAFE_WORD = re.compile(r"^[A-Za-z0-9_./:,+=@-]+$")
 
 
-def _unsafe(text: str) -> str:
-    """The first character the lexer would treat specially (a quote, a backslash, a control
-    character), or ''."""
-    for ch in text:
-        if ch in _LEXER_CHARS:
-            return ch
-    return ""
+MAX_WORD = 4096   # a 200 000-character word made llama-swap fail to start (E2BIG, tester attempt 8)
+
+
+def _safe(text: str) -> bool:
+    return isinstance(text, str) and len(text) <= MAX_WORD and bool(SAFE_WORD.match(text))
 
 
 def swap_env_refs(config_text: str) -> set[str]:
@@ -612,7 +613,7 @@ def swap_env_refs(config_text: str) -> set[str]:
         body = _strip_comment(raw)
         seen.append(body)
         value = body.split(":", 1)[1].strip() if ":" in body else ""
-        if value in ("|", "|-", ">", ">-"):
+        if value in _BLOCK_STYLES:
             block, i = _block(lines, i + 1, _indent(raw), value)
             seen.append(block)
             continue
@@ -621,10 +622,9 @@ def swap_env_refs(config_text: str) -> set[str]:
 
 
 def check_swap_env(config_text: str, env: dict, who: str = "the llama-swap config") -> None:
-    """Every `${env.VAR}` ANYWHERE in the llama-swap config must be set, non-empty, free of
-    whitespace and of lexer characters: llama-swap substitutes them all when it loads the config,
-    and one bad value in ANY entry makes it refuse the whole config (tester attempt 7) - so a label
-    for the role's entry would then be a label for a plane that does not start."""
+    """Every `${env.VAR}` ANYWHERE in the llama-swap config must be set and match SAFE_WORD:
+    llama-swap substitutes them all when it loads the config, and one bad value in ANY entry makes
+    it refuse (or re-lex) the whole config (tester attempts 7-8)."""
     for var in sorted(swap_env_refs(config_text)):
         value = env.get(var)
         if value is not None and not isinstance(value, str):
@@ -632,9 +632,160 @@ def check_swap_env(config_text: str, env: dict, who: str = "the llama-swap confi
         if not value:
             raise LabelError(f"{who}: {var} is not set in {CHAT_SERVICE}'s rendered environment "
                              f"(llama-swap substitutes every `${{env.*}}` in the config)")
-        if any(ch.isspace() for ch in value) or _unsafe(value):
-            raise LabelError(f"{who}: {var}={value!r} contains whitespace, a quote, a backslash or a control "
-                             f"character - llama-swap's shell lexer would change the command it builds")
+        if not _safe(value):
+            raise LabelError(f"{who}: {var}={value!r} has a character outside the allowlist "
+                             f"[A-Za-z0-9_./:,+=@-] (as compose renders it; a literal `$` renders as `$$`) - "
+                             f"not interpreted here")
+
+
+# --- the recognised YAML subset of the llama-swap config -----------------------------------
+_BLOCK_STYLES = ("|", "|-", ">", ">-")
+_KEY = re.compile(r'^(?:[A-Za-z0-9_.:-]+|"[A-Za-z0-9_.:${}-]+")$')
+_PLAIN_VALUE = re.compile(r"^[A-Za-z0-9_./:,+=@ ${}-]*$")
+_TOP_KEYS_SCALAR = {"listen", "healthCheckTimeout", "includeAliasesInList", "globalTTL", "logToStdout",
+                    "logLevel", "startPort", "metricsMaxInMemory"}
+_ENTRY_KEYS = {"cmd", "filters", "concurrencyLimit"}
+
+
+def check_swap_config_subset(text: str) -> None:
+    """Refuse a llama-swap config that is not in the small YAML subset this module reads: a few
+    top-level plain scalars, a `macros:` map and a `models:` map; per entry only `cmd` (a single-line
+    plain scalar, or a `|`/`|-`/`>`/`>-` block with no other indicator), `filters` (nested plain
+    maps) and `concurrencyLimit`; plain keys (or a double-quoted key without escapes); no tab, no
+    anchor/tag/alias (`&`, `!`, `*`), no flow collection, no quotes in values, no backslash, no
+    multi-line plain scalar, no duplicate key; non-ASCII only in full-line comments. Any line not
+    recognised is a LabelError naming it."""
+    lines = text.splitlines()
+    stack: list[tuple[int, set, str]] = []   # (indent of the keys at this level, keys seen, parent path)
+    section = None
+    entry_depth_path = ""
+    last_value_indent = None                 # indent of the last `key: value` line (to spot continuations)
+    i = 0
+
+    def refuse(n, why):
+        raise LabelError(f"the llama-swap config, line {n}: {why} - not in the YAML subset this module reads")
+
+    while i < len(lines):
+        n, raw = i + 1, lines[i]
+        if "\t" in raw:
+            refuse(n, "a tab")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            i += 1
+            continue
+        if any(ord(c) > 126 or ord(c) < 32 for c in raw):
+            refuse(n, "a non-ASCII or control character outside a comment")
+        ind = _indent(raw)
+        if last_value_indent is not None and ind > last_value_indent:
+            refuse(n, "a continuation of a multi-line plain scalar")
+        last_value_indent = None
+        body = _strip_comment(raw).strip()
+        if body.startswith(("- ", "-", "? ")) and not body.startswith("--"):
+            refuse(n, "a sequence or complex-key entry")
+        key, sep, value = _split_key(body)
+        if not sep:
+            refuse(n, "not a `key: value` or `key:` line")
+        if not _KEY.match(key) or key.startswith(("&", "*", "!")):
+            refuse(n, f"the key {key!r}")
+        while stack and stack[-1][0] > ind:
+            stack.pop()
+        if stack and stack[-1][0] == ind:
+            keys = stack[-1][1]
+        else:
+            if stack and ind < stack[-1][0]:
+                refuse(n, "an indentation that matches no enclosing map")
+            keys = set()
+            stack.append((ind, keys, key))
+        if key in keys:
+            refuse(n, f"the duplicate key {key!r}")
+        keys.add(key)
+        depth = len(stack)
+        if depth == 1:
+            section = key
+            if key in ("macros", "models"):
+                if value:
+                    refuse(n, f"`{key}:` must be a block map")
+            elif key not in _TOP_KEYS_SCALAR or not _plain(value):
+                refuse(n, f"the top-level key {key!r} (only macros, models and plain scalars "
+                          f"{sorted(_TOP_KEYS_SCALAR)})")
+            else:
+                last_value_indent = ind
+            i += 1
+            continue
+        if section == "macros" and depth == 2:
+            if value in _BLOCK_STYLES:
+                i = _subset_block(lines, i + 1, ind, refuse)
+                continue
+            if not _plain(value):
+                refuse(n, f"the macro value {value!r}")
+            last_value_indent = ind
+            i += 1
+            continue
+        if section == "models" and depth == 2:
+            if value:
+                refuse(n, f"the model entry {key!r} must be a block map")
+            entry_depth_path = key
+            i += 1
+            continue
+        if section == "models" and depth == 3:
+            if key not in _ENTRY_KEYS:
+                refuse(n, f"the entry key {key!r} in {entry_depth_path!r} (only cmd, filters, concurrencyLimit)")
+            if key == "cmd":
+                if value in _BLOCK_STYLES:
+                    i = _subset_block(lines, i + 1, ind, refuse)
+                    continue
+                if not _plain(value):
+                    refuse(n, f"the cmd value {value!r}")
+            elif key == "concurrencyLimit":
+                if not re.fullmatch(r"[0-9]+", value):
+                    refuse(n, f"concurrencyLimit {value!r}")
+            elif value:
+                refuse(n, "`filters:` must be a block map")
+            last_value_indent = ind if value else None
+            i += 1
+            continue
+        if section == "models" and depth > 3:
+            # filters: nested plain maps with plain scalar leaves
+            if value and not _plain(value):
+                refuse(n, f"the filters value {value!r}")
+            last_value_indent = ind if value else None
+            i += 1
+            continue
+        refuse(n, f"the key {key!r} under {section!r}")
+
+
+def _split_key(body: str) -> tuple[str, str, str]:
+    """(key, ':', value) of `key: value` / `key:` / `"quoted key": value`; ('', '', '') otherwise."""
+    if body.startswith('"'):
+        end = body.find('"', 1)
+        if end < 0 or body[end + 1:end + 2] != ":":
+            return "", "", ""
+        rest = body[end + 2:]
+        if rest and not rest.startswith(" "):
+            return "", "", ""
+        return body[:end + 1], ":", rest.strip()
+    if ": " in body:
+        key, _, value = body.partition(": ")
+        return key.strip(), ":", value.strip()
+    if body.endswith(":") and body.count(":") == 1:
+        return body[:-1].strip(), ":", ""
+    return "", "", ""
+
+
+def _plain(value: str) -> bool:
+    """A single-line plain scalar this module reads: SAFE characters plus spaces and `${...}`, not
+    starting with a YAML indicator, no `: ` or ` #` inside (which would make it something else)."""
+    return (bool(value) and bool(_PLAIN_VALUE.match(value)) and value[0] not in "&*!|>{[%@`-?:,"
+            and ": " not in value and " #" not in value) or (value.startswith("--") and bool(_PLAIN_VALUE.match(value)))
+
+
+def _subset_block(lines: list[str], i: int, parent: int, refuse) -> int:
+    """The lines of a `|`/`>` block: each deeper than its key, printable ASCII only."""
+    while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > parent):
+        if "\t" in lines[i] or any(ord(c) > 126 or ord(c) < 32 for c in lines[i]):
+            refuse(i + 1, "a tab, control or non-ASCII character inside a block")
+        i += 1
+    return i
 
 
 def _expand_macros(macros: dict[str, str], who: str) -> dict[str, str]:
@@ -662,16 +813,17 @@ def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: 
     """(the path llama-server loads for this llama-swap entry, where it came from).
 
     llama-swap substitutes `${macro}` and `${env.VAR}` into the entry's cmd and splits the result
-    with a POSIX-shell lexer (quotes group and are removed, a backslash escapes). REFUSE, DON'T
-    EMULATE: every `${env.*}` in the WHOLE config must be set and free of whitespace, quotes,
-    backslashes and control characters (check_swap_env); every literal word of the expanded cmd
-    must be free of quotes, backslashes and control characters; a `--` word or a word starting
-    with `#` is refused; macros may reference only earlier macros; an entry with keys other than
-    cmd/filters/concurrencyLimit (a per-model `env:`, ...) or an unknown `${...}` is refused. What
-    is left splits exactly on whitespace, and gets the embed server's flag rules (`_`/`-`,
-    `=`-form and remote-model flags refused, the LAST `-m`/`--model` wins, none refused)."""
+    with a POSIX-shell lexer. REFUSE, DON'T EMULATE, BY ALLOWLIST: the config must be in the
+    recognised YAML subset (check_swap_config_subset); every `${env.*}` in the WHOLE config must be
+    set and match SAFE_WORD (check_swap_env); every literal word of the expanded cmd must match
+    SAFE_WORD once its `${env.*}` and built-in references are set aside; a word starting with `--`
+    alone (`--`) or `#` cannot match; macros may reference only earlier macros; an unknown `${...}`
+    is refused. Every character of the command is then a SAFE_WORD character, an ASCII space or a
+    newline, so splitting on those is what the lexer does too. The result gets the embed server's
+    flag rules (`_`/`-`, `=`-form and remote-model flags refused, the LAST `-m`/`--model` wins,
+    none refused)."""
     who = f"llama-swap entry {model_id!r}"
-    extra = sorted(entry.keys - {"cmd", "filters", "concurrencyLimit"})
+    extra = sorted(entry.keys - _ENTRY_KEYS)
     if extra:
         raise LabelError(f"{who} has {', '.join(extra)} - not interpreted here")
     if not entry.cmd:
@@ -688,17 +840,21 @@ def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: 
             return expanded_macros[name]
         raise LabelError(f"{who}: `${{{name}}}` is not a macro, an env reference or a llama-swap built-in")
 
-    # the cmd with its macros, BEFORE env values go in: every literal word is checked
     literal_cmd = _REF.sub(literal, entry.cmd)
-    for word in literal_cmd.split():
-        ch = _unsafe(word)
-        if ch:
-            raise LabelError(f"{who}: the word {word!r} in its cmd has {ch!r} - llama-swap's shell lexer would "
-                             f"treat it specially; not interpreted here")
-        if word == "--" or word.startswith("#"):
-            raise LabelError(f"{who}: its cmd has the word {word!r} (`--` or a `#` comment) - not interpreted here")
+    if set(literal_cmd) - set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:,+=@-${} \n"):
+        bad = sorted(set(literal_cmd) - set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                            "0123456789_./:,+=@-${} \n"))
+        raise LabelError(f"{who}: its cmd has {''.join(bad)!r} - outside the allowlist; not interpreted here")
+    for word in literal_cmd.replace("\n", " ").split(" "):
+        if not word:
+            continue
+        shown = re.sub(r"\$\{env\.[A-Za-z_][A-Za-z0-9_]*\}", "v", word)
+        shown = re.sub(r"\$\{(?:PORT|MODEL_ID)\}", "v", shown)
+        if not _safe(shown) or word == "--":
+            raise LabelError(f"{who}: the word {word!r} in its cmd is outside the allowlist [A-Za-z0-9_./:,+=@-] "
+                             f"(or is `--`) - not interpreted here")
     cmd = _REF.sub(lambda m: m.group(0) if m.group(1) in _SWAP_BUILTINS else env[m.group(1)[4:]], literal_cmd)
-    tokens = cmd.split()
+    tokens = [t for t in cmd.replace("\n", " ").split(" ") if t]
     _check_remote(tokens, env, who)
     flagged = _flag(tokens, _EMBED_MODEL_FLAGS)
     if flagged is None:
@@ -791,6 +947,9 @@ def _check_container_path(container_path: str, service: str) -> None:
     """`/models/<segments>` with every segment passing `_check_segments`. Nothing is normalised."""
     if not isinstance(container_path, str) or not container_path.startswith(MODELS_MOUNT + "/"):
         raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
+    if not _safe(container_path):
+        raise LabelError(f"{container_path!r} has a character outside the allowlist [A-Za-z0-9_./:,+=@-] (as "
+                         f"compose renders it; a literal `$` renders as `$$`) - not interpreted here")
     _check_segments(container_path[len(MODELS_MOUNT) + 1:], container_path)
 
 
@@ -920,6 +1079,7 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
     if not swap_path.is_file():
         raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
     swap_text = swap_path.read_text(encoding="utf-8")
+    check_swap_config_subset(swap_text)
     macros, swap_entries = parse_llama_swap_config(swap_text)
     swap_models = {model: entry.cmd for model, entry in swap_entries.items()}
     out = []

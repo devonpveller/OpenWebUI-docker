@@ -908,17 +908,31 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   override on either upstream; a `-config` that is missing, relative or in
   `=`-form; for llama-swap's entry, any key besides `cmd`/`filters`/
   `concurrencyLimit` (a per-model `env:`), and an unknown `${...}`. llama-swap
-  (v236, the pinned image) builds its command with a POSIX-shell LEXER - quotes
-  group words and are removed, a backslash escapes, a newline in any value breaks
-  the whole config - and that lexer is not emulated. So: every `${env.*}` in the
-  WHOLE llama-swap config (every entry and macro, YAML comments excepted) must be
-  set, non-empty and free of whitespace, quotes, backslashes and control
-  characters (`..._CTX_SIZE=4096 --model /models/B.gguf` would load B; an
-  apostrophe in a file name, or a newline in another entry's value, changes or
-  breaks what llama-swap runs); every literal word of the role's expanded cmd must
-  be free of quotes, backslashes and control characters; a `--` word and a word
-  starting with `#` are refused; a macro may reference only macros defined BEFORE
-  it. What is left splits exactly on whitespace. The llama.cpp
+  (v236, the pinned image) builds its command with a POSIX-shell LEXER (quotes
+  group and vanish, a backslash escapes, `${...}` inside a substituted value is
+  expanded AGAIN) and parses its config as YAML; neither is emulated. Instead,
+  ALLOWLISTS:
+  - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
+    comments excepted), as compose renders it, and every model path, must match
+    `[A-Za-z0-9_./:,+=@-]` - printable ASCII with no `$` (compose's JSON writes a
+    literal `$` as `$$`, and llama-swap would re-expand `${...}`), no quote, no
+    backslash, no whitespace of any kind, no control character, nothing outside
+    ASCII - and be at most 4096 characters;
+  - every literal word of the role's expanded cmd must match the same allowlist
+    once its `${env.*}` and built-in `${PORT}`/`${MODEL_ID}` references are set
+    aside (so no `--` word and no `#...` word either), and a macro may reference
+    only macros defined BEFORE it;
+  - the llama-swap config itself must be in a small recognised YAML SUBSET: a few
+    top-level plain scalars (`listen`, `logToStdout`, ...), a `macros:` map and a
+    `models:` map; per entry only `cmd` (a single-line plain scalar, or a
+    `|`/`|-`/`>`/`>-` block), `filters` (nested plain maps) and
+    `concurrencyLimit`; plain or double-quoted keys; no tab, anchor, tag, alias,
+    flow collection, quoted or escaped value, multi-line plain scalar, sequence,
+    block indicator (`>+`, `|2`, ...) or duplicate key; non-ASCII only in
+    full-line comments. Any other line is a refusal naming its line number.
+
+  Every character of the command is then an allowlisted character, an ASCII
+  space or a newline, so the lexer and this module split it the same way. The llama.cpp
   flag rules then apply to BOTH llama-server command lines - the embed upstream's
   rendered command and llama-swap's expanded cmd: long flags match with `_` as `-`
   (`--hf_repo` is `--hf-repo`); a model flag in `--flag=value` form is refused
