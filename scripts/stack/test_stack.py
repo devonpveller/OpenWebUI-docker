@@ -5922,7 +5922,9 @@ def _roles_root(root: Path, env_extra: str = "COMPOSE_PROFILES=local\n", key: st
     if key is not None:
         dot = root / ".env"
         dot.write_text((dot.read_text(encoding="utf-8") if dot.exists() else "")
-                       + f"OWUI_ADMIN_API_KEY={key}\n", encoding="utf-8")
+                       + f"OWUI_ADMIN_API_KEY={key}\n"
+                       # a DEAD endpoint: even a mutated seam cannot reach this host's Open WebUI
+                       + "OWUI_BASE_URL=http://127.0.0.1:1\n", encoding="utf-8")
     return root
 
 
@@ -5954,7 +5956,7 @@ def test_up_sets_the_role_names_then_a_second_up_changes_nothing(root, no_owui_e
     assert "# labels: local-large: created as 'Qwen3.8-27B Q4_K_M (thinking)'" in out
     assert "# labels: local-small: created as 'Qwen3.8-27B Q4_K_M (no thinking)'" in out
     assert "# labels: local-embed: created as 'bge-m3 f16 (embeddings)'" in out
-    assert "# labels: 5 row(s) changed, 0 already right, at http://127.0.0.1:3000" in out
+    assert "# labels: 5 row(s) changed, 0 already right, at http://127.0.0.1:1" in out
     assert owui.rows["qwen36-27b"]["name"] == "Qwen 3.6 27B", "an old-name row was touched"
     writes = len(owui.writes)
     code, out = _main(root, "up", daemon=OpsDaemon(RENDERS), owui=owui)
