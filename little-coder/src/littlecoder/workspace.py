@@ -297,10 +297,11 @@ class WorkspaceManager:
         executor empties — so the daemon also calls this before every task (`_ensure_git_credentials`).
 
         What it cleans of a clone made before 2026-09-28 (token in the URL): it ALWAYS resets
-        `origin` to the token-free URL. Submodule origins are reset only WITH a token (the submodule
-        step runs only then), and the `upstream` remote is never touched here. So a re-focus without
-        a token leaves legacy submodule/upstream tokens in place; the landing scrub (credscrub.py)
-        is what removes those.
+        `origin` to the token-free URL. Submodule origins are reset only when the submodule step
+        runs: WITH a token, and - under `if_missing` - only when origin had no stored entry (an
+        existing entry skips the whole step, token or not). The `upstream` remote is never touched
+        here. So a re-focus can leave legacy submodule/upstream tokens in place; the landing scrub
+        (credscrub.py) is what removes those.
 
         `if_missing`: store the token only when the store holds NO credential for origin's URL yet
         (and then the submodules' too). The daemon uses it for a focus it SEEDED from disk after its

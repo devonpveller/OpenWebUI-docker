@@ -18,7 +18,8 @@ from types import SimpleNamespace
 import pytest
 
 from littlecoder.daemon import LittleCoderDaemon, ProjectRequest
-from littlecoder.openterminal import ExecResult
+from littlecoder.config import Config
+from littlecoder.openterminal import ExecResult, OpenTerminalError
 from littlecoder.tasks import TaskContext, TaskState
 from littlecoder.urlnorm import normalize_repo_url
 
@@ -37,7 +38,7 @@ def _daemon(focus_token, current_focus=FOCUS, raises=False, from_project=True):
     def refresh(repo, token, *, if_missing=False):
         calls.append((repo, token, if_missing))
         if raises:
-            raise RuntimeError("open-terminal down")
+            raise OpenTerminalError("open-terminal down")
 
     d.workspace = SimpleNamespace(refresh_origin_auth=refresh)
     return d, calls
@@ -73,6 +74,14 @@ def test_no_token_or_no_focus_does_nothing(monkeypatch):
     d2, calls2 = _daemon("tok", current_focus=None)
     d2._ensure_git_credentials()
     assert calls == [] and calls2 == []
+
+
+def test_a_programming_error_in_the_restore_is_not_swallowed(monkeypatch):
+    """Only an executor outage is swallowed; a bug (e.g. a missing attribute) must surface."""
+    d, calls = _daemon("tok")
+    del d._focus_from_project
+    with pytest.raises(AttributeError):
+        d._ensure_git_credentials()
 
 
 def test_an_unreachable_executor_does_not_crash_the_task(monkeypatch):
@@ -182,6 +191,11 @@ def test_project_keeps_the_callers_token_for_later_tasks(tmp_path, monkeypatch, 
     asyncio.run(d.switch_project(ProjectRequest(repo=WIDGET, token="req-tok")))
     assert d.current_focus.canonical_url == WIDGET
     assert _run_one_task(d, ex) == {WIDGET: "req-tok"}
+    # MD5/MD7: after a /project the CALLER's token wins over whatever the store holds for origin
+    # (reachable e.g. when a fork's upstream URL equals its origin URL and stored its own token):
+    # a /project focus re-stores unconditionally, only a disk-seeded one is if_missing.
+    ex.store[WIDGET] = "other-tok"
+    assert _run_one_task(d, ex) == {WIDGET: "req-tok"}
 
 
 def test_run_task_restores_the_credential_after_an_executor_recreate(tmp_path, monkeypatch):
@@ -207,3 +221,49 @@ def test_a_seeded_focus_keeps_the_stored_app_token(tmp_path, monkeypatch):
     assert _run_one_task(d, ex) == {WIDGET: "app-tok"}
     ex.recreate()
     assert _run_one_task(d, ex) == {WIDGET: "env-tok"}
+
+
+# --- through the REAL constructor and _seed_focus (a little-coder restart) --------------------
+
+class _SeedOT:
+    """Answers _seed_focus's `git config --get remote.origin.url` with the clone on disk."""
+
+    def execute(self, command, cwd=None, env=None, timeout=None):
+        return ExecResult(command, 0, WIDGET + "\n", "", "done", "p")
+
+
+def _restarted_daemon(tmp_path, ex):
+    """LittleCoderDaemon built by its real __init__ (so every default is the production one), then
+    focus restored from disk by the real _seed_focus. Only the executor-facing collaborators are
+    swapped for fakes; the fake agent never runs a process."""
+    cfg = Config()
+    cfg.journals.dir = str(tmp_path / "journals")
+    cfg.workspace.path = str(tmp_path / "ws")
+    cfg.workspace.open_terminal_url = "http://127.0.0.1:1"
+    d = LittleCoderDaemon(cfg)
+    d.ot = _SeedOT()
+    d.workspace = FakeWorkspace(ex)
+    d._seed_focus()
+    assert d.current_focus is not None and d.current_focus.canonical_url == WIDGET
+
+    async def no_meta():
+        return None
+
+    d._maybe_trigger_meta = no_meta
+    return d
+
+
+def test_after_a_restart_the_callers_stored_token_survives_and_an_empty_store_is_filled(
+        tmp_path, monkeypatch):
+    """MD8/MD9: the constructor's `_focus_from_project = False` is what marks a disk-seeded focus.
+    A caller token already in the executor's store (e.g. agent-bridge's App token) must survive the
+    next task; after an executor recreate the env token fills the empty store."""
+    monkeypatch.setenv("LC_DEPLOY_TOKEN", "env-tok")
+    ex = FakeExecutor()
+    ex.store[WIDGET] = "app-tok"
+    d = _restarted_daemon(tmp_path, ex)
+    assert _run_one_task(d, ex) == {WIDGET: "app-tok"}
+    assert not d.tasks["t1"].detail.startswith("daemon error")
+    ex.recreate()
+    assert _run_one_task(d, ex) == {WIDGET: "env-tok"}
+    assert not d.tasks["t1"].detail.startswith("daemon error")

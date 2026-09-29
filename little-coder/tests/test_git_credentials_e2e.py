@@ -384,3 +384,34 @@ def test_if_missing_keeps_an_existing_credential_and_fills_an_empty_store(rig):
     r = _worker(ot, ws, "git push -q origin agent/m1:refs/heads/agent/m2")
     assert r.ok, r.stderr[-400:]
     assert _tokens_in_git_configs(ws) == []
+
+
+def test_if_missing_fill_also_restores_the_submodule_credential(rig):
+    """MW4: executor recreated AND the daemon restarted (seeded focus, if_missing=True). The fill
+    must restore the SUBMODULE's credential too, or the worker's submodule push has none."""
+    wm, ot, ws, home, server = rig
+    assert wm.clone(WIDGET, deploy_token=DUMMY).ok
+    for f in (home / ".lc-git-credentials", home / ".gitconfig"):   # executor recreated
+        f.unlink()
+    assert wm.refresh_origin_auth(WIDGET, DUMMY, if_missing=True).ok
+    r = _worker(ot, ws / "vendor" / "lib", "git checkout -q -b agent/mw4 && echo z > h && "
+                "git add h && git commit -q -m mw4 && git push -q origin agent/mw4")
+    assert r.ok, r.stderr[-400:]
+    assert server.has_branch("acme/lib", "agent/mw4")
+
+
+@pytest.mark.parametrize("other", [
+    "https://x-access-token:{tok}@github.com/acme/other",     # another repo on the same host
+    "https://x-access-token:{tok}@github.com",                # a host-only entry
+    "https://x-access-token:{tok}@gitlab.example/acme/widget",  # the same path on another host
+])
+def test_if_missing_treats_other_entries_as_missing(rig, other):
+    """MW6: `already present` means an entry for ORIGIN'S URL (host + path). Another repo's entry,
+    a host-only entry or another host's entry must not count, so the fill still happens."""
+    wm, ot, ws, home, server = rig
+    assert wm.clone(WIDGET, deploy_token=DUMMY).ok
+    (home / ".lc-git-credentials").write_text(other.format(tok=DUMMY2) + "\n")
+    assert wm.refresh_origin_auth(WIDGET, DUMMY, if_missing=True).ok
+    assert DUMMY in (home / ".lc-git-credentials").read_text()     # the fill happened
+    r = _worker(ot, ws, "git checkout -q -b agent/mw6 && git push -q origin agent/mw6")
+    assert r.ok, r.stderr[-400:]

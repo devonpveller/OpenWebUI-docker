@@ -29,7 +29,7 @@ from .journals import Journals, utc_now
 from .meta import should_trigger
 from .meta_wiring import build_meta_runner
 from .observer import report_dict
-from .openterminal import OpenTerminalClient
+from .openterminal import OpenTerminalClient, OpenTerminalError
 from .sanitize import Sanitizer, redact_secrets
 from .tasks import TaskContext, TaskState, TaskStatus
 from .ulid import new_ulid
@@ -257,7 +257,7 @@ class LittleCoderDaemon:
         try:
             self.workspace.refresh_origin_auth(
                 self.current_focus, token, if_missing=not self._focus_from_project)
-        except Exception:  # executor unreachable — the task will surface it
+        except (OpenTerminalError, OSError):  # executor unreachable — the task will surface it
             pass
 
     async def shutdown(self) -> None:
@@ -319,8 +319,10 @@ class LittleCoderDaemon:
         state.lang = detect_primary_language(self.cfg.workspace.path)
         timeout = self.cfg.tasks.abandoned_timeout_seconds.get(state.channel, 21600)
         self.journals.write(ctx.started())
-        await asyncio.to_thread(self._ensure_git_credentials)
         try:
+            # Inside the try: an executor outage is swallowed by _ensure itself, but a programming
+            # error there (a missing attribute) must surface as this task's daemon error, not vanish.
+            await asyncio.to_thread(self._ensure_git_credentials)
             result = await asyncio.to_thread(self.agent.run_task, ctx, timeout)
         except TaskTimeout:
             self.journals.write(ctx.abandoned("timeout"))
