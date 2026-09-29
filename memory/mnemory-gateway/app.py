@@ -28,6 +28,7 @@ holds the real mnemory key. The gateway injects the mnemory key +
 X-User-Id upstream.
 """
 import json
+import math
 import os
 
 import httpx
@@ -40,6 +41,18 @@ MNEMORY_KEY = os.environ["MNEMORY_KEY"]                       # real mnemory API
 GATEWAY_KEY = os.environ["GATEWAY_KEY"]                       # key cloud clients use
 BOUND_USER = os.environ["BOUND_USER_ID"]                      # mnemory user_id to bind
 SHARE_VALUE = os.environ.get("SHARE_LABEL_VALUE", "cloud")
+
+# REQUEST-SIZE CAP. A request body larger than GATEWAY_MAX_BODY_BYTES (default
+# 4 MiB = 4194304 bytes) is refused with HTTP 413 and a JSON-RPC error, and
+# nothing is forwarded. It is checked against a declared Content-Length before
+# the body is read, and again while it is read (a chunked body declares none),
+# so the gateway never buffers more than the cap. 4 MiB is far above any real
+# MCP call (mnemory's own MAX_INPUT_LENGTH is 400000 characters, which JSON
+# escaping can at most sextuple to ~2.4 MB). A value that is not a positive
+# integer stops the gateway at start rather than running uncapped.
+MAX_BODY_BYTES = int(os.environ.get("GATEWAY_MAX_BODY_BYTES", "4194304"))
+if MAX_BODY_BYTES <= 0:
+    raise ValueError("GATEWAY_MAX_BODY_BYTES must be a positive integer")
 
 # Tools a cloud client may call. Reads get a forced share filter; writes
 # get forced origin/share stamping.
@@ -238,15 +251,37 @@ def _apply_policy(msg: dict):
     return msg, None
 
 
-def _filter_tools_list(payload: dict) -> dict:
-    try:
-        tools = payload["result"]["tools"]
-    except (KeyError, TypeError):
-        return payload
-    payload["result"]["tools"] = [
-        t for t in tools if t.get("name") in ALLOWED_TOOLS
-        or t.get("name") == "initialize_memory"]
+class _Unfilterable(ValueError):
+    """An upstream tools/list reply the gateway cannot filter."""
+
+
+def _filter_tools_list(payload):
+    """Filter a tools/list reply to the allow-list. FAIL CLOSED: raises
+    _Unfilterable for any reply whose tool list cannot be read, and the caller
+    then advertises NOTHING (see _closed_tools_list) instead of passing the
+    upstream's reply through unfiltered. A JSON-RPC error, or a message that
+    is not a response at all (a notification or request the server interleaves
+    on an SSE stream), carries no tool list and is returned as it is."""
+    if not isinstance(payload, dict):
+        raise _Unfilterable("not a JSON object")
+    if "result" not in payload:
+        if "error" in payload or "method" in payload:
+            return payload
+        raise _Unfilterable("neither a result nor an error")
+    result = payload["result"]
+    if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
+        raise _Unfilterable("result.tools is not a list")
+    result["tools"] = [
+        t for t in result["tools"] if isinstance(t, dict) and (
+            t.get("name") in ALLOWED_TOOLS
+            or t.get("name") == "initialize_memory")]
     return payload
+
+
+def _closed_tools_list(rpc_id):
+    """What the client gets when the upstream's tools/list reply cannot be
+    filtered: an EMPTY tool list, never the unfiltered reply."""
+    return _rpc_result(rpc_id, {"tools": []})
 
 
 class _BodyRefused(ValueError):
@@ -257,14 +292,26 @@ def _no_constant(name):
     raise _BodyRefused(f"non-standard JSON constant {name}")
 
 
+def _finite_float(s: str) -> float:
+    """A JSON number too large for a double (1e400, -1e999) parses to +/-inf,
+    which json.dumps would re-emit as the non-JSON token Infinity. Refuse it:
+    the gateway only forwards what it can re-serialise as valid JSON."""
+    v = float(s)
+    if not math.isfinite(v):
+        raise _BodyRefused(f"number out of range ({s[:32]})")
+    return v
+
+
 def _strict_json(txt: str):
     """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
-    bounded nesting); raises _BodyRefused. Used for the request body and for
-    string-encoded policed arguments alike."""
+    no number that overflows to infinity, bounded nesting); raises
+    _BodyRefused. Used for the request body and for string-encoded
+    policed arguments alike."""
     if txt.startswith("\ufeff"):
         raise _BodyRefused("byte-order mark")
     try:
-        return json.loads(txt, parse_constant=_no_constant)
+        return json.loads(txt, parse_constant=_no_constant,
+                          parse_float=_finite_float)
     except _BodyRefused:
         raise
     except (ValueError, RecursionError) as e:
@@ -353,6 +400,26 @@ def _upstream_headers(req):
     return h
 
 
+class _TooLarge(Exception):
+    """The request body exceeds MAX_BODY_BYTES."""
+
+
+async def _read_capped(request) -> bytes:
+    """Read the request body, never buffering more than MAX_BODY_BYTES.
+    Raises _TooLarge on a declared Content-Length over the cap (before
+    reading anything) or once the bytes actually read pass it."""
+    declared = request.headers.get("content-length")
+    if (declared is not None and declared.strip().isdigit()
+            and int(declared) > MAX_BODY_BYTES):
+        raise _TooLarge()
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY_BYTES:
+            raise _TooLarge()
+    return bytes(buf)
+
+
 async def health(_request):
     return PlainTextResponse("ok")
 
@@ -364,12 +431,20 @@ async def mcp(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     method = request.method
-    body = await request.body()
+    try:
+        body = await _read_capped(request)
+    except _TooLarge:
+        return JSONResponse(
+            _rpc_error(None, -32600,
+                       f"Request refused by the gateway: body larger than "
+                       f"{MAX_BODY_BYTES} bytes."),
+            status_code=413)
     up_headers = _upstream_headers(request)
 
     short_circuit = None
     out_body = None  # only bytes re-serialised below ever go upstream
     is_tools_list = False
+    list_id = None
 
     if body and method != "POST":
         return _refuse(f"{method} with a body")
@@ -396,6 +471,7 @@ async def mcp(request):
         elif isinstance(msg, dict):
             if msg.get("method") == "tools/list":
                 is_tools_list = True
+                list_id = msg.get("id")
             mm, sc = _apply_policy(msg)
             if sc is not None:
                 short_circuit = sc
@@ -415,28 +491,35 @@ async def mcp(request):
             params=dict(request.query_params))
 
         ct = upstream.headers.get("content-type", "")
-        # tools/list: filter advertised tools to the cloud allow-list.
-        if is_tools_list and "application/json" in ct:
-            try:
-                payload = _filter_tools_list(json.loads(upstream.content))
-                return JSONResponse(payload, status_code=upstream.status_code)
-            except Exception:
-                pass
+        # tools/list: filter advertised tools to the cloud allow-list, FAIL
+        # CLOSED - a reply that cannot be filtered is replaced, never passed
+        # through (it would advertise every upstream tool).
         if is_tools_list and "text/event-stream" in ct:
-            txt = upstream.text
             out_lines = []
-            for line in txt.splitlines():
+            for line in upstream.text.splitlines():
                 if line.startswith("data:"):
                     try:
-                        p = _filter_tools_list(json.loads(line[5:].strip()))
-                        out_lines.append("data: " + json.dumps(p))
-                        continue
-                    except Exception:
-                        pass
+                        p = _filter_tools_list(_strict_json(line[5:].strip()))
+                    except ValueError:  # _Unfilterable, _BodyRefused
+                        p = _closed_tools_list(list_id)
+                    out_lines.append("data: " + json.dumps(p))
+                    continue
                 out_lines.append(line)
             return Response("\n".join(out_lines) + "\n",
                             status_code=upstream.status_code,
                             media_type="text/event-stream")
+        if is_tools_list:
+            try:
+                payload = _filter_tools_list(_strict_json(upstream.text))
+            except ValueError:  # _Unfilterable, _BodyRefused
+                if 200 <= upstream.status_code < 300:
+                    return JSONResponse(_closed_tools_list(list_id))
+                return JSONResponse(
+                    _rpc_error(list_id, -32603,
+                               "upstream tools/list reply could not be filtered; "
+                               "nothing is advertised"),
+                    status_code=502)
+            return JSONResponse(payload, status_code=upstream.status_code)
 
         passthru = {k: v for k, v in upstream.headers.items()
                     if k.lower() not in ("content-length", "content-encoding",
