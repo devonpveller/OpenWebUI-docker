@@ -308,6 +308,10 @@ def scenario(out_path: str) -> None:
     r1 = (roots_for(read_map(tmap), S1) or [""])[0]
     res["r1"] = r1
     res["map_after_s1"] = read_map(tmap)
+    # 1b. S1's NEXT turn end: must post under R1 and leave the map alone
+    run_stop_hook(bash, notifier, S1, henv)
+    res["map_after_s1_again"] = read_map(tmap)
+    res["s1_second_ping_roots"] = [p["root_id"] for p in stub.snapshot() if p["user_id"] == ME]
 
     # 2. the operator replies in R1
     mark = stub.add(OP, "are you done with the gateway change?", r1)["create_at"]
@@ -332,6 +336,11 @@ def scenario(out_path: str) -> None:
     r3 = (roots_for(read_map(tmap), S3) or [""])[0]
     res["r3"] = r3
     res["map_after_s3"] = read_map(tmap)
+    # 4b. S3's next turn end: under R3, and the full id is not appended a second time
+    run_stop_hook(bash, notifier, S3, henv)
+    res["map_after_s3_again"] = read_map(tmap)
+    res["s3_pings"] = [p["root_id"] for p in stub.snapshot()
+                       if p["user_id"] == ME and (p["id"] == r3 or p["root_id"] == r3)]
     n_before = len(calls())
     mark = stub.add(OP, "status?", r3)["create_at"]
     b.poll_once(me)
@@ -406,6 +415,17 @@ class InteractiveThreadReplyTests(unittest.TestCase):
         self.assertIn([S1[:8], r["r1"], S1], r["map_after_s1"],
                       "the map must carry the FULL session id: " + repr(r["map_after_s1"]))
 
+    def test_06_later_pings_stay_in_the_thread_with_a_three_field_map(self):
+        r = scenario_result()
+        self.assertEqual(r["s1_second_ping_roots"], ["", r["r1"]],
+                         "S1's second ping must reply under R1 (the three-field line must still "
+                         "be read as <key> <root>): " + repr(r["s1_second_ping_roots"]))
+        self.assertEqual(r["map_after_s1_again"], r["map_after_s1"],
+                         "a ping under a root whose line already has the full id must not append")
+        self.assertEqual(r["s3_pings"], ["", r["r3"], r["r3"]], repr(r["s3_pings"]))
+        self.assertEqual(r["map_after_s3_again"], r["map_after_s3"],
+                         "S3's full id must be appended once, not on every ping")
+
     def test_01_reply_in_interactive_thread_starts_no_session(self):
         r = scenario_result()
         self.assertEqual(r["calls_after_reply"], [],
@@ -476,6 +496,27 @@ class BackgroundTaskWarningTests(unittest.TestCase):
         self.assertIn("DOES NOT SURVIVE YOUR TURN", sp)
         self.assertRegex(sp, r"run \d+ seconds", "the turn limit must be stated as a number")
         self.assertNotIn(" may be unreliable", sp)
+
+
+class NotifierManualCallTests(unittest.TestCase):
+    """The stand-down is for HOOK runs only: a plain `notify-mattermost.sh "msg"` (the watchdog's
+    shape, stdin closed) made from inside a bridge turn must still post."""
+
+    def test_30_manual_call_inside_a_bridge_turn_still_posts(self):
+        bash = find_git_bash()
+        tmp = tempfile.mkdtemp(prefix="cf-bridge-manual-")
+        stub = StubMM()
+        try:
+            script = make_notifier_copy(os.path.join(tmp, "repo"))
+            env = hook_env(stub.url)
+            env["CLAUDE_BRIDGE_THREAD"] = "somebridgethreadroot000000"
+            subprocess.run([bash, script, "watchdog: openwebui restarted"],
+                           stdin=subprocess.DEVNULL, env=env, capture_output=True, timeout=60)
+            msgs = [p["message"] for p in stub.snapshot()]
+            self.assertEqual(msgs, ["watchdog: openwebui restarted"], repr(msgs))
+        finally:
+            stub.srv.shutdown()
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class MapParserTests(unittest.TestCase):
