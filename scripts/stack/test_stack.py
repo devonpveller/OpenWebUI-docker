@@ -5852,7 +5852,7 @@ def test_an_unreadable_container_list_with_local_off_says_it_cannot_tell(root, m
 # --------------------------------------------------------------------------
 
 import model_labels  # noqa: E402
-from test_model_labels import ADMIN_KEY, FakeOwui  # noqa: E402
+from test_model_labels import ADMIN_KEY, FakeOwui, swap_env  # noqa: E402
 
 
 class _Resp:
@@ -5933,7 +5933,7 @@ def _roles_root(root: Path, env_extra: str = "COMPOSE_PROFILES=local\n", key: st
                                                          "/app/conf.d")]
     render["services"]["llama-cpp-upstream"].update(
         command=["-config", "/app/config.yaml"],
-        environment={"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": model_path},
+        environment=swap_env(model_path),
         volumes=[bind(store, "/models"), bind(root / model_labels.LLAMA_SWAP_REL, "/app/config.yaml")])
     render["services"]["llama-cpp-embed-upstream"].update(
         environment={"LLAMA_ARG_MODEL": "/models/bge-m3-f16.gguf"}, volumes=[bind(embed, "/models")])

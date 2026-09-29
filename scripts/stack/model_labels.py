@@ -18,11 +18,12 @@ defaults are read by compose itself and never re-implemented here:
   roles       llm-gateway's /app/conf.d bind -> local.yaml: every `model_name`
               starting `local-`, with its `litellm_params.model`
   chat model  the llama-swap config llama-cpp-upstream reads (its rendered command's
-              `-config`, default /app/config.yaml, through that path's bind):
-              the `--model` of the entry whose id is the concrete id (`:nothink`
-              is llama-swap's thinking switch, not an entry), usually
-              `${env.LLAMA_SWAP_..._MODEL_PATH}` -> that variable in the service's
-              RENDERED environment
+              `-config` - required, absolute - through that path's bind): the entry
+              whose id is the concrete id (`:nothink` is llama-swap's thinking
+              switch, not an entry); its cmd is expanded (macros, `${env.*}` from the
+              service's RENDERED environment - any value empty or with whitespace is
+              refused, since llama-swap splits the cmd on it) and read with the
+              llama.cpp flag rules below; its last `-m`/`--model` is the path
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
               (llama.cpp takes the flag over the env), else its rendered
               `LLAMA_ARG_MODEL`; a model from a URL / repo / directory / preset /
@@ -215,31 +216,73 @@ def parse_model_list(text: str) -> list[tuple[str, str]]:
     return [(name, model) for name, model in entries if name]
 
 
-def parse_llama_swap_models(text: str) -> dict[str, str]:
-    """{llama-swap model id: the raw `--model` argument of its cmd} for every entry."""
-    models: dict[str, str] = {}
-    in_models = False
-    current = None
-    for raw in text.splitlines():
+class SwapEntry(NamedTuple):
+    cmd: str            # the entry's `cmd` block, as written
+    keys: frozenset     # the entry's keys (cmd, filters, env, ...)
+
+
+def _block(lines: list[str], i: int, parent: int, style: str) -> tuple[str, int]:
+    """A YAML block scalar (`|` keeps newlines, `>`/`>-` folds them) starting after line i-1."""
+    body = []
+    while i < len(lines) and (not lines[i].strip() or _indent(lines[i]) > parent):
+        body.append(lines[i].strip())
+        i += 1
+    while body and not body[-1]:
+        body.pop()
+    return ("\n" if style.startswith("|") else " ").join(body), i
+
+
+def parse_llama_swap_config(text: str) -> tuple[dict[str, str], dict[str, SwapEntry]]:
+    """(macros, models) of a llama-swap config: each macro's text and each model entry's whole
+    `cmd` block. Only the block-style shapes this stack's config uses are read; the caller refuses
+    what it does not interpret."""
+    lines = text.splitlines()
+    macros: dict[str, str] = {}
+    models: dict[str, SwapEntry] = {}
+    section, current, keys, cmd = None, None, set(), ""
+    i = 0
+
+    def close():
+        if current is not None:
+            models[current] = SwapEntry(cmd, frozenset(keys))
+
+    while i < len(lines):
+        raw = lines[i]
         if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
             continue
-        ind = _indent(raw)
-        body = raw.strip()
+        ind, body = _indent(raw), raw.strip()
         if ind == 0:
-            in_models = body.rstrip() == "models:"
-            current = None
+            close()
+            current, keys, cmd = None, set(), ""
+            section = body.rstrip(":").strip() if body.endswith(":") else body.split(":", 1)[0]
+            i += 1
             continue
-        if not in_models:
-            continue
-        if ind == 2 and body.endswith(":") and not body.startswith("-"):
-            current = _scalar(body[:-1])
-            continue
-        if current is None:
-            continue
-        match = re.search(r"(?:^|\s)--model\s+(\S+)", body)
-        if match and current not in models:
-            models[current] = match.group(1)
-    return models
+        key, _, value = _strip_comment(body).partition(":")
+        key, value = _scalar(key), value.strip()
+        if section == "macros" and ind == 2:
+            if value in ("|", "|-", ">", ">-"):
+                macros[key], i = _block(lines, i + 1, ind, value)
+                continue
+            macros[key] = _scalar(value)
+        elif section == "models" and ind == 2 and not value:
+            close()
+            current, keys, cmd = key, set(), ""
+        elif section == "models" and current is not None and ind == 4:
+            keys.add(key)
+            if key == "cmd":
+                if value in ("|", "|-", ">", ">-"):
+                    cmd, i = _block(lines, i + 1, ind, value)
+                    continue
+                cmd = _scalar(value)
+        i += 1
+    close()
+    return macros, models
+
+
+def parse_llama_swap_models(text: str) -> dict[str, str]:
+    """{llama-swap model id: its `cmd` block} - kept for the id set the probe and tests read."""
+    return {model: entry.cmd for model, entry in parse_llama_swap_config(text)[1].items()}
 
 
 # --------------------------------------------------------------------------
@@ -274,13 +317,74 @@ def render_command(root: Path, env_file: Path | None = None, profiles=("local",)
     return cmd + ["config", "--format", "json"]
 
 
-def run_bounded(cmd, cwd, timeout: int, env=None) -> tuple[int, bytes, bytes]:
-    """Run `cmd` capturing bytes, and on timeout kill its WHOLE process tree.
+class _WindowsJob:
+    """A Windows job object with KILL_ON_JOB_CLOSE: every process the child starts is in it, so
+    terminating (or closing) the job ends the WHOLE tree - including a grandchild whose parent has
+    already exited, which `taskkill /T` cannot find (tester attempt 6). Standard library (ctypes)."""
+
+    def __init__(self, pid: int):
+        import ctypes
+        from ctypes import wintypes
+        self.k = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.k.CreateJobObjectW.restype = wintypes.HANDLE
+        self.k.OpenProcess.restype = wintypes.HANDLE
+        self.job = self.k.CreateJobObjectW(None, None)
+        if not self.job:
+            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+
+        class Basic(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                        ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class Io(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_uint64) for n in ("r", "w", "o", "rb", "wb", "ob")]
+
+        class Extended(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", Basic), ("IoInfo", Io),
+                        ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        info = Extended()
+        info.BasicLimitInformation.LimitFlags = 0x2000   # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not self.k.SetInformationJobObject(self.job, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            self.close()
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+        handle = self.k.OpenProcess(0x0001 | 0x0100, False, pid)   # PROCESS_TERMINATE | SET_QUOTA
+        if not handle:
+            self.close()
+            raise OSError(ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            if not self.k.AssignProcessToJobObject(self.job, handle):
+                raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+        except OSError:
+            self.close()
+            raise
+        finally:
+            self.k.CloseHandle(handle)
+
+    def kill(self):
+        if self.job:
+            self.k.TerminateJobObject(self.job, 1)
+
+    def close(self):
+        if self.job:
+            self.k.CloseHandle(self.job)   # KILL_ON_JOB_CLOSE: anything still in the job dies
+            self.job = None
+
+
+def run_bounded(cmd, cwd, timeout: int, env=None, grace: int = 5) -> tuple[int, bytes, bytes]:
+    """Run `cmd` capturing bytes, and on timeout kill its WHOLE process tree, then wait at most
+    `grace` seconds more - so the call returns within about `timeout + grace`, whatever the tree does.
 
     On Windows `docker.exe` starts `docker-compose.exe` as a child that holds the output pipe, so
-    killing only `docker.exe` does not return (tester attempt 5: a 4 s timeout returned after 18 s).
-    The child gets its own process group (CREATE_NEW_PROCESS_GROUP) and `taskkill /T /F` ends the
-    tree; elsewhere it gets its own session and the group is killed. (124, ...) on timeout."""
+    killing only `docker.exe` does not return (tester attempt 5). The child is put in a job object
+    (KILL_ON_JOB_CLOSE) as soon as it starts; on timeout the job is terminated, which ends every
+    process in it, orphans included. If the job cannot be set up, `taskkill /T /F` is the fallback -
+    which cannot reach an orphaned grandchild (recorded in the findings). Elsewhere the child gets its
+    own session and the whole group is killed. stdin is never inherited (DEVNULL). (124, ...) on timeout."""
     import signal
     import subprocess
     kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
@@ -289,23 +393,39 @@ def run_bounded(cmd, cwd, timeout: int, env=None) -> tuple[int, bytes, bytes]:
                                 stdin=subprocess.DEVNULL, env=env, **kwargs)
     except OSError as exc:
         return 127, b"", f"{type(exc).__name__}: {exc}".encode()
-    try:
-        out, err = proc.communicate(timeout=timeout)
-        return proc.returncode, out, err
-    except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=30)
-        else:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
+    job = None
+    if os.name == "nt":
         try:
-            proc.communicate(timeout=10)
+            job = _WindowsJob(proc.pid)
+        except OSError:
+            job = None
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            return proc.returncode, out, err
         except subprocess.TimeoutExpired:
-            pass
-        return 124, b"", f"timed out after {timeout} s (the process tree was killed)".encode()
+            _kill_tree(proc, job, signal, subprocess)
+            try:
+                proc.communicate(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+            return 124, b"", f"timed out after {timeout} s (the process tree was killed)".encode()
+    finally:
+        if job is not None:
+            job.close()
+
+
+def _kill_tree(proc, job, signal, subprocess) -> None:
+    if job is not None:
+        job.kill()
+    elif os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
 
 
 def render_inference(root: Path, env_file: Path | None = None, run=None) -> dict:
@@ -427,21 +547,85 @@ _EMBED_REMOTE_ENV = ("LLAMA_ARG_MODEL_URL", "LLAMA_ARG_DOCKER_REPO", "LLAMA_ARG_
                      "LLAMA_ARG_MODELS_DIR", "LLAMA_ARG_MODELS_PRESET")
 
 
+def _check_remote(command: list[str], env: dict, who: str) -> None:
+    """Refuse a llama-server told to load a model from anywhere but a /models file (see the list)."""
+    remote = [a for a in command if _flag_name(a) in _EMBED_REMOTE_FLAGS
+              or (_flag_name(a).startswith("--") and _flag_name(a).endswith("-default"))]
+    remote += [k for k in _EMBED_REMOTE_ENV if env.get(k)]
+    if remote:
+        raise LabelError(f"{who} loads its model from {', '.join(remote)} in the render - not a "
+                         f"{MODELS_MOUNT} file this module can label")
+
+
 def _embed_model(spec: dict) -> tuple[str, str]:
     """(the path llama-cpp-embed-upstream loads, where that came from): its rendered command's
     `-m`/`--model` if present (llama.cpp takes the flag over the env), else LLAMA_ARG_MODEL."""
     command = _command(spec, EMBED_SERVICE)
-    remote = [a for a in command if _flag_name(a) in _EMBED_REMOTE_FLAGS
-              or (_flag_name(a).startswith("--") and _flag_name(a).endswith("-default"))]
-    env = _env_map(spec, EMBED_SERVICE)
-    remote += [k for k in _EMBED_REMOTE_ENV if env.get(k)]
-    if remote:
-        raise LabelError(f"{EMBED_SERVICE} loads its model from {', '.join(remote)} in the render - not a "
-                         f"{MODELS_MOUNT} file this module can label")
+    _check_remote(command, _env_map(spec, EMBED_SERVICE), EMBED_SERVICE)
     flagged = _flag(command, _EMBED_MODEL_FLAGS)
     if flagged is not None:
         return flagged, f"`--model` in {EMBED_SERVICE}'s rendered command"
     return _environment(spec, EMBED_SERVICE, EMBED_VAR), f"{EMBED_VAR} as compose renders {EMBED_SERVICE}"
+
+
+_SWAP_BUILTINS = {"PORT", "MODEL_ID"}
+_REF = re.compile(r"\$\{([^}]*)\}")
+
+
+def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: str) -> tuple[str, str]:
+    """(the path llama-server loads for this llama-swap entry, where it came from).
+
+    llama-swap substitutes `${macro}` and `${env.VAR}` into the entry's cmd and SPLITS it on
+    whitespace (measured in the pinned llama-swap image, tester attempt 6), so an env value with a
+    space in it becomes extra ARGUMENTS: `..._CTX_SIZE=4096 --model /models/B.gguf` loads B. REFUSE,
+    DON'T EMULATE: any substituted value that is empty or contains whitespace is refused, an entry
+    with keys other than cmd/filters (a per-model `env:`, ...) or an unknown `${...}` is refused;
+    then the final cmd gets the embed server's flag rules (`_`/`-`, `=`-form and remote-model
+    flags refused, `-m`/`--model` last wins, no model flag refused)."""
+    who = f"llama-swap entry {model_id!r}"
+    extra = sorted(entry.keys - {"cmd", "filters", "concurrencyLimit"})
+    if extra:
+        raise LabelError(f"{who} has {', '.join(extra)} - not interpreted here")
+    if not entry.cmd or any(line.startswith("#") for line in entry.cmd.splitlines()):
+        raise LabelError(f"{who} has no cmd, or a `#` line inside it - not interpreted here")
+    env = _env_map(spec, CHAT_SERVICE)
+    used: list[str] = []
+
+    def sub(match):
+        name = match.group(1)
+        if name in _SWAP_BUILTINS:
+            return match.group(0)
+        if name.startswith("env."):
+            var = name[4:]
+            value = env.get(var)
+            if value is not None and not isinstance(value, str):
+                raise LabelError(f"{who}: {var} in {CHAT_SERVICE}'s rendered environment is not a string")
+            if not value:
+                raise LabelError(f"{who}: {var} is not set in {CHAT_SERVICE}'s rendered environment")
+            if any(ch.isspace() for ch in value):
+                raise LabelError(f"{who}: {var}={value!r} contains whitespace - llama-swap splits the cmd on "
+                                 f"it, so the value would become extra arguments")
+            used.append(var)
+            return value
+        if name in macros:
+            return macros[name]
+        raise LabelError(f"{who}: `${{{name}}}` is not a macro, an env reference or a llama-swap built-in")
+
+    cmd = entry.cmd
+    for _ in range(10):
+        new = _REF.sub(sub, cmd)
+        if new == cmd:
+            break
+        cmd = new
+    tokens = cmd.split()
+    _check_remote(tokens, env, who)
+    flagged = _flag(tokens, _EMBED_MODEL_FLAGS)
+    if flagged is None:
+        raise LabelError(f"{who}'s cmd has no `--model`/`-m` - not interpreted here")
+    ref = re.search(r"(?:^|\s)(?:-m|--model)\s+\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}", entry.cmd)
+    source = (f"{ref.group(1)} as compose renders {CHAT_SERVICE}, through llama-swap entry {model_id!r}"
+              if ref and env.get(ref.group(1)) == flagged else f"the cmd of llama-swap entry {model_id!r}")
+    return flagged, source
 
 
 def _swap_config_target(spec: dict) -> str:
@@ -654,7 +838,8 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
     swap_path = _bind_source(chat, CHAT_SERVICE, swap_target)
     if not swap_path.is_file():
         raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
-    swap_models = parse_llama_swap_models(swap_path.read_text(encoding="utf-8"))
+    macros, swap_entries = parse_llama_swap_config(swap_path.read_text(encoding="utf-8"))
+    swap_models = {model: entry.cmd for model, entry in swap_entries.items()}
     out = []
     for role in role_list:
         embed = _served_by_embed(role.concrete, swap_models)
@@ -667,13 +852,8 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
             container, source = _embed_model(spec)
         else:
             service, spec = CHAT_SERVICE, chat
-            raw = swap_models[role.concrete.split(":", 1)[0]]
-            match = re.fullmatch(r"\$\{env\.([A-Za-z_][A-Za-z0-9_]*)\}", raw)
-            if match:
-                container = _environment(spec, service, match.group(1))
-                source = f"{match.group(1)} as compose renders {service}"
-            else:
-                container, source = raw, "a literal path in the llama-swap config"
+            model_id = role.concrete.split(":", 1)[0]
+            container, source = _swap_model(swap_entries[model_id], macros, spec, model_id)
         _check_container_path(container, service)
         host = ""
         if check_files:

@@ -74,6 +74,15 @@ def world(tmp_path: Path) -> World:
     return World(root, store, embed)
 
 
+def swap_env(model_path) -> dict:
+    """Every `${env.LLAMA_SWAP_QWEN36_27B_*}` the real llama-swap config substitutes, as compose
+    renders them (whitespace-free), with the model path given."""
+    text = (REPO_ROOT / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8")
+    env = {v: "1" for v in re.findall(r"\$\{env\.(LLAMA_SWAP_QWEN36_27B_[A-Z_]+)\}", text)}
+    env["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"] = model_path
+    return env
+
+
 def make_render(w: World, chat=QWEN38, embed_model="/models/bge-m3-f16.gguf", drop=()) -> dict:
     def bind(src, dst):
         return {"type": "bind", "source": str(src), "target": dst, "read_only": True, "bind": {}}
@@ -81,7 +90,7 @@ def make_render(w: World, chat=QWEN38, embed_model="/models/bge-m3-f16.gguf", dr
         "llm-gateway": {"environment": {"COMPOSE_PROFILES": "local"},
                         "volumes": [bind(w.root / "inference/config/litellm/model_list", "/app/conf.d")]},
         "llama-cpp-upstream": {"command": ["-config", "/app/config.yaml"],
-                               "environment": {"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": chat},
+                               "environment": swap_env(chat),
                                "volumes": [bind(w.store, "/models"),
                                            bind(w.root / ml.LLAMA_SWAP_REL, "/app/config.yaml")]},
         "llama-cpp-embed-upstream": {"environment": {"LLAMA_ARG_MODEL": embed_model},
@@ -193,7 +202,8 @@ def test_labels_come_from_the_file_compose_renders(world):
         "local-small:nothink": "Qwen3.8-27B Q4_K_M (no thinking)",
         "local-embed": "bge-m3 f16 (embeddings)",
     }
-    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH as compose renders llama-cpp-upstream"
+    assert labels["local-large"].source == ("LLAMA_SWAP_QWEN36_27B_MODEL_PATH as compose renders "
+                                            "llama-cpp-upstream, through llama-swap entry 'qwen36-27b'")
     assert labels["local-large"].host_path.endswith("Qwen3.8-27B-Q4_K_M.gguf")
     assert labels["local-embed"].source == "LLAMA_ARG_MODEL as compose renders llama-cpp-embed-upstream"
 
@@ -832,7 +842,7 @@ def test_a_mount_at_the_target_that_is_not_a_bind_does_not_count(world):
 
 def test_the_list_form_of_a_rendered_environment_is_read(world):
     render = make_render(world)
-    render["services"]["llama-cpp-upstream"]["environment"] = [f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={QWEN38}"]
+    render["services"]["llama-cpp-upstream"]["environment"] = [f"{k}={v}" for k, v in swap_env(QWEN38).items()]
     assert by_role(ml.derive_labels(render))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
 
 
@@ -918,7 +928,8 @@ def test_a_path_the_host_and_the_container_could_read_differently_is_refused(wor
     for rel in ("A-7B-Q8_0.gguf", "B-13B-Q4_K_M.gguf", "sub/X-7B-Q8_0.gguf"):
         (world.store / rel).parent.mkdir(parents=True, exist_ok=True)
         (world.store / rel).write_bytes(b"GGUF")
-    with pytest.raises(ml.LabelError, match=re.escape(why) if "`" not in why else why.replace("`", "`")):
+    # through llama-swap's cmd a whitespace refusal comes first (llama-swap splits on it)
+    with pytest.raises(ml.LabelError, match=re.escape(why) + "|contains whitespace"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
     embed_path = path.replace("/models/", "/models/", 1)
     with pytest.raises(ml.LabelError):
@@ -1025,19 +1036,6 @@ def test_the_refused_flags_cover_every_remote_model_source_in_the_pinned_llama_s
             ml._embed_model(spec)
 
 
-def test_the_timeout_kills_the_whole_process_tree():
-    """docker.exe's compose child holds the pipe on Windows; a plain subprocess timeout then waits for
-    the grandchild (measured: timeout=3 returned after 21 s). run_bounded kills the tree."""
-    import time
-    stub = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; "
-            "time.sleep(60)']); time.sleep(60)")
-    started = time.monotonic()
-    code, out, err = ml.run_bounded([sys.executable, "-c", stub], ".", 2)
-    took = time.monotonic() - started
-    assert code == 124 and b"timed out" in err
-    assert took < 20, f"the timeout did not bound the tree: {took:.1f}s"
-
-
 # --- the survivors of tester attempt 5 ---------------------------------------------------
 
 
@@ -1073,3 +1071,163 @@ def test_an_unexpected_error_inside_the_derivation_becomes_a_label_error(world, 
     monkeypatch.setattr(ml, "_derive", boom)
     with pytest.raises(ml.LabelError, match="not the shape `docker compose config` writes"):
         ml.derive_labels(make_render(world))
+
+
+# --------------------------------------------------------------------------
+# attempt 7 (tester attempt 6): values substituted into llama-swap's cmd, the tree kill,
+# stdin, the bounded grace wait, `/modelsX`
+# --------------------------------------------------------------------------
+
+
+def _swap_cmd(world, old, new):
+    path = world.root / ml.LLAMA_SWAP_REL
+    text = path.read_text(encoding="utf-8")
+    assert text.count(old) >= 1, old
+    path.write_text(text.replace(old, new), encoding="utf-8")
+
+
+@pytest.mark.parametrize("var,value", [
+    ("LLAMA_SWAP_QWEN36_27B_CTX_SIZE", "4096 --model /models/B-13B-Q4_K_M.gguf"),
+    ("LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET", "4096 --hf_repo org/repo"),
+    ("LLAMA_SWAP_QWEN36_27B_MODEL_PATH", "/models/unsloth/Qwen3.8 27B/x-Q4_K_M.gguf"),
+    ("LLAMA_SWAP_QWEN36_27B_BATCH", "1024\t--model\t/models/B-13B-Q4_K_M.gguf"),
+])
+def test_a_value_with_whitespace_substituted_into_llama_swaps_cmd_is_refused(world, var, value):
+    """llama-swap splits its cmd on whitespace, so such a value becomes extra ARGUMENTS
+    (`..._CTX_SIZE=4096 --model /models/B` loads B - measured in the pinned llama-swap image)."""
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"][var] = value
+    with pytest.raises(ml.LabelError, match="contains whitespace"):
+        ml.derive_labels(render)
+
+
+@pytest.mark.parametrize("old,new,why", [
+    ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "--model=${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "`--flag=value` form is refused"),
+    ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "--hf_repo org/repo\\n      --model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "not a /models file"),
+    ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "--ctx-size 1", "has no `--model`/`-m`"),
+    ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+     "--model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH} ${UNKNOWN}", "is not a macro"),
+])
+def test_llama_swaps_cmd_gets_the_embed_servers_flag_rules(world, old, new, why):
+    _swap_cmd(world, old, new.replace("\\\\n", "\\n"))
+    with pytest.raises(ml.LabelError, match=re.escape(why)):
+        ml.derive_labels(make_render(world))
+
+
+def test_the_last_model_flag_in_llama_swaps_cmd_wins(world):
+    """parse_llama_swap_models used to take the FIRST `--model`; llama-server loads the last."""
+    (world.store / "B-13B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    _swap_cmd(world, "--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
+              "--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}\n      -m /models/B-13B-Q4_K_M.gguf")
+    labels = by_role(ml.derive_labels(make_render(world)))
+    assert labels["local-large"].label == "B-13B Q4_K_M (thinking)"
+    assert labels["local-large"].source == "the cmd of llama-swap entry 'qwen36-27b'"
+
+
+def test_a_remote_model_env_on_llama_swaps_service_is_refused(world):
+    """llama-server inherits llama-swap's environment: LLAMA_ARG_HF_REPO there downloads too."""
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_ARG_HF_REPO"] = "org/repo"
+    with pytest.raises(ml.LabelError, match="not a /models file"):
+        ml.derive_labels(render)
+
+
+def test_a_llama_swap_entry_with_its_own_env_is_refused(world):
+    _swap_cmd(world, "    concurrencyLimit: 0\n", "    concurrencyLimit: 0\n    env:\n      - LLAMA_ARG_MODEL=/models/x.gguf\n")
+    with pytest.raises(ml.LabelError, match="has env - not interpreted"):
+        ml.derive_labels(make_render(world))
+
+
+def test_llama_swaps_macros_are_expanded_and_checked(world):
+    macros, models = ml.parse_llama_swap_config((world.root / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8"))
+    assert "--no-mmap" in macros["common-args"] and "${PORT}" in macros["common-args"]
+    assert models["qwen36-27b"].cmd.startswith("llama-server ${common-args}")
+    assert set(models) == {"qwen36-35b-a3b", "qwen36-27b-baseline", "qwen36-27b"}
+
+
+def test_a_path_that_only_starts_like_the_models_bind_is_refused(world):
+    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
+        ml.derive_labels(make_render(world, chat="/modelsX/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"),
+                         check_files=False)
+
+
+def _alive(pid: int) -> bool:
+    if sys.platform == "win32":
+        import subprocess
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _tree_stub(pidfile: Path, parent_waits: bool, sleep: int = 60) -> list[str]:
+    code = ("import subprocess, sys, time; "
+            f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({sleep})']); "
+            f"open({str(pidfile)!r}, 'w').write(str(p.pid))" + (f"; time.sleep({sleep})" if parent_waits else ""))
+    return [sys.executable, "-c", code]
+
+
+@pytest.mark.parametrize("parent_waits", [True, False], ids=["parent-alive", "parent-already-exited"])
+def test_the_timeout_kills_the_whole_tree_and_returns_promptly(tmp_path, parent_waits):
+    """A grandchild holds the pipe. A parent-only kill would leave it alive and return only after the
+    grace period; a taskkill /T cannot find it once its parent has exited. Both must be told apart
+    from a real tree kill: the grandchild must be GONE, and the call back well inside timeout+grace."""
+    import time
+    pidfile = tmp_path / "grandchild.pid"
+    started = time.monotonic()
+    code, out, err = ml.run_bounded(_tree_stub(pidfile, parent_waits), tmp_path, 2, grace=5)
+    took = time.monotonic() - started
+    grandchild = int(pidfile.read_text())
+    time.sleep(0.5)
+    try:
+        assert code == 124 and b"timed out" in err
+        assert took < 2 + 2.5, f"returned after {took:.1f}s - the grace wait ran, so the tree was not killed"
+        assert not _alive(grandchild), "the grandchild survived the timeout"
+    finally:
+        if _alive(grandchild):
+            os.kill(grandchild, 9)
+
+
+def test_the_wait_after_the_kill_is_bounded_even_when_the_kill_fails(tmp_path, monkeypatch):
+    """If nothing could be killed, the call still returns at about timeout + grace (never hangs)."""
+    import threading
+    import time
+    monkeypatch.setattr(ml, "_kill_tree", lambda *a: None)
+    monkeypatch.setattr(ml, "_WindowsJob", lambda pid: (_ for _ in ()).throw(OSError("no job in this test")))
+    pidfile = tmp_path / "grandchild.pid"
+    result = {}
+
+    def call():
+        started = time.monotonic()
+        # short-lived on purpose: with the kill disabled, the stub's two processes end on their own
+        result["code"] = ml.run_bounded(_tree_stub(pidfile, True, sleep=8), tmp_path, 1, grace=2)[0]
+        result["took"] = time.monotonic() - started
+    thread = threading.Thread(target=call, daemon=True)
+    thread.start()
+    thread.join(20)
+    try:
+        assert not thread.is_alive(), "run_bounded waited without bound after the kill"
+        assert result["code"] == 124 and result["took"] < 1 + 2 + 3
+    finally:
+        for pid_text in ([pidfile.read_text()] if pidfile.exists() else []):
+            if _alive(int(pid_text)):
+                os.kill(int(pid_text), 9)
+
+
+def test_stdin_is_never_inherited(monkeypatch):
+    import subprocess
+    seen = {}
+    real = subprocess.Popen
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(subprocess, "Popen", spy)
+    ml.run_bounded([sys.executable, "-c", "pass"], ".", 30)
+    assert seen.get("stdin") is subprocess.DEVNULL

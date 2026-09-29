@@ -905,13 +905,21 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   rendered `LLAMA_ARG_MODEL`;
 - **refuse, don't emulate**: anything this module would have to interpret the way
   a server or the kernel does is refused instead. That means an `entrypoint`
-  override; a model or config flag in `--flag=value` form (llama-server rejects
-  `--model=x`); a `-config` that is missing or relative (it would depend on the
-  working directory); and every flag or `LLAMA_ARG_*` variable the pinned
-  llama-server offers for loading a model from a URL, a repo, a directory, a
-  preset or a built-in default, in any spelling llama.cpp accepts (`_` is `-` in a
-  long flag, so `--hf_repo` is `--hf-repo`; the list is checked against
-  `scripts/stack/fixtures/llama-server-help.txt`);
+  override on either upstream; a `-config` that is missing, relative or in
+  `=`-form; for llama-swap's entry, any key besides `cmd`/`filters`/
+  `concurrencyLimit` (a per-model `env:`), an unknown `${...}` in its cmd, and ANY
+  value substituted into that cmd (every `${env.*}`, not only the model path)
+  that is empty or contains whitespace - llama-swap splits the cmd on whitespace,
+  so `..._CTX_SIZE=4096 --model /models/B.gguf` would load B. The llama.cpp
+  flag rules then apply to BOTH llama-server command lines - the embed upstream's
+  rendered command and llama-swap's expanded cmd: long flags match with `_` as `-`
+  (`--hf_repo` is `--hf-repo`); a model flag in `--flag=value` form is refused
+  (llama-server rejects `--model=x`); `-m`/`--model` - the last one wins, as in
+  llama.cpp - is required for llama-swap's entry; and every flag or `LLAMA_ARG_*`
+  variable (in either service's environment) the pinned llama-server offers for
+  loading a model from a URL, a repo, a directory, a preset or a built-in default
+  is refused - the list is checked against
+  `scripts/stack/fixtures/llama-server-help.txt`;
 - the model path - from the env, the command or a link's target - must be plain
   names under `/models`: it is **refused** if it has an empty, `.` or `..` segment
   (so no `//`, no trailing `/`, no `nosuch/../x`), a segment ending in `.` or a
@@ -959,9 +967,11 @@ exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
 `stack.ps1` does not forward `labels`; run it with `stack.py`.
 
 Compose's JSON is read back as strict UTF-8, not in the locale codepage, with a
-120 s timeout that kills the whole process TREE on expiry (on Windows `docker.exe`
-starts the compose plugin as a child that holds the pipe; killing only the parent
-did not return), so a non-ASCII model path reaches the label exactly and output
+120 s timeout that kills the whole process TREE on expiry and then waits at most
+5 s more: on Windows the child runs in a job object (KILL_ON_JOB_CLOSE), so
+terminating the job ends `docker.exe`, the compose plugin it starts (which holds
+the pipe) and any grandchild whose parent already exited; elsewhere the child's
+process group is killed, so a non-ASCII model path reaches the label exactly and output
 that is not UTF-8 is a refusal. Whatever shape `inference/.env` has, the label
 names what compose makes of it: an
 `.env` compose cannot read (UTF-16, a BOM past byte 0, `EXPORT X=...`) fails the
