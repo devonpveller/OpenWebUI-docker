@@ -297,6 +297,13 @@ try {
   Check 'M27 a LOCKED local file is FAIL-COPY naming it, and the pass goes on (the file after it is COPIED)' (((StatusOf $res 'd\locked.tar').Status -eq 'FAIL-COPY') -and ((StatusOf $res 'd\zz-after.tar').Status -eq 'COPIED')) (($res | ForEach-Object { "$($_.Status):$($_.Rel)" }) -join ' ')
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   Check 'M27b unlocked, the next pass copies it' ((StatusOf $res 'd\locked.tar').Status -eq 'COPIED')
+  New-Item -ItemType Directory -Force -Path "$old\s" | Out-Null
+  Blob "$old\s\lockrec.tar" 2500; Blob "$old\s\zz-rec-after.tar" 2500
+  [System.IO.File]::WriteAllLines("$old\s\SHA256SUMS", [string[]]@(((Sha256Of "$old\s\lockrec.tar") + ' *lockrec.tar'), ((Sha256Of "$old\s\zz-rec-after.tar") + ' *zz-rec-after.tar')))
+  $lock = [System.IO.File]::Open("$old\s\lockrec.tar", 'Open', 'Read', 'None')
+  try { $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas) } finally { $lock.Close() }
+  Check 'M27c a locked file WITH a recorded checksum (it throws while being checked): FAIL-COPY naming it, the next file still COPIED' (((StatusOf $res 's\lockrec.tar').Status -eq 'FAIL-COPY') -and ((StatusOf $res 's\zz-rec-after.tar').Status -eq 'COPIED')) (($res | Where-Object { $_.Rel -like 's\*' } | ForEach-Object { "$($_.Status):$($_.Rel)" }) -join ' ')
+  Remove-Item -LiteralPath "$old\s", "$oldNas\s" -Recurse -Force
 
   # odd entries at the temp or final name: directory, junction
   Blob "$old\d\tmpdir.tar" 2000
@@ -311,6 +318,7 @@ try {
   Check 'M28 a .cf-partial DIRECTORY at the temp name: FAIL-COPY naming it, left untouched, nothing written into it' (((StatusOf $res 'd\tmpdir.tar').Status -eq 'FAIL-COPY') -and ((StatusOf $res 'd\tmpdir.tar').Detail -like '*directory or a reparse point*') -and (@(Get-ChildItem -LiteralPath "$oldNas\d\tmpdir.tar.cf-partial").Count -eq 1) -and -not (Test-Path -LiteralPath "$oldNas\d\tmpdir.tar" -PathType Leaf))
   Check 'M29 a .cf-partial JUNCTION at the temp name: FAIL-COPY, nothing lands in the junction target' (((StatusOf $res 'd\junc.tar').Status -eq 'FAIL-COPY') -and (@(Get-ChildItem -LiteralPath $jt -Force).Count -eq 0))
   Check 'M30 a DIRECTORY at the final name: FAIL-COPY, nothing moved into it' (((StatusOf $res 'd\isdir.tar').Status -eq 'FAIL-COPY') -and (@(Get-ChildItem -LiteralPath "$oldNas\d\isdir.tar" -Force).Count -eq 0))
+  Check 'M36 Remove-NasTemp called on a .cf-partial DIRECTORY or JUNCTION removes nothing and returns false' ((-not (Remove-NasTemp "$oldNas\d\tmpdir.tar.cf-partial")) -and (Test-Path -LiteralPath "$oldNas\d\tmpdir.tar.cf-partial\marker.txt") -and (-not (Remove-NasTemp "$oldNas\d\junc.tar.cf-partial")) -and (Test-Path -LiteralPath "$oldNas\d\junc.tar.cf-partial"))
   $null = cmd /c "rmdir `"$oldNas\d\junc.tar.cf-partial`"" 2>&1
   Remove-Item -LiteralPath "$oldNas\d\tmpdir.tar.cf-partial", "$oldNas\d\isdir.tar" -Recurse -Force
   Remove-Item -LiteralPath "$old\d\tmpdir.tar", "$old\d\isdir.tar", "$old\d\junc.tar" -Force
@@ -322,6 +330,7 @@ try {
   Set-Content -LiteralPath "$old\u\b.tar.sha256" -Value (('cd' * 32) + '  b.tar') -Encoding ascii
   Set-Content -LiteralPath "$old\u\c.tar.sha256" -Value ((Sha256Of "$old\u\c.tar") + '  c.tar') -Encoding ascii
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M31b ... and recorded in lower case (Get-NasRecordedHash normalises; comparisons are case-insensitive anyway)' ((Get-NasRecordedHash "$old\u\a.tar").Hash -ceq (Sha256Of "$old\u\a.tar"))
   Check 'M31 an UPPER-CASE SHA256SUMS hash is accepted (COPIED, not FAIL-LOCAL)' ((StatusOf $res 'u\a.tar').Status -eq 'COPIED') "$((StatusOf $res 'u\a.tar').Status) $((StatusOf $res 'u\a.tar').Detail)"
   Check 'M32 SHA256SUMS and <file>.sha256 DISAGREE: neither wins - FAIL-LOCAL, Trust RECORD, not copied' (((StatusOf $res 'u\b.tar').Status -eq 'FAIL-LOCAL') -and ((StatusOf $res 'u\b.tar').Trust -like 'RECORD*') -and ((StatusOf $res 'u\b.tar').Detail -like '*disagree*') -and -not (Test-Path -LiteralPath "$oldNas\u\b.tar"))
   Check 'M32b ... and when they agree the file is COPIED' ((StatusOf $res 'u\c.tar').Status -eq 'COPIED')
@@ -440,6 +449,13 @@ try {
   $r = RunCopyTo (Join-Path $root 'nas6\archive') @('-Dirs', 'g') $ghostSrc
   Check 'C14 a SHA256SUMS entry with no local file is MISSING LOCAL, exit 1 (the present file still VERIFIED)' (($r.Rc -eq 1) -and ($r.Out -match 'MISSING LOCAL\s+g\\ghost\.tar') -and ($r.Out -match 'real\.tar.*VERIFIED')) "rc=$($r.Rc)"
 
+  $lkSrc = Join-Path $root 'lksrc'
+  New-Item -ItemType Directory -Force -Path "$lkSrc\k" | Out-Null
+  Blob "$lkSrc\k\a-locked.tar" 1300; Blob "$lkSrc\k\b-free.tar" 1300
+  [System.IO.File]::WriteAllLines("$lkSrc\k\SHA256SUMS", [string[]]@(((Sha256Of "$lkSrc\k\a-locked.tar") + ' *a-locked.tar'), ((Sha256Of "$lkSrc\k\b-free.tar") + ' *b-free.tar')))
+  $lock2 = [System.IO.File]::Open("$lkSrc\k\a-locked.tar", 'Open', 'Read', 'None')
+  try { $r = RunCopyTo (Join-Path $root 'nas9\archive') @('-Dirs', 'k') $lkSrc } finally { $lock2.Close() }
+  Check 'C16 the copy script: a locked recorded file is FAIL COPY naming it and the next file is still VERIFIED (exit 1)' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL COPY\s+k\\a-locked\.tar') -and ($r.Out -match 'k\\b-free\.tar.*VERIFIED \(copied\)')) "rc=$($r.Rc) out=$($r.Out)"
   $hidSrc = Join-Path $root 'hidsrc'
   New-Item -ItemType Directory -Force -Path "$hidSrc\h" | Out-Null
   Blob "$hidSrc\h\hidden.tar" 1200; (Get-Item -LiteralPath "$hidSrc\h\hidden.tar").Attributes = 'Hidden'

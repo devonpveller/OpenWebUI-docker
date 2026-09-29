@@ -249,8 +249,7 @@ function Remove-NasTemp {
   try {
     if (-not (Test-Path -LiteralPath $Tmp)) { return $true }
     if (Test-NasOddEntry $Tmp) { return $false }
-    $ti = Get-Item -LiteralPath $Tmp -Force
-    if ($ti.IsReadOnly) { $ti.IsReadOnly = $false }
+    # -Force also removes a read-only file (suite M35).
     Remove-Item -LiteralPath $Tmp -Force -ErrorAction Stop
     return $true
   } catch { return $false }
