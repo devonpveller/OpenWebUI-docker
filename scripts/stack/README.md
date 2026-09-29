@@ -646,11 +646,16 @@ order, restart in dependency order, wait for health). Selection is the same as
    in order. The budget is each container's own: the healthcheck's worst case -
    `start_period + retries x (interval + timeout) + interval + 30 s` - or 300 s
    when the compose file declares none; `--timeout` sets one budget for all.
-   It is timed from the level's start, PLUS the time every gate before it in
-   the level took to its verdict (all the elapsed time while one is still
-   open). That is what the gate had when the gates ran one after another, so
-   no container gets less time than it did; only a timeout can come later,
-   never a pass or a failure docker reports.
+   Each gate's budget runs from when the gates-one-after-another recover would
+   have STARTED watching it, rebuilt from what the poll saw and never taken as
+   earlier than that (it allows for those polls seeing a change up to one poll
+   round - 3 s plus one `docker inspect` - late). A gate cannot time out while
+   one before it in the level is still open. So **no gate times out sooner than
+   it did one after another**. The price is on the other side and is bounded: a
+   timeout can come a few poll rounds per earlier gate later, and a level never
+   waits past the sum of its budgets plus a 15 s settle window per gate (one
+   after another, the worst case was the sum of the budgets plus its polls). A
+   pass, or a failure docker reports, is seen at the next poll either way.
 4. **The first failed gate stops the run**: `refused: recover stopped at
    <plane>: <service> (<container>) <what docker said>`, with the last
    healthcheck output, a `docker logs <that container>` hint and the planes

@@ -3113,6 +3113,7 @@ class _Gate:
         self.name, self.timeout, self.kind, self.settle = name, timeout, kind, settle
         self.started = started
         self.window = None       # (monotonic at first running, RestartCount, StartedAt)
+        self.by_window = False   # passed by sitting out its settle window (not on an event docker reported)
         self.last = "no container"
 
     def observe(self, state: dict | None, now: float, credit: float = 0.0):
@@ -3158,6 +3159,7 @@ class _Gate:
                     return False, (f"restart loop: it restarted {int(now - window[0])}s into the "
                                    f"{int(settle)}s settle window (RestartCount {window[1]} -> {restarts})")
                 elif now - window[0] >= settle:
+                    self.by_window = True
                     return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
                                   f"RestartCount {restarts}, not restarted)")
         if spent >= timeout:
@@ -3175,14 +3177,18 @@ def wait_gates(capture, root, docker, gates):
     of pure waiting). Every container gets the same rule and window it had alone
     (_Gate); its settle window opens at the first poll that sees it running.
 
-    BUDGETS ARE NEVER STRICTER THAN ONE-AFTER-ANOTHER. There, gate i's budget
-    clock started only when gate i-1 had its verdict, so it had the time spent on
-    every earlier gate on top of its own budget. Here gate i is CREDITED that time:
-    the seconds each earlier gate (in `gates` order) took to its verdict, or the
-    whole elapsed time while it has none. That is at least what it had before
-    (an earlier gate watched from the level's start takes at least as long as it
-    took when watched from later). It only ever lengthens a TIMEOUT: a pass or a
-    failure docker reports is seen as soon as it happens.
+    NO GATE TIMES OUT SOONER THAN IT DID ONE AFTER ANOTHER. There, gate i was
+    watched only from S_i, when gate i-1 had its verdict, and timed out at S_i +
+    its budget. Here gate i times out at S_i + its budget too, with S_i taken no
+    EARLIER than it was (one_after_another_start): rebuilt from what was observed,
+    allowing for the one-after-another polls landing late - each change seen up to
+    one poll round (3 s plus one inspect) after it happened, and a settle window
+    closing up to one round after its 15 s. While an earlier gate is still open,
+    S_i is not known yet and gate i cannot time out (one after another it was not
+    watched yet). The cost of that allowance: a TIMEOUT can come later than it
+    did, by at most a few poll rounds per earlier gate, and never past the sum of
+    the budgets plus a settle window per gate - the base's own worst case. A pass,
+    or a failure docker reports, is seen at the next poll either way.
 
     The first round in which any gate FAILS ends the wait: the level has failed and
     recover stops, as it did at the first failed gate before. Gates still pending
@@ -3194,13 +3200,17 @@ def wait_gates(capture, root, docker, gates):
                for i, (name, timeout, kind, settle) in enumerate(gates)}
     results = [None] * len(gates)
     took = [None] * len(gates)      # seconds from the level's start to each gate's verdict
+    gate_of = dict(pending)
+    cost = 0.0                      # the slowest `docker inspect` seen in this level, seconds
     while pending:
         failed = False
         for i, gate in list(pending.items()):
+            asked = monotonic()
             state = container_state(capture, root, docker, gate.name)
             now = monotonic()
-            credit = sum((now - started) if t is None else t for t in took[:i])
-            verdict = gate.observe(state, now, credit)
+            cost = max(cost, now - asked)
+            start = one_after_another_start(took, [gate_of[j] for j in range(i)], cost)
+            verdict = gate.observe(state, now, (now - started) if start is None else start)
             if verdict is not None:
                 results[i] = verdict
                 took[i] = now - started
@@ -3210,6 +3220,37 @@ def wait_gates(capture, root, docker, gates):
             break
         sleep(GATE_POLL_SECONDS)
     return results
+
+
+def one_after_another_start(took, earlier, cost: float = 0.0):
+    """S_i for the gate after `earlier`: seconds from the level's start, never earlier than one after
+    another started it; None while one of `earlier` is still open. See wait_gates.
+
+    `took[j]`: when gate j had its verdict, watched from the level's start. `cost`: the slowest
+    `docker inspect` seen. One after another started gate j at some S_j we cannot see; we carry an
+    upper bound (`start`) and a lower bound (`low`) on it. It asked docker at S_j and then every
+    poll round (`r`), so it saw a change at most r (plus the inspect) after it happened - and saw a
+    change that happened before S_j at its very first look:
+      an event (healthy, an exit) that WE saw by `low` had happened before S_j: seen at S_j + cost;
+        otherwise by the later of that and took_j + r (we saw it at took_j, so it happened by then);
+      a settle window: opened at S_j + cost if WE saw it running by `low` (running before S_j, and
+        unrestarted from then until its window closed); otherwise by the later of that and our
+        first-seen + r; closed by settle + r after it opened.
+    The lower bound only grows by what one after another cannot have skipped: a settle window.
+    """
+    r = GATE_POLL_SECONDS + cost
+    start = low = 0.0
+    for j, gate in enumerate(earlier):
+        if took[j] is None:
+            return None
+        if gate.by_window:
+            seen = gate.window[0] - gate.started
+            opened = start + cost if seen <= low else max(start + cost, seen + r)
+            start = opened + gate.settle + r
+            low += gate.settle
+        else:
+            start = start + cost if took[j] <= low else max(start + cost, took[j] + r)
+    return start
 
 
 def wait_gate(capture, root, docker, name: str, timeout: int, kind: str = GATE_SETTLE,
