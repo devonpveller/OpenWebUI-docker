@@ -406,3 +406,109 @@ def test_sse_data_line_is_parsed_strictly(upstream, token):
         200, content=sse, headers={"content-type": "text/event-stream"}))
     data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
     assert _names(json.loads(data[0][5:])) == set()
+
+
+# --- attempt-2 findings X2/X3: parses, but cannot be re-serialised as UTF-8 ------
+#
+# A lone surrogate ("\ud800", sent as the JSON escape) parses fine, but starlette's
+# JSONResponse renders with ensure_ascii=False and then encodes UTF-8 - which
+# raises. Every reply the gateway builds must survive it, on every path.
+
+_SURR = "\ud800"
+
+
+def _json_reply(payload, status=200):
+    # json.dumps default (ensure_ascii=True) - the upstream sends the escape.
+    return lambda req: httpx.Response(status, content=json.dumps(payload).encode(),
+                                      headers={"content-type": "application/json"})
+
+
+def _surrogate_list():
+    tools = [dict(t) for t in _UPSTREAM_TOOLS]
+    for t in tools:
+        t["description"] = "bad " + _SURR
+    return {"jsonrpc": "2.0", "id": 7, "result": {"tools": tools}}
+
+
+def test_surrogate_in_kept_tool_description_json_path(upstream):
+    r = _list(upstream, _json_reply(_surrogate_list()))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    body = json.loads(r.content)
+    assert _names(body) == _ADVERTISED
+    assert all(t["description"] == "bad " + _SURR for t in body["result"]["tools"])
+
+
+def test_surrogate_in_kept_tool_description_sse_path(upstream):
+    sse = ("event: message\ndata: " + json.dumps(_surrogate_list()) + "\n\n").encode()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == _ADVERTISED
+
+
+def test_invalid_utf8_on_an_sse_line_is_not_a_500(upstream):
+    # CESU-8 surrogate bytes on a non-data line: the text decode replaces them.
+    sse = (b"event: message\n: \xed\xa0\x80\ndata: " + json.dumps(_FULL_LIST).encode() + b"\n\n")
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    assert r.status_code == 200
+    data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == _ADVERTISED
+
+
+def _list_with_id(upstream, rid, reply):
+    upstream.reply = reply
+    body = json.dumps({"jsonrpc": "2.0", "id": rid, "method": "tools/list"}).encode()
+    return TestClient(gw.app).post("/mcp", content=body, headers=AUTH)
+
+
+def test_surrogate_request_id_on_the_empty_list_reply(upstream):
+    r = _list_with_id(upstream, _SURR, lambda req: httpx.Response(
+        200, content=b"{not json", headers={"content-type": "application/json"}))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    body = json.loads(r.content)
+    assert body["id"] == _SURR and body["result"]["tools"] == []
+
+
+def test_surrogate_request_id_on_the_502_reply(upstream):
+    r = _list_with_id(upstream, _SURR, lambda req: httpx.Response(
+        500, content=b"<html>", headers={"content-type": "text/html"}))
+    assert r.status_code == 502
+    assert json.loads(r.content)["id"] == _SURR
+
+
+def test_surrogate_request_id_on_the_filtered_reply(upstream):
+    reply = dict(_FULL_LIST, id=_SURR)
+    r = _list_with_id(upstream, _SURR, _json_reply(reply))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    body = json.loads(r.content)
+    assert body["id"] == _SURR and _names(body) == _ADVERTISED
+
+
+def test_surrogate_in_a_blocked_tool_name_echoed_in_the_error(upstream):
+    body = json.dumps({"jsonrpc": "2.0", "id": _SURR, "method": "tools/call",
+                       "params": {"name": "x" + _SURR, "arguments": {}}}).encode()
+    r = TestClient(gw.app).post("/mcp", content=body, headers=AUTH)
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    err = json.loads(r.content)
+    assert err["error"]["code"] == -32601 and err["id"] == _SURR
+    assert upstream == []
+
+
+def test_valid_surrogate_argument_is_forwarded(upstream):
+    r = TestClient(gw.app).post("/mcp", content=_call("search_memories", {"query": _SURR}).encode(),
+                                headers=AUTH)
+    assert r.status_code == 200
+    assert _sent(upstream)["params"]["arguments"]["query"] == _SURR
+
+
+def test_valid_non_ascii_reply_bytes_unchanged(upstream):
+    # Replies starlette COULD render keep its exact bytes: compact separators,
+    # raw UTF-8 (not \u-escaped), same content type.
+    reply = dict(_FULL_LIST)
+    reply["result"] = {"tools": [dict(t, description="caf\u00e9") for t in _UPSTREAM_TOOLS]}
+    r = _list(upstream, _json_reply(reply))
+    assert r.headers["content-type"] == "application/json"
+    assert "caf\u00e9".encode("utf-8") in r.content and b"\\u00e9" not in r.content
+    assert b'"jsonrpc":"2.0"' in r.content

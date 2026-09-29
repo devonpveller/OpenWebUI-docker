@@ -33,7 +33,7 @@ import os
 
 import httpx
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import PlainTextResponse, Response
 from starlette.routing import Route
 
 MNEMORY_URL = os.environ["MNEMORY_URL"].rstrip("/")          # http://mnemory:8050
@@ -342,8 +342,25 @@ def _parse_body(raw: bytes):
     raise _BodyRefused("not a JSON-RPC object or a non-empty batch of objects")
 
 
+def _json_response(payload, status_code=200):
+    """Every JSON reply the gateway BUILDS goes through here (never starlette's
+    JSONResponse). JSONResponse renders with ensure_ascii=False and then encodes
+    UTF-8, so a lone surrogate ("\\ud800") in any string it carries - a kept tool
+    description from the upstream, a request id, a tool name echoed in an error -
+    raised UnicodeEncodeError and the client got a 500. Same bytes as
+    JSONResponse for everything it could render; a payload it could not is
+    re-serialised with ensure_ascii=True (valid JSON, the surrogate \\u-escaped)."""
+    try:
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False,
+                          separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        body = json.dumps(payload, ensure_ascii=True, allow_nan=False,
+                          separators=(",", ":")).encode("ascii")
+    return Response(body, status_code=status_code, media_type="application/json")
+
+
 def _refuse(reason: str):
-    return JSONResponse(
+    return _json_response(
         _rpc_error(None, -32700, f"Request refused by the gateway: {reason}."),
         status_code=400)
 
@@ -429,13 +446,13 @@ async def mcp(request):
     # Authenticate the cloud client against the gateway key.
     auth = request.headers.get("authorization", "")
     if auth != f"Bearer {GATEWAY_KEY}":
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return _json_response({"error": "unauthorized"}, status_code=401)
 
     method = request.method
     try:
         body = await _read_capped(request)
     except _TooLarge:
-        return JSONResponse(
+        return _json_response(
             _rpc_error(None, -32600,
                        f"Request refused by the gateway: body larger than "
                        f"{MAX_BODY_BYTES} bytes."),
@@ -480,7 +497,7 @@ async def mcp(request):
                 out_body = json.dumps(mm).encode()
 
     if short_circuit is not None:
-        return JSONResponse(short_circuit)
+        return _json_response(short_circuit)
 
     up_headers.pop("content-length", None)
     timeout = httpx.Timeout(300.0, connect=10.0)
@@ -514,13 +531,13 @@ async def mcp(request):
                 payload = _filter_tools_list(_strict_json(upstream.text))
             except Exception:  # anything unfilterable -> advertise nothing
                 if 200 <= upstream.status_code < 300:
-                    return JSONResponse(_closed_tools_list(list_id))
-                return JSONResponse(
+                    return _json_response(_closed_tools_list(list_id))
+                return _json_response(
                     _rpc_error(list_id, -32603,
                                "upstream tools/list reply could not be filtered; "
                                "nothing is advertised"),
                     status_code=502)
-            return JSONResponse(payload, status_code=upstream.status_code)
+            return _json_response(payload, status_code=upstream.status_code)
 
         passthru = {k: v for k, v in upstream.headers.items()
                     if k.lower() not in ("content-length", "content-encoding",
