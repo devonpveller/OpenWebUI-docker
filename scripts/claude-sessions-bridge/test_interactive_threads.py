@@ -530,6 +530,11 @@ class InteractiveThreadReplyTests(unittest.TestCase):
                          f"`fork {S1}` and `handoff {S1}`, got: {posts!r}"[:800])
         self.assertFalse([m for m in posts if "new Claude session" in m],
                          "the bridge announced a new session in the interactive thread")
+        # Answered at POLL time, never admitted: the execute-time backstop (D1) would say "did
+        # not attach", which is false for a reply that never tried to attach (attempt 3, M3).
+        self.assertFalse([m for m in posts if "did not attach" in m],
+                         "a plain reply must be answered by the poll-time guard, not queued: "
+                         + repr(posts)[:300])
 
     def test_03_fork_reply_attaches_the_thread_to_that_session(self):
         r = scenario_result()
