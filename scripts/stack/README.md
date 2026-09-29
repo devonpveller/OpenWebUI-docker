@@ -902,16 +902,29 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   `${env.LLAMA_SWAP_..._MODEL_PATH}`, taken from the service's RENDERED
   environment), a `bge*` id through the embed upstream's rendered command
   `-m`/`--model` if it has one (llama.cpp takes the flag over the env) or else its
-  rendered `LLAMA_ARG_MODEL`; an embed model loaded from a URL or an HF repo is
-  refused;
-- the file is found under the service's rendered `/models` bind and walked
-  component by component the way the container's kernel walks it: a link is
-  followed BEFORE a `..` after it is applied (`/models/linkdir/../X.gguf` is
-  `X.gguf` next to where `linkdir` points, not the store root's); a relative link
-  is followed and must stay in the store; a symlink to a host-absolute path, and a
-  Windows JUNCTION (the host follows it, the container sees a host-absolute link),
-  are refused; the label is the name of the file finally REACHED, so a link named
-  `Claims-70B-Q2_K.gguf` pointing at `Inside-7B-Q8_0.gguf` labels Inside-7B;
+  rendered `LLAMA_ARG_MODEL`;
+- **refuse, don't emulate**: anything this module would have to interpret the way
+  a server or the kernel does is refused instead. That means an `entrypoint`
+  override; a model or config flag in `--flag=value` form (llama-server rejects
+  `--model=x`); a `-config` that is missing or relative (it would depend on the
+  working directory); and every flag or `LLAMA_ARG_*` variable the pinned
+  llama-server offers for loading a model from a URL, a repo, a directory, a
+  preset or a built-in default, in any spelling llama.cpp accepts (`_` is `-` in a
+  long flag, so `--hf_repo` is `--hf-repo`; the list is checked against
+  `scripts/stack/fixtures/llama-server-help.txt`);
+- the model path - from the env, the command or a link's target - must be plain
+  names under `/models`: it is **refused** if it has an empty, `.` or `..` segment
+  (so no `//`, no trailing `/`, no `nosuch/../x`), a segment ending in `.` or a
+  space, a `:` (an NTFS stream) or another character Windows treats specially, a
+  Windows device name or an 8.3 short-name form - every shape where the host and
+  the container could read the same path differently. Then symlinks are followed
+  one component at a time: every component before the last must be an existing
+  DIRECTORY and the last a regular FILE; a link's target must be relative and
+  pass the same rule (so links only lead down, never out of the store); a link to
+  a host-absolute path and a Windows JUNCTION (the host follows it, the container
+  sees a host-absolute link) are refused. The label is the name of the file finally
+  REACHED, so a link `Claims-70B-Q2_K.gguf` -> `real/Inside-7B-Q8_0.gguf` labels
+  Inside-7B;
 - the label is the file stem with its quant split off, plus the mode:
   `Qwen3.8-27B-Q4_K_M.gguf` -> `Qwen3.8-27B Q4_K_M (thinking)` for `local-large`,
   `Qwen3.8-27B Q4_K_M (no thinking)` for the `:nothink` and `local-small` roles,
@@ -945,8 +958,10 @@ exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
 `labels`. Under `--dry-run` they print that they would run it and call nothing.
 `stack.ps1` does not forward `labels`; run it with `stack.py`.
 
-Compose's JSON is read back as strict UTF-8 (with a 120 s timeout), not in the
-locale codepage, so a non-ASCII model path reaches the label exactly and output
+Compose's JSON is read back as strict UTF-8, not in the locale codepage, with a
+120 s timeout that kills the whole process TREE on expiry (on Windows `docker.exe`
+starts the compose plugin as a child that holds the pipe; killing only the parent
+did not return), so a non-ASCII model path reaches the label exactly and output
 that is not UTF-8 is a refusal. Whatever shape `inference/.env` has, the label
 names what compose makes of it: an
 `.env` compose cannot read (UTF-16, a BOM past byte 0, `EXPORT X=...`) fails the
@@ -957,10 +972,12 @@ which is also what the upstream will load.
 
 **Refuses** (exit 1): inference without `local` (no role is registered); no docker
 compose CLI, or a render that fails; a label that cannot be derived (a variable
-the render leaves empty, a path outside `/models` or with a backslash in it, a
-missing file, a symlink to a host-absolute path, a Windows junction, a link that
-leaves the store or loops, an embed model from a URL / HF repo, a render that is
-not the shape compose writes (a hand-made `--render`),
+the render leaves empty, a path outside `/models` or of any shape the rule above
+refuses, a missing directory or file, a symlink to a host-absolute path or with a
+refused target, a Windows junction, a symlink loop, an `entrypoint` override, a
+`--flag=value` model/config flag, a missing or relative `-config`, an embed model
+from a URL / repo / directory / preset / built-in default, a render that is not
+the shape compose writes (a hand-made `--render`),
 a role forwarding an id no upstream serves, `local.yaml` or the llama-swap config
 unreadable or not UTF-8) - then nothing is written; no
 `OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open

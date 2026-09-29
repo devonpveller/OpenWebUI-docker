@@ -2170,21 +2170,16 @@ def utf8_capture(cmd, cwd, timeout: int = RENDER_TIMEOUT) -> CommandResult:
     the locale codepage (cp1252 on this Windows host) turned a non-ASCII model path into
     mojibake (mr-gateway attempt 4, T13). STRICT decoding, so bytes that are not UTF-8 are a
     named failure rather than a silently different path; a timeout, so a hung CLI cannot hang
-    `up`/`recover`."""
+    `up`/`recover` - bounded over the whole process TREE (model_labels.run_bounded: docker.exe's
+    compose child holds the pipe on Windows)."""
+    import model_labels  # sibling module, standard library only
+
+    code, out, err = model_labels.run_bounded(cmd, cwd, timeout, env=command_env(cmd))
     try:
-        proc = subprocess.run(
-            list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=command_env(cmd), timeout=timeout,
-        )
-    except OSError as exc:
-        return CommandResult(127, "", str(exc))
-    except subprocess.TimeoutExpired:
-        return CommandResult(124, "", f"timed out after {timeout} s")
-    try:
-        out = proc.stdout.decode("utf-8", errors="strict")
+        text = out.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         return CommandResult(1, "", f"the output is not UTF-8 ({exc})")
-    return CommandResult(proc.returncode, out, proc.stderr.decode("utf-8", errors="replace"))
+    return CommandResult(code, text, err.decode("utf-8", errors="replace"))
 
 
 def urllib_get(url: str, timeout: int = 8) -> HttpResult:

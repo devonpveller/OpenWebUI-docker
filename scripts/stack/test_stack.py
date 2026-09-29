@@ -5932,6 +5932,7 @@ def _roles_root(root: Path, env_extra: str = "COMPOSE_PROFILES=local\n", key: st
     render["services"]["llm-gateway"]["volumes"] = [bind(root / "inference/config/litellm/model_list",
                                                          "/app/conf.d")]
     render["services"]["llama-cpp-upstream"].update(
+        command=["-config", "/app/config.yaml"],
         environment={"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": model_path},
         volumes=[bind(store, "/models"), bind(root / model_labels.LLAMA_SWAP_REL, "/app/config.yaml")])
     render["services"]["llama-cpp-embed-upstream"].update(
@@ -6306,3 +6307,17 @@ def test_a_non_ascii_model_path_survives_the_real_compose_render(tmp_path, monke
     render = ml.parse_render(result.stdout, "render")
     labels = {x.role: x for x in ml.derive_labels(render, check_files=False)}
     assert labels["local-large"].label == "\u0141\xf3d\u017a-\u9f99-7B Q4_K_M (thinking)"
+
+
+def test_the_writing_path_refuses_a_failed_render_even_with_output(root, no_owui_env):
+    """Kills the survivor: `stack.labels_render` accepting a non-zero exit when stdout is present."""
+    _roles_root(root)
+    render = (root.parent / "inference-render.json").read_text(encoding="utf-8")
+
+    def capture(cmd, cwd):
+        return stack.CommandResult(1, render, "warning: something went wrong")
+    owui = FakeOwui()
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), "labels"], capture=capture, stdout=out, labels_request=owui)
+    assert code == stack.EXIT_REFUSED, out.getvalue()
+    assert "exited 1" in out.getvalue() and owui.calls == []

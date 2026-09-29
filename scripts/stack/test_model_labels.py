@@ -21,6 +21,7 @@ import io
 import json
 import os
 import posixpath
+import re
 import shutil
 import sys
 import urllib.parse
@@ -210,7 +211,7 @@ def test_a_missing_model_file_fails_loudly_and_produces_no_label(world):
     with pytest.raises(ml.LabelError) as err:
         ml.derive_labels(make_render(world, chat="/models/unsloth/Gone-27B-GGUF/Gone-27B-Q4_K_M.gguf"))
     assert "local-large" in str(err.value) and "Gone-27B-Q4_K_M.gguf" in str(err.value)
-    assert "is not a file on this machine" in str(err.value)
+    assert "is not a directory on this machine" in str(err.value) or "is not a file on this machine" in str(err.value)
 
 
 @pytest.mark.parametrize("check", [True, False])
@@ -218,7 +219,7 @@ def test_a_missing_model_file_fails_loudly_and_produces_no_label(world):
 def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
     (tmp_path / "x").mkdir()
     (tmp_path / "x" / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
-    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind|leads outside the /models"):
+    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind|`.` or `..` segment"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
@@ -227,7 +228,7 @@ def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
                                   "/models/unsloth\\Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"])
 @pytest.mark.parametrize("check", [True, False])
 def test_a_backslash_in_the_container_path_is_refused(world, path, check):
-    with pytest.raises(ml.LabelError, match="contains a backslash"):
+    with pytest.raises(ml.LabelError, match="character Windows treats specially"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
@@ -359,8 +360,8 @@ def test_a_relative_link_inside_the_store_is_labelled_by_the_file_it_reaches(wor
     real = world.store / "real" / "Inside-7B-Q8_0.gguf"
     real.parent.mkdir()
     real.write_bytes(b"GGUF")
-    _link(world.store / "links" / "Claims-70B-Q2_K.gguf", Path("..") / "real" / "Inside-7B-Q8_0.gguf")
-    labels = by_role(ml.derive_labels(make_render(world, chat="/models/links/Claims-70B-Q2_K.gguf")))
+    _link(world.store / "Claims-70B-Q2_K.gguf", Path("real") / "Inside-7B-Q8_0.gguf")
+    labels = by_role(ml.derive_labels(make_render(world, chat="/models/Claims-70B-Q2_K.gguf")))
     assert labels["local-large"].label == "Inside-7B Q8_0 (thinking)"
     assert labels["local-large"].host_path.endswith("Inside-7B-Q8_0.gguf")
 
@@ -374,11 +375,13 @@ def test_a_link_with_a_host_absolute_target_is_refused_even_inside_the_store(wor
         ml.derive_labels(make_render(world, chat="/models/links/Abs-7B-Q8_0.gguf"))
 
 
-def test_a_relative_link_that_climbs_out_of_the_store_is_refused(world, tmp_path):
+def test_a_link_whose_target_has_a_dotdot_is_refused(world, tmp_path):
+    """Links lead DOWN from their own directory only: any `..` in a target is refused, so none
+    can climb out of the store (or reach a sibling whose resolution depends on the kernel)."""
     (tmp_path / "outside").mkdir()
     (tmp_path / "outside" / "Out-1B-Q4_0.gguf").write_bytes(b"GGUF")
     _link(world.store / "Out-1B-Q4_0.gguf", Path("..") / "outside" / "Out-1B-Q4_0.gguf")
-    with pytest.raises(ml.LabelError, match="leads outside the /models store"):
+    with pytest.raises(ml.LabelError, match="`.` or `..` segment"):
         ml.derive_labels(make_render(world, chat="/models/Out-1B-Q4_0.gguf"))
 
 
@@ -735,10 +738,9 @@ def test_each_fingerprint_component_alone_stops_the_write(field, value):
 # --------------------------------------------------------------------------
 
 
-def test_dotdot_after_a_directory_link_is_resolved_as_the_kernel_does(world):
-    """Row A: `linkdir -> sub/deeper`; `/models/linkdir/../X-7B-Q8_0.gguf` is `sub/X-7B-Q8_0.gguf`
-    in the container (the link is followed BEFORE the `..`), which links to B-13B - not the store
-    root's X (-> A-7B) a lexical `normpath` would pick."""
+def test_dotdot_after_a_directory_link_is_refused_not_emulated(world):
+    """Row A: `linkdir -> sub/deeper`; `/models/linkdir/../X-7B-Q8_0.gguf`. Attempt 5 emulated the
+    kernel (links before `..`); attempt 6 REFUSES any `..` segment - nothing to get wrong."""
     for rel in ("A-7B-Q8_0.gguf", "sub/B-13B-Q4_K_M.gguf"):
         (world.store / rel).parent.mkdir(parents=True, exist_ok=True)
         (world.store / rel).write_bytes(b"GGUF")
@@ -746,9 +748,8 @@ def test_dotdot_after_a_directory_link_is_resolved_as_the_kernel_does(world):
     _link(world.store / "linkdir", Path("sub") / "deeper", is_dir=True)
     _link(world.store / "X-7B-Q8_0.gguf", Path("A-7B-Q8_0.gguf"))
     _link(world.store / "sub" / "X-7B-Q8_0.gguf", Path("B-13B-Q4_K_M.gguf"))
-    labels = by_role(ml.derive_labels(make_render(world, chat="/models/linkdir/../X-7B-Q8_0.gguf")))
-    assert labels["local-large"].label == "B-13B Q4_K_M (thinking)"
-    assert labels["local-large"].host_path.endswith("B-13B-Q4_K_M.gguf")
+    with pytest.raises(ml.LabelError, match="`.` or `..` segment"):
+        ml.derive_labels(make_render(world, chat="/models/linkdir/../X-7B-Q8_0.gguf"))
 
 
 def test_a_reparse_point_that_is_not_a_symlink_is_refused(world, monkeypatch):
@@ -787,7 +788,7 @@ def _embed(render, **spec):
 def test_an_embed_model_flag_in_the_rendered_command_wins_over_the_env(world):
     (world.embed / "Other-Embed-Q8_0.gguf").write_bytes(b"GGUF")
     for command in (["--model", "/models/Other-Embed-Q8_0.gguf"], ["-m", "/models/Other-Embed-Q8_0.gguf"],
-                    ["--port", "8080", "--model=/models/Other-Embed-Q8_0.gguf"]):
+                    ["--port", "8080", "-m", "/models/bge-m3-f16.gguf", "--model", "/models/Other-Embed-Q8_0.gguf"]):
         labels = by_role(ml.derive_labels(_embed(make_render(world), command=command)))
         assert labels["local-embed"].label == "Other-Embed Q8_0 (embeddings)", command
         assert labels["local-embed"].source.startswith("`--model` in llama-cpp-embed-upstream's rendered command")
@@ -885,3 +886,190 @@ def test_every_hostile_render_is_a_named_refusal_never_a_traceback(world, tmp_pa
         assert code == 1, (name, out.getvalue())
         assert out.getvalue().startswith("labels: FAILED - "), (name, out.getvalue())
         assert "(thinking)" not in out.getvalue(), name
+
+
+# --------------------------------------------------------------------------
+# attempt 6 (tester attempt 5): REFUSE, DON'T EMULATE - paths, flags, the timeout, survivors
+# --------------------------------------------------------------------------
+
+REFUSED_PATHS = [
+    ("/models/nosuch/../A-7B-Q8_0.gguf", "`.` or `..` segment"),
+    ("/models/A-7B-Q8_0.gguf/../B-13B-Q4_K_M.gguf", "`.` or `..` segment"),
+    ("/models/A-7B-Q8_0.gguf/", "`.` or `..` segment"),
+    ("/models/A-7B-Q8_0.gguf/.", "`.` or `..` segment"),
+    ("/models//A-7B-Q8_0.gguf", "`.` or `..` segment"),
+    ("/models/sub./X-7B-Q8_0.gguf", "ends in `.` or a space"),
+    ("/models/sub /X-7B-Q8_0.gguf", "ends in `.` or a space"),
+    ("/models/sub::$INDEX_ALLOCATION/X-7B-Q8_0.gguf", "character Windows treats specially"),
+    ("/models/X-7B-Q8_0.gguf:stream", "character Windows treats specially"),
+    ("/models/a<b-Q8_0.gguf", "character Windows treats specially"),
+    ("/models/a\tb-Q8_0.gguf", "character Windows treats specially"),
+    ("/models/CON/X-7B-Q8_0.gguf", "Windows device name"),
+    ("/models/nul.gguf", "Windows device name"),
+    ("/models/LONGDI~1/X-7B-Q8_0.gguf", "8.3 short name"),
+]
+
+
+@pytest.mark.parametrize("check", [True, False])
+@pytest.mark.parametrize("path,why", REFUSED_PATHS, ids=[p for p, _ in REFUSED_PATHS])
+def test_a_path_the_host_and_the_container_could_read_differently_is_refused(world, path, why, check):
+    """Each row of tester attempt 5's disagreement table (and its neighbours) is REFUSED, whatever
+    is on disk - from the env, and from the embed command."""
+    for rel in ("A-7B-Q8_0.gguf", "B-13B-Q4_K_M.gguf", "sub/X-7B-Q8_0.gguf"):
+        (world.store / rel).parent.mkdir(parents=True, exist_ok=True)
+        (world.store / rel).write_bytes(b"GGUF")
+    with pytest.raises(ml.LabelError, match=re.escape(why) if "`" not in why else why.replace("`", "`")):
+        ml.derive_labels(make_render(world, chat=path), check_files=check)
+    embed_path = path.replace("/models/", "/models/", 1)
+    with pytest.raises(ml.LabelError):
+        ml.derive_labels(_embed(make_render(world), command=["-m", embed_path]), check_files=check)
+
+
+def test_a_link_target_with_dotdot_or_a_windows_only_name_is_refused(world):
+    (world.store / "A-7B-Q8_0.gguf").write_bytes(b"GGUF")
+    _link(world.store / "L1.gguf", Path("nosuch") / ".." / "A-7B-Q8_0.gguf")
+    with pytest.raises(ml.LabelError, match="`.` or `..` segment"):
+        ml.derive_labels(make_render(world, chat="/models/L1.gguf"))
+
+
+def test_every_component_before_the_last_must_be_a_directory_and_the_last_a_file(world):
+    (world.store / "A-7B-Q8_0.gguf").write_bytes(b"GGUF")
+    with pytest.raises(ml.LabelError, match="is not a directory on this machine"):
+        ml.derive_labels(make_render(world, chat="/models/A-7B-Q8_0.gguf/B-13B-Q4_K_M.gguf"))
+    (world.store / "adir.gguf").mkdir()
+    with pytest.raises(ml.LabelError, match="is not a file on this machine"):
+        ml.derive_labels(make_render(world, chat="/models/adir.gguf"))
+
+
+def test_a_file_link_used_as_a_directory_is_refused(world):
+    (world.store / "A-7B-Q8_0.gguf").write_bytes(b"GGUF")
+    _link(world.store / "looks-like-dir", Path("A-7B-Q8_0.gguf"))
+    with pytest.raises(ml.LabelError, match="is not a directory on this machine"):
+        ml.derive_labels(make_render(world, chat="/models/looks-like-dir/X-7B-Q8_0.gguf"))
+
+
+@pytest.mark.parametrize("flag", ["--hf_repo", "--model_url", "--hf_file", "--docker_repo", "--models-dir",
+                                  "--models_preset", "--embd-gemma-default", "--fim_qwen_7b_default", "-hfr"])
+def test_a_remote_model_flag_is_refused_in_any_spelling_llama_cpp_accepts(world, flag):
+    """llama.cpp treats `_` as `-` in a LONG flag: `--hf_repo` downloads exactly as `--hf-repo`."""
+    with pytest.raises(ml.LabelError, match="not a /models file this module can label"):
+        ml.derive_labels(_embed(make_render(world), command=[flag, "org/repo"]))
+
+
+@pytest.mark.parametrize("command", [["--model=/models/bge-m3-f16.gguf"], ["-m=/models/bge-m3-f16.gguf"],
+                                     ["--model_x", "y", "--model=/models/bge-m3-f16.gguf"]])
+def test_a_model_flag_in_equals_form_is_refused(world, command):
+    """llama-server rejects `--model=x` (measured, tester attempt 5): a plane that does not start."""
+    with pytest.raises(ml.LabelError, match="`--flag=value` form is refused"):
+        ml.derive_labels(_embed(make_render(world), command=command))
+
+
+@pytest.mark.parametrize("command,why", [
+    (["-config=/app/config.yaml"], "`--flag=value` form is refused"),
+    (["--config=/app/config.yaml"], "`--flag=value` form is refused"),
+    (["-config", "config.yaml"], "is relative"),
+    (["-config", "alt.yaml"], "is relative"),
+    ([], "has no `-config`"),
+    (["-config", "/app/../app/config.yaml"], "`.` or `..` segment"),
+])
+def test_llama_swaps_config_flag_is_refused_unless_plain_and_absolute(world, command, why):
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["command"] = command
+    with pytest.raises(ml.LabelError, match=re.escape(why)):
+        ml.derive_labels(render)
+
+
+def test_the_last_config_flag_wins(world):
+    """Kills the `_flag` first-wins mutant on the chat side too."""
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["command"] = ["-config", "/app/nope.yaml", "-config", "/app/config.yaml"]
+    assert by_role(ml.derive_labels(render))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+@pytest.mark.parametrize("service", ["llama-cpp-upstream", "llama-cpp-embed-upstream"])
+def test_an_entrypoint_override_is_refused(world, service):
+    render = make_render(world)
+    render["services"][service]["entrypoint"] = ["/app/llama-server", "-m", "/models/Other-Embed-Q8_0.gguf"]
+    with pytest.raises(ml.LabelError, match="has an `entrypoint`"):
+        ml.derive_labels(render)
+
+
+HELP = Path(__file__).resolve().parent / "fixtures" / "llama-server-help.txt"
+
+
+def test_the_refused_flags_cover_every_remote_model_source_in_the_pinned_llama_server():
+    """The fixture is `llama-server --help` from the pinned ghcr.io/ggml-org/llama.cpp:server-cuda
+    (image sha256:d5b92ecf..., captured 2026-09-29 in a --network none container). Every flag or
+    env var there that loads a MODEL from a URL, a repo, a directory, a preset or a built-in default
+    must be refused (the multimodal projector URL, `--mmproj-url`, loads no model and is not)."""
+    text = HELP.read_text(encoding="utf-8")
+    flags, envs = set(), set()
+    for line in text.splitlines():
+        head = line[:40]   # the help's flag column
+        names = re.findall(r"(?<![\w-])(--?[a-z][a-z0-9.-]*[a-z0-9])", head)
+        if re.search(r"model-url|docker-repo|hf-repo|hf-file|models-dir|models-preset|-default\b", head) \
+                or re.search(r"^\s*-hf[a-z]*,", head):
+            flags |= {n for n in names if n.startswith("-")}
+        envs |= set(re.findall(r"env: (LLAMA_ARG_(?:MODEL_URL|DOCKER_REPO|HF[A-Z_]*|HFD_REPO|MODELS_DIR|"
+                               r"MODELS_PRESET))\b", line))
+    flags -= {"--hf-token", "-hft"}
+    envs -= {"LLAMA_ARG_HF_TOKEN"}
+    assert "--hf-repo" in flags and "--embd-gemma-default" in flags and "LLAMA_ARG_HF_REPO" in envs
+    for flag in sorted(flags):
+        spec = {"command": [flag, "x"], "environment": {"LLAMA_ARG_MODEL": "/models/bge-m3-f16.gguf"}}
+        with pytest.raises(ml.LabelError, match="not a /models file"):
+            ml._embed_model(spec)
+    for env in sorted(envs):
+        spec = {"command": [], "environment": {"LLAMA_ARG_MODEL": "/models/bge-m3-f16.gguf", env: "x"}}
+        with pytest.raises(ml.LabelError, match="not a /models file"):
+            ml._embed_model(spec)
+
+
+def test_the_timeout_kills_the_whole_process_tree():
+    """docker.exe's compose child holds the pipe on Windows; a plain subprocess timeout then waits for
+    the grandchild (measured: timeout=3 returned after 21 s). run_bounded kills the tree."""
+    import time
+    stub = ("import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; "
+            "time.sleep(60)']); time.sleep(60)")
+    started = time.monotonic()
+    code, out, err = ml.run_bounded([sys.executable, "-c", stub], ".", 2)
+    took = time.monotonic() - started
+    assert code == 124 and b"timed out" in err
+    assert took < 20, f"the timeout did not bound the tree: {took:.1f}s"
+
+
+# --- the survivors of tester attempt 5 ---------------------------------------------------
+
+
+def test_the_reparse_attribute_alone_marks_a_junction(monkeypatch, tmp_path):
+    """Without os.path.isjunction (Python < 3.12) the FILE_ATTRIBUTE_REPARSE_POINT bit decides."""
+    monkeypatch.delattr(ml.os.path, "isjunction", raising=False)
+
+    class Stat:
+        st_file_attributes = 0x400
+    monkeypatch.setattr(ml.os, "lstat", lambda p: Stat())
+    assert ml._is_reparse_point(tmp_path) is True
+    Stat.st_file_attributes = 0x10
+    assert ml._is_reparse_point(tmp_path) is False
+
+
+def test_a_relative_bind_source_is_named_as_such(world):
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["volumes"][0]["source"] = "relative/models"
+    with pytest.raises(ml.LabelError, match="RELATIVE source"):
+        ml.derive_labels(render)
+
+
+def test_a_non_string_environment_value_is_named_as_such(world):
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"] = 7
+    with pytest.raises(ml.LabelError, match="is not a string"):
+        ml.derive_labels(render)
+
+
+def test_an_unexpected_error_inside_the_derivation_becomes_a_label_error(world, monkeypatch):
+    def boom(render, check):
+        raise TypeError("an internal shape nobody planned for")
+    monkeypatch.setattr(ml, "_derive", boom)
+    with pytest.raises(ml.LabelError, match="not the shape `docker compose config` writes"):
+        ml.derive_labels(make_render(world))

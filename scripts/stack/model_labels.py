@@ -25,14 +25,17 @@ defaults are read by compose itself and never re-implemented here:
               RENDERED environment
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
               (llama.cpp takes the flag over the env), else its rendered
-              `LLAMA_ARG_MODEL`; a model from a URL / HF repo is refused (llm-queue
-              sends every `bge*` id to the embed upstream - registry.upstream_for)
-  the file    the service's rendered /models bind source, the path walked component
-              by component the way the container's kernel walks it - a link is
-              followed BEFORE a following `..` is applied; a relative link must stay
-              in the store; a link to a host-absolute path and a Windows junction are
-              refused (the container cannot open either) - and checked to EXIST; the
-              label is the name of the file finally reached
+              `LLAMA_ARG_MODEL`; a model from a URL / repo / directory / preset /
+              built-in default is refused, in any spelling llama.cpp accepts
+              (llm-queue sends every `bge*` id to the embed upstream)
+  the file    the service's rendered /models bind source. REFUSE, DON'T EMULATE: a
+              path (env, command or link target) with an empty / `.` / `..`
+              segment, a segment ending in `.` or space, a `:` or other
+              Windows-special character, a device name or an 8.3 form is refused;
+              then links are followed one component at a time (every component
+              before the last an existing directory, the last a regular file; link
+              targets relative and plain; host-absolute links and Windows junctions
+              refused); the label is the name of the file finally reached
 
 and turns the file name into the label:
 
@@ -82,7 +85,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import posixpath
 import re
 import sys
 import time
@@ -272,6 +274,40 @@ def render_command(root: Path, env_file: Path | None = None, profiles=("local",)
     return cmd + ["config", "--format", "json"]
 
 
+def run_bounded(cmd, cwd, timeout: int, env=None) -> tuple[int, bytes, bytes]:
+    """Run `cmd` capturing bytes, and on timeout kill its WHOLE process tree.
+
+    On Windows `docker.exe` starts `docker-compose.exe` as a child that holds the output pipe, so
+    killing only `docker.exe` does not return (tester attempt 5: a 4 s timeout returned after 18 s).
+    The child gets its own process group (CREATE_NEW_PROCESS_GROUP) and `taskkill /T /F` ends the
+    tree; elsewhere it gets its own session and the group is killed. (124, ...) on timeout."""
+    import signal
+    import subprocess
+    kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    try:
+        proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                stdin=subprocess.DEVNULL, env=env, **kwargs)
+    except OSError as exc:
+        return 127, b"", f"{type(exc).__name__}: {exc}".encode()
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+        else:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        return 124, b"", f"timed out after {timeout} s (the process tree was killed)".encode()
+
+
 def render_inference(root: Path, env_file: Path | None = None, run=None) -> dict:
     """`docker compose config --format json` of the inference plane, or a LabelError. Never a guess.
 
@@ -280,13 +316,11 @@ def render_inference(root: Path, env_file: Path | None = None, run=None) -> dict
     cmd = render_command(root, env_file)
     if run is None:
         def run(cmd, cwd):
-            import subprocess
+            code, out, err = run_bounded(cmd, cwd, 120)
             try:
-                proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
-                                      encoding="utf-8", errors="replace", timeout=120)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return 127, "", f"{type(exc).__name__}: {exc}"
-            return proc.returncode, proc.stdout, proc.stderr
+                return code, out.decode("utf-8", errors="strict"), err.decode("utf-8", errors="replace")
+            except UnicodeDecodeError as exc:
+                return 1, "", f"the output is not UTF-8 ({exc})"
     code, stdout, stderr = run(cmd, root)
     if code != 0:
         why = " | ".join((stderr or stdout or "no output").strip().splitlines()[:3])
@@ -347,41 +381,58 @@ def _environment(spec: dict, service: str, var: str) -> str:
 
 
 def _command(spec: dict, service: str) -> list[str]:
+    """The rendered command. An `entrypoint` override is refused: what it runs is not interpreted."""
+    if spec.get("entrypoint"):
+        raise LabelError(f"{service} has an `entrypoint` in the render - what it runs is not interpreted here")
     command = spec.get("command") or []
-    if isinstance(command, str):
-        command = command.split()
     if not isinstance(command, list) or not all(isinstance(a, str) for a in command):
         raise LabelError(f"{service}'s rendered command is not a list of strings")
     return command
 
 
+def _flag_name(arg: str) -> str:
+    """A flag as llama.cpp matches it: `_` is `-` in a LONG flag (`--hf_repo` is `--hf-repo`)."""
+    name = arg.split("=", 1)[0]
+    return name.replace("_", "-") if name.startswith("--") else name
+
+
 def _flag(command: list[str], names: tuple[str, ...]) -> str | None:
-    """The value of the LAST occurrence of any of `names` (`--x v` or `--x=v`), or None."""
+    """The value of the LAST occurrence of any of `names`, written `--x value`, or None. The
+    `--x=value` form is REFUSED: llama-server rejects `--model=x` (measured, tester attempt 5), and
+    a form this module cannot be sure the server accepts is not labelled."""
     value = None
     for i, arg in enumerate(command):
-        for name in names:
-            if arg == name:
-                if i + 1 >= len(command):
-                    raise LabelError(f"`{name}` is the last word of the command, with no value")
-                value = command[i + 1]
-            elif arg.startswith(name + "="):
-                value = arg[len(name) + 1:]
+        name = _flag_name(arg)
+        if name not in names:
+            continue
+        if "=" in arg:
+            raise LabelError(f"`{arg}`: a model/config flag in `--flag=value` form is refused - the server may "
+                             f"not accept it (llama-server rejects `--model=...`)")
+        if i + 1 >= len(command):
+            raise LabelError(f"`{arg}` is the last word of the command, with no value")
+        value = command[i + 1]
     return value
 
 
-# llama.cpp's server: a command-line model flag beats LLAMA_ARG_MODEL; these load a model from
-# somewhere that is not a /models file, which this module cannot label - refused.
+# llama.cpp's server, as the PINNED image's `llama-server --help` lists it (fixture:
+# scripts/stack/fixtures/llama-server-help.txt; test_model_labels checks this list against it):
+# a command-line model flag beats LLAMA_ARG_MODEL, and these load a model from somewhere that is
+# not a /models file - refused. Every `--*-default` flag downloads a built-in model - refused.
 _EMBED_MODEL_FLAGS = ("-m", "--model")
-_EMBED_REMOTE_FLAGS = ("-mu", "--model-url", "-hf", "-hfr", "--hf-repo", "-hff", "--hf-file", "-dr",
-                       "--docker-repo")
-_EMBED_REMOTE_ENV = ("LLAMA_ARG_MODEL_URL", "LLAMA_ARG_HF_REPO", "LLAMA_ARG_HF_FILE", "LLAMA_ARG_DOCKER_REPO")
+_EMBED_REMOTE_FLAGS = ("-mu", "--model-url", "-dr", "--docker-repo", "-hf", "-hfr", "--hf-repo",
+                       "-hff", "--hf-file", "-hfd", "-hfrd", "--hf-repo-draft", "-hfv", "-hfrv",
+                       "--hf-repo-v", "-hffv", "--hf-file-v", "--models-dir", "--models-preset")
+_EMBED_REMOTE_ENV = ("LLAMA_ARG_MODEL_URL", "LLAMA_ARG_DOCKER_REPO", "LLAMA_ARG_HF_REPO", "LLAMA_ARG_HF_FILE",
+                     "LLAMA_ARG_HFD_REPO", "LLAMA_ARG_HF_REPO_V", "LLAMA_ARG_HF_FILE_V",
+                     "LLAMA_ARG_MODELS_DIR", "LLAMA_ARG_MODELS_PRESET")
 
 
 def _embed_model(spec: dict) -> tuple[str, str]:
     """(the path llama-cpp-embed-upstream loads, where that came from): its rendered command's
     `-m`/`--model` if present (llama.cpp takes the flag over the env), else LLAMA_ARG_MODEL."""
     command = _command(spec, EMBED_SERVICE)
-    remote = [a for a in command if a.split("=", 1)[0] in _EMBED_REMOTE_FLAGS]
+    remote = [a for a in command if _flag_name(a) in _EMBED_REMOTE_FLAGS
+              or (_flag_name(a).startswith("--") and _flag_name(a).endswith("-default"))]
     env = _env_map(spec, EMBED_SERVICE)
     remote += [k for k in _EMBED_REMOTE_ENV if env.get(k)]
     if remote:
@@ -394,14 +445,17 @@ def _embed_model(spec: dict) -> tuple[str, str]:
 
 
 def _swap_config_target(spec: dict) -> str:
-    """Where llama-swap reads its config: the rendered command's `-config` (llama-swap's default,
-    `config.yaml` in its working directory /app, when the flag is absent)."""
+    """Where llama-swap reads its config: the rendered command's `-config`, an ABSOLUTE path of plain
+    names. Absent, relative (it would depend on the working directory) or `=`-form: refused."""
     flagged = _flag(_command(spec, CHAT_SERVICE), ("-config", "--config"))
     if flagged is None:
-        return SWAP_CONFIG_TARGET
+        raise LabelError(f"{CHAT_SERVICE}'s rendered command has no `-config` - llama-swap's default location "
+                         f"is not interpreted here")
     if not flagged.startswith("/"):
-        flagged = posixpath.join("/app", flagged)
-    return posixpath.normpath(flagged)
+        raise LabelError(f"{CHAT_SERVICE}'s `-config {flagged}` is relative - it depends on the working "
+                         f"directory, which is not interpreted here")
+    _check_segments(flagged[1:], flagged)
+    return flagged
 
 
 def roles_from(text: str, where: str) -> list[Role]:
@@ -469,26 +523,43 @@ def _served_by_embed(concrete: str, swap_models: dict[str, str]) -> bool | None:
 
 
 def _check_container_path(container_path: str, service: str) -> None:
-    """The literal shape: `/models/...` and no backslash. `..` is NOT collapsed here - the
-    container's kernel follows each link BEFORE applying a following `..` (resolve_in_store)."""
-    if "\\" in container_path:
-        raise LabelError(f"{container_path} contains a backslash - a container path uses `/` only")
-    if not container_path.startswith(MODELS_MOUNT + "/"):
+    """`/models/<segments>` with every segment passing `_check_segments`. Nothing is normalised."""
+    if not isinstance(container_path, str) or not container_path.startswith(MODELS_MOUNT + "/"):
         raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
+    _check_segments(container_path[len(MODELS_MOUNT) + 1:], container_path)
 
 
-def _under_models(container_path: str, service: str) -> str:
-    """The path normalised (`/models/../x` is NOT under /models); a LabelError if it leaves the bind.
+# REFUSE, DON'T EMULATE (tester attempts 1-5). Every shape below is one where a Windows host
+# and the Linux container read the same path differently (Win32 strips a trailing `.` or space
+# and maps `sub::$INDEX_ALLOCATION` to `sub`; `x.gguf/` and `x.gguf/.` open on one and fail
+# ENOTDIR on the other; `nosuch/../x` resolves lexically on one and ENOENTs on the other), or
+# one this module would have to emulate the kernel for. They are refused, not interpreted.
+_WINDOWS_RESERVED = re.compile(r"^(?:CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9]|CONIN\$|CONOUT\$)(?:\..*)?$", re.IGNORECASE)
+_WINDOWS_ONLY_CHARS = set('<>:"|?*\\') | {chr(c) for c in range(32)}
+_SHORT_NAME = re.compile(r"~[0-9]")
 
-    A BACKSLASH is refused outright: in the Linux container it is part of a file name, but on a
-    Windows host `Path` treats it as a separator, so `/models/..<backslash>x` would be checked (and
-    labelled) as a file outside the store that llama-swap can never load."""
-    if "\\" in container_path:
-        raise LabelError(f"{container_path} contains a backslash - a container path uses `/` only")
-    norm = posixpath.normpath(container_path) if container_path.startswith("/") else container_path
-    if not norm.startswith(MODELS_MOUNT + "/"):
-        raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
-    return norm
+
+def _check_segments(rel: str, whole: str) -> None:
+    """A relative path of plain names: no empty, `.` or `..` segment (so no `//`, no trailing `/`),
+    no segment ending in `.` or a space, no `:` (an NTFS stream), no character or reserved device
+    name Windows treats specially, no 8.3 short-name form. LabelError naming the first offence."""
+    if not rel:
+        raise LabelError(f"{whole!r} names no file")
+    for segment in rel.split("/"):
+        why = ""
+        if segment in ("", ".", ".."):
+            why = "an empty, `.` or `..` segment"
+        elif segment[-1] in ". ":
+            why = f"the segment {segment!r} ends in `.` or a space (Windows strips it, Linux does not)"
+        elif set(segment) & _WINDOWS_ONLY_CHARS:
+            why = f"the segment {segment!r} has a character Windows treats specially (`:` is an NTFS stream)"
+        elif _WINDOWS_RESERVED.match(segment):
+            why = f"the segment {segment!r} is a Windows device name"
+        elif _SHORT_NAME.search(segment):
+            why = f"the segment {segment!r} looks like an 8.3 short name (host-only name normalisation)"
+        if why:
+            raise LabelError(f"{whole!r} is refused: {why} - a path the host and the container could read "
+                             f"differently is not labelled")
 
 
 _REPARSE_POINT = 0x400   # FILE_ATTRIBUTE_REPARSE_POINT
@@ -514,45 +585,47 @@ def _absolute_link_target(target: str) -> bool:
 
 
 def resolve_in_store(store: Path, container_path: str, role: str) -> Path:
-    """The file the CONTAINER opens for `container_path`, followed link by link on the host.
+    """The file `container_path` names, found by following symlinks one component at a time.
 
-    The store is what the container sees at /models. A symlink is followed only as the
-    container would follow it: a RELATIVE target is resolved against the link's directory and
-    must stay inside the store; a host-ABSOLUTE target is refused - inside the container it
-    names a path that does not exist. The label is then taken from the file finally reached,
-    so a link named `Claims-70B-Q2_K.gguf` pointing at `Inside-7B-Q8_0.gguf` labels Inside-7B.
+    `container_path` has already passed `_check_container_path` (plain names only). Every
+    component before the last must be an existing DIRECTORY and the last a regular FILE, each
+    checked on the host. A symlink's target must be RELATIVE (a host-absolute one names nothing
+    in the container) and pass the same plain-names rule - so no `..`, and a link can only lead
+    DOWN from its own directory, never out of the store. A Windows junction is refused (the host
+    follows it; the container sees a host-absolute link). The label is then taken from the file
+    finally reached: a link `Claims-70B-Q2_K.gguf` -> `real/Inside-7B-Q8_0.gguf` labels Inside-7B.
     """
-    todo = [p for p in container_path[len(MODELS_MOUNT) + 1:].split("/") if p]
-    done: list[str] = []
-    hops = 0
-    while todo:
-        part = todo.pop(0)
-        if part in ("", "."):
-            continue
-        if part == "..":
-            if not done:
-                raise LabelError(f"role {role}: {container_path} leads outside the {MODELS_MOUNT} store")
-            done.pop()
-            continue
-        here = store.joinpath(*done, part)
+    hops = [0]
+    return _walk(store, container_path[len(MODELS_MOUNT) + 1:].split("/"), "file", role, container_path, hops)
+
+
+def _walk(base: Path, parts: list[str], want: str, role: str, whole: str, hops: list[int]) -> Path:
+    cur = base
+    for i, part in enumerate(parts):
+        here = cur / part
+        need = want if i == len(parts) - 1 else "dir"
         if not here.is_symlink() and _is_reparse_point(here):
             raise LabelError(f"role {role}: {here} is a junction/reparse point - the host follows it, but the "
                              f"container sees a link to a host-absolute path it cannot open")
         if here.is_symlink():
-            hops += 1
-            if hops > 40:
-                raise LabelError(f"role {role}: {container_path} has a symlink loop")
+            hops[0] += 1
+            if hops[0] > 40:
+                raise LabelError(f"role {role}: {whole} has a symlink loop")
             target = os.readlink(here)
             if _absolute_link_target(target):
-                raise LabelError(f"role {role}: {store.joinpath(*done, part)} is a symlink to the host-absolute "
-                                 f"path {target} - the container cannot open it")
-            todo = [p for p in re.split(r"[\\/]", target) if p] + todo
-            continue
-        done.append(part)
-    final = store.joinpath(*done)
-    if not final.is_file():
-        raise LabelError(f"role {role}: {container_path} is not a file on this machine - looked for {final}")
-    return final
+                raise LabelError(f"role {role}: {here} is a symlink to the host-absolute path {target} - the "
+                                 f"container cannot open it")
+            # Windows stores a relative link target with `\` separators; the container reads the
+            # same link through the bind (measured: tester attempt 5, row "backslash link target")
+            target = target.replace("\\", "/")
+            _check_segments(target, f"{here} -> {target}")
+            here = _walk(cur, target.split("/"), need, role, whole, hops)
+        if need == "dir" and not here.is_dir():
+            raise LabelError(f"role {role}: {whole} - {here} is not a directory on this machine")
+        if need == "file" and (not here.is_file() or here.is_dir()):
+            raise LabelError(f"role {role}: {whole} is not a file on this machine - looked for {here}")
+        cur = here
+    return cur
 
 
 def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
@@ -608,8 +681,7 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
             final = resolve_in_store(_bind_source(spec, service, MODELS_MOUNT), container, role.name)
             host, name = str(final), final.name
         else:
-            # nothing on disk to follow: the lexical reading, labelled as NOT checked
-            name = _under_models(container, service)
+            name = container   # nothing on disk to follow; the output says `file NOT checked`
         mode = mode_of(role, embed)
         out.append(RoleLabel(role.name, role.concrete, mode, label_for(name, mode), container, host, source))
     return out
