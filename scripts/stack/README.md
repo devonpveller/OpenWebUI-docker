@@ -908,8 +908,9 @@ the labels and writes nothing.
 The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
 `POST /api/v1/models/create` for a role with no row, or
 `POST /api/v1/models/model/update` for one whose name differs) - the path its
-admin UI takes to rename a base model. It reads every row first, writes only a
-name that differs, sends a renamed row's meta, params, access grants and active
+admin UI takes to rename a base model. It reads and validates EVERY role row
+before it writes any - so a refusal writes nothing - then writes only a name that
+differs, sends a renamed row's meta, params, access grants and active
 flag back exactly as it read them (Open WebUI 0.11.0 replaces a row's grants with
 the list an update carries, and fails an update that carries none), and never
 touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,

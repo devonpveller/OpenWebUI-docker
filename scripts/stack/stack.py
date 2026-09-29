@@ -2753,7 +2753,8 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
 # admin API. `labels` does it on demand; `up` and `recover` do it after a
 # successful run that touched inference or the frontend, when both are on and
 # inference runs `local` (without `local` no role is registered). The sync is
-# idempotent: it reads every row first and writes only a name that differs.
+# idempotent: it reads and validates every role row before writing any, then
+# writes only a name that differs.
 
 
 def inference_runs_local(manifest, state, root) -> bool:
@@ -2784,6 +2785,12 @@ def run_labels(root: Path, console: Console, request, dry_run: bool, prefix: str
         labels = model_labels.derive_labels(root)
     except model_labels.LabelError as exc:
         console.line(f"{prefix}FAILED - {exc}. Nothing was written to Open WebUI.")
+        return EXIT_REFUSED
+    except (OSError, UnicodeError) as exc:
+        # a config file that cannot be read or decoded (local.yaml, the llama-swap
+        # config, upstreams.yml, inference/.env): the same refusal, not a traceback
+        console.line(f"{prefix}FAILED - reading the inference config: {type(exc).__name__}: {exc}. "
+                     "Nothing was written to Open WebUI.")
         return EXIT_REFUSED
     for item in labels:
         console.line(f"{prefix}{item.role} = {item.label!r} <- {item.container_path} ({item.source})")
@@ -2830,20 +2837,32 @@ def cmd_labels(manifest, state, root, console, request, dry_run: bool) -> int:
 
 
 def labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str) -> None:
-    """The `up` / `recover` hook. Never changes the verb's exit code; a failure is printed, loudly."""
+    """The `up` / `recover` hook. Never changes the verb's exit code and never raises: any
+    failure - a refusal, an unreadable config file, anything unexpected - is printed as
+    `# labels: FAILED` plus a WARNING line, and the verb's own result stands."""
     if request is None:
         return
+    try:
+        failed = _labels_after(manifest, state, root, console, request, acted_on, dry_run, verb)
+    except Exception as exc:  # noqa: BLE001 - the hook must never turn a successful verb into a failure
+        console.line(f"# labels: FAILED - {type(exc).__name__}: {str(exc)[:300]}")
+        failed = True
+    if failed:
+        console.line(f"# labels: WARNING - Open WebUI's role names were NOT synced (reason above); "
+                     f"`{verb}` itself succeeded. Fix it and run `{CLI} labels`.")
+
+
+def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str) -> bool:
+    """True when a sync was due and did not complete."""
     touched = {"inference", "frontend"} & set(acted_on)
     on = set(acted_on) | {p for p in ("inference", "frontend") if state.is_enabled(p)}
     if not touched or not {"inference", "frontend"} <= on or not inference_runs_local(manifest, state, root):
-        return
+        return False
     if dry_run:
         console.line(f"# labels: after a real `{verb}`, `{CLI} labels` would set Open WebUI's role names "
                      "from the model files (nothing is read or written in a dry run)")
-        return
-    if run_labels(root, console, request, False, "# labels: ") != EXIT_OK:
-        console.line(f"# labels: WARNING - Open WebUI's role names were NOT synced (reason above); "
-                     f"`{verb}` itself succeeded. Fix it and run `{CLI} labels`.")
+        return False
+    return run_labels(root, console, request, False, "# labels: ") != EXIT_OK
 
 
 # --------------------------------------------------------------------------

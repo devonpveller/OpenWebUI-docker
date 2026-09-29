@@ -6047,3 +6047,82 @@ def test_the_labels_verb_refuses_without_local_and_without_a_key(root, no_owui_e
     code, out = _main(root, "labels", owui=owui)
     assert code == stack.EXIT_REFUSED and "OWUI_ADMIN_API_KEY is not set" in out, out
     assert owui.calls == []
+
+
+# --- the hook never changes the verb's result (tester attempt 1, T11) ---------------
+
+_CONFIGS = [model_labels.MODEL_LIST_REL, model_labels.LLAMA_SWAP_REL, model_labels.UPSTREAMS_REL]
+
+
+def _break_config(root, rel, how, monkeypatch):
+    path = root / rel
+    if how == "undecodable":
+        path.write_bytes(path.read_bytes() + b"\n# caf\xe9\n")   # a cp1252 byte, not UTF-8
+    else:
+        real = Path.read_text
+
+        def read_text(self, *a, **k):
+            if self.resolve() == path.resolve():
+                raise OSError(13, "Permission denied", str(self))
+            return real(self, *a, **k)
+        monkeypatch.setattr(Path, "read_text", read_text)
+
+
+@pytest.mark.parametrize("rel", _CONFIGS, ids=lambda r: r.name)
+@pytest.mark.parametrize("how", ["undecodable", "unreadable"])
+@pytest.mark.parametrize("verb", ["up", "recover"])
+def test_an_unreadable_config_fails_the_sync_loudly_and_leaves_the_exit_code_alone(
+        root, no_owui_env, fast_clock, monkeypatch, rel, how, verb):
+    _enable(root)
+    _roles_root(root)
+    _break_config(root, rel, how, monkeypatch)
+    owui = FakeOwui()
+    code, out = _main(root, verb, daemon=OpsDaemon(RENDERS), owui=owui)
+    assert code == 0, out
+    assert "# labels: FAILED - " in out and "# labels: WARNING - Open WebUI's role names were NOT synced" in out
+    assert ("UnicodeDecodeError" if how == "undecodable" else "Permission denied") in out
+    assert owui.writes == []
+    if verb == "recover":
+        assert out.index("recovered: inference, frontend") < out.index("# labels: FAILED")
+
+
+@pytest.mark.parametrize("verb", ["up", "recover"])
+def test_an_unexpected_error_in_the_sync_is_reported_not_raised(root, no_owui_env, fast_clock, monkeypatch, verb):
+    _enable(root)
+    _roles_root(root)
+
+    def boom(*a, **k):
+        raise RuntimeError("something nobody planned for")
+    monkeypatch.setattr(model_labels, "sync_owui", boom)
+    code, out = _main(root, verb, daemon=OpsDaemon(RENDERS), owui=FakeOwui())
+    assert code == 0, out
+    assert "# labels: FAILED - RuntimeError: something nobody planned for" in out
+    assert "# labels: WARNING" in out
+
+
+def test_the_labels_verb_refuses_an_unreadable_config_without_a_traceback(root, no_owui_env, monkeypatch):
+    _roles_root(root)
+    _break_config(root, model_labels.MODEL_LIST_REL, "undecodable", monkeypatch)
+    owui = FakeOwui()
+    code, out = _main(root, "labels", owui=owui)
+    assert code == stack.EXIT_REFUSED and "labels: FAILED - reading the inference config: UnicodeDecodeError" in out
+    assert owui.calls == []
+
+
+def test_no_sync_runs_after_a_failed_up(root, no_owui_env):
+    """Kills the tester's surviving mutant: the hook runs only when `_drive` SUCCEEDED."""
+    _enable(root)
+    _roles_root(root)
+    daemon = OpsDaemon(RENDERS)
+    real = daemon.runner
+
+    def failing(cmd, cwd):
+        if "inference/docker-compose.yml" in cmd and "up" in cmd:
+            daemon.streamed.append(list(cmd))
+            return 17
+        return real(cmd, cwd)
+    daemon.runner = failing
+    owui = FakeOwui()
+    code, out = _main(root, "up", daemon=daemon, owui=owui)
+    assert code == stack.EXIT_REFUSED and "exited 17" in out, out
+    assert owui.calls == [] and "# labels" not in out

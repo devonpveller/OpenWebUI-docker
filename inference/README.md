@@ -98,8 +98,8 @@ model file's name with its quant split off plus the mode - `Qwen3.8-27B-Q4_K_M.g
 gives `Qwen3.8-27B Q4_K_M (thinking)` - read from the path the plane really
 loads (the shell, then `inference/.env`, then the compose default, as compose
 resolves it) and checked to exist. `python scripts/stack/stack.py labels` writes
-it to Open WebUI's model name for each role id (it needs `OWUI_ADMIN_API_KEY` in
-the root `.env`), and `stack.py up` / `recover` do it after a run when inference
+it to Open WebUI's model name for each role id (it needs `OWUI_ADMIN_API_KEY`, an
+Open WebUI admin's API key, in the shell or the root `.env`), and `stack.py up` / `recover` do it after a run when inference
 (with `local`) and the frontend are both on. `python scripts/stack/model_labels.py`
 prints the labels and writes nothing. llama-swap's own `name:` fields are gone
 for the same reason: typed names drifted from the file.

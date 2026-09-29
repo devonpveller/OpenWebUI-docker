@@ -36,8 +36,10 @@ and turns the file name into the label:
   /models/bge-m3-f16.gguf, role local-embed
       -> `bge-m3 f16 (embeddings)`
 
-THE LABEL FORMAT: the file's stem with its last `-<quant>` segment turned into
-` <quant>` (the quant written exactly as the file writes it), then the mode in
+THE LABEL FORMAT: the file's stem with its last `-<quant>` or `.<quant>` segment
+turned into ` <quant>` (the quant written exactly as the file writes it; a quant is
+Q*/IQ*/TQ*, F16/F32/FP16/FP32, BF16 or MXFP*, in any case - anything else leaves the
+stem unsplit), then the mode in
 parentheses: `thinking`, `no thinking` or `embeddings`. A multi-part GGUF's
 `-00001-of-00003` shard suffix is dropped first. Nothing in the label is typed.
 
@@ -49,12 +51,13 @@ never writes anything from a half-resolved set.
 
 THE OPEN WEBUI SYNC (`sync_owui`) sets the Open WebUI `model` row NAME for each
 role id through Open WebUI's own admin API (`/api/v1/models/...`) - the path its
-admin UI uses to rename a base model - with an admin API key. It reads every row
-first and writes only a row whose name differs; it never touches a row that is
-not a role id, sends a renamed row's meta, params, access grants and active flag
-back exactly as it read them,
-and refuses a role id whose row is a PRESET (a `base_model_id` is set) rather
-than rewrite someone's workspace model. `scripts/stack/stack.py labels` drives
+admin UI uses to rename a base model - with an admin API key. It reads and
+validates EVERY role row before it writes any (a refusal - a PRESET on a role id,
+a row without its access grants, an unreadable row, a refused key - writes
+nothing), then writes only the rows whose name differs; it never touches a row
+that is not a role id, and sends a renamed row's meta, params, access grants and
+active flag back exactly as it read them. A PRESET (a `base_model_id` is set) on a
+role id is refused rather than someone's workspace model rewritten. `scripts/stack/stack.py labels` drives
 it; `stack.py up` / `recover` run it when inference (with `local`) and the
 frontend are both enabled.
 
@@ -70,6 +73,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import posixpath
 import re
 import sys
 import time
@@ -363,7 +367,8 @@ def mode_of(role: Role, served_by_embed: bool) -> str:
 
 
 _SHARD = re.compile(r"-\d{5}-of-\d{5}$")
-_QUANT = re.compile(r"^(?:I?Q\d[\w]*|[Ff](?:16|32)|[Bb][Ff]16|MXFP\d[\w]*)$")
+# case-insensitive: Q4_K_M / q4_k_m, IQ3_XXS, TQ1_0, F16 / fp16 / FP32, BF16, MXFP4
+_QUANT = re.compile(r"^(?:I?Q\d\w*|TQ\d\w*|FP?(?:16|32)|BF16|MXFP\d\w*)$", re.IGNORECASE)
 
 
 def label_for(filename: str, mode: str) -> str:
@@ -374,8 +379,10 @@ def label_for(filename: str, mode: str) -> str:
     if not name.lower().endswith(".gguf"):
         raise LabelError(f"{filename!r} is not a .gguf file")
     stem = _SHARD.sub("", name[:-len(".gguf")])
-    head, sep, tail = stem.rpartition("-")
-    model = f"{head} {tail}" if sep and head and _QUANT.match(tail) else stem
+    # the quant is the segment after the LAST `-` or `.` (Qwen3.8-27B-Q4_K_M, model.Q4_K_M)
+    cut = max(stem.rfind("-"), stem.rfind("."))
+    head, tail = (stem[:cut], stem[cut + 1:]) if cut > 0 else ("", stem)
+    model = f"{head} {tail}" if head and _QUANT.match(tail) else stem
     if not model:
         raise LabelError(f"{filename!r} has no model name")
     return f"{model} ({mode})"
@@ -453,6 +460,14 @@ def _rel(path: Path, root: Path) -> str:
         return str(path)
 
 
+def _under_models(container_path: str, service: str) -> str:
+    """The path normalised (`/models/../x` is NOT under /models); a LabelError if it leaves the bind."""
+    norm = posixpath.normpath(container_path) if container_path.startswith("/") else container_path
+    if not norm.startswith(MODELS_MOUNT + "/"):
+        raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
+    return norm
+
+
 def _host_path(container_path: str, spec: ServiceSpec, env: dict, root: Path, service: str) -> Path:
     for vol in spec.volumes:
         text = vol
@@ -462,8 +477,7 @@ def _host_path(container_path: str, spec: ServiceSpec, env: dict, root: Path, se
         if not text.endswith(":" + MODELS_MOUNT):
             continue
         src = interpolate(text[: -len(":" + MODELS_MOUNT)], env)
-        if not container_path.startswith(MODELS_MOUNT + "/"):
-            raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
+        container_path = _under_models(container_path, service)
         base = Path(src)
         if not base.is_absolute():
             base = (root / UPSTREAMS_REL.parent / base)
@@ -505,6 +519,7 @@ def derive_labels(root: Path, env_file: Path | None = None, environ: dict[str, s
             service = CHAT_SERVICE
             raw = swap_models[role.concrete.split(":", 1)[0]]
             container, source = _resolve_var(raw, env, spec(service), env_path, root, service)
+        _under_models(container, service)   # checked with or without --skip-file-check
         host = ""
         if check_files:
             path = _host_path(container, spec(service), env, root, service)
@@ -523,7 +538,8 @@ def derive_labels(root: Path, env_file: Path | None = None, environ: dict[str, s
 
 
 class OwuiError(Exception):
-    """The sync could not complete. Rows already written stay written; the message says which."""
+    """The sync could not complete. A refusal found while READING writes nothing; a write that
+    Open WebUI rejects leaves the rows written before it, and the message names them."""
 
 
 class Change(NamedTuple):
@@ -566,13 +582,20 @@ def wait_ready(base_url: str, request: Request = urllib_request, timeout_s: int 
 
 def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Request = urllib_request,
               dry_run: bool = False) -> list[Change]:
-    """Set each role's Open WebUI model row NAME to its label. Idempotent; writes only a differing row."""
+    """Set each role's Open WebUI model row NAME to its label. Idempotent; writes only a differing row.
+
+    TWO PASSES. Pass 1 READS every role's row and validates all of them - a refused key,
+    an unreadable row, a PRESET on a role id, a row returned without its access grants -
+    and raises before ANY write if one fails, so a refusal never leaves a partial rename.
+    Pass 2 writes, in role order, only the rows pass 1 planned to create or rename. A
+    write that fails in pass 2 (Open WebUI refusing it) is the one case that can leave
+    earlier rows written; the error names them.
+    """
     if not api_key:
         raise OwuiError(f"{OWUI_KEY_VAR} is empty")
     base = base_url.rstrip("/")
     head = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
             "Accept": "application/json"}
-    changes: list[Change] = []
 
     def call(method, path, payload=None):
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
@@ -583,37 +606,25 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
             data = None
         return status, data, text
 
-    done = lambda: ", ".join(f"{c.role} {c.action}" for c in changes) or "nothing"  # noqa: E731
+    # ---- pass 1: read and validate every role row; nothing is written ----
+    plan: list[tuple[RoleLabel, str, dict | None]] = []   # (label, create|rename|unchanged, row)
     for item in labels:
         status, row, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(item.role, safe=""))
         if status in (401, 403):
             raise OwuiError(f"Open WebUI refused the key ({status}) reading {item.role}: {OWUI_KEY_VAR} must be "
                             f"an ADMIN user's API key, with API keys enabled (Admin Settings > General). "
-                            f"Done before this: {done()}")
+                            f"Nothing was written.")
         if status == 404:
-            if dry_run:
-                changes.append(Change(item.role, "would-create", "", item.label))
-                continue
-            payload = {"id": item.role, "base_model_id": None, "name": item.label,
-                       "meta": {"profile_image_url": "/static/favicon.png"}, "params": {}, "is_active": True}
-            status, made, text = call("POST", "/api/v1/models/create", payload)
-            if status != 200 or not isinstance(made, dict) or made.get("name") != item.label:
-                raise OwuiError(f"creating the {item.role} row failed: HTTP {status} {text[:200]!r}. "
-                                f"Done before this: {done()}")
-            changes.append(Change(item.role, "created", "", item.label))
+            plan.append((item, "create", None))
             continue
         if status != 200 or not isinstance(row, dict):
             raise OwuiError(f"reading the {item.role} row failed: HTTP {status} {text[:200]!r}. "
-                            f"Done before this: {done()}")
+                            f"Nothing was written.")
         if row.get("base_model_id"):
             raise OwuiError(f"the Open WebUI row {item.role!r} is a PRESET on {row.get('base_model_id')!r}, "
-                            f"not a base-model row; it was left alone. Done before this: {done()}")
-        old = row.get("name") or ""
-        if old == item.label:
-            changes.append(Change(item.role, "unchanged", old, item.label))
-            continue
-        if dry_run:
-            changes.append(Change(item.role, "would-rename", old, item.label))
+                            f"not a base-model row; it was left alone. Nothing was written.")
+        if (row.get("name") or "") == item.label:
+            plan.append((item, "unchanged", row))
             continue
         # Everything but the name is sent back as it was read - the access grants
         # too. Open WebUI 0.11.0's update REPLACES a row's grants with the list it
@@ -623,17 +634,37 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
         # returned is refused rather than rewritten with none.
         if not isinstance(row.get("access_grants"), list):
             raise OwuiError(f"the {item.role} row came back without its access grants, so renaming it would "
-                            f"replace them; it was left alone. Done before this: {done()}")
-        grants = [{"principal_type": g.get("principal_type"), "principal_id": g.get("principal_id"),
-                   "permission": g.get("permission")} for g in row["access_grants"] if isinstance(g, dict)]
-        payload = {"id": item.role, "base_model_id": None, "name": item.label,
-                   "meta": row.get("meta") or {}, "params": row.get("params") or {},
-                   "access_grants": grants, "is_active": bool(row.get("is_active", True))}
-        status, made, text = call("POST", "/api/v1/models/model/update", payload)
+                            f"replace them; it was left alone. Nothing was written.")
+        plan.append((item, "rename", row))
+
+    # ---- pass 2: write what pass 1 planned ----
+    changes: list[Change] = []
+    done = lambda: ", ".join(f"{c.role} {c.action}" for c in changes  # noqa: E731
+                             if c.action in ("created", "renamed")) or "nothing"
+    for item, action, row in plan:
+        old = (row or {}).get("name") or ""
+        if action == "unchanged":
+            changes.append(Change(item.role, "unchanged", old, item.label))
+            continue
+        if dry_run:
+            changes.append(Change(item.role, "would-" + action, old, item.label))
+            continue
+        if action == "create":
+            payload = {"id": item.role, "base_model_id": None, "name": item.label,
+                       "meta": {"profile_image_url": "/static/favicon.png"}, "params": {}, "is_active": True}
+            status, made, text = call("POST", "/api/v1/models/create", payload)
+        else:
+            grants = [{"principal_type": g.get("principal_type"), "principal_id": g.get("principal_id"),
+                       "permission": g.get("permission")} for g in row["access_grants"] if isinstance(g, dict)]
+            payload = {"id": item.role, "base_model_id": None, "name": item.label,
+                       "meta": row.get("meta") or {}, "params": row.get("params") or {},
+                       "access_grants": grants, "is_active": bool(row.get("is_active", True))}
+            status, made, text = call("POST", "/api/v1/models/model/update", payload)
         if status != 200 or not isinstance(made, dict) or made.get("name") != item.label:
-            raise OwuiError(f"renaming the {item.role} row failed: HTTP {status} {text[:200]!r}. "
-                            f"Done before this: {done()}")
-        changes.append(Change(item.role, "renamed", old, item.label))
+            verb = "creating" if action == "create" else "renaming"
+            raise OwuiError(f"{verb} the {item.role} row failed: HTTP {status} {text[:200]!r}. "
+                            f"Written before this: {done()}")
+        changes.append(Change(item.role, "created" if action == "create" else "renamed", old, item.label))
     return changes
 
 

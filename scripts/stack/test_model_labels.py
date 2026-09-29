@@ -89,6 +89,13 @@ def by_role(labels):
     ("model-BF16.gguf", "thinking", "model BF16 (thinking)"),
     ("gpt-oss-120b-MXFP4.gguf", "thinking", "gpt-oss-120b MXFP4 (thinking)"),
     ("plainname.gguf", "thinking", "plainname (thinking)"),
+    ("Mistral-7B-Instruct-v0.3.Q4_K_M.gguf", "thinking", "Mistral-7B-Instruct-v0.3 Q4_K_M (thinking)"),
+    ("model.Q4_K_M.gguf", "thinking", "model Q4_K_M (thinking)"),
+    ("x-q4_k_m.gguf", "thinking", "x q4_k_m (thinking)"),
+    ("x-TQ1_0.gguf", "thinking", "x TQ1_0 (thinking)"),
+    ("x-fp16.gguf", "embeddings", "x fp16 (embeddings)"),
+    ("Qwen3.8-27B.gguf", "thinking", "Qwen3.8-27B (thinking)"),
+    ("Qwen3.8.gguf", "thinking", "Qwen3.8 (thinking)"),
 ])
 def test_label_is_the_file_stem_with_its_quant_split_off_plus_the_mode(filename, mode, label):
     assert ml.label_for(filename, mode) == label
@@ -215,6 +222,17 @@ def test_a_path_outside_the_models_bind_fails(scratch):
     write_env(scratch, scratch.parent / "models", "/elsewhere/x-Q4_K_M.gguf")
     with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
         ml.derive_labels(scratch, environ={})
+
+
+@pytest.mark.parametrize("check", [True, False])
+def test_a_dotdot_path_that_leaves_the_bind_fails_even_when_the_file_exists(scratch, tmp_path, check):
+    """`/models/../x` is outside the container's bind; normalise before checking."""
+    outside = tmp_path / "x"
+    outside.mkdir()
+    (outside / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
+    write_env(scratch, tmp_path / "models", "/models/../x/Esc-1B-Q4_0.gguf")
+    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
+        ml.derive_labels(scratch, environ={}, check_files=check)
 
 
 def test_a_role_forwarding_an_id_no_upstream_serves_fails(scratch):
@@ -418,8 +436,22 @@ def test_a_role_id_that_is_a_preset_is_refused_not_rewritten():
     with pytest.raises(ml.OwuiError, match="is a PRESET on 'qwen36-27b'"):
         ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui)
     assert owui.rows["local-small"]["name"] == "My preset"
-    # what was done before the refusal is named
-    assert [p for p, _ in owui.writes] == ["/api/v1/models/create", "/api/v1/models/create"]
+    # every row is read and validated BEFORE any write: the refusal wrote nothing, although
+    # local-large and local-large:nothink (read before local-small) needed writing
+    assert owui.writes == []
+
+
+@pytest.mark.parametrize("bad_role", list(ROLE_TABLE))
+def test_a_refusal_on_any_role_writes_nothing_at_all(bad_role):
+    """A preset on ANY role id - first, middle or last - refuses before a single write."""
+    rows = {"local-large": _row("local-large", "stale")}
+    rows[bad_role] = _row(bad_role, "My preset", base_model_id="qwen36-27b")
+    owui = FakeOwui(rows)
+    before = copy.deepcopy(owui.rows)
+    with pytest.raises(ml.OwuiError, match="Nothing was written"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui)
+    assert owui.writes == [] and owui.rows == before
+    assert {m for m, _ in owui.calls if _ != "/health"} == {"GET"}
 
 
 def test_a_non_admin_or_wrong_key_is_named():
