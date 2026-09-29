@@ -167,15 +167,20 @@ are picked up automatically** — Robocopy's `/MIR` reflects everything
 under the source tree. No code change to the sync needed when you add a
 new backup.
 
-The same run then copies `./backup/` (singular: cold archives that are not
-sidecar output) to `archive/`, a SIBLING of the slot folder, NEW FILES ONLY
-(`/E /XC /XN /XO /XX`): nothing there is ever purged or replaced, so an archive
-stays on the NAS after it is deleted locally AND after the local copy changes or
-is truncated - the run logs a WARN naming such a file and keeps the NAS copy. A
-new version of an archive therefore needs a new name. Put a one-off archive there (in its own dated directory, with a
-`SHA256SUMS`), never under `./backups/`, where both slots would carry it and
-the mirror would drop it two weeks after it left D:. Layout rules and the
-argument sets: `scripts/backup/nas-sync-lib.ps1`; tests against local stand-ins:
+The same run then copies the archives in the SUBDIRECTORIES of `./backup/`
+(singular: cold archives that are not sidecar output; its top-level files are the
+git-tracked sidecar sources and are not archived) to `archive/`, a SIBLING of the
+slot folder, one file at a time: a missing file is copied under a temp name,
+sha256-verified and renamed into place; a NAS copy left incomplete by an
+interrupted copy is re-copied the same way; a complete NAS copy is never replaced
+and nothing there is ever deleted. If a complete NAS copy's content differs from
+the local file, the run fails (an `[ERROR] archive: MISMATCH` line saying which
+side the recorded checksum vouches for, an alert, no completion marker) and
+writes nothing. A new version of an archive therefore needs a new name. Put a
+one-off archive in its own dated subdirectory, with a `SHA256SUMS` - that
+checksum is what decides which side to trust - never under `./backups/`, where
+both slots would carry it and the mirror would drop it two weeks after it left
+D:. The rules: `scripts/backup/nas-sync-lib.ps1`; tests against local stand-ins:
 `scripts/backup/test-nas-sync.ps1`.
 
 ---

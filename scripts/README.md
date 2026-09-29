@@ -71,8 +71,8 @@ were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 
 ## `backup/` (host side — NAS mirror + DR; container-side sidecar scripts live in ../backup/)
 
-`backup-to-nas.ps1` (weekly NAS mirror of `../backups/` plus the new-files-only
-archive copy of `../backup/`; Task via `install-nas-backup-task.ps1`; helpers
+`backup-to-nas.ps1` (weekly NAS mirror of `../backups/` plus the verified,
+never-replacing archive copy of `../backup/<subdir>/`; Task via `install-nas-backup-task.ps1`; helpers
 in `nas-sync-lib.ps1`, tests in `test-nas-sync.ps1`), `copy-archives-to-nas.ps1`
 (one-time, sha256-verified archive copy; never deletes), `set-nas-credential.ps1`,
 `restore-from-snapshot.ps1` (DR driver). Container-side sidecar scripts live

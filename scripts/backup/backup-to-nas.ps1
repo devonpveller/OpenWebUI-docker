@@ -18,18 +18,21 @@
 # Second pass - the ARCHIVES (since 2026-09-29, closeout-followups cf-nas):
 #   ./backup/ (singular) holds cold archives that exist nowhere else - the
 #   2026-09-13 orphan-volume tars, the May-2025 Open WebUI volumes, OWUI model
-#   exports - next to the tracked sidecar scripts. It is copied NEW FILES ONLY
-#   (robocopy /E /XC /XN /XO /XX: never /MIR or /PURGE, and a file already on
-#   the NAS is never replaced) to an archive folder OUTSIDE the slots: by
-#   default a sibling of -NasUncRoot named `archive`
-#   (\\nas\backups\ai-stack\portal -> \\nas\backups\ai-stack\archive). Why not
-#   move them under ./backups/ instead: every archive would then be stored twice
-#   (both slots, ~17 GB each), and a slot is a MIRROR - an archive deleted from D:
-#   would vanish from the NAS within two weeks. An archive copy must outlive the
-#   local file - its deletion AND its corruption: a local file that no longer
-#   matches its NAS copy (size or timestamp) is logged as a WARN and left alone.
-#   The layout rules (sibling default, same share, never inside a slot, all
-#   judged on normalised paths) are in nas-sync-lib.ps1.
+#   exports - in its SUBDIRECTORIES; its top-level files are the git-tracked
+#   sidecar sources and are not archived (git keeps them). The archives go to a
+#   folder OUTSIDE the slots - by default a sibling of -NasUncRoot named
+#   `archive` (\\nas\backups\ai-stack\portal -> \\nas\backups\ai-stack\archive) -
+#   one file at a time (Invoke-NasArchivePass in nas-sync-lib.ps1): a missing
+#   file is copied to a temp name, sha256-verified, then renamed into place; a
+#   NAS copy left INCOMPLETE by an interrupted robocopy (its 1980 stamp) is
+#   re-copied the same way; a COMPLETE NAS copy is never replaced and nothing is
+#   deleted, so an archive outlives its local file. A complete NAS copy whose
+#   content differs from the local file is a MISMATCH: an [ERROR] line saying
+#   which side the recorded checksum vouches for, an alert, exit 2 and no
+#   completion marker. Why not move the archives under ./backups/ instead: both
+#   slots would hold them (~17 GB each) and the slot MIRROR would drop an archive
+#   two weeks after it left D:. The layout rules (sibling default, same share,
+#   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
 #
 # Parameters:
 #   -NasUncRoot    Required. e.g. \\nas.example.lan\backups\portal
@@ -41,7 +44,7 @@
 #                  The file is DPAPI-encrypted with LocalMachine scope so
 #                  the scheduled task (running under S4U logon with no
 #                  password) can still decrypt it.
-#   -NasArchiveRoot Optional. Where ./backup/ is copied (new files only, above).
+#   -NasArchiveRoot Optional. Where the ./backup/ archives go (see above).
 #                  Default: <parent of NasUncRoot>\archive. Must be absolute, on
 #                  the same \\server\share and not inside slot-A/slot-B, judged
 #                  after normalisation (`..`, `.`, `/`, trailing dots/spaces) and
@@ -218,7 +221,7 @@ Write-LogLine "dry-run mode  : $($DryRun.IsPresent)"
 if ($NoArchive) { Write-LogLine "archive pass  : skipped (-NoArchive)" }
 else {
   Write-LogLine "archive source: $archiveSrc"
-  Write-LogLine "archive dest  : $archiveDest (new files only - never replaced, never purged)"
+  Write-LogLine "archive dest  : $archiveDest (verified copies; a complete file is never replaced, nothing is purged)"
 }
 
 if ($archiveRootError) {
@@ -451,30 +454,38 @@ if ($rcExit -band 4) { $exitDescription += 'mismatches handled' }
 if ($exitDescription.Count -eq 0) { $exitDescription = @('no changes') }
 Write-LogLine "robocopy summary: $($exitDescription -join ', ')"
 
-# -- archive pass: ./backup/ -> archive root, NEW FILES ONLY ------------------------
+# -- archive pass: ./backup/<subdir>/ -> archive root, verified, never replacing -----
 # Runs only after the slot mirror succeeded, so a failure here never costs the
-# slot. A failure is alerted and makes the run exit 2 WITHOUT the completion
-# marker at the bottom (check_backups.py reads that marker), after the slot's
-# integrity check has still run.
+# slot. A MISMATCH or FAIL-* is alerted and makes the run exit 2 WITHOUT the
+# completion marker at the bottom (check_backups.py reads that marker and
+# [ERROR] lines), after the slot's integrity check has still run.
 $archiveFailed = $null
 if (-not $NoArchive) {
   if (-not (Test-Path -LiteralPath $archiveSrc)) {
     Write-LogLine "archive source $archiveSrc does not exist - archive pass skipped" 'WARN'
   } else {
-    # Files that differ from their NAS copy are NOT copied (/XC /XN /XO); say so.
-    $drift = @(Get-NasArchiveDrift -Source $archiveSrc -Destination $archiveDest)
-    foreach ($rel in $drift) {
-      Write-LogLine "archive: local $rel differs from its NAS copy (size or timestamp) - NAS copy KEPT, local not copied; check the local file" 'WARN'
+    $skipped = @(Get-ChildItem -LiteralPath $archiveSrc -File -Force).Count
+    Write-LogLine "archive pass: $archiveSrc\<subdir> -> $archiveDest$(if ($DryRun) { ' (DRY RUN - nothing written)' }); $skipped top-level file(s) skipped (git-tracked sidecar sources)"
+    $results = @()
+    try { $results = @(Invoke-NasArchivePass -Source $archiveSrc -Destination $archiveDest -DryRun:$DryRun) }
+    catch { $results = @(@{ Rel = '(pass)'; Status = 'FAIL-COPY'; Detail = $_.Exception.Message; Trust = '' }) }
+    $bad = @()
+    foreach ($x in $results) {
+      switch -Regex ($x.Status) {
+        '^(COPIED|REPAIRED|WOULD-COPY|WOULD-REPAIR)$' { Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)" }
+        '^PRESENT$' { }
+        '^MISMATCH$' {
+          Write-LogLine "archive: MISMATCH $($x.Rel) - the NAS copy is complete but its content differs from the local file ($($x.Detail)); NOTHING was overwritten. Trust: $($x.Trust)" 'ERROR'
+          $bad += $x.Rel
+        }
+        default { Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)" 'ERROR'; $bad += $x.Rel }
+      }
     }
-    $archiveArgs = Get-NasArchiveCopyArgs -Source $archiveSrc -Destination $archiveDest -LogFile $logFile -DryRun:$DryRun
-    Write-LogLine ("robocopy (archive): " + (($archiveArgs | ForEach-Object { if ($_ -match ' ') { "`"$_`"" } else { $_ } }) -join ' '))
-    & robocopy.exe @archiveArgs | Out-Null
-    $arcExit = $LASTEXITCODE
-    Write-LogLine "robocopy (archive) exit code: $arcExit - $(Get-RobocopyExitSummary -Code $arcExit)"
-    if ($arcExit -ge 8) {
-      Write-LogLine "archive pass reported a failure (exit >= 8)" 'ERROR'
-      Send-AlerterFailure -Reason "archive pass robocopy exit $arcExit ($archiveSrc -> $archiveDest)"
-      $archiveFailed = "robocopy exit $arcExit"
+    $counts = ($results | Group-Object { $_.Status } | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+    Write-LogLine "archive pass summary: $(if ($counts) { $counts } else { 'no archive files' })"
+    if ($bad.Count -gt 0) {
+      Send-AlerterFailure -Reason ("archive pass: $($bad.Count) file(s) not safely on the NAS ($archiveDest): " + (($bad | Select-Object -First 5) -join ', '))
+      $archiveFailed = "$($bad.Count) archive file(s) failed"
     }
   }
 }

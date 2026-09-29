@@ -2,33 +2,32 @@
 #
 # ONE-TIME (and re-runnable) copy of the cold archives under ./backup/<dir>/ to the
 # NAS archive folder, with a sha256 check of every file on BOTH sides. It exists
-# because those archives predate the archive pass in backup-to-nas.ps1 and are
-# ~17 GB: doing the first transfer by hand, verified file by file, proves the copy
-# instead of assuming it (the weekly pass copies but does not hash; at the 77-87
-# MB/s the 2026-09-27 runs measured, 17 GB is minutes, so time is not the reason).
-# After it, the weekly archive pass copies new files only (/XC /XN /XO) and leaves
-# these alone whatever happens to the local copies.
+# because those archives predate the archive pass in backup-to-nas.ps1; the first
+# transfer is done by hand so every file is PROVEN on the NAS (at the 77-87 MB/s the
+# 2026-09-27 runs measured, 17 GB is minutes - time is not the reason).
 #
-# What it does, per file in each -Dirs directory (recursively):
-#   1. hashes the LOCAL file; if the directory carries a SHA256SUMS naming the
-#      file, the local hash must match it (a local file that has rotted is NOT
-#      copied - FAIL LOCAL);
-#   2. if the NAS copy exists: hashes it -> VERIFIED (already present) when equal,
-#      MISMATCH when not (the NAS file is left exactly as it is; you decide);
-#   3. if absent: copies to <name>.cf-partial, preserving the timestamp, hashes
-#      the copy, and only then renames it into place -> VERIFIED. A run killed
-#      mid-copy leaves at most a *.cf-partial file, which the next run overwrites.
-#      A copy whose hash differs is FAIL COPY (left as .cf-partial); a final name
-#      that appeared meanwhile is never overwritten (FAIL COPY as well);
-#   4. an entry in a SHA256SUMS whose file is not there locally is MISSING LOCAL.
+# Per file it runs Sync-NasArchiveFile from nas-sync-lib.ps1 - the same code the
+# weekly archive pass runs - with -AlwaysHash, so an existing NAS copy is always
+# re-hashed:
+#   - absent on the NAS: copied to <name>.cf-partial, timestamp preserved, sha256
+#     checked against the local file, renamed into place          VERIFIED (copied)
+#   - NAS copy left incomplete by an interrupted robocopy (its 1980 stamp): the
+#     same verified temp copy replaces it                          VERIFIED (repaired)
+#   - NAS copy complete and equal                                  VERIFIED (already present)
+#   - NAS copy complete and different: MISMATCH, nothing written, and which side the
+#     recorded checksum (SHA256SUMS / <file>.sha256) vouches for
+#   - local file contradicting its SHA256SUMS: FAIL LOCAL, not copied
+#   - copy hash wrong, or the final name appeared meanwhile: FAIL COPY, nothing
+#     overwritten (a *.cf-partial may remain; the next run overwrites it)
+# and an entry in a SHA256SUMS whose file is not there locally is MISSING LOCAL.
 #
-# It NEVER deletes or moves anything, local or remote, and never overwrites a
-# complete file. -VerifyOnly hashes and reports without writing anything
-# (ABSENT for a file not yet on the NAS).
+# It never deletes anything and never overwrites a complete file. -VerifyOnly hashes
+# and reports without writing anything (ABSENT / INCOMPLETE for what is not there).
 #
-# Exit: 0 every file VERIFIED; 1 any ABSENT / MISMATCH / FAIL / MISSING LOCAL;
-# 2 setup error (including a destination inside a slot-A / slot-B folder, judged
-# on the normalised path: `x\..\slot-A`, `/slot-A`, `slot-A.` and `slot-A ` count).
+# Exit: 0 every file VERIFIED; 1 any ABSENT / INCOMPLETE / MISMATCH / FAIL /
+# MISSING LOCAL; 2 setup error (including a destination inside a slot-A / slot-B
+# folder, judged on the normalised path: `x\..\slot-A`, `/slot-A`, `slot-A.`,
+# `slot-A ` and any letter case count).
 #
 # Usage (the landing step; the NAS path is the job's archive root - use the same
 #   spelling as the job's session, i.e. the NAS's IP, to avoid system error 1219):
@@ -70,21 +69,6 @@ if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
   exit 2
 }
 
-function Get-Sha256Lower([string]$Path) {
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-}
-
-function Read-Sha256Sums([string]$Dir) {
-  # "<hash> *<name>" or "<hash>  <name>" (sha256sum text/binary forms)
-  $map = @{}
-  $f = Join-Path $Dir 'SHA256SUMS'
-  if (-not (Test-Path -LiteralPath $f)) { return $map }
-  foreach ($line in [System.IO.File]::ReadAllLines($f)) {
-    if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') { $map[$Matches[2]] = $Matches[1].ToLowerInvariant() }
-  }
-  return $map
-}
-
 $opened = $null
 if ($Connect -and -not $VerifyOnly) {
   $share = Get-UncShareRoot $Destination
@@ -119,7 +103,7 @@ try {
     $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Sort-Object FullName)
     Write-Host "== $d ($($files.Count) files)"
     foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory | ForEach-Object { $_.FullName }))) {
-      $listed = Read-Sha256Sums $sumDir
+      $listed = Read-NasSha256Sums $sumDir
       foreach ($name in $listed.Keys) {
         if (-not (Test-Path -LiteralPath (Join-Path $sumDir $name) -PathType Leaf)) {
           Write-Host "MISSING LOCAL  $($sumDir.Substring($Source.Length + 1))\$name  (listed in SHA256SUMS, no such file)" -ForegroundColor Red
@@ -129,37 +113,16 @@ try {
     }
     foreach ($f in $files) {
       $rel = $f.FullName.Substring($Source.Length + 1)
-      $dst = Join-Path $Destination $rel
-      $sums = Read-Sha256Sums $f.DirectoryName
-      $lh = Get-Sha256Lower $f.FullName
-      if ($sums.ContainsKey($f.Name) -and $sums[$f.Name] -ne $lh) {
-        Write-Host "FAIL LOCAL  $rel  local=$lh SHA256SUMS=$($sums[$f.Name]) - not copied" -ForegroundColor Red
-        $bad++; continue
+      $x = Sync-NasArchiveFile -LocalFile $f.FullName -NasFile (Join-Path $Destination $rel) -Rel $rel -AlwaysHash -VerifyOnly:$VerifyOnly
+      switch ($x.Status) {
+        'COPIED'   { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (copied)"; $ok++ }
+        'REPAIRED' { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (repaired - the NAS copy was incomplete)"; $ok++ }
+        'PRESENT'  { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (already present)"; $ok++ }
+        'MISMATCH' { Write-Host "MISMATCH  $rel  $($x.Detail) - NAS file left untouched. Trust: $($x.Trust)" -ForegroundColor Red; $bad++ }
+        'FAIL-LOCAL' { Write-Host "FAIL LOCAL  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
+        'FAIL-COPY' { Write-Host "FAIL COPY  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
+        default    { Write-Host "$($x.Status)  $rel  $($x.Detail)" -ForegroundColor Yellow; $bad++ }
       }
-      if (Test-Path -LiteralPath $dst -PathType Leaf) {
-        $rh = Get-Sha256Lower $dst
-        if ($rh -eq $lh) { Write-Host "$rel  $($f.Length)  sha256=$lh  VERIFIED (already present)"; $ok++ }
-        else { Write-Host "MISMATCH  $rel  local=$lh nas=$rh - NAS file left untouched" -ForegroundColor Red; $bad++ }
-        continue
-      }
-      if ($VerifyOnly) { Write-Host "ABSENT  $rel  sha256=$lh" -ForegroundColor Yellow; $bad++; continue }
-      $dstDir = Split-Path -Parent $dst
-      if (-not (Test-Path -LiteralPath $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null }
-      $partial = "$dst.cf-partial"
-      [System.IO.File]::Copy($f.FullName, $partial, $true)
-      [System.IO.File]::SetLastWriteTimeUtc($partial, $f.LastWriteTimeUtc)
-      $rh = Get-Sha256Lower $partial
-      if ($rh -ne $lh) {
-        Write-Host "FAIL COPY  $rel  local=$lh copy=$rh - left as $partial" -ForegroundColor Red
-        $bad++; continue
-      }
-      try { [System.IO.File]::Move($partial, $dst) }
-      catch {
-        Write-Host "FAIL COPY  $rel  could not rename into place ($($_.Exception.Message)) - existing file untouched, copy left as $partial" -ForegroundColor Red
-        $bad++; continue
-      }
-      Write-Host "$rel  $($f.Length)  sha256=$lh  VERIFIED (copied)"
-      $ok++
     }
   }
 } finally {
