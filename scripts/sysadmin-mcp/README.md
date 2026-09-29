@@ -174,7 +174,8 @@ The same docker reclaim runs **automatically** from the hourly `AI-Stack Disk Gu
 its #sysadmin alert carries the per-category freed bytes. `python auto_reclaim.py --plan` prints
 the listed set without removing anything. The same task also ALERTS (alert only, no reclaim) when
 C: free drops under 10% of the drive while still above the GB lines; its alert names the largest
-non-Docker space users on C:, is re-sent at most every 6 h per severity (a worse severity, or a
+non-Docker space users on C: (for CRITICAL in a second message, so the walk cannot hold the
+urgent line back), is re-sent at most every 6 h per severity (a worse severity, or a
 run that stopped workers, always goes out), and falls back to Telegram (`telegram_notify.py`) when
 the #sysadmin post fails. Its test fakes the disk figures, docker and both transports:
 `powershell -NoProfile -File scripts\maintenance\test-disk-guard.ps1`.
