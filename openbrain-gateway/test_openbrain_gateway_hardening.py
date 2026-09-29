@@ -347,3 +347,106 @@ def test_ordinary_tools_call_is_forwarded_with_policy_applied(upstream):
     assert r.status_code == 200
     assert _sent(upstream)["params"]["arguments"] == {
         "query": "q", "metadata_filter": {"share": "cloud"}}
+
+
+# --- attempt-1 findings: malformed tool ENTRIES, and three unpinned claims ------
+
+_BAD_ENTRIES = [
+    {"name": ["thought_stats"]},            # unhashable name (list)   - X1
+    {"name": {"n": "thought_stats"}},       # unhashable name (object) - X1
+    {"name": 7},                          # hashable, not a string
+    {"name": None},
+    {"description": "no name at all"},
+]
+
+
+def _malformed_entries_payload():
+    return {"jsonrpc": "2.0", "id": 7,
+            "result": {"tools": _BAD_ENTRIES + _UPSTREAM_TOOLS}}
+
+
+def test_malformed_tool_entries_json_are_dropped_not_500(upstream):
+    r = _list(upstream, lambda req: httpx.Response(200, json=_malformed_entries_payload()))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    assert _names(r.json()) == _ALLOWED
+    assert all(isinstance(t["name"], str) for t in r.json()["result"]["tools"])
+    assert b"thought_stats" not in r.content
+
+
+def test_malformed_tool_entries_sse_are_dropped_not_500(upstream):
+    sse = ("event: message\ndata: " + json.dumps(_malformed_entries_payload())
+           + "\n\n").encode()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == _ALLOWED
+    assert b"thought_stats" not in r.content
+
+
+def test_any_exception_while_filtering_fails_closed(upstream, monkeypatch):
+    # The handler, not only _filter_tools_list, is total: an unexpected error
+    # inside the filter still advertises nothing (JSON and SSE paths).
+    def boom(_payload):
+        raise TypeError("unexpected")
+    monkeypatch.setattr(gw, "_filter_tools_list", boom)
+    r = _list(upstream, lambda req: httpx.Response(200, json=_FULL_LIST))
+    assert r.status_code == 200 and _names(r.json()) == set()
+    sse = ("event: message\ndata: " + json.dumps(_FULL_LIST) + "\n\n").encode()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == set()
+
+
+def test_declared_over_cap_length_is_refused_before_reading(monkeypatch):
+    # M04: the declared Content-Length alone refuses; not one byte is read.
+    import asyncio
+    read = []
+
+    class FakeRequest:
+        headers = {"content-length": str(gw.MAX_BODY_BYTES + 1)}
+
+        async def stream(self):
+            read.append(True)
+            yield b"{}"
+
+    with pytest.raises(gw._TooLarge):
+        asyncio.run(gw._read_capped(FakeRequest()))
+    assert read == []
+
+
+def test_declared_under_cap_length_is_read(monkeypatch):
+    import asyncio
+
+    class FakeRequest:
+        headers = {"content-length": "2"}
+
+        async def stream(self):
+            yield b"{}"
+
+    assert asyncio.run(gw._read_capped(FakeRequest())) == b"{}"
+
+
+def test_reply_with_neither_result_nor_error_advertises_nothing(upstream):
+    # M18: a reply carrying no result/error/method is unfilterable - even when
+    # it smuggles a tool list somewhere other than result.tools.
+    reply = {"jsonrpc": "2.0", "id": 7, "tools": _UPSTREAM_TOOLS}
+    r = _list(upstream, lambda req: httpx.Response(200, json=reply))
+    assert r.status_code == 200
+    assert _names(r.json()) == set()
+    assert b"thought_stats" not in r.content
+    with pytest.raises(gw._Unfilterable):
+        gw._filter_tools_list({"jsonrpc": "2.0", "id": 7})
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "1e400"])
+def test_sse_data_line_is_parsed_strictly(upstream, token):
+    # M20: the SSE branch uses the strict parser - a data line a lenient
+    # json.loads would accept (and then filter) is replaced by the empty list.
+    line = json.dumps(_FULL_LIST)[:-1] + ', "x": ' + token + "}"
+    sse = ("event: message\ndata: " + line + "\n\n").encode()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    data = [ln for ln in r.text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == set()

@@ -222,7 +222,8 @@ def _filter_tools_list(payload):
     """Filter a tools/list reply to the allow-list. FAIL CLOSED: raises
     _Unfilterable for any reply whose tool list cannot be read, and the caller
     then advertises NOTHING (see _closed_tools_list) instead of passing the
-    upstream's reply through unfiltered. A JSON-RPC error, or a message that
+    upstream's reply through unfiltered. A tool entry that is not an object,
+    or whose name is not a string, is dropped. A JSON-RPC error, or a message that
     is not a response at all (a notification or request the server interleaves
     on an SSE stream), carries no tool list and is returned as it is."""
     if not isinstance(payload, dict):
@@ -235,7 +236,7 @@ def _filter_tools_list(payload):
     if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
         raise _Unfilterable("result.tools is not a list")
     result["tools"] = [
-        t for t in result["tools"] if isinstance(t, dict) and (
+        t for t in result["tools"] if isinstance(t, dict) and isinstance(t.get("name"), str) and (
             t.get("name") in ALLOWED_TOOLS)]
     return payload
 
@@ -440,7 +441,7 @@ async def mcp(request):
                 if line.startswith("data:"):
                     try:
                         p = _filter_tools_list(_strict_json(line[5:].strip()))
-                    except ValueError:  # _Unfilterable, _BodyRefused
+                    except Exception:  # anything unfilterable -> advertise nothing
                         p = _closed_tools_list(list_id)
                     out_lines.append("data: " + json.dumps(p))
                     continue
@@ -451,7 +452,7 @@ async def mcp(request):
         if is_tools_list:
             try:
                 payload = _filter_tools_list(_strict_json(upstream.text))
-            except ValueError:  # _Unfilterable, _BodyRefused
+            except Exception:  # anything unfilterable -> advertise nothing
                 if 200 <= upstream.status_code < 300:
                     return JSONResponse(_closed_tools_list(list_id))
                 return JSONResponse(
