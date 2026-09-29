@@ -191,7 +191,7 @@ function Invoke-JobFail {
             $r = Invoke-BoundedDocker -DockerArgs @('ps') -TimeoutSeconds 3
             if ($r -and ($r -join '') -match 'cfwd-hang') { $ok++ }
         }
-        $warns = @(Select-String -Path $LOG_FILE -Pattern 'job object unavailable' -ErrorAction SilentlyContinue).Count
+        $warns = if (Test-Path $LOG_FILE) { @(Select-String -Path $LOG_FILE -Pattern 'job object unavailable').Count } else { 0 }
         Write-Host "JOBFAIL attempts=$($script:AddTypeCalls) warns=$warns answered=$ok"
     } finally {
         Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
@@ -886,6 +886,10 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     # for the compile: a stub that starts a descendant at once and exits must
     # leave nothing behind.
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # PS 5.1: a native command's stderr under `2>&1` becomes an ErrorRecord,
+    # which THROWS under 'Stop'. The child's own errors must reach the case's
+    # detail, not end the pure part.
+    $ErrorActionPreference = 'Continue'
     $harness = $MyInvocation.PSCommandPath
     if (-not $harness) { $harness = $script:HarnessPath }
     $fc = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $script:HarnessPath -Part firstcall -Script $Script -Stub $hangExe 2>&1 |
