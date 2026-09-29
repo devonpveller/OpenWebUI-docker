@@ -2905,7 +2905,8 @@ def test_health_does_not_probe_a_required_plane_nobody_enabled(root):
 # --- ac-planes-contained: memory's sibling checkout, and the shared backup module ----
 
 
-MNEMORY_CLONE = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory"
+MNEMORY_CLONE = ("git clone https://github.com/devonpveller/mnemory.git ../mnemory; "
+                 "git -C ../mnemory checkout e83cb54154812005fd363f9df82ee59e5e1c028b")
 
 
 def _without_mnemory(root):
