@@ -1231,10 +1231,6 @@ class Bridge:
                 release_once()
                 with self.running_lock:
                     self.running.discard(thread_root)
-                # The attach turn is over: from here the stored session id (or, if the fork
-                # failed and none was stored, the guard again) decides what a reply means.
-                with self.state_lock:
-                    self._attaching().discard(thread_root)
                 with self.proc_lock:
                     self.procs.pop(thread_root, None)
                     self.proc_kind.pop(thread_root, None)
@@ -1511,6 +1507,22 @@ class Bridge:
         handoff = None
         if not session_id:
             handoff = HANDOFF_RE.match(prompt)
+            # D1 (cf-bridge attempt 2). No bridge session and no fork/handoff in THIS message, in
+            # an interactive session's thread: this is a reply that was queued behind an attach
+            # that FAILED (or a replayed one). Starting a new session here would take the desk
+            # session's thread over - the G15 defect. Say so and offer again instead.
+            # A root post (trigger == root) is never a reply, whatever the map says.
+            rec = (None if handoff or trigger_post == thread_root
+                   else interactive_threads().get(thread_root))
+            if rec:
+                log(f"thread {thread_root[:8]}: queued reply after a failed attach - not starting "
+                    f"a session")
+                audit({"event": "interactive_thread_reply_unattached", "thread": thread_root,
+                       "post": trigger_post, "session": rec.get("session_id") or rec.get("key")})
+                post("⚠️ **The fork/handoff for this thread did not attach** (see the failed turn "
+                     "above), so this message was NOT run - no new session was started.\n\n"
+                     + interactive_offer(rec), thread_root)
+                return
         model_label = thread_model or MODEL or "default"
         # Transitions (new session, handoff) get an informative post; ordinary continuations
         # get a silent ⏳ reaction on the operator's message instead — no "resuming…" noise.
@@ -1785,26 +1797,18 @@ class Bridge:
         with self.state_lock:
             return str((self.state["threads"].get(thread_root) or {}).get("session_id") or "")
 
-    def _attaching(self) -> set:
-        """Threads whose fork/handoff passed the interactive-thread guard in this process."""
-        if not hasattr(self, "_attaching_set"):
-            self._attaching_set: set[str] = set()
-        return self._attaching_set
-
     def _thread_attached(self, thread_root: str) -> bool:
-        """True when this thread is, or is becoming, a bridge thread: a stored session id, a
-        fork/handoff admitted here, a turn running, work queued, or an unfinished inbox record
-        (a restart replays those)."""
+        """True when this thread is, or is becoming, a bridge thread: a stored session id, or
+        an operator message admitted but not finished (the inbox record).
+
+        The inbox is the ONE in-flight signal needed. poll_once records every admitted message
+        before it queues it, and the worker consumes the record only in its `finally`, after
+        execute() has stored any new session id. So a queued message, a running turn and a
+        fork admitted earlier in the same poll pass are all covered by it, and it survives a
+        restart (replay_inbox). Attempt 2 also checked an in-process `_attaching` set, the
+        running set and the queue; each was provably redundant with the inbox (removing any
+        one changed no outcome), so they were removed rather than kept untested."""
         if self._thread_session(thread_root):
-            return True
-        with self.state_lock:
-            if thread_root in self._attaching():
-                return True
-        with self.running_lock:
-            if thread_root in self.running:
-                return True
-        q = self.queues.get(thread_root)
-        if q is not None and not q.empty():
             return True
         try:
             return bool(self.inbox.pending(thread_root))
@@ -2407,15 +2411,13 @@ class Bridge:
             # a `fork|handoff <uuid> ...` reply passes through and attaches the thread as usual.
             # A thread that already has a bridge session (attached earlier) just continues - and
             # so does one whose attach is still IN FLIGHT: its session id is stored only when the
-            # first turn returns, so `_thread_attached` also looks at the attach just admitted,
-            # the running set, the queue and the inbox (cf-bridge attempt 1, A4: a follow-up
-            # during the fork turn was answered "nothing was started" and dropped).
+            # first turn returns, so `_thread_attached` also counts an admitted, unfinished
+            # message (cf-bridge attempt 1, A4: a follow-up during the fork turn was answered
+            # "nothing was started" and dropped). If that attach then FAILS, execute() refuses
+            # to start a new session for the queued reply (attempt 2, D1).
             if p.get("root_id") and not self._thread_attached(thread_root):
                 rec = interactive_threads().get(thread_root)
-                if rec and HANDOFF_RE.match(_strip_directives(msg)):
-                    with self.state_lock:
-                        self._attaching().add(thread_root)
-                elif rec:
+                if rec and not HANDOFF_RE.match(_strip_directives(msg)):
                     log(f"thread {thread_root[:8]}: reply in interactive session "
                         f"{rec.get('session_id') or rec.get('key')}'s thread - offered fork/handoff")
                     audit({"event": "interactive_thread_reply", "thread": thread_root, "post": pid,

@@ -209,9 +209,13 @@ The bridge reads that map (`BRIDGE_NOTIFY_THREADS` overrides the path). **A repl
 interactive session's thread starts nothing.** The bridge answers in the thread that the session
 lives at the desk, and offers `fork <full id> <message>` (a forked copy runs here; the desk
 session is untouched) or `handoff <full id> <message>` (only once it is closed at the desk).
-Replying with either attaches that thread at once. Replies sent while that first turn is
-still running are queued for the attached session, and a mid-turn `approve` is a verdict as
-usual. After that it is an ordinary bridge thread.
+Replying with either starts the attach at once. Replies sent while that first turn is still
+running are queued behind it, and a mid-turn `approve` is a verdict as usual. If the attach
+succeeds, the queued replies go to the attached session and the thread is an ordinary bridge
+thread from then on. If it FAILS (for example, a mistyped id, or a desk session whose
+transcript lives under another project directory), no session is bound. Each queued reply is
+then answered "the fork/handoff for this thread did not attach" with the offer again, and
+nothing is started.
 When only the key is known, the offer says to find the full id with `sessions <key>`.
 
 Before this, such a reply started a brand-new headless session with none of the desk session's
@@ -219,12 +223,17 @@ context. The live audit shows it happened on 2026-09-28 (thread `aiou1nmo`).
 
 Headless bridge sessions load the same local settings, so they fired the notifier as well and
 each one opened a **second** thread beside its bridge thread. `run_turn` now exports
-`CLAUDE_BRIDGE_THREAD=<thread root>` to every turn. A notifier run that sees it AND got its
-session id from a hook payload on stdin (the Stop hook) does nothing. Every other call inside
-a bridge turn, such as a manual `notify-mattermost.sh "msg"` or a watchdog alert, posts flat,
-whatever its text says. Its text is never mined for a `session <8 hex>` id there. The live
-Notification hook passes its text with stdin closed, so under the marker it too posts one
-flat message, never a thread.
+`CLAUDE_BRIDGE_THREAD=<thread root>` to every turn. Under that marker the notifier behaves
+like this:
+- A run whose session id came from a hook payload on stdin (the Stop hook) does nothing.
+- A run with `MM_SESSION_ID` set posts under THAT session's thread, opening it and writing the
+  map if needed. The caller named the session on purpose. Stdin is not read then, so this
+  holds even if a hook payload is piped in.
+- Every other call posts FLAT, whatever its text says: a manual `notify-mattermost.sh "msg"`,
+  a watchdog alert, or anything with garbage or an id-less payload on stdin. Its text is never
+  mined for a `session <8 hex>` id there.
+- The live Notification hook passes its text with stdin closed, so it too posts one flat
+  message (with the operator mention), never a thread.
 
 ## Follows — auto-wake on replies in other threads (2026-07-15)
 

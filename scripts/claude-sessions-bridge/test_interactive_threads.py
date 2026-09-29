@@ -44,6 +44,7 @@ LIVE_API_LINE = 'API="http://localhost:8065/api/v4/posts"'
 S1 = "1a1a1a1a-1111-4111-8111-111111111111"   # interactive, Stop hook -> full id known
 S3 = "3c3c3c3c-3333-4333-8333-333333333333"   # interactive, Notification first, then Stop
 S4 = "4d4d4d4d-4444-4444-8444-444444444444"   # interactive, Notification only
+S6 = "6f6f6f6f-6666-4666-8666-666666666666"   # interactive, its fork FAILS (attempt 2, D1)
 
 
 # ── stub Mattermost ─────────────────────────────────────────────────────────
@@ -147,15 +148,23 @@ FAKE_CLAUDE = r'''
 import json, os, subprocess, sys, uuid
 argv = sys.argv[1:]
 prompt = sys.stdin.read()
-if "SLOWJOB" in prompt:          # keeps the turn in flight long enough to reply during it
-    import time; time.sleep(5)
 sid = None
 if "--resume" in argv and "--fork-session" not in argv:
     sid = argv[argv.index("--resume") + 1]
 sid = sid or str(uuid.uuid4())
+fail = "FAILFORK" in prompt
+# The log line is the "started" signal, so it is written FIRST, before any sleep. (Attempt 2's
+# T7 flake: it was written after the 5 s sleep, so "is the fork still running?" raced its end.)
 with open(os.environ["CF_FAKE_LOG"], "a", encoding="utf-8") as fh:
-    fh.write(json.dumps({"argv": argv, "prompt": prompt, "session_id": sid,
+    fh.write(json.dumps({"argv": argv, "prompt": prompt, "session_id": "" if fail else sid,
+                         "failed": fail,
                          "bridge_thread_env": os.environ.get("CLAUDE_BRIDGE_THREAD", "")}) + "\n")
+if "SLOWJOB" in prompt:          # keeps the turn in flight long enough to reply during it
+    import time; time.sleep(5)
+if fail:
+    # Exactly how the real CLI fails a --resume it cannot open: stderr, exit 1, NO result event.
+    sys.stderr.write("No conversation found with session ID: " + sid + "\n")
+    sys.exit(1)
 # The Stop hook, as .claude/settings.local.json wires it: `bash notify-mattermost.sh` with the
 # hook JSON on stdin, inheriting THIS process's environment.
 hook = os.environ.get("CF_HOOK_SCRIPT")
@@ -350,8 +359,7 @@ def scenario(out_path: str) -> None:
     n_before = len(calls())
     mark = stub.add(OP, f"model: sonnet fork {S1} SLOWJOB carry on from here", r1)["create_at"]
     b.poll_once(me)
-    wait_calls(n_before + 1)
-    time.sleep(0.5)
+    wait_calls(n_before + 1)          # the fake logs at its START, so the turn is in flight
     with b.running_lock:
         res["fork_running_when_followup_sent"] = r1 in b.running
     stub.add(OP, "and also check the logs", r1)
@@ -369,6 +377,33 @@ def scenario(out_path: str) -> None:
     settle(expect_calls=n_before + 1, timeout=60)
     res["calls_after_attached_reply"] = calls()[n_before:]
     res["bridge_posts_after_attached_reply"] = bridge_posts_in(r1, mark - 1)
+
+    # 3c. a FAILED attach (attempt 2, D1): fork S6 fails like the real CLI while a reply is
+    #     queued behind it. The queued reply must NOT start a new session; nor may a later one.
+    run_stop_hook(bash, notifier, S6, henv)
+    r6 = (roots_for(read_map(tmap), S6) or [""])[0]
+    res["r6"] = r6
+    n_before = len(calls())
+    mark = stub.add(OP, f"fork {S6} SLOWJOB FAILFORK go", r6)["create_at"]
+    b.poll_once(me)
+    wait_calls(n_before + 1)
+    with b.running_lock:
+        res["failfork_running_when_followup_sent"] = r6 in b.running
+    stub.add(OP, "and also check the logs", r6)
+    b.poll_once(me)
+    settle(expect_calls=n_before + 1, timeout=45)
+    time.sleep(1.0)
+    settle(timeout=45)
+    res["calls_after_failfork"] = calls()[n_before:]
+    res["posts_after_failfork"] = bridge_posts_in(r6, mark - 1)
+    res["session_after_failfork"] = b.state["threads"].get(r6, {}).get("session_id", "")
+    n_before = len(calls())
+    mark = stub.add(OP, "status now?", r6)["create_at"]
+    b.poll_once(me)
+    time.sleep(1.0)
+    settle(timeout=45)
+    res["calls_after_failfork_reply"] = calls()[n_before:]
+    res["posts_after_failfork_reply"] = bridge_posts_in(r6, mark - 1)
 
     # 4. S3: a permission ping (8-char id only) opens the thread, then its Stop hook runs
     run_notification_hook(bash, notifier, S3, henv)
@@ -527,6 +562,28 @@ class InteractiveThreadReplyTests(unittest.TestCase):
         offers = [m for m in r["bridge_posts_after_fork"] if "nothing was started" in m]
         self.assertEqual(offers, [], "a reply during the attach turn got the offer: " + repr(offers)[:300])
 
+    def test_09_failed_attach_never_starts_a_new_session(self):
+        """Attempt 2, D1: the fork fails like the real CLI (stderr, exit 1, no result) while a
+        reply is queued behind it. The queued reply, and a later one, must not start a session."""
+        r = scenario_result()
+        self.assertTrue(r["r6"], "setup: no thread opened for S6")
+        self.assertTrue(r["failfork_running_when_followup_sent"],
+                        "setup: the failing fork must still be running when the reply is sent")
+        fc = r["calls_after_failfork"]
+        self.assertEqual(len(fc), 1, "only the failing fork may run; got "
+                         + repr([(c["prompt"][:30], c["argv"][-3:]) for c in fc]))
+        self.assertTrue(fc[0]["failed"])
+        self.assertEqual(r["session_after_failfork"], "",
+                         "no session may be bound to the desk session's thread")
+        posts = r["posts_after_failfork"]
+        self.assertFalse([m for m in posts if "new Claude session" in m], repr(posts)[:500])
+        self.assertTrue([m for m in posts if "did not attach" in m and f"fork {S6}" in m],
+                        "the queued reply must be answered with the attach-failed offer: "
+                        + repr(posts)[:500])
+        self.assertEqual(r["calls_after_failfork_reply"], [])
+        self.assertTrue([m for m in r["posts_after_failfork_reply"] if f"fork {S6}" in m],
+                        repr(r["posts_after_failfork_reply"])[:300])
+
     def test_08_reply_in_an_attached_thread_resumes_it(self):
         """Attempt 1, X1: once attached, the thread is an ordinary bridge thread."""
         r = scenario_result()
@@ -608,7 +665,7 @@ class NotifierManualCallTests(unittest.TestCase):
     `session <8 hex/digits>` in the text used to count as "a hook run" and the message vanished).
     """
 
-    def _run(self, runs: list, marker: bool = True):
+    def _run(self, runs: list, marker: bool = True, extra_env: dict | None = None):
         """runs: [(message or None, stdin bytes or None)]. Returns (posts, map lines)."""
         bash = find_git_bash()
         tmp = tempfile.mkdtemp(prefix="cf-bridge-manual-")
@@ -618,6 +675,7 @@ class NotifierManualCallTests(unittest.TestCase):
             env = hook_env(stub.url)
             if marker:
                 env["CLAUDE_BRIDGE_THREAD"] = "somebridgethreadroot000000"
+            env.update(extra_env or {})
             for msg, stdin in runs:
                 argv = [bash, script] + ([msg] if msg is not None else [])
                 if stdin is None:
@@ -659,21 +717,36 @@ class NotifierManualCallTests(unittest.TestCase):
                          + repr(posts))
         self.assertEqual(lines, [])
 
-    def test_35_caller_named_session_inside_a_bridge_turn_still_posts(self):
-        # MM_SESSION_ID is the caller naming a session on purpose - not a hook payload.
-        bash = find_git_bash()
-        tmp = tempfile.mkdtemp(prefix="cf-bridge-manual-")
-        stub = StubMM()
-        try:
-            script = make_notifier_copy(os.path.join(tmp, "repo"))
-            env = hook_env(stub.url)
-            env.update({"CLAUDE_BRIDGE_THREAD": "somebridgethreadroot000000", "MM_SESSION_ID": S4})
-            subprocess.run([bash, script, "named on purpose"], stdin=subprocess.DEVNULL, env=env,
-                           capture_output=True, timeout=60)
-            self.assertEqual([p["message"] for p in stub.snapshot()], ["named on purpose"])
-        finally:
-            stub.srv.shutdown()
-            shutil.rmtree(tmp, ignore_errors=True)
+    def test_35_caller_named_session_inside_a_bridge_turn_threads_under_it(self):
+        """MM_SESSION_ID is the caller naming a session on purpose - not a hook payload. It
+        posts even under the marker, and (exactly as the README says) it opens or joins THAT
+        session's thread and writes the map; it is the one case under the marker that is not
+        flat."""
+        posts, lines = self._run([("named on purpose", None), ("and again", None)],
+                                 extra_env={"MM_SESSION_ID": S4})
+        self.assertEqual([m for m, _ in posts], ["named on purpose", "and again"], repr(posts))
+        self.assertEqual(posts[0][1], "", "the first post is the thread root")
+        self.assertEqual(lines, [[S4[:8], lines[0][1], S4]], repr(lines))
+        self.assertEqual(posts[1][1], lines[0][1], "the second post joins that thread")
+
+    def test_36_garbage_on_stdin_under_the_marker_still_posts(self):
+        """Attempt 2, MS2: only a payload that YIELDS a session id is a hook run. Non-empty
+        stdin that is not one (garbage, JSON without a session id, an empty id) posts flat."""
+        runs = [("garbage piped", b"this is not json at all 1a2b3c4d"),
+                ("json without an id", b'{"hook_event_name": "Stop"}'),
+                ("empty id", b'{"session_id": "", "hook_event_name": "Stop"}')]
+        posts, lines = self._run(runs)
+        self.assertEqual(posts, [(m, "") for m, _ in runs], repr(posts))
+        self.assertEqual(lines, [])
+
+    def test_37_mm_session_id_wins_over_stdin(self):
+        """Attempt 2, MS4: with MM_SESSION_ID set, stdin is not read - the caller's id keys the
+        thread even when a hook payload for another session is piped in (no marker)."""
+        payload = json.dumps({"session_id": S1, "hook_event_name": "Stop"}).encode()
+        posts, lines = self._run([("env named", payload)], marker=False,
+                                 extra_env={"MM_SESSION_ID": S4})
+        self.assertEqual(len(posts), 1, repr(posts))
+        self.assertEqual([ln[0] for ln in lines], [S4[:8]], repr(lines))
 
     def test_34_outside_a_bridge_turn_the_notification_text_still_threads(self):
         # No marker: the live Notification hook's shape keeps its old behaviour (a thread keyed
