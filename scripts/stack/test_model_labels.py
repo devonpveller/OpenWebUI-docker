@@ -75,10 +75,10 @@ def world(tmp_path: Path) -> World:
 
 
 def swap_env(model_path) -> dict:
-    """Every `${env.LLAMA_SWAP_QWEN36_27B_*}` the real llama-swap config substitutes, as compose
-    renders them (whitespace-free), with the model path given."""
+    """Every `${env.*}` the real llama-swap config makes llama-swap substitute (ALL entries - one bad
+    value anywhere makes it refuse the whole config), as compose renders them, with the model path given."""
     text = (REPO_ROOT / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8")
-    env = {v: "1" for v in re.findall(r"\$\{env\.(LLAMA_SWAP_QWEN36_27B_[A-Z_]+)\}", text)}
+    env = {v: "1" for v in ml.swap_env_refs(text)}
     env["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"] = model_path
     return env
 
@@ -238,7 +238,8 @@ def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
                                   "/models/unsloth\\Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"])
 @pytest.mark.parametrize("check", [True, False])
 def test_a_backslash_in_the_container_path_is_refused(world, path, check):
-    with pytest.raises(ml.LabelError, match="character Windows treats specially"):
+    # through llama-swap the lexer rule (a backslash) refuses first; either refusal is right
+    with pytest.raises(ml.LabelError, match="character Windows treats specially|a backslash"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
@@ -1105,14 +1106,14 @@ def test_a_value_with_whitespace_substituted_into_llama_swaps_cmd_is_refused(wor
     ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
      "--model=${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "`--flag=value` form is refused"),
     ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
-     "--hf_repo org/repo\\n      --model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "not a /models file"),
+     "--hf_repo org/repo --model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "not a /models file"),
     ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
      "--ctx-size 1", "has no `--model`/`-m`"),
     ("--model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}",
      "--model ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH} ${UNKNOWN}", "is not a macro"),
 ])
 def test_llama_swaps_cmd_gets_the_embed_servers_flag_rules(world, old, new, why):
-    _swap_cmd(world, old, new.replace("\\\\n", "\\n"))
+    _swap_cmd(world, old, new)
     with pytest.raises(ml.LabelError, match=re.escape(why)):
         ml.derive_labels(make_render(world))
 
@@ -1154,22 +1155,51 @@ def test_a_path_that_only_starts_like_the_models_bind_is_refused(world):
                          check_files=False)
 
 
-def _alive(pid: int) -> bool:
-    if sys.platform == "win32":
-        import subprocess
-        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
-        return str(pid) in out
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+def _held(lock: Path) -> bool:
+    """Is the grandchild's lock still held? Identity by LOCK, never by PID: a lock dies with the
+    process that took it, so this can never mistake - or touch - a foreign process that reused a PID."""
+    with open(lock, "a+") as f:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(f, fcntl.LOCK_UN)
+        except OSError:
+            return True
+    return False
 
 
-def _tree_stub(pidfile: Path, parent_waits: bool, sleep: int = 60) -> list[str]:
-    code = ("import subprocess, sys, time; "
-            f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep({sleep})']); "
-            f"open({str(pidfile)!r}, 'w').write(str(p.pid))" + (f"; time.sleep({sleep})" if parent_waits else ""))
+_GRANDCHILD = (
+    "import os, sys, time\n"
+    "f = open(sys.argv[1], 'a+')\n"
+    "if os.name == 'nt':\n"
+    "    import msvcrt; f.seek(0); msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)\n"
+    "else:\n"
+    "    import fcntl; fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+    "open(sys.argv[2], 'w').write('ready')\n"
+    "time.sleep(float(sys.argv[3]))\n"
+)
+
+
+def _tree_stub(tmp: Path, parent_waits: bool, sleep: float = 15, holds_pipe: bool = True) -> list[str]:
+    """A child that starts a grandchild. The grandchild takes a lock (its identity), says `ready`, and
+    sleeps `sleep` s - SHORT on purpose: if a mutant leaves it alive it ends by itself; no test ever
+    kills anything by PID. `holds_pipe=False` detaches it from the output pipe (a success-path leftover)."""
+    lock, ready = tmp / "grandchild.lock", tmp / "grandchild.ready"
+    (tmp / "grandchild.py").write_text(_GRANDCHILD, encoding="utf-8")
+    redirect = "" if holds_pipe else ", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+    code = ("import subprocess, sys, time, os\n"
+            f"subprocess.Popen([sys.executable, {str(tmp / 'grandchild.py')!r}, {str(lock)!r}, {str(ready)!r}, "
+            f"{str(sleep)!r}]{redirect})\n"
+            f"deadline = time.time() + 10\n"
+            f"while not os.path.exists({str(ready)!r}) and time.time() < deadline: time.sleep(0.05)\n"
+            + (f"time.sleep({sleep})\n" if parent_waits else ""))
     return [sys.executable, "-c", code]
 
 
@@ -1177,21 +1207,30 @@ def _tree_stub(pidfile: Path, parent_waits: bool, sleep: int = 60) -> list[str]:
 def test_the_timeout_kills_the_whole_tree_and_returns_promptly(tmp_path, parent_waits):
     """A grandchild holds the pipe. A parent-only kill would leave it alive and return only after the
     grace period; a taskkill /T cannot find it once its parent has exited. Both must be told apart
-    from a real tree kill: the grandchild must be GONE, and the call back well inside timeout+grace."""
+    from a real tree kill: the grandchild's lock must be FREE (it is dead), and the call back well
+    inside timeout+grace."""
     import time
-    pidfile = tmp_path / "grandchild.pid"
     started = time.monotonic()
-    code, out, err = ml.run_bounded(_tree_stub(pidfile, parent_waits), tmp_path, 2, grace=5)
+    code, out, err = ml.run_bounded(_tree_stub(tmp_path, parent_waits), tmp_path, 2, grace=5)
     took = time.monotonic() - started
-    grandchild = int(pidfile.read_text())
+    assert (tmp_path / "grandchild.ready").exists(), "the stub never started its grandchild"
     time.sleep(0.5)
-    try:
-        assert code == 124 and b"timed out" in err
-        assert took < 2 + 2.5, f"returned after {took:.1f}s - the grace wait ran, so the tree was not killed"
-        assert not _alive(grandchild), "the grandchild survived the timeout"
-    finally:
-        if _alive(grandchild):
-            os.kill(grandchild, 9)
+    assert code == 124 and b"timed out" in err
+    assert took < 2 + 2.5, f"returned after {took:.1f}s - the grace wait ran, so the tree was not killed"
+    assert not _held(tmp_path / "grandchild.lock"), "the grandchild survived the timeout"
+
+
+def test_a_successful_run_leaves_nothing_behind(tmp_path):
+    """The child exits 0 but leaves a detached grandchild running: it must not outlive the call
+    (Windows: the job closes with KILL_ON_JOB_CLOSE; elsewhere: the process group is killed)."""
+    import time
+    code, out, err = ml.run_bounded(_tree_stub(tmp_path, False, holds_pipe=False), tmp_path, 20)
+    assert code == 0, err
+    assert (tmp_path / "grandchild.ready").exists()
+    deadline = time.monotonic() + 3
+    while _held(tmp_path / "grandchild.lock") and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not _held(tmp_path / "grandchild.lock"), "the success path left the grandchild running"
 
 
 def test_the_wait_after_the_kill_is_bounded_even_when_the_kill_fails(tmp_path, monkeypatch):
@@ -1200,24 +1239,18 @@ def test_the_wait_after_the_kill_is_bounded_even_when_the_kill_fails(tmp_path, m
     import time
     monkeypatch.setattr(ml, "_kill_tree", lambda *a: None)
     monkeypatch.setattr(ml, "_WindowsJob", lambda pid: (_ for _ in ()).throw(OSError("no job in this test")))
-    pidfile = tmp_path / "grandchild.pid"
     result = {}
 
     def call():
         started = time.monotonic()
-        # short-lived on purpose: with the kill disabled, the stub's two processes end on their own
-        result["code"] = ml.run_bounded(_tree_stub(pidfile, True, sleep=8), tmp_path, 1, grace=2)[0]
+        # short-lived on purpose: with the kill disabled, the stub's processes end on their own
+        result["code"] = ml.run_bounded(_tree_stub(tmp_path, True, sleep=8), tmp_path, 1, grace=2)[0]
         result["took"] = time.monotonic() - started
     thread = threading.Thread(target=call, daemon=True)
     thread.start()
     thread.join(20)
-    try:
-        assert not thread.is_alive(), "run_bounded waited without bound after the kill"
-        assert result["code"] == 124 and result["took"] < 1 + 2 + 3
-    finally:
-        for pid_text in ([pidfile.read_text()] if pidfile.exists() else []):
-            if _alive(int(pid_text)):
-                os.kill(int(pid_text), 9)
+    assert not thread.is_alive(), "run_bounded waited without bound after the kill"
+    assert result["code"] == 124 and result["took"] < 1 + 2 + 3
 
 
 def test_stdin_is_never_inherited(monkeypatch):
@@ -1231,3 +1264,85 @@ def test_stdin_is_never_inherited(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", spy)
     ml.run_bounded([sys.executable, "-c", "pass"], ".", 30)
     assert seen.get("stdin") is subprocess.DEVNULL
+
+
+# --------------------------------------------------------------------------
+# attempt 8 (tester attempt 7): llama-swap's cmd goes through a POSIX-shell LEXER, not a
+# whitespace split - quotes group and vanish, a backslash escapes, a newline breaks the config
+# --------------------------------------------------------------------------
+
+_Q = chr(39)   # '
+_DQ = chr(34)  # "
+_BS = chr(92)  # backslash
+
+
+@pytest.mark.parametrize("var,value", [
+    ("LLAMA_SWAP_QWEN36_27B_MODEL_PATH", f"/models/unsloth/Qwen3.8-27B-GGUF/Qwen{_Q}s-27B-Q4_K_M.gguf"),
+    ("LLAMA_SWAP_QWEN36_27B_MODEL_PATH", f"/models/unsloth/{_DQ}Qwen3.8-27B-GGUF{_DQ}/x-Q4_K_M.gguf"),
+    ("LLAMA_SWAP_QWEN36_27B_CTX_SIZE", f"4096{_Q}"),                        # half of a quote pair ...
+    ("LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS", f"99{_BS}"),                     # an escape
+    ("LLAMA_SWAP_QWEN36_35B_BATCH", "1024\n--model"),                       # a newline in ANOTHER entry
+    ("LLAMA_SWAP_QWEN36_35B_CTX_SIZE", ""),                                  # unset in ANOTHER entry
+    ("LLAMA_SWAP_QWEN36_35B_UBATCH", f"512{_DQ}"),                           # a quote in ANOTHER entry
+])
+def test_a_value_the_shell_lexer_would_reinterpret_is_refused_anywhere_in_the_config(world, var, value):
+    """Rows of tester attempt 7: an apostrophe in the file name, quotes in the path, a quote pair
+    across two tunables (it swallows `--n-gpu-layers`), a backslash, and a bad value in ANOTHER
+    entry (llama-swap then refuses the whole config). Each refused, no label."""
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"][var] = value
+    with pytest.raises(ml.LabelError, match="the llama-swap config: " + re.escape(var)):
+        ml.derive_labels(render)
+
+
+@pytest.mark.parametrize("old,new,why", [
+    ("--ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}",
+     f"--alias {_Q}x --model /models/B-13B-Q4_K_M.gguf{_Q} --ctx-size ${{env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}}",
+     "treat it specially"),
+    ("--ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}",
+     "--ctx-size ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE} -- --model /models/B-13B-Q4_K_M.gguf", "`--` or a `#`"),
+    ("--ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}",
+     "--ctx-size ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE} #note --model /models/B-13B-Q4_K_M.gguf", "`--` or a `#`"),
+    ("--ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}",
+     f"--ctx-size ${{env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}} --alias a{_BS}b", "treat it specially"),
+])
+def test_a_literal_cmd_word_the_lexer_would_reinterpret_is_refused(world, old, new, why):
+    """Quotes, a backslash, `--` and a `#` comment word in the cmd itself - kills X5 (the `#` word)."""
+    _swap_cmd(world, old, new)
+    with pytest.raises(ml.LabelError, match=re.escape(why)):
+        ml.derive_labels(make_render(world))
+
+
+def _macros(world, text):
+    path = world.root / ml.LLAMA_SWAP_REL
+    body = path.read_text(encoding="utf-8")
+    start = body.index("macros:")
+    end = body.index("\nmodels:")
+    path.write_text(body[:start] + "macros:\n" + text + body[end:], encoding="utf-8")
+
+
+def test_a_macro_may_reference_an_earlier_macro(world):
+    """X3, nested macros: `common-args` built from an EARLIER macro expands and labels normally."""
+    _macros(world, "  port-args: --host 0.0.0.0 --port ${PORT}\n"
+                   "  common-args: >-\n    ${port-args}\n    --no-mmap\n")
+    assert by_role(ml.derive_labels(make_render(world)))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def test_a_macro_that_references_a_later_macro_is_refused(world):
+    _macros(world, "  common-args: >-\n    ${port-args}\n    --no-mmap\n"
+                   "  port-args: --host 0.0.0.0 --port ${PORT}\n")
+    with pytest.raises(ml.LabelError, match="defined LATER"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_macro_that_references_an_unknown_name_is_refused(world):
+    _macros(world, "  common-args: --no-mmap ${nowhere}\n")
+    with pytest.raises(ml.LabelError, match="which is not a macro"):
+        ml.derive_labels(make_render(world))
+
+
+def test_env_references_in_yaml_comments_are_not_config(world):
+    """A `${env.*}` in a YAML comment is not substituted by llama-swap and must not be required."""
+    refs = ml.swap_env_refs("# ${env.IN_A_COMMENT}\nmodels:\n  m:\n    cmd: |\n      x ${env.REAL}\n"
+                            "      # ${env.IN_THE_BLOCK}\n    proxy: http://${env.PROXY} # ${env.TRAILING}\n")
+    assert refs == {"REAL", "IN_THE_BLOCK", "PROXY"}

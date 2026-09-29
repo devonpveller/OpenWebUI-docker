@@ -907,10 +907,18 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   a server or the kernel does is refused instead. That means an `entrypoint`
   override on either upstream; a `-config` that is missing, relative or in
   `=`-form; for llama-swap's entry, any key besides `cmd`/`filters`/
-  `concurrencyLimit` (a per-model `env:`), an unknown `${...}` in its cmd, and ANY
-  value substituted into that cmd (every `${env.*}`, not only the model path)
-  that is empty or contains whitespace - llama-swap splits the cmd on whitespace,
-  so `..._CTX_SIZE=4096 --model /models/B.gguf` would load B. The llama.cpp
+  `concurrencyLimit` (a per-model `env:`), and an unknown `${...}`. llama-swap
+  (v236, the pinned image) builds its command with a POSIX-shell LEXER - quotes
+  group words and are removed, a backslash escapes, a newline in any value breaks
+  the whole config - and that lexer is not emulated. So: every `${env.*}` in the
+  WHOLE llama-swap config (every entry and macro, YAML comments excepted) must be
+  set, non-empty and free of whitespace, quotes, backslashes and control
+  characters (`..._CTX_SIZE=4096 --model /models/B.gguf` would load B; an
+  apostrophe in a file name, or a newline in another entry's value, changes or
+  breaks what llama-swap runs); every literal word of the role's expanded cmd must
+  be free of quotes, backslashes and control characters; a `--` word and a word
+  starting with `#` are refused; a macro may reference only macros defined BEFORE
+  it. What is left splits exactly on whitespace. The llama.cpp
   flag rules then apply to BOTH llama-server command lines - the embed upstream's
   rendered command and llama-swap's expanded cmd: long flags match with `_` as `-`
   (`--hf_repo` is `--hf-repo`); a model flag in `--flag=value` form is refused

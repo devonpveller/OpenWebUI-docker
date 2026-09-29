@@ -21,9 +21,13 @@ defaults are read by compose itself and never re-implemented here:
               `-config` - required, absolute - through that path's bind): the entry
               whose id is the concrete id (`:nothink` is llama-swap's thinking
               switch, not an entry); its cmd is expanded (macros, `${env.*}` from the
-              service's RENDERED environment - any value empty or with whitespace is
-              refused, since llama-swap splits the cmd on it) and read with the
-              llama.cpp flag rules below; its last `-m`/`--model` is the path
+              service's RENDERED environment). llama-swap splits it with a POSIX-shell
+              lexer (quotes group, backslash escapes), which is not emulated: any
+              `${env.*}` in the WHOLE config that is unset, empty, or has whitespace,
+              a quote, a backslash or a control character, any literal cmd word with
+              a quote, backslash or control character, a `--` or `#...` word, and a
+              macro referencing a later one are refused; what is left is read with
+              the llama.cpp flag rules below; its last `-m`/`--model` is the path
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
               (llama.cpp takes the flag over the env), else its rendered
               `LLAMA_ARG_MODEL`; a model from a URL / repo / directory / preset /
@@ -411,8 +415,15 @@ def run_bounded(cmd, cwd, timeout: int, env=None, grace: int = 5) -> tuple[int, 
                 pass
             return 124, b"", f"timed out after {timeout} s (the process tree was killed)".encode()
     finally:
+        # also after a SUCCESSFUL run: anything the child left running dies with it (Windows:
+        # closing the job, KILL_ON_JOB_CLOSE; elsewhere: the child's process group)
         if job is not None:
             job.close()
+        elif os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def _kill_tree(proc, job, signal, subprocess) -> None:
@@ -570,53 +581,123 @@ def _embed_model(spec: dict) -> tuple[str, str]:
 
 _SWAP_BUILTINS = {"PORT", "MODEL_ID"}
 _REF = re.compile(r"\$\{([^}]*)\}")
+# llama-swap (v236, the pinned image) splits a cmd with a POSIX-shell lexer: quotes group words and
+# are removed, a backslash escapes, and a newline in a substituted value breaks the config (tester
+# attempt 7). This module does not emulate that lexer: any character that makes the lexer do
+# more than split on whitespace is refused, so what is left splits exactly like str.split().
+_LEXER_CHARS = set("'\"\\") | {chr(c) for c in range(32)} | {chr(127)}
 
 
-def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: str) -> tuple[str, str]:
+def _unsafe(text: str) -> str:
+    """The first character the lexer would treat specially (a quote, a backslash, a control
+    character), or ''."""
+    for ch in text:
+        if ch in _LEXER_CHARS:
+            return ch
+    return ""
+
+
+def swap_env_refs(config_text: str) -> set[str]:
+    """Every `${env.VAR}` llama-swap will see in its config: in block scalars (a cmd, a folded
+    macro - where `#` is content) and in every other line with its YAML comment removed. A
+    full-line comment outside a block is not config and is skipped."""
+    lines = config_text.splitlines()
+    seen: list[str] = []
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
+            continue
+        body = _strip_comment(raw)
+        seen.append(body)
+        value = body.split(":", 1)[1].strip() if ":" in body else ""
+        if value in ("|", "|-", ">", ">-"):
+            block, i = _block(lines, i + 1, _indent(raw), value)
+            seen.append(block)
+            continue
+        i += 1
+    return set(re.findall(r"\$\{env\.([^}]*)\}", "\n".join(seen)))
+
+
+def check_swap_env(config_text: str, env: dict, who: str = "the llama-swap config") -> None:
+    """Every `${env.VAR}` ANYWHERE in the llama-swap config must be set, non-empty, free of
+    whitespace and of lexer characters: llama-swap substitutes them all when it loads the config,
+    and one bad value in ANY entry makes it refuse the whole config (tester attempt 7) - so a label
+    for the role's entry would then be a label for a plane that does not start."""
+    for var in sorted(swap_env_refs(config_text)):
+        value = env.get(var)
+        if value is not None and not isinstance(value, str):
+            raise LabelError(f"{who}: {var} in {CHAT_SERVICE}'s rendered environment is not a string")
+        if not value:
+            raise LabelError(f"{who}: {var} is not set in {CHAT_SERVICE}'s rendered environment "
+                             f"(llama-swap substitutes every `${{env.*}}` in the config)")
+        if any(ch.isspace() for ch in value) or _unsafe(value):
+            raise LabelError(f"{who}: {var}={value!r} contains whitespace, a quote, a backslash or a control "
+                             f"character - llama-swap's shell lexer would change the command it builds")
+
+
+def _expand_macros(macros: dict[str, str], who: str) -> dict[str, str]:
+    """Each macro with the macros it references substituted - only macros defined EARLIER may be
+    referenced (a later one is not expanded by the pinned llama-swap, tester attempt 7); a
+    reference to anything else but `${env.*}` and the built-ins is refused."""
+    done: dict[str, str] = {}
+    for name, text in macros.items():
+        def sub(match, name=name):
+            ref = match.group(1)
+            if ref in _SWAP_BUILTINS or ref.startswith("env."):
+                return match.group(0)
+            if ref in done:
+                return done[ref]
+            if ref in macros:
+                raise LabelError(f"{who}: macro {name!r} references {ref!r}, which is defined LATER - "
+                                 f"not interpreted here")
+            raise LabelError(f"{who}: macro {name!r} references `${{{ref}}}`, which is not a macro")
+        done[name] = _REF.sub(sub, text)
+    return done
+
+
+def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: str,
+                config_text: str) -> tuple[str, str]:
     """(the path llama-server loads for this llama-swap entry, where it came from).
 
-    llama-swap substitutes `${macro}` and `${env.VAR}` into the entry's cmd and SPLITS it on
-    whitespace (measured in the pinned llama-swap image, tester attempt 6), so an env value with a
-    space in it becomes extra ARGUMENTS: `..._CTX_SIZE=4096 --model /models/B.gguf` loads B. REFUSE,
-    DON'T EMULATE: any substituted value that is empty or contains whitespace is refused, an entry
-    with keys other than cmd/filters (a per-model `env:`, ...) or an unknown `${...}` is refused;
-    then the final cmd gets the embed server's flag rules (`_`/`-`, `=`-form and remote-model
-    flags refused, `-m`/`--model` last wins, no model flag refused)."""
+    llama-swap substitutes `${macro}` and `${env.VAR}` into the entry's cmd and splits the result
+    with a POSIX-shell lexer (quotes group and are removed, a backslash escapes). REFUSE, DON'T
+    EMULATE: every `${env.*}` in the WHOLE config must be set and free of whitespace, quotes,
+    backslashes and control characters (check_swap_env); every literal word of the expanded cmd
+    must be free of quotes, backslashes and control characters; a `--` word or a word starting
+    with `#` is refused; macros may reference only earlier macros; an entry with keys other than
+    cmd/filters/concurrencyLimit (a per-model `env:`, ...) or an unknown `${...}` is refused. What
+    is left splits exactly on whitespace, and gets the embed server's flag rules (`_`/`-`,
+    `=`-form and remote-model flags refused, the LAST `-m`/`--model` wins, none refused)."""
     who = f"llama-swap entry {model_id!r}"
     extra = sorted(entry.keys - {"cmd", "filters", "concurrencyLimit"})
     if extra:
         raise LabelError(f"{who} has {', '.join(extra)} - not interpreted here")
-    if not entry.cmd or any(line.startswith("#") for line in entry.cmd.splitlines()):
-        raise LabelError(f"{who} has no cmd, or a `#` line inside it - not interpreted here")
+    if not entry.cmd:
+        raise LabelError(f"{who} has no cmd - not interpreted here")
     env = _env_map(spec, CHAT_SERVICE)
-    used: list[str] = []
+    check_swap_env(config_text, env)
+    expanded_macros = _expand_macros(macros, "the llama-swap config")
 
-    def sub(match):
+    def literal(match):
         name = match.group(1)
-        if name in _SWAP_BUILTINS:
+        if name in _SWAP_BUILTINS or name.startswith("env."):
             return match.group(0)
-        if name.startswith("env."):
-            var = name[4:]
-            value = env.get(var)
-            if value is not None and not isinstance(value, str):
-                raise LabelError(f"{who}: {var} in {CHAT_SERVICE}'s rendered environment is not a string")
-            if not value:
-                raise LabelError(f"{who}: {var} is not set in {CHAT_SERVICE}'s rendered environment")
-            if any(ch.isspace() for ch in value):
-                raise LabelError(f"{who}: {var}={value!r} contains whitespace - llama-swap splits the cmd on "
-                                 f"it, so the value would become extra arguments")
-            used.append(var)
-            return value
-        if name in macros:
-            return macros[name]
+        if name in expanded_macros:
+            return expanded_macros[name]
         raise LabelError(f"{who}: `${{{name}}}` is not a macro, an env reference or a llama-swap built-in")
 
-    cmd = entry.cmd
-    for _ in range(10):
-        new = _REF.sub(sub, cmd)
-        if new == cmd:
-            break
-        cmd = new
+    # the cmd with its macros, BEFORE env values go in: every literal word is checked
+    literal_cmd = _REF.sub(literal, entry.cmd)
+    for word in literal_cmd.split():
+        ch = _unsafe(word)
+        if ch:
+            raise LabelError(f"{who}: the word {word!r} in its cmd has {ch!r} - llama-swap's shell lexer would "
+                             f"treat it specially; not interpreted here")
+        if word == "--" or word.startswith("#"):
+            raise LabelError(f"{who}: its cmd has the word {word!r} (`--` or a `#` comment) - not interpreted here")
+    cmd = _REF.sub(lambda m: m.group(0) if m.group(1) in _SWAP_BUILTINS else env[m.group(1)[4:]], literal_cmd)
     tokens = cmd.split()
     _check_remote(tokens, env, who)
     flagged = _flag(tokens, _EMBED_MODEL_FLAGS)
@@ -838,7 +919,8 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
     swap_path = _bind_source(chat, CHAT_SERVICE, swap_target)
     if not swap_path.is_file():
         raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
-    macros, swap_entries = parse_llama_swap_config(swap_path.read_text(encoding="utf-8"))
+    swap_text = swap_path.read_text(encoding="utf-8")
+    macros, swap_entries = parse_llama_swap_config(swap_text)
     swap_models = {model: entry.cmd for model, entry in swap_entries.items()}
     out = []
     for role in role_list:
@@ -853,7 +935,7 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
         else:
             service, spec = CHAT_SERVICE, chat
             model_id = role.concrete.split(":", 1)[0]
-            container, source = _swap_model(swap_entries[model_id], macros, spec, model_id)
+            container, source = _swap_model(swap_entries[model_id], macros, spec, model_id, swap_text)
         _check_container_path(container, service)
         host = ""
         if check_files:
