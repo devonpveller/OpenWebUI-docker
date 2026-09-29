@@ -1783,9 +1783,6 @@ $RestartLoopThreshold = 3
 # One page per key per window. The catastrophe path's own Telegram throttle is
 # 1h and its Mattermost mirror has none, so the cooldown is enforced here.
 $LoopAlertCooldownHours = 6
-# A looping container is called "no longer restarting" (the all-clear) only
-# once it has run this long since its last start, or is stopped.
-$LoopSettledMinutes = 10
 # SLOW loops: the fast rule needs restarts on consecutive passes, so a
 # container that crashes less often than once a pass (every other pass is
 # ~72 a day) never trips it. This rule counts every restart seen in the last
@@ -1794,6 +1791,16 @@ $LoopSettledMinutes = 10
 # then, and a crash every 20 minutes reaches it in about 2 hours.
 $SlowLoopWindowHours = 6
 $SlowLoopThreshold = 6
+# SETTLED: stopped, or running this long since its last start, with no new
+# restart this pass. A settled container gets the all-clear AND its restart
+# history is dropped, so restarts from before it settled can never page it as
+# a slow loop later (attempt-2 finding W-1: a fixed fast loop was re-paged
+# after the cooldown and its all-clear withheld). One rule for both, and it is
+# an hour on purpose: the window rule can only reach 6 in 6h when the gaps
+# between restarts AVERAGE under an hour, so a container up for a full hour
+# has stopped looping by the same measure - while a 10-minute rule would have
+# wiped the history of every loop slower than a pass.
+$LoopSettledMinutes = 60
 # The docker executable. A variable only so the bounded-call test can point it
 # at a stub that never returns.
 $WatchdogDockerExe = 'docker'
@@ -1837,20 +1844,51 @@ function ConvertTo-ProcessArgument {
     return '"' + $escaped + '"'
 }
 
-# Kill every live descendant of a process id, deepest first. Used when the
-# process itself has already exited, so `taskkill /T` has no tree to walk.
-# PIDs are reused on Windows, so a candidate must have been created AFTER the
-# parent it names.
-function Stop-ProcessDescendants {
+# A Windows JOB OBJECT for each bounded call, created with KILL_ON_JOB_CLOSE:
+# the child is assigned to it right after Start(), everything the child starts
+# from then on is in it too - including a great-grandchild whose own parent has
+# already exited, which neither `taskkill /T` nor a ParentProcessId walk can
+# reach (attempt-2 finding W-4) - and closing the handle kills whatever is left.
+# No WMI query, so nothing on this path waits on the WMI service (W-3).
+# $WatchdogUseJobObject exists so the test can exercise the fallback.
+$WatchdogUseJobObject = $true
+function New-WatchdogJob {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][int]$ParentId, [datetime]$NotBefore = [datetime]::MinValue)
+    param()
+    if (-not $WatchdogUseJobObject) { return [IntPtr]::Zero }
     try {
-        $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ParentId" -ErrorAction Stop |
-            Where-Object { $_.CreationDate -ge $NotBefore })
-    } catch { return }
-    foreach ($k in $kids) {
-        Stop-ProcessDescendants -ParentId ([int]$k.ProcessId) -NotBefore $k.CreationDate
-        try { Stop-Process -Id ([int]$k.ProcessId) -Force -ErrorAction Stop } catch { }
+        if (-not ('AiStackWatchdogJob' -as [type])) {
+            Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class AiStackWatchdogJob {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr attrs, string name);
+  [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+  [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [StructLayout(LayoutKind.Sequential)] struct Basic { public long PerProcessUserTimeLimit; public long PerJobUserTimeLimit; public uint LimitFlags;
+    public UIntPtr MinimumWorkingSetSize; public UIntPtr MaximumWorkingSetSize; public uint ActiveProcessLimit; public UIntPtr Affinity;
+    public uint PriorityClass; public uint SchedulingClass; }
+  [StructLayout(LayoutKind.Sequential)] struct Io { public ulong R, W, O, RB, WB, OB; }
+  [StructLayout(LayoutKind.Sequential)] struct Extended { public Basic BasicLimit; public Io IoInfo; public UIntPtr ProcessMemoryLimit;
+    public UIntPtr JobMemoryLimit; public UIntPtr PeakProcessMemoryUsed; public UIntPtr PeakJobMemoryUsed; }
+  public static IntPtr Create() {
+    IntPtr job = CreateJobObject(IntPtr.Zero, null);
+    if (job == IntPtr.Zero) return IntPtr.Zero;
+    Extended e = new Extended(); e.BasicLimit.LimitFlags = 0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    int len = Marshal.SizeOf(typeof(Extended)); IntPtr p = Marshal.AllocHGlobal(len);
+    try { Marshal.StructureToPtr(e, p, false); if (!SetInformationJobObject(job, 9, p, (uint)len)) { CloseHandle(job); return IntPtr.Zero; } }
+    finally { Marshal.FreeHGlobal(p); }
+    return job;
+  }
+  public static bool Assign(IntPtr job, IntPtr process) { return AssignProcessToJobObject(job, process); }
+  public static void Close(IntPtr job) { if (job != IntPtr.Zero) CloseHandle(job); }
+}
+"@
+        }
+        return [AiStackWatchdogJob]::Create()
+    } catch {
+        Write-LogEntry "job object unavailable ($($_.Exception.Message)) - bounded calls fall back to taskkill /T" "WARN"
+        return [IntPtr]::Zero
     }
 }
 
@@ -1881,6 +1919,7 @@ function Invoke-BoundedProcess {
     if (-not $TimeoutSeconds -or $TimeoutSeconds -le 0) { $TimeoutSeconds = 25 }
 
     $proc = New-Object System.Diagnostics.Process
+    $job = [IntPtr]::Zero
     try {
         $psi = $proc.StartInfo
         $psi.FileName = $FilePath
@@ -1892,7 +1931,12 @@ function Invoke-BoundedProcess {
         $psi.RedirectStandardInput = $true
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         [void]$proc.Start()
-        $startedAt = try { $proc.StartTime.AddSeconds(-1) } catch { (Get-Date).AddSeconds(-5) }
+        # Into the job at once. (A process the child starts in the few
+        # microseconds before this line would escape it; docker does not.)
+        $job = New-WatchdogJob
+        if ($job -ne [IntPtr]::Zero -and -not [AiStackWatchdogJob]::Assign($job, $proc.Handle)) {
+            [AiStackWatchdogJob]::Close($job); $job = [IntPtr]::Zero
+        }
         # Both streams asynchronously BEFORE waiting: reading one to the end
         # while the child fills the other is the classic deadlock.
         $outTask = $proc.StandardOutput.ReadToEndAsync()
@@ -1903,8 +1947,10 @@ function Invoke-BoundedProcess {
         if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
             $script:BoundedFailureReason = "did not answer within ${TimeoutSeconds}s"
             # The whole tree: what hangs is often a grandchild, and .NET
-            # Framework's Kill() has no entireProcessTree overload.
-            & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+            # Framework's Kill() has no entireProcessTree overload. With a job
+            # the finally block's Close kills the tree, orphans included;
+            # without one, taskkill /T reaches what still has a live parent.
+            if ($job -eq [IntPtr]::Zero) { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null }
             return $null
         }
         # The parameterless wait after the timed one is what makes ExitCode
@@ -1914,13 +1960,11 @@ function Invoke-BoundedProcess {
         # The CHILD exiting is not the end of its output: a descendant that
         # inherited the pipe holds it open, and reading to EOF would wait for
         # THAT process (measured by the attempt-1 tester: 29.7s under a 2s
-        # bound). Give the readers only what is left of the bound, then kill
-        # every descendant still alive - the parent is gone, so taskkill /T
-        # cannot find them; walk ParentProcessId instead.
+        # bound). Give the readers only what is left of the bound; closing the
+        # job (finally) then kills the descendant holding the pipe.
         $leftMs = [int][Math]::Max(0, ($TimeoutSeconds * 1000) - $sw.ElapsedMilliseconds)
         if (-not [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), $leftMs)) {
             $script:BoundedFailureReason = "did not answer within ${TimeoutSeconds}s (it exited, but a process it started kept its output open)"
-            Stop-ProcessDescendants -ParentId $proc.Id -NotBefore $startedAt
             return $null
         }
         $outLines = @(@($outTask.Result -split "`r?`n") | Where-Object { $null -ne $_ -and $_ -ne '' })
@@ -1950,6 +1994,8 @@ function Invoke-BoundedProcess {
             try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
             try { $proc.Dispose() } catch { }
         }
+        # KILL_ON_JOB_CLOSE: ends anything the call left behind, on every path.
+        if ($job -ne [IntPtr]::Zero) { try { [AiStackWatchdogJob]::Close($job) } catch { } }
     }
 }
 
@@ -2166,6 +2212,7 @@ function Test-ContainerRestartLoops {
         $key = $f.Name
         $streak = 0
         $accum = 0
+        $delta = 0
         $hist = @()
         # Parse the state defensively: one hand-edited or truncated value must
         # cost one quiet pass, not throw out of the whole health pass.
@@ -2176,8 +2223,11 @@ function Test-ContainerRestartLoops {
             foreach ($h in @($p.Hist)) {
                 $hp = ([string]$h) -split ':'
                 $he = [int64]0; $hn = 0
-                if ($hp.Count -eq 2 -and [int64]::TryParse($hp[0], [ref]$he) -and [int]::TryParse($hp[1], [ref]$hn) -and
-                    $he -ge ($nowEpoch - [int64]($SlowLoopWindowHours * 3600))) { $hist += "${he}:${hn}" }
+                # Inside the window on BOTH sides: an entry dated in the future
+                # (clock skew, a hand edit) would otherwise never age out (W-2),
+                # and a non-positive count is not a restart.
+                if ($hp.Count -eq 2 -and [int64]::TryParse($hp[0], [ref]$he) -and [int]::TryParse($hp[1], [ref]$hn) -and $hn -gt 0 -and
+                    $he -ge ($nowEpoch - [int64]($SlowLoopWindowHours * 3600)) -and $he -le ($nowEpoch + 300)) { $hist += "${he}:${hn}" }
             }
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
@@ -2199,6 +2249,12 @@ function Test-ContainerRestartLoops {
                 }
             }
         }
+        # Settled FIRST, so the window below never counts restarts from
+        # before the container settled.
+        $started = ConvertTo-UtcInstant $f.StartedAt
+        $settled = ($delta -le 0) -and ($f.Status -ne 'restarting') -and
+            ($f.Status -ne 'running' -or ($started -and ((Get-Date).ToUniversalTime() - $started).TotalMinutes -ge $LoopSettledMinutes))
+        if ($settled) { $hist = @(); $streak = 0; $accum = 0 }
         $inWindow = 0
         foreach ($h in $hist) { $inWindow += [int](($h -split ':')[1]) }
         $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist) }
@@ -2209,14 +2265,10 @@ function Test-ContainerRestartLoops {
             # SLOW loop: quiet passes in between reset the streak above, but
             # the restarts keep adding up over the window.
             $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = $inWindow }
-        } elseif ($f.Status -ne 'restarting') {
-            # A candidate for the all-clear only when it has SETTLED: stopped,
-            # or running for $LoopSettledMinutes since its last start. One quiet
-            # pass alone can be shorter than the gap between two crashes.
-            $started = ConvertTo-UtcInstant $f.StartedAt
-            if ($f.Status -ne 'running' -or ($started -and ((Get-Date).ToUniversalTime() - $started).TotalMinutes -ge $LoopSettledMinutes)) {
-                $quiet += $key
-            }
+        } elseif ($settled) {
+            # The all-clear (a no-op unless the key is firing). One quiet pass
+            # alone can be shorter than the gap between two crashes.
+            $quiet += $key
         }
     }
 
