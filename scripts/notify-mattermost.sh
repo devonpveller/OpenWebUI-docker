@@ -209,6 +209,10 @@ PROJECT="$(basename "$ROOT_DIR")"
 #    message class. That hook file is operator-local and gitignored, so this
 #    script cannot depend on it being changed.
 sid="${MM_SESSION_ID:-}"
+# Set ONLY when the id came from a hook payload on stdin - the one real signal that this is a
+# HOOK run. The bridge stand-down (1c) keys on it; a sid recovered from the message text is
+# not evidence of a hook (cf-bridge attempt 1, A7: "ALERT backup session 20260928 overdue").
+SID_FROM_HOOK=""
 if [ -z "$sid" ] && [ ! -t 0 ]; then
   # Same brace-the-assignment fix as the lock's read below: a `2>/dev/null` INSIDE
   # a command substitution silences the command, but the warning bash itself prints
@@ -235,12 +239,15 @@ try:
 except Exception:
     print("")' 2>/dev/null)
   fi
+  [ -n "$sid" ] && SID_FROM_HOOK=1
 fi
 # ...and last, recover it from the message itself. The Notification hook formats
 # "session <8 hex> - ..." into the text it passes, so the id is right there even
 # when stdin is gone. Narrow on purpose: 8 hex characters after the word
 # "session", nothing else.
-if [ -z "$sid" ] && [ -n "$1" ]; then
+# NOT inside a bridge turn: there the text is a manual or watchdog message, and any "session
+# <8 digits>" in it would thread it under a session it does not belong to. It posts flat.
+if [ -z "$sid" ] && [ -n "$1" ] && [ -z "${CLAUDE_BRIDGE_THREAD:-}" ]; then
   # Three more processes for one substring - grep, head and awk - on the path that
   # serves the Notification hook, which is the majority of notifications. Bash can
   # do this without leaving the shell.
@@ -281,9 +288,12 @@ key=$(normkey "$sid")
 #     sessions in this repo, so they load the same local settings and fire this hook - and each
 #     one opened a SECOND thread beside the one the bridge carries it in (measured 2026-09-28:
 #     two bridge sessions in the live map). run_turn marks their process tree with
-#     CLAUDE_BRIDGE_THREAD. Only a HOOK run stands down (a session id was resolved): a manual or
-#     watchdog call made from inside a bridge turn still posts.
-if [ -n "${CLAUDE_BRIDGE_THREAD:-}" ] && [ -n "$sid" ]; then
+#     CLAUDE_BRIDGE_THREAD. Only a HOOK run stands down - one whose session id came from the
+#     hook payload on stdin (the Stop hook). A manual or watchdog call made from inside a bridge
+#     turn still posts, flat, whatever its text says. (The live Notification hook passes its
+#     text with stdin closed, so under the marker it too posts one flat message, never a
+#     thread.)
+if [ -n "${CLAUDE_BRIDGE_THREAD:-}" ] && [ -n "$SID_FROM_HOOK" ]; then
   exit 0
 fi
 # The FULL session id, when this run knows it (the Stop hook does; the Notification hook only

@@ -81,7 +81,7 @@ in `../backup/`; conventions in
 
 `notify-mattermost.sh` — Claude Code Stop/Notification hook target (one thread per
 interactive session in #claude-sessions, recorded in `scripts/.mm-session-threads`, which the
-claude-sessions bridge reads; stands down inside bridge sessions; per-session allowlist
+claude-sessions bridge reads; its Stop-hook runs stand down inside bridge sessions; per-session allowlist
 `scripts/.mm-notify-sessions`).
 
 ## Rules

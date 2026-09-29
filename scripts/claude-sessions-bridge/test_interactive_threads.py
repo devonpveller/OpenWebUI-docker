@@ -147,6 +147,8 @@ FAKE_CLAUDE = r'''
 import json, os, subprocess, sys, uuid
 argv = sys.argv[1:]
 prompt = sys.stdin.read()
+if "SLOWJOB" in prompt:          # keeps the turn in flight long enough to reply during it
+    import time; time.sleep(5)
 sid = None
 if "--resume" in argv and "--fork-session" not in argv:
     sid = argv[argv.index("--resume") + 1]
@@ -205,7 +207,12 @@ def make_notifier_copy(root: str) -> str:
 def hook_env(stub_url: str) -> dict:
     env = {k: v for k, v in os.environ.items()
            if k not in ("MM_SESSION_ID", "CLAUDE_BRIDGE_THREAD", "MM_DEADLINE_SECS", "MM_WALL_SECS")}
-    env.update({"CF_STUB_URL": stub_url, "MM_OPERATOR_MENTION": ""})
+    # GENEROUS, FIXED budgets. The notifier's defaults (10 s / 11 s wall) are sized for a 15 s
+    # hook, and on a loaded machine a python fork inside it can eat enough of that to post a
+    # ping flat - the attempt-1 flake in test_06. The tests are about threading decisions,
+    # not about the budget, so the budget is taken out of play.
+    env.update({"CF_STUB_URL": stub_url, "MM_OPERATOR_MENTION": "",
+                "MM_DEADLINE_SECS": "30", "MM_WALL_SECS": "60"})
     return env
 
 
@@ -255,6 +262,7 @@ def scenario(out_path: str) -> None:
         "BRIDGE_WORKTREE_DEFAULT": "off", "BRIDGE_ALLOW_SELF": "0",
         "CF_FAKE_LOG": fake_log, "CF_HOOK_SCRIPT": notifier, "CF_BASH": bash,
         "CF_STUB_URL": stub.url, "MM_OPERATOR_MENTION": "",
+        "MM_DEADLINE_SECS": "30", "MM_WALL_SECS": "60",   # see hook_env
     })
     for k in ("MM_SESSION_ID", "CLAUDE_BRIDGE_THREAD", "BRIDGE_CHARTER_FILE", "BRIDGE_APPEND_PROMPT"):
         os.environ.pop(k, None)
@@ -286,18 +294,33 @@ def scenario(out_path: str) -> None:
         except OSError:
             return []
 
+    def idle() -> bool:
+        with b.running_lock:
+            if b.running:
+                return False
+        return all(q.empty() for q in b.queues.values())
+
     def settle(expect_calls: int | None = None, timeout: float = 90) -> None:
+        """Idle for FIVE consecutive checks 0.2 s apart (a worker holds an item for a moment
+        between taking it and marking the thread running), and the expected number of fake
+        claude calls has been logged."""
         end = time.time() + timeout
+        quiet = 0
         while time.time() < end:
-            with b.running_lock:
-                busy = bool(b.running)
-            pending = any(not q.empty() for q in b.queues.values())
-            if not busy and not pending and (expect_calls is None or len(calls()) >= expect_calls):
-                time.sleep(0.5)
-                with b.running_lock:
-                    if not b.running:
-                        return
+            ok = idle() and (expect_calls is None or len(calls()) >= expect_calls)
+            quiet = quiet + 1 if ok else 0
+            if quiet >= 5:
+                return
             time.sleep(0.2)
+        # Not an exception: on the BASE code an expected call never comes, and one step timing
+        # out must not throw away every other step's result. Recorded instead; test_40 fails on it.
+        res.setdefault("settle_timeouts", []).append(
+            f"{timeout}s: calls={len(calls())}, expected {expect_calls}")
+
+    def wait_calls(n: int, timeout: float = 60) -> None:
+        end = time.time() + timeout
+        while time.time() < end and len(calls()) < n:
+            time.sleep(0.1)
 
     def bridge_posts_in(root: str, after: int) -> list[str]:
         return [p["message"] for p in stub.snapshot()
@@ -322,13 +345,30 @@ def scenario(out_path: str) -> None:
     res["calls_after_reply"] = calls()
     res["bridge_posts_after_reply"] = bridge_posts_in(r1, mark - 1)
 
-    # 3. the operator takes the offer: fork S1 in the same thread
+    # 3. the operator takes the offer: fork S1 in the same thread (a SLOW turn), and while that
+    #    attach turn is still running replies again and answers `approve` (attempt 1, A4)
     n_before = len(calls())
-    mark = stub.add(OP, f"fork {S1} carry on from here", r1)["create_at"]
+    mark = stub.add(OP, f"model: sonnet fork {S1} SLOWJOB carry on from here", r1)["create_at"]
     b.poll_once(me)
-    settle(expect_calls=n_before + 1, timeout=60)
+    wait_calls(n_before + 1)
+    time.sleep(0.5)
+    with b.running_lock:
+        res["fork_running_when_followup_sent"] = r1 in b.running
+    stub.add(OP, "and also check the logs", r1)
+    stub.add(OP, "approve", r1)
+    b.poll_once(me)
+    settle(expect_calls=n_before + 2, timeout=45)
     res["calls_after_fork"] = calls()[n_before:]
     res["bridge_posts_after_fork"] = bridge_posts_in(r1, mark - 1)
+    res["fork_session"] = b.state["threads"].get(r1, {}).get("session_id", "")
+
+    # 3b. a reply in the now-attached thread resumes the FORK (attempt 1, X1)
+    n_before = len(calls())
+    mark = stub.add(OP, "one more thing", r1)["create_at"]
+    b.poll_once(me)
+    settle(expect_calls=n_before + 1, timeout=60)
+    res["calls_after_attached_reply"] = calls()[n_before:]
+    res["bridge_posts_after_attached_reply"] = bridge_posts_in(r1, mark - 1)
 
     # 4. S3: a permission ping (8-char id only) opens the thread, then its Stop hook runs
     run_notification_hook(bash, notifier, S3, henv)
@@ -366,7 +406,7 @@ def scenario(out_path: str) -> None:
     map_before = len(read_map(tmap))
     r2 = stub.add(OP, "headless job: summarise the queue")
     b.poll_once(me)
-    settle(expect_calls=n_before + 1, timeout=90)
+    settle(expect_calls=n_before + 1, timeout=45)
     new_calls = calls()[n_before:]
     res["headless_calls"] = new_calls
     res["headless_root"] = r2["id"]
@@ -376,6 +416,17 @@ def scenario(out_path: str) -> None:
                                        and p["create_at"] > r2["create_at"]]
     res["threads_state"] = {k: v.get("session_id") for k, v in b.state["threads"].items()}
 
+    # 7. the guard is for REPLIES only: an operator ROOT post whose id somehow appears in the
+    #    map (contrived: appended by hand here) still starts a session (attempt 1, X4)
+    n_before = len(calls())
+    r7 = stub.add(OP, "a new task in a new thread")
+    with open(tmap, "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(f"7a7a7a7a {r7['id']} 7a7a7a7a-7777-4777-8777-777777777777\n")
+    b.poll_once(me)
+    settle(expect_calls=n_before + 1, timeout=60)
+    res["calls_after_mapped_root"] = calls()[n_before:]
+    res["bridge_posts_after_mapped_root"] = bridge_posts_in(r7["id"], r7["create_at"] - 1)
+
     with open(out_path, "w", encoding="utf-8") as fh:
         json.dump(res, fh, indent=1)
     stub.srv.shutdown()
@@ -383,11 +434,14 @@ def scenario(out_path: str) -> None:
 
 
 _RESULT: dict | None = None
+_FAILED: str = ""   # a failed scenario is cached too, so N tests do not rerun it N times
 
 
 def scenario_result() -> dict:
     """Run the child scenario once per test process and cache its JSON."""
-    global _RESULT
+    global _RESULT, _FAILED
+    if _FAILED:
+        raise AssertionError(_FAILED)
     if _RESULT is None:
         find_git_bash()  # skip cleanly when there is no Git Bash
         fd, out = tempfile.mkstemp(suffix=".json", prefix="cf-bridge-result-")
@@ -397,8 +451,9 @@ def scenario_result() -> dict:
         p = subprocess.run([sys.executable, os.path.abspath(__file__), "--scenario", out],
                            env=env, capture_output=True, text=True, timeout=600)
         if p.returncode != 0:
-            raise AssertionError(f"scenario process failed ({p.returncode}):\n"
-                                 f"{p.stdout[-3000:]}\n{p.stderr[-3000:]}")
+            _FAILED = (f"scenario process failed ({p.returncode}):\n"
+                       f"{p.stdout[-3000:]}\n{p.stderr[-3000:]}")
+            raise AssertionError(_FAILED)
         with open(out, "r", encoding="utf-8") as fh:
             _RESULT = json.load(fh)
         os.remove(out)
@@ -444,11 +499,43 @@ class InteractiveThreadReplyTests(unittest.TestCase):
     def test_03_fork_reply_attaches_the_thread_to_that_session(self):
         r = scenario_result()
         fc = r["calls_after_fork"]
-        self.assertEqual(len(fc), 1, f"expected one turn for the fork reply, got {len(fc)}")
+        self.assertGreaterEqual(len(fc), 1, "the fork reply started no turn")
         argv = fc[0]["argv"]
         self.assertIn("--resume", argv)
         self.assertEqual(argv[argv.index("--resume") + 1], S1, "fork must resume S1")
         self.assertIn("--fork-session", argv, "fork must not write into the desk session")
+        self.assertEqual(argv[argv.index("--model") + 1], "sonnet",
+                         "a leading `model:` directive must still apply to the fork")
+
+    def test_07_reply_during_the_attach_turn_is_queued_not_offered(self):
+        """Attempt 1, A4: the fork turn is still running when the operator replies again and
+        answers `approve`. The reply must be queued for the attached session; the verdict is
+        consumed; neither gets the 'nothing was started' offer."""
+        r = scenario_result()
+        self.assertTrue(r["fork_running_when_followup_sent"],
+                        "setup: the fork turn must still be running when the follow-up is sent")
+        fc = r["calls_after_fork"]
+        self.assertEqual(len(fc), 2, "expected the fork turn + ONE queued follow-up turn, got "
+                         + repr([c["prompt"][:40] for c in fc]))
+        self.assertIn("and also check the logs", fc[1]["prompt"])
+        argv = fc[1]["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], fc[0]["session_id"],
+                         "the follow-up must resume the FORK's session")
+        self.assertNotIn("--fork-session", argv)
+        self.assertFalse([c for c in fc if c["prompt"].strip() == "approve"],
+                         "`approve` during a turn is a verdict, never a prompt")
+        offers = [m for m in r["bridge_posts_after_fork"] if "nothing was started" in m]
+        self.assertEqual(offers, [], "a reply during the attach turn got the offer: " + repr(offers)[:300])
+
+    def test_08_reply_in_an_attached_thread_resumes_it(self):
+        """Attempt 1, X1: once attached, the thread is an ordinary bridge thread."""
+        r = scenario_result()
+        fc = r["calls_after_attached_reply"]
+        self.assertEqual(len(fc), 1, repr(fc)[:300])
+        argv = fc[0]["argv"]
+        self.assertEqual(argv[argv.index("--resume") + 1], r["fork_session"])
+        self.assertNotIn("--fork-session", argv)
+        self.assertFalse([m for m in r["bridge_posts_after_attached_reply"] if "nothing was started" in m])
 
     def test_04_notification_then_stop_recovers_the_full_id(self):
         r = scenario_result()
@@ -479,10 +566,26 @@ class HeadlessOneThreadTests(unittest.TestCase):
                          "the notifier recorded a thread for a headless session: "
                          + repr(r["map_new_lines_headless"]))
 
+    def test_12_guard_ignores_root_posts(self):
+        """Attempt 1, X4: a ROOT post starts a session even if its id is in the map."""
+        r = scenario_result()
+        self.assertEqual(len(r["calls_after_mapped_root"]), 1, repr(r["calls_after_mapped_root"])[:300])
+        self.assertNotIn("--resume", r["calls_after_mapped_root"][0]["argv"],
+                         "a root post starts a NEW session")
+        self.assertFalse([m for m in r["bridge_posts_after_mapped_root"] if "nothing was started" in m])
+
     def test_11_bridge_marks_its_sessions(self):
         r = scenario_result()
         self.assertEqual(r["headless_calls"][0]["bridge_thread_env"], r["headless_root"],
                          "run_turn must export CLAUDE_BRIDGE_THREAD=<thread root>")
+
+
+class ScenarioHealthTests(unittest.TestCase):
+    def test_40_every_scenario_step_settled(self):
+        """A step that timed out waiting for the bridge means its assertions read a half-done
+        run. On the tip every step settles; this is what makes a green here trustworthy."""
+        r = scenario_result()
+        self.assertEqual(r.get("settle_timeouts", []), [])
 
 
 class BackgroundTaskWarningTests(unittest.TestCase):
@@ -499,24 +602,86 @@ class BackgroundTaskWarningTests(unittest.TestCase):
 
 
 class NotifierManualCallTests(unittest.TestCase):
-    """The stand-down is for HOOK runs only: a plain `notify-mattermost.sh "msg"` (the watchdog's
-    shape, stdin closed) made from inside a bridge turn must still post."""
+    """The stand-down is for HOOK runs only - a session id that arrived as a hook payload on
+    stdin. A plain `notify-mattermost.sh "msg"` (the watchdog's shape: stdin closed) made from
+    inside a bridge turn must still post, FLAT, whatever its text says (attempt 1, A7: any
+    `session <8 hex/digits>` in the text used to count as "a hook run" and the message vanished).
+    """
 
-    def test_30_manual_call_inside_a_bridge_turn_still_posts(self):
+    def _run(self, runs: list, marker: bool = True):
+        """runs: [(message or None, stdin bytes or None)]. Returns (posts, map lines)."""
         bash = find_git_bash()
         tmp = tempfile.mkdtemp(prefix="cf-bridge-manual-")
         stub = StubMM()
         try:
             script = make_notifier_copy(os.path.join(tmp, "repo"))
             env = hook_env(stub.url)
-            env["CLAUDE_BRIDGE_THREAD"] = "somebridgethreadroot000000"
-            subprocess.run([bash, script, "watchdog: openwebui restarted"],
-                           stdin=subprocess.DEVNULL, env=env, capture_output=True, timeout=60)
-            msgs = [p["message"] for p in stub.snapshot()]
-            self.assertEqual(msgs, ["watchdog: openwebui restarted"], repr(msgs))
+            if marker:
+                env["CLAUDE_BRIDGE_THREAD"] = "somebridgethreadroot000000"
+            for msg, stdin in runs:
+                argv = [bash, script] + ([msg] if msg is not None else [])
+                if stdin is None:
+                    subprocess.run(argv, stdin=subprocess.DEVNULL, env=env,
+                                   capture_output=True, timeout=60)
+                else:
+                    subprocess.run(argv, input=stdin, env=env, capture_output=True, timeout=60)
+            posts = [(p["message"], p["root_id"]) for p in stub.snapshot()]
+            return posts, read_map(os.path.join(tmp, "repo", "scripts", ".mm-session-threads"))
         finally:
             stub.srv.shutdown()
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_30_manual_call_inside_a_bridge_turn_still_posts(self):
+        posts, lines = self._run([("watchdog: openwebui restarted", None)])
+        self.assertEqual(posts, [("watchdog: openwebui restarted", "")], repr(posts))
+        self.assertEqual(lines, [])
+
+    def test_31_manual_and_watchdog_texts_with_hex_or_digit_runs_still_post(self):
+        msgs = ["merged: session 3cf42692 finished the gateway change",
+                "ALERT backup session 20260928 overdue",
+                "Session ABCDEF12 needs a look",
+                "🔔 Claude Code (ai-stack) session 1a2b3c4d - needs your permission",
+                "disk C: 12345678 bytes free, session 00000000"]
+        posts, lines = self._run([(m, None) for m in msgs])
+        self.assertEqual(posts, [(m, "") for m in msgs],
+                         "every one must post, flat (no thread, no stand-down): " + repr(posts))
+        self.assertEqual(lines, [], "a manual call must never open a thread: " + repr(lines))
+
+    def test_32_manual_text_with_a_hex_run_and_an_empty_pipe_still_posts(self):
+        # A Bash-tool call: stdin is a pipe with nothing in it, not a tty and not a hook payload.
+        posts, _ = self._run([("ALERT backup session 20260928 overdue", b"")])
+        self.assertEqual(posts, [("ALERT backup session 20260928 overdue", "")], repr(posts))
+
+    def test_33_stop_hook_payload_under_the_marker_stands_down(self):
+        payload = json.dumps({"session_id": S1, "hook_event_name": "Stop"}).encode()
+        posts, lines = self._run([(None, payload), ("text naming session 1a1a1a1a", payload)])
+        self.assertEqual(posts, [], "a hook run inside a bridge session must post nothing: "
+                         + repr(posts))
+        self.assertEqual(lines, [])
+
+    def test_35_caller_named_session_inside_a_bridge_turn_still_posts(self):
+        # MM_SESSION_ID is the caller naming a session on purpose - not a hook payload.
+        bash = find_git_bash()
+        tmp = tempfile.mkdtemp(prefix="cf-bridge-manual-")
+        stub = StubMM()
+        try:
+            script = make_notifier_copy(os.path.join(tmp, "repo"))
+            env = hook_env(stub.url)
+            env.update({"CLAUDE_BRIDGE_THREAD": "somebridgethreadroot000000", "MM_SESSION_ID": S4})
+            subprocess.run([bash, script, "named on purpose"], stdin=subprocess.DEVNULL, env=env,
+                           capture_output=True, timeout=60)
+            self.assertEqual([p["message"] for p in stub.snapshot()], ["named on purpose"])
+        finally:
+            stub.srv.shutdown()
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_34_outside_a_bridge_turn_the_notification_text_still_threads(self):
+        # No marker: the live Notification hook's shape keeps its old behaviour (a thread keyed
+        # by the 8 characters), so interactive permission pings are unchanged.
+        posts, lines = self._run([("🔔 Claude Code (ai-stack) session 5e5e5e5e - needs you", None)],
+                                 marker=False)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual([ln[0] for ln in lines], ["5e5e5e5e"], repr(lines))
 
 
 class MapParserTests(unittest.TestCase):
@@ -550,6 +715,11 @@ class MapParserTests(unittest.TestCase):
     def test_sentinel_does_not_disown_the_thread(self):
         got = self.parse("abcdef12 rootA\nabcdef12 -\n")
         self.assertIn("rootA", got)
+
+    def test_sentinel_is_never_a_root(self):
+        """Attempt 1, X3."""
+        self.assertEqual(self.parse("abcdef12 -\n"), {})
+        self.assertNotIn("-", self.parse("abcdef12 rootA\nabcdef12 -\n"))
 
     def test_mismatched_or_malformed_full_id_is_ignored(self):
         got = self.parse("abcdef12 rootA 99999999-0000-4000-8000-000000000000\n"

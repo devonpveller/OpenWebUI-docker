@@ -1231,6 +1231,10 @@ class Bridge:
                 release_once()
                 with self.running_lock:
                     self.running.discard(thread_root)
+                # The attach turn is over: from here the stored session id (or, if the fork
+                # failed and none was stored, the guard again) decides what a reply means.
+                with self.state_lock:
+                    self._attaching().discard(thread_root)
                 with self.proc_lock:
                     self.procs.pop(thread_root, None)
                     self.proc_kind.pop(thread_root, None)
@@ -1780,6 +1784,32 @@ class Bridge:
     def _thread_session(self, thread_root: str) -> str:
         with self.state_lock:
             return str((self.state["threads"].get(thread_root) or {}).get("session_id") or "")
+
+    def _attaching(self) -> set:
+        """Threads whose fork/handoff passed the interactive-thread guard in this process."""
+        if not hasattr(self, "_attaching_set"):
+            self._attaching_set: set[str] = set()
+        return self._attaching_set
+
+    def _thread_attached(self, thread_root: str) -> bool:
+        """True when this thread is, or is becoming, a bridge thread: a stored session id, a
+        fork/handoff admitted here, a turn running, work queued, or an unfinished inbox record
+        (a restart replays those)."""
+        if self._thread_session(thread_root):
+            return True
+        with self.state_lock:
+            if thread_root in self._attaching():
+                return True
+        with self.running_lock:
+            if thread_root in self.running:
+                return True
+        q = self.queues.get(thread_root)
+        if q is not None and not q.empty():
+            return True
+        try:
+            return bool(self.inbox.pending(thread_root))
+        except Exception:  # noqa: BLE001 - an unreadable inbox is "nothing pending"
+            return False
 
     def _reopen_thread(self, thread_root: str) -> bool:
         """A human messaging a closed session reopens it. Returns True if it WAS closed."""
@@ -2375,10 +2405,17 @@ class Bridge:
             # G15: a reply in an INTERACTIVE session's thread (opened by the IDE notifier) is
             # not a prompt for a new headless session. Say so in-thread and offer fork/handoff;
             # a `fork|handoff <uuid> ...` reply passes through and attaches the thread as usual.
-            # A thread that already has a bridge session (attached earlier) just continues.
-            if p.get("root_id") and not self._thread_session(thread_root):
+            # A thread that already has a bridge session (attached earlier) just continues - and
+            # so does one whose attach is still IN FLIGHT: its session id is stored only when the
+            # first turn returns, so `_thread_attached` also looks at the attach just admitted,
+            # the running set, the queue and the inbox (cf-bridge attempt 1, A4: a follow-up
+            # during the fork turn was answered "nothing was started" and dropped).
+            if p.get("root_id") and not self._thread_attached(thread_root):
                 rec = interactive_threads().get(thread_root)
-                if rec and not HANDOFF_RE.match(_strip_directives(msg)):
+                if rec and HANDOFF_RE.match(_strip_directives(msg)):
+                    with self.state_lock:
+                        self._attaching().add(thread_root)
+                elif rec:
                     log(f"thread {thread_root[:8]}: reply in interactive session "
                         f"{rec.get('session_id') or rec.get('key')}'s thread - offered fork/handoff")
                     audit({"event": "interactive_thread_reply", "thread": thread_root, "post": pid,
