@@ -201,6 +201,11 @@ class LittleCoderDaemon:
         self.tasks: dict[str, TaskState] = {}
         self.contexts: dict[str, TaskContext] = {}
         self.current_focus: NormalizedRepo | None = None
+        # The token the current focus was authenticated with (a caller's per-request token, else
+        # None → LC_DEPLOY_TOKEN). Held in memory ONLY: the executor keeps its credential store in
+        # its container-local HOME, which a recreate empties, so `_ensure_git_credentials` re-stores
+        # it before every task (cf-lc-token, 2026-09-28 — the token no longer rides in .git/config).
+        self._focus_token: str | None = None
         self.in_flight: str | None = None
         self.draining = False
         self._drain_deadline = config.shutdown.drain_deadline_seconds
@@ -233,6 +238,20 @@ class LittleCoderDaemon:
             if res.ok and res.stdout.strip():
                 self.current_focus = normalize_repo_url(res.stdout.strip())
         except Exception:  # open-terminal not up yet — corrected on first /project
+            pass
+
+    def _ensure_git_credentials(self) -> None:
+        """Re-store the focused repo's git credential before a task runs. Since cf-lc-token
+        (2026-09-28) the token is never in `.git/config`; it sits in the executor's credential store,
+        which lives in the executor's HOME and is emptied when that container is recreated. A task
+        dispatched without a fresh /project (OWUI, or after an executor restart) would otherwise push
+        with no credential. Best-effort: a failure here leaves the task to report its own push error."""
+        token = self._focus_token or os.environ.get("LC_DEPLOY_TOKEN") or None
+        if not token or self.current_focus is None:
+            return
+        try:
+            self.workspace.refresh_origin_auth(self.current_focus, token)
+        except Exception:  # executor unreachable — the task will surface it
             pass
 
     async def shutdown(self) -> None:
@@ -294,6 +313,7 @@ class LittleCoderDaemon:
         state.lang = detect_primary_language(self.cfg.workspace.path)
         timeout = self.cfg.tasks.abandoned_timeout_seconds.get(state.channel, 21600)
         self.journals.write(ctx.started())
+        await asyncio.to_thread(self._ensure_git_credentials)
         try:
             result = await asyncio.to_thread(self.agent.run_task, ctx, timeout)
         except TaskTimeout:
@@ -512,12 +532,14 @@ class LittleCoderDaemon:
 
         if decision.action is SwitchAction.NOOP:
             # Already focused — the workspace was NOT wiped, so `origin` is intact… but the token
-            # EMBEDDED in its URL at the original clone is SHORT-LIVED (a GitHub App installation
-            # token lives 1h). A NOOP re-focus hours later would push with a DEAD credential (the
-            # live "expired token in origin" failure). Re-bake origin's auth with the caller's
-            # current token — a cheap `remote set-url`; the work in the tree is untouched.
+            # stored for it at the original clone is SHORT-LIVED (a GitHub App installation token
+            # lives 1h). A NOOP re-focus hours later would push with a DEAD credential (the live
+            # "expired token in origin" failure). Re-store origin's credential with the caller's
+            # current token (and reset origin to its token-free URL, which also cleans a clone made
+            # before 2026-09-28); the work in the tree is untouched.
             out: dict = {"action": "noop", "focus": requested.canonical_url}
             noop_token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
+            self._focus_token = req.token or None
             if noop_token:
                 res = await asyncio.to_thread(
                     self.workspace.refresh_origin_auth, requested, noop_token
@@ -552,6 +574,7 @@ class LittleCoderDaemon:
         # Per-request token (from the caller) overrides the global LC_DEPLOY_TOKEN, so different
         # projects can use different PATs (personal vs org). Falls back to the ambient token.
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
+        self._focus_token = req.token or None
         result = await asyncio.to_thread(
             self.workspace.clone, requested, token, req.recurse_submodules)
         if not result.ok:
