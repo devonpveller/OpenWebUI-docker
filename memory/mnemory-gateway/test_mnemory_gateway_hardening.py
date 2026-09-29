@@ -512,3 +512,60 @@ def test_valid_non_ascii_reply_bytes_unchanged(upstream):
     assert r.headers["content-type"] == "application/json"
     assert "caf\u00e9".encode("utf-8") in r.content and b"\\u00e9" not in r.content
     assert b'"jsonrpc":"2.0"' in r.content
+
+
+# --- attempt-3 findings: X4 (declared upstream charset on SSE) and mutant N06 ------
+
+_CHARSET_PROBES = {
+    # (declared charset, extra non-data line bytes) - each decodes to a lone
+    # surrogate under the DECLARED charset (httpx upstream.text).
+    "utf7-comment": ("utf-7", b": x+2AA-y"),
+    "utf7-event": ("utf-7", b"event: +2AA-"),
+    "unicode-escape-comment": ("unicode_escape", b": \\ud800"),
+    "raw-unicode-escape-id": ("raw_unicode_escape", b"id: \\udfff"),
+}
+
+
+@pytest.mark.parametrize("probe", sorted(_CHARSET_PROBES))
+def test_sse_declared_charset_cannot_make_a_500(upstream, probe):
+    charset, line = _CHARSET_PROBES[probe]
+    sse = line + b"\ndata: " + json.dumps(_FULL_LIST).encode() + b"\n\n"
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": f"text/event-stream; charset={charset}"}))
+    assert r.status_code == 200, (probe, r.status_code, r.text[:200])
+    text = r.content.decode("utf-8")            # strictly valid UTF-8
+    data = [ln for ln in text.splitlines() if ln.startswith("data:")]
+    assert _names(json.loads(data[0][5:])) == _ADVERTISED
+
+
+def test_json_declared_utf7_surrogate_in_kept_field_is_served(upstream):
+    # The JSON branch decodes the reply as UTF-8 itself and ignores the declared
+    # charset (a utf-7 reading would yield a lone surrogate): 200, filtered,
+    # valid UTF-8, and the description arrives as the bytes the upstream sent.
+    tools = [dict(t, description="d") for t in _UPSTREAM_TOOLS]
+    raw = json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"tools": tools}})
+    raw = raw.replace('"description": "d"', '"description": "+2AA-"').encode()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=raw, headers={"content-type": "application/json; charset=utf-7"}))
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    body = json.loads(r.content.decode("utf-8"))
+    assert {t["description"] for t in body["result"]["tools"]} == {"+2AA-"}
+    assert _names(body) == _ADVERTISED
+
+
+def test_fallback_output_is_strictly_valid_utf8():
+    # N06: the ensure_ascii fallback must emit valid UTF-8 (in fact ASCII), not
+    # e.g. surrogatepass bytes that json.loads would still accept.
+    resp = gw._json_response({"id": "\ud800", "d": "caf\u00e9 \udfff"}, status_code=502)
+    body = bytes(resp.body)
+    body.decode("utf-8")                         # strict: raises on invalid UTF-8
+    assert body.isascii()
+    assert json.loads(body) == {"id": "\ud800", "d": "caf\u00e9 \udfff"}
+    assert resp.status_code == 502
+    assert resp.headers["content-type"] == "application/json"
+
+
+def test_surrogate_replies_through_the_handler_are_strict_utf8(upstream):
+    r = _list_with_id(upstream, "\ud800", _json_reply(_surrogate_list()))
+    assert r.status_code == 200
+    r.content.decode("utf-8")

@@ -514,7 +514,13 @@ async def mcp(request):
         # through (it would advertise every upstream tool).
         if is_tools_list and "text/event-stream" in ct:
             out_lines = []
-            for line in upstream.text.splitlines():
+            # Decode the stream as UTF-8 ourselves (the MCP / SSE wire is UTF-8),
+            # NOT with the charset the upstream declares: httpx's upstream.text
+            # honours e.g. charset=utf-7 / unicode_escape, which can turn a
+            # non-data line into a lone surrogate that the reply cannot encode.
+            # errors="replace" can never yield a surrogate.
+            sse_text = upstream.content.decode("utf-8", "replace")
+            for line in sse_text.splitlines():
                 if line.startswith("data:"):
                     try:
                         p = _filter_tools_list(_strict_json(line[5:].strip()))
@@ -528,7 +534,8 @@ async def mcp(request):
                             media_type="text/event-stream")
         if is_tools_list:
             try:
-                payload = _filter_tools_list(_strict_json(upstream.text))
+                payload = _filter_tools_list(_strict_json(
+                    upstream.content.decode("utf-8", "replace")))
             except Exception:  # anything unfilterable -> advertise nothing
                 if 200 <= upstream.status_code < 300:
                     return _json_response(_closed_tools_list(list_id))
