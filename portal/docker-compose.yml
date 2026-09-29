@@ -190,6 +190,14 @@ services:
     environment:
       - TZ=UTC
       - PUBLIC_DOMAIN=${PUBLIC_DOMAIN}
+      # Turns on Authelia's `template` config filter, so configuration.yml
+      # reads its domains from PUBLIC_DOMAIN ({{ mustEnv "PUBLIC_DOMAIN" }})
+      # instead of shipping one. Measured with authelia:4.39 validate-config:
+      # an UNSET PUBLIC_DOMAIN fails in mustEnv and a BLANK one fails Authelia's
+      # own "session domain is required" check - either way it refuses to
+      # start rather than guard an empty domain. (portal-on.ps1 also
+      # pre-flights PUBLIC_DOMAIN via stack.manifest.toml's portal `keys`.)
+      - X_AUTHELIA_CONFIG_FILTERS=template
       # Renamed from AUTHELIA_JWT_SECRET to its 4.39 home (the old name auto-maps
       # but emits a deprecation warning on every startup; will become an error
       # in Authelia 5.0). The .env key stays as AUTHELIA_JWT_SECRET so the

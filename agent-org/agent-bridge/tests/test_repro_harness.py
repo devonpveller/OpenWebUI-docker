@@ -33,7 +33,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -61,7 +61,7 @@ def _remote(*, merge_base=BASE_SHA):
 
 
 async def _effort(orch, check_cmd="dotnet build App.sln"):
-    await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+    await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
     assert await orch.projects.set_check("game", check_cmd)
     return await orch.router.open_effort("wire", project="game")
 

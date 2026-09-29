@@ -165,7 +165,7 @@ that mentions it (this plan's `PLAN.md` / `DECISIONS.md` and two findings notes)
   `evidence.workspace` still points into `.claude/worktrees/wt-u4quad`, so **removing that
   worktree makes them fail admission and the comparison drops to 2/4** - the honest
   behaviour of the admission gate. Whoever retires that worktree re-runs those two cells
-  or accepts the drop. `documentation/notes/u4close-findings.md` F5.
+  or accepts the drop. `../documentation-plans-ai-stack/journal/notes/u4close-findings.md` F5.
 - **The little-coder cells run on a MIRROR, and the record says so.** `lc_docker.py` copies
   the workspace into the container and copies the changed files back; the host workspace's
   `.git` is not carried across, so the runner gets a fresh `git init` and no history, while
@@ -191,5 +191,5 @@ publishes nothing (`docker inspect little-coder --format '{{json .NetworkSetting
 answers 200. Merging `work/u4quad` with `work/dfu-u4` (which had already built the
 docker-exec dispatch) turned that into a hard config error, and `quadrant/lc_docker.py` is
 the transport that resolved it. The park's reason is in
-`documentation/notes/u4quad-findings.md` F7; what lifted it is in
-`documentation/notes/u4close-findings.md`.
+`../documentation-plans-ai-stack/journal/notes/u4quad-findings.md` F7; what lifted it is in
+`../documentation-plans-ai-stack/journal/notes/u4close-findings.md`.

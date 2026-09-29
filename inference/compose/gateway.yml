@@ -42,7 +42,7 @@ services:
   # llama-cpp-embed aliases on llm-net, so every caller's
   # http://llama-cpp:8080 lands here and is forwarded by model name (cut-in
   # applied 2026-06-12; see
-  # documentation/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md).
+  # ../documentation-plans-ai-stack/journal/archive/implementation-guide/LiteLLM-Proxy/CUT-IN-READY.md).
   # ENFORCING since J.1 (2026-08-21): master_key is set and each caller needs
   # its own sk- virtual key; the key's metadata.lane becomes the
   # x-ai-stack-caller header llm-queue attributes on (custom_callbacks.py).
@@ -176,7 +176,7 @@ services:
     image: ghcr.io/berriai/litellm@sha256:c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a
     container_name: llm-gateway-ui
     # llm-net (reaches llm-gateway-db) + app-net (2026-08-22: the portal Caddy
-    # fronts /ui at litellm.devinveller.ai behind Authelia). NO aliases — must
+    # fronts /ui at litellm.<PUBLIC_DOMAIN> behind Authelia). NO aliases — must
     # never be an inference path. NOT on llm-backend-net (can't reach the
     # upstreams).
     networks:

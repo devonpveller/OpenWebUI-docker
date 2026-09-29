@@ -93,7 +93,7 @@ async def _orch(db_url, tmp_path, *, recall: bool = True, transport=None):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     settings.memory_recall_enabled = recall
@@ -312,7 +312,7 @@ async def test_the_guard_bounds_the_GOAL_and_the_prompt_echoes_the_goal(db_url, 
 
     A guard on a substring of ONE text cannot deduplicate two texts, and closing the echo
     means changing how every dispatch composes its prompt - outside this item, recorded in
-    `documentation/notes/u6recall-findings.md`. So the property asserted here is the one that
+    `../documentation-plans-ai-stack/journal/notes/u6recall-findings.md`. So the property asserted here is the one that
     is actually recall's to hold: THE MEMORY BLOCK IS ECHOED NO MORE OFTEN THAN ANY OTHER
     BLOCK IN THE GOAL. That stays true if the echo is ever fixed, and fails if recall alone
     starts injecting twice - which is the failure the guard exists for."""

@@ -285,7 +285,7 @@ Set-Content -Path $anchorFile -Encoding ascii -Value @(
     "    ""The threshold round records exactly one escalation naming the local runner.""",
     "  ],",
     "  ""out_of_scope"": [ ""The live queue namespace - this probe runs in a scratch state dir."" ],",
-    "  ""findings_sink"": ""documentation/notes/u4close-findings.md""",
+    "  ""findings_sink"": ""../documentation-plans-ai-stack/journal/notes/u4close-findings.md""",
     "}")
 
 # THE BASELINE. Everything the verdict is allowed to claim is measured against this.

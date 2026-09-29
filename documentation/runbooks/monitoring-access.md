@@ -104,7 +104,7 @@ HTTP endpoint or storage bucket every minute. The integration path would
 be:
 
 1. Create a Logpush job in Zero Trust dashboard pointing at
-   `https://devinveller.ai/cf-logs-ingest` (a new Caddy route, secured
+   `https://<PUBLIC_DOMAIN>/cf-logs-ingest` (a new Caddy route, secured
    by a long shared header secret).
 2. Add a tiny `cf-log-ingest` sidecar (similar shape to
    `authelia-notif-bridge`) that receives the POST, classifies anomalous

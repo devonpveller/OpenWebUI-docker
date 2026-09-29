@@ -19,6 +19,7 @@ docker CLI, `wsl -d docker-desktop`, and Windows tools directly.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -56,8 +57,207 @@ def load_config() -> dict:
 
 
 # ── subprocess helpers ─────────────────────────────────────────────────────────
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+
+# `docker compose` global options that take a VALUE, and those that do not. Anything else before
+# the subcommand makes the argv unparseable, and an unparseable compose argv is refused.
+_COMPOSE_GLOBAL_VALUE = {"-f", "--file", "-p", "--project-name", "--profile", "--env-file",
+                         "--project-directory", "--ansi", "--parallel", "--progress"}
+_COMPOSE_GLOBAL_FLAG = {"--compatibility", "--dry-run", "--all-resources"}
+# the ONLY `compose config` options sysadmin code passes
+_COMPOSE_CONFIG_OPTS = [["--images"], ["--no-consistency", "--format", "json"]]
+
+
+def compose_subcommand(a: list[str]) -> tuple[str | None, list[str]]:
+    """(subcommand, its args) for the argv after `compose`, skipping global options and their
+    values; (None, []) when the argv cannot be parsed."""
+    i = 0
+    while i < len(a):
+        x = a[i]
+        if x in _COMPOSE_GLOBAL_FLAG:
+            i += 1
+        elif x in _COMPOSE_GLOBAL_VALUE:
+            if i + 1 >= len(a):
+                return None, []
+            i += 2
+        elif "=" in x and x.split("=", 1)[0] in _COMPOSE_GLOBAL_VALUE and x.startswith("--"):
+            i += 1
+        elif x.startswith("-"):
+            return None, []  # an option we do not know: we cannot know whether it takes a value
+        else:
+            return x, a[i + 1:]
+    return None, []
+
+
+def docker_refusal(args: list[str]) -> str | None:
+    """The LOWEST-level guard for docker argv (everything after `docker`): an ALLOWLIST of the exact
+    shapes sysadmin code uses, with each verb's SUBCOMMAND read at its position (a word appearing
+    elsewhere in the argv, e.g. a profile or project NAMED `config`, proves nothing). Independent
+    of docker_reclaim's allow-list on purpose: a mutated or buggy caller must not reach the daemon
+    with anything else (2026-09-27: a test mutation that opened the upper guard ran
+    `system prune -af --volumes` against the host; attempt 2's word test let
+    `compose --profile config down -v` through). Returns a reason, or None when allowed."""
+    a = [str(x) for x in args]
+    if not a:
+        return "empty docker argv"
+    verb, rest = a[0], a[1:]
+    if verb.startswith("-"):
+        return "global docker options are not used by sysadmin code (they could redirect the daemon)"
+    if verb in ("ps", "inspect", "images", "logs", "info", "version"):
+        return None  # read-only in every form
+    if verb == "exec":
+        # the /tmp sweep and idleness probes: only into the configured ao-workers, no exec options
+        workers = set(load_config().get("ao_workers", []))
+        if rest and rest[0] in workers:
+            return None
+        return "docker exec outside the configured ao-workers (or with exec options)"
+    if verb == "compose":  # its globals come before the subcommand, so parse past them
+        subc, cargs = compose_subcommand(rest)
+        if subc is None:
+            return "docker compose argv could not be parsed (unknown global option) - refused"
+        if subc != "config":
+            return f"docker compose subcommand {subc!r}: only `config`"
+        if cargs not in _COMPOSE_CONFIG_OPTS:
+            return f"docker compose config {cargs}: only --images, or --no-consistency --format json"
+        return None
+    sub = rest[0] if rest else ""
+    if sub.startswith("-") or not sub:
+        return f"docker {verb}: no subcommand at position 2"
+    tail = rest[1:]
+    if verb == "image":
+        if sub in ("inspect", "ls"):
+            return None
+        if sub == "rm" and len(tail) == 1 and tail[0] and not tail[0].startswith("-"):
+            return None
+        return "docker image: only inspect/ls, or rm of ONE ref with no flags"
+    if verb == "volume":
+        if sub in ("ls", "inspect"):
+            return None
+        if sub == "rm" and tail and all(_HEX64.match(x) for x in tail):
+            return None
+        return "docker volume: only ls/inspect, or rm of 64-hex anonymous-volume names (no flags)"
+    if verb == "system":
+        return None if sub == "df" else "docker system: only df"
+    if verb == "builder":
+        m = (sub == "prune" and len(tail) == 3 and tail[:2] == ["-af", "--filter"]
+             and re.fullmatch(r"until=([0-9]+)h", tail[2]))
+        return None if (m and int(m.group(1)) >= 24) else "docker builder: only `prune -af --filter until=<N>h`, N>=24"
+    return f"docker {verb}: not a shape sysadmin code uses"
+
+
+def program_name(arg0) -> str:
+    """argv[0]'s program name as Windows would resolve it: the last path component across \\ and /,
+    lower-cased, with the trailing dots and spaces Win32 strips removed (`docker.exe.`, `"docker "`)."""
+    return re.split(r"[\\/]", str(arg0))[-1].lower().rstrip(". ")
+
+
+_RUN_PROGRAMS = {"docker", "docker.exe", "wsl", "wsl.exe", "schtasks", "schtasks.exe"}
+_WSL_PROGRAMS = {"find", "df", "truncate"}  # what sysadmin code runs inside docker-desktop
+
+
+def run_refusal(cmd) -> str | None:
+    """argv[0] ALLOWLIST for sysadmin._run: exactly docker / wsl / schtasks by their plain names.
+    Refuses 8.3 short names (`DOCKER~1.EXE` may be docker-compose), NUL bytes, look-alikes
+    (docker-compose, docker-buildx, com.docker.cli) and wrappers (cmd /c, env, sh, powershell), and a
+    wsl call whose -e program is not one sysadmin uses (so `wsl -e docker ...` cannot smuggle docker
+    past docker_refusal)."""
+    if not cmd:
+        return "empty argv"
+    raw = str(cmd[0])
+    if "\x00" in raw or any("\x00" in str(c) for c in cmd):
+        return "NUL byte in argv"
+    name = program_name(raw)
+    if "~" in name:
+        return f"8.3 short name {name!r}: the real program cannot be known"
+    if name not in _RUN_PROGRAMS:
+        return f"program {name!r}: sysadmin code runs only docker, wsl and schtasks"
+    a = [str(x) for x in cmd[1:]]
+    if name.startswith("wsl"):
+        if a[:3] != ["-d", "docker-desktop", "-e"] or len(a) < 4 or a[3] not in _WSL_PROGRAMS:
+            return f"wsl call outside `-d docker-desktop -e {sorted(_WSL_PROGRAMS)}`"
+        why = wsl_args_refusal(a[3], a[4:])
+        if why:
+            return f"wsl {a[3]}: {why}"
+    if name.startswith("schtasks"):
+        why = schtasks_refusal(a)
+        if why:
+            return f"schtasks: {why}"
+    return None
+
+
+# -- ARGUMENT validation for the non-docker programs (docker has docker_refusal) --------------
+COMPACT_TASK = "AI-Stack Sysadmin Compact VHDX"  # == compaction.TASK_NAME (a test pins the equality)
+_FIND_VALUE_PREDICATES = {"-name", "-size", "-maxdepth", "-type"}
+# the ONLY -exec forms allowed, each exactly as the code writes it and each read-only
+_FIND_EXEC_TAILS = (["-exec", "du", "-k", "{}", ";"], ["-exec", "stat", "-c", "%Y %n", "{}", "+"])
+
+
+def _mount() -> str:
+    return load_config()["docker_desktop_mount"].rstrip("/")
+
+
+def container_log_path(p: str) -> bool:
+    """<mount>/data/docker/containers/<64-hex id>/<same id>-json.log - Docker's own log file."""
+    return bool(re.fullmatch(re.escape(_mount()) + r"/data/docker/containers/([0-9a-f]{64})/\1-json\.log", str(p)))
+
+
+def wsl_args_refusal(prog: str, args: list[str]) -> str | None:
+    """find: a scan root the code uses, only read-only predicates (-name/-size/-maxdepth/-type) and at
+    most ONE of the two exact read-only -exec tails (`du -k {} ;`, `stat -c "%Y %n" {} +`) - no
+    -delete, other -exec, -execdir, -ok, -fprint*, -fls. df: exactly `-k <mount>`. truncate: exactly
+    `-s 0 <paths>`, every path a container log (container_log_path)."""
+    m = _mount()
+    if prog == "df":
+        return None if args == ["-k", m] else f"df only as `-k {m}`"
+    if prog == "truncate":
+        if len(args) < 3 or args[:2] != ["-s", "0"]:
+            return "truncate only as `-s 0 <container-log paths>`"
+        bad = [p for p in args[2:] if not container_log_path(p)]
+        return f"not container-log paths: {bad[:3]}" if bad else None
+    if prog == "find":
+        if not args or args[0] not in (f"{m}/data/docker/containers", f"{m}/data/docker/volumes"):
+            return "find root must be the containers or volumes dir of the docker-desktop disk"
+        rest = args[1:]
+        for tail in _FIND_EXEC_TAILS:
+            if rest[-len(tail):] == tail:
+                rest = rest[:-len(tail)]
+                break
+        i = 0
+        while i < len(rest):
+            if rest[i] in _FIND_VALUE_PREDICATES and i + 1 < len(rest):
+                i += 2
+                continue
+            return f"find predicate {rest[i]!r} is not an allowed read-only predicate"
+        return None
+    return f"program {prog!r} not allowed"
+
+
+def schtasks_refusal(args: list[str]) -> str | None:
+    """Only `/query /tn <name> [/fo LIST]` and `/run /tn "AI-Stack Sysadmin Compact VHDX"` (the gated
+    compaction). /delete, /create, /change, /end and everything else are refused, and so is a /tn
+    value that starts with `/` (a switch in the name's slot) or contains `"`."""
+    low = [x.lower() for x in args]
+    if len(args) >= 3 and (args[2].startswith("/") or '"' in args[2]):
+        return "the /tn value must be a task name: not a switch (/...) and no quote character"
+    if len(args) in (3, 5) and low[:2] == ["/query", "/tn"] and (len(args) == 3 or low[3:] == ["/fo", "list"]):
+        return None
+    if args == ["/run", "/tn", COMPACT_TASK]:
+        return None
+    return "only `/query /tn <name> [/fo LIST]` or `/run /tn` the compaction task"
+
+
 def _run(cmd: list[str], timeout: int = 30) -> dict:
-    """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises."""
+    """Run a command (arg list, no shell). Returns {rc, out, err}. Never raises.
+    argv[0] must be one of the three programs sysadmin code runs (run_refusal); docker argv then
+    passes docker_refusal(). A refused command never starts (rc 126)."""
+    why = run_refusal(cmd)
+    if why:
+        return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {[str(c) for c in cmd[:6]]}"}
+    name = program_name(cmd[0])
+    if name in ("docker", "docker.exe"):
+        why = docker_refusal(list(cmd[1:]))
+        if why:
+            return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:8]}"}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return {"rc": p.returncode, "out": p.stdout or "", "err": p.stderr or ""}

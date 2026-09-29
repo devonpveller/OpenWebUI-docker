@@ -51,8 +51,8 @@ def host_of(repo_url: str) -> str:
 
 
 def owner_of(repo_url: str) -> str:
-    """The owner/org segment of a git URL — e.g. 'PolyshDesign' from
-    `https://github.com/PolyshDesign/repo.git` (or `git@github.com:PolyshDesign/repo.git`).
+    """The owner/org segment of a git URL — e.g. 'PixelDesign' from
+    `https://github.com/PixelDesign/repo.git` (or `git@github.com:PixelDesign/repo.git`).
     Case preserved; "" if unparseable. For nested groups the top-level group is returned."""
     u = (repo_url or "").strip()
     m = re.match(r"^[\w.+-]+@[^:/]+:(?P<path>.+)$", u)                 # scp: git@host:owner/repo
@@ -67,7 +67,7 @@ def owner_of(repo_url: str) -> str:
 
 def owner_token_env(repo_url: str) -> str:
     """The per-owner deploy-token env-var NAME by convention: `LC_<OWNER>_TOKEN`
-    (e.g. PolyshDesign → `LC_POLYSHDESIGN_TOKEN`). "" if the owner can't be parsed. The bridge
+    (e.g. PixelDesign → `LC_PIXELDESIGN_TOKEN`). "" if the owner can't be parsed. The bridge
     uses this env var only if it is actually SET; otherwise it falls back to the pool `LC_DEPLOY_TOKEN`."""
     owner = owner_of(repo_url)
     if not owner:

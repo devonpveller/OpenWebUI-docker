@@ -27,7 +27,7 @@ Aiception watches for hard-won knowledge during real work: debugging breakthroug
 
 ## Prerequisites
 
-- Working Open Brain setup if you want duplicate checking and capture via `search_thoughts` and `capture_thought` ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want duplicate checking and capture via `search_thoughts` and `capture_thought` ([guide](../../../OB1/docs/01-getting-started.md))
 - An AI client that can load a reusable skill or prompt file
 - A place to save newly created skill files
 
@@ -55,7 +55,7 @@ When the skill is working correctly, it should:
 
 ## Full Recipe
 
-If you want the broader walkthrough and examples, use the companion recipe: [../../recipes/claudeception/](../../recipes/claudeception/).
+If you want the broader walkthrough and examples, use the companion recipe: [../../recipes/claudeception/](../../../OB1/recipes/claudeception/).
 
 ## Troubleshooting
 

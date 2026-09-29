@@ -21,7 +21,7 @@ def load_config() -> Dict[str, Any]:
     except Exception:
         return {
             "ai_stack": {
-                "workspace_root": "d:\\Open WebUI\\ai-stack",
+                "workspace_root": "/path/to/ai-stack",
                 "name": "OpenWebUI AI Stack"
             }
         }
@@ -242,7 +242,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Main entry point for system health pipe"""
     try:
         config = load_config()
-        workspace_root = config.get("ai_stack", {}).get("workspace_root", "d:\\Open WebUI\\ai-stack")
+        workspace_root = config.get("ai_stack", {}).get("workspace_root", "/path/to/ai-stack")
         
         user_input = payload.get("input", "").lower()
         detailed_check = any(keyword in user_input for keyword in [

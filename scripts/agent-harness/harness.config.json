@@ -273,6 +273,11 @@
       "_desc": "unattended: both gates self-pass, andon-clear, and say so in the record",
       "anchor": "auto",
       "pre_review": "auto"
+    },
+    "anchored": {
+      "_desc": "the operator still confirms INTENT; the release for review self-passes. Added 2026-09-12 on the operator's instruction to put pre_review on auto. NOT 'dark': that would also self-pass the ANCHOR, which nobody asked for and which is the gate that exists because a run passing every check still shipped the wrong artifact. Tests validate correctness; the anchor validates intent, and only the second is a human's to give.",
+      "anchor": "human",
+      "pre_review": "auto"
     }
   },
 
@@ -329,7 +334,7 @@
         "params": { "repo": "", "stale_seconds": 0 },
         "on_fire": "halt",
         "on_indeterminate": "halt",
-        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md"
+        "incident": "../documentation-plans-ai-stack/journal/notes/drill-rebased-the-work-line-incident.md"
       },
       {
         "id": "policy-declared-unread",
@@ -359,7 +364,7 @@
         },
         "on_fire": "halt",
         "on_indeterminate": "halt",
-        "incident": "documentation/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
+        "incident": "../documentation-plans-ai-stack/journal/notes/drill-rebased-the-work-line-incident.md (Invoke-DrillGit swallowed every git error)"
       },
       {
         "id": "work-branch-on-remote",

@@ -21,7 +21,7 @@ from app.orchestrator import Orchestrator
 from app.worker.harness import FakeHarness
 
 ROOT = Path(__file__).resolve().parents[1]
-REPO = "https://github.com/devonpveller/ai-orchestration-gym"
+REPO = "https://github.com/demoowner/ai-orchestration-gym"
 
 
 # ── the ensure_branch capability ──────────────────────────────────────────────
@@ -32,7 +32,7 @@ async def test_ensure_branch_creates_when_absent():
         p = request.url.path
         if p.endswith("/git/ref/heads/develop") and request.method == "GET":
             return httpx.Response(404)                                  # develop absent
-        if p == "/repos/devonpveller/ai-orchestration-gym":
+        if p == "/repos/demoowner/ai-orchestration-gym":
             return httpx.Response(200, json={"default_branch": "main"})
         if p.endswith("/git/ref/heads/main"):
             return httpx.Response(200, json={"object": {"sha": "mainsha00000"}})
@@ -41,7 +41,7 @@ async def test_ensure_branch_creates_when_absent():
             return httpx.Response(201, json={})
         return httpx.Response(404)
 
-    res = await ensure_branch(FakeGitHubApp(owner="devonpveller"), REPO, "develop",
+    res = await ensure_branch(FakeGitHubApp(owner="demoowner"), REPO, "develop",
                               transport=httpx.MockTransport(handler))
     assert res.ok and "created" in res.summary
     assert seen["ref"] == {"ref": "refs/heads/develop", "sha": "mainsha00000"}
@@ -53,7 +53,7 @@ async def test_ensure_branch_idempotent_when_present():
             return httpx.Response(200, json={"object": {"sha": "devsha"}})
         return httpx.Response(500)                                       # nothing else may be hit
 
-    res = await ensure_branch(FakeGitHubApp(owner="devonpveller"), REPO, "develop",
+    res = await ensure_branch(FakeGitHubApp(owner="demoowner"), REPO, "develop",
                               transport=httpx.MockTransport(handler))
     assert res.ok and "already exists" in res.summary
 
@@ -68,7 +68,7 @@ async def _orch(db_url, tmp_path, *, develop_integration=True):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
         develop_integration=develop_integration,
     )
@@ -93,7 +93,7 @@ def _integ_handler(state: dict, *, conflict=False):
             state["prod_pr"] = json.loads(request.content)
             return httpx.Response(201, json={"number": 9,
                                              "html_url": REPO + "/pull/9"})
-        if p == "/repos/devonpveller/ai-orchestration-gym":
+        if p == "/repos/demoowner/ai-orchestration-gym":
             return httpx.Response(200, json={"default_branch": "main"})
         return httpx.Response(404)
     return handler

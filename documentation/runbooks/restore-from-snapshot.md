@@ -98,6 +98,165 @@ expected git history.
 
 ---
 
+## Before ANY wipe of a host bind mount: one call, or nothing
+
+A host bind mount's directory comes from a plane's `.env` (`OPEN_NOTEBOOK_DIR`, `LM_MODELS_DIR`) or a
+fixed path in its compose file (`../data/tailscale`). Four ways to get it wrong, each of which makes a
+`Remove-Item` delete the wrong directory: a RELATIVE value is resolved by compose against the compose
+file's own directory, not this shell's; a blank value falls back to a compose default; a variable set
+in THIS SHELL outranks the plane's `.env` in compose's interpolation; and - when a runbook block is
+pasted line by line - a refused step does not stop the next line, which then runs with whatever an
+earlier paste left in `$nb` or `$models`.
+
+So every host-bind-mount wipe in this runbook is ONE call to `Invoke-BindRestore`, on one line. It
+takes the directory from the container's OWN mount (`docker inspect` - running, or stopped by step 1),
+compares it with the compose render made after the shell variable is removed, checks the archive's
+`.sha256` (hash and file name, whatever directory the sidecar recorded), refuses a target that is a
+filesystem root or holds the current directory, the checkout or your home, and only then deletes
+(literal paths; every cmdlet both functions call is called by its module-qualified name, e.g.
+`Microsoft.PowerShell.Management\Remove-Item`, the archive is hashed with .NET SHA-256 rather than a
+cmdlet, and `docker`/`git` are called by the full path of the resolved executable - so a leftover alias
+or function under the PLAIN command name, such as `Remove-Item` or `docker`, is ignored. An alias or
+function deliberately defined under the module-qualified name or the executable's full path DOES run
+instead; that is someone inside your own session, which this runbook does not defend against), restores and
+starts the containers. The backup directory is guarded too (a target equal to it, containing it or
+inside it is refused), and a run from outside any git work tree simply has no checkout to guard. Everything it uses is a
+parameter or assigned inside it (strict mode, so a name it did not assign is an error, never an older
+value from your session). Any failure THROWS, and the delete is never reached without a resolve that
+returned. There is no separate "resolve", "delete" or "restore" line to paste on its own.
+
+Paste both functions once per session (as one paste; if they are not defined, the call line fails with
+"not recognized" and nothing runs):
+
+```powershell
+function Resolve-BindTarget {
+    param([Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Destination,
+          [Parameter(Mandatory)][string]$ComposeFile, [string[]]$ComposeProfile = @(),
+          [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '')
+    Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    # docker (and git) are called by the full path of the resolved APPLICATION and cmdlets by their
+    # module-qualified names, so a leftover alias or function under the plain name (docker,
+    # Remove-Item, ...) is ignored. One deliberately defined under the qualified name or the full
+    # path does run instead - not defended against (an adversary inside your own session).
+    $dockerExe = @(Microsoft.PowerShell.Core\Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
+    $dockerExe = $dockerExe[0].Source
+    # 1. A shell variable outranks the plane's .env for compose: remove it from this session.
+    if ($ShellVar) { Microsoft.PowerShell.Management\Remove-Item "Env:$ShellVar" -ErrorAction SilentlyContinue }
+    # 2. What the container really mounts at $Destination (running, or stopped by step 1).
+    #    JSON, filtered here: Windows PowerShell 5.1 strips the double quotes a Go template
+    #    comparison needs when it passes them to docker.
+    $mounted = $null; $mounts = $null; $list = $null
+    $mounts = & $dockerExe inspect $Container --format '{{json .Mounts}}'
+    if ($LASTEXITCODE -eq 0 -and $mounts) {
+        $list = $mounts | Microsoft.PowerShell.Utility\ConvertFrom-Json      # assigned first: in 5.1 a piped array is ONE object
+        $mounted = @($list | Microsoft.PowerShell.Core\Where-Object { $_.Destination -eq $Destination } | Microsoft.PowerShell.Core\ForEach-Object { $_.Source })
+        if ($mounted.Count -ne 1) { $mounted = $null } else { $mounted = $mounted[0] }
+    }
+    # 3. What the compose render says, now from the plane's .env (or its default) only.
+    $profileArgs = @(); foreach ($pr in $ComposeProfile) { $profileArgs += @('--profile', $pr) }
+    $cfg = $null; $vols = $null; $rendered = $null
+    $cfg = & $dockerExe compose -f $ComposeFile @profileArgs config --format json | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    if ($cfg -and $cfg.services.PSObject.Properties[$Service]) {
+        $vols = $cfg.services.$Service.volumes
+        $rendered = @($vols | Microsoft.PowerShell.Core\Where-Object { $_.target -eq $Destination } | Microsoft.PowerShell.Core\ForEach-Object { $_.source })
+        if ($rendered.Count -ne 1) { $rendered = $null } else { $rendered = $rendered[0] }
+    }
+    if (-not $mounted)  { throw "REFUSED: no container '$Container' with a mount at $Destination - nothing proves which directory it uses" }
+    if (-not $rendered) { throw "REFUSED: the compose render has no bind source at $Destination for '$Service'" }
+    # Windows paths compare case-insensitively (lower-cased here); everywhere else case is part of
+    # the name, so the comparison is -cne: /X and /x are different directories.
+    $onWindows = ($env:OS -eq 'Windows_NT')
+    $norm = { param($p) $x = "$p".Trim().TrimEnd('\', '/').Replace('\', '/'); if ($onWindows) { $x.ToLowerInvariant() } else { $x } }
+    if ((& $norm $mounted) -cne (& $norm $rendered)) {
+        throw "REFUSED: the container mounts '$mounted' but the render says '$rendered' - find out why before wiping anything"
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $rendered -PathType Container)) { throw "REFUSED: '$rendered' is not an existing directory" }
+    $rendered
+}
+
+function Invoke-BindRestore {
+    param([Parameter(Mandatory)][string]$Container, [Parameter(Mandatory)][string]$Destination,
+          [Parameter(Mandatory)][string]$ComposeFile, [string[]]$ComposeProfile = @(),
+          [Parameter(Mandatory)][string]$Service, [string]$ShellVar = '',
+          [Parameter(Mandatory)][string]$BackupDir, [Parameter(Mandatory)][string]$Archive,
+          [Parameter(Mandatory)][string[]]$Start)
+    Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $target = $null; $backup = $null; $archivePath = $null; $sentinel = $null; $fields = $null
+    $want = $null; $got = $null; $full = $null; $guarded = $null; $home0 = $null; $top = $null; $gitExe = $null; $g = $null; $cmp = $null; $eap = $null; $bk = $null; $stream = $null
+    $dockerExe = @(Microsoft.PowerShell.Core\Get-Command docker -CommandType Application -ErrorAction SilentlyContinue)
+    if ($dockerExe.Count -eq 0) { throw 'REFUSED: no docker executable on PATH' }
+    $dockerExe = $dockerExe[0].Source
+    if ($Archive -notmatch '^[A-Za-z0-9._-]+\.tar\.gz$') { throw "REFUSED: '$Archive' is not an archive file name (replace <ts> with the timestamp of YOUR archive)" }
+    $backup = (Microsoft.PowerShell.Management\Resolve-Path -LiteralPath $BackupDir).Path
+    $archivePath = Microsoft.PowerShell.Management\Join-Path $backup $Archive
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $archivePath -PathType Leaf)) { throw "REFUSED: $Archive is not in $backup" }
+    # 1. The directory - resolved, or this call ends here (a throw), before anything is touched.
+    $target = Resolve-BindTarget -Container $Container -Destination $Destination -ComposeFile $ComposeFile `
+        -ComposeProfile $ComposeProfile -Service $Service -ShellVar $ShellVar
+    if (-not $target) { throw 'REFUSED: no target was resolved' }
+    # 2. Never a directory whose wipe would take more than a data store with it: a filesystem or
+    #    drive root, or the current directory, this checkout, your home - or any directory that
+    #    CONTAINS one of them.
+    $full = [IO.Path]::GetFullPath($target).TrimEnd('\', '/')
+    if ($full -eq '' -or [IO.Path]::GetPathRoot($target).TrimEnd('\', '/') -eq $full) { throw "REFUSED: '$target' is a filesystem root" }
+    $home0 = [Environment]::GetFolderPath('UserProfile')
+    $gitExe = @(Microsoft.PowerShell.Core\Get-Command git -CommandType Application -ErrorAction SilentlyContinue)
+    if ($gitExe.Count) {
+        # Windows PowerShell 5.1 turns a native command's stderr into a TERMINATING error under
+        # Stop, even with 2>$null; outside a work tree git prints "fatal: not a git repository".
+        # So Continue is scoped to this one call, and a non-zero exit means "no checkout to guard".
+        $eap = $ErrorActionPreference
+        try { $ErrorActionPreference = 'Continue'; $top = & $gitExe[0].Source rev-parse --show-toplevel 2>$null }
+        finally { $ErrorActionPreference = $eap }
+        if ($LASTEXITCODE -ne 0 -or -not $top) { $top = $null }
+    }
+    $bk = [IO.Path]::GetFullPath($backup).TrimEnd('\', '/')
+    $cmp = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    if ([string]::Equals($bk, $full, $cmp) -or $bk.StartsWith($full + [IO.Path]::DirectorySeparatorChar, $cmp) -or $bk.StartsWith($full + '/', $cmp) -or
+        $full.StartsWith($bk + [IO.Path]::DirectorySeparatorChar, $cmp) -or $full.StartsWith($bk + '/', $cmp)) {
+        throw "REFUSED: '$target' is, contains, or is inside the backup directory $backup - the wipe would destroy the archive before the restore reads it"
+    }
+    foreach ($guarded in @((Microsoft.PowerShell.Management\Get-Location).ProviderPath, $home0, $top)) {
+        if (-not $guarded) { continue }
+        $g = [IO.Path]::GetFullPath($guarded).TrimEnd('\', '/')
+        $cmp = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        if ([string]::Equals($g, $full, $cmp) -or $g.StartsWith($full + [IO.Path]::DirectorySeparatorChar, $cmp) -or $g.StartsWith($full + '/', $cmp)) {
+            throw "REFUSED: '$target' is, or contains, the current directory / this checkout / your home"
+        }
+    }
+    # 3. The archive matches its sentinel. Checked HERE, not by `sha256sum -c` in a container: the
+    #    backup sidecars write the sentinel with the path THEY saw (/backups/<archive>), so only the
+    #    hash and the file name are compared, whatever directory it was recorded under.
+    $sentinel = "$archivePath.sha256"
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $sentinel -PathType Leaf)) { throw "REFUSED: $Archive has no .sha256 sentinel - nothing was deleted" }
+    $fields = ((Microsoft.PowerShell.Management\Get-Content -LiteralPath $sentinel -TotalCount 1) -split '\s+', 2)
+    if ($fields.Count -ne 2 -or $fields[0] -notmatch '^[0-9a-fA-F]{64}$' -or (($fields[1].TrimStart('*') -split '[\\/]')[-1]) -ne $Archive) {
+        throw "REFUSED: $Archive.sha256 does not name $Archive with a SHA-256 - nothing was deleted"
+    }
+    $want = $fields[0].ToLowerInvariant()
+    # .NET, not Get-FileHash: in Windows PowerShell 5.1 Get-FileHash is a SCRIPT function whose
+    # module-qualified name does not resolve in every runspace, and .NET cannot be shadowed at all.
+    $stream = [IO.File]::OpenRead($archivePath)
+    try { $got = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose() }
+    if ($got -ne $want) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
+    Microsoft.PowerShell.Utility\Write-Host "Wiping and restoring: $target"
+    # 4. Wipe (literal paths, the module-qualified cmdlet), restore, start - each checked.
+    Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force |
+        Microsoft.PowerShell.Core\ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    & $dockerExe run --rm -v "${target}:/dest" -v "${backup}:/backups:ro" alpine sh -c "cd /dest && tar xzf '/backups/$Archive'"
+    if ($LASTEXITCODE -ne 0) { throw "RESTORE FAILED (exit $LASTEXITCODE): $target was wiped and is not restored - fix the cause and run this same line again" }
+    foreach ($c in $Start) {
+        & $dockerExe start $c | Microsoft.PowerShell.Core\Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "restored, but 'docker start $c' failed (exit $LASTEXITCODE)" }
+    }
+    Microsoft.PowerShell.Utility\Write-Host "Restored $Archive into $target; started: $($Start -join ', ')"
+}
+```
+
 ## open-notebook (SurrealDB + notebook_data)
 
 **Two-phase**. Restore SurrealDB FIRST, then the bind mount.
@@ -141,19 +300,10 @@ INFO FOR DB;
 # 1. Stop open_notebook.
 docker stop open_notebook
 
-# 2. Verify sentinel.
-docker run --rm -v "${PWD}\backups\open-notebook:/backups:ro" alpine sh -c "cd /backups && sha256sum -c notebook-data-*.sha256 | tail -1"
-
-# 3. Wipe + restore the host bind mount.
-$archive = 'notebook-data-20260530T011617Z.tar.gz'
-Remove-Item -Recurse -Force 'D:\Open WebUI\open-notebook\notebook_data\*'
-docker run --rm `
-  -v 'D:\Open WebUI\open-notebook\notebook_data:/dest' `
-  -v "${PWD}\backups\open-notebook:/in:ro" `
-  alpine sh -c "cd /dest && tar xzf /in/$archive"
-
-# 4. Restart open_notebook.
-docker start open_notebook
+# 2. Verify, wipe, restore and start - ONE line (see "Before ANY wipe"). OPEN_NOTEBOOK_DIR lives
+#    in OB1/docker/.env; blank means ../../../open-notebook, resolved against OB1/docker/.
+#    Replace <ts> with the timestamp of YOUR archive (ls .\backups\open-notebook).
+Invoke-BindRestore -Container open_notebook -Destination /app/data -ComposeFile OB1/docker/docker-compose.yml -ComposeProfile notebook -Service open_notebook -ShellVar OPEN_NOTEBOOK_DIR -BackupDir .\backups\open-notebook -Archive 'notebook-data-<ts>.tar.gz' -Start open_notebook
 ```
 
 ---
@@ -207,7 +357,7 @@ Part K (2026-08-21)** — the live volumes are:
 | mnemory | `memory_mnemory-data` | `docker compose -f memory/docker-compose.yml stop mnemory mnemory-cloud-gateway` |
 | little-coder | `coder_little-coder-{journals,skill,cohorts,polyglot,sessions}` — **one archive, five volumes**, see below | `docker compose -f coder/docker-compose.yml stop little-coder open-terminal lc-egress` |
 | tailscale | bind `./data/tailscale` | frontend project, see below |
-| lm-models | bind `C:\Users\yamao\.lmstudio\models` | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
+| lm-models | bind `LM_MODELS_DIR` (from `inference/.env`; relative = against `inference/compose/`) | `docker compose -f inference/docker-compose.yml stop llama-cpp-upstream llama-cpp-embed-upstream` |
 | ao-journals | `agent-org_ao-worker-1-journals`, `agent-org_ao-worker-2-journals` | `docker compose -f agent-org/docker/docker-compose.yml --profile workers stop ao-worker-1 ao-worker-2` |
 
 **little-coder** is the one service whose backup is a SINGLE archive covering
@@ -264,18 +414,23 @@ docker run --rm `
 # 4. Restart via the same plane compose file (compose start, or `up -d`).
 ```
 
-**Tailscale**: the bind mount is `./data/tailscale`, not a named volume.
-Step 3 becomes:
+**Tailscale**: the bind mount is `../data/tailscale` from `frontend/` (i.e. `./data/tailscale`), not a
+named volume - a host bind-mount wipe, so it goes through `Invoke-BindRestore` like the others (see
+"Before ANY wipe"; there is no shell variable to clear). Step 1 stops **tailscale and openwebui**
+(the openwebui row above: tailscale first). Steps 2-4 become ONE line; `-Start` lists openwebui before
+tailscale (the netns rule; starting a running container is a no-op). Replace `<ts>` with YOUR archive's:
 ```powershell
-Remove-Item -Recurse -Force '.\data\tailscale\*'
-docker run --rm -v "${PWD}\data\tailscale:/dest" -v "${PWD}\backups\tailscale:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+Invoke-BindRestore -Container tailscale -Destination /var/lib/tailscale -ComposeFile frontend/docker-compose.yml -ComposeProfile gpu,tailscale -Service tailscale -BackupDir .\backups\tailscale -Archive 'tailscale-<ts>.tar.gz' -Start openwebui,tailscale
 ```
 
-**LM Studio models**: the bind mount is your Windows path
-`C:\Users\yamao\.lmstudio\models`. Step 3:
+**LM Studio models**: the bind mount is `LM_MODELS_DIR` from `inference/.env`. A RELATIVE
+value (the `.env.example` default is `../../data/models/gguf`) is resolved by compose against
+`inference/compose/`, not against the repo root this runbook runs from, and a `$env:LM_MODELS_DIR`
+in your shell would outrank `inference/.env` - so never paste the variable into a delete. Steps
+2-4 become ONE line through `Invoke-BindRestore` (see "Before ANY wipe"; the container is the one
+step 1 stopped):
 ```powershell
-Remove-Item -Recurse -Force 'C:\Users\yamao\.lmstudio\models\*'
-docker run --rm -v 'C:\Users\yamao\.lmstudio\models:/dest' -v "${PWD}\backups\lm-models:/in:ro" alpine sh -c "cd /dest && tar xzf /in/$archive"
+Invoke-BindRestore -Container llama-cpp-upstream -Destination /models -ComposeFile inference/docker-compose.yml -ComposeProfile local -Service llama-cpp-upstream -ShellVar LM_MODELS_DIR -BackupDir .\backups\lm-models -Archive 'lm-models-<ts>.tar.gz' -Start llama-cpp-upstream,llama-cpp-embed-upstream
 ```
 **Time this carefully** — restoring 50+ GB over USB or slow disk will
 take a while.

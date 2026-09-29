@@ -31,7 +31,7 @@
 #   ready-review   the operator released it for review
 #   reviewing      a reviewer holds it
 #   merged         landed by the reviewer. TERMINAL unless the merge derived deploy
-#                  surfaces (an OB1 integration image, a :local build context, an owui/ file
+#                  surfaces (an OB1 integration image, a :local build context, a frontend/owui/ file
 #                  OWUI only sees by paste) - then -List shows [UNDEPLOYED: ...] until each is
 #                  closed by -Deployed with health evidence. The list is DERIVED from the
 #                  merge range at -Merged, never typed by the author (deploystate, 2026-09-06).
@@ -45,8 +45,8 @@
 # the leases used, applied to the thing that actually needs it: the work item.
 #
 #   .\queue.ps1 -Propose -Id mem-readme -Anchor <path> -Developer wt-mem-readme   # BEFORE any work
-#   .\queue.ps1 -ConfirmAnchor -Id mem-readme -By profnovice                       # THE ANCHOR GATE
-#   .\queue.ps1 -AmendAnchor -Id mem-readme -By profnovice -Anchor <path> -Reason "..."
+#   .\queue.ps1 -ConfirmAnchor -Id mem-readme -By alice                       # THE ANCHOR GATE
+#   .\queue.ps1 -AmendAnchor -Id mem-readme -By alice -Anchor <path> -Reason "..."
 #     (the world turned out different; sends the item BACK to the developer - see the handler)
 #   .\queue.ps1 -Submit -Id mem-readme -Branch work/mem-readme -Developer wt-mem-readme -TestPlan <path>
 #   .\queue.ps1 -List
@@ -67,10 +67,10 @@
 #      uses - so the way forward is the ordinary -Submit. The REVIEWER's -Requeue is the
 #      stale-pass rule and goes to 'ready-to-test'. Both bump `attempt`, and both take an
 #      optional -TestPlan.)
-#   .\queue.ps1 -Approve -Id mem-readme -By profnovice               # THE HUMAN GATE
+#   .\queue.ps1 -Approve -Id mem-readme -By alice               # THE HUMAN GATE
 #   .\queue.ps1 -Claim -Id mem-readme -Role reviewer -By wt-reviewer-1
 #   .\queue.ps1 -Merged -Id mem-readme -By wt-reviewer-1 -Sha <merge sha>
-#   .\queue.ps1 -Deployed -Id mem-readme -By profnovice -Evidence <path> [-Surface image:openbrain-curator]
+#   .\queue.ps1 -Deployed -Id mem-readme -By alice -Evidence <path> [-Surface image:openbrain-curator]
 #     (closes the surfaces -Merged derived; -By is a person - the auto: namespace is refused)
 #
 # Exit codes: 0 ok | 1 usage/state error | 2 harness disabled | 3 claimed by someone else
@@ -488,14 +488,14 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # [needs hand-off] was set at -Submit and never cleared, so 32 of the live board's 42 rows
 # wore it and 31 of those were TERMINAL (counted 2026-09-06 by this item's tester; the
 # reconciliation of three readings taken hours apart is the table in
-# documentation/notes/deploy-gate-2026-09-06.md, which is the figure of record). A flag
+# ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md, which is the figure of record). A flag
 # meaning "the reviewer cannot merge this", worn by 32 rows and TRUE of one, is a flag that
 # hides the row it is for.
 #
 # THE SURFACES ARE DERIVED FROM THE MERGE RANGE, NEVER DECLARED. `git diff --name-only
 # <first parent>..<merge>` is the only input: an OB1 gitlink move whose OB1 diff touches
 # integrations/<dir>/ that has a Dockerfile at the new pin -> image:<compose service that
-# builds ../integrations/<dir>>; a changed owui/ file THAT owui/manifest.csv LISTS ->
+# builds ../integrations/<dir>>; a changed frontend/owui/ file THAT frontend/owui/manifest.csv LISTS ->
 # paste:<path>; a changed build context of a :local-tagged service in this repository's
 # compose files -> image:<service>. A list the author typed is the list the author
 # remembered; this one is what git saw.
@@ -504,8 +504,8 @@ function Assert-PlanReadable([string]$path, [string]$flag) {
 # rule was `any owui/** path`, and owui/ also holds its own README and the manifest itself:
 # the real owuidrift merge e989265 derived paste:owui/manifest.csv and paste:owui/README.md,
 # two surfaces nobody can ever close honestly, because neither is pasted into anything.
-# owui/manifest.csv is the file -> OWUI id map, so it already answers the question exactly;
-# it is read from the MERGED tree, and an owui/ path it does not list derives nothing and
+# The manifest (frontend/owui/manifest.csv since 2026-09-25) is the file -> OWUI id map, so it already answers the question exactly;
+# it is read from the MERGED tree, and a path under it that it does not list derives nothing and
 # says so in a note.
 
 function Get-ArrayField($item, [string]$name) {
@@ -798,18 +798,22 @@ function Get-DeploySurfaces($item, [string]$Sha) {
             }
         }
     }
-    # (2) the files OWUI only sees by paste - and owui/manifest.csv says which those are.
+    # (2) the files OWUI only sees by paste - and frontend/owui/manifest.csv says which those are.
     #     See the section header: `any owui/** path` derived surfaces for the manifest and the
     #     README, which are not pasted into anything. The manifest of the MERGED tree is read,
     #     never the working copy, and its `file` column is resolved BY HEADER NAME (the column
     #     set moved from `bytes` to `sha256` between 08c4ae1 and e989265; the position did not,
     #     but reading it by name means the next move costs nothing). Paths carry no commas, so
     #     a plain split is enough here - this is not a general CSV reader.
-    $owuiChanged = @($changed | Where-Object { $_ -match '^owui/' })
+    #     The directory is frontend/owui/ since ac-planes-contained (2026-09-25; it was
+    #     owui/ at the repo root). A merge range from before that move names owui/ paths
+    #     and so derives no paste surface under this rule.
+    $owuiDir = "frontend/owui"
+    $owuiChanged = @($changed | Where-Object { $_.StartsWith($owuiDir + "/") })
     if ($owuiChanged.Count -gt 0) {
-        $manifest = @(Invoke-GitCapture @("show", "$Sha`:owui/manifest.csv"))
+        $manifest = @(Invoke-GitCapture @("show", "$Sha`:$owuiDir/manifest.csv"))
         if ($LASTEXITCODE -ne 0) {
-            $notes += ("owui/ changed but the merged tree has no owui/manifest.csv, which is what says a file is pasted - no paste surface derived for: " + ($owuiChanged -join ", "))
+            $notes += ("$owuiDir/ changed but the merged tree has no $owuiDir/manifest.csv, which is what says a file is pasted - no paste surface derived for: " + ($owuiChanged -join ", "))
         } else {
             $pasteable = @{}
             $fileCol = -1
@@ -822,14 +826,14 @@ function Get-DeploySurfaces($item, [string]$Sha) {
                 }
                 if ($fileCol -ge $cells.Count) { continue }
                 $f = ([string]$cells[$fileCol]).Trim() -replace '\\', '/'
-                if ($f) { $pasteable["owui/" + $f.TrimStart('/')] = $true }
+                if ($f) { $pasteable[$owuiDir + "/" + $f.TrimStart('/')] = $true }
             }
             if ($fileCol -lt 0) {
-                $notes += ("owui/manifest.csv at {0} has no 'file' column - no paste surface derived for: {1}" -f $Sha.Substring(0, 7), ($owuiChanged -join ", "))
+                $notes += ("$owuiDir/manifest.csv at {0} has no 'file' column - no paste surface derived for: {1}" -f $Sha.Substring(0, 7), ($owuiChanged -join ", "))
             } else {
                 foreach ($p in $owuiChanged) {
                     if ($pasteable.ContainsKey($p)) { $pastes += ("paste:" + $p) }
-                    else { $notes += ("{0} changed but owui/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface" -f $p) }
+                    else { $notes += ("{0} changed but $owuiDir/manifest.csv does not list it - it is not pasted into OWUI, so it is not a deploy surface" -f $p) }
                 }
             }
         }
@@ -936,7 +940,8 @@ function Invoke-OracleOnStall([string]$i) {
     #
     # ADVISORY: a stall check that could not run must never block a tester from recording a
     # verdict. But it says SKIPPED and why - a check that quietly does nothing is the exact
-    # failure class this plan's sec 0 A6 is about (CLAUDE.md:200 records eight found in a day).
+    # failure class this plan's sec 0 A6 is about (eight were found in one day; recorded in the pre-rewrite CLAUDE.md, now in the plan
+    # store at journal/archive/CLAUDE-pre-ac-claude-md.md).
     $mod = Join-Path $PSScriptRoot "oracle_on_stall.py"
     if (-not (Test-Path $mod)) {
         Write-Host "  stall check SKIPPED: oracle_on_stall.py is not beside queue.ps1." -ForegroundColor Yellow
@@ -1201,7 +1206,7 @@ if ($List) {
         # written at -Submit and never cleared, so until 2026-09-06 every merged item wore it
         # forever: 32 of the 42 rows on the live board carried it and 31 of those were terminal,
         # so the one row where it was TRUE was one in thirty-two. (Figure of record and the
-        # reconciliation of three readings: documentation/notes/deploy-gate-2026-09-06.md.)
+        # reconciliation of three readings: ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md.)
         # A terminal item has nothing left to merge; the flag is for the rows still moving.
         if (($it.state -notin $TerminalStates) -and ($it.PSObject.Properties.Name -contains "line_mergeable") -and -not $it.line_mergeable) { $flag += " [needs hand-off]" }
         # The two states that are waiting on a PERSON are called out: an unread queue is
@@ -2086,7 +2091,7 @@ if ($Merged) {
         foreach ($s in @($derived.surfaces)) { Write-Host ("    - " + $s) -ForegroundColor Yellow }
         Write-Host ("  Deploy stays human-gated. When it is done and healthy: queue.ps1 -Deployed -Id {0} -By <operator> -Evidence <path> [-Surface <one of them>]" -f $Id)
     } else {
-        Write-Host ("  No deploy surface derived from {0}..{1}: no OB1 integration image, no owui/ paste, no :local build context changed." -f $lb7, $Sha.Substring(0, 7))
+        Write-Host ("  No deploy surface derived from {0}..{1}: no OB1 integration image, no frontend/owui/ paste, no :local build context changed." -f $lb7, $Sha.Substring(0, 7))
     }
     foreach ($n in @($derived.notes)) { Write-Host ("  NOTE: " + $n) -ForegroundColor DarkGray }
     Write-Host ("  {0} can now retire the worktree (remove-worktree.ps1 -Id ...)." -f $item.developer)
@@ -2116,7 +2121,7 @@ if ($Deployed) {
     $pending = @(Get-DeployPending $item)
     if (-not ($item.PSObject.Properties.Name -contains "deploy_pending") -or ($all.Count -eq 0)) {
         Die (("'{0}' records no deploy surface: it merged before -Merged derived them (2026-09-06), or its " +
-              "merge range changed no OB1 integration image, no :local build context and no owui/ file. There " +
+              "merge range changed no OB1 integration image, no :local build context and no frontend/owui/ file. There " +
               "is nothing to close, so -Deployed is refused rather than recorded against nothing.") -f $Id)
     }
     if ($pending.Count -eq 0) { Die "'$Id' has no deploy surface left open - its record is inconsistent (state merged, nothing pending); -Show it" }

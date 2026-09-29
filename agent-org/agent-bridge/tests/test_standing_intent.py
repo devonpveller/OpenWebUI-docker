@@ -38,7 +38,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -98,7 +98,7 @@ def test_forbidden_terms_extraction():
 async def test_nl_set_standing_intent_and_inject_into_goal(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch.models._client.queue_structured(OperatorIntent(
             kind="chitchat", reply="Rule set.", project="murder", standing_intent=INTENT))
         mgmt = await orch.mgmt_channel_id()
@@ -124,7 +124,7 @@ async def test_delivery_reintroducing_forbidden_term_is_rejected(db_url, tmp_pat
     merge — it auto-iterates with the violation, never opens a PR for the drift."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch.projects.set_standing_intent("murder", INTENT)
         # the diff RE-INTRODUCES the forbidden NuGet package (the exact live drift)
         orch._gh_transport = _remote(
@@ -144,7 +144,7 @@ async def test_delivery_reintroducing_forbidden_term_is_rejected(db_url, tmp_pat
 async def test_clean_delivery_passes_the_intent_gate(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         await orch.projects.set_standing_intent("murder", INTENT)
         # a diff that does NOT reintroduce the forbidden term → sails through
         orch._gh_transport = _remote(
@@ -165,7 +165,7 @@ async def test_rereport_converges_on_existing_effort(db_url, tmp_path):
     branch, one PR — instead of a new slug."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote([])
         first, chan, root = await orch.router.open_effort("fix-murder-build-errors",
                                                           project="murder")
@@ -198,7 +198,7 @@ async def test_rereport_converges_on_existing_effort(db_url, tmp_path):
 async def test_new_effort_phrase_bypasses_convergence(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote([])
         first, _c, _r = await orch.router.open_effort("existing", project="murder")
         await orch.charters.set_goal(first, "errors:\n'Point' ambiguous reference here\nfix",
@@ -216,7 +216,7 @@ async def test_work_request_that_restates_the_rule_still_dispatches(db_url, tmp_
     the rule must set the rule AND dispatch the work."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _remote([])
         orch.models._client.queue_structured(OperatorIntent(
             kind="request", reply="On it.", project="murder",

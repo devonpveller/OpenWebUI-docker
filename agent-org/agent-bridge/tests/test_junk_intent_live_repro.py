@@ -50,7 +50,7 @@ async def test_live_repro_request_kind_junk_reply_no_effort_name(db_url):
     must NOT post a bare '…' and must NOT drop the scoped work."""
     orch, chat, db = await _orch(db_url)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch.models._client.queue_structured(
             OperatorIntent(kind="request", reply="…", effort_name=None))
         orch.models._client.queue_structured(
@@ -69,7 +69,7 @@ async def test_live_repro_clarification_kind_junk_reply(db_url):
     """kind=clarification + junk reply + no effort_id — another fall-through shape; same contract."""
     orch, chat, db = await _orch(db_url)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch.models._client.queue_structured(
             OperatorIntent(kind="clarification", reply="…"))
         orch.models._client.queue_structured(

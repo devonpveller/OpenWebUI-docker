@@ -22,17 +22,19 @@ The `frontend/dockerfile.tailscale` now includes:
 
 ### 3. Development Helper Tools
 
-#### PowerShell Development Script
+#### Checks to run by hand (from the repo root)
 ```powershell
-# Validate everything before committing
-.\scripts\checks\dev-helper.ps1 -Action validate
+# Every git-tracked *.sh has LF line endings (the same check pre-commit runs)
+powershell -NoProfile -File scripts\checks\validate-lineendings.ps1
 
-# Fix line ending issues automatically
-.\scripts\checks\dev-helper.ps1 -Action fix-lineendings
-
-# Full development check (fix + rebuild)
-.\scripts\checks\dev-helper.ps1 -Action full-check
+# The frontend plane's compose file renders (repeat per plane you touched)
+docker compose -f frontend/docker-compose.yml config -q
 ```
+(`scripts\checks\dev-helper.ps1` used to wrap these. Its compose check was a
+bare `docker compose config`, which validates only the root anchor - no
+services - and reported "valid" without looking at a plane, and its rebuild was
+a bare `build tailscale` that exits `no such service`. It was archived
+2026-09-25 to `scripts/archive/legacy-recovery/`.)
 
 #### Enhanced Health Monitoring
 The health monitoring script now detects:
@@ -74,23 +76,23 @@ sed -i 's/\r$//' frontend/entrypoint.sh
 ### If Container Won't Start
 ```powershell
 # 1. Check for line ending issues
-.\scripts\checks\dev-helper.ps1 -Action validate
+powershell -NoProfile -File scripts\checks\validate-lineendings.ps1
 
-# 2. Fix and rebuild
-.\scripts\checks\dev-helper.ps1 -Action full-check
-
-# 3. Manual rebuild if needed
-docker compose build --no-cache tailscale
-docker compose up -d tailscale
+# 2. Fix the file (see above), then rebuild the tailscale image deliberately
+#    (tailscale:local is pinned) and recreate it. Naming the plane file is
+#    required: a bare `docker compose` addresses the service-less root anchor.
+#    frontend/.env must carry COMPOSE_PROFILES=gpu,tailscale, or compose cannot
+#    load the tailscale service (see the note in frontend/docker-compose.yml).
+docker compose -f frontend/docker-compose.yml build --no-cache tailscale
+docker compose -f frontend/docker-compose.yml up -d tailscale
 ```
 
 ## Best Practices for Development
 
 ### For Windows Developers
-1. **Always run validation before committing**:
-   ```powershell
-   .\scripts\checks\dev-helper.ps1 -Action validate
-   ```
+1. **Let the pre-commit hook validate** (`git config core.hooksPath .githooks`;
+   it runs the line-ending and compose checks on what you stage), or run
+   `powershell -NoProfile -File scripts\checks\validate-lineendings.ps1` by hand.
 
 2. **Use WSL or Git Bash for shell script editing**
 3. **Configure VS Code for Unix line endings**:
@@ -127,16 +129,16 @@ Run comprehensive health check:
 
 If issues occur despite prevention measures:
 
-1. **Quick fix for line endings**:
-   ```powershell
-   .\scripts\checks\dev-helper.ps1 -Action fix-lineendings
-   ```
+1. **Quick fix for line endings**: the PowerShell or `dos2unix` commands under
+   "If Line Ending Issues Occur" above.
 
-2. **Emergency rebuild**:
-   ```batch
-   .\scripts
-ecovery\emergency-recovery.ps1 (the .bat twin was archived 2026-08-21)
+2. **Emergency recovery** (a gentle restart of openwebui, tailscale and the llama-cpp
+   upstreams first when basic checks pass; otherwise an ordered restart of frontend,
+   inference, memory, search, coder, OB1 and agent-org with health gates; never the portal):
+   ```powershell
+   .\scripts\recovery\emergency-recovery.ps1 -Action recover
    ```
+   (The `.bat` twin was archived 2026-08-21.)
 
 3. **Full system recovery**:
    ```powershell

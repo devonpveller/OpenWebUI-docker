@@ -11,7 +11,7 @@ collections** into **Open Brain (OB1)** as `threads` + `sources`.
 > collections against the known-good schema *before* touching the OWUI version).
 > It has since been generalized — nothing here is specific to that upgrade. The
 > upgrade write-up lives in
-> [`documentation/implementation-guide/update-owui-to-0-9-6/`](../../documentation/implementation-guide/update-owui-to-0-9-6/).
+> [`documentation/implementation-guide/update-owui-to-0-9-6/`](../../../../documentation-plans-ai-stack/journal/archive/implementation-guide/update-owui-to-0-9-6/).
 
 ## The four steps
 

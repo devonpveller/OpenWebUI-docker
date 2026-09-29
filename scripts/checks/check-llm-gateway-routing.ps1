@@ -68,7 +68,7 @@ $queueUpstreamAllow = '(?i)LLM_QUEUE(_EMBED)?_UPSTREAM_BASE_URL'
 # `*\.claude\*` entry that used to sit in this list allowed the ENTIRE tree:
 # the guard filtered every candidate away, read none of them, and exited 0. Measured
 # 2026-09-19 by planting a bypass in a worktree and watching it pass - see
-# documentation/notes/routing-check-worktree-blindspot-2026-09-19.md.
+# ../documentation-plans-ai-stack/journal/notes/routing-check-worktree-blindspot-2026-09-19.md.
 # check-env-file-scope.ps1 was fixed the same way on 2026-09-20, and
 # check-corpus-exposure-producers.ps1 documents why it never copied the glob in.
 #
@@ -152,6 +152,13 @@ $violations = New-Object System.Collections.Generic.List[object]
 $pruneDirNames = @('.git', '.claude', '.venv', '.testvenv', 'node_modules', '.next',
                    'backups', 'tiktoken-cache', 'notebook_data', 'data')
 
+# FAIL CLOSED ON ITS OWN I/O (ac-hooks-portable2, review blocker 1). A directory this
+# walk could not list, or a candidate file it could not read, used to be skipped in
+# silence ("locked / in-use / binary - skip"), so a bypass in an unreadable place was
+# reported as a clean tree. Each such failure is now recorded, and any failure refuses:
+# a gate that could not look has not passed. check_llm_gateway_routing.py does the same.
+$script:ScanErrors = New-Object System.Collections.Generic.List[string]
+
 function Get-ScanFiles {
     param([string]$RootDir, [string[]]$ExtPatterns, [string[]]$PruneNames)
     $results = New-Object System.Collections.Generic.List[string]
@@ -169,7 +176,7 @@ function Get-ScanFiles {
                 if ([System.IO.File]::GetAttributes($sub) -band [System.IO.FileAttributes]::ReparsePoint) { continue }
                 $stack.Push($sub)
             }
-        } catch { continue }
+        } catch { $script:ScanErrors.Add("list ${dir}: $($_.Exception.Message)"); continue }
         try {
             foreach ($file in [System.IO.Directory]::EnumerateFiles($dir)) {
                 $leaf = [System.IO.Path]::GetFileName($file)
@@ -177,7 +184,7 @@ function Get-ScanFiles {
                     if ($leaf -like $pat) { $results.Add($file); break }
                 }
             }
-        } catch { continue }
+        } catch { $script:ScanErrors.Add("list ${dir}: $($_.Exception.Message)"); continue }
     }
     return $results
 }
@@ -203,7 +210,8 @@ foreach ($f in $files) {
     try {
         $lines = [System.IO.File]::ReadAllLines($f)
     } catch {
-        continue   # locked / in-use / binary - skip
+        $script:ScanErrors.Add("read ${f}: $($_.Exception.Message)")
+        continue
     }
     foreach ($line in $lines) {
         $n++
@@ -216,6 +224,13 @@ foreach ($f in $files) {
             $violations.Add([pscustomobject]@{ File = $rel; Line = $n; Text = $line.Trim() })
         }
     }
+}
+
+if ($script:ScanErrors.Count -gt 0) {
+    Write-Host "[check-llm-gateway-routing] FAIL - $($script:ScanErrors.Count) path(s) under $Root could not be listed or read, so they were not checked:" -ForegroundColor Red
+    foreach ($e in ($script:ScanErrors | Select-Object -First 10)) { Write-Host "  $e" -ForegroundColor Red }
+    if ($violations.Count -gt 0) { Write-Host "  (and $($violations.Count) bypass(es) were found in what could be read)" -ForegroundColor Red }
+    exit 1
 }
 
 if ($violations.Count -eq 0) {

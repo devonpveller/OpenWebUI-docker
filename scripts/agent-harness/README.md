@@ -26,7 +26,7 @@ The wider design (test containers, bridge integration):
 | `anchor.ps1` | The SHAPE of an anchor and whether one is usable. Owns no state; `queue.ps1` asks it whether the anchor it was handed is worth gating on |
 | `common.ps1` | Dot-sourced by the rest: resolves the SHARED coordination state dir, the work line, and stderr-safe git capture. Not run directly |
 | `verify-merge-protocol.ps1` | Executable proof of MERGE-PROTOCOL's two-agent path: 72 checks against a scratch line (never `development`), self-cleaning. Run it after changing any script here or the protocol. It cuts that scratch line FROM `development`, so it inherits that branch's pre-commit hooks: while `scripts/checks/check-corpus-exposure-producers.ps1` is absent there the hook fails and SIX checks go red (`two divergent commits exist` and the five that depend on those commits existing) - a fact about the base, not about the protocol |
-| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `documentation/evidence/passplan/fixtures/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 213 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
+| `verify-queue-defects.ps1` | Executable proof for the `queue.ps1` defects found by USE: D1-D7 (2026-09-04), D8/D9 (2026-09-06) (the per-case `-Pass` rule replayed against the REAL `curator2` evidence in `scripts/agent-harness/fixtures/passplan/`, and plan-hash drift), D10/D11 (item-file encoding and plan readability), and D12-D17 (2026-09-06: deploy surfaces derived not declared, `-Deployed`'s health evidence, unresolvable commits and OB1 pins, the hand-off flag on terminal states, the attempt bump after an anchor amendment, and the unterminated-fence warning), plus the regression column they must not have broken. 213 checks. Fully hermetic - its own scratch repo and state dir per case, so it can never touch the real queue. `-Script <path>` names WHICH `queue.ps1` to drive: point it at the copy you edited, and at the copy you did not, to see it go red |
 | `queue.ps1` | The work pipeline: `-Propose` / `-ConfirmAnchor` / `-Submit` / `-Claim -Role tester|reviewer` / `-Pass` / `-Fail` / `-Approve` / `-Requeue` / `-Merged` / `-Deployed` / `-Reject` / `-List` / `-Show`. `-Merged` derives from the merge range what the item SHIPS, and `-Deployed -By <person> -Evidence <...> [-Surface <one>]` closes those surfaces with health evidence - see [what a merge SHIPS](#what-a-merge-ships-undeployed-and--deployed). Enforces separation of duties (exit 4), the anchor gate (exit 5) and the stale-pass rule. `-Requeue` is also the DEVELOPER's way back from `test-passed` when the artifact itself must change |
 | `lease.ps1` | Named exclusive leases for the SHARED RUNTIME only (planes): `-Acquire` / `-Refresh` / `-Release` / `-Status` / `-Takeover` (exit 3 = held, wait). Names validate against `lease-names.conf` (`-AdHoc` to escape); multi-name requests are sorted + all-or-nothing, so agents cannot deadlock |
 
@@ -152,7 +152,7 @@ a per-worktree `info/exclude` is **not** honored — verified).
   every candidate away, read nothing and printed a green (fixed 2026-09-20: it matches
   root-relative, prints `N file(s) scanned` on every verdict, and refuses zero). Until a
   check names how much it examined, its green from a worktree is not evidence - see
-  `documentation/notes/stack-layers-sl-checks-worktree-findings.md` for the sweep of all 50.
+  `../documentation-plans-ai-stack/journal/notes/stack-layers-sl-checks-worktree-findings.md` for the sweep of all 50.
 
 - **An agent's PATH is not the operator's PATH.** A tester concluded that a README
   command was unrunnable because `Get-Command grep` returned nothing in its process; I
@@ -204,7 +204,7 @@ a per-worktree `info/exclude` is **not** honored — verified).
 
 `merged` used to be the last thing the board said about an item, and for some items that
 is a lie: a merge that bumps the OB1 gitlink does not rebuild the image, and a merge that
-changes a file under `owui/` does not paste it into Open WebUI. Since 2026-09-06 `-Merged`
+changes a file under `frontend/owui/` does not paste it into Open WebUI. Since 2026-09-06 `-Merged`
 works out what the merge SHIPS and records it, so `-List` can say `merged, not live`:
 
 ```text
@@ -218,10 +218,10 @@ Three flags, in the operator's terms:
   The list is DERIVED at `-Merged` from `git diff --name-only <first parent>..<merge sha>`,
   never from anything the author typed: an OB1 gitlink move whose OB1 diff touches an
   `integrations/<dir>/` that has a `Dockerfile` becomes `image:<the compose service that
-  builds it>`; a changed `owui/` file **that `owui/manifest.csv` lists** becomes
+  builds it>`; a changed `frontend/owui/` file **that `frontend/owui/manifest.csv` lists** becomes
   `paste:<that file>` (the manifest is the file-to-OWUI-id map, so it is the authority on
-  what is pasteable at all - a change to the manifest or to `owui/README.md` derives
-  nothing, and an unlisted `owui/` file is reported as a NOTE); a changed build context of
+  what is pasteable at all - a change to the manifest or to `frontend/owui/README.md` derives
+  nothing, and an unlisted `frontend/owui/` file is reported as a NOTE); a changed build context of
   a `:local`-tagged service in this repository becomes `image:<that service>`. Most merges
   derive nothing and record an empty list. Items merged before that date have no surfaces
   and read as plain `merged`.
@@ -234,7 +234,7 @@ Three flags, in the operator's terms:
   merge (before 2026-09-06 the flag was written at `-Submit` and never cleared: 32 of the 42
   rows on the live board carried it and 31 of those were terminal, so the one row where it
   was true was one in thirty-two - the count moved three times in a day as the board did,
-  and `documentation/notes/deploy-gate-2026-09-06.md` reconciles the three readings).
+  and `../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md` reconciles the three readings).
 
 Closing a surface is a RECORD of a deploy, never a deploy:
 

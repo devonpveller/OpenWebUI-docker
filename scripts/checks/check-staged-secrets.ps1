@@ -1,4 +1,4 @@
-﻿# check-staged-secrets.ps1 - pre-commit secret guard
+# check-staged-secrets.ps1 - pre-commit secret guard
 #
 # WHY THIS EXISTS (2026-08-20):
 #   .env.bak-pre-mtp and .env.bak-pre-qwen38 were committed and only caught at
@@ -28,15 +28,72 @@
 
 $ErrorActionPreference = 'Stop'
 
-# --- staged, still-present files (Added/Copied/Modified) --------------------
+# --- staged, still-present files (Added/Copied/Modified/Renamed/Type-changed)
+# TYPE CHANGE (T) added 2026-09-25 (ac-hooks-portable attempt 1, tester): a tracked
+# file turned into a SYMLINK is status T, outside ACMR, so `ln -sf <key> SECURITY.md`
+# and a tracked `frontend/.env` turned into a symlink both passed as "nothing
+# staged". A symlink's staged blob IS its target text, and that text is what the
+# commit publishes - so `git show :<path>` below scans exactly it, and the name rules
+# test the link's own name. (A link pointing at a key FILE publishes only the path;
+# the key file itself is scanned if it is staged too.)
+# RENAMED (R) was missing until 2026-09-25 (ac-hooks-portable F1, anchor amended):
+# rename detection is on by default, so `git mv x frontend/.env` - or a rename
+# plus an edit that adds a key - was status R, outside ACM, and this guard said
+# "nothing staged - skip" and exited 0 on every host. `--name-only` prints a
+# rename's DESTINATION path, which is the name the rules must test and the blob
+# `git show :<path>` must read. Copies (C) were already inside ACM.
+# check_staged_secrets.py carries the same filter; keep them in step.
 # Exclude submodule gitlinks (mode 160000): they are commit pointers, not
 # blobs, so `git show :<path>` errors on them. `--diff-filter` can't express
 # "not a gitlink", so filter by mode from the staged index listing.
-$gitlinks = @(& git ls-files --stage |
+#
+# PATH NAMES UNDER pwsh OFF WINDOWS (ac-hooks-portable, 2026-09-25). git C-quotes
+# a non-ASCII name (`"caf\303\251.env"`), and `git show ":<quoted>"` then fails.
+# Under Windows PowerShell 5.1 that stderr, with EAP=Stop, THROWS - the script
+# exits 1 and the commit is refused (by accident, but closed). Under pwsh 7 a
+# native command's stderr no longer throws, so the same file fell to the
+# `$LASTEXITCODE -ne 0` skip below and its content was never read, and its
+# quoted leaf (`...env"`) matched no filename rule either: with a non-ASCII
+# `.env`, or a non-ASCII file holding a gw- key, staged, this script exited 0
+# (measured at 3c3ff75, pwsh 7.4 in a Linux container). Off
+# Windows the names are therefore read NUL-separated (-z), which git never
+# quotes. On Windows the two git calls below are exactly the ones they were.
+#
+# EVERY git CALL HERE FAILS CLOSED (ac-hooks-portable2, review blocker 1). Under WSL
+# the hook used to pick Windows PowerShell, whose Windows git refused the Linux
+# checkout ("dubious ownership"); both queries below then returned nothing, and
+# this guard printed "nothing staged - skip" and exited 0 - it had not asked its
+# question at all. A query that FAILED is not an answer. The same holds for any
+# git that cannot read this repository (GIT_DIR wrong, safe.directory, a broken
+# index). The exit code of each call is checked, and a failure refuses the commit.
+function Stop-GitFailed([string]$What, [int]$Rc) {
+    Write-Host "  [secrets] FAIL - 'git $What' exited $Rc, so this guard cannot tell what is staged." -ForegroundColor Red
+    Write-Host "  A failed query is not 'nothing staged'. Fix git's access to this repository" -ForegroundColor Red
+    Write-Host "  (safe.directory, GIT_DIR, the index), then commit again." -ForegroundColor Red
+    exit 1
+}
+$zPaths = ($PSVersionTable.PSEdition -eq 'Core') -and ($IsWindows -ne $true)
+if ($zPaths) {
+    $lsOut = & git ls-files --stage -z
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'ls-files --stage -z' $LASTEXITCODE }
+    $diffOut = & git diff --cached --name-only -z --diff-filter=ACMRT
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'diff --cached --name-only -z' $LASTEXITCODE }
+    $gitlinks = @((@($lsOut) -join "`n").Split([char]0) |
+        Where-Object { $_ -match '^160000 ' } |
+        ForEach-Object { ($_ -split '\t', 2)[1] })
+    $staged = @((@($diffOut) -join "`n").Split([char]0)) |
+        Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
+} else {
+$lsOut = & git ls-files --stage
+if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'ls-files --stage' $LASTEXITCODE }
+$diffOut = & git diff --cached --name-only --diff-filter=ACMRT
+if ($LASTEXITCODE -ne 0) { Stop-GitFailed 'diff --cached --name-only' $LASTEXITCODE }
+$gitlinks = @(@($lsOut) |
     Where-Object { $_ -match '^160000 ' } |
     ForEach-Object { ($_ -split '\t', 2)[1] })
-$staged = @(& git diff --cached --name-only --diff-filter=ACM) |
+$staged = @($diffOut) |
     Where-Object { $_ -and $_.Trim() -ne '' -and $gitlinks -notcontains $_ }
+}
 
 if (-not $staged -or $staged.Count -eq 0) {
     Write-Host "  [secrets] nothing staged - skip"
@@ -88,7 +145,9 @@ $patterns = @(
 foreach ($f in $staged) {
     # Read the STAGED blob, not the working file - they can differ.
     $content = & git show ":$f" 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $content) { continue }
+    # A staged path whose blob cannot be read was NOT scanned: refuse, never skip it.
+    if ($LASTEXITCODE -ne 0) { Stop-GitFailed "show :$f" $LASTEXITCODE }
+    if (-not $content) { continue }
     $text = ($content -join "`n")
 
     # Skip obvious binaries.

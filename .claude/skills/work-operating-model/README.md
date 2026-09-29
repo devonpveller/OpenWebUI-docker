@@ -14,7 +14,7 @@ This skill runs a strict, five-layer elicitation interview:
 
 It resumes or starts a session, interviews through concrete recent examples, confirms each checkpoint before saving, writes one summary thought per approved layer through the base Open Brain connector, runs a final contradiction pass, and generates export artifacts.
 
-If you want the schema, MCP server, and setup instructions, use the paired [Work Operating Model Activation recipe](../../recipes/work-operating-model-activation/).
+If you want the schema, MCP server, and setup instructions, use the paired [Work Operating Model Activation recipe](../../../OB1/recipes/work-operating-model-activation/).
 
 ## Supported Clients
 
@@ -25,8 +25,8 @@ If you want the schema, MCP server, and setup instructions, use the paired [Work
 
 ## Prerequisites
 
-- Working Open Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../docs/01-getting-started.md))
-- The [Work Operating Model Activation recipe](../../recipes/work-operating-model-activation/) installed and connected
+- Working Open Brain setup with `search_thoughts` and `capture_thought` available ([guide](../../../OB1/docs/01-getting-started.md))
+- The [Work Operating Model Activation recipe](../../../OB1/recipes/work-operating-model-activation/) installed and connected
 - AI client that supports reusable skills or equivalent system instructions
 
 ## Installation

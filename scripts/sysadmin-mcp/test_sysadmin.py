@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for sysadmin-mcp. Stdlib only (no pytest), matching the house style.
 
-Run:  python scripts/sysadmin-mcp/test_sysadmin.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_sysadmin.py
        python scripts/sysadmin-mcp/test_sysadmin.py --unit   # skip live-stack/stdio tests
 
 Sections:
@@ -20,6 +21,8 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_sysadmin")
 
 _passed = 0
 _failed = 0
@@ -62,9 +65,13 @@ def test_live() -> None:
     dr = sa.disk_report()
     check("disk_report has drives", "drives" in dr and "system" in dr["drives"])
     check("disk_report has verdict", "verdict" in dr and "severity" in dr["verdict"])
-    check("disk_report system free_gb numeric",
-          isinstance(dr["drives"]["system"].get("free_gb"), (int, float)),
-          str(dr["drives"]["system"]))
+    if os.name == "nt":
+        check("disk_report system free_gb numeric",
+              isinstance(dr["drives"]["system"].get("free_gb"), (int, float)),
+              str(dr["drives"]["system"]))
+    else:  # the test container has no C: - WINDOWS-ONLY check; here the probe must fail SOFT
+        check("disk_report system drive probe fails soft off Windows (error field, no crash)",
+              "error" in dr["drives"]["system"], str(dr["drives"]["system"]))
     check("verdict severity valid",
           dr["verdict"]["severity"] in ("healthy", "attention", "critical"),
           dr["verdict"].get("severity"))
@@ -124,7 +131,10 @@ def test_stdio() -> None:
         txt = ""
         if call and call.get("result"):
             txt = call["result"]["content"][0]["text"]
-        check("tools/call stack_health returns text", "Stack:" in txt, txt[:200])
+        if _testguard.require_daemon("test_sysadmin", allowed=True):
+            check("tools/call stack_health returns text", "Stack:" in txt, txt[:200])
+        else:  # dead endpoint: the tool must still answer, with the connection error as text
+            check("tools/call stack_health answers (daemon unreachable -> error text)", "error" in txt.lower(), txt[:200])
         # both gated mutating tools must be fail-closed through the MCP boundary
         bad = _rpc(proc, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                           "params": {"name": "reclaim_execute", "arguments": {"confirm_token": "deadbeef"}}})
@@ -229,7 +239,8 @@ if __name__ == "__main__":
     test_unit()
     test_volume_age()
     if not only_unit:
-        test_live()
+        if _testguard.require_daemon("test_sysadmin", allowed=False):
+            test_live()
         test_stdio()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

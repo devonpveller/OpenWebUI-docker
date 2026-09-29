@@ -26,7 +26,7 @@
     "rather than assuming it."
   ],
   "workspace_id": "ai-stack",
-  "source_of_record": "documentation/implementation-guide/dark-factory-unification/DECISIONS.md",
+  "source_of_record": "../documentation-plans-ai-stack/implementation-guide/dark-factory-unification/DECISIONS.md",
   "memories": [
     {
       "key": "dfu-class-01-green-while-checking-nothing",

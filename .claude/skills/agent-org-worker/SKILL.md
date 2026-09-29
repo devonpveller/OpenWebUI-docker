@@ -25,6 +25,11 @@ rules are non-overridable.
   understood the goal to be, why you built it this way); wait for a cleared review; if a
   review flags drift, **refactor before resuming**.
 - Drop suggestions into `#suggestions` — recurring suggestions surface misaligned goals/rules.
+- When the project is the **ai-stack repo itself**, write plans, notes, findings, evidence
+  and test plans to its private plan store `../documentation-plans-ai-stack`
+  (`implementation-guide/<feature>/findings|test-plans/<id>.md`, else `journal/notes/` or
+  `journal/evidence/<id>/`), never into the ai-stack tree; if the store is unreachable from
+  your workspace, say so on the bus and put the text in your report.
 
 **Never:**
 - Grant yourself new scope; take an irreversible/external action (push/deploy/delete/spend/

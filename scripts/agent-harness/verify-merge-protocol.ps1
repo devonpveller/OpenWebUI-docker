@@ -366,7 +366,7 @@ Remove-Item $mledger -ErrorAction SilentlyContinue
 #
 # Shipping three red checks would teach whoever runs this drill that red is normal, which
 # costs more than the missing coverage. The gap is written up in
-# documentation/notes/commit-msg-hook-drill-gap.md with the working manual procedure.
+# ../documentation-plans-ai-stack/journal/notes/commit-msg-hook-drill-gap.md with the working manual procedure.
 
 # --- retirement must not leave a stale registry row -------------------------------------
 #
@@ -497,7 +497,7 @@ Check "plan_sha256 was recorded at submit and matches the queued plan" `
 Check "a reviewer cannot claim before the operator releases it" ($LASTEXITCODE -ne 0)
 & $queue -Approve -Id drill-a -By wt-drilla 2>&1 | Out-Null
 Check "the developer cannot release their OWN work (exit 4)" ($LASTEXITCODE -eq 4)
-foreach ($id in @("a", "b")) { & $queue -Approve -Id "drill-$id" -By profnovice | Out-Null }
+foreach ($id in @("a", "b")) { & $queue -Approve -Id "drill-$id" -By alice | Out-Null }
 Check "the operator released both for review" ((Get-QueueState "drill-a") -eq "ready-review" -and (Get-QueueState "drill-b") -eq "ready-review")
 
 Step 7 "the reviewer - neither developer - lands the first item"
@@ -533,7 +533,7 @@ Check "the verdict recorded is fits_codebase, not the retired fits_anchor" (
     (Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") | ConvertFrom-Json).fits_codebase -eq $true)
 # WHAT THE MERGE SHIPPED (deploystate, 2026-09-06). -Merged derives deploy_pending[] from
 # the merge range; the drill's branch changes one note at the root, which is no OB1 image,
-# no owui/ paste and no :local build context, so the derived list is EMPTY - present, and
+# no frontend/owui/ paste and no :local build context, so the derived list is EMPTY - present, and
 # empty. An item whose merge DID ship something reads [UNDEPLOYED: ...] in -List until
 # -Deployed closes it; that path is drilled hermetically in verify-queue-defects.ps1 (D12/D13).
 $aMerged = Get-Content -Raw -Path (Join-Path $QueueDir "drill-a.json") -Encoding UTF8 | ConvertFrom-Json
@@ -574,7 +574,7 @@ $evidenceRetest = Write-DrillEvidence "drill-evidence-retest.md" @(
     "## Case 2 - exactly one owner   PASS",
     "    both intents present, one owner line")
 & $queue -Pass -Id drill-b -By wt-tester -Evidence $evidenceRetest -PlanAdequate | Out-Null
-& $queue -Approve -Id drill-b -By profnovice | Out-Null
+& $queue -Approve -Id drill-b -By alice | Out-Null
 Check "re-tested and re-released at the new content" ((Get-QueueState "drill-b") -eq "ready-review")
 
 Step 10 "the reviewer lands the adapted work"

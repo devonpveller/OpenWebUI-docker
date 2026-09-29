@@ -95,7 +95,7 @@ networks:
     external: true
     name: ai-stack_llm-net
   # App seam — owned by the anchor; the portal Caddy reaches llm-gateway-ui
-  # here (litellm.devinveller.ai, added 2026-08-22).
+  # here (litellm.<PUBLIC_DOMAIN>, added 2026-08-22).
   app-net:
     external: true
     name: ai-stack_app-net

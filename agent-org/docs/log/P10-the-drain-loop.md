@@ -45,7 +45,7 @@ closed. `_drain_iterate` now dispatches directly unless it is inside delegate's 
    Scope context is now injected only from a genuine sub-scope (`depth > 0`); at a root there is no
    sibling to be bounded away from.
 **Owner:** any session. **Self-contained** — you need no prior conversation, but read
-[`ORCHESTRATION-DESIGN.md`](ORCHESTRATION-DESIGN.md) **§4, §5, §6.5** first; this plan implements them.
+[`ORCHESTRATION-DESIGN.md`](../ORCHESTRATION-DESIGN.md) **§4, §5, §6.5** first; this plan implements them.
 **Execution record / issue register:** [`P9-make-the-fixes-real.md`](P9-make-the-fixes-real.md).
 
 > **We are building the ORCHESTRATION, not the test project.** The todo CLI in the gym is a *probe*.
@@ -310,7 +310,7 @@ Deliberately not closed in this iteration — recorded so the next session does 
 
 ## Validation
 
-Run a gym round (`d:\Open WebUI\ai-orchestration-gym`,
+Run a gym round (`..\ai-orchestration-gym`, beside the ai-stack checkout,
 `python runner/gym_runner.py --auth app run <scenario> --yes-provision`). **The org's self-report never
 scores** — verify against the GitHub remote and the audit. Success looks like:
 - more than 2 QA rounds when work remains (the old cap is gone),

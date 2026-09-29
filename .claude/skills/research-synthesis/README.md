@@ -6,7 +6,7 @@
 
 This skill helps an AI client synthesize research instead of merely summarize it. It organizes a source set into clear findings, preserves meaningful disagreement, marks confidence honestly, and ends with what the evidence supports now versus what still needs work.
 
-For the OB1 workflow that chains this into competitive work, meeting outputs, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the OB1 workflow that chains this into competitive work, meeting outputs, and memo drafting, use the [Research-to-Decision Workflow recipe](../../../OB1/recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the OB1 workflow that chains this into competitive work, meeting outputs, an
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - A real source set with a defined research question
 

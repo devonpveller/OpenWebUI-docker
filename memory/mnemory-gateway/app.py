@@ -76,10 +76,97 @@ def _force_write_labels(args: dict) -> dict:
     args["labels"] = labels
     cats = args.get("categories")
     if isinstance(cats, list):
-        args["categories"] = [c for c in cats if c != "personal"]
+        args["categories"] = [c for c in cats if not _is_personal(c)]
     for k in _STRIP_ARGS:
         args.pop(k, None)
     return args
+
+
+def _typed(v, kind: str):
+    """Return (ok, value) for a policed argument: DECODE-THEN-POLICE.
+
+    Some MCP clients send list/object arguments as JSON strings, and the
+    upstream's tool layer may decode such a string itself - so a string must
+    never reach it for a policed argument. A string that decodes (strictly, as
+    a body would) to the expected type is replaced by the decoded value, and
+    the policy is applied to that; anything else is refused (-32602).
+    None/absent is accepted. kind: "object" | "str_list" | "obj_list".
+    """
+    if v is None:
+        return True, None
+    if isinstance(v, str):
+        try:
+            v = _strict_json(v)
+        except _BodyRefused:
+            return False, None
+    if kind == "object":
+        return isinstance(v, dict), v
+    if kind == "str_list":
+        return isinstance(v, list) and all(isinstance(x, str) for x in v), v
+    if kind == "obj_list":
+        return isinstance(v, list), v   # items are checked one by one by the caller
+    raise ValueError(kind)
+
+
+def _is_personal(cat) -> bool:
+    """mnemory normalises a category with cat.strip().lower() and treats
+    "<prefix>:<name>" as a subcategory of <prefix> (mnemory/categories.py,
+    validate_categories). Match the same way: "personal", " Personal " and
+    "PERSONAL:family" are all the personal category."""
+    if not isinstance(cat, str):
+        return False
+    c = cat.strip().lower()
+    return c == "personal" or c.split(":", 1)[0] == "personal"
+
+
+def _normalise_policed_args(name: str, args: dict):
+    """Bring every argument the policy reads or rewrites to the JSON type the
+    policy expects (decoding a JSON string, see _typed), in place. Returns an
+    error message for -32602, or None. The policed pairs (see
+    _force_read_labels / _force_write_labels):
+      search_memories, find_memories, list_memories: labels (object)
+      add_memory: labels (object), categories (list of strings)
+      add_memories: memories (list of objects, required); in each item
+                    labels (object), categories (list of strings)
+    user_id / agent_id are removed whatever their type.
+    """
+    def fix(d, key, kind, label):
+        ok, v = _typed(d.get(key), kind)
+        if not ok:
+            return label
+        if key in d:
+            d[key] = v
+        return None
+
+    if name in READ_TOOLS or name == "add_memory":
+        err = fix(args, "labels", "object", "labels must be an object")
+        if err:
+            return err
+    if name == "add_memory":
+        err = fix(args, "categories", "str_list", "categories must be a list of strings")
+        if err:
+            return err
+    if name == "add_memories":
+        if args.get("memories") is None:
+            return "memories must be a list of objects"
+        err = fix(args, "memories", "obj_list", "memories must be a list of objects")
+        if err:
+            return err
+        items = []
+        for m in args["memories"]:
+            ok, m = _typed(m, "object")
+            if not ok or m is None:
+                return "memories must be a list of objects"
+            for key, kind, label in (
+                    ("labels", "object", "each memory's labels must be an object"),
+                    ("categories", "str_list",
+                     "each memory's categories must be a list of strings")):
+                err = fix(m, key, kind, label)
+                if err:
+                    return err
+            items.append(m)
+        args["memories"] = items
+    return None
 
 
 def _rpc_error(rpc_id, code, message):
@@ -105,8 +192,13 @@ def _apply_policy(msg: dict):
 
     if method == "tools/call":
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            return msg, _rpc_error(rpc_id, -32602, "params must be an object")
         name = params.get("name")
         args = params.get("arguments") or {}
+        if not isinstance(name, str) or not isinstance(args, dict):
+            return msg, _rpc_error(
+                rpc_id, -32602, "tools/call needs a string name and object arguments")
 
         if name == "initialize_memory":
             # Benign empty core so the cloud client proceeds gracefully.
@@ -122,20 +214,24 @@ def _apply_policy(msg: dict):
                 f"Tool '{name}' is not available to cloud services "
                 f"(privacy policy). Allowed: {sorted(ALLOWED_TOOLS)}.")
 
+        bad = _normalise_policed_args(name, args)
+        if bad:
+            return msg, _rpc_error(rpc_id, -32602, f"{name}: {bad}")
+
         if name in READ_TOOLS:
             params["arguments"] = _force_read_labels(args)
         elif name in WRITE_TOOLS:
             if name == "add_memories":
-                mems = args.get("memories")
-                if isinstance(mems, list):
-                    args["memories"] = [
-                        _force_write_labels(m) if isinstance(m, dict) else m
-                        for m in mems]
+                args["memories"] = [_force_write_labels(m) for m in args["memories"]]
                 for k in _STRIP_ARGS:
                     args.pop(k, None)
                 params["arguments"] = args
             else:
                 params["arguments"] = _force_write_labels(args)
+        else:  # PASS_TOOLS: identity is the gateway's here too
+            for k in _STRIP_ARGS:
+                args.pop(k, None)
+            params["arguments"] = args
         msg["params"] = params
         return msg, None
 
@@ -153,24 +249,107 @@ def _filter_tools_list(payload: dict) -> dict:
     return payload
 
 
+class _BodyRefused(ValueError):
+    """A request body the gateway cannot apply its policy to."""
+
+
+def _no_constant(name):
+    raise _BodyRefused(f"non-standard JSON constant {name}")
+
+
+def _strict_json(txt: str):
+    """json.loads under the gateway's strict rules (no BOM, no NaN/Infinity,
+    bounded nesting); raises _BodyRefused. Used for the request body and for
+    string-encoded policed arguments alike."""
+    if txt.startswith("\ufeff"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        return json.loads(txt, parse_constant=_no_constant)
+    except _BodyRefused:
+        raise
+    except (ValueError, RecursionError) as e:
+        raise _BodyRefused(f"not a JSON document ({e.__class__.__name__})")
+
+
 def _parse_body(raw: bytes):
-    """MCP streamable-http body is a single JSON-RPC object (or batch)."""
-    txt = raw.decode("utf-8", "replace").strip()
-    if not txt:
-        return None
-    return json.loads(txt)
+    """Parse the MCP streamable-http body STRICTLY: one JSON-RPC object, or a
+    non-empty batch of objects, as plain UTF-8 JSON.
+
+    FAIL CLOSED. The upstream's own parser accepts more than this (a byte-order
+    mark, other encodings), so a body this function cannot parse is REFUSED,
+    never forwarded as received: the gateway only ever sends upstream what it
+    parsed here and re-serialised after policy. Raises _BodyRefused.
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise _BodyRefused("byte-order mark")
+    try:
+        txt = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _BodyRefused("not a UTF-8 JSON document (UnicodeDecodeError)")
+    msg = _strict_json(txt)
+    if isinstance(msg, dict):
+        return msg
+    if isinstance(msg, list) and msg and all(isinstance(m, dict) for m in msg):
+        return msg
+    raise _BodyRefused("not a JSON-RPC object or a non-empty batch of objects")
+
+
+def _refuse(reason: str):
+    return JSONResponse(
+        _rpc_error(None, -32700, f"Request refused by the gateway: {reason}."),
+        status_code=400)
+
+
+# Request headers mnemory reads to decide WHO the caller is, or WHETHER it is
+# authenticated (mnemory/server.py, APIKeyMiddleware: dispatch, _extract_token,
+# _set_identity_from_headers). A client copy of any of them is dropped, compared
+# case-insensitively, and the gateway then sets its own values exactly once.
+# Header names are case-insensitive on the wire, so a client "x-user-id" next to
+# the gateway's "X-User-Id" is two values of ONE header, and the upstream reads
+# whichever arrives first.
+#   authorization           the API key / JWT (the gateway's key replaces it)
+#   x-api-key               the alternative API key header
+#   cookie                  mnemory_exchange_session / cognis_session carry an
+#                           authenticated identity of their own
+#   x-user-id               user identity when the key is not user-mapped
+#   x-openwebui-user-email  the fallback user identity
+#   x-agent-id              agent scope (the cloud door binds none)
+# host and content-length are transport headers httpx recomputes.
+_DROP_HEADERS = frozenset((
+    "host", "content-length",
+    "authorization", "x-api-key", "cookie",
+    "x-user-id", "x-openwebui-user-email", "x-agent-id",
+))
+
+
+# Hop-by-hop headers (RFC 9110 section 7.6.1) describe the CLIENT's connection,
+# not the request, and the gateway frames the bytes it rebuilt itself: none of
+# them is forwarded, nor any header the client's Connection header names.
+# content-encoding goes too - the body sent upstream is the gateway's own plain
+# JSON, never the client's encoding of it.
+_HOP_BY_HOP = frozenset((
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding", "te",
+    "trailer", "upgrade", "proxy-authorization", "proxy-authenticate",
+    "content-encoding",
+))
+
+
+def _connection_named(req) -> set:
+    names = set()
+    for v in req.headers.getlist("connection"):
+        names.update(t.strip().lower() for t in v.split(",") if t.strip())
+    return names
 
 
 def _upstream_headers(req):
+    drop = _DROP_HEADERS | _HOP_BY_HOP | _connection_named(req)
     h = {}
     for k, v in req.headers.items():
-        lk = k.lower()
-        if lk in ("host", "content-length", "authorization"):
+        if k.lower() in drop:
             continue
         h[k] = v
     h["Authorization"] = f"Bearer {MNEMORY_KEY}"
     h["X-User-Id"] = BOUND_USER
-    h.pop("X-Agent-Id", None)
     return h
 
 
@@ -189,15 +368,21 @@ async def mcp(request):
     up_headers = _upstream_headers(request)
 
     short_circuit = None
-    out_body = body
+    out_body = None  # only bytes re-serialised below ever go upstream
     is_tools_list = False
 
-    if method == "POST" and body:
+    if body and method != "POST":
+        return _refuse(f"{method} with a body")
+    if method == "POST":
         try:
             msg = _parse_body(body)
-        except Exception:
-            msg = None
+        except _BodyRefused as e:
+            return _refuse(str(e))
         if isinstance(msg, list):  # JSON-RPC batch
+            # tools/list is filtered on the way back only for a single request,
+            # so inside a batch it is refused rather than answered unfiltered.
+            if any(m.get("method") == "tools/list" for m in msg):
+                return _refuse("tools/list inside a batch")
             mutated, sc = [], None
             for m in msg:
                 mm, r = _apply_policy(m)
@@ -225,7 +410,7 @@ async def mcp(request):
     async with httpx.AsyncClient(timeout=timeout) as client:
         upstream = await client.request(
             method, f"{MNEMORY_URL}/mcp",
-            content=out_body if method in ("POST", "PUT", "PATCH") else None,
+            content=out_body,
             headers=up_headers,
             params=dict(request.query_params))
 

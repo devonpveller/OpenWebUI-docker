@@ -65,7 +65,7 @@ scope_tasks  0
 
 **Worker workspace (`docker exec ao-worker-1`, `/workspace/.git/logs/HEAD`)**
 ```
-14:09:23  clone: from https://github.com/devonpveller/ai-orchestration-gym
+14:09:23  clone: from https://github.com/<owner>/ai-orchestration-gym
 14:10:07  checkout: moving from main to agent/effort-gym-008-todo-product
 ```
 
@@ -169,7 +169,7 @@ The org's convention (`orchestrator.py:6237`) is `agent/{effort_id}` =
 PRIOR ATTEMPTS AT THIS SAME ERROR (the operator reports it AGAIN — nothing delivered so far
 resolved it):
 - `effort-gym-008-todo-product` (project `gym`): branch `agent/effort-gym-008-todo-product`
-  never reached `devonpveller/ai-orchestration-gym`
+  never reached `<owner>/ai-orchestration-gym`
 - `effort-gym-004d-todo-product` ...
 - `effort-gym-007-todo-product` ...
 First fetch and READ those branches, then — IN THIS SAME TURN — implement, verify and publish

@@ -54,7 +54,7 @@ async def _orch(db_url, tmp_path=None, *, github=False, **overrides):
     if github and tmp_path is not None:
         key = tmp_path / "app.pem"
         key.write_text("dummy")
-        kwargs.update(github_app_id="1", github_app_owner="devonpveller",
+        kwargs.update(github_app_id="1", github_app_owner="demoowner",
                       github_app_private_key_path=str(key))
     kwargs.update(overrides)
     settings = Settings(**kwargs)
@@ -153,7 +153,7 @@ async def test_incomplete_sweep_delivers_a_pr_but_does_not_close_done(db_url, tm
     the card is needs-attention and the lifecycle is not 'done'."""
     orch, db = await _orch(db_url, tmp_path, github=True, goal_lens_retries=1)   # P29: pin 1 retry here
     try:
-        await orch.projects.add("gym", "https://github.com/devonpveller/gym")   # on the App's account
+        await orch.projects.add("gym", "https://github.com/demoowner/gym")   # on the App's account
         eid, _c, _r = await orch.router.open_effort("todo-product", project="gym")
         await orch.charters.set_goal(eid, "add a due-date field to the todo tool", created_by="po")
         orch._gh_transport = _remote()

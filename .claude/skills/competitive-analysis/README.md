@@ -6,7 +6,7 @@
 
 This skill turns a loose "analyze the competition" request into a structured competitive brief. It helps an AI client identify the relevant competitor set, compare positioning and packaging, call out real threats and openings, and end with recommended moves instead of a generic market summary.
 
-If you want the multi-step OB1 workflow that combines this with synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+If you want the multi-step OB1 workflow that combines this with synthesis, meeting notes, and memo drafting, use the [Research-to-Decision Workflow recipe](../../../OB1/recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ If you want the multi-step OB1 workflow that combines this with synthesis, meeti
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - Public source access for competitor websites, pricing pages, docs, and announcements
 

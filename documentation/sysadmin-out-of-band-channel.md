@@ -14,9 +14,9 @@ channel** plus an autonomous **engine-restart watchdog**.
 > minutes while Docker stayed perfectly healthy. The watchdog detected it 8
 > times and alerted nowhere. Telegram now also carries the **catastrophe tier**
 > (Layer 4). Full account:
-> [`notes/tailnet-outage-alert-silence-2026-09-16.md`](notes/tailnet-outage-alert-silence-2026-09-16.md).
+> [`../documentation-plans-ai-stack/journal/notes/tailnet-outage-alert-silence-2026-09-16.md`](../../documentation-plans-ai-stack/journal/notes/tailnet-outage-alert-silence-2026-09-16.md).
 
-Related: [`backup-restore-runbook.md`](backup-restore-runbook.md) (data recovery),
+Related: [`runbooks/backup-restore-runbook.md`](runbooks/backup-restore-runbook.md) (data recovery),
 `scripts/recovery/emergency-recovery.ps1` (ordered restart), and the `litellm-proxy-status` /
 disk-bloat memories.
 
@@ -138,7 +138,7 @@ Two structural fixes shipped with it, both of which had been masking faults:
    automatically (the host bridges reconnect within one poll).
 
 > Hands-on host access (RDP/SSH over Tailscale) is **not enabled yet** (host is on the tailnet at
-> `shuya8873desktop01-1.tail37f875.ts.net`, but RDP is off and no SSH server is installed). Until it
+> `<machine>.<tailnet>.ts.net`, but RDP is off and no SSH server is installed). Until it
 > is, the Telegram commands above are the remote levers. Tailscale-SSH server is not available on a
 > Windows host; enabling tailnet-scoped RDP is the planned fallback.
 

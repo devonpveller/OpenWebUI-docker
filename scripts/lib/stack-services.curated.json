@@ -172,7 +172,7 @@
         "container": "llm-gateway-ui",
         "project": "inference",
         "critical": false,
-        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.devinveller.ai); serves no inference"
+        "note": "Admin-UI sidecar (tailnet :8445/ui + litellm.<PUBLIC_DOMAIN>); serves no inference"
       }
     ],
     "memory": [
@@ -390,7 +390,7 @@
         "profile": "idea-refinery",
         "project": "open-brain",
         "critical": false,
-        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (documentation/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure. sl-driver-parity reached the same row from the other side and the reason is worth keeping: the pre-commit verifier rendered WITHOUT profiles, so this container was invisible to it and the watchdog refused to route a repair for a container that had been up for days."
+        "note": "Idea Refinery drain (cron 03:00 UTC). Added 2026-09-19 with sl-ob1-profiles: it was the one live open-brain container absent from this file (../documentation-plans-ai-stack/journal/notes/stack-services-unlisted-containers.md), and giving the OB1 render its profiles would otherwise have turned that documented gap into a pre-commit failure. sl-driver-parity reached the same row from the other side and the reason is worth keeping: the pre-commit verifier rendered WITHOUT profiles, so this container was invisible to it and the watchdog refused to route a repair for a container that had been up for days."
       }
     ],
     "backups": [

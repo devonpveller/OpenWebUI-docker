@@ -282,7 +282,7 @@ if ($notRecreated.Count -gt 0) {
 }
 Write-Host ("    label      : docker inspect -> Config.Labels[org.opencontainers.image.revision] must equal the pin")
 if (-not $dockerfileHasLabel) {
-    Write-Host ("    NOTE       : {0} carries no 'ARG OB1_SHA' + 'LABEL org.opencontainers.image.revision' - the label will be EMPTY after this deploy (copy research-curator's two lines; follow-up in documentation/notes/deploy-gate-2026-09-06.md)" -f $dockerfilePath) -ForegroundColor Yellow
+    Write-Host ("    NOTE       : {0} carries no 'ARG OB1_SHA' + 'LABEL org.opencontainers.image.revision' - the label will be EMPTY after this deploy (copy research-curator's two lines; follow-up in ../documentation-plans-ai-stack/journal/notes/deploy-gate-2026-09-06.md)" -f $dockerfilePath) -ForegroundColor Yellow
 }
 Write-Host ""
 if ($WhatIfOnly) {

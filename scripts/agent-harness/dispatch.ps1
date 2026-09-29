@@ -8,7 +8,7 @@
 # understated - the RESOLUTION existed and the DISPATCH did not. This file is the dispatch.
 #
 # Transport decision (class-2). The DECISIONS.md entry for it is PENDING, not written: it
-# is staged under "DECISIONS entries to append" in documentation/notes/dfu-u4-findings.md
+# is staged under "DECISIONS entries to append" in ../documentation-plans-ai-stack/journal/notes/dfu-u4-findings.md
 # and the orchestrator appends it at merge (this branch does not touch DECISIONS.md).
 # An earlier revision of this header cited it as "logged in DECISIONS.md as U4-1", which was
 # a citation to a record that did not exist - worse than no citation, because it reads as

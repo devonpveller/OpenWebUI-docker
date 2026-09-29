@@ -38,7 +38,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -51,7 +51,7 @@ async def _orch(db_url, tmp_path):
 def _stack_remote(bumped: dict, *, sub_landed=True):
     gitmodules = base64.b64encode(
         b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n'
-        b'\turl = https://github.com/devonpveller/murder\n').decode()
+        b'\turl = https://github.com/demoowner/murder\n').decode()
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -108,8 +108,8 @@ async def test_worker_stated_composition_blocker_auto_routes_to_host(db_url, tmp
     could standalone, then blocked only on the full test the host context can run."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("fix-vendored", project="murder")
         await orch.charters.set_goal(eid, "make it build against vendored MonoGame", created_by="po")
@@ -130,7 +130,7 @@ async def test_worker_stated_composition_blocker_auto_routes_to_host(db_url, tmp
 async def test_explicit_blocked_protocol_elevated_with_needs_and_feasible(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("proto", project="murder")
         await orch.charters.set_goal(eid, "do the thing", created_by="po")
@@ -153,9 +153,9 @@ async def test_run_in_host_context_dispatches_recursive_host_focus(db_url, tmp_p
     the build can actually run — worker edits the vendored subdir in place and pushes its branch."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
         await orch.projects.set_check("monogame-engine", "dotnet build vendor/murder/Murder.sln")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         bumped: dict = {}
         orch._gh_transport = _stack_remote(bumped)
         eid, chan, root = await orch.router.open_effort("hostwork", project="murder")
@@ -165,7 +165,7 @@ async def test_run_in_host_context_dispatches_recursive_host_focus(db_url, tmp_p
         await _drain(orch)
         # the focus was the HOST, recursively cloned
         focus = harness.focus_calls[-1]
-        assert focus["repo"].startswith("https://github.com/devonpveller/Engine")
+        assert focus["repo"].startswith("https://github.com/demoowner/Engine")
         assert focus["recurse_submodules"] is True
         prompts = " ".join(w["prompt"] for w in harness.wakes)
         assert "git push origin" in prompts and "vendor/murder" in prompts
@@ -179,8 +179,8 @@ async def test_run_in_host_context_dispatches_recursive_host_focus(db_url, tmp_p
 async def test_run_in_host_context_elevates_if_still_blocked(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("stillblocked", project="murder")
         await orch.charters.set_goal(eid, "fix it", created_by="po")
@@ -199,8 +199,8 @@ async def test_stale_blocked_composition_effort_auto_resolves_in_host_context(db
     work). The watchdog's _try_auto_resolve_blocked re-runs it in the host context."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("stuck", project="murder")
         await orch.charters.set_goal(eid, "fix the atlas", created_by="po")
@@ -221,8 +221,8 @@ async def test_human_needed_blocker_is_not_auto_resolved(db_url, tmp_path):
     put for the operator, even on a composition."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         orch._gh_transport = _stack_remote({})
         eid, chan, root = await orch.router.open_effort("human", project="murder")
         await orch.charters.set_goal(eid, "fix it", created_by="po")

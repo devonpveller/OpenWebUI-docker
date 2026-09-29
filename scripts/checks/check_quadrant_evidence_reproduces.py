@@ -27,7 +27,7 @@ set, whose records name no venue and are refused for that.
 2026-08-31, after a verifier found the hole in this file's own fix. Until then `--auto`
 returned 0 whenever it discovered nothing, and it SAID so ("that is a vacuous pass"). The
 disclosure was honest and still insufficient, because U4's evidence is COMMITTED at a known
-path: `rm -rf documentation/evidence/dfu-u4/` - the precise loss this check exists to
+path: `rm -rf scripts/agent-harness/quadrant/evidence/dfu-u4/` - the precise loss this check exists to
 prevent - made `--auto` find nothing and pass, while WALKTHROUGH.md credited it with
 reaching that set. Only `cli.py report --results-dir <committed>` went red.
 
@@ -42,6 +42,10 @@ TWO CASES STAY GENUINELY VACUOUS, and each prints which one it is:
     be expected of it, so nothing is;
   * the tree IS a git checkout whose index tracks no run records under the discovery roots -
     a repository that banks no evidence, which this one was until 2026-08-31.
+    EXCEPT the home repository: a checkout that tracks THIS FILE is the one that ships the
+    evidence beside it, so there "tracks no run records" is RED (added 2026-09-25, when the
+    committed root moved from documentation/evidence/ to scripts/agent-harness/quadrant/
+    evidence/ - a relocation is exactly how this check could come to examine nothing).
 What this does NOT close: `git rm`-ing the evidence and committing that clears the
 expectation too. No check reading the index can tell that from a legitimate removal - it is
 a diff a reviewer reads. The boundary is drawn at the index and stated here rather than
@@ -215,12 +219,19 @@ def _repo_root() -> Path:
 
 
 #: Where `--auto` looks for results sets. `.quadrant/` is the WORKING location (gitignored,
-#: per-checkout, thrown away with the worktree that made it); `documentation/evidence/` is
-#: the COMMITTED one. Both are searched, and the second is why the banked check still has
+#: per-checkout, thrown away with the worktree that made it); `scripts/agent-harness/quadrant/
+#: evidence/` is the COMMITTED one. Both are searched, and the second is why the banked check still has
 #: something to audit in a fresh clone — added 2026-08-31 after the four-quadrant comparison
 #: that closed U4 was destroyed with its worktree, leaving a walkthrough row claiming 4/4
 #: over a `report` that answered COMPARED 0/4.
-DISCOVERY_ROOTS = (".quadrant", "documentation/evidence")
+#:
+#: MOVED 2026-09-25 (adoption-closeout ac-journal-move). The committed root was
+#: `documentation/evidence` until the operator journal left this repo for the private plan
+#: store. The run records this check re-derives are not journal - CODE reads them - so they
+#: moved beside the code instead, byte for byte (`git mv`, blob ids unchanged), and the old
+#: root was REPLACED here rather than kept alongside: a root that exists in no checkout
+#: would only widen the search over nothing.
+DISCOVERY_ROOTS = (".quadrant", "scripts/agent-harness/quadrant/evidence")
 
 
 def _discover(root: Path) -> List[Path]:
@@ -230,7 +241,7 @@ def _discover(root: Path) -> List[Path]:
         base = root / rel
         if not base.is_dir():
             continue
-        # One level of nesting under the root, then the set itself - `documentation/evidence`
+        # One level of nesting under the root, then the set itself - the committed root
         # groups sets by the item they belong to (`dfu-u4/quadrant`), `.quadrant` does not.
         for d in sorted(base.rglob("*")):
             if d.is_dir() and any(d.glob("*/record.json")):
@@ -238,11 +249,33 @@ def _discover(root: Path) -> List[Path]:
     return out
 
 
+#: This file, repo-relative. See _is_home_repository.
+SELF_REL = "scripts/checks/check_quadrant_evidence_reproduces.py"
+
+
+def _is_home_repository(root: Path) -> bool:
+    """Does the checkout under audit TRACK this check itself?
+
+    Added 2026-09-25 with the move of the committed root (ac-journal-move). "A git checkout
+    whose index tracks no run records" is genuinely vacuous for an arbitrary repository, and
+    stays so - but not for the repository that ships this check beside its evidence. There,
+    an empty committed root means the records were deleted in a commit or the roots were
+    repointed at nothing, which is exactly how a relocation could leave this check green
+    while examining zero records. Asked of the index, like the expectation itself.
+    """
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", "--", SELF_REL],
+                              capture_output=True, encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
 def _roots_phrase() -> str:
     """The discovery roots as prose, DERIVED from DISCOVERY_ROOTS.
 
     Every message that names where this check looks is built from here. The stale sibling
-    that made this necessary: the roots list gained `documentation/evidence` on 2026-08-31
+    that made this necessary: the roots list gained its committed root on 2026-08-31
     and both the docstring and the "nothing to check" line went on saying `.quadrant/`, so
     the sentence a future auditor reads named the wrong search root. A third root added
     later cannot desynchronise the text again, because there is no second copy of it.
@@ -261,13 +294,13 @@ def _committed_records(root: Path) -> Tuple[List[str], str]:
     reason means the tree cannot be held to anything, and that reason is PRINTED rather than
     quietly treated as coverage.
 
-    The INDEX, not HEAD: `rm -rf documentation/evidence/` leaves the index untouched, and
+    The INDEX, not HEAD: `rm -rf` on the committed root leaves the index untouched, and
     that is the loss that actually happened - so it must be caught the moment it happens,
     not only once someone commits it.
 
     THE ENCLOSING-REPOSITORY TRAP, found by this fix's own guard test on its first run and
     worth more than the test that found it. `git -C <dir> ls-files` does not fail outside a
-    repository - it SEARCHES UPWARDS, and on this machine `C:/Users/yamao` is itself a git
+    repository - it SEARCHES UPWARDS, and on the machine it was found on the user's home dir was a git
     repo, so a temporary directory under the home tree answered "exit 0, no tracked records"
     and read as a repository that banks no evidence. Worse than the wrong message: paths
     from `--full-name` are relative to whatever toplevel git found, so an enclosing repo
@@ -358,7 +391,15 @@ def main(argv: List[str]) -> int:
         # "lost everything". Ask git what this checkout is SUPPOSED to hold first, and red
         # before the vacuous branch below can be reached.
         committed, vacuous_because = _committed_records(repo)
-        missing = [c for c in committed if not (repo / c).is_file()]
+        if not committed and "banks no evidence" in vacuous_because and _is_home_repository(repo):
+            print(f"NO COMMITTED EVIDENCE  this checkout tracks THIS CHECK "
+                  f"({SELF_REL}) and yet its index tracks no run record under "
+                  f"{_roots_phrase()}. The repository that banks this check is the one that "
+                  f"banks the evidence it re-derives, so an empty committed root here means "
+                  f"the records were removed or DISCOVERY_ROOTS no longer points at them - "
+                  f"and a check that found nothing to examine does not get to pass.")
+            return 1
+        missing =[c for c in committed if not (repo / c).is_file()]
         if missing:
             print(f"MISSING COMMITTED EVIDENCE  this checkout's index tracks "
                   f"{len(committed)} run record(s) under {_roots_phrase()}; "

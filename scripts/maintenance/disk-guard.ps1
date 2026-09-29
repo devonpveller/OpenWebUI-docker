@@ -5,8 +5,9 @@
 # the known failure mode being ao-worker /tmp session logs filling C: (154 GB
 # once). Now, every hour:
 #
-#   WARN  (< $WarnFreeGb, default 30):  safe docker reclaim (dangling images +
-#         build cache) + the ao-worker /tmp sweep + a #sysadmin warning.
+#   WARN  (< $WarnFreeGb, default 30):  the sysadmin docker reclaim
+#         (auto_reclaim.py: unused image tags, old build cache, orphaned
+#         anonymous volumes) + the ao-worker /tmp sweep + a #sysadmin warning.
 #   CRIT  (< $CritFreeGb, default 12):  the above, PLUS stop the agent-org
 #         gym workers (ao-worker-*) - the largest uncapped writers - and put
 #         an URGENT line in #sysadmin. Workers stay down until the operator
@@ -53,11 +54,21 @@ function Log([string]$m) {
 }
 Log "LOW DISK: C: free ${free} GB (warn<${WarnFreeGb}, crit<${CritFreeGb})"
 
-# --- safe reclaim (same guards as the weekly rotation; NEVER volume prune) --
-$img = (docker image prune -f 2>&1 | Select-Object -Last 1)
-$bld = (docker builder prune -f --keep-storage 5GB 2>&1 | Select-Object -Last 1)
-Log "reclaim: images[$img] cache[$bld]"
+# --- docker reclaim: the sysadmin's own plan/execute (scripts/sysadmin-mcp/auto_reclaim.py) --
+# Until 2026-09-27 this ran `image prune -f` + `builder prune -f`, which can only take UNTAGGED
+# leftovers: it reported "images 0B, cache 0B" while ~34 GB of unused tagged images and ~750
+# orphaned anonymous volumes sat in the vhdx. auto_reclaim.py applies the operator's rules
+# (docker_reclaim.py): unused image tags 14+ days old that no compose render names and the
+# keep-list does not protect; build cache older than 168h; anonymous volumes no container
+# references, 7+ days old. NAMED volumes are never removed. Its last stdout line is the
+# per-category summary that goes into the alert below.
 $py = Join-Path $repoRoot '.venv\Scripts\python.exe'
+$reclaimLine = 'RECLAIM not run (no .venv python)'
+if (Test-Path $py) {
+    $reclaimOut = @(& $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\auto_reclaim.py') 2>&1 | ForEach-Object { "$_" })
+    if ($reclaimOut.Count) { $reclaimLine = $reclaimOut[-1] } else { $reclaimLine = 'RECLAIM produced no output' }
+}
+Log "reclaim: $reclaimLine"
 if (Test-Path $py) {
     & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\sweep_tmp.py') 2>&1 |
         Select-Object -Last 1 | ForEach-Object { Log "tmp sweep: $_" }
@@ -107,13 +118,14 @@ if ($critical) {
 
 $after = CFreeGb
 $sev = if ($critical) { ':rotating_light: **DISK CRITICAL**' } else { ':warning: **Disk low**' }
-$msg = "$sev - C: free ${free} -> ${after} GB after reclaim. images[$img] cache[$bld]." +
+$msg = "$sev - C: free ${free} -> ${after} GB after reclaim. $reclaimLine (freed inside the Docker vhdx; C: gets it back at the next compaction)." +
        $(if ($orgAction) { " Org: $orgAction." } else { "" }) +
        $(if ($stopped.Count) { " Gym workers stopped: $($stopped -join ', ')." } else { "" }) +
        $(if ($critical) { " To RESUME after space is safe: release the kill-switch (POST http://127.0.0.1:8830/kill-switch {\""on\"":false} or ask the org via Mattermost) and docker start the workers." } else { "" }) +
        " Weekly compaction: Sundays 03:15; trigger early via the sysadmin channel if needed."
+Log "alert: $msg"
 if (Test-Path $py) {
     & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\mm_post.py') $msg 2>&1 | Out-Null
-    Log "posted to #sysadmin"
+    if ($LASTEXITCODE -eq 0) { Log "posted to #sysadmin" } else { Log "WARN: #sysadmin post failed (mm_post exit $LASTEXITCODE)" }
 }
 Log "disk-guard done (C: free ${after} GB)"

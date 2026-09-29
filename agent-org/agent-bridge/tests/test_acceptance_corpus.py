@@ -30,7 +30,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -52,7 +52,7 @@ def _remote(state: dict):
                 "files": [{"filename": "todo.py", "additions": 1, "deletions": 0}]})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={"number": 7,
-                "html_url": "https://github.com/devonpveller/Docker-Game/pull/7"})
+                "html_url": "https://github.com/demoowner/Docker-Game/pull/7"})
         if "/merge" in p and request.method == "PUT":
             state["merged"] = True
             return httpx.Response(200, json={"merged": True})
@@ -63,7 +63,7 @@ def _remote(state: dict):
 
 
 async def _game(orch):
-    await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+    await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
     return await orch.router.open_effort("wire", project="game")
 
 
@@ -73,7 +73,7 @@ async def test_corpus_is_durable_idempotent_and_retirable(db_url, tmp_path):
     project rejected."""
     orch, _chat, _h, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         id1 = await orch.projects.add_acceptance_check(
             "game", "operator PR#11: no reopen command", "python -m pytest tests/test_reopen.py")
         id2 = await orch.projects.add_acceptance_check(
@@ -114,7 +114,7 @@ async def test_operator_captures_a_check_via_nl(db_url, tmp_path):
     `accept check for <project>: <command> :: <note>` records a durable check and dispatches NO work."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         await orch.nl_intake(
             "accept check for game: python -m pytest tests/test_reopen.py :: PR#11 review: reopen must exist",
             channel_id="c1", user_id="operator-api")

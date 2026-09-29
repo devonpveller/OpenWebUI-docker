@@ -51,10 +51,29 @@
 #               enabled; no requires-refusal ever names it.
 #   manual    - present when the driver must NOT start/stop this plane; the
 #               value names what does. `up`/`down`/`restart` skip or refuse it.
+#   networks_only - the compose file declares networks and NO service (the
+#               anchor). `up` does not run `docker compose up -d` on it - compose
+#               exits 1 on a project with no service - but creates each declared
+#               network that is missing and leaves every existing one untouched.
 #   host      - what the machine itself must provide, in prose.
+#   host_paths - paths OUTSIDE this checkout the plane cannot build without,
+#               each an inline table { path, contains, why, remedy }: `path`
+#               is repo-root-relative, `contains` names what must exist inside
+#               it (so an empty directory or a plain file does not pass),
+#               `remedy` is the command that creates it, run from the repo
+#               root. Unlike `host` this IS checked: an unusable path makes
+#               `doctor` FAIL and `enable`/`init` refuse, each naming `remedy`.
 #   keys      - variable names that must be present and non-blank in the plane's
 #               OWN env file (`<project dir>/.env`). A blank one makes `enable`
-#               refuse, naming the key and the file.
+#               refuse, naming the key and the file. A key is also refused while
+#               its value EQUALS the non-blank value `<project dir>/.env.example`
+#               ships for it: for a key listed here that shipped value is a
+#               placeholder by construction (`change-me-...`, `REPLACE_WITH_...`,
+#               `ai.example.com`). `enable`, `doctor` and `up` all refuse it.
+#               A key NOT listed here is refused too when its .env.example value
+#               matches stack.py's PLACEHOLDER_PATTERN and a service the plane
+#               runs (under its active profiles) interpolates it - derived from
+#               the .env.example files, so a new placeholder needs no entry here.
 #   ports     - published HOST ports -> what answers on them.
 #   profiles  - compose profiles. Each is a sub-table with a `description`, an
 #               optional `requires`, and EXACTLY ONE of the three DEPLOYMENT
@@ -106,9 +125,13 @@
 # account of it.
 compose  = "docker-compose.yml"
 implicit = true
+# Compose will not `up` a project with no service ("no service selected",
+# exit 1), so `up` ENSURES these networks instead: stack.py's ensure_networks()
+# creates each one that is missing and never touches one that exists.
+networks_only = true
 requires = []
 optional = []
-host     = ["Docker Engine (Docker Desktop on this host); creates the networks, starts no container"]
+host     = ["Docker Engine (Docker Desktop on this host); `up` creates the missing networks and starts no container"]
 keys     = []
 
 [planes.anchor.ports]
@@ -231,7 +254,11 @@ keys = ["WEBUI_SECRET_KEY"]
 # a default here would hand a `stock` host `gpu`. `opt_in` is the flag for
 # exactly that - something other than the driver's defaults turns it on, and
 # here it is the COMPOSE_PROFILES line in .env.
+# `stands_in_for`: the GPU-free stand-in. When stack.py's GPU refusal takes `gpu`
+# out of this plane's COMPOSE_PROFILES it puts `stock` in, so Open WebUI still
+# runs (without it only openwebui-backup starts). stack.py validates the name.
 opt_in      = true
+stands_in_for = ["gpu"]
 description = "Open WebUI alone on the pinned upstream image - no GPU, no local build, no tailscale, no anchor network (frontend/docker-compose.yml:162-193). The fresh-clone deployment; mutually exclusive with `gpu`, whose container_name it shares"
 
 [planes.frontend.profiles.gpu]
@@ -264,7 +291,16 @@ compose  = "memory/docker-compose.yml"
 lease    = "memory"
 requires = ["anchor", "inference"]
 optional = []
-host     = []
+host = [
+  "the sibling mnemory checkout at ../mnemory (see host_paths): memory/docker-compose.yml builds mnemory:local from `context: ../../mnemory`, OUTSIDE this repository",
+]
+# The build context of `mnemory` (memory/docker-compose.yml, `context:
+# ../../mnemory`, relative to memory/) is ../mnemory relative to the repo root.
+# The sibling checkout on this host tracks the fork's `dev` branch; the
+# upstream project is fpytloun/mnemory. test_stack.py holds this path to the compose file.
+host_paths = [
+  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory" },
+]
 keys     = ["MCP_API_KEY"]
 
 [planes.memory.ports]
@@ -427,7 +463,7 @@ requires    = ["research"]
 # file; or COMPOSE_PROFILES=research,wiki,notebook,idea-refinery in OB1/docker/.env,
 # which raw compose honours AND `effective_profiles()` unions into whatever flags
 # the driver passes. Recorded in
-# documentation/notes/stack-layers-sl-ob1-gitlink-findings.md.
+# ../documentation-plans-ai-stack/journal/notes/stack-layers-sl-ob1-gitlink-findings.md.
 
 [planes.ob1.profiles.research]
 # OB1/docker/docker-compose.yml: openbrain-research + openbrain-curator, which
@@ -540,6 +576,30 @@ opt_in      = true
 
 
 # ==========================================================================
+# SHARED MODULES - repo-root trees that are not one plane's internals, because
+# more than one plane consumes them. Read by nothing at runtime; declared so a
+# reader of one plane folder knows what it reaches outside it, and held to the
+# compose files by scripts/stack/test_stack.py (every `../backup` reference in
+# a plane compose file belongs to a plane listed here, and every plane listed
+# here has one).
+#   path      - repo-root-relative directory.
+#   consumers - plane -> how it consumes the module (bind mount / build context).
+# ==========================================================================
+
+[modules.backup]
+path        = "backup"
+description = "the backup sidecar scripts (<service>-backup.sh, generic-tar-backup.sh, pg-backup.sh), the two restore helpers, and the shared backup image's Dockerfile; each plane's backup sidecar bind-mounts its script read-only at /scripts/backup.sh"
+
+[modules.backup.consumers]
+frontend  = "bind mount: openwebui-backup.sh, generic-tar-backup.sh (tailscale-backup)"
+inference = "bind mount: llm-gateway-backup.sh, generic-tar-backup.sh (inference/compose/backups.yml)"
+memory    = "bind mount: mnemory-backup.sh"
+coder     = "bind mount: little-coder-backup.sh"
+portal    = "build context: ../backup (Dockerfile; the caddy-backup and authelia-backup images); bind mount: caddy-backup.sh, authelia-backup.sh"
+agent-org = "bind mount: pg-backup.sh, generic-tar-backup.sh"
+
+
+# ==========================================================================
 # PRODUCTS - vertical slices. `enable <product>` enables every plane listed
 # (plus everything those planes require), every profile under [profiles], and
 # every profile under [surfaces] unless --headless is passed. A plane named
@@ -558,6 +618,10 @@ profiles    = { inference = ["local"] }
 [products.memory]
 description = "mnemory, the unified memory layer, and its cloud door"
 planes      = ["memory"]
+# mnemory calls LLM_MODEL=qwen36-27b:nothink and EMBED_MODEL=qllama/bge-m3:latest
+# (memory/docker-compose.yml); the gateway registers both only under `local`, so
+# without it the product is a memory layer whose every call fails.
+profiles    = { inference = ["local"] }
 
 [products.search]
 description = "the private search gateway (SearXNG behind Mullvad)"
@@ -578,7 +642,7 @@ profiles    = { ob1 = ["research"] }
 surfaces    = { ob1 = ["wiki", "notebook"] }
 
 [products.coding-agent]
-description = "little-coder; its surface is Open WebUI (PLAN section 1)"
+description = "little-coder, the coding agent; its surface is Open WebUI"
 planes      = ["coder"]
 surfaces    = { frontend = [] }
 

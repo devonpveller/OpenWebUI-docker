@@ -58,7 +58,7 @@ def main():
         
         log("INFO", f"Using admin tool: {admin_tool}")
         
-        # Configure LM Studio serve on port 8234 pointing to 169.254.83.107:5506
+        # Configure LM Studio serve on port 8234 pointing to <lmstudio-host>:5506
         log("INFO", "Configuring Tailscale serve for LM Studio...")
         
         result = subprocess.run(
@@ -68,7 +68,7 @@ def main():
                 "--action", "serve_start",
                 "--path", "/lmstudio",
                 "--proxy_port", "8234",
-                "--target_host", "169.254.83.107",
+                "--target_host", "<lmstudio-host>",
                 "--target_port", "5506"
             ],
             capture_output=True,

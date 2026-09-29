@@ -21,7 +21,7 @@ mmapi = bridge.mmapi
 
 ME = "me-bot-claude-user-id-00000"
 PM = "pm-bot-pm-user-id-000000000"
-OP = "op-profnovice-user-id-00000"
+OP = "op-alice-user-id-00000"
 
 
 def follow(**kw) -> dict:
@@ -43,7 +43,7 @@ def post(**kw) -> dict:
 class FollowMatchTests(unittest.TestCase):
     def setUp(self):
         # prefill the username cache so no API call is attempted
-        mmapi._user_cache.update({PM: "bot-pm", OP: "profnovice", ME: "bot-claude"})
+        mmapi._user_cache.update({PM: "bot-pm", OP: "alice", ME: "bot-claude"})
 
     def test_reply_from_other_user_wakes(self):
         self.assertTrue(bridge.follow_matches(follow(), post(), ME))
@@ -72,9 +72,9 @@ class FollowMatchTests(unittest.TestCase):
         self.assertTrue(bridge.follow_matches(follow(thread_id=""), post(root_id=""), ME))
 
     def test_wake_on_filters_by_username(self):
-        self.assertFalse(bridge.follow_matches(follow(wake_on=["profnovice"]), post(), ME))
+        self.assertFalse(bridge.follow_matches(follow(wake_on=["alice"]), post(), ME))
         self.assertTrue(bridge.follow_matches(follow(wake_on=["bot-pm"]), post(), ME))
-        self.assertTrue(bridge.follow_matches(follow(wake_on=["profnovice", "bot-pm"]), post(), ME))
+        self.assertTrue(bridge.follow_matches(follow(wake_on=["alice", "bot-pm"]), post(), ME))
 
     def test_wake_on_tolerates_at_prefix_and_case(self):
         self.assertTrue(bridge.follow_matches(follow(wake_on=["@Bot-PM"]), post(), ME))
@@ -89,7 +89,9 @@ class FollowEngineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self._orig = (bridge.STATE_FILE, bridge.AUDIT_FILE, bridge.LOG_FILE,
-                      bridge.post, mmapi._api)
+                      bridge.post, mmapi._api, bridge.OPERATORS)
+        # BRIDGE_OPERATORS is configuration with no shipped default; name the test's own.
+        bridge.OPERATORS = {"alice"}
         bridge.STATE_FILE = os.path.join(self.tmp, "state.json")
         bridge.AUDIT_FILE = os.path.join(self.tmp, "audit.jsonl")
         bridge.LOG_FILE = os.path.join(self.tmp, "bridge.log")
@@ -109,7 +111,7 @@ class FollowEngineTests(unittest.TestCase):
 
     def tearDown(self):
         (bridge.STATE_FILE, bridge.AUDIT_FILE, bridge.LOG_FILE,
-         bridge.post, mmapi._api) = self._orig
+         bridge.post, mmapi._api, bridge.OPERATORS) = self._orig
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     @staticmethod
@@ -206,7 +208,7 @@ class FollowEngineTests(unittest.TestCase):
 
     def test_operator_post_in_followed_channel_renews_without_waking(self):
         import time as _t
-        mmapi._user_cache.update({OP: "profnovice", PM: "bot-pm", ME: "bot-claude"})
+        mmapi._user_cache.update({OP: "alice", PM: "bot-pm", ME: "bot-claude"})
         now = int(_t.time() * 1000)
         window = 10 * 3600 * 1000
         self.b.state["follows"]["fw-ch1"] = follow(

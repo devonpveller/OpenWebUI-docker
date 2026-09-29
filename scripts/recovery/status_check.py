@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Status Check - Python equivalent of quick-fixes.bat status
+Status Check - read-only overview of every inventoried container.
+
+Its probes are `docker ps` plus `docker exec`/`docker inspect` by CONTAINER
+name, so it needs no compose project; it outlived quick-fixes.bat (archived 2026-09-25), whose
+`status` option it used to mirror.
 
 Comprehensive system status check with detailed diagnostics.
 """
@@ -343,8 +347,8 @@ def check_service_accessibility():
     else:
         log_error("OpenWebUI accessibility: FAILED")
 
-    # NOTE: the Ollama API check was removed — the ollama container is disabled
-    # in this stack (see CLAUDE.md). Inference is direct to llama-cpp.
+    # NOTE: the Ollama API check was removed — the ollama container was retired
+    # from this stack. Inference is direct to llama-cpp.
 
     # Check llama-cpp accessibility
     result = run_docker_command(
@@ -452,7 +456,7 @@ def check_extended_planes():
             if mcp_started and db_started and db_started > mcp_started:
                 ok = False
                 log_warn(f"  {mcp}: STALE DB POOL — {guard} started {db_started} > {mcp} {mcp_started}")
-                log_warn(f"     fix: docker restart {mcp}   (or: quick-fixes.bat openbrain)")
+                log_warn(f"     fix: docker restart {mcp}   (or: powershell -NoProfile -File scripts/checks/check-openbrain-health.ps1 -Repair)")
 
     return ok
 

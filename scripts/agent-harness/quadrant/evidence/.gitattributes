@@ -1,0 +1,7 @@
+# FIXTURES ARE BYTES. The files under here are committed evidence that code in this repo
+# READS - moved beside that code from documentation/evidence/ on 2026-09-25 (ac-journal-move)
+# when the journal left for the plan store, because CI runs on a checkout of this repo alone.
+# Readers compare hashes and quote heading lines verbatim, so a checkout that translated line
+# endings would turn a passing fixture red on a machine that normalises differently. Same rule
+# as the documentation/evidence/.gitattributes these came from.
+* -text

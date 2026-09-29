@@ -64,9 +64,9 @@
 # That means `scripts/checks/stack-watchdog.ps1`'s seven tailscale repair calls
 # (and the two advice strings that print the same commands),
 # `scripts/recovery/emergency-recovery.ps1` (both its whole-project verbs and
-# its `restart tailscale`), `scripts/recovery/quick-fixes.bat`'s four
-# (`restart tailscale`, `build --no-cache tailscale`, and two `up -d
-# tailscale`) and `backup/openwebui-restore.sh`'s documented
+# its `restart tailscale`), the manual tailscale rebuild in
+# `documentation/runbooks/PREVENTION-GUIDE.md` (`build --no-cache tailscale`,
+# `up -d tailscale`) and `backup/openwebui-restore.sh`'s documented
 # `stop tailscale openwebui` all exit 1 until the value is right — silently, in
 # the watchdog's case, since it pipes them to Out-Null. The repo's own
 # `scripts/checks/check-watchdog-repair-targets.ps1` reports exactly this
@@ -229,8 +229,8 @@ services:
       # shipped every on-disk secret into the internet-facing frontend. Only
       # the status-pipe subsystem, the system prompts the githelper pipe
       # reads, and the tailnet-info dump are visible now.
-      - ../status-pipe:/host_project/status-pipe:ro
-      - ../system-prompts:/host_project/system-prompts:ro
+      - ./status-pipe:/host_project/status-pipe:ro
+      - ./system-prompts:/host_project/system-prompts:ro
       - ../data/tailscale:/host_project/data/tailscale:ro
     environment:
       - TZ=America/New_York

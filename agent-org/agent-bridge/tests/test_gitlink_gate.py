@@ -1,7 +1,7 @@
 """DELIVERY-PIPELINE gitlink-reachability gate (live 2026-07-05): a worker committed inside its
 vendored submodule checkout (`vendor/MonoGame`), bumped the superproject pointer, and published
 ONLY the superproject branch — the branch then referenced submodule commit `ac3a830b…` that never
-reached `devonpveller/MonoGame`, so the operator's `git submodule update --init --recursive` died
+reached `demoowner/MonoGame`, so the operator's `git submodule update --init --recursive` died
 with `fatal: remote error: upload-pack: not our ref`. Delivery verification said "landed" (branch
 exists + ahead) and invited a merge of a branch NO ONE ELSE CAN BUILD. The gate: for every gitlink
 the branch CHANGED, verify the referenced commit exists on the submodule's remote; if not,
@@ -30,8 +30,8 @@ GOOD_SHA = "c591fdd8238c991e818427ffdb9999dd419296a9"
 
 
 def _engine_remote(*, gitlink_sha=BAD_SHA, sub_commit_status=None, heal_after=None):
-    """A MockTransport for `devonpveller/Engine` whose branch changed the `vendor/Sub` gitlink to
-    `gitlink_sha`, plus the `devonpveller/Sub` remote answering commit-reachability probes.
+    """A MockTransport for `demoowner/Engine` whose branch changed the `vendor/Sub` gitlink to
+    `gitlink_sha`, plus the `demoowner/Sub` remote answering commit-reachability probes.
     `sub_commit_status`: fixed status for GET Sub/commits/<sha> (defaults: 422 for BAD_SHA, 200
     for GOOD_SHA). `heal_after`: after N probes, the commit becomes reachable (the re-engage
     pushed it)."""
@@ -39,7 +39,7 @@ def _engine_remote(*, gitlink_sha=BAD_SHA, sub_commit_status=None, heal_after=No
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        if "/repos/devonpveller/Sub/commits/" in p:
+        if "/repos/demoowner/Sub/commits/" in p:
             state["probes"] += 1
             if heal_after is not None and state["probes"] > heal_after:
                 return httpx.Response(200, json={"sha": p.rsplit("/", 1)[-1]})
@@ -52,7 +52,7 @@ def _engine_remote(*, gitlink_sha=BAD_SHA, sub_commit_status=None, heal_after=No
             return httpx.Response(200, json={
                 "type": "submodule", "name": "Sub", "path": "vendor/Sub",
                 "sha": gitlink_sha,
-                "submodule_git_url": "https://github.com/devonpveller/Sub",
+                "submodule_git_url": "https://github.com/demoowner/Sub",
             })
         if "/contents/src/game.cs" in p:
             return httpx.Response(200, json={"type": "file", "name": "game.cs", "sha": "aa11"})
@@ -78,16 +78,16 @@ def _engine_remote(*, gitlink_sha=BAD_SHA, sub_commit_status=None, heal_after=No
 # ── unit: read_broken_gitlinks ─────────────────────────────────────────────────
 async def test_read_broken_gitlinks_flags_unreachable_pointer():
     broken = await read_broken_gitlinks(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Engine", "agent/effort-fix",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Engine", "agent/effort-fix",
         transport=_engine_remote(gitlink_sha=BAD_SHA))
-    assert broken == [{"path": "vendor/Sub", "sha": BAD_SHA, "submodule_repo": "devonpveller/Sub"}]
+    assert broken == [{"path": "vendor/Sub", "sha": BAD_SHA, "submodule_repo": "demoowner/Sub"}]
 
 
 async def test_read_broken_gitlinks_clean_when_pointer_published():
     broken = await read_broken_gitlinks(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Engine", "agent/effort-fix",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Engine", "agent/effort-fix",
         transport=_engine_remote(gitlink_sha=GOOD_SHA))
     assert broken == []
 
@@ -95,8 +95,8 @@ async def test_read_broken_gitlinks_clean_when_pointer_published():
 async def test_read_broken_gitlinks_fails_open_on_infra_errors():
     # a 500 from the submodule remote is NOT proof of a broken pointer — never block on infra
     broken = await read_broken_gitlinks(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/Engine", "agent/effort-fix",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/Engine", "agent/effort-fix",
         transport=_engine_remote(gitlink_sha=BAD_SHA, sub_commit_status=500))
     assert broken == []
 
@@ -111,7 +111,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -133,7 +133,7 @@ async def test_broken_gitlink_reengages_once_then_escalates(db_url, tmp_path):
     re-engage once with the per-path remedy and then escalate — not mark done, not invite a merge."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("fix", project="engine")
         orch._gh_transport = _engine_remote(gitlink_sha=BAD_SHA)     # never heals
         await orch.delegate(eid, chan, root, "fix the build", plan_steps=["do the work"])
@@ -152,7 +152,7 @@ async def test_broken_gitlink_fixed_by_reengage_finishes_done(db_url, tmp_path):
     """The re-engaged worker publishes the submodule commit → the re-check passes → done."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("fix", project="engine")
         # first reachability probe fails (unpushed), probes after the re-engage succeed
         orch._gh_transport = _engine_remote(gitlink_sha=BAD_SHA, heal_after=1)
@@ -168,7 +168,7 @@ async def test_healthy_gitlink_change_is_not_blocked(db_url, tmp_path):
     """A submodule bump to a PUBLISHED commit sails through — the gate only bites on unreachable."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("fix", project="engine")
         orch._gh_transport = _engine_remote(gitlink_sha=GOOD_SHA)
         await orch.delegate(eid, chan, root, "fix the build", plan_steps=["do the work"])

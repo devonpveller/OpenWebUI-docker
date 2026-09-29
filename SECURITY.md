@@ -9,7 +9,7 @@ Documents security posture, decisions, and known gaps. Last updated 2026-08-20.
 - **Whole-repo mount into OWUI REMOVED.** `.:/host_project:ro` on the
   internet-facing frontend (which shipped `.env`, `secrets/`, tailscale
   certs, the GitHub App key into the container) is gone — replaced by three
-  narrow read-only mounts (`status-pipe/`, `system-prompts/`,
+  narrow read-only mounts (`frontend/status-pipe/`, `frontend/system-prompts/`,
   `data/tailscale/`). Verified in-container.
 - **Watchtower RETIRED.** The workspace now has **zero** `docker.sock`
   mounts anywhere (previously one, on watchtower, with an unpinned `:latest`
@@ -102,7 +102,7 @@ If this trust model changes (e.g., adding tailnet users you don't fully trust), 
 
 **Decision (2026-05-28):** accepted in exchange for: DDoS absorption, bot filtering, free TLS at the edge, IP hiding (no home-IP exposure), no router port-forwarding.
 
-**Additional layer (added by operator 2026-05-29):** Cloudflare Access policy on top of the tunnel, restricting access to email `Yamaoka01@gmail.com` via one-time PIN before any request reaches Authelia.
+**Additional layer (added by operator 2026-05-29):** Cloudflare Access policy on top of the tunnel, restricting access to the operator's own email address via one-time PIN before any request reaches Authelia.
 
 If the data-exposure trade-off becomes unacceptable, the alternatives are: tailnet-only (kill the portal) or self-hosted edge (port-forward with all the IP-exposure and DDoS costs).
 
@@ -141,14 +141,14 @@ Authelia 4.39 logs warnings; auto-mapped to `AUTHELIA_IDENTITY_VALIDATION_RESET_
 - `tunnel-watcher` polls `cloudflared:2000/ready` every 30s and alerts HIGH after 3 consecutive failures (~90s default); INFO on recovery; hourly heartbeat to docker logs
 
 ### Real-time alerting (Gmail via portal-alerter)
-- All operator alerts land in **`Yamaoka01@gmail.com`** via the `portal-alerter` Deno sidecar
+- All operator alerts land in the operator's own mailbox (the Google account the alerter's OAuth token belongs to) via the `portal-alerter` Deno sidecar
 - OAuth client: **dedicated** GCP OAuth 2.0 client (`portal-alerter`), separate from OB1's `open-brain-email` client. Revoking either side at https://myaccount.google.com/permissions does NOT affect the other.
 - Refresh token: `secrets/google/portal-alerter/token.json` (gitignored)
 - Alert triggers (from `authelia-watcher` + `integrity-tripwire`): regulation bans, new-IP login successes, repeated 1FA failures from same IP, WebAuthn/TOTP credential changes, config-file drift
 - Scheduled traffic digest: `portal-cron` fires `POST /run` on the alerter daily 07:00 UTC by default
 
 ### Backup state
-- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), smolcrawl, tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC)
+- **Full-stack coverage** (post-2026-05-30): nightly logical/tar backups for caddy, authelia, openwebui, mnemory, little-coder (5 volumes), tailscale, openbrain-db (`pg_dump -Fc`), openbrain-wiki (volume tar), open-notebook (surreal export + notebook_data tar) — plus weekly lm-models tar (Sundays 01:00 UTC). (smolcrawl was in this set until its service and backup were retired 2026-08-21.)
 - Every backup writes a `.sha256` sentinel beside the archive; restore tooling verifies before touching anything
 - Convention for new services: [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md). Coverage check: `.\scripts\check-backup-coverage.ps1`
 - Restore workflow: per-service in [documentation/runbooks/restore-from-snapshot.md](documentation/runbooks/restore-from-snapshot.md); disaster recovery via `.\scripts\restore-from-snapshot.ps1 -SnapshotRoot ... -Date ... -Apply`
@@ -222,7 +222,7 @@ In approximate priority order:
 
 ## 10. References
 
-- Implementation plan: [documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md](documentation/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
+- Implementation plan: [../documentation-plans-ai-stack/journal/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md](../documentation-plans-ai-stack/journal/archive/implementation-guide/auth-front-end/plan-internet-exposed-front-end.md)
 - Post-implementation audit (2026-05-29): [../documentation-plans-ai-stack/implementation-guide/open-source authentication front ends for ai stack/audit-post-implementation-2026-05-29.md](../documentation-plans-ai-stack/implementation-guide/open-source%20authentication%20front%20ends%20for%20ai%20stack/audit-post-implementation-2026-05-29.md)
 - Incident response playbook: [documentation/runbooks/incident-response.md](documentation/runbooks/incident-response.md)
 - Backup conventions (new services): [documentation/runbooks/backup-conventions.md](documentation/runbooks/backup-conventions.md)

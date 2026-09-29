@@ -36,7 +36,7 @@
 # wrong both times, in a file whose entire subject is labelling: first "all fixtures are
 # labelled" (disproved by this script's own passing CASE 6), then "three are unlabelled"
 # (there were two, and the next sentence named them). Both were caught by testers, one each
-# on attempts 1 and 2. `documentation/notes/u4quad-findings.md:342` records the same repo
+# on attempts 1 and 2. `../documentation-plans-ai-stack/journal/notes/u4quad-findings.md:342` records the same repo
 # going stale on a hardcoded count twice over.
 #
 # So the numbers are DERIVED instead: every fixture is registered in `$script:Made` with its

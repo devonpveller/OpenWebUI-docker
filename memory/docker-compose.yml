@@ -96,7 +96,9 @@ services:
       - MNEMORY_URL=http://mnemory:8050
       - MNEMORY_KEY=${MCP_API_KEY}
       - GATEWAY_KEY=${MNEMORY_GATEWAY_KEY}
-      - BOUND_USER_ID=${MNEMORY_CLOUD_USER:-yamaoka01@gmail.com}
+      # The mnemory user_id cloud clients are bound to - YOURS, from
+      # memory/.env. No default: a shipped default would be someone else's id.
+      - BOUND_USER_ID=${MNEMORY_CLOUD_USER}
       - SHARE_LABEL_VALUE=cloud
     restart: unless-stopped
     <<: *hardening

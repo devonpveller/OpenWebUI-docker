@@ -60,7 +60,7 @@ Six fields, each earning its place:
 | `audience` | who reads or runs it - the field that would have prevented the coder README |
 | `acceptance` | objectively checkable criteria - **this is what the tester tests** |
 | `out_of_scope` | the tempting adjacent work this deliberately does not do |
-| `findings_sink` | where anything true but out of scope gets written down instead |
+| `findings_sink` | where anything true but out of scope gets written down instead - a path in the plan store, `../documentation-plans-ai-stack/implementation-guide/<feature>/findings/<id>.md` (or `journal/notes/` there) |
 
 The tool refuses vague anchors: a missing field, an empty list, or an acceptance criterion
 too short to check. Say what would count as FAILING each criterion, not only what passing
@@ -170,6 +170,16 @@ written there. This protocol used to say to call such disagreements out "explici
 no destination; agents reasonably read that as "in the artifact", and half of one README
 became a defect table. Neither losing the finding nor pasting it into the deliverable is
 right; the sink is the third option.
+
+**Where the paperwork lives: the plan store, not this repo** (since 2026-09-25). The anchor,
+the findings sink, the test plan and any evidence file you keep go in the private sibling
+repo `../documentation-plans-ai-stack/`: `implementation-guide/<feature>/anchors/<id>.json`,
+`.../findings/<id>.md`, `.../test-plans/<id>.md`, and `journal/evidence/<id>/` (`journal/notes/`
+when there is no feature). Commit and push it there before you `-Submit`, with
+`git pull --rebase` first - other items write to the same repo. This repo's pre-commit
+refuses new files under `documentation/notes|evidence|archive/` and new root-level
+`TEST-PLAN*` / `*-FINDINGS*` files. Evidence that CODE reads is the exception: a fixture a
+check or drill needs lives next to that code, because CI runs on this repo alone.
 
 **The sink is held to the artifact's standard.** A false claim in a findings file is not a
 smaller mistake than a false claim in the deliverable - it is a larger one, because the
@@ -412,6 +422,34 @@ and a bridge turn could be running in it - not that landing needs the operator's
 `new-worktree.ps1` warns about this at provisioning time so it is never a
 surprise at landing time.
 
+**The generated doc blocks must verify at the merge (ac-doc-generator).** A merge into a line
+is **always `--no-ff`**: a fast-forward creates no merge commit, so NO hook runs and nothing
+compares the docs' generated blocks. The merge commit runs `pre-merge-commit`, whose step 4b
+always runs on a merge and REFUSES it on a stale block it could compare, or when OB1 is checked
+out but not at the MERGED gitlink (or has tracked edits). It only WARNS when the machine lacks
+docker or an OB1 checkout - so that a newcomer's `git pull` is not blocked - which is why the
+reviewer does not rely on the hook alone: a bare `git worktree add` has no OB1 and no `.env`
+files, so provision the merge worktree before merging, then check it by hand:
+
+```powershell
+$m = '<main-checkout>/.claude/worktrees/merge-line'
+git -C $m submodule update --init OB1                      # OB1 at the line's pin
+foreach ($d in '.', 'frontend', 'inference', 'memory', 'search', 'coder', 'portal', 'agent-org/docker', 'OB1/docker') {
+    if (-not (Test-Path "$m/$d/.env")) { Copy-Item "$m/$d/.env.example" "$m/$d/.env" } }
+foreach ($r in 'daily-digest', 'email-history-import') {
+    if (-not (Test-Path "$m/OB1/recipes/$r/.env")) { New-Item -ItemType File "$m/OB1/recipes/$r/.env" | Out-Null } }
+# after `merge --no-ff ... --no-commit` (or before, on the line): OB1 at the MERGED pin
+git -C $m submodule update OB1
+python "$m/scripts/stack/stack.py" docs --check            # must exit 0 - 3 or 4 is NOT mergeable
+```
+
+`docs --check` must exit **0** with OB1 at the merged gitlink; exit 3 (something could not be
+rendered here) or 4 (OB1 not at the index's gitlink, or dirty) means something was not compared
+and is not a pass. Put the result in the merge message beside the attestation. (The hook
+that runs is the one `core.hooksPath` names - the main checkout's - so until a line carrying step
+4b reaches that checkout, this manual check is the gate.) CI also runs the full check on every
+push to `work/**` and on pull requests.
+
 `--no-ff` keeps the branch visible in history, and the merge message carries the evidence -
 the operator's branch policy made mechanical, and what makes a later bisect readable. If the
 merge bumps the `OB1` gitlink, verify the SHA is reachable on the OB1 remote **first**; an
@@ -434,22 +472,22 @@ what it found:
 | What the merge range contains | The surface it derives |
 |---|---|
 | An `OB1` gitlink move whose OB1 diff touches `integrations/<dir>/`, and that directory has a `Dockerfile` at the new pin | `image:<the compose service in OB1/docker/docker-compose.yml that builds it>` |
-| A changed `owui/` file that **`owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
+| A changed `frontend/owui/` file that **`frontend/owui/manifest.csv` lists** - the manifest maps file to OWUI id, so it is the authority on what is pasted at all | `paste:<the file>` |
 | A changed build context of a `:local`-tagged service in this repository's compose files (where the context IS the repository root, its Dockerfile and what that Dockerfile `COPY`s) | `image:<the service>` |
 
 Nothing else derives a surface, and a merge that ships none records an empty list - the
-normal case for docs, scripts and the harness itself. A change to `owui/manifest.csv` or
-`owui/README.md` derives nothing, because neither is pasted into anything: the rule was
+normal case for docs, scripts and the harness itself. A change to `frontend/owui/manifest.csv` or
+`frontend/owui/README.md` derives nothing, because neither is pasted into anything: the rule was
 `any owui/** path` until 2026-09-06, and the real `owuidrift` merge `e989265` derived
 `paste:owui/manifest.csv` and `paste:owui/README.md` - two surfaces nobody could ever close
-honestly. An `owui/` file the manifest does not list is reported as a NOTE, not silently
+honestly. A `frontend/owui/` file the manifest does not list is reported as a NOTE, not silently
 dropped. A merge whose OB1 pin exists in no
 clone this tool can reach is REFUSED rather than recorded: that pin is the zombie `-List`
 flags as `[UNRESOLVABLE]`, and pushing it to OB1's remote is the fix (CLAUDE.md: never bump
 the gitlink to a commit that is not there).
 
 While a surface is open, `-List` shows the item as
-`merged ... [UNDEPLOYED: image:openbrain-curator, paste:owui/tools/deep_research.py]`, and
+`merged ... [UNDEPLOYED: image:openbrain-curator, paste:frontend/owui/tools/deep_research.py]`, and
 `-Show` prints a DEPLOY block naming each surface OPEN or CLOSED. **The deploy itself is
 still the gated, human step it always was (§4) - this verb RECORDS one, it never performs
 one.** When the deploy has happened and the thing is running:
@@ -575,7 +613,7 @@ by force-push; `development` history is append-only.
 - **A merge is not a deploy, and the board now says which merges are not yet live.** Anything
   that must be proven through the real caddy/tailnet chain still happens after the merge,
   serially, by nature - what changed on 2026-09-06 is that `-Merged` derives from the merge
-  range what the item SHIPS (an OB1 integration image, a `:local` build context, an `owui/`
+  range what the item SHIPS (an OB1 integration image, a `:local` build context, a `frontend/owui/`
   file OWUI only sees by paste), `-List` shows that item as `[UNDEPLOYED: ...]` until each
   surface is closed, and `-Deployed` closes one with per-surface evidence naming the pin and
   the container's health state (step 6). Performing the deploy is still human and still

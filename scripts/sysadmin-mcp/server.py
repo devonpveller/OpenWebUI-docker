@@ -11,10 +11,11 @@ READ-ONLY investigative tools (safe anytime, no gate):
   • stack_health      — one-line stack health summary
   • container_logs    — tail a container's logs (investigation)
   • volume_report     — volumes + dangling set (REPORT ONLY; flags protected data volumes)
-  • reclaim_plan      — read-only: what a safe reclaim WOULD free + a confirm_token
+  • reclaim_plan      — read-only: what a reclaim WOULD remove / skip (and why) + a confirm_token
 
 GATED mutating tools (fall through the bridge approval relay; also token/idle-guarded in code):
-  • reclaim_execute   — perform the safe reclaim; refuses without a plan-bound confirm_token
+  • reclaim_execute   — remove exactly a plan's listed set (each item re-checked); refuses
+                          without a current plan's confirm_token
 
 Elevated vhdx compaction is intentionally NOT here — it is a separate RunLevel-Highest Scheduled
 Task triggered behind the same gate (compaction.py, later increment).
@@ -30,6 +31,9 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if os.environ.get("ACSR_TESTGUARD"):  # started by a test: guard this process too (see _testguard.py)
+    import _testguard  # noqa: E402
+    _testguard.install_process_guard(os.environ["ACSR_TESTGUARD"], "server.py")
 import sysadmin as sa  # noqa: E402
 import executor as ex  # noqa: E402
 import compaction as cp  # noqa: E402
@@ -151,21 +155,63 @@ def render_volume_report(d: dict) -> str:
     return "\n".join(out)
 
 
+def _gbs(b) -> str:
+    return "n/a" if b is None else f"{round(b / 1e9, 2)} GB"
+
+
+def _skips(cat: dict, key: str, per_reason: int = 3) -> list[str]:
+    """Skip summary: count per reason kind, with a few examples each."""
+    out = []
+    by_kind: dict = {}
+    for x in cat.get("skipped", []):
+        by_kind.setdefault(x.get("kind", "?"), []).append(x)
+    for kind, n in (cat.get("skipped_by_reason") or {}).items():
+        eg = "; ".join(f"{str(e.get(key))[:40]} - {e.get('reason')}" for e in by_kind.get(kind, [])[:per_reason])
+        out.append(f"  - skipped, {kind}: {n}" + (f"  (e.g. {eg})" if eg else ""))
+    return out
+
+
 def render_reclaim_plan(d: dict) -> str:
-    out = ["# Safe-reclaim plan (read-only)"]
+    out = ["# Reclaim plan (read-only)"]
     est = d.get("estimate_gb", {})
-    out.append(f"**Estimated free:** ao-worker /tmp {est.get('ao_worker_tmp', 0)} GB, "
-               f"logs {est.get('logs', 0)} GB, dangling images ≤{est.get('images_dangling', 0)} GB, "
-               f"build cache {est.get('build_cache', 0)} GB")
-    out.append(f"**confirm_token:** `{d.get('confirm_token')}`  (pass to reclaim_execute)")
-    out.append("\n**ao-workers:**")
-    for w in d.get("workers", []):
-        tag = "CLEAR" if w.get("clearable") else "skip"
-        extra = f", {w.get('tmp_gb')} GB / {w.get('files')} files" if w.get("clearable") else ""
-        out.append(f"  - {w.get('worker')}: {tag} — {w.get('reason')}{extra}")
-    logs = d.get("logs_to_truncate", [])
-    out.append("\n**logs to truncate:** " + (", ".join(f"{lg['container']} ({lg['log_gb']}GB)" for lg in logs) or "(none)"))
-    out.append(f"**prune:** images={d.get('prune_images')}, build_cache={d.get('prune_builder')}")
+    out.append(f"**Estimated free (inside Docker):** image tags {est.get('images', 0)} GB, "
+               f"anon volumes {est.get('anon_volumes', 0)} GB, build cache ~{est.get('build_cache', 0)} GB, "
+               f"ao-worker /tmp {est.get('ao_worker_tmp', 0)} GB, logs {est.get('logs', 0)} GB")
+    out.append(f"**confirm_token:** `{d.get('confirm_token')}`  (pass to reclaim_execute; it covers "
+               f"exactly the listed set below, each item re-checked at execute)")
+    dk = d.get("docker") or {}
+    img, vol, bc = dk.get("images", {}), dk.get("volumes", {}), dk.get("build_cache", {})
+    st = dk.get("settings", {})
+    out.append(f"\n## Image tags - remove {img.get('count', 0)} tag(s) / {img.get('image_ids', 0)} image(s), "
+               f"~{_gbs(img.get('bytes'))}  (rule: no container uses it, not compose-named, "
+               f"{st.get('image_min_age_days', 14):g}+ days old, not in image-keep.txt)")
+    if img.get("disabled_reason"):
+        out.append(f"  - **category OFF (removes nothing):** {img['disabled_reason']}")
+    shown = set()
+    for r in img.get("largest", []):
+        out.append(f"  - {', '.join(r['refs'])}  {r['gb']} GB, {r['age_days']} d")
+        shown.update(r["refs"])
+    rest = [x["ref"] for x in img.get("remove", []) if x["ref"] not in shown]
+    if rest:
+        out.append(f"  - ... and {len(rest)} more: {', '.join(rest[:40])}" + (" ..." if len(rest) > 40 else ""))
+    out += _skips(img, "ref")
+    out.append(f"\n## Anonymous volumes - remove {vol.get('count', 0)}, ~{_gbs(vol.get('bytes'))}  "
+               f"(rule: 64-hex name, no container running or stopped references it, "
+               f"{st.get('anon_volume_min_age_days', 7):g}+ days old; named volumes never)")
+    if vol.get("disabled_reason"):
+        out.append(f"  - **category OFF (removes nothing):** {vol['disabled_reason']}")
+    for r in vol.get("largest", []):
+        out.append(f"  - {r['name'][:16]}...  {r['gb']} GB, {r['age_days']} d")
+    out += _skips(vol, "name")
+    out.append(f"\n## Build cache - `{bc.get('command')}`  ~{_gbs(bc.get('bytes'))} over {bc.get('entries', 0)} entries")
+    if d.get("scope", "all") == "all":
+        out.append("\n## ao-workers")
+        for w in d.get("workers", []):
+            tag = "CLEAR" if w.get("clearable") else "skip"
+            extra = f", {w.get('tmp_gb')} GB / {w.get('files')} files" if w.get("clearable") else ""
+            out.append(f"  - {w.get('worker')}: {tag} - {w.get('reason')}{extra}")
+        logs = d.get("logs_to_truncate", [])
+        out.append("**logs to truncate:** " + (", ".join(f"{lg['container']} ({lg['log_gb']}GB)" for lg in logs) or "(none)"))
     out.append("\n" + d.get("note", ""))
     return "\n".join(out)
 
@@ -173,17 +219,27 @@ def render_reclaim_plan(d: dict) -> str:
 def render_reclaim_result(d: dict) -> str:
     if d.get("refused"):
         return (f"REFUSED (fail-closed): {d.get('reason')}\n"
-                f"fresh confirm_token: `{d.get('current_token')}` — review the plan and retry.")
-    out = ["# Safe reclaim done"]
+                f"fresh confirm_token: `{d.get('current_token')}` - review the plan and retry.")
+    out = ["# Reclaim done"]
     fg = d.get("freed_gb", {})
-    out.append(f"**Freed ≈ {fg.get('total_approx', 0)} GB** (tmp {fg.get('ao_worker_tmp', 0)} GB, logs {fg.get('logs', 0)} GB) + dangling images/cache")
+    out.append(f"**Freed ~{fg.get('total_approx', 0)} GB inside Docker** - measured by `docker system df` "
+               f"before/after: images {fg.get('images')} GB, anon volumes {fg.get('anon_volumes')} GB, "
+               f"build cache {fg.get('build_cache')} GB; plus ao-worker /tmp {fg.get('ao_worker_tmp', 0)} GB, "
+               f"logs {fg.get('logs', 0)} GB. C: gets it back at the next vhdx compaction.")
+    if d.get("summary"):
+        out.append(f"  - {d['summary']}")
+    dk = d.get("docker") or {}
+    for cat, key in (("images", "ref"), ("volumes", "name")):
+        sk = dk.get(cat, {}).get("skipped", [])
+        if sk:
+            out.append(f"  - {cat} skipped at execute (re-validation): "
+                       + "; ".join(f"{str(x.get(key))[:40]} - {x.get('reason')}" for x in sk[:10]))
     for c in d.get("cleared_workers", []):
         out.append(f"  - cleared {c['worker']}: {c.get('freed_gb')} GB ({c.get('files')} files)")
-    for s in d.get("skipped_workers", []):
-        out.append(f"  - skipped {s['worker']}: {s.get('reason')}")
+    for s_ in d.get("skipped_workers", []):
+        out.append(f"  - skipped {s_['worker']}: {s_.get('reason')}")
     if d.get("truncated_logs"):
         out.append(f"  - truncated logs: {len(d['truncated_logs'])}")
-    out.append(f"  - prune: images={d.get('pruned', {}).get('images')}, cache={d.get('pruned', {}).get('build_cache')}")
     return "\n".join(out)
 
 
@@ -305,23 +361,42 @@ TOOLS = {
     "volume_report": {
         "fn": tool_volume_report,
         "description": ("List Docker volumes and the dangling set, flagging protected data volumes "
-                        "that must NEVER be pruned. REPORT ONLY — does not and cannot prune."),
+                        "that must NEVER be pruned. REPORT ONLY — does not and cannot prune. (Orphaned "
+                        "ANONYMOUS volumes are removed by reclaim_plan/reclaim_execute under their own "
+                        "rules; named volumes by nothing.)"),
         "schema": {"type": "object", "properties": {}},
     },
     "reclaim_plan": {
         "fn": tool_reclaim_plan,
-        "description": ("READ-ONLY: what a SAFE disk reclaim would do (clear idle ao-worker /tmp "
-                        "session logs, truncate oversized container logs, prune dangling images + "
-                        "build cache) and an estimate of bytes freed. Returns a `confirm_token` to "
-                        "pass to reclaim_execute. Never touches volumes; skips busy workers."),
+        "description": ("READ-ONLY: what a disk reclaim would remove, with counts, estimated bytes, the "
+                        "largest entries, and every SKIP with its reason. Categories: (1) image TAGS no "
+                        "container (running or stopped) uses, that no plane's compose render names, "
+                        "created 14 days ago or more, and not matched by the keep-list "
+                        "scripts/sysadmin-mcp/image-keep.txt (an image id with a protected tag is never "
+                        "removed through another tag); UNTAGGED images (dangling, or pulled by digest only) "
+                        "that no container uses and no compose file pins by digest, removed by id; "
+                        "(2) build cache older than 168h "
+                        "(`builder prune -af --filter until=168h`); (3) ANONYMOUS volumes (64-hex names no "
+                        "compose file declares) no container running or stopped references, created 7 "
+                        "days ago or more; "
+                        "(4) idle ao-worker /tmp session logs and oversized container logs. NAMED volumes "
+                        "are never removed (listed as skipped). Returns a `confirm_token` covering exactly "
+                        "the listed set, for reclaim_execute."),
         "schema": {"type": "object", "properties": {}},
     },
     "reclaim_execute": {
         "fn": tool_reclaim_execute,
-        "description": ("GATED / MUTATING: perform the safe reclaim from reclaim_plan. REQUIRES the "
-                        "`confirm_token` from a current reclaim_plan (refuses/fail-closed otherwise). "
-                        "Re-verifies each worker is idle at execution time; truncates logs (never "
-                        "deletes data); never touches volumes. Does NOT compact the vhdx."),
+        "description": ("GATED / MUTATING: remove exactly the set a current reclaim_plan listed. REQUIRES "
+                        "its `confirm_token` (refuses/fail-closed otherwise). Re-checks every item first: "
+                        "an image or anonymous volume that became in use (by a running or stopped "
+                        "container) or changed since the plan is skipped, never removed. Removes by "
+                        "explicit name only (`docker image rm <tag>`, untagged images by id with `docker "
+                        "image rm <id>`, `docker volume rm <anonymous id>`); "
+                        "never `volume prune`, `image prune -a` or `system prune`; named volumes never. "
+                        "Thresholds are the stricter of the plan's and config.json's. Truncates logs (never "
+                        "deletes). Reports freed bytes per category from "
+                        "`docker system df` before/after. Does NOT compact the vhdx, so C: only gets the "
+                        "space back at the next compaction."),
         "schema": {"type": "object", "properties": {
             "confirm_token": {"type": "string", "description": "token from a current reclaim_plan"},
         }, "required": ["confirm_token"]},

@@ -86,7 +86,7 @@
 #   3. its image carries the same project value, so the label is demonstrably inherited.
 #
 # Miss any one and it stays protected. The measurement is finding 15 of
-# documentation/notes/harness-reap-findings-2026-09-07.md - **named by path, because a
+# ../documentation-plans-ai-stack/journal/notes/harness-reap-findings-2026-09-07.md - **named by path, because a
 # citation that says only "the sink" makes the reader find it, and this file's whole
 # problem was a reader who followed a citation to the wrong model.**
 #

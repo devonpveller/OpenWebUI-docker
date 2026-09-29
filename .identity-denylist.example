@@ -1,0 +1,29 @@
+# .identity-denylist.example - the FORMAT of the operator denylist read by
+# scripts/checks/check_identity.py. This example is tracked; a real denylist NEVER is.
+#
+# WHY IT EXISTS. The gate's generic layer recognises personal data by its shape (private
+# and tailnet IPs, *.ts.net names, C:\Users\<name> paths, email addresses). Your domain,
+# your GitHub or git user name, your tailnet and machine names have no shape - they are
+# words - so the gate can only recognise them if you tell it, locally.
+#
+# WHERE TO PUT YOURS (first found wins):
+#   1. --denylist PATH, or the environment variable AI_STACK_IDENTITY_DENYLIST
+#   2. .identity-denylist at the root of the checkout (gitignored)
+#   3. identity-denylist inside the git directory - `git rev-parse --git-common-dir`,
+#      usually .git/identity-denylist. RECOMMENDED: it can never be staged, and every
+#      `git worktree` of the repository reads the same file.
+# A newcomer needs none of this: with no denylist the gate runs its generic layer only,
+# which is also what CI runs.
+#
+# FORMAT. One literal per line, matched case-insensitively ANYWHERE in a line (so a user
+# name also catches it inside an email or a path). Blank lines and lines starting with #
+# are ignored. Anything after ` #` is a label the gate prints INSTEAD of the value - a hit
+# reads `operator (denylist entry 3 [tailnet])`, never the literal. Entries shorter than
+# 4 characters are refused: they would match inside ordinary words.
+#
+# Example entries (synthetic - replace them with your own values):
+example-domain.dev      # public domain
+jdoe-example            # github / git user name
+jdoe.example@mail.test  # personal email
+tail0example            # tailnet name
+jdoe-desktop-01         # machine name

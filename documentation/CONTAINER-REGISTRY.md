@@ -24,7 +24,7 @@ purpose. Containers that failed that test today were removed (see
 
 | Container | Purpose | Why it exists / what breaks without it |
 |---|---|---|
-| `openwebui` | The chat frontend (OWUI 0.11.0, GPU build; image pinned `openwebui:local`) | The primary human surface; hosts the paste-deployed tools/pipes/skills (`owui/`) |
+| `openwebui` | The chat frontend (OWUI 0.11.0, GPU build; image pinned `openwebui:local`) | The primary human surface; hosts the paste-deployed tools/pipes/skills (`frontend/owui/`) |
 | `tailscale` | Tailnet ingress; **shares openwebui's netns** (encoded in the project's depends_on) | Carries all 8 tailnet serve routes (OWUI, llama-cpp aliases — probe `/health/liveliness` since J.1, ON ×2, wiki, LiteLLM UI, Mattermost). Restart order openwebui→tailscale is mandatory |
 
 (`open-terminal` moved to the **coder** project in K.4 — it is that plane's

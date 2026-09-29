@@ -280,7 +280,7 @@ def _evidence_present(val: str, record_dir: Any = None) -> bool:
     r"""Is the artifact this record names actually HERE?
 
     THE DEFECT THIS CLOSES, measured 2026-09-01 from a clean clone at `fba111d`. Every
-    committed record under `documentation/evidence/dfu-u4/` was REFUSED at admission -
+    committed record under `scripts/agent-harness/quadrant/evidence/dfu-u4/` was REFUSED at admission -
     "evidence.workspace does not exist on disk: D:\...\wt-u4close\...\workspace" - and
     `cli.py report` answered COMPARED 0/4, exit 1, while the retained workspaces and
     transcripts sat in the checkout, tracked by git, beside their records. `Path(val)` is
@@ -288,7 +288,7 @@ def _evidence_present(val: str, record_dir: Any = None) -> bool:
     branch merged, so the gate was answering a question about a machine rather than about
     the evidence set in hand. It had passed until then only because that directory still
     existed on the author's disk - the exact "runs in the author's tree only" shape
-    `documentation/evidence/README.md` was created to end.
+    `../documentation-plans-ai-stack/journal/evidence/README.md` was created to end.
 
     THE SIBLING IS AUTHORITATIVE, and the recorded absolute path is not consulted when one
     can be resolved. That is not a preference; it is

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the backup-freshness monitor, off-site layer especially. Stdlib only.
 
-Run:  python scripts/sysadmin-mcp/test_check_backups.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_check_backups.py
 
 The regression these exist for (2026-09-13): the weekly NAS sync failed on 09-06 and
 09-13 because the backup-user password had expired, and this script exited 0 both
@@ -20,6 +21,9 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import check_backups as cb  # noqa: E402
+import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_check_backups")
 
 _passed = 0
 _failed = 0
@@ -37,7 +41,7 @@ def check(name: str, cond: bool, detail: str = "") -> None:
 
 # Verbatim shape of the real logs/nas-sync-2026-09-13.log (password-expired run).
 FAILED_LOG = """[2026-09-13T04:00:00-04:00] [INFO] === NAS sync start ===
-[2026-09-13T04:00:00-04:00] [INFO] destination   : \\\\PolyshDesignNAS\\backups\\ai-stack\\portal\\slot-B
+[2026-09-13T04:00:00-04:00] [INFO] destination   : \\\\nas-host\\backups\\ai-stack\\portal\\slot-B
 [2026-09-13T04:00:01-04:00] [INFO] vault loaded (user: backup-user)
 [2026-09-13T04:00:06-04:00] [INFO]   net use: The password of this user has expired.
 [2026-09-13T04:00:06-04:00] [INFO]   net use: System error 2242 has occurred.

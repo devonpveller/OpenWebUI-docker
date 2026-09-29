@@ -40,11 +40,11 @@ async def test_fork_repo_executor_success():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/repos/isadorasophia/murder/forks"
         assert request.headers["authorization"] == "Bearer ghs_faketoken"
-        return httpx.Response(202, json={"full_name": "devonpveller/murder",
-                                         "html_url": "https://github.com/devonpveller/murder"})
-    res = await fork_repo(FakeGitHubApp(owner="devonpveller"), "isadorasophia/murder",
+        return httpx.Response(202, json={"full_name": "demoowner/murder",
+                                         "html_url": "https://github.com/demoowner/murder"})
+    res = await fork_repo(FakeGitHubApp(owner="demoowner"), "isadorasophia/murder",
                           transport=httpx.MockTransport(handler))
-    assert res.ok and "devonpveller/murder" in res.summary and res.url.endswith("/murder")
+    assert res.ok and "demoowner/murder" in res.summary and res.url.endswith("/murder")
 
 
 async def test_fork_repo_executor_404_is_clear():
@@ -57,12 +57,12 @@ async def test_fork_repo_executor_404_is_clear():
 async def test_read_repo_state_reports_submodules_and_tree():
     import base64
     gitmodules = base64.b64encode(
-        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/devonpveller/murder\n'
+        b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/demoowner/murder\n'
     ).decode()
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        if p == "/repos/devonpveller/MonoGame-Engine":
+        if p == "/repos/demoowner/MonoGame-Engine":
             return httpx.Response(200, json={"default_branch": "main"})
         if p.endswith("/contents/.gitmodules"):
             return httpx.Response(200, json={"content": gitmodules})
@@ -71,8 +71,8 @@ async def test_read_repo_state_reports_submodules_and_tree():
                                              {"name": "README.md", "type": "file"}])
         return httpx.Response(404)
 
-    st = await read_repo_state(FakeGitHubApp(owner="devonpveller"),
-                               "https://github.com/devonpveller/MonoGame-Engine",
+    st = await read_repo_state(FakeGitHubApp(owner="demoowner"),
+                               "https://github.com/demoowner/MonoGame-Engine",
                                transport=httpx.MockTransport(handler))
     assert st.readable and st.default_branch == "main"
     assert "vendor/murder" in st.submodule_paths          # structured — for the deterministic filter
@@ -86,7 +86,7 @@ async def test_bump_submodule_creates_gitlink_branch():
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        if p == "/repos/devonpveller/MonoGame-Engine":
+        if p == "/repos/demoowner/MonoGame-Engine":
             return httpx.Response(200, json={"default_branch": "main"})
         if p.endswith("/git/ref/heads/main"):
             return httpx.Response(200, json={"object": {"sha": "base_commit_sha"}})
@@ -104,8 +104,8 @@ async def test_bump_submodule_creates_gitlink_branch():
         return httpx.Response(404)
 
     res = await bump_submodule(
-        FakeGitHubApp(owner="devonpveller"),
-        "https://github.com/devonpveller/MonoGame-Engine", "vendor/murder",
+        FakeGitHubApp(owner="demoowner"),
+        "https://github.com/demoowner/MonoGame-Engine", "vendor/murder",
         "murder_commit_sha_0123456789abcdef", branch="agent/effort-wire",
         transport=httpx.MockTransport(handler))
     assert res.ok and "vendor/murder" in res.summary and res.url.endswith("/agent/effort-wire")
@@ -143,7 +143,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     assert settings.github_app_enabled                       # the capability plane is on for the flow
@@ -158,8 +158,8 @@ async def test_fork_proposes_hardgate_then_executes_on_approve(db_url, tmp_path)
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(202, json={"full_name": "devonpveller/murder",
-                                             "html_url": "https://github.com/devonpveller/murder"})
+            return httpx.Response(202, json={"full_name": "demoowner/murder",
+                                             "html_url": "https://github.com/demoowner/murder"})
         orch._gh_transport = httpx.MockTransport(handler)
         orch.models._client.queue_structured(OperatorIntent(
             kind="capability", capability="fork", repo_url="isadorasophia/murder", reply="Sure —"))

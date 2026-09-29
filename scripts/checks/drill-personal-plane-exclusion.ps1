@@ -278,7 +278,7 @@ function Note($t)    { Write-Host "        $t" -ForegroundColor DarkGray }
 # that this tree cannot currently deliver, for a reason the drill can state precisely - and
 # the run still exits NON-ZERO when any gap is open. It exists because the alternative was
 # to delete the assertion, and an assertion deleted is a requirement that leaves no trace.
-# See the summary block at the end of this file, and documentation/notes/u8h3-findings.md.
+# See the summary block at the end of this file, and ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md.
 function Gap($id, $t) {
     Write-Host "  GAP   [$id] $t" -ForegroundColor Yellow
     $script:gaps++
@@ -566,7 +566,7 @@ $GAP_DISPOSITIONS = [ordered]@{
     # (1) IS KEPT ANYWAY. It is correct and it is necessary; when the OB1 bug is fixed this
     # gap closes by itself and reports CLOSED rather than failing the build. Fixing (2) is
     # NOT this item - it is a live wiki-index defect that belongs to the wiki work line, and
-    # it is written up in documentation/notes/u8h3-findings.md rather than folded in here.
+    # it is written up in ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md rather than folded in here.
     # --- and the red-coverage ledger ------------------------------------------------------
     "RED-COVERAGE"                      = "OPEN WORK, owned by the next change to this drill: 7 of 15 ATTACK sections (2, 4, 5, 5b, 6, 9, 10) have greens and no red. Writing seven reds is its own item and not H3's; what changed in round 3 is that the shortfall is COUNTED and NAMED rather than asserted away by the red phase's opening comment, which used to claim the opposite. GREEN DOES NOT COVER: that those seven sections' greens can fail at all. For each of them, deleting the mechanism that does the work would look exactly like the mechanism working, and this run would still be green."
 }
@@ -1145,7 +1145,7 @@ try {
     # run and the READ attacks below can be about reading. The shipped read policy is NOT
     # touched and is asserted below to still be `false`; H1 has to decide the real fix
     # (a narrow FOR INSERT policy, or a writer that keeps its elevation). See
-    # documentation/notes/u8h3-findings.md.
+    # ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md.
     $null = Db @"
 CREATE ROLE $APPUSER LOGIN PASSWORD 'test' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
 GRANT service_role TO $APPUSER;
@@ -2270,7 +2270,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
         Note "      ReferenceError, and a bare catch {} swallows it. PROVE IT IN ONE COMMAND:"
         Note "      node --test OB1/recipes/_shared/wiki-pages.test.mjs   (5 of 10 RED = still broken)"
         Note "  That defect also stops the LIVE wiki_pages index being written or backfilled."
-        Note "  See documentation/notes/u8h3-findings.md. It is NOT a boundary defect."
+        Note "  See ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md. It is NOT a boundary defect."
     }
 
     # 14d. RED - AND IT MOVED, BECAUSE THE GUARD MOVED.
@@ -2668,7 +2668,7 @@ CREATE POLICY drill_audit_write ON public.agent_memory_audit_events
 
     # --- 13. THE LIFT: can the "do not write a personal-exposure memory" rule be dropped? ---
     Section "THE LIFT - a personal-plane memory was WRITTEN, REFUSED at every door, RECORDED, and REMOVED"
-    # WHAT THIS SECTION IS FOR. documentation/notes/personal-plane-second-home-LATENT-LEAK.md
+    # WHAT THIS SECTION IS FOR. ../documentation-plans-ai-stack/journal/notes/personal-plane-second-home-LATENT-LEAK.md
     # imposed an operational rule - "do not write a personal-exposure memory until this is
     # closed" - because the plane holding zero personal rows was the only thing keeping the
     # leak unexploitable. A rule like that is not lifted by an argument; it is lifted by a
@@ -2917,5 +2917,5 @@ Write-Host "  Every attack was STOPPED. What is not met is the RECORDING half of
 Write-Host "  and the doors that connect as postgres. Both are C.9 H1/H4 items, both are named" -ForegroundColor Yellow
 Write-Host "  above with the measurement, and neither is closed by this run." -ForegroundColor Yellow
 Write-Host "  CI (C.9 H4) should pass -AcceptDispositionedGaps, which exits 0 for exactly this" -ForegroundColor Yellow
-Write-Host "  set and non-zero for anything new. See documentation/notes/u8h3-findings.md." -ForegroundColor Yellow
+Write-Host "  set and non-zero for anything new. See ../documentation-plans-ai-stack/journal/notes/u8h3-findings.md." -ForegroundColor Yellow
 exit $ledgerExit

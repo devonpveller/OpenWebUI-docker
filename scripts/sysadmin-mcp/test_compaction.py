@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the elevated compaction capability. Stdlib only. NON-DESTRUCTIVE by design.
 
-Run:  python scripts/sysadmin-mcp/test_compaction.py
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests'
+      (on a host it exits 2 by design); there: python test_compaction.py
 
 Proves (without ever compacting or triggering the task):
   • compaction.py contains no volume/destructive verbs; the elevated .ps1 never prunes volumes.
@@ -21,6 +22,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import compaction as cp  # noqa: E402
 import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_compaction")
 
 _passed = 0
 _failed = 0

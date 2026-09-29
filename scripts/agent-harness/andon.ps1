@@ -2,7 +2,7 @@
 #
 # WHY THIS EXISTS, and why the conditions are the ones they are (U6, 2026-08-30):
 # an unattended run has nobody watching it. The 2026-08-30 run of this very plan produced
-# a written record of what actually went wrong in it (DECISIONS.md, documentation/notes/),
+# a written record of what actually went wrong in it (DECISIONS.md, ../documentation-plans-ai-stack/journal/notes/),
 # and every condition shipped in harness.config.json comes from that record with its
 # incident named. No taxonomy was invented. Per PLAN.md section 0 A6, a condition whose
 # "detection" is prose is FALSIFIED, not implemented - so a condition exists here ONLY if

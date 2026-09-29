@@ -31,7 +31,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -67,7 +67,7 @@ def _remote(*, heal_after: int | None = None):
             return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={
-                "number": 9, "html_url": "https://github.com/devonpveller/Engine/pull/9"})
+                "number": 9, "html_url": "https://github.com/demoowner/Engine/pull/9"})
         if p.endswith("/pulls") and request.method == "GET":
             return httpx.Response(200, json=[])
         if p.count("/") == 3:
@@ -96,7 +96,7 @@ def _remote_real_changes():
             return httpx.Response(200, json={"commit": {"sha": sha}})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(201, json={
-                "number": 12, "html_url": "https://github.com/devonpveller/Engine/pull/12"})
+                "number": 12, "html_url": "https://github.com/demoowner/Engine/pull/12"})
         if p.endswith("/pulls") and request.method == "GET":
             return httpx.Response(200, json=[])
         if p.count("/") == 3:
@@ -121,7 +121,7 @@ async def test_no_changes_over_a_real_branch_delivers_not_readonly_closes(db_url
     DELIVERY pipeline (a PR), never a hollow read-only close."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("full", project="engine")
         orch._gh_transport = _remote_real_changes()
         harness.output_queue = ["did work", "published",
@@ -139,7 +139,7 @@ async def test_no_changes_over_a_real_branch_delivers_not_readonly_closes(db_url
 async def test_empty_diff_reengaged_worker_publishes_real_fix(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("fix", project="engine")
         orch._gh_transport = _remote(heal_after=2)      # pre-dispatch + first verify empty, then the fix lands
         await orch.delegate(eid, chan, root, "fix the override", plan_steps=["work"])
@@ -156,7 +156,7 @@ async def test_empty_diff_reengaged_worker_publishes_real_fix(db_url, tmp_path):
 async def test_empty_diff_forever_escalates_and_opens_no_pr(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("hollow", project="engine")
         orch._gh_transport = _remote(heal_after=None)   # never heals
         await orch.delegate(eid, chan, root, "fix the override", plan_steps=["work"])
@@ -172,7 +172,7 @@ async def test_empty_diff_forever_escalates_and_opens_no_pr(db_url, tmp_path):
 async def test_empty_diff_with_no_changes_protocol_closes_noop(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("noop", project="engine")
         orch._gh_transport = _remote(heal_after=None)
         harness.output_queue = ["did work", "published",
@@ -221,7 +221,7 @@ async def test_stale_head_never_counts_as_delivery(db_url, tmp_path):
     plain truth; still stale → escalate, no PR, not done."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("resurrect", project="engine")
         orch._gh_transport = _stale_branch(heal_after=None)      # head never moves
         await orch.delegate(eid, chan, root, "fix the thing", plan_steps=["work"])
@@ -244,7 +244,7 @@ async def test_behavioral_goal_stale_branch_no_changes_is_not_closed_done(db_url
     any project specifics."""
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("atlas-runtime", project="engine")
         goal = ("the editor throws at runtime when Game Profile is clicked: the atlas is not "
                 "loaded, and the cursor is missing")
@@ -266,7 +266,7 @@ async def test_behavioral_goal_stale_branch_no_changes_is_not_closed_done(db_url
 async def test_stale_head_healed_by_reengage_proceeds(db_url, tmp_path):
     orch, chat, harness, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("resurrect2", project="engine")
         # pre-dispatch read (1) + post-publish verify (2) see the stale head; after the
         # re-engage the worker's push moves it

@@ -31,7 +31,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -52,12 +52,12 @@ async def test_plan_drafts_presents_then_executes_on_approve(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
         # existing state the planner reasons over: the engine repo + one fork already registered
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder",
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder",
                                 upstream_url="https://github.com/isadorasophia/murder")
         orch._gh_transport = httpx.MockTransport(lambda r: httpx.Response(
-            202, json={"full_name": "devonpveller/MonoGame",
-                       "html_url": "https://github.com/devonpveller/MonoGame"}))
+            202, json={"full_name": "demoowner/MonoGame",
+                       "html_url": "https://github.com/demoowner/MonoGame"}))
         # 1st structured call = intent classification (kind=plan); 2nd = the planner's drafted plan
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Let me draft that."))
         orch.models._client.queue_structured(LifecyclePlan(goal="engine vendoring my forks", steps=[
@@ -102,15 +102,15 @@ async def test_planner_is_anchored_to_actual_repo_state(db_url, tmp_path):
     import base64
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
 
         def handler(request: httpx.Request) -> httpx.Response:
             p = request.url.path
-            if p == "/repos/devonpveller/MonoGame-Engine":
+            if p == "/repos/demoowner/MonoGame-Engine":
                 return httpx.Response(200, json={"default_branch": "main"})
             if p.endswith("/contents/.gitmodules"):
                 gm = base64.b64encode(
-                    b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/devonpveller/murder\n').decode()
+                    b'[submodule "vendor/murder"]\n\tpath = vendor/murder\n\turl = https://github.com/demoowner/murder\n').decode()
                 return httpx.Response(200, json={"content": gm})
             if p.endswith("/contents"):
                 return httpx.Response(200, json=[{"name": "vendor", "type": "dir"}])
@@ -137,11 +137,11 @@ async def test_planner_deterministically_drops_already_present_submodules(db_url
     import base64
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
 
         def handler(request: httpx.Request) -> httpx.Response:
             p = request.url.path
-            if p == "/repos/devonpveller/MonoGame-Engine":
+            if p == "/repos/demoowner/MonoGame-Engine":
                 return httpx.Response(200, json={"default_branch": "main"})
             if p.endswith("/contents/.gitmodules"):
                 gm = base64.b64encode(
@@ -174,7 +174,7 @@ async def test_planner_deterministically_drops_already_present_submodules(db_url
 async def test_plan_abort_runs_nothing(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
         orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
             LifecycleStep(kind="worker_task", target="monogame-engine", task="do a thing", summary="t")]))
@@ -224,7 +224,7 @@ async def test_bare_approve_resolves_the_single_pending_item(db_url, tmp_path):
     old rigid `usage: approve <effort_id>` error. Governance stays crisp: it names the target it ran."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
         orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
             LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
@@ -292,7 +292,7 @@ async def test_pending_approvals_survive_a_restart(db_url, tmp_path):
     # ── run 1: propose a lifecycle plan AND a capability, then 'bounce' the bridge ──
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
         orch.models._client.queue_structured(LifecyclePlan(goal="vendor forks", steps=[
             LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
@@ -330,7 +330,7 @@ async def test_status_surfaces_the_pending_approval_queue(db_url, tmp_path):
     show the awaiting-approval queue with each id (+ a summary) so the operator acts without re-asking."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
         orch.models._client.queue_structured(LifecyclePlan(goal="vendor forks", steps=[
             LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))
@@ -354,7 +354,7 @@ async def test_resolved_approval_is_removed_from_the_store(db_url, tmp_path):
     """A decided proposal must NOT resurrect on the next restart — approve/abort deletes the mirror."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         orch.models._client.queue_structured(OperatorIntent(kind="plan", reply="Drafting."))
         orch.models._client.queue_structured(LifecyclePlan(goal="x", steps=[
             LifecycleStep(kind="worker_task", target="monogame-engine", task="wire", summary="w")]))

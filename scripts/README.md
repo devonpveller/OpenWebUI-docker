@@ -18,11 +18,28 @@
 ## `recovery/`
 
 `emergency-recovery.ps1` (canonical; `recover`/`nuclear`/`gpu-reset`; now
-pins CWD to the repo root — it was silently CWD-dependent before),
-plus the Python primitives they drive (`namespace_reset.py`,
-`nuclear_option.py`, `rebuild_tailscale.py`, `restart_openwebui.py`,
-`gpu_check.py`, `status_check.py` — all locate the repo by walking up to
-docker-compose.yml) and `update-stack.bat`.
+pins CWD to the repo root — it was silently CWD-dependent before), plus `status_check.py`, a read-only overview
+(`docker ps`, then per-container `docker exec`/`docker inspect` probes and the
+`scripts/lib/stack-services.json` inventory - no compose project involved).
+`quick-fixes.bat`, `update-stack.bat` and five orphaned Python helpers
+were archived 2026-09-25 to `scripts/archive/legacy-recovery/` (see the
+provenance row in `archive/README.md` for what replaces each).
+
+`verify-recovery-gates.ps1` is the executable proof for `emergency-recovery.ps1`'s
+health gates (ac-recovery-gates, 2026-09-25): it lifts the gate functions out with
+the parser (never runs a recovery), drives them against a stubbed `docker`, and with
+`-BaseRef <ref>` shows the pre-fix gate returning False for a healthy container.
+`-Live` reads real health with `docker inspect` only; `-Live -Negative` adds one
+throwaway `--network none` container that exits at once and is removed. It also
+fails if a bare `docker compose` (no `-f`, so the zero-service root anchor) other
+than `docker compose version` reappears in the script. The anchor itself is never
+`up`-ed or `down`-ed (`up -d` on it exits "no service selected"; `down` would drop its
+networks): `Confirm-AnchorNetworks` ensures them the way `stack.py` `ensure_networks()`
+does, and the drill feeds both the same inputs and compares their `network create`
+commands. `-Live` runs that ensure behind a guard that lets only the render and
+`network inspect` reach docker, and checks the three network IDs are unchanged.
+The legacy scripts that still issued bare `docker compose <service>` verbs
+were retired by the follow-up item (ac-legacy-recovery) rather than fixed.
 
 ## `checks/`
 
@@ -43,7 +60,9 @@ docker-compose.yml) and `update-stack.bat`.
   `check-env-file-scope.ps1`, `check-ob1-recipe-tests.ps1`,
   `check-ob1-deno-recipes.ps1`, `check-ob1-integration-images.ps1` — then the
   hook appends an attestation line. `.githooks/pre-commit` is the authority.
-- `test-quartz4-offline.ps1`, `dev-helper.ps1` — manual dev aids.
+- `test-quartz4-offline.ps1` — manual dev aid. (`dev-helper.ps1` was archived
+  2026-09-25 to `archive/legacy-recovery/`: its compose check validated only the
+  service-less root anchor.)
 
 ## `portal/`
 

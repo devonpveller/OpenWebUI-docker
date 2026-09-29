@@ -28,15 +28,15 @@ async def test_open_pull_request_creates_pr():
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        if p == "/repos/devonpveller/murder":
+        if p == "/repos/demoowner/murder":
             return httpx.Response(200, json={"default_branch": "main"})
         if p.endswith("/pulls") and request.method == "POST":
             seen["pr"] = json.loads(request.content)
-            return httpx.Response(201, json={"number": 7, "html_url": "https://github.com/devonpveller/murder/pull/7"})
+            return httpx.Response(201, json={"number": 7, "html_url": "https://github.com/demoowner/murder/pull/7"})
         return httpx.Response(404)
 
     res = await open_pull_request(
-        FakeGitHubApp(owner="devonpveller"), "https://github.com/devonpveller/murder",
+        FakeGitHubApp(owner="demoowner"), "https://github.com/demoowner/murder",
         "agent/effort-x", title="agent: x", body="intent…",
         transport=httpx.MockTransport(handler))
     assert res.ok and res.url.endswith("/pull/7") and res.detail == "7"
@@ -46,16 +46,16 @@ async def test_open_pull_request_creates_pr():
 async def test_open_pull_request_existing_is_idempotent():
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        if p == "/repos/devonpveller/murder":
+        if p == "/repos/demoowner/murder":
             return httpx.Response(200, json={"default_branch": "main"})
         if p.endswith("/pulls") and request.method == "POST":
             return httpx.Response(422, json={"message": "A pull request already exists"})
         if p.endswith("/pulls") and request.method == "GET":
-            return httpx.Response(200, json=[{"number": 3, "html_url": "https://github.com/devonpveller/murder/pull/3"}])
+            return httpx.Response(200, json=[{"number": 3, "html_url": "https://github.com/demoowner/murder/pull/3"}])
         return httpx.Response(404)
 
     res = await open_pull_request(
-        FakeGitHubApp(owner="devonpveller"), "https://github.com/devonpveller/murder",
+        FakeGitHubApp(owner="demoowner"), "https://github.com/demoowner/murder",
         "agent/effort-x", title="t", body="b", transport=httpx.MockTransport(handler))
     assert res.ok and "already open" in res.summary and res.detail == "3"
 
@@ -66,13 +66,13 @@ async def test_merge_pull_request_success_and_unmergeable():
         assert json.loads(request.content)["merge_method"] == "merge"   # --no-ff equivalent
         return httpx.Response(200, json={"merged": True})
 
-    res = await merge_pull_request(FakeGitHubApp(owner="devonpveller"),
-                                   "https://github.com/devonpveller/murder", 7,
+    res = await merge_pull_request(FakeGitHubApp(owner="demoowner"),
+                                   "https://github.com/demoowner/murder", 7,
                                    transport=httpx.MockTransport(ok_handler))
     assert res.ok and "merged" in res.summary
 
-    res2 = await merge_pull_request(FakeGitHubApp(owner="devonpveller"),
-                                    "https://github.com/devonpveller/murder", 8,
+    res2 = await merge_pull_request(FakeGitHubApp(owner="demoowner"),
+                                    "https://github.com/demoowner/murder", 8,
                                     transport=httpx.MockTransport(lambda r: httpx.Response(405, json={})))
     assert not res2.ok and "isn't mergeable" in res2.summary
 
@@ -87,7 +87,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -114,7 +114,7 @@ def _delivery_handler(merged: dict):
             })
         if p.endswith("/pulls") and request.method == "POST":
             merged["pr_body"] = json.loads(request.content).get("body", "")
-            return httpx.Response(201, json={"number": 12, "html_url": "https://github.com/devonpveller/Docker-Game/pull/12"})
+            return httpx.Response(201, json={"number": 12, "html_url": "https://github.com/demoowner/Docker-Game/pull/12"})
         if p.endswith("/pulls/12/merge") and request.method == "PUT":
             merged["hit"] = True
             return httpx.Response(200, json={"merged": True})
@@ -127,7 +127,7 @@ def _delivery_handler(merged: dict):
 async def test_verified_done_opens_pr_and_registers_merge_gate(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         state: dict = {}
         orch._gh_transport = httpx.MockTransport(_delivery_handler(state))
@@ -164,7 +164,7 @@ async def test_nl_merge_it_with_nothing_pending_answers_deterministically(db_url
 async def test_nl_merge_it_merges_the_single_pending_pr(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         merged: dict = {}
         orch._gh_transport = httpx.MockTransport(_delivery_handler(merged))
@@ -183,7 +183,7 @@ async def test_nl_merge_it_merges_the_single_pending_pr(db_url, tmp_path):
 async def test_abort_merge_leaves_pr_open(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         merged: dict = {}
         orch._gh_transport = httpx.MockTransport(_delivery_handler(merged))
@@ -205,7 +205,7 @@ async def test_failed_merge_restores_the_gate_for_retry(db_url, tmp_path):
     'merge it'. Popping it before the attempt otherwise STRANDS the delivery ('nothing pending')."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         state: dict = {}
         base = _delivery_handler(state)
@@ -241,7 +241,7 @@ def _pr_repo_handler(state: dict, *, repos_with_branch: set[str]):
     """Mock GitHub: branch exists on `repos_with_branch`; PR + merge endpoints record calls."""
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
-        repo = p.split("/repos/devonpveller/")[-1].split("/")[0] if "/repos/" in p else ""
+        repo = p.split("/repos/demoowner/")[-1].split("/")[0] if "/repos/" in p else ""
         if "/branches/" in p:
             if repo not in repos_with_branch:
                 return httpx.Response(404, json={})
@@ -256,7 +256,7 @@ def _pr_repo_handler(state: dict, *, repos_with_branch: set[str]):
             n = state.setdefault("n", 0) + 1
             state["n"] = n
             state.setdefault("prs", []).append(repo)
-            return httpx.Response(201, json={"number": n, "html_url": f"https://github.com/devonpveller/{repo}/pull/{n}"})
+            return httpx.Response(201, json={"number": n, "html_url": f"https://github.com/demoowner/{repo}/pull/{n}"})
         if "/merge" in p and request.method == "PUT":
             state.setdefault("merged", []).append(repo)
             return httpx.Response(200, json={"merged": True})
@@ -272,8 +272,8 @@ async def test_nl_create_pr_with_premerge_is_operator_plane_not_a_worker(db_url,
     coding request that dispatches a worker (which can't open PRs) into the sandbox."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         state: dict = {}
         orch._gh_transport = httpx.MockTransport(
             _pr_repo_handler(state, repos_with_branch={"murder", "MonoGame-Engine"}))
@@ -293,7 +293,7 @@ async def test_nl_create_pr_with_premerge_is_operator_plane_not_a_worker(db_url,
 async def test_nl_create_pr_without_merge_registers_gate(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         state: dict = {}
         orch._gh_transport = httpx.MockTransport(_pr_repo_handler(state, repos_with_branch={"murder"}))
         mgmt = await orch.mgmt_channel_id()
@@ -312,7 +312,7 @@ async def test_mgmt_thread_reply_inherits_effort_project(db_url, tmp_path):
     THAT effort's project — not fall to the sandbox."""
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         eid, chan, root = await orch.router.open_effort("wire", project="monogame-engine")
         orch._effort_mgmt_thread[eid] = "mgmt-thread-1"     # the conversation the summary lives in
         slug = await orch._resolve_project_slug(None, None, effort_name="do-a-thing",
@@ -341,7 +341,7 @@ async def test_read_sibling_agent_prs_lists_other_agent_heads():
         return httpx.Response(404)
 
     sibs = await read_sibling_agent_prs(
-        FakeGitHubApp(owner="devonpveller"), "https://github.com/devonpveller/Engine",
+        FakeGitHubApp(owner="demoowner"), "https://github.com/demoowner/Engine",
         "agent/effort-a", transport=httpx.MockTransport(handler))
     assert [s["number"] for s in sibs] == [3]            # own head + human PRs excluded
     assert sibs[0]["files"] == ["Directory.Build.props", "Engine.sln"]
@@ -358,7 +358,7 @@ async def test_closure_names_sibling_pr_and_overlap(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -367,7 +367,7 @@ async def test_closure_names_sibling_pr_and_overlap(db_url, tmp_path):
     await orch.setup()
     chat = orch.chat
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         eid, chan, root = await orch.router.open_effort("mine", project="engine")
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -386,7 +386,7 @@ async def test_closure_names_sibling_pr_and_overlap(db_url, tmp_path):
                 return httpx.Response(200, json={"type": "file", "sha": "aa"})
             if p.endswith("/pulls") and request.method == "POST":
                 return httpx.Response(201, json={
-                    "number": 9, "html_url": "https://github.com/devonpveller/Engine/pull/9"})
+                    "number": 9, "html_url": "https://github.com/demoowner/Engine/pull/9"})
             if p.endswith("/pulls") and request.method == "GET":
                 return httpx.Response(200, json=[
                     {"number": 9, "head": {"ref": f"agent/{eid}"}, "title": "agent: mine"},
@@ -416,8 +416,8 @@ async def test_close_pull_request_capability():
         assert json.loads(request.content) == {"state": "closed"}
         return httpx.Response(200, json={"state": "closed"})
 
-    res = await close_pull_request(FakeGitHubApp(owner="devonpveller"),
-                                   "https://github.com/devonpveller/Engine", 3,
+    res = await close_pull_request(FakeGitHubApp(owner="demoowner"),
+                                   "https://github.com/demoowner/Engine", 3,
                                    transport=httpx.MockTransport(handler))
     assert res.ok and "closed" in res.summary and "branch kept" in res.summary
 
@@ -431,7 +431,7 @@ async def test_nl_close_pr_closes_the_open_agent_pr(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -440,7 +440,7 @@ async def test_nl_close_pr_closes_the_open_agent_pr(db_url, tmp_path):
     await orch.setup()
     chat = orch.chat
     try:
-        await orch.projects.add("engine", "https://github.com/devonpveller/Engine")
+        await orch.projects.add("engine", "https://github.com/demoowner/Engine")
         closed = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -479,7 +479,7 @@ async def test_stale_reverify_does_not_masquerade_as_new_pr(db_url, tmp_path):
     from app.modules.capabilities import BranchDelivery
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire", project="game")
         await orch.charters.set_goal(
             eid, "wire the build against the vendored source", created_by="po")
@@ -508,7 +508,7 @@ async def test_fresh_delivery_still_announces_pr_opened(db_url, tmp_path):
     from app.modules.capabilities import BranchDelivery
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("game", "https://github.com/devonpveller/Docker-Game")
+        await orch.projects.add("game", "https://github.com/demoowner/Docker-Game")
         eid, chan, root = await orch.router.open_effort("wire2", project="game")
         await orch.charters.set_goal(
             eid, "wire the build against the vendored source", created_by="po")

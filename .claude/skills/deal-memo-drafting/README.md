@@ -6,7 +6,7 @@
 
 This skill helps an AI client draft a real decision memo from work that already exists. It takes market findings, model review output, meeting synthesis, and supporting documents, then shapes them into a recommendation-ready memo while keeping evidence gaps and confidence levels explicit.
 
-For the OB1 composition workflow that feeds this skill from earlier analysis steps, use the [Research-to-Decision Workflow recipe](../../recipes/research-to-decision-workflow/).
+For the OB1 composition workflow that feeds this skill from earlier analysis steps, use the [Research-to-Decision Workflow recipe](../../../OB1/recipes/research-to-decision-workflow/).
 
 ## Supported Clients
 
@@ -17,7 +17,7 @@ For the OB1 composition workflow that feeds this skill from earlier analysis ste
 
 ## Prerequisites
 
-- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../docs/01-getting-started.md))
+- Working Open Brain setup if you want the skill to use memory search or capture ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - A real diligence packet, not just a company name and a blank page
 

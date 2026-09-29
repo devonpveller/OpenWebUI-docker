@@ -51,6 +51,13 @@ LLM_QUEUE_MAX_IN_FLIGHT (N)  <=  P + 1                 # headroom discipline
 llama-swap concurrencyLimit  ==  0                     # the queue is the sole gate
 ```
 
+**Pending (2026-09-25, not built):** this coupling is why the queue cannot see a
+different backend. `P` is one hand-set number for one local upstream; a cloud model
+group behind LiteLLM, or a second engine, is invisible to the lanes. The change and
+its reasoning are in the plan store:
+`../documentation-plans-ai-stack/implementation-guide/LiteLLM-Proxy/DESIGN-B2-inference-queue.md`
+§10.4 "Per-backend capacity" (raised by the research-workbench effort, D16).
+
 ## Development & iteration
 
 ```pwsh
@@ -82,7 +89,7 @@ docker exec -i llm-queue   python - http://llm-gateway:8080 48 < inference/llm-q
 
 `restart` is deliberate and correct here: both steps EDIT THE CONTENTS of files that stay
 where they are, so the existing binds still resolve and there is nothing to re-render.
-(Do not "upgrade" it to `up -d` after reading `documentation/notes/stack-layers-sl-colo-inference-findings.md`
+(Do not "upgrade" it to `up -d` after reading `../documentation-plans-ai-stack/journal/notes/stack-layers-sl-colo-inference-findings.md`
 F14 — that hazard is about a bind whose SOURCE PATH has moved, which is a different case.)
 
 ## Operational notes

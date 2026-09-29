@@ -45,7 +45,7 @@ async def _orch(db_url, tmp_path):
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
         review_mode="off", plan_approval="off",
-        github_app_id="1", github_app_owner="devonpveller",
+        github_app_id="1", github_app_owner="demoowner",
         github_app_private_key_path=str(key),
     )
     db = Database(db_url)
@@ -90,8 +90,8 @@ def _remote(state: dict):
 async def test_live_cleanup_prompt_closes_prs_and_deletes_named_branches(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
-        await orch.projects.add("murder", "https://github.com/devonpveller/murder")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
+        await orch.projects.add("murder", "https://github.com/demoowner/murder")
         state: dict = {}
         orch._gh_transport = _remote(state)
         mgmt = await orch.mgmt_channel_id()
@@ -115,7 +115,7 @@ async def test_live_cleanup_prompt_closes_prs_and_deletes_named_branches(db_url,
 async def test_delete_never_fires_without_explicit_agent_branch_names(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         state: dict = {}
         orch._gh_transport = _remote(state)
         mgmt = await orch.mgmt_channel_id()
@@ -130,7 +130,7 @@ async def test_delete_never_fires_without_explicit_agent_branch_names(db_url, tm
 async def test_delete_refuses_non_agent_branches(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         state: dict = {}
         orch._gh_transport = _remote(state)
         mgmt = await orch.mgmt_channel_id()
@@ -171,7 +171,7 @@ async def test_active_env_template_widens_egress_to_its_registries(db_url, tmp_p
 async def test_error_report_repro_becomes_project_check_cmd(db_url, tmp_path):
     orch, chat, db = await _orch(db_url, tmp_path)
     try:
-        await orch.projects.add("monogame-engine", "https://github.com/devonpveller/MonoGame-Engine")
+        await orch.projects.add("monogame-engine", "https://github.com/demoowner/MonoGame-Engine")
         eid, chan, root = await orch.router.open_effort("fix-errs", project="monogame-engine")
         await orch._intake_or_dispatch(
             eid, chan, root,

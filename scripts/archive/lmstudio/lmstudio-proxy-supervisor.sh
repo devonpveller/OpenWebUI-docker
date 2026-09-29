@@ -2,7 +2,7 @@
 # LM Studio Proxy Supervisor
 # Keeps socat proxy running persistently
 
-LMSTUDIO_HOST=${LMSTUDIO_HOST:-169.254.83.107}
+LMSTUDIO_HOST=${LMSTUDIO_HOST:-<lmstudio-host>}
 LMSTUDIO_PORT=${LMSTUDIO_PORT:-5506}
 LOCAL_PORT=8234
 LOGFILE="/tmp/socat-supervisor.log"

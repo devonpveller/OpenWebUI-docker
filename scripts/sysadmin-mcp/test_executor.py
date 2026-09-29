@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Tests for the GATED executor. Stdlib only.
 
-Run:  python scripts/sysadmin-mcp/test_executor.py              # safe: plan + gating + source guard
-      python scripts/sysadmin-mcp/test_executor.py --live-exec  # ALSO performs a real safe reclaim
+Run:  ONLY inside the test container - scripts/sysadmin-mcp/README.md, 'Run the tests' (on a host it
+      exits 2 by design); there: python test_executor.py  # plan + gating + source guard
+      --live-exec ALSO performs a real reclaim: only in the DinD driver recipe, against the DinD
 
 The default run performs NO mutation. It proves:
   • the source contains no volume-mutating verbs or blanket rm (safety by construction),
@@ -21,6 +22,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import executor as ex  # noqa: E402
 import sysadmin as sa  # noqa: E402
+import _testguard  # noqa: E402  - fail-closed: dead DOCKER_HOST unless set, readonly call stub
+_testguard.install(sa, "readonly", "test_executor")
 
 _passed = 0
 _failed = 0
@@ -125,6 +128,8 @@ if __name__ == "__main__":
     test_plan()
     test_gate_failclosed()
     if "--live-exec" in sys.argv:
-        test_live_exec()
+        # a REAL reclaim: only ever against a disposable daemon named in DOCKER_HOST
+        if _testguard.require_daemon("test_executor", allowed=False):
+            test_live_exec()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

@@ -25,7 +25,7 @@ companies for any fast-moving market and keep the same structural-diff process.
 ## Prerequisites
 
 - Working Open Brain setup if you want memory search and capture
-  ([guide](../../docs/01-getting-started.md))
+  ([guide](../../../OB1/docs/01-getting-started.md))
 - AI client that supports reusable skills, rules, or custom instructions
 - One of:
   - live web access in the client

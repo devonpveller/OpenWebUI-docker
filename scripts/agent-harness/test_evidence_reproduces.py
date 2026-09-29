@@ -56,8 +56,8 @@ def make_set(tmp_path: Path, *, status: str = "completed", venue: bool = True,
         "evidence": {"workspace": str(ws), "transcript": str(run_dir / "transcript.txt")},
         "acceptance": [{
             "criterion": "the kept artifact is still there",
-            # QUOTED. `sys.executable` lives under "D:\Open WebUI\..." on this machine and
-            # the command is run through the shell: unquoted, cmd.exe answers "'D:\Open' is
+            # QUOTED. `sys.executable` can live under a path with a space ("D:\My Stack\...")
+            # and the command is run through the shell: unquoted, cmd.exe answers "'D:\My' is
             # not recognized" and the check reads that as a non-reproducing verdict. The
             # test would then have been measuring the quoting rather than the check.
             "check": f'"{sys.executable}" -c "import pathlib,sys; '
@@ -209,7 +209,7 @@ def test_auto_discovery_reaches_the_committed_evidence_root(tmp_path):
     sys.path.insert(0, str(REPO / "scripts" / "checks"))
     import check_quadrant_evidence_reproduces as chk  # noqa: PLC0415
 
-    committed = tmp_path / "documentation" / "evidence" / "dfu-u4" / "quadrant" / "run-1"
+    committed = tmp_path / "scripts" / "agent-harness" / "quadrant" / "evidence" / "dfu-u4" / "quadrant" / "run-1"
     committed.mkdir(parents=True)
     (committed / "record.json").write_text("{}", encoding="utf-8")
     working = tmp_path / ".quadrant" / "runs" / "run-1"
@@ -217,7 +217,7 @@ def test_auto_discovery_reaches_the_committed_evidence_root(tmp_path):
     (working / "record.json").write_text("{}", encoding="utf-8")
 
     found = {p.as_posix() for p in chk._discover(tmp_path)}
-    assert (tmp_path / "documentation" / "evidence" / "dfu-u4" / "quadrant").as_posix() in found, found
+    assert (tmp_path / "scripts" / "agent-harness" / "quadrant" / "evidence" / "dfu-u4" / "quadrant").as_posix() in found, found
     assert (tmp_path / ".quadrant" / "runs").as_posix() in found, found
 
 
@@ -297,7 +297,7 @@ def test_copy_run_leaves_a_workspace_recorded_outside_the_run_dir_alone(tmp_path
 # ---------------------------------------------------------------------------
 # "no evidence here" vs "the committed evidence is gone" - the asymmetry that made the
 # banked check unable to detect the defect it was built for. Added 2026-08-31 from a
-# verifier finding: with `documentation/evidence/dfu-u4/` deleted, `--auto` printed a
+# verifier finding: with `scripts/agent-harness/quadrant/evidence/dfu-u4/` deleted, `--auto` printed a
 # vacuous pass and returned 0, while WALKTHROUGH.md credited it with reaching that set.
 # ---------------------------------------------------------------------------
 
@@ -313,8 +313,8 @@ def git_repo_with_committed_set(tmp_path: Path, **kw) -> Path:
     `git add` is enough: the expectation is read from the index, because `rm -rf` on the
     evidence leaves the index untouched and that is the loss this must catch immediately.
     """
-    results = make_set(tmp_path, rel="documentation/evidence/dfu-u4/quadrant", **kw)
-    for args in (["init", "-q"], ["add", "-A", "--", "documentation"]):
+    results = make_set(tmp_path, rel="scripts/agent-harness/quadrant/evidence/dfu-u4/quadrant", **kw)
+    for args in (["init", "-q"], ["add", "-A", "--", "scripts"]):
         proc = subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True,
                               encoding="utf-8", errors="replace")
         assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -337,7 +337,7 @@ def test_auto_reds_when_the_committed_evidence_is_missing_from_the_checkout(tmp_
 
     assert chk.main(["--auto"]) == 0, capsys.readouterr().out
 
-    shutil.rmtree(tmp_path / "documentation" / "evidence" / "dfu-u4")
+    shutil.rmtree(tmp_path / "scripts" / "agent-harness" / "quadrant" / "evidence" / "dfu-u4")
     assert not results.exists()
     rc = chk.main(["--auto"])
     out = capsys.readouterr().out
@@ -345,7 +345,7 @@ def test_auto_reds_when_the_committed_evidence_is_missing_from_the_checkout(tmp_
     assert "MISSING COMMITTED EVIDENCE" in out, out
     # It must NAME what is missing - a red that does not say what is gone sends the reader
     # back to guessing, which is what the vacuous pass did.
-    assert "documentation/evidence/dfu-u4/quadrant" in out, out
+    assert "scripts/agent-harness/quadrant/evidence/dfu-u4/quadrant" in out, out
     assert "vacuous" not in out, out
 
 
@@ -374,6 +374,38 @@ def test_a_git_checkout_that_banks_no_evidence_stays_vacuous_and_says_which_case
     out = capsys.readouterr().out
     assert rc == 0, out
     assert "vacuous pass" in out and "banks no evidence" in out, out
+
+
+def test_the_home_repository_with_an_empty_committed_root_is_red_not_vacuous(tmp_path, capsys,
+                                                                             monkeypatch):
+    """A checkout that TRACKS the check itself is the repository that banks its evidence.
+
+    Added 2026-09-25 (ac-journal-move) when the committed root moved out of
+    documentation/evidence/. RED WITHOUT THE FIX: a relocation that pointed DISCOVERY_ROOTS at
+    an empty directory read as "a repository that banks no evidence" - exit 0, zero records
+    examined.
+    """
+    chk = chk_module()
+    me = tmp_path / "scripts" / "checks" / "check_quadrant_evidence_reproduces.py"
+    me.parent.mkdir(parents=True)
+    me.write_text("# stand-in for the check\n", encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A", "--", "scripts"]):
+        proc = subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True,
+                              encoding="utf-8", errors="replace")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+    monkeypatch.setattr(chk, "_repo_root", lambda: tmp_path)
+    rc = chk.main(["--auto"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "NO COMMITTED EVIDENCE" in out and "vacuous" not in out, out
+
+
+def test_this_checkout_banks_a_non_zero_number_of_committed_records():
+    """The real repository, not a fixture: the committed root holds records to re-derive."""
+    chk = chk_module()
+    committed, why = chk._committed_records(REPO)
+    assert committed, why
+    assert all(c.startswith("scripts/agent-harness/quadrant/evidence/") for c in committed), committed
 
 
 def test_a_committed_record_refused_at_admission_is_red_not_skipped(tmp_path, capsys,
@@ -421,10 +453,10 @@ def test_every_message_naming_the_search_roots_is_derived_from_the_roots(tmp_pat
     "under .quadrant/".
     """
     chk = chk_module()
-    monkeypatch.setattr(chk, "DISCOVERY_ROOTS", (".quadrant", "documentation/evidence",
+    monkeypatch.setattr(chk, "DISCOVERY_ROOTS", (".quadrant", "scripts/agent-harness/quadrant/evidence",
                                                  "somewhere/else"))
     phrase = chk._roots_phrase()
-    for root in (".quadrant/", "documentation/evidence/", "somewhere/else/"):
+    for root in (".quadrant/", "scripts/agent-harness/quadrant/evidence/", "somewhere/else/"):
         assert root in phrase, phrase
 
     monkeypatch.setattr(chk, "_repo_root", lambda: tmp_path)

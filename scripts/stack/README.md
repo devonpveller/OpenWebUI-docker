@@ -16,11 +16,14 @@ AST check, and the whole suite is hermetic - the docker call is injected, so no
 test ever reaches a daemon.
 
 `stack.ps1` **is a shim over this driver** since 2026-09-19 (`sl-driver-parity`).
-`sl-ob1-profiles` had given that script's plane registry four OB1 profiles to keep
-the thirty running containers starting; the registry is gone, and the same set is
-expressed here instead - `idea-refinery` is `default` and `requires` `research`,
-so `up` passes both, which against the pinned gitlink renders exactly the same
-thirty services.
+`sl-ob1-profiles` had given that script's plane registry all four OB1 profiles to
+keep every running container starting; the registry is gone, and it is NOT
+expressed here as the same set - `idea-refinery` is `default` and `requires`
+`research`, so `up` passes both, which against the pinned gitlink renders
+<!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->, against
+<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->. `wiki` and `notebook`
+come from `enable research` or `COMPOSE_PROFILES` in `OB1/docker/.env` (see
+`[declared, not rendered]` below).
 It forwards its arguments and exits with the driver's code; it holds no plane
 registry, no probe and no ordering of its own, so there is nothing in it left to
 drift. It survives because runbooks, plane READMEs and compose comments say
@@ -48,13 +51,24 @@ python scripts/stack/stack.py up                  # start them, in dependency or
 python scripts/stack/stack.py up --all            # every declared plane (what stack.ps1 up did)
 python scripts/stack/stack.py up coder            # exactly one plane
 python scripts/stack/stack.py doctor              # docker, env files, blank keys
-python scripts/stack/stack.py health              # the 16-probe sweep (read-only)
-python scripts/stack/stack.py stats               # inference demand + queue board
+python scripts/stack/stack.py health              # the probes of the enabled planes (read-only)
+python scripts/stack/stack.py stats               # container CPU/mem/net + inference queue board and ledger
+python scripts/stack/stack.py recover --dry-run   # the ordered, gated restart plan; stops nothing
+python scripts/stack/stack.py recover             # stop in reverse order, start in order, gate every container
+python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC>/ : one tar.gz per named volume
+python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
+python scripts/stack/stack.py docs --check        # are the generated blocks in the docs still true?
 ```
 
-`status`, `health`, `doctor` and `inventory --check` are **read-only**: they
-start, stop and recreate nothing, so they need no plane lease.
+`status`, `health`, `doctor`, `stats`, `inventory --check` and `docs --check` are **read-only**:
+they start, stop and recreate nothing, so they need no plane lease. `recover`,
+`backup` and `restore` are not: hold the plane's lease
+(`scripts/agent-harness/lease.ps1`) before running them against a shared host.
+
+On Linux, spell it `python3`; every verb is standard-library Python and runs
+there. `stack.ps1` and `scripts/recovery/emergency-recovery.ps1` stay as the
+Windows extras they always were.
 
 With **no state file at all** the machine runs `frontend` and nothing else -
 that is what a fresh clone gets.
@@ -111,18 +125,20 @@ seen*.
 | `lease` | the `scripts/agent-harness/lease-names.conf` name for the plane. Absent = no canonical lease name (the anchor). |
 | `requires` / `optional` | see above. |
 | `implicit` | the plane is started whenever anything runs and never has to be enabled. Only the anchor. No refusal ever names it, and `enable` never writes it into the state file. |
+| `networks_only` | the compose file declares networks and no service. Only the anchor. `up` never runs `docker compose up -d` on it (compose exits 1, "no service selected"); it renders the file with `config --no-interpolate --format json` and runs `docker network create` for each declared network that does not exist. An existing network is never altered: if it MATCHES the declaration (driver, internal, attachable, each declared driver_opt and label) it is left as is; if it DIFFERS - e.g. an `ai-stack_llm-net` that is not internal - `up` REFUSES before creating anything, and `doctor` reports it as a FAIL. `down` still runs `docker compose down`. |
 | `manual` | present when the driver must **not** start or stop this plane; the value names what does. Only the portal: exposing the stack to the internet stays a human action, exactly as `stack.ps1`'s header says. |
 | `host` | what the machine itself must provide, in prose (a GPU, a tunnel, model files). `doctor` prints these; nothing enforces them. |
-| `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. |
+| `host_paths` | paths OUTSIDE the checkout that the plane builds from, each `{ path, contains, why, remedy }` with `path` repo-root-relative and `contains` the names that must exist inside it (memory: `.git` and `Dockerfile`), so an empty directory or a plain file does not pass. Unlike `host` this is checked: while one is missing or incomplete, `doctor` FAILs the plane and `enable`/`init` refuse, naming `remedy` (the command that creates it, run from the repo root). Only memory declares one: `../mnemory`, its build context. |
+| `keys` | variable names that must exist and be non-blank in the plane's env file. A blank one makes `enable` refuse and name the key. So does a value still EQUAL to the non-blank value the plane's `.env.example` ships for that key - for a required key that shipped value is a placeholder by construction - and that one `doctor` and `up` refuse too, before anything starts. **Keys NOT listed here are covered as well**: any value in a plane's `.env.example` that matches `stack.py`'s `PLACEHOLDER_PATTERN` (change-me, REPLACE_WITH, your-/putyour, `<...>`, an example.com domain or address, "placeholder") is refused while the plane's `.env` still holds it, provided a service the plane runs under its active profiles interpolates it (`${VAR}` in the `config --no-interpolate` render; a bulk `env_file:` does not count). So TAILSCALE_AUTH_KEY counts under `tailscale` and not under `stock`. |
 | `ports` | published **host** ports -> what answers on them. |
-| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below. |
+| `profiles` | compose profiles, each a sub-table with a `description` and **exactly one** of the three flags below; optionally `requires` (other profiles of the plane it needs) and `stands_in_for` (profiles it replaces when the GPU refusal takes them out - frontend's `stock` for `gpu`). |
 
 #### Every profile says whether a default `up` starts it
 
 | Flag | Means | Today |
 |---|---|---|
 | `default = true` | the driver passes `--profile <name>` on every invocation | `ob1`'s `idea-refinery` - parity with what `stack.ps1` always passed |
-| `opt_in = true` | something **other than the driver** turns it on, and the description says what | `inference`'s `local` (`COMPOSE_PROFILES` in the root `.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
+| `opt_in = true` | a **deliberate choice** turns it on - a product that declares it, or something outside the driver - and the description says what | `inference`'s `local` (`enable inference`, the product, or `COMPOSE_PROFILES=local` in `inference/.env`), `agent-org`'s `workers`/`cloud` (the operator - `stack.ps1`'s header always said these were not managed), `portal`'s `internet` (`portal-on.ps1`) |
 | `pending = true` | declared here, **not yet in the compose file**; a later item adds it. Enabling one is a no-op and the driver says so | `frontend`'s `gpu`/`tailscale` |
 
 Declaring none of the three is **refused** by `inventory --check`. That gate
@@ -150,6 +166,40 @@ does exactly that union, and passing no flag at all stays safe because compose
 then reads `COMPOSE_PROFILES` itself. That is today's path for every plane except
 `ob1`.
 
+#### ...and `--profile` does not SET `COMPOSE_PROFILES` either
+
+The flags decide which services start; a service that interpolates
+`${COMPOSE_PROFILES}` still sees whatever the variable was. `llm-gateway` does
+(`inference/compose/gateway.yml`), and its config assembler registers the `local`
+model group only when `local` is in that variable. So enabling the inference product (which
+writes `local`) followed by `up` used to pass `--profile local`, start the
+upstreams, and hand the gateway `COMPOSE_PROFILES=""`: **zero** models registered.
+With `COMPOSE_PROFILES=local` in `inference/.env` the same gateway registers five.
+
+So whenever the driver passes any `--profile`, it also sets `COMPOSE_PROFILES`
+in that compose process's environment to **the same list** - `compose_command()`
+returns the argv with the override attached, and the two seams that execute a
+command (`subprocess_runner`, `subprocess_capture`, plus the backup/restore
+pipe) merge it over the inherited environment. The rules:
+
+- The value is `effective_profiles()`: the state file's profiles, the plane's
+  `default` ones, their `requires` closure, **unioned** with the plane's own
+  env-file `COMPOSE_PROFILES`. The variable therefore never says less than the
+  env file did, and never differs from the flags.
+- It **replaces** a `COMPOSE_PROFILES` exported in the shell, exactly as the
+  flags already did, so another plane's value (`gpu,tailscale`) cannot reach the
+  gateway.
+- With **no** flag nothing is set, and compose reads the variable itself (shell,
+  then the plane's env file) - unchanged.
+- It is environment, not argv, so every printed line (`--dry-run` included)
+  shows it as a prefix: `COMPOSE_PROFILES=local docker compose -f
+  inference/docker-compose.yml --profile local up -d`. That is sh/bash syntax;
+  in PowerShell set `$env:COMPOSE_PROFILES` first. Copy a line WITHOUT its
+  prefix and the gateway gets the env file's value, not the flags.
+
+Every service that reads `COMPOSE_PROFILES` in any plane's render is that one
+gateway; the check is repeated in the item's findings.
+
 ### Product keys
 
 | Key | Meaning |
@@ -160,13 +210,24 @@ then reads `COMPOSE_PROFILES` itself. That is today's path for every plane excep
 | `surfaces` | `{ plane = ["profile", ...] }` - how a person reaches the engine. Dropped by `--headless`; a plane that appears **only** under `surfaces` is itself dropped by `--headless`. |
 
 Five names (`inference`, `memory`, `search`, `agent-org`, `portal`) are both a
-plane and a product. A bare name resolves to the **plane**, because that is the
-smaller action and the one whose refusal matters: `enable memory` must refuse
-while inference is off rather than quietly enabling inference too. Force the
-other reading with `--product <name>` (or `--plane <name>`). **Both `enable` and
-`disable`** print a `# note:` line whenever a name is ambiguous, saying which
-reading they took - `disable` is the destructive half of the pair, so it is the
-one where a silent reading would be worse.
+plane and a product. A bare name means the **product**: a newcomer copies
+`enable <name>` from the product menu and must get what the menu promises -
+`enable memory` brings inference, `enable inference` turns on `local`.
+`--plane <name>` acts on the plane alone (and `--product <name>` is still
+accepted). **Both `enable` and `disable`** print a `# note:` line whenever a
+shared name is used, saying which reading they took - `disable` is the
+destructive half of the pair, so it is the one where a silent reading would be
+worse - and `enable` then lists every plane it wrote with its profiles. The set
+is derived from the manifest; `test_stack.py` pins it to these five.
+
+### Shared modules
+
+`[modules.<name>]` declares a repo-root tree that more than one plane consumes,
+so it is not any one plane's internals: `path` (repo-root-relative) and
+`consumers` (`plane = "how it is consumed"`). The driver reads nothing from it;
+`scripts/stack/test_stack.py` holds it to the compose files - the planes whose
+compose files reference `../backup` must be exactly the declared consumers.
+Today there is one: `backup`.
 
 ### Ordering
 
@@ -196,11 +257,32 @@ so the two are never confused.
 {
   "version": 1,
   "planes": {
-    "frontend": { "profiles": [], "context": null },
-    "inference": { "profiles": [], "context": "optiplex-1" }
-  }
+    "frontend":  { "profiles": [], "context": null,
+                   "owners": { "plane": [], "product:coding-agent": [] } },
+    "inference": { "profiles": ["local"], "context": "optiplex-1",
+                   "owners": { "product:inference": ["local"] } }
+  },
+  "products": { "coding-agent": { "headless": false }, "inference": { "headless": false } }
 }
 ```
+
+`profiles` is what every verb reads - the union of what the plane's `owners`
+asked for. `owners` records WHO enabled the plane: `plane` for a direct enable
+(`enable --plane`, `init --planes`, the no-state default) and `product:<name>`
+for each product, each with the profiles it asked for. `products` lists the
+products enabled here. Both exist so `disable <product>` can take out only what
+that product added (see `disable`). **A file written before they existed** has
+neither key: every plane in it loads as enabled directly, owning its current
+profiles, and no product counts as enabled. Reading such a file never rewrites
+it; the first `enable`/`disable`/`init` saves it with the new keys. In a file
+that HAS `products`, an empty `owners` is real: a plane kept only because
+another enabled plane requires it. It loads as unowned (not as a direct enable)
+and goes when its last requirer goes.
+
+`enable` prints each plane's profiles and labels any it did not turn on itself:
+`local (already on: product memory)`, `(default)`, `(required by another
+profile)` - so `enable --plane inference` after `enable memory` does not read
+as though `--plane` turned `local` on.
 
 `context` is the Docker context the plane runs on; when set, the command becomes
 `docker --context optiplex-1 compose -f ...`. That is the data the
@@ -216,7 +298,8 @@ would start the wrong set.
 ### `list`
 
 Planes with `enabled` / `disabled`, the profiles and context of the enabled
-ones, the `up would start:` line, and the products. Read-only, no docker.
+ones, the `up would start:` line, and the products (`[enabled]` on each one the
+state file records). Read-only, no docker.
 
 ### `status` / `up` / `down` - which planes?
 
@@ -225,7 +308,7 @@ All three take the same selection:
 | Form | Acts on |
 |---|---|
 | *(nothing)* | the planes this machine **enables**. `up`/`down` add their `requires` closure; `status` does not - reporting on a plane nobody enabled is noise |
-| `<plane>` | exactly that plane. `up <plane>` prints a `#` note naming any requirement it is **not** starting |
+| `<plane>` | exactly that plane. `up <plane>` first ensures the anchor's networks, as a bare `up` does (it creates a missing one and starts nothing else), and prints a `#` note naming any other requirement it is **not** starting |
 | `--all` | every plane the manifest declares except the `manual` ones - what a bare `stack.ps1 up` meant |
 
 A plane name together with `--all` is refused.
@@ -240,8 +323,8 @@ exits non-zero.
 
 `up` starts the selected planes in dependency order; `down` stops them in
 reverse. `--dry-run` prints the exact
-`docker [--context X] compose -f <file> [--profile p]... <verb>`
-lines and runs **nothing**.
+`[COMPOSE_PROFILES=p,...] docker [--context X] compose -f <file> [--profile p]... <verb>`
+lines (the prefix whenever a profile is passed; see above) and runs **nothing**.
 
 A `manual` plane (the portal) is never started or stopped; a `#` comment line
 after the commands names the script that drives it.
@@ -249,22 +332,70 @@ after the commands names the script that drives it.
 If a docker command exits non-zero the run stops there and reports which plane
 and which code - the rest is not attempted.
 
-**Refuses:** nothing. An empty enabled set just prints a `#` note.
+**Refuses**, before anything starts (an empty enabled set just prints a `#` note):
+
+- a pinned submodule that is not initialised, or a manifest `keys` entry that is
+  **blank, missing or still its shipped placeholder** (the same rule `enable`
+  applies), or another key a running service reads that is still its shipped
+  placeholder (`_preflight`; also under `--dry-run`);
+- **a plane compose cannot render** (`up` and `recover`, not under `--dry-run`),
+  checked on a GPU-less daemon because the GPU check below reads the render. It
+  is its own refusal, headed `refused: compose cannot render <file>`, carrying
+  compose's own error line, the command, and the plane's env file - never
+  reported as a GPU problem and with no GPU steps (a host with a GPU gets the same
+  error from compose's `up`). Fix what compose names and re-run;
+- **a GPU the daemon does not have** (`_gpu_preflight`, `up` and `recover`, not
+  under `--dry-run`, which reads nothing from docker). The driver asks `docker
+  info` once per docker context; an `nvidia` runtime or an `nvidia.com/gpu` CDI
+  device passes and nothing else is read. Otherwise it renders each selected
+  plane - interpolated, under exactly the profiles `up` will run (flags, the
+  plane's env-file `COMPOSE_PROFILES`, or the shell's, as compose would resolve
+  them) - and refuses when a service in that render reserves an NVIDIA device
+  (`deploy.resources.reservations.devices` with `driver: nvidia` or a `gpu`
+  capability, `runtime: nvidia`, `gpus:`), naming each plane, profile and
+  service, then numbered steps. The steps are **built from the state's owners and
+  applied to a copy of the state as they are chosen**, so carrying them out takes
+  the GPU profiles out and the refused command, re-run, gets past THIS refusal
+  (any other check it then meets - a key, a render - speaks for itself):
+  `disable <product>` for each product that asked for the profile (after `enable
+  memory`: `disable memory`); `disable --plane <plane>` only when nothing but a
+  direct enable holds it; an edit of `.stack/state.json` when a direct enable
+  carries it and something else still needs the plane (a pre-products state
+  file); `enable --plane <plane>` when the plane went with its owners (for
+  inference: the gateway without its local backends); for the plane's env-file
+  `COMPOSE_PROFILES`, the exact new value - the GPU profile dropped **together
+  with every profile whose manifest `requires` reaches it**, and every profile
+  that declares `stands_in_for` it added (frontend `gpu,tailscale` becomes
+  `stock`, so Open WebUI still runs); `unset COMPOSE_PROFILES` when only the
+  shell turns it on, followed - when the plane's env file would not then run
+  the stand-in (no `COMPOSE_PROFILES` line, say) - by the env-file value that
+  does, so both paths end at the same profiles; then the refused command **as typed** (`recover inference`,
+  `up --all`). Each step names the interpreter that is running the driver
+  (`python3 scripts/stack/stack.py ...` when it was started as `python3`), so a
+  host with no `python` on PATH can follow it. `--plane` is never offered while a product owns the plane (it
+  would be refused). Before this, a GPU-less host got compose's raw `could not
+  select device driver "nvidia"` halfway through `up`, after the anchor and
+  earlier planes had started. An unknown answer from `docker info` (docker not
+  reachable, unparsable output) is not a refusal - compose then says why.
 
 ### `restart <plane>` [`--dry-run`]
 
-**Refuses** `restart all` (naming `down` + `up` and
-`scripts/recovery/emergency-recovery.ps1`, which layers health gates on the same
-order). **Refuses** a `manual` plane, naming its script. Restarting a plane that
-is not enabled prints a note and proceeds.
+**Refuses** `restart all` (naming `recover`, `down` + `up`, and
+`scripts/recovery/emergency-recovery.ps1`, the Windows original of `recover`).
+**Refuses** a `manual` plane, naming its script. Restarting a plane that is
+not enabled prints a note and proceeds.
 
-### `enable <plane|product>` [`--headless`] [`--plane`|`--product`]
+### `enable <product|plane>` [`--headless`] [`--plane`|`--product`]
+
+A name that is both is the **product** (see *Product keys*); `--plane <name>`
+takes the plane.
 
 A **plane**: enables just that plane (plus its `default` profiles).
 
 - **Refuses** when a required plane is not enabled, naming it *and* the command
-  that would enable it:
-  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable inference)`
+  that would enable it - `--plane` when a product shares the name, since the
+  refusal asked for the plane and not for the product's profiles:
+  `refused: memory requires inference, which is not enabled (python scripts/stack/stack.py enable --plane inference)`
 - **Refuses** when one of the plane's `keys` is blank or missing in the env file
   that plane reads, naming the key, whether it is blank or missing, the file, and
   the remedy:
@@ -277,7 +408,10 @@ A **plane**: enables just that plane (plus its `default` profiles).
 
 
 A **product**: enables its planes, their `requires` closure, its `profiles`,
-and its `surfaces` unless `--headless`.
+and its `surfaces` unless `--headless`, marking each plane `product:<name>` in
+the state file's `owners` and the product in `products` (what `disable` reads).
+`memory` declares `inference = ["local"]`: mnemory's `LLM_MODEL` and
+`EMBED_MODEL` are registered at the gateway only under `local`.
 
 - A product does **not** refuse on its own members being off - expanding them is
   the point. It still **refuses** on any member plane's blank key, naming the
@@ -289,34 +423,106 @@ and its `surfaces` unless `--headless`.
 Enabling a `pending` profile is allowed and prints a note saying it changes
 nothing until the item that adds it to the compose file lands.
 
-### `disable <plane|product>`
+### `disable <product|plane>` [`--plane`|`--product`]
 
-**Refuses** while an enabled plane still requires the one being disabled,
-naming the dependents. Disabling something that is not enabled is a no-op note.
+A shared name is the product here too; `--plane <name>` disables the plane alone.
+
+A **product** takes out only what it added. Its `product:<name>` mark comes off
+every plane it enabled, and then a plane is removed only when **no owner is
+left** (no other enabled product, no direct enable) **and no remaining plane
+requires it**; a plane that stays loses only the profiles no remaining owner
+asked for. It prints the planes removed, the planes kept and why (`product
+coding-agent`, `enabled directly`, `required by memory`), and the profiles
+dropped. A product that is **not enabled here** - including every product on a
+state file written before products were tracked - is a no-op note, and nothing
+is written. Measured on the attempt this replaced: `disable portal` with only
+the frontend enabled removed the frontend (Open WebUI), because `portal`'s
+product lists `frontend`.
+
+A **plane** (`--plane`) is removed on its own. **Refuses** while a product
+enabled it (naming the product - disable that instead), and while an enabled
+plane still requires it (naming the dependents). Disabling a plane that is not
+enabled is a no-op note.
 
 ### `doctor`
 
 Reports docker on PATH, `docker compose version`, the Python version, the
 manifest and state paths, and then per enabled plane: the compose file exists,
-the env file exists (and how it is loaded), every blank or missing key, and the
-plane's `host` requirements. Exits 1 if anything is `[FAIL]`. Read-only.
+the env file exists (and how it is loaded), every blank, missing or
+still-placeholder key, and the plane's `host` requirements. A compose file
+missing because its submodule is not initialised names `git submodule update
+--init <path>`. Exits 1 if anything is `[FAIL]`. Read-only.
 
 ### `health`
 
-**Sixteen** probes: the fifteen `stack.ps1 health` ran, one for one, with the
-same pass conditions, the same `[OK]` / `[FAIL]` line shape and the same exit
-code - **the number of failed probes** - plus one that has no `.ps1` ancestor.
+<!-- stack:health-probes -->
 
-#### The sixteenth: `inference: serving depth`
+_Generated by `python scripts/stack/stack.py docs --write`; do not edit between the markers. Read out of `HealthSweep.run()` itself, with every host answer stubbed; `<...>` is what the live run fills in._
 
-Added by `sl-recovery-backups` (2026-09-21) because **all fifteen of the others
-were green for thirty hours while every chat returned
+| Plane | Probe | Runs when |
+|---|---|---|
+| anchor | `0 unhealthy containers (found: <names>)` | always (the anchor is implicit) |
+| anchor | `anchor: ai-stack_llm-net exists and is internal` | always (the anchor is implicit) |
+| inference | `inference: llm-gateway liveliness` | the plane is enabled |
+| inference | `inference: serving depth: <what it found>` | the plane is enabled |
+| frontend | `frontend: OWUI http://127.0.0.1:3000/health` | the plane is enabled |
+| frontend | `frontend: 8 tailnet serve routes` | the plane is enabled, and the frontend deploys the `tailscale` profile |
+| frontend | `frontend: owui/ manifest rows drifted from live webui.db: <count>` | the plane is enabled, and PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed |
+| memory | `memory: cloud door http://127.0.0.1:8060/health` | the plane is enabled |
+| search | `search: gateway http://127.0.0.1:8085/healthz` | the plane is enabled |
+| search | `search: <verdict> - <n> engine(s) answering` | the plane is enabled |
+| coder | `coder: little-coder daemon :8090/health` | the plane is enabled |
+| ob1 | `OB1: open_notebook API :5055/api/config` | the plane is enabled |
+| ob1 | `OB1: ops door :8062/health` | the plane is enabled |
+| ob1 | `OB1: research-curator http://127.0.0.1:8816/health` | the plane is enabled |
+| ob1 | `OB1: openbrain-db accepting connections` | the plane is enabled |
+| agent-org | `agent-org: mattermost ping` | the plane is enabled |
+
+**16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds).** Only the planes this machine enables are probed, plus the anchor; the exit code is the number of probes that failed.
+
+<!-- /stack:health-probes -->
+
+These are the probes `stack.ps1 health` ran, one for one, with the same pass
+conditions, the same `[OK]` / `[FAIL]` line shape and the same exit code - **the
+number of failed probes** - plus the serving-depth probe, which has no `.ps1`
+ancestor. The table above is generated from `HealthSweep.run()`, so it cannot
+list a probe the sweep does not run.
+
+**Only the planes this machine enables are probed** (ac-front-door), plus the
+implicit anchor - not the wider requires-closure `up` starts (on any state the
+driver wrote the two are equal; on a hand-edited one they are not, and a plane
+nobody enabled is not probed). The anchor probe checks that `ai-stack_llm-net`
+exists AND is internal. A fresh clone runs the frontend's and the
+anchor's probes and names the other six planes on one `[skip] not enabled on
+this machine` line; the exit code counts failures among the probes that ran.
+The full set - <!-- stack:health-count -->16 probes with every plane enabled, when the frontend deploys the `tailscale` profile, PowerShell is on PATH (`powershell` on Windows, `pwsh` elsewhere) and Open WebUI has at least one plugin deployed (14 when none of those holds)<!-- /stack:health-count --> - runs only when every plane is enabled. The owui-drift probe needs
+PowerShell (`powershell` on Windows, `pwsh` elsewhere) and prints a `[skip]`
+line where there is none.
+
+#### The serving-depth probe: `inference: serving depth`
+
+Added by `sl-recovery-backups` (2026-09-21) because **every other probe
+was green for thirty hours while every chat returned
 `500 upstream command exited prematurely`** (2026-09-19 18:54 -> 09-21 00:57).
 `llama-cpp-upstream` had been recreated with `LM_MODELS_DIR` unset, so compose
 bound its default `../../data/models/gguf` - an empty directory - at `/models`.
 The container was healthy, the anchor network existed, LiteLLM's
 `/health/liveliness` answered 200, and llama-swap's `/health` answers **without
 loading a model**. Nothing asked whether inference could actually serve.
+
+It runs whenever `local` is on for inference from ANY source - the state file,
+`COMPOSE_PROFILES=local` in `inference/.env`, or the shell - or a
+`llama-cpp-upstream` container exists at all (running or not; an unreadable
+container list counts as existing). A shell `COMPOSE_PROFILES` exported for
+another plane (frontend's `gpu,tailscale`) cannot switch it off. Only when none
+of those holds is there no upstream by design - the gateway alone is the
+documented GPU-less deployment, and the GPU refusal's steps lead there - and the
+line reads ``serving depth: not applicable - inference runs without `local` ...``
+and passes. It stays one line either way, so the probe count above holds. When the probe
+runs and cannot read the upstream, its hint follows WHY it ran: `local` on (`up`
+starts the upstream), a leftover container with `local` off (remove it with the
+`rm -sf` line from `inference/README.md`, or turn `local` on), or an unreadable
+`docker ps -a` (fix docker access).
 
 What it checks, in the cheapest order that cannot be fooled:
 
@@ -390,12 +596,146 @@ Rules the probes encode, each bought with an outage:
 The probe NAMES are pinned in `test_stack.py` (`PS1_PROBES`), so a probe that is
 dropped, merged into a neighbour or renamed fails the suite.
 
-### `stats`
+### `recover` [`<plane>`|`--all`] [`--dry-run`] [`--timeout SECONDS`]
 
-Hands off to `scripts/stack/stack-stats.ps1` (the llm-queue `/observe` board and
-the LiteLLM spend ledger, read-only). That script is PowerShell 5.1 only, so off
-Windows this verb **refuses** and names what to run instead - a verb that prints
-nothing and exits 0 is the failure class this repo hunts.
+The portable equivalent of `scripts/recovery/emergency-recovery.ps1 -Action
+recover` - its FULL path (`Invoke-EmergencyRecovery`: stop everything in reverse
+order, restart in dependency order, wait for health). Selection is the same as
+`up`: the enabled planes plus their `requires` closure, one plane, or `--all`.
+
+0. **The GPU check** `up` runs (see `up`), before anything stops or starts; not
+   under `--dry-run`.
+1. **Every plane is rendered first** (`docker compose -f <file> [--profile ...]
+   config --format json`, with exactly the profiles `up` passes). A plane that
+   cannot be rendered is a refusal while the stack is still running.
+   Then every `depends_on` condition is checked, because the `up -d --no-deps`
+   below skips compose's own checks: `service_healthy` on a service with no
+   healthcheck (none in the compose file and none in its image, asked with a
+   read-only `docker image inspect`) and `service_completed_successfully` on a
+   service with `restart: always` / `unless-stopped` are **refused, naming the
+   plane, the service and the target, before anything is stopped** - in
+   `--dry-run` too. A healthcheck block with timing fields and no `test` is not
+   a healthcheck of its own (compose merges it onto the image's), so the image is
+   asked. An image that is not on the daemon cannot be asked before the stop;
+   that is a `# WARNING` saying it is **decided after the pull**: once the
+   target's level is up, its container is read and, if it has no health status at
+   all, recover refuses by name before starting the dependant - where compose's
+   own `up` refuses too.
+2. **Stop**, planes in reverse of `up`'s order; inside a plane, its services in
+   reverse depends_on levels (`docker compose ... stop --timeout 30 <services>`).
+3. **Start**: the anchor's networks are ensured first (always, even for one
+   plane - a recovery on a daemon that lost them would otherwise fail at the
+   first `up`); then planes in `up`'s order, each plane's services level by
+   level (`up -d --no-deps <services>`), and **every container is gated**. The
+   gate's KIND is derived from the render and printed in `--dry-run` as
+   `gate [<kind>]`:
+
+   | kind | when | passes | fails |
+   |---|---|---|---|
+   | `completes` | another service depends_on it with `condition: service_completed_successfully` | it EXITS 0 - its dependants start only after that | any other exit code, or still not exited at the budget |
+   | `healthy` | a compose healthcheck | `healthy` | `unhealthy` (at once), `exited`, `restarting` |
+   | `one-shot` | `restart: "no"`, or no restart policy | exit 0 at any point; or running, unrestarted, for the settle window | a non-zero exit, a restart |
+   | `settle` | a restart policy and no healthcheck | running with the same `RestartCount` and `StartedAt` for 15 s (or the declared `deploy.restart_policy.delay` plus one poll) | a restart, an exit or `restarting` inside the window (`restart loop: ...`, `exited with exit code N ... inside the settle window`) |
+
+   A container that crashes only AFTER its window, or turns unhealthy after it
+   was healthy, still passes - the gates cannot see that. The gates of one
+   level run one after another, so each settle window adds its 15 s. The budget
+   is the healthcheck's own worst case - `start_period + retries x (interval +
+   timeout) + interval + 30 s` - or 300 s when the compose file declares none;
+   `--timeout` sets one budget for all.
+4. **The first failed gate stops the run**: `refused: recover stopped at
+   <plane>: <service> (<container>) <what docker said>`, with the last
+   healthcheck output and the planes left stopped. Exit 1.
+
+The orders are **derived, not listed**. Container levels come from each
+service's `depends_on` plus `network_mode: service:X`, so:
+
+- **the netns rule** - `tailscale` runs in `openwebui`'s network namespace
+  (`frontend/docker-compose.yml`): it stops before `openwebui` and starts after
+  it is healthy, and `check_netns()` refuses any plan that would restart a
+  namespace provider without its tenants after it. emergency-recovery.ps1
+  writes the same rule by hand in `Invoke-MinimalRecovery` and relies on the
+  project's depends_on in its full path;
+- **the inference rule** - both llama.cpp upstreams and `llm-queue` start
+  before `llm-gateway`, from `inference/compose/gateway.yml`'s depends_on.
+
+`--dry-run` prints the whole plan - every `stop` and `up` line and every gate
+with its budget - after reading the renders (read-only), and runs nothing else.
+
+A key still at its shipped placeholder is **printed as a WARNING, not
+refused**: recover brings back a deployment already running on those values,
+and a refusal would leave a crashed host down until the key is rotated. `up`,
+`enable` and `doctor` still refuse it.
+
+**Deliberately not ported:** the diagnostics that choose the "minimal" path,
+the fall-through to `nuclear`, the .ps1's GPU health check (`nvidia-smi`; the
+driver's own GPU-availability check does run, as step 0), the tailscale `ping 8.8.8.8`, and
+the `nuclear` / `gpu-reset` modes. **Differs from the .ps1 on purpose:** planes
+go in `up`'s order, so inference starts before the frontend; the .ps1's full
+`recover` path starts the frontend first, while its own minimal path and
+`nuclear` start inference first. And **every gate is fatal**: the .ps1 throws
+only when openwebui misses its gate and logs a WARN for every other one, then
+starts the next plane anyway. `recover` stops at the first container that
+fails, because starting a plane on top of a dependency that is not healthy is
+how a partial outage becomes a silent one. It also has no fixed pauses (the
+.ps1 sleeps 15 s and 20 s between phases) - the gates are the waits - and it
+stops every container with `--timeout 30` (the .ps1 gives the frontend 45 s).
+
+### `backup <plane>` [`--dest DIR`]
+
+One `<volume>.tar.gz` per **named volume the plane's services mount under the
+profiles it runs with**, read from the render - never a hand list. Written to
+`backups/<plane>/manual-<UTC stamp>/` (or `DIR/<plane>/manual-<stamp>/`), with
+`manifest.json` (volume, compose key, archive, bytes, sha256) and a
+`SHA256SUMS` that `sha256sum -c` reads. The archive is streamed out of a
+throwaway `alpine:3.21` helper (`--network none`, the volume mounted
+read-only) - no bind mount, so the same verb works on Windows, on Linux, in a
+DinD and over a docker context.
+
+- The dump sidecar is found from the render, not from `depends_on` alone: a
+  service in the same plane named `*backup*`/`*dump*` (or with such an image)
+  that depends_on the engine, names it as a host in its environment (`PGHOST`,
+  a URL, a DSN), or mounts the database volume.
+- A **live copy** (a volume a running container holds) is recorded in
+  `manifest.json` under `live_copy`, with the running containers and a warning,
+  not only on the console: a SQLite file such as `webui.db` may be mid-write.
+- A failed helper is removed by name (`docker rm -f`) before `backup` or
+  `restore` returns, and the output says whether it is gone.
+- A **database data directory whose engine is running** (postgres, pgvector,
+  surrealdb) is **not tarred**: it is named, with the plane's dump sidecar, as
+  "use the plane's dump for a consistent copy". With the engine stopped it is
+  archived as a cold copy.
+- A volume absent from the daemon is skipped by name; so is an external one.
+- **Host bind mounts are not archived**; the output counts the writable ones.
+- Nothing archived is a refusal (exit 1), and the empty directory is removed.
+
+### `restore <plane> --from <dir|manifest.json|archive>` [`--volume NAME`]
+
+Every check runs **before anything changes**, and each failure is a refusal
+that changed nothing: the manifest is `backup`'s and names this plane; every
+selected archive's **sha256 matches**; every selected volume is one the
+plane's render declares; and **no running container holds it** (asked of the
+daemon, so a container from any project counts). Only then are the selected
+volumes touched: a missing one is created with compose's own
+`com.docker.compose.project` / `.volume` labels (so the next `up` adopts it),
+and its contents are **replaced** by the archive's - extracted into a staging
+directory first, so a torn archive leaves the old contents as they were.
+That staging needs **free space for the old contents and the new at once**
+(about 10 GB extra for this host's Open WebUI volume); a restore that runs out
+fails in the extraction and leaves the old contents untouched.
+`--volume` takes the volume name or its compose key; `--from` a single
+`.tar.gz` implies it.
+
+### `stats` [`--hours N`] [`--bucket-minutes N`]
+
+Off Windows: `docker stats --no-stream` for every running container of every
+enabled plane, then - when the inference plane is enabled - the llm-queue
+`/observe/queue` board and the LiteLLM spend ledger (demand buckets, by caller,
+global totals), the same two sources `stack-stats.ps1` reads. With inference
+**not enabled** it says so instead of printing zeros; an unreachable ledger is
+named and exits 1. A container that disappears between `compose ps` and `docker
+stats` costs only its own row, which is marked `(gone: ...)`. On Windows it still hands off to
+`scripts/stack/stack-stats.ps1`, unchanged.
 
 ### `inventory --write` | `--check`
 
@@ -439,7 +779,7 @@ the gitlink will move to.
 That is how `research`, `wiki` and `notebook` were carried between 2026-09-19
 (sl-ob1-profiles put them in the manifest) and 2026-09-20 (sl-ob1-gitlink bumped
 the gitlink `5005197` -> `fe3e045`): `inventory --check` printed those three, and
-the nine container rows that named them, as `[ ~~ ] declared, not rendered` and
+the container rows that named them, as `[ ~~ ] declared, not rendered` and
 **passed**. **The bump has happened**, so the render carries all four and every
 row is verified for real - `unpinned_profiles` returns the empty set for every
 plane today. The submodule set is read from `.gitmodules`, so this is not an `ob1`
@@ -448,9 +788,11 @@ still drift, so the exemption cannot launder a typo.
 
 **The one thing the operator owes at that bump**, which `--check` said out loud on
 every run until it happened: declare the full profile set once, or `up` starts
-fewer containers than are running. Measured at `fe3e045`: the bare OB1 render is
-**20** services, all four profiles render **30**, and a driver with no ob1 entry in
-its state passes `idea-refinery` + `research` only, which RENDERS **23**. Either
+fewer containers than are running. At the pinned gitlink the bare OB1 render is
+<!-- stack:count:ob1:bare -->**20** services with no profile<!-- /stack:count:ob1:bare -->, all four profiles render
+<!-- stack:count:ob1:all -->**30** services with every profile (`idea-refinery`, `research`, `wiki`, `notebook`)<!-- /stack:count:ob1:all -->, and a driver with no ob1
+entry in its state passes `idea-refinery` + `research` only, which RENDERS
+<!-- stack:count:ob1:default -->**23** services with `idea-refinery` + `research` (the driver's default)<!-- /stack:count:ob1:default -->. Either
 `python scripts/stack/stack.py enable research`, which merges all four into
 `.stack/state.json` and leaves every other enabled plane alone, or
 `COMPOSE_PROFILES=research,wiki,notebook,idea-refinery` in `OB1/docker/.env`, which
@@ -468,6 +810,69 @@ and un-repairable by the watchdog for as long as that check existed.
 A project whose compose file is not on disk - CI does not check out the OB1
 submodule - is carried from the sidecar and printed as `NOT VERIFIED` by name.
 A check that cannot run must never look like one that passed.
+
+### `docs --write` | `--check` [`--allow-unverified`]
+
+The documentation's countable facts - services per plane and per profile set,
+container names, profiles, published host ports, networks, the product menu,
+the health probes - are not written by hand. Each sits between two HTML comments
+in the doc, an opening `stack:<name>` and a closing `/stack:<name>`, and
+`docs --write` fills it; `docs --check` changes nothing and exits 1 naming every
+block that differs. Prose stays prose: edit around a block, never inside it.
+
+| Block | Shape | What it holds |
+|---|---|---|
+| `plane-table` | lines | every plane: compose project, file, services under each profile set, published host ports, what starts it |
+| `product-menu` | lines | every product: planes in `up` order, the profiles `enable` writes, surfaces, the manifest keys - resolved by `product_plan()`, the function `enable` itself uses |
+| `plane-services:<plane>` | lines | that plane's services: container, profiles, host ports, networks |
+| `profile-counts:<plane>` | lines | that plane's service count with no profile, the driver's default, each profile (with its `requires`) and every profile, and what each adds |
+| `health-probes` | lines | the probe list, read out of `HealthSweep.run()` with every host answer stubbed, and which probes are conditional |
+| `count:<plane>:<set>` | one line | one count WITH its condition; `<set>` is `bare`, `default`, `all` or profiles joined by `+` |
+| `health-count` | one line | the probe count and the conditions it holds under |
+| `profiled-planes` | one line | which planes declare profiles, from the manifest |
+
+**Every count names the condition it was taken under.** A profiled plane has
+several true service counts, one per profile set; a number printed without its
+set is what made two docs look contradictory. Renders use each
+plane's `.env.example` (`render_env_path`) in a scrubbed environment
+(`render_capture`: this shell's `COMPOSE_PROFILES` and exported variables never
+reach compose), and a generated block that would carry this checkout's path or
+a secret-shaped value from a real `.env` is refused - the docs come out the same
+on any machine.
+
+**Which file carries which block is registered** in `DOCS_BLOCKS` in `stack.py`.
+A registered block whose markers were deleted, half-deleted or mangled, a marker
+that does not pair, an unregistered block, and a one-line block written across
+lines are all failures, named by file and line - a block that silently stops
+being generated is the failure this check exists for.
+
+A `stack:` marker in a tracked `*.md` the registry does NOT name is refused
+too: nothing would generate or compare it, so a hand-written number inside it
+would read as generated.
+
+A block whose input is not on this machine - the OB1 submodule not checked out,
+**an OB1 checkout that is not at the STAGED gitlink or carries tracked edits**
+(untracked files inside it are ignored), a gitignored env file compose stats, no
+docker - is `NOT VERIFIED`, named, and left as committed; the text says it was NOT
+compared. A `plane-table` is compared ROW BY ROW: only the rows of the planes that
+cannot be rendered are kept as committed (`PARTLY VERIFIED`), so a hand edit of
+any other row is still STALE. `--check` then exits **3**, never 0, unless
+`--allow-unverified`.
+
+**CI's `stack-driver` job is the gate that never skips**: it checks out the OB1
+submodule, has docker, and runs `docs --check` WITHOUT `--allow-unverified`, so a
+3 fails it. The pre-commit hook runs it (step 4b) whenever a registered doc, a
+compose file, the manifest, an `.env.example`, `stack.py` or the OB1 gitlink is
+staged; it refuses a 1 and records a 3 as a SKIPPED gate, saying what was not
+compared and that CI compares it - a contributor without docker or OB1 is not
+blocked, and not falsely told the blocks were checked. `docs --check` exits **4** instead of 3 when a gap
+is an OB1 that IS checked out but not at the staged gitlink, or dirty. On a
+**merge** commit the hook always runs and refuses a 1 or a 4 - both fixable by the
+merger - but only warns on a 3 (no docker, no OB1 checkout, and likewise no
+Python 3.11), so a newcomer's `git pull` is not blocked; CI compares those.
+MERGE-PROTOCOL.md step 5 requires `--no-ff` and a `docs --check` exit 0. Git calls
+aimed at the submodule drop git's repository-local variables
+(`git rev-parse --local-env-vars`), which a hook sets for the PARENT repository.
 
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 
@@ -541,13 +946,29 @@ plane change cannot fail it; the shipping tree is covered by three `shipped`
 tests plus `inventory --check` itself, which the pre-commit hook and the
 `stack-driver` CI job both run for real.
 
-`.github/workflows/ci.yml` runs `python -m pytest scripts/stack -q` and
-`python scripts/stack/stack.py inventory --check` on Python 3.12.
+`recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
+daemon with containers, volumes and the helper container, so gate timeouts,
+restart loops, a tampered archive and a busy volume are all testable with no
+daemon. Their real-daemon proof is `scripts/stack/rehearse-ops.sh`: in an
+isolated Docker-in-Docker it brings up the stock frontend, backs up its data
+volume, destroys it, is refused on a tampered archive and on a running
+container, restores it, and checks the marker and `/health`; then `stats`,
+`recover frontend`, and a recover that meets a planted unhealthy container.
+(`rehearse-fresh-clone.sh` is its sibling for a fresh clone's first `up`.)
+
+`.github/workflows/ci.yml` runs `python -m pytest scripts/stack -q`,
+`python scripts/stack/stack.py inventory --check` and
+`python scripts/stack/stack.py docs --check` on Python 3.12, with the OB1 submodule
+checked out.
+The docs generator's block renderers and marker scanner are tested against
+`MINI_MANIFEST` with a scripted render (`DocsHost`).
 
 ## Not in this item
 
-Porting `emergency-recovery.ps1` or `stack-watchdog.ps1` to Python; both still
-carry their own ordering and their own probes. Executing against remote docker
+Porting `stack-watchdog.ps1`, or `emergency-recovery.ps1`'s `nuclear` and
+`gpu-reset` modes (its `recover` mode is `stack.py recover` since
+`ac-ops-portable`); both scripts still carry their own ordering. Mirroring
+backups to a NAS (`backup-to-nas.ps1` stays the Windows path). Executing against remote docker
 contexts - the `--context` prefix is passed through and nothing more
 (`cluster-transition`). Archiving `stack.ps1`: it stays as the shim until every
 caller has moved. Adding compose profiles to a plane - both of the

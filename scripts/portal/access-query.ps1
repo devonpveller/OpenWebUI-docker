@@ -7,7 +7,7 @@
 # WHAT THIS IS GOOD FOR:
 #   - "Anyone hit my portal in the last hour from outside my home IP?"
 #   - "Show me every login failure in the last day"
-#   - "What URLs has openwebui.devinveller.ai received this week?"
+#   - "What URLs has openwebui.<PUBLIC_DOMAIN> received this week?"
 #   - "Has anyone reached /api/notebook/* recently?"
 #   - "List the unique source IPs that have hit the portal"
 #

@@ -50,7 +50,7 @@ hand-off. Root cause — the floor lumped **push** with deploy/delete as "irreve
 - **Deploy tokens by owner/org (multi-PAT).** A repo's token is resolved automatically at clone time
   (`orchestrator._project_token`): (1) an explicit `Project.token_env` override; else (2) the
   **per-owner convention `LC_<OWNER>_TOKEN`** (`projects.owner_token_env` — e.g.
-  `github.com/PolyshDesign/*` → `LC_POLYSHDESIGN_TOKEN`) used only if set; else (3) the pool's
+  `github.com/PixelDesign/*` → `LC_PIXELDESIGN_TOKEN`) used only if set; else (3) the pool's
   `LC_DEPLOY_TOKEN` (your own repos). So onboarding an org repo needs **no per-project token config** —
   just set `LC_<ORG>_TOKEN` on the bridge; scaling to a new org = add one env var. The resolved token
   threads to the worker's `/project` clone (`router.wake(repo_token=…)` → `harness.set_project(token=…)`);
