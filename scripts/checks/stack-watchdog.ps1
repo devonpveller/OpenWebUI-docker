@@ -1,10 +1,10 @@
-﻿# Enhanced Tailscale Health Check and Recovery Service for Windows
+# Enhanced Tailscale Health Check and Recovery Service for Windows
 # This script provides autonomous management of Tailscale connectivity
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$false)]
-    [ValidateSet("check", "daemon", "install-service")]
+    [ValidateSet("check", "loops", "daemon", "install-service")]
     [string]$Mode = "check",
     
     [Parameter(Mandatory=$false)]
@@ -29,7 +29,7 @@ $SERVICE_NAME = "TailscaleHealthMonitor"
 # with $ErrorActionPreference='Stop' above, the first docker call that redirects
 # stderr (e.g. `docker compose logs ... 2>$null` in Test-EntrypointHealth) turns
 # that benign warning into a TERMINATING error (PS 5.1 native-stderr gotcha) and
-# the whole health check aborts at step 1 — the window just flashes and exits 1,
+# the whole health check aborts at step 1 - the window just flashes and exits 1,
 # checking/repairing nothing. Defining the var here silences the warning at the
 # source for every docker invocation this script makes. This only
 # affects this script's own process env; it does NOT modify .env or any container.
@@ -37,7 +37,7 @@ $SERVICE_NAME = "TailscaleHealthMonitor"
 # The value is a non-empty PLACEHOLDER, not the real key: Windows cannot store an
 # empty env var (PowerShell deletes it on `=''`), and docker only suppresses the
 # "is not set" warning for a DEFINED, non-empty value. This monitor never creates
-# or recreates the caddy service (the sole consumer of WORKBENCH_KEY — it is not
+# or recreates the caddy service (the sole consumer of WORKBENCH_KEY - it is not
 # in the monitor's managed-service list), so this placeholder never reaches caddy;
 # and even if it somehow did, a wrong key makes caddy reject /workbench (fail
 # closed). A real value present in the environment (e.g. a manual run from a
@@ -469,7 +469,7 @@ function Test-EntrypointHealth {
         # Check for common Docker build issues in logs. Isolated in its own
         # try/catch: a failure to READ the logs (docker stderr, daemon hiccup)
         # must NOT be misread as "entrypoint invalid" and abort the whole health
-        # check — that exact misclassification (a docker stderr warning bubbling
+        # check - that exact misclassification (a docker stderr warning bubbling
         # up under -Stop) is what crashed every run before 2026-06-05.
         try {
             # cmd /c merges the streams BEFORE PowerShell sees them - the tailscale
@@ -629,7 +629,7 @@ function Test-OpenTerminalHealth {
     param()
 
     try {
-        # open-terminal is the little-coder workspace plane — it left openwebui's
+        # open-terminal is the little-coder workspace plane - it left openwebui's
         # network namespace (it is on lc-net / llm-net now), so probe it INSIDE
         # its own container, not via openwebui's localhost:8000.
         $Response = docker exec open-terminal curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health 2>$null
@@ -673,7 +673,7 @@ function Repair-OpenTerminal {
 # Generic helper: ensure a non-critical compose container is running.
 # Uses Test-ServiceHealth (which reads docker's compose-defined healthcheck
 # status, or just the running state for containers without a healthcheck).
-# Used for mnemory and the backup sidecars —
+# Used for mnemory and the backup sidecars -
 # none are required for the core OpenWebUI/Tailscale/LLM path, so failures
 # are logged but do not fail the overall health check.
 #
@@ -716,7 +716,7 @@ function Confirm-AuxiliaryContainer {
 
 # Function to test llama-cpp connectivity
 function Test-LlamaCppConnectivity {
-    # Skip the exec probe if the container isn't running — `docker compose exec`
+    # Skip the exec probe if the container isn't running - `docker compose exec`
     # against a stopped service writes to stderr, which (with ErrorActionPreference
     # = "Stop" at the top of this script) bubbles up as a thrown exception and
     # lands in the catch block as a misleading [ERROR]. A stopped container is
@@ -790,14 +790,14 @@ function Test-InferenceServingDepth {
 # IMPORTANT: llama.cpp server's HTTP handler stalls /health and /v1/models while
 # embedding requests are in flight (verified: /health times out at 30s, but
 # /v1/embeddings keeps returning 200 in the logs). So a /health timeout does
-# NOT mean the container is dead — it just means it's busy. We use a two-stage
+# NOT mean the container is dead - it just means it's busy. We use a two-stage
 # probe: try /health quickly; if it stalls, fall back to scanning recent logs
 # for active embedding traffic. Docker's healthcheck has the same blind spot
 # and frequently marks this container "unhealthy" while it is in fact serving.
 function Test-LlamaCppEmbedConnectivity {
     # Stage 0: container must be running. Note we deliberately DO NOT require
     # Health -ne "unhealthy" here (Test-ServiceHealth does), because the docker
-    # healthcheck false-positives under load — see comment above.
+    # healthcheck false-positives under load - see comment above.
     $Status = $null
     try {
         $InspectJson = docker inspect llama-cpp-embed-upstream --format '{{json .State}}' 2>$null
@@ -809,7 +809,7 @@ function Test-LlamaCppEmbedConnectivity {
         return $false
     }
 
-    # Stage 1: quick /health probe. Short timeout — we don't want to block the
+    # Stage 1: quick /health probe. Short timeout - we don't want to block the
     # monitor for 30 s on every cycle when the server is busy.
     try {
         Write-LogEntry "Testing llama-cpp-embed connectivity..." "DEBUG"
@@ -821,7 +821,7 @@ function Test-LlamaCppEmbedConnectivity {
     } catch { }
 
     # Stage 2: /health didn't answer. Scan recent logs for active embedding
-    # traffic — if the server has served an embedding request in the last 2 min
+    # traffic - if the server has served an embedding request in the last 2 min
     # it is alive, just blocked on inference. Patterns match llama.cpp server's
     # request-completion lines ("done request: POST /v1/embeddings ... 200")
     # and slot lifecycle markers.
@@ -1012,7 +1012,7 @@ function Invoke-OpenBrainHealth {
 
 # agent-org is a SEPARATE compose project (project=agent-org); this monitor's
 # `docker compose` (ai-stack) can't see it. Delegate to the canonical by-name
-# probe scripts\check-agent-org-health.ps1 — same pattern as Open Brain. It
+# probe scripts\check-agent-org-health.ps1 - same pattern as Open Brain. It
 # guards the agent-bridge stale-DB-pool + the ao-git-egress stale-mount classes.
 # -Repair auto-restarts/recreates broken pieces; -Quiet keeps per-OK lines out of
 # the loop; -LogPath routes its detail into this monitor's log.
@@ -1038,7 +1038,7 @@ function Invoke-AgentOrgHealth {
 # Function to perform comprehensive health check
 # --- HOST Tailscale daemon (a separate tailnet node from the container!) ---
 # 2026-07-05: after an OOM-crash reboot the host daemon sat in 'NoState' (the
-# tray app was not running and unattended mode was not yet enabled) — the
+# tray app was not running and unattended mode was not yet enabled) - the
 # operator's remote access was dead while every container-side check passed.
 # Detect and best-effort repair by (re)starting the tray app; the daemon-level
 # fix (unattended mode) is set, this is the belt-and-braces layer.
@@ -1262,7 +1262,7 @@ function Confirm-ClaudeSessionsBridge {
 # --- Backup recency: an "Up" sidecar can still produce nothing ------------
 # The backup scripts precheck-skip with exit 0 (deliberately: never tar broken
 # state), so a wrong probe target means NO artifacts and NO error. That let
-# five sidecars go silent for ~5 weeks (2026-05-29 → 07-05) unnoticed. This
+# five sidecars go silent for ~5 weeks (2026-05-29 -> 07-05) unnoticed. This
 # watches the OUTPUT instead: newest artifact per backups/<dir> must be
 # younger than its cadence allows. Alerts to the log + Mattermost (throttled).
 #
@@ -1753,6 +1753,534 @@ function Confirm-BridgeFunctionalHealth {
     Write-LogEntry "$Label functionally healthy (beacon ${ageMin}m old, bin ok, fails=$($h.consecutive_failures))" "DEBUG"
 }
 
+# === CONTAINER LOOPS: crash loops + orphaned network namespaces ===============
+# Ported 2026-09-28 (closeout-followups item cf-watchdog) from the archived
+# work/crashloop branch (100366c; plan store journal/archive/branches/). Only
+# the detection functions and the bounded docker calls came across; that
+# branch's verifier did not.
+#
+# WHY (2026-09-08/09): stt-tts-tailscale was restarted 5,091 times over 33 hours
+# and nothing here noticed, because every other check in this script asks a
+# FIXED LIST of containers whether they are healthy and it was not on the list.
+# This section enumerates whatever Docker has, in any compose project, so a new
+# container is covered without editing this file. Its twin, stt-tts-server,
+# reported healthy through the same outage: it had joined the netns of a
+# container that restarted after it, so it was listening in a namespace nobody
+# routes to, and a healthcheck on its own loopback could not see that. That is
+# checked from outside, by comparing start times.
+#
+# Neither check REPAIRS anything. A restart loop is nearly always a credential
+# or config fault (an expired auth key, that time); restarting it again resets
+# the counter and hides the evidence. They alert through the catastrophe path
+# (Telegram + the Mattermost mirror) behind a per-key cooldown, so a loop that
+# runs all night pages once, not every ten-minute pass.
+
+# Restarts accumulated over consecutive passes before it is called a loop. The
+# StackWatchdog task runs every 10 minutes (PT10M); a container that exits at
+# once settles near one Docker-backoff restart a minute, ~10 a pass, so it trips
+# on the second pass. One restart per pass trips on the fourth.
+$RestartLoopThreshold = 3
+# One page per key per window. The catastrophe path's own Telegram throttle is
+# 1h and its Mattermost mirror has none, so the cooldown is enforced here.
+$LoopAlertCooldownHours = 6
+# A looping container is called "no longer restarting" (the all-clear) only
+# once it has run this long since its last start, or is stopped.
+$LoopSettledMinutes = 10
+# The docker executable. A variable only so the bounded-call test can point it
+# at a stub that never returns.
+$WatchdogDockerExe = 'docker'
+# Per-call bounds. PS 5.1 has no timeout on a native call and docker offers
+# none, so a wedged daemon lock would otherwise hang the pass - and the task
+# runs MultipleInstances=IgnoreNew with ExecutionTimeLimit=PT72H, so ONE hang
+# silently drops every later run for up to three days.
+$DockerCallTimeoutSeconds = 25   # the batched ps / inspect
+$DockerProbeTimeoutSeconds = 8   # one container's inspect
+$DockerLogsTimeoutSeconds = 10   # docker logs for an alert's fault line
+# Per-PASS bounds for the loops that make one call per container.
+$FallbackBudgetSeconds = 120
+$NetnsConfirmBudgetSeconds = 30
+# A projection of `docker inspect` in the SAME shape as the full JSON, so one
+# parser reads both this and a recorded `docker inspect` document.
+$ContainerFactsFormat = '{"Name":{{json .Name}},"Id":{{json .Id}},"RestartCount":{{json .RestartCount}},"State":{"Status":{{json .State.Status}},"StartedAt":{{json .State.StartedAt}}},"HostConfig":{"NetworkMode":{{json .HostConfig.NetworkMode}},"RestartPolicy":{{json .HostConfig.RestartPolicy}}}}'
+
+# Docker restarts a container FOREVER under always / unless-stopped, and under
+# on-failure with MaximumRetryCount 0 ("no limit", not "never"). Under 'no' and
+# a bounded on-failure the count cannot run away.
+$UnboundedRestartPolicies = @('always', 'unless-stopped')
+function Test-UnboundedRestartPolicy {
+    [CmdletBinding()]
+    param([string]$Policy, [int]$MaxRetries)
+    if ($UnboundedRestartPolicies -contains $Policy) { return $true }
+    if ($Policy -eq 'on-failure' -and $MaxRetries -le 0) { return $true }
+    return $false
+}
+
+# Quote ONE argument for a Windows command line. The repo root has a space in
+# it, and an unquoted argument built from it splits (measured on the archived
+# branch: both alert senders died that way). ProcessStartInfo.Arguments takes
+# one string, so the quoting is ours.
+function ConvertTo-ProcessArgument {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
+    return '"' + $escaped + '"'
+}
+
+# Run an external command with a hard wall-clock bound. Returns its output
+# lines, or $null when the call did not complete cleanly. $null means one of:
+#   timed out          -> $script:BoundedFailureReason = "did not answer within Ns"
+#   exited non-zero    -> "exited N: <first stderr line>"; whatever it DID print
+#                         is kept in $script:BoundedFailureLines
+#   threw before start -> the reason is empty
+# Callers report the reason rather than assuming a timeout: "did not answer" is
+# this section's signature for a wedged daemon, and a 0.1s "No such container"
+# must not read like one. Both are reset at the top of every call.
+# .NET Process + WaitForExit(ms) + `taskkill /T /F`, not Start-Job (whose
+# Stop-Job/Remove-Job block until the child exits, so it bounded the WAIT and
+# not the call) and not Start-Process -PassThru (which returned $null
+# intermittently and left ExitCode empty on 5.1).
+function Invoke-BoundedProcess {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$ProcArgs = @(),
+        [int]$TimeoutSeconds = 0
+    )
+    $ErrorActionPreference = 'Continue'   # function-local: native stderr must not throw
+    $script:BoundedFailureReason = ''
+    $script:BoundedFailureLines = @()
+    if ($TimeoutSeconds -le 0) { $TimeoutSeconds = $DockerCallTimeoutSeconds }
+    if (-not $TimeoutSeconds -or $TimeoutSeconds -le 0) { $TimeoutSeconds = 25 }
+
+    $proc = New-Object System.Diagnostics.Process
+    try {
+        $psi = $proc.StartInfo
+        $psi.FileName = $FilePath
+        $psi.Arguments = ((@($ProcArgs) | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.RedirectStandardInput = $true
+        [void]$proc.Start()
+        # Both streams asynchronously BEFORE waiting: reading one to the end
+        # while the child fills the other is the classic deadlock.
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
+        # An empty stdin, not an inherited one.
+        $proc.StandardInput.Close()
+
+        if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+            $script:BoundedFailureReason = "did not answer within ${TimeoutSeconds}s"
+            # The whole tree: what hangs is often a grandchild, and .NET
+            # Framework's Kill() has no entireProcessTree overload.
+            & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+            return $null
+        }
+        # The parameterless wait after the timed one is what makes ExitCode
+        # readable (it came back empty after WaitForExit([int]) alone).
+        $proc.WaitForExit()
+        $code = $proc.ExitCode
+        $outLines = @(@($outTask.Result -split "`r?`n") | Where-Object { $null -ne $_ -and $_ -ne '' })
+        $errLines = @(@($errTask.Result -split "`r?`n") | Where-Object { $null -ne $_ -and $_ -ne '' })
+        $lines = @($outLines) + @($errLines)
+        # The EXIT CODE decides, never "produced output".
+        if ($code -ne 0) {
+            $errFirst = @($errLines | Where-Object { $_ -and $_.Trim() }) | Select-Object -First 1
+            $first = if ($errFirst) { $errFirst } else {
+                @($lines | Where-Object { $_ -and $_.Trim() }) | Select-Object -First 1
+            }
+            $script:BoundedFailureReason = "exited $code" + $(if ($first) { ": $first" } else { "" })
+            # `docker inspect a b ghost` exits 1 and still prints a good row for
+            # a and b; keep them for a caller that salvages. `= @(...)`, not
+            # `= , $lines`: an assignment does not unroll, so the comma would
+            # nest the array one level too deep.
+            $script:BoundedFailureLines = @($lines)
+            Write-LogEntry ("bounded process '{0}' {1}" -f $FilePath, $script:BoundedFailureReason) "DEBUG"
+            return $null
+        }
+        return , $lines
+    } catch {
+        Write-LogEntry "bounded process '$FilePath' failed: $($_.Exception.Message)" "WARN"
+        return $null
+    } finally {
+        if ($proc) {
+            try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+            try { $proc.Dispose() } catch { }
+        }
+    }
+}
+
+# Bounded `docker <args>`. ASSIGN its result, never pipe it: it returns
+# `, @(...)` so an empty answer stays distinguishable from $null, and a pipeline
+# would unroll that.
+function Invoke-BoundedDocker {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$DockerArgs,
+        [int]$TimeoutSeconds = 0
+    )
+    return Invoke-BoundedProcess -FilePath $WatchdogDockerExe -ProcArgs $DockerArgs -TimeoutSeconds $TimeoutSeconds
+}
+
+# One container's facts from one `docker inspect` record - either a full
+# recorded document or the $ContainerFactsFormat projection, which has the same
+# shape. $null for anything that is not such a record.
+function ConvertTo-ContainerFact {
+    [CmdletBinding()]
+    param($Record)
+    if ($null -eq $Record) { return $null }
+    if ($Record -is [string]) {
+        $t = $Record.Trim()
+        if (-not $t.StartsWith('{')) { return $null }
+        try { $Record = $t | ConvertFrom-Json } catch { return $null }
+    }
+    if (-not $Record.Id -or -not $Record.Name -or -not $Record.State -or -not $Record.HostConfig) { return $null }
+    $rc = 0; [void][int]::TryParse([string]$Record.RestartCount, [ref]$rc)
+    $policy = ''; $mr = 0
+    if ($Record.HostConfig.RestartPolicy) {
+        $policy = [string]$Record.HostConfig.RestartPolicy.Name
+        [void][int]::TryParse([string]$Record.HostConfig.RestartPolicy.MaximumRetryCount, [ref]$mr)
+    }
+    return [pscustomobject]@{
+        Name          = ([string]$Record.Name -replace '^/', '')
+        Id            = [string]$Record.Id
+        RestartCount  = $rc
+        Status        = [string]$Record.State.Status
+        StartedAt     = [string]$Record.State.StartedAt
+        RestartPolicy = $policy
+        MaxRetries    = $mr
+        NetworkMode   = [string]$Record.HostConfig.NetworkMode
+    }
+}
+
+# Facts for every container Docker knows about: one batched inspect on the
+# happy path. When the batch fails it salvages what the batch printed, then
+# probes the rest one by one inside a per-pass budget, and NAMES what it could
+# not read - an empty array would read as "no containers".
+function Get-ContainerRuntimeFacts {
+    try {
+        $rawNames = Invoke-BoundedDocker -DockerArgs @('ps', '-a', '--format', '{{.Names}}')
+        if ($null -eq $rawNames) {
+            Write-LogEntry "docker ps $script:BoundedFailureReason - container loop checks skipped this pass" "WARN"
+            return @()
+        }
+        $names = @($rawNames | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+        if ($names.Count -eq 0) {
+            Write-LogEntry "docker ps returned no containers - nothing to check" "DEBUG"
+            return @()
+        }
+        $rows = Invoke-BoundedDocker -DockerArgs (@('inspect', '--format', $ContainerFactsFormat) + $names)
+        if ($null -ne $rows) {
+            $out = @()
+            foreach ($row in @($rows)) {
+                $f = ConvertTo-ContainerFact -Record $row
+                if ($f) { $out += $f }
+            }
+            Resolve-Catastrophe -Key 'docker-unreadable' -Message "docker can describe every container again."
+            return $out
+        }
+
+        Write-LogEntry ("batched docker inspect {0} - falling back to per-container probes" -f `
+            $(if ($script:BoundedFailureReason) { $script:BoundedFailureReason } else { "did not complete" })) "WARN"
+        $out = @()
+        $seen = @{}
+        foreach ($row in @($script:BoundedFailureLines)) {
+            $f = ConvertTo-ContainerFact -Record $row
+            if ($f) { $out += $f; $seen[$f.Name] = $true }
+        }
+        $unreadable = @()
+        $vanished = @()
+        $skipped = @()
+        $budget = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($n in $names) {
+            if ($seen[$n]) { continue }
+            if ($budget.Elapsed.TotalSeconds -gt $FallbackBudgetSeconds) { $skipped += $n; continue }
+            $row = Invoke-BoundedDocker -DockerArgs @('inspect', '--format', $ContainerFactsFormat, $n) -TimeoutSeconds $DockerProbeTimeoutSeconds
+            if ($null -eq $row) {
+                # Removed between `ps` and `inspect` is ordinary churn (a compose
+                # recreate, a worker teardown), not a wedged daemon.
+                if ($script:BoundedFailureReason -match '(?i)no such (object|container)') {
+                    $vanished += $n
+                } else {
+                    $unreadable += [pscustomobject]@{ Name = $n; Why = $script:BoundedFailureReason }
+                }
+                continue
+            }
+            $f = ConvertTo-ContainerFact -Record (@($row) | Select-Object -First 1)
+            if ($f) { $out += $f }
+            else { $unreadable += [pscustomobject]@{ Name = $n; Why = "answered, but the row did not parse" } }
+        }
+        $budget.Stop()
+        if ($skipped.Count -gt 0) {
+            Write-LogEntry ("per-container fallback ran out of budget after {0}s - {1} container(s) not probed this pass: {2}" -f `
+                [int]$budget.Elapsed.TotalSeconds, $skipped.Count, ($skipped -join ', ')) "WARN"
+        }
+        if ($vanished.Count -gt 0) {
+            Write-LogEntry ("{0} container(s) removed between docker ps and docker inspect - not a fault: {1}" -f `
+                $vanished.Count, ($vanished -join ', ')) "DEBUG"
+        }
+        if ($unreadable.Count -gt 0) {
+            $detail = (@($unreadable | ForEach-Object { "$($_.Name) ($($_.Why))" }) -join ', ')
+            Send-LoopAlert -Key 'docker-unreadable' -Message ("docker cannot describe $($unreadable.Count) container(s) within ${DockerProbeTimeoutSeconds}s: $detail. " +
+                "Their control plane is wedged even if the service still serves; a docker restart on one may also hang.") | Out-Null
+        }
+        Write-LogEntry "per-container fallback read $($out.Count) of $($names.Count) container(s)" "WARN"
+        return $out
+    } catch {
+        Write-LogEntry "container facts unavailable: $($_.Exception.Message)" "WARN"
+        return @()
+    }
+}
+
+# The most useful line of a container's recent log, for the alert: "restarting
+# a lot" alone sends the operator to a terminal. Bounded like everything else -
+# this is the one call made while an incident is already in progress.
+function Get-ContainerFaultLine {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    try {
+        $raw = Invoke-BoundedDocker -DockerArgs @('logs', '--tail', '60', $Name) -TimeoutSeconds $DockerLogsTimeoutSeconds
+        if ($null -eq $raw) { return "(log unavailable: docker logs $script:BoundedFailureReason)" }
+        $lines = @($raw | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
+        if ($lines.Count -eq 0) { return "(no log output)" }
+        $pattern = '(?i)(error|fail|invalid|denied|refused|unable|cannot|fatal|panic|exit status|unauthori)'
+        $pick = $lines[$lines.Count - 1]
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            if ($lines[$i] -match $pattern) { $pick = $lines[$i]; break }
+        }
+        # Collapse FIRST, then measure the collapsed string.
+        $collapsed = $pick.Trim() -replace '\s+', ' '
+        return $collapsed.Substring(0, [Math]::Min(280, $collapsed.Length))
+    } catch {
+        return "(log unavailable: $($_.Exception.Message))"
+    }
+}
+
+# RFC3339 from Docker -> a UTC instant, or $null.
+function ConvertTo-UtcInstant {
+    [CmdletBinding()]
+    param([string]$Value)
+    if (-not $Value) { return $null }
+    try { return ([datetimeoffset]::Parse($Value, [cultureinfo]::InvariantCulture)).UtcDateTime }
+    catch { return $null }
+}
+
+# One page per key per $LoopAlertCooldownHours, through the catastrophe path.
+# Returns $true when it sent. The cooldown sentinel is separate from the
+# catastrophe path's own .tg-alert-* throttle, which is 1h and does not cover
+# its Mattermost mirror at all.
+function Send-LoopAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Message
+    )
+    $sentinel = Join-Path $PROJECT_DIR "logs\.loop-alert-$Key"
+    try {
+        if (Test-Path $sentinel) {
+            if (((Get-Date) - (Get-Item $sentinel).LastWriteTime).TotalHours -lt $LoopAlertCooldownHours) {
+                Write-LogEntry "LOOP [$Key] still firing; not re-paged inside the ${LoopAlertCooldownHours}h cooldown: $Message" "WARN"
+                return $false
+            }
+        }
+    } catch { }
+    Send-CatastropheAlert -Key $Key -Message $Message
+    try { (Get-Date -Format o) | Out-File $sentinel -Encoding ascii -Force } catch { }
+    return $true
+}
+
+# Crash loops by RESTART-COUNT DELTA between passes, never the absolute count:
+# a container carrying 5,000 historical restarts that is now stable stays quiet.
+# A container seen for the first time (or recreated - a new Id) only records a
+# baseline. State lives in logs\.watchdog-restart-state.json. Returns $true when
+# nothing is looping.
+function Test-ContainerRestartLoops {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Facts)
+
+    $statePath = Join-Path $PROJECT_DIR "logs\.watchdog-restart-state.json"
+    $prev = @{}
+    try {
+        if (Test-Path $statePath) {
+            $raw = Get-Content $statePath -Raw -ErrorAction Stop
+            if ($raw -and $raw.Trim()) {
+                $obj = $raw | ConvertFrom-Json
+                foreach ($p in $obj.PSObject.Properties) { $prev[$p.Name] = $p.Value }
+            }
+        }
+    } catch {
+        Write-LogEntry "restart-state unreadable ($($_.Exception.Message)); rebuilding baseline" "WARN"
+        $prev = @{}
+    }
+
+    $next = @{}
+    $seen = @{}
+    $looping = @()
+    $quiet = @()
+    foreach ($f in $Facts) {
+        if (-not (Test-UnboundedRestartPolicy -Policy $f.RestartPolicy -MaxRetries $f.MaxRetries)) { continue }
+        $key = $f.Name
+        $streak = 0
+        $accum = 0
+        # Parse the state defensively: one hand-edited or truncated value must
+        # cost one quiet pass, not throw out of the whole health pass.
+        $p = $prev[$key]
+        if ($p -and $p.Id -eq $f.Id) {
+            $prevCount = 0; $prevStreak = 0; $prevAccum = 0
+            $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
+            [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
+            [void][int]::TryParse([string]$p.Accum, [ref]$prevAccum)
+            if ($okCount) {
+                $delta = $f.RestartCount - $prevCount
+                if ($delta -gt 0) {
+                    $streak = $prevStreak + 1
+                    $accum = $prevAccum + $delta
+                } elseif ($f.Status -eq 'restarting') {
+                    # No new restart since the last pass, but Docker is sitting
+                    # in its restart backoff (up to a minute): the loop has NOT
+                    # stopped - a pass run soon after the previous one lands
+                    # here. Keep the streak rather than reset it.
+                    $streak = $prevStreak
+                    $accum = $prevAccum
+                }
+            }
+        }
+        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0 }
+        $seen[$key] = $true
+        if ($accum -ge $RestartLoopThreshold) {
+            $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak }
+        } elseif ($f.Status -ne 'restarting') {
+            # A candidate for the all-clear only when it has SETTLED: stopped,
+            # or running for $LoopSettledMinutes since its last start. One quiet
+            # pass alone can be shorter than the gap between two crashes.
+            $started = ConvertTo-UtcInstant $f.StartedAt
+            if ($f.Status -ne 'running' -or ($started -and ((Get-Date).ToUniversalTime() - $started).TotalMinutes -ge $LoopSettledMinutes)) {
+                $quiet += $key
+            }
+        }
+    }
+
+    # Carry forward a baseline this pass simply did not see (the facts can be
+    # partial by design), for at most six passes - an hour - after which a name
+    # Docker stopped reporting is dropped.
+    foreach ($k in $prev.Keys) {
+        if ($seen[$k]) { continue }
+        $missed = 0
+        [void][int]::TryParse([string]$prev[$k].Missed, [ref]$missed)
+        if ($missed -ge 6) { continue }
+        $next[$k] = @{
+            Count  = $prev[$k].Count
+            Id     = $prev[$k].Id
+            Streak = $prev[$k].Streak
+            Accum  = $prev[$k].Accum
+            Missed = $missed + 1
+        }
+    }
+
+    try {
+        $dir = Split-Path -Parent $statePath
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        ($next | ConvertTo-Json -Depth 4) | Out-File $statePath -Encoding utf8 -Force
+    } catch { Write-LogEntry "could not persist restart-state: $($_.Exception.Message)" "WARN" }
+
+    # All-clear for a loop that has stopped (a no-op unless its key is firing).
+    foreach ($k in $quiet) {
+        Resolve-Catastrophe -Key ("crashloop-" + $k) -Message "container '$k' is no longer restarting."
+    }
+
+    if ($looping.Count -eq 0) {
+        Write-LogEntry "no container restart loops (watched $($seen.Count))" "DEBUG"
+        return $true
+    }
+    foreach ($l in $looping) {
+        $name = $l.Fact.Name
+        $why = Get-ContainerFaultLine -Name $name
+        Send-LoopAlert -Key ("crashloop-" + $name) -Message ("container '$name' is CRASH-LOOPING: $($l.Accum) restart(s) over $($l.Streak) watchdog pass(es), " +
+            "total $($l.Fact.RestartCount). Not restarted by the watchdog (a loop is usually a credential or config fault). Last fault line: $why") | Out-Null
+    }
+    return $false
+}
+
+# A running container joined to another's namespace (network_mode
+# "service:x" -> HostConfig.NetworkMode "container:<id>") is stranded when its
+# OWNER restarts after it started, or when the owner is gone. Returns $true when
+# no joiner is orphaned.
+function Test-NetnsJoinedContainers {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Facts)
+
+    $byId = @{}
+    foreach ($f in $Facts) { $byId[$f.Id] = $f }
+    $ok = $true
+    $confirmBudget = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($f in $Facts) {
+        if ($f.NetworkMode -notlike 'container:*') { continue }
+        if ($f.Status -ne 'running') { continue }
+        $ownerId = $f.NetworkMode.Substring('container:'.Length)
+        $owner = $byId[$ownerId]
+        if (-not $owner) {
+            # Absent from the facts is NOT absent from Docker - the facts can be
+            # partial. Ask Docker, on a short leash; only a definite "no such
+            # container" is a page.
+            if ($confirmBudget.Elapsed.TotalSeconds -gt $NetnsConfirmBudgetSeconds) {
+                Write-LogEntry "$($f.Name) netns owner $ownerId not confirmed - the ${NetnsConfirmBudgetSeconds}s confirmation budget is spent this pass" "WARN"
+                continue
+            }
+            $probe = Invoke-BoundedDocker -DockerArgs @('inspect', '--format', $ContainerFactsFormat, $ownerId) -TimeoutSeconds $DockerProbeTimeoutSeconds
+            if ($null -ne $probe) {
+                $owner = ConvertTo-ContainerFact -Record (@($probe) | Select-Object -First 1)
+            } elseif ($script:BoundedFailureReason -match '(?i)no such (object|container)') {
+                Send-LoopAlert -Key ("netns-" + $f.Name) -Message ("container '$($f.Name)' shares the network namespace of a container that NO LONGER EXISTS ($ownerId) - " +
+                    "it has no working network. Recreate it.") | Out-Null
+                $ok = $false
+                continue
+            }
+            if (-not $owner) {
+                Write-LogEntry ("$($f.Name) netns owner $ownerId could not be confirmed" +
+                    $(if ($script:BoundedFailureReason) { " ($script:BoundedFailureReason)" } else { "" }) +
+                    " - not alerting on an unconfirmed absence") "WARN"
+                continue
+            }
+        }
+        $joinerStart = ConvertTo-UtcInstant $f.StartedAt
+        $ownerStart = ConvertTo-UtcInstant $owner.StartedAt
+        if ($null -eq $joinerStart -or $null -eq $ownerStart) {
+            Write-LogEntry "$($f.Name)/$($owner.Name) netns check skipped - unparseable start time" "DEBUG"
+            continue
+        }
+        if ($ownerStart -gt $joinerStart) {
+            $why = Get-ContainerFaultLine -Name $owner.Name
+            Send-LoopAlert -Key ("netns-" + $f.Name) -Message ("container '$($f.Name)' is ORPHANED in a dead network namespace: its owner '$($owner.Name)' restarted at $($owner.StartedAt), " +
+                "AFTER '$($f.Name)' started at $($f.StartedAt). Its own healthcheck cannot see this. Restart the owner first, then '$($f.Name)'. Owner's last fault line: $why") | Out-Null
+            $ok = $false
+        } else {
+            Write-LogEntry "$($f.Name) netns owner $($owner.Name) intact" "DEBUG"
+            Resolve-Catastrophe -Key ("netns-" + $f.Name) -Message "container '$($f.Name)' shares a live network namespace again."
+        }
+    }
+    return $ok
+}
+
+# One census feeds both checks. $true = nothing found (or nothing readable,
+# which is logged but is not itself a finding).
+function Invoke-ContainerLoopCheck {
+    [CmdletBinding()]
+    param()
+    $facts = @(Get-ContainerRuntimeFacts)
+    if ($facts.Count -eq 0) {
+        Write-LogEntry "container facts empty - skipping the crash-loop and netns checks this pass" "WARN"
+        return $true
+    }
+    $loopsOk = [bool](@(Test-ContainerRestartLoops -Facts $facts) | Select-Object -Last 1)
+    $netnsOk = [bool](@(Test-NetnsJoinedContainers -Facts $facts) | Select-Object -Last 1)
+    return ($loopsOk -and $netnsOk)
+}
+# === END CONTAINER LOOPS ======================================================
+
 function Invoke-HealthCheck {
     Write-LogEntry "Starting comprehensive health check..."
     # Faults found this cycle. Checks RECORD into this and carry on rather
@@ -2014,18 +2542,18 @@ function Invoke-HealthCheck {
         }
     }
 
-    # Verify remaining compose containers (non-critical — log + attempt recovery
+    # Verify remaining compose containers (non-critical - log + attempt recovery
     # but do not fail the overall health check). Order matters: mnemory depends
     # on llama-cpp + llama-cpp-embed, which are confirmed healthy above.
     Confirm-AuxiliaryContainer -Container "mnemory"            -RestartWaitSeconds 20 | Out-Null
     Confirm-AuxiliaryContainer -Container "mnemory-backup"      -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -Container "openwebui-backup"    -RestartWaitSeconds 10 | Out-Null
     # surrealdb has no HTTP healthcheck (WS-only); just verify the container is up.
-    # open_notebook gets a real API probe below — surrealdb must be up first since
+    # open_notebook gets a real API probe below - surrealdb must be up first since
     # open_notebook depends on it.
     Confirm-AuxiliaryContainer -Container "surrealdb"           -RestartWaitSeconds 10 | Out-Null
 
-    # Test open-notebook API independently (separate from running-state check —
+    # Test open-notebook API independently (separate from running-state check -
     # the FastAPI process can be unresponsive while the container is still up).
     # Non-fatal: notebook UI is non-critical for the core LLM/RAG path.
     if (-not (Test-OpenNotebookHealth)) {
@@ -2035,7 +2563,7 @@ function Invoke-HealthCheck {
         }
     }
 
-    # --- Private web-search gateway plane (SearXNG-over-Tor) — non-critical ---
+    # --- Private web-search gateway plane (SearXNG-over-Tor) - non-critical ---
     # Compose SERVICE keys differ from CONTAINER names here (redis ->
     # search-redis, gateway -> search-gateway; tor retired 2026-08-21). These
     # calls take CONTAINER names - until 2026-08-28 they passed the service keys
@@ -2056,7 +2584,7 @@ function Invoke-HealthCheck {
         Confirm-AuxiliaryContainer -Container "search-gateway" -RestartWaitSeconds 15 | Out-Null
     }
 
-    # --- little-coder plane (autonomous coding agent) — non-critical ---
+    # --- little-coder plane (autonomous coding agent) - non-critical ---
     # open-terminal (checked above) is its workspace; these are the agent + its
     # MCP-as-OpenAPI bridge + the egress proxy.
     Confirm-AuxiliaryContainer -Container "little-coder" -RestartWaitSeconds 15 | Out-Null
@@ -2091,7 +2619,7 @@ function Invoke-HealthCheck {
 
     # --- remaining main-stack backup sidecars (cron loops; mnemory-backup and
     # openwebui-backup are confirmed above; portal backups (caddy/authelia) are
-    # deliberately NOT here — the portal has its own lifecycle (portal-on/off)
+    # deliberately NOT here - the portal has its own lifecycle (portal-on/off)
     # and must not be auto-started; OB/agent-org backups live in their own
     # Invoke-*Health blocks. Test-BackupRecency below watches everyone's OUTPUT.
     Confirm-AuxiliaryContainer -Container "little-coder-backup"  -RestartWaitSeconds 10 | Out-Null
@@ -2099,6 +2627,12 @@ function Invoke-HealthCheck {
     Confirm-AuxiliaryContainer -Container "lm-models-backup"     -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -Container "tailscale-backup"     -RestartWaitSeconds 10 | Out-Null
     Confirm-AuxiliaryContainer -Container "open-notebook-backup" -RestartWaitSeconds 10 | Out-Null
+
+    # --- EVERY container, not a list: crash loops + orphaned network
+    # namespaces (see the CONTAINER LOOPS section). Reports, never repairs.
+    if (-not [bool](@(Invoke-ContainerLoopCheck) | Select-Object -Last 1)) {
+        $script:HealthIssues += 'container-loop'
+    }
 
     # --- Open Brain stack (SEPARATE compose project) incl. mcp stale-pool guard ---
     Invoke-OpenBrainHealth
@@ -2191,6 +2725,21 @@ switch ($Mode.ToLower()) {
         exit $(if ($Success) { 0 } else { 1 })
     }
     
+    "loops" {
+        # REPORT-ONLY: the container-loop census and nothing else. No repair,
+        # no compose, no Docker Desktop restart (Confirm-DockerEngine is NOT
+        # called - it can stop Docker Desktop and shut WSL down), no host task
+        # restarts. Only read-only docker calls (version, ps, inspect, logs),
+        # each bounded, and alerts through the catastrophe path.
+        $engine = Invoke-BoundedDocker -DockerArgs @('version', '--format', '{{.Server.Version}}')
+        if ($null -eq $engine) {
+            Write-LogEntry "loops mode: docker engine did not answer ($script:BoundedFailureReason) - nothing checked, nothing repaired" "ERROR"
+            exit 2
+        }
+        $Success = [bool](@(Invoke-ContainerLoopCheck) | Select-Object -Last 1)
+        exit $(if ($Success) { 0 } else { 1 })
+    }
+
     "daemon" {
         Start-Daemon
     }
@@ -2204,10 +2753,11 @@ switch ($Mode.ToLower()) {
     }
     
     default {
-        Write-Host "Usage: stack-watchdog.ps1 [-Mode check|daemon|install-service] [-IntervalSeconds 60]"
+        Write-Host "Usage: stack-watchdog.ps1 [-Mode check|loops|daemon|install-service] [-IntervalSeconds 60]"
         Write-Host ""
         Write-Host "Modes:"
         Write-Host "  check           - Run single health check (default)"
+        Write-Host "  loops           - Report-only: crash loops + orphaned netns across every container, no repair"
         Write-Host "  daemon          - Run continuously as daemon"
         Write-Host "  install-service - Install as Windows Service (requires admin)"
         exit 1
