@@ -27,6 +27,17 @@
 # its own destination, and Resolve-NasArchiveRoot refuses an archive root inside
 # (or equal to) either slot - compared after normalisation, so `x\..\slot-A`,
 # `.\slot-A`, `/slot-A`, `slot-A.` and `slot-A ` are all the slot.
+#
+# THREAT MODEL (stated by decision, 2026-09-29): the archive pass protects against
+# ORDINARY conditions under ./backup/ - links (junctions, symlinks) at any depth,
+# hidden files and folders, folders it cannot read, interrupted and stale copies,
+# locked files, and bad or conflicting checksum records - and fails LOUDLY on each.
+# It does NOT defend against someone actively rearranging ./backup/ WHILE a pass
+# runs (e.g. swapping a folder for a junction between the listing and the copy), nor
+# against a -Source / project root whose PARENT is a link: a person with write
+# access there can edit these scripts too. Such a swap is still not silent for long:
+# the next run compares every archived file with its local source and reports any
+# difference as a MISMATCH (alert, no completion marker).
 
 function Get-DotEnvValue {
   # KEY=value from a .env file; quotes stripped; comments and blank lines skipped.
@@ -62,8 +73,9 @@ function Get-NasNormalPath {
     drops the trailing dots and spaces of the LAST segment; this function then also
     trims trailing dots and spaces from EVERY segment (Win32 does not always, but a
     comparison that over-matches only over-refuses) and drops a trailing separator.
-    Refuses a relative path (it would resolve against the current directory) and the
-    \\?\ and \\.\ device forms (they bypass that normalisation).
+    Refuses a relative path (it would resolve against the current directory), a
+    drive-relative one (`\x`, `C:x` - they depend on the current drive/directory) and
+    the \\?\ and \\.\ device forms (they bypass that normalisation).
     Not I/O-free: for a segment with `~` GetFullPath asks the filesystem for the long
     name (8.3 expansion), so a short-name spelling of a slot is refused too when the
     folder exists; nothing is created or written.
@@ -72,7 +84,7 @@ function Get-NasNormalPath {
   if ($Path.StartsWith('\\?\') -or $Path.StartsWith('\\.\') -or $Path.StartsWith('//?/') -or $Path.StartsWith('//./')) {
     throw "device-path form is not accepted: '$Path'"
   }
-  if (-not [System.IO.Path]::IsPathRooted($Path) -or ($Path -match '^[A-Za-z]:(?![\\/])')) {
+  if (-not [System.IO.Path]::IsPathRooted($Path) -or ($Path -match '^[A-Za-z]:(?![\\/])') -or ($Path -match '^[\\/](?![\\/])')) {
     throw "path must be absolute: '$Path'"
   }
   $full = [System.IO.Path]::GetFullPath($Path)
@@ -419,6 +431,27 @@ function Find-NasLinks {
   return $found
 }
 
+function Get-NasFolderFiles {
+  <#
+    The re-checking listing of ONE archive folder: $Folder itself and every item below
+    it (hidden ones included, -Force) are checked for a reparse point, and any listing
+    error throws (-ErrorAction Stop) - so a link or a denial that appears after an
+    up-front scan still fails. Returns @{ File; Rel } in path order, Rel relative to
+    $Base. Used by the weekly pass and by copy-archives-to-nas.ps1 alike.
+  #>
+  param([string]$Folder, [string]$Base)
+  $reparse = [System.IO.FileAttributes]::ReparsePoint
+  $fi = Get-Item -LiteralPath $Folder -Force -ErrorAction Stop
+  if (($fi.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($fi.FullName)" }
+  $out = @()
+  foreach ($i in @(Get-ChildItem -LiteralPath $Folder -Recurse -Force -ErrorAction Stop | Sort-Object FullName)) {
+    if (($i.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($i.FullName)" }
+    if ($i.PSIsContainer) { continue }
+    $out += @{ File = $i.FullName; Rel = $i.FullName.Substring($Base.TrimEnd('\').Length + 1) }
+  }
+  return $out
+}
+
 function Get-NasArchiveFiles {
   <#
     The files the weekly archive pass covers: every file BELOW a subdirectory of
@@ -442,15 +475,10 @@ function Get-NasArchiveFiles {
   if ($links.Count -gt 0) {
     throw ("refusing to archive through links - replace each with the real folder/file: " + ($links -join ', '))
   }
-  $reparse = [System.IO.FileAttributes]::ReparsePoint
   $out = @()
   foreach ($d in @(Get-ChildItem -LiteralPath $src -Directory -Force -ErrorAction Stop | Sort-Object Name)) {
-    if (($d.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($d.FullName)" }
-    foreach ($i in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop | Sort-Object FullName)) {
-      if (($i.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($i.FullName)" }
-      if ($i.PSIsContainer) { continue }
-      $out += @{ File = $i.FullName; Rel = $i.FullName.Substring($src.Length + 1) }
-    }
+    # Get-NasFolderFiles re-checks the folder itself and everything below it.
+    $out += @(Get-NasFolderFiles -Folder $d.FullName -Base $src)
   }
   return $out
 }

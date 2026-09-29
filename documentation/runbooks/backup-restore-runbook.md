@@ -197,6 +197,16 @@ overwritten in any of them. What each means and what to do:
 | `MISMATCH` | the NAS copy is complete but differs from the local file | `Trust: LOCAL` = the local file matches its recorded checksum, the NAS copy is damaged: after checking, move the NAS copy aside and let the next run (or `copy-archives-to-nas.ps1`) copy it again; `Trust: UNKNOWN` = no recorded checksum: compare both by hand and decide |
 | `FAIL-COPY` | this one file could not be written, verified or renamed (share full or read-only, network drop, the local file locked or unreadable, another run wrote the file meanwhile, or a directory / junction sits at the file's name or its `.cf-partial` temp name - never written through), or `(pass)`: the pass itself failed, e.g. an archive folder under `./backup/` could not be listed (access denied) or a junction / symbolic link was found under `./backup/` (the line names it; replace it with the real folder or file) | read the reason in the line; fix the cause; the next run retries. Our temp file is removed; if it could not be, the line says `temp ... could not be removed` - delete that `.cf-partial` by hand. The other files of the pass are still processed |
 
+**What the archive copy protects against, and what it does not.** It refuses, loudly (an
+`[ERROR]`, an alert, no completion marker), the ordinary conditions under `./backup/`: junctions
+and symbolic links at any depth, folders it cannot read, interrupted or stale copies, locked
+files, and missing, wrong or conflicting checksum records; hidden files and folders are archived
+like any other. It does NOT defend against someone actively rearranging `./backup/` while a run is
+in progress (for example swapping a folder for a junction between the listing and the copy), nor
+against the project folder being reached through a link in its parent path - a person with that
+write access can change these scripts as well. Such a swap does not stay silent: the next run
+compares every archived file with its local source and reports a difference as `MISMATCH`.
+
 Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.
 `scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`

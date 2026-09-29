@@ -241,7 +241,7 @@ try {
   Blob "$old\d\fat.tar" 5000; Stamp "$old\d\fat.tar" ([datetime]::SpecifyKind([datetime]'1980-01-01T12:00:00', 'Utc'))
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   $e1 = StatusOf $res 'd\epoch.tar'; $f1s = StatusOf $res 'd\fat.tar'
-  Check 'M20 pre-1980 local stamps (1970 epoch, FAT 1980-01-01): COPIED, NAS stamp clamped to 1980-01-04, the log detail names the original' (($e1.Status -eq 'COPIED') -and ($f1s.Status -eq 'COPIED') -and ((Get-Item -LiteralPath "$oldNas\d\epoch.tar").LastWriteTimeUtc -eq [datetime]'1980-01-04') -and ($e1.Detail -like '*clamped*1970-01-01*')) "$($e1.Status) $($e1.Detail)"
+  Check 'M20 pre-1980 local stamps (1970 epoch, FAT 1980-01-01): COPIED, NAS stamp clamped to 1980-01-04, the log detail names the original' (($e1.Status -eq 'COPIED') -and ($f1s.Status -eq 'COPIED') -and ((Get-Item -LiteralPath "$oldNas\d\epoch.tar").LastWriteTimeUtc -eq [datetime]'1980-01-04') -and ($e1.Detail -like '*clamped to 1980-01-04*1970-01-01*')) "$($e1.Status) $($e1.Detail)"
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   Check 'M21 ... the next pass: both PRESENT (not REPAIRED - a finished copy never looks incomplete)' ((@($res | Where-Object { $_.Status -eq 'PRESENT' }).Count -eq 2)) (($res | ForEach-Object { $_.Status }) -join ',')
   $oldState = TreeHashes $oldNas
@@ -401,8 +401,18 @@ try {
     Check "L1 $($lc.N): the UP-FRONT scan refuses it (throws 'replace each ...' naming it), nothing archived" ($made -and $threw -and ($msg -like "*replace each*$($lc.P)*") -and -not (Test-Path -LiteralPath $lkNas)) "made=$made threw=$threw msg=$msg"
     $null = cmd /c "$($lc.Rm) `"$($lc.P)`"" 2>&1
   }
+  $null = cmd /c "mklink /J `"$lk\arch\two-a`" `"$lkOut\folder`"" 2>&1; $null = cmd /c "mklink /J `"$lk\arch\inner\two-b`" `"$lkOut\folder`"" 2>&1
+  $msg = ''; try { $null = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas) } catch { $msg = $_.Exception.Message }
+  Check 'L1b two links at once: the up-front scan names BOTH' (($msg -like "*$lk\arch\two-a*") -and ($msg -like "*$lk\arch\inner\two-b*")) $msg
+  $null = cmd /c "rmdir `"$lk\arch\two-a`"" 2>&1; $null = cmd /c "rmdir `"$lk\arch\inner\two-b`"" 2>&1
   $res = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas)
-  Check 'L2 with the links removed the same tree archives normally (2 files, nothing from behind the links)' ((@($res | Where-Object { $_.Status -eq 'COPIED' }).Count -eq 2) -and -not (Test-Path -LiteralPath "$lkNas\arch\inner\jn"))
+  Check 'L2 a normal passing run over a NESTED folder: exactly 2 results, both COPIED (arch\real.tar, arch\inner\deep.tar), nothing from behind the links' (($res.Count -eq 2) -and (@($res | Where-Object { $_.Status -eq 'COPIED' }).Count -eq 2) -and ((StatusOf $res 'arch\inner\deep.tar').Status -eq 'COPIED') -and -not (Test-Path -LiteralPath "$lkNas\arch\inner\jn")) (($res | ForEach-Object { "$($_.Status):$($_.Rel)" }) -join ' ')
+  # hidden FILE and hidden FOLDER below the top level
+  Blob "$lk\arch\inner\hid.tar" 500; (Get-Item -LiteralPath "$lk\arch\inner\hid.tar").Attributes = 'Hidden'
+  New-Item -ItemType Directory -Force -Path "$lk\arch\hidsub" | Out-Null; Blob "$lk\arch\hidsub\x.tar" 500
+  (Get-Item -LiteralPath "$lk\arch\hidsub").Attributes = 'Hidden, Directory'
+  $res = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas)
+  Check 'L4b a HIDDEN FILE and a file in a HIDDEN FOLDER below the top level are both COPIED' (((StatusOf $res 'arch\inner\hid.tar').Status -eq 'COPIED') -and ((StatusOf $res 'arch\hidsub\x.tar').Status -eq 'COPIED')) (($res | ForEach-Object { "$($_.Status):$($_.Rel)" }) -join ' ')
   # a HIDDEN top-level archive folder is archived like any other (not dropped)
   New-Item -ItemType Directory -Force -Path "$lk\hiddenarch" | Out-Null
   (Get-Item -LiteralPath "$lk\hiddenarch").Attributes = 'Hidden, Directory'
@@ -412,19 +422,35 @@ try {
   # the tree changes AFTER the up-front scan: the listing itself must refuse
   $realFind = ${function:Find-NasLinks}
   try {
-    ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = cmd /c "mklink /J `"$lk\arch\inner\late`" `"$lkOut\folder`"" 2>&1; return $found }
-    $msg = ''; $threw = $false
-    try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas3')) } catch { $threw = $true; $msg = $_.Exception.Message }
-    Check 'L5 a junction created AFTER the link scan is still refused by the listing (throws naming it)' ($threw -and ($msg -like "*$lk\arch\inner\late*")) "threw=$threw msg=$msg"
-    $null = cmd /c "rmdir `"$lk\arch\inner\late`"" 2>&1
+    $lateCases = @(
+      @{ N = 'nested junction';       Mk = "mklink /J `"$lk\arch\inner\late`" `"$lkOut\folder`"";                  P = "$lk\arch\inner\late";     Rm = 'rmdir' }
+      @{ N = 'TOP-LEVEL junction';    Mk = "mklink /J `"$lk\latetop`" `"$lkOut\folder`"";                          P = "$lk\latetop";             Rm = 'rmdir' }
+      @{ N = 'nested FILE symlink';   Mk = "mklink `"$lk\arch\inner\late.tar`" `"$lkOut\file-behind-link.tar`"";   P = "$lk\arch\inner\late.tar"; Rm = 'del' }
+    )
+    foreach ($lc in $lateCases) {
+      $lateMk = $lc.Mk
+      ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = cmd /c $lateMk 2>&1; return $found }.GetNewClosure()
+      $msg = ''; $threw = $false
+      try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas3')) } catch { $threw = $true; $msg = $_.Exception.Message }
+      Check "L5 a $($lc.N) created AFTER the link scan is still refused by the listing (throws naming it)" ($threw -and ($msg -like "*$($lc.P)*")) "threw=$threw msg=$msg"
+      ${function:Find-NasLinks} = $realFind
+      $null = cmd /c "$($lc.Rm) `"$($lc.P)`"" 2>&1
+    }
     $sidL = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = & icacls "$lk\arch\inner" /deny "*${sidL}:(RX)" 2>&1; return $found }
     $threw = $false
     try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas4')) } catch { $threw = $true }
     Check 'L6 a folder denied AFTER the link scan still fails the listing (throws)' $threw
+    ${function:Find-NasLinks} = $realFind
+    $null = & icacls "$lk\arch\inner" /remove:d "*$sidL" 2>&1
+    ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = & icacls "$lk" /deny "*${sidL}:(RX)" 2>&1; return $found }
+    $threw = $false
+    try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas5')) } catch { $threw = $true }
+    Check 'L6b the source ROOT denied AFTER the link scan still fails the listing (throws)' $threw
   } finally {
     ${function:Find-NasLinks} = $realFind
     $null = & icacls "$lk\arch\inner" /remove:d "*$sidL" 2>&1
+    $null = & icacls "$lk" /remove:d "*$sidL" 2>&1
   }
   Check 'L3 the live-layout rule: a source whose ROOT is a link is refused too' ($(try { $null = cmd /c "mklink /J `"$root\lkroot`" `"$lk`"" 2>&1; $null = @(Invoke-NasArchivePass -Source "$root\lkroot" -Destination (Join-Path $root 'linknas2')); $false } catch { $_.Exception.Message -like '*lkroot*' } finally { $null = cmd /c "rmdir `"$root\lkroot`"" 2>&1 }))
 
@@ -555,6 +581,32 @@ try {
     $r = RunCopyTo (Join-Path $root 'nas13\archive') @('-Dirs', 'k') "$root\copylink-root"
     Check 'C18 the copy script: a -Source ROOT that is a junction is FAIL LINK naming it, exit 1, nothing copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $root\copylink-root")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas13'))) "rc=$($r.Rc) out=$($r.Out)"
   } finally { $null = cmd /c "rmdir `"$root\copylink-root`"" 2>&1 }
+  $null = cmd /c "mklink /J `"$root\copylink-hroot`" `"$cl`" && attrib +h `"$root\copylink-hroot`" /l" 2>&1
+  try {
+    $r = RunCopyTo (Join-Path $root 'nas14\archive') @('-Dirs', 'k') "$root\copylink-hroot"
+    Check 'C18b ... a HIDDEN -Source root junction too (FAIL LINK, exit 1, nothing copied)' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $root\copylink-hroot")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas14'))) "rc=$($r.Rc) out=$($r.Out)"
+  } finally { $null = cmd /c "rmdir `"$root\copylink-hroot`"" 2>&1 }
+  $r = RunCopyTo '\192.0.2.77\backups\ai-stack\archive' @('-Dirs', 'k') $cl
+  Check 'C19 a DRIVE-RELATIVE destination (\192.0.2.77\... - one backslash) is refused before any write (exit 2)' (($r.Rc -eq 2) -and ($r.Out -match 'must be absolute')) "rc=$($r.Rc) out=$($r.Out)"
+  New-Item -ItemType Directory -Force -Path "$root\dirs-real\sub" | Out-Null; Blob "$root\dirs-real\sub\far.tar" 400
+  $null = cmd /c "mklink /J `"$cl\lnk`" `"$root\dirs-real`"" 2>&1
+  try {
+    $r = RunCopyTo (Join-Path $root 'nas15\archive') @('-Dirs', 'lnk\sub') $cl
+    Check 'C20 a -Dirs value with a LINK segment (lnk\sub, lnk a junction) is FAIL LINK naming the segment, exit 1, nothing copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\lnk")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas15'))) "rc=$($r.Rc) out=$($r.Out)"
+  } finally { $null = cmd /c "rmdir `"$cl\lnk`"" 2>&1 }
+  # the copy script's own listing re-checks: a lib whose up-front scan sees nothing (as if
+  # the link appeared after it) still refuses the junction
+  $c21 = Join-Path $root 'c21run\scripts\backup'; New-Item -ItemType Directory -Force -Path $c21 | Out-Null
+  Copy-Item -LiteralPath $CopyScript -Destination "$c21\copy-archives-to-nas.ps1"
+  [System.IO.File]::WriteAllText("$c21\nas-sync-lib.ps1", [System.IO.File]::ReadAllText($Lib) + "`r`nfunction Find-NasLinks { param([string]`$Path) return @() }`r`n")
+  $null = cmd /c "mklink /J `"$cl\k\inner\late`" `"$root\copylink-out`"" 2>&1
+  try {
+    $ErrorActionPreference = 'Continue'
+    $o21 = & $ps -NoProfile -ExecutionPolicy Bypass -File "$c21\copy-archives-to-nas.ps1" -Destination (Join-Path $root 'nas16\archive') -Source $cl -Dirs k 2>&1 | Out-String
+    $rc21 = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check 'C21 the copy script uses the re-checking listing: a junction the scan did not report is still FAIL LINK, exit 1, nothing copied' (($rc21 -eq 1) -and ($o21 -match [regex]::Escape("$cl\k\inner\late")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas16\archive\k'))) "rc=$rc21 out=$o21"
+  } finally { $null = cmd /c "rmdir `"$cl\k\inner\late`"" 2>&1 }
 
   $lkSrc = Join-Path $root 'lksrc'
   New-Item -ItemType Directory -Force -Path "$lkSrc\k" | Out-Null
@@ -589,6 +641,10 @@ try {
   Copy-Item -LiteralPath $CopyScript -Destination "$eproj\scripts\backup\copy-archives-to-nas.ps1"
   Copy-Item -LiteralPath $backups -Destination "$eproj\backups" -Recurse
   Copy-Item -LiteralPath $backup -Destination "$eproj\backup" -Recurse
+  # hidden items below the top level, archived by the job end to end
+  Blob "$eproj\backup\models\hidden-export.json" 350; (Get-Item -LiteralPath "$eproj\backup\models\hidden-export.json").Attributes = 'Hidden'
+  New-Item -ItemType Directory -Force -Path "$eproj\backup\models\hidsub" | Out-Null; Blob "$eproj\backup\models\hidsub\n.json" 350
+  (Get-Item -LiteralPath "$eproj\backup\models\hidsub").Attributes = 'Hidden, Directory'
   $fakePw = 'cfnas-pw-NOT-REAL-4q7z'
   [System.IO.File]::WriteAllLines("$eproj\.env", [string[]]@('NAS_BACKUP_USER=cfnas-user', "NAS_BACKUP_PASSWORD=$fakePw"))
   [System.IO.File]::WriteAllText("$eproj\scripts\lib\portal-alerter-client.ps1",
@@ -608,12 +664,24 @@ function global:Map-CfPath([string]$p) {
   return $p
 }
 function global:Test-CfShare([string]$p) { return ($p -and $p.ToLowerInvariant().StartsWith($global:CfPrefix.ToLowerInvariant())) }
+# Every place the stubs WRITE must be the mapped share or inside the test's own temp
+# root; anything else (a mangled '\192.0.2.77\...' that resolves to D:\192.0.2.77, a
+# stray absolute path) is refused and traced - a rig slip cannot write to the host.
+function global:Assert-CfDest([string]$p) {
+  if (-not $p) { return }
+  if (Test-CfShare $p) { return }
+  $full = [System.IO.Path]::GetFullPath($p)
+  if ($full.ToLowerInvariant().StartsWith(($env:CFNAS_ROOT.TrimEnd('\') + '\').ToLowerInvariant())) { return }
+  Add-Content -LiteralPath $env:CFNAS_TRACE -Value "REFUSED-DEST|$p"
+  throw "stub: refusing a write outside the stand-in: $p"
+}
 function global:net.exe { Add-Content -LiteralPath $env:CFNAS_TRACE -Value ('NET|' + ($args -join ' ')); $global:LASTEXITCODE = [int]$env:CFNAS_RC_NET; 'The command completed successfully.' }
 function global:msg.exe { Add-Content -LiteralPath $env:CFNAS_TRACE -Value 'MSGEXE' }
 function global:Resolve-DnsName { param($Name, $Type, $ErrorAction) [pscustomobject]@{ IPAddress = '192.0.2.77' } }
 function global:robocopy.exe {
   $k = if ($args -contains '/MIR') { 'MIR' } else { 'OTHER' }
   Add-Content -LiteralPath $env:CFNAS_TRACE -Value ("ROBO-$k|" + ($args -join ' '))
+  foreach ($a in $args) { $pa = $(if ($a -like '/LOG*:*') { $a.Substring($a.IndexOf(':') + 1) } elseif ($a -like '/*') { '' } else { $a }); if ($pa) { Assert-CfDest $pa } }
   $mapped = @($args | ForEach-Object { Map-CfPath $_ })
   $forced = [Environment]::GetEnvironmentVariable("CFNAS_RC_$k")
   if ($forced) { $global:LASTEXITCODE = [int]$forced; return }
@@ -641,11 +709,13 @@ function global:Test-Path {
 }
 function global:New-Item {
   [CmdletBinding()] param([string]$ItemType, [Parameter(Position = 0)][string[]]$Path, [switch]$Force)
+  foreach ($x in $Path) { Assert-CfDest $x }
   if ($PSBoundParameters.ContainsKey('Path')) { $PSBoundParameters['Path'] = @($Path | ForEach-Object { Map-CfPath $_ }) }
   Microsoft.PowerShell.Management\New-Item @PSBoundParameters
 }
 function global:Copy-Item {
   [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$Destination, [switch]$Force, [switch]$Recurse)
+  Assert-CfDest $Destination
   if (Test-CfShare $Destination) {
     Add-Content -LiteralPath $env:CFNAS_TRACE -Value "COPY|$Destination"
     if ($env:CFNAS_FAIL_COPY -eq '1') { throw 'stub: the share refused the write' }
@@ -658,6 +728,7 @@ function global:Copy-Item {
 function global:Remove-Item {
   [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [switch]$Force, [switch]$Recurse)
   $t = if ($LiteralPath) { $LiteralPath[0] } else { $Path[0] }
+  Assert-CfDest $t
   if (Test-CfShare $t) { Add-Content -LiteralPath $env:CFNAS_TRACE -Value "REMOVE|$t" }
   if ($PSBoundParameters.ContainsKey('Path')) { $PSBoundParameters['Path'] = @($Path | ForEach-Object { Map-CfPath $_ }) }
   if ($PSBoundParameters.ContainsKey('LiteralPath')) { $PSBoundParameters['LiteralPath'] = @($LiteralPath | ForEach-Object { Map-CfPath $_ }) }
@@ -665,6 +736,7 @@ function global:Remove-Item {
 }
 function global:Move-Item {
   [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$Destination, [switch]$Force)
+  Assert-CfDest $Destination
   if (Test-CfShare $Destination) { Add-Content -LiteralPath $env:CFNAS_TRACE -Value "MOVE|$Destination" }
   if ($PSBoundParameters.ContainsKey('Path')) { $PSBoundParameters['Path'] = @($Path | ForEach-Object { Map-CfPath $_ }) }
   if ($PSBoundParameters.ContainsKey('LiteralPath')) { $PSBoundParameters['LiteralPath'] = @($LiteralPath | ForEach-Object { Map-CfPath $_ }) }
@@ -697,7 +769,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
     Set-Content -LiteralPath $trace -Value '' -Encoding ascii
     Get-ChildItem -LiteralPath "$eproj\logs" -File | Remove-Item -Force
     $saved = @{}
-    $vars = @{ CFNAS_TRACE = $trace; CFNAS_SHARE = $share; CFNAS_PARAMS = $Params; CFNAS_RC_NET = '0'; CFNAS_RC_MIR = ''; CFNAS_RC_OTHER = ''
+    $vars = @{ CFNAS_TRACE = $trace; CFNAS_SHARE = $share; CFNAS_ROOT = $root; CFNAS_PARAMS = $Params; CFNAS_RC_NET = '0'; CFNAS_RC_MIR = ''; CFNAS_RC_OTHER = ''
       CFNAS_BAD_PARTIAL = ''; CFNAS_RACE = ''; CFNAS_SHARE_REACHABLE = ''; CFNAS_FAIL_COPY = ''; CFNAS_THROW_LIST = ''; CFNAS_HASH_THROW = ''; DOCKER_HOST = 'tcp://127.0.0.1:1' }
     foreach ($k in $EnvSet.Keys) { $vars[$k] = $EnvSet[$k] }
     foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
@@ -720,9 +792,10 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Write-Host "== J: backup-to-nas.ps1 end to end (stubbed SMB, local stand-in share)"
   $r = RunStubbed $job "NasUncRoot=$unc"
   Check 'J1 happy run: exit 0 and the completion marker' (($r.Code -eq 0) -and ($r.Log -match '=== NAS sync complete ===')) "code=$($r.Code)"
-  Check 'J1s the log carries the per-status summary (archive pass summary: COPIED=9)' ($r.Log -match 'archive pass summary: COPIED=9\b')
+  Check "J1s the log carries the per-status summary (archive pass summary: COPIED=$($eArch.Count), hidden file and hidden folder included)" (($eArch.Count -eq 11) -and ($r.Log -match "archive pass summary: COPIED=$($eArch.Count)\b") -and (Test-Path -LiteralPath "$nasArc\models\hidden-export.json") -and (Test-Path -LiteralPath "$nasArc\models\hidsub\n.json")) "count=$($eArch.Count)"
+
   Check 'J1b call order: net use /delete, net use, slot mirror, net use /delete - no other robocopy, no alert' ((Kinds $r) -eq 'NET,NET,ROBO-MIR,NET') (Kinds $r)
-  Check 'J1c the archive pass wrote to \\<ip>\backups\ai-stack\archive (temp name, then rename)' ((@($r.Trace | Where-Object { $_ -like 'COPY|\\192.0.2.77\backups\ai-stack\archive\*.cf-partial' }).Count -eq 9) -and (@($r.Trace | Where-Object { $_ -like 'MOVE|\\192.0.2.77\backups\ai-stack\archive\*' -and $_ -notlike '*.cf-partial' }).Count -eq 9)) "copies=$(@($r.Trace | Where-Object { $_ -like 'COPY|*' }).Count)"
+  Check 'J1c the archive pass wrote to \\<ip>\backups\ai-stack\archive (temp name, then rename)' ((@($r.Trace | Where-Object { $_ -like 'COPY|\\192.0.2.77\backups\ai-stack\archive\*.cf-partial' }).Count -eq $eArch.Count) -and (@($r.Trace | Where-Object { $_ -like 'MOVE|\\192.0.2.77\backups\ai-stack\archive\*' -and $_ -notlike '*.cf-partial' }).Count -eq $eArch.Count)) "copies=$(@($r.Trace | Where-Object { $_ -like 'COPY|*' }).Count)"
   Check 'J1d the stand-in archive = ./backup subdirectory files, the slot = ./backups' ((SameTree $eArch (TreeHashes $nasArc)) -and (SameTree (TreeHashes "$eproj\backups") (TreeHashes (Join-Path $share "ai-stack\portal\$slot"))))
   Check 'J1e no UNC path escaped the stubs; the password appears in neither output nor log' (NoLeak $r)
   Check 'J1f the slot integrity check ran against the stand-in' ($r.Log -match 'integrity check OK')
@@ -757,11 +830,16 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
   Check 'J6 the share refuses the write: exit 2, no marker, FAIL-COPY [ERROR], alert, final name never created' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY models\\later\.json') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and -not (Test-Path -LiteralPath "$nasArc\models\later.json")) "code=$($r.Code)"
 
-  1..6 | ForEach-Object { Blob "$eproj\backup\models\cap-$_.json" 300 }
+  function AlertNames([string]$a) { if ($a -match 'not safely on the NAS \([^)]*\): (.*?)( and \d+ more \(see log .*\))?$') { return @($Matches[1] -split ', ') } else { return @() } }
+  1..4 | ForEach-Object { Blob "$eproj\backup\models\cap-$_.json" 300 }
+  $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
+  $al = @($r.Trace | Where-Object { $_ -like 'ALERT|*' }) -join ''
+  Check 'J6c exactly 5 failing files: the alert names all 5 and has NO "more" suffix' (($al -like '*archive pass: 5 file(s)*') -and ($al -notlike '* more (see log*') -and ((AlertNames $al).Count -eq 5)) $al
+  Blob "$eproj\backup\models\cap-5.json" 300
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
   Get-ChildItem -LiteralPath "$eproj\backup\models" -Filter 'cap-*.json' | Remove-Item -Force
   $al = @($r.Trace | Where-Object { $_ -like 'ALERT|*' }) -join ''
-  Check 'J6c more than 5 failing files: the alert names 5 and says "and N more (see log <path>)"' (($al -like '*archive pass: 7 file(s)*') -and ($al -like '* and 2 more (see log *nas-sync-*.log)*')) $al
+  Check 'J6d 6 failing files: the alert names exactly 5 and ends "and 1 more (see log <path>)"' (($al -like '*archive pass: 6 file(s)*') -and ($al -like '* and 1 more (see log *nas-sync-*.log)*') -and ((AlertNames $al).Count -eq 5)) $al
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_RC_MIR = '8' }
   Check 'J6b slot mirror rc 8: exit 2, no archive pass, alert' (($r.Code -eq 2) -and ($r.Log -notmatch 'archive pass:') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -ge 1)) "code=$($r.Code)"
 
@@ -844,6 +922,13 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Check 'K4 -Connect with the share already reachable: no net use at all' (($r.Code -eq 0) -and -not ($r.Trace | Where-Object { $_ -like 'NET|*' }))
   $r = RunStubbed $cp "Destination=\\192.0.2.77\backups\ai-stack\archive|Source=$e2e\emptysrc|Dirs=none|Connect|VerifyOnly" @{ CFNAS_SHARE_REACHABLE = '0' }
   Check 'K5 -Connect -VerifyOnly: no net use (verify never opens a session)' (-not ($r.Trace | Where-Object { $_ -like 'NET|*' }))
+
+  $outside = Join-Path ([System.IO.Path]::GetTempPath()) ('cfnas-refused-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+  $probe = Join-Path $e2e 'probe.ps1'
+  [System.IO.File]::WriteAllText($probe, "New-Item -ItemType Directory -Path '$outside' | Out-Null")
+  $r = RunStubbed $probe ''
+  Check 'K6 the stub harness REFUSES a write outside the stand-in (traced REFUSED-DEST, nothing created)' ((@($r.Trace | Where-Object { $_ -like 'REFUSED-DEST|*' }).Count -ge 1) -and -not (Test-Path -LiteralPath $outside)) ($r.Trace -join ' ; ')
+  if (Test-Path -LiteralPath $outside) { Remove-Item -LiteralPath $outside -Recurse -Force }
 
   Write-Host "== Z: sources untouched"
   Check 'Z1 ./backup stand-in unchanged by every run above' (SameTree $srcAll (TreeHashes $backup))

@@ -37,7 +37,10 @@
 #   with a Trust verdict where there is one - an alert, exit 2 and no completion
 #   marker. Why not move the archives under ./backups/ instead: both
 #   slots would hold them (~17 GB each) and the slot MIRROR would drop an archive
-#   two weeks after it left D:. The layout rules (sibling default, same share,
+#   two weeks after it left D:. Threat model (stated in nas-sync-lib.ps1):
+#   ordinary conditions are refused loudly; an active local writer rearranging
+#   ./backup/ during a pass is out of scope - the next run reports any resulting
+#   difference as a MISMATCH. The layout rules (sibling default, same share,
 #   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
 #
 # Parameters:

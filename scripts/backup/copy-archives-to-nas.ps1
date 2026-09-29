@@ -113,13 +113,27 @@ try {
       Write-Host "FAIL  $d  (no such directory under $Source)" -ForegroundColor Red
       $bad++; continue
     }
-    # -Force: hidden files too, exactly as the weekly pass (Get-NasArchiveFiles) lists them.
+    # Every path segment from -Source down to this -Dirs folder must be a real folder
+    # (-Dirs 'a\b' with 'a' a junction would otherwise be followed).
+    $segLink = $null; $cur = $Source
+    foreach ($seg in @($d -split '[\\/]' | Where-Object { $_ })) {
+      $cur = Join-Path $cur $seg
+      if (((Get-Item -LiteralPath $cur -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $segLink = $cur; break }
+    }
+    if ($segLink) {
+      Write-Host "FAIL LINK  $segLink  (a junction or symbolic link in the -Dirs path - not followed)" -ForegroundColor Red
+      $bad++; continue
+    }
     $links = @(Find-NasLinks $srcDir)
     if ($links.Count -gt 0) {
       foreach ($l in $links) { Write-Host "FAIL LINK  $l  (a junction or symbolic link - not followed; replace it with the real folder/file)" -ForegroundColor Red }
       $bad += $links.Count; continue
     }
-    $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Force | Sort-Object FullName)
+    # The same re-checking listing as the weekly pass (hidden items included; a link or
+    # an error that appears after the scan above still fails this directory).
+    try { $entries = @(Get-NasFolderFiles -Folder $srcDir -Base $Source) }
+    catch { Write-Host "FAIL LINK  $($_.Exception.Message)" -ForegroundColor Red; $bad++; continue }
+    $files = @($entries | ForEach-Object { Get-Item -LiteralPath $_.File -Force })
     Write-Host "== $d ($($files.Count) files)"
     foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory -Force | ForEach-Object { $_.FullName }))) {
       $listed = Read-NasSha256Sums $sumDir
