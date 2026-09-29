@@ -39,7 +39,10 @@ services:
     # split). TRAP found 2026-08-21: a fresh `--build` pulls an unpinned newer
     # `mcp` package whose fastmcp module moved -> ModuleNotFoundError crash
     # loop. Rebuild deliberately (fix/pin deps in ../../mnemory) — never as a
-    # side effect of `up --build`.
+    # side effect of `up --build`. The fork revision to build from is PINNED by
+    # the manifest's host_paths remedy (stack.manifest.toml, plane memory),
+    # which memory/README.md repeats; an older checkout builds an image that
+    # dies at startup on this internal-only network.
     image: mnemory:local
     pull_policy: never
     container_name: mnemory

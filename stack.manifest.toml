@@ -296,10 +296,14 @@ host = [
 ]
 # The build context of `mnemory` (memory/docker-compose.yml, `context:
 # ../../mnemory`, relative to memory/) is ../mnemory relative to the repo root.
-# The sibling checkout on this host tracks the fork's `dev` branch; the
-# upstream project is fpytloun/mnemory. test_stack.py holds this path to the compose file.
+# The remedy PINS the fork revision the plane is built from (e83cb5415481):
+# the first one that loads its BM25 model from the image with no network call
+# and holds mcp below 2. Moving the pin = a new fork commit, pushed, and this
+# remedy, memory/README.md and test_stack.py's MNEMORY_CLONE changed together.
+# doctor checks the path, not the revision. The upstream project is
+# fpytloun/mnemory. test_stack.py holds this path to the compose file.
 host_paths = [
-  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone -b dev https://github.com/devonpveller/mnemory.git ../mnemory" },
+  { path = "../mnemory", contains = [".git", "Dockerfile"], why = "memory/docker-compose.yml builds mnemory:local from this sibling checkout", remedy = "git clone https://github.com/devonpveller/mnemory.git ../mnemory; git -C ../mnemory checkout e83cb54154812005fd363f9df82ee59e5e1c028b" },
 ]
 keys     = ["MCP_API_KEY"]
 
