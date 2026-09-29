@@ -3187,16 +3187,24 @@ def wait_gates(capture, root, docker, gates):
         from what was observed, allowing for those polls seeing each change up to
         3 s plus two inspects late (the inspect before the sleep and the one that
         sees it) and closing a settle window up to one round late;
-      * the timeout is declared only once one more round has passed (`grace`: 3 s
-        plus the slowest inspect), because this level's own polls come less often
-        than a single gate's did and would otherwise declare it before that last
-        one-after-another poll. A gate alone in its level polls exactly as before
-        and gets no grace.
+      * the timeout is declared late enough (`grace`) that whatever one after
+        another would still have seen PASS is seen here too. One after another's
+        last poll came at most one lone round (3 s + an inspect) past the budget.
+        This level polls each gate once per LEVEL round (3 s + an inspect per open
+        gate), so it sees a change up to one level round later - and a settle
+        window twice: once to see the container running, once to see the window
+        close. grace = one lone round + two level rounds, a level round being the
+        longest measured so far and never less than 3 s + the slowest inspect x
+        the gates polled per round. A gate alone in its level polls exactly as
+        before and gets no grace.
     While an earlier gate is still open, S_i is not known yet and gate i cannot
     time out (one after another it was not watched yet). The price of those
-    allowances: a TIMEOUT can come later than it did, by a few poll rounds per
-    earlier gate, and never past the sum of the budgets plus a settle window per
-    gate. A pass, or a failure docker reports, is seen at the next poll either way.
+    allowances: every TIMEOUT is declared `grace` later than it was, and a later
+    gate's start can move by a few rounds more; a level never waits past the sum
+    of its budgets plus seven level rounds per gate (a gate's verdict comes at
+    most its budget + grace + a level round after its credited start, and the
+    next start at most lag + a round after that). A pass, or a failure docker
+    reports, is seen at the next poll either way.
 
     The first round in which any gate FAILS ends the wait: the level has failed and
     recover stops, as it did at the first failed gate before. Gates still pending
@@ -3210,15 +3218,23 @@ def wait_gates(capture, root, docker, gates):
     took = [None] * len(gates)      # seconds from the level's start to each gate's verdict
     gate_of = dict(pending)
     cost = 0.0                      # the slowest `docker inspect` seen in this level, seconds
+    longest_round = 0.0             # the longest measured round (from one round's start to the next's)
+    round_started = None
     while pending:
         failed = False
+        now = monotonic()
+        if round_started is not None:
+            longest_round = max(longest_round, now - round_started)
+        round_started = now
+        polled = len(pending)
         for i, gate in list(pending.items()):
             asked = monotonic()
             state = container_state(capture, root, docker, gate.name)
             now = monotonic()
             cost = max(cost, now - asked)
             start = one_after_another_start(took, [gate_of[j] for j in range(i)], cost)
-            grace = (GATE_POLL_SECONDS + cost) if len(gates) > 1 else 0.0
+            level_round = max(longest_round, GATE_POLL_SECONDS + cost * polled)
+            grace = (GATE_POLL_SECONDS + cost + 2 * level_round) if len(gates) > 1 else 0.0
             verdict = gate.observe(state, now, (now - started) if start is None else start, grace)
             if verdict is not None:
                 results[i] = verdict

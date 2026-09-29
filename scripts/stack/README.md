@@ -650,18 +650,24 @@ order, restart in dependency order, wait for health). Selection is the same as
    have STARTED watching it, rebuilt from what the poll saw and never taken as
    earlier than that: it allows for those polls seeing a change up to 3 s plus
    two `docker inspect`s late, and closing a settle window a round (3 s plus
-   one inspect) late, using the slowest inspect this level measured. A timeout
-   is declared one round past the budget, because a level's polls come less
-   often than a lone gate's did (a gate alone in its level gets no such grace).
-   A gate cannot time out while one before it in the level is still open. So
-   **no gate times out sooner than it did one after another**, provided no
-   inspect back then was slower than the slowest this level met - the one
-   cost the rule can know. The price is on the other side and is bounded: a
-   timeout can come a few poll rounds per earlier gate later (a container
-   ready in those seconds passes where it timed out before), and a level never
-   waits past the sum of its budgets plus a 15 s settle window per gate (one
-   after another, the worst case was the sum of the budgets plus its polls). A
-   pass, or a failure docker reports, is seen at the next poll either way.
+   one inspect) late, using the slowest inspect this level measured. A gate
+   cannot time out while one before it in the level is still open. In a level
+   of more than one gate a timeout is declared `grace` past the budget - one
+   lone round plus two LEVEL rounds (a level round is 3 s plus an inspect per
+   open gate, the longest measured) - because the level polls each gate less
+   often than a lone gate was polled: without it a gate that passed alone could
+   time out here (a first gate in a big level did). A gate alone in its level
+   gets no grace. So **no gate times out sooner than it did one after
+   another**, provided no inspect back then was slower than the slowest this
+   level met - the one cost the rule can know.
+   The price is on the other side, and bounded: every timeout, a first gate's
+   included, is declared `grace` later (9 s with free inspects; 3 s + c + 2 x
+   (3 s + c x gates) at an inspect of c - about 12.5 s for 12 gates at 0.14 s),
+   and a later gate's start can move a few rounds more; a container that
+   becomes ready in those seconds passes where it timed out before. A level
+   never waits past the sum of its budgets plus seven level rounds per gate
+   (measured: within 15 s per gate in every run so far). A pass, or a failure
+   docker reports, is seen at the next poll either way.
 4. **The first failed gate stops the run**: `refused: recover stopped at
    <plane>: <service> (<container>) <what docker said>`, with the last
    healthcheck output, a `docker logs <that container>` hint and the planes
