@@ -639,13 +639,43 @@ order, restart in dependency order, wait for health). Selection is the same as
 
    A container that crashes only AFTER its window, or turns unhealthy after it
    was healthy, still passes - the gates cannot see that. The gates of one
-   level run one after another, so each settle window adds its 15 s. The budget
-   is the healthcheck's own worst case - `start_period + retries x (interval +
-   timeout) + interval + 30 s` - or 300 s when the compose file declares none;
-   `--timeout` sets one budget for all.
+   level are **watched together**, every 3 s, from the moment that level's `up`
+   returned: a level of N settle-gated containers takes one 15 s window, not N
+   of them (cf-recover, 2026-09-29; before it, each window was waited in turn,
+   which cost OB1's settle-gated services minutes). Levels still start strictly
+   in order. The budget is each container's own: the healthcheck's worst case -
+   `start_period + retries x (interval + timeout) + interval + 30 s` - or 300 s
+   when the compose file declares none; `--timeout` sets one budget for all.
+   Each gate's budget runs from when the gates-one-after-another recover would
+   have STARTED watching it, rebuilt from what the poll saw and never taken as
+   earlier than that: it allows for those polls seeing a change up to 3 s plus
+   two `docker inspect`s late, and closing a settle window a round (3 s plus
+   one inspect) late, using the slowest inspect this level measured. A gate
+   cannot time out while one before it in the level is still open. In a level
+   of more than one gate a timeout is declared `grace` past the budget - one
+   lone round plus two LEVEL rounds (a level round is 3 s plus an inspect per
+   open gate, the longest measured) - because the level polls each gate less
+   often than a lone gate was polled: without it a gate that passed alone could
+   time out here (a first gate in a big level did). A gate alone in its level
+   gets no grace. So **no gate times out sooner than it did one after
+   another**, provided no inspect back then was slower than the slowest this
+   level met - the one cost the rule can know.
+   The price is on the other side, and bounded: every timeout, a first gate's
+   included, is declared `grace` later (9 s with free inspects; 3 s + c + 2 x
+   (3 s + c x gates) at an inspect of c - about 12.5 s for 12 gates at 0.14 s),
+   and a later gate's start can move a few rounds more; a container that
+   becomes ready in those seconds passes where it timed out before. A level
+   never waits past the sum of its budgets plus seven level rounds per gate
+   (measured: within 15 s per gate in every run so far). A pass, or a failure
+   docker reports, is seen at the next poll either way.
 4. **The first failed gate stops the run**: `refused: recover stopped at
    <plane>: <service> (<container>) <what docker said>`, with the last
-   healthcheck output and the planes left stopped. Exit 1.
+   healthcheck output, a `docker logs <that container>` hint and the planes
+   left stopped. Exit 1. The container named is the first to FAIL in time;
+   when two fail at the same poll, the first in the level's order. (One after
+   another, the first in the level's order that failed was named even when a
+   later one had failed sooner.) The level's gates still open at that poll are
+   printed `[--] ... not awaited`, never as passed.
 
 The orders are **derived, not listed**. Container levels come from each
 service's `depends_on` plus `network_mode: service:X`, so:
