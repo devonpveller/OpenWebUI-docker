@@ -634,14 +634,24 @@ STACK_ROOT = Path(__file__).resolve().parents[2]   # the checkout this module be
 def _git_env() -> dict:
     """The environment git runs with: the caller's, minus EVERY `GIT_*` variable (GIT_DIR,
     GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_* ... would each point git at another repo, index or
-    config - tester attempt 10)."""
-    return {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    config - tester attempt 10), then two of OURS: GIT_NO_REPLACE_OBJECTS=1 (`refs/replace/*` would
+    let `HEAD:<rel>` name a blob no commit holds - tester attempt 11) and GIT_GRAFT_FILE pointing at
+    nothing (grafts rewrite parents, never a commit's tree, so `HEAD:<rel>` does not depend on them;
+    neutralised anyway)."""
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
+    env["GIT_GRAFT_FILE"] = os.devnull
+    return env
+
+
+# every git call of the committed-config check: no replace objects, whatever the config says
+_GIT_PREFIX = ["--no-replace-objects", "-c", "core.useReplaceRefs=false"]
 
 
 def _run_git(args, cwd):
     import subprocess
     try:
-        proc = subprocess.run(["git", "-C", str(cwd), *args], cwd=str(cwd), capture_output=True,
+        proc = subprocess.run(["git", *_GIT_PREFIX, "-C", str(cwd), *args], cwd=str(cwd), capture_output=True,
                               env=_git_env(), timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, b"", f"{type(exc).__name__}: {exc}"
@@ -657,14 +667,19 @@ def check_committed(path: Path, root: Path, run=None) -> str:
     or raises a LabelError naming the file. The llama-swap config the render mounts must be, byte for
     byte, the blob committed at HEAD of the STACK ROOT's own checkout:
 
-      - git runs as `git -C <root>` with every `GIT_*` variable removed from its environment, and
-        `git rev-parse --show-toplevel` must be the root itself;
+      - git runs as `git --no-replace-objects -c core.useReplaceRefs=false -C <root>` with every
+        `GIT_*` variable removed from its environment (then GIT_NO_REPLACE_OBJECTS=1 and an empty
+        GIT_GRAFT_FILE set), and `git rev-parse --show-toplevel` must be the root itself - so
+        `HEAD:<path>` is the blob in HEAD's own tree, never a `refs/replace/*` substitute;
       - the path is taken AS THE RENDER NAMES IT, never resolved: it must lie under the root with no
-        `.`/`..` segment, and neither the file nor any directory between the root and it may be a
+        `..` segment (pathlib has already dropped `.` segments and doubled separators, which name
+        the same directory), and neither the file nor any directory between the root and it may be a
         symlink, a junction or another reparse point, or hold a `.git` entry (a nested repo or a
         gitfile - git would use the nearest repo);
       - the file must be tracked, and its bytes must equal `git cat-file blob HEAD:<path>` compared
-        here in Python, with CRLF -> LF the only normalisation (a Windows checkout of an LF blob).
+        here in Python, with CRLF -> LF the only normalisation (a Windows checkout of an LF blob; a
+        lone CR is a YAML line break and is NOT normalised away). The text returned - and parsed - is
+        decoded from those verified bytes; the file is not read again.
         No clean filter, attribute or index flag takes part: assume-unchanged, skip-worktree, a
         staged edit, a local `filter.*.clean` all leave the bytes different and are refused.
 
@@ -685,7 +700,7 @@ def check_committed(path: Path, root: Path, run=None) -> str:
         raise LabelError(f"{refuse} (it is not under the stack root {root})")
     rel_parts = parts[len(root_parts):]
     if any(part in ("", ".", "..") for part in rel_parts):
-        raise LabelError(f"{refuse} (a `.` or `..` segment in the path)")
+        raise LabelError(f"{refuse} (a `..` segment in the path)")
     here = root
     for n, part in enumerate(rel_parts):
         here = here / part

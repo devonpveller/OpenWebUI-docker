@@ -1676,7 +1676,8 @@ def test_git_variables_in_the_callers_environment_are_ignored(world, tmp_path_fa
         monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(other))
     with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
         ml.derive_labels(make_render(world))
-    assert not {k for k in ml._git_env() if k.upper().startswith("GIT_")}
+    # the caller's are gone; only the check's own two are set
+    assert {k for k in ml._git_env() if k.upper().startswith("GIT_")} == {"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
 
 
 @pytest.mark.parametrize("where", ["info/attributes", ".gitattributes"])
@@ -1710,8 +1711,102 @@ def test_index_flags_cannot_hide_an_edit(world, flag):
 
 def test_a_dot_dot_segment_in_the_bound_path_is_refused(world):
     cfg = world.root / "inference" / "config" / ".." / "config" / "llama-swap.config.yaml"
-    with pytest.raises(ml.LabelError, match="`.` or `..` segment"):
+    with pytest.raises(ml.LabelError, match="a `..` segment"):
         ml.derive_labels(_bind_config(make_render(world), Path(str(cfg))))
+
+
+def test_a_dot_segment_is_normalised_away_before_the_check(world):
+    """Exactly what the docs say: pathlib drops `.` segments (and doubled separators) before the
+    check sees the path - they name the same directory - so such a bind is the committed file."""
+    cfg = str(world.root / ml.LLAMA_SWAP_REL).replace("config", "." + os.sep + "config", 1)
+    assert "." + os.sep in cfg and "." not in Path(cfg).parts
+    assert by_role(ml.derive_labels(_bind_config(make_render(world), Path(cfg))))["local-large"].label \
+        == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def _plain_git_blob(root: Path) -> bytes:
+    """`git cat-file blob HEAD:<rel>` as plain git answers it - replace refs honoured."""
+    return _git(root, "cat-file", "blob", f"HEAD:{ml.LLAMA_SWAP_REL.as_posix()}").stdout
+
+
+def test_a_replaced_head_blob_is_not_the_committed_config(world):
+    """Tester attempt 11: `git replace <HEAD blob> <edited blob>` - the edited blob in NO commit - made
+    plain `cat-file blob HEAD:<rel>` return the edit, and the edit labelled B-13B."""
+    rel = ml.LLAMA_SWAP_REL.as_posix()
+    head_blob = _git(world.root, "rev-parse", f"HEAD:{rel}").stdout.decode().strip()
+    other = _other_config(world)
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(other)
+    evil = _git(world.root, "hash-object", "-w", "--", rel).stdout.decode().strip()
+    _git(world.root, "replace", head_blob, evil)
+    assert _plain_git_blob(world.root) == other   # the attack is live for plain git
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_replaced_head_commit_is_not_the_committed_config(world):
+    """... and `git replace <HEAD commit> <a commit holding the edit>` after `reset --soft` back to the
+    real HEAD: `git status` is even clean, yet HEAD's own tree holds the committed config."""
+    real = _git(world.root, "rev-parse", "HEAD").stdout.decode().strip()
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(_other_config(world))
+    commit_all(world.root)
+    evil = _git(world.root, "rev-parse", "HEAD").stdout.decode().strip()
+    _git(world.root, "reset", "-q", "--soft", real)
+    _git(world.root, "replace", real, evil)
+    assert _git(world.root, "status", "--porcelain", "--", ml.LLAMA_SWAP_REL.as_posix()).stdout.strip() == b""
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_git_runs_without_replace_objects_or_grafts(world):
+    """Every git call of the check: `--no-replace-objects -c core.useReplaceRefs=false`, and the
+    environment sets GIT_NO_REPLACE_OBJECTS=1 and an empty GIT_GRAFT_FILE after the scrub."""
+    seen = []
+
+    def spy(args, cwd):
+        seen.append(list(args))
+        return ml._run_git(args, cwd)
+    ml.derive_labels(make_render(world), git=spy)
+    assert seen and ml._GIT_PREFIX == ["--no-replace-objects", "-c", "core.useReplaceRefs=false"]
+    env = ml._git_env()
+    assert env["GIT_NO_REPLACE_OBJECTS"] == "1" and env["GIT_GRAFT_FILE"] == os.devnull
+    assert {k for k in env if k.upper().startswith("GIT_")} == {"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
+
+
+def test_a_lone_cr_is_not_normalised_away(world):
+    """X2: only CRLF -> LF is normalised. A lone CR is a YAML line break: `# comment\rX: y` is a
+    comment AND a key to YAML. A lone CR the commit does not have is a difference, refused."""
+    path = world.root / ml.LLAMA_SWAP_REL
+    data = path.read_bytes()
+    at = data.index(b"#")                     # inside the first comment line
+    path.write_bytes(data[:at + 1] + b"\r" + data[at + 1:])
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_the_parsed_bytes_are_the_verified_bytes(world, monkeypatch):
+    """X4: the config is read ONCE; what is parsed is what was compared with HEAD's blob. A file that
+    changes after the check (every later read returns B) still labels from the verified content."""
+    path = (world.root / ml.LLAMA_SWAP_REL).resolve()
+    other = _other_config(world)
+    reads = []
+    real_bytes, real_text = Path.read_bytes, Path.read_text
+
+    def read_bytes(self):
+        if self.resolve() == path:
+            reads.append("bytes")
+            return real_bytes(self) if len(reads) == 1 else other
+        return real_bytes(self)
+
+    def read_text(self, *a, **k):
+        if self.resolve() == path:
+            reads.append("text")
+            return other.decode("utf-8")
+        return real_text(self, *a, **k)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    labels = by_role(ml.derive_labels(make_render(world)))
+    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+    assert reads == ["bytes"]
 
 
 def _committed_config_text() -> str:

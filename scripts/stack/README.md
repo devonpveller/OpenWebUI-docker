@@ -914,14 +914,20 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   - ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the llama-swap
     config the render mounts must be, byte for byte, the blob committed at HEAD
     of the STACK ROOT's checkout (the driver's `--root`). git runs as
-    `git -C <root>` with every `GIT_*` variable removed, and its toplevel must be
-    the root itself. The path is taken as the render names it, never resolved:
-    it must lie under the root with no `.`/`..` segment, and neither the file nor
+    `git --no-replace-objects -c core.useReplaceRefs=false -C <root>` with every
+    `GIT_*` variable removed (then `GIT_NO_REPLACE_OBJECTS=1` and an empty
+    `GIT_GRAFT_FILE`), and its toplevel must be the root itself - so
+    `HEAD:<path>` is the blob in HEAD's own tree, never a `git replace`
+    substitute. The path is taken as the render names it, never resolved:
+    it must lie under the root with no `..` segment (a `.` segment or doubled
+    separator is dropped by path normalisation first - it names the same
+    directory), and neither the file nor
     any directory between the root and it may be a symlink, a junction or other
     reparse point, or hold a `.git` entry (a nested repository or gitfile). The
     file must be tracked, and its bytes are compared in Python with
     `git cat-file blob HEAD:<path>`, CRLF -> LF the only normalisation (a
-    Windows checkout of an LF blob) - no clean filter, attribute or index flag
+    Windows checkout of an LF blob; a lone CR is not normalised away), and the
+    verified bytes are what is parsed - no clean filter, attribute or index flag
     (assume-unchanged, skip-worktree) takes part. Anything else is refused,
     naming the file: "llama-swap config differs from the committed version;
     labels are only derived from the committed config". The committed file is
