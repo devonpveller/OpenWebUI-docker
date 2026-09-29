@@ -30,8 +30,10 @@ defaults are read by compose itself and never re-implemented here:
               scalar, a macro may use only earlier macros, and the config must be
               in a recognised YAML subset (check_swap_config_subset). ABOVE ALL,
               ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the file
-              must be byte-for-byte the blob committed at HEAD (check_committed),
-              and that committed file's parse is pinned by a test; the allowlists
+              must be byte-for-byte the blob committed at HEAD of the stack root's
+              own checkout - unresolved path, no link or nested repo on the way,
+              GIT_* scrubbed, `cat-file blob` compared in Python (check_committed) -
+              and that committed file is pinned by a test; the allowlists
               and the subset are defence in depth. What is left is read with the
               llama.cpp flag rules below; its last `-m`/`--model` is the path
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
@@ -626,47 +628,91 @@ def swap_env_refs(config_text: str) -> set[str]:
     return set(re.findall(r"\$\{env\.([^}]*)\}", "\n".join(seen)))
 
 
-def check_committed(path: Path, run=None) -> None:
-    """ONLY TRUST THE COMMITTED CONFIG (operator decision, 2026-09-29). The llama-swap config the
-    render mounts must be byte-for-byte the version committed at HEAD in the git checkout it lives
-    in: tracked, and `git hash-object <file>` equal to the blob `HEAD:<path>`. An uncommitted edit,
-    an untracked file, no git, or a file outside a checkout is a LabelError naming the file. The
-    committed file is pinned by test_model_labels (its expected parse), so a change to it goes
-    through review; the YAML subset check and the allowlists stay as defence in depth.
-    "Byte-for-byte" is as git compares a checkout with its commit: `git hash-object <path>` applies
-    the checkout's own line-ending conversion (core.autocrlf / .gitattributes), so an LF blob checked
-    out as CRLF on Windows - what `git diff` shows as unchanged - is the committed version; any other
-    difference is not.
-    `run(args, cwd) -> (code, stdout, stderr)` runs git (injectable for tests)."""
-    import subprocess
+STACK_ROOT = Path(__file__).resolve().parents[2]   # the checkout this module belongs to
 
-    if run is None:
-        def run(args, cwd):
-            try:
-                proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
-                                      encoding="utf-8", errors="replace", timeout=30)
-            except (OSError, subprocess.SubprocessError) as exc:
-                return 127, "", f"{type(exc).__name__}: {exc}"
-            return proc.returncode, proc.stdout, proc.stderr
+
+def _git_env() -> dict:
+    """The environment git runs with: the caller's, minus EVERY `GIT_*` variable (GIT_DIR,
+    GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_* ... would each point git at another repo, index or
+    config - tester attempt 10)."""
+    return {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+
+
+def _run_git(args, cwd):
+    import subprocess
+    try:
+        proc = subprocess.run(["git", "-C", str(cwd), *args], cwd=str(cwd), capture_output=True,
+                              env=_git_env(), timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, b"", f"{type(exc).__name__}: {exc}"
+    return proc.returncode, proc.stdout, proc.stderr.decode("utf-8", "replace")
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+
+
+def check_committed(path: Path, root: Path, run=None) -> str:
+    """ONLY TRUST THE COMMITTED CONFIG (operator decision, 2026-09-29). Returns the config's text,
+    or raises a LabelError naming the file. The llama-swap config the render mounts must be, byte for
+    byte, the blob committed at HEAD of the STACK ROOT's own checkout:
+
+      - git runs as `git -C <root>` with every `GIT_*` variable removed from its environment, and
+        `git rev-parse --show-toplevel` must be the root itself;
+      - the path is taken AS THE RENDER NAMES IT, never resolved: it must lie under the root with no
+        `.`/`..` segment, and neither the file nor any directory between the root and it may be a
+        symlink, a junction or another reparse point, or hold a `.git` entry (a nested repo or a
+        gitfile - git would use the nearest repo);
+      - the file must be tracked, and its bytes must equal `git cat-file blob HEAD:<path>` compared
+        here in Python, with CRLF -> LF the only normalisation (a Windows checkout of an LF blob).
+        No clean filter, attribute or index flag takes part: assume-unchanged, skip-worktree, a
+        staged edit, a local `filter.*.clean` all leave the bytes different and are refused.
+
+    The committed file is pinned by test_model_labels (its expected parse, filters and
+    concurrencyLimit included), so a change to it goes through review; the YAML subset check and the
+    allowlists stay as defence in depth. `run(args, cwd) -> (code, stdout bytes, stderr)` runs git
+    (injectable for tests)."""
+    run = run or _run_git
     refuse = (f"the llama-swap config {path} differs from the committed version, or cannot be checked "
               f"against it; labels are only derived from the committed config")
-    code, top, err = run(["rev-parse", "--show-toplevel"], path.parent)
+    root = Path(root)
+    path = Path(path)
+    if not path.is_absolute() or not root.is_absolute():
+        raise LabelError(f"{refuse} (not an absolute path under the stack root {root})")
+    parts, root_parts = path.parts, root.parts
+    if (len(parts) <= len(root_parts)
+            or not all(_same_path(Path(a), Path(b)) for a, b in zip(parts[:len(root_parts)], root_parts))):
+        raise LabelError(f"{refuse} (it is not under the stack root {root})")
+    rel_parts = parts[len(root_parts):]
+    if any(part in ("", ".", "..") for part in rel_parts):
+        raise LabelError(f"{refuse} (a `.` or `..` segment in the path)")
+    here = root
+    for n, part in enumerate(rel_parts):
+        here = here / part
+        if here.is_symlink() or _is_reparse_point(here):
+            raise LabelError(f"{refuse} ({here} is a symlink, junction or reparse point)")
+        if n < len(rel_parts) - 1 and os.path.lexists(here / ".git"):
+            raise LabelError(f"{refuse} ({here} holds a .git entry - a nested repository)")
+    if not path.is_file():
+        raise LabelError(f"{refuse} (not a regular file)")
+    code, top, err = run(["rev-parse", "--show-toplevel"], root)
     if code != 0 or not top.strip():
-        raise LabelError(f"{refuse} (not in a git checkout, or git unavailable: {err.strip()[:120]})")
-    top = Path(top.strip())
-    try:
-        rel = Path(os.path.relpath(path.resolve(), top.resolve())).as_posix()
-    except ValueError:
-        raise LabelError(f"{refuse} (it is outside the checkout {top})") from None
-    if rel.startswith("../"):
-        raise LabelError(f"{refuse} (it is outside the checkout {top})")
-    code, _, _ = run(["ls-files", "--error-unmatch", "--", rel], top)
+        raise LabelError(f"{refuse} (the stack root {root} is not a git checkout, or git is unavailable: "
+                         f"{err.strip()[:120]})")
+    top_path = Path(top.decode("utf-8", "replace").strip())
+    if not _same_path(top_path.resolve(), root.resolve()):
+        raise LabelError(f"{refuse} (git's checkout is {top_path}, not the stack root {root})")
+    rel = "/".join(rel_parts)
+    code, _, _ = run(["ls-files", "--error-unmatch", "--", rel], root)
     if code != 0:
         raise LabelError(f"{refuse} (it is not tracked by git)")
-    code, head, _ = run(["rev-parse", f"HEAD:{rel}"], top)
-    code2, work, _ = run(["hash-object", "--", rel], top)
-    if code != 0 or code2 != 0 or not head.strip() or head.strip() != work.strip():
+    code, blob, _ = run(["cat-file", "blob", f"HEAD:{rel}"], root)
+    if code != 0:
+        raise LabelError(f"{refuse} (it is not committed at HEAD)")
+    data = path.read_bytes()
+    if data.replace(b"\r\n", b"\n") != blob.replace(b"\r\n", b"\n"):
         raise LabelError(f"{refuse} (the file on disk is not the blob committed at HEAD)")
+    return data.decode("utf-8")
 
 
 def check_swap_env_placement(config_text: str) -> None:
@@ -1128,10 +1174,10 @@ def _walk(base: Path, parts: list[str], want: str, role: str, whole: str, hops: 
     return cur
 
 
-def derive_labels(render: dict, check_files: bool = True, git=None) -> list[RoleLabel]:
+def derive_labels(render: dict, check_files: bool = True, git=None, root=None) -> list[RoleLabel]:
     """Every role's label from compose's render. LabelError, naming the cause, rather than a partial set."""
     try:
-        return _derive(render, check_files, git)
+        return _derive(render, check_files, git, root)
     except UnicodeError:
         raise   # a file the render points at is not UTF-8: the caller names that, not "the render"
     except (TypeError, AttributeError, KeyError, ValueError, RecursionError) as exc:
@@ -1140,7 +1186,7 @@ def derive_labels(render: dict, check_files: bool = True, git=None) -> list[Role
                          f"({type(exc).__name__}: {str(exc)[:160]})") from None
 
 
-def _derive(render: dict, check_files: bool, git=None) -> list[RoleLabel]:
+def _derive(render: dict, check_files: bool, git=None, root=None) -> list[RoleLabel]:
     if not isinstance(render, dict) or not isinstance(render.get("services"), dict):
         raise LabelError("the render has no services")
     gateway = _service(render, GATEWAY_SERVICE)
@@ -1154,8 +1200,7 @@ def _derive(render: dict, check_files: bool, git=None) -> list[RoleLabel]:
     swap_path = _bind_source(chat, CHAT_SERVICE, swap_target)
     if not swap_path.is_file():
         raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
-    check_committed(swap_path, git)
-    swap_text = swap_path.read_text(encoding="utf-8")
+    swap_text = check_committed(swap_path, root if root is not None else STACK_ROOT, git)
     check_swap_config_subset(swap_text)
     check_swap_env_placement(swap_text)
     macros, swap_entries = parse_llama_swap_config(swap_text)
@@ -1396,7 +1441,7 @@ def main(argv=None, out=None, run=None) -> int:
             render = parse_render(Path(args.render).read_text(encoding="utf-8"), args.render)
         else:
             render = render_inference(root, env_file, run)
-        labels = derive_labels(render, check_files=not args.skip_file_check)
+        labels = derive_labels(render, check_files=not args.skip_file_check, root=root)
     except (LabelError, OSError, UnicodeError) as exc:
         _say(f"labels: FAILED - {exc}. No label was produced.", out)
         return 1

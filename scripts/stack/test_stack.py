@@ -6086,13 +6086,15 @@ def _break_config(root, rel, how, monkeypatch):
         path.write_bytes(path.read_bytes() + b"\n# caf\xe9\n")   # a cp1252 byte, not UTF-8
         commit_all(root)   # committed, so the decode (not the committed-config rule) is what refuses
     else:
-        real = Path.read_text
+        # the llama-swap config is read as BYTES (compared with the committed blob), the rest as text
+        for method in ("read_text", "read_bytes"):
+            real = getattr(Path, method)
 
-        def read_text(self, *a, **k):
-            if self.resolve() == path.resolve():
-                raise OSError(13, "Permission denied", str(self))
-            return real(self, *a, **k)
-        monkeypatch.setattr(Path, "read_text", read_text)
+            def denied(self, *a, _real=real, **k):
+                if self.resolve() == path.resolve():
+                    raise OSError(13, "Permission denied", str(self))
+                return _real(self, *a, **k)
+            monkeypatch.setattr(Path, method, denied)
 
 
 @pytest.mark.parametrize("rel", _CONFIGS, ids=lambda r: r.name)

@@ -76,8 +76,10 @@ def commit_all(root: Path) -> None:
 
 
 @pytest.fixture
-def world(tmp_path: Path) -> World:
+def world(tmp_path: Path, monkeypatch) -> World:
     root = tmp_path / "repo"
+    # the stack root the committed-config check holds the config to (the driver passes its --root)
+    monkeypatch.setattr(ml, "STACK_ROOT", root)
     for rel in (ml.MODEL_LIST_REL, ml.LLAMA_SWAP_REL):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / rel, root / rel)
@@ -1546,34 +1548,170 @@ def test_an_untracked_llama_swap_config_is_refused(world):
         ml.derive_labels(render)
 
 
-def test_a_config_outside_any_checkout_or_without_git_is_refused(world, tmp_path_factory, monkeypatch):
-    outside = tmp_path_factory.mktemp("loose")   # a sibling of the world checkout, not inside it
-    # the host's temp dir may itself sit inside some checkout (a home-directory repo): stop discovery here
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outside.parent))
-    shutil.copy(world.root / ml.LLAMA_SWAP_REL, outside / "llama-swap.config.yaml")
-    render = make_render(world)
+def _bind_config(render: dict, source: Path) -> dict:
     for mount in render["services"]["llama-cpp-upstream"]["volumes"]:
         if mount["target"] == "/app/config.yaml":
-            mount["source"] = str(outside / "llama-swap.config.yaml")
-    with pytest.raises(ml.LabelError, match="not in a git checkout, or git unavailable"):
-        ml.derive_labels(render)
-    with pytest.raises(ml.LabelError, match="not in a git checkout, or git unavailable"):
-        ml.derive_labels(make_render(world), git=lambda args, cwd: (127, "", "FileNotFoundError: git"))
+            mount["source"] = str(source)
+    return render
 
 
-def test_a_hash_that_git_reports_differently_is_refused(world):
-    """The comparison really is `git hash-object` against `HEAD:<path>` (kills a check that only asks
-    whether the file is tracked)."""
+def _git(root: Path, *args, env=None):
     import subprocess
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false",
+                           "-c", f"core.hooksPath={root / '.git-nohooks'}", "-C", str(root), *args],
+                          check=True, capture_output=True, env=env)
 
+
+def _other_config(world) -> bytes:
+    """The committed config with the 27B entry loading ANOTHER model (label B if it got through)."""
+    text = (world.root / ml.LLAMA_SWAP_REL).read_bytes()
+    out = text.replace(b"${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", b"/models/vendor/B-13B-GGUF/B-13B-Q4_K_M.gguf")
+    assert out != text
+    return out
+
+
+def test_a_config_outside_the_stack_root_or_without_git_is_refused(world, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("loose")   # a sibling of the stack root, not under it
+    shutil.copy(world.root / ml.LLAMA_SWAP_REL, outside / "llama-swap.config.yaml")
+    with pytest.raises(ml.LabelError, match="not under the stack root"):
+        ml.derive_labels(_bind_config(make_render(world), outside / "llama-swap.config.yaml"))
+    with pytest.raises(ml.LabelError, match="not a git checkout, or git is unavailable"):
+        ml.derive_labels(make_render(world), git=lambda args, cwd: (127, b"", "FileNotFoundError: git"))
+
+
+def test_a_stack_root_that_is_not_the_checkouts_top_is_refused(world, monkeypatch):
+    """git's toplevel must be the stack root itself: a root INSIDE some bigger checkout is refused."""
+    inner = world.root / "inference"
+    monkeypatch.setattr(ml, "STACK_ROOT", inner)
+    with pytest.raises(ml.LabelError, match="not the stack root"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_config_that_differs_from_the_head_blob_is_refused(world):
+    """The comparison is the file's bytes against `git cat-file blob HEAD:<path>`, in Python (kills a
+    check that only asks whether the file is tracked)."""
     def git(args, cwd):
-        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
-        out = proc.stdout
-        if args[:1] == ["hash-object"]:
-            out = "0" * 40 + "\n"
-        return proc.returncode, out, proc.stderr
+        code, out, err = ml._run_git(args, cwd)
+        if args[:2] == ["cat-file", "blob"]:
+            out = out.replace(b"--no-mmap", b"--mmap")
+        return code, out, err
     with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
         ml.derive_labels(make_render(world), git=git)
+
+
+@pytest.mark.parametrize("relative", [False, True])
+def test_a_file_symlink_at_the_config_path_is_refused(world, relative):
+    """Tester attempt 10: the link's TARGET (another committed file) was what got hashed -> label B."""
+    other = world.root / "inference" / "config" / "other.yaml"
+    other.write_bytes(_other_config(world))
+    cfg = world.root / ml.LLAMA_SWAP_REL
+    commit_all(world.root)
+    cfg.unlink()
+    _link(cfg, Path("other.yaml") if relative else other)
+    commit_all(world.root)   # even a COMMITTED symlink: git's blob is the link text, not the file
+    with pytest.raises(ml.LabelError, match="is a symlink, junction or reparse point"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_directory_symlink_between_the_root_and_the_config_is_refused(world):
+    cfg_dir = world.root / "inference" / "config"
+    copy = world.root / "copy"
+    shutil.copytree(cfg_dir, copy)
+    (copy / "llama-swap.config.yaml").write_bytes(_other_config(world))
+    commit_all(world.root)
+    shutil.rmtree(cfg_dir)
+    _link(cfg_dir, copy, is_dir=True)
+    with pytest.raises(ml.LabelError, match="is a symlink, junction or reparse point"):
+        ml.derive_labels(make_render(world))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions exist only on Windows")
+def test_a_directory_junction_between_the_root_and_the_config_is_refused(world):
+    import subprocess
+    cfg_dir = world.root / "inference" / "config"
+    copy = world.root / "copy"
+    shutil.copytree(cfg_dir, copy)
+    commit_all(world.root)
+    shutil.rmtree(cfg_dir)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(cfg_dir), str(copy)], capture_output=True, text=True)
+    if made.returncode != 0:
+        pytest.skip(f"mklink /J failed: {made.stdout} {made.stderr}")
+    try:
+        with pytest.raises(ml.LabelError, match="is a symlink, junction or reparse point"):
+            ml.derive_labels(make_render(world))
+    finally:
+        os.rmdir(cfg_dir)   # removes the junction only, never its target
+
+
+@pytest.mark.parametrize("kind", ["nested repo", "gitfile"])
+def test_a_nested_repository_between_the_root_and_the_config_is_refused(world, kind):
+    """Tester attempt 10: git uses the NEAREST repo - one inside inference/config committed label B."""
+    cfg = world.root / ml.LLAMA_SWAP_REL
+    cfg.write_bytes(_other_config(world))
+    cfg_dir = cfg.parent
+    if kind == "nested repo":
+        commit_all(cfg_dir)
+    else:
+        (cfg_dir / ".git").write_text("gitdir: ../../.git\n", encoding="utf-8")
+    with pytest.raises(ml.LabelError, match="holds a .git entry"):
+        ml.derive_labels(make_render(world))
+
+
+@pytest.mark.parametrize("var", ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT"])
+def test_git_variables_in_the_callers_environment_are_ignored(world, tmp_path_factory, monkeypatch, var):
+    """Tester attempt 10: GIT_DIR (+GIT_WORK_TREE) pointing at another repo where the EDITED config is
+    committed labelled B. Every GIT_* variable is removed before git runs."""
+    other = tmp_path_factory.mktemp("other")
+    (other / ml.LLAMA_SWAP_REL).parent.mkdir(parents=True)
+    (other / ml.LLAMA_SWAP_REL).write_bytes(_other_config(world))
+    commit_all(other)
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(_other_config(world))   # uncommitted in the stack root
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(world.root))
+    if var == "GIT_INDEX_FILE":
+        monkeypatch.setenv("GIT_INDEX_FILE", str(other / ".git" / "index"))
+    if var == "GIT_CONFIG_COUNT":
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(other))
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+    assert not {k for k in ml._git_env() if k.upper().startswith("GIT_")}
+
+
+@pytest.mark.parametrize("where", ["info/attributes", ".gitattributes"])
+def test_a_local_clean_filter_cannot_make_an_edit_look_committed(world, tmp_path_factory, where):
+    """Tester attempt 10: `hash-object` applied a local `filter.x.clean` that printed the HEAD blob.
+    `cat-file blob` + a byte comparison here takes no filter or attribute into account."""
+    keep = tmp_path_factory.mktemp("keep") / "head.yaml"
+    keep.write_bytes((world.root / ml.LLAMA_SWAP_REL).read_bytes())
+    _git(world.root, "config", "filter.x.clean", f'cat "{keep.as_posix()}"')
+    line = f"{ml.LLAMA_SWAP_REL.as_posix()} filter=x\n"
+    if where == "info/attributes":
+        (world.root / ".git" / "info").mkdir(exist_ok=True)
+        (world.root / ".git" / "info" / "attributes").write_text(line, encoding="utf-8")
+    else:
+        (world.root / ".gitattributes").write_text(line, encoding="utf-8")   # uncommitted
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(_other_config(world))
+    probe = _git(world.root, "hash-object", "--", ml.LLAMA_SWAP_REL.as_posix()).stdout.strip()
+    head = _git(world.root, "rev-parse", f"HEAD:{ml.LLAMA_SWAP_REL.as_posix()}").stdout.strip()
+    assert probe == head   # the attack is live: hash-object is fooled
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_index_flags_cannot_hide_an_edit(world, flag):
+    _git(world.root, "update-index", flag, ml.LLAMA_SWAP_REL.as_posix())
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(_other_config(world))
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_dot_dot_segment_in_the_bound_path_is_refused(world):
+    cfg = world.root / "inference" / "config" / ".." / "config" / "llama-swap.config.yaml"
+    with pytest.raises(ml.LabelError, match="`.` or `..` segment"):
+        ml.derive_labels(_bind_config(make_render(world), Path(str(cfg))))
 
 
 def _committed_config_text() -> str:
@@ -1602,6 +1740,87 @@ PINNED_27B_CMD = ["llama-server", "${common-args}", "--model", "${env.LLAMA_SWAP
     for w in (flag, "${env.LLAMA_SWAP_QWEN36_27B_" + var + "}")]
 
 
+PINNED_EFFECTIVE_LINES = [
+    'listen: 0.0.0.0:8080',
+    'healthCheckTimeout: 300',
+    'includeAliasesInList: true',
+    'globalTTL: 0',
+    'logToStdout: both',
+    'macros:',
+    '  common-args: >-',
+    '    --host 0.0.0.0 --port ${PORT}',
+    '    --chat-template-file /etc/llama/chat-template.jinja',
+    '    --flash-attn on',
+    '    --no-mmap',
+    'models:',
+    '  qwen36-35b-a3b:',
+    '    cmd: |',
+    '      llama-server ${common-args}',
+    '      --model        ${env.LLAMA_SWAP_QWEN36_35B_MODEL_PATH}',
+    '      --ctx-size     ${env.LLAMA_SWAP_QWEN36_35B_CTX_SIZE}',
+    '      --n-gpu-layers ${env.LLAMA_SWAP_QWEN36_35B_N_GPU_LAYERS}',
+    '      --parallel     ${env.LLAMA_SWAP_QWEN36_35B_N_PARALLEL}',
+    '      --batch-size   ${env.LLAMA_SWAP_QWEN36_35B_BATCH}',
+    '      --ubatch-size  ${env.LLAMA_SWAP_QWEN36_35B_UBATCH}',
+    '      --cache-type-k ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_K}',
+    '      --cache-type-v ${env.LLAMA_SWAP_QWEN36_35B_CACHE_TYPE_V}',
+    '      --reasoning-budget ${env.LLAMA_SWAP_QWEN36_35B_REASONING_BUDGET}',
+    '    filters:',
+    '      setParamsByID:',
+    '        "${MODEL_ID}":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: true',
+    '        "${MODEL_ID}:nothink":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: false',
+    '  qwen36-27b-baseline:',
+    '    cmd: |',
+    '      llama-server ${common-args}',
+    '      --model        /models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf',
+    '      --ctx-size     262144',
+    '      --n-gpu-layers 99',
+    '      --parallel     3',
+    '      --batch-size   1024',
+    '      --ubatch-size  512',
+    '      --cache-type-k q4_0',
+    '      --cache-type-v q4_0',
+    '      --reasoning-budget 4096',
+    '    filters:',
+    '      setParamsByID:',
+    '        "${MODEL_ID}":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: true',
+    '        "${MODEL_ID}:nothink":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: false',
+    '  qwen36-27b:',
+    '    concurrencyLimit: 0',
+    '    cmd: |',
+    '      llama-server ${common-args}',
+    '      --model        ${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}',
+    '      --ctx-size     ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}',
+    '      --n-gpu-layers ${env.LLAMA_SWAP_QWEN36_27B_N_GPU_LAYERS}',
+    '      --parallel     ${env.LLAMA_SWAP_QWEN36_27B_N_PARALLEL}',
+    '      --batch-size   ${env.LLAMA_SWAP_QWEN36_27B_BATCH}',
+    '      --ubatch-size  ${env.LLAMA_SWAP_QWEN36_27B_UBATCH}',
+    '      --cache-type-k ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_K}',
+    '      --cache-type-v ${env.LLAMA_SWAP_QWEN36_27B_CACHE_TYPE_V}',
+    '      --reasoning-budget ${env.LLAMA_SWAP_QWEN36_27B_REASONING_BUDGET}',
+    '      --spec-type    ${env.LLAMA_SWAP_QWEN36_27B_SPEC_TYPE}',
+    '      --spec-draft-n-max ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_N_MAX}',
+    '      --spec-draft-type-k ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_K}',
+    '      --spec-draft-type-v ${env.LLAMA_SWAP_QWEN36_27B_SPEC_DRAFT_CACHE_TYPE_V}',
+    '    filters:',
+    '      setParamsByID:',
+    '        "${MODEL_ID}":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: true',
+    '        "${MODEL_ID}:nothink":',
+    '          chat_template_kwargs:',
+    '            enable_thinking: false',
+]
+
+
 def test_the_committed_llama_swap_config_is_pinned():
     """THE PIN. The committed config, parsed as llama-swap reads it: its macros, its entries and their
     keys, the role's cmd words and its model flag. A committed change to the config must change this
@@ -1624,6 +1843,19 @@ def test_the_committed_llama_swap_config_is_pinned():
                                                           "SPEC_DRAFT_CACHE_TYPE_K", "SPEC_DRAFT_CACHE_TYPE_V")} | {
         f"LLAMA_SWAP_QWEN36_35B_{v}" for v in ("MODEL_PATH", "CTX_SIZE", "N_GPU_LAYERS", "N_PARALLEL", "BATCH",
                                                "UBATCH", "CACHE_TYPE_K", "CACHE_TYPE_V", "REASONING_BUDGET")}
+    # EVERYTHING llama-swap reads, not only what the labels use (tester attempt 10: a flipped `:nothink`
+    # filter or an out-of-range concurrencyLimit passed the narrower pin): every line that is not blank
+    # or a full-line comment, exactly, in order - top-level settings, concurrencyLimit, the filters.
+    effective = [line.rstrip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+    assert effective == PINNED_EFFECTIVE_LINES
+    # ... and, spelled out, the two the tester found unpinned:
+    assert effective.count("    concurrencyLimit: 0") == 1 and sum("concurrencyLimit" in x for x in effective) == 1
+    for entry in models:   # the labels say "(no thinking)" for `:nothink` - its filter must say so too
+        block = effective[effective.index(f"  {entry}:"):]
+        nothink = block.index('        "${MODEL_ID}:nothink":')
+        thinking = block.index('        "${MODEL_ID}":')
+        assert block[nothink + 2] == "            enable_thinking: false", entry
+        assert block[thinking + 2] == "            enable_thinking: true", entry
 
 
 @pytest.mark.parametrize("value", ["@1", "@x", "4096:", "q4_0:"])

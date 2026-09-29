@@ -912,18 +912,26 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   group and vanish, a backslash escapes, `${...}` inside a substituted value is
   expanded AGAIN) and parses its config as YAML; neither is emulated. Instead:
   - ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the llama-swap
-    config the render mounts must be byte-for-byte the version committed at HEAD
-    in the git checkout it lives in (`git hash-object` of the file equals the
-    blob `HEAD:<path>`; git applies the checkout's line-ending conversion, so a
-    CRLF checkout of an LF blob - no `git diff` - is the committed version).
-    An uncommitted or staged edit, an untracked file, a file
-    outside a checkout, or no git is refused, naming the file: "llama-swap config
-    differs from the committed version; labels are only derived from the
-    committed config". The committed file is PINNED by a test
-    (`test_the_committed_llama_swap_config_is_pinned`: its macros, entries and
-    keys, the role's cmd words and model flag), so a change to it goes through
-    review. So on a host, the merged config must be in the checkout (committed,
-    no local edit) before `labels` runs. What follows is defence in depth,
+    config the render mounts must be, byte for byte, the blob committed at HEAD
+    of the STACK ROOT's checkout (the driver's `--root`). git runs as
+    `git -C <root>` with every `GIT_*` variable removed, and its toplevel must be
+    the root itself. The path is taken as the render names it, never resolved:
+    it must lie under the root with no `.`/`..` segment, and neither the file nor
+    any directory between the root and it may be a symlink, a junction or other
+    reparse point, or hold a `.git` entry (a nested repository or gitfile). The
+    file must be tracked, and its bytes are compared in Python with
+    `git cat-file blob HEAD:<path>`, CRLF -> LF the only normalisation (a
+    Windows checkout of an LF blob) - no clean filter, attribute or index flag
+    (assume-unchanged, skip-worktree) takes part. Anything else is refused,
+    naming the file: "llama-swap config differs from the committed version;
+    labels are only derived from the committed config". The committed file is
+    PINNED by a test (`test_the_committed_llama_swap_config_is_pinned`: every
+    line llama-swap reads - top-level settings, macros, each entry's cmd words,
+    model flag, `concurrencyLimit` and `filters`, e.g. `:nothink` ->
+    `enable_thinking: false` - comments excepted), so a change to it goes
+    through review. `up` and `recover` run `labels` too, so on a host the
+    merged config must be in the checkout (committed, no local edit) before
+    either runs. What follows is defence in depth,
     ALLOWLISTS:
   - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
     comments excepted), as compose renders it, and every model path, must match

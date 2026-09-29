@@ -405,9 +405,13 @@ def sync(scratch: Path, repo: Path, args=("labels",)):
         say("    | " + text)
         return 1, text
     (out_dir / "render.json").write_text(render.stdout, encoding="utf-8")
+    (out_dir / "home").mkdir(exist_ok=True)
+    (out_dir / "home" / ".gitconfig").write_text("[safe]\n\tdirectory = *\n", encoding="utf-8", newline="\n")
     name = PREFIX + "sync-" + secrets.token_hex(2)
     proc = _docker("run", "--rm", "--name", name, "--network", NET, *labels(),
-                   "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=*",
+                   # the repo is owned by another uid in the container: trust it through a GLOBAL config
+                   # (HOME), since the committed-config check strips every GIT_* variable before git runs
+                   "-e", "HOME=/out/home",
                    "--mount", f"type=bind,src={repo},dst=/repo,readonly", "--mount",
                    f"type=bind,src={scratch / 'store'},dst=/store,readonly", "--mount",
                    f"type=bind,src={out_dir},dst=/out,readonly", SYNC_IMAGE,

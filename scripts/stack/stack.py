@@ -2843,7 +2843,8 @@ def run_labels(manifest, state, root: Path, console: Console, request, capture, 
     import model_labels  # sibling module, standard library only
 
     try:
-        labels = model_labels.derive_labels(labels_render(manifest, state, root, capture, render_file))
+        labels = model_labels.derive_labels(labels_render(manifest, state, root, capture, render_file),
+                                            root=root)
     except model_labels.LabelError as exc:
         console.line(f"{prefix}FAILED - {exc}. Nothing was written to Open WebUI.")
         return EXIT_REFUSED
