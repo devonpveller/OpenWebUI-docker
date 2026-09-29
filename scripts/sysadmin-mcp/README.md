@@ -172,7 +172,12 @@ Space freed this way is freed inside the Docker vhdx: C: gets it back only at th
 The same docker reclaim runs **automatically** from the hourly `AI-Stack Disk Guard` task
 (`scripts/maintenance/disk-guard.ps1` -> `auto_reclaim.py`) when C: free is under its warn line;
 its #sysadmin alert carries the per-category freed bytes. `python auto_reclaim.py --plan` prints
-the listed set without removing anything.
+the listed set without removing anything. The same task also ALERTS (alert only, no reclaim) when
+C: free drops under 10% of the drive while still above the GB lines; its alert names the largest
+non-Docker space users on C:, is re-sent at most every 6 h per severity (a worse severity, or a
+run that stopped workers, always goes out), and falls back to Telegram (`telegram_notify.py`) when
+the #sysadmin post fails. Its test fakes the disk figures, docker and both transports:
+`powershell -NoProfile -File scripts\maintenance\test-disk-guard.ps1`.
 
 ## Safety notes
 - Never `docker volume prune`, `docker image prune -a` or `docker system prune`; never a named
