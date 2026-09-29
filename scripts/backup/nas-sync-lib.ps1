@@ -427,10 +427,13 @@ function Get-NasArchiveFiles {
     never-replacing archive would turn every edit of one into a MISMATCH failure -
     so they are skipped by position, with no dependency on git being installed
     (test-nas-sync.ps1 G1/G2 check that every tracked file there IS top-level).
-    Hidden files are included (-Force). A directory that cannot be listed (access
-    denied, ...) THROWS, and so does ANY junction or symbolic link anywhere under
-    $Source (Find-NasLinks), naming it: a partial listing must fail the pass, never
-    shrink it, and a link is refused, never followed.
+    Hidden files AND hidden folders are included (-Force). A directory that cannot be
+    listed (access denied, ...) THROWS, and so does ANY junction or symbolic link
+    anywhere under $Source, naming it: a partial listing must fail the pass, never
+    shrink it, and a link is refused, never followed. Links are refused TWICE: by the
+    up-front scan (Find-NasLinks - names them all at once) and again by the listing
+    itself, which checks every item it returns, so a link or a denial that appears
+    between the scan and the listing still fails the pass.
     Returns @{ File; Rel } in path order.
   #>
   param([string]$Source)
@@ -439,10 +442,14 @@ function Get-NasArchiveFiles {
   if ($links.Count -gt 0) {
     throw ("refusing to archive through links - replace each with the real folder/file: " + ($links -join ', '))
   }
+  $reparse = [System.IO.FileAttributes]::ReparsePoint
   $out = @()
   foreach ($d in @(Get-ChildItem -LiteralPath $src -Directory -Force -ErrorAction Stop | Sort-Object Name)) {
-    foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)) {
-      $out += @{ File = $f.FullName; Rel = $f.FullName.Substring($src.Length + 1) }
+    if (($d.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($d.FullName)" }
+    foreach ($i in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop | Sort-Object FullName)) {
+      if (($i.Attributes -band $reparse) -ne 0) { throw "refusing to archive through links - replace it with the real folder/file: $($i.FullName)" }
+      if ($i.PSIsContainer) { continue }
+      $out += @{ File = $i.FullName; Rel = $i.FullName.Substring($src.Length + 1) }
     }
   }
   return $out

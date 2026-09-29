@@ -74,6 +74,13 @@ if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
   Write-Host "ERROR: source $Source does not exist" -ForegroundColor Red
   exit 2
 }
+# The -Source ROOT itself must not be a link either (each -Dirs directory and
+# everything below it is checked by Find-NasLinks in the loop).
+if (((Get-Item -LiteralPath $Source -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+  Write-Host "FAIL LINK  $Source  (the -Source root is a junction or symbolic link - not followed; point -Source at the real folder)" -ForegroundColor Red
+  Write-Host "summary: 0 VERIFIED, 1 not verified"
+  exit 1
+}
 
 $opened = $null
 if ($Connect -and -not $VerifyOnly) {

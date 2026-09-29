@@ -391,17 +391,41 @@ try {
     @{ N = 'nested file symlink';      Mk = "mklink `"$lk\arch\inner\fl.tar`" `"$lkOut\file-behind-link.tar`""; P = "$lk\arch\inner\fl.tar"; Rm = 'del' }
     @{ N = 'top-level junction';       Mk = "mklink /J `"$lk\topjn`" `"$lkOut\folder`"";              P = "$lk\topjn";               Rm = 'rmdir' }
     @{ N = 'top-level file symlink';   Mk = "mklink `"$lk\top-link.sh`" `"$lkOut\file-behind-link.tar`""; P = "$lk\top-link.sh";   Rm = 'del' }
+    @{ N = 'HIDDEN nested junction';   Mk = "mklink /J `"$lk\arch\inner\hjn`" `"$lkOut\folder`" && attrib +h `"$lk\arch\inner\hjn`" /l"; P = "$lk\arch\inner\hjn"; Rm = 'rmdir' }
   )
   foreach ($lc in $linkCases) {
     $null = cmd /c $lc.Mk 2>&1
     $made = Test-Path -LiteralPath $lc.P
     $msg = ''; $threw = $false
     try { $null = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas) } catch { $threw = $true; $msg = $_.Exception.Message }
-    Check "L1 $($lc.N): the pass THROWS naming it, nothing archived" ($made -and $threw -and ($msg -like "*$($lc.P)*") -and -not (Test-Path -LiteralPath $lkNas)) "made=$made threw=$threw msg=$msg"
+    Check "L1 $($lc.N): the UP-FRONT scan refuses it (throws 'replace each ...' naming it), nothing archived" ($made -and $threw -and ($msg -like "*replace each*$($lc.P)*") -and -not (Test-Path -LiteralPath $lkNas)) "made=$made threw=$threw msg=$msg"
     $null = cmd /c "$($lc.Rm) `"$($lc.P)`"" 2>&1
   }
   $res = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas)
   Check 'L2 with the links removed the same tree archives normally (2 files, nothing from behind the links)' ((@($res | Where-Object { $_.Status -eq 'COPIED' }).Count -eq 2) -and -not (Test-Path -LiteralPath "$lkNas\arch\inner\jn"))
+  # a HIDDEN top-level archive folder is archived like any other (not dropped)
+  New-Item -ItemType Directory -Force -Path "$lk\hiddenarch" | Out-Null
+  (Get-Item -LiteralPath "$lk\hiddenarch").Attributes = 'Hidden, Directory'
+  Blob "$lk\hiddenarch\h.tar" 700
+  $res = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas)
+  Check 'L4 a HIDDEN top-level archive folder is archived (its file COPIED), not dropped' ((StatusOf $res 'hiddenarch\h.tar').Status -eq 'COPIED') (($res | ForEach-Object { "$($_.Status):$($_.Rel)" }) -join ' ')
+  # the tree changes AFTER the up-front scan: the listing itself must refuse
+  $realFind = ${function:Find-NasLinks}
+  try {
+    ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = cmd /c "mklink /J `"$lk\arch\inner\late`" `"$lkOut\folder`"" 2>&1; return $found }
+    $msg = ''; $threw = $false
+    try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas3')) } catch { $threw = $true; $msg = $_.Exception.Message }
+    Check 'L5 a junction created AFTER the link scan is still refused by the listing (throws naming it)' ($threw -and ($msg -like "*$lk\arch\inner\late*")) "threw=$threw msg=$msg"
+    $null = cmd /c "rmdir `"$lk\arch\inner\late`"" 2>&1
+    $sidL = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    ${function:Find-NasLinks} = { param($Path) $found = & $realFind $Path; $null = & icacls "$lk\arch\inner" /deny "*${sidL}:(RX)" 2>&1; return $found }
+    $threw = $false
+    try { $null = @(Invoke-NasArchivePass -Source $lk -Destination (Join-Path $root 'linknas4')) } catch { $threw = $true }
+    Check 'L6 a folder denied AFTER the link scan still fails the listing (throws)' $threw
+  } finally {
+    ${function:Find-NasLinks} = $realFind
+    $null = & icacls "$lk\arch\inner" /remove:d "*$sidL" 2>&1
+  }
   Check 'L3 the live-layout rule: a source whose ROOT is a link is refused too' ($(try { $null = cmd /c "mklink /J `"$root\lkroot`" `"$lk`"" 2>&1; $null = @(Invoke-NasArchivePass -Source "$root\lkroot" -Destination (Join-Path $root 'linknas2')); $false } catch { $_.Exception.Message -like '*lkroot*' } finally { $null = cmd /c "rmdir `"$root\lkroot`"" 2>&1 }))
 
   # the ROOT of the source unreadable
@@ -526,6 +550,11 @@ try {
   $r = RunCopyTo (Join-Path $root 'nas12\archive') @('-Dirs', 'k') $cl
   Check 'C17 the copy script: a junction nested under a -Dirs directory is FAIL LINK naming it, exit 1, nothing from that directory copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\k\inner\jn")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas12\archive\k'))) "rc=$($r.Rc) out=$($r.Out)"
   $null = cmd /c "rmdir `"$cl\k\inner\jn`"" 2>&1
+  $null = cmd /c "mklink /J `"$root\copylink-root`" `"$cl`"" 2>&1
+  try {
+    $r = RunCopyTo (Join-Path $root 'nas13\archive') @('-Dirs', 'k') "$root\copylink-root"
+    Check 'C18 the copy script: a -Source ROOT that is a junction is FAIL LINK naming it, exit 1, nothing copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $root\copylink-root")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas13'))) "rc=$($r.Rc) out=$($r.Out)"
+  } finally { $null = cmd /c "rmdir `"$root\copylink-root`"" 2>&1 }
 
   $lkSrc = Join-Path $root 'lksrc'
   New-Item -ItemType Directory -Force -Path "$lkSrc\k" | Out-Null
@@ -728,6 +757,11 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
   Check 'J6 the share refuses the write: exit 2, no marker, FAIL-COPY [ERROR], alert, final name never created' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY models\\later\.json') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and -not (Test-Path -LiteralPath "$nasArc\models\later.json")) "code=$($r.Code)"
 
+  1..6 | ForEach-Object { Blob "$eproj\backup\models\cap-$_.json" 300 }
+  $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_FAIL_COPY = '1' }
+  Get-ChildItem -LiteralPath "$eproj\backup\models" -Filter 'cap-*.json' | Remove-Item -Force
+  $al = @($r.Trace | Where-Object { $_ -like 'ALERT|*' }) -join ''
+  Check 'J6c more than 5 failing files: the alert names 5 and says "and N more (see log <path>)"' (($al -like '*archive pass: 7 file(s)*') -and ($al -like '* and 2 more (see log *nas-sync-*.log)*')) $al
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_RC_MIR = '8' }
   Check 'J6b slot mirror rc 8: exit 2, no archive pass, alert' (($r.Code -eq 2) -and ($r.Log -notmatch 'archive pass:') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -ge 1)) "code=$($r.Code)"
 

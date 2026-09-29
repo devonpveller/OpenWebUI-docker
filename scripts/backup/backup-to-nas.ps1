@@ -495,7 +495,8 @@ if (-not $NoArchive) {
     $counts = ($results | Group-Object { $_.Status } | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
     Write-LogLine "archive pass summary: $(if ($counts) { $counts } else { 'no archive files' })"
     if ($bad.Count -gt 0) {
-      Send-AlerterFailure -Reason ("archive pass: $($bad.Count) file(s) not safely on the NAS ($archiveDest): " + (($bad | Select-Object -First 5) -join ', '))
+      $more = $(if ($bad.Count -gt 5) { " and $($bad.Count - 5) more (see log $logFile)" } else { '' })
+      Send-AlerterFailure -Reason ("archive pass: $($bad.Count) file(s) not safely on the NAS ($archiveDest): " + (($bad | Select-Object -First 5) -join ', ') + $more)
       $archiveFailed = "$($bad.Count) archive file(s) failed"
     }
   }
