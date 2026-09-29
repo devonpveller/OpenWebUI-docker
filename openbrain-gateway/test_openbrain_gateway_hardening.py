@@ -579,6 +579,11 @@ def test_sse_declared_charset_cannot_make_a_500(upstream, probe):
     assert r.status_code == 200, (probe, r.status_code, r.text[:200])
     text = r.content.decode("utf-8")            # strictly valid UTF-8
     data = [ln for ln in text.splitlines() if ln.startswith("data:")]
+    if probe == "utf7-event":
+        # attempt 6: the event's type is "+2AA-", not "message", so the whole
+        # event is dropped (a type is never echoed) - nothing is advertised.
+        assert data == [] and "event:" not in text
+        return
     assert _names(json.loads(data[0][5:])) == _ALLOWED
 
 
@@ -813,3 +818,145 @@ def test_non_utf8_json_reply_advertises_nothing(upstream, raw):
         200, content=raw, headers={"content-type": "application/json"}))
     assert r.status_code == 200
     assert _names(json.loads(r.content)) == set()
+
+
+# --- attempt-5 findings: X7 (event/id content), X8 (quadratic join), priming ------
+
+
+def _splitlines_client_advertised(raw: bytes):
+    """A str.splitlines()-based SSE client, as httpx-sse 0.4.0/0.4.1 (httpx's
+    LineDecoder splits like splitlines: VT, FF, FS/GS/RS, U+0085, U+2028,
+    U+2029 too) with the mcp 1.x rule: `message` events with non-empty data."""
+    names, etype, data = [], "message", []
+    for line in raw.decode("utf-8", "replace").lstrip("\ufeff").splitlines() + [""]:
+        if line == "":
+            if data and etype == "message" and "\n".join(data):
+                try:
+                    names += [t.get("name") for t in json.loads("\n".join(data))["result"]["tools"]]
+                except Exception:
+                    pass
+            etype, data = "message", []
+            continue
+        if line.startswith(":"):
+            continue
+        f, _, v = line.partition(":")
+        v = v[1:] if v.startswith(" ") else v
+        if f == "data":
+            data.append(v)
+        elif f == "event":
+            etype = v
+    return set(names)
+
+
+_SPLITTERS = {"u2028": "\u2028", "u2029": "\u2029", "u0085": "\u0085", "vt": "\x0b",
+              "ff": "\x0c", "fs": "\x1c", "gs": "\x1d", "rs": "\x1e"}
+_FULL_TXT = json.dumps(_FULL_LIST)
+
+
+@pytest.mark.parametrize("field", ["id", "event"])
+@pytest.mark.parametrize("sep", sorted(_SPLITTERS))
+def test_event_and_id_values_cannot_inject_a_line(upstream, field, sep):
+    # X7: `id: x<sep>data: {full list}<sep>` - a splitlines client read the
+    # injected data line when the value was copied verbatim.
+    ch = _SPLITTERS[sep]
+    raw = (f"{field}: x{ch}data: {_FULL_TXT}{ch}\n" f"data: {_FULL_TXT}\n\n").encode("utf-8")
+    r = _sse(upstream, raw)
+    assert r.status_code == 200
+    assert b"thought_stats" not in r.content
+    assert "thought_stats" not in _splitlines_client_advertised(r.content)
+    assert "thought_stats" not in _client_advertised(r.content)
+    assert ch.encode("utf-8") not in r.content
+    if field == "id":   # unsafe id dropped, the data still served filtered
+        assert _client_advertised(r.content) == _ALLOWED
+        assert b"id:" not in r.content
+    else:               # a non-"message" type: the whole event is dropped
+        assert r.content == b""
+
+
+@pytest.mark.parametrize("field", ["id", "event"])
+def test_a_full_list_as_the_event_or_id_value_is_never_copied(upstream, field):
+    r = _sse(upstream, f"{field}: {_FULL_TXT}\ndata: {_FULL_TXT}\n\n".encode())
+    assert b"thought_stats" not in r.content
+
+
+@pytest.mark.parametrize("bad", ["a\x00b", "a\x01b", "a\x7fb", "a b", "caf\u00e9", "x" * 129, ""],
+                         ids=["nul", "soh", "del", "space", "non-ascii", "too-long", "empty"])
+def test_unsafe_ids_are_dropped(upstream, bad):
+    r = _sse(upstream, f"id: {bad}\nevent: message\ndata: {_FULL_TXT}\n\n".encode("utf-8"))
+    assert b"id:" not in r.content
+    assert r.content.startswith(b"event: message\ndata: ")
+
+
+def test_a_safe_id_is_kept_exactly_and_the_last_one_wins(upstream):
+    r = _sse(upstream, f"id: first\nid: a-1_B:9.z~\ndata: {_FULL_TXT}\n\n".encode())
+    assert r.content.startswith(b"id: a-1_B:9.z~\ndata: ")
+
+
+@pytest.mark.parametrize("value,kept", [("3000", True), ("30x", False), ("\u0663", False),
+                                        ("12345678901", False), ("", False), (" 5", False)])
+def test_retry_only_ascii_digits(upstream, value, kept):
+    r = _sse(upstream, f"retry: {value}\ndata: {_FULL_TXT}\n\n".encode("utf-8"))
+    assert (b"retry: 3000\n" in r.content) is kept
+    if not kept:
+        assert b"retry" not in r.content
+
+
+def test_event_type_needs_exactly_one_optional_space(upstream):
+    # "event:  message" has type " message" (one space removed), not
+    # "message": a client ignores it, and the gateway drops it whole.
+    r = _sse(upstream, f"event:  message\ndata: {_FULL_TXT}\n\n".encode())
+    assert r.content == b""
+    r = _sse(upstream, f"event:message\ndata: {_FULL_TXT}\n\n".encode())
+    assert r.content.startswith(b"event: message\ndata: ")
+
+
+def test_data_lines_are_joined_with_lf_not_concatenated(upstream):
+    # A number split over two data lines is "1\n2" to a client: invalid JSON,
+    # so the empty list - never the "12" a ""-join would make of it.
+    head = json.dumps(_FULL_LIST)[:-1] + ', "n": 1'
+    r = _sse(upstream, f"data: {head}\ndata: 2}}\n\n".encode())
+    assert _client_advertised(r.content) == set()
+    ev = json.loads(_client_events(r.content)[0])
+    assert ev["result"]["tools"] == []
+
+
+def test_data_join_is_linear(upstream):
+    # X8: 80k data lines in one event (~8 MB) - was 315 s with a quadratic join.
+    import time
+    lines = ['{"jsonrpc": "2.0", "id": 7, "result": {"tools": [']
+    lines += ['{"name": "x%06d", "description": "%s"},' % (i, "p" * 64) for i in range(80000)]
+    lines += ['{"name": "thought_stats"}]}}']
+    raw = ("".join("data: " + ln + "\n" for ln in lines) + "\n").encode()
+    t0 = time.perf_counter()
+    r = _sse(upstream, raw)
+    took = time.perf_counter() - t0
+    assert r.status_code == 200
+    assert took < 10, f"{took:.1f}s"
+    assert b"thought_stats" not in r.content
+
+
+# P1 - an MCP resumability "priming" event (`id: n` + empty data) comes first.
+@pytest.mark.parametrize("priming", [b"id: 1\ndata: \n\n", b"id: 1\ndata:\n\n", b"id: 1\ndata\n\n",
+                                     b"id: 1\ndata:   \n\n"], ids=["space", "colon", "bare", "blank"])
+def test_priming_event_then_the_real_result(upstream, priming):
+    raw = priming + b"id: 2\nevent: message\ndata: " + _J + b"\n\n"
+    r = _sse(upstream, raw)
+    assert r.content.startswith(b"id: 1\ndata: \n\nevent: message\nid: 2\ndata: ")
+    assert _client_advertised(r.content) == _ALLOWED
+    assert _splitlines_client_advertised(r.content) == _ALLOWED
+    assert b"thought_stats" not in r.content
+
+
+def test_an_event_without_data_is_kept_without_data(upstream):
+    r = _sse(upstream, b"id: 5\n\ndata: " + _J + b"\n\n")
+    assert r.content.startswith(b"id: 5\n\ndata: ")
+    assert _client_advertised(r.content) == _ALLOWED
+
+
+def test_a_response_to_another_request_is_dropped_not_rewritten(upstream):
+    other = json.dumps({"jsonrpc": "2.0", "id": 99, "result": {"tools": _UPSTREAM_TOOLS}})
+    raw = f"data: {other}\n\ndata: {_FULL_TXT}\n\n".encode()
+    r = _sse(upstream, raw)
+    assert r.content.count(b"data:") == 1
+    assert b"99" not in r.content and b"thought_stats" not in r.content
+    assert _client_advertised(r.content) == _ALLOWED

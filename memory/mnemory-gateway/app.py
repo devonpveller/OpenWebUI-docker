@@ -292,20 +292,45 @@ def _closed_tools_list(rpc_id):
 # valid data line in two and let the tail out unparsed (attempt-4 X6).
 _SSE_EOL = re.compile(r"\r\n|\r|\n")
 
+# The only `id:` / `retry:` values the gateway re-emits. An id is re-emitted
+# (it is the client's Last-Event-ID for resumability) only if it is 1-128
+# printable ASCII characters with no space: nothing any line splitter - the
+# spec's CR/LF, or str.splitlines() / httpx's LineDecoder, which also split at
+# VT, FF, FS/GS/RS, U+0085, U+2028, U+2029 (attempt-5 X7) - could split, and
+# no control character. retry: 1-10 ASCII digits. Anything else is dropped.
+_SSE_SAFE_ID = re.compile(r"[\x21-\x7e]{1,128}")
+_SSE_SAFE_RETRY = re.compile(r"[0-9]{1,10}")
+
 
 def _sse_filter_tools_list(raw: bytes, list_id) -> str:
     """Re-serialise an SSE tools/list reply, FAIL CLOSED. Parsed the way an
     EventSource client parses it: UTF-8 decode with replacement (never the
     charset the upstream declares - utf-7 etc. can decode to a lone surrogate,
-    attempt-3 X4; replacement never yields one), ONE leading
-    BOM stripped (attempt-4 X5 - a kept BOM hid the first `data:` line from the
-    gateway while the client, which strips it, read the whole list), lines split
-    on CR/LF only, events ended by a blank line (or the end of the body).
+    attempt-3 X4; replacement never yields one), ONE leading BOM stripped
+    (attempt-4 X5), lines split on CR/LF only, events ended by a blank line (or
+    the end of the body), a field's value after one optional space, the last
+    `event`/`id`/`retry` winning, data lines joined with LF (collected in a
+    list and joined once - attempt-5 X8 was a quadratic join).
 
-    Only what the gateway re-serialises goes out: per event, `event:` and `id:`
-    (values as parsed), `retry:` if all digits, and ONE `data:` line holding
-    the event's data (its data lines joined with LF, as a client joins them)
-    parsed strictly and filtered, or the empty tool list if that fails.
+    NOTHING upstream-chosen is copied (attempt-5 X7). Per event the gateway
+    writes only:
+      * `event: message` - when the event's type is `message` (explicitly or by
+        default). An event of any other type is dropped whole: MCP puts its
+        messages in `message` events, and a type is never echoed.
+      * `id: <v>` / `retry: <n>` - only values matching _SSE_SAFE_ID /
+        _SSE_SAFE_RETRY.
+      * data, re-serialised by json.dumps (ASCII) or empty:
+          - no data field: the event is kept without data (id / retry only);
+          - data that is empty or whitespace (an MCP resumability "priming"
+            event, `id: n` + `data:`): an empty `data:` - it carries no tool,
+            and a client does not take it for the tools/list response;
+          - a JSON-RPC response (result/error) whose id is NOT this tools/list
+            request's: dropped - it is not this request's answer and must not
+            be turned into one;
+          - a notification / request (`method`, no result/error): passed,
+            re-serialised;
+          - this request's response: filtered to the allow-list;
+          - anything unparseable or unfilterable: the EMPTY tool list.
     Comments, unknown fields and anything unparsed are dropped, never copied."""
     text = raw.decode("utf-8", "replace")
     if text.startswith("\ufeff"):
@@ -323,7 +348,7 @@ def _sse_filter_tools_list(raw: bytes, list_id) -> str:
 
     out = []
     for ev in events:
-        fields, data = [], None
+        etype, typed, eid, retry, data = "message", False, None, None, None
         for line in ev:
             if line.startswith(":"):
                 continue  # comment
@@ -331,23 +356,52 @@ def _sse_filter_tools_list(raw: bytes, list_id) -> str:
             if sep and value.startswith(" "):
                 value = value[1:]
             if name == "data":
-                data = value if data is None else data + "\n" + value
-            elif name in ("event", "id"):
-                if "\0" not in value:
-                    fields.append(f"{name}: {value}")
+                if data is None:
+                    data = []
+                data.append(value)
+            elif name == "event":
+                etype, typed = value, True
+            elif name == "id":
+                eid = value
             elif name == "retry":
-                if value.isdigit():
-                    fields.append(f"retry: {value}")
+                retry = value
             # any other field name is ignored, as a client ignores it
+        if etype != "message":
+            continue
+        fields = []
+        if typed:  # keep a valid upstream's framing byte for byte
+            fields.append("event: message")
+        if eid is not None and _SSE_SAFE_ID.fullmatch(eid):
+            fields.append(f"id: {eid}")
+        if retry is not None and _SSE_SAFE_RETRY.fullmatch(retry):
+            fields.append(f"retry: {retry}")
         if data is not None:
-            try:
-                p = _filter_tools_list(_strict_json(data))
-            except Exception:  # anything unfilterable -> advertise nothing
-                p = _closed_tools_list(list_id)
-            fields.append("data: " + json.dumps(p))
+            joined = "\n".join(data)
+            if not joined.strip():
+                fields.append("data: ")
+            else:
+                p = _sse_event_payload(joined, list_id)
+                if p is None:
+                    continue  # a response to another request: not this answer
+                fields.append("data: " + json.dumps(p))
         if fields:
             out.append("\n".join(fields) + "\n\n")
     return "".join(out)
+
+
+def _sse_event_payload(data: str, list_id):
+    """The re-serialisable payload for one event's data, or None to drop it."""
+    try:
+        msg = _strict_json(data)
+    except Exception:
+        return _closed_tools_list(list_id)
+    if isinstance(msg, dict) and ("result" in msg or "error" in msg) \
+            and msg.get("id") != list_id:
+        return None
+    try:
+        return _filter_tools_list(msg)
+    except Exception:  # anything unfilterable -> advertise nothing
+        return _closed_tools_list(list_id)
 
 
 class _BodyRefused(ValueError):
