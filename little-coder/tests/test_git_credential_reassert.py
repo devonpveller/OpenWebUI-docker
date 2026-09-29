@@ -267,3 +267,56 @@ def test_after_a_restart_the_callers_stored_token_survives_and_an_empty_store_is
     ex.recreate()
     assert _run_one_task(d, ex) == {WIDGET: "env-tok"}
     assert not d.tasks["t1"].detail.startswith("daemon error")
+
+
+def test_a_restore_bug_is_that_tasks_error_and_the_worker_runs_the_next_task(tmp_path, monkeypatch):
+    """MA1: `_ensure_git_credentials` deliberately lets a non-outage error out (MD10). The call sits
+    INSIDE `_run_task`'s try, so the error becomes THAT task's journaled daemon error and the REAL
+    `_worker` loop goes on to the next task. Moved outside the try, the error kills the worker, the
+    second task never runs and `in_flight` stays set - every later task would hang silently.
+    (Adapted from the attempt-4 tester's probe.)"""
+    from littlecoder.tasks import TaskStatus
+
+    monkeypatch.setenv("LC_DEPLOY_TOKEN", "env-tok")
+    ex = FakeExecutor()
+    d = _real_daemon(tmp_path, ex)
+    d.current_focus = normalize_repo_url(WIDGET)
+    d.draining = False
+    calls = {"n": 0}
+
+    def refresh(repo, token, *, if_missing=False):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("bug in the re-store")
+        return ExecResult("refresh", 0, "", "", "done", "p")
+
+    d.workspace.refresh_origin_auth = refresh
+    ran = []
+
+    def run_task(ctx, timeout):
+        ran.append(ctx.state.task_id)
+        return SimpleNamespace(outcome="unverified", signal=None, commands_run=0)
+
+    d.agent = SimpleNamespace(run_task=run_task)
+
+    async def main():
+        d.queue = asyncio.Queue()
+        for tid in ("t1", "t2"):
+            st = TaskState(task_id=tid, session_id="s", channel="cli", user_id="u", prompt="p",
+                           repo=WIDGET)
+            d.tasks[tid] = st
+            d.contexts[tid] = TaskContext(st)
+            d.queue.put_nowait(tid)
+        worker = asyncio.create_task(d._worker())
+        try:
+            await asyncio.wait_for(d.queue.join(), 5)     # MA1: never joins -> TimeoutError
+            await asyncio.sleep(0)
+            return worker.done() and worker.exception()
+        finally:
+            worker.cancel()
+
+    died = asyncio.run(main())
+    t1, t2 = d.tasks["t1"], d.tasks["t2"]
+    assert t1.detail.startswith("daemon error") and "bug in the re-store" in t1.detail
+    assert t2.status is TaskStatus.DONE and ran == ["t2"]
+    assert d.in_flight is None and not died
