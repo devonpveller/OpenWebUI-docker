@@ -148,11 +148,10 @@ jobs:
             cp "$p/.env.example" "$p/.env"
           done
       - run: cp agent-org/docker/.env.example agent-org/docker/.env
-      # OB1 renders only with its own .env and the two recipe env files its compose
-      # names as env_file - all gitignored, so a checkout has none of them.
-      - run: |
-          cp OB1/docker/.env.example OB1/docker/.env
-          touch OB1/recipes/daily-digest/.env OB1/recipes/email-history-import/.env
+      # OB1 renders only with its own .env (gitignored, so a checkout has none). Its
+      # recipe env files are `required: false` env_files since cf-ob1-fresh, so they are
+      # deliberately NOT created: this job renders OB1 as a fresh clone has it.
+      - run: cp OB1/docker/.env.example OB1/docker/.env
       # setup-python's interpreter has pip and nothing else. Until ac-ci (X1) no step
       # installed pytest, so this job could only fail with "No module named pytest" -
       # never observed, because the workflow file itself was invalid until then (F1).
