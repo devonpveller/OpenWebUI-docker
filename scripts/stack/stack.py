@@ -4899,9 +4899,11 @@ class DocRenders:
                     f"{rel(self.root, env_path)} is absent (gitignored), and {compose_rel} does not render "
                     "without it - copy it from its .env.example"
                 )
-            # A SERVICE-level env_file elsewhere (OB1's recipe .env files) is absent: the
-            # render cannot run, which is "could not compare", not drift - `--write` would
-            # refuse the same way (ac-linux-rehearsal F2). Named, so the reader can create it.
+            # A SERVICE-level env_file elsewhere is absent: the render cannot run, which is
+            # "could not compare", not drift - `--write` would refuse the same way
+            # (ac-linux-rehearsal F2). Named, so the reader can create it. No committed
+            # compose file triggers this any more: OB1's recipe .env files, the case it was
+            # written for, are `required: false` since cf-ob1-fresh. Kept for the next one.
             missing = re.search(r"env file (.+?) not found", result.stderr or "")
             if missing:
                 raw = missing.group(1).strip()
@@ -4910,8 +4912,8 @@ class DocRenders:
                 except (ValueError, OSError):
                     shown = raw
                 raise Unverifiable(
-                    f"could not compare: {shown} is absent (gitignored), and {compose_rel} does not "
-                    "render without it - create it (README's Contributing loop copies or touches every one)"
+                    f"could not compare: {shown} is absent, and {compose_rel} does not render without it "
+                    "- create it, or mark that env_file `required: false` if its services start without it"
                 )
         return result
 

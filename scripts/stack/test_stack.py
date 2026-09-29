@@ -4436,11 +4436,13 @@ def test_a_plane_that_cannot_be_rendered_here_is_not_verified_and_left_alone(doc
 
 def test_a_missing_service_env_file_is_could_not_compare_naming_it_not_stale(docs_root):
     # ac-linux-rehearsal F2: the plane's own .env EXISTS, but a service-level env_file
-    # elsewhere (OB1's recipe .env files) is absent. compose then refuses the render; that
-    # is "could not compare" (exit 3, the file named), never "stale - run docs --write".
+    # elsewhere is absent. compose then refuses the render; that is "could not compare"
+    # (exit 3, the file named), never "stale - run docs --write". OB1's recipe .env files
+    # were the real case until cf-ob1-fresh made them `required: false`; the path below is
+    # a stand-in for the next required one.
     assert docs(docs_root, "--write")[0] == 0
     host = DocsHost()
-    missing = "OB1/recipes/email-history-import/.env"
+    missing = "OB1/recipes/some-recipe/.env"
 
     def recipe_env_missing(cmd, cwd):
         if "OB1/docker/docker-compose.yml" in cmd and "--profiles" not in cmd:
@@ -4452,6 +4454,7 @@ def test_a_missing_service_env_file_is_could_not_compare_naming_it_not_stale(doc
     code, out, _h = docs(docs_root, "--check", host=recipe_env_missing)
     assert code == stack.EXIT_UNVERIFIED, out
     assert f"could not compare: {missing} is absent" in out
+    assert "`required: false`" in out
     assert "--write" not in out.split("NOT VERIFIED", 1)[-1].split("\n", 1)[0]
     assert "refused:" not in out
 
