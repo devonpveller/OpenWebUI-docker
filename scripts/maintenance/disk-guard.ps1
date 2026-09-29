@@ -24,7 +24,10 @@
 #     only when an alert is actually about to go out;
 #   - is THROTTLED: while the severity stays the same it is re-sent at most
 #     every $AlertThrottleHours (default 6). A worse severity, or a run that
-#     stopped workers, is always sent. Recovery (a healthy run) clears it.
+#     stopped workers, is always sent. Recovery (a healthy run) clears it. A
+#     stamp in the future (clock moved back, hand edit) counts as expired.
+#   - CRITICAL is sent BEFORE the space walk; the walk follows as a second
+#     message. The percent line compares the UNROUNDED percentage.
 #   - goes to #sysadmin (mm_post.py); if that post fails it goes to Telegram
 #     (telegram_notify.py, the Docker-independent path); if both fail the log
 #     says NOT DELIVERED and the throttle is not armed, so next hour retries.
@@ -84,8 +87,11 @@ if (-not $SpaceScanExclude -or $SpaceScanExclude.Count -eq 0) {
 function CDisk {
     $d = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
     $freeB = [double]$d.FreeSpace; $sizeB = [double]$d.Size
-    $pct = if ($sizeB -gt 0) { [math]::Round(100 * $freeB / $sizeB, 1) } else { 100 }
-    [pscustomobject]@{ FreeGb = [math]::Round($freeB / 1GB, 1); TotalGb = [math]::Round($sizeB / 1GB, 1); FreePct = $pct }
+    # FreePctRaw is what the percent line compares (unrounded, so the line is exactly $WarnFreePct);
+    # FreePct is what messages show, TRUNCATED to 0.1 so a value under the line never reads as it.
+    $raw = if ($sizeB -gt 0) { 100 * $freeB / $sizeB } else { 100 }
+    [pscustomobject]@{ FreeGb = [math]::Round($freeB / 1GB, 1); TotalGb = [math]::Round($sizeB / 1GB, 1)
+        FreePct = [math]::Floor($raw * 10) / 10; FreePctRaw = $raw }
 }
 function CFreeGb { (CDisk).FreeGb }
 
@@ -95,7 +101,7 @@ $free = $disk.FreeGb
 $severity = 'healthy'
 if ($free -lt $CritFreeGb) { $severity = 'critical' }
 elseif ($free -lt $WarnFreeGb) { $severity = 'warn' }
-elseif ($disk.FreePct -lt $WarnFreePct) { $severity = 'pressure' }
+elseif ($disk.FreePctRaw -lt $WarnFreePct) { $severity = 'pressure' }
 
 $logDir = Join-Path $repoRoot 'logs'
 $alertState = Join-Path $logDir 'disk-guard-alert.json'
@@ -193,6 +199,7 @@ if ($last -and $last.severity -and $last.ts) {
     $ageH = if ($parsed) { ([DateTime]::UtcNow - $lastTs).TotalHours } else { [double]::MaxValue }
     if ($stopped.Count) { $why = 'workers were stopped this run' }
     elseif ($sevRank[$severity] -gt $lastRank) { $why = "severity rose from $($last.severity)" }
+    elseif ($ageH -lt 0) { $why = "the last-alert stamp is in the future ($($last.ts)) - treated as expired" }
     elseif ($ageH -ge $AlertThrottleHours) { $why = "last alert $([math]::Round($ageH, 1))h ago" }
     else {
         $due = $false
@@ -201,10 +208,24 @@ if ($last -and $last.severity -and $last.ts) {
 }
 if (-not $due) { Log "disk-guard done (C: free $(CFreeGb) GB)"; exit 0 }
 
+# --- delivery: #sysadmin, else Telegram; never claim a send that did not happen -----------------
+function Send-Alert([string]$Text) {
+    # Returns the channel that took it ('#sysadmin' / 'Telegram') or '' when none did.
+    if (-not (Test-Path $py)) { Log "WARN: no .venv python at $py - cannot post"; return '' }
+    & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\mm_post.py') $Text 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { Log "posted to #sysadmin"; return '#sysadmin' }
+    Log "WARN: #sysadmin post failed (mm_post exit $LASTEXITCODE) - trying Telegram"
+    $tg = "ai-stack disk-guard (Mattermost post failed): " + (($Text -replace '\*\*', '') -replace ':rotating_light: |:warning: ', '')
+    & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\telegram_notify.py') $tg 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { Log "sent to Telegram"; return 'Telegram' }
+    Log "WARN: Telegram send failed (telegram_notify exit $LASTEXITCODE)"
+    return ''
+}
+
 # --- the largest NON-Docker space users on C: (read-only walk, bounded) --------------------------
 function Measure-TreeBytes([string]$Path, [datetime]$Deadline) {
-    # Sums file lengths under $Path without following junctions/symlinks. Returns -1 when the
-    # budget ran out part-way (the caller reports that item as partial).
+    # Sums file lengths under $Path without following junctions/symlinks. When the budget runs out
+    # part-way it returns (-1 - bytes counted so far); the caller reports that item as partial.
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if (-not $item) { return [int64]0 }
     if (-not $item.PSIsContainer) { return [int64]$item.Length }
@@ -227,34 +248,33 @@ function Format-Bytes([double]$b) {
     if ($b -ge 1GB) { return ('{0:N1} GB' -f ($b / 1GB)) }
     return ('{0:N0} MB' -f ($b / 1MB))
 }
-$spaceLine = ''
-try {
-    $deadline = (Get-Date).AddSeconds($SpaceScanBudgetSeconds)
-    $ex = @($SpaceScanExclude | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\').ToLowerInvariant() })
-    $rows = @()
-    $partial = $false
-    foreach ($root in $SpaceScanRoots) {
-        foreach ($c in @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
-            if ($ex -contains $c.FullName.TrimEnd('\').ToLowerInvariant()) { continue }
-            if ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
-            if ((Get-Date) -gt $deadline) { $partial = $true; break }
-            $n = Measure-TreeBytes $c.FullName $deadline
-            $isPartial = $n -lt 0
-            if ($isPartial) { $n = -1 - $n; $partial = $true }
-            $rows += [pscustomobject]@{ Path = $c.FullName; Bytes = [double]$n; Partial = $isPartial }
+function Get-SpaceLine {
+    try {
+        $deadline = (Get-Date).AddSeconds($SpaceScanBudgetSeconds)
+        $ex = @($SpaceScanExclude | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\').ToLowerInvariant() })
+        $rows = @()
+        $partial = $false
+        foreach ($root in $SpaceScanRoots) {
+            foreach ($c in @(Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue)) {
+                if ($ex -contains $c.FullName.TrimEnd('\').ToLowerInvariant()) { continue }
+                if ($c.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                if ((Get-Date) -gt $deadline) { $partial = $true; break }
+                $n = Measure-TreeBytes $c.FullName $deadline
+                $isPartial = $n -lt 0
+                if ($isPartial) { $n = -1 - $n; $partial = $true }
+                $rows += [pscustomobject]@{ Path = $c.FullName; Bytes = [double]$n; Partial = $isPartial }
+            }
         }
-    }
-    $top = @($rows | Where-Object { $_.Bytes -gt 0 } | Sort-Object Bytes -Descending | Select-Object -First $SpaceScanTop)
-    if ($top.Count) {
-        $spaceLine = 'Largest non-Docker space users on C: ' +
-            (($top | ForEach-Object { "$($_.Path) $(Format-Bytes $_.Bytes)$(if ($_.Partial) { ' (partial)' })" }) -join '; ') +
-            $(if ($partial) { " (scan stopped at its ${SpaceScanBudgetSeconds}s budget; sizes may be low)" } else { '' }) + '.'
-    } else {
-        $spaceLine = 'Largest non-Docker space users on C: none measured' +
+        $top = @($rows | Where-Object { $_.Bytes -gt 0 } | Sort-Object Bytes -Descending | Select-Object -First $SpaceScanTop)
+        if ($top.Count) {
+            return 'Largest non-Docker space users on C: ' +
+                (($top | ForEach-Object { "$($_.Path) $(Format-Bytes $_.Bytes)$(if ($_.Partial) { ' (partial)' })" }) -join '; ') +
+                $(if ($partial) { " (scan stopped at its ${SpaceScanBudgetSeconds}s budget; sizes may be low)" } else { '' }) + '.'
+        }
+        return 'Largest non-Docker space users on C: none measured' +
             $(if ($partial) { " (scan stopped at its ${SpaceScanBudgetSeconds}s budget)" } else { '' }) + '.'
-    }
-} catch { $spaceLine = "Largest non-Docker space users on C: scan failed ($_)." }
-Log "space: $spaceLine"
+    } catch { return "Largest non-Docker space users on C: scan failed ($_)." }
+}
 
 $after = CFreeGb
 $sev = switch ($severity) {
@@ -262,39 +282,42 @@ $sev = switch ($severity) {
     'warn'     { ':warning: **Disk low**' }
     default    { ":warning: **Disk under ${WarnFreePct}%**" }
 }
-$head = "$sev - C: free ${free} GB = $($disk.FreePct)% of $($disk.TotalGb) GB"
-if ($severity -eq 'pressure') {
-    $msg = "$head, below the ${WarnFreePct}% line. Alert only: the automatic docker reclaim starts under ${WarnFreeGb} GB. " +
-           "$spaceLine Ask @sysadmin for a reclaim/compaction plan if the Docker share is large."
-} else {
-    $msg = "$head -> ${after} GB after reclaim. $reclaimLine (freed inside the Docker vhdx; C: gets it back at the next compaction)." +
+$head = "$sev - C: free ${free} GB = $($disk.FreePct.ToString('0.0', [Globalization.CultureInfo]::InvariantCulture))% of $($disk.TotalGb) GB"
+function Get-AlertText([string]$SpaceLine) {
+    if ($severity -eq 'pressure') {
+        return "$head, below the ${WarnFreePct}% line. Alert only: the automatic docker reclaim starts under ${WarnFreeGb} GB. " +
+               "$SpaceLine Ask @sysadmin for a reclaim/compaction plan if the Docker share is large."
+    }
+    return "$head -> ${after} GB after reclaim. $reclaimLine (freed inside the Docker vhdx; C: gets it back at the next compaction)." +
            $(if ($orgAction) { " Org: $orgAction." } else { "" }) +
            $(if ($stopped.Count) { " Gym workers stopped: $($stopped -join ', ')." } else { "" }) +
            $(if ($critical) { " To RESUME after space is safe: release the kill-switch (POST http://127.0.0.1:8830/kill-switch {\""on\"":false} or ask the org via Mattermost) and docker start the workers." } else { "" }) +
-           " $spaceLine" +
+           " $SpaceLine" +
            " Weekly compaction: Sundays 03:15; trigger early via the sysadmin channel if needed."
 }
-Log "alert ($why): $msg"
 
-# --- delivery: #sysadmin, else Telegram; never claim a send that did not happen -----------------
-$delivered = ''
-if (Test-Path $py) {
-    & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\mm_post.py') $msg 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) { $delivered = '#sysadmin'; Log "posted to #sysadmin" }
-    else {
-        Log "WARN: #sysadmin post failed (mm_post exit $LASTEXITCODE) - trying Telegram"
-        $tg = "ai-stack disk-guard (Mattermost post failed): " + (($msg -replace '\*\*', '') -replace ':rotating_light: |:warning: ', '')
-        & $py (Join-Path $repoRoot 'scripts\sysadmin-mcp\telegram_notify.py') $tg 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { $delivered = 'Telegram'; Log "sent to Telegram" }
-        else { Log "WARN: Telegram send failed (telegram_notify exit $LASTEXITCODE)" }
-    }
-} else { Log "WARN: no .venv python at $py - cannot post" }
+# CRITICAL goes out BEFORE the space walk (up to $SpaceScanBudgetSeconds) and the walk follows as a
+# second message, so the urgent line is not held back by it. The others carry the walk inline.
+if ($critical) {
+    $msg = Get-AlertText 'Largest non-Docker space users on C: in a follow-up message.'
+} else {
+    $spaceLine = Get-SpaceLine
+    Log "space: $spaceLine"
+    $msg = Get-AlertText $spaceLine
+}
+Log "alert ($why): $msg"
+$delivered = Send-Alert $msg
 
 if ($delivered) {
     try {
         (@{ severity = $severity; ts = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); via = $delivered } |
             ConvertTo-Json -Compress) | Set-Content -LiteralPath $alertState -Encoding ASCII
     } catch { Log "WARN: could not write $alertState ($_)" }
+    if ($critical) {
+        $spaceLine = Get-SpaceLine
+        Log "space: $spaceLine"
+        $null = Send-Alert ("DISK CRITICAL follow-up - C: free ${after} GB. $spaceLine")
+    }
 } else {
     Log "ALERT NOT DELIVERED on any channel - the throttle stays open, next hour retries"
 }

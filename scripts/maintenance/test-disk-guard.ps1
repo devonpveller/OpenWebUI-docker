@@ -8,7 +8,8 @@
 #     auto_reclaim.py / sweep_tmp.py, and exits with the number in <sandbox>\rc-<script>.txt
 #     (0 when absent). No Python runs, so auto_reclaim, sweep_tmp, mm_post and
 #     telegram_notify are never executed: nothing is reclaimed, posted or sent.
-#   - Get-CimInstance, docker, Invoke-RestMethod, Start-Sleep and Register-ScheduledTask are
+#   - Get-CimInstance, docker, Invoke-RestMethod, Start-Sleep, Register-ScheduledTask (and,
+#     for one case, Get-Date) are
 #     shadowed by functions defined here (a script invoked with & resolves commands through
 #     its caller's scope, and functions win over cmdlets and applications). The C: figures
 #     are whatever the case sets; DOCKER_HOST is also forced to the dead tcp://127.0.0.1:1.
@@ -36,12 +37,18 @@ $results = @()
 
 # Shared state the fakes write to. GLOBAL on purpose: inside a function called from the child
 # script, $script: would resolve to the GUARD's script scope, not this one.
-$global:DGT = @{ Free = 0.0; Size = 930.5 * 1GB; Workers = @(); Docker = @(); Rest = @() }
+$global:DGT = @{ Free = 0.0; Size = 930.5 * 1GB; Workers = @(); Docker = @(); Rest = @(); Tick = 0; Clock = [datetime]'2026-01-01' }
 
 function Get-CimInstance { param($ClassName, $Filter) [pscustomobject]@{ FreeSpace = $global:DGT.Free; Size = $global:DGT.Size } }
 function docker { $global:DGT.Docker += ($args -join ' '); if ($args[0] -eq 'ps') { return $global:DGT.Workers } }
 function Invoke-RestMethod { param($Method = 'GET', $Uri, $ContentType, $Body, $TimeoutSec) $global:DGT.Rest += "$Method $Uri"; [pscustomobject]@{ instances = @() } }
 function Start-Sleep { }
+# Get-Date is real unless a case sets DGT.Tick: then every call advances a fake clock by Tick
+# seconds (the space walk's budget checks become deterministic). [DateTime]::UtcNow is untouched.
+function Get-Date {
+    if ($global:DGT -and $global:DGT.Tick) { $global:DGT.Clock = $global:DGT.Clock.AddSeconds($global:DGT.Tick); return $global:DGT.Clock }
+    Microsoft.PowerShell.Utility\Get-Date @args
+}
 function Register-ScheduledTask { throw 'the disk-guard test must never register a task' }
 
 function Write-Case([string]$Id, [string]$Title, [bool]$Pass, [string]$Detail) {
@@ -82,8 +89,15 @@ public static class CfdgRecorder__SFX__ { public static int Main(string[] a) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $p) -Force | Out-Null
         $fs = [IO.File]::Create($p); $fs.SetLength([int64]$spec[1] * 1MB); $fs.Close()
     }
-    # a junction back to big\ must not be counted twice
+    # junctions back to big\ - one at the top, one nested inside mid\ - must not be counted
     cmd /c "mklink /J `"$scan\big-link`" `"$scan\big`"" 2>&1 | Out-Null
+    cmd /c "mklink /J `"$scan\mid\deep\nested-link`" `"$scan\big`"" 2>&1 | Out-Null
+    # a second scan root for the in-tree budget case: deep\top.bin 5 MB, then 4 levels further down
+    foreach ($spec in @(@('scan2\deep\top.bin', 5), @('scan2\deep\a\b\c\d\x.bin', 1))) {
+        $p = Join-Path $root $spec[0]
+        New-Item -ItemType Directory -Path (Split-Path -Parent $p) -Force | Out-Null
+        $fs = [IO.File]::Create($p); $fs.SetLength([int64]$spec[1] * 1MB); $fs.Close()
+    }
     return $root
 }
 
@@ -92,6 +106,14 @@ function Get-Calls([string]$Root, [string]$Name) {
     # the leading comma keeps a one-element result an ARRAY ($x[0] of a bare string is its first char)
     if (-not (Test-Path $f)) { return ,([string[]]@()) }
     return ,([string[]]@(Get-Content -LiteralPath $f | Where-Object { $_ -like "$Name`t*" } | ForEach-Object { $_.Substring($Name.Length + 1) }))
+}
+# the main alerts only - not the CRITICAL space follow-up
+function Get-Alerts([string]$Root) {
+    return ,([string[]]@((Get-Calls $Root 'mm_post.py') | Where-Object { $_ -notlike 'DISK CRITICAL follow-up*' }))
+}
+function Set-AlertState([string]$Root, [string]$Severity, [datetime]$TsUtc) {
+    (@{ severity = $Severity; ts = $TsUtc.ToString('yyyy-MM-ddTHH:mm:ssZ'); via = '#sysadmin' } | ConvertTo-Json -Compress) |
+        Set-Content -LiteralPath (Join-Path $Root 'logs\disk-guard-alert.json') -Encoding ASCII
 }
 function Get-GuardLog([string]$Root) {
     $f = Join-Path $Root 'logs\disk-guard.log'
@@ -147,28 +169,30 @@ try {
     Write-Case 'D3' 'WARN (20 GB): reclaim, sweep, one post with the reclaim line; no stop' `
         ((Get-Calls $r 'auto_reclaim.py').Count -eq 1 -and (Get-Calls $r 'sweep_tmp.py').Count -eq 1 -and $mm.Count -eq 1 -and
          $mm[0] -match 'RECLAIM fake' -and $mm[0] -match 'Disk low' -and $global:DGT.Rest.Count -eq 0 -and
+         (Get-Calls $r 'telegram_notify.py').Count -eq 0 -and
          @($global:DGT.Docker | Where-Object { $_ -like 'stop*' }).Count -eq 0) `
-        "reclaim=$((Get-Calls $r 'auto_reclaim.py').Count) sweep=$((Get-Calls $r 'sweep_tmp.py').Count) posts=$($mm.Count) rest=$($global:DGT.Rest.Count)`nmessage: $($mm -join ' | ')"
+        "reclaim=$((Get-Calls $r 'auto_reclaim.py').Count) sweep=$((Get-Calls $r 'sweep_tmp.py').Count) posts=$($mm.Count) telegram=$((Get-Calls $r 'telegram_notify.py').Count) rest=$($global:DGT.Rest.Count)`nmessage: $($mm -join ' | ')"
 
     # D4 - CRITICAL keeps its actions: kill-switch, hard stop of the workers, URGENT post
     $r = Box; $global:DGT.Workers = @('ao-worker-1', 'ao-worker-2', 'openwebui'); $global:DGT.Docker = @(); $global:DGT.Rest = @()
     $o = Invoke-Guard $r 10.0
     $mm = Get-Calls $r 'mm_post.py'
     $stops = @($global:DGT.Docker | Where-Object { $_ -like 'stop *' })
-    Write-Case 'D4' 'CRITICAL (10 GB): kill-switch, stop ao-worker-* only, post names them' `
+    Write-Case 'D4' 'CRITICAL (10 GB): kill-switch, stop ao-worker-* only; alert first, space walk as a follow-up' `
         (($global:DGT.Rest -join ',') -match 'POST http://127.0.0.1:8830/kill-switch' -and ($stops -join ',') -eq 'stop ao-worker-1,stop ao-worker-2' -and
-         $mm.Count -eq 1 -and $mm[0] -match 'DISK CRITICAL' -and $mm[0] -match 'ao-worker-1') `
+         $mm.Count -eq 2 -and $mm[0] -match 'DISK CRITICAL' -and $mm[0] -match 'ao-worker-1' -and $mm[0] -notmatch 'big 30 MB' -and
+         $mm[1] -like 'DISK CRITICAL follow-up*' -and $mm[1] -match 'big 30 MB') `
         "rest=$($global:DGT.Rest -join ', ')`nstops=$($stops -join ', ') posts=$($mm.Count)`nmessage: $($mm -join ' | ')"
     $global:DGT.Workers = @()
 
     # D5 - throttle: same severity inside the window is not re-sent; worse is; an aged alert is;
     # healthy clears it
     $r = Box; $steps = @()
-    $null = Invoke-Guard $r 20.0; $steps += "warn:$((Get-Calls $r 'mm_post.py').Count)"
-    $null = Invoke-Guard $r 20.0; $steps += "warn-again:$((Get-Calls $r 'mm_post.py').Count)"
+    $null = Invoke-Guard $r 20.0; $steps += "warn:$((Get-Alerts $r).Count)"
+    $null = Invoke-Guard $r 20.0; $steps += "warn-again:$((Get-Alerts $r).Count)"
     $reclaim2 = (Get-Calls $r 'auto_reclaim.py').Count
-    $null = Invoke-Guard $r 10.0; $steps += "critical:$((Get-Calls $r 'mm_post.py').Count)"
-    $null = Invoke-Guard $r 10.0; $steps += "critical-again:$((Get-Calls $r 'mm_post.py').Count)"
+    $null = Invoke-Guard $r 10.0; $steps += "critical:$((Get-Alerts $r).Count)"
+    $null = Invoke-Guard $r 10.0; $steps += "critical-again:$((Get-Alerts $r).Count)"
     $st = Join-Path $r 'logs\disk-guard-alert.json'
     $aged = $false
     if (Test-Path $st) {
@@ -176,9 +200,9 @@ try {
         $j.ts = [DateTime]::UtcNow.AddHours(-7).ToString('yyyy-MM-ddTHH:mm:ssZ')
         ($j | ConvertTo-Json -Compress) | Set-Content -LiteralPath $st -Encoding ASCII; $aged = $true
     }
-    $null = Invoke-Guard $r 10.0; $steps += "critical-7h-later:$((Get-Calls $r 'mm_post.py').Count)"
+    $null = Invoke-Guard $r 10.0; $steps += "critical-7h-later:$((Get-Alerts $r).Count)"
     $null = Invoke-Guard $r 200.0; $cleared = -not (Test-Path $st); $steps += "healthy:cleared=$cleared"
-    $null = Invoke-Guard $r 81.0; $steps += "pressure-new-episode:$((Get-Calls $r 'mm_post.py').Count)"
+    $null = Invoke-Guard $r 81.0; $steps += "pressure-new-episode:$((Get-Alerts $r).Count)"
     $want = 'warn:1,warn-again:1,critical:2,critical-again:2,critical-7h-later:3,healthy:cleared=True,pressure-new-episode:4'
     Write-Case 'D5' 'hourly runs: one message per severity per 6 h, worse always, recovery re-arms' `
         (($steps -join ',') -eq $want -and $reclaim2 -eq 2 -and (Get-GuardLog $r) -match 'alert throttled') `
@@ -188,11 +212,16 @@ try {
     $r = Box
     Set-Content -LiteralPath (Join-Path $r 'rc-mm_post.py.txt') -Value '1' -Encoding ASCII
     $null = Invoke-Guard $r 20.0
-    $tg = Get-Calls $r 'telegram_notify.py'; $lg = Get-GuardLog $r
-    Write-Case 'D6' 'Mattermost post fails -> logged as failed, sent via Telegram' `
-        ((Get-Calls $r 'mm_post.py').Count -eq 1 -and $tg.Count -eq 1 -and $tg[0] -match 'Mattermost post failed' -and $tg[0] -match '20 GB' -and
-         $lg -match '#sysadmin post failed' -and $lg -match 'sent to Telegram' -and $lg -notmatch 'posted to #sysadmin') `
-        "mm attempts=$((Get-Calls $r 'mm_post.py').Count) telegram=$($tg.Count)`ntelegram text: $($tg -join ' | ')"
+    $tg = Get-Calls $r 'telegram_notify.py'; $lg1 = Get-GuardLog $r
+    $st = Join-Path $r 'logs\disk-guard-alert.json'
+    $via = if (Test-Path $st) { (Get-Content $st -Raw | ConvertFrom-Json).via } else { '(no state)' }
+    $null = Invoke-Guard $r 20.0   # the next hour, Mattermost still down: throttled, nothing re-sent
+    $lg = Get-GuardLog $r
+    Write-Case 'D6' 'Mattermost post fails -> logged as failed, sent via Telegram, and that delivery arms the throttle' `
+        ((Get-Calls $r 'mm_post.py').Count -eq 1 -and (Get-Calls $r 'telegram_notify.py').Count -eq 1 -and $tg[0] -match 'Mattermost post failed' -and $tg[0] -match '20 GB' -and
+         $lg1 -match '#sysadmin post failed' -and $lg1 -match 'sent to Telegram' -and $lg1 -notmatch 'posted to #sysadmin' -and
+         $lg1 -notmatch 'NOT DELIVERED' -and $via -eq 'Telegram' -and $lg -match 'alert throttled') `
+        "run 1: mm attempts=1? telegram=$($tg.Count) state via=$via NOT-DELIVERED line: $($lg1 -match 'NOT DELIVERED')`nrun 2: mm attempts total=$((Get-Calls $r 'mm_post.py').Count) telegram total=$((Get-Calls $r 'telegram_notify.py').Count) throttled: $($lg -match 'alert throttled')`ntelegram text: $($tg -join ' | ')"
 
     # D7 - both down: NOT DELIVERED in the log, the throttle is not armed, next run tries again
     $r = Box
@@ -223,6 +252,41 @@ try {
     $mm = Get-Calls $r 'mm_post.py'; $m = if ($mm.Count) { $mm[0] } else { '' }
     Write-Case 'D9' 'space scan out of budget: alert still sent, marked as cut short' `
         ($mm.Count -eq 1 -and $m -match 'budget') "message: $m"
+
+    # D10 - a throttle stamp in the FUTURE counts as expired (clock moved back / hand edit)
+    $r = Box
+    Set-AlertState $r 'warn' ([DateTime]::UtcNow.AddYears(1))
+    $null = Invoke-Guard $r 20.0
+    Write-Case 'D10' 'warn with a same-severity stamp 1 year in the future is sent, not muted' `
+        ((Get-Alerts $r).Count -eq 1 -and (Get-GuardLog $r) -match 'in the future') "alerts=$((Get-Alerts $r).Count)"
+
+    # D11 - a run that stops workers is always sent, even inside a fresh critical throttle
+    $r = Box; $global:DGT.Workers = @(); $steps = @()
+    $null = Invoke-Guard $r 10.0; $steps += "critical-no-workers:$((Get-Alerts $r).Count)"
+    $global:DGT.Workers = @('ao-worker-1')
+    $null = Invoke-Guard $r 10.0; $steps += "critical-stops-a-worker:$((Get-Alerts $r).Count)"
+    $global:DGT.Workers = @()
+    $null = Invoke-Guard $r 10.0; $steps += "critical-no-workers-again:$((Get-Alerts $r).Count)"
+    $want = 'critical-no-workers:1,critical-stops-a-worker:2,critical-no-workers-again:2'
+    Write-Case 'D11' 'stopping workers bypasses the throttle; a critical run that stops nothing does not' `
+        (($steps -join ',') -eq $want) "got : $($steps -join ',')`nwant: $want"
+
+    # D12 - the 10% line is exact and unrounded: 100.0 of 1000 GB (10.00%) is silent, 99.6 (9.96%) alerts
+    $global:DGT.Size = 1000 * 1GB
+    $r = Box; $null = Invoke-Guard $r 100.0; $at = (Get-Alerts $r).Count
+    $r = Box; $null = Invoke-Guard $r 99.6; $under = Get-Alerts $r
+    $global:DGT.Size = 930.5 * 1GB
+    Write-Case 'D12' 'percent line: exactly 10.00% silent, 9.96% alerts (shown truncated as 9.9%)' `
+        ($at -eq 0 -and $under.Count -eq 1 -and $under[0] -match '= 9\.9% of 1000 GB') "at 10.00%: alerts=$at ; at 9.96%: $($under -join ' | ')"
+
+    # D13 - a budget that runs out INSIDE a tree marks that item partial (fake clock, 1 s per read)
+    $r = Box
+    $x = @{ SpaceScanRoots = @(Join-Path $r 'scan2'); SpaceScanExclude = @('Z:\none'); SpaceScanBudgetSeconds = 2 }
+    $global:DGT.Tick = 1
+    try { $null = Invoke-Guard $r 81.0 $x } finally { $global:DGT.Tick = 0 }
+    $mm = Get-Alerts $r; $m = if ($mm.Count) { $mm[0] } else { '' }
+    Write-Case 'D13' 'walk cut short inside a tree: item listed as partial, message says the budget ran out' `
+        ($hasScan -and $m -match 'deep 5 MB \(partial\)' -and $m -match 'budget') "message: $m"
 }
 catch {
     Write-Case 'ERR' 'the harness stopped part-way (a later case did not run)' $false "$_"
@@ -230,6 +294,7 @@ catch {
 finally {
     foreach ($b in $sandboxes) {
         cmd /c "rmdir `"$b\scan\big-link`"" 2>&1 | Out-Null
+        cmd /c "rmdir `"$b\scan\mid\deep\nested-link`"" 2>&1 | Out-Null
         Remove-Item -LiteralPath $b -Recurse -Force -ErrorAction SilentlyContinue
     }
     Remove-Variable -Name DGT -Scope Global -ErrorAction SilentlyContinue
