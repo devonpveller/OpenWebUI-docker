@@ -41,7 +41,9 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('pure', 'dind', 'all')][string]$Part = 'all',
+    # 'firstcall' is internal: P20 runs it in a FRESH process (see there).
+    [ValidateSet('pure', 'dind', 'all', 'firstcall')][string]$Part = 'all',
+    [string]$Stub = '',
     [string]$Script = '',
     [string]$Owner = 'cf-watchdog-test',
     [string]$AlpineImage = 'alpine:3.20',
@@ -54,6 +56,7 @@ $ErrorActionPreference = 'Stop'
 # -RecordFixtures, then with each record's NetworkSettings removed (the parser
 # does not read it, and its bridge IPs trip the identity gate). Re-record the same way.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:HarnessPath = $MyInvocation.MyCommand.Path
 $FixtureDir = Join-Path $here 'fixtures\watchdog-loops'
 if (-not $Script) { $Script = Join-Path $here 'stack-watchdog.ps1' }  # ($PSScriptRoot is empty in a 5.1 param default)
 $Script = (Resolve-Path $Script).Path
@@ -111,26 +114,11 @@ function Measure-Alerts {
 # =============================================================================
 # PART 1 - pure functions on recorded docker inspect JSON
 # =============================================================================
-function Invoke-PurePart {
-    $env:DOCKER_HOST = 'tcp://127.0.0.1:1'   # dead endpoint: nothing here can reach a daemon
-    Remove-Item Env:\DOCKER_CONTEXT -ErrorAction SilentlyContinue
-    $sbx = New-Sandbox
-    # try/finally: the sandbox goes on every exit, a throw included.
-    try { Invoke-PureCases -sbx $sbx }
-    catch { Write-Case 'P0' 'pure part ran to the end' $false "harness error: $($_.Exception.Message)" }
-    finally {
-        Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-PureCases {
+# Load the watchdog's FUNCTIONS and top-level assignments only - the main
+# switch (which would run a health check) is never executed - into the scope
+# that dot-sources this block. Paths are re-pointed at the sandbox.
+$script:Loader = {
     param([string]$sbx)
-    Write-Host "pure part: sandbox $sbx ; DOCKER_HOST=$env:DOCKER_HOST ; script $Script"
-
-    # Load FUNCTIONS and top-level assignments only - the main switch (which
-    # would run a health check) is never executed. Paths are re-pointed at the
-    # sandbox afterwards.
     $tokens = $null; $perr = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($Script, [ref]$tokens, [ref]$perr)
     if ($perr.Count -gt 0) { throw "parse errors in ${Script}: $($perr[0].Message)" }
@@ -151,12 +139,53 @@ function Invoke-PureCases {
     # also echoes every line to the console.
     function Write-LogEntry { param([string]$Message, [string]$Level = 'INFO')
         "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level] $Message" | Out-File -FilePath $LOG_FILE -Append -Encoding UTF8 }
+}
+
+# P20's child: a FRESH process, so its first bounded call is the one that pays
+# for the job type's Add-Type compile. One call to a stub that starts a
+# descendant at once and exits; prints how many stub processes survive it.
+function Invoke-FirstCall {
+    $env:DOCKER_HOST = 'tcp://127.0.0.1:1'
+    $sbx = New-Sandbox
+    try {
+        . $script:Loader $sbx
+        $WatchdogDockerExe = $Stub
+        $compiledBefore = [bool]('AiStackWatchdogJob' -as [type])
+        $r = Invoke-BoundedDocker -DockerArgs @('logs', 'x') -TimeoutSeconds 3
+        Start-Sleep -Milliseconds 800
+        $left = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
+        Write-Host "FIRSTCALL compiledBefore=$compiledBefore returned=$($null -ne $r) left=$left"
+    } finally {
+        Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-PurePart {
+    $env:DOCKER_HOST = 'tcp://127.0.0.1:1'   # dead endpoint: nothing here can reach a daemon
+    Remove-Item Env:\DOCKER_CONTEXT -ErrorAction SilentlyContinue
+    $sbx = New-Sandbox
+    # try/finally: the sandbox goes on every exit, a throw included.
+    try { Invoke-PureCases -sbx $sbx }
+    catch { Write-Case 'P0' 'pure part ran to the end' $false "harness error: $($_.Exception.Message)" }
+    finally {
+        Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+        Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-PureCases {
+    param([string]$sbx)
+    Write-Host "pure part: sandbox $sbx ; DOCKER_HOST=$env:DOCKER_HOST ; script $Script"
+
+    . $script:Loader $sbx
 
     $need = @('Test-ContainerRestartLoops', 'Test-NetnsJoinedContainers', 'Test-UnboundedRestartPolicy',
               'ConvertTo-ContainerFact', 'Invoke-BoundedDocker', 'Get-ContainerRuntimeFacts', 'Send-LoopAlert')
     $missing = @($need | Where-Object { -not (Get-Command $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
-        foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15') {
+        foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11', 'P12', 'P13', 'P14', 'P15',
+                        'P16', 'P17', 'P18', 'P19', 'P20', 'P21') {
             Write-Case $id 'container-loop detection' $false ("the watchdog under test defines none of: " + ($missing -join ', '))
         }
         return
@@ -342,16 +371,21 @@ function Invoke-PureCases {
     $p12a = & $said "ALERT ai-stack: container 'p12-fixed' is CRASH-LOOPING"
     Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p12-fixed' 'p12' 7 'running' (& $iso 61) '') | Out-Null
     $p12r = & $said "RESOLVED ai-stack: container 'p12-fixed'"
-    # The cooldown expires: age every sentinel for this key by 7 hours.
+    $p12files = @(Get-ChildItem (Join-Path $sbx 'logs') -Force -Filter '*-alert-crashloop-p12-fixed' | ForEach-Object Name)
+    # (Kept from attempt 3: age any sentinel left for this key by 7 hours.)
     Get-ChildItem (Join-Path $sbx 'logs') -Force -Filter '*crashloop-p12-fixed*' |
         ForEach-Object { $_.LastWriteTime = (Get-Date).AddHours(-7) }
     Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p12-fixed' 'p12' 7 'running' (& $iso 70) '') | Out-Null
     Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p12-fixed' 'p12' 7 'running' (& $iso 80) '') | Out-Null
+    # One NEW restart after the all-clear: the 7 old ones are still inside 6h
+    # but before ClearedAt, so the window holds 1, not 8 - no page.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p12-fixed' 'p12' 8 'running' (& $iso 1) '') | Out-Null
     $p12a2 = & $said "ALERT ai-stack: container 'p12-fixed' is CRASH-LOOPING"
     $p12r2 = & $said "RESOLVED ai-stack: container 'p12-fixed'"
-    Write-Case 'P12' 'a fixed loop with 6+ restarts gets one all-clear at settle and no page after the cooldown' `
-        (($p12a -eq 1) -and ($p12r -eq 1) -and ($p12a2 -eq 1) -and ($p12r2 -eq 1)) `
-        "7 restarts: ALERT $p12a; running 61 min: RESOLVED $p12r; cooldown aged 7h, 2 more settled passes: ALERT total $p12a2, RESOLVED total $p12r2"
+    Write-Case 'P12' 'a fixed loop with 6+ restarts gets one all-clear at settle (paging state reset) and no page from its old restarts' `
+        (($p12a -eq 1) -and ($p12r -eq 1) -and ($p12files.Count -eq 0) -and ($p12a2 -eq 1) -and ($p12r2 -eq 1)) `
+        ("7 restarts: ALERT $p12a; running 61 min: RESOLVED $p12r; cooldown/throttle sentinels left after the all-clear: " +
+         "$(if ($p12files) { $p12files -join ', ' } else { 'none' }); 2 more settled passes then ONE new restart (the 7 old ones still inside 6h): ALERT total $p12a2, RESOLVED total $p12r2")
 
     # P13 (W-2): history dated in the FUTURE, or with a non-positive count, is
     # dropped - it must not page a container that is not restarting.
@@ -361,12 +395,20 @@ function Invoke-PureCases {
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $st | Add-Member -NotePropertyName 'p13-skew' -NotePropertyValue ([pscustomobject]@{
         Count = 3; Id = 'p13'; Streak = 0; Accum = 0; Missed = 0; Hist = @((1..6 | ForEach-Object { "${fut}:1" }) + "${now}:-4") }) -Force
+    $month = [DateTimeOffset]::UtcNow.AddDays(30).ToUnixTimeSeconds()
+    $st | Add-Member -NotePropertyName 'p13-month' -NotePropertyValue ([pscustomobject]@{
+        Count = 3; Id = 'p13m'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..6 | ForEach-Object { "${month}:1" }) }) -Force
     ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
-    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p13-skew' 'p13' 3 'running' (& $iso 5) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @((& $fact 'cfwd-healthy' 'p13-skew' 'p13' 3 'running' (& $iso 5) ''),
+                                        (& $fact 'cfwd-healthy' 'p13-month' 'p13m' 3 'running' (& $iso 5) '')) | Out-Null
     $p13 = & $said "container 'p13-skew'"
-    $kept = @(((Get-Content $statePath -Raw | ConvertFrom-Json).'p13-skew').Hist | Where-Object { $_ }).Count
-    Write-Case 'P13' 'future-dated and non-positive history entries are dropped, not counted' (($p13 -eq 0) -and ($kept -eq 0)) `
-        "6 entries dated a year ahead + one of -4: messages $p13; entries kept $kept"
+    $p13m = & $said "container 'p13-month'"
+    $stNow = Get-Content $statePath -Raw | ConvertFrom-Json
+    $kept = @($stNow.'p13-skew'.Hist | Where-Object { $_ }).Count
+    $keptM = @($stNow.'p13-month'.Hist | Where-Object { $_ }).Count
+    Write-Case 'P13' 'future-dated (a year or a month ahead) and non-positive history entries are dropped, not counted' `
+        (($p13 -eq 0) -and ($kept -eq 0) -and ($p13m -eq 0) -and ($keptM -eq 0)) `
+        "6 entries a year ahead + one of -4: messages $p13, entries kept $kept; 6 entries 30 days ahead: messages $p13m, entries kept $keptM"
 
     # P14: a slow loop's history survives a pass that did not see the container
     # (partial facts): 5 restarts, a pass without it, then the 6th -> paged.
@@ -381,6 +423,91 @@ function Invoke-PureCases {
     $after14 = & $said "container 'p14-carry' is CRASH-LOOPING: 6 restart\(s\) in the last"
     Write-Case 'P14' 'restart history is carried across a pass that missed the container' (($cnt -eq 5) -and ($before14 -eq 0) -and ($after14 -eq 1)) `
         "5 restarts over 10 passes: pages $before14; one pass without it, then restart 6: slow-loop pages $after14"
+
+    # P16 (W-6): a loop that RELAPSES after its all-clear is paged again at once.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p16-relapse' 'p16' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p16-relapse' 'p16' 7 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p16-relapse' 'p16' 7 'running' (& $iso 61) '') | Out-Null
+    $p16r = & $said "RESOLVED ai-stack: container 'p16-relapse'"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p16-relapse' 'p16' 27 'restarting' (& $iso 1) '') | Out-Null
+    $tt = Get-Transport $sbx
+    $p16a = Measure-Alerts $tt "container 'p16-relapse' is CRASH-LOOPING"
+    Write-Case 'P16' 'a relapse after the all-clear pages again at once' (($p16r -eq 1) -and ($p16a -eq 'tg=2 mm=2')) `
+        "paged, then RESOLVED $p16r; relapse of 20 restarts in one pass: alerts $p16a (expected tg=2 mm=2)"
+
+    # P17 (W-6): paged, then STOPPED (all-clear), started again, loops -> paged.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p17-stop' 'p17' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p17-stop' 'p17' 6 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p17-stop' 'p17' 6 'exited' (& $iso 30) '') | Out-Null
+    $p17r = & $said "RESOLVED ai-stack: container 'p17-stop'"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p17-stop' 'p17' 6 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p17-stop' 'p17' 12 'running' (& $iso 1) '') | Out-Null
+    $tt = Get-Transport $sbx
+    $p17a = Measure-Alerts $tt "container 'p17-stop' is CRASH-LOOPING"
+    Write-Case 'P17' 'paged, stopped (all-clear), started, loops again: paged again' (($p17r -eq 1) -and ($p17a -eq 'tg=2 mm=2')) `
+        "RESOLVED on stop: $p17r; after start + 6 restarts: alerts $p17a (expected tg=2 mm=2)"
+
+    # P21: a paged loop caught 'exited' between two restarts, with a NEW
+    # restart this pass, has not settled: no all-clear.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p21-between' 'p21' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p21-between' 'p21' 7 'running' (& $iso 1) '') | Out-Null
+    # A quiet pass resets the fast streak, so only the settle rule stands between
+    # the next pass and a false all-clear.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p21-between' 'p21' 7 'running' (& $iso 2) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p21-between' 'p21' 8 'exited' (& $iso 1) '') | Out-Null
+    $p21a = & $said "ALERT ai-stack: container 'p21-between'"
+    $p21r = & $said "RESOLVED ai-stack: container 'p21-between'"
+    Write-Case 'P21' "a paged loop seen 'exited' with a new restart this pass gets no all-clear" (($p21a -eq 1) -and ($p21r -eq 0)) `
+        "paged $p21a; after a pass with status exited and one new restart: RESOLVED $p21r"
+    # P18 (W-7): SLOW loops with IRREGULAR gaps, on a simulated clock. A pass
+    # every 10 minutes; restart times from a gap list. The oracle below
+    # computes, independently, the first pass at which either rule holds: the
+    # fast rule (restarts on consecutive passes adding to 3) or the window
+    # (restarts seen by passes in the last 6h adding to 6). The watchdog must
+    # page at exactly that pass.
+    $rng = New-Object System.Random 40
+    $expGaps = @(1..60 | ForEach-Object { [math]::Max(1, [math]::Round(-[math]::Log(1 - $rng.NextDouble()) * 40)) })
+    $scen = [ordered]@{
+        'p18-20-70' = @(1..30 | ForEach-Object { if ($_ % 2) { 20 } else { 70 } })
+        'p18-40-70' = @(1..30 | ForEach-Object { if ($_ % 2) { 40 } else { 70 } })
+        'p18-exp40' = $expGaps
+    }
+    $t0 = [datetime]::SpecifyKind([datetime]'2030-01-01T00:00:00', 'Utc')
+    $p18lines = @(); $p18ok = $true
+    foreach ($name in $scen.Keys) {
+        $restarts = @(); $acc = 0
+        foreach ($g in $scen[$name]) { $acc += $g; $restarts += $acc }
+        # Oracle.
+        $passes = @(0..71 | ForEach-Object { 5 + 10 * $_ })
+        $prevN = 0; $streakAcc = 0; $seenAt = @(); $oracle = -1
+        for ($k = 0; $k -lt $passes.Count; $k++) {
+            $T = $passes[$k]
+            $n = @($restarts | Where-Object { $_ -le $T }).Count
+            $d = $n - $prevN; $prevN = $n
+            if ($k -eq 0) { continue }
+            if ($d -gt 0) { $streakAcc += $d; $seenAt += , @($T, $d) } else { $streakAcc = 0 }
+            $win = 0; foreach ($s in $seenAt) { if ($s[0] -ge ($T - 360)) { $win += $s[1] } }
+            if ($streakAcc -ge 3 -or $win -ge 6) { $oracle = $T; break }
+        }
+        # The watchdog, on the same passes.
+        $pagedAt = -1
+        foreach ($T in $passes) {
+            $script:SimNow = $t0.AddMinutes($T)
+            $WatchdogClock = { $script:SimNow }
+            $n = @($restarts | Where-Object { $_ -le $T }).Count
+            $last = @($restarts | Where-Object { $_ -le $T } | Select-Object -Last 1)
+            $startMin = if ($last.Count) { $last[0] } else { 0 }
+            $startIso = $t0.AddMinutes($startMin).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+            Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' $name $name $n 'running' $startIso '') | Out-Null
+            if ((& $said "container '$name' is CRASH-LOOPING") -gt 0) { $pagedAt = $T; break }
+        }
+        $WatchdogClock = $null
+        $gapsShown = (@($scen[$name] | Select-Object -First 8) -join '/')
+        if ($oracle -lt 0 -or $pagedAt -ne $oracle) { $p18ok = $false }
+        $p18lines += "${name}: gaps $gapsShown... ; oracle first page at t=${oracle} min; watchdog paged at t=${pagedAt} min"
+    }
+    Write-Case 'P18' 'slow loops with irregular gaps (20/70, 40/70, random mean 40) page exactly when 6-in-6h (or the fast rule) first holds' `
+        $p18ok ($p18lines -join "`n")
 
     # P6: every docker call the section makes is bounded - a stub docker that
     # answers `ps` and never returns from anything else. Before hanging it
@@ -453,6 +580,34 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
         (($null -eq $r15) -and ($t15 -lt 6) -and ($left15 -eq 0)) "returned null=$($null -eq $r15) in $([math]::Round($t15,1))s; stub processes left: $left15"
     Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $WatchdogUseJobObject = $true
+
+    # P19: when the job cannot take the child (assignment fails), its handle is
+    # CLOSED, not leaked: 40 calls, the process's handle count does not climb.
+    $WatchdogFailJobAssign = $true
+    $ok19 = 0
+    1..3 | ForEach-Object { $null = Invoke-BoundedDocker -DockerArgs @('ps') }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $h0 = (Get-Process -Id $PID).HandleCount
+    for ($i = 0; $i -lt 40; $i++) { $r19 = Invoke-BoundedDocker -DockerArgs @('ps'); if ($r19 -and ($r19 -join '') -match 'cfwd-hang') { $ok19++ } }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+    $h1 = (Get-Process -Id $PID).HandleCount
+    $WatchdogFailJobAssign = $false
+    Write-Case 'P19' 'a job the child could not be assigned to is closed, not leaked' (($ok19 -eq 40) -and (($h1 - $h0) -lt 20)) `
+        "40 calls with assignment failing: $ok19 answered; process handle count $h0 -> $h1 (a leak adds one per call)"
+
+    # P20 (W-8): the job - and so the Add-Type compile - exists BEFORE the
+    # child starts. Run in a FRESH process, where the first bounded call pays
+    # for the compile: a stub that starts a descendant at once and exits must
+    # leave nothing behind.
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $harness = $MyInvocation.PSCommandPath
+    if (-not $harness) { $harness = $script:HarnessPath }
+    $fc = @(& $ps -NoProfile -ExecutionPolicy Bypass -File $script:HarnessPath -Part firstcall -Script $Script -Stub $hangExe 2>&1 |
+        ForEach-Object { "$_" } | Where-Object { $_ -match '^FIRSTCALL' })
+    Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Case 'P20' "the first call of a fresh process: the job exists before the child starts, so an immediate descendant dies" `
+        (($fc.Count -eq 1) -and ($fc[0] -match 'compiledBefore=False') -and ($fc[0] -match 'left=0$')) `
+        "child process said: $(if ($fc) { $fc[0] } else { '(nothing)' })"
     $WatchdogDockerExe = 'docker'
 }
 
@@ -643,6 +798,7 @@ function Invoke-DindPart {
     }
 }
 
+if ($Part -eq 'firstcall') { Invoke-FirstCall; exit 0 }
 if ($Part -in 'pure', 'all') { Invoke-PurePart }
 if ($Part -in 'dind', 'all') { Invoke-DindPart }
 Write-Host ""

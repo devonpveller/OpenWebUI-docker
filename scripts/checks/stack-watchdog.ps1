@@ -1792,15 +1792,26 @@ $LoopAlertCooldownHours = 6
 $SlowLoopWindowHours = 6
 $SlowLoopThreshold = 6
 # SETTLED: stopped, or running this long since its last start, with no new
-# restart this pass. A settled container gets the all-clear AND its restart
-# history is dropped, so restarts from before it settled can never page it as
-# a slow loop later (attempt-2 finding W-1: a fixed fast loop was re-paged
-# after the cooldown and its all-clear withheld). One rule for both, and it is
-# an hour on purpose: the window rule can only reach 6 in 6h when the gaps
-# between restarts AVERAGE under an hour, so a container up for a full hour
-# has stopped looping by the same measure - while a 10-minute rule would have
-# wiped the history of every loop slower than a pass.
+# restart this pass. Settled decides ONE thing - the all-clear for a container
+# that was paged - and never touches the restart history: the slow rule's
+# history ages out by its own window, so "6 in 6h" stays 6 in 6h whatever the
+# gaps between them (attempt-3 finding W-7). What stops a fixed loop being
+# re-paged from its old restarts (attempt-2 W-1) is the all-clear itself: when
+# one is sent, the container's ClearedAt is set and only restarts AFTER it
+# count toward the window, and the paging state (cooldown and throttle
+# sentinels) is reset so a relapse pages at once (attempt-3 W-6).
+# An hour, not ten minutes, so a slow loop is not called fixed between two
+# crashes a pass or two apart. A loop whose gaps sometimes exceed an hour can
+# still be called fixed and then paged again once 6 NEW restarts arrive: the
+# operator hears about it again, and the all-clear in between was premature.
 $LoopSettledMinutes = 60
+# Test seam only: a scriptblock returning the current UTC [datetime] for the
+# restart-loop rules. $null = the real clock.
+$WatchdogClock = $null
+function Get-LoopNowUtc {
+    if ($WatchdogClock) { return [datetime](& $WatchdogClock) }
+    return [datetime]::UtcNow
+}
 # The docker executable. A variable only so the bounded-call test can point it
 # at a stub that never returns.
 $WatchdogDockerExe = 'docker'
@@ -1852,10 +1863,15 @@ function ConvertTo-ProcessArgument {
 # No WMI query, so nothing on this path waits on the WMI service (W-3).
 # $WatchdogUseJobObject exists so the test can exercise the fallback.
 $WatchdogUseJobObject = $true
+# Test seam only: behave as if AssignProcessToJobObject failed.
+$WatchdogFailJobAssign = $false
 function New-WatchdogJob {
     [CmdletBinding()]
     param()
     if (-not $WatchdogUseJobObject) { return [IntPtr]::Zero }
+    # A failure is remembered for the rest of this process: one WARN, not one
+    # compile attempt and one WARN per docker call (W-9).
+    if ($script:WatchdogJobUnavailable) { return [IntPtr]::Zero }
     try {
         if (-not ('AiStackWatchdogJob' -as [type])) {
             Add-Type -TypeDefinition @"
@@ -1887,7 +1903,8 @@ public static class AiStackWatchdogJob {
         }
         return [AiStackWatchdogJob]::Create()
     } catch {
-        Write-LogEntry "job object unavailable ($($_.Exception.Message)) - bounded calls fall back to taskkill /T" "WARN"
+        $script:WatchdogJobUnavailable = $true
+        Write-LogEntry "job object unavailable ($($_.Exception.Message)) - bounded calls fall back to taskkill /T for the rest of this run" "WARN"
         return [IntPtr]::Zero
     }
 }
@@ -1929,13 +1946,17 @@ function Invoke-BoundedProcess {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.RedirectStandardInput = $true
+        # The job - and on the first call of a run the Add-Type compile behind
+        # it, 0.3-0.7s measured - is made BEFORE Start() (W-8). What remains is
+        # the gap between Start() returning and the assignment below: no
+        # compile, a few managed calls. A process the child starts inside that
+        # gap escapes the job; docker starts nothing that early.
+        $job = New-WatchdogJob
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         [void]$proc.Start()
-        # Into the job at once. (A process the child starts in the few
-        # microseconds before this line would escape it; docker does not.)
-        $job = New-WatchdogJob
-        if ($job -ne [IntPtr]::Zero -and -not [AiStackWatchdogJob]::Assign($job, $proc.Handle)) {
-            [AiStackWatchdogJob]::Close($job); $job = [IntPtr]::Zero
+        if ($job -ne [IntPtr]::Zero) {
+            $assigned = (-not $WatchdogFailJobAssign) -and [AiStackWatchdogJob]::Assign($job, $proc.Handle)
+            if (-not $assigned) { [AiStackWatchdogJob]::Close($job); $job = [IntPtr]::Zero }
         }
         # Both streams asynchronously BEFORE waiting: reading one to the end
         # while the child fills the other is the classic deadlock.
@@ -2065,7 +2086,7 @@ function Get-ContainerRuntimeFacts {
                 $f = ConvertTo-ContainerFact -Record $row
                 if ($f) { $out += $f }
             }
-            Resolve-Catastrophe -Key 'docker-unreadable' -Message "docker can describe every container again."
+            Resolve-LoopAlert -Key 'docker-unreadable' -Message "docker can describe every container again." | Out-Null
             return $out
         }
 
@@ -2178,6 +2199,29 @@ function Send-LoopAlert {
     return $true
 }
 
+# The all-clear for a key Send-LoopAlert paged: the RESOLVED message (through
+# Resolve-Catastrophe, as before), then the paging state is RESET - the
+# cooldown sentinel and the catastrophe path's 1h Telegram throttle for this
+# key - so the next loop of the same container pages at once instead of being
+# swallowed by a cooldown the operator was just told is over (W-6). A no-op,
+# returning $false, when the key was never paged. The .loop-alert sentinel is
+# the marker of "paged and not yet cleared".
+function Resolve-LoopAlert {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Message
+    )
+    $sentinel = Join-Path $PROJECT_DIR "logs\.loop-alert-$Key"
+    if (-not (Test-Path $sentinel)) { return $false }
+    Resolve-Catastrophe -Key $Key -Message $Message
+    foreach ($p in @($sentinel, (Join-Path $PROJECT_DIR "logs\.tg-alert-$Key"))) {
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+    Write-LogEntry "LOOP [$Key] cleared: $Message" "SUCCESS"
+    return $true
+}
+
 # Crash loops by RESTART-COUNT DELTA between passes, never the absolute count:
 # a container carrying 5,000 historical restarts that is now stable stays quiet.
 # A container seen for the first time (or recreated - a new Id) only records a
@@ -2206,7 +2250,8 @@ function Test-ContainerRestartLoops {
     $seen = @{}
     $looping = @()
     $quiet = @()
-    $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $nowUtc = Get-LoopNowUtc
+    $nowEpoch = [int64]([datetimeoffset]([datetime]::SpecifyKind($nowUtc, 'Utc'))).ToUnixTimeSeconds()
     foreach ($f in $Facts) {
         if (-not (Test-UnboundedRestartPolicy -Policy $f.RestartPolicy -MaxRetries $f.MaxRetries)) { continue }
         $key = $f.Name
@@ -2214,6 +2259,7 @@ function Test-ContainerRestartLoops {
         $accum = 0
         $delta = 0
         $hist = @()
+        $cleared = [int64]0
         # Parse the state defensively: one hand-edited or truncated value must
         # cost one quiet pass, not throw out of the whole health pass.
         $p = $prev[$key]
@@ -2229,6 +2275,9 @@ function Test-ContainerRestartLoops {
                 if ($hp.Count -eq 2 -and [int64]::TryParse($hp[0], [ref]$he) -and [int]::TryParse($hp[1], [ref]$hn) -and $hn -gt 0 -and
                     $he -ge ($nowEpoch - [int64]($SlowLoopWindowHours * 3600)) -and $he -le ($nowEpoch + 300)) { $hist += "${he}:${hn}" }
             }
+            # When the last all-clear was SENT; restarts at or before it do not
+            # count toward the window. A value in the future is ignored.
+            if (-not [int64]::TryParse([string]$p.ClearedAt, [ref]$cleared) -or $cleared -gt ($nowEpoch + 300)) { $cleared = 0 }
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
             [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
@@ -2249,27 +2298,37 @@ function Test-ContainerRestartLoops {
                 }
             }
         }
-        # Settled FIRST, so the window below never counts restarts from
-        # before the container settled.
         $started = ConvertTo-UtcInstant $f.StartedAt
         $settled = ($delta -le 0) -and ($f.Status -ne 'restarting') -and
-            ($f.Status -ne 'running' -or ($started -and ((Get-Date).ToUniversalTime() - $started).TotalMinutes -ge $LoopSettledMinutes))
-        if ($settled) { $hist = @(); $streak = 0; $accum = 0 }
+            ($f.Status -ne 'running' -or ($started -and ($nowUtc - $started).TotalMinutes -ge $LoopSettledMinutes))
+        # The window: restarts inside $SlowLoopWindowHours AND after the last
+        # all-clear. History is never wiped by settling (W-7).
         $inWindow = 0
-        foreach ($h in $hist) { $inWindow += [int](($h -split ':')[1]) }
-        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist) }
+        foreach ($h in $hist) {
+            $hp2 = $h -split ':'
+            if ([int64]$hp2[0] -gt $cleared) { $inWindow += [int]$hp2[1] }
+        }
         $seen[$key] = $true
         if ($accum -ge $RestartLoopThreshold) {
             $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = 0 }
+        } elseif ($settled) {
+            # Settled is judged BEFORE the window: a container with no new
+            # restart that has been up an hour (or is stopped) is not looping
+            # this pass, however many restarts its window still holds. The
+            # all-clear, only for a container that was paged; sending it moves
+            # ClearedAt, so the restarts before it never page again. The window
+            # is untouched, so a slow loop that has not been paged keeps its
+            # count and is judged on its next restart.
+            if (Resolve-LoopAlert -Key ("crashloop-" + $key) -Message "container '$key' is no longer restarting.") {
+                $cleared = $nowEpoch
+                $quiet += $key
+            }
         } elseif ($inWindow -ge $SlowLoopThreshold) {
             # SLOW loop: quiet passes in between reset the streak above, but
             # the restarts keep adding up over the window.
             $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = $inWindow }
-        } elseif ($settled) {
-            # The all-clear (a no-op unless the key is firing). One quiet pass
-            # alone can be shorter than the gap between two crashes.
-            $quiet += $key
         }
+        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist); ClearedAt = $cleared }
     }
 
     # Carry forward a baseline this pass simply did not see (the facts can be
@@ -2286,6 +2345,7 @@ function Test-ContainerRestartLoops {
             Streak = $prev[$k].Streak
             Accum  = $prev[$k].Accum
             Hist   = @($prev[$k].Hist)
+            ClearedAt = $prev[$k].ClearedAt
             Missed = $missed + 1
         }
     }
@@ -2296,10 +2356,6 @@ function Test-ContainerRestartLoops {
         ($next | ConvertTo-Json -Depth 4) | Out-File $statePath -Encoding utf8 -Force
     } catch { Write-LogEntry "could not persist restart-state: $($_.Exception.Message)" "WARN" }
 
-    # All-clear for a loop that has stopped (a no-op unless its key is firing).
-    foreach ($k in $quiet) {
-        Resolve-Catastrophe -Key ("crashloop-" + $k) -Message "container '$k' is no longer restarting."
-    }
 
     if ($looping.Count -eq 0) {
         Write-LogEntry "no container restart loops (watched $($seen.Count))" "DEBUG"
@@ -2382,7 +2438,7 @@ function Test-NetnsJoinedContainers {
             $ok = $false
         } else {
             Write-LogEntry "$($f.Name) netns owner $($owner.Name) intact" "DEBUG"
-            Resolve-Catastrophe -Key ("netns-" + $f.Name) -Message "container '$($f.Name)' shares a live network namespace again."
+            Resolve-LoopAlert -Key ("netns-" + $f.Name) -Message "container '$($f.Name)' shares a live network namespace again." | Out-Null
         }
     }
     return $ok
