@@ -366,3 +366,21 @@ def test_scrub_on_a_copy_of_a_legacy_workspace(rig, tmp_path):
     assert wm2.refresh_origin_auth(WIDGET, DUMMY).ok
     r = _worker(ot, copy, "git checkout -q -b agent/c && git push -q origin agent/c")
     assert r.ok, r.stderr[-400:]
+
+
+def test_if_missing_keeps_an_existing_credential_and_fills_an_empty_store(rig):
+    """N5, the real shell: a SEEDED focus re-stores with if_missing=True. An existing entry (the
+    caller's token) must survive; after an executor recreate (empty HOME) the store is filled."""
+    wm, ot, ws, home, server = rig
+    assert wm.clone(WIDGET, deploy_token=DUMMY).ok
+    assert wm.refresh_origin_auth(WIDGET, DUMMY2, if_missing=True).ok
+    cred = (home / ".lc-git-credentials").read_text()
+    assert DUMMY in cred and DUMMY2 not in cred                  # kept, not overwritten
+    r = _worker(ot, ws, "git checkout -q -b agent/m1 && git push -q origin agent/m1")
+    assert r.ok, r.stderr[-400:]
+    for f in (home / ".lc-git-credentials", home / ".gitconfig"):  # executor recreated
+        f.unlink()
+    assert wm.refresh_origin_auth(WIDGET, DUMMY, if_missing=True).ok
+    r = _worker(ot, ws, "git push -q origin agent/m1:refs/heads/agent/m2")
+    assert r.ok, r.stderr[-400:]
+    assert _tokens_in_git_configs(ws) == []

@@ -206,6 +206,11 @@ class LittleCoderDaemon:
         # its container-local HOME, which a recreate empties, so `_ensure_git_credentials` re-stores
         # it before every task (cf-lc-token, 2026-09-28 — the token no longer rides in .git/config).
         self._focus_token: str | None = None
+        # True once a /project (clone, switch or NOOP) set the focus in THIS process. False for a
+        # focus seeded from disk after a restart: the caller's token is then unknown, so the
+        # pre-task re-store only fills an EMPTY store (after an executor recreate) with
+        # LC_DEPLOY_TOKEN and never overwrites what the last /project stored (cf-lc-token N5).
+        self._focus_from_project = False
         self.in_flight: str | None = None
         self.draining = False
         self._drain_deadline = config.shutdown.drain_deadline_seconds
@@ -250,7 +255,8 @@ class LittleCoderDaemon:
         if not token or self.current_focus is None:
             return
         try:
-            self.workspace.refresh_origin_auth(self.current_focus, token)
+            self.workspace.refresh_origin_auth(
+                self.current_focus, token, if_missing=not self._focus_from_project)
         except Exception:  # executor unreachable — the task will surface it
             pass
 
@@ -540,6 +546,7 @@ class LittleCoderDaemon:
             out: dict = {"action": "noop", "focus": requested.canonical_url}
             noop_token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
             self._focus_token = req.token or None
+            self._focus_from_project = True
             if noop_token:
                 res = await asyncio.to_thread(
                     self.workspace.refresh_origin_auth, requested, noop_token
@@ -575,6 +582,7 @@ class LittleCoderDaemon:
         # projects can use different PATs (personal vs org). Falls back to the ambient token.
         token = req.token or os.environ.get("LC_DEPLOY_TOKEN") or None
         self._focus_token = req.token or None
+        self._focus_from_project = True
         result = await asyncio.to_thread(
             self.workspace.clone, requested, token, req.recurse_submodules)
         if not result.ok:

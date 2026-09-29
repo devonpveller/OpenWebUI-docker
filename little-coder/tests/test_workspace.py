@@ -349,3 +349,16 @@ def test_submodule_added_is_a_known_audit_event():
     it MUST be a registered event or the write throws and fakes a failure AFTER a real push."""
     from littlecoder.audit import KNOWN_EVENTS
     assert "submodule_added" in KNOWN_EVENTS
+
+
+def test_refresh_if_missing_only_fills_an_empty_store():
+    """cf-lc-token N5: for a focus seeded after a daemon restart, the re-store is conditional on
+    the store holding nothing for origin's URL; origin is still reset to the clean URL."""
+    ot = _FakeOT()
+    ws = WorkspaceManager(ot, workspace_path="/workspace", real_git="/usr/bin/git")
+    ws.refresh_origin_auth(WIDGET, "env-tok", if_missing=True)
+    cmd, _ = ot.calls[0]
+    _assert_token_only_in_env(ot, 0, "env-tok")
+    assert "remote set-url origin https://github.com/acme/widget" in cmd
+    assert "if ! printf" in cmd and "credential-store" in cmd and " get " in cmd
+    assert cmd.index(" get ") < cmd.index(" store)")

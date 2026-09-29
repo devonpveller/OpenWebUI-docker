@@ -63,6 +63,16 @@ def _cred_store(g: str, url_expr: str) -> str:
     )
 
 
+def _cred_has(g: str, url_expr: str) -> str:
+    """Shell condition: the credential store already holds a password for `url_expr`. Asks
+    credential-store itself (`get`), so matching is git's own (path included); the answer is
+    consumed by `grep -q` and never printed."""
+    return (
+        f"printf 'url=%s\\n\\n' {url_expr} | {{ {g} credential-store --file=\"{GIT_CRED_FILE}\" get "
+        f"2>/dev/null; }} | grep -q '^password='"
+    )
+
+
 def _submodule_cred_script(g: str) -> str:
     """The per-submodule script for `git submodule foreach`: make the submodule's origin token-free
     (it may still carry a token from before 2026-09-28) and, for a same-host GitHub origin, store the
@@ -277,22 +287,38 @@ class WorkspaceManager:
                                timeout=self.clone_timeout)
 
     def refresh_origin_auth(
-        self, repo: NormalizedRepo, deploy_token: str | None
+        self, repo: NormalizedRepo, deploy_token: str | None, *, if_missing: bool = False
     ) -> ExecResult:
         """Re-store `origin`'s credential with a FRESH deploy token (real git — operator setup path,
         like `clone`/`add_upstream_remote`). The token given at clone time is SHORT-LIVED (a GitHub App
         installation token lives 1h): a NOOP re-focus hours later, or a task that outlives the token,
         would `git push` with a dead credential — the live "expired token in origin" failure. Cheap +
-        idempotent. ALWAYS resets origin to the token-free URL first, so a clone made before
-        2026-09-28 (token in the URL) is cleaned by its next re-focus; with no token that is all it
-        does. The credential store lives in the executor's HOME, which a recreate of the executor
-        empties — so the daemon also calls this before every task (`_ensure_git_credentials`)."""
+        idempotent. The credential store lives in the executor's HOME, which a recreate of the
+        executor empties — so the daemon also calls this before every task (`_ensure_git_credentials`).
+
+        What it cleans of a clone made before 2026-09-28 (token in the URL): it ALWAYS resets
+        `origin` to the token-free URL. Submodule origins are reset only WITH a token (the submodule
+        step runs only then), and the `upstream` remote is never touched here. So a re-focus without
+        a token leaves legacy submodule/upstream tokens in place; the landing scrub (credscrub.py)
+        is what removes those.
+
+        `if_missing`: store the token only when the store holds NO credential for origin's URL yet
+        (and then the submodules' too). The daemon uses it for a focus it SEEDED from disk after its
+        own restart, where it does not know the caller's token: an existing entry (e.g. a GitHub App
+        token from agent-bridge's last /project) is kept rather than overwritten with the env PAT."""
         url = repo.canonical_url
         g = shlex.quote(self.real_git)
         q = shlex.quote
         ws = q(self.workspace_path)
         cmd = f"cd {ws} && {g} remote set-url origin {q(url)}"
-        if deploy_token:
+        if deploy_token and if_missing:
+            reauth = (
+                f"cd {ws} && {g} submodule foreach --recursive "
+                f"{shlex.quote(_submodule_cred_script(g))} 2>/dev/null || true"
+            )
+            cmd += (f" && if ! {_cred_has(g, q(url))}; then "
+                    f"{_cred_config(g)} && {_cred_store(g, q(url))} ; ({reauth}); fi")
+        elif deploy_token:
             cmd += f" && {_cred_config(g)} && {_cred_store(g, q(url))}"
             # SYMMETRIC WITH clone() (live 2026-07-12: the cursor fix's murder commit couldn't push).
             # A composition fix edited inside a vendored submodule must be PUSHED to THAT submodule's
