@@ -3223,10 +3223,16 @@ class OpsDaemon(FakeDaemon):
         return stack.CommandResult(0, "", "")
 
 
+# monotonic() has an arbitrary origin, never 0: a gate that measured its time from 0
+# instead of from its own start would time out on its first undecided poll, and a
+# fake clock starting at 0 cannot see that (cf-recover attempt 1, mutant M10).
+CLOCK0 = 1_000_000.0
+
+
 @pytest.fixture
 def fast_clock(monkeypatch):
-    """The gate loop's clock and sleep: a four-minute timeout runs in no time."""
-    now = [0.0]
+    """The gate loop's clock and sleep: a four-minute timeout runs in no time. Starts at CLOCK0."""
+    now = [CLOCK0]
     monkeypatch.setattr(stack, "monotonic", lambda: now[0])
 
     def _sleep(seconds):
@@ -3383,7 +3389,7 @@ def test_a_container_that_never_reaches_a_verdict_times_out_with_its_last_state(
     code, out = ops(root, daemon, "recover", "frontend", "--timeout", "40")
     assert code == stack.EXIT_REFUSED
     assert "openwebui (openwebui) no verdict within 40s (last seen: running/starting)" in out
-    assert fast_clock[0] >= 40
+    assert fast_clock[0] - CLOCK0 >= 40
 
 
 def test_a_restart_loop_without_a_healthcheck_never_passes_as_running(root, fast_clock):
@@ -3455,7 +3461,8 @@ def test_a_level_of_n_settle_gated_containers_waits_one_window_not_n(root, fast_
                 "RestartCount 0, not restarted)") in out, out
     assert "recovered: frontend - every container passed its gate" in out
     # the window was really waited, once: not 8 x 15 s
-    assert stack.SETTLE_SECONDS <= fast_clock[0] <= stack.SETTLE_SECONDS + stack.GATE_POLL_SECONDS, fast_clock[0]
+    waited = fast_clock[0] - CLOCK0
+    assert stack.SETTLE_SECONDS <= waited <= stack.SETTLE_SECONDS + stack.GATE_POLL_SECONDS, waited
 
 
 def test_a_container_that_dies_inside_the_shared_window_fails_the_level_with_the_same_verdict(root, fast_clock):
@@ -3472,7 +3479,7 @@ def test_a_container_that_dies_inside_the_shared_window_fails_the_level_with_the
     # the next level was not started
     assert not any("--no-deps" in c and "tailscale" in c and "up" in c for c in daemon.streamed)
     # it failed at the 9 s poll, not after side-1..3 had each settled for 15 s first
-    assert fast_clock[0] == 9, fast_clock[0]
+    assert fast_clock[0] - CLOCK0 == 9, fast_clock[0] - CLOCK0
     # and the sidecars still inside their window when it failed are named as not awaited, never as passed
     for i in (1, 2, 3, 5, 6):
         assert f"  [--] frontend/side-{i} (side-{i}): not awaited - another gate of this level failed" in out
@@ -3504,12 +3511,12 @@ _GATE_KINDS = {"one-shot-done": stack.GATE_ONE_SHOT, "completes": stack.GATE_COM
 
 
 def _solo(name, timeout, monkeypatch):
-    now = [0.0]
+    now = [CLOCK0]
     monkeypatch.setattr(stack, "monotonic", lambda: now[0])
     monkeypatch.setattr(stack, "sleep", lambda s: now.__setitem__(0, now[0] + s))
     verdict = stack.wait_gate(_Inspect(_GATE_SCRIPTS), None, ["docker"], name, timeout,
                               _GATE_KINDS.get(name, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
-    return verdict, now[0]
+    return verdict, now[0] - CLOCK0
 
 
 def test_watching_a_level_together_gives_each_container_the_verdict_it_gets_alone(monkeypatch):
@@ -3518,29 +3525,158 @@ def test_watching_a_level_together_gives_each_container_the_verdict_it_gets_alon
     names = list(_GATE_SCRIPTS)
     solo = {n: _solo(n, 30, monkeypatch) for n in names}
     assert not solo["dies-at-9"][0][0] and not solo["restarted-at-6"][0][0] and solo["steady"][0][0]
-    now = [0.0]
+    now = [CLOCK0]
     monkeypatch.setattr(stack, "monotonic", lambda: now[0])
     monkeypatch.setattr(stack, "sleep", lambda s: now.__setitem__(0, now[0] + s))
     together = stack.wait_gates(_Inspect(_GATE_SCRIPTS), None, ["docker"],
                                 [(n, 30, _GATE_KINDS.get(n, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
                                  for n in names])
     first_failure = min(t for (passed, _seen), t in solo.values() if not passed)
-    assert now[0] == first_failure == 6
+    assert now[0] - CLOCK0 == first_failure == 6
     for name, verdict in zip(names, together):
         (solo_verdict, solo_time) = solo[name]
         if solo_time <= first_failure:
             assert verdict == solo_verdict, name
         else:
             assert verdict is None, name
-    # without the failing two, every gate is answered, exactly as alone, in the longest one's time
+    # without the failing two, every gate is answered exactly as alone. `never` is LAST, so its 30 s
+    # budget is credited what the four before it took (15 + 12 + 3 + 6 s) - one after another it
+    # would have started only then: 36 + 30 = 66 s, never less time than before
     keep = [n for n in names if solo[n][0][0] or n == "never"]
-    now[0] = 0.0
+    now[0] = CLOCK0
     together = stack.wait_gates(_Inspect(_GATE_SCRIPTS), None, ["docker"],
                                 [(n, 30, _GATE_KINDS.get(n, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
                                  for n in keep])
     assert together == [solo[n][0] for n in keep]
-    assert now[0] == max(solo[n][1] for n in keep) == 30
+    assert now[0] - CLOCK0 == sum(solo[n][1] for n in keep[:-1]) + 30 == 66
 
+
+class _Timed:
+    """`docker inspect` as a function of time since CLOCK0: {name: t -> state}."""
+
+    def __init__(self, clock, scripts):
+        self.clock, self.scripts = clock, scripts
+
+    def __call__(self, cmd, cwd):
+        state = dict(self.scripts[cmd[-1]](self.clock[0] - CLOCK0))
+        restarts = state.pop("RestartCount", 0)
+        return stack.CommandResult(0, json.dumps(state) + "|" + str(restarts), "")
+
+
+def _exits_at(t_exit, code=1):
+    def state(t):
+        if t < t_exit:
+            return dict(_STEADY)
+        return {"Status": "exited", "ExitCode": code, "RestartCount": 0, "StartedAt": "t0"}
+    return state
+
+
+def _healthy_at(t_ok):
+    return lambda t: {"Status": "running", "Health": {"Status": "healthy" if t >= t_ok else "starting"}}
+
+
+_CREATED = {"Status": "created"}
+_STEADY_MSG = "running and steady for 15s (no healthcheck; RestartCount 0, not restarted)"
+
+
+def test_a_failure_and_a_pass_in_the_same_round_still_stop_the_level_at_that_round(fast_clock):
+    """cf-recover attempt 1, M5: `failed = not verdict[0]` let the pass after a failure clear it,
+    and the failed level waited out the open gate's whole budget."""
+    inspect = _Timed(fast_clock, {"a": _exits_at(15), "b": lambda t: dict(_STEADY), "c": lambda t: _CREATED})
+    out = stack.wait_gates(inspect, None, ["docker"], [("a", 120, stack.GATE_SETTLE, 15),
+                                                     ("b", 120, stack.GATE_SETTLE, 15),
+                                                     ("c", 120, stack.GATE_SETTLE, 15)])
+    assert out[0] == (False, "exited with exit code 1 15s after it was first seen running "
+                             "(a crash inside the settle window)")
+    assert out[1] == (True, _STEADY_MSG)
+    assert out[2] is None
+    assert fast_clock[0] - CLOCK0 == 15
+
+
+def test_recover_prints_the_open_gate_as_not_awaited_when_a_failure_and_a_pass_share_a_round(root, fast_clock):
+    _enable(root, "frontend")
+    dead = {"Status": "exited", "ExitCode": 1, "RestartCount": 0, "StartedAt": "t0"}
+    states = {"side-1": [_STEADY] * 5 + [dead], "side-2": [_STEADY], "side-3": [_CREATED]}
+    daemon = OpsDaemon(_with_sidecars(3), states=states)
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED, out
+    assert "  [FAIL] frontend/side-1 (side-1): exited with exit code 1 15s after it was first seen running" in out
+    assert "  [ok] frontend/side-2 (side-2): " + _STEADY_MSG in out
+    assert "  [--] frontend/side-3 (side-3): not awaited - another gate of this level failed" in out
+    assert "[FAIL] frontend/side-3" not in out
+    assert fast_clock[0] - CLOCK0 == 15
+
+
+def test_two_failures_at_one_poll_name_the_first_in_the_levels_order_and_its_logs(root, fast_clock):
+    """cf-recover attempt 1, M6: the README says the first in the level's order is named."""
+    _enable(root, "frontend")
+    dead = {"Status": "exited", "ExitCode": 1, "RestartCount": 0, "StartedAt": "t0"}
+    states = {f"side-{i}": [_STEADY] for i in range(1, 7)}
+    states["side-2"] = [_STEADY] * 3 + [dict(dead)]
+    states["side-5"] = [_STEADY] * 3 + [dict(dead, ExitCode=2)]
+    daemon = OpsDaemon(_with_sidecars(6), states=states)
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED, out
+    assert "  [FAIL] frontend/side-5 (side-5): exited with exit code 2" in out
+    assert ("refused: recover stopped at frontend: side-2 (side-2) exited with exit code 1 9s after it was "
+            "first seen running (a crash inside the settle window).") in out
+    # the hint names the container that failed, not the level's first
+    assert "# fix it (`docker logs side-2`)" in out
+
+
+def test_the_settle_window_opens_at_the_first_running_poll_not_at_the_levels_start(fast_clock):
+    """cf-recover attempt 1, M12: `created` for two polls, then steady - it passes 15 s after it
+    was first seen running (at 21 s), not 15 s after the level started."""
+    inspect = _Timed(fast_clock, {"late": lambda t: _CREATED if t < 6 else dict(_STEADY)})
+    assert stack.wait_gate(inspect, None, ["docker"], "late", 120, stack.GATE_SETTLE, 15) == (True, _STEADY_MSG)
+    assert fast_clock[0] - CLOCK0 == 21
+
+
+def test_a_gate_that_is_undecided_on_its_first_poll_is_timed_from_its_own_start(fast_clock):
+    """M10: with the budget measured from monotonic()'s origin it failed at once."""
+    inspect = _Timed(fast_clock, {"x": _healthy_at(30)})
+    assert stack.wait_gate(inspect, None, ["docker"], "x", 90, stack.GATE_HEALTHY, 15) == (True, "healthy after 30s")
+    fast_clock[0] = CLOCK0
+    inspect = _Timed(fast_clock, {"y": lambda t: _CREATED})
+    assert stack.wait_gate(inspect, None, ["docker"], "y", 90, stack.GATE_SETTLE, 15) == (
+        False, "no verdict within 90s (last seen: created)")
+    assert fast_clock[0] - CLOCK0 == 90
+
+
+def test_a_late_gate_in_a_big_level_gets_at_least_the_time_it_had_one_after_another(fast_clock):
+    """cf-recover attempt 1, budgets: behind 8 settle gates (120 s one after another), a gate healthy
+    at 100 s on a 90 s budget PASSED at base; watched together from the level's start it must still pass."""
+    scripts = {f"s{i}": (lambda t: dict(_STEADY)) for i in range(8)}
+    scripts["late"] = _healthy_at(100)
+    inspect = _Timed(fast_clock, scripts)
+    gates = [(f"s{i}", 300, stack.GATE_SETTLE, 15) for i in range(8)] + [("late", 90, stack.GATE_HEALTHY, 15)]
+    out = stack.wait_gates(inspect, None, ["docker"], gates)
+    assert out[-1] == (True, "healthy after 102s")      # seen at the first poll at or after 100 s
+    assert all(v[0] for v in out)
+    assert fast_clock[0] - CLOCK0 == 102
+
+
+def test_the_credit_is_what_earlier_gates_took_so_a_first_gate_and_a_hopeless_gate_still_time_out(fast_clock):
+    # first in its level: no credit - its own 90 s budget, exactly as before
+    inspect = _Timed(fast_clock, {"first": lambda t: _CREATED, "s": lambda t: dict(_STEADY)})
+    out = stack.wait_gates(inspect, None, ["docker"], [("first", 90, stack.GATE_HEALTHY, 15),
+                                                     ("s", 300, stack.GATE_SETTLE, 15)])
+    assert out[0] == (False, "no verdict within 90s (last seen: created)")
+    assert fast_clock[0] - CLOCK0 == 90
+    # behind one gate that took 15 s: 15 + 60 = 75 s - not 60, and not unbounded
+    fast_clock[0] = CLOCK0
+    inspect = _Timed(fast_clock, {"s": lambda t: dict(_STEADY), "never": lambda t: _CREATED})
+    out = stack.wait_gates(inspect, None, ["docker"], [("s", 300, stack.GATE_SETTLE, 15),
+                                                     ("never", 60, stack.GATE_SETTLE, 15)])
+    assert out == [(True, _STEADY_MSG), (False, "no verdict within 60s (last seen: created)")]
+    assert fast_clock[0] - CLOCK0 == 75
+    # not charged while an earlier gate is still open: 'then' is healthy at 180 s on a 90 s budget,
+    # behind 'slow' (healthy at 150 s) - one after another it had 150 + 90 s, and it still does
+    fast_clock[0] = CLOCK0
+    inspect = _Timed(fast_clock, {"slow": _healthy_at(150), "then": _healthy_at(180)})
+    out = stack.wait_gates(inspect, None, ["docker"], [("slow", 200, stack.GATE_HEALTHY, 15),
+                                                     ("then", 90, stack.GATE_HEALTHY, 15)])
+    assert out == [(True, "healthy after 150s"), (True, "healthy after 180s")]
 
 def test_a_declared_restart_delay_widens_the_settle_window():
     svc = stack.Service("x", "x", {}, None, None, "img", (), {}, 40.0)
@@ -3895,7 +4031,7 @@ def test_a_container_without_a_healthcheck_passes_once_it_is_steady(root, fast_c
     assert code == 0, out
     assert ("frontend/openwebui-backup (openwebui-backup): running and steady for 15s (no healthcheck; "
             "RestartCount 2, not restarted)") in out
-    assert fast_clock[0] < 60
+    assert fast_clock[0] - CLOCK0 < 60
 
 
 # --- attempt 2: what attempt 1's tester broke ---------------------------------

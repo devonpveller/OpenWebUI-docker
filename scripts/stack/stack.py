@@ -3109,16 +3109,17 @@ class _Gate:
     verdict, None while there is not.
     """
 
-    def __init__(self, name: str, timeout: int, kind: str = GATE_SETTLE, settle: float = SETTLE_SECONDS,
-                 started: float = 0.0):
+    def __init__(self, name: str, timeout: int, kind: str, settle: float, started: float):
         self.name, self.timeout, self.kind, self.settle = name, timeout, kind, settle
         self.started = started
         self.window = None       # (monotonic at first running, RestartCount, StartedAt)
         self.last = "no container"
 
-    def observe(self, state: dict | None, now: float):
+    def observe(self, state: dict | None, now: float, credit: float = 0.0):
+        """`credit`: seconds of the level's time NOT charged to this gate's budget (see wait_gates)."""
         kind, timeout, settle = self.kind, self.timeout, self.settle
         elapsed = int(now - self.started)
+        spent = int(now - self.started - credit)    # what the budget is judged on
         window = self.window
         if state is not None:
             status = state.get("Status") or "?"
@@ -3132,7 +3133,7 @@ class _Gate:
                         return True, f"completed (exit 0) after {elapsed}s"
                     return False, (f"exited with exit code {code} - a service others wait on with "
                                    "service_completed_successfully must exit 0")
-                if elapsed >= timeout:
+                if spent >= timeout:
                     return False, f"did not complete within {timeout}s (last seen: {last})"
                 return None
             if health == "healthy":
@@ -3159,7 +3160,7 @@ class _Gate:
                 elif now - window[0] >= settle:
                     return True, (f"running and steady for {int(now - window[0])}s (no healthcheck; "
                                   f"RestartCount {restarts}, not restarted)")
-        if elapsed >= timeout:
+        if spent >= timeout:
             return False, f"no verdict within {timeout}s (last seen: {self.last})"
         return None
 
@@ -3171,9 +3172,17 @@ def wait_gates(capture, root, docker, gates):
     container still without a verdict, then sleeps once - so a level of N containers
     with no healthcheck settles in one 15 s window, not N of them back to back (the
     first cut waited for each in turn: OB1's 22 settle-gated services cost 5.5 min
-    of pure waiting). Every container gets the same rule, window and timeout it had
-    alone (_Gate), timed from the start of the level - which is when `up` started
-    them all.
+    of pure waiting). Every container gets the same rule and window it had alone
+    (_Gate); its settle window opens at the first poll that sees it running.
+
+    BUDGETS ARE NEVER STRICTER THAN ONE-AFTER-ANOTHER. There, gate i's budget
+    clock started only when gate i-1 had its verdict, so it had the time spent on
+    every earlier gate on top of its own budget. Here gate i is CREDITED that time:
+    the seconds each earlier gate (in `gates` order) took to its verdict, or the
+    whole elapsed time while it has none. That is at least what it had before
+    (an earlier gate watched from the level's start takes at least as long as it
+    took when watched from later). It only ever lengthens a TIMEOUT: a pass or a
+    failure docker reports is seen as soon as it happens.
 
     The first round in which any gate FAILS ends the wait: the level has failed and
     recover stops, as it did at the first failed gate before. Gates still pending
@@ -3184,13 +3193,17 @@ def wait_gates(capture, root, docker, gates):
     pending = {i: _Gate(name, timeout, kind, settle, started)
                for i, (name, timeout, kind, settle) in enumerate(gates)}
     results = [None] * len(gates)
+    took = [None] * len(gates)      # seconds from the level's start to each gate's verdict
     while pending:
         failed = False
         for i, gate in list(pending.items()):
             state = container_state(capture, root, docker, gate.name)
-            verdict = gate.observe(state, monotonic())
+            now = monotonic()
+            credit = sum((now - started) if t is None else t for t in took[:i])
+            verdict = gate.observe(state, now, credit)
             if verdict is not None:
                 results[i] = verdict
+                took[i] = now - started
                 del pending[i]
                 failed = failed or not verdict[0]
         if failed or not pending:
@@ -3379,6 +3392,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
                         return EXIT_REFUSED
             code = runner(cmd, root)
             failure = f"`up` exited {code}" if code != 0 else None
+            failed_name = container_of(renders[p], level[0])   # the `docker logs` hint: the failed gate's, when one failed
             if failure is None:
                 # The whole level at once (wait_gates): its containers were started together,
                 # so their settle windows run together - one window per level, not one per container.
@@ -3394,12 +3408,13 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
                     console.line(f"  [{'ok' if passed else 'FAIL'}] {p}/{key} ({name}): {seen}")
                     if not passed and failure is None:
                         failure = f"{key} ({name}) {seen}"
+                        failed_name = name
             if failure:
                 console.line(f"refused: recover stopped at {p}: {failure}.")
                 later = work[index + 1:]
                 if later:
                     console.line(f"# stopped and not started: {', '.join(later)}")
-                console.line(f"# fix it (`docker logs {container_of(renders[p], level[0])}`), then re-run "
+                console.line(f"# fix it (`docker logs {failed_name}`), then re-run "
                              "`stack.py recover` - it stops and restarts everything again in order")
                 return EXIT_REFUSED
     if dry_run:

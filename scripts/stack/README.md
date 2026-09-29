@@ -645,13 +645,20 @@ order, restart in dependency order, wait for health). Selection is the same as
    which cost OB1's settle-gated services minutes). Levels still start strictly
    in order. The budget is each container's own: the healthcheck's worst case -
    `start_period + retries x (interval + timeout) + interval + 30 s` - or 300 s
-   when the compose file declares none, timed from the level's start;
-   `--timeout` sets one budget for all.
+   when the compose file declares none; `--timeout` sets one budget for all.
+   It is timed from the level's start, PLUS the time every gate before it in
+   the level took to its verdict (all the elapsed time while one is still
+   open). That is what the gate had when the gates ran one after another, so
+   no container gets less time than it did; only a timeout can come later,
+   never a pass or a failure docker reports.
 4. **The first failed gate stops the run**: `refused: recover stopped at
    <plane>: <service> (<container>) <what docker said>`, with the last
-   healthcheck output and the planes left stopped. Exit 1. The level's gates
-   still open at that poll are printed `[--] ... not awaited`, never as passed;
-   when two fail at the same poll the first in the level's order is named.
+   healthcheck output, a `docker logs <that container>` hint and the planes
+   left stopped. Exit 1. The container named is the first to FAIL in time;
+   when two fail at the same poll, the first in the level's order. (One after
+   another, the first in the level's order that failed was named even when a
+   later one had failed sooner.) The level's gates still open at that poll are
+   printed `[--] ... not awaited`, never as passed.
 
 The orders are **derived, not listed**. Container levels come from each
 service's `depends_on` plus `network_mode: service:X`, so:
