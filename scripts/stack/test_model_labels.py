@@ -1577,8 +1577,13 @@ def test_a_hash_that_git_reports_differently_is_refused(world):
 
 
 def _committed_config_text() -> str:
-    """The llama-swap config as COMMITTED at HEAD in this checkout (not the working copy)."""
+    """The llama-swap config as COMMITTED at HEAD in this checkout (not the working copy). In an
+    export of a commit (`git archive <sha> | tar -x`, not a checkout of its own) the file on disk IS
+    that commit's file, so it is read from disk."""
     import subprocess
+    top = subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != REPO_ROOT.resolve():
+        return (REPO_ROOT / ml.LLAMA_SWAP_REL).read_bytes().decode("utf-8").replace("\r\n", "\n")
     proc = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"HEAD:{ml.LLAMA_SWAP_REL.as_posix()}"],
                           capture_output=True, text=True, encoding="utf-8")
     assert proc.returncode == 0, proc.stderr
