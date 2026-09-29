@@ -639,13 +639,19 @@ order, restart in dependency order, wait for health). Selection is the same as
 
    A container that crashes only AFTER its window, or turns unhealthy after it
    was healthy, still passes - the gates cannot see that. The gates of one
-   level run one after another, so each settle window adds its 15 s. The budget
-   is the healthcheck's own worst case - `start_period + retries x (interval +
-   timeout) + interval + 30 s` - or 300 s when the compose file declares none;
+   level are **watched together**, every 3 s, from the moment that level's `up`
+   returned: a level of N settle-gated containers takes one 15 s window, not N
+   of them (cf-recover, 2026-09-29; before it, each window was waited in turn,
+   which cost OB1's settle-gated services minutes). Levels still start strictly
+   in order. The budget is each container's own: the healthcheck's worst case -
+   `start_period + retries x (interval + timeout) + interval + 30 s` - or 300 s
+   when the compose file declares none, timed from the level's start;
    `--timeout` sets one budget for all.
 4. **The first failed gate stops the run**: `refused: recover stopped at
    <plane>: <service> (<container>) <what docker said>`, with the last
-   healthcheck output and the planes left stopped. Exit 1.
+   healthcheck output and the planes left stopped. Exit 1. The level's gates
+   still open at that poll are printed `[--] ... not awaited`, never as passed;
+   when two fail at the same poll the first in the level's order is named.
 
 The orders are **derived, not listed**. Container levels come from each
 service's `depends_on` plus `network_mode: service:X`, so:
