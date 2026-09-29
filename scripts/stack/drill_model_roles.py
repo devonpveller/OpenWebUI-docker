@@ -27,9 +27,14 @@ container on it are named `mrg-<run>-*` and carry `ai-stack.harness.owner=<owner
 plus `ai-stack.drill.run=<run>`, so scripts/agent-harness/reap.ps1 removes them if
 this is killed. EVERY docker call goes through `_docker`, which refuses any verb
 outside a fixed allowlist (run, exec, rm, inspect, logs, network create/rm/inspect,
-build -t llm-queue:wt-*, image inspect) and any `rm` / `network rm` of a name
-outside this run's prefix - no prune, no stop/restart/up of anything else, ever.
-Nothing is pulled: the images must already be present (`image inspect` checks).
+build -t llm-queue:wt-* / mrg-sync:wt-*, image inspect) and any `rm` / `network rm` of
+a name outside this run's prefix - no prune, no stop/restart/up of anything else, ever.
+No image is pulled: the images must already be present (`image inspect` checks). The
+one exception to "nothing fetched": the sync image mrg-sync:wt-<owner> is python:3.12-slim
+plus git, and its build installs git from Debian's apt (the build's network, never the
+drill network). Git is needed because labels are only derived from the COMMITTED
+llama-swap config (operator decision, 2026-09-29): the scratch repo is a git checkout
+committed on the host, and one run edits its config without committing (refused).
 
 Run from a worktree, e.g.:
   python scripts/stack/drill_model_roles.py --owner wt-mr-gateway --tree . --phase all
@@ -119,8 +124,8 @@ def _docker(*args, input_text=None, check_rc=True, quiet=False):
         for name in [a for a in args[len(verb):] if not a.startswith("-")]:
             if not name.startswith(PREFIX):
                 raise SystemExit(f"drill refused to remove {name!r}: not this run's ({PREFIX}*)")
-    if verb == ("build",) and not any(re.fullmatch(r"llm-queue:wt-[\w.-]+", a) for a in args):
-        raise SystemExit("drill refused a build that is not tagged llm-queue:wt-*")
+    if verb == ("build",) and not any(re.fullmatch(r"(llm-queue|mrg-sync):wt-[\w.-]+", a) for a in args):
+        raise SystemExit("drill refused a build that is not tagged llm-queue:wt-* or mrg-sync:wt-*")
     proc = subprocess.run(["docker", *args], input=input_text, capture_output=True, text=True,
                           encoding="utf-8", errors="replace")
     if check_rc and proc.returncode != 0:
@@ -322,13 +327,23 @@ def dump(owui):
     return json.loads(out.strip().splitlines()[-1])
 
 
+def _rmtree(path: Path) -> None:
+    """shutil.rmtree that also removes git's read-only object files (Windows)."""
+    import stat
+
+    def unlock(func, p, _exc):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    shutil.rmtree(path, onexc=unlock) if sys.version_info >= (3, 12) else shutil.rmtree(path, onerror=unlock)
+
+
 def build_repo(tree: Path, scratch: Path, model_path: str, key: str, owui: str) -> Path:
     """A scratch repo the render and sync containers mount: the tree's driver and its whole
     inference plane (compose files, config, llm-queue build context), no secrets - its
     inference/.env is written here, with placeholders for what the render requires."""
     repo = scratch / "repo"
     if repo.exists():
-        shutil.rmtree(repo)
+        _rmtree(repo)
     for rel in ("stack.manifest.toml", "scripts/stack/stack.py", "scripts/stack/model_labels.py"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(tree / rel, repo / rel)
@@ -347,7 +362,30 @@ def build_repo(tree: Path, scratch: Path, model_path: str, key: str, owui: str) 
         encoding="utf-8", newline="\n")
     (repo / ".env").write_text(f"OWUI_ADMIN_API_KEY={key}\nOWUI_BASE_URL=http://{owui}:8080\n",
                                encoding="utf-8", newline="\n")
+    # labels come only from the COMMITTED llama-swap config: make the scratch repo a checkout with
+    # everything committed (a throwaway identity, no hooks, no line-ending conversion)
+    nohooks = scratch / "nohooks"
+    nohooks.mkdir(exist_ok=True)
+    git = ["git", "-c", "user.name=drill", "-c", "user.email=drill@drill.invalid", "-c", "commit.gpgsign=false",
+           "-c", f"core.hooksPath={nohooks}", "-C", str(repo)]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    subprocess.run([*git, "config", "core.autocrlf", "false"], check=True, capture_output=True)
+    subprocess.run([*git, "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-q", "-m", "drill"], check=True, capture_output=True)
     return repo
+
+
+def sync_image(owner: str) -> str:
+    """python:3.12-slim + git, tagged mrg-sync:wt-<owner> (a test tag, never :local)."""
+    tag = f"mrg-sync:{owner}" if owner.startswith("wt-") else f"mrg-sync:wt-{owner}"
+    dockerfile = ("FROM python:3.12-slim\n"
+                  "RUN apt-get update && apt-get install -y --no-install-recommends git "
+                  "&& rm -rf /var/lib/apt/lists/*\n")
+    _docker("build", "-q", "-t", tag, "--label", f"ai-stack.harness.owner={owner}", "-", input_text=dockerfile)
+    return tag
+
+
+SYNC_IMAGE = PYTHON_IMAGE   # replaced by sync_image() in the owui phase
 
 
 def sync(scratch: Path, repo: Path, args=("labels",)):
@@ -369,9 +407,10 @@ def sync(scratch: Path, repo: Path, args=("labels",)):
     (out_dir / "render.json").write_text(render.stdout, encoding="utf-8")
     name = PREFIX + "sync-" + secrets.token_hex(2)
     proc = _docker("run", "--rm", "--name", name, "--network", NET, *labels(),
+                   "-e", "GIT_CONFIG_COUNT=1", "-e", "GIT_CONFIG_KEY_0=safe.directory", "-e", "GIT_CONFIG_VALUE_0=*",
                    "--mount", f"type=bind,src={repo},dst=/repo,readonly", "--mount",
                    f"type=bind,src={scratch / 'store'},dst=/store,readonly", "--mount",
-                   f"type=bind,src={out_dir},dst=/out,readonly", PYTHON_IMAGE,
+                   f"type=bind,src={out_dir},dst=/out,readonly", SYNC_IMAGE,
                    "python", "/repo/scripts/stack/stack.py", "--root", "/repo", "--state", "/tmp/state.json",
                    *args, "--render", "/out/render.json", check_rc=False, quiet=True)
     out = (proc.stdout or "") + (proc.stderr or "")
@@ -381,9 +420,12 @@ def sync(scratch: Path, repo: Path, args=("labels",)):
 
 
 def owui_phase(tree: Path, gw: str, master: str, image: str):
+    global SYNC_IMAGE
     say(f"== owui phase: a disposable Open WebUI ({image}) wired to the drill LiteLLM")
     _docker("image", "inspect", image, "--format", "{{.Id}}")
     _docker("image", "inspect", CLI_IMAGE, "--format", "{{.Id}}")
+    SYNC_IMAGE = sync_image(OWNER)
+    say(f"  sync image {SYNC_IMAGE} (python:3.12-slim + git)")
     owui = run_container("owui", image, env={
         "WEBUI_SECRET_KEY": secrets.token_hex(16), "ENABLE_API_KEYS": "true", "ENABLE_OLLAMA_API": "false",
         "OPENAI_API_BASE_URL": f"http://{gw}:8080/v1", "OPENAI_API_KEY": master, "OFFLINE_MODE": "true",
@@ -468,6 +510,15 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
               and n3.get("local-small") == "Other-14B Q8_0 (no thinking)"
               and n3.get("local-embed") == "bge-m3 f16 (embeddings)", "the swap relabelled the chat roles only")
 
+        say("  -- uncommitted: the llama-swap config edited but NOT committed (expect exit 1, nothing written)")
+        cfg = repo / "inference" / "config" / "llama-swap.config.yaml"
+        cfg.write_text(cfg.read_text(encoding="utf-8") + "# an uncommitted comment\n", encoding="utf-8", newline="\n")
+        rc, out = sync(scratch, repo)
+        t3b = dump(owui)
+        check(rc == 1 and "differs from the committed version" in out and "llama-swap.config.yaml" in out,
+              "exit 1 naming the config that differs from the committed version")
+        check(t3 == t3b, "nothing was written by the refused run")
+
         say("  -- unresolvable: a path to a file that does not exist (expect exit 1, nothing written)")
         repo = build_repo(tree, scratch, "/models/vendor/Gone-GGUF/Gone-1B-Q4_0.gguf", key, owui)
         rc, out = sync(scratch, repo)
@@ -475,7 +526,10 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
         check(rc == 1 and "FAILED" in out and "Gone-1B-Q4_0.gguf" in out, "exit 1 naming the missing file")
         check(t3 == t4, "nothing was written by the failed run")
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        try:
+            _rmtree(scratch)
+        except OSError as exc:
+            say(f"  (scratch {scratch} not fully removed: {exc})")
 
 
 # --------------------------------------------------------------------------

@@ -910,14 +910,30 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   `concurrencyLimit` (a per-model `env:`), and an unknown `${...}`. llama-swap
   (v236, the pinned image) builds its command with a POSIX-shell LEXER (quotes
   group and vanish, a backslash escapes, `${...}` inside a substituted value is
-  expanded AGAIN) and parses its config as YAML; neither is emulated. Instead,
-  ALLOWLISTS:
+  expanded AGAIN) and parses its config as YAML; neither is emulated. Instead:
+  - ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the llama-swap
+    config the render mounts must be byte-for-byte the version committed at HEAD
+    in the git checkout it lives in (`git hash-object` of the file equals the
+    blob `HEAD:<path>`; git applies the checkout's line-ending conversion, so a
+    CRLF checkout of an LF blob - no `git diff` - is the committed version).
+    An uncommitted or staged edit, an untracked file, a file
+    outside a checkout, or no git is refused, naming the file: "llama-swap config
+    differs from the committed version; labels are only derived from the
+    committed config". The committed file is PINNED by a test
+    (`test_the_committed_llama_swap_config_is_pinned`: its macros, entries and
+    keys, the role's cmd words and model flag), so a change to it goes through
+    review. So on a host, the merged config must be in the checkout (committed,
+    no local edit) before `labels` runs. What follows is defence in depth,
+    ALLOWLISTS:
   - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
     comments excepted), as compose renders it, and every model path, must match
     `[A-Za-z0-9_./:,+=@-]` - printable ASCII with no `$` (compose's JSON writes a
     literal `$` as `$$`, and llama-swap would re-expand `${...}`), no quote, no
     backslash, no whitespace of any kind, no control character, nothing outside
-    ASCII - and be at most 4096 characters;
+    ASCII - and be at most 4096 characters; a value starting with `@` or ending
+    with `:` (YAML indicators) is refused too, and every `${env.*}` must sit
+    inside a `|`/`>` block scalar (in a plain scalar the substituted value would
+    be re-read as YAML);
   - every literal word of the role's expanded cmd must match the same allowlist
     once its `${env.*}` and built-in `${PORT}`/`${MODEL_ID}` references are set
     aside (so no `--` word and no `#...` word either), and a macro may reference
@@ -927,12 +943,14 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
     `models:` map; per entry only `cmd` (a single-line plain scalar, or a
     `|`/`|-`/`>`/`>-` block), `filters` (nested plain maps) and
     `concurrencyLimit`; plain or double-quoted keys; no tab, anchor, tag, alias,
-    flow collection, quoted or escaped value, multi-line plain scalar, sequence,
-    block indicator (`>+`, `|2`, ...) or duplicate key; non-ASCII only in
-    full-line comments. Any other line is a refusal naming its line number.
+    flow collection, quoted or escaped value, multi-line plain scalar, sequence
+    or block indicator (`>+`, `|2`, ...); non-ASCII only in full-line comments.
+    Any other line is a refusal naming its line number. This is a reader for
+    the recognised shapes, not a YAML validator: it does not promise to catch
+    every construct YAML would read differently - the committed-config rule
+    and the pin are what bound the config.
 
-  Every character of the command is then an allowlisted character, an ASCII
-  space or a newline, so the lexer and this module split it the same way. The llama.cpp
+  The allowed words are then split on ASCII spaces and newlines. The llama.cpp
   flag rules then apply to BOTH llama-server command lines - the embed upstream's
   rendered command and llama-swap's expanded cmd: long flags match with `_` as `-`
   (`--hf_repo` is `--hf-repo`); a model flag in `--flag=value` form is refused

@@ -25,9 +25,14 @@ defaults are read by compose itself and never re-implemented here:
               shell and parses the config as YAML; neither is emulated. BY ALLOWLIST:
               every `${env.*}` in the WHOLE config and every literal cmd word must
               match [A-Za-z0-9_./:,+=@-] (no `$`, quote, backslash, whitespace,
-              control or non-ASCII character; at most 4096 long), a macro may use
-              only earlier macros, and the config must be in a recognised YAML
-              subset (check_swap_config_subset). What is left is read with the
+              control or non-ASCII character; at most 4096 long; a value may not
+              start with `@` or end with `:`), every `${env.*}` sits in a block
+              scalar, a macro may use only earlier macros, and the config must be
+              in a recognised YAML subset (check_swap_config_subset). ABOVE ALL,
+              ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the file
+              must be byte-for-byte the blob committed at HEAD (check_committed),
+              and that committed file's parse is pinned by a test; the allowlists
+              and the subset are defence in depth. What is left is read with the
               llama.cpp flag rules below; its last `-m`/`--model` is the path
   embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
               (llama.cpp takes the flag over the env), else its rendered
@@ -586,8 +591,8 @@ _REF = re.compile(r"\$\{([^}]*)\}")
 # and every literal word of the role's command, must be made ONLY of these printable ASCII
 # characters - no `$` (llama-swap re-expands `${...}` inside substituted values, and compose's JSON
 # writes a literal `$` as `$$`), no quote, no backslash, no whitespace of any kind, no control
-# character, nothing outside ASCII. Then llama-swap's POSIX-shell lexer has nothing to do but split
-# on the ASCII spaces and newlines between words, which is exactly what this module does.
+# character, nothing outside ASCII. These allowlists are defence in depth behind the committed-config
+# rule (check_committed) and the pinned parse of that config (test_model_labels).
 SAFE_WORD = re.compile(r"^[A-Za-z0-9_./:,+=@-]+$")
 
 
@@ -621,6 +626,71 @@ def swap_env_refs(config_text: str) -> set[str]:
     return set(re.findall(r"\$\{env\.([^}]*)\}", "\n".join(seen)))
 
 
+def check_committed(path: Path, run=None) -> None:
+    """ONLY TRUST THE COMMITTED CONFIG (operator decision, 2026-09-29). The llama-swap config the
+    render mounts must be byte-for-byte the version committed at HEAD in the git checkout it lives
+    in: tracked, and `git hash-object <file>` equal to the blob `HEAD:<path>`. An uncommitted edit,
+    an untracked file, no git, or a file outside a checkout is a LabelError naming the file. The
+    committed file is pinned by test_model_labels (its expected parse), so a change to it goes
+    through review; the YAML subset check and the allowlists stay as defence in depth.
+    "Byte-for-byte" is as git compares a checkout with its commit: `git hash-object <path>` applies
+    the checkout's own line-ending conversion (core.autocrlf / .gitattributes), so an LF blob checked
+    out as CRLF on Windows - what `git diff` shows as unchanged - is the committed version; any other
+    difference is not.
+    `run(args, cwd) -> (code, stdout, stderr)` runs git (injectable for tests)."""
+    import subprocess
+
+    if run is None:
+        def run(args, cwd):
+            try:
+                proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=30)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return 127, "", f"{type(exc).__name__}: {exc}"
+            return proc.returncode, proc.stdout, proc.stderr
+    refuse = (f"the llama-swap config {path} differs from the committed version, or cannot be checked "
+              f"against it; labels are only derived from the committed config")
+    code, top, err = run(["rev-parse", "--show-toplevel"], path.parent)
+    if code != 0 or not top.strip():
+        raise LabelError(f"{refuse} (not in a git checkout, or git unavailable: {err.strip()[:120]})")
+    top = Path(top.strip())
+    try:
+        rel = Path(os.path.relpath(path.resolve(), top.resolve())).as_posix()
+    except ValueError:
+        raise LabelError(f"{refuse} (it is outside the checkout {top})") from None
+    if rel.startswith("../"):
+        raise LabelError(f"{refuse} (it is outside the checkout {top})")
+    code, _, _ = run(["ls-files", "--error-unmatch", "--", rel], top)
+    if code != 0:
+        raise LabelError(f"{refuse} (it is not tracked by git)")
+    code, head, _ = run(["rev-parse", f"HEAD:{rel}"], top)
+    code2, work, _ = run(["hash-object", "--", rel], top)
+    if code != 0 or code2 != 0 or not head.strip() or head.strip() != work.strip():
+        raise LabelError(f"{refuse} (the file on disk is not the blob committed at HEAD)")
+
+
+def check_swap_env_placement(config_text: str) -> None:
+    """Every `${env.*}` must sit inside a BLOCK scalar (a `|`/`>` cmd or macro). In a plain scalar a
+    substituted value is re-read as YAML, where a leading `@`, `-` or `&`, or a trailing `:`, changes
+    its type or breaks the config (tester attempt 9, y26b)."""
+    lines = config_text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            i += 1
+            continue
+        body = _strip_comment(raw)
+        value = body.split(":", 1)[1].strip() if ":" in body else ""
+        if value in _BLOCK_STYLES:
+            _, i = _block(lines, i + 1, _indent(raw), value)
+            continue
+        if "${env." in body:
+            raise LabelError(f"the llama-swap config, line {i + 1}: a `${{env.*}}` outside a block scalar - "
+                             f"not interpreted here")
+        i += 1
+
+
 def check_swap_env(config_text: str, env: dict, who: str = "the llama-swap config") -> None:
     """Every `${env.VAR}` ANYWHERE in the llama-swap config must be set and match SAFE_WORD:
     llama-swap substitutes them all when it loads the config, and one bad value in ANY entry makes
@@ -632,6 +702,9 @@ def check_swap_env(config_text: str, env: dict, who: str = "the llama-swap confi
         if not value:
             raise LabelError(f"{who}: {var} is not set in {CHAT_SERVICE}'s rendered environment "
                              f"(llama-swap substitutes every `${{env.*}}` in the config)")
+        if value.startswith("@") or value.endswith(":"):
+            raise LabelError(f"{who}: {var}={value!r} starts with `@` or ends with `:` (YAML indicators) - "
+                             f"not interpreted here")
         if not _safe(value):
             raise LabelError(f"{who}: {var}={value!r} has a character outside the allowlist "
                              f"[A-Za-z0-9_./:,+=@-] (as compose renders it; a literal `$` renders as `$$`) - "
@@ -653,8 +726,10 @@ def check_swap_config_subset(text: str) -> None:
     plain scalar, or a `|`/`|-`/`>`/`>-` block with no other indicator), `filters` (nested plain
     maps) and `concurrencyLimit`; plain keys (or a double-quoted key without escapes); no tab, no
     anchor/tag/alias (`&`, `!`, `*`), no flow collection, no quotes in values, no backslash, no
-    multi-line plain scalar, no duplicate key; non-ASCII only in full-line comments. Any line not
-    recognised is a LabelError naming it."""
+    multi-line plain scalar; non-ASCII only in full-line comments. Any line not recognised is a
+    LabelError naming it. This reads the recognised shapes; it is not a YAML validator and does not
+    promise to catch every construct YAML reads differently - defence in depth behind check_committed
+    and the pinned parse."""
     lines = text.splitlines()
     stack: list[tuple[int, set, str]] = []   # (indent of the keys at this level, keys seen, parent path)
     section = None
@@ -818,8 +893,9 @@ def _swap_model(entry: SwapEntry, macros: dict[str, str], spec: dict, model_id: 
     set and match SAFE_WORD (check_swap_env); every literal word of the expanded cmd must match
     SAFE_WORD once its `${env.*}` and built-in references are set aside; a word starting with `--`
     alone (`--`) or `#` cannot match; macros may reference only earlier macros; an unknown `${...}`
-    is refused. Every character of the command is then a SAFE_WORD character, an ASCII space or a
-    newline, so splitting on those is what the lexer does too. The result gets the embed server's
+    is refused. The config itself is the committed one (check_committed) whose parse is pinned by a
+    test; the allowlists are defence in depth. The words are split on ASCII spaces and newlines and
+    the result gets the embed server's
     flag rules (`_`/`-`, `=`-form and remote-model flags refused, the LAST `-m`/`--model` wins,
     none refused)."""
     who = f"llama-swap entry {model_id!r}"
@@ -1052,10 +1128,10 @@ def _walk(base: Path, parts: list[str], want: str, role: str, whole: str, hops: 
     return cur
 
 
-def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
+def derive_labels(render: dict, check_files: bool = True, git=None) -> list[RoleLabel]:
     """Every role's label from compose's render. LabelError, naming the cause, rather than a partial set."""
     try:
-        return _derive(render, check_files)
+        return _derive(render, check_files, git)
     except UnicodeError:
         raise   # a file the render points at is not UTF-8: the caller names that, not "the render"
     except (TypeError, AttributeError, KeyError, ValueError, RecursionError) as exc:
@@ -1064,7 +1140,7 @@ def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
                          f"({type(exc).__name__}: {str(exc)[:160]})") from None
 
 
-def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
+def _derive(render: dict, check_files: bool, git=None) -> list[RoleLabel]:
     if not isinstance(render, dict) or not isinstance(render.get("services"), dict):
         raise LabelError("the render has no services")
     gateway = _service(render, GATEWAY_SERVICE)
@@ -1078,8 +1154,10 @@ def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
     swap_path = _bind_source(chat, CHAT_SERVICE, swap_target)
     if not swap_path.is_file():
         raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
+    check_committed(swap_path, git)
     swap_text = swap_path.read_text(encoding="utf-8")
     check_swap_config_subset(swap_text)
+    check_swap_env_placement(swap_text)
     macros, swap_entries = parse_llama_swap_config(swap_text)
     swap_models = {model: entry.cmd for model, entry in swap_entries.items()}
     out = []

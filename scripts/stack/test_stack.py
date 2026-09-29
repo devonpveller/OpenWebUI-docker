@@ -5852,7 +5852,7 @@ def test_an_unreadable_container_list_with_local_off_says_it_cannot_tell(root, m
 # --------------------------------------------------------------------------
 
 import model_labels  # noqa: E402
-from test_model_labels import ADMIN_KEY, FakeOwui, swap_env  # noqa: E402
+from test_model_labels import ADMIN_KEY, FakeOwui, commit_all, swap_env  # noqa: E402
 
 
 class _Resp:
@@ -5938,6 +5938,7 @@ def _roles_root(root: Path, env_extra: str = "COMPOSE_PROFILES=local\n", key: st
     render["services"]["llama-cpp-embed-upstream"].update(
         environment={"LLAMA_ARG_MODEL": "/models/bge-m3-f16.gguf"}, volumes=[bind(embed, "/models")])
     (root.parent / "inference-render.json").write_text(json.dumps(render), encoding="utf-8")
+    commit_all(root)   # labels come only from the COMMITTED llama-swap config
     if key is not None:
         dot = root / ".env"
         dot.write_text((dot.read_text(encoding="utf-8") if dot.exists() else "")
@@ -6083,6 +6084,7 @@ def _break_config(root, rel, how, monkeypatch):
     path = root / rel
     if how == "undecodable":
         path.write_bytes(path.read_bytes() + b"\n# caf\xe9\n")   # a cp1252 byte, not UTF-8
+        commit_all(root)   # committed, so the decode (not the committed-config rule) is what refuses
     else:
         real = Path.read_text
 

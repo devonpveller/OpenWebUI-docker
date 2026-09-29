@@ -58,6 +58,23 @@ class World(NamedTuple):
     embed: Path
 
 
+def commit_all(root: Path) -> None:
+    """Make `root` a throwaway git checkout with everything in it committed: labels are only derived
+    from the COMMITTED llama-swap config (operator decision, 2026-09-29). No hooks run here."""
+    import subprocess
+    nohooks = root / ".git-nohooks"
+    nohooks.mkdir(exist_ok=True)
+    base = ["git", "-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false",
+            "-c", f"core.hooksPath={nohooks}"]
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+        # in the repo's OWN config, so the commit and model_labels' `git hash-object` agree
+        subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True, capture_output=True)
+    subprocess.run([*base, "-C", str(root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*base, "-C", str(root), "commit", "-q", "--allow-empty", "-m", "t"], check=True,
+                   capture_output=True)
+
+
 @pytest.fixture
 def world(tmp_path: Path) -> World:
     root = tmp_path / "repo"
@@ -70,6 +87,7 @@ def world(tmp_path: Path) -> World:
     embed = tmp_path / "embeddings"
     embed.mkdir()
     (embed / "bge-m3-f16.gguf").write_bytes(b"GGUF")
+    commit_all(root)
     return World(root, store, embed)
 
 
@@ -832,6 +850,7 @@ def test_llama_swaps_rendered_config_flag_picks_the_config(world):
     alt = world.root / "alt.yaml"
     alt.write_text((world.root / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8").replace(
         "${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "/models/alt/Alt-9B-Q5_K_M.gguf"), encoding="utf-8")
+    commit_all(world.root)
     (world.store / "alt").mkdir()
     (world.store / "alt" / "Alt-9B-Q5_K_M.gguf").write_bytes(b"GGUF")
     render = make_render(world)
@@ -1097,6 +1116,7 @@ def _swap_cmd(world, old, new):
     text = path.read_text(encoding="utf-8")
     assert text.count(old) >= 1, old
     path.write_text(text.replace(old, new), encoding="utf-8")
+    commit_all(world.root)   # a COMMITTED edit: what follows tests the defence in depth behind rule 1
 
 
 @pytest.mark.parametrize("var,value", [
@@ -1331,6 +1351,7 @@ def _macros(world, text):
     start = body.index("macros:")
     end = body.index("\nmodels:")
     path.write_text(body[:start] + "macros:\n" + text + body[end:], encoding="utf-8")
+    commit_all(world.root)
 
 
 def test_a_macro_may_reference_an_earlier_macro(world):
@@ -1486,3 +1507,159 @@ def test_a_quoted_filters_key_with_a_colon_is_read_as_one_key():
     ml.check_swap_config_subset('models:\n  m:\n    cmd: llama-server --model /models/a.gguf\n'
                                 '    filters:\n      setParamsByID:\n        "${MODEL_ID}:nothink":\n'
                                 '          chat_template_kwargs:\n            enable_thinking: false\n')
+
+
+# --------------------------------------------------------------------------
+# attempt 10: ONLY TRUST THE COMMITTED CONFIG (operator decision 2026-09-29), the pin, Z8
+# --------------------------------------------------------------------------
+
+
+def test_the_committed_llama_swap_config_is_accepted(world):
+    assert by_role(ml.derive_labels(make_render(world)))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def test_an_uncommitted_edit_of_the_llama_swap_config_is_refused(world):
+    """Any byte that differs from HEAD refuses - even a harmless comment."""
+    path = world.root / ml.LLAMA_SWAP_REL
+    path.write_text(path.read_text(encoding="utf-8") + "# an uncommitted comment\n", encoding="utf-8")
+    with pytest.raises(ml.LabelError, match="differs from the committed version.*not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_staged_but_uncommitted_edit_is_refused(world):
+    import subprocess
+    path = world.root / ml.LLAMA_SWAP_REL
+    path.write_text(path.read_text(encoding="utf-8") + "# staged\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(world.root), "add", "-A"], check=True, capture_output=True)
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_an_untracked_llama_swap_config_is_refused(world):
+    alt = world.root / "untracked.yaml"
+    alt.write_text((world.root / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8"), encoding="utf-8")
+    render = make_render(world)
+    up = render["services"]["llama-cpp-upstream"]
+    up["command"] = ["-config", "/app/untracked.yaml"]
+    up["volumes"].append({"type": "bind", "source": str(alt), "target": "/app/untracked.yaml", "read_only": True})
+    with pytest.raises(ml.LabelError, match="not tracked by git"):
+        ml.derive_labels(render)
+
+
+def test_a_config_outside_any_checkout_or_without_git_is_refused(world, tmp_path_factory, monkeypatch):
+    outside = tmp_path_factory.mktemp("loose")   # a sibling of the world checkout, not inside it
+    # the host's temp dir may itself sit inside some checkout (a home-directory repo): stop discovery here
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outside.parent))
+    shutil.copy(world.root / ml.LLAMA_SWAP_REL, outside / "llama-swap.config.yaml")
+    render = make_render(world)
+    for mount in render["services"]["llama-cpp-upstream"]["volumes"]:
+        if mount["target"] == "/app/config.yaml":
+            mount["source"] = str(outside / "llama-swap.config.yaml")
+    with pytest.raises(ml.LabelError, match="not in a git checkout, or git unavailable"):
+        ml.derive_labels(render)
+    with pytest.raises(ml.LabelError, match="not in a git checkout, or git unavailable"):
+        ml.derive_labels(make_render(world), git=lambda args, cwd: (127, "", "FileNotFoundError: git"))
+
+
+def test_a_hash_that_git_reports_differently_is_refused(world):
+    """The comparison really is `git hash-object` against `HEAD:<path>` (kills a check that only asks
+    whether the file is tracked)."""
+    import subprocess
+
+    def git(args, cwd):
+        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+        out = proc.stdout
+        if args[:1] == ["hash-object"]:
+            out = "0" * 40 + "\n"
+        return proc.returncode, out, proc.stderr
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world), git=git)
+
+
+def _committed_config_text() -> str:
+    """The llama-swap config as COMMITTED at HEAD in this checkout (not the working copy)."""
+    import subprocess
+    proc = subprocess.run(["git", "-C", str(REPO_ROOT), "show", f"HEAD:{ml.LLAMA_SWAP_REL.as_posix()}"],
+                          capture_output=True, text=True, encoding="utf-8")
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+PINNED_COMMON_ARGS = ["--host", "0.0.0.0", "--port", "${PORT}", "--chat-template-file",
+                      "/etc/llama/chat-template.jinja", "--flash-attn", "on", "--no-mmap"]
+PINNED_27B_CMD = ["llama-server", "${common-args}", "--model", "${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}"] + [
+    w for flag, var in [("--ctx-size", "CTX_SIZE"), ("--n-gpu-layers", "N_GPU_LAYERS"), ("--parallel", "N_PARALLEL"),
+                        ("--batch-size", "BATCH"), ("--ubatch-size", "UBATCH"), ("--cache-type-k", "CACHE_TYPE_K"),
+                        ("--cache-type-v", "CACHE_TYPE_V"), ("--reasoning-budget", "REASONING_BUDGET"),
+                        ("--spec-type", "SPEC_TYPE"), ("--spec-draft-n-max", "SPEC_DRAFT_N_MAX"),
+                        ("--spec-draft-type-k", "SPEC_DRAFT_CACHE_TYPE_K"),
+                        ("--spec-draft-type-v", "SPEC_DRAFT_CACHE_TYPE_V")]
+    for w in (flag, "${env.LLAMA_SWAP_QWEN36_27B_" + var + "}")]
+
+
+def test_the_committed_llama_swap_config_is_pinned():
+    """THE PIN. The committed config, parsed as llama-swap reads it: its macros, its entries and their
+    keys, the role's cmd words and its model flag. A committed change to the config must change this
+    test too - and so goes through review. (Rule 1 already refuses any uncommitted difference.)"""
+    text = _committed_config_text()
+    ml.check_swap_config_subset(text)
+    ml.check_swap_env_placement(text)   # every ${env.*} sits inside a block scalar
+    macros, models = ml.parse_llama_swap_config(text)
+    assert list(macros) == ["common-args"] and macros["common-args"].split() == PINNED_COMMON_ARGS
+    assert list(models) == ["qwen36-35b-a3b", "qwen36-27b-baseline", "qwen36-27b"]
+    assert {k: sorted(v.keys) for k, v in models.items()} == {
+        "qwen36-35b-a3b": ["cmd", "filters"], "qwen36-27b-baseline": ["cmd", "filters"],
+        "qwen36-27b": ["cmd", "concurrencyLimit", "filters"]}
+    assert models["qwen36-27b"].cmd.split() == PINNED_27B_CMD
+    assert ml._flag(models["qwen36-27b"].cmd.split(), ml._EMBED_MODEL_FLAGS) == "${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}"
+    refs = ml.swap_env_refs(text)
+    assert refs == {f"LLAMA_SWAP_QWEN36_27B_{v}" for v in ("MODEL_PATH", "CTX_SIZE", "N_GPU_LAYERS", "N_PARALLEL",
+                                                          "BATCH", "UBATCH", "CACHE_TYPE_K", "CACHE_TYPE_V",
+                                                          "REASONING_BUDGET", "SPEC_TYPE", "SPEC_DRAFT_N_MAX",
+                                                          "SPEC_DRAFT_CACHE_TYPE_K", "SPEC_DRAFT_CACHE_TYPE_V")} | {
+        f"LLAMA_SWAP_QWEN36_35B_{v}" for v in ("MODEL_PATH", "CTX_SIZE", "N_GPU_LAYERS", "N_PARALLEL", "BATCH",
+                                               "UBATCH", "CACHE_TYPE_K", "CACHE_TYPE_V", "REASONING_BUDGET")}
+
+
+@pytest.mark.parametrize("value", ["@1", "@x", "4096:", "q4_0:"])
+def test_z8_a_value_starting_with_at_or_ending_with_a_colon_is_refused(world, value):
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_SWAP_QWEN36_27B_CTX_SIZE"] = value
+    with pytest.raises(ml.LabelError, match="starts with `@` or ends with `:`"):
+        ml.derive_labels(render)
+
+
+def test_z8_an_env_reference_outside_a_block_scalar_is_refused(world):
+    """y26b: `${env.X}` in a PLAIN scalar - its substituted value is re-read as YAML. The subset
+    accepts this shape; the placement check is what refuses it."""
+    _macros(world, "  common-args: --host 0.0.0.0 --port ${PORT} --ctx ${env.LLAMA_SWAP_QWEN36_27B_CTX_SIZE}\n")
+    with pytest.raises(ml.LabelError, match="outside a block scalar"):
+        ml.derive_labels(make_render(world))
+    placement_only = "models:\n  m:\n    cmd: llama-server ${env.X}\n"
+    with pytest.raises(ml.LabelError, match="outside a block scalar"):
+        ml.check_swap_env_placement(placement_only)
+
+
+@pytest.mark.parametrize("value", ["@x --no-mmap", "`x", "&a x", "*a", "!t x", "%x", "? x", ", x"])
+def test_z8_a_plain_macro_starting_with_a_yaml_indicator_is_refused(value):
+    """The subset's first-character check (Z8 survived attempt 9): tested directly on the subset."""
+    with pytest.raises(ml.LabelError, match="macro value"):
+        ml.check_swap_config_subset(f"macros:\n  common-args: {value}\nmodels:\n  m:\n    cmd: |\n      x\n")
+
+
+def test_a_crlf_checkout_of_the_committed_config_is_the_committed_version(world):
+    """The live checkout (core.autocrlf=true on Windows) holds the config as CRLF over an LF blob:
+    `git diff` shows nothing, so it is the committed version. A real edit on top is still refused."""
+    import subprocess
+    path = world.root / ml.LLAMA_SWAP_REL
+    text = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+    path.write_bytes(text.encode("utf-8"))
+    commit_all(world.root)   # an LF blob, as in the real repo
+    subprocess.run(["git", "-C", str(world.root), "config", "core.autocrlf", "true"], check=True, capture_output=True)
+    path.write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+    diff = subprocess.run(["git", "-C", str(world.root), "diff", "--quiet", "--", ml.LLAMA_SWAP_REL.as_posix()])
+    assert diff.returncode == 0
+    assert by_role(ml.derive_labels(make_render(world)))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+    path.write_bytes((text + "# edit\n").replace("\n", "\r\n").encode("utf-8"))
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
