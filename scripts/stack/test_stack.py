@@ -4108,7 +4108,12 @@ def test_a_change_one_after_another_just_missed_is_never_credited_early(fast_clo
 @pytest.mark.parametrize("gates_in_level,cost,budget,running_from,others_healthy_at", [
     (22, 0.2, 30, 15.0, 250.0),     # tester's a4_fg_replay: alone PASS at 32.2 s, attempt 4 TIMEOUT at 37.2 s
     (12, 0.14, 300, 285.5, 310.0),  # tester's a4_fg_replay12 (OB1 L1's size): alone 301.58 s, attempt 4 304.34 s
-], ids=["22-gates-0.2s", "12-gates-0.14s"])
+    # attempt-6 tester's g7_replay: the others finish just after g0's window opens, so the window opens in a LONG
+    # round and the budget ends in SHORT ones. A level round taken only from the gates polled NOW (mutant G7, no
+    # measured longest round) times these out: alone PASS 32.1 s / G7 TIMEOUT 42.0 s; 92.7 s / 100.5 s
+    (13, 0.9, 30, 14.75, 15.0),
+    (31, 0.3, 90, 74.0, 75.0),
+], ids=["22-gates-0.2s", "12-gates-0.14s", "13-gates-0.9s-others-done-early", "31-gates-0.3s-others-done-early"])
 def test_a_first_gate_in_a_big_level_passes_when_it_passed_alone(fast_clock, gates_in_level, cost, budget,
                                                                  running_from, others_healthy_at):
     """Attempt 4's grace was one LONE round, but a level polls each gate once per LEVEL round (3 s + an
@@ -4121,6 +4126,16 @@ def test_a_first_gate_in_a_big_level_passes_when_it_passed_alone(fast_clock, gat
     assert alone[0][0], alone
     out, _end = _together(fast_clock, scripts, gates, cost)
     assert out[0][0], out[0]
+
+
+def test_a_lone_gate_judges_its_budget_on_whole_seconds_spent_truncated(fast_clock):
+    """`spent` is truncated (int), as the one-after-another gate always did: rounding it would time a lone gate
+    out up to 0.5 s sooner (tester, attempt 6, mutant Y4: 185 of 5020 lone-gate levels). Budget 60 s, 0.14 s
+    inspect, running from 44.0 s: truncated, it passes at 62.94 s; rounded, it timed out at 59.8 s."""
+    scripts = {"x": lambda t: _CREATED if t < 44.0 else dict(_STEADY)}
+    out, end = _together(fast_clock, scripts, [("x", 60, _S, 15)], 0.14)
+    assert out == [(True, "running and steady for 15s (no healthcheck; RestartCount 0, not restarted)")]
+    assert abs(end - 62.94) < 1e-6, end
 
 def test_a_first_gate_whose_window_closes_in_its_last_round_passes_as_it_did_alone(fast_clock):
     """Tester's attempt-3 seeds 11/23: a FIRST gate (no credit) whose settle window closes in the last
