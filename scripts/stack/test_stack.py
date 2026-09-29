@@ -114,6 +114,10 @@ def _powershell_present(monkeypatch):
     # a FakeDaemon/FakeHost capture.
     monkeypatch.setattr(stack, "subprocess_capture",
                         lambda cmd, cwd: stack.CommandResult(127, "", "hermetic test: no docker"))
+    # the labels render's own capture (strict UTF-8, timeout) is fenced the same way
+    monkeypatch.setattr(stack, "utf8_capture",
+                        lambda cmd, cwd, timeout=0: stack.CommandResult(127, "", "hermetic test: no docker"),
+                        raising=False)
 
 
 def run(root: Path, *args, runner=None, capture=None):
@@ -6216,3 +6220,87 @@ def test_the_label_render_is_the_inference_plane_with_local_and_the_state_contex
     assert renders and renders[0][:4] == ["docker", "compose", "-f", "inference/docker-compose.yml"]
     assert "--profile" in renders[0] and renders[0][renders[0].index("--profile") + 1] == "local"
 
+
+# --- attempt 5 (tester attempt 4): the render's context, and its strict UTF-8 capture ---------
+
+_REAL_UTF8_CAPTURE = stack.utf8_capture   # bound at import, before the hermetic fixture fences it
+
+
+def test_the_label_render_runs_on_the_inference_planes_docker_context(root, no_owui_env):
+    """Kills the tester's surviving mutant: `labels_render` ignoring the plane's `--context`."""
+    code, out, _ = run(root, "init", "--planes", "inference,frontend", "--context", "inference=remote1", "--force")
+    assert code == 0, out
+    _roles_root(root)
+    daemon = _rdaemon(root)
+    seen = []
+
+    def capture(cmd, cwd):
+        seen.append(list(cmd))
+        return daemon.capture(cmd, cwd)
+    out = io.StringIO()
+    code = stack.main(["--root", str(root), "labels", "--dry-run"], capture=capture, stdout=out,
+                      labels_request=FakeOwui())
+    renders = [c for c in seen if c[-3:] == ["config", "--format", "json"]]
+    assert renders, out.getvalue()
+    assert renders[0][:3] == ["docker", "--context", "remote1"], renders[0]
+
+
+def _py(code):
+    return [sys.executable, "-c", code]
+
+
+def test_the_render_capture_decodes_compose_output_as_strict_utf8(tmp_path):
+    """T13(3) on the writing path: compose's JSON is UTF-8; the locale codepage turned
+    `\\u0141\\xf3d\\u017a-\\u9f99-7B` into mojibake and refused a valid model path."""
+    name = "\u0141\xf3d\u017a-\u9f99-7B-Q4_K_M.gguf"
+    ok = _REAL_UTF8_CAPTURE(_py("import sys; sys.stdout.buffer.write('%s'.encode('utf-8'))" % name.encode(
+        "unicode_escape").decode("ascii")), tmp_path)
+    assert ok.code == 0 and ok.stdout == name
+    bad = _REAL_UTF8_CAPTURE(_py("import sys; sys.stdout.buffer.write(b'\\xff\\xfe not utf-8')"), tmp_path)
+    assert bad.code == 1 and "not UTF-8" in bad.stderr
+    slow = _REAL_UTF8_CAPTURE(_py("import time; time.sleep(30)"), tmp_path, timeout=1)
+    assert slow.code == 124 and "timed out" in slow.stderr
+
+
+def test_the_label_render_uses_the_strict_capture_when_none_is_injected(root, no_owui_env, monkeypatch):
+    _roles_root(root)
+    used = []
+    render = (root.parent / "inference-render.json").read_text(encoding="utf-8")
+
+    def fake_utf8(cmd, cwd, timeout=stack.RENDER_TIMEOUT):
+        used.append(list(cmd))
+        return stack.CommandResult(0, render, "")
+    monkeypatch.setattr(stack, "utf8_capture", fake_utf8)
+    manifest = stack.Manifest.load(root / stack.MANIFEST_NAME)
+    state = stack.State.load(root / stack.STATE_REL)
+    stack.labels_render(manifest, state, root, stack.subprocess_capture)
+    assert used and used[0][-3:] == ["config", "--format", "json"]
+
+
+def _compose_cli():
+    import subprocess
+    try:
+        return subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@pytest.mark.skipif(not _compose_cli(), reason="needs the docker compose CLI (no daemon)")
+def test_a_non_ascii_model_path_survives_the_real_compose_render(tmp_path, monkeypatch):
+    """The REAL compose renders the REAL inference compose file; the strict UTF-8 capture reads it back
+    exactly, so the label derived on the writing path is the configured one."""
+    import os
+
+    import model_labels as ml
+    name = "\u0141\xf3d\u017a-\u9f99-7B-Q4_K_M.gguf"
+    example = (REPO_ROOT / "inference/.env.example").read_text(encoding="utf-8")
+    env_file = tmp_path / "u.env"
+    env_file.write_text(example + f"\nLLAMA_SWAP_QWEN36_27B_MODEL_PATH=/models/v/{name}\n", encoding="utf-8")
+    monkeypatch.setenv("DOCKER_HOST", "tcp://127.0.0.1:1")
+    for var in [k for k in os.environ if k.startswith(("LLAMA_SWAP_", "COMPOSE_"))]:
+        monkeypatch.delenv(var)
+    result = _REAL_UTF8_CAPTURE(ml.render_command(REPO_ROOT, env_file), REPO_ROOT)
+    assert result.code == 0, result.stderr
+    render = ml.parse_render(result.stdout, "render")
+    labels = {x.role: x for x in ml.derive_labels(render, check_files=False)}
+    assert labels["local-large"].label == "\u0141\xf3d\u017a-\u9f99-7B Q4_K_M (thinking)"

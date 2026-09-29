@@ -2162,6 +2162,31 @@ def subprocess_capture(cmd, cwd) -> CommandResult:
     return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
+RENDER_TIMEOUT = 120
+
+
+def utf8_capture(cmd, cwd, timeout: int = RENDER_TIMEOUT) -> CommandResult:
+    """subprocess_capture for `docker compose config --format json`: compose writes UTF-8, and
+    the locale codepage (cp1252 on this Windows host) turned a non-ASCII model path into
+    mojibake (mr-gateway attempt 4, T13). STRICT decoding, so bytes that are not UTF-8 are a
+    named failure rather than a silently different path; a timeout, so a hung CLI cannot hang
+    `up`/`recover`."""
+    try:
+        proc = subprocess.run(
+            list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=command_env(cmd), timeout=timeout,
+        )
+    except OSError as exc:
+        return CommandResult(127, "", str(exc))
+    except subprocess.TimeoutExpired:
+        return CommandResult(124, "", f"timed out after {timeout} s")
+    try:
+        out = proc.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        return CommandResult(1, "", f"the output is not UTF-8 ({exc})")
+    return CommandResult(proc.returncode, out, proc.stderr.decode("utf-8", errors="replace"))
+
+
 def urllib_get(url: str, timeout: int = 8) -> HttpResult:
     """GET a URL. Any failure is a status 0 with the reason as the body.
 
@@ -2785,6 +2810,11 @@ def owui_admin_settings(root: Path) -> tuple[str, str]:
     return url, key
 
 
+def result_is_real(capture) -> bool:
+    """The default capture decodes with the locale codepage; the render needs strict UTF-8."""
+    return capture is subprocess_capture or capture is None
+
+
 def labels_render(manifest, state, root, capture, render_file=None) -> dict:
     """COMPOSE's render of the inference plane - the one source a label is derived from.
 
@@ -2798,6 +2828,8 @@ def labels_render(manifest, state, root, capture, render_file=None) -> dict:
 
     if render_file:
         return model_labels.parse_render(Path(render_file).read_text(encoding="utf-8"), str(render_file))
+    if result_is_real(capture):
+        capture = utf8_capture
     profiles = manifest.profile_order("inference", set(effective_profiles(manifest, state, root, "inference"))
                                       | {"local"})
     cmd = compose_command(manifest, "inference", ["config", "--format", "json"],

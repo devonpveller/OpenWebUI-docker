@@ -17,17 +17,22 @@ defaults are read by compose itself and never re-implemented here:
 
   roles       llm-gateway's /app/conf.d bind -> local.yaml: every `model_name`
               starting `local-`, with its `litellm_params.model`
-  chat model  llama-cpp-upstream's /app/config.yaml bind (the llama-swap config):
+  chat model  the llama-swap config llama-cpp-upstream reads (its rendered command's
+              `-config`, default /app/config.yaml, through that path's bind):
               the `--model` of the entry whose id is the concrete id (`:nothink`
               is llama-swap's thinking switch, not an entry), usually
               `${env.LLAMA_SWAP_..._MODEL_PATH}` -> that variable in the service's
               RENDERED environment
-  embed model llama-cpp-embed-upstream's rendered `LLAMA_ARG_MODEL` (llm-queue sends
-              every `bge*` id to the embed upstream - registry.upstream_for)
-  the file    the service's rendered /models bind source, the path followed the way
-              the container follows it (relative symlinks inside the store; a
-              host-absolute link is refused), and checked to EXIST; the label is
-              the name of the file finally reached
+  embed model llama-cpp-embed-upstream's rendered command `-m`/`--model` if it has one
+              (llama.cpp takes the flag over the env), else its rendered
+              `LLAMA_ARG_MODEL`; a model from a URL / HF repo is refused (llm-queue
+              sends every `bge*` id to the embed upstream - registry.upstream_for)
+  the file    the service's rendered /models bind source, the path walked component
+              by component the way the container's kernel walks it - a link is
+              followed BEFORE a following `..` is applied; a relative link must stay
+              in the store; a link to a host-absolute path and a Windows junction are
+              refused (the container cannot open either) - and checked to EXIST; the
+              label is the name of the file finally reached
 
 and turns the file name into the label:
 
@@ -293,8 +298,8 @@ def render_inference(root: Path, env_file: Path | None = None, run=None) -> dict
 def parse_render(text: str, what: str) -> dict:
     try:
         data = json.loads(text or "")
-    except ValueError as exc:
-        raise LabelError(f"{what} is not JSON ({exc})") from None
+    except (ValueError, RecursionError) as exc:
+        raise LabelError(f"{what} is not JSON this module can read ({type(exc).__name__}: {str(exc)[:120]})") from None
     if not isinstance(data, dict) or not isinstance(data.get("services"), dict):
         raise LabelError(f"{what} has no services")
     return data
@@ -308,21 +313,95 @@ def _service(render: dict, name: str) -> dict:
 
 
 def _bind_source(spec: dict, service: str, target: str) -> Path:
-    for mount in spec.get("volumes") or []:
+    volumes = spec.get("volumes") or []
+    if not isinstance(volumes, list):
+        raise LabelError(f"{service}'s rendered volumes are not a list")
+    for mount in volumes:
         if isinstance(mount, dict) and mount.get("target") == target and mount.get("type") == "bind":
-            if mount.get("source"):
-                return Path(mount["source"])
+            source = mount.get("source")
+            if not isinstance(source, str) or not source:
+                raise LabelError(f"{service}'s bind at {target} has no source path in the render")
+            if not (Path(source).is_absolute() or source.startswith("/")):
+                raise LabelError(f"{service}'s bind at {target} has the RELATIVE source {source!r}; compose "
+                                 f"renders absolute paths - this is not a compose render")
+            return Path(source)
     raise LabelError(f"{service} has no bind mount at {target} in the render")
 
 
-def _environment(spec: dict, service: str, var: str) -> str:
+def _env_map(spec: dict, service: str) -> dict:
     env = spec.get("environment") or {}
     if isinstance(env, list):   # compose renders a map; accept the list form too
-        env = dict(item.split("=", 1) if "=" in item else (item, None) for item in env)
-    value = env.get(var)
+        env = dict(str(item).split("=", 1) if "=" in str(item) else (str(item), None) for item in env)
+    if not isinstance(env, dict):
+        raise LabelError(f"{service}'s rendered environment is not a map")
+    return env
+
+
+def _environment(spec: dict, service: str, var: str) -> str:
+    value = _env_map(spec, service).get(var)
+    if value is not None and not isinstance(value, str):
+        raise LabelError(f"{var} in {service}'s rendered environment is not a string")
     if not value:
         raise LabelError(f"{var} is not set in {service}'s rendered environment")
     return value
+
+
+def _command(spec: dict, service: str) -> list[str]:
+    command = spec.get("command") or []
+    if isinstance(command, str):
+        command = command.split()
+    if not isinstance(command, list) or not all(isinstance(a, str) for a in command):
+        raise LabelError(f"{service}'s rendered command is not a list of strings")
+    return command
+
+
+def _flag(command: list[str], names: tuple[str, ...]) -> str | None:
+    """The value of the LAST occurrence of any of `names` (`--x v` or `--x=v`), or None."""
+    value = None
+    for i, arg in enumerate(command):
+        for name in names:
+            if arg == name:
+                if i + 1 >= len(command):
+                    raise LabelError(f"`{name}` is the last word of the command, with no value")
+                value = command[i + 1]
+            elif arg.startswith(name + "="):
+                value = arg[len(name) + 1:]
+    return value
+
+
+# llama.cpp's server: a command-line model flag beats LLAMA_ARG_MODEL; these load a model from
+# somewhere that is not a /models file, which this module cannot label - refused.
+_EMBED_MODEL_FLAGS = ("-m", "--model")
+_EMBED_REMOTE_FLAGS = ("-mu", "--model-url", "-hf", "-hfr", "--hf-repo", "-hff", "--hf-file", "-dr",
+                       "--docker-repo")
+_EMBED_REMOTE_ENV = ("LLAMA_ARG_MODEL_URL", "LLAMA_ARG_HF_REPO", "LLAMA_ARG_HF_FILE", "LLAMA_ARG_DOCKER_REPO")
+
+
+def _embed_model(spec: dict) -> tuple[str, str]:
+    """(the path llama-cpp-embed-upstream loads, where that came from): its rendered command's
+    `-m`/`--model` if present (llama.cpp takes the flag over the env), else LLAMA_ARG_MODEL."""
+    command = _command(spec, EMBED_SERVICE)
+    remote = [a for a in command if a.split("=", 1)[0] in _EMBED_REMOTE_FLAGS]
+    env = _env_map(spec, EMBED_SERVICE)
+    remote += [k for k in _EMBED_REMOTE_ENV if env.get(k)]
+    if remote:
+        raise LabelError(f"{EMBED_SERVICE} loads its model from {', '.join(remote)} in the render - not a "
+                         f"{MODELS_MOUNT} file this module can label")
+    flagged = _flag(command, _EMBED_MODEL_FLAGS)
+    if flagged is not None:
+        return flagged, f"`--model` in {EMBED_SERVICE}'s rendered command"
+    return _environment(spec, EMBED_SERVICE, EMBED_VAR), f"{EMBED_VAR} as compose renders {EMBED_SERVICE}"
+
+
+def _swap_config_target(spec: dict) -> str:
+    """Where llama-swap reads its config: the rendered command's `-config` (llama-swap's default,
+    `config.yaml` in its working directory /app, when the flag is absent)."""
+    flagged = _flag(_command(spec, CHAT_SERVICE), ("-config", "--config"))
+    if flagged is None:
+        return SWAP_CONFIG_TARGET
+    if not flagged.startswith("/"):
+        flagged = posixpath.join("/app", flagged)
+    return posixpath.normpath(flagged)
 
 
 def roles_from(text: str, where: str) -> list[Role]:
@@ -389,6 +468,15 @@ def _served_by_embed(concrete: str, swap_models: dict[str, str]) -> bool | None:
     return None
 
 
+def _check_container_path(container_path: str, service: str) -> None:
+    """The literal shape: `/models/...` and no backslash. `..` is NOT collapsed here - the
+    container's kernel follows each link BEFORE applying a following `..` (resolve_in_store)."""
+    if "\\" in container_path:
+        raise LabelError(f"{container_path} contains a backslash - a container path uses `/` only")
+    if not container_path.startswith(MODELS_MOUNT + "/"):
+        raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
+
+
 def _under_models(container_path: str, service: str) -> str:
     """The path normalised (`/models/../x` is NOT under /models); a LabelError if it leaves the bind.
 
@@ -401,6 +489,23 @@ def _under_models(container_path: str, service: str) -> str:
     if not norm.startswith(MODELS_MOUNT + "/"):
         raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
     return norm
+
+
+_REPARSE_POINT = 0x400   # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """A Windows junction (or any other reparse point) that is not a symlink: `is_symlink()` is
+    False for it and the HOST follows it, but inside the container it is a link to a host-absolute
+    path (/mnt/host/c/...) the container cannot open."""
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None and isjunction(path):
+        return True
+    try:
+        attrs = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attrs & _REPARSE_POINT)
 
 
 def _absolute_link_target(target: str) -> bool:
@@ -430,6 +535,9 @@ def resolve_in_store(store: Path, container_path: str, role: str) -> Path:
             done.pop()
             continue
         here = store.joinpath(*done, part)
+        if not here.is_symlink() and _is_reparse_point(here):
+            raise LabelError(f"role {role}: {here} is a junction/reparse point - the host follows it, but the "
+                             f"container sees a link to a host-absolute path it cannot open")
         if here.is_symlink():
             hops += 1
             if hops > 40:
@@ -449,6 +557,19 @@ def resolve_in_store(store: Path, container_path: str, role: str) -> Path:
 
 def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
     """Every role's label from compose's render. LabelError, naming the cause, rather than a partial set."""
+    try:
+        return _derive(render, check_files)
+    except UnicodeError:
+        raise   # a file the render points at is not UTF-8: the caller names that, not "the render"
+    except (TypeError, AttributeError, KeyError, ValueError, RecursionError) as exc:
+        # a render that is not the shape compose writes (a hostile or hand-made --render)
+        raise LabelError(f"the render is not the shape `docker compose config` writes "
+                         f"({type(exc).__name__}: {str(exc)[:160]})") from None
+
+
+def _derive(render: dict, check_files: bool) -> list[RoleLabel]:
+    if not isinstance(render, dict) or not isinstance(render.get("services"), dict):
+        raise LabelError("the render has no services")
     gateway = _service(render, GATEWAY_SERVICE)
     fragments = _bind_source(gateway, GATEWAY_SERVICE, FRAGMENT_TARGET)
     local = fragments / LOCAL_FRAGMENT
@@ -456,9 +577,10 @@ def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
         raise LabelError(f"{local} (llm-gateway's {FRAGMENT_TARGET}/{LOCAL_FRAGMENT}) does not exist")
     role_list = roles_from(local.read_text(encoding="utf-8"), str(local))
     chat = _service(render, CHAT_SERVICE)
-    swap_path = _bind_source(chat, CHAT_SERVICE, SWAP_CONFIG_TARGET)
+    swap_target = _swap_config_target(chat)
+    swap_path = _bind_source(chat, CHAT_SERVICE, swap_target)
     if not swap_path.is_file():
-        raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {SWAP_CONFIG_TARGET}) does not exist")
+        raise LabelError(f"{swap_path} ({CHAT_SERVICE}'s {swap_target}) does not exist")
     swap_models = parse_llama_swap_models(swap_path.read_text(encoding="utf-8"))
     out = []
     for role in role_list:
@@ -469,8 +591,7 @@ def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
         if embed:
             service = EMBED_SERVICE
             spec = _service(render, service)
-            container = _environment(spec, service, EMBED_VAR)
-            source = f"{EMBED_VAR} as compose renders {service}"
+            container, source = _embed_model(spec)
         else:
             service, spec = CHAT_SERVICE, chat
             raw = swap_models[role.concrete.split(":", 1)[0]]
@@ -480,11 +601,15 @@ def derive_labels(render: dict, check_files: bool = True) -> list[RoleLabel]:
                 source = f"{match.group(1)} as compose renders {service}"
             else:
                 container, source = raw, "a literal path in the llama-swap config"
-        container = _under_models(container, service)
-        host, name = "", container
+        _check_container_path(container, service)
+        host = ""
         if check_files:
+            # followed component by component, links first, as the container's kernel does
             final = resolve_in_store(_bind_source(spec, service, MODELS_MOUNT), container, role.name)
             host, name = str(final), final.name
+        else:
+            # nothing on disk to follow: the lexical reading, labelled as NOT checked
+            name = _under_models(container, service)
         mode = mode_of(role, embed)
         out.append(RoleLabel(role.name, role.concrete, mode, label_for(name, mode), container, host, source))
     return out

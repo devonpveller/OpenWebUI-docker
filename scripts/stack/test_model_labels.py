@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 import posixpath
 import shutil
 import sys
@@ -217,7 +218,7 @@ def test_a_missing_model_file_fails_loudly_and_produces_no_label(world):
 def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
     (tmp_path / "x").mkdir()
     (tmp_path / "x" / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
-    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
+    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind|leads outside the /models"):
         ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
@@ -726,3 +727,161 @@ def test_each_fingerprint_component_alone_stops_the_write(field, value):
         ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), edit))
     assert owui.writes == []
     assert owui.rows["local-large"][field] == value
+
+
+# --------------------------------------------------------------------------
+# attempt 5 (tester attempt 4): `..` after a directory link, junctions, the rendered
+# command, hostile renders, and the mutants that survived
+# --------------------------------------------------------------------------
+
+
+def test_dotdot_after_a_directory_link_is_resolved_as_the_kernel_does(world):
+    """Row A: `linkdir -> sub/deeper`; `/models/linkdir/../X-7B-Q8_0.gguf` is `sub/X-7B-Q8_0.gguf`
+    in the container (the link is followed BEFORE the `..`), which links to B-13B - not the store
+    root's X (-> A-7B) a lexical `normpath` would pick."""
+    for rel in ("A-7B-Q8_0.gguf", "sub/B-13B-Q4_K_M.gguf"):
+        (world.store / rel).parent.mkdir(parents=True, exist_ok=True)
+        (world.store / rel).write_bytes(b"GGUF")
+    (world.store / "sub" / "deeper").mkdir()
+    _link(world.store / "linkdir", Path("sub") / "deeper", is_dir=True)
+    _link(world.store / "X-7B-Q8_0.gguf", Path("A-7B-Q8_0.gguf"))
+    _link(world.store / "sub" / "X-7B-Q8_0.gguf", Path("B-13B-Q4_K_M.gguf"))
+    labels = by_role(ml.derive_labels(make_render(world, chat="/models/linkdir/../X-7B-Q8_0.gguf")))
+    assert labels["local-large"].label == "B-13B Q4_K_M (thinking)"
+    assert labels["local-large"].host_path.endswith("B-13B-Q4_K_M.gguf")
+
+
+def test_a_reparse_point_that_is_not_a_symlink_is_refused(world, monkeypatch):
+    """Row B, on any OS: whatever `_is_reparse_point` says is a junction is refused, not followed."""
+    real = ml._is_reparse_point
+    monkeypatch.setattr(ml, "_is_reparse_point", lambda p: p.name == "unsloth" or real(p))
+    with pytest.raises(ml.LabelError, match="junction/reparse point"):
+        ml.derive_labels(make_render(world))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="junctions exist only on Windows")
+def test_a_windows_junction_in_the_store_is_refused(world, tmp_path):
+    """Row B, for real: `is_symlink()` is False for a junction; the container cannot open it."""
+    import subprocess
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "Out-7B-Q8_0.gguf").write_bytes(b"GGUF")
+    link = world.store / "j"
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True)
+    if made.returncode != 0:
+        pytest.skip(f"mklink /J failed: {made.stdout} {made.stderr}")
+    try:
+        assert not link.is_symlink() and ml._is_reparse_point(link)
+        with pytest.raises(ml.LabelError, match="junction/reparse point"):
+            ml.derive_labels(make_render(world, chat="/models/j/Out-7B-Q8_0.gguf"))
+    finally:
+        os.rmdir(link)   # removes the junction only, never its target
+    assert (outside / "Out-7B-Q8_0.gguf").exists()
+
+
+def _embed(render, **spec):
+    render["services"]["llama-cpp-embed-upstream"].update(spec)
+    return render
+
+
+def test_an_embed_model_flag_in_the_rendered_command_wins_over_the_env(world):
+    (world.embed / "Other-Embed-Q8_0.gguf").write_bytes(b"GGUF")
+    for command in (["--model", "/models/Other-Embed-Q8_0.gguf"], ["-m", "/models/Other-Embed-Q8_0.gguf"],
+                    ["--port", "8080", "--model=/models/Other-Embed-Q8_0.gguf"]):
+        labels = by_role(ml.derive_labels(_embed(make_render(world), command=command)))
+        assert labels["local-embed"].label == "Other-Embed Q8_0 (embeddings)", command
+        assert labels["local-embed"].source.startswith("`--model` in llama-cpp-embed-upstream's rendered command")
+
+
+@pytest.mark.parametrize("spec", [
+    {"command": ["-hf", "org/repo"]},
+    {"command": ["--model-url", "https://x/y.gguf"]},
+    {"command": ["--hf-repo=org/repo"]},
+    {"environment": {"LLAMA_ARG_MODEL": "/models/bge-m3-f16.gguf", "LLAMA_ARG_HF_REPO": "org/repo"}},
+])
+def test_an_embed_model_this_module_cannot_label_is_refused(world, spec):
+    with pytest.raises(ml.LabelError, match="not a /models file this module can label"):
+        ml.derive_labels(_embed(make_render(world), **spec))
+
+
+def test_llama_swaps_rendered_config_flag_picks_the_config(world):
+    alt = world.root / "alt.yaml"
+    alt.write_text((world.root / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8").replace(
+        "${env.LLAMA_SWAP_QWEN36_27B_MODEL_PATH}", "/models/alt/Alt-9B-Q5_K_M.gguf"), encoding="utf-8")
+    (world.store / "alt").mkdir()
+    (world.store / "alt" / "Alt-9B-Q5_K_M.gguf").write_bytes(b"GGUF")
+    render = make_render(world)
+    up = render["services"]["llama-cpp-upstream"]
+    up["command"] = ["-config", "/app/alt.yaml"]
+    up["volumes"].append({"type": "bind", "source": str(alt), "target": "/app/alt.yaml", "read_only": True})
+    assert by_role(ml.derive_labels(render))["local-large"].label == "Alt-9B Q5_K_M (thinking)"
+    up["command"] = ["-config", "/app/unbound.yaml"]
+    with pytest.raises(ml.LabelError, match="no bind mount at /app/unbound.yaml"):
+        ml.derive_labels(render)
+
+
+def test_a_mount_at_the_target_that_is_not_a_bind_does_not_count(world):
+    render = make_render(world)
+    for mount in render["services"]["llama-cpp-upstream"]["volumes"]:
+        if mount["target"] == "/models":
+            mount["type"] = "volume"
+    with pytest.raises(ml.LabelError, match="no bind mount at /models"):
+        ml.derive_labels(render)
+
+
+def test_the_list_form_of_a_rendered_environment_is_read(world):
+    render = make_render(world)
+    render["services"]["llama-cpp-upstream"]["environment"] = [f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={QWEN38}"]
+    assert by_role(ml.derive_labels(render))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def test_a_failed_render_with_output_is_still_a_failure(world):
+    good = json.dumps(make_render(world))
+    with pytest.raises(ml.LabelError, match="exit 1"):
+        ml.render_inference(world.root, run=lambda cmd, cwd: (1, good, "warning: something"))
+
+
+def _hostile(world):
+    base = make_render(world)
+    cases = {
+        "deep-nesting": "[" * 100000 + "]" * 100000,
+        "services-list": json.dumps({"services": []}),
+        "service-a-string": json.dumps({"services": {**base["services"], "llama-cpp-upstream": "x"}}),
+    }
+    for name, (svc, key, value) in {
+        "environment-a-string": ("llama-cpp-upstream", "environment", "LLAMA=1"),
+        "environment-an-int": ("llama-cpp-upstream", "environment", 7),
+        "env-value-an-int": ("llama-cpp-upstream", "environment", {"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": 7}),
+        "volumes-an-int": ("llama-cpp-upstream", "volumes", 7),
+        "volumes-a-dict": ("llama-cpp-upstream", "volumes", {"a": 1}),
+        "command-an-int": ("llama-cpp-upstream", "command", 7),
+        "command-with-an-int": ("llama-cpp-embed-upstream", "command", ["--model", 7]),
+        "gateway-volumes-a-string": ("llm-gateway", "volumes", "x"),
+    }.items():
+        r = json.loads(json.dumps(base))
+        r["services"][svc][key] = value
+        cases[name] = json.dumps(r)
+    for name, (svc, field, value) in {
+        "source-an-int": ("llama-cpp-upstream", "source", 7),
+        "source-relative": ("llama-cpp-upstream", "source", "relative/models"),
+        "source-empty": ("llama-cpp-upstream", "source", ""),
+        "target-a-list": ("llama-cpp-upstream", "target", ["/models"]),
+    }.items():
+        r = json.loads(json.dumps(base))
+        r["services"][svc]["volumes"][0][field] = value
+        cases[name] = json.dumps(r)
+    cases["flag-without-value"] = json.dumps(_embed(json.loads(json.dumps(base)), command=["--model"]))
+    cases["not-an-object"] = "7"
+    cases["bom-prefixed"] = "\ufeff" + json.dumps(base)
+    return cases
+
+
+def test_every_hostile_render_is_a_named_refusal_never_a_traceback(world, tmp_path):
+    for name, text in _hostile(world).items():
+        saved = tmp_path / f"{name}.json"
+        saved.write_text(text, encoding="utf-8")
+        out = io.StringIO()
+        code = ml.main(["--root", str(world.root), "--render", str(saved)], out=out)
+        assert code == 1, (name, out.getvalue())
+        assert out.getvalue().startswith("labels: FAILED - "), (name, out.getvalue())
+        assert "(thinking)" not in out.getvalue(), name

@@ -897,14 +897,20 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
 
 - the role's `litellm_params.model` (from `local.yaml` behind `llm-gateway`'s
   rendered `/app/conf.d` bind) is the concrete id; a llama-swap id resolves through
-  that entry's `--model` in the llama-swap config (the rendered `/app/config.yaml`
-  bind; usually `${env.LLAMA_SWAP_..._MODEL_PATH}`, taken from the service's
-  RENDERED environment), a `bge*` id through the embed upstream's rendered
-  `LLAMA_ARG_MODEL`;
-- the file is found under the service's rendered `/models` bind and followed the
-  way the container follows it: a relative symlink is followed (and must stay in
-  the store), a symlink to a host-absolute path is refused (the container cannot
-  open it); the label is the name of the file finally REACHED, so a link named
+  that entry's `--model` in the llama-swap config (the file the rendered command's
+  `-config` names - `/app/config.yaml` - through its bind; usually
+  `${env.LLAMA_SWAP_..._MODEL_PATH}`, taken from the service's RENDERED
+  environment), a `bge*` id through the embed upstream's rendered command
+  `-m`/`--model` if it has one (llama.cpp takes the flag over the env) or else its
+  rendered `LLAMA_ARG_MODEL`; an embed model loaded from a URL or an HF repo is
+  refused;
+- the file is found under the service's rendered `/models` bind and walked
+  component by component the way the container's kernel walks it: a link is
+  followed BEFORE a `..` after it is applied (`/models/linkdir/../X.gguf` is
+  `X.gguf` next to where `linkdir` points, not the store root's); a relative link
+  is followed and must stay in the store; a symlink to a host-absolute path, and a
+  Windows JUNCTION (the host follows it, the container sees a host-absolute link),
+  are refused; the label is the name of the file finally REACHED, so a link named
   `Claims-70B-Q2_K.gguf` pointing at `Inside-7B-Q8_0.gguf` labels Inside-7B;
 - the label is the file stem with its quant split off, plus the mode:
   `Qwen3.8-27B-Q4_K_M.gguf` -> `Qwen3.8-27B Q4_K_M (thinking)` for `local-large`,
@@ -939,7 +945,10 @@ exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
 `labels`. Under `--dry-run` they print that they would run it and call nothing.
 `stack.ps1` does not forward `labels`; run it with `stack.py`.
 
-Whatever shape `inference/.env` has, the label names what compose makes of it: an
+Compose's JSON is read back as strict UTF-8 (with a 120 s timeout), not in the
+locale codepage, so a non-ASCII model path reaches the label exactly and output
+that is not UTF-8 is a refusal. Whatever shape `inference/.env` has, the label
+names what compose makes of it: an
 `.env` compose cannot read (UTF-16, a BOM past byte 0, `EXPORT X=...`) fails the
 render, so there is no label; one compose reads its own way (`export<TAB>X=`,
 `X: value`, ` # comment`) gives compose's value; one where compose falls back to
@@ -949,7 +958,9 @@ which is also what the upstream will load.
 **Refuses** (exit 1): inference without `local` (no role is registered); no docker
 compose CLI, or a render that fails; a label that cannot be derived (a variable
 the render leaves empty, a path outside `/models` or with a backslash in it, a
-missing file, a symlink the container could not follow or that leaves the store,
+missing file, a symlink to a host-absolute path, a Windows junction, a link that
+leaves the store or loops, an embed model from a URL / HF repo, a render that is
+not the shape compose writes (a hand-made `--render`),
 a role forwarding an id no upstream serves, `local.yaml` or the llama-swap config
 unreadable or not UTF-8) - then nothing is written; no
 `OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open
