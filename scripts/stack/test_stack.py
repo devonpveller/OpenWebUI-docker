@@ -3430,6 +3430,118 @@ def test_restarting_status_fails_the_gate_at_once(root, fast_clock):
     assert "openwebui-backup (openwebui-backup) restart loop: docker reports it restarting (RestartCount 3)" in out
 
 
+def _with_sidecars(n):
+    """The frontend render plus n no-healthcheck sidecars side-1..side-n, all in the first level."""
+    render = json.loads(json.dumps(FRONTEND_GPU))
+    for i in range(1, n + 1):
+        render["services"][f"side-{i}"] = _svc("alpine:3.21", f"side-{i}")
+    return {"frontend/docker-compose.yml": render}
+
+
+_STEADY = {"Status": "running", "RestartCount": 0, "StartedAt": "t0"}
+
+
+def test_a_level_of_n_settle_gated_containers_waits_one_window_not_n(root, fast_clock):
+    """cf-recover: the settle windows of one depends_on level run together.
+
+    RED at b25bee7: eight sidecars waited 15 s each, one after another (120 s of clock).
+    """
+    _enable(root, "frontend")
+    daemon = OpsDaemon(_with_sidecars(8), states={f"side-{i}": [_STEADY] for i in range(1, 9)})
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == 0, out
+    for i in range(1, 9):
+        assert (f"  [ok] frontend/side-{i} (side-{i}): running and steady for 15s (no healthcheck; "
+                "RestartCount 0, not restarted)") in out, out
+    assert "recovered: frontend - every container passed its gate" in out
+    # the window was really waited, once: not 8 x 15 s
+    assert stack.SETTLE_SECONDS <= fast_clock[0] <= stack.SETTLE_SECONDS + stack.GATE_POLL_SECONDS, fast_clock[0]
+
+
+def test_a_container_that_dies_inside_the_shared_window_fails_the_level_with_the_same_verdict(root, fast_clock):
+    """The verdict text is the one the one-at-a-time gate printed; it just arrives 9 s in, not 54 s."""
+    _enable(root, "frontend")
+    states = {f"side-{i}": [_STEADY] for i in range(1, 7)}
+    states["side-4"] = [_STEADY] * 3 + [{"Status": "exited", "ExitCode": 1, "RestartCount": 0, "StartedAt": "t0"}]
+    daemon = OpsDaemon(_with_sidecars(6), states=states)
+    code, out = ops(root, daemon, "recover", "frontend")
+    assert code == stack.EXIT_REFUSED, out
+    assert ("refused: recover stopped at frontend: side-4 (side-4) exited with exit code 1 9s after it was "
+            "first seen running (a crash inside the settle window).") in out
+    assert "every container passed its gate" not in out
+    # the next level was not started
+    assert not any("--no-deps" in c and "tailscale" in c and "up" in c for c in daemon.streamed)
+    # it failed at the 9 s poll, not after side-1..3 had each settled for 15 s first
+    assert fast_clock[0] == 9, fast_clock[0]
+    # and the sidecars still inside their window when it failed are named as not awaited, never as passed
+    for i in (1, 2, 3, 5, 6):
+        assert f"  [--] frontend/side-{i} (side-{i}): not awaited - another gate of this level failed" in out
+
+
+class _Inspect:
+    """The smallest `docker inspect` capture: per container, a state list consumed one poll at a time."""
+
+    def __init__(self, scripts):
+        self.scripts = {k: list(v) for k, v in scripts.items()}
+
+    def __call__(self, cmd, cwd):
+        seq = self.scripts[cmd[-1]]
+        state = dict(seq.pop(0) if len(seq) > 1 else seq[0])
+        restarts = state.pop("RestartCount", 0)
+        return stack.CommandResult(0, json.dumps(state) + "|" + str(restarts), "")
+
+
+_GATE_SCRIPTS = {
+    "steady": [_STEADY],
+    "healthy-late": [{"Status": "running", "Health": {"Status": "starting"}}] * 4 + [HEALTHY],
+    "one-shot-done": [_STEADY, {"Status": "exited", "ExitCode": 0, "RestartCount": 0, "StartedAt": "t0"}],
+    "completes": [_STEADY] * 2 + [{"Status": "exited", "ExitCode": 0}],
+    "dies-at-9": [_STEADY] * 3 + [{"Status": "exited", "ExitCode": 1, "RestartCount": 0, "StartedAt": "t0"}],
+    "restarted-at-6": [_STEADY, _STEADY, dict(_STEADY, StartedAt="t1")],
+    "never": [{"Status": "created"}],
+}
+_GATE_KINDS = {"one-shot-done": stack.GATE_ONE_SHOT, "completes": stack.GATE_COMPLETES}
+
+
+def _solo(name, timeout, monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(stack, "monotonic", lambda: now[0])
+    monkeypatch.setattr(stack, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    verdict = stack.wait_gate(_Inspect(_GATE_SCRIPTS), None, ["docker"], name, timeout,
+                              _GATE_KINDS.get(name, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
+    return verdict, now[0]
+
+
+def test_watching_a_level_together_gives_each_container_the_verdict_it_gets_alone(monkeypatch):
+    """Every verdict the shared watch reaches is the verdict that container gets watched alone;
+    it stops at the round of the first failure, and only gates still open then are left unanswered."""
+    names = list(_GATE_SCRIPTS)
+    solo = {n: _solo(n, 30, monkeypatch) for n in names}
+    assert not solo["dies-at-9"][0][0] and not solo["restarted-at-6"][0][0] and solo["steady"][0][0]
+    now = [0.0]
+    monkeypatch.setattr(stack, "monotonic", lambda: now[0])
+    monkeypatch.setattr(stack, "sleep", lambda s: now.__setitem__(0, now[0] + s))
+    together = stack.wait_gates(_Inspect(_GATE_SCRIPTS), None, ["docker"],
+                                [(n, 30, _GATE_KINDS.get(n, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
+                                 for n in names])
+    first_failure = min(t for (passed, _seen), t in solo.values() if not passed)
+    assert now[0] == first_failure == 6
+    for name, verdict in zip(names, together):
+        (solo_verdict, solo_time) = solo[name]
+        if solo_time <= first_failure:
+            assert verdict == solo_verdict, name
+        else:
+            assert verdict is None, name
+    # without the failing two, every gate is answered, exactly as alone, in the longest one's time
+    keep = [n for n in names if solo[n][0][0] or n == "never"]
+    now[0] = 0.0
+    together = stack.wait_gates(_Inspect(_GATE_SCRIPTS), None, ["docker"],
+                                [(n, 30, _GATE_KINDS.get(n, stack.GATE_SETTLE), stack.SETTLE_SECONDS)
+                                 for n in keep])
+    assert together == [solo[n][0] for n in keep]
+    assert now[0] == max(solo[n][1] for n in keep) == 30
+
+
 def test_a_declared_restart_delay_widens_the_settle_window():
     svc = stack.Service("x", "x", {}, None, None, "img", (), {}, 40.0)
     assert stack.settle_seconds(svc) == 40.0 + stack.GATE_POLL_SECONDS
