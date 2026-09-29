@@ -928,11 +928,29 @@ exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
 `labels`. Under `--dry-run` they print that they would run it and call nothing.
 `stack.ps1` does not forward `labels`; run it with `stack.py`.
 
+The `.env` is read the way compose reads it - a UTF-8 BOM (PowerShell 5.1's
+`-Encoding utf8` writes one) is dropped, `KEY: value` is a key, an unquoted value
+ends at ` #` - and a value whose meaning this reader will not guess (a `$` compose
+would interpolate, a backslash escape in `"..."`, a quote that does not close on
+its line) is a refusal naming the line, never a fallback to the compose default.
+
 **Refuses** (exit 1): inference without `local` (no role is registered); a label
-that cannot be derived (a variable with no value, a path outside `/models`, a
-missing file, a role forwarding an id no upstream serves) - then nothing is
-written; no `OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within
-180 s; a key Open WebUI refuses (401/403); a preset on a role id.
+that cannot be derived (a variable with no value, a `.env` value as above, a path
+outside `/models` or with a backslash in it, a missing file, a file whose symlink
+leads outside the model store, a role forwarding an id no upstream serves, a
+config file that cannot be read or decoded) - then nothing is written; no
+`OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open
+WebUI refuses (401/403); a preset on a role id or a row returned without its
+grants - found while READING, so nothing is written.
+
+**Can fail after writing** (exit 1, the error names the rows already written, each
+of which carries its correct new label; the next run converges): a role row that
+changed in Open WebUI between the read and its write (every row is re-read just
+before its write); Open WebUI rejecting a write. One case repeats on every run: a
+role row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
+so the sync plans a create and Open WebUI rejects it (HTTP 401 `Something went
+wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >
+Models), then run `labels` again.
 
 ### `init` [`--planes a,b`] [`--product X`] [`--context plane=name`] [`--headless`] [`--force`]
 

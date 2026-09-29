@@ -38,7 +38,7 @@ and turns the file name into the label:
 
 THE LABEL FORMAT: the file's stem with its last `-<quant>` or `.<quant>` segment
 turned into ` <quant>` (the quant written exactly as the file writes it; a quant is
-Q*/IQ*/TQ*, F16/F32/FP16/FP32, BF16 or MXFP*, in any case - anything else leaves the
+Q<n>_*/IQ<n>_*/TQ<n>_*, F16/F32/FP16/FP32, BF16 or MXFP*, in any case - anything else leaves the
 stem unsplit), then the mode in
 parentheses: `thinking`, `no thinking` or `embeddings`. A multi-part GGUF's
 `-00001-of-00003` shard suffix is dropped first. Nothing in the label is typed.
@@ -314,26 +314,87 @@ def interpolate(raw: str, env: dict[str, str]) -> str:
     return _INTERP.sub(repl, raw)
 
 
+_ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
+
+
+class EnvFile(NamedTuple):
+    values: dict[str, str]      # every value read the way compose reads it
+    problems: dict[str, str]    # name -> why this reader will NOT vouch for its value
+
+
 def read_env_file(path: Path) -> dict[str, str]:
-    """KEY=VALUE lines; the same reading stack.py's read_env_file does."""
+    """{KEY: value}, read as `docker compose` reads an env file (see parse_env_file)."""
+    return parse_env_file(path).values
+
+
+def parse_env_file(path: Path) -> EnvFile:
+    """Read a compose `.env` the way compose-go's dotenv does, for the shapes this stack uses,
+    and NAME every value it cannot vouch for instead of guessing (a guess is a wrong label).
+
+    Agrees with `docker compose config` (measured 2026-09-29, compose v5.3, 21 shapes -
+    model-roles/test-evidence): a UTF-8 BOM (PowerShell 5.1's `-Encoding utf8` writes one) is
+    dropped; `export ` is dropped; the key ends at the FIRST `=` or `:` (`KEY: value` is
+    valid); whitespace around key and value is trimmed; an unquoted value ends at ` #`
+    (space-hash; a tab-hash or a bare `#` stay in the value, as in compose); `'...'` is
+    literal; `"..."` may be followed by ` # comment`.
+
+    REFUSED per key (listed in `problems`, so a derivation that NEEDS that key fails loudly):
+    a `$` in an unquoted or double-quoted value (compose interpolates it), a backslash in a
+    double-quoted value (compose unescapes it), anything after a closing quote that is not
+    a ` # comment`. A quote that does not close on its line makes compose read the NEXT
+    lines into the value, so every later key is refused too.
+    """
     values: dict[str, str] = {}
+    problems: dict[str, str] = {}
     if not path.is_file():
-        return values
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        return EnvFile(values, problems)
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    unclosed_at = 0
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
             line = line[len("export "):].lstrip()
-        name, _, value = line.partition("=")
-        name = name.strip()
-        if not name:
+        cut = min((i for i in (line.find("="), line.find(":")) if i >= 0), default=-1)
+        if cut <= 0:
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        name, value = line[:cut].strip(), line[cut + 1:].strip()
+        if not _ENV_KEY.match(name):
+            continue
+        where = f"{path.name} line {number}"
+        if unclosed_at:
+            problems[name] = (f"{where} follows the unclosed quote on line {unclosed_at}; compose reads "
+                              f"those lines as that value")
+            continue
+        why = ""
+        if value[:1] in ("'", '"'):
+            quote = value[0]
+            end = value.find(quote, 1)
+            if end < 0:
+                unclosed_at = number
+                problems[name] = f"{where}: the {quote} quote does not close on its line"
+                continue
+            inner, rest = value[1:end], value[end + 1:].strip()
+            if rest and not rest.startswith("#"):
+                why = f"{where}: text after the closing quote"
+            elif quote == '"' and "$" in inner:
+                why = f"{where}: `$` inside a double-quoted value (compose interpolates it)"
+            elif quote == '"' and "\\" in inner:
+                why = f"{where}: a backslash inside a double-quoted value (compose unescapes it)"
+            value = inner
+        else:
+            hashed = value.find(" #")
+            if hashed >= 0:
+                value = value[:hashed].rstrip()
+            if "$" in value:
+                why = f"{where}: `$` in the value (compose interpolates it)"
         values[name] = value
-    return values
+        if why:
+            problems[name] = why
+        else:
+            problems.pop(name, None)
+    return EnvFile(values, problems)
 
 
 # --------------------------------------------------------------------------
@@ -367,8 +428,9 @@ def mode_of(role: Role, served_by_embed: bool) -> str:
 
 
 _SHARD = re.compile(r"-\d{5}-of-\d{5}$")
-# case-insensitive: Q4_K_M / q4_k_m, IQ3_XXS, TQ1_0, F16 / fp16 / FP32, BF16, MXFP4
-_QUANT = re.compile(r"^(?:I?Q\d\w*|TQ\d\w*|FP?(?:16|32)|BF16|MXFP\d\w*)$", re.IGNORECASE)
+# case-insensitive: Q4_K_M / q4_k_m, Q8_0, IQ3_XXS, TQ1_0, F16 / fp16 / FP32, BF16, MXFP4.
+# A Q-quant always has `_` after its digits, so `Model-2024-Q1` keeps `Q1` in the name.
+_QUANT = re.compile(r"^(?:I?Q\d+_\w+|TQ\d+_\w+|FP?(?:16|32)|BF16|MXFP\d\w*)$", re.IGNORECASE)
 
 
 def label_for(filename: str, mode: str) -> str:
@@ -389,23 +451,34 @@ def label_for(filename: str, mode: str) -> str:
 
 
 class _Env(dict):
-    """The interpolation environment, remembering where each non-empty value came from."""
+    """The interpolation environment, remembering where each non-empty value came from, and
+    REFUSING (LabelError) to hand out a value the env-file reader could not vouch for."""
 
     def __init__(self):
         super().__init__()
         self.origin: dict[str, str] = {}
+        self.problems: dict[str, str] = {}
+
+    def get(self, name, default=None):
+        if name in self.problems:
+            raise LabelError(f"{name}: {self.problems[name]} - this reader will not guess what compose "
+                             f"makes of it; write it as a plain `{name}=value`")
+        return super().get(name, default)
 
 
 def compose_env(root: Path, env_file: Path | None, environ: dict[str, str] | None) -> tuple[_Env, Path]:
     """The interpolation environment compose would use: the shell over inference/.env."""
     path = env_file if env_file is not None else root / ENV_REL
     values = _Env()
-    for name, value in read_env_file(path).items():
+    parsed = parse_env_file(path)
+    values.problems.update(parsed.problems)
+    for name, value in parsed.values.items():
         values[name] = value
         if value:
             values.origin[name] = "file"
     for name, value in (os.environ if environ is None else environ).items():
         values[name] = value
+        values.problems.pop(name, None)   # the shell wins; its value is taken as given
         if value:
             values.origin[name] = "shell"
         else:
@@ -461,14 +534,21 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def _under_models(container_path: str, service: str) -> str:
-    """The path normalised (`/models/../x` is NOT under /models); a LabelError if it leaves the bind."""
+    """The path normalised (`/models/../x` is NOT under /models); a LabelError if it leaves the bind.
+
+    A BACKSLASH is refused outright: in the Linux container it is part of a file name, but on a
+    Windows host `Path` treats it as a separator, so `/models/..<backslash>x` would be checked (and labelled)
+    as a file outside the store that llama-swap can never load."""
+    if "\\" in container_path:
+        raise LabelError(f"{container_path} contains a backslash - a container path uses `/` only")
     norm = posixpath.normpath(container_path) if container_path.startswith("/") else container_path
     if not norm.startswith(MODELS_MOUNT + "/"):
         raise LabelError(f"{container_path} is not under {service}'s {MODELS_MOUNT} bind")
     return norm
 
 
-def _host_path(container_path: str, spec: ServiceSpec, env: dict, root: Path, service: str) -> Path:
+def _host_path(container_path: str, spec: ServiceSpec, env: dict, root: Path, service: str) -> tuple[Path, Path]:
+    """(the host directory bound at /models, the host path of the file)."""
     for vol in spec.volumes:
         text = vol
         for suffix in (":ro", ":rw"):
@@ -481,7 +561,7 @@ def _host_path(container_path: str, spec: ServiceSpec, env: dict, root: Path, se
         base = Path(src)
         if not base.is_absolute():
             base = (root / UPSTREAMS_REL.parent / base)
-        return base.joinpath(*container_path[len(MODELS_MOUNT) + 1:].split("/"))
+        return base, base.joinpath(*container_path[len(MODELS_MOUNT) + 1:].split("/"))
     raise LabelError(f"{service} has no {MODELS_MOUNT} bind in {UPSTREAMS_REL.as_posix()}")
 
 
@@ -522,10 +602,17 @@ def derive_labels(root: Path, env_file: Path | None = None, environ: dict[str, s
         _under_models(container, service)   # checked with or without --skip-file-check
         host = ""
         if check_files:
-            path = _host_path(container, spec(service), env, root, service)
+            base, path = _host_path(container, spec(service), env, root, service)
             if not path.is_file():
                 raise LabelError(f"role {role.name}: {container} (from {source}) is not a file on this "
                                  f"machine - looked for {path}")
+            # a symlink whose target lies OUTSIDE the store passes is_file() here, but inside the
+            # container an outside target does not resolve: refuse what llama-swap could not load
+            try:
+                path.resolve().relative_to(base.resolve())
+            except ValueError:
+                raise LabelError(f"role {role.name}: {path} resolves to {path.resolve()}, outside the "
+                                 f"{MODELS_MOUNT} store {base.resolve()} - the container cannot follow it") from None
             host = str(path)
         mode = mode_of(role, embed)
         out.append(RoleLabel(role.name, role.concrete, mode, label_for(container, mode), container, host, source))
@@ -587,9 +674,11 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
     TWO PASSES. Pass 1 READS every role's row and validates all of them - a refused key,
     an unreadable row, a PRESET on a role id, a row returned without its access grants -
     and raises before ANY write if one fails, so a refusal never leaves a partial rename.
-    Pass 2 writes, in role order, only the rows pass 1 planned to create or rename. A
-    write that fails in pass 2 (Open WebUI refusing it) is the one case that can leave
-    earlier rows written; the error names them.
+    Pass 2 writes, in role order, only the rows pass 1 planned to create or rename, and
+    re-reads each row just before its write, refusing if it changed since pass 1. A write
+    that fails in pass 2 (Open WebUI refusing it, or a row changed meanwhile) is the one
+    case that can leave earlier rows written; the error names them, and each of those rows
+    carries its correct new label.
     """
     if not api_key:
         raise OwuiError(f"{OWUI_KEY_VAR} is empty")
@@ -649,6 +738,13 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
         if dry_run:
             changes.append(Change(item.role, "would-" + action, old, item.label))
             continue
+        # RE-READ just before the write and refuse if the row moved since pass 1 (someone
+        # made it a preset, changed its grants, created or deleted it): a write built from the
+        # pass-1 snapshot would overwrite that change. The window left is this GET -> POST.
+        status, now, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(item.role, safe=""))
+        if _fingerprint(status, now) != _fingerprint(200 if row is not None else 404, row):
+            raise OwuiError(f"the {item.role} row changed in Open WebUI while this sync ran (HTTP {status}); "
+                            f"it was left alone - run `labels` again. Written before this: {done()}")
         if action == "create":
             payload = {"id": item.role, "base_model_id": None, "name": item.label,
                        "meta": {"profile_image_url": "/static/favicon.png"}, "params": {}, "is_active": True}
@@ -668,6 +764,19 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
     return changes
 
 
+def _fingerprint(status: int, row) -> tuple:
+    """What must not move between pass 1 and a write: existence, preset-ness, the time of the
+    last update, the name and the access grants (a grant change need not touch `updated_at`)."""
+    if status == 404:
+        return ("absent",)
+    if status != 200 or not isinstance(row, dict):
+        return ("unreadable", status)
+    grants = row.get("access_grants")
+    grants = sorted((g.get("principal_type"), g.get("principal_id"), g.get("permission"))
+                    for g in grants if isinstance(g, dict)) if isinstance(grants, list) else None
+    return ("row", row.get("base_model_id"), row.get("updated_at"), row.get("name"), repr(grants))
+
+
 def describe(change: Change) -> str:
     if change.action in ("created", "would-create"):
         return f"{change.role}: {change.action} as {change.new!r}"
@@ -679,6 +788,15 @@ def describe(change: Change) -> str:
 # --------------------------------------------------------------------------
 # CLI: print the labels (writes nothing)
 # --------------------------------------------------------------------------
+
+
+def _say(text: str, out) -> None:
+    """print, degrading characters the stream cannot encode (a cp1252 pipe) instead of raising."""
+    try:
+        print(text, file=out)
+    except UnicodeEncodeError:
+        encoding = getattr(out, "encoding", None) or "ascii"
+        print(text.encode(encoding, "replace").decode(encoding, "replace"), file=out)
 
 
 def main(argv=None, out=None) -> int:
@@ -697,14 +815,14 @@ def main(argv=None, out=None) -> int:
     try:
         labels = derive_labels(root, env_file, check_files=not args.skip_file_check)
     except LabelError as exc:
-        print(f"labels: FAILED - {exc}. No label was produced.", file=out)
+        _say(f"labels: FAILED - {exc}. No label was produced.", out)
         return 1
     if args.json:
-        print(json.dumps([item._asdict() for item in labels], indent=2), file=out)
+        _say(json.dumps([item._asdict() for item in labels], indent=2), out)
         return 0
     for item in labels:
         checked = f"; file {item.host_path}" if item.host_path else "; file NOT checked"
-        print(f"{item.role:<22} {item.label:<40} <- {item.container_path} ({item.source}{checked})", file=out)
+        _say(f"{item.role:<22} {item.label:<40} <- {item.container_path} ({item.source}{checked})", out)
     return 0
 
 

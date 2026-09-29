@@ -6126,3 +6126,27 @@ def test_no_sync_runs_after_a_failed_up(root, no_owui_env):
     code, out = _main(root, "up", daemon=daemon, owui=owui)
     assert code == stack.EXIT_REFUSED and "exited 17" in out, out
     assert owui.calls == [] and "# labels" not in out
+
+
+def test_labels_survives_a_stream_that_cannot_encode_the_model_name(root, no_owui_env):
+    """N6: a redirected PowerShell 5.1 pipe is cp1252; a model file name need not be."""
+    name = "模型-7B-Q4_0.gguf"   # CJK, not in cp1252
+    _roles_root(root, model_path=f"/models/cjk/{name}")
+    store = root.parent / "models" / "cjk"
+    store.mkdir(parents=True)
+    (store / name).write_bytes(b"GGUF")
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    owui = FakeOwui()
+    code = stack.main(["--root", str(root), "labels"], stdout=stream, labels_request=owui)
+    stream.flush()
+    out = raw.getvalue().decode("cp1252")
+    assert code == 0, out
+    assert "5 row(s) changed" in out
+    assert owui.rows["local-large"]["name"] == "模型-7B Q4_0 (thinking)"   # the TRUE label
+
+
+def test_the_driver_env_reader_drops_a_bom(tmp_path):
+    path = tmp_path / ".env"
+    path.write_bytes(b"\xef\xbb\xbfCOMPOSE_PROFILES=local\n")
+    assert stack.read_env_file(path) == {"COMPOSE_PROFILES": "local"}

@@ -110,7 +110,13 @@ class Console:
         self.stream = stream if stream is not None else sys.stdout
 
     def line(self, text=""):
-        print(text, file=self.stream)
+        try:
+            print(text, file=self.stream)
+        except UnicodeEncodeError:
+            # a stream that cannot carry the text (a redirected PowerShell 5.1 pipe is cp1252,
+            # a model file name need not be): print what it can carry, never raise over output
+            encoding = getattr(self.stream, "encoding", None) or "ascii"
+            print(str(text).encode(encoding, "replace").decode(encoding, "replace"), file=self.stream)
         # Flush every line: docker's own output goes straight to the terminal, so a
         # buffered stream would print our headers AFTER the command they introduce.
         try:
@@ -503,10 +509,13 @@ class State:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
+    # utf-8-sig: PowerShell 5.1's `-Encoding utf8` writes a BOM, which compose drops; read as
+    # utf-8 it glued itself to the first key. (compose also accepts `KEY: value`; this reader
+    # does not - model-roles findings F15. scripts/stack/model_labels.py has the full reader.)
     values: dict[str, str] = {}
     if not path.is_file():
         return values
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

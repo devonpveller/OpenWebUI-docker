@@ -484,3 +484,188 @@ def test_a_row_returned_without_its_grants_is_refused_not_stripped():
     with pytest.raises(ml.OwuiError, match="without its access grants"):
         ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, no_grants)
     assert owui.rows["local-large"]["name"] == "old" and owui.writes == []
+
+
+# --------------------------------------------------------------------------
+# attempt 3: .env read the way compose reads it (tester attempt 2, N1), backslashes (N4),
+# symlinks (N5), the pass-1/pass-2 race (N3), `Model-2024-Q1`
+# --------------------------------------------------------------------------
+
+# `docker compose config` of `X=${X:-DEFAULT}` against each .env (compose v5.3, 2026-09-29;
+# model-roles/test-evidence/mr-gateway/env-shapes.txt). None = compose reads something this
+# reader will not vouch for, so a derivation that needs the key must REFUSE.
+COMPOSE_READS = [
+    ("plain", b"X=/m/a.gguf\n", "/m/a.gguf"),
+    ("bom-line1", b"\xef\xbb\xbfX=/m/a.gguf\n", "/m/a.gguf"),
+    ("bom-comment-first", b"\xef\xbb\xbf# c\nX=/m/a.gguf\n", "/m/a.gguf"),
+    ("colon", b"X: /m/a.gguf\n", "/m/a.gguf"),
+    ("colon-nospace", b"X:/m/a.gguf\n", "/m/a.gguf"),
+    ("spaces", b"X = /m/a.gguf\n", "/m/a.gguf"),
+    ("export", b"export X=/m/a.gguf\n", "/m/a.gguf"),
+    ("single-quoted", b"X='/m/a.gguf'\n", "/m/a.gguf"),
+    ("double-quoted", b'X="/m/a.gguf"\n', "/m/a.gguf"),
+    ("inline-comment", b"X=/m/a.gguf # note\n", "/m/a.gguf"),
+    ("tab-hash-stays", b"X=/m/a.gguf\t# note\n", "/m/a.gguf\t# note"),
+    ("bare-hash-stays", b"X=/m/a.gguf#x\n", "/m/a.gguf#x"),
+    ("dq-then-comment", b'X="/m/a.gguf" # note\n', "/m/a.gguf"),
+    ("crlf", b"X=/m/a.gguf\r\n", "/m/a.gguf"),
+    ("trailing-space", b"X=/m/a.gguf   \n", "/m/a.gguf"),
+    ("sq-dollar-literal", b"X='/m/$Y.gguf'\n", "/m/$Y.gguf"),
+    ("nested-var", b"Y=/m\nX=${Y}/a.gguf\n", None),
+    ("dollar-dollar", b"X=/m/$$a.gguf\n", None),
+    ("dq-escape", b'X="/m/a\\nb.gguf"\n', None),
+    ("multi-line", b'X="/m/a\n.gguf"\n', None),
+    ("after-quote", b'X="/m/a.gguf"x\n', None),
+]
+
+
+@pytest.mark.parametrize("name,data,expected", COMPOSE_READS, ids=[c[0] for c in COMPOSE_READS])
+def test_the_env_reader_agrees_with_compose_or_refuses(tmp_path, name, data, expected):
+    path = tmp_path / ".env"
+    path.write_bytes(data)
+    parsed = ml.parse_env_file(path)
+    if expected is None:
+        assert "X" in parsed.problems, parsed
+    else:
+        assert parsed.values.get("X") == expected and "X" not in parsed.problems, parsed
+
+
+def test_a_later_key_after_an_unclosed_quote_is_refused_too(tmp_path):
+    path = tmp_path / ".env"
+    path.write_bytes(b'A="open\nX=/m/a.gguf\n')
+    assert "X" in ml.parse_env_file(path).problems
+
+
+def _with_default_on_disk(scratch):
+    """The compose DEFAULT file exists too - as the old Qwen3.6 GGUF does on the real host - so a
+    reader that silently falls back to the default gets a file check that PASSES: a wrong label."""
+    store = scratch.parent / "models"
+    default = store / "lmstudio-community" / "Qwen3.6-27B-GGUF"
+    default.mkdir(parents=True, exist_ok=True)
+    (default / "Qwen3.6-27B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    return store
+
+
+@pytest.mark.parametrize("shape", ["bom-line1", "colon", "inline-comment"])
+def test_an_env_shape_compose_accepts_gives_the_configured_label_not_the_default(scratch, shape):
+    store = _with_default_on_disk(scratch)
+    path = "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"
+    line = {"bom-line1": f"\ufeffLLAMA_SWAP_QWEN36_27B_MODEL_PATH={path}",
+            "colon": f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH: {path}",
+            "inline-comment": f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={path} # Qwen3.8"}[shape]
+    (scratch / ml.ENV_REL).write_text(f"{line}\nCOMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n",
+                                      encoding="utf-8")
+    labels = by_role(ml.derive_labels(scratch, environ={}))
+    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH in inference/.env"
+
+
+@pytest.mark.parametrize("value,why", [
+    ("${OTHER}/x/Other-8B-Q4_0.gguf", "compose interpolates"),
+    ('"/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf\\t"', "compose unescapes"),
+    ('"/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf', "does not close"),
+])
+def test_an_env_shape_this_reader_cannot_vouch_for_refuses_loudly(scratch, value, why):
+    store = _with_default_on_disk(scratch)
+    (scratch / ml.ENV_REL).write_text(f"COMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n"
+                                      f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={value}\n", encoding="utf-8")
+    with pytest.raises(ml.LabelError, match=why):
+        ml.derive_labels(scratch, environ={})
+
+
+def test_the_shell_overrides_a_value_the_file_reader_refused(scratch):
+    store = _with_default_on_disk(scratch)
+    (scratch / ml.ENV_REL).write_text(f"COMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n"
+                                      "LLAMA_SWAP_QWEN36_27B_MODEL_PATH=${NOPE}\n", encoding="utf-8")
+    labels = by_role(ml.derive_labels(scratch, environ={
+        "LLAMA_SWAP_QWEN36_27B_MODEL_PATH": "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"}))
+    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+@pytest.mark.parametrize("path", ["/models/..\\outside/Esc-1B-Q4_0.gguf",
+                                  "/models/a\\..\\..\\outside\\Esc-1B-Q4_0.gguf",
+                                  "/models/unsloth\\Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"])
+@pytest.mark.parametrize("check", [True, False])
+def test_a_backslash_in_the_container_path_is_refused(scratch, tmp_path, path, check):
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
+    write_env(scratch, tmp_path / "models", path)
+    with pytest.raises(ml.LabelError, match="contains a backslash"):
+        ml.derive_labels(scratch, environ={}, check_files=check)
+
+
+def test_a_symlink_that_leaves_the_store_is_refused(scratch, tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "Out-1B-Q4_0.gguf").write_bytes(b"GGUF")
+    link = tmp_path / "models" / "linked" / "Out-1B-Q4_0.gguf"
+    link.parent.mkdir(parents=True)
+    try:
+        link.symlink_to(outside / "Out-1B-Q4_0.gguf")
+    except OSError as exc:  # Windows without the symlink privilege; CI (Linux) runs it
+        pytest.skip(f"cannot create a symlink here: {exc}")
+    write_env(scratch, tmp_path / "models", "/models/linked/Out-1B-Q4_0.gguf")
+    with pytest.raises(ml.LabelError, match="outside the /models store"):
+        ml.derive_labels(scratch, environ={})
+
+
+@pytest.mark.parametrize("filename,label", [
+    ("Model-2024-Q1.gguf", "Model-2024-Q1 (thinking)"),
+    ("x-Q4.gguf", "x-Q4 (thinking)"),
+    ("x-Q2_K.gguf", "x Q2_K (thinking)"),
+])
+def test_a_q_without_an_underscore_is_part_of_the_name(filename, label):
+    assert ml.label_for(filename, "thinking") == label
+
+
+def _racing(owui, after_gets, change):
+    """A request that applies `change` once pass 1 has read every role row."""
+    real = owui.__call__
+    gets = []
+
+    def request(method, url, headers, body, timeout):
+        if method == "GET" and "/api/v1/models/model" in url:
+            gets.append(url)
+            if len(gets) == after_gets + 1:
+                change()
+        return real(method, url, headers, body, timeout)
+    return request
+
+
+def test_a_row_that_becomes_a_preset_between_read_and_write_is_left_alone():
+    """N3: local-small becomes a PRESET (with a grant) after pass 1 read it."""
+    owui = FakeOwui({"local-large": _row("local-large", "stale"), "local-small": _row("local-small", "old")})
+
+    def edit():
+        owui.rows["local-small"].update(base_model_id="qwen36-27b", params={"system": "mine"}, updated_at=99)
+        owui.grants["local-small"].append({"principal_type": "group", "principal_id": "g2",
+                                           "permission": "write"})
+    with pytest.raises(ml.OwuiError, match="local-small row changed in Open WebUI while this sync ran"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), edit))
+    assert owui.rows["local-small"]["base_model_id"] == "qwen36-27b"
+    assert owui.rows["local-small"]["params"] == {"system": "mine"}
+    assert {"principal_type": "group", "principal_id": "g2", "permission": "write"} in owui.grants["local-small"]
+    # a row written before the change carries its correct new label
+    assert owui.rows["local-large"]["name"] == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def test_a_grant_added_between_read_and_write_is_not_dropped():
+    owui = FakeOwui({"local-large": _row("local-large", "stale")})
+
+    def grant():
+        owui.grants["local-large"].append({"principal_type": "user", "principal_id": "*", "permission": "read"})
+    with pytest.raises(ml.OwuiError, match="changed in Open WebUI"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), grant))
+    assert owui.writes == []
+    assert {"principal_type": "user", "principal_id": "*", "permission": "read"} in owui.grants["local-large"]
+
+
+def test_a_row_created_by_someone_else_between_read_and_write_is_left_alone():
+    owui = FakeOwui()
+
+    def create():
+        owui.rows["local-large"] = _row("local-large", "made by hand")
+    with pytest.raises(ml.OwuiError, match="local-large row changed"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), create))
+    assert owui.writes == [] and owui.rows["local-large"]["name"] == "made by hand"
