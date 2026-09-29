@@ -96,8 +96,9 @@ The old names (`qwen36-27b`, `qwen36-27b:nothink`, `bge-m3`, `bge-m3-f16.gguf`,
 **What Open WebUI shows for a role is derived, not typed.** The label is the
 model file's name with its quant split off plus the mode - `Qwen3.8-27B-Q4_K_M.gguf`
 gives `Qwen3.8-27B Q4_K_M (thinking)` - read from the path the plane really
-loads (the shell, then `inference/.env`, then the compose default, as compose
-resolves it) and checked to exist. `python scripts/stack/stack.py labels` writes
+loads - asked of compose itself (`docker compose ... config`, a read-only render),
+so the label names exactly the file compose resolves from the shell,
+`inference/.env` and the defaults - and checked to exist. `python scripts/stack/stack.py labels` writes
 it to Open WebUI's model name for each role id (it needs `OWUI_ADMIN_API_KEY`, an
 Open WebUI admin's API key, in the shell or the root `.env`), and `stack.py up` / `recover` do it after a run when inference
 (with `local`) and the frontend are both on. `python scripts/stack/model_labels.py`

@@ -1584,7 +1584,7 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
     _manual_notes(manifest, console, [p for p in ordered if manifest.manual(p)], "start")
     if code == EXIT_OK:
-        labels_after(manifest, state, root, console, labels_request, driven, dry_run, "up")
+        labels_after(manifest, state, root, console, labels_request, driven, dry_run, "up", capture)
     return code
 
 
@@ -2785,19 +2785,44 @@ def owui_admin_settings(root: Path) -> tuple[str, str]:
     return url, key
 
 
-def run_labels(root: Path, console: Console, request, dry_run: bool, prefix: str,
-               wait_s: int = 180, sleep=time.sleep) -> int:
-    """Derive every role's label, then sync the Open WebUI rows. Prints each change."""
+def labels_render(manifest, state, root, capture, render_file=None) -> dict:
+    """COMPOSE's render of the inference plane - the one source a label is derived from.
+
+    The same `docker [--context X] compose -f inference/docker-compose.yml --profile ...
+    config --format json` `recover` reads its plan from: read-only (nothing is created,
+    started or pulled), no daemon needed, ~1 s. `local` is always among the profiles, so
+    the upstreams are in the render. `render_file` is a saved render instead (a disposable
+    environment with no docker CLI). Any failure is a LabelError: there is no fallback.
+    """
+    import model_labels  # sibling module, standard library only
+
+    if render_file:
+        return model_labels.parse_render(Path(render_file).read_text(encoding="utf-8"), str(render_file))
+    profiles = manifest.profile_order("inference", set(effective_profiles(manifest, state, root, "inference"))
+                                      | {"local"})
+    cmd = compose_command(manifest, "inference", ["config", "--format", "json"],
+                          context=state.context_of("inference"), profiles=profiles)
+    result = capture(cmd, root)
+    if result.code != 0:
+        why = " | ".join((result.stderr or result.stdout or "no output").strip().splitlines()[:3])
+        raise model_labels.LabelError(f"`{' '.join(cmd)}` exited {result.code}: {why} - a label is derived "
+                                      "only from compose's own render, never guessed")
+    return model_labels.parse_render(result.stdout, "the render of inference/docker-compose.yml")
+
+
+def run_labels(manifest, state, root: Path, console: Console, request, capture, dry_run: bool, prefix: str,
+               render_file=None, wait_s: int = 180, sleep=time.sleep) -> int:
+    """Derive every role's label from compose's render, then sync the Open WebUI rows. Prints each change."""
     import model_labels  # sibling module, standard library only
 
     try:
-        labels = model_labels.derive_labels(root)
+        labels = model_labels.derive_labels(labels_render(manifest, state, root, capture, render_file))
     except model_labels.LabelError as exc:
         console.line(f"{prefix}FAILED - {exc}. Nothing was written to Open WebUI.")
         return EXIT_REFUSED
     except (OSError, UnicodeError) as exc:
-        # a config file that cannot be read or decoded (local.yaml, the llama-swap
-        # config, upstreams.yml, inference/.env): the same refusal, not a traceback
+        # a file the render points at (local.yaml, the llama-swap config, a saved render)
+        # that cannot be read or decoded: the same refusal, not a traceback
         console.line(f"{prefix}FAILED - reading the inference config: {type(exc).__name__}: {exc}. "
                      "Nothing was written to Open WebUI.")
         return EXIT_REFUSED
@@ -2836,23 +2861,25 @@ def _urllib_owui(method, url, headers, body, timeout):
     return model_labels.urllib_request(method, url, headers, body, timeout)
 
 
-def cmd_labels(manifest, state, root, console, request, dry_run: bool) -> int:
+def cmd_labels(manifest, state, root, console, request, capture, dry_run: bool, render_file=None) -> int:
     """`stack.py labels [--dry-run]`: the on-demand sync. Refuses where no role is registered."""
     if not inference_runs_local(manifest, state, root):
         raise Refusal("refused: inference does not run its `local` profile here (the state file, "
                       "inference/.env's COMPOSE_PROFILES and the shell all leave it out), so the gateway "
                       "registers no local role and there is nothing to label")
-    return run_labels(root, console, request, dry_run, "labels: ")
+    return run_labels(manifest, state, root, console, request, capture, dry_run, "labels: ", render_file)
 
 
-def labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str) -> None:
+def labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str,
+                 capture=None) -> None:
     """The `up` / `recover` hook. Never changes the verb's exit code and never raises: any
     failure - a refusal, an unreadable config file, anything unexpected - is printed as
     `# labels: FAILED` plus a WARNING line, and the verb's own result stands."""
     if request is None:
         return
     try:
-        failed = _labels_after(manifest, state, root, console, request, acted_on, dry_run, verb)
+        failed = _labels_after(manifest, state, root, console, request, acted_on, dry_run, verb,
+                               capture or subprocess_capture)
     except Exception as exc:  # noqa: BLE001 - the hook must never turn a successful verb into a failure
         console.line(f"# labels: FAILED - {type(exc).__name__}: {str(exc)[:300]}")
         failed = True
@@ -2861,7 +2888,8 @@ def labels_after(manifest, state, root, console, request, acted_on, dry_run: boo
                      f"`{verb}` itself succeeded. Fix it and run `{CLI} labels`.")
 
 
-def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str) -> bool:
+def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str,
+                  capture) -> bool:
     """True when a sync was due and did not complete."""
     touched = {"inference", "frontend"} & set(acted_on)
     on = set(acted_on) | {p for p in ("inference", "frontend") if state.is_enabled(p)}
@@ -2871,7 +2899,7 @@ def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bo
         console.line(f"# labels: after a real `{verb}`, `{CLI} labels` would set Open WebUI's role names "
                      "from the model files (nothing is read or written in a dry run)")
         return False
-    return run_labels(root, console, request, False, "# labels: ") != EXIT_OK
+    return run_labels(manifest, state, root, console, request, capture, False, "# labels: ") != EXIT_OK
 
 
 # --------------------------------------------------------------------------
@@ -3492,7 +3520,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     else:
         console.line(f"recovered: {', '.join(work) or 'nothing'} - every container passed its gate")
     _manual_notes(manifest, console, manual, "recover")
-    labels_after(manifest, state, root, console, labels_request, work, dry_run, "recover")
+    labels_after(manifest, state, root, console, labels_request, work, dry_run, "recover", capture)
     return EXIT_OK
 
 
@@ -5846,6 +5874,10 @@ def build_parser() -> argparse.ArgumentParser:
                                    "OWUI_ADMIN_API_KEY (shell or the root .env); OWUI_BASE_URL defaults to "
                                    "http://127.0.0.1:3000. Writes only a name that differs.")
     p.add_argument("--dry-run", action="store_true", help="derive and read; print what would change, write nothing")
+    p.add_argument("--render", default=None, metavar="JSON",
+                   help="a saved `docker compose -f inference/docker-compose.yml --profile local config "
+                        "--format json` to derive from, instead of rendering (a disposable environment "
+                        "with no docker CLI)")
     sub.add_parser("health", help="the functional probe sweep (read-only; exit code = failed probes)")
     p = sub.add_parser("stats", help="container CPU/memory/net + the inference queue and ledger (read-only)")
     p.add_argument("--hours", type=int, default=1, help="ledger window in hours (default 1)")
@@ -5941,7 +5973,8 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
             return cmd_recover(manifest, state, root, console, runner, capture, args.plane, args.every,
                                args.dry_run, args.timeout, hook_request)
         if args.verb == "labels":
-            return cmd_labels(manifest, state, root, console, labels_request or _urllib_owui, args.dry_run)
+            return cmd_labels(manifest, state, root, console, labels_request or _urllib_owui, capture,
+                              args.dry_run, args.render)
         if args.verb == "backup":
             return cmd_backup(manifest, state, root, console, capture, pipe, args.plane, args.dest)
         if args.verb == "restore":

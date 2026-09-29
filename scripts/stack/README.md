@@ -881,29 +881,40 @@ MERGE-PROTOCOL.md step 5 requires `--no-ff` and a `docs --check` exit 0. Git cal
 aimed at the submodule drop git's repository-local variables
 (`git rev-parse --local-env-vars`), which a hook sets for the PARENT repository.
 
-### `labels` [`--dry-run`]
+### `labels` [`--dry-run`] [`--render JSON`]
 
 Sets the name Open WebUI shows for each local model **role** (`local-large`,
 `local-large:nothink`, `local-small`, `local-small:nothink`, `local-embed` - the
 `model_name`s in `inference/config/litellm/model_list/local.yaml`) to a label
 **derived from the model file** the inference plane loads, so a model swap
 relabels itself and no name is typed by hand (model-roles, operator decision
-R4). The derivation is `scripts/stack/model_labels.py`:
+R4). The derivation is `scripts/stack/model_labels.py`, and its ONLY source for
+what the plane loads is **compose's own render**: `docker [--context X] compose -f
+inference/docker-compose.yml --profile local config --format json`, the read-only
+render `recover` already reads (it creates, starts and pulls nothing, needs no
+daemon, and takes about a second). Nothing re-reads `.env`: compose resolves the
+shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
 
-- the role's `litellm_params.model` is the concrete id; a llama-swap id resolves
-  through that entry's `--model` in `inference/config/llama-swap.config.yaml`
-  (usually `${env.LLAMA_SWAP_..._MODEL_PATH}`), a `bge*` id through the embed
-  upstream's `LLAMA_ARG_MODEL`;
-- the variable is interpolated as compose does it - the shell, then
-  `inference/.env`, then the `${VAR:-default}` in `inference/compose/upstreams.yml`
-  - and the file is checked to exist under the service's `/models` bind;
+- the role's `litellm_params.model` (from `local.yaml` behind `llm-gateway`'s
+  rendered `/app/conf.d` bind) is the concrete id; a llama-swap id resolves through
+  that entry's `--model` in the llama-swap config (the rendered `/app/config.yaml`
+  bind; usually `${env.LLAMA_SWAP_..._MODEL_PATH}`, taken from the service's
+  RENDERED environment), a `bge*` id through the embed upstream's rendered
+  `LLAMA_ARG_MODEL`;
+- the file is found under the service's rendered `/models` bind and followed the
+  way the container follows it: a relative symlink is followed (and must stay in
+  the store), a symlink to a host-absolute path is refused (the container cannot
+  open it); the label is the name of the file finally REACHED, so a link named
+  `Claims-70B-Q2_K.gguf` pointing at `Inside-7B-Q8_0.gguf` labels Inside-7B;
 - the label is the file stem with its quant split off, plus the mode:
   `Qwen3.8-27B-Q4_K_M.gguf` -> `Qwen3.8-27B Q4_K_M (thinking)` for `local-large`,
   `Qwen3.8-27B Q4_K_M (no thinking)` for the `:nothink` and `local-small` roles,
   `bge-m3 f16 (embeddings)` for `local-embed`.
 
 `python scripts/stack/model_labels.py [--env-file F] [--skip-file-check]` prints
-the labels and writes nothing.
+the labels and writes nothing (`--env-file` goes to compose's `--env-file`).
+`--render JSON` (both commands) derives from a saved render instead - for a
+disposable environment with no docker CLI; it is compose output all the same.
 
 The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
 `POST /api/v1/models/create` for a role with no row, or
@@ -928,25 +939,30 @@ exit code: a failure prints `# labels: FAILED - ...` and a `WARNING` line naming
 `labels`. Under `--dry-run` they print that they would run it and call nothing.
 `stack.ps1` does not forward `labels`; run it with `stack.py`.
 
-The `.env` is read the way compose reads it - a UTF-8 BOM (PowerShell 5.1's
-`-Encoding utf8` writes one) is dropped, `KEY: value` is a key, an unquoted value
-ends at ` #` - and a value whose meaning this reader will not guess (a `$` compose
-would interpolate, a backslash escape in `"..."`, a quote that does not close on
-its line) is a refusal naming the line, never a fallback to the compose default.
+Whatever shape `inference/.env` has, the label names what compose makes of it: an
+`.env` compose cannot read (UTF-16, a BOM past byte 0, `EXPORT X=...`) fails the
+render, so there is no label; one compose reads its own way (`export<TAB>X=`,
+`X: value`, ` # comment`) gives compose's value; one where compose falls back to
+the default (a form feed or lone CR swallowing the line) gives the default -
+which is also what the upstream will load.
 
-**Refuses** (exit 1): inference without `local` (no role is registered); a label
-that cannot be derived (a variable with no value, a `.env` value as above, a path
-outside `/models` or with a backslash in it, a missing file, a file whose symlink
-leads outside the model store, a role forwarding an id no upstream serves, a
-config file that cannot be read or decoded) - then nothing is written; no
+**Refuses** (exit 1): inference without `local` (no role is registered); no docker
+compose CLI, or a render that fails; a label that cannot be derived (a variable
+the render leaves empty, a path outside `/models` or with a backslash in it, a
+missing file, a symlink the container could not follow or that leaves the store,
+a role forwarding an id no upstream serves, `local.yaml` or the llama-swap config
+unreadable or not UTF-8) - then nothing is written; no
 `OWUI_ADMIN_API_KEY`; Open WebUI not answering `/health` within 180 s; a key Open
 WebUI refuses (401/403); a preset on a role id or a row returned without its
 grants - found while READING, so nothing is written.
 
 **Can fail after writing** (exit 1, the error names the rows already written, each
 of which carries its correct new label; the next run converges): a role row that
-changed in Open WebUI between the read and its write (every row is re-read just
-before its write); Open WebUI rejecting a write. One case repeats on every run: a
+changed in Open WebUI between the read and its write - every row is re-read just
+before its write and compared on existence, `base_model_id`, `updated_at`, name,
+grants, meta, params and the active flag; Open WebUI rejecting a write. **Not
+closed:** a change landing between that re-read and the POST (one round trip;
+Open WebUI has no conditional update) is overwritten. One case repeats on every run: a
 role row whose stored `meta` Open WebUI cannot parse answers **404** to the read,
 so the sync plans a create and Open WebUI rejects it (HTTP 401 `Something went
 wrong`, measured on a disposable 0.11.0) - repair or delete that row in Open WebUI (Admin Settings >

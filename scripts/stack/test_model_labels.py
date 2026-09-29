@@ -1,6 +1,9 @@
 """Hermetic tests for scripts/stack/model_labels.py (model-roles, 2026-09-28).
 
-No Docker and no Open WebUI: the label generator reads files, and the Open WebUI
+No Docker daemon and no Open WebUI. The label generator derives from compose's render;
+these tests hand it renders shaped exactly as `docker compose config --format json`
+gives them, and the few tests that ask the REAL compose CLI (no daemon; DOCKER_HOST
+dead) skip where there is none. The Open WebUI
 sync is driven through FakeOwui, an in-memory stand-in for the four admin-API
 calls it makes (GET /health, GET /api/v1/models/model, POST .../create, POST
 .../model/update) that behaves the way Open WebUI 0.11.0's routers/models.py
@@ -16,10 +19,12 @@ from __future__ import annotations
 import copy
 import io
 import json
+import posixpath
 import shutil
 import sys
 import urllib.parse
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -38,37 +43,51 @@ OLD_NAMES = ["qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf", "q
 
 
 # --------------------------------------------------------------------------
-# a scratch repo root: the REAL inference config and compose files, a scratch
-# env file and a scratch model store
+# a scratch world: the REAL local.yaml and llama-swap config, a scratch model store,
+# and a RENDER shaped exactly like `docker compose config --format json` gives it
+# (services -> environment map, volumes -> [{type, source, target, read_only}])
 # --------------------------------------------------------------------------
+
+QWEN38 = "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"
+
+
+class World(NamedTuple):
+    root: Path
+    store: Path
+    embed: Path
 
 
 @pytest.fixture
-def scratch(tmp_path: Path) -> Path:
+def world(tmp_path: Path) -> World:
     root = tmp_path / "repo"
-    for rel in (ml.MODEL_LIST_REL, ml.LLAMA_SWAP_REL, ml.UPSTREAMS_REL):
+    for rel in (ml.MODEL_LIST_REL, ml.LLAMA_SWAP_REL):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(REPO_ROOT / rel, root / rel)
     store = tmp_path / "models"
     (store / "unsloth" / "Qwen3.8-27B-GGUF").mkdir(parents=True)
     (store / "unsloth" / "Qwen3.8-27B-GGUF" / "Qwen3.8-27B-Q4_K_M.gguf").write_bytes(b"GGUF")
-    embed = root / "data" / "models" / "embeddings"
-    embed.mkdir(parents=True)
+    embed = tmp_path / "embeddings"
+    embed.mkdir()
     (embed / "bge-m3-f16.gguf").write_bytes(b"GGUF")
-    write_env(root, store, "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf")
-    return root
+    return World(root, store, embed)
 
 
-def write_env(root: Path, store: Path | None, path: str | None, extra: str = "") -> Path:
-    lines = ["COMPOSE_PROFILES=local"]
-    if store is not None:
-        lines.append(f"LM_MODELS_DIR={store}")
-    if path is not None:
-        lines.append(f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={path}")
-    env = root / ml.ENV_REL
-    env.parent.mkdir(parents=True, exist_ok=True)
-    env.write_text("\n".join(lines) + "\n" + extra, encoding="utf-8")
-    return env
+def make_render(w: World, chat=QWEN38, embed_model="/models/bge-m3-f16.gguf", drop=()) -> dict:
+    def bind(src, dst):
+        return {"type": "bind", "source": str(src), "target": dst, "read_only": True, "bind": {}}
+    services = {
+        "llm-gateway": {"environment": {"COMPOSE_PROFILES": "local"},
+                        "volumes": [bind(w.root / "inference/config/litellm/model_list", "/app/conf.d")]},
+        "llama-cpp-upstream": {"command": ["-config", "/app/config.yaml"],
+                               "environment": {"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": chat},
+                               "volumes": [bind(w.store, "/models"),
+                                           bind(w.root / ml.LLAMA_SWAP_REL, "/app/config.yaml")]},
+        "llama-cpp-embed-upstream": {"environment": {"LLAMA_ARG_MODEL": embed_model},
+                                     "volumes": [bind(w.embed, "/models")]},
+    }
+    for key in drop:
+        services.pop(key)
+    return {"name": "inference", "services": services}
 
 
 def by_role(labels):
@@ -159,12 +178,12 @@ def test_parse_model_list_reads_comments_quotes_and_nested_params():
 
 
 # --------------------------------------------------------------------------
-# the derivation
+# the derivation, from compose's render
 # --------------------------------------------------------------------------
 
 
-def test_labels_come_from_the_configured_file(scratch):
-    labels = by_role(ml.derive_labels(scratch, environ={}))
+def test_labels_come_from_the_file_compose_renders(world):
+    labels = by_role(ml.derive_labels(make_render(world)))
     assert {role: item.label for role, item in labels.items()} == {
         "local-large": "Qwen3.8-27B Q4_K_M (thinking)",
         "local-large:nothink": "Qwen3.8-27B Q4_K_M (no thinking)",
@@ -172,129 +191,265 @@ def test_labels_come_from_the_configured_file(scratch):
         "local-small:nothink": "Qwen3.8-27B Q4_K_M (no thinking)",
         "local-embed": "bge-m3 f16 (embeddings)",
     }
-    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH in inference/.env"
+    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH as compose renders llama-cpp-upstream"
     assert labels["local-large"].host_path.endswith("Qwen3.8-27B-Q4_K_M.gguf")
-    assert labels["local-embed"].source == "LLAMA_ARG_MODEL as written in inference/compose/upstreams.yml"
+    assert labels["local-embed"].source == "LLAMA_ARG_MODEL as compose renders llama-cpp-embed-upstream"
 
 
-def test_changing_the_path_changes_the_label_with_no_hand_edit(scratch, tmp_path):
-    store = tmp_path / "models"
-    other = store / "vendor" / "Other-14B-GGUF"
+def test_changing_the_rendered_path_changes_the_label_with_no_hand_edit(world):
+    other = world.store / "vendor" / "Other-14B-GGUF"
     other.mkdir(parents=True)
     (other / "Other-14B-Q8_0.gguf").write_bytes(b"GGUF")
-    write_env(scratch, store, "/models/vendor/Other-14B-GGUF/Other-14B-Q8_0.gguf")
-    labels = by_role(ml.derive_labels(scratch, environ={}))
+    labels = by_role(ml.derive_labels(make_render(world, chat="/models/vendor/Other-14B-GGUF/Other-14B-Q8_0.gguf")))
     assert labels["local-large"].label == "Other-14B Q8_0 (thinking)"
     assert labels["local-small"].label == "Other-14B Q8_0 (no thinking)"
 
 
-def test_an_unset_variable_falls_back_to_the_compose_default_as_compose_does(scratch, tmp_path):
-    write_env(scratch, tmp_path / "models", None)
-    labels = by_role(ml.derive_labels(scratch, environ={}, check_files=False))
-    assert labels["local-large"].container_path == \
-        "/models/lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M.gguf"
-    assert labels["local-large"].source.startswith("the compose default in inference/compose/upstreams.yml")
-    # `:-` means an EMPTY value falls back too
-    write_env(scratch, tmp_path / "models", "")
-    labels = by_role(ml.derive_labels(scratch, environ={}, check_files=False))
-    assert labels["local-large"].label == "Qwen3.6-27B Q4_K_M (thinking)"
-
-
-def test_the_shell_wins_over_the_env_file_as_compose_does(scratch, tmp_path):
-    other = tmp_path / "models" / "x"
-    other.mkdir(parents=True)
-    (other / "Shell-8B-Q6_K.gguf").write_bytes(b"GGUF")
-    labels = by_role(ml.derive_labels(
-        scratch, environ={"LLAMA_SWAP_QWEN36_27B_MODEL_PATH": "/models/x/Shell-8B-Q6_K.gguf"}))
-    assert labels["local-large"].label == "Shell-8B Q6_K (thinking)"
-    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH from the shell environment"
-
-
-def test_a_missing_model_file_fails_loudly_and_produces_no_label(scratch):
-    write_env(scratch, scratch.parent / "models", "/models/unsloth/Gone-27B-GGUF/Gone-27B-Q4_K_M.gguf")
+def test_a_missing_model_file_fails_loudly_and_produces_no_label(world):
     with pytest.raises(ml.LabelError) as err:
-        ml.derive_labels(scratch, environ={})
+        ml.derive_labels(make_render(world, chat="/models/unsloth/Gone-27B-GGUF/Gone-27B-Q4_K_M.gguf"))
     assert "local-large" in str(err.value) and "Gone-27B-Q4_K_M.gguf" in str(err.value)
     assert "is not a file on this machine" in str(err.value)
 
 
-def test_a_path_outside_the_models_bind_fails(scratch):
-    write_env(scratch, scratch.parent / "models", "/elsewhere/x-Q4_K_M.gguf")
-    with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
-        ml.derive_labels(scratch, environ={})
-
-
 @pytest.mark.parametrize("check", [True, False])
-def test_a_dotdot_path_that_leaves_the_bind_fails_even_when_the_file_exists(scratch, tmp_path, check):
-    """`/models/../x` is outside the container's bind; normalise before checking."""
-    outside = tmp_path / "x"
-    outside.mkdir()
-    (outside / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
-    write_env(scratch, tmp_path / "models", "/models/../x/Esc-1B-Q4_0.gguf")
+@pytest.mark.parametrize("path", ["/elsewhere/x-Q4_K_M.gguf", "/models/../x/Esc-1B-Q4_0.gguf"])
+def test_a_path_that_leaves_the_models_bind_fails(world, tmp_path, path, check):
+    (tmp_path / "x").mkdir()
+    (tmp_path / "x" / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
     with pytest.raises(ml.LabelError, match="not under llama-cpp-upstream's /models bind"):
-        ml.derive_labels(scratch, environ={}, check_files=check)
+        ml.derive_labels(make_render(world, chat=path), check_files=check)
 
 
-def test_a_role_forwarding_an_id_no_upstream_serves_fails(scratch):
-    path = scratch / ml.MODEL_LIST_REL
+@pytest.mark.parametrize("path", ["/models/..\\outside/Esc-1B-Q4_0.gguf",
+                                  "/models/a\\..\\..\\outside\\Esc-1B-Q4_0.gguf",
+                                  "/models/unsloth\\Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"])
+@pytest.mark.parametrize("check", [True, False])
+def test_a_backslash_in_the_container_path_is_refused(world, path, check):
+    with pytest.raises(ml.LabelError, match="contains a backslash"):
+        ml.derive_labels(make_render(world, chat=path), check_files=check)
+
+
+def test_a_role_forwarding_an_id_no_upstream_serves_fails(world):
+    path = world.root / ml.MODEL_LIST_REL
     path.write_text(path.read_text(encoding="utf-8").replace(
         "model: openai/qwen36-27b\n      api_base: http://llm-queue:8080/v1\n      api_key: dummy\n  - model_name: "
         "local-large:nothink", "model: openai/qwen99-typo\n      api_base: http://llm-queue:8080/v1\n"
         "      api_key: dummy\n  - model_name: local-large:nothink"), encoding="utf-8")
     with pytest.raises(ml.LabelError, match="local-large forwards 'qwen99-typo', which no upstream serves"):
-        ml.derive_labels(scratch, environ={})
+        ml.derive_labels(make_render(world))
 
 
-def test_a_variable_with_no_value_and_no_default_fails(scratch):
-    path = scratch / ml.UPSTREAMS_REL
-    text = path.read_text(encoding="utf-8")
-    start = text.index("- LLAMA_SWAP_QWEN36_27B_MODEL_PATH=")
-    end = text.index("\n", start)
-    path.write_text(text[:start] + "- LLAMA_SWAP_QWEN36_27B_MODEL_PATH=${LLAMA_SWAP_QWEN36_27B_MODEL_PATH}"
-                    + text[end:], encoding="utf-8")
-    write_env(scratch, scratch.parent / "models", None)
-    with pytest.raises(ml.LabelError, match="LLAMA_SWAP_QWEN36_27B_MODEL_PATH resolves to nothing"):
-        ml.derive_labels(scratch, environ={})
+@pytest.mark.parametrize("value", ["", None])
+def test_a_variable_the_render_leaves_empty_fails(world, value):
+    with pytest.raises(ml.LabelError, match="LLAMA_SWAP_QWEN36_27B_MODEL_PATH is not set in llama-cpp-upstream"):
+        ml.derive_labels(make_render(world, chat=value))
 
 
-def test_a_missing_env_file_given_explicitly_fails(scratch):
-    with pytest.raises(ml.LabelError, match="does not exist"):
-        ml.derive_labels(scratch, env_file=scratch / "nope.env", environ={})
+@pytest.mark.parametrize("service", ["llm-gateway", "llama-cpp-upstream", "llama-cpp-embed-upstream"])
+def test_a_render_without_a_needed_service_fails(world, service):
+    with pytest.raises(ml.LabelError, match=f"the render has no {service} service"):
+        ml.derive_labels(make_render(world, drop=[service]))
 
 
-@pytest.mark.parametrize("raw,env,value", [
-    ("${A:-d}", {}, "d"), ("${A:-d}", {"A": ""}, "d"), ("${A-d}", {"A": ""}, ""), ("${A-d}", {}, "d"),
-    ("${A}", {"A": "x"}, "x"), ("$A/b", {"A": "x"}, "x/b"), ("$$A", {"A": "x"}, "$A"),
-    ("${LM:-../../data/models/gguf}:/models:ro", {"LM": "C:\\m"}, "C:\\m:/models:ro"),
+# --- the render itself: compose is asked, and there is no fallback ----------------------
+
+
+def test_the_render_is_compose_config_of_the_inference_plane_with_local():
+    cmd = ml.render_command(Path("/r"), Path("/r/inference/.env.example"))
+    assert cmd[:3] == ["docker", "compose", "-f"] and cmd[3].replace("\\", "/").endswith("inference/docker-compose.yml")
+    assert cmd[4:] == ["--env-file", str(Path("/r/inference/.env.example")), "--profile", "local",
+                       "config", "--format", "json"]
+
+
+@pytest.mark.parametrize("result,why", [
+    ((127, "", "FileNotFoundError: docker"), "exit 127"),
+    ((1, "", "line 1: unexpected character"), "unexpected character"),
+    ((0, "not json", ""), "is not JSON"),
+    ((0, "{}", ""), "has no services"),
 ])
-def test_interpolation_follows_compose(raw, env, value):
-    assert ml.interpolate(raw, env) == value
+def test_no_render_means_no_label(world, result, why):
+    """compose unavailable, a failed render or garbage: a LabelError - never a guess or a default."""
+    calls = []
+
+    def run(cmd, cwd):
+        calls.append(cmd)
+        return result
+    with pytest.raises(ml.LabelError, match=why):
+        ml.render_inference(world.root, run=run)
+    assert calls and calls[0][-3:] == ["config", "--format", "json"]
 
 
-def test_a_required_variable_that_is_unset_fails():
-    with pytest.raises(ml.LabelError, match="A is not set"):
-        ml.interpolate("${A:?set it}", {})
+def _compose_available():
+    import subprocess
+    try:
+        return subprocess.run(["docker", "compose", "version"], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# Shapes of the path line in an env file that attempts 1-3's own .env reader read DIFFERENTLY from
+# compose (tester attempt 3's table). With compose as the only reader, each gives compose's answer:
+# the rendered value (for form-feed / lone-CR that is the compose DEFAULT - compose's own reading,
+# so it is also what the upstream loads), or no label at all when compose refuses the file.
+ENV_SHAPES = [
+    ("plain", "X={p}\n"),
+    ("export-tab", "export\tX={p}\n"),
+    ("colon", "X: {p}\n"),
+    ("bom-at-byte-0", "FIRST:\ufeffX={p}\n"),
+    ("bom-mid-file", "\ufeffX={p}\n"),
+    ("inline-comment", "X={p} # note\n"),
+    ("utf16", "UTF16:X={p}\n"),
+    ("bom-line2", "A=1\n\ufeffX={p}\n"),
+    ("form-feed", "A=foo\fX={p}\n"),
+    ("lone-cr", "A=1\rX={p}\r"),
+    ("EXPORT", "EXPORT X={p}\n"),
+]
+
+
+@pytest.mark.skipif(not _compose_available(), reason="needs the docker compose CLI (no daemon): CI and the host")
+@pytest.mark.parametrize("name,shape", ENV_SHAPES, ids=[s[0] for s in ENV_SHAPES])
+def test_the_label_is_whatever_compose_renders_for_any_env_shape(tmp_path, name, shape):
+    """The REAL inference compose file, rendered by the REAL compose (read-only, DOCKER_HOST dead):
+    the label names exactly the file compose resolves, or there is no label."""
+    import os
+    import subprocess
+    example = (REPO_ROOT / "inference/.env.example").read_text(encoding="utf-8")
+    example = "\n".join(line for line in example.splitlines()
+                        if not line.startswith("LLAMA_SWAP_QWEN36_27B_MODEL_PATH="))
+    line = shape.replace("X", "LLAMA_SWAP_QWEN36_27B_MODEL_PATH").format(p=QWEN38)
+    env_file = tmp_path / "shape.env"
+    if line.startswith("UTF16:"):
+        env_file.write_bytes((example + "\n" + line[len("UTF16:"):]).encode("utf-16"))
+    elif line.startswith("FIRST:"):
+        env_file.write_bytes((line[len("FIRST:"):] + example + "\n").encode("utf-8"))
+    else:
+        env_file.write_bytes((example + "\n" + line).encode("utf-8"))
+
+    def run(cmd, cwd):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("LLAMA_SWAP_", "COMPOSE_"))}
+        env["DOCKER_HOST"] = "tcp://127.0.0.1:1"
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", env=env, timeout=120)
+        return proc.returncode, proc.stdout, proc.stderr
+    try:
+        render = ml.render_inference(REPO_ROOT, env_file, run)
+    except ml.LabelError as exc:
+        assert "exited" in str(exc) or "exit" in str(exc)
+        return   # compose refused the file: no label - and never the default's
+    rendered = render["services"]["llama-cpp-upstream"]["environment"]["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"]
+    labels = by_role(ml.derive_labels(render, check_files=False))
+    assert labels["local-large"].container_path == posixpath.normpath(rendered)
+    assert labels["local-large"].label == ml.label_for(rendered, "thinking")
+
+
+# --- symlinks: followed as the container follows them; the label is the file reached ----
+
+
+def _link(link: Path, target, is_dir=False):
+    link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        link.symlink_to(target, target_is_directory=is_dir)
+    except OSError as exc:   # Windows without the symlink privilege; CI (Linux) runs these
+        pytest.skip(f"cannot create a symlink here: {exc}")
+
+
+def test_a_relative_link_inside_the_store_is_labelled_by_the_file_it_reaches(world):
+    real = world.store / "real" / "Inside-7B-Q8_0.gguf"
+    real.parent.mkdir()
+    real.write_bytes(b"GGUF")
+    _link(world.store / "links" / "Claims-70B-Q2_K.gguf", Path("..") / "real" / "Inside-7B-Q8_0.gguf")
+    labels = by_role(ml.derive_labels(make_render(world, chat="/models/links/Claims-70B-Q2_K.gguf")))
+    assert labels["local-large"].label == "Inside-7B Q8_0 (thinking)"
+    assert labels["local-large"].host_path.endswith("Inside-7B-Q8_0.gguf")
+
+
+def test_a_link_with_a_host_absolute_target_is_refused_even_inside_the_store(world):
+    real = world.store / "real" / "Inside-7B-Q8_0.gguf"
+    real.parent.mkdir()
+    real.write_bytes(b"GGUF")
+    _link(world.store / "links" / "Abs-7B-Q8_0.gguf", real.resolve())
+    with pytest.raises(ml.LabelError, match="host-absolute path"):
+        ml.derive_labels(make_render(world, chat="/models/links/Abs-7B-Q8_0.gguf"))
+
+
+def test_a_relative_link_that_climbs_out_of_the_store_is_refused(world, tmp_path):
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "Out-1B-Q4_0.gguf").write_bytes(b"GGUF")
+    _link(world.store / "Out-1B-Q4_0.gguf", Path("..") / "outside" / "Out-1B-Q4_0.gguf")
+    with pytest.raises(ml.LabelError, match="leads outside the /models store"):
+        ml.derive_labels(make_render(world, chat="/models/Out-1B-Q4_0.gguf"))
+
+
+def test_a_directory_link_is_followed_like_a_file_link(world):
+    _link(world.store / "alias", Path("unsloth"), is_dir=True)
+    labels = by_role(ml.derive_labels(make_render(world, chat="/models/alias/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf")))
+    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+
+
+def test_a_symlink_loop_is_refused(world):
+    _link(world.store / "a.gguf", Path("b.gguf"))
+    _link(world.store / "b.gguf", Path("a.gguf"))
+    with pytest.raises(ml.LabelError, match="symlink loop"):
+        ml.derive_labels(make_render(world, chat="/models/a.gguf"))
+
+
+# --- the CLI ----------------------------------------------------------------------------
+
+
+def test_the_cli_prints_labels_from_a_saved_render_and_fails_with_exit_1_and_no_label(world, tmp_path):
+    saved = tmp_path / "render.json"
+    saved.write_text(json.dumps(make_render(world)), encoding="utf-8")
+    out = io.StringIO()
+    assert ml.main(["--root", str(world.root), "--render", str(saved), "--json"], out=out) == 0
+    assert [r["role"] for r in json.loads(out.getvalue())] == list(ROLE_TABLE)
+    saved.write_text(json.dumps(make_render(world, chat="/models/none/None-1B-Q4_0.gguf")), encoding="utf-8")
+    out = io.StringIO()
+    assert ml.main(["--root", str(world.root), "--render", str(saved)], out=out) == 1
+    assert out.getvalue().startswith("labels: FAILED - role local-large:")
+    assert "No label was produced." in out.getvalue() and "(thinking)" not in out.getvalue()
+
+
+def test_the_cli_renders_with_compose_and_refuses_without_it(world):
+    seen = []
+
+    def run(cmd, cwd):
+        seen.append(cmd)
+        return 127, "", "docker: not found"
+    out = io.StringIO()
+    assert ml.main(["--root", str(world.root)], out=out, run=run) == 1
+    assert "labels: FAILED - `docker compose ... config`" in out.getvalue() and seen
+
+
+def test_the_cli_survives_a_stream_that_cannot_encode_the_label(world, tmp_path):
+    """X4: the CLI's cp1252 fallback (`_say`) - a redirected PowerShell 5.1 pipe."""
+    name = "\u6a21\u578b-7B-Q4_0.gguf"
+    (world.store / "cjk").mkdir()
+    (world.store / "cjk" / name).write_bytes(b"GGUF")
+    saved = tmp_path / "render.json"
+    saved.write_text(json.dumps(make_render(world, chat=f"/models/cjk/{name}")), encoding="utf-8")
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    assert ml.main(["--root", str(world.root), "--render", str(saved)], out=stream) == 0
+    assert "?-7B Q4_0 (thinking)" in raw.getvalue().decode("cp1252")
 
 
 def test_the_env_example_gives_the_documented_default():
-    """inference/.env.example documents Qwen3.6-27B-Q4_K_M (the file a stranger starts from)."""
-    labels = by_role(ml.derive_labels(REPO_ROOT, env_file=REPO_ROOT / "inference" / ".env.example",
-                                      environ={}, check_files=False))
+    """inference/.env.example documents Qwen3.6-27B-Q4_K_M - asked of compose when it is available."""
+    if not _compose_available():
+        pytest.skip("needs the docker compose CLI")
+    import os
+    import subprocess
+
+    def run(cmd, cwd):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("LLAMA_SWAP_", "COMPOSE_"))}
+        env["DOCKER_HOST"] = "tcp://127.0.0.1:1"
+        proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env, timeout=120)
+        return proc.returncode, proc.stdout, proc.stderr
+    render = ml.render_inference(REPO_ROOT, REPO_ROOT / "inference/.env.example", run)
+    labels = by_role(ml.derive_labels(render, check_files=False))
     assert labels["local-large"].label == "Qwen3.6-27B Q4_K_M (thinking)"
     assert labels["local-embed"].label == "bge-m3 f16 (embeddings)"
-    assert labels["local-large"].host_path == ""
-
-
-def test_the_cli_prints_labels_and_fails_with_exit_1_and_no_label(scratch):
-    out = io.StringIO()
-    assert ml.main(["--root", str(scratch), "--json"], out=out) == 0
-    rows = json.loads(out.getvalue())
-    assert [r["role"] for r in rows] == list(ROLE_TABLE)
-    write_env(scratch, scratch.parent / "models", "/models/none/None-1B-Q4_0.gguf")
-    out = io.StringIO()
-    assert ml.main(["--root", str(scratch)], out=out) == 1
-    assert out.getvalue().startswith("labels: FAILED - role local-large:")
-    assert "No label was produced." in out.getvalue() and "(thinking)" not in out.getvalue()
 
 
 def test_llama_swap_carries_no_hand_typed_name():
@@ -487,127 +642,8 @@ def test_a_row_returned_without_its_grants_is_refused_not_stripped():
 
 
 # --------------------------------------------------------------------------
-# attempt 3: .env read the way compose reads it (tester attempt 2, N1), backslashes (N4),
-# symlinks (N5), the pass-1/pass-2 race (N3), `Model-2024-Q1`
+# attempts 3-4: `Model-2024-Q1`, and the pass-1/pass-2 race
 # --------------------------------------------------------------------------
-
-# `docker compose config` of `X=${X:-DEFAULT}` against each .env (compose v5.3, 2026-09-29;
-# model-roles/test-evidence/mr-gateway/env-shapes.txt). None = compose reads something this
-# reader will not vouch for, so a derivation that needs the key must REFUSE.
-COMPOSE_READS = [
-    ("plain", b"X=/m/a.gguf\n", "/m/a.gguf"),
-    ("bom-line1", b"\xef\xbb\xbfX=/m/a.gguf\n", "/m/a.gguf"),
-    ("bom-comment-first", b"\xef\xbb\xbf# c\nX=/m/a.gguf\n", "/m/a.gguf"),
-    ("colon", b"X: /m/a.gguf\n", "/m/a.gguf"),
-    ("colon-nospace", b"X:/m/a.gguf\n", "/m/a.gguf"),
-    ("spaces", b"X = /m/a.gguf\n", "/m/a.gguf"),
-    ("export", b"export X=/m/a.gguf\n", "/m/a.gguf"),
-    ("single-quoted", b"X='/m/a.gguf'\n", "/m/a.gguf"),
-    ("double-quoted", b'X="/m/a.gguf"\n', "/m/a.gguf"),
-    ("inline-comment", b"X=/m/a.gguf # note\n", "/m/a.gguf"),
-    ("tab-hash-stays", b"X=/m/a.gguf\t# note\n", "/m/a.gguf\t# note"),
-    ("bare-hash-stays", b"X=/m/a.gguf#x\n", "/m/a.gguf#x"),
-    ("dq-then-comment", b'X="/m/a.gguf" # note\n', "/m/a.gguf"),
-    ("crlf", b"X=/m/a.gguf\r\n", "/m/a.gguf"),
-    ("trailing-space", b"X=/m/a.gguf   \n", "/m/a.gguf"),
-    ("sq-dollar-literal", b"X='/m/$Y.gguf'\n", "/m/$Y.gguf"),
-    ("nested-var", b"Y=/m\nX=${Y}/a.gguf\n", None),
-    ("dollar-dollar", b"X=/m/$$a.gguf\n", None),
-    ("dq-escape", b'X="/m/a\\nb.gguf"\n', None),
-    ("multi-line", b'X="/m/a\n.gguf"\n', None),
-    ("after-quote", b'X="/m/a.gguf"x\n', None),
-]
-
-
-@pytest.mark.parametrize("name,data,expected", COMPOSE_READS, ids=[c[0] for c in COMPOSE_READS])
-def test_the_env_reader_agrees_with_compose_or_refuses(tmp_path, name, data, expected):
-    path = tmp_path / ".env"
-    path.write_bytes(data)
-    parsed = ml.parse_env_file(path)
-    if expected is None:
-        assert "X" in parsed.problems, parsed
-    else:
-        assert parsed.values.get("X") == expected and "X" not in parsed.problems, parsed
-
-
-def test_a_later_key_after_an_unclosed_quote_is_refused_too(tmp_path):
-    path = tmp_path / ".env"
-    path.write_bytes(b'A="open\nX=/m/a.gguf\n')
-    assert "X" in ml.parse_env_file(path).problems
-
-
-def _with_default_on_disk(scratch):
-    """The compose DEFAULT file exists too - as the old Qwen3.6 GGUF does on the real host - so a
-    reader that silently falls back to the default gets a file check that PASSES: a wrong label."""
-    store = scratch.parent / "models"
-    default = store / "lmstudio-community" / "Qwen3.6-27B-GGUF"
-    default.mkdir(parents=True, exist_ok=True)
-    (default / "Qwen3.6-27B-Q4_K_M.gguf").write_bytes(b"GGUF")
-    return store
-
-
-@pytest.mark.parametrize("shape", ["bom-line1", "colon", "inline-comment"])
-def test_an_env_shape_compose_accepts_gives_the_configured_label_not_the_default(scratch, shape):
-    store = _with_default_on_disk(scratch)
-    path = "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"
-    line = {"bom-line1": f"\ufeffLLAMA_SWAP_QWEN36_27B_MODEL_PATH={path}",
-            "colon": f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH: {path}",
-            "inline-comment": f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={path} # Qwen3.8"}[shape]
-    (scratch / ml.ENV_REL).write_text(f"{line}\nCOMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n",
-                                      encoding="utf-8")
-    labels = by_role(ml.derive_labels(scratch, environ={}))
-    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
-    assert labels["local-large"].source == "LLAMA_SWAP_QWEN36_27B_MODEL_PATH in inference/.env"
-
-
-@pytest.mark.parametrize("value,why", [
-    ("${OTHER}/x/Other-8B-Q4_0.gguf", "compose interpolates"),
-    ('"/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf\\t"', "compose unescapes"),
-    ('"/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf', "does not close"),
-])
-def test_an_env_shape_this_reader_cannot_vouch_for_refuses_loudly(scratch, value, why):
-    store = _with_default_on_disk(scratch)
-    (scratch / ml.ENV_REL).write_text(f"COMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n"
-                                      f"LLAMA_SWAP_QWEN36_27B_MODEL_PATH={value}\n", encoding="utf-8")
-    with pytest.raises(ml.LabelError, match=why):
-        ml.derive_labels(scratch, environ={})
-
-
-def test_the_shell_overrides_a_value_the_file_reader_refused(scratch):
-    store = _with_default_on_disk(scratch)
-    (scratch / ml.ENV_REL).write_text(f"COMPOSE_PROFILES=local\nLM_MODELS_DIR={store}\n"
-                                      "LLAMA_SWAP_QWEN36_27B_MODEL_PATH=${NOPE}\n", encoding="utf-8")
-    labels = by_role(ml.derive_labels(scratch, environ={
-        "LLAMA_SWAP_QWEN36_27B_MODEL_PATH": "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"}))
-    assert labels["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
-
-
-@pytest.mark.parametrize("path", ["/models/..\\outside/Esc-1B-Q4_0.gguf",
-                                  "/models/a\\..\\..\\outside\\Esc-1B-Q4_0.gguf",
-                                  "/models/unsloth\\Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf"])
-@pytest.mark.parametrize("check", [True, False])
-def test_a_backslash_in_the_container_path_is_refused(scratch, tmp_path, path, check):
-    outside = tmp_path / "outside"
-    outside.mkdir(exist_ok=True)
-    (outside / "Esc-1B-Q4_0.gguf").write_bytes(b"GGUF")
-    write_env(scratch, tmp_path / "models", path)
-    with pytest.raises(ml.LabelError, match="contains a backslash"):
-        ml.derive_labels(scratch, environ={}, check_files=check)
-
-
-def test_a_symlink_that_leaves_the_store_is_refused(scratch, tmp_path):
-    outside = tmp_path / "elsewhere"
-    outside.mkdir()
-    (outside / "Out-1B-Q4_0.gguf").write_bytes(b"GGUF")
-    link = tmp_path / "models" / "linked" / "Out-1B-Q4_0.gguf"
-    link.parent.mkdir(parents=True)
-    try:
-        link.symlink_to(outside / "Out-1B-Q4_0.gguf")
-    except OSError as exc:  # Windows without the symlink privilege; CI (Linux) runs it
-        pytest.skip(f"cannot create a symlink here: {exc}")
-    write_env(scratch, tmp_path / "models", "/models/linked/Out-1B-Q4_0.gguf")
-    with pytest.raises(ml.LabelError, match="outside the /models store"):
-        ml.derive_labels(scratch, environ={})
 
 
 @pytest.mark.parametrize("filename,label", [
@@ -669,3 +705,24 @@ def test_a_row_created_by_someone_else_between_read_and_write_is_left_alone():
     with pytest.raises(ml.OwuiError, match="local-large row changed"):
         ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), create))
     assert owui.writes == [] and owui.rows["local-large"]["name"] == "made by hand"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", "renamed by hand"),                 # R3
+    ("updated_at", 12345),                       # R4 - the commonest concurrent edit
+    ("base_model_id", "qwen36-27b"),             # R5
+    ("meta", {"description": "edited in the same second"}),
+    ("params", {"temperature": 0.1}),
+    ("is_active", False),
+])
+def test_each_fingerprint_component_alone_stops_the_write(field, value):
+    """ONE field changes between pass 1 and the write, nothing else (updated_at included, since
+    Open WebUI stores it in whole seconds): the row is refused and left as the other party left it."""
+    owui = FakeOwui({"local-large": _row("local-large", "stale")})
+
+    def edit():
+        owui.rows["local-large"][field] = value
+    with pytest.raises(ml.OwuiError, match="local-large row changed in Open WebUI"):
+        ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, _racing(owui, len(ROLE_TABLE), edit))
+    assert owui.writes == []
+    assert owui.rows["local-large"][field] == value

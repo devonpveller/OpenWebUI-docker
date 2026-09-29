@@ -54,6 +54,7 @@ LITELLM_IMAGE = ("ghcr.io/berriai/litellm@sha256:"
                  "c98c9395c56a35b7abacff8269d43ff99aabacb62bbf42a04cc1514fcb9bde4a")
 POSTGRES_IMAGE = "postgres:16-alpine"
 PYTHON_IMAGE = "python:3.12-slim"
+CLI_IMAGE = "docker:27-cli"      # carries the compose plugin; runs `config` only, with no socket
 OWUI_IMAGE = "openwebui:local"
 ROLES = ["local-large", "local-large:nothink", "local-small", "local-small:nothink", "local-embed"]
 OLD = ["qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf", "qllama/bge-m3:latest"]
@@ -322,16 +323,17 @@ def dump(owui):
 
 
 def build_repo(tree: Path, scratch: Path, model_path: str, key: str, owui: str) -> Path:
-    """A scratch repo the sync container mounts: the tree's driver + inference files, no secrets."""
+    """A scratch repo the render and sync containers mount: the tree's driver and its whole
+    inference plane (compose files, config, llm-queue build context), no secrets - its
+    inference/.env is written here, with placeholders for what the render requires."""
     repo = scratch / "repo"
     if repo.exists():
         shutil.rmtree(repo)
-    for rel in ("stack.manifest.toml", "scripts/stack/stack.py", "scripts/stack/model_labels.py",
-                "inference/config/litellm/model_list/local.yaml",
-                "inference/config/litellm/model_list/cloud.openrouter.yaml",
-                "inference/config/llama-swap.config.yaml", "inference/compose/upstreams.yml"):
+    for rel in ("stack.manifest.toml", "scripts/stack/stack.py", "scripts/stack/model_labels.py"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(tree / rel, repo / rel)
+    shutil.copytree(tree / "inference", repo / "inference",
+                    ignore=shutil.ignore_patterns(".env", "__pycache__", ".pytest_cache", "*.egg-info"))
     # stand-in model files (empty): the label comes from the NAME, the check from existence
     store = scratch / "store"
     for rel in ("unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf", "vendor/Other-14B-GGUF/Other-14B-Q8_0.gguf"):
@@ -340,7 +342,8 @@ def build_repo(tree: Path, scratch: Path, model_path: str, key: str, owui: str) 
     (repo / "data/models/embeddings").mkdir(parents=True, exist_ok=True)
     (repo / "data/models/embeddings/bge-m3-f16.gguf").write_bytes(b"")
     (repo / "inference/.env").write_text(
-        f"COMPOSE_PROFILES=local\nLM_MODELS_DIR=/store\nLLAMA_SWAP_QWEN36_27B_MODEL_PATH={model_path}\n",
+        "COMPOSE_PROFILES=local\nLITELLM_DB_PASSWORD=drill\nLITELLM_MASTER_KEY=sk-drill\n"
+        f"LM_MODELS_DIR=/store\nLLAMA_SWAP_QWEN36_27B_MODEL_PATH={model_path}\n",
         encoding="utf-8", newline="\n")
     (repo / ".env").write_text(f"OWUI_ADMIN_API_KEY={key}\nOWUI_BASE_URL=http://{owui}:8080\n",
                                encoding="utf-8", newline="\n")
@@ -348,12 +351,29 @@ def build_repo(tree: Path, scratch: Path, model_path: str, key: str, owui: str) 
 
 
 def sync(scratch: Path, repo: Path, args=("labels",)):
+    """Render the scratch repo's inference plane with COMPOSE (a `docker:*-cli` container, no
+    network, no docker socket - `config` needs no daemon), then run the tree's `stack.py labels
+    --render` from a python container on the drill network. Both mount the repo at /repo and
+    the store at /store, so the render's paths are the paths the sync container sees."""
+    out_dir = scratch / "out"
+    out_dir.mkdir(exist_ok=True)
+    render = _docker("run", "--rm", "--name", PREFIX + "render-" + secrets.token_hex(2), "--network", "none",
+                     *labels(), "--mount", f"type=bind,src={repo},dst=/repo,readonly", "--mount",
+                     f"type=bind,src={scratch / 'store'},dst=/store,readonly", "-w", "/repo", CLI_IMAGE,
+                     "docker", "compose", "-f", "/repo/inference/docker-compose.yml", "--profile", "local",
+                     "config", "--format", "json", check_rc=False, quiet=True)
+    if render.returncode != 0:
+        text = f"compose render FAILED (exit {render.returncode}): {(render.stderr or '').strip()[:300]}"
+        say("    | " + text)
+        return 1, text
+    (out_dir / "render.json").write_text(render.stdout, encoding="utf-8")
     name = PREFIX + "sync-" + secrets.token_hex(2)
     proc = _docker("run", "--rm", "--name", name, "--network", NET, *labels(),
                    "--mount", f"type=bind,src={repo},dst=/repo,readonly", "--mount",
-                   f"type=bind,src={scratch / 'store'},dst=/store,readonly", PYTHON_IMAGE,
+                   f"type=bind,src={scratch / 'store'},dst=/store,readonly", "--mount",
+                   f"type=bind,src={out_dir},dst=/out,readonly", PYTHON_IMAGE,
                    "python", "/repo/scripts/stack/stack.py", "--root", "/repo", "--state", "/tmp/state.json",
-                   *args, check_rc=False, quiet=True)
+                   *args, "--render", "/out/render.json", check_rc=False, quiet=True)
     out = (proc.stdout or "") + (proc.stderr or "")
     for line in out.strip().splitlines():
         say("    | " + line)
@@ -363,6 +383,7 @@ def sync(scratch: Path, repo: Path, args=("labels",)):
 def owui_phase(tree: Path, gw: str, master: str, image: str):
     say(f"== owui phase: a disposable Open WebUI ({image}) wired to the drill LiteLLM")
     _docker("image", "inspect", image, "--format", "{{.Id}}")
+    _docker("image", "inspect", CLI_IMAGE, "--format", "{{.Id}}")
     owui = run_container("owui", image, env={
         "WEBUI_SECRET_KEY": secrets.token_hex(16), "ENABLE_API_KEYS": "true", "ENABLE_OLLAMA_API": "false",
         "OPENAI_API_BASE_URL": f"http://{gw}:8080/v1", "OPENAI_API_KEY": master, "OFFLINE_MODE": "true",
