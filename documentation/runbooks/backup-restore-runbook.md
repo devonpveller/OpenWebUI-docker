@@ -24,8 +24,9 @@ Backups land in repo-root `./backups/<service>/`, newest-per-service, with a
 (`scripts/backup/backup-to-nas.ps1`) copies all of `./backups/` to
 `\\<nas>\backups\...\slot-A|B`. The same run copies the cold archives in
 `./backup/` (singular - the orphan-volume tars, the May-2025 Open WebUI volumes,
-the OWUI model exports) ADDITIVELY to a sibling folder, `\\<nas>\backups\...\archive`:
-never mirrored, so an archive deleted from D: stays on the NAS (§8).
+the OWUI model exports) to a sibling folder, `\\<nas>\backups\...\archive`,
+NEW FILES ONLY: never mirrored and never replaced, so an archive deleted or
+damaged on D: stays intact on the NAS (§8).
 
 | Service | Type | Artifact | Restore tool |
 |---|---|---|---|
@@ -182,7 +183,10 @@ procedure. Prefer the newer slot unless it is the corrupted set.
 
 The cold archives from `./backup/` are NOT in the slots: they are in the
 `archive` folder next to them (`\\<nas>\backups\ai-stack\archive\<dir>\`),
-copied with `robocopy /E /XX` and never purged. Where a directory carries a
+copied with `robocopy /E /XC /XN /XO /XX` - new files only, never replaced or
+purged (a local file that no longer matches its NAS copy is a `[WARN] archive:`
+line in `logs/nas-sync-*.log`, and the NAS copy is the one to trust until the
+local file is checked). Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.
 `scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`
 re-hashes the local and NAS copies of the default archive directories and says

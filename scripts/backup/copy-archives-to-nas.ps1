@@ -3,10 +3,11 @@
 # ONE-TIME (and re-runnable) copy of the cold archives under ./backup/<dir>/ to the
 # NAS archive folder, with a sha256 check of every file on BOTH sides. It exists
 # because those archives predate the archive pass in backup-to-nas.ps1 and are
-# ~17 GB: doing the first transfer by hand, verified file by file, keeps a weekly
-# run from spending an hour on it and proves the copy instead of assuming it.
-# After it, the weekly archive pass (robocopy /E /FFT) sees the same size and
-# timestamp and leaves the files alone.
+# ~17 GB: doing the first transfer by hand, verified file by file, proves the copy
+# instead of assuming it (the weekly pass copies but does not hash; at the 77-87
+# MB/s the 2026-09-27 runs measured, 17 GB is minutes, so time is not the reason).
+# After it, the weekly archive pass copies new files only (/XC /XN /XO) and leaves
+# these alone whatever happens to the local copies.
 #
 # What it does, per file in each -Dirs directory (recursively):
 #   1. hashes the LOCAL file; if the directory carries a SHA256SUMS naming the
@@ -17,12 +18,17 @@
 #   3. if absent: copies to <name>.cf-partial, preserving the timestamp, hashes
 #      the copy, and only then renames it into place -> VERIFIED. A run killed
 #      mid-copy leaves at most a *.cf-partial file, which the next run overwrites.
+#      A copy whose hash differs is FAIL COPY (left as .cf-partial); a final name
+#      that appeared meanwhile is never overwritten (FAIL COPY as well);
+#   4. an entry in a SHA256SUMS whose file is not there locally is MISSING LOCAL.
 #
 # It NEVER deletes or moves anything, local or remote, and never overwrites a
 # complete file. -VerifyOnly hashes and reports without writing anything
 # (ABSENT for a file not yet on the NAS).
 #
-# Exit: 0 every file VERIFIED; 1 any ABSENT / MISMATCH / FAIL; 2 setup error.
+# Exit: 0 every file VERIFIED; 1 any ABSENT / MISMATCH / FAIL / MISSING LOCAL;
+# 2 setup error (including a destination inside a slot-A / slot-B folder, judged
+# on the normalised path: `x\..\slot-A`, `/slot-A`, `slot-A.` and `slot-A ` count).
 #
 # Usage (the landing step; the NAS path is the job's archive root - use the same
 #   spelling as the job's session, i.e. the NAS's IP, to avoid system error 1219):
@@ -53,13 +59,11 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 if (-not $Source) { $Source = Join-Path $projectRoot 'backup' }
 $Source = $Source.TrimEnd('\')
-$Destination = $Destination.TrimEnd('\')
-
-foreach ($slot in @('slot-A', 'slot-B')) {
-  if ($Destination -match "(^|\\)$slot(\\|$)") {
-    Write-Host "ERROR: destination $Destination is inside a $slot folder, which the weekly /MIR purges" -ForegroundColor Red
-    exit 2
-  }
+try { $Destination = Get-NasNormalPath $Destination }
+catch { Write-Host "ERROR: destination: $($_.Exception.Message)" -ForegroundColor Red; exit 2 }
+if (Test-NasSlotSegment $Destination) {
+  Write-Host "ERROR: destination $Destination is inside a slot-A/slot-B folder, which the weekly /MIR purges" -ForegroundColor Red
+  exit 2
 }
 if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
   Write-Host "ERROR: source $Source does not exist" -ForegroundColor Red
@@ -114,6 +118,15 @@ try {
     }
     $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Sort-Object FullName)
     Write-Host "== $d ($($files.Count) files)"
+    foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory | ForEach-Object { $_.FullName }))) {
+      $listed = Read-Sha256Sums $sumDir
+      foreach ($name in $listed.Keys) {
+        if (-not (Test-Path -LiteralPath (Join-Path $sumDir $name) -PathType Leaf)) {
+          Write-Host "MISSING LOCAL  $($sumDir.Substring($Source.Length + 1))\$name  (listed in SHA256SUMS, no such file)" -ForegroundColor Red
+          $bad++
+        }
+      }
+    }
     foreach ($f in $files) {
       $rel = $f.FullName.Substring($Source.Length + 1)
       $dst = Join-Path $Destination $rel
@@ -140,7 +153,11 @@ try {
         Write-Host "FAIL COPY  $rel  local=$lh copy=$rh - left as $partial" -ForegroundColor Red
         $bad++; continue
       }
-      [System.IO.File]::Move($partial, $dst)
+      try { [System.IO.File]::Move($partial, $dst) }
+      catch {
+        Write-Host "FAIL COPY  $rel  could not rename into place ($($_.Exception.Message)) - existing file untouched, copy left as $partial" -ForegroundColor Red
+        $bad++; continue
+      }
       Write-Host "$rel  $($f.Length)  sha256=$lh  VERIFIED (copied)"
       $ok++
     }

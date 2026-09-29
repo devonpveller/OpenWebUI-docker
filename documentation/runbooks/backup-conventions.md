@@ -168,9 +168,11 @@ under the source tree. No code change to the sync needed when you add a
 new backup.
 
 The same run then copies `./backup/` (singular: cold archives that are not
-sidecar output) to `archive/`, a SIBLING of the slot folder, with `/E /XX` -
-additive, never purged, so an archive stays on the NAS after it is deleted
-locally. Put a one-off archive there (in its own dated directory, with a
+sidecar output) to `archive/`, a SIBLING of the slot folder, NEW FILES ONLY
+(`/E /XC /XN /XO /XX`): nothing there is ever purged or replaced, so an archive
+stays on the NAS after it is deleted locally AND after the local copy changes or
+is truncated - the run logs a WARN naming such a file and keeps the NAS copy. A
+new version of an archive therefore needs a new name. Put a one-off archive there (in its own dated directory, with a
 `SHA256SUMS`), never under `./backups/`, where both slots would carry it and
 the mirror would drop it two weeks after it left D:. Layout rules and the
 argument sets: `scripts/backup/nas-sync-lib.ps1`; tests against local stand-ins:
