@@ -245,8 +245,15 @@ function Invoke-BindRestore {
     if ($got -ne $want) { throw "REFUSED: $Archive does not match $Archive.sha256 - nothing was deleted" }
     Microsoft.PowerShell.Utility\Write-Host "Wiping and restoring: $target"
     # 4. Wipe (literal paths, the module-qualified cmdlet), restore, start - each checked.
-    Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force |
-        Microsoft.PowerShell.Core\ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    #    A delete that fails part-way (a file held open by another process) leaves the target
+    #    partly wiped: say so, and that the same line is the way back (the stopped container keeps
+    #    its mount, so the re-run resolves the same directory and wipes what is left).
+    try {
+        Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $target -Force |
+            Microsoft.PowerShell.Core\ForEach-Object { Microsoft.PowerShell.Management\Remove-Item -LiteralPath $_.FullName -Recurse -Force }
+    } catch {
+        throw "WIPE FAILED part-way ($($_.Exception.Message)): $target is partly deleted and not restored - free what holds the file (stop the process that has it open) and run this same line again"
+    }
     & $dockerExe run --rm -v "${target}:/dest" -v "${backup}:/backups:ro" alpine sh -c "cd /dest && tar xzf '/backups/$Archive'"
     if ($LASTEXITCODE -ne 0) { throw "RESTORE FAILED (exit $LASTEXITCODE): $target was wiped and is not restored - fix the cause and run this same line again" }
     foreach ($c in $Start) {

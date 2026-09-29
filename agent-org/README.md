@@ -77,7 +77,7 @@ Keys, in `agent-org/docker/.env`:
 |---|---|
 | `MM_DB_PASSWORD`, `AO_DB_PASSWORD` | Blank, or still the shipped `change-me-...`: `enable`, `doctor` and `up` refuse, naming them. |
 | `AO_MATTERMOST_BOT_TOKEN` | Blank on a first start: `agent-bridge` crash-loops with `Illegal header value b'Bearer '` until you create the bot (below). |
-| `AO_LOCAL_API_KEY` | Not in `.env.example`, not checked. `agent-bridge` reads it for the local model lane and otherwise sends `agent-org`, which the gateway refuses. Put a virtual key here ([issue one](../inference/README.md#issue-a-key-for-each-caller)). |
+| `AO_LOCAL_API_KEY` | Shipped blank in `.env.example`; the driver does not check it. `agent-bridge` reads it for the local model lane (left out of the file it sends `agent-org`), and the gateway refuses anything but a key it issued. Put a virtual key here ([issue one](../inference/README.md#issue-a-key-for-each-caller)). |
 | `LC_LLAMA_API_KEY` | The workers' key for the gateway; the shipped `llama` is refused. A virtual key, as above. |
 | `AO_OPEN_TERMINAL_KEY` | The worker executors' key. Still the shipped `change-me-...` while `workers` is enabled: `enable --product agent-org`, `doctor` and `up` refuse. |
 | `LC_DEPLOY_TOKEN` | Optional: a deploy token for private work repositories. |
@@ -163,6 +163,11 @@ or enable the *product*, which records the `workers` profile so that every later
 ```bash
 python scripts/stack/stack.py enable --product agent-org
 ```
+
+While `workers` is active for the plane, `enable`, `doctor` and `up` check that the
+generated configs exist (`agent-org/agent-bridge/worker-configs/worker-1` and `-2`) and
+refuse, naming `python agent-org/scripts/gen-worker-configs.py`, until they do. The
+hand-typed `docker compose ... --profile workers` line above is not checked.
 
 A running worker keeps the environment it started with. After changing
 `LC_DEPLOY_TOKEN` or `LC_LLAMA_API_KEY`, recreate the pool:

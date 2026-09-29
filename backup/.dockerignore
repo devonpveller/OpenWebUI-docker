@@ -1,0 +1,7 @@
+# The backup sidecar image (Dockerfile here) COPYs nothing from its build context: it installs
+# from Alpine and GitHub, and every backup script is bind-mounted at run time. On a live host
+# this directory also holds old exports and archives (gitignored, many GB). BuildKit sends only
+# what a COPY names, but the legacy builder (DOCKER_BUILDKIT=0) and any future `COPY .` would
+# send all of it to the daemon. Send nothing: Docker always sends the Dockerfile and this file.
+# A future COPY names its file here as `!<name>`.
+*

@@ -68,7 +68,7 @@ import tempfile
 DEAD = "tcp://127.0.0.1:1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 SITE_DIR = os.path.join(HERE, "_testsite")
-UNGUARDED_RUN = None  # sysadmin._run as it was before install(); t05 drives its deny-list with a recorder
+UNGUARDED_RUN = None  # sysadmin._run as it was before install(); t05 drives its allowlist with a recorder
 _GUARDED = {"docker", "docker-compose", "wsl", "schtasks", "powershell", "pwsh", "cmd", "sh", "bash",
             "taskkill", "sc", "shutdown", "reg", "net", "wmic", "diskpart", "bcdedit", "vssadmin"}
 _REAL_EXEC = subprocess.Popen._execute_child

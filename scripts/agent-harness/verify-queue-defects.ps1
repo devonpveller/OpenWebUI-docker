@@ -1140,6 +1140,68 @@ $r = Invoke-Q $f12 @("-Merged", "-Id", "qd12r", "-By", "qrev", "-Sha", $merge12r
 $it = Get-QItem $f12 "qd12r"
 Check "D12: a merge editing ONLY README.md at the root derives NOTHING - a root build context is its Dockerfile's COPY sources, not the whole tree" `
     (($r.code -eq 0) -and ($it.state -eq "merged") -and (@($it.deploy_pending).Count -eq 0)) ("exit=" + $r.code + " pending=" + (@($it.deploy_pending) -join ","))
+# A BUILD CONTEXT IS WHAT ITS .dockerignore LETS THROUGH (cf-small-fixes). On the line: thingsrc/
+# gains a `*` + `!main.txt` .dockerignore (the exact shape frontend/ ships), and a new :local
+# service `wild` builds wildsrc/ behind a WILDCARD re-include, which the tool must not try to
+# interpret. Three merges: a doc under each context (thing: nothing; wild: counted - the
+# fallback); the re-included file (thing: counted); the .dockerignore itself (thing: counted).
+function Merge-DeployBranch($fix, [string]$id, [string]$branch) {
+    Invoke-Q $fix @("-Propose", "-Id", $id, "-Anchor", $anchorFile, "-Developer", "qdev") | Out-Null
+    Invoke-Q $fix @("-ConfirmAnchor", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $fix @("-Submit", "-Id", $id, "-Branch", $branch, "-Developer", "qdev", "-TestPlan", $planV1) | Out-Null
+    Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "tester", "-By", "qtester") | Out-Null
+    Invoke-Q $fix @("-Pass", "-Id", $id, "-By", "qtester", "-Evidence", $ev, "-PlanAdequate") | Out-Null
+    Invoke-Q $fix @("-Approve", "-Id", $id, "-By", "qoperator") | Out-Null
+    Invoke-Q $fix @("-Claim", "-Id", $id, "-Role", "reviewer", "-By", "qrev") | Out-Null
+    Push-Location $fix.repo
+    try { Invoke-Git merge --no-ff -q $branch -m ("merge " + $id + " (evidence: drill)") | Out-Null; $m = (Invoke-Git rev-parse HEAD | Select-Object -First 1).Trim() } finally { Pop-Location }
+    $rr = Invoke-Q $fix @("-Merged", "-Id", $id, "-By", "qrev", "-Sha", $m, "-FitsCodebase")
+    return @{ r = $rr; it = (Get-QItem $fix $id) }
+}
+function New-DeployBranch($fix, [string]$branch, [hashtable]$files) {
+    Push-Location $fix.repo
+    try {
+        Invoke-Git checkout -q -b $branch base | Out-Null
+        foreach ($k in $files.Keys) {
+            $full = Join-Path $fix.repo $k
+            New-Item -ItemType Directory -Force -Path (Split-Path $full) | Out-Null
+            Set-Content -Path $full -Encoding ascii -Value $files[$k]
+            Invoke-Git add $k | Out-Null
+        }
+        Invoke-Git commit -q -m ("branch " + $branch) | Out-Null
+        Invoke-Git checkout -q base | Out-Null
+    } finally { Pop-Location }
+}
+# Its own fixture, so the surfaces it leaves open do not reach D13's -List of d12.
+$f12d = New-DeployFixture "d12d"
+Push-Location $f12d.repo
+try {
+    New-Item -ItemType Directory -Force -Path (Join-Path $f12d.repo "wildsrc") | Out-Null
+    Set-Content -Path (Join-Path $f12d.repo "thingsrc\.dockerignore") -Encoding ascii -Value @("# only the entrypoint reaches the image", "*", "!main.txt")
+    Set-Content -Path (Join-Path $f12d.repo "wildsrc\.dockerignore") -Encoding ascii -Value @("*", "!*.txt")
+    Set-Content -Path (Join-Path $f12d.repo "wildsrc\w.txt") -Encoding ascii -Value "v1"
+    Add-Content -Path (Join-Path $f12d.repo "plane\docker-compose.yml") -Encoding ascii -Value @(
+        "  wild:",
+        "    build:",
+        "      context: ../wildsrc",
+        "    image: wild:local")
+    Invoke-Git add thingsrc wildsrc plane | Out-Null
+    Invoke-Git commit -q -m "line: thingsrc gets a keep-one .dockerignore; wild builds behind a wildcard one" | Out-Null
+} finally { Pop-Location }
+New-DeployBranch $f12d "work/di-docs" @{ "thingsrc/NOTES.md" = "a note"; "wildsrc/NOTES.md" = "a note" }
+New-DeployBranch $f12d "work/di-kept" @{ "thingsrc/main.txt" = "v3" }
+New-DeployBranch $f12d "work/di-ign" @{ "thingsrc/.dockerignore" = @("*", "!main.txt", "!extra.txt") }
+$x = Merge-DeployBranch $f12d "qd12i" "work/di-docs"
+Check "D12: a doc under a context whose .dockerignore is * plus literal re-includes derives NOTHING for it (thing)" `
+    (($x.r.code -eq 0) -and (@($x.it.deploy_pending) -notcontains "image:thing")) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
+Check "D12: ... while a WILDCARD .dockerignore is not interpreted - the same doc under wildsrc still derives image:wild" `
+    ((@($x.it.deploy_pending) -join ",") -eq "image:wild") ("pending=" + (@($x.it.deploy_pending) -join ","))
+$x = Merge-DeployBranch $f12d "qd12k" "work/di-kept"
+Check "D12: the re-included file (thingsrc/main.txt) still derives image:thing" `
+    (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:thing")) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
+$x = Merge-DeployBranch $f12d "qd12g" "work/di-ign"
+Check "D12: a change to the .dockerignore itself derives image:thing" `
+    (($x.r.code -eq 0) -and ((@($x.it.deploy_pending) -join ",") -eq "image:thing")) ("exit=" + $x.r.code + " pending=" + (@($x.it.deploy_pending) -join ","))
 # A merge that ships nothing derives an EMPTY list and no flag.
 $f12b = New-Fixture "d12b"
 $ev = Join-Path $Root "d12b-evidence.md"

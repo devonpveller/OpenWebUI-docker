@@ -252,12 +252,12 @@ def _run(cmd: list[str], timeout: int = 30) -> dict:
     passes docker_refusal(). A refused command never starts (rc 126)."""
     why = run_refusal(cmd)
     if why:
-        return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {[str(c) for c in cmd[:6]]}"}
+        return {"rc": 126, "out": "", "err": f"refused by sysadmin allowlist: {why}: {[str(c) for c in cmd[:6]]}"}
     name = program_name(cmd[0])
     if name in ("docker", "docker.exe"):
         why = docker_refusal(list(cmd[1:]))
         if why:
-            return {"rc": 126, "out": "", "err": f"refused by sysadmin deny-list: {why}: {cmd[1:8]}"}
+            return {"rc": 126, "out": "", "err": f"refused by sysadmin allowlist: {why}: {cmd[1:8]}"}
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return {"rc": p.returncode, "out": p.stdout or "", "err": p.stderr or ""}

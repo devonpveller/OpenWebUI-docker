@@ -58,7 +58,10 @@ def _make_host_path(path: Path, spec: dict) -> None:
     for name in spec.get("contains", []):
         if name == ".git":
             (path / name).mkdir(exist_ok=True)
+        elif name.endswith("/"):
+            (path / name).mkdir(parents=True, exist_ok=True)
         else:
+            (path / name).parent.mkdir(parents=True, exist_ok=True)
             (path / name).write_text("# placeholder\n", encoding="utf-8")
 
 
@@ -2942,7 +2945,7 @@ def test_enable_memory_without_the_sibling_mnemory_refuses_with_the_clone(root):
     assert "memory" not in state_of(root)["planes"]
 
 
-@pytest.mark.parametrize("shape", ["empty-dir", "plain-file", "no-dockerfile", "no-git"])
+@pytest.mark.parametrize("shape", ["empty-dir", "plain-file", "no-dockerfile", "no-git", "dockerfile-is-a-dir"])
 def test_an_unusable_sibling_mnemory_is_refused_by_doctor_and_enable(root, shape):
     """Existing is not enough: only a directory holding .git and the Dockerfile passes."""
     sibling = root.parent / "mnemory"
@@ -2955,6 +2958,10 @@ def test_an_unusable_sibling_mnemory_is_refused_by_doctor_and_enable(root, shape
             (sibling / ".git").mkdir()
         if shape == "no-git":
             (sibling / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        if shape == "dockerfile-is-a-dir":
+            # cf-small-fixes G10: a DIRECTORY named Dockerfile passed the old .exists() test
+            (sibling / ".git").mkdir()
+            (sibling / "Dockerfile").mkdir()
     run(root, "init", "--planes", "inference,frontend", "--force")
     code, out, _ = run(root, "enable", "memory")
     assert code == stack.EXIT_REFUSED, out
@@ -2966,6 +2973,120 @@ def test_an_unusable_sibling_mnemory_is_refused_by_doctor_and_enable(root, shape
     assert code == stack.EXIT_REFUSED
     assert "[FAIL] ../mnemory " in out and f"run `{MNEMORY_CLONE}`" in out
     assert "[OK]   host path ../mnemory" not in out
+
+
+def test_a_sibling_mnemory_worktree_with_a_gitfile_is_usable(root):
+    """`.git` may be a FILE (a git worktree or submodule gitfile); only the Dockerfile must be a file."""
+    sibling = root.parent / "mnemory"
+    _without_mnemory(root)
+    sibling.mkdir()
+    (sibling / ".git").write_text("gitdir: /elsewhere/.git/worktrees/mnemory\n", encoding="utf-8")
+    (sibling / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    run(root, "init", "--planes", "inference,frontend", "--force")
+    code, out, _ = run(root, "enable", "memory")
+    assert code == 0, out
+    assert "memory" in state_of(root)["planes"]
+
+
+def test_host_path_members_are_checked_by_kind(tmp_path):
+    """The kind rule: a plain name must be a file, a trailing `/` a directory, `.git` either."""
+    (tmp_path / "Dockerfile").mkdir()
+    (tmp_path / "vendor").write_text("x\n", encoding="utf-8")
+    assert "no Dockerfile" in stack.host_path_problem(tmp_path, {"path": ".", "contains": ["Dockerfile"]})
+    assert "no vendor/" in stack.host_path_problem(tmp_path, {"path": ".", "contains": ["vendor/"]})
+    (tmp_path / "Dockerfile").rmdir()
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    (tmp_path / "vendor").unlink()
+    (tmp_path / "vendor").mkdir()
+    (tmp_path / ".git").write_text("gitdir: x\n", encoding="utf-8")
+    assert stack.host_path_problem(tmp_path, {"path": ".", "contains": [".git", "Dockerfile", "vendor/"]}) is None
+
+
+# --- cf-small-fixes G18: agent-org's worker pool needs its GENERATED configs -----------
+
+GEN_WORKER_CONFIGS = "python agent-org/scripts/gen-worker-configs.py"
+
+
+def _without_worker_configs(root):
+    configs = root / "agent-org" / "agent-bridge" / "worker-configs"
+    if configs.exists():
+        shutil.rmtree(configs)
+
+
+def _agent_org_deps(root):
+    for dep in ("inference",):
+        assert run(root, "enable", "--plane", dep)[0] == 0
+
+
+def test_enable_the_agent_org_product_without_worker_configs_refuses_naming_the_generator(root):
+    _agent_org_deps(root)
+    _without_worker_configs(root)
+    code, out, _ = run(root, "enable", "--product", "agent-org")
+    assert code == stack.EXIT_REFUSED, out
+    assert "agent-org/agent-bridge/worker-configs is missing (plane agent-org)" in out
+    assert f"Run `{GEN_WORKER_CONFIGS}`." in out
+    assert "agent-org" not in state_of(root)["planes"]
+
+
+def test_enable_agent_org_without_workers_does_not_need_the_worker_configs(root):
+    _agent_org_deps(root)
+    _without_worker_configs(root)
+    code, out, _ = run(root, "enable", "--plane", "agent-org")
+    assert code == 0, out
+    assert GEN_WORKER_CONFIGS not in out
+
+
+def test_up_with_workers_and_no_worker_configs_refuses_before_starting_anything(root):
+    _agent_org_deps(root)
+    assert run(root, "enable", "--product", "agent-org")[0] == 0     # the configs are there here
+    _without_worker_configs(root)                                   # ... and then are not
+    daemon = FakeDaemon()
+    code, out, _ = run(root, "up", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "agent-org/agent-bridge/worker-configs is missing (plane agent-org)" in out
+    assert f"run `{GEN_WORKER_CONFIGS}` from the repo root" in out
+    assert "Nothing was started." in out
+    assert daemon.streamed == []
+
+
+def test_up_with_workers_and_only_one_worker_config_still_refuses(root):
+    _agent_org_deps(root)
+    assert run(root, "enable", "--product", "agent-org")[0] == 0
+    (root / "agent-org" / "agent-bridge" / "worker-configs" / "worker-2" / "little-coder.config.yaml").unlink()
+    code, out, _ = run(root, "up", "--dry-run", capture=_no_capture)
+    assert code == stack.EXIT_REFUSED, out
+    assert "worker-2/little-coder.config.yaml" in out
+
+
+def test_doctor_checks_the_worker_configs_only_with_workers(root):
+    _agent_org_deps(root)
+    assert run(root, "enable", "--plane", "agent-org")[0] == 0
+    _without_worker_configs(root)
+    daemon = FakeDaemon()
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
+    assert "[--]   host path agent-org/agent-bridge/worker-configs (checked only with profile workers)" in out
+    assert "[FAIL] agent-org/agent-bridge/worker-configs" not in out
+    # with the product, `workers` is recorded - now doctor must fail it
+    state = state_of(root)
+    state["planes"]["agent-org"] = {"profiles": ["workers"]}
+    (root / stack.STATE_REL).write_text(json.dumps(state), encoding="utf-8")
+    code, out, _ = run(root, "doctor", runner=daemon.runner, capture=daemon.capture)
+    assert code == stack.EXIT_REFUSED
+    assert "[FAIL] agent-org/agent-bridge/worker-configs is missing (plane agent-org)" in out
+    assert f"run `{GEN_WORKER_CONFIGS}`" in out
+
+
+def test_the_worker_config_host_path_is_what_the_compose_file_mounts():
+    """Each worker's mount in agent-org's compose file is one `contains` entry of the manifest's host path."""
+    manifest = stack.Manifest.load(REAL_MANIFEST)
+    (spec,) = manifest.plane("agent-org")["host_paths"]
+    assert spec["profile"] == "workers"
+    text = (REPO_ROOT / manifest.plane("agent-org")["compose"]).read_text(encoding="utf-8")
+    mounts = re.findall(r"-\s*\.\./agent-bridge/worker-configs/(worker-\d+):/app/config", text)
+    assert mounts, "agent-org compose no longer mounts generated worker configs - drop the host path"
+    assert sorted(f"{m}/little-coder.config.yaml" for m in mounts) == sorted(spec["contains"])
+    assert (REPO_ROOT / Path(spec["path"])).resolve() == \
+        (REPO_ROOT / "agent-org" / "docker" / ".." / "agent-bridge" / "worker-configs").resolve()
 
 
 def test_the_mnemory_host_path_requires_the_dockerfile_the_compose_file_names():

@@ -588,27 +588,51 @@ def host_path_problem(root: Path, spec: dict) -> str | None:
     Existing is not enough: an empty directory or a plain file at the path
     would pass an .exists() test and still fail the build. The entry's
     `contains` names what a real checkout holds there (memory: `.git` and the
-    Dockerfile its compose file builds with); each must be present.
+    Dockerfile its compose file builds with); each must be present, and each
+    as the right KIND: `.git` may be a directory (a clone) or a file (a
+    worktree or submodule gitfile), a name ending in `/` must be a directory,
+    and any other name must be a regular file - a DIRECTORY called
+    `Dockerfile` would pass an .exists() test and still fail the build.
     """
     path = root / Path(spec["path"])
     if not path.exists():
         return "is missing"
     if not path.is_dir():
         return "is not a directory"
-    absent = [name for name in spec.get("contains", []) if not (path / name).exists()]
+    absent = [name for name in spec.get("contains", []) if not _host_path_member_ok(path, name)]
     if absent:
         return "is not a checkout the plane can build from (no " + ", ".join(absent) + ")"
     return None
 
 
-def missing_host_paths(manifest: Manifest, root: Path, plane: str) -> list[tuple[dict, str]]:
+def _host_path_member_ok(path: Path, name: str) -> bool:
+    """One `contains` name is present inside `path` as the kind it names."""
+    if name == ".git":
+        return (path / name).exists()
+    if name.endswith("/"):
+        return (path / name.rstrip("/")).is_dir()
+    return (path / name).is_file()
+
+
+def host_path_applies(spec: dict, active) -> bool:
+    """Whether one `host_paths` entry is checked: always, unless it names a `profile`, and then
+    only while that profile is active (`active`: the profiles compose will run the plane with;
+    None = not known, so a profile-gated entry is not checked)."""
+    profile = spec.get("profile")
+    return not profile or (active is not None and profile in active)
+
+
+def missing_host_paths(manifest: Manifest, root: Path, plane: str, active=None) -> list[tuple[dict, str]]:
     """(entry, reason) for each of the plane's `host_paths` that is not usable.
 
-    A path OUTSIDE the checkout that the plane builds from - memory's sibling
-    ../mnemory. Each entry carries the `remedy` command that creates it.
+    A path the plane cannot run without that no clone carries - memory's sibling
+    ../mnemory, or agent-org's GENERATED worker configs (gitignored; only under
+    the `workers` profile). Each entry carries the `remedy` command that creates it.
     """
     found = []
     for spec in manifest.plane(plane).get("host_paths", []):
+        if not host_path_applies(spec, active):
+            continue
         reason = host_path_problem(root, spec)
         if reason:
             found.append((spec, reason))
@@ -1308,7 +1332,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
     used to be left to each compose file's `:?` guard, which on a GPU-less host
     surfaced inside the GPU check's render (ac-driver-products attempt 3, T12e).
     """
-    submodule_lines = []
+    submodule_lines, host_lines = [], []
     for plane in planes:
         submodule = missing_submodule(manifest, root, plane)
         if submodule:
@@ -1316,11 +1340,19 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                 f"  {plane}: {manifest.plane(plane)['compose']} is missing because the {submodule} "
                 f"submodule is not initialised - run {submodule_remedy(submodule)}"
             )
+            continue
+        # A path the plane cannot run without (host_paths), under the profiles `up` will run -
+        # agent-org's generated worker configs only matter with `workers` (cf-small-fixes G18).
+        for spec, reason in missing_host_paths(manifest, root, plane,
+                                               active_profiles(manifest, state, root, plane)):
+            host_lines.append("  " + host_path_line(spec, plane, reason))
     placeholder_lines = _placeholder_lines(manifest, state, root, planes, capture, blank=True)
-    if submodule_lines or placeholder_lines:
+    if submodule_lines or placeholder_lines or host_lines:
         steps = []
         if submodule_lines:
             steps.append("initialise the submodule with the command named above")
+        if host_lines:
+            steps.append("run the command named for each path above")
         if placeholder_lines:
             unset = any(line.endswith((" is blank", " is missing")) for line in placeholder_lines)
             steps.append(("give each key named above a value of your own" if unset
@@ -1328,7 +1360,7 @@ def _preflight(manifest, state, root, planes, verb: str, capture) -> None:
                          + " (for a secret: `openssl rand -hex 32`)")
         raise Refusal(
             f"refused: fix these before `{verb}` starts anything:\n"
-            + "\n".join(submodule_lines + placeholder_lines)
+            + "\n".join(submodule_lines + host_lines + placeholder_lines)
             + "\nNothing was started. " + _sentence("; then ".join(steps)) + ", and re-run."
         )
 
@@ -1632,7 +1664,8 @@ def _key_problems(manifest, state, root, planes, subject, capture, profile_map=N
     """
     lines, files, submodules = [], [], []
     for plane in planes:
-        for spec, reason in missing_host_paths(manifest, root, plane):
+        active = active_profiles(manifest, state, root, plane, (profile_map or {}).get(plane, ()))
+        for spec, reason in missing_host_paths(manifest, root, plane, active):
             lines.append("  " + host_path_line(spec, plane, reason))
             command = f"`{spec['remedy']}`"
             if command not in submodules:
@@ -2003,7 +2036,11 @@ def cmd_doctor(manifest, state, root, console, runner, capture=None) -> int:
         else:
             console.line(f"    [FAIL] compose file missing: {manifest.plane(plane)['compose']}")
             problems += 1
+        doctor_active = active_profiles(manifest, state, root, plane)
         for spec in manifest.plane(plane).get("host_paths", []):
+            if not host_path_applies(spec, doctor_active):
+                console.line(f"    [--]   host path {spec['path']} (checked only with profile {spec['profile']})")
+                continue
             reason = host_path_problem(root, spec)
             if reason:
                 console.line("    [FAIL] " + host_path_line(spec, plane, reason))
