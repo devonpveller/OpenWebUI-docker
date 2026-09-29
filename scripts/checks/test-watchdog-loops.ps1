@@ -145,9 +145,10 @@ function Invoke-PurePart {
               'ConvertTo-ContainerFact', 'Invoke-BoundedDocker', 'Get-ContainerRuntimeFacts', 'Send-LoopAlert')
     $missing = @($need | Where-Object { -not (Get-Command $_ -CommandType Function -ErrorAction SilentlyContinue) })
     if ($missing.Count -gt 0) {
-        foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6') {
+        foreach ($id in 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8', 'P9', 'P10', 'P11') {
             Write-Case $id 'container-loop detection' $false ("the watchdog under test defines none of: " + ($missing -join ', '))
         }
+        Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -237,11 +238,101 @@ function Invoke-PurePart {
     }
     Write-Case 'P5' 'decision edges: historic count, recreate, policy no, bounded and unbounded on-failure' $allOk ($lines -join "`n")
 
+    # Helpers for P7-P10: a fact from a RECORDED record with fields overridden.
+    $iso = { param([double]$minsAgo) (Get-Date).ToUniversalTime().AddMinutes(-$minsAgo).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ') }
+    $fact = {
+        param([string]$from, [string]$name, [string]$id, [int]$count, [string]$status, [string]$started, [string]$netmode)
+        $r = ($pass2 | Where-Object { $_.Name -eq "/$from" }) | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+        $r.Name = "/$name"; $r.Id = $id; $r.RestartCount = $count
+        $r.State.Status = $status; $r.State.StartedAt = $started
+        if ($netmode) { $r.HostConfig.NetworkMode = $netmode }
+        ConvertTo-ContainerFact -Record $r
+    }
+    $said = { param([string]$pattern) @((Get-Transport $sbx).Telegram | Where-Object { $_ -match $pattern }).Count }
+
+    # P7: the all-clear waits until a looping container has SETTLED (stopped,
+    # or running $LoopSettledMinutes). Fires, then: running 2 min -> none;
+    # restarting -> none; running 11 min -> RESOLVED.
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p7-loop' 'p7' 0 'running' (& $iso 1) '') | Out-Null
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p7-loop' 'p7' 5 'running' (& $iso 1) '') | Out-Null
+    $fired = & $said "ALERT ai-stack: container 'p7-loop' is CRASH-LOOPING"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p7-loop' 'p7' 5 'running' (& $iso 2) '') | Out-Null
+    $r2min = & $said "RESOLVED ai-stack: container 'p7-loop'"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p7-loop' 'p7' 5 'restarting' (& $iso 3) '') | Out-Null
+    $rBack = & $said "RESOLVED ai-stack: container 'p7-loop'"
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p7-loop' 'p7' 5 'running' (& $iso 11) '') | Out-Null
+    $r11 = & $said "RESOLVED ai-stack: container 'p7-loop'"
+    Write-Case 'P7' 'all-clear only once settled: not at 2 min running, not in backoff, yes at 11 min' `
+        (($fired -eq 1) -and ($r2min -eq 0) -and ($rBack -eq 0) -and ($r11 -eq 1)) `
+        "alert sent $fired; RESOLVED after running 2 min: $r2min; after a restarting pass: $rBack; after running 11 min: $r11"
+
+    # P8: only a RUNNING joiner can be orphaned: an exited joiner whose owner
+    # started after it is not paged.
+    $p8o = & $fact 'cfwd-owner-ok' 'p8-owner' 'p8o' 0 'running' (& $iso 1) ''
+    $p8j = & $fact 'cfwd-joiner-ok' 'p8-joiner' 'p8j' 0 'exited' (& $iso 30) 'container:p8o'
+    $p8 = [bool](@(Test-NetnsJoinedContainers -Facts @($p8o, $p8j)) | Select-Object -Last 1)
+    $p8n = & $said "'p8-joiner'"
+    Write-Case 'P8' 'a stopped joiner is not paged, even with an owner that restarted after it' (($p8 -eq $true) -and ($p8n -eq 0)) `
+        "result $p8; messages naming p8-joiner: $p8n"
+
+    # P9: a RUNNING joiner whose owner is not running - stopped (exited), or in
+    # restart backoff - with an OLDER owner start time is orphaned (it has only
+    # lo). The owner-restarted-after rule alone misses both. A paused owner is not.
+    $p9 = @(
+        (& $fact 'cfwd-owner-ok' 'p9-owner-stopped' 'p9os' 0 'exited' (& $iso 60) ''),
+        (& $fact 'cfwd-joiner-ok' 'p9-joiner-stopped' 'p9js' 0 'running' (& $iso 30) 'container:p9os'),
+        (& $fact 'cfwd-owner-ok' 'p9-owner-backoff' 'p9ob' 4 'restarting' (& $iso 60) ''),
+        (& $fact 'cfwd-joiner-ok' 'p9-joiner-backoff' 'p9jb' 0 'running' (& $iso 30) 'container:p9ob'),
+        (& $fact 'cfwd-owner-ok' 'p9-owner-paused' 'p9op' 0 'paused' (& $iso 60) ''),
+        (& $fact 'cfwd-joiner-ok' 'p9-joiner-paused' 'p9jp' 0 'running' (& $iso 30) 'container:p9op')
+    )
+    $p9r = [bool](@(Test-NetnsJoinedContainers -Facts $p9) | Select-Object -Last 1)
+    $tt = Get-Transport $sbx
+    $sStop = Measure-Alerts $tt "container 'p9-joiner-stopped' is ORPHANED: .*'p9-owner-stopped', is exited"
+    $sBack = Measure-Alerts $tt "container 'p9-joiner-backoff' is ORPHANED: .*'p9-owner-backoff', is restarting"
+    $sPaus = Measure-Alerts $tt "'p9-joiner-paused'"
+    Write-Case 'P9' 'running joiner of a stopped owner and of a backing-off owner (older start) is orphaned; paused owner is not' `
+        (($p9r -eq $false) -and ($sStop -eq 'tg=1 mm=1') -and ($sBack -eq 'tg=1 mm=1') -and ($sPaus -eq 'tg=0 mm=0')) `
+        "result $p9r; stopped owner $sStop; backing-off owner $sBack; paused owner $sPaus"
+
+    # P10: SLOW loop - one restart every other pass (the attempt-1 tester's A3,
+    # ~72/day) never reaches the fast rule; the window rule pages it at the
+    # 6th restart inside $SlowLoopWindowHours. And restarts older than the
+    # window do not count.
+    $seq = @(); $count = 0; $firstAt = 0
+    for ($i = 1; $i -le 14; $i++) {
+        if ($i % 2 -eq 0) { $count++ }
+        Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p10-slow' 'p10' $count 'running' (& $iso 5) '') | Out-Null
+        $n = & $said "container 'p10-slow' is CRASH-LOOPING: \d+ restart\(s\) in the last ${SlowLoopWindowHours}h \(a slow loop\)"
+        if ($n -gt 0 -and $firstAt -eq 0) { $firstAt = $i }
+        $seq += "$i/$count"
+    }
+    $slowMsgs = & $said "container 'p10-slow' is CRASH-LOOPING"
+    # Old history: a state entry carrying 10 restarts from 7h ago, then 1 new.
+    $statePath = Join-Path $sbx 'logs\.watchdog-restart-state.json'
+    $st = Get-Content $statePath -Raw | ConvertFrom-Json
+    $old = [DateTimeOffset]::UtcNow.AddHours(-7).ToUnixTimeSeconds()
+    $st | Add-Member -NotePropertyName 'p10-old' -NotePropertyValue ([pscustomobject]@{
+        Count = 20; Id = 'p10old'; Streak = 0; Accum = 0; Missed = 0; Hist = @(1..10 | ForEach-Object { "${old}:1" }) }) -Force
+    ($st | ConvertTo-Json -Depth 5) | Out-File $statePath -Encoding utf8 -Force
+    Test-ContainerRestartLoops -Facts @(& $fact 'cfwd-healthy' 'p10-old' 'p10old' 21 'running' (& $iso 5) '') | Out-Null
+    $oldMsgs = & $said "container 'p10-old'"
+    Write-Case 'P10' "slow loop (a restart every other pass) pages at the ${SlowLoopThreshold}th restart in ${SlowLoopWindowHours}h; history older than the window does not count" `
+        (($firstAt -eq 12) -and ($slowMsgs -eq 1) -and ($oldMsgs -eq 0)) `
+        ("pass/restarts: $($seq -join ' ')`nfirst slow-loop page at pass $firstAt (expected 12, the 6th restart); pages in total $slowMsgs`n" +
+         "container with 10 restarts 7h ago + 1 now: messages $oldMsgs")
+
     # P6: every docker call the section makes is bounded - a stub docker that
-    # answers `ps` and never returns from anything else.
+    # answers `ps` and never returns from anything else. On `inspect` it also
+    # starts a grandchild first, so the timeout must kill the whole TREE.
     $hangSrc = @"
 public static class CfwdHang__SFX__ { public static int Main(string[] a) {
+  string me = System.Reflection.Assembly.GetExecutingAssembly().Location;
   if (a.Length > 0 && a[0] == "ps") { System.Console.WriteLine("cfwd-hang"); return 0; }
+  if (a.Length > 0 && a[0] == "gc") { System.Threading.Thread.Sleep(60000); return 0; }
+  var psi = new System.Diagnostics.ProcessStartInfo(me, "gc"); psi.UseShellExecute = false;
+  System.Diagnostics.Process.Start(psi);   // inherits this process's stdout/stderr
+  if (a.Length > 0 && a[0] == "logs") { System.Console.WriteLine("fatal: from a docker that left a child"); System.Console.Out.Flush(); return 0; }
   System.Threading.Thread.Sleep(-1); return 0; } }
 "@
     $hangExe = Join-Path $sbx 'stubs\docker-hang.exe'
@@ -254,7 +345,7 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $raw = Invoke-BoundedDocker -DockerArgs @('inspect', 'x'); $tRaw = $sw.Elapsed.TotalSeconds; $why = $script:BoundedFailureReason
     $sw.Restart(); $facts = @(Get-ContainerRuntimeFacts); $tFacts = $sw.Elapsed.TotalSeconds
-    $sw.Restart(); $fl = Get-ContainerFaultLine -Name 'cfwd-hang'; $tLog = $sw.Elapsed.TotalSeconds
+    $sw.Restart(); $fl = Invoke-BoundedDocker -DockerArgs @('inspect', 'y'); $fl = "$($script:BoundedFailureReason)"; $tLog = $sw.Elapsed.TotalSeconds
     $orphanOwnerless = [pscustomobject]@{ Name = 'j'; Id = 'jid'; RestartCount = 0; Status = 'running'; StartedAt = '2026-09-28T00:00:00Z'
                                           RestartPolicy = 'no'; MaxRetries = 0; NetworkMode = 'container:ownerid' }
     $sw.Restart(); $nn = [bool](@(Test-NetnsJoinedContainers -Facts @($orphanOwnerless)) | Select-Object -Last 1); $tNet = $sw.Elapsed.TotalSeconds
@@ -262,15 +353,28 @@ public static class CfwdHang__SFX__ { public static int Main(string[] a) {
     $left = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
     $tt = Get-Transport $sbx
     $unread = Measure-Alerts $tt 'docker cannot describe 1 container'
+    Start-Sleep -Milliseconds 500
     $ok = ($null -eq $raw) -and ($why -eq 'did not answer within 2s') -and ($tRaw -lt 6) -and
-          ($facts.Count -eq 0) -and ($tFacts -lt 12) -and ($fl -match 'did not answer within 2s') -and ($tLog -lt 6) -and
+          ($facts.Count -eq 0) -and ($tFacts -lt 12) -and ($fl -eq 'did not answer within 2s') -and ($tLog -lt 6) -and
           ($nn -eq $true) -and ($tNet -lt 6) -and ($left -eq 0) -and ($unread -eq 'tg=1 mm=1')
     Write-Case 'P6' 'a docker that never returns cannot hang the section' $ok `
         ("Invoke-BoundedDocker: null=$($null -eq $raw) in $([math]::Round($tRaw,1))s reason='$why'`n" +
          "Get-ContainerRuntimeFacts: $($facts.Count) fact(s) in $([math]::Round($tFacts,1))s (batch + per-container probe both timed out); unreadable alert $unread`n" +
-         "Get-ContainerFaultLine: '$fl' in $([math]::Round($tLog,1))s`n" +
+         "a second hanging inspect: '$fl' in $([math]::Round($tLog,1))s`n" +
          "Test-NetnsJoinedContainers (owner probe hangs): ok=$nn in $([math]::Round($tNet,1))s`n" +
-         "stub processes left running: $left")
+         "stub processes left running (children AND grandchildren): $left")
+
+    # P11: a docker that EXITS at once but leaves a grandchild holding its
+    # stdout (the attempt-1 tester's A14: 29.7s under a 2s bound). The call
+    # must return inside the bound, and the grandchild must be killed.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $fl = Get-ContainerFaultLine -Name 'cfwd-hang'; $tGc = $sw.Elapsed.TotalSeconds; $sw.Stop()
+    Start-Sleep -Milliseconds 500
+    $leftGc = @(Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue).Count
+    Write-Case 'P11' 'a grandchild holding the output open cannot stretch the bound, and is killed' `
+        (($tGc -lt 4) -and ($fl -match 'kept its output open') -and ($leftGc -eq 0)) `
+        "Get-ContainerFaultLine returned in $([math]::Round($tGc,1))s: '$fl'; stub processes left: $leftGc"
+    Get-Process -Name 'docker-hang' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $WatchdogDockerExe = 'docker'
     Remove-Item $sbx -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -378,6 +482,8 @@ function Invoke-DindPart {
             @('run', '-d', '--name', 'cfwd-joiner', '--restart', 'unless-stopped', '--network', 'container:cfwd-owner', $A, 'sleep', '3600'),
             @('run', '-d', '--name', 'cfwd-owner-ok', '--restart', 'unless-stopped', $A, 'sleep', '3600'),
             @('run', '-d', '--name', 'cfwd-joiner-ok', '--restart', 'unless-stopped', '--network', 'container:cfwd-owner-ok', $A, 'sleep', '3600'),
+            @('run', '-d', '--name', 'cfwd-owner-stop', '--restart', 'unless-stopped', $A, 'sleep', '3600'),
+            @('run', '-d', '--name', 'cfwd-joiner-stop', '--restart', 'unless-stopped', '--network', 'container:cfwd-owner-stop', $A, 'sleep', '3600'),
             @('run', '-d', '--name', 'cfwd-owner-gone', '--restart', 'unless-stopped', $A, 'sleep', '3600'),
             @('run', '-d', '--name', 'cfwd-joiner-gone', '--restart', 'unless-stopped', '--network', 'container:cfwd-owner-gone', $A, 'sleep', '3600')
         )
@@ -388,15 +494,21 @@ function Invoke-DindPart {
         Start-Sleep 2
         # Orphan cfwd-joiner (its owner restarts AFTER it started) and remove
         # cfwd-owner-gone out from under cfwd-joiner-gone.
-        foreach ($cmd in @(@('restart', '-t', '0', 'cfwd-owner'), @('rm', '-f', 'cfwd-owner-gone'))) {
+        foreach ($cmd in @(@('restart', '-t', '0', 'cfwd-owner'), @('rm', '-f', 'cfwd-owner-gone'), @('stop', '-t', '0', 'cfwd-owner-stop'))) {
             $x = Invoke-Dind $cmd
             if ($x.Code -ne 0) { throw "'$($cmd -join ' ')' failed: $($x.Out)" }
         }
         $gone = Invoke-Dind @('inspect', '--format', '{{.State.Status}}', 'cfwd-joiner-gone')
         Write-Host "  cfwd-joiner-gone after its owner was removed: $($gone.Out.Trim())"
+        $stopSt = Invoke-Dind @('inspect', '--format', '{{.State.Status}}', 'cfwd-joiner-stop')
+        $stopIf = Invoke-Dind @('exec', 'cfwd-joiner-stop', 'ip', '-o', 'link')
+        $script:StopEvidence = "cfwd-joiner-stop is $($stopSt.Out.Trim()) with its owner stopped; its interfaces: " + (($stopIf.Out -split "`n" | ForEach-Object { ($_ -split ':')[1].Trim() }) -join ', ')
+        Write-Host "  $script:StopEvidence"
 
+        # (The committed fixtures were recorded before the stopped-owner pair
+        # was added; re-recording adds it, which the pure part ignores.)
         $seeded = @('cfwd-loop', 'cfwd-healthy', 'cfwd-stopped', 'cfwd-exited', 'cfwd-owner', 'cfwd-joiner',
-                    'cfwd-owner-ok', 'cfwd-joiner-ok', 'cfwd-joiner-gone')
+                    'cfwd-owner-ok', 'cfwd-joiner-ok', 'cfwd-joiner-gone', 'cfwd-owner-stop', 'cfwd-joiner-stop')
 
         # Relocated copy of the watchdog under test, with the faked leaves.
         $sbx = New-Sandbox
@@ -423,6 +535,7 @@ function Invoke-DindPart {
         $loopA = Measure-Alerts $t3 "container 'cfwd-loop' is CRASH-LOOPING"
         $orphA = Measure-Alerts $t3 "container 'cfwd-joiner' is ORPHANED"
         $goneA = Measure-Alerts $t3 "container 'cfwd-joiner-gone' shares the network namespace of a container that NO LONGER EXISTS"
+        $stopA = Measure-Alerts $t3 "container 'cfwd-joiner-stop' is ORPHANED: .*'cfwd-owner-stop', is exited"
         $fault = @($t3.Telegram | Where-Object { $_ -match "cfwd-loop" -and $_ -match 'invalid key' }).Count
         $all = @($t3.Telegram + $t3.Mattermost)
         $wlogPath = Join-Path $sbx 'logs\tailscale-health.log'
@@ -432,14 +545,15 @@ function Invoke-DindPart {
         $noisy = @(foreach ($n in $quiet) { if (@($all | Where-Object { $_ -match ("'" + [regex]::Escape($n) + "'") }).Count -gt 0) { $n } })
         $detail = ("passes exited $c1 / $c2 / $c3" + $(if ($script:LastPassErr) { " (watchdog said: $($script:LastPassErr[0]))" } else { "" }) + "`n" +
                    "transport after pass1 tg=$($t1.Telegram.Count) mm=$($t1.Mattermost.Count); pass2 tg=$($t2.Telegram.Count) mm=$($t2.Mattermost.Count); pass3 tg=$($t3.Telegram.Count) mm=$($t3.Mattermost.Count)`n" +
-                   "crash loop $loopA (fault line carries 'invalid key': $fault); orphaned joiner $orphA; joiner of a removed owner $goneA`n" +
+                   "crash loop $loopA (fault line carries 'invalid key': $fault); orphaned joiner $orphA; joiner of a removed owner $goneA; joiner of a STOPPED owner $stopA`n" +
+                   "$script:StopEvidence`n" +
                    "pass 3 logged 'LOOP [crashloop-cfwd-loop] still firing' (detected, cooldown held): $still time(s)`n" +
                    "alerted among healthy/stopped/exited/intact: $(if ($noisy) { $noisy -join ', ' } else { 'none' })`n" +
                    "DinD state: " + ($counts.Out -replace "`n", '; ') + "`n" +
                    "telegram messages:`n  " + ($t3.Telegram -join "`n  ") + "`nmattermost messages:`n  " + ($t3.Mattermost -join "`n  "))
-        $ok = ($loopA -eq 'tg=1 mm=1') -and ($orphA -eq 'tg=1 mm=1') -and ($goneA -eq 'tg=1 mm=1') -and ($fault -eq 1) -and
+        $ok = ($loopA -eq 'tg=1 mm=1') -and ($orphA -eq 'tg=1 mm=1') -and ($goneA -eq 'tg=1 mm=1') -and ($stopA -eq 'tg=1 mm=1') -and ($fault -eq 1) -and
               ($noisy.Count -eq 0) -and ($still -ge 1) -and ($t3.Telegram.Count -eq $t2.Telegram.Count) -and ($t3.Mattermost.Count -eq $t2.Mattermost.Count)
-        Write-Case 'D1' 'DinD: crash loop and orphaned netns alerted once each, healthy/stopped quiet, no re-alert inside the cooldown' $ok $detail
+        Write-Case 'D1' 'DinD: crash loop and orphaned netns (owner restarted / removed / stopped) alerted once each, healthy/stopped quiet, no re-alert inside the cooldown' $ok $detail
     } catch {
         Write-Case 'D1' 'DinD proof' $false "harness error: $($_.Exception.Message)"
     } finally {

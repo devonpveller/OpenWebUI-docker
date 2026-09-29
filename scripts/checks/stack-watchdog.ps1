@@ -1786,6 +1786,14 @@ $LoopAlertCooldownHours = 6
 # A looping container is called "no longer restarting" (the all-clear) only
 # once it has run this long since its last start, or is stopped.
 $LoopSettledMinutes = 10
+# SLOW loops: the fast rule needs restarts on consecutive passes, so a
+# container that crashes less often than once a pass (every other pass is
+# ~72 a day) never trips it. This rule counts every restart seen in the last
+# $SlowLoopWindowHours and pages at $SlowLoopThreshold: 6 in 6 hours is a
+# sustained one an hour, well above a container restarted by hand now and
+# then, and a crash every 20 minutes reaches it in about 2 hours.
+$SlowLoopWindowHours = 6
+$SlowLoopThreshold = 6
 # The docker executable. A variable only so the bounded-call test can point it
 # at a stub that never returns.
 $WatchdogDockerExe = 'docker'
@@ -1829,6 +1837,23 @@ function ConvertTo-ProcessArgument {
     return '"' + $escaped + '"'
 }
 
+# Kill every live descendant of a process id, deepest first. Used when the
+# process itself has already exited, so `taskkill /T` has no tree to walk.
+# PIDs are reused on Windows, so a candidate must have been created AFTER the
+# parent it names.
+function Stop-ProcessDescendants {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$ParentId, [datetime]$NotBefore = [datetime]::MinValue)
+    try {
+        $kids = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ParentId" -ErrorAction Stop |
+            Where-Object { $_.CreationDate -ge $NotBefore })
+    } catch { return }
+    foreach ($k in $kids) {
+        Stop-ProcessDescendants -ParentId ([int]$k.ProcessId) -NotBefore $k.CreationDate
+        try { Stop-Process -Id ([int]$k.ProcessId) -Force -ErrorAction Stop } catch { }
+    }
+}
+
 # Run an external command with a hard wall-clock bound. Returns its output
 # lines, or $null when the call did not complete cleanly. $null means one of:
 #   timed out          -> $script:BoundedFailureReason = "did not answer within Ns"
@@ -1865,7 +1890,9 @@ function Invoke-BoundedProcess {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.RedirectStandardInput = $true
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
         [void]$proc.Start()
+        $startedAt = try { $proc.StartTime.AddSeconds(-1) } catch { (Get-Date).AddSeconds(-5) }
         # Both streams asynchronously BEFORE waiting: reading one to the end
         # while the child fills the other is the classic deadlock.
         $outTask = $proc.StandardOutput.ReadToEndAsync()
@@ -1884,6 +1911,18 @@ function Invoke-BoundedProcess {
         # readable (it came back empty after WaitForExit([int]) alone).
         $proc.WaitForExit()
         $code = $proc.ExitCode
+        # The CHILD exiting is not the end of its output: a descendant that
+        # inherited the pipe holds it open, and reading to EOF would wait for
+        # THAT process (measured by the attempt-1 tester: 29.7s under a 2s
+        # bound). Give the readers only what is left of the bound, then kill
+        # every descendant still alive - the parent is gone, so taskkill /T
+        # cannot find them; walk ParentProcessId instead.
+        $leftMs = [int][Math]::Max(0, ($TimeoutSeconds * 1000) - $sw.ElapsedMilliseconds)
+        if (-not [System.Threading.Tasks.Task]::WaitAll(@($outTask, $errTask), $leftMs)) {
+            $script:BoundedFailureReason = "did not answer within ${TimeoutSeconds}s (it exited, but a process it started kept its output open)"
+            Stop-ProcessDescendants -ParentId $proc.Id -NotBefore $startedAt
+            return $null
+        }
         $outLines = @(@($outTask.Result -split "`r?`n") | Where-Object { $null -ne $_ -and $_ -ne '' })
         $errLines = @(@($errTask.Result -split "`r?`n") | Where-Object { $null -ne $_ -and $_ -ne '' })
         $lines = @($outLines) + @($errLines)
@@ -2121,15 +2160,25 @@ function Test-ContainerRestartLoops {
     $seen = @{}
     $looping = @()
     $quiet = @()
+    $nowEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     foreach ($f in $Facts) {
         if (-not (Test-UnboundedRestartPolicy -Policy $f.RestartPolicy -MaxRetries $f.MaxRetries)) { continue }
         $key = $f.Name
         $streak = 0
         $accum = 0
+        $hist = @()
         # Parse the state defensively: one hand-edited or truncated value must
         # cost one quiet pass, not throw out of the whole health pass.
         $p = $prev[$key]
         if ($p -and $p.Id -eq $f.Id) {
+            # Restart history for the window rule: "epoch:count" strings, one
+            # per pass that saw restarts, pruned to $SlowLoopWindowHours.
+            foreach ($h in @($p.Hist)) {
+                $hp = ([string]$h) -split ':'
+                $he = [int64]0; $hn = 0
+                if ($hp.Count -eq 2 -and [int64]::TryParse($hp[0], [ref]$he) -and [int]::TryParse($hp[1], [ref]$hn) -and
+                    $he -ge ($nowEpoch - [int64]($SlowLoopWindowHours * 3600))) { $hist += "${he}:${hn}" }
+            }
             $prevCount = 0; $prevStreak = 0; $prevAccum = 0
             $okCount = [int]::TryParse([string]$p.Count, [ref]$prevCount)
             [void][int]::TryParse([string]$p.Streak, [ref]$prevStreak)
@@ -2139,6 +2188,7 @@ function Test-ContainerRestartLoops {
                 if ($delta -gt 0) {
                     $streak = $prevStreak + 1
                     $accum = $prevAccum + $delta
+                    $hist += "${nowEpoch}:${delta}"
                 } elseif ($f.Status -eq 'restarting') {
                     # No new restart since the last pass, but Docker is sitting
                     # in its restart backoff (up to a minute): the loop has NOT
@@ -2149,10 +2199,16 @@ function Test-ContainerRestartLoops {
                 }
             }
         }
-        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0 }
+        $inWindow = 0
+        foreach ($h in $hist) { $inWindow += [int](($h -split ':')[1]) }
+        $next[$key] = @{ Count = $f.RestartCount; Id = $f.Id; Streak = $streak; Accum = $accum; Missed = 0; Hist = @($hist) }
         $seen[$key] = $true
         if ($accum -ge $RestartLoopThreshold) {
-            $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak }
+            $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = 0 }
+        } elseif ($inWindow -ge $SlowLoopThreshold) {
+            # SLOW loop: quiet passes in between reset the streak above, but
+            # the restarts keep adding up over the window.
+            $looping += [pscustomobject]@{ Fact = $f; Accum = $accum; Streak = $streak; Window = $inWindow }
         } elseif ($f.Status -ne 'restarting') {
             # A candidate for the all-clear only when it has SETTLED: stopped,
             # or running for $LoopSettledMinutes since its last start. One quiet
@@ -2177,6 +2233,7 @@ function Test-ContainerRestartLoops {
             Id     = $prev[$k].Id
             Streak = $prev[$k].Streak
             Accum  = $prev[$k].Accum
+            Hist   = @($prev[$k].Hist)
             Missed = $missed + 1
         }
     }
@@ -2199,7 +2256,9 @@ function Test-ContainerRestartLoops {
     foreach ($l in $looping) {
         $name = $l.Fact.Name
         $why = Get-ContainerFaultLine -Name $name
-        Send-LoopAlert -Key ("crashloop-" + $name) -Message ("container '$name' is CRASH-LOOPING: $($l.Accum) restart(s) over $($l.Streak) watchdog pass(es), " +
+        $rate = if ($l.Window -gt 0) { "$($l.Window) restart(s) in the last ${SlowLoopWindowHours}h (a slow loop)" }
+                else { "$($l.Accum) restart(s) over $($l.Streak) watchdog pass(es)" }
+        Send-LoopAlert -Key ("crashloop-" + $name) -Message ("container '$name' is CRASH-LOOPING: $rate, " +
             "total $($l.Fact.RestartCount). Not restarted by the watchdog (a loop is usually a credential or config fault). Last fault line: $why") | Out-Null
     }
     return $false
@@ -2245,6 +2304,18 @@ function Test-NetnsJoinedContainers {
                     " - not alerting on an unconfirmed absence") "WARN"
                 continue
             }
+        }
+        # An owner that is NOT RUNNING - stopped, exited, dead, or sitting in
+        # restart backoff - leaves the joiner running with only `lo` (measured
+        # in test, 2026-09-28: the joiner stays `running` and `ip -o addr`
+        # inside it lists lo alone), whatever the start times say. `paused`
+        # keeps its namespace and is not a fault.
+        if ($owner.Status -notin @('running', 'paused')) {
+            $why = Get-ContainerFaultLine -Name $owner.Name
+            Send-LoopAlert -Key ("netns-" + $f.Name) -Message ("container '$($f.Name)' is ORPHANED: the owner of its network namespace, '$($owner.Name)', is $($owner.Status), " +
+                "so '$($f.Name)' is running with no network. Its own healthcheck cannot see this. Start the owner, then restart '$($f.Name)'. Owner's last fault line: $why") | Out-Null
+            $ok = $false
+            continue
         }
         $joinerStart = ConvertTo-UtcInstant $f.StartedAt
         $ownerStart = ConvertTo-UtcInstant $owner.StartedAt
