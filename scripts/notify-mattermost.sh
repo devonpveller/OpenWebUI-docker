@@ -277,6 +277,23 @@ normkey() {
 }
 key=$(normkey "$sid")
 
+# 1c) A BRIDGE SESSION ALREADY HAS ITS THREAD. The #claude-sessions bridge runs headless
+#     sessions in this repo, so they load the same local settings and fire this hook - and each
+#     one opened a SECOND thread beside the one the bridge carries it in (measured 2026-09-28:
+#     two bridge sessions in the live map). run_turn marks their process tree with
+#     CLAUDE_BRIDGE_THREAD. Only a HOOK run stands down (a session id was resolved): a manual or
+#     watchdog call made from inside a bridge turn still posts.
+if [ -n "${CLAUDE_BRIDGE_THREAD:-}" ] && [ -n "$sid" ]; then
+  exit 0
+fi
+# The FULL session id, when this run knows it (the Stop hook does; the Notification hook only
+# prints 8 characters). Recorded as the map's third field so the bridge can offer the operator
+# `fork <id>` / `handoff <id>` for this session's thread - the key alone cannot resume anything.
+FULL_SID=""
+if [[ "$sid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  FULL_SID=$(printf '%s' "$sid" | tr 'A-F' 'a-f')
+fi
+
 # 2) Session allowlist: when it exists and is non-empty, only registered sessions ping.
 #    COMPARED ON THE SAME PREFIX, for a reason that nearly shipped as an outage.
 #    The gate only fires when a session id is KNOWN. The Notification hook used to
@@ -549,8 +566,10 @@ lock_done() {
 # LAST match wins, as before: the map is append-only and a recovery appends a new
 # root, so the newest line is the live one.
 MAP_ROOT=""
+MAP_SID=""   # the full session id recorded on the matching line, if any (third field)
 map_root() {
   MAP_ROOT=""
+  MAP_SID=""
   # A `-` value is the DEAD-ROOT SENTINEL - see where it is read below.
   [ -n "$key" ] || return 0
   # GUARD THE FILE, do not rely on the redirect's `2>/dev/null`. Redirections are
@@ -559,9 +578,11 @@ map_root() {
   # script whose own test plan asserts zero. The map legitimately does not exist
   # before the first session is recorded, so this is the common path, not an edge.
   [ -r "$THREADS" ] || return 0
-  local _k _v
-  while read -r _k _v || [ -n "$_k" ]; do
+  # THREE fields since cf-bridge: `read -r _k _v` would put "root uuid" into _v.
+  local _k _v _s
+  while read -r _k _v _s || [ -n "$_k" ]; do
     if [ "$_k" = "$key" ]; then
+      MAP_SID="$_s"
       if [ "$_v" = "-" ]; then
         # THE DEAD-ROOT SENTINEL: "this id is gone, do not send to it again."
         #
@@ -832,7 +853,12 @@ fi
 _dead_root="$root"
 out=$(post "${MENTION:+$MENTION }$MSG" "$root" "$POST_FLOOR")
 if [ -n "$out" ] && [ "$out" != '!deadroot' ] && [ -n "$_make_root" ] && [ -n "$key" ]; then
-  { printf '%s %s\n' "$key" "$out" >> "$THREADS"; } 2>/dev/null
+  { printf '%s %s%s\n' "$key" "$out" "${FULL_SID:+ $FULL_SID}" >> "$THREADS"; } 2>/dev/null
+elif [ -n "$out" ] && [ "$out" != '!deadroot' ] && [ -n "$root" ] && [ -n "$key" ] \
+     && [ -n "$FULL_SID" ] && [ -z "$MAP_SID" ]; then
+  # The thread was opened by a Notification-hook run, which knows only the key. The first run
+  # that knows the full id records it against the same root - one local append, once.
+  { printf '%s %s %s\n' "$key" "$root" "$FULL_SID" >> "$THREADS"; } 2>/dev/null
 fi
 
 # The thread now exists, or the post failed and there is nothing to publish.

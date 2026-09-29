@@ -7,6 +7,8 @@ The inbound half of ../documentation-plans-ai-stack/implementation-guide/claude-
   #claude-sessions channel
     ├─ ROOT post            → start a NEW `claude -p` session (session_id captured)
     ├─ reply in a thread    → RESUME that thread's session (`--resume <session_id>`)
+    ├─ reply in an INTERACTIVE session's thread (opened by scripts/notify-mattermost.sh)
+    │                       → nothing starts; the bridge offers `fork`/`handoff <id>` in-thread
     ├─ turn completes       → final result posted back into the thread
     ├─ gated tool mid-turn  → approval_server.py posts "🛑 Approval needed"; the operator's
     │                         in-thread `approve` / `deny` moves the turn along (fail-closed)
@@ -288,6 +290,20 @@ HANDOFF_RE = re.compile(
     r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\s*(.*)\Z",
     re.IGNORECASE | re.DOTALL)
 
+
+def _strip_directives(msg: str) -> str:
+    """The message with its leading `model:`/`mode:`/`profile:`/`worktree:` directives removed,
+    as execute() consumes them - so `model: sonnet fork <uuid> ...` still reads as a fork."""
+    while True:
+        for rx in (MODEL_DIRECTIVE_RE, MODE_DIRECTIVE_RE, PROFILE_DIRECTIVE_RE, WORKTREE_DIRECTIVE_RE):
+            m = rx.match(msg)
+            if m:
+                msg = m.group(2).strip()
+                break
+        else:
+            return msg
+
+
 MM_POST_LIMIT = 12000  # Mattermost hard cap is ~16383 chars; chunk well under it
 
 REMOTE_NOTE = (
@@ -309,7 +325,18 @@ REMOTE_NOTE = (
     "not a test. Land your work with documentation/implementation-guide/multi-agent-concurrency/"
     "MERGE-PROTOCOL.md — you do NOT test or merge your own work. Write the test plan, then submit "
     "it (scripts/agent-harness/queue.ps1 -Submit); a tester who did not write it executes that plan, "
-    "and a reviewer who did not write it rebases and merges. Say what you queued in this thread."
+    "and a reviewer who did not write it rebases and merges. Say what you queued in this thread.\n\n"
+    # G7 (closeout-followups cf-bridge). A turn is ONE `claude -p` process (run_turn below) and
+    # this bridge resumes a session only for an operator message or a follow wake - never
+    # because a command finished. Observed 2026-08-29: a background poller's output ended
+    # `[killed]` the second the reply posted, and the promised follow-up never came.
+    "BACKGROUND WORK DOES NOT SURVIVE YOUR TURN. Each turn here is one `claude -p` process that "
+    "ends when you post your final message, and this bridge never resumes you because a command "
+    "finished. So a Bash `run_in_background` task, a Monitor or a background agent is lost at "
+    "turn end and its completion notice never reaches you. If your reply depends on a job, wait "
+    f"for it IN THIS TURN (a turn may run {TURN_TIMEOUT} seconds before the bridge kills it); for "
+    "an async Mattermost reply use follow_thread as above. Never end a turn promising to report "
+    "back when something finishes - nothing will wake you to do it."
 )
 
 
@@ -443,6 +470,60 @@ def claimed_threads() -> dict:
             return json.load(fh)
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+# The IDE notifier's thread map (scripts/notify-mattermost.sh, the Stop/Notification hook of
+# INTERACTIVE Claude Code sessions). One line per event, append-only, last line per key wins:
+#   "<key> <root_post_id> [<full-session-uuid>]"   a thread root for that session
+#   "<key> -"                                      that session's CURRENT root died
+# <key> is the session id's first 8 characters. The full uuid is present once any Stop hook of
+# the session has run (the Notification hook only ever knows the 8-character form).
+# G15 (closeout-followups cf-bridge): an operator reply in one of these threads used to start
+# a brand-new headless session, because nothing here read this file.
+NOTIFY_THREADS_FILE = (os.environ.get("BRIDGE_NOTIFY_THREADS")
+                       or os.path.join(_REPO_ROOT, "scripts", ".mm-session-threads"))
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def interactive_threads(path: str = "") -> dict:
+    """{root_post_id: {"key": <8-char>, "session_id": <full uuid or "">}} for every thread the
+    notifier ever opened. A `-` line retires the key's current root for the NOTIFIER only; the
+    thread still belongs to that session, so it stays here. Re-read on demand (a few hundred
+    bytes), so a thread opened a second ago is recognised without a bridge restart."""
+    roots: dict[str, str] = {}
+    full: dict[str, str] = {}
+    try:
+        with open(path or NOTIFY_THREADS_FILE, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2 or parts[1] == "-":
+            continue
+        key, root = parts[0].lower(), parts[1]
+        roots[root] = key
+        if len(parts) >= 3 and _UUID_RE.match(parts[2].lower()) and parts[2].lower().startswith(key):
+            full[key] = parts[2].lower()
+    return {root: {"key": key, "session_id": full.get(key, "")} for root, key in roots.items()}
+
+
+def interactive_offer(rec: dict) -> str:
+    """The in-thread answer to an operator reply in an interactive session's thread: nothing was
+    started, and here is how to continue that session from Mattermost if that is what they want."""
+    sid, key = rec.get("session_id", ""), rec.get("key", "")
+    head = (f"🔒 This thread belongs to the **interactive** Claude Code session `{sid or key}` "
+            f"(terminal/VS Code). The bridge cannot put a message into a session that is open "
+            f"there, so **nothing was started** - answer it at the desk, or continue it here:")
+    if sid:
+        return (head + f"\n- `fork {sid} <your message>` - a forked copy runs here, headless; the "
+                f"desk session is untouched (safe while it is still open)."
+                f"\n- `handoff {sid} <your message>` - this thread takes the session itself; only "
+                f"once it is closed at the desk (two writers on one session diverge).")
+    return (head + f"\n- its full id is not recorded yet (only a permission ping has named it): "
+            f"reply `sessions {key}` to look it up, then `fork <full id> <your message>` "
+            f"(desk session untouched) or `handoff <full id> <your message>` (once it is closed "
+            f"at the desk).")
 
 
 
@@ -771,10 +852,14 @@ def run_turn(claude_bin: str, thread_root: str, prompt: str, session_id: str | N
     # config.ps1/config.py already resolve LAST. So a session started from this thread -
     # and every harness script it runs - sees the profile the operator chose here, without
     # the bridge having to thread a parameter through code it does not own.
-    env = None
+    env = dict(os.environ)
     if harness_profile:
-        env = dict(os.environ)
         env["AI_STACK_HARNESS_PROFILE"] = harness_profile
+    # Marks the process tree as a BRIDGE session. The session's hooks inherit it, and
+    # scripts/notify-mattermost.sh (the IDE notifier, which the local settings wire as the
+    # Stop/Notification hook for every session in this repo) stands down on it: this thread
+    # already carries the session, and a second notifier thread for it is noise (G15).
+    env["CLAUDE_BRIDGE_THREAD"] = thread_root
     proc = subprocess.Popen(cmd, cwd=(cwd or REPO), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     if on_proc is not None:  # register with the bridge so `!stop` can abort a lane-2 turn
@@ -1692,6 +1777,10 @@ class Bridge:
         with self.state_lock:
             return int((self.state["threads"].get(thread_root) or {}).get("closed") or 0)
 
+    def _thread_session(self, thread_root: str) -> str:
+        with self.state_lock:
+            return str((self.state["threads"].get(thread_root) or {}).get("session_id") or "")
+
     def _reopen_thread(self, thread_root: str) -> bool:
         """A human messaging a closed session reopens it. Returns True if it WAS closed."""
         with self.state_lock:
@@ -2283,6 +2372,22 @@ class Bridge:
                        "user": username, "chars": len(msg)})
                 react(pid, "speech_balloon")
                 continue
+            # G15: a reply in an INTERACTIVE session's thread (opened by the IDE notifier) is
+            # not a prompt for a new headless session. Say so in-thread and offer fork/handoff;
+            # a `fork|handoff <uuid> ...` reply passes through and attaches the thread as usual.
+            # A thread that already has a bridge session (attached earlier) just continues.
+            if p.get("root_id") and not self._thread_session(thread_root):
+                rec = interactive_threads().get(thread_root)
+                if rec and not HANDOFF_RE.match(_strip_directives(msg)):
+                    log(f"thread {thread_root[:8]}: reply in interactive session "
+                        f"{rec.get('session_id') or rec.get('key')}'s thread - offered fork/handoff")
+                    audit({"event": "interactive_thread_reply", "thread": thread_root, "post": pid,
+                           "session": rec.get("session_id") or rec.get("key"), "user": username})
+                    try:
+                        post(interactive_offer(rec), thread_root)
+                    except Exception as e:  # noqa: BLE001
+                        log(f"interactive-thread offer failed for {thread_root[:8]}: {e}")
+                    continue
             with self.running_lock:
                 turn_in_flight = thread_root in self.running
             if turn_in_flight and VERDICT_RE.match(msg):
