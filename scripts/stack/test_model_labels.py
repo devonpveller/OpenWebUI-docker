@@ -78,7 +78,9 @@ def swap_env(model_path) -> dict:
     """Every `${env.*}` the real llama-swap config makes llama-swap substitute (ALL entries - one bad
     value anywhere makes it refuse the whole config), as compose renders them, with the model path given."""
     text = (REPO_ROOT / ml.LLAMA_SWAP_REL).read_text(encoding="utf-8")
-    env = {v: "1" for v in ml.swap_env_refs(text)}
+    refs = getattr(ml, "swap_env_refs", None)   # getattr: the file also runs against an older module
+    names = refs(text) if refs else re.findall(r"\$\{env\.([A-Z0-9_]+)\}", text)
+    env = {v: "1" for v in names}
     env["LLAMA_SWAP_QWEN36_27B_MODEL_PATH"] = model_path
     return env
 
