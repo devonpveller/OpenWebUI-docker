@@ -24,7 +24,8 @@
 #   `archive` (\\nas\backups\ai-stack\portal -> \\nas\backups\ai-stack\archive) -
 #   one file at a time (Invoke-NasArchivePass in nas-sync-lib.ps1): a missing
 #   file is copied to a temp name, sha256-verified, then renamed into place; a
-#   NAS copy left INCOMPLETE by an interrupted robocopy (its 1980 stamp) is
+#   NAS copy left INCOMPLETE by an interrupted robocopy (stamped inside its
+#   unfinished-copy window, 1979-12-31..1980-01-02; older stamps are complete) is
 #   re-copied the same way (our own copies are never stamped before 1980-01-03,
 #   so they can never look like that); a COMPLETE NAS copy is never replaced and
 #   nothing but our own temps is deleted, so an archive outlives its local file.

@@ -11,7 +11,8 @@
 # re-hashed:
 #   - absent on the NAS: copied to <name>.cf-partial, timestamp preserved, sha256
 #     checked against the local file, renamed into place          VERIFIED (copied)
-#   - NAS copy left incomplete by an interrupted robocopy (its 1980 stamp): the
+#   - NAS copy left incomplete by an interrupted robocopy (stamped inside its
+#     1979-12-31..1980-01-02 unfinished-copy window): the
 #     same verified temp copy replaces it                          VERIFIED (repaired)
 #   - NAS copy complete and equal                                  VERIFIED (already present)
 #   - NAS copy complete and different: MISMATCH, nothing written, and which side the
@@ -103,9 +104,10 @@ try {
       Write-Host "FAIL  $d  (no such directory under $Source)" -ForegroundColor Red
       $bad++; continue
     }
-    $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File | Sort-Object FullName)
+    # -Force: hidden files too, exactly as the weekly pass (Get-NasArchiveFiles) lists them.
+    $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Force | Sort-Object FullName)
     Write-Host "== $d ($($files.Count) files)"
-    foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory | ForEach-Object { $_.FullName }))) {
+    foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory -Force | ForEach-Object { $_.FullName }))) {
       $listed = Read-NasSha256Sums $sumDir
       foreach ($name in $listed.Keys) {
         if (-not (Test-Path -LiteralPath (Join-Path $sumDir $name) -PathType Leaf)) {
@@ -116,7 +118,8 @@ try {
     }
     foreach ($f in $files) {
       $rel = $f.FullName.Substring($Source.Length + 1)
-      $x = Sync-NasArchiveFile -LocalFile $f.FullName -NasFile (Join-Path $Destination $rel) -Rel $rel -AlwaysHash -VerifyOnly:$VerifyOnly
+      try { $x = Sync-NasArchiveFile -LocalFile $f.FullName -NasFile (Join-Path $Destination $rel) -Rel $rel -AlwaysHash -VerifyOnly:$VerifyOnly }
+      catch { $x = @{ Rel = $rel; Status = 'FAIL-COPY'; Detail = "$($_.Exception.Message)"; Trust = '' } }
       switch ($x.Status) {
         'COPIED'   { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (copied)"; $ok++ }
         'REPAIRED' { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (repaired - the NAS copy was incomplete)"; $ok++ }
