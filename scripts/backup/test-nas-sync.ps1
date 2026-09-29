@@ -277,6 +277,17 @@ try {
   $r = RunCopyTo $dest @()
   Check 'C10 a differing complete NAS file is MISMATCH, exit 1, left untouched, verdict LOCAL (SHA256SUMS)' (($r.Rc -eq 1) -and ($r.Out -match 'MISMATCH\s+nas-archive-may2025-owui\\open-webui\.tar.*Trust: LOCAL') -and ((Sha256Of $victim) -eq $tampered)) "rc=$($r.Rc)"
 
+  # NAS rot that keeps size AND timestamp: the weekly fast path cannot see it (documented);
+  # the copy script (-AlwaysHash) must.
+  $v2 = "$dest\orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar"
+  $v2T = (Get-Item -LiteralPath $v2).LastWriteTimeUtc
+  $fs = [System.IO.File]::Open($v2, 'Open', 'ReadWrite'); $fs.Position = 1000; $fs.WriteByte(0x5A); $fs.Close(); Stamp $v2 $v2T
+  $rotten = Sha256Of $v2
+  $res = @(Invoke-NasArchivePass -Source $backup -Destination $dest)
+  Check 'C10b same-size same-timestamp NAS rot: the weekly pass says PRESENT without hashing (the documented fast path)' ((StatusOf $res 'orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar').Detail -like '*not hashed*')
+  $r = RunCopyTo $dest @('-Dirs', 'orphan-volumes-2026-09-13', '-VerifyOnly')
+  Check 'C10c ... and copy-archives-to-nas.ps1 -VerifyOnly re-hashes and reports it MISMATCH (exit 1), NAS untouched' (($r.Rc -eq 1) -and ($r.Out -match 'MISMATCH\s+orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar') -and ((Sha256Of $v2) -eq $rotten)) "rc=$($r.Rc)"
+
   $dest3 = Join-Path $root 'nas3\archive'
   $rot = "$backup\nas-archive-may2025-owui\may2025-chats-export.json"
   $svr = Save-Local $rot

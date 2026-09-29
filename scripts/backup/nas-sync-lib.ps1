@@ -295,15 +295,14 @@ function Get-NasArchiveFiles {
     (Dockerfile, README.md, *.sh, .dockerignore) - git keeps their history, and a
     never-replacing archive would turn every edit of one into a MISMATCH failure -
     so they are skipped by position, with no dependency on git being installed
-    (test-nas-sync.ps1 G1/G2 check that every tracked file there IS top-level). Our own
-    *.cf-partial temps are skipped too. Returns @{ File; Rel } in path order.
+    (test-nas-sync.ps1 G1/G2 check that every tracked file there IS top-level).
+    Returns @{ File; Rel } in path order.
   #>
   param([string]$Source)
   $src = $Source.TrimEnd('\')
   $out = @()
   foreach ($d in @(Get-ChildItem -LiteralPath $src -Directory -Force | Sort-Object Name)) {
     foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force | Sort-Object FullName)) {
-      if ($f.Name.EndsWith('.cf-partial')) { continue }
       $out += @{ File = $f.FullName; Rel = $f.FullName.Substring($src.Length + 1) }
     }
   }
