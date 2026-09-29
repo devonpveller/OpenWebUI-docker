@@ -12,7 +12,8 @@
 #                                 git-tracked top-level sidecar sources), copied by
 #                                 Invoke-NasArchivePass one file at a time: temp name,
 #                                 sha256 verified, renamed into place. A complete NAS
-#                                 copy is never replaced and nothing but our own
+#                                 copy is never replaced (one exception, see
+#                                 Test-NasIncompleteStamp) and nothing but our own
 #                                 *.cf-partial temps is ever deleted; an INCOMPLETE
 #                                 one (stamped inside robocopy's 1980 unfinished-copy
 #                                 window) is re-copied; a complete
@@ -216,18 +217,21 @@ function Test-NasIncompleteStamp {
     writes and is treated as a complete file (hashed: PRESENT or MISMATCH). Our own
     finished copies never land in the window (Get-NasCopyStamp). The one ambiguity
     that cannot be removed: a complete copy that some OTHER tool stamped inside the
-    window is indistinguishable from robocopy's unfinished one.
+    window is indistinguishable from robocopy's unfinished one (and is re-copied).
+    The window's lower edge is inclusive: 1979-12-31T00:00:00Z is inside.
   #>
   param([datetime]$LastWriteTimeUtc)
   return ($LastWriteTimeUtc -ge [datetime]'1979-12-31' -and $LastWriteTimeUtc -lt [datetime]'1980-01-03')
 }
 
 function Get-NasCopyStamp {
-  # The timestamp a finished NAS copy gets: the local file's, CLAMPED to 1980-01-03
-  # when it is earlier (an epoch-0 or FAT "no date" local stamp would otherwise land a
-  # complete copy in, or next to, robocopy's unfinished-copy window).
+  # The timestamp a finished NAS copy gets: the local file's, CLAMPED to 1980-01-04
+  # 00:00 UTC when it is earlier (an epoch-0 or FAT "no date" local stamp would
+  # otherwise land a complete copy in robocopy's unfinished-copy window). The clamp is
+  # a full day past the window's end (1980-01-03), so no timestamp rounding on the
+  # share (2 s FAT-style, time-zone shifted) can move our copy into the window.
   param([datetime]$LocalUtc)
-  $floor = [datetime]::SpecifyKind([datetime]'1980-01-03', [System.DateTimeKind]::Utc)
+  $floor = [datetime]::SpecifyKind([datetime]'1980-01-04', [System.DateTimeKind]::Utc)
   if ($LocalUtc -lt $floor) { return $floor }
   return $LocalUtc
 }
@@ -297,7 +301,7 @@ function Sync-NasArchiveFile {
   }
   $li = Get-Item -LiteralPath $LocalFile -Force
   $stamp = Get-NasCopyStamp $li.LastWriteTimeUtc
-  $clampNote = $(if ($stamp -ne $li.LastWriteTimeUtc) { " (NAS stamp clamped to 1980-01-03; local stamp $($li.LastWriteTimeUtc.ToString('s'))Z)" } else { '' })
+  $clampNote = $(if ($stamp -ne $li.LastWriteTimeUtc) { " (NAS stamp clamped to 1980-01-04; local stamp $($li.LastWriteTimeUtc.ToString('s'))Z)" } else { '' })
   $rec = Get-NasRecordedHash $LocalFile
   $recorded = $rec.Hash
   $present = Test-Path -LiteralPath $NasFile -PathType Leaf
@@ -397,6 +401,24 @@ function Sync-NasArchiveFile {
   }
 }
 
+function Find-NasLinks {
+  <#
+    Every reparse point (junction, directory or file symbolic link) at or below
+    $Path, the root itself included, at ANY depth. PS 5.1's recursive listing lists a
+    link but does not descend into a nested one and raises no error, so a folder
+    reached through a link would silently drop out of an archive pass - the pass
+    refuses links instead of following them. Returns the full paths.
+  #>
+  param([string]$Path)
+  $found = @()
+  $top = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+  if (($top.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return @($top.FullName) }
+  foreach ($i in @(Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction Stop)) {
+    if (($i.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $found += $i.FullName }
+  }
+  return $found
+}
+
 function Get-NasArchiveFiles {
   <#
     The files the weekly archive pass covers: every file BELOW a subdirectory of
@@ -406,11 +428,17 @@ function Get-NasArchiveFiles {
     so they are skipped by position, with no dependency on git being installed
     (test-nas-sync.ps1 G1/G2 check that every tracked file there IS top-level).
     Hidden files are included (-Force). A directory that cannot be listed (access
-    denied, ...) THROWS: a partial listing must fail the pass, never shrink it.
+    denied, ...) THROWS, and so does ANY junction or symbolic link anywhere under
+    $Source (Find-NasLinks), naming it: a partial listing must fail the pass, never
+    shrink it, and a link is refused, never followed.
     Returns @{ File; Rel } in path order.
   #>
   param([string]$Source)
   $src = $Source.TrimEnd('\')
+  $links = @(Find-NasLinks $src)
+  if ($links.Count -gt 0) {
+    throw ("refusing to archive through links - replace each with the real folder/file: " + ($links -join ', '))
+  }
   $out = @()
   foreach ($d in @(Get-ChildItem -LiteralPath $src -Directory -Force -ErrorAction Stop | Sort-Object Name)) {
     foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Recurse -File -Force -ErrorAction Stop | Sort-Object FullName)) {

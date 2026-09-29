@@ -26,8 +26,10 @@
 #   file is copied to a temp name, sha256-verified, then renamed into place; a
 #   NAS copy left INCOMPLETE by an interrupted robocopy (stamped inside its
 #   unfinished-copy window, 1979-12-31..1980-01-02; older stamps are complete) is
-#   re-copied the same way (our own copies are never stamped before 1980-01-03,
-#   so they can never look like that); a COMPLETE NAS copy is never replaced and
+#   re-copied the same way (our own copies are never stamped before 1980-01-04,
+#   so they can never look like that); a COMPLETE NAS copy is never replaced
+#   (one exception: a copy ANOTHER tool stamped inside that window looks
+#   unfinished and is re-copied) and
 #   nothing but our own temps is deleted, so an archive outlives its local file.
 #   A complete NAS copy whose content differs from the local file (MISMATCH), a
 #   local file that contradicts its recorded checksum (FAIL-LOCAL) and a copy

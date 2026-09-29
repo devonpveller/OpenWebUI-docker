@@ -173,7 +173,9 @@ git-tracked sidecar sources and are not archived) to `archive/`, a SIBLING of th
 slot folder, one file at a time: a missing file is copied under a temp name,
 sha256-verified and renamed into place; a NAS copy left incomplete by an
 interrupted copy is re-copied the same way; a complete NAS copy is never replaced
-and nothing there is ever deleted but the pass's own `*.cf-partial` temps. If a
+(the one exception: a complete NAS copy that ANOTHER tool stamped inside robocopy's unfinished-copy window (1979-12-31 to 1980-01-02 UTC) cannot be told from an unfinished one and is re-copied from the local file) and nothing there is ever deleted but the pass's own `*.cf-partial`
+temps. Do not put junctions or symbolic links under `./backup/`: the pass refuses
+them (the run fails naming the link) rather than follow them. If a
 complete NAS copy's content differs from the local file (MISMATCH), a local file
 contradicts its recorded checksum (FAIL-LOCAL) or a copy cannot be written
 (FAIL-COPY), the run fails - an `[ERROR]` line, an alert, no completion marker -

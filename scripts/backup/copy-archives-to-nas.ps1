@@ -25,7 +25,9 @@
 # and an entry in a SHA256SUMS whose file is not there locally is MISSING LOCAL.
 #
 # It deletes nothing but its own *.cf-partial temps and never overwrites a complete
-# file; a finished copy never carries a stamp before 1980-01-03. -VerifyOnly hashes
+# file; a finished copy never carries a stamp before 1980-01-04. It refuses any
+# junction or symbolic link under a -Dirs directory (FAIL LINK, that directory is
+# skipped), as the weekly pass does. -VerifyOnly hashes
 # and reports without writing anything (ABSENT / INCOMPLETE for what is not there).
 #
 # Exit: 0 every file VERIFIED; 1 any ABSENT / INCOMPLETE / MISMATCH / FAIL /
@@ -105,6 +107,11 @@ try {
       $bad++; continue
     }
     # -Force: hidden files too, exactly as the weekly pass (Get-NasArchiveFiles) lists them.
+    $links = @(Find-NasLinks $srcDir)
+    if ($links.Count -gt 0) {
+      foreach ($l in $links) { Write-Host "FAIL LINK  $l  (a junction or symbolic link - not followed; replace it with the real folder/file)" -ForegroundColor Red }
+      $bad += $links.Count; continue
+    }
     $files = @(Get-ChildItem -LiteralPath $srcDir -Recurse -File -Force | Sort-Object FullName)
     Write-Host "== $d ($($files.Count) files)"
     foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory -Force | ForEach-Object { $_.FullName }))) {

@@ -119,7 +119,9 @@ $md = Try-Call { Get-NasSlotMirrorArgs -Source 'C:\s' -Destination 'C:\d' -DryRu
 Check 'R8 -DryRun adds /L to the mirror' ($md -contains '/L')
 Check 'R9 ISO week parity: 2026-09-27 (week 39) -> slot-B, 2026-10-04 (week 40) -> slot-A' (((Get-NasSlotName -Date ([datetime]'2026-09-27')) -eq 'slot-B') -and ((Get-NasSlotName -Date ([datetime]'2026-10-04')) -eq 'slot-A'))
 Check 'R10 the robocopy archive argument set of attempts 1-2 is gone (clean replacement)' (-not (Get-Command Get-NasArchiveCopyArgs -ErrorAction SilentlyContinue))
-Check 'R11 only robocopy''s unfinished-copy window [1979-12-31, 1980-01-03) is INCOMPLETE; 1975, 1601, 1979-12-30, 1980-01-03 and 2026 are not' ((Test-NasIncompleteStamp ([datetime]'1980-01-02')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-01T05:00:00')) -and (Test-NasIncompleteStamp ([datetime]'1979-12-31T12:00:00')) -and -not (Test-NasIncompleteStamp ([datetime]'1980-01-03')) -and -not (Test-NasIncompleteStamp ([datetime]'1975-06-01')) -and -not (Test-NasIncompleteStamp ([datetime]'1601-01-02')) -and -not (Test-NasIncompleteStamp ([datetime]'1979-12-30')) -and -not (Test-NasIncompleteStamp ([datetime]'2026-09-13')))
+Check 'R11 only robocopy''s unfinished-copy window [1979-12-31, 1980-01-03) is INCOMPLETE - the lower edge 1979-12-31T00:00:00 itself is inside; 1979-12-30T23:59:59, 1975, 1601, 1980-01-03 and 2026 are not' ((Test-NasIncompleteStamp ([datetime]'1979-12-31T00:00:00')) -and -not (Test-NasIncompleteStamp ([datetime]'1979-12-30T23:59:59')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-02')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-01T05:00:00')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-02T23:59:59')) -and -not (Test-NasIncompleteStamp ([datetime]'1980-01-03')) -and -not (Test-NasIncompleteStamp ([datetime]'1975-06-01')) -and -not (Test-NasIncompleteStamp ([datetime]'1601-01-02')) -and -not (Test-NasIncompleteStamp ([datetime]'2026-09-13')))
+$cs = @('1970-01-01', '1980-01-01T12:00:00', '1980-01-03T12:00:00') | ForEach-Object { Get-NasCopyStamp ([datetime]::SpecifyKind([datetime]$_, 'Utc')) }
+Check 'R12 the clamp is 1980-01-04 00:00 UTC - a full day clear of the window, so share time rounding cannot put our copy inside it' ((@($cs | Where-Object { $_ -eq [datetime]'1980-01-04' }).Count -eq 3) -and -not (Test-NasIncompleteStamp ($cs[0].AddSeconds(-2))) -and -not (Test-NasIncompleteStamp ($cs[0].AddHours(-14))) -and ((Get-NasCopyStamp ([datetime]::SpecifyKind([datetime]'2026-09-13', 'Utc'))) -eq [datetime]'2026-09-13'))
 
 # ---------------------------------------------------------------- stand-in trees
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("cf-nas-test-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -239,7 +241,7 @@ try {
   Blob "$old\d\fat.tar" 5000; Stamp "$old\d\fat.tar" ([datetime]::SpecifyKind([datetime]'1980-01-01T12:00:00', 'Utc'))
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   $e1 = StatusOf $res 'd\epoch.tar'; $f1s = StatusOf $res 'd\fat.tar'
-  Check 'M20 pre-1980 local stamps (1970 epoch, FAT 1980-01-01): COPIED, NAS stamp clamped to 1980-01-03, the log detail names the original' (($e1.Status -eq 'COPIED') -and ($f1s.Status -eq 'COPIED') -and ((Get-Item -LiteralPath "$oldNas\d\epoch.tar").LastWriteTimeUtc -eq [datetime]'1980-01-03') -and ($e1.Detail -like '*clamped*1970-01-01*')) "$($e1.Status) $($e1.Detail)"
+  Check 'M20 pre-1980 local stamps (1970 epoch, FAT 1980-01-01): COPIED, NAS stamp clamped to 1980-01-04, the log detail names the original' (($e1.Status -eq 'COPIED') -and ($f1s.Status -eq 'COPIED') -and ((Get-Item -LiteralPath "$oldNas\d\epoch.tar").LastWriteTimeUtc -eq [datetime]'1980-01-04') -and ($e1.Detail -like '*clamped*1970-01-01*')) "$($e1.Status) $($e1.Detail)"
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   Check 'M21 ... the next pass: both PRESENT (not REPAIRED - a finished copy never looks incomplete)' ((@($res | Where-Object { $_.Status -eq 'PRESENT' }).Count -eq 2)) (($res | ForEach-Object { $_.Status }) -join ',')
   $oldState = TreeHashes $oldNas
@@ -349,6 +351,68 @@ try {
   (Get-Item -LiteralPath $st).IsReadOnly = $true
   $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
   Check 'M35 a READ-ONLY stale temp beside a PRESENT file is removed' (((StatusOf $res 'd\fat.tar').Detail -like '*removed a stale*') -and -not (Test-Path -LiteralPath $st))
+  # a leftover temp that cannot be removed (locked) before a first copy
+  Blob "$old\d\stuck.tar" 1800
+  Set-Content -LiteralPath "$oldNas\d\stuck.tar.cf-partial" -Value 'old temp' -Encoding ascii
+  $lock3 = [System.IO.File]::Open("$oldNas\d\stuck.tar.cf-partial", 'Open', 'Read', 'None')
+  try { $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas) } finally { $lock3.Close() }
+  $sk = StatusOf $res 'd\stuck.tar'
+  Check 'M37 a leftover temp that cannot be removed: FAIL-COPY "a leftover ... could not be removed" + "WARNING: temp ... could not be removed", final never created' (($sk.Status -eq 'FAIL-COPY') -and ($sk.Detail -like '*a leftover*could not be removed*') -and ($sk.Detail -like '*WARNING: temp*could not be removed*') -and -not (Test-Path -LiteralPath "$oldNas\d\stuck.tar")) "$($sk.Status) $($sk.Detail)"
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M37b unlocked, the next pass replaces the temp and COPIES the file' (((StatusOf $res 'd\stuck.tar').Status -eq 'COPIED') -and -not (Test-Path -LiteralPath "$oldNas\d\stuck.tar.cf-partial"))
+
+  # a FILE symlink at the NAS name (the reparse half of Test-NasOddEntry)
+  $fsTarget = Join-Path $root 'fs-target.bin'; Blob $fsTarget 1600
+  Blob "$old\d\fsl.tar" 1600
+  $null = cmd /c "mklink `"$oldNas\d\fsl.tar`" `"$fsTarget`"" 2>&1
+  if (Test-Path -LiteralPath "$oldNas\d\fsl.tar") {
+    $tgtHash = Sha256Of $fsTarget
+    $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+    Check 'M38 a FILE SYMLINK at the NAS name: FAIL-COPY (reparse point), the link and its target untouched' (((StatusOf $res 'd\fsl.tar').Status -eq 'FAIL-COPY') -and ((StatusOf $res 'd\fsl.tar').Detail -like '*reparse point*') -and ((Sha256Of $fsTarget) -eq $tgtHash))
+    $null = cmd /c "del `"$oldNas\d\fsl.tar`"" 2>&1
+  } else { Check 'M38 (file symlinks cannot be created on this host - developer mode off?)' $false 'mklink failed' }
+  Remove-Item -LiteralPath "$old\d\fsl.tar" -Force
+
+  # upper-case sidecar is normalised
+  Blob "$old\d\upside.tar" 900
+  Set-Content -LiteralPath "$old\d\upside.tar.sha256" -Value ((Sha256Of "$old\d\upside.tar").ToUpperInvariant() + '  upside.tar') -Encoding ascii
+  Check 'M31c an UPPER-CASE <file>.sha256 is read in lower case' ((Get-NasRecordedHash "$old\d\upside.tar").Hash -ceq (Sha256Of "$old\d\upside.tar"))
+  Remove-Item -LiteralPath "$old\d\upside.tar", "$old\d\upside.tar.sha256" -Force
+
+  Write-Host "== L: links under the local source are REFUSED, never followed (tester attempt 5: F14)"
+  $lk = Join-Path $root 'linksrc'; $lkNas = Join-Path $root 'linknas'; $lkOut = Join-Path $root 'linkout'
+  New-Item -ItemType Directory -Force -Path "$lk\arch\inner", "$lkOut\folder" | Out-Null
+  Blob "$lk\arch\real.tar" 800; Blob "$lk\arch\inner\deep.tar" 800
+  Blob "$lkOut\folder\behind-link.tar" 800; Blob "$lkOut\file-behind-link.tar" 800
+  Set-Content -LiteralPath "$lk\top-script.sh" -Value 'echo' -Encoding ascii
+  $linkCases = @(
+    @{ N = 'nested junction';          Mk = "mklink /J `"$lk\arch\inner\jn`" `"$lkOut\folder`"";      P = "$lk\arch\inner\jn";       Rm = 'rmdir' }
+    @{ N = 'nested directory symlink'; Mk = "mklink /D `"$lk\arch\inner\dl`" `"$lkOut\folder`"";      P = "$lk\arch\inner\dl";       Rm = 'rmdir' }
+    @{ N = 'nested file symlink';      Mk = "mklink `"$lk\arch\inner\fl.tar`" `"$lkOut\file-behind-link.tar`""; P = "$lk\arch\inner\fl.tar"; Rm = 'del' }
+    @{ N = 'top-level junction';       Mk = "mklink /J `"$lk\topjn`" `"$lkOut\folder`"";              P = "$lk\topjn";               Rm = 'rmdir' }
+    @{ N = 'top-level file symlink';   Mk = "mklink `"$lk\top-link.sh`" `"$lkOut\file-behind-link.tar`""; P = "$lk\top-link.sh";   Rm = 'del' }
+  )
+  foreach ($lc in $linkCases) {
+    $null = cmd /c $lc.Mk 2>&1
+    $made = Test-Path -LiteralPath $lc.P
+    $msg = ''; $threw = $false
+    try { $null = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas) } catch { $threw = $true; $msg = $_.Exception.Message }
+    Check "L1 $($lc.N): the pass THROWS naming it, nothing archived" ($made -and $threw -and ($msg -like "*$($lc.P)*") -and -not (Test-Path -LiteralPath $lkNas)) "made=$made threw=$threw msg=$msg"
+    $null = cmd /c "$($lc.Rm) `"$($lc.P)`"" 2>&1
+  }
+  $res = @(Invoke-NasArchivePass -Source $lk -Destination $lkNas)
+  Check 'L2 with the links removed the same tree archives normally (2 files, nothing from behind the links)' ((@($res | Where-Object { $_.Status -eq 'COPIED' }).Count -eq 2) -and -not (Test-Path -LiteralPath "$lkNas\arch\inner\jn"))
+  Check 'L3 the live-layout rule: a source whose ROOT is a link is refused too' ($(try { $null = cmd /c "mklink /J `"$root\lkroot`" `"$lk`"" 2>&1; $null = @(Invoke-NasArchivePass -Source "$root\lkroot" -Destination (Join-Path $root 'linknas2')); $false } catch { $_.Exception.Message -like '*lkroot*' } finally { $null = cmd /c "rmdir `"$root\lkroot`"" 2>&1 }))
+
+  # the ROOT of the source unreadable
+  $deniedRoot = Join-Path $root 'deniedroot'
+  New-Item -ItemType Directory -Force -Path "$deniedRoot\sub" | Out-Null; Blob "$deniedRoot\sub\x.tar" 500
+  $sidR = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $null = & icacls $deniedRoot /deny "*${sidR}:(RX)" 2>&1
+  try {
+    $threw = $false; try { $null = @(Invoke-NasArchivePass -Source $deniedRoot -Destination (Join-Path $root 'nas10')) } catch { $threw = $true }
+    Check 'M39 the source ROOT itself unreadable (access denied): the pass THROWS' $threw
+  } finally { $null = & icacls $deniedRoot /remove:d "*$sidR" 2>&1 }
   foreach ($f in @(Get-ChildItem -LiteralPath $old, $oldNas -Recurse -File -Force)) { $f.IsReadOnly = $false }
 
   Write-Host "== P: a slot spelling never reaches the archive pass (local stand-in)"
@@ -448,6 +512,20 @@ try {
   [System.IO.File]::WriteAllLines("$ghostSrc\g\SHA256SUMS", [string[]]@("$(Sha256Of "$ghostSrc\g\real.tar") *real.tar", (('0' * 64) + ' *ghost.tar')))
   $r = RunCopyTo (Join-Path $root 'nas6\archive') @('-Dirs', 'g') $ghostSrc
   Check 'C14 a SHA256SUMS entry with no local file is MISSING LOCAL, exit 1 (the present file still VERIFIED)' (($r.Rc -eq 1) -and ($r.Out -match 'MISSING LOCAL\s+g\\ghost\.tar') -and ($r.Out -match 'real\.tar.*VERIFIED')) "rc=$($r.Rc)"
+  $ghost2 = Join-Path $root 'ghostsrc2'
+  New-Item -ItemType Directory -Force -Path "$ghost2\g\hid" | Out-Null
+  (Get-Item -LiteralPath "$ghost2\g\hid").Attributes = 'Hidden, Directory'
+  Blob "$ghost2\g\hid\here.tar" 700
+  [System.IO.File]::WriteAllLines("$ghost2\g\hid\SHA256SUMS", [string[]]@("$(Sha256Of "$ghost2\g\hid\here.tar") *here.tar", (('1' * 64) + ' *gone.tar')))
+  $r = RunCopyTo (Join-Path $root 'nas11\archive') @('-Dirs', 'g') $ghost2
+  Check 'C14b a SHA256SUMS in a HIDDEN folder is read too: its missing entry is MISSING LOCAL' (($r.Rc -eq 1) -and ($r.Out -match 'MISSING LOCAL\s+g\\hid\\gone\.tar')) "rc=$($r.Rc) out=$($r.Out)"
+  $cl = Join-Path $root 'copylink'
+  New-Item -ItemType Directory -Force -Path "$cl\k\inner", "$root\copylink-out" | Out-Null
+  Blob "$cl\k\a.tar" 600; Blob "$root\copylink-out\b.tar" 600
+  $null = cmd /c "mklink /J `"$cl\k\inner\jn`" `"$root\copylink-out`"" 2>&1
+  $r = RunCopyTo (Join-Path $root 'nas12\archive') @('-Dirs', 'k') $cl
+  Check 'C17 the copy script: a junction nested under a -Dirs directory is FAIL LINK naming it, exit 1, nothing from that directory copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\k\inner\jn")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas12\archive\k'))) "rc=$($r.Rc) out=$($r.Out)"
+  $null = cmd /c "rmdir `"$cl\k\inner\jn`"" 2>&1
 
   $lkSrc = Join-Path $root 'lksrc'
   New-Item -ItemType Directory -Force -Path "$lkSrc\k" | Out-Null
@@ -613,6 +691,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   Write-Host "== J: backup-to-nas.ps1 end to end (stubbed SMB, local stand-in share)"
   $r = RunStubbed $job "NasUncRoot=$unc"
   Check 'J1 happy run: exit 0 and the completion marker' (($r.Code -eq 0) -and ($r.Log -match '=== NAS sync complete ===')) "code=$($r.Code)"
+  Check 'J1s the log carries the per-status summary (archive pass summary: COPIED=9)' ($r.Log -match 'archive pass summary: COPIED=9\b')
   Check 'J1b call order: net use /delete, net use, slot mirror, net use /delete - no other robocopy, no alert' ((Kinds $r) -eq 'NET,NET,ROBO-MIR,NET') (Kinds $r)
   Check 'J1c the archive pass wrote to \\<ip>\backups\ai-stack\archive (temp name, then rename)' ((@($r.Trace | Where-Object { $_ -like 'COPY|\\192.0.2.77\backups\ai-stack\archive\*.cf-partial' }).Count -eq 9) -and (@($r.Trace | Where-Object { $_ -like 'MOVE|\\192.0.2.77\backups\ai-stack\archive\*' -and $_ -notlike '*.cf-partial' }).Count -eq 9)) "copies=$(@($r.Trace | Where-Object { $_ -like 'COPY|*' }).Count)"
   Check 'J1d the stand-in archive = ./backup subdirectory files, the slot = ./backups' ((SameTree $eArch (TreeHashes $nasArc)) -and (SameTree (TreeHashes "$eproj\backups") (TreeHashes (Join-Path $share "ai-stack\portal\$slot"))))
@@ -632,12 +711,14 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   $jt = "$eproj\backup\orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar"
   $svj = Save-Local $jt
   [System.IO.File]::WriteAllBytes($jt, [byte[]]@())
+  $jm = "$eproj\backup\models\models-export.json"; $svjm = Save-Local $jm
+  Add-Content -LiteralPath $jm -Value 'changed' -Encoding ascii
   $r = RunStubbed $job "NasUncRoot=$unc"
   Check 'J3 a complete NAS copy that differs from local: exit 2, NO completion marker, NAS untouched' (($r.Code -eq 2) -and ($r.Log -notmatch '=== NAS sync complete ===') -and (SameTree $arcState (TreeHashes $nasArc))) "code=$($r.Code)"
-  Check 'J3b ... an [ERROR] MISMATCH line with the Trust verdict, one alert, the integrity check still ran, session torn down' (($r.Log -match '\[ERROR\] archive: MISMATCH orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar .*NOTHING was overwritten\. Trust: UNKNOWN') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|nas-backup.failure|*archive pass: 1 file*' }).Count -eq 1) -and ($r.Log -match 'verifying a sample') -and ($r.Trace[-1] -like 'NET|use*/delete*'))
+  Check 'J3b ... [ERROR] MISMATCH lines with the Trust verdict, ONE alert naming BOTH files, MISMATCH=2 in the summary, the integrity check still ran, session torn down' (($r.Log -match '\[ERROR\] archive: MISMATCH orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar .*NOTHING was overwritten\. Trust: UNKNOWN') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|nas-backup.failure|*archive pass: 2 file*' -and $_ -like '*ai-stack_llm-gateway-db-data.tar*' -and $_ -like '*models-export.json*' }).Count -eq 1) -and ($r.Log -match 'archive pass summary: .*MISMATCH=2') -and ($r.Log -match 'verifying a sample') -and ($r.Trace[-1] -like 'NET|use*/delete*'))
   $r = RunStubbed $job "NasUncRoot=$unc|DryRun"
   Check 'J4 dry run with that mismatch: exit 2, no DRY RUN complete, alert, nothing written' (($r.Code -eq 2) -and ($r.Log -notmatch 'DRY RUN\) complete') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'COPY|*' -or $_ -like 'MOVE|*' })) "code=$($r.Code)"
-  Restore-Local $svj
+  Restore-Local $svj; Restore-Local $svjm
 
   Blob "$eproj\backup\models\later.json" 700
   $shareBefore = TreeHashes $share
@@ -682,6 +763,14 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
     $null = & icacls $den /remove:d "*$sid" 2>&1
     Remove-Item -LiteralPath $den -Recurse -Force
   }
+  # a nested junction under ./backup through the job
+  $jOut = Join-Path $root 'j-link-out'; New-Item -ItemType Directory -Force -Path $jOut | Out-Null; Blob "$jOut\hidden-behind.tar" 400
+  $jl = "$eproj\backup\models\linked"
+  $null = cmd /c "mklink /J `"$jl`" `"$jOut`"" 2>&1
+  try {
+    $r = RunStubbed $job "NasUncRoot=$unc"
+    Check 'J14 a junction nested under ./backup through the job: [ERROR] FAIL-COPY (pass) naming it, one alert, exit 2, NO marker' (($r.Code -eq 2) -and ($r.Log -match ('\[ERROR\] archive: FAIL-COPY \(pass\) refusing to archive through links.*' + [regex]::Escape($jl))) -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
+  } finally { $null = cmd /c "rmdir `"$jl`"" 2>&1 }
   # the job's FAIL-LOCAL line carries the Trust verdict
   $jr = "$eproj\backup\nas-archive-may2025-owui\may2025-chats-export.json"
   $svjr = Save-Local $jr

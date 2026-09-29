@@ -24,10 +24,11 @@ Backups land in repo-root `./backups/<service>/`, newest-per-service, with a
 (`scripts/backup/backup-to-nas.ps1`) copies all of `./backups/` to
 `\\<nas>\backups\...\slot-A|B`. The same run copies the cold archives in
 `./backup/` (singular - the orphan-volume tars, the May-2025 Open WebUI volumes,
-the OWUI model exports, i.e. every file in a SUBDIRECTORY of `./backup/`) to a
-sibling folder, `\\<nas>\backups\...\archive`, as sha256-verified copies: never
-mirrored and a complete copy never replaced, so an archive deleted or damaged on
-D: stays intact on the NAS (§8).
+the OWUI model exports, i.e. every file in a SUBDIRECTORY of `./backup/`; any
+junction or symbolic link anywhere under `./backup/` fails the run instead of being
+followed) to a sibling folder, `\\<nas>\backups\...\archive`, as sha256-verified
+copies: never mirrored and a complete copy never replaced (the one exception: a complete NAS copy that ANOTHER tool stamped inside robocopy's unfinished-copy window (1979-12-31 to 1980-01-02 UTC) cannot be told from an unfinished one and is re-copied from the local file), so an
+archive deleted or damaged on D: stays intact on the NAS (§8).
 
 | Service | Type | Artifact | Restore tool |
 |---|---|---|---|
@@ -185,7 +186,7 @@ procedure. Prefer the newer slot unless it is the corrupted set.
 The cold archives from `./backup/` are NOT in the slots: they are in the
 `archive` folder next to them (`\\<nas>\backups\ai-stack\archive\<dir>\`),
 copied one file at a time (temp name, sha256 check, rename) and never replaced or
-purged. If a complete NAS copy and the local file differ, the weekly run FAILS
+purged (the one exception: a complete NAS copy that ANOTHER tool stamped inside robocopy's unfinished-copy window (1979-12-31 to 1980-01-02 UTC) cannot be told from an unfinished one and is re-copied from the local file). If a complete NAS copy and the local file differ, the weekly run FAILS
 with an `[ERROR] archive: <STATUS> <file> ...` line in `logs/nas-sync-*.log`, an
 alert, and no completion marker (`nas-offsite` goes red). Nothing on the NAS is
 overwritten in any of them. What each means and what to do:
@@ -194,7 +195,7 @@ overwritten in any of them. What each means and what to do:
 |---|---|---|
 | `FAIL-LOCAL` | the LOCAL file contradicts the checksum recorded beside it (its `SHA256SUMS` entry or `<file>.sha256`), or those two records disagree with each other; it was not copied. THE RECORD ITSELF CAN BE THE BAD PART | read `Trust:` - `NAS` = the NAS copy matches the record: restore the local file from it; `RECORD` = the local file and the NAS copy agree with each other but not with the record, or the two records disagree: fix the recorded checksum (re-derive it from a copy you trust), the next run then copies normally; `NONE ON NAS` = never archived: the local file may be damaged - or the record is wrong: check the record against another copy before recovering; `NEITHER` = local, NAS and record all differ: investigate, starting with the record |
 | `MISMATCH` | the NAS copy is complete but differs from the local file | `Trust: LOCAL` = the local file matches its recorded checksum, the NAS copy is damaged: after checking, move the NAS copy aside and let the next run (or `copy-archives-to-nas.ps1`) copy it again; `Trust: UNKNOWN` = no recorded checksum: compare both by hand and decide |
-| `FAIL-COPY` | this one file could not be written, verified or renamed (share full or read-only, network drop, the local file locked or unreadable, another run wrote the file meanwhile, or a directory / junction sits at the file's name or its `.cf-partial` temp name - never written through), or `(pass)`: the pass itself failed, e.g. an archive folder under `./backup/` could not be listed (access denied) | read the reason in the line; fix the cause; the next run retries. Our temp file is removed; if it could not be, the line says `temp ... could not be removed` - delete that `.cf-partial` by hand. The other files of the pass are still processed |
+| `FAIL-COPY` | this one file could not be written, verified or renamed (share full or read-only, network drop, the local file locked or unreadable, another run wrote the file meanwhile, or a directory / junction sits at the file's name or its `.cf-partial` temp name - never written through), or `(pass)`: the pass itself failed, e.g. an archive folder under `./backup/` could not be listed (access denied) or a junction / symbolic link was found under `./backup/` (the line names it; replace it with the real folder or file) | read the reason in the line; fix the cause; the next run retries. Our temp file is removed; if it could not be, the line says `temp ... could not be removed` - delete that `.cf-partial` by hand. The other files of the pass are still processed |
 
 Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.
