@@ -44,6 +44,7 @@ The inbound half of
 | `bridge.py` | poller + per-thread workers + session table + follow registry (`state/state.json`) |
 | `approval_server.py` | stdio MCP server loaded into each turn; relays permission prompts to the thread; exposes the `follow_thread`/`unfollow`/`list_follows` tools |
 | `test_follows.py` | unit tests for the follow/auto-wake matcher (`python test_follows.py`) |
+| `test_interactive_threads.py` | end-to-end: real bridge + a copy of the notifier against a stub Mattermost and a fake `claude` (interactive-thread replies, one thread per headless session, the background-work preamble); needs Git Bash |
 | `state/` | *(gitignored)* session map, `bridge.log`, audit logs (`audit.jsonl`, `approvals.jsonl`), per-turn MCP configs, pending `follow-req-*.json` handoffs |
 
 *(A `run-bridge.ps1` supervisor existed briefly on 2026-07-13 and was removed the same day —
@@ -195,6 +196,45 @@ bridge thread's first message becomes its `title` in `state/state.json`, bridge 
 named `mm <title>` in the `/resume` picker, result footers carry the id prefix, and a
 `state.json` thread key opens as `http://localhost:8065/<team>/pl/<post-id>`.
 
+### Threads opened by interactive sessions (2026-09-28, cf-bridge)
+
+Interactive (terminal/VS Code) sessions post their turn-end and permission pings into this
+channel too, one thread per session, through `scripts/notify-mattermost.sh` (the Stop and
+Notification hook in `.claude/settings.local.json`). That script records each thread in
+`scripts/.mm-session-threads` (gitignored), one line per event, last line per key wins:
+`<8-char key> <root post id> [<full session id>]`, or `<key> -` when that root died. The full
+id is written by the first Stop-hook run; the Notification hook only knows the 8 characters.
+
+The bridge reads that map (`BRIDGE_NOTIFY_THREADS` overrides the path). **A reply in an
+interactive session's thread starts nothing.** The bridge answers in the thread that the session
+lives at the desk, and offers `fork <full id> <message>` (a forked copy runs here; the desk
+session is untouched) or `handoff <full id> <message>` (only once it is closed at the desk).
+Replying with either starts the attach at once. Replies sent while that first turn is still
+running are queued behind it, and a mid-turn `approve` is a verdict as usual. If the attach
+succeeds, the queued replies go to the attached session and the thread is an ordinary bridge
+thread from then on. If it FAILS (for example, a mistyped id, or a desk session whose
+transcript lives under another project directory), no session is bound. Each queued reply is
+then answered "the fork/handoff for this thread did not attach" with the offer again, and
+nothing is started.
+When only the key is known, the offer says to find the full id with `sessions <key>`.
+
+Before this, such a reply started a brand-new headless session with none of the desk session's
+context. The live audit shows it happened on 2026-09-28 (thread `aiou1nmo`).
+
+Headless bridge sessions load the same local settings, so they fired the notifier as well and
+each one opened a **second** thread beside its bridge thread. `run_turn` now exports
+`CLAUDE_BRIDGE_THREAD=<thread root>` to every turn. Under that marker the notifier behaves
+like this:
+- A run whose session id came from a hook payload on stdin (the Stop hook) does nothing.
+- A run with `MM_SESSION_ID` set posts under THAT session's thread, opening it and writing the
+  map if needed. The caller named the session on purpose. Stdin is not read then, so this
+  holds even if a hook payload is piped in.
+- Every other call posts FLAT, whatever its text says: a manual `notify-mattermost.sh "msg"`,
+  a watchdog alert, or anything with garbage or an id-less payload on stdin. Its text is never
+  mined for a `session <8 hex>` id there.
+- The live Notification hook passes its text with stdin closed, so it too posts one flat
+  message (with the operator mention), never a thread.
+
 ## Follows — auto-wake on replies in other threads (2026-07-15)
 
 A session can **subscribe to any Mattermost thread (or whole channel)** and be woken —
@@ -274,3 +314,8 @@ cross-talk with this bridge's approval flow. The operator removed bot-pm from th
 - The bridge polls (default 4 s); no websocket yet.
 - Verdict words (`approve/deny/yes/no/ok/stop…`) posted while a turn is running are consumed
   as verdicts, not prompts — phrase mid-turn steering as full sentences.
+- **Background work does not survive a turn.** A turn is one `claude -p` process. Nothing in the
+  bridge resumes a session because a command finished; only an operator message or a follow
+  wake does that. So a `run_in_background` task, a Monitor or a background agent is lost at
+  turn end. `REMOTE_NOTE` tells every headless session this: wait in-turn (up to
+  `BRIDGE_TURN_TIMEOUT`), or `follow_thread` for an async Mattermost reply.
