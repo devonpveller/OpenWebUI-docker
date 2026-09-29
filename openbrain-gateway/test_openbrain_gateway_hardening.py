@@ -613,3 +613,203 @@ def test_surrogate_replies_through_the_handler_are_strict_utf8(upstream):
     r = _list_with_id(upstream, "\ud800", _json_reply(_surrogate_list()))
     assert r.status_code == 200
     r.content.decode("utf-8")
+
+
+# --- attempt-4 findings: SSE framing (X5 BOM, X6 Unicode line breaks) and the
+# --- decode itself (survivors Y2 Y4-Y10) ------------------------------------------
+
+import re as _re  # noqa: E402
+
+
+def _client_events(raw: bytes):
+    """What an EventSource-conformant client dispatches: UTF-8 decode with
+    replacement, one leading BOM stripped, lines on CR/LF only, data lines
+    joined with LF, an event dispatched at a blank line."""
+    t = raw.decode("utf-8", "replace")
+    if t.startswith("\ufeff"):
+        t = t[1:]
+    events, data = [], []
+    for line in _re.split(r"\r\n|\r|\n", t):
+        if line == "":
+            if data:
+                events.append("\n".join(data))
+            data = []
+            continue
+        if line.startswith(":"):
+            continue
+        f, _, v = line.partition(":")
+        if v.startswith(" "):
+            v = v[1:]
+        if f == "data":
+            data.append(v)
+    return events
+
+
+def _client_advertised(raw: bytes):
+    names = set()
+    for d in _client_events(raw):
+        try:
+            for t in json.loads(d)["result"]["tools"]:
+                names.add(t.get("name"))
+        except Exception:
+            pass
+    return names
+
+
+def _sse(upstream, raw, ct="text/event-stream"):
+    return _list(upstream, lambda req: httpx.Response(200, content=raw, headers={"content-type": ct}))
+
+
+_J = json.dumps(_FULL_LIST).encode()
+
+
+def _assert_sse_closed(r, expect):
+    assert r.status_code == 200, (r.status_code, r.text[:200])
+    body = r.content
+    body.decode("utf-8")
+    assert _client_advertised(body) == expect, _client_advertised(body)
+    assert b"thought_stats" not in body
+
+
+@pytest.mark.parametrize("raw", [
+    b"\xef\xbb\xbfdata: " + _J + b"\n\n",
+    b"\xef\xbb\xbfevent: message\ndata: " + _J + b"\n\n",
+], ids=["bom-data-first", "bom-event-first"])
+def test_sse_leading_bom_is_stripped_and_the_list_filtered(upstream, raw):
+    # X5: a kept BOM hid the first line from the gateway; a client strips it.
+    _assert_sse_closed(_sse(upstream, raw), _ALLOWED)
+
+
+def test_sse_only_one_bom_is_stripped(upstream):
+    # The spec strips ONE; after it, "\ufeffdata" is an unknown field name, so a
+    # client dispatches nothing - the gateway must not "repair" it either.
+    r = _sse(upstream, b"\xef\xbb\xbf\xef\xbb\xbfdata: " + _J + b"\n\n")
+    _assert_sse_closed(r, set())
+    assert b"data:" not in r.content
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\u0085"], ids=["u2028", "u2029", "u0085"])
+def test_sse_unicode_line_separator_inside_a_valid_string(upstream, sep):
+    # X6: JSON allows these raw in a string; they are NOT SSE line breaks.
+    tools = [dict(t, description="a" + sep + "b") for t in _UPSTREAM_TOOLS]
+    payload = {"jsonrpc": "2.0", "id": 7, "result": {"tools": tools}}
+    raw = b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
+    r = _sse(upstream, raw)
+    _assert_sse_closed(r, _ALLOWED)
+    ev = json.loads(_client_events(r.content)[0])
+    assert {t["description"] for t in ev["result"]["tools"]} == {"a" + sep + "b"}
+    assert sep.encode("utf-8") not in r.content  # re-serialised ASCII, never copied
+
+
+@pytest.mark.parametrize("eol", [b"\r", b"\r\n", b"\n"], ids=["cr", "crlf", "lf"])
+def test_sse_cr_crlf_lf_line_endings(upstream, eol):
+    raw = b"event: message" + eol + b"data: " + _J + eol + eol
+    r = _sse(upstream, raw)
+    _assert_sse_closed(r, _ALLOWED)
+    assert r.content.startswith(b"event: message\ndata: ")
+
+
+def test_sse_multi_line_data_event_is_joined_then_filtered(upstream):
+    # A client joins data lines with LF; JSON whitespace allows the break.
+    text = json.dumps(_FULL_LIST, indent=1).encode()
+    raw = b"event: message\n" + b"".join(b"data: " + ln + b"\n" for ln in text.split(b"\n")) + b"\n"
+    r = _sse(upstream, raw)
+    _assert_sse_closed(r, _ALLOWED)
+    assert r.content.count(b"data:") == 1
+
+
+def test_sse_comments_and_unknown_fields_are_not_copied(upstream):
+    raw = (b": thought_stats in a comment\n"
+           b"foo: thought_stats in an unknown field\n"
+           b"event: message\ndata: " + _J + b"\n\n")
+    r = _sse(upstream, raw)
+    _assert_sse_closed(r, _ALLOWED)
+    assert b"comment" not in r.content and b"foo" not in r.content
+
+
+def test_sse_trailing_event_without_a_blank_line(upstream):
+    r = _sse(upstream, b"event: message\ndata: " + _J)
+    _assert_sse_closed(r, _ALLOWED)
+    assert r.content.endswith(b"\n\n")
+
+
+def test_sse_unterminated_garbage_is_not_copied(upstream):
+    r = _sse(upstream, b"event: message\ndata: " + _J + b"\n\n" + b"thought_stats tail")
+    _assert_sse_closed(r, _ALLOWED)
+
+
+def test_sse_content_type_is_matched_case_insensitively(upstream):
+    r = _sse(upstream, b"data: " + _J + b"\n\n", ct="Text/Event-Stream")
+    assert r.headers["content-type"].startswith("text/event-stream")
+    _assert_sse_closed(r, _ALLOWED)
+
+
+def test_valid_sse_event_id_and_data_keep_their_framing(upstream):
+    raw = b"event: message\nid: 1\ndata: " + _J + b"\n\n"
+    r = _sse(upstream, raw)
+    filtered = json.loads(_J)
+    filtered["result"]["tools"] = [t for t in filtered["result"]["tools"]
+                                   if t["name"] in _ALLOWED]
+    assert r.content == b"event: message\nid: 1\ndata: " + json.dumps(filtered).encode() + b"\n\n"
+
+
+# Raw (unescaped) UTF-8 non-ASCII must come through exactly - pins the decode
+# (a latin-1 / cp1252 decode turns it into mojibake: survivors Y4, Y5, Y10).
+_RAW_DESC = "caf\u00e9 \u65e5\u672c \U0001f600 \u00a0"
+
+
+def _raw_utf8_payload():
+    tools = [dict(t, description=_RAW_DESC) for t in _UPSTREAM_TOOLS]
+    return json.dumps({"jsonrpc": "2.0", "id": 7, "result": {"tools": tools}},
+                      ensure_ascii=False).encode("utf-8")
+
+
+def test_valid_raw_utf8_json_reply_is_decoded_as_utf8(upstream):
+    raw = _raw_utf8_payload()
+    assert not raw.isascii()
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=raw, headers={"content-type": "application/json"}))
+    body = json.loads(r.content.decode("utf-8"))
+    assert _names(body) == _ALLOWED
+    assert {t["description"] for t in body["result"]["tools"]} == {_RAW_DESC}
+
+
+def test_valid_raw_utf8_sse_reply_is_decoded_as_utf8(upstream):
+    r = _sse(upstream, b"event: message\ndata: " + _raw_utf8_payload() + b"\n\n")
+    ev = json.loads(_client_events(r.content)[0])
+    assert {t["description"] for t in ev["result"]["tools"]} == {_RAW_DESC}
+    assert {t["name"] for t in ev["result"]["tools"]} == _ALLOWED
+
+
+# An invalid UTF-8 byte inside a kept string is REPLACED (U+FFFD) and the list
+# still served - neither dropped (errors="ignore": Y7), nor escaped into
+# invalid JSON (backslashreplace: Y8), nor fatal (strict: Y1, Y2).
+def _bad_byte_payload():
+    return _J.replace(b'"inputSchema": {}}', b'"inputSchema": {}, "description": "x\xffy"}')
+
+
+def test_invalid_utf8_byte_in_a_json_reply_is_replaced(upstream):
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=_bad_byte_payload(), headers={"content-type": "application/json"}))
+    body = json.loads(r.content.decode("utf-8"))
+    assert _names(body) == _ALLOWED
+    assert {t["description"] for t in body["result"]["tools"]} == {"x\ufffdy"}
+
+
+def test_invalid_utf8_byte_in_an_sse_reply_is_replaced(upstream):
+    r = _sse(upstream, b"event: message\ndata: " + _bad_byte_payload() + b"\n\n")
+    ev = json.loads(_client_events(r.content)[0])
+    assert {t["name"] for t in ev["result"]["tools"]} == _ALLOWED
+    assert {t["description"] for t in ev["result"]["tools"]} == {"x\ufffdy"}
+
+
+# Behaviour change, recorded (findings F8): a JSON reply that is not plain UTF-8
+# - BOM-prefixed, or UTF-16/32 - is unfilterable and advertises NOTHING. At base
+# json.loads(bytes) auto-detected those encodings.
+@pytest.mark.parametrize("raw", [b"\xef\xbb\xbf" + _J, _J.decode().encode("utf-16"),
+                                 _J.decode().encode("utf-32")], ids=["bom", "utf16", "utf32"])
+def test_non_utf8_json_reply_advertises_nothing(upstream, raw):
+    r = _list(upstream, lambda req: httpx.Response(
+        200, content=raw, headers={"content-type": "application/json"}))
+    assert r.status_code == 200
+    assert _names(json.loads(r.content)) == set()

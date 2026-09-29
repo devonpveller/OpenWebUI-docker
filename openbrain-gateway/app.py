@@ -33,6 +33,7 @@ it the same metadata_filter / metadata_extra treatment and add it here.
 import json
 import math
 import os
+import re
 
 import httpx
 from starlette.applications import Starlette
@@ -247,6 +248,70 @@ def _closed_tools_list(rpc_id):
     return _rpc_result(rpc_id, {"tools": []})
 
 
+# SSE line terminators per the HTML Living Standard (server-sent events):
+# CRLF, CR or LF - and NOTHING else. str.splitlines() also splits at U+2028,
+# U+2029, U+0085 (and more), which JSON allows raw inside a string: it cut a
+# valid data line in two and let the tail out unparsed (attempt-4 X6).
+_SSE_EOL = re.compile(r"\r\n|\r|\n")
+
+
+def _sse_filter_tools_list(raw: bytes, list_id) -> str:
+    """Re-serialise an SSE tools/list reply, FAIL CLOSED. Parsed the way an
+    EventSource client parses it: UTF-8 decode with replacement (never the
+    charset the upstream declares - utf-7 etc. can decode to a lone surrogate,
+    attempt-3 X4; replacement never yields one), ONE leading
+    BOM stripped (attempt-4 X5 - a kept BOM hid the first `data:` line from the
+    gateway while the client, which strips it, read the whole list), lines split
+    on CR/LF only, events ended by a blank line (or the end of the body).
+
+    Only what the gateway re-serialises goes out: per event, `event:` and `id:`
+    (values as parsed), `retry:` if all digits, and ONE `data:` line holding
+    the event's data (its data lines joined with LF, as a client joins them)
+    parsed strictly and filtered, or the empty tool list if that fails.
+    Comments, unknown fields and anything unparsed are dropped, never copied."""
+    text = raw.decode("utf-8", "replace")
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    events, cur = [], []
+    for line in _SSE_EOL.split(text):
+        if line == "":
+            if cur:
+                events.append(cur)
+            cur = []
+        else:
+            cur.append(line)
+    if cur:  # a last event with no blank line after it: closed off here
+        events.append(cur)
+
+    out = []
+    for ev in events:
+        fields, data = [], None
+        for line in ev:
+            if line.startswith(":"):
+                continue  # comment
+            name, sep, value = line.partition(":")
+            if sep and value.startswith(" "):
+                value = value[1:]
+            if name == "data":
+                data = value if data is None else data + "\n" + value
+            elif name in ("event", "id"):
+                if "\0" not in value:
+                    fields.append(f"{name}: {value}")
+            elif name == "retry":
+                if value.isdigit():
+                    fields.append(f"retry: {value}")
+            # any other field name is ignored, as a client ignores it
+        if data is not None:
+            try:
+                p = _filter_tools_list(_strict_json(data))
+            except Exception:  # anything unfilterable -> advertise nothing
+                p = _closed_tools_list(list_id)
+            fields.append("data: " + json.dumps(p))
+        if fields:
+            out.append("\n".join(fields) + "\n\n")
+    return "".join(out)
+
+
 class _BodyRefused(ValueError):
     """A request body the gateway cannot apply its policy to."""
 
@@ -452,24 +517,8 @@ async def mcp(request):
         # tools/list: filter advertised tools to the cloud allow-list, FAIL
         # CLOSED - a reply that cannot be filtered is replaced, never passed
         # through (it would advertise every upstream tool).
-        if is_tools_list and "text/event-stream" in ct:
-            out_lines = []
-            # Decode the stream as UTF-8 ourselves (the MCP / SSE wire is UTF-8),
-            # NOT with the charset the upstream declares: httpx's upstream.text
-            # honours e.g. charset=utf-7 / unicode_escape, which can turn a
-            # non-data line into a lone surrogate that the reply cannot encode.
-            # errors="replace" can never yield a surrogate.
-            sse_text = upstream.content.decode("utf-8", "replace")
-            for line in sse_text.splitlines():
-                if line.startswith("data:"):
-                    try:
-                        p = _filter_tools_list(_strict_json(line[5:].strip()))
-                    except Exception:  # anything unfilterable -> advertise nothing
-                        p = _closed_tools_list(list_id)
-                    out_lines.append("data: " + json.dumps(p))
-                    continue
-                out_lines.append(line)
-            return Response("\n".join(out_lines) + "\n",
+        if is_tools_list and "text/event-stream" in ct.lower():
+            return Response(_sse_filter_tools_list(upstream.content, list_id),
                             status_code=upstream.status_code,
                             media_type="text/event-stream")
         if is_tools_list:
