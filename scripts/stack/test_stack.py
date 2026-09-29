@@ -6223,7 +6223,9 @@ def test_the_label_render_is_the_inference_plane_with_local_and_the_state_contex
 
 # --- attempt 5 (tester attempt 4): the render's context, and its strict UTF-8 capture ---------
 
-_REAL_UTF8_CAPTURE = stack.utf8_capture   # bound at import, before the hermetic fixture fences it
+# bound at import, before the hermetic fixture fences it; getattr so this file still COLLECTS
+# against an older driver and the base-red run fails per test, not at import
+_REAL_UTF8_CAPTURE = getattr(stack, "utf8_capture", None)
 
 
 def test_the_label_render_runs_on_the_inference_planes_docker_context(root, no_owui_env):
