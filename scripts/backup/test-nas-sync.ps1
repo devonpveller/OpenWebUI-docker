@@ -455,7 +455,12 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
 } catch {
   Check 'X the stand-in run finished without an unexpected error' $false ($_.Exception.Message + ' @ ' + $_.InvocationInfo.PositionMessage)
 } finally {
-  if ($Keep) { Write-Host "kept: $root" } else { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+  if ($Keep) { Write-Host "kept: $root" } else {
+    try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    # A mutant that lets `slot-A ` / `slot-B...` through makes robocopy create those
+    # names, which only the \\?\ form can delete.
+    if (Test-Path -LiteralPath $root) { cmd /c "rmdir /s /q `"\\?\$root`"" 2>&1 | Out-Null }
+  }
 }
 
 Write-Host ("RESULT: passed {0}, failed {1}" -f $script:pass, $script:fail)
