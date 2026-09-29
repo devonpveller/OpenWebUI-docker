@@ -25,11 +25,14 @@
 #   one file at a time (Invoke-NasArchivePass in nas-sync-lib.ps1): a missing
 #   file is copied to a temp name, sha256-verified, then renamed into place; a
 #   NAS copy left INCOMPLETE by an interrupted robocopy (its 1980 stamp) is
-#   re-copied the same way; a COMPLETE NAS copy is never replaced and nothing is
-#   deleted, so an archive outlives its local file. A complete NAS copy whose
-#   content differs from the local file is a MISMATCH: an [ERROR] line saying
-#   which side the recorded checksum vouches for, an alert, exit 2 and no
-#   completion marker. Why not move the archives under ./backups/ instead: both
+#   re-copied the same way (our own copies are never stamped before 1980-01-03,
+#   so they can never look like that); a COMPLETE NAS copy is never replaced and
+#   nothing but our own temps is deleted, so an archive outlives its local file.
+#   A complete NAS copy whose content differs from the local file (MISMATCH), a
+#   local file that contradicts its recorded checksum (FAIL-LOCAL) and a copy
+#   that could not be written or verified (FAIL-COPY) are each an [ERROR] line -
+#   with a Trust verdict where there is one - an alert, exit 2 and no completion
+#   marker. Why not move the archives under ./backups/ instead: both
 #   slots would hold them (~17 GB each) and the slot MIRROR would drop an archive
 #   two weeks after it left D:. The layout rules (sibling default, same share,
 #   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
@@ -478,7 +481,12 @@ if (-not $NoArchive) {
           Write-LogLine "archive: MISMATCH $($x.Rel) - the NAS copy is complete but its content differs from the local file ($($x.Detail)); NOTHING was overwritten. Trust: $($x.Trust)" 'ERROR'
           $bad += $x.Rel
         }
-        default { Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)" 'ERROR'; $bad += $x.Rel }
+        default {
+          # FAIL-LOCAL (the local file contradicts its recorded checksum) and FAIL-COPY
+          # (the copy could not be written or verified) - both mean "not safely archived".
+          Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)$(if ($x.Trust) { ". Trust: $($x.Trust)" })" 'ERROR'
+          $bad += $x.Rel
+        }
       }
     }
     $counts = ($results | Group-Object { $_.Status } | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '

@@ -186,12 +186,17 @@ The cold archives from `./backup/` are NOT in the slots: they are in the
 `archive` folder next to them (`\\<nas>\backups\ai-stack\archive\<dir>\`),
 copied one file at a time (temp name, sha256 check, rename) and never replaced or
 purged. If a complete NAS copy and the local file differ, the weekly run FAILS
-with an `[ERROR] archive: MISMATCH <file> ... Trust: <verdict>` line in
-`logs/nas-sync-*.log` (and an alert; `nas-offsite` goes red). The verdict comes
-from the checksum recorded beside the local file (its `SHA256SUMS` entry or
-`<file>.sha256`): `LOCAL` = the NAS copy is damaged, `NAS` = the local file is
-damaged, restore it from the NAS; `NEITHER` / `UNKNOWN` = compare by hand. Nothing
-is overwritten either way. Where a directory carries a
+with an `[ERROR] archive: <STATUS> <file> ...` line in `logs/nas-sync-*.log`, an
+alert, and no completion marker (`nas-offsite` goes red). Nothing on the NAS is
+overwritten in any of them. What each means and what to do:
+
+| status | means | do |
+|---|---|---|
+| `FAIL-LOCAL` | the LOCAL file contradicts the checksum recorded beside it (its `SHA256SUMS` entry or `<file>.sha256`); it was not copied | read `Trust:` - `NAS` = the NAS copy matches the recorded checksum: restore the local file from it; `NONE ON NAS` = it was never archived: recover it from another copy; `NEITHER` = no good copy found, investigate |
+| `MISMATCH` | the NAS copy is complete but differs from the local file | `Trust: LOCAL` = the local file matches its recorded checksum, the NAS copy is damaged: after checking, move the NAS copy aside and let the next run (or `copy-archives-to-nas.ps1`) copy it again; `Trust: UNKNOWN` = no recorded checksum: compare both by hand and decide |
+| `FAIL-COPY` | the copy could not be written, verified or renamed (share full or read-only, network drop, another run wrote the file meanwhile, or the pass itself failed - `(pass)`) | read the reason in the line; fix the cause; the next run retries (our temp file was removed) |
+
+Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.
 `scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`
 re-hashes the local and NAS copies of the default archive directories and says

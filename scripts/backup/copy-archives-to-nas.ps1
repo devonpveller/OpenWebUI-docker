@@ -16,12 +16,15 @@
 #   - NAS copy complete and equal                                  VERIFIED (already present)
 #   - NAS copy complete and different: MISMATCH, nothing written, and which side the
 #     recorded checksum (SHA256SUMS / <file>.sha256) vouches for
-#   - local file contradicting its SHA256SUMS: FAIL LOCAL, not copied
+#   - local file contradicting its recorded checksum (SHA256SUMS entry or
+#     <file>.sha256): FAIL LOCAL, not copied, with a Trust verdict for the NAS copy
 #   - copy hash wrong, or the final name appeared meanwhile: FAIL COPY, nothing
-#     overwritten (a *.cf-partial may remain; the next run overwrites it)
+#     overwritten, our temp removed
+#   - a stale *.cf-partial beside a verified copy is removed
 # and an entry in a SHA256SUMS whose file is not there locally is MISSING LOCAL.
 #
-# It never deletes anything and never overwrites a complete file. -VerifyOnly hashes
+# It deletes nothing but its own *.cf-partial temps and never overwrites a complete
+# file; a finished copy never carries a stamp before 1980-01-03. -VerifyOnly hashes
 # and reports without writing anything (ABSENT / INCOMPLETE for what is not there).
 #
 # Exit: 0 every file VERIFIED; 1 any ABSENT / INCOMPLETE / MISMATCH / FAIL /
@@ -119,7 +122,7 @@ try {
         'REPAIRED' { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (repaired - the NAS copy was incomplete)"; $ok++ }
         'PRESENT'  { Write-Host "$rel  $($f.Length)  $($x.Detail)  VERIFIED (already present)"; $ok++ }
         'MISMATCH' { Write-Host "MISMATCH  $rel  $($x.Detail) - NAS file left untouched. Trust: $($x.Trust)" -ForegroundColor Red; $bad++ }
-        'FAIL-LOCAL' { Write-Host "FAIL LOCAL  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
+        'FAIL-LOCAL' { Write-Host "FAIL LOCAL  $rel  $($x.Detail). Trust: $($x.Trust)" -ForegroundColor Red; $bad++ }
         'FAIL-COPY' { Write-Host "FAIL COPY  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
         default    { Write-Host "$($x.Status)  $rel  $($x.Detail)" -ForegroundColor Yellow; $bad++ }
       }

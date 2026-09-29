@@ -198,7 +198,7 @@ try {
   $res = @(Invoke-NasArchivePass -Source $backup -Destination $archive)
   Check 'M11 a changed local file (bigger) is MISMATCH, NAS copy untouched' (((StatusOf $res 'models\models-export.json').Status -eq 'MISMATCH'))
   $t2 = StatusOf $res 'extra\thing.tar'
-  Check 'M12 a local file truncated to 0 bytes is MISMATCH and the verdict is: trust the NAS (it matches thing.tar.sha256)' (($t2.Status -eq 'MISMATCH') -and ($t2.Trust -like 'NAS *')) "$($t2.Status) / $($t2.Trust)"
+  Check 'M12 a local file truncated to 0 bytes that has a thing.tar.sha256 is FAIL-LOCAL, verdict NAS (the NAS copy matches the recorded checksum)' (($t2.Status -eq 'FAIL-LOCAL') -and ($t2.Trust -like 'NAS *')) "$($t2.Status) / $($t2.Trust)"
   Check 'M12b same size, different content, different timestamp is MISMATCH (verdict UNKNOWN: no recorded checksum)' (((StatusOf $res 'orphan-volumes-2026-09-13\ai-stack_openwebui-data.tar').Status -eq 'MISMATCH') -and ((StatusOf $res 'orphan-volumes-2026-09-13\ai-stack_openwebui-data.tar').Trust -like 'UNKNOWN*'))
   Check 'M13 the whole NAS archive tree is unchanged by that pass' (SameTree $arcState (TreeHashes $archive))
   Restore-Local $sv1; Restore-Local $sv2; Restore-Local $sv3
@@ -231,6 +231,44 @@ try {
   $res = @(Invoke-NasArchivePass -Source $backup -Destination $archive -DryRun)
   Check 'M19 -DryRun: WOULD-COPY for a new file, nothing written' (((StatusOf $res 'models\new-export.json').Status -eq 'WOULD-COPY') -and (SameTree $before (TreeHashes $archive)))
   Remove-Item -LiteralPath "$backup\models\new-export.json"
+
+  Write-Host "== M2: pre-1980 stamps, read-only files, stale temps, a sidecar gate (tester attempt 3: F6 F7 F10 F11)"
+  $old = Join-Path $root 'oldsrc'; $oldNas = Join-Path $root 'oldnas'
+  New-Item -ItemType Directory -Force -Path "$old\d" | Out-Null
+  Blob "$old\d\epoch.tar" 4000; Stamp "$old\d\epoch.tar" ([datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc'))
+  Blob "$old\d\fat.tar" 5000; Stamp "$old\d\fat.tar" ([datetime]::SpecifyKind([datetime]'1980-01-01T12:00:00', 'Utc'))
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  $e1 = StatusOf $res 'd\epoch.tar'; $f1s = StatusOf $res 'd\fat.tar'
+  Check 'M20 pre-1980 local stamps (1970 epoch, FAT 1980-01-01): COPIED, NAS stamp clamped to 1980-01-03, the log detail names the original' (($e1.Status -eq 'COPIED') -and ($f1s.Status -eq 'COPIED') -and ((Get-Item -LiteralPath "$oldNas\d\epoch.tar").LastWriteTimeUtc -eq [datetime]'1980-01-03') -and ($e1.Detail -like '*clamped*1970-01-01*')) "$($e1.Status) $($e1.Detail)"
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M21 ... the next pass: both PRESENT (not REPAIRED - a finished copy never looks incomplete)' ((@($res | Where-Object { $_.Status -eq 'PRESENT' }).Count -eq 2)) (($res | ForEach-Object { $_.Status }) -join ',')
+  $oldState = TreeHashes $oldNas
+  [System.IO.File]::WriteAllBytes("$old\d\epoch.tar", [byte[]]@()); Stamp "$old\d\epoch.tar" ([datetime]::SpecifyKind([datetime]'1970-01-01', 'Utc'))
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M22 a pre-1980 local file truncated to 0 bytes: MISMATCH, the NAS copy is NOT replaced (attempt-3 F6)' (((StatusOf $res 'd\epoch.tar').Status -eq 'MISMATCH') -and (SameTree $oldState (TreeHashes $oldNas))) ((StatusOf $res 'd\epoch.tar').Status)
+  # a NAS copy made by another tool that kept the raw pre-1980 stamp, content correct
+  Blob "$old\d\raw.tar" 3000; Stamp "$old\d\raw.tar" ([datetime]::SpecifyKind([datetime]'1980-01-02', 'Utc'))
+  Copy-Item -LiteralPath "$old\d\raw.tar" -Destination "$oldNas\d\raw.tar"; Stamp "$oldNas\d\raw.tar" ([datetime]::SpecifyKind([datetime]'1980-01-02', 'Utc'))
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M22b a complete NAS copy with the SAME raw 1980 stamp as its local file is PRESENT (hashed), never REPAIRED' (((StatusOf $res 'd\raw.tar').Status -eq 'PRESENT') -and ((StatusOf $res 'd\raw.tar').Detail -like 'sha256=*'))
+  $w = "$oldNas\d\raw.tar"; [System.IO.File]::WriteAllBytes($w, (New-Object byte[] 3000)); Stamp $w ([datetime]::SpecifyKind([datetime]'1980-01-02', 'Utc'))
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M22c ... and a wrong one is MISMATCH, not REPAIRED, NAS untouched' (((StatusOf $res 'd\raw.tar').Status -eq 'MISMATCH') -and ([System.IO.File]::ReadAllBytes($w)[0] -eq 0))
+  # read-only local archive
+  Blob "$old\d\ro.tar" 6000; (Get-Item -LiteralPath "$old\d\ro.tar").IsReadOnly = $true
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M23 a READ-ONLY local archive is COPIED (attempt-3 F7), the NAS copy verified and read-only, no temp left' (((StatusOf $res 'd\ro.tar').Status -eq 'COPIED') -and ((Sha256Of "$oldNas\d\ro.tar") -eq (Sha256Of "$old\d\ro.tar")) -and (Get-Item -LiteralPath "$oldNas\d\ro.tar").IsReadOnly -and -not (Test-Path -LiteralPath "$oldNas\d\ro.tar.cf-partial")) "$((StatusOf $res 'd\ro.tar').Status) $((StatusOf $res 'd\ro.tar').Detail)"
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M23b ... and PRESENT on the next pass' ((StatusOf $res 'd\ro.tar').Status -eq 'PRESENT')
+  # stale temp beside a complete file
+  Set-Content -LiteralPath "$oldNas\d\fat.tar.cf-partial" -Value 'stale' -Encoding ascii
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M24 a stale .cf-partial beside a PRESENT file is removed (attempt-3 F11)' (((StatusOf $res 'd\fat.tar').Status -eq 'PRESENT') -and ((StatusOf $res 'd\fat.tar').Detail -like '*removed a stale*') -and -not (Test-Path -LiteralPath "$oldNas\d\fat.tar.cf-partial"))
+  # .sha256 sidecar gates the FIRST copy
+  Blob "$old\d\side.tar" 2000; Set-Content -LiteralPath "$old\d\side.tar.sha256" -Value (('ab' * 32) + '  side.tar') -Encoding ascii
+  $res = @(Invoke-NasArchivePass -Source $old -Destination $oldNas)
+  Check 'M25 a local file contradicting its .sha256 sidecar is FAIL-LOCAL before a FIRST copy (verdict NONE ON NAS), not copied (attempt-3 F10)' (((StatusOf $res 'd\side.tar').Status -eq 'FAIL-LOCAL') -and ((StatusOf $res 'd\side.tar').Trust -like 'NONE ON NAS*') -and -not (Test-Path -LiteralPath "$oldNas\d\side.tar"))
+  foreach ($f in @(Get-ChildItem -LiteralPath $old, $oldNas -Recurse -File)) { $f.IsReadOnly = $false }
 
   Write-Host "== P: a slot spelling never reaches the archive pass (local stand-in)"
   foreach ($sp in $SlotSpellings) {
@@ -294,7 +332,12 @@ try {
   $b = [byte[]]$svr.B.Clone(); $b[0] = $b[0] -bxor 0xFF; [System.IO.File]::WriteAllBytes($rot, $b)
   $r = RunCopyTo $dest3 @()
   Restore-Local $svr
-  Check 'C11 a local file that no longer matches SHA256SUMS is FAIL LOCAL and not copied' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL LOCAL\s+nas-archive-may2025-owui\\may2025-chats-export\.json') -and -not (Test-Path -LiteralPath "$dest3\nas-archive-may2025-owui\may2025-chats-export.json")) "rc=$($r.Rc)"
+  Check 'C11 a local file that no longer matches SHA256SUMS is FAIL LOCAL, not copied, verdict NONE ON NAS' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL LOCAL\s+nas-archive-may2025-owui\\may2025-chats-export\.json.*Trust: NONE ON NAS') -and -not (Test-Path -LiteralPath "$dest3\nas-archive-may2025-owui\may2025-chats-export.json")) "rc=$($r.Rc)"
+  $svr = Save-Local $rot
+  [System.IO.File]::WriteAllBytes($rot, $b)
+  $r = RunCopyTo $dest @('-Dirs', 'nas-archive-may2025-owui', '-VerifyOnly')
+  Restore-Local $svr
+  Check 'C11b the same damaged local file where the NAS holds a good copy: FAIL LOCAL, verdict NAS (restore from it)' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL LOCAL\s+nas-archive-may2025-owui\\may2025-chats-export\.json.*Trust: NAS')) "rc=$($r.Rc)"
 
   $dest4 = Join-Path $root 'nas4\archive'
   New-Item -ItemType Directory -Force -Path "$dest4\orphan-volumes-2026-09-13" | Out-Null
@@ -377,6 +420,7 @@ function global:robocopy.exe {
 }
 function global:Get-ChildItem {
   [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$Filter, [switch]$Recurse, [switch]$File, [switch]$Directory, [switch]$Force)
+  if ($Directory -and $env:CFNAS_THROW_LIST -eq '1') { throw 'stub: listing the archive source failed' }
   if ($PSBoundParameters.ContainsKey('Path')) { $PSBoundParameters['Path'] = @($Path | ForEach-Object { Map-CfPath $_ }) }
   if ($PSBoundParameters.ContainsKey('LiteralPath')) { $PSBoundParameters['LiteralPath'] = @($LiteralPath | ForEach-Object { Map-CfPath $_ }) }
   Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
@@ -409,6 +453,14 @@ function global:Copy-Item {
   if ($PSBoundParameters.ContainsKey('LiteralPath')) { $PSBoundParameters['LiteralPath'] = @($LiteralPath | ForEach-Object { Map-CfPath $_ }) }
   if ($PSBoundParameters.ContainsKey('Destination')) { $PSBoundParameters['Destination'] = Map-CfPath $Destination }
   Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters
+}
+function global:Remove-Item {
+  [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [switch]$Force, [switch]$Recurse)
+  $t = if ($LiteralPath) { $LiteralPath[0] } else { $Path[0] }
+  if (Test-CfShare $t) { Add-Content -LiteralPath $env:CFNAS_TRACE -Value "REMOVE|$t" }
+  if ($PSBoundParameters.ContainsKey('Path')) { $PSBoundParameters['Path'] = @($Path | ForEach-Object { Map-CfPath $_ }) }
+  if ($PSBoundParameters.ContainsKey('LiteralPath')) { $PSBoundParameters['LiteralPath'] = @($LiteralPath | ForEach-Object { Map-CfPath $_ }) }
+  Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
 }
 function global:Move-Item {
   [CmdletBinding()] param([Parameter(Position = 0)][string[]]$Path, [string[]]$LiteralPath, [string]$Destination, [switch]$Force)
@@ -444,7 +496,7 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
     Get-ChildItem -LiteralPath "$eproj\logs" -File | Remove-Item -Force
     $saved = @{}
     $vars = @{ CFNAS_TRACE = $trace; CFNAS_SHARE = $share; CFNAS_PARAMS = $Params; CFNAS_RC_NET = '0'; CFNAS_RC_MIR = ''; CFNAS_RC_OTHER = ''
-      CFNAS_BAD_PARTIAL = ''; CFNAS_RACE = ''; CFNAS_SHARE_REACHABLE = ''; CFNAS_FAIL_COPY = ''; DOCKER_HOST = 'tcp://127.0.0.1:1' }
+      CFNAS_BAD_PARTIAL = ''; CFNAS_RACE = ''; CFNAS_SHARE_REACHABLE = ''; CFNAS_FAIL_COPY = ''; CFNAS_THROW_LIST = ''; DOCKER_HOST = 'tcp://127.0.0.1:1' }
     foreach ($k in $EnvSet.Keys) { $vars[$k] = $EnvSet[$k] }
     foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
     $ErrorActionPreference = 'Continue'
@@ -517,16 +569,27 @@ foreach ($kv in ($env:CFNAS_PARAMS -split '\|')) {
   $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_RC_NET = '2' }
   Check 'J10 net use fails: exit 1, no robocopy, no write, password not leaked' (($r.Code -eq 1) -and -not ($r.Trace | Where-Object { $_ -like 'ROBO-*' -or $_ -like 'COPY|*' }) -and (NoLeak $r))
 
+  $r = RunStubbed $job "NasUncRoot=$unc" @{ CFNAS_THROW_LIST = '1' }
+  Check 'J11 the archive pass THROWS: [ERROR] FAIL-COPY (pass), one alert, exit 2, NO completion marker (tester t3-pass-throw-swallowed)' (($r.Code -eq 2) -and ($r.Log -match '\[ERROR\] archive: FAIL-COPY \(pass\) .*listing the archive source failed') -and (@($r.Trace | Where-Object { $_ -like 'ALERT|*' }).Count -eq 1) -and ($r.Log -notmatch '=== NAS sync complete ===')) "code=$($r.Code)"
+
   Write-Host "== K: copy-archives-to-nas.ps1 under stubs"
   $cp = "$eproj\scripts\backup\copy-archives-to-nas.ps1"
   $kd = Join-Path $e2e 'kdest'
   $r = RunStubbed $cp "Destination=$kd|Source=$eproj\backup|Dirs=orphan-volumes-2026-09-13" @{ CFNAS_BAD_PARTIAL = '1' }
   $kf = "$kd\orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar"
-  Check 'K1 a copy whose hash differs is FAIL COPY, exit 1, left as .cf-partial, never renamed into place' (($r.Code -eq 1) -and ($r.Out -match 'FAIL COPY\s+orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar') -and -not (Test-Path -LiteralPath $kf) -and (Test-Path -LiteralPath "$kf.cf-partial")) "code=$($r.Code) out=$($r.Out)"
+  Check 'K1 a copy whose hash differs is FAIL COPY, exit 1, never renamed into place, temp removed' (($r.Code -eq 1) -and ($r.Out -match 'FAIL COPY\s+orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar') -and -not (Test-Path -LiteralPath $kf) -and -not (Test-Path -LiteralPath "$kf.cf-partial")) "code=$($r.Code) out=$($r.Out)"
   $kd2 = Join-Path $e2e 'kdest2'
   $r = RunStubbed $cp "Destination=$kd2|Source=$eproj\backup|Dirs=orphan-volumes-2026-09-13" @{ CFNAS_RACE = '1' }
   $kf2 = "$kd2\orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar"
-  Check 'K2 a final file that appears during the copy is never overwritten (FAIL COPY, exit 1)' (($r.Code -eq 1) -and ($r.Out -match 'FAIL COPY\s+.*could not rename') -and ([System.IO.File]::ReadAllText($kf2) -eq 'concurrent')) "code=$($r.Code)"
+  Check 'K2 a final file that appears during the copy is never overwritten (FAIL COPY, exit 1, temp removed)' (($r.Code -eq 1) -and ($r.Out -match 'FAIL COPY\s+.*could not rename') -and ([System.IO.File]::ReadAllText($kf2) -eq 'concurrent') -and -not (Test-Path -LiteralPath "$kf2.cf-partial")) "code=$($r.Code)"
+  # the same race on the REPAIR path: the NAS file was incomplete when we decided,
+  # another run finished it before our rename -> never -Force-replaced (attempt-3 F8)
+  $kd3 = Join-Path $e2e 'kdest3'
+  $kf3 = "$kd3\orphan-volumes-2026-09-13\ai-stack_llm-gateway-db-data.tar"
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $kf3) | Out-Null
+  [System.IO.File]::WriteAllBytes($kf3, (New-Object byte[] 500000)); Stamp $kf3 ([datetime]'1980-01-02')
+  $r = RunStubbed $cp "Destination=$kd3|Source=$eproj\backup|Dirs=orphan-volumes-2026-09-13" @{ CFNAS_RACE = '1' }
+  Check 'K2b repair-path race: the file another run completed is NOT replaced (MISMATCH written-meanwhile, exit 1), temp removed' (($r.Code -eq 1) -and ($r.Out -match 'MISMATCH\s+orphan-volumes-2026-09-13\\ai-stack_llm-gateway-db-data\.tar.*meanwhile') -and ([System.IO.File]::ReadAllText($kf3) -eq 'concurrent') -and -not (Test-Path -LiteralPath "$kf3.cf-partial")) "code=$($r.Code) out=$($r.Out)"
   New-Item -ItemType Directory -Force -Path "$e2e\emptysrc\none" | Out-Null
   $r = RunStubbed $cp "Destination=\\192.0.2.77\backups\ai-stack\archive|Source=$e2e\emptysrc|Dirs=none|Connect" @{ CFNAS_SHARE_REACHABLE = '0' }
   $nets = @($r.Trace | Where-Object { $_ -like 'NET|*' })

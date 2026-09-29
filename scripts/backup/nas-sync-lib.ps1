@@ -12,10 +12,12 @@
 #                                 git-tracked top-level sidecar sources), copied by
 #                                 Invoke-NasArchivePass one file at a time: temp name,
 #                                 sha256 verified, renamed into place. A complete NAS
-#                                 copy is never replaced and nothing is ever deleted;
-#                                 an INCOMPLETE one (robocopy's 1980 stamp) is
-#                                 re-copied; a complete one whose content differs is
-#                                 a MISMATCH the job turns into an alerted failure.
+#                                 copy is never replaced and nothing but our own
+#                                 *.cf-partial temps is ever deleted; an INCOMPLETE
+#                                 one (robocopy's 1980 stamp) is re-copied; a complete
+#                                 one whose content differs is a MISMATCH, and a local
+#                                 file contradicting its recorded checksum is a
+#                                 FAIL-LOCAL - the job turns both into alerted failures.
 #
 # The archive root defaults to a SIBLING of <NasUncRoot> ("archive" next to
 # "portal"), the same level where the 2026-09-27 orphan-volume archives were put by
@@ -197,66 +199,108 @@ function Get-NasRecordedHash {
 function Test-NasIncompleteStamp {
   # robocopy /Z marks a restartable, UNFINISHED copy with a 1980-01-01/02 timestamp
   # (measured: a killed copy leaves a full-length file with the wrong content and
-  # that stamp). No archive here is genuinely from 1980.
+  # that stamp). Our own finished copies never carry such a stamp (see
+  # Get-NasCopyStamp), so on the NAS it can only be someone else's unfinished copy.
   param([datetime]$LastWriteTimeUtc)
   return ($LastWriteTimeUtc -lt [datetime]'1980-01-03')
 }
 
+function Get-NasCopyStamp {
+  # The timestamp a finished NAS copy gets: the local file's, CLAMPED to 1980-01-03
+  # when it is earlier (an epoch-0 or FAT "no date" local stamp would otherwise make a
+  # complete copy look like robocopy's unfinished one, forever).
+  param([datetime]$LocalUtc)
+  $floor = [datetime]::SpecifyKind([datetime]'1980-01-03', [System.DateTimeKind]::Utc)
+  if ($LocalUtc -lt $floor) { return $floor }
+  return $LocalUtc
+}
+
+function Remove-NasTemp {
+  # Our own temp file only (<name>.cf-partial); never anything else.
+  param([string]$Tmp)
+  if (-not $Tmp.EndsWith('.cf-partial')) { throw "refusing to remove '$Tmp': not a .cf-partial temp" }
+  try {
+    if (Test-Path -LiteralPath $Tmp -PathType Leaf) {
+      $ti = Get-Item -LiteralPath $Tmp -Force
+      if ($ti.IsReadOnly) { $ti.IsReadOnly = $false }
+      Remove-Item -LiteralPath $Tmp -Force -ErrorAction Stop
+    }
+    return $true
+  } catch { return $false }
+}
+
 function Sync-NasArchiveFile {
   <#
-    One archive file, local -> NAS, in the only safe order:
-      absent on the NAS          -> copy to <name>.cf-partial (a leftover one from a
-                                    killed run is overwritten), set its timestamp,
-                                    sha256 it against the local file, then rename it
-                                    into place - never over an existing name.  COPIED
-      NAS copy INCOMPLETE        -> (robocopy's 1980 stamp) the same temp copy +
-                                    verify, then it REPLACES the incomplete file.  REPAIRED
-      NAS copy complete, same size and timestamp (+-2 s) and not -AlwaysHash
-                                 -> left alone, not hashed.                    PRESENT
-      NAS copy complete otherwise -> both sha256'd: equal -> PRESENT (a timestamp-only
-                                    difference is harmless); different -> MISMATCH,
-                                    NOTHING is written, and the Trust field says which
-                                    side the recorded checksum (SHA256SUMS or
-                                    <file>.sha256) vouches for.
-    A local file that contradicts its own SHA256SUMS entry is FAIL-LOCAL and never
-    copied. -VerifyOnly writes nothing (ABSENT / INCOMPLETE are reported). -DryRun
-    reports WOULD-COPY / WOULD-REPAIR and writes nothing. File I/O goes through
-    cmdlets only (Copy-Item, Move-Item, New-Item, Get-Item, Get-FileHash), never
-    [System.IO.File], so a test harness can map a UNC path onto a stand-in.
-    Returns @{ Rel; Status; Detail; Trust }. Status in: COPIED REPAIRED PRESENT
-    WOULD-COPY WOULD-REPAIR ABSENT INCOMPLETE MISMATCH FAIL-LOCAL FAIL-COPY.
+    One archive file, local -> NAS. Order of decisions:
+      1. The checksum RECORDED beside the local file (its SHA256SUMS entry, else
+         <file>.sha256): if the local file contradicts it -> FAIL-LOCAL, nothing is
+         copied, and Trust says whether the NAS copy is the good one.
+      2. NAS copy absent -> copy to <name>.cf-partial (a leftover one is replaced),
+         clear ReadOnly on the temp, stamp it (Get-NasCopyStamp), sha256 it against
+         the local file, rename it into place - never over an existing name - and
+         restore ReadOnly if the local file has it.                        COPIED
+      3. NAS copy INCOMPLETE = robocopy's unfinished stamp (before 1980-01-03) while
+         the local stamp is not that old -> the same verified temp copy; right
+         before replacing, the NAS file is looked at AGAIN and only replaced if it
+         is still incomplete (another run may have finished it).         REPAIRED
+      4. NAS copy complete, same size and (clamped) timestamp, not -AlwaysHash
+         -> left alone, not hashed.                                      PRESENT
+      5. NAS copy complete otherwise -> both hashed: equal -> PRESENT; different ->
+         MISMATCH, NOTHING written. (With a recorded checksum the local file already
+         passed step 1, so Trust is LOCAL; without one it is UNKNOWN.)
+    A stale <name>.cf-partial beside a PRESENT file is removed. On any FAIL-COPY our
+    temp is removed. -VerifyOnly writes nothing (ABSENT / INCOMPLETE reported);
+    -DryRun reports WOULD-COPY / WOULD-REPAIR and writes nothing. File I/O goes
+    through cmdlets only, so a test harness can map a UNC path onto a stand-in.
+    Returns @{ Rel; Status; Detail; Trust }.
   #>
   param([string]$LocalFile, [string]$NasFile, [string]$Rel, [switch]$AlwaysHash, [switch]$VerifyOnly, [switch]$DryRun)
   $r = @{ Rel = $Rel; Status = ''; Detail = ''; Trust = '' }
   $li = Get-Item -LiteralPath $LocalFile -Force
+  $stamp = Get-NasCopyStamp $li.LastWriteTimeUtc
+  $clampNote = $(if ($stamp -ne $li.LastWriteTimeUtc) { " (NAS stamp clamped to 1980-01-03; local stamp $($li.LastWriteTimeUtc.ToString('s'))Z)" } else { '' })
+  $tmp = "$NasFile.cf-partial"
   $recorded = Get-NasRecordedHash $LocalFile
-  $sums = Read-NasSha256Sums (Split-Path -Parent $LocalFile)
+  $present = Test-Path -LiteralPath $NasFile -PathType Leaf
   $lh = $null
-  if ($sums.ContainsKey($li.Name)) {
+  if ($recorded) {
     $lh = Get-NasSha256 $LocalFile
-    if ($lh -ne $sums[$li.Name]) {
-      $r.Status = 'FAIL-LOCAL'; $r.Detail = "local=$lh SHA256SUMS=$($sums[$li.Name]) - not copied"; return $r
+    if ($lh -ne $recorded) {
+      $r.Status = 'FAIL-LOCAL'
+      $r.Detail = "local=$lh recorded=$recorded - the LOCAL file contradicts its recorded checksum; not copied"
+      if ($present) {
+        $nh = Get-NasSha256 $NasFile
+        if ($nh -eq $recorded) { $r.Trust = 'NAS (the NAS copy matches the recorded checksum - restore the local file from it)' }
+        else { $r.Trust = 'NEITHER (the NAS copy does not match the recorded checksum either)' }
+      } else { $r.Trust = 'NONE ON NAS (the file was never archived - recover it from another copy)' }
+      return $r
     }
   }
-  $present = Test-Path -LiteralPath $NasFile -PathType Leaf
   $incomplete = $false
   if ($present) {
     $ni = Get-Item -LiteralPath $NasFile -Force
-    $incomplete = Test-NasIncompleteStamp $ni.LastWriteTimeUtc
+    $incomplete = (Test-NasIncompleteStamp $ni.LastWriteTimeUtc) -and -not (Test-NasIncompleteStamp $li.LastWriteTimeUtc)
     if (-not $incomplete) {
-      $dt = [math]::Abs(($ni.LastWriteTimeUtc - $li.LastWriteTimeUtc).TotalSeconds)
+      $dt = [math]::Abs(($ni.LastWriteTimeUtc - $stamp).TotalSeconds)
+      $same = $false
       if (-not $AlwaysHash -and $ni.Length -eq $li.Length -and $dt -le 2) {
-        $r.Status = 'PRESENT'; $r.Detail = 'same size and timestamp (not hashed)'; return $r
+        $same = $true; $r.Detail = 'same size and timestamp (not hashed)'
+      } else {
+        if (-not $lh) { $lh = Get-NasSha256 $LocalFile }
+        $nh = Get-NasSha256 $NasFile
+        if ($nh -eq $lh) { $same = $true; $r.Detail = "sha256=$lh" }
+        else {
+          $r.Status = 'MISMATCH'
+          $r.Detail = "local=$lh ($($li.Length) B) nas=$nh ($($ni.Length) B)"
+          if ($recorded) { $r.Trust = 'LOCAL (it matches its recorded checksum; the NAS copy is damaged - re-copy it by hand after checking)' }
+          else { $r.Trust = 'UNKNOWN (no recorded checksum beside the local file - compare by hand)' }
+          return $r
+        }
       }
-      if (-not $lh) { $lh = Get-NasSha256 $LocalFile }
-      $nh = Get-NasSha256 $NasFile
-      if ($nh -eq $lh) { $r.Status = 'PRESENT'; $r.Detail = "sha256=$lh"; return $r }
-      $r.Status = 'MISMATCH'
-      $r.Detail = "local=$lh ($($li.Length) B) nas=$nh ($($ni.Length) B)"
-      if ($recorded -and $recorded -eq $lh) { $r.Trust = 'LOCAL (it matches its recorded checksum; the NAS copy is damaged - re-copy it by hand after checking)' }
-      elseif ($recorded -and $recorded -eq $nh) { $r.Trust = 'NAS (it matches the recorded checksum; the LOCAL file is damaged - restore it from the NAS)' }
-      elseif ($recorded) { $r.Trust = 'NEITHER (neither side matches the recorded checksum)' }
-      else { $r.Trust = 'UNKNOWN (no recorded checksum beside the local file - compare by hand)' }
+      $r.Status = 'PRESENT'
+      if (-not $VerifyOnly -and -not $DryRun -and (Test-Path -LiteralPath $tmp -PathType Leaf)) {
+        if (Remove-NasTemp $tmp) { $r.Detail += '; removed a stale .cf-partial' }
+      }
       return $r
     }
   }
@@ -267,24 +311,47 @@ function Sync-NasArchiveFile {
   }
   if ($DryRun) { $r.Status = $(if ($incomplete) { 'WOULD-REPAIR' } else { 'WOULD-COPY' }); return $r }
   if (-not $lh) { $lh = Get-NasSha256 $LocalFile }
-  $tmp = "$NasFile.cf-partial"
   $dir = Split-Path -Parent $NasFile
   try {
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (Test-Path -LiteralPath $tmp -PathType Leaf) { $null = Remove-NasTemp $tmp }
     Copy-Item -LiteralPath $LocalFile -Destination $tmp -Force -ErrorAction Stop
-    (Get-Item -LiteralPath $tmp -Force).LastWriteTimeUtc = $li.LastWriteTimeUtc
+    $ti = Get-Item -LiteralPath $tmp -Force
+    if ($ti.IsReadOnly) { $ti.IsReadOnly = $false }
+    $ti.LastWriteTimeUtc = $stamp
   } catch {
-    $r.Status = 'FAIL-COPY'; $r.Detail = "copy to $tmp failed: $($_.Exception.Message)"; return $r
+    $null = Remove-NasTemp $tmp
+    $r.Status = 'FAIL-COPY'; $r.Detail = "copy to $tmp failed: $($_.Exception.Message) - temp removed"; return $r
   }
   $th = Get-NasSha256 $tmp
-  if ($th -ne $lh) { $r.Status = 'FAIL-COPY'; $r.Detail = "local=$lh copy=$th - left as $tmp"; return $r }
-  try {
-    if ($incomplete) { Move-Item -LiteralPath $tmp -Destination $NasFile -Force -ErrorAction Stop; $r.Status = 'REPAIRED' }
-    else { Move-Item -LiteralPath $tmp -Destination $NasFile -ErrorAction Stop; $r.Status = 'COPIED' }
-  } catch {
-    $r.Status = 'FAIL-COPY'; $r.Detail = "could not rename into place ($($_.Exception.Message)) - existing file untouched, copy left as $tmp"; return $r
+  if ($th -ne $lh) {
+    $null = Remove-NasTemp $tmp
+    $r.Status = 'FAIL-COPY'; $r.Detail = "local=$lh copy=$th - temp removed"; return $r
   }
-  $r.Detail = "sha256=$lh"
+  try {
+    if ($incomplete) {
+      # Look again: another run may have finished the file since we decided.
+      $ni2 = Get-Item -LiteralPath $NasFile -Force
+      if (-not (Test-NasIncompleteStamp $ni2.LastWriteTimeUtc)) {
+        $null = Remove-NasTemp $tmp
+        $nh2 = Get-NasSha256 $NasFile
+        if ($nh2 -eq $lh) { $r.Status = 'PRESENT'; $r.Detail = "sha256=$lh (completed by another run meanwhile)"; return $r }
+        $r.Status = 'MISMATCH'; $r.Detail = "local=$lh nas=$nh2 (written by another run meanwhile)"
+        $r.Trust = $(if ($recorded) { 'LOCAL (it matches its recorded checksum)' } else { 'UNKNOWN (no recorded checksum - compare by hand)' })
+        return $r
+      }
+      Move-Item -LiteralPath $tmp -Destination $NasFile -Force -ErrorAction Stop; $r.Status = 'REPAIRED'
+    } else {
+      Move-Item -LiteralPath $tmp -Destination $NasFile -ErrorAction Stop; $r.Status = 'COPIED'
+    }
+  } catch {
+    $null = Remove-NasTemp $tmp
+    $r.Status = 'FAIL-COPY'; $r.Detail = "could not rename into place ($($_.Exception.Message)) - existing file untouched, temp removed"; return $r
+  }
+  if ($li.IsReadOnly) {
+    try { (Get-Item -LiteralPath $NasFile -Force).IsReadOnly = $true } catch { }
+  }
+  $r.Detail = "sha256=$lh$clampNote"
   return $r
 }
 

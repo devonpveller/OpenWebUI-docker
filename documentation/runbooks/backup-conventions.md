@@ -173,12 +173,14 @@ git-tracked sidecar sources and are not archived) to `archive/`, a SIBLING of th
 slot folder, one file at a time: a missing file is copied under a temp name,
 sha256-verified and renamed into place; a NAS copy left incomplete by an
 interrupted copy is re-copied the same way; a complete NAS copy is never replaced
-and nothing there is ever deleted. If a complete NAS copy's content differs from
-the local file, the run fails (an `[ERROR] archive: MISMATCH` line saying which
-side the recorded checksum vouches for, an alert, no completion marker) and
-writes nothing. A new version of an archive therefore needs a new name. Put a
-one-off archive in its own dated subdirectory, with a `SHA256SUMS` - that
-checksum is what decides which side to trust - never under `./backups/`, where
+and nothing there is ever deleted but the pass's own `*.cf-partial` temps. If a
+complete NAS copy's content differs from the local file (MISMATCH), a local file
+contradicts its recorded checksum (FAIL-LOCAL) or a copy cannot be written
+(FAIL-COPY), the run fails - an `[ERROR]` line, an alert, no completion marker -
+and overwrites nothing; `backup-restore-runbook.md` section 8 says what to do for
+each. A new version of an archive therefore needs a new name. Put a one-off
+archive in its own dated subdirectory, with a `SHA256SUMS` (it is checked before
+every copy, and it decides which side to trust) - never under `./backups/`, where
 both slots would carry it and the mirror would drop it two weeks after it left
 D:. The rules: `scripts/backup/nas-sync-lib.ps1`; tests against local stand-ins:
 `scripts/backup/test-nas-sync.ps1`.
