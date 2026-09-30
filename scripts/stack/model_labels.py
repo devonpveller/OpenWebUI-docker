@@ -99,7 +99,10 @@ WebUI 0.11.0: `meta.hidden` lives only on a row, and a served id with NO row is
 listed (not hidden) to admins - normal users do not see it at all - so such an id
 gets a hidden row created for it, but only when Open WebUI actually lists it
 (GET /api/models); an id it does not list gets no row. A hidden role still answers
-chats and still serves as a preset's base (measured the same way).
+chats and still serves as a preset's base (measured the same way). A created row has no
+access grants: with BYPASS_ADMIN_ACCESS_CONTROL off, a second admin loses that id (and
+presets on it) once it exists (model-roles findings F4). `rollback_steps` prints how to
+undo each write - a CREATED row is deleted, not un-hidden.
 
 Standard library only: stack.py and its CI job install nothing but pytest.
 
@@ -1556,6 +1559,31 @@ def _fingerprint(status: int, row) -> tuple:
     return ("row", row.get("base_model_id"), row.get("updated_at"), row.get("name"), repr(grants),
             json.dumps(row.get("meta"), sort_keys=True), json.dumps(row.get("params"), sort_keys=True),
             row.get("is_active"))
+
+
+def rollback_steps(changes: list[Change]) -> list[str]:
+    """What undoes a real run, one mechanical step per written row, in the order written.
+
+    A CREATED row is deleted (setting `meta.hidden` false would leave a row where there was
+    none - and a row, even a visible one, changes who may use that id; findings F4); a
+    renamed or re-hidden row gets its old name / old `meta.hidden` back."""
+    steps = []
+    for c in changes:
+        if c.action == "created":
+            steps.append(f"delete the row {c.role!r} (this run created it): "
+                         f"POST /api/v1/models/model/delete {{\"id\": {json.dumps(c.role)}}}")
+            continue
+        if c.action not in WRITTEN:
+            continue
+        undo = []
+        if c.old != c.new:
+            undo.append(f"name back to {c.old!r}")
+        if c.was_hidden is not None and c.was_hidden != c.hidden:
+            undo.append(f"meta.hidden back to {str(bool(c.was_hidden)).lower()}")
+        if undo:
+            steps.append(f"row {c.role!r}: {' and '.join(undo)} (POST /api/v1/models/model/update, "
+                         f"everything else as read)")
+    return steps
 
 
 def _picker(hidden: bool | None) -> str:

@@ -89,6 +89,8 @@ same ids they always have:
 order, all other ids `local.yaml` registers hidden - they still answer API calls and
 presets), because the operator picks a model, not a role; `stack.py labels` owns this
 visibility (`meta.hidden`), so it follows a swap, and an admin un-hiding one is reverted on the next run.
+An old name Open WebUI lists with no row gets a hidden row created for it; the run prints a `rollback:` line per
+write (delete what it created), and [`scripts/stack/README.md`](../scripts/stack/README.md) has what a created row changes.
 
 `local-small` is the resident 27B with thinking off: one GPU holds one model, so
 a separate small model would mean swap thrash. The `:nothink` suffix is

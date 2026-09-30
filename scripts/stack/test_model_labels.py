@@ -2275,3 +2275,23 @@ def test_the_served_ids_are_every_name_the_rendered_local_yaml_registers(world):
                                                  "qllama/bge-m3:latest", *ROLE_TABLE]
     with pytest.raises(ml.LabelError, match="llm-gateway"):
         ml.served_ids(make_render(world, drop=("llm-gateway",)))
+
+
+def test_the_rollback_deletes_created_rows_and_restores_changed_ones():
+    """Tester attempt 1 (T8): `meta.hidden: false` does not undo a CREATED row - deleting it does."""
+    owui = _live_like()
+    changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
+    steps = ml.rollback_steps(changes)
+    assert steps == [
+        "row 'local-small': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
+        "row 'local-small:nothink': meta.hidden back to false (POST /api/v1/models/model/update, "
+        "everything else as read)",
+        "row 'local-embed': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
+        "row 'qwen36-27b': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
+        "delete the row 'qwen36-27b:nothink' (this run created it): "
+        'POST /api/v1/models/model/delete {"id": "qwen36-27b:nothink"}']
+    renamed = ml.Change("local-small", "renamed", "old", "new", True, False)
+    assert ml.rollback_steps([renamed]) == [
+        "row 'local-small': name back to 'old' and meta.hidden back to false "
+        "(POST /api/v1/models/model/update, everything else as read)"]
+    assert ml.rollback_steps([c._replace(action="would-hide") for c in changes]) == []

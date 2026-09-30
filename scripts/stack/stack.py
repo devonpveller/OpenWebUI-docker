@@ -2926,6 +2926,8 @@ def run_labels(manifest, state, root: Path, console: Console, request, capture, 
         console.line(f"{prefix}dry run: {pending} row(s) would change at {url}; nothing was written")
     else:
         console.line(f"{prefix}{written} row(s) changed, {right} already right, at {url}")
+        for step in model_labels.rollback_steps(changes):
+            console.line(f"{prefix}rollback: {step}")
     return EXIT_OK
 
 
@@ -6090,9 +6092,13 @@ def build_parser() -> argparse.ArgumentParser:
                        "to one row per model and mode (idempotent)",
                        description="Derive each local model role's label from the GGUF the inference plane "
                                    "loads (scripts/stack/model_labels.py) and set the Open WebUI model row name "
-                                   "of each role id to it through Open WebUI's admin API. Needs "
-                                   "OWUI_ADMIN_API_KEY (shell or the root .env); OWUI_BASE_URL defaults to "
-                                   "http://127.0.0.1:3000. Writes only a name that differs.")
+                                   "of each role id to it through Open WebUI's admin API; also set the picker "
+                                   "visibility (meta.hidden) of every id local.yaml registers - one row shown "
+                                   "per model and mode, the rest hidden - creating a hidden row for a served id "
+                                   "Open WebUI lists without one. Rows local.yaml does not register are never "
+                                   "touched. Needs OWUI_ADMIN_API_KEY (shell or the root .env); OWUI_BASE_URL "
+                                   "defaults to http://127.0.0.1:3000. Writes only a row whose name or "
+                                   "visibility differs, and prints how to roll back each write.")
     p.add_argument("--dry-run", action="store_true", help="derive and read; print what would change, write nothing")
     p.add_argument("--render", default=None, metavar="JSON",
                    help="a saved `docker compose -f inference/docker-compose.yml --profile local config "

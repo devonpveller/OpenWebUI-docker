@@ -1039,17 +1039,22 @@ the labels and writes nothing (`--env-file` goes to compose's `--env-file`).
 `--render JSON` (both commands) derives from a saved render instead - for a
 disposable environment with no docker CLI; it is compose output all the same.
 
-The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, then
-`POST /api/v1/models/create` for a role with no row, or
-`POST /api/v1/models/model/update` for one whose name differs) - the path its
-admin UI takes to rename a base model. It reads and validates EVERY role row
-before it writes any - so a refusal writes nothing - then writes only a name that
-differs, sends a renamed row's meta, params, access grants and active
-flag back exactly as it read them (Open WebUI 0.11.0 replaces a row's grants with
-the list an update carries, and fails an update that carries none), and never
-touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,
-not rewritten. Each change is printed (`created as`, `renamed 'old' -> 'new'`,
-`unchanged`).
+The sync uses Open WebUI's own admin API (`GET /api/v1/models/model?id=`, `GET
+/api/models`, then `POST /api/v1/models/create` for a row to create, or
+`POST /api/v1/models/model/update` for one whose name or visibility differs) - the
+paths its admin UI takes to rename or hide a base model. It MANAGES every id
+`local.yaml` registers - the roles and the old names - and nothing else: a row
+`local.yaml` does not register (a preset, a pipe, arena, a cloud row) is never read
+or written. It reads and validates EVERY managed row before it writes any, so a
+refusal writes nothing. Refused before writing: a key Open WebUI refuses; a row it
+cannot read; a PRESET (a `base_model_id` is set) on ANY managed id, role or old name;
+a row returned without its access grants; and a failing `GET /api/models` (read only
+when a served non-role id has no row). Then it writes only a row whose name (roles
+only - an old name keeps its own) or visibility differs, and sends that row's meta,
+params, access grants and active flag back exactly as it read them, `meta.hidden`
+aside (Open WebUI 0.11.0 replaces a row's grants with the list an update carries,
+and fails an update that carries none). Each change is printed (`created as`,
+`renamed 'old' -> 'new'`, `now hidden from the picker`, `unchanged`).
 
 **It also owns the picker** (mr-picker, 2026-09-30): the visibility (`meta.hidden`,
 the flag Open WebUI's own "hide" sets) of every row whose id `local.yaml` registers -
@@ -1058,11 +1063,16 @@ in pass 1 with the names). Among the chat roles the first of each label, in the 
 `local-large`, `local-large:nothink`, `local-small`, `local-small:nothink`, is shown and
 the rest hidden; `local-embed` and every non-role id are hidden. A served id with no
 row is given a hidden row only when Open WebUI lists it (`GET /api/models`): without a
-row Open WebUI lists it to admins, and `meta.hidden` lives on a row. Rows `local.yaml`
-does not register (presets, pipes, arena, cloud) are never read or written. The run
-prints the plan (`picker: shown ...; hidden ...`) and each change (`now hidden from the
-picker`, `would be shown in the picker`, ...); an admin un-hiding a managed row is
-reverted on the next run. Rollback: set `meta.hidden` back on the rows it printed.
+row Open WebUI lists it to admins, and `meta.hidden` lives on a row. A created row has
+no access grants: with `BYPASS_ADMIN_ACCESS_CONTROL` on (Open WebUI's default, this
+host's setting) that changes nothing for anyone, but with it off a second admin loses
+that id, and presets built on it, once the row exists (measured, model-roles findings
+F4). The run prints the plan (`picker: shown ...; hidden ...`) and each change (`now
+hidden from the picker`, `would be shown in the picker`, ...); an admin un-hiding a
+managed row is reverted on the next run. **Rollback** is printed by the run itself, one
+`rollback:` line per write: DELETE each row it CREATED (`POST
+/api/v1/models/model/delete`; setting `meta.hidden` false would leave a row where there
+was none), and set the old name / old `meta.hidden` back on each row it changed.
 
 It needs **`OWUI_ADMIN_API_KEY`** - an Open WebUI ADMIN user's API key (Settings >
 Account > API keys; API keys must be enabled in Admin Settings > General) - from
