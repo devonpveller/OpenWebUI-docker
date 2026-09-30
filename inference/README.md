@@ -84,6 +84,15 @@ same ids they always have:
 | `local-small:nothink` | `qwen36-27b:nothink` | no thinking | the same file |
 | `local-embed` | `bge-m3` | embeddings | `llama-cpp-embed-upstream`'s `LLAMA_ARG_MODEL` |
 
+**The Open WebUI picker shows each real model once per mode, by its label** (today
+`local-large` and `local-large:nothink`; the first role of each label in the table's
+order, all other ids `local.yaml` registers hidden - they still answer API calls and
+presets), because the operator picks a model, not a role; `stack.py labels` owns this
+visibility (`meta.hidden`), so it follows a swap, and an admin un-hiding one is reverted on the next run.
+An old name Open WebUI lists with no row gets a hidden row created for it; the run prints a `rollback:` line per
+write (delete what it created), and [`scripts/stack/README.md`](../scripts/stack/README.md) has what a created row changes
+(nothing with Open WebUI's default admin access; with `BYPASS_ADMIN_ACCESS_CONTROL` off, a second admin loses that id and presets on it).
+
 `local-small` is the resident 27B with thinking off: one GPU holds one model, so
 a separate small model would mean swap thrash. The `:nothink` suffix is
 llama-swap's thinking switch (`setParamsByID`), which is why the concrete id
