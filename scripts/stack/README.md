@@ -59,7 +59,7 @@ python scripts/stack/stack.py backup frontend     # backups/frontend/manual-<UTC
 python scripts/stack/stack.py restore frontend --from backups/frontend/manual-<UTC>
 python scripts/stack/stack.py inventory --check   # is stack-services.json still true?
 python scripts/stack/stack.py docs --check        # are the generated blocks in the docs still true?
-python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names would change
+python scripts/stack/stack.py labels --dry-run    # which Open WebUI role names / picker rows would change
 python scripts/stack/stack.py labels              # set them from the model files (idempotent)
 ```
 
@@ -1050,6 +1050,19 @@ the list an update carries, and fails an update that carries none), and never
 touches a row that is not a role id. A role id whose row is a PRESET (it has a `base_model_id`) is refused,
 not rewritten. Each change is printed (`created as`, `renamed 'old' -> 'new'`,
 `unchanged`).
+
+**It also owns the picker** (mr-picker, 2026-09-30): the visibility (`meta.hidden`,
+the flag Open WebUI's own "hide" sets) of every row whose id `local.yaml` registers -
+the roles and the old names - is set in the same two passes (planned, and refused,
+in pass 1 with the names). Among the chat roles the first of each label, in the order
+`local-large`, `local-large:nothink`, `local-small`, `local-small:nothink`, is shown and
+the rest hidden; `local-embed` and every non-role id are hidden. A served id with no
+row is given a hidden row only when Open WebUI lists it (`GET /api/models`): without a
+row Open WebUI lists it to admins, and `meta.hidden` lives on a row. Rows `local.yaml`
+does not register (presets, pipes, arena, cloud) are never read or written. The run
+prints the plan (`picker: shown ...; hidden ...`) and each change (`now hidden from the
+picker`, `would be shown in the picker`, ...); an admin un-hiding a managed row is
+reverted on the next run. Rollback: set `meta.hidden` back on the rows it printed.
 
 It needs **`OWUI_ADMIN_API_KEY`** - an Open WebUI ADMIN user's API key (Settings >
 Account > API keys; API keys must be enabled in Admin Settings > General) - from

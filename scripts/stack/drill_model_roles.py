@@ -62,6 +62,8 @@ PYTHON_IMAGE = "python:3.12-slim"
 CLI_IMAGE = "docker:27-cli"      # carries the compose plugin; runs `config` only, with no socket
 OWUI_IMAGE = "openwebui:local"
 ROLES = ["local-large", "local-large:nothink", "local-small", "local-small:nothink", "local-embed"]
+# every id local.yaml registers: `labels` owns their picker visibility (mr-picker, 2026-09-30)
+SERVED = set(ROLES) | {"qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf", "qllama/bge-m3:latest"}
 OLD = ["qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf", "qllama/bge-m3:latest"]
 EXPECT = {"local-large": "qwen36-27b", "local-large:nothink": "qwen36-27b:nothink",
           "local-small": "qwen36-27b:nothink", "local-small:nothink": "qwen36-27b:nothink",
@@ -465,10 +467,10 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
     try:
         repo = build_repo(tree, scratch, "/models/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf", key, owui)
         t0 = dump(owui)
-        say("  -- run 1: `stack.py labels` (expect local-large renamed, four created)")
+        say("  -- run 1: `stack.py labels` (expect local-large renamed, four created, the old names hidden)")
         rc, out = sync(scratch, repo)
         t1 = dump(owui)
-        check(rc == 0 and "5 row(s) changed" in out, "run 1 exit 0, 5 rows changed")
+        check(rc == 0 and re.search(r"labels: \d+ row\(s\) changed", out) is not None, "run 1 exit 0, rows changed")
         if rc != 0:
             tail = _docker("logs", "--tail", "60", owui, check_rc=False)
             say("  Open WebUI log tail:")
@@ -481,10 +483,16 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
                 "local-embed": "bge-m3 f16 (embeddings)"}
         check({k: names.get(k) for k in want} == want, f"role rows carry the derived labels: "
               f"{ {k: names.get(k) for k in want} }")
-        others0 = [r for r in t0["model"] if not r["id"].startswith("local-")]
-        others1 = [r for r in t1["model"] if not r["id"].startswith("local-")]
-        check(others0 == others1, "every non-role row is byte-identical before/after run 1 "
-              f"({[r['id'] for r in others1]})")
+        others0 = [r for r in t0["model"] if r["id"] not in SERVED]
+        others1 = [r for r in t1["model"] if r["id"] not in SERVED]
+        check(others0 == others1, "every row the local gateway does not serve is byte-identical before/after "
+              f"run 1 ({[r['id'] for r in others1]})")
+        q0 = next(r for r in t0["model"] if r["id"] == "qwen36-27b")
+        q1 = next(r for r in t1["model"] if r["id"] == "qwen36-27b")
+        check({k: v for k, v in q0.items() if k not in ("meta", "updated_at")}
+              == {k: v for k, v in q1.items() if k not in ("meta", "updated_at")}
+              and json.loads(q1["meta"]) == {**json.loads(q0["meta"]), "hidden": True},
+              "the old-name row kept everything but gained meta.hidden = true")
         ll0 = next(r for r in t0["model"] if r["id"] == "local-large")
         ll1 = next(r for r in t1["model"] if r["id"] == "local-large")
         check({k: v for k, v in ll0.items() if k not in ("name", "updated_at")}
@@ -496,7 +504,7 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
         say("  -- run 2: the same again (expect nothing changed, nothing written)")
         rc, out = sync(scratch, repo)
         t2 = dump(owui)
-        check(rc == 0 and "0 row(s) changed, 5 already right" in out, "run 2 exit 0, 0 rows changed")
+        check(rc == 0 and "labels: 0 row(s) changed" in out, "run 2 exit 0, 0 rows changed")
         check(t1 == t2, "the model and grant tables are byte-identical after run 2 (updated_at included)")
 
         status, body = owui_call(owui, "GET", "/api/models", key)
@@ -504,6 +512,10 @@ def owui_phase(tree: Path, gw: str, master: str, image: str):
         say(f"  /api/models as the admin: { {k: listed.get(k) for k in ROLES} }")
         check(all(listed.get(k) == want[k] for k in ROLES), "Open WebUI's model list shows the derived labels")
         check(listed.get("qwen36-27b") == "Qwen 3.6 27B", "the old-name row still shows its own name")
+        picker = {m["id"] for m in (body or {}).get("data", [])
+                  if not ((m.get("info") or {}).get("meta") or {}).get("hidden")} & SERVED
+        check(picker == {"local-large", "local-large:nothink"},
+              f"the picker lists one gateway row per label: {sorted(picker)}")
 
         say("  -- swap: LLAMA_SWAP_QWEN36_27B_MODEL_PATH -> Other-14B-Q8_0.gguf (no hand edit of any label)")
         repo = build_repo(tree, scratch, "/models/vendor/Other-14B-GGUF/Other-14B-Q8_0.gguf", key, owui)

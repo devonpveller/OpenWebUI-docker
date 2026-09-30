@@ -2816,11 +2816,14 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
 # model-roles (operator decisions R1-R5, 2026-09-28). The label is DERIVED by
 # scripts/stack/model_labels.py from the GGUF the inference plane loads, and
 # written to the Open WebUI model row NAME of each role id through Open WebUI's
-# admin API. `labels` does it on demand; `up` and `recover` do it after a
-# successful run that touched inference or the frontend, when both are on and
-# inference runs `local` (without `local` no role is registered). The sync is
-# idempotent: it reads and validates every role row before writing any, then
-# writes only a name that differs.
+# admin API. The same sync owns the PICKER VISIBILITY (`meta.hidden`) of every
+# row whose id the local gateway serves (mr-picker, 2026-09-30): one row per
+# derived label is shown, the embedding role and the old concrete names are
+# hidden (model_labels.picker_hidden). `labels` does it on demand; `up` and
+# `recover` do it after a successful run that touched inference or the
+# frontend, when both are on and inference runs `local` (without `local` no
+# role is registered). The sync is idempotent: it reads and validates every
+# managed row before writing any, then writes only a row that differs.
 
 
 def inference_runs_local(manifest, state, root) -> bool:
@@ -2880,8 +2883,9 @@ def run_labels(manifest, state, root: Path, console: Console, request, capture, 
     import model_labels  # sibling module, standard library only
 
     try:
-        labels = model_labels.derive_labels(labels_render(manifest, state, root, capture, render_file),
-                                            root=root)
+        render = labels_render(manifest, state, root, capture, render_file)
+        labels = model_labels.derive_labels(render, root=root)
+        served = model_labels.served_ids(render)
     except model_labels.LabelError as exc:
         console.line(f"{prefix}FAILED - {exc}. Nothing was written to Open WebUI.")
         return EXIT_REFUSED
@@ -2893,6 +2897,11 @@ def run_labels(manifest, state, root: Path, console: Console, request, capture, 
         return EXIT_REFUSED
     for item in labels:
         console.line(f"{prefix}{item.role} = {item.label!r} <- {item.container_path} ({item.source})")
+    hidden = model_labels.picker_hidden(labels, served)
+    console.line(f"{prefix}picker: shown {', '.join(i for i, h in hidden.items() if not h) or 'nothing'}; "
+                 f"hidden {', '.join(i for i, h in hidden.items() if h) or 'nothing'} - this sync owns the "
+                 "picker visibility of every id the local gateway serves (one row per model and mode); "
+                 "un-hiding one of them in Open WebUI is undone by the next run")
     url, key = owui_admin_settings(root)
     if not key:
         console.line(f"{prefix}not synced - {model_labels.OWUI_KEY_VAR} is not set (shell or the root .env): "
@@ -2904,18 +2913,19 @@ def run_labels(manifest, state, root: Path, console: Console, request, capture, 
                      f"Nothing was written; run `{CLI} labels` once it is up.")
         return EXIT_REFUSED
     try:
-        changes = model_labels.sync_owui(labels, url, key, request, dry_run=dry_run)
+        changes = model_labels.sync_owui(labels, url, key, request, dry_run=dry_run, served=served)
     except model_labels.OwuiError as exc:
         console.line(f"{prefix}FAILED - {exc}")
         return EXIT_REFUSED
     for change in changes:
         console.line(f"{prefix}{model_labels.describe(change)}")
-    written = sum(1 for c in changes if c.action in ("created", "renamed"))
+    written = sum(1 for c in changes if c.action in model_labels.WRITTEN)
     pending = sum(1 for c in changes if c.action.startswith("would-"))
+    right = sum(1 for c in changes if c.action == "unchanged")
     if dry_run:
         console.line(f"{prefix}dry run: {pending} row(s) would change at {url}; nothing was written")
     else:
-        console.line(f"{prefix}{written} row(s) changed, {len(changes) - written} already right, at {url}")
+        console.line(f"{prefix}{written} row(s) changed, {right} already right, at {url}")
     return EXIT_OK
 
 
@@ -2949,7 +2959,7 @@ def labels_after(manifest, state, root, console, request, acted_on, dry_run: boo
         console.line(f"# labels: FAILED - {type(exc).__name__}: {str(exc)[:300]}")
         failed = True
     if failed:
-        console.line(f"# labels: WARNING - Open WebUI's role names were NOT synced (reason above); "
+        console.line(f"# labels: WARNING - Open WebUI's role names and picker were NOT synced (reason above); "
                      f"`{verb}` itself succeeded. Fix it and run `{CLI} labels`.")
 
 
@@ -2962,7 +2972,8 @@ def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bo
         return False
     if dry_run:
         console.line(f"# labels: after a real `{verb}`, `{CLI} labels` would set Open WebUI's role names "
-                     "from the model files (nothing is read or written in a dry run)")
+                     "from the model files and the picker's visibility of every id the local gateway "
+                     "serves (nothing is read or written in a dry run)")
         return False
     return run_labels(manifest, state, root, console, request, capture, False, "# labels: ") != EXIT_OK
 
@@ -6075,7 +6086,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(kind="auto")
 
     sub.add_parser("doctor", help="docker, compose, env files and blank keys")
-    p = sub.add_parser("labels", help="set Open WebUI's model-role names from the model files (idempotent)",
+    p = sub.add_parser("labels", help="set Open WebUI's model-role names from the model files, and its picker "
+                       "to one row per model and mode (idempotent)",
                        description="Derive each local model role's label from the GGUF the inference plane "
                                    "loads (scripts/stack/model_labels.py) and set the Open WebUI model row name "
                                    "of each role id to it through Open WebUI's admin API. Needs "

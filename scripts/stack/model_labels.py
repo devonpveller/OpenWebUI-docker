@@ -76,14 +76,30 @@ never writes anything from a half-resolved set.
 THE OPEN WEBUI SYNC (`sync_owui`) sets the Open WebUI `model` row NAME for each
 role id through Open WebUI's own admin API (`/api/v1/models/...`) - the path its
 admin UI uses to rename a base model - with an admin API key. It reads and
-validates EVERY role row before it writes any (a refusal - a PRESET on a role id,
-a row without its access grants, an unreadable row, a refused key - writes
-nothing), then writes only the rows whose name differs; it never touches a row
-that is not a role id, and sends a renamed row's meta, params, access grants and
-active flag back exactly as it read them. A PRESET (a `base_model_id` is set) on a
-role id is refused rather than someone's workspace model rewritten. `scripts/stack/stack.py labels` drives
-it; `stack.py up` / `recover` run it when inference (with `local`) and the
-frontend are both enabled.
+validates EVERY row it manages before it writes any (a refusal - a PRESET on a
+managed id, a row without its access grants, an unreadable row, a refused key -
+writes nothing), then writes only the rows that differ; it never touches a row
+the local gateway does not serve, and sends a written row's meta, params, access
+grants and active flag back exactly as it read them (only `meta.hidden` changes,
+and only when the visibility changes). A PRESET (a `base_model_id` is set) on a
+managed id is refused rather than someone's workspace model rewritten.
+`scripts/stack/stack.py labels` drives it; `stack.py up` / `recover` run it when
+inference (with `local`) and the frontend are both enabled.
+
+THE PICKER (model-roles item mr-picker, 2026-09-30). The sync also OWNS the picker
+visibility - Open WebUI's own `meta.hidden`, the flag its admin UI's "hide" sets -
+of every row whose id the local gateway serves (every `model_name` in local.yaml):
+among the chat roles, grouped by label, the FIRST role in CHAT_ROLE_ORDER of each
+label is shown and the rest hidden; the embedding role and every served id that is
+not a role (the old concrete names) are hidden. So the picker lists each real model
+once per mode, by its derived label, and follows a model swap with no hand edit (a
+local-small on its own file gets its own label, so it is shown). An admin un-hiding
+one of these rows is reverted on the next run. Measured against a disposable Open
+WebUI 0.11.0: `meta.hidden` lives only on a row, and a served id with NO row is
+listed (not hidden) to admins - normal users do not see it at all - so such an id
+gets a hidden row created for it, but only when Open WebUI actually lists it
+(GET /api/models); an id it does not list gets no row. A hidden role still answers
+chats and still serves as a preset's base (measured the same way).
 
 Standard library only: stack.py and its CI job install nothing but pytest.
 
@@ -118,6 +134,9 @@ EMBED_VAR = "LLAMA_ARG_MODEL"
 MODELS_MOUNT = "/models"
 
 MODES = ("thinking", "no thinking", "embeddings")
+# The picker shows the FIRST chat role of each label in this order (mr-picker); a chat
+# role not named here ranks after these, in local.yaml's order.
+CHAT_ROLE_ORDER = ("local-large", "local-large:nothink", "local-small", "local-small:nothink")
 OWUI_KEY_VAR = "OWUI_ADMIN_API_KEY"
 OWUI_URL_VAR = "OWUI_BASE_URL"
 OWUI_DEFAULT_URL = "http://127.0.0.1:3000"
@@ -1066,6 +1085,52 @@ def roles(root: Path) -> list[Role]:
     return roles_from(path.read_text(encoding="utf-8"), MODEL_LIST_REL.as_posix())
 
 
+def served_ids_from(text: str, where: str) -> list[str]:
+    """Every `model_name` a LiteLLM model_list fragment registers, in file order, once each."""
+    ids: list[str] = []
+    for name, _model in parse_model_list(text):
+        if name not in ids:
+            ids.append(name)
+    if not ids:
+        raise LabelError(f"{where} registers no model")
+    return ids
+
+
+def served_ids(render: dict) -> list[str]:
+    """Every id the LOCAL gateway serves: the `model_name`s of the local.yaml llm-gateway's
+    /app/conf.d bind holds in compose's render - the same file the roles are read from."""
+    try:
+        gateway = _service(render, GATEWAY_SERVICE)
+        local = _bind_source(gateway, GATEWAY_SERVICE, FRAGMENT_TARGET) / LOCAL_FRAGMENT
+    except (TypeError, AttributeError, KeyError, ValueError) as exc:
+        raise LabelError(f"the render is not the shape `docker compose config` writes "
+                         f"({type(exc).__name__}: {str(exc)[:160]})") from None
+    if not local.is_file():
+        raise LabelError(f"{local} (llm-gateway's {FRAGMENT_TARGET}/{LOCAL_FRAGMENT}) does not exist")
+    return served_ids_from(local.read_text(encoding="utf-8"), str(local))
+
+
+def picker_hidden(labels: list[RoleLabel], served=()) -> dict[str, bool]:
+    """{id: hidden} for every managed id: the roles, then every other served id (hidden).
+
+    Chat roles are ranked by CHAT_ROLE_ORDER (others after, in the order given); the first
+    of each LABEL is shown, the rest hidden. The embedding role is hidden: it cannot chat."""
+    rank = {name: i for i, name in enumerate(CHAT_ROLE_ORDER)}
+    ranked = sorted(enumerate(labels), key=lambda pair: (rank.get(pair[1].role, len(rank)), pair[0]))
+    shown: set[str] = set()
+    out: dict[str, bool] = {}
+    for _i, item in ranked:
+        if item.mode == "embeddings":
+            out[item.role] = True
+            continue
+        out[item.role] = item.label in shown
+        shown.add(item.label)
+    hidden = {item.role: out[item.role] for item in labels}   # in the order given
+    for sid in served:
+        hidden.setdefault(sid, True)
+    return hidden
+
+
 def mode_of(role: Role, served_by_embed: bool) -> str:
     if served_by_embed:
         return "embeddings"
@@ -1284,10 +1349,15 @@ class OwuiError(Exception):
 
 
 class Change(NamedTuple):
-    role: str
-    action: str   # created | renamed | unchanged | would-create | would-rename
+    role: str     # the row id: a role, or another id the local gateway serves
+    action: str   # created | renamed | hidden | shown | unchanged | absent, or would-<create|rename|hide|show>
     old: str
     new: str
+    hidden: bool | None = None       # the row's picker visibility after the run (None: no row)
+    was_hidden: bool | None = None   # before the run (None: there was no row)
+
+
+WRITTEN = ("created", "renamed", "hidden", "shown")
 
 
 Request = Callable[..., tuple]   # (method, url, headers, body_bytes|None, timeout) -> (status, text)
@@ -1322,17 +1392,22 @@ def wait_ready(base_url: str, request: Request = urllib_request, timeout_s: int 
 
 
 def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Request = urllib_request,
-              dry_run: bool = False) -> list[Change]:
-    """Set each role's Open WebUI model row NAME to its label. Idempotent; writes only a differing row.
+              dry_run: bool = False, served=()) -> list[Change]:
+    """Set each role's Open WebUI row NAME to its label and every managed row's picker
+    visibility (`meta.hidden`, see picker_hidden). Idempotent; writes only a differing row.
 
-    TWO PASSES. Pass 1 READS every role's row and validates all of them - a refused key,
-    an unreadable row, a PRESET on a role id, a row returned without its access grants -
-    and raises before ANY write if one fails, so a refusal never leaves a partial rename.
-    Pass 2 writes, in role order, only the rows pass 1 planned to create or rename, and
+    MANAGED ids are the roles plus `served` - every id the local gateway serves; nothing
+    else is read or written. TWO PASSES. Pass 1 READS every managed row and validates all
+    of them - a refused key, an unreadable row, a PRESET on a managed id, a row returned
+    without its access grants, an unreadable model list - and raises before ANY write if
+    one fails, so a refusal never leaves a partial run. A served non-role id with no row is
+    created (hidden) only when Open WebUI lists it (GET /api/models, read once, only if
+    such an id exists): `meta.hidden` lives on a row, and without one Open WebUI shows it to
+    admins. Pass 2 writes, in order, only the rows pass 1 planned to create or change, and
     re-reads each row just before its write, refusing if it changed since pass 1. A write
     that fails in pass 2 (Open WebUI refusing it, or a row changed meanwhile) is the one
     case that can leave earlier rows written; the error names them, and each of those rows
-    carries its correct new label.
+    carries its correct new name and visibility.
     """
     if not api_key:
         raise OwuiError(f"{OWUI_KEY_VAR} is empty")
@@ -1349,74 +1424,120 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
             data = None
         return status, data, text
 
-    # ---- pass 1: read and validate every role row; nothing is written ----
-    plan: list[tuple[RoleLabel, str, dict | None]] = []   # (label, create|rename|unchanged, row)
-    for item in labels:
-        status, row, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(item.role, safe=""))
+    def refused(status, what):
+        return OwuiError(f"Open WebUI refused the key ({status}) reading {what}: {OWUI_KEY_VAR} must be "
+                         f"an ADMIN user's API key, with API keys enabled (Admin Settings > General). "
+                         f"Nothing was written.")
+
+    hidden_of = picker_hidden(labels, served)
+    names = {item.role: item.label for item in labels}   # a served non-role id keeps its name
+    listed: dict[str, str] | None = None                  # GET /api/models, read at most once
+
+    def listing() -> dict[str, str]:
+        nonlocal listed
+        if listed is None:
+            status, data, text = call("GET", "/api/models")
+            if status in (401, 403):
+                raise refused(status, "the model list")
+            items = data.get("data") if isinstance(data, dict) else None
+            if status != 200 or not isinstance(items, list):
+                raise OwuiError(f"reading Open WebUI's model list failed: HTTP {status} {text[:200]!r}. "
+                                f"Nothing was written.")
+            listed = {m["id"]: str(m.get("name") or m["id"]) for m in items
+                      if isinstance(m, dict) and isinstance(m.get("id"), str)}
+        return listed
+
+    # ---- pass 1: read and validate every managed row; nothing is written ----
+    # (id, create|update|unchanged|absent, row, target name, target hidden)
+    plan: list[tuple[str, str, dict | None, str, bool]] = []
+    for rid, hide in hidden_of.items():
+        kind = "role" if rid in names else "served id"
+        status, row, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(rid, safe=""))
         if status in (401, 403):
-            raise OwuiError(f"Open WebUI refused the key ({status}) reading {item.role}: {OWUI_KEY_VAR} must be "
-                            f"an ADMIN user's API key, with API keys enabled (Admin Settings > General). "
-                            f"Nothing was written.")
+            raise refused(status, rid)
         if status == 404:
-            plan.append((item, "create", None))
+            if rid in names:
+                plan.append((rid, "create", None, names[rid], hide))
+            elif rid in listing():
+                plan.append((rid, "create", None, listing()[rid], hide))
+            else:
+                plan.append((rid, "absent", None, "", hide))
             continue
-        if status != 200 or not isinstance(row, dict):
-            raise OwuiError(f"reading the {item.role} row failed: HTTP {status} {text[:200]!r}. "
+        if status != 200 or not isinstance(row, dict) or not isinstance(row.get("meta") or {}, dict):
+            raise OwuiError(f"reading the {rid} row failed: HTTP {status} {text[:200]!r}. "
                             f"Nothing was written.")
         if row.get("base_model_id"):
-            raise OwuiError(f"the Open WebUI row {item.role!r} is a PRESET on {row.get('base_model_id')!r}, "
-                            f"not a base-model row; it was left alone. Nothing was written.")
-        if (row.get("name") or "") == item.label:
-            plan.append((item, "unchanged", row))
+            raise OwuiError(f"the Open WebUI row {rid!r} (a {kind} the local gateway serves) is a PRESET on "
+                            f"{row.get('base_model_id')!r}, not a base-model row; it was left alone. "
+                            f"Nothing was written.")
+        old = row.get("name") or ""
+        name = names.get(rid, old)
+        if old == name and bool((row.get("meta") or {}).get("hidden")) == hide:
+            plan.append((rid, "unchanged", row, name, hide))
             continue
-        # Everything but the name is sent back as it was read - the access grants
-        # too. Open WebUI 0.11.0's update REPLACES a row's grants with the list it
-        # is sent, and an update WITHOUT the field fails (HTTP 500: its router
-        # re-validates `access_grants=None` against `list`; measured against a
-        # disposable 0.11.0 by this item's drill). A row whose grants were not
-        # returned is refused rather than rewritten with none.
+        # Everything but the name and `meta.hidden` is sent back as it was read - the
+        # access grants too. Open WebUI 0.11.0's update REPLACES a row's grants with the
+        # list it is sent, and an update WITHOUT the field fails (HTTP 500: its router
+        # re-validates `access_grants=None` against `list`; measured against a disposable
+        # 0.11.0 by the mr-gateway drill). A row whose grants were not returned is refused
+        # rather than rewritten with none.
         if not isinstance(row.get("access_grants"), list):
-            raise OwuiError(f"the {item.role} row came back without its access grants, so renaming it would "
+            raise OwuiError(f"the {rid} row came back without its access grants, so writing it would "
                             f"replace them; it was left alone. Nothing was written.")
-        plan.append((item, "rename", row))
+        plan.append((rid, "update", row, name, hide))
 
     # ---- pass 2: write what pass 1 planned ----
     changes: list[Change] = []
     done = lambda: ", ".join(f"{c.role} {c.action}" for c in changes  # noqa: E731
-                             if c.action in ("created", "renamed")) or "nothing"
-    for item, action, row in plan:
+                             if c.action in WRITTEN) or "nothing"
+    for rid, action, row, name, hide in plan:
         old = (row or {}).get("name") or ""
+        was = None if row is None else bool((row.get("meta") or {}).get("hidden"))
         if action == "unchanged":
-            changes.append(Change(item.role, "unchanged", old, item.label))
+            changes.append(Change(rid, "unchanged", old, name, hide, was))
             continue
+        if action == "absent":
+            changes.append(Change(rid, "absent", "", "", None, None))
+            continue
+        if action == "create":
+            verb = "create"
+        elif old != name:
+            verb = "rename"
+        else:
+            verb = "hide" if hide else "show"
         if dry_run:
-            changes.append(Change(item.role, "would-" + action, old, item.label))
+            changes.append(Change(rid, "would-" + verb, old, name, hide, was))
             continue
         # RE-READ just before the write and refuse if the row moved since pass 1 (someone
         # made it a preset, renamed it, changed its grants, meta, params or active flag, created
         # or deleted it): a write built from the pass-1 snapshot would overwrite that change.
         # What is NOT closed: a change landing between this GET and the POST (one round trip;
         # Open WebUI has no conditional update) is overwritten.
-        status, now, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(item.role, safe=""))
+        status, now, text = call("GET", "/api/v1/models/model?id=" + urllib.parse.quote(rid, safe=""))
         if _fingerprint(status, now) != _fingerprint(200 if row is not None else 404, row):
-            raise OwuiError(f"the {item.role} row changed in Open WebUI while this sync ran (HTTP {status}); "
+            raise OwuiError(f"the {rid} row changed in Open WebUI while this sync ran (HTTP {status}); "
                             f"it was left alone - run `labels` again. Written before this: {done()}")
         if action == "create":
-            payload = {"id": item.role, "base_model_id": None, "name": item.label,
-                       "meta": {"profile_image_url": "/static/favicon.png"}, "params": {}, "is_active": True}
+            payload = {"id": rid, "base_model_id": None, "name": name,
+                       "meta": {"profile_image_url": "/static/favicon.png", "hidden": hide},
+                       "params": {}, "is_active": True}
             status, made, text = call("POST", "/api/v1/models/create", payload)
         else:
+            meta = dict(row.get("meta") or {})
+            if was != hide:
+                meta["hidden"] = hide
             grants = [{"principal_type": g.get("principal_type"), "principal_id": g.get("principal_id"),
                        "permission": g.get("permission")} for g in row["access_grants"] if isinstance(g, dict)]
-            payload = {"id": item.role, "base_model_id": None, "name": item.label,
-                       "meta": row.get("meta") or {}, "params": row.get("params") or {},
-                       "access_grants": grants, "is_active": bool(row.get("is_active", True))}
+            payload = {"id": rid, "base_model_id": None, "name": name, "meta": meta,
+                       "params": row.get("params") or {}, "access_grants": grants,
+                       "is_active": bool(row.get("is_active", True))}
             status, made, text = call("POST", "/api/v1/models/model/update", payload)
-        if status != 200 or not isinstance(made, dict) or made.get("name") != item.label:
-            verb = "creating" if action == "create" else "renaming"
-            raise OwuiError(f"{verb} the {item.role} row failed: HTTP {status} {text[:200]!r}. "
-                            f"Written before this: {done()}")
-        changes.append(Change(item.role, "created" if action == "create" else "renamed", old, item.label))
+        if (status != 200 or not isinstance(made, dict) or made.get("name") != name
+                or bool((made.get("meta") or {}).get("hidden")) != hide):
+            raise OwuiError(f"{'creating' if action == 'create' else 'updating'} the {rid} row failed: "
+                            f"HTTP {status} {text[:200]!r}. Written before this: {done()}")
+        past = {"create": "created", "rename": "renamed", "hide": "hidden", "show": "shown"}[verb]
+        changes.append(Change(rid, past, old, name, hide, was))
     return changes
 
 
@@ -1437,12 +1558,25 @@ def _fingerprint(status: int, row) -> tuple:
             row.get("is_active"))
 
 
+def _picker(hidden: bool | None) -> str:
+    return "hidden from the picker" if hidden else "shown in the picker"
+
+
 def describe(change: Change) -> str:
-    if change.action in ("created", "would-create"):
-        return f"{change.role}: {change.action} as {change.new!r}"
-    if change.action == "unchanged":
-        return f"{change.role}: unchanged ({change.new!r})"
-    return f"{change.role}: {change.action} {change.old!r} -> {change.new!r}"
+    c = change
+    if c.action == "absent":
+        return f"{c.role}: no row, and Open WebUI does not list it - nothing to hide, no row created"
+    if c.action in ("created", "would-create"):
+        return f"{c.role}: {c.action} as {c.new!r}, {_picker(c.hidden)}"
+    if c.action == "unchanged":
+        return f"{c.role}: unchanged ({c.new!r}, {_picker(c.hidden)})"
+    if c.action in ("hidden", "would-hide", "shown", "would-show"):
+        verb = "would be" if c.action.startswith("would-") else "now"
+        return f"{c.role}: {verb} {_picker(c.hidden)} ({c.new!r})"
+    text = f"{c.role}: {c.action} {c.old!r} -> {c.new!r}"
+    if c.was_hidden is not None and c.hidden is not None and c.was_hidden != c.hidden:
+        text += f", {'would be' if c.action.startswith('would-') else 'now'} {_picker(c.hidden)}"
+    return text
 
 
 # --------------------------------------------------------------------------
