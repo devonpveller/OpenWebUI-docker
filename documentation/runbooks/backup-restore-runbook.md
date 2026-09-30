@@ -204,8 +204,11 @@ files, and missing, wrong or conflicting checksum records; hidden files and fold
 like any other. It does NOT defend against someone actively rearranging `./backup/` while a run is
 in progress (for example swapping a folder for a junction between the listing and the copy), nor
 against the project folder being reached through a link in its parent path - a person with that
-write access can change these scripts as well. Such a swap does not stay silent: the next run
-compares every archived file with its local source and reports a difference as `MISMATCH`.
+write access can change these scripts as well. What catches the result of such a swap later: the
+weekly run re-hashes a file only when its size or timestamp differs from the local file, and then
+reports a difference as `MISMATCH`; a swap that left size AND timestamp equal is caught only by
+`scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`, which re-hashes
+every file on both sides.
 
 Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.

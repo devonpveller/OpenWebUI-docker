@@ -117,6 +117,11 @@ $ma = Try-Call { Get-NasSlotMirrorArgs -Source 'C:\s' -Destination 'C:\d' -LogFi
 Check 'R7 slot args unchanged from 0fb1c0c: /MIR /R:3 /W:5 /Z /MT:8 /XJ /LOG+ /NDL' (($ma -join ' ') -eq 'C:\s C:\d /MIR /R:3 /W:5 /Z /MT:8 /XJ /LOG+:C:\l.log /NDL') ($ma -join ' ')
 $md = Try-Call { Get-NasSlotMirrorArgs -Source 'C:\s' -Destination 'C:\d' -DryRun }
 Check 'R8 -DryRun adds /L to the mirror' ($md -contains '/L')
+Check 'R13 Get-NasFolderFiles makes Rel relative to a -Base given WITH or WITHOUT a trailing backslash' ($(
+  $t13 = Join-Path ([System.IO.Path]::GetTempPath()) ('cf-nas-test-r13-' + [guid]::NewGuid().ToString('N').Substring(0, 6))
+  New-Item -ItemType Directory -Force -Path "$t13\a\b" | Out-Null; Set-Content -LiteralPath "$t13\a\b\f.txt" -Value 'x' -Encoding ascii
+  try { $e1 = @(Get-NasFolderFiles -Folder "$t13\a" -Base "$t13\"); $e2 = @(Get-NasFolderFiles -Folder "$t13\a" -Base $t13); ($e1[0].Rel -eq 'a\b\f.txt') -and ($e2[0].Rel -eq 'a\b\f.txt') }
+  finally { Remove-Item -LiteralPath $t13 -Recurse -Force }))
 Check 'R9 ISO week parity: 2026-09-27 (week 39) -> slot-B, 2026-10-04 (week 40) -> slot-A' (((Get-NasSlotName -Date ([datetime]'2026-09-27')) -eq 'slot-B') -and ((Get-NasSlotName -Date ([datetime]'2026-10-04')) -eq 'slot-A'))
 Check 'R10 the robocopy archive argument set of attempts 1-2 is gone (clean replacement)' (-not (Get-Command Get-NasArchiveCopyArgs -ErrorAction SilentlyContinue))
 Check 'R11 only robocopy''s unfinished-copy window [1979-12-31, 1980-01-03) is INCOMPLETE - the lower edge 1979-12-31T00:00:00 itself is inside; 1979-12-30T23:59:59, 1975, 1601, 1980-01-03 and 2026 are not' ((Test-NasIncompleteStamp ([datetime]'1979-12-31T00:00:00')) -and -not (Test-NasIncompleteStamp ([datetime]'1979-12-30T23:59:59')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-02')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-01T05:00:00')) -and (Test-NasIncompleteStamp ([datetime]'1980-01-02T23:59:59')) -and -not (Test-NasIncompleteStamp ([datetime]'1980-01-03')) -and -not (Test-NasIncompleteStamp ([datetime]'1975-06-01')) -and -not (Test-NasIncompleteStamp ([datetime]'1601-01-02')) -and -not (Test-NasIncompleteStamp ([datetime]'2026-09-13')))
@@ -596,12 +601,46 @@ try {
   $rc19 = $LASTEXITCODE
   $ErrorActionPreference = 'Stop'
   Check 'C19 a DRIVE-RELATIVE destination (one leading backslash) is refused before any write (exit 2, nothing created)' (($rc19 -eq 2) -and ($o19 -match 'must be absolute') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas17'))) "rc=$rc19 out=$o19"
+  # the same with a forward slash, and the drive-letter-relative form 'C:nas19\...' (relative to the
+  # current directory ON that drive) - both built to land INSIDE $root if ever accepted
+  $drives = @(
+    @{ N = 'forward-slash drive-relative (/...)'; P = ((Split-Path -NoQualifier $root) -replace '\\', '/') + '/nas18/archive'; Chk = 'nas18' }
+    @{ N = 'drive-letter-relative (C:x\...)';     P = (Split-Path -Qualifier $root) + 'nas19\archive';                          Chk = 'nas19' }
+  )
+  foreach ($dv in $drives) {
+    $ErrorActionPreference = 'Continue'
+    $o19 = & $ps -NoProfile -ExecutionPolicy Bypass -Command "Set-Location -LiteralPath '$root'; [Environment]::CurrentDirectory = '$root'; & '$CopyRun' -Destination '$($dv.P)' -Source '$cl' -Dirs k; exit `$LASTEXITCODE" 2>&1 | Out-String
+    $rc19 = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check "C19b a $($dv.N) destination is refused before any write (exit 2, nothing created)" (($rc19 -eq 2) -and ($o19 -match 'must be absolute') -and -not (Test-Path -LiteralPath (Join-Path $root $dv.Chk))) "rc=$rc19 out=$o19"
+  }
   New-Item -ItemType Directory -Force -Path "$root\dirs-real\sub" | Out-Null; Blob "$root\dirs-real\sub\far.tar" 400
   $null = cmd /c "mklink /J `"$cl\lnk`" `"$root\dirs-real`"" 2>&1
   try {
     $r = RunCopyTo (Join-Path $root 'nas15\archive') @('-Dirs', 'lnk\sub') $cl
     Check 'C20 a -Dirs value with a LINK segment (lnk\sub, lnk a junction) is FAIL LINK naming the segment, exit 1, nothing copied' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\lnk")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas15'))) "rc=$($r.Rc) out=$($r.Out)"
+    $r = RunCopyTo (Join-Path $root 'nas15b\archive') @('-Dirs', 'lnk/sub') $cl
+    Check 'C20b ... with a FORWARD slash (lnk/sub) too' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\lnk")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas15b'))) "rc=$($r.Rc) out=$($r.Out)"
+    $null = cmd /c "mklink /J `"$cl\hlnk`" `"$root\dirs-real`" && attrib +h `"$cl\hlnk`" /l" 2>&1
+    $r = RunCopyTo (Join-Path $root 'nas15c\archive') @('-Dirs', 'hlnk\sub') $cl
+    Check 'C20c ... with a HIDDEN junction segment (hlnk\sub) too' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $cl\hlnk")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas15c'))) "rc=$($r.Rc) out=$($r.Out)"
+    $null = cmd /c "rmdir `"$cl\hlnk`"" 2>&1
   } finally { $null = cmd /c "rmdir `"$cl\lnk`"" 2>&1 }
+  # a '..' segment in -Dirs would leave -Source
+  New-Item -ItemType Directory -Force -Path "$root\copylink-sibling" | Out-Null; Blob "$root\copylink-sibling\outside.tar" 300
+  foreach ($dd in @('..\copylink-sibling', '../copylink-sibling', 'k\..\..\copylink-sibling')) {
+    $r = RunCopyTo (Join-Path $root 'nas20\archive') @('-Dirs', $dd) $cl
+    Check "C22 a -Dirs value with a '..' segment [$dd] is FAIL DIRS, exit 1, nothing copied from outside -Source" (($r.Rc -eq 1) -and ($r.Out -match 'FAIL DIRS') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas20'))) "rc=$($r.Rc) out=$($r.Out)"
+  }
+  # an unreadable folder is FAIL READ, not FAIL LINK
+  New-Item -ItemType Directory -Force -Path "$cl\m\locked-sub" | Out-Null; Blob "$cl\m\locked-sub\z.tar" 300; Blob "$cl\m\ok.tar" 300
+  $sidC = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $null = & icacls "$cl\m\locked-sub" /deny "*${sidC}:(RX)" 2>&1
+  try {
+    $r = RunCopyTo (Join-Path $root 'nas21\archive') @('-Dirs', 'm') $cl
+    Check 'C23 an unreadable folder under a -Dirs directory is FAIL READ (not FAIL LINK), exit 1, nothing copied from that directory' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL READ') -and ($r.Out -notmatch 'FAIL LINK') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas21\archive\m'))) "rc=$($r.Rc) out=$($r.Out)"
+  } finally { $null = & icacls "$cl\m\locked-sub" /remove:d "*$sidC" 2>&1 }
+  Remove-Item -LiteralPath "$cl\m" -Recurse -Force
   # the copy script's own listing re-checks: a lib whose up-front scan sees nothing (as if
   # the link appeared after it) still refuses the junction
   $c21 = Join-Path $root 'c21run\scripts\backup'; New-Item -ItemType Directory -Force -Path $c21 | Out-Null

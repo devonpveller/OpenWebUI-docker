@@ -39,8 +39,10 @@
 #   slots would hold them (~17 GB each) and the slot MIRROR would drop an archive
 #   two weeks after it left D:. Threat model (stated in nas-sync-lib.ps1):
 #   ordinary conditions are refused loudly; an active local writer rearranging
-#   ./backup/ during a pass is out of scope - the next run reports any resulting
-#   difference as a MISMATCH. The layout rules (sibling default, same share,
+#   ./backup/ during a pass is out of scope - a later run reports a resulting
+#   difference as a MISMATCH when size or timestamp differ; an equal-size,
+#   equal-timestamp one only `copy-archives-to-nas.ps1 -VerifyOnly` catches.
+#   The layout rules (sibling default, same share,
 #   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
 #
 # Parameters:

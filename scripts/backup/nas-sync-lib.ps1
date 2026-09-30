@@ -35,9 +35,11 @@
 # It does NOT defend against someone actively rearranging ./backup/ WHILE a pass
 # runs (e.g. swapping a folder for a junction between the listing and the copy), nor
 # against a -Source / project root whose PARENT is a link: a person with write
-# access there can edit these scripts too. Such a swap is still not silent for long:
-# the next run compares every archived file with its local source and reports any
-# difference as a MISMATCH (alert, no completion marker).
+# access there can edit these scripts too. What catches the result of such a swap
+# later: the next weekly run re-hashes a file only when its size or timestamp differs
+# from the local one, and then reports a difference as a MISMATCH (alert, no
+# completion marker); a swap that left size AND timestamp equal is caught only by
+# `copy-archives-to-nas.ps1 -VerifyOnly`, which re-hashes every file on both sides.
 
 function Get-DotEnvValue {
   # KEY=value from a .env file; quotes stripped; comments and blank lines skipped.

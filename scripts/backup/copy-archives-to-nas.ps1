@@ -109,6 +109,10 @@ $ok = 0; $bad = 0
 try {
   foreach ($d in $Dirs) {
     $srcDir = Join-Path $Source $d
+    if (@($d -split '[\\/]') -contains '..') {
+      Write-Host "FAIL DIRS  $d  (a '..' segment would leave -Source - not allowed)" -ForegroundColor Red
+      $bad++; continue
+    }
     if (-not (Test-Path -LiteralPath $srcDir -PathType Container)) {
       Write-Host "FAIL  $d  (no such directory under $Source)" -ForegroundColor Red
       $bad++; continue
@@ -124,7 +128,8 @@ try {
       Write-Host "FAIL LINK  $segLink  (a junction or symbolic link in the -Dirs path - not followed)" -ForegroundColor Red
       $bad++; continue
     }
-    $links = @(Find-NasLinks $srcDir)
+    try { $links = @(Find-NasLinks $srcDir) }
+    catch { Write-Host "FAIL READ  $srcDir  ($($_.Exception.Message))" -ForegroundColor Red; $bad++; continue }
     if ($links.Count -gt 0) {
       foreach ($l in $links) { Write-Host "FAIL LINK  $l  (a junction or symbolic link - not followed; replace it with the real folder/file)" -ForegroundColor Red }
       $bad += $links.Count; continue
@@ -132,7 +137,11 @@ try {
     # The same re-checking listing as the weekly pass (hidden items included; a link or
     # an error that appears after the scan above still fails this directory).
     try { $entries = @(Get-NasFolderFiles -Folder $srcDir -Base $Source) }
-    catch { Write-Host "FAIL LINK  $($_.Exception.Message)" -ForegroundColor Red; $bad++; continue }
+    catch {
+      $m = $_.Exception.Message
+      $label = $(if ($m -like 'refusing to archive through links*') { 'FAIL LINK' } else { 'FAIL READ' })
+      Write-Host "$label  $m" -ForegroundColor Red; $bad++; continue
+    }
     $files = @($entries | ForEach-Object { Get-Item -LiteralPath $_.File -Force })
     Write-Host "== $d ($($files.Count) files)"
     foreach ($sumDir in @(@($srcDir) + @(Get-ChildItem -LiteralPath $srcDir -Recurse -Directory -Force | ForEach-Object { $_.FullName }))) {
