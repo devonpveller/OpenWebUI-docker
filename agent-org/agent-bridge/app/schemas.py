@@ -208,6 +208,10 @@ class OperatorIntent(BaseModel):
         # User-facing admin inlets — every slash command has an NL path (operator preference:
         # all user-facing inlets stem from NL; slash commands are only a power-user fallback).
         "project_list", "project_remove", "egress_allow", "kill", "unkill",
+        # Point a role PROFILE (pm, po, planner, worker-default, reviewer-*) at another gateway model
+        # name (model-roles: local-large, ...). A new audited profile version; lane and every other
+        # field untouched. Set `profile_name` + `profile_model` (+ `profile_dry_run` to only check).
+        "profile_model",
     ] = "chitchat"
     reply: str = ""                       # the PO's conversational, first-person response
     effort_name: str | None = None        # kebab-case slug for a NEW request
@@ -238,6 +242,10 @@ class OperatorIntent(BaseModel):
     # The operator-plane structure action for kind=capability: "fork". Its target is carried in
     # `repo_url` (the repo to fork) / `project` (a name for the result).
     capability: str | None = None
+    # kind=profile_model: which profile, which gateway model name, and whether to only report.
+    profile_name: str | None = None
+    profile_model: str | None = None
+    profile_dry_run: bool = False
 
 
 # ── Grounding result (UX-FLOW Stage 4, P4.0) ────────────────────────────────

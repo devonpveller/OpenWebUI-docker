@@ -1141,17 +1141,21 @@ python scripts/stack/owui_role_migration.py --db webui.db --apply --restore-file
 python scripts/stack/owui_role_migration.py --db webui.db --restore r.json [--apply]
 ```
 
-A dry run opens the database read-only and prints the before/after table of exactly the
-cells it would change. `--apply` writes the restore file first (a new file; never
-overwritten), then changes every cell in one transaction that re-reads each one and
-refuses if any moved since the plan; a second `--apply` finds nothing to do. `--restore`
-puts every recorded cell back with the same storage class and bytes, and refuses the whole
-restore if any cell holds neither the migrated nor the original value. A config value is
-rewritten only if `json.dumps` reproduces its stored text (how Open WebUI 0.11 writes it).
-Open WebUI reads `rag.embedding_model` once at startup, so run it with Open WebUI
-**stopped**; a non-empty `webui.db-wal` refuses `--apply` unless `--wal-ok` says you
-checked. Other config keys that still name an old id are listed, not changed. Stdlib only,
-so it runs inside the `openwebui` image against the data volume.
+A dry run prints the before/after table of exactly the cells it would change and creates
+nothing beside the database: it reads the file `mode=ro&immutable=1`, or - when a non-empty
+`webui.db-wal` holds rows the main file lacks - a temporary copy of both. `--apply` opens the
+database in SQLite's EXCLUSIVE locking mode, which is granted only when no other connection
+has it open, so a running Open WebUI is refused (`another process has ... open`) rather than
+guessed at; the plan, the restore file (a new file, written and fsynced first) and every
+write happen in that one transaction, and a failure rolls back and removes the restore file.
+A second `--apply` finds nothing to do. `--restore` puts every recorded cell back with the
+same storage class and bytes under the same lock; a cell already holding its original value
+is skipped, and a cell holding neither the migrated nor the original value refuses the whole
+restore (dry run included), naming the cell - put it back by hand or leave it, then run the
+restore again. A config value is rewritten only if `json.dumps` reproduces its stored text
+(how Open WebUI 0.11 writes it). Open WebUI reads `rag.embedding_model` once at startup, so
+run it with Open WebUI **stopped**. Other config keys that still name an old id are listed,
+not changed. Stdlib only, so it runs inside the `openwebui` image against the data volume.
 
 ---
 

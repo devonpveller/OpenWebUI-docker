@@ -43,3 +43,16 @@ warning** (never silently trusts a weak monitor — the Human Operator carries m
 
 ⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `local-large`
 proves capable; the cloud budget caps the rest (UX-FLOW §6).
+
+## Changing a profile's model on a running install
+
+These files only SEED a profile the database does not have yet; after that the database
+owns the live values (so an operator's lane flip survives a restart). A new install seeds
+`local-large`, the model role (`inference/README.md`). An existing install moves a profile
+by saying so, like every operator inlet (NL -> OperatorIntent -> a governed handler):
+`set profile <name> model <model>` in `#mgmt` or through `POST /nl` (`{"message": ...,
+"actor": "<who>"}`), with `(dry run)` on the end to only check. The handler refuses an
+unknown profile and a model the gateway does not list, writes ONE new profile version with
+only `model` changed (lane, charter, temperature, scope and caller key carried over), and
+audits a `profile_model_set` event with who asked and the before/after. The same model again
+writes nothing; the same command with the old model is the rollback.

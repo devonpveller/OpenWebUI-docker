@@ -90,6 +90,11 @@ class ModelClient(Protocol):
         user: str,
     ) -> str: ...
 
+    async def list_models(self, *, api_base: str, api_key: str) -> list[str]:
+        """The model names the gateway at `api_base` registers (`GET /models` - a listing, NOT a
+        health probe: LiteLLM answers it from its config and loads nothing, C5)."""
+        ...
+
 
 class OpenAICompatClient:
     """Real client: OpenAI-compatible endpoint + Instructor for schema validation,
@@ -149,6 +154,11 @@ class OpenAICompatClient:
         )
         return resp.choices[0].message.content or ""
 
+    async def list_models(self, *, api_base, api_key) -> list[str]:
+        base = self._AsyncOpenAI(base_url=api_base, api_key=api_key or "agent-org")
+        page = await base.models.list()
+        return [m.id for m in page.data]
+
 
 class FakeModelClient:
     """Test double. `queue_structured`/`queue_text` pre-load responses per profile."""
@@ -160,6 +170,13 @@ class FakeModelClient:
         # Queue exceptions (e.g. a simulated 503) to exercise backpressure handling. An item is
         # popped per call; a BaseException is raised, a model is returned.
         self._raises: list[BaseException] = []
+        # What `list_models` answers: the gateway's registered names (the model-roles set plus the
+        # old concrete names, as the live LiteLLM registers them during the migration). A test sets
+        # it to an Exception to simulate an unreachable gateway.
+        self.registered_models: list[str] | BaseException = [
+            "local-large", "local-large:nothink", "local-small", "local-small:nothink", "local-embed",
+            "qwen36-27b", "qwen36-27b:nothink", "bge-m3", "bge-m3-f16.gguf", "qllama/bge-m3:latest",
+        ]
 
     def queue_structured(self, obj: BaseModel) -> None:
         self._structured.append(obj)
@@ -183,6 +200,12 @@ class FakeModelClient:
     async def complete(self, **kw) -> str:  # type: ignore[no-untyped-def]
         self.calls.append({"kind": "complete", **kw})
         return self._text.pop(0) if self._text else ""
+
+    async def list_models(self, **kw) -> list[str]:  # type: ignore[no-untyped-def]
+        self.calls.append({"kind": "list_models", **kw})
+        if isinstance(self.registered_models, BaseException):
+            raise self.registered_models
+        return list(self.registered_models)
 
 
 class ModelRouter:
@@ -215,6 +238,12 @@ class ModelRouter:
                 return self.s.local_api_base, self.s.local_api_key
             return self.s.cloud_api_base, self.s.cloud_api_key
         return self.s.local_api_base, self.s.local_api_key
+
+    async def registered_models(self, lane: str) -> set[str]:
+        """The names the gateway serving `lane` registers. Raises on any failure - a caller that
+        validates against it must fail CLOSED (refuse), never assume a name exists."""
+        api_base, api_key = self._endpoint(lane)
+        return set(await self._get_client().list_models(api_base=api_base, api_key=api_key))
 
     async def _with_backpressure_retry(self, make_call, *, label: str):
         """Run an inference call, retrying on 429/503 admission backpressure with exponential

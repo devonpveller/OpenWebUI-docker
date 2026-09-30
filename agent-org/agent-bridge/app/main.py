@@ -39,6 +39,9 @@ class EffortIn(BaseModel):
 class OperatorNlIn(BaseModel):
     message: str
     thread_id: str | None = None
+    # Who is asking, recorded by governed handlers that audit an actor (e.g. a profile-model change
+    # issued by a named landing step). Defaults to the API inlet's own identity.
+    actor: str | None = None
 
 
 class ConcernIn(BaseModel):
@@ -165,7 +168,8 @@ def create_app(orch: Orchestrator | None = None) -> FastAPI:
         mgmt = await orch.mgmt_channel_id()
         if not mgmt:
             raise HTTPException(503, "mgmt channel not resolvable yet")
-        await orch.nl_intake(body.message, mgmt, user_id="operator-api", thread_id=body.thread_id)
+        await orch.nl_intake(body.message, mgmt, user_id="operator-api", thread_id=body.thread_id,
+                             actor=f"operator-api:{body.actor}" if body.actor else "operator-api")
         return {"ok": True, "channel_id": mgmt}
 
     @app.get("/state/{effort_id}")

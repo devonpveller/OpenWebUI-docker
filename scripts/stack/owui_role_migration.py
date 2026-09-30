@@ -28,23 +28,28 @@ this script does not reach still works.
 
 SAFETY
 ------
-* DRY RUN BY DEFAULT: opens the database read-only (`mode=ro`), prints the
-  before/after table of exactly the cells it would change, and writes nothing.
-* `--apply` needs `--restore-file PATH` (a new file; never overwritten). The
-  restore file is written and flushed BEFORE the database is touched; then one
-  transaction re-reads every planned cell, refuses if any changed since the plan,
-  and writes. A second `--apply` finds nothing to do and writes nothing.
+* DRY RUN BY DEFAULT: reads without creating anything beside the database - the
+  main file opened `mode=ro&immutable=1` when there is no un-checkpointed WAL,
+  otherwise a temporary COPY of the file and its `-wal` (an immutable read would
+  miss the WAL's rows) - prints the before/after table of exactly the cells it
+  would change, and writes nothing.
+* `--apply` needs `--restore-file PATH` (a new file; never overwritten). It opens
+  the database in SQLite's EXCLUSIVE locking mode inside an EXCLUSIVE transaction,
+  which SQLite grants only when no other connection has the file open - so a
+  running Open WebUI (its pool keeps connections open) is REFUSED, not guessed
+  at. The plan, the restore file (written and fsynced first) and the writes all
+  happen inside that one transaction; any failure rolls it back and removes the
+  restore file. A second `--apply` finds nothing to do and writes nothing.
 * `--restore PATH [--apply]` puts every recorded cell back byte-identical (same
-  SQLite storage class, same bytes); it refuses - writing nothing - if any cell
-  no longer holds the value the migration wrote, unless it already holds the
-  original (then that cell is skipped).
+  SQLite storage class, same bytes), under the same exclusive lock. A cell that
+  already holds its original value is skipped; a cell holding NEITHER the
+  migrated nor the original value (changed since) refuses the whole restore -
+  the dry run too - naming each such cell.
 * A JSON config value is rewritten only if Python's `json.dumps` reproduces the
   stored text exactly (that is how Open WebUI 0.11's SQLAlchemy JSON column
   writes it); otherwise the script refuses rather than reformat a value.
-* Open WebUI reads `rag.embedding_model` once at startup, and writing under a
-  running instance races it, so the landing runs this with Open WebUI STOPPED.
-  A non-empty `<db>-wal` file is the sign of a running (or crashed) instance:
-  `--apply` refuses unless `--wal-ok` says the operator has checked.
+* Open WebUI reads `rag.embedding_model` once at startup, so the landing runs
+  this with Open WebUI STOPPED (and checks that with `docker inspect` first).
 
 THREAT MODEL: this changes which model NAME Open WebUI's stored rows send. It does
 not defend against anyone editing the database or this script.
@@ -62,12 +67,15 @@ Stdlib only (runs inside the openwebui image or any python3 >= 3.8).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 from typing import Any
 
 CHAT_ROLES = {
@@ -275,143 +283,209 @@ def _sha(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# write paths
+# opening the database
 # ---------------------------------------------------------------------------
 
-def _wal_guard(db: str, wal_ok: bool) -> None:
-    wal = db + "-wal"
-    if os.path.exists(wal) and os.path.getsize(wal) > 0 and not wal_ok:
-        raise Refused(f"{wal} is not empty: Open WebUI may be running (or stopped uncleanly). Stop it "
-                      "first (the landing plan's order), or pass --wal-ok if you have checked it is "
-                      "stopped. Nothing written.")
+@contextlib.contextmanager
+def _read_view(db: str, out):
+    """A read-only view of `db` that creates nothing beside it.
 
-
-def _ro_uri(db: str) -> str:
-    from urllib.request import pathname2url
-    return "file:" + pathname2url(os.path.abspath(db)) + "?mode=ro"
-
-
-def _connect_rw(db: str) -> sqlite3.Connection:
+    No `-wal` (or an empty one): the main file IS the whole database, opened
+    `mode=ro&immutable=1`, which creates no `-wal`/`-shm`. A NON-empty `-wal` (Open WebUI
+    running, or stopped without closing its connections) holds committed rows the main file
+    lacks, and an immutable open would silently miss them - so the main file and its `-wal`
+    are COPIED to a temporary directory and the copy is read (SQLite folds the WAL into the
+    copy); the live directory is only read. The copy is deleted afterwards."""
     if not os.path.isfile(db):
         raise Refused(f"{db} is not a file")
-    conn = sqlite3.connect(db, isolation_level=None, timeout=5)
-    conn.execute("PRAGMA busy_timeout = 5000")
+    wal = db + "-wal"
+    if os.path.exists(wal) and os.path.getsize(wal) > 0:
+        tmp = tempfile.mkdtemp(prefix="owui-role-migration-")
+        try:
+            copy = os.path.join(tmp, "webui.db")
+            shutil.copyfile(db, copy)
+            shutil.copyfile(wal, copy + "-wal")
+            print(f"  read from a temporary COPY: {wal} is not empty, so the main file alone "
+                  "is not the whole database", file=out)
+            conn = sqlite3.connect(copy)
+            try:
+                yield conn
+            finally:
+                conn.close()
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        return
+    from urllib.request import pathname2url
+    conn = sqlite3.connect("file:" + pathname2url(os.path.abspath(db)) + "?mode=ro&immutable=1", uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _open_exclusive(db: str, lock_timeout: float) -> sqlite3.Connection:
+    """The write connection: EXCLUSIVE locking mode, and an EXCLUSIVE transaction already open.
+
+    SQLite grants that lock only if NO other connection has the database open - an idle Open
+    WebUI keeps pooled connections open, so a running instance is refused here, not guessed from
+    a file size. The plan, the restore file and the writes all happen inside this one transaction,
+    so nothing can change between reading a cell and writing it. In WAL mode the exclusive
+    locking mode keeps the WAL index in memory (no `-shm`), recovers a WAL an unclean stop left,
+    and checkpoints it on close."""
+    if not os.path.isfile(db):
+        raise Refused(f"{db} is not a file")
+    conn = sqlite3.connect(db, isolation_level=None, timeout=lock_timeout)
+    try:
+        conn.execute("PRAGMA locking_mode = EXCLUSIVE")
+        conn.execute("BEGIN EXCLUSIVE")
+    except sqlite3.OperationalError as e:
+        conn.close()
+        if "locked" in str(e) or "busy" in str(e):
+            raise Refused(f"another process has {db} open (is Open WebUI running?). Stop it "
+                          "(the landing plan's order) and run again. Nothing written.") from e
+        raise
     return conn
 
 
-def _write_cells(conn: sqlite3.Connection, cells: list[tuple[dict, Any, Any]]) -> None:
-    """cells: (cell, expected current value, new value). All-or-nothing."""
-    conn.execute("BEGIN IMMEDIATE")  # a lock failure here raises before anything is written
+def _finish(conn: sqlite3.Connection, commit: bool) -> None:
     try:
-        for c, expect, _new in cells:
-            cur = _read_cell(conn, c["table"], c["keycol"], c["key"], c["column"])
-            if not _same(cur, expect):
-                raise Refused(f'{c["table"]}.{c["key"]}.{c["column"]} changed since the plan '
-                              f"(now {_short(cur)!s}); nothing written")
-        for c, _expect, new in cells:
-            conn.execute(f'UPDATE "{c["table"]}" SET "{c["column"]}" = ? WHERE "{c["keycol"]}" = ?',
-                         (new, c["key"]))
-        conn.execute("COMMIT")
-    except BaseException:
-        conn.execute("ROLLBACK")
-        raise
+        conn.execute("COMMIT" if commit else "ROLLBACK")
+    finally:
+        conn.close()
 
 
-def migrate(db: str, apply: bool, restore_file: str | None, wal_ok: bool, out=None) -> int:
+def _abandon(conn: sqlite3.Connection) -> None:
+    try:
+        _finish(conn, commit=False)
+    except sqlite3.Error:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# migrate / restore
+# ---------------------------------------------------------------------------
+
+def _report_plan(changes: list[dict], notes: list[str], rnote: str | None, apply: bool, out) -> None:
+    for n in notes + ([rnote] if rnote else []):
+        print(f"  note: {n}", file=out)
+    if not changes:
+        print("  nothing to change: every reference this script owns already names a role.", file=out)
+        return
+    print(table(changes, f"  {len(changes)} cell(s) {'to change' if apply else 'would change'}:"), file=out)
+
+
+def migrate(db: str, apply: bool, restore_file: str | None, lock_timeout: float = 2.0, out=None) -> int:
     out = out or sys.stdout
     if apply and not restore_file:
         raise Refused("--apply needs --restore-file PATH (a new file the rollback reads)")
     if apply and restore_file and os.path.exists(restore_file):
         raise Refused(f"{restore_file} already exists; refusing to overwrite a restore file")
-    uri = _ro_uri(db)
-    if not os.path.isfile(db):
-        raise Refused(f"{db} is not a file")
-    ro = sqlite3.connect(uri, uri=True)
-    try:
-        changes, notes = plan(ro)
-        rnote = role_rows_note(ro)
-    finally:
-        ro.close()
     mode = "APPLY" if apply else "DRY RUN (nothing written; --apply to write)"
     print(f"owui_role_migration: {mode}\n  database: {db}", file=out)
-    for n in notes + ([rnote] if rnote else []):
-        print(f"  note: {n}", file=out)
-    if not changes:
-        print("  nothing to change: every reference this script owns already names a role.", file=out)
-        return 0
-    print(table(changes, f"  {len(changes)} cell(s) {'to change' if apply else 'would change'}:"), file=out)
     if not apply:
+        with _read_view(db, out) as ro:
+            changes, notes = plan(ro)
+            _report_plan(changes, notes, role_rows_note(ro), False, out)
         return 0
-    _wal_guard(db, wal_ok)
-    record = {
-        "format": RESTORE_FORMAT,
-        "database": os.path.abspath(db),
-        "created_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "cells": [{k: c[k] for k in ("what", "table", "keycol", "key", "column", "before", "after")}
-                  for c in changes],
-    }
-    with open(restore_file, "x", encoding="utf-8", newline="\n") as f:
-        json.dump(record, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-        f.flush()
-        os.fsync(f.fileno())
-    conn = _connect_rw(db)
+    conn = _open_exclusive(db, lock_timeout)
+    wrote_file = False
     try:
-        _write_cells(conn, [(c, _untyped(c["before"]), _untyped(c["after"])) for c in changes])
-    except (Refused, sqlite3.Error):
-        conn.close()
-        os.remove(restore_file)  # the transaction rolled back: nothing to restore
+        changes, notes = plan(conn)
+        _report_plan(changes, notes, role_rows_note(conn), True, out)
+        if not changes:
+            _finish(conn, commit=False)
+            return 0
+        record = {
+            "format": RESTORE_FORMAT,
+            "database": os.path.abspath(db),
+            "created_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "cells": [{k: c[k] for k in ("what", "table", "keycol", "key", "column", "before", "after")}
+                      for c in changes],
+        }
+        with open(restore_file, "x", encoding="utf-8", newline="\n") as f:
+            wrote_file = True
+            json.dump(record, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        for c in changes:
+            conn.execute(f'UPDATE "{c["table"]}" SET "{c["column"]}" = ? WHERE "{c["keycol"]}" = ?',
+                         (_untyped(c["after"]), c["key"]))
+        _finish(conn, commit=True)
+    except BaseException:
+        _abandon(conn)
+        if wrote_file:
+            os.remove(restore_file)  # the transaction rolled back: nothing to restore
         raise
-    conn.close()
     print(f"  written. restore file: {restore_file} (sha256 {_sha(restore_file)})", file=out)
     return 0
 
 
-def restore(db: str, restore_file: str, apply: bool, wal_ok: bool, out=None) -> int:
+def _classify_restore(conn: sqlite3.Connection, cells: list[dict]) -> tuple[list[tuple[dict, Any]], int]:
+    """(cells to put back, with their original value; count already original). Refuses the WHOLE
+    restore if any cell holds neither the value the migration wrote nor the original - someone
+    changed it since, and overwriting that silently would lose their change."""
+    todo: list[tuple[dict, Any]] = []
+    skipped = 0
+    drifted = []
+    for c in cells:
+        if c["table"] not in ("model", "config") or c["column"] not in ("base_model_id", "value") \
+                or c["keycol"] not in ("id", "key"):
+            raise Refused(f"restore file names a cell outside this script's scope: {c}")
+        cur = _read_cell(conn, c["table"], c["keycol"], c["key"], c["column"])
+        before, after = _untyped(c["before"]), _untyped(c["after"])
+        if _same(cur, before):
+            skipped += 1
+        elif _same(cur, after):
+            todo.append((c, before))
+        else:
+            drifted.append(f'{c["table"]}.{c["key"]}.{c["column"]} (now {_short(cur)})')
+    if drifted:
+        raise Refused("these cells hold neither the migrated nor the original value, so they changed "
+                      "after the migration: " + "; ".join(drifted) + ". Nothing restored. Put each "
+                      "back by hand (its original value is the restore file's `before`) or leave it "
+                      "as it is, then run the restore again - a cell already holding its original "
+                      "value is skipped, so only the drifted cell needs a decision.")
+    return todo, skipped
+
+
+def restore(db: str, restore_file: str, apply: bool, lock_timeout: float = 2.0, out=None) -> int:
     out = out or sys.stdout
     with open(restore_file, encoding="utf-8") as f:
         record = json.load(f)
     if record.get("format") != RESTORE_FORMAT:
         raise Refused(f"{restore_file} is not a {RESTORE_FORMAT} restore file")
     cells = record.get("cells") or []
-    uri = _ro_uri(db)
-    ro = sqlite3.connect(uri, uri=True)
-    todo: list[tuple[dict, Any, Any]] = []
-    skipped = 0
-    try:
-        for c in cells:
-            if c["table"] not in ("model", "config") or c["column"] not in ("base_model_id", "value") \
-                    or c["keycol"] not in ("id", "key"):
-                raise Refused(f"restore file names a cell outside this script's scope: {c}")
-            cur = _read_cell(ro, c["table"], c["keycol"], c["key"], c["column"])
-            before, after = _untyped(c["before"]), _untyped(c["after"])
-            if _same(cur, before):
-                skipped += 1
-                continue
-            if not _same(cur, after):
-                raise Refused(f'{c["table"]}.{c["key"]}.{c["column"]} holds neither the migrated nor the '
-                              f"original value (now {_short(cur)}); refusing the whole restore")
-            todo.append((c, after, before))
-    finally:
-        ro.close()
     mode = "APPLY" if apply else "DRY RUN (nothing written; --apply to write)"
     print(f"owui_role_migration --restore: {mode}\n  database: {db}\n  restore file: {restore_file}", file=out)
-    if skipped:
-        print(f"  {skipped} cell(s) already hold their original value: skipped", file=out)
-    if not todo:
-        print("  nothing to restore.", file=out)
-        return 0
-    shown = [dict(c, show=(_short(_untyped(c["after"])), _short(_untyped(c["before"])))) for c, _a, _b in todo]
-    print(table(shown, f"  {len(todo)} cell(s) {'to restore' if apply else 'would be restored'}:"), file=out)
+
+    def report(todo, skipped):
+        if skipped:
+            print(f"  {skipped} cell(s) already hold their original value: skipped", file=out)
+        if not todo:
+            print("  nothing to restore.", file=out)
+            return
+        shown = [dict(c, show=(_short(_untyped(c["after"])), _short(orig))) for c, orig in todo]
+        print(table(shown, f"  {len(todo)} cell(s) {'to restore' if apply else 'would be restored'}:"),
+              file=out)
+
     if not apply:
+        with _read_view(db, out) as ro:
+            report(*_classify_restore(ro, cells))
         return 0
-    _wal_guard(db, wal_ok)
-    conn = _connect_rw(db)
+    conn = _open_exclusive(db, lock_timeout)
     try:
-        _write_cells(conn, todo)
-    finally:
-        conn.close()
-    print("  restored.", file=out)
+        todo, skipped = _classify_restore(conn, cells)
+        report(todo, skipped)
+        for c, orig in todo:
+            conn.execute(f'UPDATE "{c["table"]}" SET "{c["column"]}" = ? WHERE "{c["keycol"]}" = ?',
+                         (orig, c["key"]))
+        _finish(conn, commit=bool(todo))
+    except BaseException:
+        _abandon(conn)
+        raise
+    if todo:
+        print("  restored.", file=out)
     return 0
 
 
@@ -422,14 +496,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true", help="write (default: dry run, read-only)")
     ap.add_argument("--restore-file", help="with --apply: the NEW file that records every changed cell")
     ap.add_argument("--restore", metavar="RESTORE_FILE", help="put back the cells a restore file recorded")
-    ap.add_argument("--wal-ok", action="store_true", help="write even though <db>-wal is not empty")
+    ap.add_argument("--lock-timeout", type=float, default=2.0,
+                    help="seconds to wait for the exclusive lock before refusing (default 2)")
     args = ap.parse_args(argv)
     try:
         if args.restore:
             if args.restore_file:
                 ap.error("--restore and --restore-file do not combine")
-            return restore(args.db, args.restore, args.apply, args.wal_ok)
-        return migrate(args.db, args.apply, args.restore_file, args.wal_ok)
+            return restore(args.db, args.restore, args.apply, args.lock_timeout)
+        return migrate(args.db, args.apply, args.restore_file, args.lock_timeout)
     except Refused as e:
         print(f"REFUSED: {e}", file=sys.stderr)
         return 1

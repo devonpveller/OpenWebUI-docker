@@ -11,6 +11,8 @@ import hashlib
 import io
 import json
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -38,9 +40,11 @@ CONFIG_DDL = """CREATE TABLE config (
 ORDER = ["arena-model", "code", "qwen36-27b", "gemma3:4b", "qllama/bge-m3:latest", "bge-m3", "general"]
 
 
-def make_db(tmp_path: Path, *, presets=None, config=None) -> Path:
+def make_db(tmp_path: Path, *, presets=None, config=None, wal=False) -> Path:
     db = tmp_path / "webui.db"
     c = sqlite3.connect(db)
+    if wal:  # the live webui.db is in WAL mode
+        c.execute("PRAGMA journal_mode=wal")
     c.execute(MODEL_DDL)
     c.execute(CONFIG_DDL)
     rows = presets if presets is not None else [
@@ -76,6 +80,14 @@ def snapshot(db: Path) -> dict:
             out[(t, row[0])] = row[1:]
     c.close()
     return out
+
+
+def run_err(argv) -> tuple[int, str, str]:
+    import contextlib
+    o, e = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(o), contextlib.redirect_stderr(e):
+        rc = m.main([str(a) for a in argv])
+    return rc, o.getvalue(), e.getvalue()
 
 
 def run(argv) -> tuple[int, str]:
@@ -155,9 +167,18 @@ def test_restore_refuses_whole_when_a_cell_moved_since(tmp_path):
     c.commit()
     c.close()
     s = snapshot(db)
-    rc, _ = run(["--db", db, "--restore", rf, "--apply"])
-    assert rc == 1
+    for extra in ([], ["--apply"]):                  # the dry run refuses too, not "would restore"
+        rc, out, err = run_err(["--db", db, "--restore", rf, *extra])
+        assert rc == 1, extra
+        assert "model.research.base_model_id (now gemma3:4b)" in err and "would be restored" not in out
     assert snapshot(db) == s
+    # the documented way out: put the drifted cell back by hand, then the restore completes
+    c = sqlite3.connect(db)
+    c.execute("UPDATE model SET base_model_id='qwen36-27b' WHERE id='research'")
+    c.commit()
+    c.close()
+    rc, out = run(["--db", db, "--restore", rf, "--apply"])
+    assert rc == 0 and "1 cell(s) already hold their original value" in out
 
 
 def test_apply_refuses_without_a_restore_file_or_onto_an_existing_one(tmp_path):
@@ -171,18 +192,74 @@ def test_apply_refuses_without_a_restore_file_or_onto_an_existing_one(tmp_path):
     assert snapshot(db) == s
 
 
-def test_a_non_empty_wal_refuses_the_write_unless_waved(tmp_path):
-    db = make_db(tmp_path)
-    s = snapshot(db)
-    (tmp_path / "webui.db-wal").write_bytes(b"x" * 10)
+def _hold_open(db: Path, *, write: str | None = None) -> subprocess.Popen:
+    """Another PROCESS with the database open, as an idle Open WebUI keeps its pooled
+    connections; with `write`, it commits that statement first. Stops when stdin closes."""
+    code = ("import sqlite3, sys\n"
+            f"c = sqlite3.connect({str(db)!r})\n"
+            "c.execute('select count(*) from model').fetchone()\n"
+            + (f"c.execute({write!r}); c.commit()\n" if write else "")
+            + "print('ready', flush=True)\nsys.stdin.read()\n")
+    p = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "ready"
+    return p
+
+
+def _files(d: Path) -> dict:
+    return {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(d.iterdir()) if f.is_file()}
+
+
+def test_apply_and_restore_are_refused_while_another_process_has_the_db_open(tmp_path):
+    db = make_db(tmp_path, wal=True)
     rf = tmp_path / "r.json"
-    assert run(["--db", db, "--apply", "--restore-file", rf])[0] == 1
-    assert snapshot(db) == s and not rf.exists()
-    # the file above is not a real WAL (the test db is in rollback-journal mode, and sqlite may
-    # discard a stray -wal when a connection closes), so re-plant it for the waved run
-    (tmp_path / "webui.db-wal").write_bytes(b"x" * 10)
-    assert run(["--db", db, "--apply", "--restore-file", rf, "--wal-ok"])[0] == 0
-    assert snapshot(db) != s
+    p = _hold_open(db)
+    try:
+        rc, out, err = run_err(["--db", db, "--apply", "--restore-file", rf, "--lock-timeout", "0.2"])
+        assert rc == 1 and "another process has" in err
+        assert not rf.exists()
+    finally:
+        p.stdin.close()
+        p.wait()
+    s = snapshot(db)
+    assert s[("model", "code")][5] == "qwen36-27b"                   # nothing written
+    assert run(["--db", db, "--apply", "--restore-file", rf])[0] == 0  # it goes once the holder is gone
+    p = _hold_open(db)
+    try:
+        rc, _out, err = run_err(["--db", db, "--restore", rf, "--apply", "--lock-timeout", "0.2"])
+        assert rc == 1 and "another process has" in err
+    finally:
+        p.stdin.close()
+        p.wait()
+    assert snapshot(db)[("model", "code")][5] == "local-large"
+
+
+def test_dry_run_creates_nothing_beside_a_wal_mode_db(tmp_path):
+    db = make_db(tmp_path, wal=True)
+    before = _files(tmp_path)
+    assert set(before) == {"webui.db"}
+    rc, out = run(["--db", db])
+    assert rc == 0 and "5 cell(s) would change" in out
+    assert _files(tmp_path) == before                               # no -wal, no -shm, same bytes
+
+
+def test_dry_run_reads_an_unclean_wal_through_a_copy_and_leaves_it_alone(tmp_path):
+    db = make_db(tmp_path, wal=True)
+    # a committed change that lives ONLY in the WAL: the writer dies without closing
+    code = ("import sqlite3, os\n"
+            f"c = sqlite3.connect({str(db)!r})\n"
+            "c.execute(\"UPDATE model SET base_model_id='qwen36-27b' WHERE id='gemma-preset'\")\n"
+            "c.commit()\nos._exit(0)\n")
+    subprocess.run([sys.executable, "-c", code], check=True)
+    assert (tmp_path / "webui.db-wal").stat().st_size > 0
+    before = _files(tmp_path)
+    rc, out = run(["--db", db])
+    assert rc == 0 and "temporary COPY" in out
+    assert "model.gemma-preset" in out and "6 cell(s) would change" in out   # the WAL row is seen
+    assert _files(tmp_path) == before                               # the live files are untouched
+    rf = tmp_path / "r.json"
+    rc, out = run(["--db", db, "--apply", "--restore-file", rf])    # apply recovers the WAL itself
+    assert rc == 0 and "6 cell(s) to change" in out
+    assert snapshot(db)[("model", "gemma-preset")][5] == "local-large"
 
 
 def test_a_value_json_dumps_cannot_reproduce_is_refused_not_reformatted(tmp_path):
@@ -224,23 +301,23 @@ def test_order_list_keeps_a_role_that_is_already_listed(tmp_path):
     assert order == ["local-large", "a", "b", "local-embed"]
 
 
-def test_a_change_between_plan_and_write_refuses_everything(tmp_path, monkeypatch):
+def test_a_failure_after_the_restore_file_rolls_back_and_removes_it(tmp_path, monkeypatch):
     db = make_db(tmp_path)
-    real = m._write_cells
+    s0 = snapshot(db)
+    real = m._untyped
+    calls = {"n": 0}
 
-    def racing(conn, cells):
-        other = sqlite3.connect(db)
-        other.execute("UPDATE model SET base_model_id='gemma3:4b' WHERE id='code'")
-        other.commit()
-        other.close()
-        return real(conn, cells)
+    def boom(t):
+        calls["n"] += 1
+        if calls["n"] == 3:                          # mid-way through the UPDATEs
+            raise sqlite3.OperationalError("disk I/O error (simulated)")
+        return real(t)
 
-    monkeypatch.setattr(m, "_write_cells", racing)
-    rc, _ = run(["--db", db, "--apply", "--restore-file", tmp_path / "r.json"])
-    assert rc == 1
-    s_race = snapshot(db)
-    assert s_race[("model", "research")][5] == "qwen36-27b"  # base_model_id untouched
-    assert not (tmp_path / "r.json").exists()
+    monkeypatch.setattr(m, "_untyped", boom)
+    rf = tmp_path / "r.json"
+    rc, _out, err = run_err(["--db", db, "--apply", "--restore-file", rf])
+    assert rc == 1 and "simulated" in err
+    assert snapshot(db) == s0 and not rf.exists()
 
 
 def test_not_an_open_webui_database_is_refused(tmp_path):
