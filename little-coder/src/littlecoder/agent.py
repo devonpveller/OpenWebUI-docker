@@ -295,6 +295,9 @@ class AgentRunner:
                 "LITTLE_CODER_PI_EXTENSIONS": "0",
                 # No startup network operations: pi never installs a `packages` entry.
                 "PI_OFFLINE": "1",
+                # jiti's transpile cache (default <tmpdir>/jiti, agent-writable) is executed
+                # when a cached file carries the right trailer - keep it off (cf-lc-upgrade X2).
+                "JITI_FS_CACHE": "false",
             }
         )
         return env

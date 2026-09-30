@@ -135,6 +135,12 @@ def test_dockerfile_runs_pi_offline_without_pi_discovery():
     assert _env_value("LITTLE_CODER_PI_EXTENSIONS") == "0"
 
 
+def test_dockerfile_disables_the_jiti_fs_cache():
+    # jiti 2.7.0 reads JITI_FS_CACHE via JSON.parse -> Boolean; its default cache is <tmpdir>/jiti,
+    # agent-writable, and a cached file is served when it ends with jiti's own trailer (X2).
+    assert _env_value("JITI_FS_CACHE") == "false"
+
+
 class _State:
     task_id = "t1"
     session_id = "s1"
@@ -161,10 +167,12 @@ def test_daemon_pins_the_load_surface_env_per_task(monkeypatch):
     monkeypatch.setenv("LITTLE_CODER_EXTENSIONS_DIR", "/home/lc/.config/little-coder/extensions")
     monkeypatch.setenv("LITTLE_CODER_PI_EXTENSIONS", "1")
     monkeypatch.setenv("PI_OFFLINE", "0")
+    monkeypatch.setenv("JITI_FS_CACHE", "true")
     env = _runner(["--print"])._build_env(_Ctx(), "/tmp/ev")
     assert env["LITTLE_CODER_EXTENSIONS_DIR"] == LOCKED_USER_EXTENSIONS_DIR
     assert env["LITTLE_CODER_PI_EXTENSIONS"] == "0"
     assert env["PI_OFFLINE"] == "1"
+    assert env["JITI_FS_CACHE"] == "false"
 
 
 @pytest.mark.parametrize("extra", [
@@ -194,6 +202,24 @@ def test_entrypoint_locks_home_after_the_last_chown_and_before_exec():
     assert m and set(m.group(1).split()) == {".little-coder", ".cache", ".npm", ".lc-quarantine"}
     for locked in (".pi", ".config", ".agents", ".node_modules"):
         assert locked not in m.group(1).split()
+
+
+def test_entrypoint_keeps_pis_default_session_dir_writable():
+    # X3: an operator's direct `docker exec -u lc little-coder little-coder --print ...` has no
+    # --session-dir, so pi creates ~/.pi/agent/sessions/<cwd>/; it must stay lc-writable DATA,
+    # re-opened AFTER the home lock (which chowns ~/.pi to root) and before exec.
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    assert 'PI_SESSIONS="$LC_HOME/.pi/agent/sessions"' in src
+    lock = src.index('chown root:root "$LC_HOME" && chmod 0755 "$LC_HOME"')
+    reopen = src.index('chown -R lc:lc "$PI_SESSIONS" && chmod 0755 "$PI_SESSIONS"')
+    assert lock < reopen < src.rindex('exec gosu lc "$@"')
+
+
+def test_entrypoint_resolves_npm_root_with_roots_home():
+    # the root entrypoint must not read npm config from the agent user's home
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    assert 'NPM_GLOBAL_ROOT="$(HOME=/root npm root -g)"' in src
+    assert "$(npm root -g)" not in src
 
 
 def test_build_patcher_fails_on_a_missing_target():

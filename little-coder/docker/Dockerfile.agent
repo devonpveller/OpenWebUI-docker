@@ -53,11 +53,17 @@ RUN node /tmp/apply-pi-patches.mjs && rm -f /tmp/apply-pi-patches.mjs
 # agent user (and so the model's `write` tool) can write - code the model planted would run in
 # THIS control-plane container. Pin it to a root-owned, empty, read-only dir. PI_OFFLINE=1: pi
 # performs no startup network operations, so a `packages` settings entry is never installed.
+# JITI_FS_CACHE=false: pi transpiles every extension with jiti 2.7.0, whose default fs cache is
+# <tmpdir>/jiti - writable by the agent user - and jiti serves a cached module whenever the
+# file ENDS with the source-hash trailer it wrote, so a prepended line runs at the next launch
+# (tester X2; pre-existing in 1.10.0 too). With the cache off jiti transpiles in memory on every
+# launch and reads nothing back.
 # agent.py pins the same values per task; the entrypoint makes $HOME root-owned read-only.
 RUN mkdir -p /opt/little-coder/user-extensions && chmod 0555 /opt/little-coder/user-extensions
 ENV LITTLE_CODER_EXTENSIONS_DIR=/opt/little-coder/user-extensions \
     LITTLE_CODER_PI_EXTENSIONS=0 \
-    PI_OFFLINE=1
+    PI_OFFLINE=1 \
+    JITI_FS_CACHE=false
 
 WORKDIR /app
 COPY pyproject.toml ./

@@ -10,6 +10,9 @@ mkdir -p /var/lib/little-coder/journals \
          /var/lib/little-coder/polyglot \
          /workspace
 chown -R lc:lc /var/lib/little-coder /workspace 2>/dev/null || true
+# The global npm root, resolved ONCE as root with root's own HOME, so no npm config in the agent
+# user's home can move where the entrypoint installs or removes extensions.
+NPM_GLOBAL_ROOT="$(HOME=/root npm root -g)"
 # The workspace volume is shared with open-terminal (a different uid); make
 # the WHOLE TREE traversable/writable from both planes, not just the mount
 # point. Recursive (live 2026-07-14): dotnet build artifacts under vendor/
@@ -38,7 +41,7 @@ fi
 # built-in bash, which runs in THIS container — network-isolated and contained,
 # but outside the open-terminal plane / git-proxy.
 if [ "${LC_ROUTE_EXEC:-0}" = "1" ]; then
-  EXT_DIR="$(npm root -g)/little-coder/.pi/extensions"
+  EXT_DIR="$NPM_GLOBAL_ROOT/little-coder/.pi/extensions"
   mkdir -p "$EXT_DIR/open-terminal-exec"
   if cp /opt/little-coder/pi-extensions/open-terminal-exec/index.ts \
         "$EXT_DIR/open-terminal-exec/index.ts" 2>/dev/null; then
@@ -88,15 +91,21 @@ chown -R lc:lc /home/lc
 # away by LITTLE_CODER_EXTENSIONS_DIR; Node's ~/.node_modules fallback). So $HOME itself is
 # root-owned and read-only (a root-owned dir inside an lc-owned home can still be RENAMED away
 # by lc - measured), and so is everything in it except the data dirs below.
-# Stays writable (data, never loaded as code or config): ~/.little-coder (upstream's pre-edit
-# checkpoints), ~/.cache, ~/.npm, ~/.lc-quarantine, /tmp, /workspace and the named volumes
-# (journals, sessions, skill library, cohorts, polyglot).
+# Stays writable, as DATA: ~/.little-coder (upstream's pre-edit checkpoints), ~/.cache, ~/.npm,
+# ~/.lc-quarantine, ~/.pi/agent/sessions (pi's default session dir: an operator's direct
+# `docker exec -u lc little-coder little-coder --print ...` run creates its session there; pi only
+# JSON.parses session lines), /tmp, /workspace and the named volumes. What makes each of those
+# data and not a load path is checked per path in the cf-lc-upgrade findings ("Load surface"):
+# e.g. /tmp holds pi's jiti transpile cache, which IS executed when enabled - hence
+# JITI_FS_CACHE=false in the image and in agent.py. A writable dir is only safe while nothing
+# loads code or config from it; re-check that on every upstream bump.
 # Anything else in $HOME from an earlier run of THIS container (a restart, not a recreate,
 # keeps the writable layer) is moved to ~/.lc-quarantine/<ts>/ - never loaded, never deleted.
 LC_HOME=/home/lc
 HOME_DATA_DIRS=".little-coder .cache .npm .lc-quarantine"
 HOME_SKELETON=".bashrc .profile .bash_logout"
-PI_PKG="$(npm root -g)/little-coder/node_modules/@earendil-works/pi-coding-agent/package.json"
+PI_SESSIONS="$LC_HOME/.pi/agent/sessions"
+PI_PKG="$NPM_GLOBAL_ROOT/little-coder/node_modules/@earendil-works/pi-coding-agent/package.json"
 PI_VERSION="$(node -p "require('$PI_PKG').version" 2>/dev/null || echo unknown)"
 QUAR="$LC_HOME/.lc-quarantine/$(date +%Y%m%dT%H%M%S)"
 in_list() { case " $2 " in *" $1 "*) return 0;; esac; return 1; }
@@ -106,6 +115,12 @@ MODELS_TMP="$(mktemp)"
 cp "$LC_HOME/.config/little-coder/models.json" "$MODELS_TMP" 2>/dev/null || true
 rm -f "$LC_HOME/.config/little-coder/models.json" "$LC_HOME/.pi/agent/settings.json" \
       "$LC_HOME/.pi/agent/auth.json"
+# pi's default session dir is data (the operator's direct-run sessions): carry it across the
+# quarantine sweep instead of moving it aside with the rest of ~/.pi.
+SESS_TMP=""
+if [ -d "$PI_SESSIONS" ] && [ ! -L "$PI_SESSIONS" ]; then
+  SESS_TMP="$(mktemp -d)" && mv "$PI_SESSIONS" "$SESS_TMP/sessions"
+fi
 for entry in "$LC_HOME"/.[!.]* "$LC_HOME"/*; do
   [ -e "$entry" ] || continue
   name="$(basename "$entry")"
@@ -135,6 +150,10 @@ for entry in "$LC_HOME"/.[!.]* "$LC_HOME"/*; do
   find "$entry" -type f -exec chmod 0444 {} +
 done
 chown root:root "$LC_HOME" && chmod 0755 "$LC_HOME"
-echo "[entrypoint] load surface locked: ~ root-owned read-only except ~/.little-coder ~/.cache ~/.npm ~/.lc-quarantine; user extensions dir: ${LITTLE_CODER_EXTENSIONS_DIR:-UNSET}"
+# The session dir is created INSIDE the locked ~/.pi/agent (root 0555), so lc can write session
+# files in it but can neither rename it nor put anything else beside it.
+if [ -n "$SESS_TMP" ]; then mv "$SESS_TMP/sessions" "$PI_SESSIONS"; rmdir "$SESS_TMP"; fi
+mkdir -p "$PI_SESSIONS" && chown -R lc:lc "$PI_SESSIONS" && chmod 0755 "$PI_SESSIONS"
+echo "[entrypoint] load surface locked: ~ root-owned read-only except ~/.little-coder ~/.cache ~/.npm ~/.lc-quarantine ~/.pi/agent/sessions; user extensions dir: ${LITTLE_CODER_EXTENSIONS_DIR:-UNSET}; jiti fs cache: ${JITI_FS_CACHE:-UNSET}"
 
 exec gosu lc "$@"
