@@ -1589,11 +1589,18 @@ def test_a_stack_root_that_is_not_the_checkouts_top_is_refused(world, monkeypatc
 
 def test_a_config_that_differs_from_the_head_blob_is_refused(world):
     """The comparison is the file's bytes against `git cat-file blob HEAD:<path>`, in Python (kills a
-    check that only asks whether the file is tracked)."""
+    check that only asks whether the file is tracked). The injected HEAD blob is self-consistent - its
+    id is its hash - so it is the byte comparison, not the re-hash, that refuses."""
+    real = ml._run_git(["cat-file", "blob", f"HEAD:{ml.LLAMA_SWAP_REL.as_posix()}"], world.root)[1]
+    fake = real.replace(b"--no-mmap", b"--mmap")
+    assert fake != real
+
     def git(args, cwd):
         code, out, err = ml._run_git(args, cwd)
         if args[:2] == ["cat-file", "blob"]:
-            out = out.replace(b"--no-mmap", b"--mmap")
+            out = fake
+        if args[:1] == ["rev-parse"] and args[-1].startswith("HEAD:"):
+            out = (ml._object_id(b"blob", fake, out.decode().strip()) + "\n").encode()
         return code, out, err
     with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
         ml.derive_labels(make_render(world), git=git)
@@ -1766,7 +1773,8 @@ def test_git_runs_without_replace_objects_or_grafts(world):
         seen.append(list(args))
         return ml._run_git(args, cwd)
     ml.derive_labels(make_render(world), git=spy)
-    assert seen and ml._GIT_PREFIX == ["--no-replace-objects", "-c", "core.useReplaceRefs=false"]
+    assert seen and ml._GIT_PREFIX == ["--no-replace-objects", "-c", "core.useReplaceRefs=false",
+                                       "-c", "core.fsmonitor=false"]
     env = ml._git_env()
     assert env["GIT_NO_REPLACE_OBJECTS"] == "1" and env["GIT_GRAFT_FILE"] == os.devnull
     assert {k for k in env if k.upper().startswith("GIT_")} == {"GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
@@ -1993,5 +2001,66 @@ def test_a_crlf_checkout_of_the_committed_config_is_the_committed_version(world)
     assert diff.returncode == 0
     assert by_role(ml.derive_labels(make_render(world)))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
     path.write_bytes((text + "# edit\n").replace("\n", "\r\n").encode("utf-8"))
+    with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
+        ml.derive_labels(make_render(world))
+
+
+def test_a_configured_fsmonitor_program_does_not_run(world, tmp_path_factory):
+    """Tester attempt 12: a `core.fsmonitor` program in the repo's config RAN during the check (and
+    could swap HEAD and the file under it). Every git call passes `-c core.fsmonitor=false`."""
+    marker = tmp_path_factory.mktemp("fsm") / "ran"
+    script = world.root.parent / "fsmonitor.sh"
+    script.write_bytes(f'#!/bin/sh\necho ran >> "{marker.as_posix()}"\nexit 1\n'.encode())
+    script.chmod(0o755)
+    _git(world.root, "config", "core.fsmonitor", script.as_posix())
+    import subprocess
+    subprocess.run(["git", "-C", str(world.root), "status", "--porcelain"], capture_output=True)
+    subprocess.run(["git", "-C", str(world.root), "ls-files", "--error-unmatch", "--",
+                    ml.LLAMA_SWAP_REL.as_posix()], capture_output=True)
+    if not marker.exists():
+        pytest.skip("this git does not run a core.fsmonitor hook program here - the attack is not live")
+    marker.unlink()
+    assert by_role(ml.derive_labels(make_render(world)))["local-large"].label == "Qwen3.8-27B Q4_K_M (thinking)"
+    assert not marker.exists(), "the fsmonitor program ran during the check"
+
+
+def test_an_overwritten_loose_blob_is_refused(world):
+    """Tester attempt 12: HEAD's loose blob file rewritten in place with other content (git does not
+    verify an object on read) returned the edit. The check re-hashes the blob it gets and requires the
+    id `rev-parse HEAD:<rel>` names."""
+    import zlib
+    rel = ml.LLAMA_SWAP_REL.as_posix()
+    oid = _git(world.root, "rev-parse", f"HEAD:{rel}").stdout.decode().strip()
+    obj = world.root / ".git" / "objects" / oid[:2] / oid[2:]
+    assert obj.is_file(), "the fixture's objects are loose"
+    evil = _other_config(world)
+    obj.chmod(0o644)
+    obj.write_bytes(zlib.compress(b"blob %d\0" % len(evil) + evil))
+    (world.root / ml.LLAMA_SWAP_REL).write_bytes(evil)
+    assert _plain_git_blob(world.root) == evil   # the attack is live for plain git
+    with pytest.raises(ml.LabelError, match="does not hash to its id"):
+        ml.derive_labels(make_render(world))
+
+
+def test_the_alternates_variable_is_scrubbed(monkeypatch):
+    """GIT_ALTERNATE_OBJECT_DIRECTORIES (another object store searched for HEAD's ids) is a GIT_*
+    variable: the scrub removes it."""
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", "/elsewhere/objects")
+    assert "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in ml._git_env()
+
+
+@pytest.mark.parametrize("how", ["final newline dropped", "an LF swapped for a CR"])
+def test_the_comparison_is_of_bytes_not_lines(world, how):
+    """Y4: a comparison of `splitlines()` would call these equal; YAML and the committed-config rule
+    do not. Only CRLF -> LF is normalised."""
+    path = world.root / ml.LLAMA_SWAP_REL
+    data = path.read_bytes()
+    if how == "final newline dropped":
+        assert data.endswith(b"\n")
+        data = data[:-2] if data.endswith(b"\r\n") else data[:-1]
+    else:
+        at = data.index(b"\n", data.index(b"#"))   # the end of the first comment line
+        data = data[:at - 1] + b"\r" + data[at + 1:] if data[at - 1:at] == b"\r" else data[:at] + b"\r" + data[at + 1:]
+    path.write_bytes(data)
     with pytest.raises(ml.LabelError, match="not the blob committed at HEAD"):
         ml.derive_labels(make_render(world))

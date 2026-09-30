@@ -914,8 +914,9 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
   - ONLY THE COMMITTED CONFIG (operator decision, 2026-09-29): the llama-swap
     config the render mounts must be, byte for byte, the blob committed at HEAD
     of the STACK ROOT's checkout (the driver's `--root`). git runs as
-    `git --no-replace-objects -c core.useReplaceRefs=false -C <root>` with every
-    `GIT_*` variable removed (then `GIT_NO_REPLACE_OBJECTS=1` and an empty
+    `git --no-replace-objects -c core.useReplaceRefs=false -c core.fsmonitor=false
+    -C <root>` (no fsmonitor program runs) with every `GIT_*` variable removed
+    (`GIT_ALTERNATE_OBJECT_DIRECTORIES` included) (then `GIT_NO_REPLACE_OBJECTS=1` and an empty
     `GIT_GRAFT_FILE`), and its toplevel must be the root itself - so
     `HEAD:<path>` is the blob in HEAD's own tree, never a `git replace`
     substitute. The path is taken as the render names it, never resolved:
@@ -927,7 +928,9 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
     file must be tracked, and its bytes are compared in Python with
     `git cat-file blob HEAD:<path>`, CRLF -> LF the only normalisation (a
     Windows checkout of an LF blob; a lone CR is not normalised away), and the
-    verified bytes are what is parsed - no clean filter, attribute or index flag
+    verified bytes are what is parsed; the blob git returns is re-hashed here
+    and must hash to the id `git rev-parse HEAD:<path>` names (git does not
+    verify an object on read) - no clean filter, attribute or index flag
     (assume-unchanged, skip-worktree) takes part. Anything else is refused,
     naming the file: "llama-swap config differs from the committed version;
     labels are only derived from the committed config". The committed file is
@@ -937,7 +940,16 @@ shell, `inference/.env` and the compose defaults itself, exactly as `up` will.
     `enable_thinking: false` - comments excepted), so a change to it goes
     through review. `up` and `recover` run `labels` too, so on a host the
     merged config must be in the checkout (committed, no local edit) before
-    either runs. What follows is defence in depth,
+    either runs.
+    THREAT MODEL (operator decision, 2026-09-29): this check protects against
+    ORDINARY AND ACCIDENTAL edits - uncommitted or staged edits, index flags,
+    symlinks and junctions, nested repositories, `GIT_*` overrides, filters and
+    attributes, replace refs, an fsmonitor program, a loose object overwritten in
+    place. It does NOT protect against someone who can write to `.git`'s
+    internals - a forged tree or commit object with a valid id, an alternates
+    object store or pack naming HEAD's ids, a rewritten ref - or to the stack's
+    own code: such a person can edit `scripts/stack` directly. Those cases are
+    out of scope by decision. What follows is defence in depth,
     ALLOWLISTS:
   - every `${env.*}` in the WHOLE llama-swap config (every entry and macro, YAML
     comments excepted), as compose renders it, and every model path, must match

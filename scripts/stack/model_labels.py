@@ -644,8 +644,18 @@ def _git_env() -> dict:
     return env
 
 
-# every git call of the committed-config check: no replace objects, whatever the config says
-_GIT_PREFIX = ["--no-replace-objects", "-c", "core.useReplaceRefs=false"]
+# every git call of the committed-config check: no replace objects and no fsmonitor program (a
+# configured `core.fsmonitor` is a command git would RUN during ls-files - tester attempt 12),
+# whatever the repository's config says. GIT_ALTERNATE_OBJECT_DIRECTORIES goes with the GIT_* scrub.
+_GIT_PREFIX = ["--no-replace-objects", "-c", "core.useReplaceRefs=false", "-c", "core.fsmonitor=false"]
+
+
+def _object_id(kind: bytes, body: bytes, oid: str) -> str:
+    """The id git gives an object of this kind and body, in the hash the repo uses (the length of
+    `oid` says which: 40 hex = SHA-1, 64 = SHA-256)."""
+    import hashlib
+    algo = hashlib.sha256 if len(oid) == 64 else hashlib.sha1
+    return algo(kind + b" " + str(len(body)).encode() + b"\0" + body).hexdigest()
 
 
 def _run_git(args, cwd):
@@ -685,8 +695,19 @@ def check_committed(path: Path, root: Path, run=None) -> str:
 
     The committed file is pinned by test_model_labels (its expected parse, filters and
     concurrencyLimit included), so a change to it goes through review; the YAML subset check and the
-    allowlists stay as defence in depth. `run(args, cwd) -> (code, stdout bytes, stderr)` runs git
-    (injectable for tests)."""
+    allowlists stay as defence in depth. Every git call also passes `-c core.fsmonitor=false` (no
+    fsmonitor program runs), and the blob returned is re-hashed here: it must hash to the id `git
+    rev-parse HEAD:<path>` names (git does not verify an object on read).
+
+    THREAT MODEL (operator decision, 2026-09-29): this protects against ORDINARY AND ACCIDENTAL
+    edits - uncommitted/staged edits, index flags, symlinks, junctions, nested repos, GIT_* overrides
+    (GIT_ALTERNATE_OBJECT_DIRECTORIES included), filters, attributes, replace refs, an fsmonitor
+    program, a loose object overwritten in place. It does NOT protect against someone who can write
+    to .git's internals (a forged tree or commit with a valid id, an alternates store or pack naming
+    HEAD's ids, rewritten refs) or to the stack's own code - such a person can edit scripts/stack
+    directly. Those are out of scope by decision.
+
+    `run(args, cwd) -> (code, stdout bytes, stderr)` runs git (injectable for tests)."""
     run = run or _run_git
     refuse = (f"the llama-swap config {path} differs from the committed version, or cannot be checked "
               f"against it; labels are only derived from the committed config")
@@ -721,9 +742,14 @@ def check_committed(path: Path, root: Path, run=None) -> str:
     code, _, _ = run(["ls-files", "--error-unmatch", "--", rel], root)
     if code != 0:
         raise LabelError(f"{refuse} (it is not tracked by git)")
-    code, blob, _ = run(["cat-file", "blob", f"HEAD:{rel}"], root)
-    if code != 0:
+    code, oid, _ = run(["rev-parse", "--verify", "--end-of-options", f"HEAD:{rel}"], root)
+    code2, blob, _ = run(["cat-file", "blob", f"HEAD:{rel}"], root)
+    if code != 0 or code2 != 0:
         raise LabelError(f"{refuse} (it is not committed at HEAD)")
+    oid = oid.decode("ascii", "replace").strip()
+    if _object_id(b"blob", blob, oid) != oid:
+        # git does not verify an object on read: a loose object file overwritten in place
+        raise LabelError(f"{refuse} (the object git returned for HEAD:{rel} does not hash to its id {oid})")
     data = path.read_bytes()
     if data.replace(b"\r\n", b"\n") != blob.replace(b"\r\n", b"\n"):
         raise LabelError(f"{refuse} (the file on disk is not the blob committed at HEAD)")
