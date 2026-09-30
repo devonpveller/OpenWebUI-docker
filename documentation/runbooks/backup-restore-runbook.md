@@ -196,6 +196,7 @@ overwritten in any of them. What each means and what to do:
 | `FAIL-LOCAL` | the LOCAL file contradicts the checksum recorded beside it (its `SHA256SUMS` entry or `<file>.sha256`), or those two records disagree with each other; it was not copied. THE RECORD ITSELF CAN BE THE BAD PART | read `Trust:` - `NAS` = the NAS copy matches the record: restore the local file from it; `RECORD` = the local file and the NAS copy agree with each other but not with the record, or the two records disagree: fix the recorded checksum (re-derive it from a copy you trust), the next run then copies normally; `NONE ON NAS` = never archived: the local file may be damaged - or the record is wrong: check the record against another copy before recovering; `NEITHER` = local, NAS and record all differ: investigate, starting with the record |
 | `MISMATCH` | the NAS copy is complete but differs from the local file | `Trust: LOCAL` = the local file matches its recorded checksum, the NAS copy is damaged: after checking, move the NAS copy aside and let the next run (or `copy-archives-to-nas.ps1`) copy it again; `Trust: UNKNOWN` = no recorded checksum: compare both by hand and decide |
 | `FAIL-COPY` | this one file could not be written, verified or renamed (share full or read-only, network drop, the local file locked or unreadable, another run wrote the file meanwhile, or a directory / junction sits at the file's name or its `.cf-partial` temp name - never written through), or `(pass)`: the pass itself failed, e.g. an archive folder under `./backup/` could not be listed (access denied) or a junction / symbolic link was found under `./backup/` (the line names it; replace it with the real folder or file) | read the reason in the line; fix the cause; the next run retries. Our temp file is removed; if it could not be, the line says `temp ... could not be removed` - delete that `.cf-partial` by hand. The other files of the pass are still processed |
+| `FAIL-READ` | a local archive file (or, in `copy-archives-to-nas.ps1`, a folder) could not be READ - access denied; the line names it | fix the permissions on the local file or folder; the next run copies it |
 
 **What the archive copy protects against, and what it does not.** It refuses, loudly (an
 `[ERROR]`, an alert, no completion marker), the ordinary conditions under `./backup/`: junctions
@@ -207,14 +208,15 @@ against the project folder being reached through a link in its parent path - a p
 write access can change these scripts as well. What catches the result of such a swap later: the
 weekly run re-hashes a file only when its size or timestamp differs from the local file, and then
 reports a difference as `MISMATCH`; a swap that left size AND timestamp equal is caught only by
-`scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`, which re-hashes
-every file on both sides.
+`scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly` with NO `-Dirs`,
+which re-hashes every file of every archive folder the weekly run covers (each subdirectory of
+`./backup/`), on both sides.
 
 Where a directory carries a
 `SHA256SUMS` (or a `.sha256` per file) verify against it after copying back.
-`scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly`
-re-hashes the local and NAS copies of the default archive directories and says
-VERIFIED / ABSENT / MISMATCH per file without writing anything.
+`scripts/backup/copy-archives-to-nas.ps1 -Destination <archive folder> -VerifyOnly` (no `-Dirs`)
+re-hashes the local and NAS copies of EVERY archive folder (each subdirectory of `./backup/`) and
+says VERIFIED / ABSENT / MISMATCH per file without writing anything; `-Dirs <folder>` narrows it.
 
 ---
 

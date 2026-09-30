@@ -501,13 +501,25 @@ try {
   $destState = TreeHashes $dest
   $r = RunCopyTo $dest @()
   Check 'C6 second run: all VERIFIED (already present), exit 0, NAS unchanged' (($r.Rc -eq 0) -and (([regex]::Matches($r.Out, 'already present')).Count -eq 6) -and (SameTree $destState (TreeHashes $dest))) "rc=$($r.Rc)"
+  $r = RunCopyTo $dest @('-VerifyOnly', '-Dirs', 'orphan-volumes-2026-09-13')
+  $r2 = RunCopyTo $dest @('-VerifyOnly', '-Dirs', 'nas-archive-may2025-owui')
+  Check 'C7 -VerifyOnly -Dirs <each landing folder> after the copy: exit 0 for both' (($r.Rc -eq 0) -and ($r2.Rc -eq 0)) "rc=$($r.Rc)/$($r2.Rc)"
   $r = RunCopyTo $dest @('-VerifyOnly')
-  Check 'C7 -VerifyOnly after the copy: exit 0' ($r.Rc -eq 0) "rc=$($r.Rc)"
+  Check 'C7b -VerifyOnly WITHOUT -Dirs covers every archive folder: models\ and extra\ (not copied yet) are ABSENT, exit 1' (($r.Rc -eq 1) -and ($r.Out -match 'ABSENT\s+models\\models-export\.json') -and ($r.Out -match 'ABSENT\s+extra\\thing\.tar')) "rc=$($r.Rc) out=$($r.Out)"
   $res = @(Invoke-NasArchivePass -Source $backup -Destination $dest)
   $copiedNow = @($res | Where-Object { $_.Status -eq 'COPIED' } | ForEach-Object { $_.Rel } | Sort-Object)
   Check 'C8 the weekly pass after the one-time copy copies only what it did not cover (models\, extra\) and finds the 6 PRESENT unhashed' ((($copiedNow -join ',') -eq 'extra\thing.tar,extra\thing.tar.sha256,models\models-export.json') -and (@($res | Where-Object { $_.Status -eq 'PRESENT' -and $_.Detail -like '*not hashed*' }).Count -eq 6)) ($copiedNow -join ',')
   $res = @(Invoke-NasArchivePass -Source $backup -Destination $dest)
   Check 'C9 ... and the run after that: all PRESENT - the next scheduled run keeps them' (@($res | Where-Object { $_.Status -ne 'PRESENT' }).Count -eq 0)
+  # the documented check for a same-size, same-timestamp swap: -VerifyOnly with no -Dirs
+  $r = RunCopyTo $dest @('-VerifyOnly')
+  Check 'C24 -VerifyOnly with no -Dirs after the weekly pass: every archive file (models\ and extra\ included) VERIFIED, top-level sources not listed, exit 0' (($r.Rc -eq 0) -and ($r.Out -match 'models\\models-export\.json.*VERIFIED') -and ($r.Out -match 'extra\\thing\.tar.*VERIFIED') -and ($r.Out -notmatch 'generic-tar-backup\.sh')) "rc=$($r.Rc) out=$($r.Out)"
+  $sw = "$dest\models\models-export.json"; $swB = [System.IO.File]::ReadAllBytes($sw); $swT = (Get-Item -LiteralPath $sw).LastWriteTimeUtc
+  $swX = [byte[]]$swB.Clone(); $swX[10] = $swX[10] -bxor 0xFF; [System.IO.File]::WriteAllBytes($sw, $swX); Stamp $sw $swT
+  $res = @(Invoke-NasArchivePass -Source $backup -Destination $dest)
+  $r = RunCopyTo $dest @('-VerifyOnly')
+  Check 'C24b a same-size, same-timestamp swap under models\: the weekly pass says PRESENT (not hashed), the default -VerifyOnly reports MISMATCH, exit 1' (((StatusOf $res 'models\models-export.json').Detail -like '*not hashed*') -and ($r.Rc -eq 1) -and ($r.Out -match 'MISMATCH\s+models\\models-export\.json')) "rc=$($r.Rc) out=$($r.Out)"
+  [System.IO.File]::WriteAllBytes($sw, $swB); Stamp $sw $swT
 
   $victim = "$dest\nas-archive-may2025-owui\open-webui.tar"
   $fs = [System.IO.File]::Open($victim, 'Open', 'ReadWrite'); $fs.WriteByte(0x41); $fs.Close()
@@ -628,9 +640,9 @@ try {
   } finally { $null = cmd /c "rmdir `"$cl\lnk`"" 2>&1 }
   # a '..' segment in -Dirs would leave -Source
   New-Item -ItemType Directory -Force -Path "$root\copylink-sibling" | Out-Null; Blob "$root\copylink-sibling\outside.tar" 300
-  foreach ($dd in @('..\copylink-sibling', '../copylink-sibling', 'k\..\..\copylink-sibling')) {
+  foreach ($dd in @('..\copylink-sibling', '../copylink-sibling', 'k\..\..\copylink-sibling', '...', '.. ', '.', 'k\.', ' .\k')) {
     $r = RunCopyTo (Join-Path $root 'nas20\archive') @('-Dirs', $dd) $cl
-    Check "C22 a -Dirs value with a '..' segment [$dd] is FAIL DIRS, exit 1, nothing copied from outside -Source" (($r.Rc -eq 1) -and ($r.Out -match 'FAIL DIRS') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas20'))) "rc=$($r.Rc) out=$($r.Out)"
+    Check "C22 a -Dirs value with a dots-only segment [$dd] is FAIL DIRS, exit 1, nothing copied (not from outside -Source, not -Source's own top-level files)" (($r.Rc -eq 1) -and ($r.Out -match 'FAIL DIRS') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas20'))) "rc=$($r.Rc) out=$($r.Out)"
   }
   # an unreadable folder is FAIL READ, not FAIL LINK
   New-Item -ItemType Directory -Force -Path "$cl\m\locked-sub" | Out-Null; Blob "$cl\m\locked-sub\z.tar" 300; Blob "$cl\m\ok.tar" 300
@@ -640,6 +652,28 @@ try {
     $r = RunCopyTo (Join-Path $root 'nas21\archive') @('-Dirs', 'm') $cl
     Check 'C23 an unreadable folder under a -Dirs directory is FAIL READ (not FAIL LINK), exit 1, nothing copied from that directory' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL READ') -and ($r.Out -notmatch 'FAIL LINK') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas21\archive\m'))) "rc=$($r.Rc) out=$($r.Out)"
   } finally { $null = & icacls "$cl\m\locked-sub" /remove:d "*$sidC" 2>&1 }
+  # a folder denied AFTER the copy script's link scan (a lib whose scan applies the deny) is FAIL READ too
+  New-Item -ItemType Directory -Force -Path "$cl\m\late-sub" | Out-Null; Blob "$cl\m\late-sub\y.tar" 300
+  $c25 = Join-Path $root 'c25run\scripts\backup'; New-Item -ItemType Directory -Force -Path $c25 | Out-Null
+  Copy-Item -LiteralPath $CopyScript -Destination "$c25\copy-archives-to-nas.ps1"
+  [System.IO.File]::WriteAllText("$c25\nas-sync-lib.ps1", [System.IO.File]::ReadAllText($Lib) + "`r`nfunction Find-NasLinks { param([string]`$Path) `$null = & icacls '$cl\m\late-sub' /deny '*${sidC}:(RX)' 2>&1; return @() }`r`n")
+  try {
+    $ErrorActionPreference = 'Continue'
+    $o25 = & $ps -NoProfile -ExecutionPolicy Bypass -File "$c25\copy-archives-to-nas.ps1" -Destination (Join-Path $root 'nas22\archive') -Source $cl -Dirs m 2>&1 | Out-String
+    $rc25 = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check 'C25 a folder denied AFTER the link scan: FAIL READ (not FAIL LINK), exit 1, nothing copied from that directory' (($rc25 -eq 1) -and ($o25 -match 'FAIL READ') -and ($o25 -notmatch 'FAIL LINK') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas22\archive\m'))) "rc=$rc25 out=$o25"
+  } finally { $null = & icacls "$cl\m\late-sub" /remove:d "*$sidC" 2>&1 }
+  # a single local FILE that cannot be read: FAIL READ naming it, the other file still copied
+  Remove-Item -LiteralPath "$cl\m\late-sub", "$cl\m\locked-sub" -Recurse -Force
+  Blob "$cl\m\unreadable.tar" 300
+  $null = & icacls "$cl\m\unreadable.tar" /deny "*${sidC}:(R)" 2>&1
+  try {
+    $r = RunCopyTo (Join-Path $root 'nas23\archive') @('-Dirs', 'm') $cl
+    Check 'C26 a single unreadable local FILE: FAIL READ naming it (no "null-valued expression"), the readable file still VERIFIED, exit 1' (($r.Rc -eq 1) -and ($r.Out -match 'FAIL READ\s+m\\unreadable\.tar') -and ($r.Out -notmatch 'null-valued') -and ($r.Out -match 'm\\ok\.tar.*VERIFIED')) "rc=$($r.Rc) out=$($r.Out)"
+    $res = @(Invoke-NasArchivePass -Source $cl -Destination (Join-Path $root 'nas24'))
+    Check 'C26b ... and the weekly pass reports it FAIL-READ naming the file' (((StatusOf $res 'm\unreadable.tar').Status -eq 'FAIL-READ') -and ((StatusOf $res 'm\unreadable.tar').Detail -like '*unreadable.tar*')) "$((StatusOf $res 'm\unreadable.tar').Status) $((StatusOf $res 'm\unreadable.tar').Detail)"
+  } finally { $null = & icacls "$cl\m\unreadable.tar" /remove:d "*$sidC" 2>&1 }
   Remove-Item -LiteralPath "$cl\m" -Recurse -Force
   # the copy script's own listing re-checks: a lib whose up-front scan sees nothing (as if
   # the link appeared after it) still refuses the junction

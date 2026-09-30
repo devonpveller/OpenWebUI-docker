@@ -30,6 +30,14 @@
 # skipped), as the weekly pass does. -VerifyOnly hashes
 # and reports without writing anything (ABSENT / INCOMPLETE for what is not there).
 #
+# -Dirs defaults: for a COPY, the two landing folders (orphan-volumes-2026-09-13,
+# nas-archive-may2025-owui); for -VerifyOnly, EVERY archive folder the weekly pass
+# covers - each subdirectory of -Source (top-level files are the git-tracked sidecar
+# sources and are skipped, the same rule as Get-NasArchiveFiles). A -Dirs segment made
+# only of dots and spaces ('.', '..', '...', '.. ') is FAIL DIRS - it would reach
+# -Source itself (and its sidecar sources) or leave it. A local file that cannot be
+# read is FAIL READ naming it.
+#
 # Exit: 0 every file VERIFIED; 1 any ABSENT / INCOMPLETE / MISMATCH / FAIL /
 # MISSING LOCAL; 2 setup error (including a destination inside a slot-A / slot-B
 # folder, judged on the normalised path: `x\..\slot-A`, `/slot-A`, `slot-A.`,
@@ -52,7 +60,7 @@ param(
 
   [string]$Source,
 
-  [string[]]$Dirs = @('orphan-volumes-2026-09-13', 'nas-archive-may2025-owui'),
+  [string[]]$Dirs,
 
   [switch]$Connect,
 
@@ -82,6 +90,17 @@ if (((Get-Item -LiteralPath $Source -Force).Attributes -band [System.IO.FileAttr
   exit 1
 }
 
+if (-not $PSBoundParameters.ContainsKey('Dirs')) {
+  if ($VerifyOnly) {
+    # verify what the weekly pass archives: every subdirectory of -Source
+    try { $Dirs = @(Get-ChildItem -LiteralPath $Source -Directory -Force -ErrorAction Stop | Sort-Object Name | ForEach-Object { $_.Name }) }
+    catch { Write-Host "FAIL READ  $Source  ($($_.Exception.Message))" -ForegroundColor Red; exit 1 }
+    Write-Host "verifying every archive folder under ${Source}: $($Dirs -join ', ')"
+  } else {
+    $Dirs = @('orphan-volumes-2026-09-13', 'nas-archive-may2025-owui')
+  }
+}
+
 $opened = $null
 if ($Connect -and -not $VerifyOnly) {
   $share = Get-UncShareRoot $Destination
@@ -109,8 +128,8 @@ $ok = 0; $bad = 0
 try {
   foreach ($d in $Dirs) {
     $srcDir = Join-Path $Source $d
-    if (@($d -split '[\\/]') -contains '..') {
-      Write-Host "FAIL DIRS  $d  (a '..' segment would leave -Source - not allowed)" -ForegroundColor Red
+    if (@($d -split '[\\/]' | Where-Object { $_ -match '^[. ]+$' }).Count -gt 0) {
+      Write-Host "FAIL DIRS  $d  (a segment made only of dots/spaces would reach -Source itself or leave it - not allowed)" -ForegroundColor Red
       $bad++; continue
     }
     if (-not (Test-Path -LiteralPath $srcDir -PathType Container)) {
@@ -164,6 +183,7 @@ try {
         'MISMATCH' { Write-Host "MISMATCH  $rel  $($x.Detail) - NAS file left untouched. Trust: $($x.Trust)" -ForegroundColor Red; $bad++ }
         'FAIL-LOCAL' { Write-Host "FAIL LOCAL  $rel  $($x.Detail). Trust: $($x.Trust)" -ForegroundColor Red; $bad++ }
         'FAIL-COPY' { Write-Host "FAIL COPY  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
+        'FAIL-READ' { Write-Host "FAIL READ  $rel  $($x.Detail)" -ForegroundColor Red; $bad++ }
         default    { Write-Host "$($x.Status)  $rel  $($x.Detail)" -ForegroundColor Yellow; $bad++ }
       }
     }

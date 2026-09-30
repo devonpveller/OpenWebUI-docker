@@ -41,7 +41,8 @@
 #   ordinary conditions are refused loudly; an active local writer rearranging
 #   ./backup/ during a pass is out of scope - a later run reports a resulting
 #   difference as a MISMATCH when size or timestamp differ; an equal-size,
-#   equal-timestamp one only `copy-archives-to-nas.ps1 -VerifyOnly` catches.
+#   equal-timestamp one only `copy-archives-to-nas.ps1 -VerifyOnly` (no -Dirs:
+#   every archive folder) catches.
 #   The layout rules (sibling default, same share,
 #   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
 #

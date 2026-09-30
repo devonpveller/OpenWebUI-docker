@@ -39,7 +39,8 @@
 # later: the next weekly run re-hashes a file only when its size or timestamp differs
 # from the local one, and then reports a difference as a MISMATCH (alert, no
 # completion marker); a swap that left size AND timestamp equal is caught only by
-# `copy-archives-to-nas.ps1 -VerifyOnly`, which re-hashes every file on both sides.
+# `copy-archives-to-nas.ps1 -VerifyOnly` WITHOUT -Dirs, which re-hashes every file of
+# every archive folder the weekly pass covers, on both sides.
 
 function Get-DotEnvValue {
   # KEY=value from a .env file; quotes stripped; comments and blank lines skipped.
@@ -181,7 +182,10 @@ function Get-NasSlotMirrorArgs {
 
 function Get-NasSha256 {
   param([string]$Path)
-  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+  $h = Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop
+  # PS 5.1's Get-FileHash can return nothing for an unreadable file without throwing.
+  if (-not $h -or -not $h.Hash) { throw "cannot read '$Path' to hash it (access denied or locked)" }
+  return $h.Hash.ToLowerInvariant()
 }
 
 function Read-NasSha256Sums {
@@ -314,6 +318,9 @@ function Sync-NasArchiveFile {
     }
   }
   $li = Get-Item -LiteralPath $LocalFile -Force
+  # A local file we cannot READ is its own, named failure (not a copy failure).
+  try { ([System.IO.File]::Open($LocalFile, 'Open', 'Read', 'ReadWrite')).Dispose() }
+  catch [System.UnauthorizedAccessException] { $r.Status = 'FAIL-READ'; $r.Detail = "cannot read the local file (access denied): $LocalFile"; return $r }
   $stamp = Get-NasCopyStamp $li.LastWriteTimeUtc
   $clampNote = $(if ($stamp -ne $li.LastWriteTimeUtc) { " (NAS stamp clamped to 1980-01-04; local stamp $($li.LastWriteTimeUtc.ToString('s'))Z)" } else { '' })
   $rec = Get-NasRecordedHash $LocalFile
