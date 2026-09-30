@@ -75,7 +75,7 @@ from .modules.model_router import (
     is_backpressure_text,
 )
 from .modules.planner import Planner
-from .modules.profiles import ProfileRegistry
+from .modules.profiles import ConcurrentProfileChange, ProfileRegistry
 from .modules.project_context import ProjectContext
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
@@ -130,6 +130,14 @@ _STOP_INTENT_RE = re.compile(
 # different word and never match. `abort <id>` itself is already handled by `_CONTROL_RE` upstream.
 _STOP_COMMAND_RE = re.compile(
     r"^\s*(?:stop|halt|archive|cancel|shut\s+down)\s+(?P<eid>effort-[\w.-]*[\w-])\s*\.?\s*$", re.I)
+# model-roles (mr-consumers, operator decision 2026-09-30): point a role PROFILE at another gateway
+# model name - "set profile pm model local-large", "set the profile po model to qwen36-27b (dry run)".
+# The whole message must be this shape; anything looser reaches the PO model, which may still
+# classify kind=profile_model. Both paths run the SAME governed handler (_nl_profile_model).
+_PROFILE_MODEL_RE = re.compile(
+    r"^\s*set\s+(?:the\s+)?profile\s+(?P<name>[A-Za-z0-9][\w-]*)\s+model\s+(?:to\s+)?"
+    r"(?P<model>[A-Za-z0-9][\w./:@-]*?)"
+    r"(?P<dry>\s*[(\[]?\s*(?:--)?dry[\s-]?run\s*[)\]]?)?\s*\.?\s*$", re.I)
 
 # Deterministic cues that a message is a WORK request (junk-intent repair, live 2026-07-05 miss:
 # a pasted build-error list junk-misfired the classifier twice and the fix request was dropped).
@@ -796,6 +804,11 @@ _PO_NL_SYS = (
     "`project`=X.\n"
     "- egress_allow: 'let the workers reach X', 'allow X for egress', 'whitelist host X' → "
     "kind=egress_allow + `host`=the host or repo URL.\n"
+    "- profile_model: 'set profile pm model local-large', 'point the planner at local-large' "
+    "(ONE profile per message) → kind=profile_model + "
+    "`profile_name`=the profile (pm, po, pm-voice, planner, worker-default, reviewer-correctness, "
+    "reviewer-ethics, reviewer-scope, reviewer-security) + `profile_model`=the model name exactly as "
+    "written; `profile_dry_run`=true if they say 'dry run'/'check'/'what would'.\n"
     "- kill: 'stop everything', 'freeze the fleet', 'emergency stop', 'kill switch' → kind=kill "
     "(freezes ALL work; reversible). unkill: 'resume', 'release', 'unfreeze', 'let them run' → "
     "kind=unkill.\n"
@@ -3516,13 +3529,13 @@ class Orchestrator:
     # ── natural-language intake (the conversational PO surface) ───────────────
     async def nl_intake(
         self, message: str, channel_id: str, *, user_id: str | None = None,
-        thread_id: str | None = None,
-    ) -> None:
+        thread_id: str | None = None, actor: str | None = None,
+    ) -> dict | None:
         """Route a natural-language operator message to the PO agent, which interprets intent
         and replies conversationally. Non-destructive actions (open an effort, apply steering,
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
-        (local qwen36-27b by default; cloud if P0.5 mandated)."""
+        (local-large by default; cloud if P0.5 mandated)."""
         # CONTROL-SURFACE PARITY (live 2026-07-15, iteration-2's first gate): `approve <effort>`
         # sent through POST /nl reached the PO MODEL, which NARRATED "Approved. Dispatching…"
         # while the plan stayed `draft` — a false-ack at the operator API, because the privileged
@@ -3561,6 +3574,14 @@ class Orchestrator:
                 thread_id=thread_id,
             )
             return
+        # PROFILE MODEL (model-roles): an exact "set profile <name> model <model>" is config, handled
+        # deterministically - no model call, so it works with the GPU busy and cannot be misread.
+        m_pm = _PROFILE_MODEL_RE.match(_ctrl)
+        if m_pm:
+            self._remember(channel_id, thread_id, "operator", message)
+            return await self._nl_profile_model(
+                m_pm.group("name"), m_pm.group("model"), dry_run=bool(m_pm.group("dry")),
+                actor=actor or user_id or "operator", channel_id=channel_id, thread_id=thread_id)
         # PURE standing-intent statements are CONFIG, never work (live 2026-07-15, the gym
         # 'ouroboros': the model minted an effort_name from "in gym, set the standing intent: …",
         # its is_work heuristic went True, and the fall-through dispatched an effort whose
@@ -3964,6 +3985,19 @@ class Orchestrator:
             else:
                 reply = ""   # actionable kind, junk ack → drop the junk; the handler posts its own
 
+        # PROFILE MODEL, classified by the PO model: routed HERE, before every project / repo /
+        # config branch below (N2: a classification that also carried an unknown `project` or a
+        # `repo_url` reached the "unknown project" reply or the onboarding path, posting the model's
+        # own reply and possibly onboarding a repo). It is never applied (P3: a question the PO
+        # misreads must not write): always a dry run that answers with the exact command, and only
+        # that exact command - matched deterministically above - applies. The model's reply is not
+        # posted or remembered (P2): the handler's outcome is the whole answer.
+        if intent.kind == "profile_model":
+            self._remember(channel_id, thread_id, "operator", message)
+            return await self._nl_profile_model(
+                intent.profile_name or "", intent.profile_model or "",
+                dry_run=True, actor=actor or user_id or "operator",
+                channel_id=channel_id, thread_id=thread_id, confirm_hint=True)
         # Remember this turn (under its thread) so the next message keeps context.
         self._remember(channel_id, thread_id, "operator", message)
         self._remember(channel_id, thread_id, "po", reply)
@@ -10082,6 +10116,90 @@ class Orchestrator:
         # start-effort fire AND a clarification answer as "Tidied up", dropping the work).
         r"\b(?:clean(?:\s*up)?|clear(?:\s+out)?|sweep|wrap\s+up)\b\s+(?:\w+\s+){0,4}?"
         r"(?:board|efforts?|finished|done|stale|completed?|old|mess|everything|up)\b", re.I)
+
+    async def _nl_profile_model(
+        self, name: str, model: str, *, dry_run: bool, actor: str, channel_id: str,
+        thread_id: str | None, confirm_hint: bool = False,
+    ) -> dict:
+        """The governed handler for kind=profile_model (model-roles, operator decision 2026-09-30:
+        every operator inlet is NL -> OperatorIntent -> a governed handler).
+
+        Validates, fail closed: the profile exists; the model is a CHAT model allowed for the
+        profile's effective lane (`profile_chat_models_local` / `_cloud` - the gateway's /models
+        listing carries no model type, so an explicit list keeps embedding names and the cloud
+        group off a local profile); and the gateway serving that lane lists it (a gateway that
+        cannot be asked is a refusal). Then ONE new profile version with only `model` changed, and
+        an audit event with who asked and the before/after. The same model again writes nothing;
+        a concurrent write to the same profile is refused (retry) rather than raised.
+
+        Only this handler speaks: the caller's model-authored reply is never posted with it (P2).
+        `confirm_hint` (the PO-classified path, always a dry run) adds the exact command that
+        applies it. Returns {"outcome": applied|dry_run|unchanged|refused|conflict, ...}."""
+        name, model = (name or "").strip().lower(), (model or "").strip()
+        actor = (actor or "operator")[:64]    # events.actor is String(64)
+        command = f"set profile {name} model {model}"
+
+        async def refuse(why: str, outcome: str = "refused") -> dict:
+            await self.audit.log("profile_model_refused", actor=actor, payload={
+                "profile": name, "model": model, "dry_run": dry_run, "reason": why,
+                "outcome": outcome})
+            await self.chat.post(channel_id, f"⚠️ Profile model NOT changed: {why}",
+                                 thread_id=thread_id)
+            return {"outcome": outcome, "profile": name, "model": model, "reason": why}
+
+        known = self.profiles.all()
+        if not name or name not in known:
+            return await refuse(f"no profile called `{name or '?'}` (known: "
+                                + ", ".join(f"`{k}`" for k in sorted(known)) + ").")
+        if not model:
+            return await refuse(f"no model named for `{name}`.")
+        # Validate against the active row as it is NOW in the database (not the cache), and hand
+        # its lane + version to the write, which refuses if either moved while the gateway was
+        # asked (N1: a lane flip committed in that window was written over, "lane unchanged").
+        row = await self.profiles.active_row(name)
+        if row is None:
+            return await refuse(f"no active profile called `{name}`.")
+        lane, version = row["lane"], row["version"]
+        effective = "cloud" if lane == "cloud" and self.s.cloud_enabled else "local"
+        allowed = {m.strip() for m in (self.s.profile_chat_models_cloud if effective == "cloud"
+                                       else self.s.profile_chat_models_local).split(",") if m.strip()}
+        if model not in allowed:
+            return await refuse(
+                f"`{model}` is not a chat model for a profile on the {effective} lane (allowed: "
+                + ", ".join(f"`{m}`" for m in sorted(allowed)) + ").")
+        try:
+            registered = await self.models.registered_models(lane)
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED: an unverifiable model is refused
+            return await refuse(f"could not read the gateway's model list ({type(exc).__name__}), "
+                                f"so `{model}` cannot be verified.")
+        try:
+            res = await self.profiles.set_model(name, model, registered=registered, dry_run=dry_run,
+                                                expect_lane=lane, expect_version=version)
+        except KeyError:
+            return await refuse(f"no active profile called `{name}`.")
+        except ConcurrentProfileChange:
+            return await refuse(f"profile `{name}` was changed concurrently by another request; "
+                                f"nothing written by this one - check it and retry.", "conflict")
+        except ValueError as exc:
+            return await refuse(f"{exc}.")
+        if res["changed"] and not dry_run:
+            await self.audit.log("profile_model_set", actor=actor, payload={
+                "profile": name, "before": res["before"], "after": res["after"],
+                "version": res["version"], "lane": res["lane"]})
+            body = (f"🔁 Profile **`{name}`** now asks for **`{res['after']}`** (was "
+                    f"`{res['before']}`; version {res['version']}, lane `{res['lane']}` unchanged).")
+            outcome = "applied"
+        elif res["changed"]:
+            body = (f"🔎 Dry run: profile **`{name}`** would move `{res['before']}` → "
+                    f"`{res['after']}` (lane `{res['lane']}` unchanged). Nothing written.")
+            if confirm_hint:
+                body += f"\nTo apply it, send exactly: `{command}`"
+            outcome = "dry_run"
+        else:
+            body = f"✅ Profile **`{name}`** already asks for `{res['after']}` — nothing to change."
+            outcome = "unchanged"
+        await self.chat.post(channel_id, body, thread_id=thread_id)
+        return dict(res, outcome=outcome)
 
     async def _nl_tidy_up(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """"Tidy up" the board the way a human would (operator 2026-07-10 "it would be good to have

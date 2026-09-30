@@ -13,7 +13,7 @@ nothing but Python and Docker. That rule is enforced by a test in
 scripts/stack/test_stack.py and by the item's anchor.
 
 Verbs:  status  up  down  restart <plane>  recover  enable  disable  list
-        doctor  init  health  stats  backup <plane>  restore <plane>
+        doctor  init  health  stats  backup <plane>  restore <plane>  labels
         inventory --write|--check  docs --write|--check [--allow-unverified]
         status/up/down/recover take an optional plane, or --all for every
         declared plane (the `manual` ones excepted); with neither they act on
@@ -110,7 +110,13 @@ class Console:
         self.stream = stream if stream is not None else sys.stdout
 
     def line(self, text=""):
-        print(text, file=self.stream)
+        try:
+            print(text, file=self.stream)
+        except UnicodeEncodeError:
+            # a stream that cannot carry the text (a redirected PowerShell 5.1 pipe is cp1252,
+            # a model file name need not be): print what it can carry, never raise over output
+            encoding = getattr(self.stream, "encoding", None) or "ascii"
+            print(str(text).encode(encoding, "replace").decode(encoding, "replace"), file=self.stream)
         # Flush every line: docker's own output goes straight to the terminal, so a
         # buffered stream would print our headers AFTER the command they introduce.
         try:
@@ -503,10 +509,13 @@ class State:
 
 
 def read_env_file(path: Path) -> dict[str, str]:
+    # utf-8-sig: PowerShell 5.1's `-Encoding utf8` writes a BOM, which compose drops; read as
+    # utf-8 it glued itself to the first key. (compose also accepts `KEY: value`; this reader
+    # does not - model-roles findings F15. scripts/stack/model_labels.py has the full reader.)
     values: dict[str, str] = {}
     if not path.is_file():
         return values
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -1584,7 +1593,8 @@ def _sentence(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool, capture=None) -> int:
+def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: bool, capture=None,
+           labels_request=None) -> int:
     ordered, mode = select_planes(manifest, state, plane, every, "up")
     if not ordered:
         console.line("# nothing enabled (`stack.py enable <plane|product>`, `stack.py init`, or `up --all`)")
@@ -1605,6 +1615,8 @@ def cmd_up(manifest, state, root, console, runner, plane, every: bool, dry_run: 
         _requires_note(manifest, console, plane, driven)
     code = _drive(manifest, state, root, console, runner, ["up", "-d"], driven, dry_run, "up", capture)
     _manual_notes(manifest, console, [p for p in ordered if manifest.manual(p)], "start")
+    if code == EXIT_OK:
+        labels_after(manifest, state, root, console, labels_request, driven, dry_run, "up", capture)
     return code
 
 
@@ -2187,6 +2199,26 @@ def subprocess_capture(cmd, cwd) -> CommandResult:
     return CommandResult(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
+RENDER_TIMEOUT = 120
+
+
+def utf8_capture(cmd, cwd, timeout: int = RENDER_TIMEOUT) -> CommandResult:
+    """subprocess_capture for `docker compose config --format json`: compose writes UTF-8, and
+    the locale codepage (cp1252 on this Windows host) turned a non-ASCII model path into
+    mojibake (mr-gateway attempt 4, T13). STRICT decoding, so bytes that are not UTF-8 are a
+    named failure rather than a silently different path; a timeout, so a hung CLI cannot hang
+    `up`/`recover` - bounded over the whole process TREE (model_labels.run_bounded: docker.exe's
+    compose child holds the pipe on Windows)."""
+    import model_labels  # sibling module, standard library only
+
+    code, out, err = model_labels.run_bounded(cmd, cwd, timeout, env=command_env(cmd))
+    try:
+        text = out.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        return CommandResult(1, "", f"the output is not UTF-8 ({exc})")
+    return CommandResult(code, text, err.decode("utf-8", errors="replace"))
+
+
 def urllib_get(url: str, timeout: int = 8) -> HttpResult:
     """GET a URL. Any failure is a status 0 with the reason as the body.
 
@@ -2219,8 +2251,15 @@ _OWUI_PLUGIN_CENSUS = (
     "print(sum(c.execute('select count(*) from '+t).fetchone()[0] for t in ('tool','function','skill')))"
 )
 
+# The model the landing completion asks for: a ROLE (model-roles, 2026-09-28), so
+# registering more roles or a cloud model can never make the probe pick another
+# backend. local-small is the resident chat model with thinking off - three tokens
+# of answer, not three tokens of reasoning.
+PROBE_ROLE = "local-small"
+
 _LANDING_COMPLETION = r"""
 import json, os, time, urllib.error, urllib.request
+ROLE = "@PROBE_ROLE@"
 KEY = os.environ.get("LITELLM_MASTER_KEY", "")
 BASE = "http://localhost:8080"
 HEAD = {"Authorization": "Bearer " + KEY, "Content-Type": "application/json",
@@ -2237,13 +2276,15 @@ def call(path, payload=None, timeout=30):
 try:
     _, listing = call("/v1/models")
     ids = [d.get("id", "") for d in (listing.get("data") or [])]
-    # The embedding models load on a different upstream; a completion against one
-    # proves nothing about the chat backend that was empty.
-    chat = [i for i in ids if i and "embed" not in i.lower() and "bge" not in i.lower()]
-    if not chat:
-        print("FAIL the gateway advertises no chat model (models: %s)" % (ids or "none"))
+    # The probe asks for the ROLE, never "the first chat-looking id": the assembler
+    # loads fragments in file order, so cloud.openrouter.yaml's cloud-large sorts
+    # ahead of every local model the moment its key is set, and a probe of that
+    # (the gateway has no egress) says nothing about the local chat backend.
+    if ROLE not in ids:
+        print("FAIL the gateway does not advertise the %s role (models: %s) - llm-gateway must run "
+              "inference/config/litellm/model_list/local.yaml with the roles" % (ROLE, ids or "none"))
         raise SystemExit(0)
-    model = chat[0]
+    model = ROLE
     started = time.time()
     status, answer = call("/v1/chat/completions", {
         "model": model, "max_tokens": 3,
@@ -2264,7 +2305,7 @@ except urllib.error.HTTPError as exc:
     print("FAIL the gateway answered HTTP %s: %s" % (exc.code, detail))
 except Exception as exc:
     print("FAIL %s: %s" % (type(exc).__name__, str(exc)[:200].replace("\n", " ")))
-"""
+""".replace("@PROBE_ROLE@", PROBE_ROLE)
 
 
 class HealthSweep:
@@ -2766,6 +2807,164 @@ def cmd_health(manifest, state, root, console, capture, http) -> int:
                    | set(compose_profiles_env(manifest, root, "inference")) | shell)
         local = "local" in sources
     return HealthSweep(console, root, capture, http, planes, inference_local=local).run()
+
+
+# --------------------------------------------------------------------------
+# labels - Open WebUI shows each model ROLE as the model file it really loads
+# --------------------------------------------------------------------------
+#
+# model-roles (operator decisions R1-R5, 2026-09-28). The label is DERIVED by
+# scripts/stack/model_labels.py from the GGUF the inference plane loads, and
+# written to the Open WebUI model row NAME of each role id through Open WebUI's
+# admin API. `labels` does it on demand; `up` and `recover` do it after a
+# successful run that touched inference or the frontend, when both are on and
+# inference runs `local` (without `local` no role is registered). The sync is
+# idempotent: it reads and validates every role row before writing any, then
+# writes only a name that differs.
+
+
+def inference_runs_local(manifest, state, root) -> bool:
+    """`local` from ANY source, as cmd_health decides it (ac-followups X1)."""
+    shell = {x.strip() for x in (os.environ.get("COMPOSE_PROFILES") or "").split(",") if x.strip()}
+    sources = (set(run_profiles(manifest, state, "inference"))
+               | set(compose_profiles_env(manifest, root, "inference")) | shell)
+    return "local" in sources
+
+
+def owui_admin_settings(root: Path) -> tuple[str, str]:
+    """(base url, admin API key): the shell first, then the ROOT .env (the driver's file, D10)."""
+    import model_labels  # sibling module, standard library only
+
+    env = read_env_file(root / ".env")
+    key = os.environ.get(model_labels.OWUI_KEY_VAR) or env.get(model_labels.OWUI_KEY_VAR, "")
+    url = (os.environ.get(model_labels.OWUI_URL_VAR) or env.get(model_labels.OWUI_URL_VAR, "")
+           or model_labels.OWUI_DEFAULT_URL)
+    return url, key
+
+
+def result_is_real(capture) -> bool:
+    """The default capture decodes with the locale codepage; the render needs strict UTF-8."""
+    return capture is subprocess_capture or capture is None
+
+
+def labels_render(manifest, state, root, capture, render_file=None) -> dict:
+    """COMPOSE's render of the inference plane - the one source a label is derived from.
+
+    The same `docker [--context X] compose -f inference/docker-compose.yml --profile ...
+    config --format json` `recover` reads its plan from: read-only (nothing is created,
+    started or pulled), no daemon needed, ~1 s. `local` is always among the profiles, so
+    the upstreams are in the render. `render_file` is a saved render instead (a disposable
+    environment with no docker CLI). Any failure is a LabelError: there is no fallback.
+    """
+    import model_labels  # sibling module, standard library only
+
+    if render_file:
+        return model_labels.parse_render(Path(render_file).read_text(encoding="utf-8"), str(render_file))
+    if result_is_real(capture):
+        capture = utf8_capture
+    profiles = manifest.profile_order("inference", set(effective_profiles(manifest, state, root, "inference"))
+                                      | {"local"})
+    cmd = compose_command(manifest, "inference", ["config", "--format", "json"],
+                          context=state.context_of("inference"), profiles=profiles)
+    result = capture(cmd, root)
+    if result.code != 0:
+        why = " | ".join((result.stderr or result.stdout or "no output").strip().splitlines()[:3])
+        raise model_labels.LabelError(f"`{' '.join(cmd)}` exited {result.code}: {why} - a label is derived "
+                                      "only from compose's own render, never guessed")
+    return model_labels.parse_render(result.stdout, "the render of inference/docker-compose.yml")
+
+
+def run_labels(manifest, state, root: Path, console: Console, request, capture, dry_run: bool, prefix: str,
+               render_file=None, wait_s: int = 180, sleep=time.sleep) -> int:
+    """Derive every role's label from compose's render, then sync the Open WebUI rows. Prints each change."""
+    import model_labels  # sibling module, standard library only
+
+    try:
+        labels = model_labels.derive_labels(labels_render(manifest, state, root, capture, render_file),
+                                            root=root)
+    except model_labels.LabelError as exc:
+        console.line(f"{prefix}FAILED - {exc}. Nothing was written to Open WebUI.")
+        return EXIT_REFUSED
+    except (OSError, UnicodeError) as exc:
+        # a file the render points at (local.yaml, the llama-swap config, a saved render)
+        # that cannot be read or decoded: the same refusal, not a traceback
+        console.line(f"{prefix}FAILED - reading the inference config: {type(exc).__name__}: {exc}. "
+                     "Nothing was written to Open WebUI.")
+        return EXIT_REFUSED
+    for item in labels:
+        console.line(f"{prefix}{item.role} = {item.label!r} <- {item.container_path} ({item.source})")
+    url, key = owui_admin_settings(root)
+    if not key:
+        console.line(f"{prefix}not synced - {model_labels.OWUI_KEY_VAR} is not set (shell or the root .env): "
+                     "an Open WebUI ADMIN user's API key (Settings > Account > API keys; API keys must be "
+                     "enabled in Admin Settings > General). Nothing was written to Open WebUI.")
+        return EXIT_REFUSED
+    if not model_labels.wait_ready(url, request, wait_s, sleep):
+        console.line(f"{prefix}not synced - Open WebUI at {url} did not answer /health within {wait_s}s. "
+                     f"Nothing was written; run `{CLI} labels` once it is up.")
+        return EXIT_REFUSED
+    try:
+        changes = model_labels.sync_owui(labels, url, key, request, dry_run=dry_run)
+    except model_labels.OwuiError as exc:
+        console.line(f"{prefix}FAILED - {exc}")
+        return EXIT_REFUSED
+    for change in changes:
+        console.line(f"{prefix}{model_labels.describe(change)}")
+    written = sum(1 for c in changes if c.action in ("created", "renamed"))
+    pending = sum(1 for c in changes if c.action.startswith("would-"))
+    if dry_run:
+        console.line(f"{prefix}dry run: {pending} row(s) would change at {url}; nothing was written")
+    else:
+        console.line(f"{prefix}{written} row(s) changed, {len(changes) - written} already right, at {url}")
+    return EXIT_OK
+
+
+def _urllib_owui(method, url, headers, body, timeout):
+    """The real Open WebUI call (model_labels.urllib_request), imported late like the module itself."""
+    import model_labels  # sibling module, standard library only
+
+    return model_labels.urllib_request(method, url, headers, body, timeout)
+
+
+def cmd_labels(manifest, state, root, console, request, capture, dry_run: bool, render_file=None) -> int:
+    """`stack.py labels [--dry-run]`: the on-demand sync. Refuses where no role is registered."""
+    if not inference_runs_local(manifest, state, root):
+        raise Refusal("refused: inference does not run its `local` profile here (the state file, "
+                      "inference/.env's COMPOSE_PROFILES and the shell all leave it out), so the gateway "
+                      "registers no local role and there is nothing to label")
+    return run_labels(manifest, state, root, console, request, capture, dry_run, "labels: ", render_file)
+
+
+def labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str,
+                 capture=None) -> None:
+    """The `up` / `recover` hook. Never changes the verb's exit code and never raises: any
+    failure - a refusal, an unreadable config file, anything unexpected - is printed as
+    `# labels: FAILED` plus a WARNING line, and the verb's own result stands."""
+    if request is None:
+        return
+    try:
+        failed = _labels_after(manifest, state, root, console, request, acted_on, dry_run, verb,
+                               capture or subprocess_capture)
+    except Exception as exc:  # noqa: BLE001 - the hook must never turn a successful verb into a failure
+        console.line(f"# labels: FAILED - {type(exc).__name__}: {str(exc)[:300]}")
+        failed = True
+    if failed:
+        console.line(f"# labels: WARNING - Open WebUI's role names were NOT synced (reason above); "
+                     f"`{verb}` itself succeeded. Fix it and run `{CLI} labels`.")
+
+
+def _labels_after(manifest, state, root, console, request, acted_on, dry_run: bool, verb: str,
+                  capture) -> bool:
+    """True when a sync was due and did not complete."""
+    touched = {"inference", "frontend"} & set(acted_on)
+    on = set(acted_on) | {p for p in ("inference", "frontend") if state.is_enabled(p)}
+    if not touched or not {"inference", "frontend"} <= on or not inference_runs_local(manifest, state, root):
+        return False
+    if dry_run:
+        console.line(f"# labels: after a real `{verb}`, `{CLI} labels` would set Open WebUI's role names "
+                     "from the model files (nothing is read or written in a dry run)")
+        return False
+    return run_labels(manifest, state, root, console, request, capture, False, "# labels: ") != EXIT_OK
 
 
 # --------------------------------------------------------------------------
@@ -3368,7 +3567,7 @@ def _gate_note(render: PlaneRender, key: str, timeout: int) -> str:
 
 
 def cmd_recover(manifest, state, root, console, runner, capture, plane, every: bool, dry_run: bool,
-                timeout: int | None = None) -> int:
+                timeout: int | None = None, labels_request=None) -> int:
     """Stop the selected planes in reverse dependency order, then start them in order, gated.
 
     The ordered, health-gated restart that emergency-recovery.ps1's `recover`
@@ -3527,6 +3726,7 @@ def cmd_recover(manifest, state, root, console, runner, capture, plane, every: b
     else:
         console.line(f"recovered: {', '.join(work) or 'nothing'} - every container passed its gate")
     _manual_notes(manifest, console, manual, "recover")
+    labels_after(manifest, state, root, console, labels_request, work, dry_run, "recover", capture)
     return EXIT_OK
 
 
@@ -5875,6 +6075,17 @@ def build_parser() -> argparse.ArgumentParser:
         p.set_defaults(kind="auto")
 
     sub.add_parser("doctor", help="docker, compose, env files and blank keys")
+    p = sub.add_parser("labels", help="set Open WebUI's model-role names from the model files (idempotent)",
+                       description="Derive each local model role's label from the GGUF the inference plane "
+                                   "loads (scripts/stack/model_labels.py) and set the Open WebUI model row name "
+                                   "of each role id to it through Open WebUI's admin API. Needs "
+                                   "OWUI_ADMIN_API_KEY (shell or the root .env); OWUI_BASE_URL defaults to "
+                                   "http://127.0.0.1:3000. Writes only a name that differs.")
+    p.add_argument("--dry-run", action="store_true", help="derive and read; print what would change, write nothing")
+    p.add_argument("--render", default=None, metavar="JSON",
+                   help="a saved `docker compose -f inference/docker-compose.yml --profile local config "
+                        "--format json` to derive from, instead of rendering (a disposable environment "
+                        "with no docker CLI)")
     sub.add_parser("health", help="the functional probe sweep (read-only; exit code = failed probes)")
     p = sub.add_parser("stats", help="container CPU/memory/net + the inference queue and ledger (read-only)")
     p.add_argument("--hours", type=int, default=1, help="ledger window in hours (default 1)")
@@ -5906,15 +6117,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None) -> int:
-    """Five seams, so every test is hermetic.
+def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None, labels_request=None) -> int:
+    """Six seams, so every test is hermetic.
 
     `runner(cmd, cwd) -> int` STREAMS a command (docker compose up, the stats
     script); `capture(cmd, cwd) -> CommandResult` reads one back (the health
     probes, the compose renders); `http(url, timeout) -> HttpResult` is the
     only network call; `pipe(cmd, cwd, stdin_path=, stdout_path=)` moves a
     file through a command (backup's tar out, restore's tar in); `stdout` is
-    the single output stream.
+    the single output stream. `labels_request(method, url, headers, body, timeout)
+    -> (status, text)` is the Open WebUI admin API call the label sync makes; when a
+    test injects a runner and no labels_request, `up`/`recover` run no label sync at
+    all (an injected runner means nothing real may happen).
     """
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -5924,6 +6138,8 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
     capture = capture or subprocess_capture
     http = http or urllib_get
     pipe = pipe or subprocess_pipe
+    # The label sync after `up`/`recover`: real only when the docker runner is real.
+    hook_request = labels_request or (None if runner is not subprocess_runner else _urllib_owui)
 
     if not args.verb:
         parser.print_help(console.stream)
@@ -5944,7 +6160,7 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
             return cmd_status(manifest, state, root, console, runner, args.plane, args.every)
         if args.verb == "up":
             return cmd_up(manifest, state, root, console, runner, args.plane, args.every, args.dry_run,
-                          capture)
+                          capture, hook_request)
         if args.verb == "down":
             return cmd_down(manifest, state, root, console, runner, args.plane, args.every, args.dry_run)
         if args.verb == "restart":
@@ -5963,7 +6179,10 @@ def main(argv=None, runner=None, stdout=None, capture=None, http=None, pipe=None
             return cmd_stats(manifest, state, root, console, runner, capture, args.hours, args.bucket_minutes)
         if args.verb == "recover":
             return cmd_recover(manifest, state, root, console, runner, capture, args.plane, args.every,
-                               args.dry_run, args.timeout)
+                               args.dry_run, args.timeout, hook_request)
+        if args.verb == "labels":
+            return cmd_labels(manifest, state, root, console, labels_request or _urllib_owui, capture,
+                              args.dry_run, args.render)
         if args.verb == "backup":
             return cmd_backup(manifest, state, root, console, capture, pipe, args.plane, args.dest)
         if args.verb == "restore":

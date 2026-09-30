@@ -10,15 +10,15 @@ schema_version: 1
 inference:
   base_url: http://llama-cpp:8080/v1
   api_key_env: LC_LLAMA_API_KEY
-  model_reasoning: qwen36-27b
-  model_fast: qwen36-27b:nothink
+  model_reasoning: local-large
+  model_fast: local-small
   default: fast
 
 # Upstream little-coder CLI invocation (design §3.1). INTEGRATION POINT —
 # the exact flags / prompt delivery are pinned when the agent image is built.
 agent:
   command: [little-coder]
-  model: llamacpp/qwen36-27b
+  model: llamacpp/local-large
   prompt_mode: arg
   # --mode json streams structured events (thinking / tool calls / answer
   # deltas) so the OWUI surface can show the process live.

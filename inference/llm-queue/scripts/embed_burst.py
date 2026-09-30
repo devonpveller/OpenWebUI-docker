@@ -12,7 +12,7 @@ import httpx
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://llm-gateway:8080"
 N = int(sys.argv[2]) if len(sys.argv) > 2 else 60
 
-BODY = {"model": "bge-m3", "input": "the quick brown fox embeds over the lazy queue"}
+BODY = {"model": "local-embed", "input": "the quick brown fox embeds over the lazy queue"}
 
 
 async def one(client):

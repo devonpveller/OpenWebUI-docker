@@ -636,7 +636,7 @@ profiles    = { inference = ["local"] }
 [products.memory]
 description = "mnemory, the unified memory layer, and its cloud door"
 planes      = ["memory"]
-# mnemory calls LLM_MODEL=qwen36-27b:nothink and EMBED_MODEL=qllama/bge-m3:latest
+# mnemory calls LLM_MODEL=local-small and EMBED_MODEL=local-embed
 # (memory/docker-compose.yml); the gateway registers both only under `local`, so
 # without it the product is a memory layer whose every call fails.
 profiles    = { inference = ["local"] }

@@ -26,7 +26,7 @@
           "type": "array"
         },
         "model": {
-          "default": "llamacpp/qwen36-27b",
+          "default": "llamacpp/local-large",
           "title": "Model",
           "type": "string"
         },
@@ -119,7 +119,7 @@
     },
     "InferenceConfig": {
       "additionalProperties": false,
-      "description": "llama-cpp backend (design \u00a73.5). Two variants of the same model id.",
+      "description": "llama-cpp backend (design \u00a73.5), reached through LiteLLM. Two model ROLES (see inference/README.md): reasoning = local-large (thinking), fast = local-small (no thinking).",
       "properties": {
         "api_key_env": {
           "default": "LC_LLAMA_API_KEY",
@@ -146,17 +146,17 @@
           "type": "string"
         },
         "embedding_model": {
-          "default": "bge-m3-f16.gguf",
+          "default": "local-embed",
           "title": "Embedding Model",
           "type": "string"
         },
         "model_fast": {
-          "default": "qwen36-27b:nothink",
+          "default": "local-small",
           "title": "Model Fast",
           "type": "string"
         },
         "model_reasoning": {
-          "default": "qwen36-27b",
+          "default": "local-large",
           "title": "Model Reasoning",
           "type": "string"
         }

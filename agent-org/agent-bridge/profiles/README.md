@@ -8,7 +8,7 @@ config). The bridge seeds the DB from these JSON files at boot; lane-flips persi
 
 ## Lanes — the pre-P0.5 default is **local**
 
-Every profile ships `lane: "local"` (model `qwen36-27b`). This is the honest, fail-safe
+Every profile ships `lane: "local"` (model `local-large`, the resident 27B - see `inference/README.md`). This is the honest, fail-safe
 pre-decision posture: until the **P0.5 capability-floor test** decides whether local 27B
 judgment is strong enough, *everything runs local on the same model* (zero swap thrash;
 governance §2.1 "default everything local").
@@ -41,5 +41,24 @@ warning** (never silently trusts a weak monitor — the Human Operator carries m
 | `reviewer-security` | local (→cloud) | security lens | `charters/reviewer-security.md` |
 | `reviewer-scope` | local (→cloud) | scope-creep lens | `charters/reviewer-scope.md` |
 
-⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `qwen36-27b`
+⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `local-large`
 proves capable; the cloud budget caps the rest (UX-FLOW §6).
+
+## Changing a profile's model on a running install
+
+These files only SEED a profile the database does not have yet; after that the database
+owns the live values (so an operator's lane flip survives a restart). A new install seeds
+`local-large`, the model role (`inference/README.md`). An existing install moves a profile
+by saying so, like every operator inlet (NL -> OperatorIntent -> a governed handler):
+`set profile <name> model <model>` in `#mgmt` or through `POST /nl` (`{"message": ...,
+"actor": "<who>"}`), with `(dry run)` on the end to only check. Only that exact command
+applies: a looser request the PO model reads as a profile change is always answered as a dry
+run that quotes the exact command to send. The handler refuses an unknown profile (names are
+case-folded; models are not), a model outside the CHAT set for the profile's lane
+(`AO_PROFILE_CHAT_MODELS_LOCAL` / `_CLOUD`; embedding names and the cloud group are refused on a
+local profile), a model the gateway does not list, and a gateway it cannot ask. It writes ONE new
+profile version with only `model` changed (lane, charter, temperature, scope and caller key
+carried over) and audits a `profile_model_set` event with who asked and the before/after. The
+same model again writes nothing; a second request racing the first on one profile is refused
+("changed concurrently; retry", HTTP 409 on `/nl`); the same command with the old model is the
+rollback.

@@ -1,6 +1,6 @@
 """P0.5 — capability-floor test (the decision-gate that gates Pc).
 
-Measures the LOCAL `qwen36-27b` (via the existing air-gapped `llm-gateway`, no OpenRouter
+Measures the LOCAL `local-large` role (via the existing air-gapped `llm-gateway`, no OpenRouter
 needed) on the three axes that decide whether local judgment is strong enough, or whether the
 judgment roles (PM/PO/planner/reviewer) must move to the cloud lane:
 
@@ -329,7 +329,7 @@ async def run(args) -> dict:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="P0.5 capability-floor test (local qwen36-27b)")
+    ap = argparse.ArgumentParser(description="P0.5 capability-floor test (local-large)")
     ap.add_argument("--quick", action="store_true", help="fast smoke (fewer calls)")
     ap.add_argument("--model", default=None, help="override the model id (default: worker_model)")
     ap.add_argument("--api-base", default=None, help="override the gateway base URL")
