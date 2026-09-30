@@ -32,18 +32,18 @@ class _Strict(BaseModel):
 
 
 class InferenceConfig(_Strict):
-    """llama-cpp backend (design §3.5). Two variants of the same model id."""
+    """llama-cpp backend (design §3.5), reached through LiteLLM. Two model ROLES (see inference/README.md): reasoning = local-large (thinking), fast = local-small (no thinking)."""
 
     base_url: str = "http://llama-cpp:8080/v1"
     api_key_env: str = "LC_LLAMA_API_KEY"
-    model_reasoning: str = "qwen36-27b"  # judge, drafting, justifications
-    model_fast: str = "qwen36-27b:nothink"  # cluster assignment, routing
+    model_reasoning: str = "local-large"  # judge, drafting, justifications
+    model_fast: str = "local-small"  # cluster assignment, routing (no thinking)
     default: Literal["fast", "reasoning"] = "fast"
     # Embedding backend (llama-cpp-embed, separate port from the chat
     # backend). Used by `similarity.EmbeddingSimilarity` for the
     # discriminator-anchored cluster matching (design §5.2).
     embedding_base_url: str = "http://llama-cpp-embed:8080/v1"
-    embedding_model: str = "bge-m3-f16.gguf"
+    embedding_model: str = "local-embed"
 
 
 class AgentConfig(_Strict):
@@ -55,7 +55,7 @@ class AgentConfig(_Strict):
     argv; the daemon appends `--model` and the prompt per `prompt_mode`."""
 
     command: list[str] = Field(default_factory=lambda: ["little-coder"])
-    model: str = "llamacpp/qwen36-27b"
+    model: str = "llamacpp/local-large"
     prompt_mode: Literal["stdin", "arg"] = "stdin"
     extra_args: list[str] = Field(default_factory=list)
     # Session-per-trigger continuity (design §3.1 follow-up). Each

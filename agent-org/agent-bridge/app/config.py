@@ -270,8 +270,17 @@ class Settings(BaseSettings):
     # nothing to this gateway; we only consume it. NEVER probe model health (C5).
     local_api_base: str = "http://llama-cpp:8080/v1"
     local_api_key: str = "agent-org"       # any non-empty string (permissive gateway)
-    worker_model: str = "qwen36-27b"
-    judge_model: str = "qwen36-27b"        # same model = zero swap thrash (OD-10)
+    worker_model: str = "local-large"
+    judge_model: str = "local-large"       # same role = zero swap thrash (OD-10)
+    # The CHAT models a profile may be pointed at through the governed `set profile <name> model
+    # <model>` intent, per effective lane (model-roles). The gateway's /models listing says only
+    # that a name is registered, not that it chats - `local-embed` is registered too - so the
+    # allowed set is explicit: the local chat roles plus the legacy chat ids (kept until mr-retire,
+    # so a rollback can name them), and the cloud group only for a profile on the cloud lane.
+    profile_chat_models_local: str = (
+        "local-large,local-large:nothink,local-small,local-small:nothink,"
+        "qwen36-27b,qwen36-27b:nothink")
+    profile_chat_models_cloud: str = "cloud-large,cloud-small"
 
     # ── Cloud model lane (separate llm-gateway-cloud — CONDITIONAL, Pc) ──────
     # Only wired if the P0.5 capability-floor gate mandates a cloud judge.

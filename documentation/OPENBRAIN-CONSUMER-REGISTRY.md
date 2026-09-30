@@ -42,7 +42,7 @@ reads) unless marked otherwise. Confirm a row before relying on it — services 
 
 | Service | Reads | Path | Plane | Notes / failure mode |
 |---|---|---|---|---|
-| `openbrain-digest` (`send-digest.ts`) | recent `thoughts` window | `openbrain-rest` | ops (RLS-bound) | LLM: `qwen36-27b:nothink` via `llama-cpp:8080/v1`, **hard 30s client timeout, ~200 max_tokens per call**. The 09-01 personal-mail flood (950KB into its window) blew the 30s budget → no digest. Corpus size is its de-facto contract |
+| `openbrain-digest` (`send-digest.ts`) | recent `thoughts` window | `openbrain-rest` | ops (RLS-bound) | LLM: `local-small` via `llama-cpp:8080/v1`, **hard 30s client timeout, ~200 max_tokens per call**. The 09-01 personal-mail flood (950KB into its window) blew the 30s budget → no digest. Corpus size is its de-facto contract |
 | `openbrain-podcast` (`link-enrich.ts`) | emails from `thoughts` via `AiNewsSection` (BrainClient → openbrain-rest) | openbrain-rest | ops | Filters `gmailLabels` startsWith `brain/`. **Zero brain/ mail in window = silent no-episode (exit 0)**. Chains: gmail-pull → podcast → digest |
 | wiki compiler (`generate-wiki.mjs`) | `thoughts`, `thought_entities(content)` **raw selects** when invoked without `--semantic-expand` (the wiki-service path) | PostgREST | was ungoverned → U5 home #4; bound since thoughts RLS | Publishes into 48k `wiki_pages` |
 | `openbrain-suggestion-worker`, `openbrain-curator` | thoughts/corpus | PostgREST/direct | ops | not deeply verified — confirm before contract changes |

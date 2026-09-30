@@ -1122,6 +1122,46 @@ refusal.
 
 ---
 
+## Open WebUI onto the model roles: `owui_role_migration.py`
+
+Not a `stack.py` verb: a one-off landing step. Services name a model **role**
+(`local-large`, `local-small`, `local-embed`, ...; `inference/README.md`), and three
+references Open WebUI keeps in its database move with them:
+
+- every preset whose `base_model_id` is a concrete chat id (`qwen36-27b` ->
+  `local-large`, `qwen36-27b:nothink` -> `local-large:nothink`); only that column
+  changes, so the preset's id, name, prompt, grants and chats stay as they are;
+- `rag.embedding_model`, when the engine is `openai` (LiteLLM) and the value is a
+  bge-m3 name -> `local-embed` (same model, same 1024-dim vectors, nothing re-embedded);
+- `ui.model_order_list`: each concrete id is replaced in place by its role.
+
+```text
+python scripts/stack/owui_role_migration.py --db webui.db                        # dry run
+python scripts/stack/owui_role_migration.py --db webui.db --apply --restore-file r.json
+python scripts/stack/owui_role_migration.py --db webui.db --restore r.json [--apply]
+```
+
+A dry run prints the before/after table of exactly the cells it would change and creates
+nothing beside the database: it reads the file `mode=ro&immutable=1`, or - when a non-empty
+`webui.db-wal` holds rows the main file lacks - a temporary copy of both. `--apply` opens the
+database in SQLite's EXCLUSIVE locking mode. The primary guard against writing under a
+running Open WebUI is checking that its container is stopped (`docker inspect`, as the landing
+does); the lock is the backstop and refuses (`another process holds a lock on ...`) a process
+that has read the WAL-mode database and kept its connection - Open WebUI's pooled connections -
+but not a connection that never read it, nor an idle holder of a rollback-journal database.
+The plan, the restore file (a new file, written and fsynced first) and every
+write happen in that one transaction, and a failure rolls back and removes the restore file.
+A second `--apply` finds nothing to do. `--restore` puts every recorded cell back with the
+same storage class and bytes under the same lock; a cell already holding its original value
+is skipped, and a cell holding neither the migrated nor the original value refuses the whole
+restore (dry run included), naming the cell - put it back by hand or leave it, then run the
+restore again. A config value is rewritten only if `json.dumps` reproduces its stored text
+(how Open WebUI 0.11 writes it). Open WebUI reads `rag.embedding_model` once at startup, so
+run it with Open WebUI **stopped**. Other config keys that still name an old id are listed,
+not changed. Stdlib only, so it runs inside the `openwebui` image against the data volume.
+
+---
+
 ## Tests
 
 ```text
@@ -1148,6 +1188,9 @@ tests plus `inventory --check` itself, which the pre-commit hook and the
 against a scratch copy of the real inference config and a `FakeOwui` that
 answers the four Open WebUI admin-API calls as 0.11.0 does; their real proof is
 the disposable Open WebUI in item `mr-gateway`'s test plan.
+`owui_role_migration.py` (`test_owui_role_migration.py`) runs against throwaway SQLite
+databases built with Open WebUI 0.11.0's own `model` and `config` DDL; its real proof is a
+copy of a live `webui.db` in item `mr-consumers`' test plan.
 
 `recover`, `backup`, `restore` and `stats` run against `OpsDaemon`, a scripted
 daemon with containers, volumes and the helper container, so gate timeouts,
