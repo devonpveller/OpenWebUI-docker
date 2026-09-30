@@ -1,4 +1,4 @@
-﻿# scripts/backup/backup-to-nas.ps1
+# scripts/backup/backup-to-nas.ps1
 #
 # Weekly NAS sync of the portal backup archives, two-slot alternating.
 # Mirrors `./backups/` to `<NasUncRoot>\slot-A\` or `<NasUncRoot>\slot-B\`
@@ -15,6 +15,37 @@
 # All of `./backups/` gets mirrored, so any future backup container
 # (writing under ./backups/) is included automatically.
 #
+# Second pass - the ARCHIVES (since 2026-09-29, closeout-followups cf-nas):
+#   ./backup/ (singular) holds cold archives that exist nowhere else - the
+#   2026-09-13 orphan-volume tars, the May-2025 Open WebUI volumes, OWUI model
+#   exports - in its SUBDIRECTORIES; its top-level files are the git-tracked
+#   sidecar sources and are not archived (git keeps them). The archives go to a
+#   folder OUTSIDE the slots - by default a sibling of -NasUncRoot named
+#   `archive` (\\nas\backups\ai-stack\portal -> \\nas\backups\ai-stack\archive) -
+#   one file at a time (Invoke-NasArchivePass in nas-sync-lib.ps1): a missing
+#   file is copied to a temp name, sha256-verified, then renamed into place; a
+#   NAS copy left INCOMPLETE by an interrupted robocopy (stamped inside its
+#   unfinished-copy window, 1979-12-31..1980-01-02; older stamps are complete) is
+#   re-copied the same way (our own copies are never stamped before 1980-01-04,
+#   so they can never look like that); a COMPLETE NAS copy is never replaced
+#   (one exception: a copy ANOTHER tool stamped inside that window looks
+#   unfinished and is re-copied) and
+#   nothing but our own temps is deleted, so an archive outlives its local file.
+#   A complete NAS copy whose content differs from the local file (MISMATCH), a
+#   local file that contradicts its recorded checksum (FAIL-LOCAL) and a copy
+#   that could not be written or verified (FAIL-COPY) are each an [ERROR] line -
+#   with a Trust verdict where there is one - an alert, exit 2 and no completion
+#   marker. Why not move the archives under ./backups/ instead: both
+#   slots would hold them (~17 GB each) and the slot MIRROR would drop an archive
+#   two weeks after it left D:. Threat model (stated in nas-sync-lib.ps1):
+#   ordinary conditions are refused loudly; an active local writer rearranging
+#   ./backup/ during a pass is out of scope - a later run reports a resulting
+#   difference as a MISMATCH when size or timestamp differ; an equal-size,
+#   equal-timestamp one only `copy-archives-to-nas.ps1 -VerifyOnly` (no -Dirs:
+#   every archive folder) catches.
+#   The layout rules (sibling default, same share,
+#   never inside a slot, all judged on normalised paths) are in nas-sync-lib.ps1.
+#
 # Parameters:
 #   -NasUncRoot    Required. e.g. \\nas.example.lan\backups\portal
 #                  The script appends \slot-A or \slot-B based on the
@@ -25,6 +56,13 @@
 #                  The file is DPAPI-encrypted with LocalMachine scope so
 #                  the scheduled task (running under S4U logon with no
 #                  password) can still decrypt it.
+#   -NasArchiveRoot Optional. Where the ./backup/ archives go (see above).
+#                  Default: <parent of NasUncRoot>\archive. Must be absolute, on
+#                  the same \\server\share and not inside slot-A/slot-B, judged
+#                  after normalisation (`..`, `.`, `/`, trailing dots/spaces) and
+#                  again after the IP rewrite; refused with exit 1 before any
+#                  SMB session otherwise.
+#   -NoArchive     Optional. Skip the archive pass (slot mirror only).
 #   -DryRun        Optional. Prints what Robocopy would do, does nothing.
 #
 # Logs:
@@ -38,7 +76,8 @@
 # Exit codes:
 #   0  - sync succeeded (Robocopy exit 0-7 are "success or minor warnings")
 #   1  - parameter / setup error
-#   2  - Robocopy reported a real failure (>= 8)
+#   2  - Robocopy reported a real failure (>= 8), in the slot mirror or the
+#        archive pass (the completion marker is then NOT written)
 #   3  - integrity verification of a .sha256 sentinel failed
 #
 # Run manually:
@@ -64,6 +103,11 @@ param(
   # -NoIpResolve restores the old hostname behaviour.
   [switch]$NoIpResolve,
 
+  [Parameter(Mandatory = $false)]
+  [string]$NasArchiveRoot,
+
+  [switch]$NoArchive,
+
   [switch]$DryRun
 )
 
@@ -73,6 +117,7 @@ $ErrorActionPreference = 'Continue'
 
 $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $backupSrc = Join-Path $projectRoot 'backups'
+$archiveSrc = Join-Path $projectRoot 'backup'
 $logDir = Join-Path $projectRoot 'logs'
 $dateStamp = Get-Date -Format 'yyyy-MM-dd'
 $logFile = Join-Path $logDir "nas-sync-$dateStamp.log"
@@ -85,6 +130,15 @@ $rule = [System.Globalization.CalendarWeekRule]::FirstFourDayWeek
 $weekNum = $cal.GetWeekOfYear((Get-Date), $rule, [DayOfWeek]::Monday)
 $slot = if ($weekNum % 2 -eq 0) { 'slot-A' } else { 'slot-B' }
 $nasDest = Join-Path $NasUncRoot $slot
+
+# Shared helpers: .env reader, archive-root rules, the two robocopy argument sets.
+. (Join-Path $PSScriptRoot 'nas-sync-lib.ps1')
+$archiveDest = $null
+$archiveRootError = $null
+if (-not $NoArchive) {
+  try { $archiveDest = Resolve-NasArchiveRoot -NasUncRoot $NasUncRoot -NasArchiveRoot $NasArchiveRoot }
+  catch { $archiveRootError = $_.Exception.Message }
+}
 
 # Ensure log dir exists
 if (-not (Test-Path $logDir)) {
@@ -176,6 +230,17 @@ Write-LogLine "source        : $backupSrc"
 Write-LogLine "destination   : $nasDest"
 Write-LogLine "iso week      : $weekNum -> $slot"
 Write-LogLine "dry-run mode  : $($DryRun.IsPresent)"
+if ($NoArchive) { Write-LogLine "archive pass  : skipped (-NoArchive)" }
+else {
+  Write-LogLine "archive source: $archiveSrc"
+  Write-LogLine "archive dest  : $archiveDest (verified copies; a complete file is never replaced, nothing is purged)"
+}
+
+if ($archiveRootError) {
+  Write-LogLine "archive root rejected: $archiveRootError" 'ERROR'
+  Send-AlerterFailure -Reason "archive root rejected: $archiveRootError"
+  exit 1
+}
 
 # Verify the source exists and contains files
 if (-not (Test-Path $backupSrc)) {
@@ -215,7 +280,7 @@ $nasServer = $uncParts[0]
 $nasShare = $uncParts[1]
 $shareRoot = "\\$nasServer\$nasShare"
 
-# ── credentials: .env FIRST, DPAPI vault as fallback ──────────────────────────
+# -- credentials: .env FIRST, DPAPI vault as fallback --------------------------
 # The vault (DPAPI LocalMachine) is the more secure store and remains supported.
 # .env is the DISCOVERABLE one: on 2026-09-13 the operator went looking for "the
 # hardcoded password", found nothing -- correctly, it was ciphertext in
@@ -227,22 +292,7 @@ $shareRoot = "\\$nasServer\$nasShare"
 # Precedence is .env > vault so a rotation takes effect immediately, without
 # remembering to re-seal. `set-nas-credential.ps1 -FromEnv` keeps the vault in
 # step for anything that still reads it.
-function Get-DotEnvValue {
-  param([string]$Path, [string]$Key)
-  if (-not (Test-Path $Path)) { return $null }
-  foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
-    $t = $line.Trim()
-    if ($t.StartsWith('#') -or -not $t.Contains('=')) { continue }
-    $eq = $t.IndexOf('=')
-    if ($t.Substring(0, $eq).Trim() -ne $Key) { continue }
-    $v = $t.Substring($eq + 1).Trim()
-    if ($v.Length -ge 2 -and (($v[0] -eq '"' -and $v[-1] -eq '"') -or ($v[0] -eq "'" -and $v[-1] -eq "'"))) {
-      $v = $v.Substring(1, $v.Length - 2)
-    }
-    return $v
-  }
-  return $null
-}
+# Get-DotEnvValue comes from nas-sync-lib.ps1 (dot-sourced above).
 
 if (-not $NasVaultPath) {
   $NasVaultPath = Join-Path $projectRoot 'secrets\nas-backup-vault.dat'
@@ -316,9 +366,21 @@ if (-not $NoIpResolve) {
   if ($resolved) {
     Write-LogLine "resolved $nasServer -> $resolved (session opened by IP to avoid error 1219)"
     $nasDest = $nasDest -replace [regex]::Escape("\\$nasServer\"), "\\$resolved\"
+    if ($archiveDest) {
+      # Re-judge the archive root in the spelling robocopy will actually get.
+      $slotRootIp = $NasUncRoot -replace [regex]::Escape("\\$nasServer\"), "\\$resolved\"
+      $archiveIp = $archiveDest -replace [regex]::Escape("\\$nasServer\"), "\\$resolved\"
+      try { $archiveDest = Resolve-NasArchiveRoot -NasUncRoot $slotRootIp -NasArchiveRoot $archiveIp }
+      catch {
+        Write-LogLine "archive root rejected after the IP rewrite: $($_.Exception.Message)" 'ERROR'
+        Send-AlerterFailure -Reason "archive root rejected after the IP rewrite: $($_.Exception.Message)"
+        exit 1
+      }
+    }
     $nasServer = $resolved
     $shareRoot = "\\$nasServer\$nasShare"
     Write-LogLine "destination rewritten: $nasDest"
+    if ($archiveDest) { Write-LogLine "archive dest rewritten: $archiveDest" }
   } else {
     Write-LogLine "could not resolve $nasServer to an IP; continuing with the hostname" 'WARN'
   }
@@ -377,17 +439,12 @@ Write-LogLine "SMB session established"
 # /MIR mirrors (deletes files in dest not in source),
 # /R:3 /W:5 retries, /Z restartable, /MT:8 parallel copies, /LOG+ append.
 # /XJ excludes junction points just in case. /NDL hides directory listings.
-$logArg = "/LOG+:$logFile"
-
-if ($DryRun) {
-  Write-LogLine "(DRY RUN -- /L added; no files will be written)"
-  Write-LogLine "robocopy: `"$backupSrc`" `"$nasDest`" /L /MIR /R:3 /W:5 /Z /MT:8 /XJ $logArg /NDL"
-  & robocopy.exe $backupSrc $nasDest /L /MIR /R:3 /W:5 /Z /MT:8 /XJ $logArg /NDL | Out-Null
-}
-else {
-  Write-LogLine "robocopy: `"$backupSrc`" `"$nasDest`" /MIR /R:3 /W:5 /Z /MT:8 /XJ $logArg /NDL"
-  & robocopy.exe $backupSrc $nasDest /MIR /R:3 /W:5 /Z /MT:8 /XJ $logArg /NDL | Out-Null
-}
+# The argument set is built by nas-sync-lib.ps1 (Get-NasSlotMirrorArgs) - the
+# same /MIR /R:3 /W:5 /Z /MT:8 /XJ /LOG+ /NDL as before, in one tested place.
+$mirrorArgs = Get-NasSlotMirrorArgs -Source $backupSrc -Destination $nasDest -LogFile $logFile -DryRun:$DryRun
+if ($DryRun) { Write-LogLine "(DRY RUN -- /L added; no files will be written)" }
+Write-LogLine ("robocopy: " + (($mirrorArgs | ForEach-Object { if ($_ -match ' ') { "`"$_`"" } else { $_ } }) -join ' '))
+& robocopy.exe @mirrorArgs | Out-Null
 $rcExit = $LASTEXITCODE
 Write-LogLine "robocopy exit code: $rcExit"
 
@@ -409,8 +466,54 @@ if ($rcExit -band 4) { $exitDescription += 'mismatches handled' }
 if ($exitDescription.Count -eq 0) { $exitDescription = @('no changes') }
 Write-LogLine "robocopy summary: $($exitDescription -join ', ')"
 
+# -- archive pass: ./backup/<subdir>/ -> archive root, verified, never replacing -----
+# Runs only after the slot mirror succeeded, so a failure here never costs the
+# slot. A MISMATCH or FAIL-* is alerted and makes the run exit 2 WITHOUT the
+# completion marker at the bottom (check_backups.py reads that marker and
+# [ERROR] lines), after the slot's integrity check has still run.
+$archiveFailed = $null
+if (-not $NoArchive) {
+  if (-not (Test-Path -LiteralPath $archiveSrc)) {
+    Write-LogLine "archive source $archiveSrc does not exist - archive pass skipped" 'WARN'
+  } else {
+    $skipped = @(Get-ChildItem -LiteralPath $archiveSrc -File -Force).Count
+    Write-LogLine "archive pass: $archiveSrc\<subdir> -> $archiveDest$(if ($DryRun) { ' (DRY RUN - nothing written)' }); $skipped top-level file(s) skipped (git-tracked sidecar sources)"
+    $results = @()
+    try { $results = @(Invoke-NasArchivePass -Source $archiveSrc -Destination $archiveDest -DryRun:$DryRun) }
+    catch { $results = @(@{ Rel = '(pass)'; Status = 'FAIL-COPY'; Detail = $_.Exception.Message; Trust = '' }) }
+    $bad = @()
+    foreach ($x in $results) {
+      switch -Regex ($x.Status) {
+        '^(COPIED|REPAIRED|WOULD-COPY|WOULD-REPAIR)$' { Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)" }
+        '^PRESENT$' { }
+        '^MISMATCH$' {
+          Write-LogLine "archive: MISMATCH $($x.Rel) - the NAS copy is complete but its content differs from the local file ($($x.Detail)); NOTHING was overwritten. Trust: $($x.Trust)" 'ERROR'
+          $bad += $x.Rel
+        }
+        default {
+          # FAIL-LOCAL (the local file contradicts its recorded checksum) and FAIL-COPY
+          # (the copy could not be written or verified) - both mean "not safely archived".
+          Write-LogLine "archive: $($x.Status) $($x.Rel) $($x.Detail)$(if ($x.Trust) { ". Trust: $($x.Trust)" })" 'ERROR'
+          $bad += $x.Rel
+        }
+      }
+    }
+    $counts = ($results | Group-Object { $_.Status } | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+    Write-LogLine "archive pass summary: $(if ($counts) { $counts } else { 'no archive files' })"
+    if ($bad.Count -gt 0) {
+      $more = $(if ($bad.Count -gt 5) { " and $($bad.Count - 5) more (see log $logFile)" } else { '' })
+      Send-AlerterFailure -Reason ("archive pass: $($bad.Count) file(s) not safely on the NAS ($archiveDest): " + (($bad | Select-Object -First 5) -join ', ') + $more)
+      $archiveFailed = "$($bad.Count) archive file(s) failed"
+    }
+  }
+}
+
 # If this was a dry run, stop here without verification.
 if ($DryRun) {
+  if ($archiveFailed) {
+    Write-LogLine "(DRY RUN) archive pass failed ($archiveFailed) - run NOT complete" 'ERROR'
+    exit 2
+  }
   Write-LogLine "=== NAS sync (DRY RUN) complete ==="
   exit 0
 }
@@ -454,5 +557,9 @@ else {
 Write-LogLine "tearing down SMB session: net use $shareRoot /delete"
 & net.exe use $shareRoot /delete /yes 2>&1 | ForEach-Object { Write-LogLine "  net use /delete: $_" }
 
+if ($archiveFailed) {
+  Write-LogLine "slot mirror OK but the archive pass failed ($archiveFailed) - run NOT complete" 'ERROR'
+  exit 2
+}
 Write-LogLine "=== NAS sync complete ==="
 exit 0
