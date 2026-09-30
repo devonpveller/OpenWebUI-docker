@@ -181,8 +181,8 @@ services:
       # Local model lane — the EXISTING air-gapped llm-gateway (llama-cpp alias). NEVER a
       # new gateway; never a model health-probe (C5).
       AO_LOCAL_API_BASE: http://llama-cpp:8080/v1
-      AO_WORKER_MODEL: qwen36-27b
-      AO_JUDGE_MODEL: qwen36-27b
+      AO_WORKER_MODEL: local-large
+      AO_JUDGE_MODEL: local-large
       # Cloud lane — OFF by default (pre-P0.5). Flip on ONLY if Pc is built + P0.5 mandates.
       AO_CLOUD_ENABLED: ${AO_CLOUD_ENABLED:-false}
       AO_CLOUD_API_BASE: http://llm-gateway-cloud:4000/v1

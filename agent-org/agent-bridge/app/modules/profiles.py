@@ -6,6 +6,13 @@ is a one-field edit (`lane`). Profiles are versioned/audited like rules (§4.2).
 
 v1 storage: seed from versioned JSON files under `profiles/`, mirror into the DB so the
 bridge reads a single source and lane-flips persist. No new service.
+
+Who owns which field once a profile row exists: the DB owns `lane` (an operator flip
+persists across restarts); the seed file owns `model` - the gateway model ROLE the
+profile asks for (model-roles: `local-large`, ...). A seed whose `model` differs from
+the active row's becomes a new audited version with the persisted lane kept, exactly as
+a lane flip does, so moving a profile to another role is a file edit plus a restart and
+reverting the file moves it back. Every other field is seeded once, as before.
 """
 
 from __future__ import annotations
@@ -31,7 +38,8 @@ class ProfileRegistry:
 
     async def load_from_disk(self) -> None:
         """Seed the DB (and cache) from JSON files. Existing DB rows win on lane
-        (a persisted operator lane-flip is not clobbered by the seed file)."""
+        (a persisted operator lane-flip is not clobbered by the seed file); the seed
+        file wins on model (a changed model is a new version - see the module doc)."""
         if not self.dir.exists():
             log.warning("profiles dir %s missing — no profiles seeded", self.dir)
             return
@@ -58,6 +66,24 @@ class ProfileRegistry:
                             tool_access=ps.tool_access,
                             caller_key=ps.caller_key,
                         )
+                    )
+                elif existing.model != ps.model:
+                    existing.active = False
+                    s.add(
+                        Profile(
+                            name=existing.name,
+                            version=existing.version + 1,
+                            lane=existing.lane,
+                            model=ps.model,
+                            system_prompt_ref=existing.system_prompt_ref,
+                            temperature=existing.temperature,
+                            tool_access=existing.tool_access,
+                            caller_key=existing.caller_key,
+                        )
+                    )
+                    log.info(
+                        "profile %s model %s -> %s (seed file %s, version %d)",
+                        ps.profile, existing.model, ps.model, f.name, existing.version + 1,
                     )
             await s.commit()
         await self.refresh()

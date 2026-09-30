@@ -301,7 +301,7 @@ class AdvisoryAnswer(BaseModel):
 class ProfileSchema(BaseModel):
     profile: str
     lane: Literal["local", "cloud"] = "local"
-    model: str = "qwen36-27b"
+    model: str = "local-large"
     system_prompt_ref: str
     temperature: float = 0.2
     tool_access: list[str] = Field(default_factory=list)

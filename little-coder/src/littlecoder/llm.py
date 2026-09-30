@@ -87,7 +87,7 @@ class ChatClient:
         self,
         base_url: str,
         api_key: str = "",
-        default_model: str = "qwen36-27b",
+        default_model: str = "local-large",
         timeout_seconds: float = 60.0,
         sanitizer: Sanitizer | None = None,
     ) -> None:

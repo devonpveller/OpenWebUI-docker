@@ -3522,7 +3522,7 @@ class Orchestrator:
         and replies conversationally. Non-destructive actions (open an effort, apply steering,
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
         asks for the explicit, auditable command (governance §3). Runs on the PO profile's lane
-        (local qwen36-27b by default; cloud if P0.5 mandated)."""
+        (local-large by default; cloud if P0.5 mandated)."""
         # CONTROL-SURFACE PARITY (live 2026-07-15, iteration-2's first gate): `approve <effort>`
         # sent through POST /nl reached the PO MODEL, which NARRATED "Approved. Dispatching…"
         # while the plan stayed `draft` — a false-ack at the operator API, because the privileged

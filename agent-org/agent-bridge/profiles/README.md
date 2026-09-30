@@ -8,7 +8,7 @@ config). The bridge seeds the DB from these JSON files at boot; lane-flips persi
 
 ## Lanes — the pre-P0.5 default is **local**
 
-Every profile ships `lane: "local"` (model `qwen36-27b`). This is the honest, fail-safe
+Every profile ships `lane: "local"` (model `local-large`, the resident 27B - see `inference/README.md`). This is the honest, fail-safe
 pre-decision posture: until the **P0.5 capability-floor test** decides whether local 27B
 judgment is strong enough, *everything runs local on the same model* (zero swap thrash;
 governance §2.1 "default everything local").
@@ -41,5 +41,5 @@ warning** (never silently trusts a weak monitor — the Human Operator carries m
 | `reviewer-security` | local (→cloud) | security lens | `charters/reviewer-security.md` |
 | `reviewer-scope` | local (→cloud) | scope-creep lens | `charters/reviewer-scope.md` |
 
-⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `qwen36-27b`
+⚠️ **Tune the local↔cloud boundary empirically** (operator): stretch local as `local-large`
 proves capable; the cloud budget caps the rest (UX-FLOW §6).

@@ -1,5 +1,5 @@
 {
-  "_comment": "little-coder models override (installed to ~/.config/little-coder/models.json by docker/entrypoint-agent.sh). Points the llamacpp provider at the ai-stack llama-swap endpoint and registers the model ids llama-swap actually serves (qwen36-27b), which differ from upstream's bundled models.json (qwen3.6-27b). contextWindow MUST track (and stay under) the qwen36-27b per-request lane (ctx-size / n_parallel) -> 90000 for the 98304 lane since 2026-07-09b (ctx 196608, parallel 2). NOTE: the pre-2026-07-09 value 131072 was actually ABOVE the old 87552 lane (latent overflow bug). See ai-stack/.env 'qwen36-27b LANE CONSUMERS'. Restart little-coder after changing.",
+  "_comment": "little-coder models override (installed to ~/.config/little-coder/models.json by docker/entrypoint-agent.sh). Points the llamacpp provider at the ai-stack gateway alias (LiteLLM) and registers the model ROLE little-coder asks for, local-large (inference/README.md: the resident 27B with thinking), so a model swap needs no change here. contextWindow MUST track (and stay under) the resident 27B's per-request lane (ctx-size / n_parallel) -> 90000 for the 98304 lane since 2026-07-09b (ctx 196608, parallel 2). NOTE: the pre-2026-07-09 value 131072 was actually ABOVE the old 87552 lane (latent overflow bug). See the 27B LANE CONSUMERS note (historically in ai-stack/.env). Restart little-coder after changing.",
   "providers": {
     "llamacpp": {
       "api": "openai-completions",
@@ -7,8 +7,8 @@
       "apiKey": "LLAMACPP_API_KEY",
       "models": [
         {
-          "id": "qwen36-27b",
-          "name": "Qwen3.6-27B (local llama.cpp via llama-swap)",
+          "id": "local-large",
+          "name": "local-large (resident local model via LiteLLM)",
           "reasoning": true,
           "input": ["text"],
           "contextWindow": 90000,

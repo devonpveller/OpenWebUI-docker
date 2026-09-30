@@ -152,7 +152,7 @@ function StartMcp {
         -e "DB_HOST=$script:db" -e "DB_PORT=5432" -e "DB_NAME=openbrain" `
         -e "DB_USER=$DbUser" -e "DB_PASSWORD=$DbPassword" `
         -e "MCP_ACCESS_KEY=$script:mcpKey" -e "PORT=8000" `
-        -e "EMBEDDING_API_BASE=http://127.0.0.1:9/v1" -e "EMBEDDING_API_KEY=x" -e "EMBEDDING_MODEL=bge-m3" `
+        -e "EMBEDDING_API_BASE=http://127.0.0.1:9/v1" -e "EMBEDDING_API_KEY=x" -e "EMBEDDING_MODEL=local-embed" `
         -e "CHAT_API_BASE=http://127.0.0.1:9/v1" -e "CHAT_API_KEY=x" -e "CHAT_MODEL=none" `
         openbrain-mcp-server:local 2>&1
     # Wait for the listener rather than sleeping a guessed interval: a door asked before it

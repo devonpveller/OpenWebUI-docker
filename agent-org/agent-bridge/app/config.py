@@ -270,8 +270,8 @@ class Settings(BaseSettings):
     # nothing to this gateway; we only consume it. NEVER probe model health (C5).
     local_api_base: str = "http://llama-cpp:8080/v1"
     local_api_key: str = "agent-org"       # any non-empty string (permissive gateway)
-    worker_model: str = "qwen36-27b"
-    judge_model: str = "qwen36-27b"        # same model = zero swap thrash (OD-10)
+    worker_model: str = "local-large"
+    judge_model: str = "local-large"       # same role = zero swap thrash (OD-10)
 
     # ── Cloud model lane (separate llm-gateway-cloud — CONDITIONAL, Pc) ──────
     # Only wired if the P0.5 capability-floor gate mandates a cloud judge.
