@@ -2278,20 +2278,36 @@ def test_the_served_ids_are_every_name_the_rendered_local_yaml_registers(world):
 
 
 def test_the_rollback_deletes_created_rows_and_restores_changed_ones():
-    """Tester attempt 1 (T8): `meta.hidden: false` does not undo a CREATED row - deleting it does."""
+    """Tester attempt 1 (T8): `meta.hidden: false` does not undo a CREATED row - deleting it does.
+    Tester attempt 2 (T10): a row whose meta had NO `hidden` key gets the key REMOVED, not set to
+    false, so executing the printed steps restores every managed row as it was."""
     owui = _live_like()
+    owui.rows["local-small"]["meta"]["hidden"] = False    # an explicit false stays an explicit false
+    before = copy.deepcopy(owui.rows)
     changes = ml.sync_owui(_labels(), "http://owui:8080", ADMIN_KEY, owui, served=SERVED)
     steps = ml.rollback_steps(changes)
+    tail = " (POST /api/v1/models/model/update, everything else as read)"
     assert steps == [
-        "row 'local-small': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
-        "row 'local-small:nothink': meta.hidden back to false (POST /api/v1/models/model/update, "
-        "everything else as read)",
-        "row 'local-embed': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
-        "row 'qwen36-27b': meta.hidden back to false (POST /api/v1/models/model/update, everything else as read)",
+        "row 'local-small': meta.hidden back to false" + tail,
+        "row 'local-small:nothink': meta.hidden REMOVED (the row had no such key)" + tail,
+        "row 'local-embed': meta.hidden REMOVED (the row had no such key)" + tail,
+        "row 'qwen36-27b': meta.hidden REMOVED (the row had no such key)" + tail,
         "delete the row 'qwen36-27b:nothink' (this run created it): "
         'POST /api/v1/models/model/delete {"id": "qwen36-27b:nothink"}']
-    renamed = ml.Change("local-small", "renamed", "old", "new", True, False)
-    assert ml.rollback_steps([renamed]) == [
-        "row 'local-small': name back to 'old' and meta.hidden back to false "
-        "(POST /api/v1/models/model/update, everything else as read)"]
+    # carry the steps out literally: the managed rows come back as they were, created rows go
+    for step in steps:
+        rid = re.search(r"'([^']+)'", step).group(1)
+        if step.startswith("delete the row"):
+            del owui.rows[rid]
+        elif "REMOVED" in step:
+            owui.rows[rid]["meta"].pop("hidden")
+        else:
+            owui.rows[rid]["meta"]["hidden"] = step.split("meta.hidden back to ")[1].startswith("true")
+    strip = lambda rows: {r: {k: v for k, v in row.items() if k != "updated_at"}  # noqa: E731
+                          for r, row in rows.items()}
+    assert strip(owui.rows) == strip(before)
+    renamed = ml.Change("local-small", "renamed", "old", "new", True, False, True)
+    assert ml.rollback_steps([renamed]) == ["row 'local-small': name back to 'old' and meta.hidden back to false" + tail]
+    assert ml.rollback_steps([renamed._replace(had_hidden_key=False)]) == [
+        "row 'local-small': name back to 'old' and meta.hidden REMOVED (the row had no such key)" + tail]
     assert ml.rollback_steps([c._replace(action="would-hide") for c in changes]) == []

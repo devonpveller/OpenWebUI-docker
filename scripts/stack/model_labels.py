@@ -77,7 +77,8 @@ THE OPEN WEBUI SYNC (`sync_owui`) sets the Open WebUI `model` row NAME for each
 role id through Open WebUI's own admin API (`/api/v1/models/...`) - the path its
 admin UI uses to rename a base model - with an admin API key. It reads and
 validates EVERY row it manages before it writes any (a refusal - a PRESET on a
-managed id, a row without its access grants, an unreadable row, a refused key -
+managed id, a row needing a write without its access grants, an unreadable row or
+model list, a refused key -
 writes nothing), then writes only the rows that differ; it never touches a row
 the local gateway does not serve, and sends a written row's meta, params, access
 grants and active flag back exactly as it read them (only `meta.hidden` changes,
@@ -1358,6 +1359,7 @@ class Change(NamedTuple):
     new: str
     hidden: bool | None = None       # the row's picker visibility after the run (None: no row)
     was_hidden: bool | None = None   # before the run (None: there was no row)
+    had_hidden_key: bool | None = None   # the row's meta HAD a `hidden` key before the run (None: no row)
 
 
 WRITTEN = ("created", "renamed", "hidden", "shown")
@@ -1496,8 +1498,9 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
     for rid, action, row, name, hide in plan:
         old = (row or {}).get("name") or ""
         was = None if row is None else bool((row.get("meta") or {}).get("hidden"))
+        key = None if row is None else "hidden" in (row.get("meta") or {})
         if action == "unchanged":
-            changes.append(Change(rid, "unchanged", old, name, hide, was))
+            changes.append(Change(rid, "unchanged", old, name, hide, was, key))
             continue
         if action == "absent":
             changes.append(Change(rid, "absent", "", "", None, None))
@@ -1509,7 +1512,7 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
         else:
             verb = "hide" if hide else "show"
         if dry_run:
-            changes.append(Change(rid, "would-" + verb, old, name, hide, was))
+            changes.append(Change(rid, "would-" + verb, old, name, hide, was, key))
             continue
         # RE-READ just before the write and refuse if the row moved since pass 1 (someone
         # made it a preset, renamed it, changed its grants, meta, params or active flag, created
@@ -1540,7 +1543,7 @@ def sync_owui(labels: list[RoleLabel], base_url: str, api_key: str, request: Req
             raise OwuiError(f"{'creating' if action == 'create' else 'updating'} the {rid} row failed: "
                             f"HTTP {status} {text[:200]!r}. Written before this: {done()}")
         past = {"create": "created", "rename": "renamed", "hide": "hidden", "show": "shown"}[verb]
-        changes.append(Change(rid, past, old, name, hide, was))
+        changes.append(Change(rid, past, old, name, hide, was, key))
     return changes
 
 
@@ -1566,7 +1569,9 @@ def rollback_steps(changes: list[Change]) -> list[str]:
 
     A CREATED row is deleted (setting `meta.hidden` false would leave a row where there was
     none - and a row, even a visible one, changes who may use that id; findings F4); a
-    renamed or re-hidden row gets its old name / old `meta.hidden` back."""
+    renamed or re-hidden row gets its old name / old `meta.hidden` back - and a row whose
+    meta had NO `hidden` key gets the key REMOVED, not set to false, so the row is restored
+    as it was, not only to the same behaviour."""
     steps = []
     for c in changes:
         if c.action == "created":
@@ -1579,7 +1584,10 @@ def rollback_steps(changes: list[Change]) -> list[str]:
         if c.old != c.new:
             undo.append(f"name back to {c.old!r}")
         if c.was_hidden is not None and c.was_hidden != c.hidden:
-            undo.append(f"meta.hidden back to {str(bool(c.was_hidden)).lower()}")
+            if c.had_hidden_key is False:
+                undo.append("meta.hidden REMOVED (the row had no such key)")
+            else:
+                undo.append(f"meta.hidden back to {str(bool(c.was_hidden)).lower()}")
         if undo:
             steps.append(f"row {c.role!r}: {' and '.join(undo)} (POST /api/v1/models/model/update, "
                          f"everything else as read)")

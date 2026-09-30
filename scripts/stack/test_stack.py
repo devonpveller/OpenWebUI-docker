@@ -6989,7 +6989,7 @@ def test_the_labels_verb_leaves_one_gateway_row_per_model_and_mode_in_the_picker
     # the rollback is printed, and a CREATED row is deleted, not un-hidden (tester attempt 1)
     assert ("labels: rollback: delete the row 'qwen36-27b:nothink' (this run created it): "
             'POST /api/v1/models/model/delete {"id": "qwen36-27b:nothink"}') in out, out
-    assert "labels: rollback: row 'qwen36-27b': meta.hidden back to false" in out, out
+    assert "labels: rollback: row 'qwen36-27b': meta.hidden REMOVED (the row had no such key)" in out, out
     writes = len(owui.writes)
     code, out = _main(root, "labels", daemon=_rdaemon(root), owui=owui)
     assert code == 0 and "labels: 0 row(s) changed, 8 already right" in out and len(owui.writes) == writes, out
