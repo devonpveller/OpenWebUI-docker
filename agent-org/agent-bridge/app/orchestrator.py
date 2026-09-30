@@ -75,7 +75,7 @@ from .modules.model_router import (
     is_backpressure_text,
 )
 from .modules.planner import Planner
-from .modules.profiles import ProfileRegistry
+from .modules.profiles import ConcurrentProfileChange, ProfileRegistry
 from .modules.project_context import ProjectContext
 from .modules.projects import ProjectRegistry
 from .modules.roles import RoleAuthority
@@ -3530,7 +3530,7 @@ class Orchestrator:
     async def nl_intake(
         self, message: str, channel_id: str, *, user_id: str | None = None,
         thread_id: str | None = None, actor: str | None = None,
-    ) -> None:
+    ) -> dict | None:
         """Route a natural-language operator message to the PO agent, which interprets intent
         and replies conversationally. Non-destructive actions (open an effort, apply steering,
         report status) are executed; safety decisions are NOT auto-run from fuzzy NL — the PO
@@ -3579,10 +3579,9 @@ class Orchestrator:
         m_pm = _PROFILE_MODEL_RE.match(_ctrl)
         if m_pm:
             self._remember(channel_id, thread_id, "operator", message)
-            await self._nl_profile_model(
+            return await self._nl_profile_model(
                 m_pm.group("name"), m_pm.group("model"), dry_run=bool(m_pm.group("dry")),
                 actor=actor or user_id or "operator", channel_id=channel_id, thread_id=thread_id)
-            return
         # PURE standing-intent statements are CONFIG, never work (live 2026-07-15, the gym
         # 'ouroboros': the model minted an effort_name from "in gym, set the standing intent: …",
         # its is_work heuristic went True, and the fall-through dispatched an effort whose
@@ -4285,11 +4284,14 @@ class Orchestrator:
             except Exception as exc:  # noqa: BLE001
                 reply += f"\n\n_(couldn't allow that host: {exc})_"
         elif intent.kind == "profile_model":
-            await self._nl_profile_model(
+            # A model-CLASSIFIED profile change is never applied (P3: a question the PO misreads
+            # must not write): it is always a dry run that answers with the exact command, and only
+            # that exact command - matched deterministically above - applies. The model's own reply
+            # is not posted either (P2): the handler's outcome is the whole answer.
+            return await self._nl_profile_model(
                 intent.profile_name or "", intent.profile_model or "",
-                dry_run=bool(intent.profile_dry_run), actor=actor or user_id or "operator",
-                channel_id=channel_id, thread_id=thread_id, lead=reply)
-            return
+                dry_run=True, actor=actor or user_id or "operator",
+                channel_id=channel_id, thread_id=thread_id, confirm_hint=True)
         elif intent.kind == "kill":
             await self.gate.kill_switch(on=True, actor="human")
             reply += ("\n\n🛑 **Kill switch ENGAGED** — the whole fleet is frozen; no worker will run "
@@ -10113,59 +10115,80 @@ class Orchestrator:
 
     async def _nl_profile_model(
         self, name: str, model: str, *, dry_run: bool, actor: str, channel_id: str,
-        thread_id: str | None, lead: str = "",
-    ) -> dict | None:
+        thread_id: str | None, confirm_hint: bool = False,
+    ) -> dict:
         """The governed handler for kind=profile_model (model-roles, operator decision 2026-09-30:
-        every operator inlet is NL -> OperatorIntent -> a governed handler). Validates the profile
-        and that the gateway serving the profile's lane REGISTERS the model (fail closed: a gateway
-        that cannot be asked is a refusal), then writes ONE new profile version with only `model`
-        changed and audits who asked with the before/after. The same model again writes nothing.
-        Returns the result dict (None on a refusal); always replies in the operator's thread."""
+        every operator inlet is NL -> OperatorIntent -> a governed handler).
+
+        Validates, fail closed: the profile exists; the model is a CHAT model allowed for the
+        profile's effective lane (`profile_chat_models_local` / `_cloud` - the gateway's /models
+        listing carries no model type, so an explicit list keeps embedding names and the cloud
+        group off a local profile); and the gateway serving that lane lists it (a gateway that
+        cannot be asked is a refusal). Then ONE new profile version with only `model` changed, and
+        an audit event with who asked and the before/after. The same model again writes nothing;
+        a concurrent write to the same profile is refused (retry) rather than raised.
+
+        Only this handler speaks: the caller's model-authored reply is never posted with it (P2).
+        `confirm_hint` (the PO-classified path, always a dry run) adds the exact command that
+        applies it. Returns {"outcome": applied|dry_run|unchanged|refused|conflict, ...}."""
         name, model = (name or "").strip().lower(), (model or "").strip()
         actor = (actor or "operator")[:64]    # events.actor is String(64)
-        head = (lead.strip() + "\n\n") if lead and lead.strip() else ""
+        command = f"set profile {name} model {model}"
 
-        async def refuse(why: str) -> None:
+        async def refuse(why: str, outcome: str = "refused") -> dict:
             await self.audit.log("profile_model_refused", actor=actor, payload={
-                "profile": name, "model": model, "dry_run": dry_run, "reason": why})
-            await self.chat.post(channel_id, f"{head}⚠️ Profile model NOT changed: {why}",
+                "profile": name, "model": model, "dry_run": dry_run, "reason": why,
+                "outcome": outcome})
+            await self.chat.post(channel_id, f"⚠️ Profile model NOT changed: {why}",
                                  thread_id=thread_id)
+            return {"outcome": outcome, "profile": name, "model": model, "reason": why}
 
         known = self.profiles.all()
         if not name or name not in known:
-            await refuse(f"no profile called `{name or '?'}` (known: "
-                         + ", ".join(f"`{k}`" for k in sorted(known)) + ").")
-            return None
+            return await refuse(f"no profile called `{name or '?'}` (known: "
+                                + ", ".join(f"`{k}`" for k in sorted(known)) + ").")
         if not model:
-            await refuse(f"no model named for `{name}`.")
-            return None
+            return await refuse(f"no model named for `{name}`.")
+        lane = known[name].lane
+        effective = "cloud" if lane == "cloud" and self.s.cloud_enabled else "local"
+        allowed = {m.strip() for m in (self.s.profile_chat_models_cloud if effective == "cloud"
+                                       else self.s.profile_chat_models_local).split(",") if m.strip()}
+        if model not in allowed:
+            return await refuse(
+                f"`{model}` is not a chat model for a profile on the {effective} lane (allowed: "
+                + ", ".join(f"`{m}`" for m in sorted(allowed)) + ").")
         try:
-            registered = await self.models.registered_models(known[name].lane)
+            registered = await self.models.registered_models(lane)
         except Exception as exc:  # noqa: BLE001 - fail CLOSED: an unverifiable model is refused
-            await refuse(f"could not read the gateway's model list ({type(exc).__name__}), so "
-                         f"`{model}` cannot be verified.")
-            return None
+            return await refuse(f"could not read the gateway's model list ({type(exc).__name__}), "
+                                f"so `{model}` cannot be verified.")
         try:
             res = await self.profiles.set_model(name, model, registered=registered, dry_run=dry_run)
         except KeyError:
-            await refuse(f"no active profile called `{name}`.")
-            return None
+            return await refuse(f"no active profile called `{name}`.")
+        except ConcurrentProfileChange:
+            return await refuse(f"profile `{name}` was changed concurrently by another request; "
+                                f"nothing written by this one - check it and retry.", "conflict")
         except ValueError as exc:
-            await refuse(f"{exc}.")
-            return None
+            return await refuse(f"{exc}.")
         if res["changed"] and not dry_run:
             await self.audit.log("profile_model_set", actor=actor, payload={
                 "profile": name, "before": res["before"], "after": res["after"],
                 "version": res["version"], "lane": res["lane"]})
             body = (f"🔁 Profile **`{name}`** now asks for **`{res['after']}`** (was "
                     f"`{res['before']}`; version {res['version']}, lane `{res['lane']}` unchanged).")
+            outcome = "applied"
         elif res["changed"]:
             body = (f"🔎 Dry run: profile **`{name}`** would move `{res['before']}` → "
                     f"`{res['after']}` (lane `{res['lane']}` unchanged). Nothing written.")
+            if confirm_hint:
+                body += f"\nTo apply it, send exactly: `{command}`"
+            outcome = "dry_run"
         else:
             body = f"✅ Profile **`{name}`** already asks for `{res['after']}` — nothing to change."
-        await self.chat.post(channel_id, head + body, thread_id=thread_id)
-        return res
+            outcome = "unchanged"
+        await self.chat.post(channel_id, body, thread_id=thread_id)
+        return dict(res, outcome=outcome)
 
     async def _nl_tidy_up(self, message: str, channel_id: str, thread_id: str | None) -> bool:
         """"Tidy up" the board the way a human would (operator 2026-07-10 "it would be good to have

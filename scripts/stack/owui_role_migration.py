@@ -34,12 +34,17 @@ SAFETY
   miss the WAL's rows) - prints the before/after table of exactly the cells it
   would change, and writes nothing.
 * `--apply` needs `--restore-file PATH` (a new file; never overwritten). It opens
-  the database in SQLite's EXCLUSIVE locking mode inside an EXCLUSIVE transaction,
-  which SQLite grants only when no other connection has the file open - so a
-  running Open WebUI (its pool keeps connections open) is REFUSED, not guessed
-  at. The plan, the restore file (written and fsynced first) and the writes all
-  happen inside that one transaction; any failure rolls it back and removes the
-  restore file. A second `--apply` finds nothing to do and writes nothing.
+  the database in SQLite's EXCLUSIVE locking mode inside an EXCLUSIVE transaction.
+  The PRIMARY guard against writing under a running Open WebUI is the landing's
+  `docker inspect` check that the container is stopped; the lock is the backstop,
+  and it refuses exactly this: a process that has READ the WAL-mode database and
+  still holds its connection (idle or mid-transaction) - Open WebUI's case, whose
+  pool keeps read connections open (verified on 0.11's `openwebui:local`). It does
+  NOT refuse a connection that opened the file but never read it, nor an idle
+  holder of a rollback-journal database (neither holds a lock). The plan, the
+  restore file (written and fsynced first) and the writes all happen inside that
+  one transaction; any failure rolls it back and removes the restore file. A
+  second `--apply` finds nothing to do and writes nothing.
 * `--restore PATH [--apply]` puts every recorded cell back byte-identical (same
   SQLite storage class, same bytes), under the same exclusive lock. A cell that
   already holds its original value is skipped; a cell holding NEITHER the
@@ -256,7 +261,12 @@ def role_rows_note(conn: sqlite3.Connection) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _short(v: Any, n: int = 60) -> str:
-    s = v if isinstance(v, str) else json.dumps(v)
+    if isinstance(v, str):
+        s = v
+    elif isinstance(v, bytes):
+        s = f"<blob {v[:40]!r}>"   # a BLOB shown as one, so a storage-class drift is visible
+    else:
+        s = json.dumps(v)
     return s if len(s) <= n else s[: n - 3] + "..."
 
 
@@ -326,9 +336,13 @@ def _read_view(db: str, out):
 def _open_exclusive(db: str, lock_timeout: float) -> sqlite3.Connection:
     """The write connection: EXCLUSIVE locking mode, and an EXCLUSIVE transaction already open.
 
-    SQLite grants that lock only if NO other connection has the database open - an idle Open
-    WebUI keeps pooled connections open, so a running instance is refused here, not guessed from
-    a file size. The plan, the restore file and the writes all happen inside this one transaction,
+    SQLite refuses it while another process holds a lock on the database. For a WAL-mode
+    database (webui.db) that is any process that has READ it and kept its connection - Open
+    WebUI's pooled connections, idle or mid-transaction; a connection that opened the file and
+    never read it holds nothing, nor does an idle holder of a rollback-journal database, so those
+    are not refused. That is why this is the BACKSTOP and the landing's `docker inspect` check
+    that openwebui is stopped is the primary guard. The plan, the restore file and the writes all
+    happen inside this one transaction,
     so nothing can change between reading a cell and writing it. In WAL mode the exclusive
     locking mode keeps the WAL index in memory (no `-shm`), recovers a WAL an unclean stop left,
     and checkpoints it on close."""
@@ -341,8 +355,8 @@ def _open_exclusive(db: str, lock_timeout: float) -> sqlite3.Connection:
     except sqlite3.OperationalError as e:
         conn.close()
         if "locked" in str(e) or "busy" in str(e):
-            raise Refused(f"another process has {db} open (is Open WebUI running?). Stop it "
-                          "(the landing plan's order) and run again. Nothing written.") from e
+            raise Refused(f"another process holds a lock on {db} (is Open WebUI running?). Stop "
+                          "it (the landing plan's order) and run again. Nothing written.") from e
         raise
     return conn
 

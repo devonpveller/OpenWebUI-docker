@@ -15,12 +15,18 @@ import logging
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from ..db import Database
 from ..models import Profile
 from ..schemas import ProfileSchema
 
 log = logging.getLogger("agent_bridge.profiles")
+
+
+class ConcurrentProfileChange(Exception):
+    """Another request wrote the same profile's next version first (the (name, version) unique
+    constraint refused this one); nothing of this request was written."""
 
 
 class ProfileRegistry:
@@ -155,7 +161,11 @@ class ProfileRegistry:
                     caller_key=cur.caller_key,
                 )
             )
-            await s.commit()
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                await s.rollback()
+                raise ConcurrentProfileChange(name) from exc
             result["version"] = cur.version + 1
         await self.refresh()
         log.info("profile %s model %s -> %s (v%d)", name, result["before"], model, result["version"])

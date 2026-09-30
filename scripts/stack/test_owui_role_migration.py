@@ -215,7 +215,7 @@ def test_apply_and_restore_are_refused_while_another_process_has_the_db_open(tmp
     p = _hold_open(db)
     try:
         rc, out, err = run_err(["--db", db, "--apply", "--restore-file", rf, "--lock-timeout", "0.2"])
-        assert rc == 1 and "another process has" in err
+        assert rc == 1 and "another process holds a lock" in err
         assert not rf.exists()
     finally:
         p.stdin.close()
@@ -226,7 +226,7 @@ def test_apply_and_restore_are_refused_while_another_process_has_the_db_open(tmp
     p = _hold_open(db)
     try:
         rc, _out, err = run_err(["--db", db, "--restore", rf, "--apply", "--lock-timeout", "0.2"])
-        assert rc == 1 and "another process has" in err
+        assert rc == 1 and "another process holds a lock" in err
     finally:
         p.stdin.close()
         p.wait()
@@ -341,3 +341,31 @@ def test_restore_file_records_storage_classes(tmp_path):
     assert kinds[("config", "rag.embedding_model")] == ("text", "text")
     assert {c["key"] for c in rec["cells"]} == {"code", "research", "nothink-preset",
                                                "rag.embedding_model", "ui.model_order_list"}
+
+
+def test_restore_compares_the_storage_class_not_only_the_bytes(tmp_path):
+    """A cell holding the migrated TEXT as a BLOB of the same bytes is neither value: the restore
+    refuses it (dry run and apply) rather than treat equal-looking bytes as its own write."""
+    db = make_db(tmp_path)
+    rf = tmp_path / "restore.json"
+    assert run(["--db", db, "--apply", "--restore-file", rf])[0] == 0
+    c = sqlite3.connect(db)
+    c.execute("UPDATE model SET base_model_id = CAST('local-large' AS BLOB) WHERE id='code'")
+    c.commit()
+    c.close()
+    s = snapshot(db)
+    assert s[("model", "code")][4:6] == ("blob", b"local-large")
+    for extra in ([], ["--apply"]):
+        rc, _out, err = run_err(["--db", db, "--restore", rf, *extra])
+        assert rc == 1 and "model.code.base_model_id" in err, extra
+    assert snapshot(db) == s
+
+
+def test_same_is_storage_class_exact():
+    """`_same` is the restore's comparison: equal value AND equal SQLite storage class (Python type),
+    so INTEGER 1 is not REAL 1.0 even though 1 == 1.0, and TEXT is never a BLOB of its bytes."""
+    assert m._same("local-large", "local-large")
+    assert not m._same(1, 1.0) and not m._same(1, True)
+    assert not m._same("local-large", b"local-large") and not m._same(None, "")
+    for v in ("x", b"x", 1, 1.5, None):                     # a restore file round-trips each class
+        assert m._same(m._untyped(m._typed(v)), v)

@@ -1144,9 +1144,12 @@ python scripts/stack/owui_role_migration.py --db webui.db --restore r.json [--ap
 A dry run prints the before/after table of exactly the cells it would change and creates
 nothing beside the database: it reads the file `mode=ro&immutable=1`, or - when a non-empty
 `webui.db-wal` holds rows the main file lacks - a temporary copy of both. `--apply` opens the
-database in SQLite's EXCLUSIVE locking mode, which is granted only when no other connection
-has it open, so a running Open WebUI is refused (`another process has ... open`) rather than
-guessed at; the plan, the restore file (a new file, written and fsynced first) and every
+database in SQLite's EXCLUSIVE locking mode. The primary guard against writing under a
+running Open WebUI is checking that its container is stopped (`docker inspect`, as the landing
+does); the lock is the backstop and refuses (`another process holds a lock on ...`) a process
+that has read the WAL-mode database and kept its connection - Open WebUI's pooled connections -
+but not a connection that never read it, nor an idle holder of a rollback-journal database.
+The plan, the restore file (a new file, written and fsynced first) and every
 write happen in that one transaction, and a failure rolls back and removes the restore file.
 A second `--apply` finds nothing to do. `--restore` puts every recorded cell back with the
 same storage class and bytes under the same lock; a cell already holding its original value

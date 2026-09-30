@@ -8,6 +8,7 @@ gateway's model list)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 from pathlib import Path
@@ -37,9 +38,9 @@ def _profiles_on(tmp_path: Path, model: str) -> Path:
     return d
 
 
-async def _orch(db_url, profiles_dir: Path):
+async def _orch(db_url, profiles_dir: Path, **extra):
     settings = Settings(
-        _env_file=None, chat_adapter="fake",
+        _env_file=None, chat_adapter="fake", **extra,
         profiles_dir=str(profiles_dir), charters_dir=str(ROOT / "charters"),
         floor_dir=str(ROOT / "floor"), worker_instance_urls="http://w1:8090",
         max_concurrent_workers=1, database_url=db_url, project_survey_enabled=False,
@@ -61,6 +62,38 @@ async def _rows(db, name: str) -> list[Profile]:
 async def _events(db, kind: str) -> list[Event]:
     async with db.session_factory() as s:
         return list((await s.execute(select(Event).where(Event.kind == kind))).scalars().all())
+
+
+class _CommitBarrier:
+    """Wraps the registry's Database so every profile COMMIT waits until `n` writers reach it -
+    i.e. each has already read the active row. Makes the P1 race deterministic instead of
+    depending on how the event loop happens to interleave two requests."""
+
+    def __init__(self, db, n: int = 2):
+        self._db, self._barrier = db, asyncio.Barrier(n)
+
+    def __getattr__(self, k):
+        return getattr(self._db, k)
+
+    def session_factory(self):
+        cm, barrier = self._db.session_factory(), self._barrier
+
+        class _Cm:
+            async def __aenter__(self_inner):
+                sess = await cm.__aenter__()
+                real = sess.commit
+
+                async def commit():
+                    await asyncio.wait_for(barrier.wait(), 10)
+                    return await real()
+
+                sess.commit = commit
+                return sess
+
+            async def __aexit__(self_inner, *a):
+                return await cm.__aexit__(*a)
+
+        return _Cm()
 
 
 def _fields(p: Profile) -> tuple:
@@ -147,33 +180,143 @@ async def test_refuses_unknown_profile_unregistered_model_and_unreachable_gatewa
         snapshot = {n: [(r.version, r.model) for r in await _rows(db, n)] for n in orch.profiles.all()}
         await orch.nl_intake("set profile nobody model local-large", mgmt, thread_id="t1")
         await orch.nl_intake("set profile pm model local-huge", mgmt, thread_id="t1")
+        # an allowed chat role the gateway does not list (e.g. a gateway still before mr-gateway)
+        orch.models._client.registered_models = ["qwen36-27b", "qwen36-27b:nothink"]
+        await orch.nl_intake("set profile pm model local-small", mgmt, thread_id="t1")
         orch.models._client.registered_models = ConnectionError("gateway down")
         await orch.nl_intake("set profile pm model local-large", mgmt, thread_id="t1")
         assert {n: [(r.version, r.model) for r in await _rows(db, n)]
                 for n in orch.profiles.all()} == snapshot       # nothing written
         assert not await _events(db, "profile_model_set")
         refused = await _events(db, "profile_model_refused")
-        assert [e.payload["profile"] for e in refused] == ["nobody", "pm", "pm"]
+        assert [e.payload["profile"] for e in refused] == ["nobody", "pm", "pm", "pm"]
         msgs = [p["message"] for p in chat.posted]
         assert any("no profile called `nobody`" in m for m in msgs)
-        assert any("`local-huge`" in m and "not registered" in m for m in msgs)
+        assert any("`local-huge` is not a chat model" in m for m in msgs)
+        assert any("`local-small` is not registered at the gateway" in m for m in msgs)
         assert any("cannot be verified" in m for m in msgs)
     finally:
         await db.dispose()
 
 
-async def test_the_po_model_path_reaches_the_same_handler(db_url, tmp_path):
+async def test_the_po_model_path_is_only_ever_a_dry_run_with_the_exact_command(db_url, tmp_path):
+    """P3: a model-CLASSIFIED change never writes, even when the model did not mark it a dry run
+    (a misread question must not apply); the reply is the handler's outcome plus the exact
+    command. P2: the model's own reply is not posted."""
     orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
     try:
         orch.models._client.queue_structured(OperatorIntent(
             kind="profile_model", profile_name="reviewer-scope", profile_model="local-large",
-            reply="Sure -"))
+            profile_dry_run=False, reply="Done - reviewer-scope now uses it."))
         mgmt = await orch.mgmt_channel_id()
-        await orch.nl_intake("could you point the scope reviewer at local-large please", mgmt,
+        await orch.nl_intake("what would happen if the scope reviewer used local-large?", mgmt,
                              thread_id="t1", user_id="u-operator")
+        assert orch.profiles.get("reviewer-scope").model == "qwen36-27b"          # nothing written
+        assert [r.version for r in await _rows(db, "reviewer-scope")] == [1]
+        assert not await _events(db, "profile_model_set")
+        msgs = [p["message"] for p in chat.posted]
+        assert any("Dry run" in m and "send exactly: `set profile reviewer-scope model local-large`" in m
+                   for m in msgs)
+        assert not any("Done - reviewer-scope now uses it." in m for m in msgs)    # P2
+        # the exact command it offered is what applies
+        await orch.nl_intake("set profile reviewer-scope model local-large", mgmt, thread_id="t1",
+                             user_id="u-operator")
         assert orch.profiles.get("reviewer-scope").model == "local-large"
         ev = await _events(db, "profile_model_set")
         assert len(ev) == 1 and ev[0].actor == "u-operator"
+    finally:
+        await db.dispose()
+
+
+async def test_a_po_path_refusal_posts_only_the_refusal(db_url, tmp_path):
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        orch.models._client.queue_structured(OperatorIntent(
+            kind="profile_model", profile_name="pm", profile_model="local-embed",
+            reply="Done - pm now uses it."))
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("give pm the embed model", mgmt, thread_id="t1")
+        msgs = [p["message"] for p in chat.posted]
+        assert any(m.startswith("⚠️ Profile model NOT changed") for m in msgs)
+        assert not any("Done - pm now uses it." in m for m in msgs)
+    finally:
+        await db.dispose()
+
+
+async def test_only_chat_models_for_the_lane_are_accepted(db_url, tmp_path):
+    """P4: 'registered at the gateway' is not enough - local-embed is registered, and the cloud
+    group is listed by the local gateway once an OpenRouter key is set. Only the lane's chat set."""
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        orch.models._client.registered_models = orch.models._client.registered_models + [
+            "cloud-large", "cloud-small"]
+        mgmt = await orch.mgmt_channel_id()
+        for bad in ("local-embed", "bge-m3", "cloud-large", "cloud-small"):
+            await orch.nl_intake(f"set profile pm model {bad}", mgmt, thread_id="t1")
+        assert [r.version for r in await _rows(db, "pm")] == [1]
+        refused = await _events(db, "profile_model_refused")
+        assert [e.payload["model"] for e in refused] == ["local-embed", "bge-m3", "cloud-large", "cloud-small"]
+        assert all("not a chat model for a profile on the local lane" in e.payload["reason"] for e in refused)
+        for ok in ("local-small", "local-large:nothink", "qwen36-27b:nothink", "local-large"):
+            await orch.nl_intake(f"set profile pm model {ok}", mgmt, thread_id="t1")
+        assert [r.model for r in await _rows(db, "pm")] == [
+            "qwen36-27b", "local-small", "local-large:nothink", "qwen36-27b:nothink", "local-large"]
+    finally:
+        await db.dispose()
+
+
+async def test_the_cloud_group_only_for_a_profile_on_an_enabled_cloud_lane(db_url, tmp_path):
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"), cloud_enabled=True)
+    try:
+        orch.models._client.registered_models = ["cloud-large", "cloud-small"]
+        await orch.profiles.set_lane("pm", "cloud")
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("set profile pm model local-large", mgmt, thread_id="t1")   # not a cloud chat model
+        await orch.nl_intake("set profile pm model cloud-large", mgmt, thread_id="t1")
+        await orch.nl_intake("set profile po model cloud-large", mgmt, thread_id="t1")   # po is local
+        assert orch.profiles.get("pm").model == "cloud-large" and orch.profiles.get("pm").lane == "cloud"
+        assert orch.profiles.get("po").model == "qwen36-27b"
+        assert [e.payload["model"] for e in await _events(db, "profile_model_refused")] == [
+            "local-large", "cloud-large"]
+        # the cloud list is asked of the CLOUD endpoint
+        lm = [c for c in orch.models._client.calls if c["kind"] == "list_models"]
+        assert lm and lm[-1]["api_base"] == orch.s.cloud_api_base
+    finally:
+        await db.dispose()
+
+
+async def test_profile_names_are_case_folded(db_url, tmp_path):
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        await orch.nl_intake("SET PROFILE PM MODEL local-large", mgmt, thread_id="t1")
+        assert orch.profiles.get("pm").model == "local-large"
+        await orch.nl_intake("set profile po model LOCAL-LARGE", mgmt, thread_id="t1")   # models are not
+        assert orch.profiles.get("po").model == "qwen36-27b"
+    finally:
+        await db.dispose()
+
+
+async def test_two_concurrent_intents_on_one_profile_one_wins_one_is_refused(db_url, tmp_path):
+    """P1: the (name, version) unique constraint lets exactly one write; the other is caught,
+    replied to, audited as a conflict - never an unhandled IntegrityError."""
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        orch.profiles.db = _CommitBarrier(orch.profiles.db)
+        res = await asyncio.gather(
+            orch.nl_intake("set profile pm model local-large", mgmt, thread_id="t1"),
+            orch.nl_intake("set profile pm model local-small", mgmt, thread_id="t1"))
+        outcomes = sorted(r["outcome"] for r in res)
+        assert outcomes == ["applied", "conflict"], outcomes
+        rows = await _rows(db, "pm")
+        assert [r.version for r in rows] == [1, 2] and [r.active for r in rows] == [False, True]
+        winner = next(r for r in res if r["outcome"] == "applied")
+        assert rows[-1].model == winner["after"]
+        conflict = [e for e in await _events(db, "profile_model_refused") if e.payload["outcome"] == "conflict"]
+        assert len(conflict) == 1
+        assert any("changed concurrently" in p["message"] and "retry" in p["message"] for p in chat.posted)
+        assert orch.profiles.get("pm").model == winner["after"]
     finally:
         await db.dispose()
 
@@ -237,13 +380,23 @@ async def test_the_landing_path_through_the_http_inlet(db_url, tmp_path):
             for n in names:
                 r = await c.post("/nl", json={"message": f"set profile {n} model local-large (dry run)",
                                               "actor": "landing-mr-consumers"})
-                assert r.status_code == 200
+                assert r.status_code == 200 and r.json()["outcome"] == "dry_run"
             assert {p["model"] for p in (await c.get("/profiles")).json()["profiles"].values()} == {"qwen36-27b"}
             for n in names:
-                await c.post("/nl", json={"message": f"set profile {n} model local-large",
-                                          "actor": "landing-mr-consumers"})
+                r = await c.post("/nl", json={"message": f"set profile {n} model local-large",
+                                              "actor": "landing-mr-consumers"})
+                assert r.status_code == 200 and r.json()["outcome"] == "applied"
             got = (await c.get("/profiles")).json()["profiles"]
             assert {p["model"] for p in got.values()} == {"local-large"}
+            # P1 through HTTP: two concurrent writes to one profile -> one 200, one 409
+            orch.profiles.db = _CommitBarrier(orch.profiles.db)
+            rs = await asyncio.gather(*(c.post("/nl", json={"message": f"set profile pm model {m}",
+                                                           "actor": "race"})
+                                        for m in ("local-small", "local-large:nothink")))
+            assert sorted(r.status_code for r in rs) == [200, 409]
+            loser = next(r for r in rs if r.status_code == 409).json()
+            assert loser["outcome"] == "conflict" and "retry" in loser["reason"]
     ev = await _events(orch.db, "profile_model_set")
-    assert len(ev) == 9 and {e.actor for e in ev} == {"operator-api:landing-mr-consumers"}
+    landing = [e for e in ev if e.actor == "operator-api:landing-mr-consumers"]
+    assert len(landing) == 9
     await orch.db.dispose()

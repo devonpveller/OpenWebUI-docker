@@ -51,8 +51,14 @@ owns the live values (so an operator's lane flip survives a restart). A new inst
 `local-large`, the model role (`inference/README.md`). An existing install moves a profile
 by saying so, like every operator inlet (NL -> OperatorIntent -> a governed handler):
 `set profile <name> model <model>` in `#mgmt` or through `POST /nl` (`{"message": ...,
-"actor": "<who>"}`), with `(dry run)` on the end to only check. The handler refuses an
-unknown profile and a model the gateway does not list, writes ONE new profile version with
-only `model` changed (lane, charter, temperature, scope and caller key carried over), and
-audits a `profile_model_set` event with who asked and the before/after. The same model again
-writes nothing; the same command with the old model is the rollback.
+"actor": "<who>"}`), with `(dry run)` on the end to only check. Only that exact command
+applies: a looser request the PO model reads as a profile change is always answered as a dry
+run that quotes the exact command to send. The handler refuses an unknown profile (names are
+case-folded; models are not), a model outside the CHAT set for the profile's lane
+(`AO_PROFILE_CHAT_MODELS_LOCAL` / `_CLOUD`; embedding names and the cloud group are refused on a
+local profile), a model the gateway does not list, and a gateway it cannot ask. It writes ONE new
+profile version with only `model` changed (lane, charter, temperature, scope and caller key
+carried over) and audits a `profile_model_set` event with who asked and the before/after. The
+same model again writes nothing; a second request racing the first on one profile is refused
+("changed concurrently; retry", HTTP 409 on `/nl`); the same command with the old model is the
+rollback.
