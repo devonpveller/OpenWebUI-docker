@@ -586,8 +586,16 @@ try {
     $r = RunCopyTo (Join-Path $root 'nas14\archive') @('-Dirs', 'k') "$root\copylink-hroot"
     Check 'C18b ... a HIDDEN -Source root junction too (FAIL LINK, exit 1, nothing copied)' (($r.Rc -eq 1) -and ($r.Out -match [regex]::Escape("FAIL LINK  $root\copylink-hroot")) -and -not (Test-Path -LiteralPath (Join-Path $root 'nas14'))) "rc=$($r.Rc) out=$($r.Out)"
   } finally { $null = cmd /c "rmdir `"$root\copylink-hroot`"" 2>&1 }
-  $r = RunCopyTo '\192.0.2.77\backups\ai-stack\archive' @('-Dirs', 'k') $cl
-  Check 'C19 a DRIVE-RELATIVE destination (\192.0.2.77\... - one backslash) is refused before any write (exit 2)' (($r.Rc -eq 2) -and ($r.Out -match 'must be absolute')) "rc=$($r.Rc) out=$($r.Out)"
+  # A drive-relative destination (one leading backslash - what '\\192.0.2.77\...' becomes
+  # when a shell eats a backslash). SAFE BY CONSTRUCTION: the child runs with its current
+  # directory inside $root and the drive-relative path names a folder INSIDE $root, so
+  # even a regression (or a mutant) that accepts it writes only into the test's own tree.
+  $drRel = (Split-Path -NoQualifier $root) + '\nas17\archive'
+  $ErrorActionPreference = 'Continue'
+  $o19 = & $ps -NoProfile -ExecutionPolicy Bypass -Command "Set-Location -LiteralPath '$root'; [Environment]::CurrentDirectory = '$root'; & '$CopyRun' -Destination '$drRel' -Source '$cl' -Dirs k; exit `$LASTEXITCODE" 2>&1 | Out-String
+  $rc19 = $LASTEXITCODE
+  $ErrorActionPreference = 'Stop'
+  Check 'C19 a DRIVE-RELATIVE destination (one leading backslash) is refused before any write (exit 2, nothing created)' (($rc19 -eq 2) -and ($o19 -match 'must be absolute') -and -not (Test-Path -LiteralPath (Join-Path $root 'nas17'))) "rc=$rc19 out=$o19"
   New-Item -ItemType Directory -Force -Path "$root\dirs-real\sub" | Out-Null; Blob "$root\dirs-real\sub\far.tar" 400
   $null = cmd /c "mklink /J `"$cl\lnk`" `"$root\dirs-real`"" 2>&1
   try {
