@@ -400,3 +400,64 @@ async def test_the_landing_path_through_the_http_inlet(db_url, tmp_path):
     landing = [e for e in ev if e.actor == "operator-api:landing-mr-consumers"]
     assert len(landing) == 9
     await orch.db.dispose()
+
+
+async def test_a_write_landing_while_the_gateway_is_asked_is_a_conflict(db_url, tmp_path):
+    """N1: the handler validates against the row it READ, then awaits the gateway list. A lane
+    flip (or another model change) committed in that window must not be written over: conflict,
+    nothing written by this request, the other write intact."""
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        client = orch.models._client
+        real = client.list_models
+        mgmt = await orch.mgmt_channel_id()
+
+        async def flip_lane_meanwhile(**kw):
+            await orch.profiles.set_lane("pm", "cloud")         # commits during the wait
+            return await real(**kw)
+
+        client.list_models = flip_lane_meanwhile
+        res = await orch.nl_intake("set profile pm model local-large", mgmt, thread_id="t1")
+        assert res["outcome"] == "conflict"
+        pm = orch.profiles.get("pm")
+        assert (pm.lane, pm.model) == ("cloud", "qwen36-27b")   # the flip stands; no model write
+        assert [(r.version, r.lane, r.model) for r in await _rows(db, "pm")][-1] == (2, "cloud", "qwen36-27b")
+
+        async def change_model_meanwhile(**kw):
+            await orch.profiles.set_model("po", "local-small", registered={"local-small"})
+            return await real(**kw)
+
+        client.list_models = change_model_meanwhile
+        res = await orch.nl_intake("set profile po model local-large", mgmt, thread_id="t1")
+        assert res["outcome"] == "conflict"
+        assert orch.profiles.get("po").model == "local-small"
+        assert [r.version for r in await _rows(db, "po")] == [1, 2]
+        assert not await _events(db, "profile_model_set")
+        assert len([e for e in await _events(db, "profile_model_refused")
+                    if e.payload["outcome"] == "conflict"]) == 2
+        assert not any("unchanged)." in p["message"] and "now asks for" in p["message"] for p in chat.posted)
+    finally:
+        await db.dispose()
+
+
+async def test_a_po_classification_with_a_project_or_repo_goes_only_to_the_handler(db_url, tmp_path):
+    """N2: a profile_model classification that ALSO carries an unknown project or a repo URL is
+    routed to the handler before any project / onboarding branch: no model reply, no onboarding."""
+    orch, chat, db = await _orch(db_url, _profiles_on(tmp_path, "qwen36-27b"))
+    try:
+        mgmt = await orch.mgmt_channel_id()
+        for extra in ({"project": "no-such-project"},
+                      {"repo_url": "https://github.com/acme/new-thing.git"}):
+            chat.posted.clear()
+            orch.models._client.queue_structured(OperatorIntent(
+                kind="profile_model", profile_name="pm", profile_model="local-small",
+                reply="Done - pm now uses local-small.", **extra))
+            res = await orch.nl_intake("move pm to the small model", mgmt, thread_id="t1")
+            assert res["outcome"] == "dry_run", extra
+            msgs = [p["message"] for p in chat.posted]
+            assert len(msgs) == 1 and "send exactly: `set profile pm model local-small`" in msgs[0], msgs
+            assert not any("Done - pm" in m for m in msgs)
+        assert await orch.projects.list() == []                     # nothing onboarded
+        assert orch.profiles.get("pm").model == "qwen36-27b"
+    finally:
+        await db.dispose()

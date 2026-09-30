@@ -357,7 +357,8 @@ def test_restore_compares_the_storage_class_not_only_the_bytes(tmp_path):
     assert s[("model", "code")][4:6] == ("blob", b"local-large")
     for extra in ([], ["--apply"]):
         rc, _out, err = run_err(["--db", db, "--restore", rf, *extra])
-        assert rc == 1 and "model.code.base_model_id" in err, extra
+        # the drifted cell is named, and a BLOB is printed AS a blob (not as the text it resembles)
+        assert rc == 1 and "model.code.base_model_id (now <blob b'local-large'>)" in err, (extra, err)
     assert snapshot(db) == s
 
 

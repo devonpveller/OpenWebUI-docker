@@ -3985,6 +3985,19 @@ class Orchestrator:
             else:
                 reply = ""   # actionable kind, junk ack → drop the junk; the handler posts its own
 
+        # PROFILE MODEL, classified by the PO model: routed HERE, before every project / repo /
+        # config branch below (N2: a classification that also carried an unknown `project` or a
+        # `repo_url` reached the "unknown project" reply or the onboarding path, posting the model's
+        # own reply and possibly onboarding a repo). It is never applied (P3: a question the PO
+        # misreads must not write): always a dry run that answers with the exact command, and only
+        # that exact command - matched deterministically above - applies. The model's reply is not
+        # posted or remembered (P2): the handler's outcome is the whole answer.
+        if intent.kind == "profile_model":
+            self._remember(channel_id, thread_id, "operator", message)
+            return await self._nl_profile_model(
+                intent.profile_name or "", intent.profile_model or "",
+                dry_run=True, actor=actor or user_id or "operator",
+                channel_id=channel_id, thread_id=thread_id, confirm_hint=True)
         # Remember this turn (under its thread) so the next message keeps context.
         self._remember(channel_id, thread_id, "operator", message)
         self._remember(channel_id, thread_id, "po", reply)
@@ -4283,15 +4296,6 @@ class Orchestrator:
                 reply += f"\n\n✅ Workers can now reach **`{h}`** (git-egress widened)."
             except Exception as exc:  # noqa: BLE001
                 reply += f"\n\n_(couldn't allow that host: {exc})_"
-        elif intent.kind == "profile_model":
-            # A model-CLASSIFIED profile change is never applied (P3: a question the PO misreads
-            # must not write): it is always a dry run that answers with the exact command, and only
-            # that exact command - matched deterministically above - applies. The model's own reply
-            # is not posted either (P2): the handler's outcome is the whole answer.
-            return await self._nl_profile_model(
-                intent.profile_name or "", intent.profile_model or "",
-                dry_run=True, actor=actor or user_id or "operator",
-                channel_id=channel_id, thread_id=thread_id, confirm_hint=True)
         elif intent.kind == "kill":
             await self.gate.kill_switch(on=True, actor="human")
             reply += ("\n\n🛑 **Kill switch ENGAGED** — the whole fleet is frozen; no worker will run "
@@ -10149,7 +10153,13 @@ class Orchestrator:
                                 + ", ".join(f"`{k}`" for k in sorted(known)) + ").")
         if not model:
             return await refuse(f"no model named for `{name}`.")
-        lane = known[name].lane
+        # Validate against the active row as it is NOW in the database (not the cache), and hand
+        # its lane + version to the write, which refuses if either moved while the gateway was
+        # asked (N1: a lane flip committed in that window was written over, "lane unchanged").
+        row = await self.profiles.active_row(name)
+        if row is None:
+            return await refuse(f"no active profile called `{name}`.")
+        lane, version = row["lane"], row["version"]
         effective = "cloud" if lane == "cloud" and self.s.cloud_enabled else "local"
         allowed = {m.strip() for m in (self.s.profile_chat_models_cloud if effective == "cloud"
                                        else self.s.profile_chat_models_local).split(",") if m.strip()}
@@ -10163,7 +10173,8 @@ class Orchestrator:
             return await refuse(f"could not read the gateway's model list ({type(exc).__name__}), "
                                 f"so `{model}` cannot be verified.")
         try:
-            res = await self.profiles.set_model(name, model, registered=registered, dry_run=dry_run)
+            res = await self.profiles.set_model(name, model, registered=registered, dry_run=dry_run,
+                                                expect_lane=lane, expect_version=version)
         except KeyError:
             return await refuse(f"no active profile called `{name}`.")
         except ConcurrentProfileChange:

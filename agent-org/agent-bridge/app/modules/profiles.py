@@ -120,8 +120,21 @@ class ProfileRegistry:
         await self.refresh()
         log.info("profile %s lane -> %s (by %s)", name, lane, actor)
 
+    async def active_row(self, name: str) -> dict | None:
+        """The active row's lane, version and model as the DATABASE has them now (the cache can
+        trail a write made through another path)."""
+        async with self.db.session_factory() as s:
+            cur = (
+                await s.execute(
+                    select(Profile).where(Profile.name == name, Profile.active.is_(True))
+                )
+            ).scalar_one_or_none()
+            return None if cur is None else {"lane": cur.lane, "version": cur.version,
+                                             "model": cur.model}
+
     async def set_model(self, name: str, model: str, *, registered: set[str],
-                        dry_run: bool = False) -> dict:
+                        dry_run: bool = False, expect_lane: str | None = None,
+                        expect_version: int | None = None) -> dict:
         """Point a role at another gateway model name as a new profile version. One field: lane,
         charter, temperature, scope and caller key are carried over unchanged. The DB owns the live
         value (the seed files only seed a MISSING profile), so this is how an existing install
@@ -130,7 +143,10 @@ class ProfileRegistry:
 
         Refuses (raises, writes nothing): an unknown profile (KeyError), a model the gateway does
         not register (`registered` - the caller fetches it; ValueError). Idempotent: the same model
-        again writes nothing (`changed=False`). `dry_run` validates and reports, writing nothing."""
+        again writes nothing (`changed=False`). `dry_run` validates and reports, writing nothing.
+        `expect_lane` / `expect_version`: what the caller validated against; if the active row no
+        longer has them (another write landed meanwhile), ConcurrentProfileChange and nothing is
+        written - as when the (name, version) constraint refuses a racing insert."""
         model = (model or "").strip()
         if not model:
             raise ValueError("no model named")
@@ -144,6 +160,9 @@ class ProfileRegistry:
             ).scalar_one_or_none()
             if cur is None:
                 raise KeyError(name)
+            if ((expect_lane is not None and cur.lane != expect_lane)
+                    or (expect_version is not None and cur.version != expect_version)):
+                raise ConcurrentProfileChange(name)
             result = {"profile": name, "before": cur.model, "after": model, "lane": cur.lane,
                       "version": cur.version, "changed": cur.model != model, "dry_run": dry_run}
             if not result["changed"] or dry_run:
